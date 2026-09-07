@@ -22,7 +22,7 @@ import { useProxyViewer } from '../hooks/useProxyViewer';
 import { StudioFilesContext, type StudioFileActions } from '../shell/studio/studioFiles';
 import type { CompanionId } from '../chat/data/types';
 import { UPLOAD_MAX_BYTES, uploadWorkspaceFile } from '../data/api';
-import { appendToDraft, TOAST_EVENT } from '../native/shell';
+import { appendToDraft, showToast, TOAST_EVENT } from '../native/shell';
 import { BotRail } from './GrokSidebar';
 import { GrokChat } from './GrokChat';
 import { BotPanel, type ChatMeta } from './BotPanel';
@@ -31,7 +31,7 @@ import { CallOverlay } from '../voice/CallOverlay';
 import { useKonami } from '../theme/eggs';
 import { applyTheme } from '../theme/applyTheme';
 import { TAGLINE } from '../theme/voice';
-import { useAgents, reorderAgentIds, sameChatId, type Agent } from './agents';
+import { useAgents, reorderAgentIds, patchAgent, sameChatId, type Agent } from './agents';
 import { useChatHistory, type HistoryItem } from './history';
 import { OPEN_PANE_EVENT } from './messagePins';
 
@@ -314,6 +314,15 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
           onOpenChat={openChat}
           onOpenAgent={openAgent}
           onEditAgent={(a) => { setEditTarget(a); setEditorOpen(true); }}
+          onPatchAgent={(a, patch) => {
+            const previous = { muted: Boolean(a.muted), pinned: Boolean(a.pinned), unread: a.unread };
+            void patchAgent(a.id, patch, previous).then(() => reloadAgents()).catch(() => {
+              const action = patch.muted !== undefined
+                ? (patch.muted ? 'mute' : 'unmute')
+                : (patch.pinned ? 'pin' : 'unpin');
+              showToast(`Could not ${action} ${a.name}`);
+            });
+          }}
           onReorder={(ids) => { void reorderAgentIds(ids).then(() => reloadAgents()); }}
           onNewAgent={() => { setEditTarget(undefined); setEditorOpen(true); }}
           activeRoom={activeRoom}

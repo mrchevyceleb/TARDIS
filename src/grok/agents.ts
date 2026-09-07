@@ -28,6 +28,8 @@ export type Agent = {
   unread?: number;
   /** Pinned to the top bubble strip (user choice). */
   pinned?: boolean;
+  /** Hide unread badges — companions that work with the crew, not the user. */
+  muted?: boolean;
 };
 
 export function useAgents(): { agents: Agent[]; reload: () => void } {
@@ -45,8 +47,22 @@ export function useAgents(): { agents: Agent[]; reload: () => void } {
       const id = (e as CustomEvent<string>).detail;
       setAgents((prev) => prev.map((a) => (a.id === id ? { ...a, unread: 0 } : a)));
     };
+    const onPatch = (e: Event) => {
+      const detail = (e as CustomEvent<{ id: string; patch: Partial<Agent> }>).detail;
+      if (!detail?.id || !detail.patch) return;
+      setAgents((prev) => prev.map((a) => {
+        if (a.id !== detail.id) return a;
+        const next = { ...a, ...detail.patch };
+        if (next.muted) next.unread = 0;
+        return next;
+      }));
+    };
     window.addEventListener('rivendell:agent-read', onRead);
-    return () => window.removeEventListener('rivendell:agent-read', onRead);
+    window.addEventListener('rivendell:agent-patch', onPatch);
+    return () => {
+      window.removeEventListener('rivendell:agent-read', onRead);
+      window.removeEventListener('rivendell:agent-patch', onPatch);
+    };
   }, []);
   useEffect(() => {
     reload();
@@ -74,7 +90,7 @@ export class AgentUpdateConflictError extends Error {
   }
 }
 
-export async function updateAgentReq(id: string, patch: { name?: string; role?: string; engine?: string; model?: string; effort?: string; brainRevision?: number; voice?: string; pinned?: boolean; scope?: string }): Promise<Agent> {
+export async function updateAgentReq(id: string, patch: { name?: string; role?: string; engine?: string; model?: string; effort?: string; brainRevision?: number; voice?: string; pinned?: boolean; muted?: boolean; scope?: string }): Promise<Agent> {
   const response = await fetch(`/api/agents/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -100,6 +116,25 @@ export async function reorderAgentIds(ids: string[]): Promise<Agent[]> {
     body: JSON.stringify({ ids }),
   });
   return r.agents ?? [];
+}
+
+/** Mute, pin, or similar flags — optimistic, then confirmed by the next poll. */
+export async function patchAgent(
+  id: string,
+  patch: { muted?: boolean; pinned?: boolean },
+  previous?: Pick<Agent, 'muted' | 'pinned' | 'unread'>,
+): Promise<Agent> {
+  window.dispatchEvent(new CustomEvent('rivendell:agent-patch', {
+    detail: { id, patch: { ...patch, ...(patch.muted ? { unread: 0 } : {}) } },
+  }));
+  try {
+    return await updateAgentReq(id, patch);
+  } catch (err) {
+    if (previous) {
+      window.dispatchEvent(new CustomEvent('rivendell:agent-patch', { detail: { id, patch: previous } }));
+    }
+    throw err;
+  }
 }
 
 /** Report the focused thread as read (clears the unread badge). */

@@ -12,7 +12,7 @@ const rawImage = express.raw({ type: 'image/*', limit: '6mb' });
 export const agentsRouter = Router();
 
 agentsRouter.get('/', asyncHandler(async (_req, res) => {
-  res.json({ agents: listAgents().map((a) => ({ ...a, unread: agentUnread(a) })) });
+  res.json({ agents: listAgents().map((a) => ({ ...a, unread: agentUnread(a), muted: Boolean(a.muted) })) });
 }));
 
 agentsRouter.post('/:id/read', asyncHandler(async (req, res) => {
@@ -42,15 +42,23 @@ agentsRouter.post('/', asyncHandler(async (req, res) => {
 }));
 
 agentsRouter.patch('/:id', asyncHandler(async (req, res) => {
-  const { name, role, engine, model, effort, brainRevision, voice, pinned, scope } = req.body ?? {};
+  const { name, role, engine, model, effort, brainRevision, voice, pinned, muted, scope } = req.body ?? {};
   const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  if (muted !== undefined && typeof muted !== 'boolean') {
+    res.status(400).json({ error: 'muted must be a boolean' });
+    return;
+  }
   try {
     const expectedRevision = Number.isSafeInteger(brainRevision) && brainRevision > 0
       ? brainRevision as number
       : undefined;
     const agent = updateAgent(
       id,
-      { name, role, engine, model, effort, voice, pinned, scope },
+      {
+        name, role, engine, model, effort, voice, pinned,
+        muted,
+        scope,
+      },
       expectedRevision,
     );
     if (!agent) { res.status(404).json({ error: 'agent not found' }); return; }

@@ -95,6 +95,8 @@ function agentHistoryKey(agent: Agent): string {
 
 /** Count of assistant-authored events since the last read (0 = read). */
 export function agentUnread(agent: Agent): number {
+  // Muted companions still write and talk to the crew; they just never badge.
+  if (agent.muted) return 0;
   try {
     const { events } = loadEventLogSync(agentHistoryKey(agent));
     if (!events.length) return 0;

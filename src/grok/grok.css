@@ -171,6 +171,12 @@
 }
 .bt-conv:hover { background: var(--r-line); }
 .bt-conv.on { background: var(--r-bg-hover); box-shadow: inset 3px 0 0 var(--r-tardis-lit); }
+.bt-conv.muted .bt-conv-title { color: var(--r-ink-mute); }
+.bt-conv-mute {
+  flex: none;
+  display: grid; place-items: center;
+  color: var(--r-ink-faint);
+}
 .bt-conv .bt-disc { width: 44px; height: 44px; font-size: 16px; }
 .bt-conv-main { flex: 1; min-width: 0; }
 .bt-conv-top { display: flex; align-items: baseline; gap: 8px; }
@@ -239,6 +245,20 @@
 }
 .bt-plug-row:hover { background: var(--r-line); color: var(--r-ink); }
 .bt-plug-row svg { color: var(--r-ink-mute); flex: none; }
+
+/* companion right-click menu (portaled into .bot-app so theme tokens apply) */
+.bt-agent-ctx {
+  position: fixed;
+  z-index: 80;
+  width: 240px;
+  background: var(--r-bg-card);
+  border: 1px solid var(--r-line-strong);
+  border-radius: 16px;
+  animation: r-materialise 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+  padding: 6px;
+}
+.bt-agent-ctx .bt-plug-row { border-radius: 10px; }
 
 /* ============================================================
    CENTER — agent chat
@@ -896,6 +916,28 @@
 @media (max-width: 600px) {
   .bt-agent-brain-grid { grid-template-columns: 1fr; gap: 0; }
 }
+.bt-agent-checkrow {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 14px;
+  font-size: 13.5px;
+  color: var(--r-ink);
+  cursor: pointer;
+}
+.bt-agent-checkrow input {
+  margin-top: 3px;
+  accent-color: var(--r-gold);
+  flex: none;
+}
+.bt-agent-checkrow span { min-width: 0; }
+.bt-agent-checkrow small {
+  display: block;
+  font-size: 11.5px;
+  color: var(--r-ink-faint);
+  margin-top: 2px;
+  font-weight: 400;
+}
 
 /* voice picker — current voice pill + hear-it button, listbox with per-voice play */
 .bt-voice-wrap { position: relative; display: flex; gap: 8px; }
@@ -1199,6 +1241,18 @@
   border: 2px solid var(--r-bg-soft);
   box-shadow: 0 0 6px color-mix(in oklch, var(--r-elf-blue) 70%, transparent);
   animation: bt-breathe 2.4s ease-in-out infinite;
+}
+.bt-pin.muted .bt-pin-name { color: var(--r-ink-mute); }
+.bt-pin-mute {
+  position: absolute;
+  top: -2px; right: -2px;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  background: var(--r-bg-card);
+  border: 2px solid var(--r-bg-soft);
+  color: var(--r-ink-mute);
+  display: grid; place-items: center;
+  box-sizing: content-box;
 }
 .bt-pin-unread {
   position: absolute;

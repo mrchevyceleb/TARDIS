@@ -87,6 +87,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
   const voiceWrapRef = useRef<HTMLDivElement | null>(null);
   const voiceTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [pinned, setPinned] = useState(false);
+  const [muted, setMuted] = useState(false);
   const [scope, setScope] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -120,6 +121,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     setEffort(agent?.effort && allowedEfforts.includes(agent.effort) ? agent.effort : defaults.effort);
     setVoice(agent?.voice ?? 'ara');
     setPinned(Boolean(agent?.pinned));
+    setMuted(Boolean(agent?.muted));
     setScope('');
     setErr(null);
     setAvatarVersion(undefined);
@@ -330,7 +332,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     try {
       const brain = { engine, model: model || undefined, effort };
       const saved = agent
-        ? await updateAgentReq(agent.id, { name, role, ...brain, brainRevision, voice, pinned, scope: scope.trim() || undefined })
+        ? await updateAgentReq(agent.id, { name, role, ...brain, brainRevision, voice, pinned, muted, scope: scope.trim() || undefined })
         : await createAgent({ name, role, ...brain, voice, scope: scope.trim() || undefined });
       onSaved(saved);
       onClose();
@@ -459,10 +461,22 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
         </div>
 
         {agent ? (
-          <label className="bt-agent-pinrow" title="Pinned companions show as bubbles at the top of the sidebar">
-            <input type="checkbox" checked={pinned} onChange={(e) => setPinned(e.target.checked)} />
-            <span>Pin to top — show as a bubble above the list</span>
-          </label>
+          <>
+            <label className="bt-agent-checkrow" title="Pinned companions show as bubbles at the top of the sidebar">
+              <input type="checkbox" checked={pinned} onChange={(e) => setPinned(e.target.checked)} />
+              <span>
+                Pin to top
+                <small>Show as a bubble above the list</small>
+              </span>
+            </label>
+            <label className="bt-agent-checkrow" title="Muted companions keep working with the crew but never badge">
+              <input type="checkbox" checked={muted} onChange={(e) => setMuted(e.target.checked)} />
+              <span>
+                Mute notifications
+                <small>Hide unread badges — for companions that talk to other agents, not you</small>
+              </span>
+            </label>
+          </>
         ) : null}
 
         <div className="bt-agent-field">

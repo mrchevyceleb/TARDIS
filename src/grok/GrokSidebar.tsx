@@ -11,9 +11,12 @@
 // [+] creates a companion (name/role/engine/scope). Every row = a companion and
 // its ONE persistent forever-thread. Scratch threads surface via search only.
 
-import { useCallback, useMemo, useRef, useState, useEffect } from 'react';
+import { useCallback, useMemo, useRef, useState, useEffect, type KeyboardEvent as ReactKeyEvent, type MouseEvent } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Activity,
+  Bell,
+  BellOff,
   PanelLeftClose,
   Pencil,
   AppWindow,
@@ -80,6 +83,7 @@ export type BotRailProps = {
   onOpenChat: (item: HistoryItem) => void;
   onOpenAgent: (a: Agent) => void;
   onEditAgent: (a: Agent) => void;
+  onPatchAgent: (a: Agent, patch: { muted?: boolean; pinned?: boolean }) => void;
   onNewAgent: () => void;
   activeRoom?: string;
   onOpenRoom: (key: string) => void;
@@ -88,6 +92,110 @@ export type BotRailProps = {
   onOpenStudio: () => void;
   onHome: () => void;
 };
+
+type AgentMenuState = { x: number; y: number; id: string; restore: HTMLElement | null };
+
+function clampMenu(x: number, y: number, w = 240, h = 160): { x: number; y: number } {
+  return {
+    x: Math.max(8, Math.min(x, window.innerWidth - w - 8)),
+    y: Math.max(8, Math.min(y, window.innerHeight - h - 8)),
+  };
+}
+
+function menuItems(root: HTMLElement | null): HTMLButtonElement[] {
+  return root ? [...root.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')] : [];
+}
+
+function AgentContextMenu({
+  menu,
+  agent,
+  onMute,
+  onPin,
+  onEdit,
+  onClose,
+}: {
+  menu: AgentMenuState;
+  agent: Agent;
+  onMute: (a: Agent) => void;
+  onPin: (a: Agent) => void;
+  onEdit: (a: Agent) => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const node = ref.current;
+    if (node) {
+      const box = node.getBoundingClientRect();
+      const left = Math.max(8, Math.min(menu.x, window.innerWidth - box.width - 8));
+      const top = Math.max(8, Math.min(menu.y, window.innerHeight - box.height - 8));
+      if (left !== menu.x) node.style.left = `${left}px`;
+      if (top !== menu.y) node.style.top = `${top}px`;
+      menuItems(node)[0]?.focus();
+    }
+    const onDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+    };
+    const onViewport = () => onClose();
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey, true);
+    window.addEventListener('resize', onViewport);
+    document.addEventListener('scroll', onViewport, true);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('resize', onViewport);
+      document.removeEventListener('scroll', onViewport, true);
+      if (menu.restore?.isConnected) menu.restore.focus();
+    };
+  }, [onClose, menu.x, menu.y, menu.restore]);
+
+  const onMenuKey = (e: ReactKeyEvent<HTMLDivElement>) => {
+    const items = menuItems(ref.current);
+    if (!items.length) return;
+    const i = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement));
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End' || e.key === 'Tab') {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    if (e.key === 'ArrowDown') items[(i + 1) % items.length]?.focus();
+    else if (e.key === 'ArrowUp') items[(i - 1 + items.length) % items.length]?.focus();
+    else if (e.key === 'Home') items[0]?.focus();
+    else if (e.key === 'End') items[items.length - 1]?.focus();
+    else if (e.key === 'Tab') onClose();
+  };
+
+  return createPortal(
+    <div
+      ref={ref}
+      className="bt-agent-ctx"
+      style={{ left: menu.x, top: menu.y }}
+      role="menu"
+      aria-label={`${agent.name} actions`}
+      onContextMenu={(e) => e.preventDefault()}
+      onKeyDown={onMenuKey}
+    >
+      <button type="button" role="menuitem" className="bt-plug-row" onClick={() => { onMute(agent); onClose(); }}>
+        {agent.muted ? <Bell size={16} /> : <BellOff size={16} />}
+        {agent.muted ? 'Unmute notifications' : 'Mute notifications'}
+      </button>
+      <button type="button" role="menuitem" className="bt-plug-row" onClick={() => { onPin(agent); onClose(); }}>
+        <Pin size={16} />
+        {agent.pinned ? 'Unpin from top' : 'Pin to top'}
+      </button>
+      <button type="button" role="menuitem" className="bt-plug-row" onClick={() => { onEdit(agent); onClose(); }}>
+        <Pencil size={16} />
+        Edit
+      </button>
+    </div>,
+    document.querySelector('.bot-app') ?? document.body,
+  );
+}
 
 function dayStamp(ts: number): string {
   const d = new Date(ts);
@@ -103,11 +211,20 @@ function dayStamp(ts: number): string {
 export function BotRail(props: BotRailProps) {
   const [query, setQuery] = useState('');
   const [pluginsOpen, setPluginsOpen] = useState(false);
+  const [agentMenu, setAgentMenu] = useState<AgentMenuState | null>(null);
   // Manual order drag-and-drop: the dragged agent id + where it would land.
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropBefore, setDropBefore] = useState<string | null>(null);
   const pluginsRef = useRef<HTMLDivElement | null>(null);
   const live = useLive();
+  const menuAgent = agentMenu ? props.agents.find((a) => a.id === agentMenu.id) : undefined;
+  const openAgentMenu = (e: MouseEvent, a: Agent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const { x, y } = clampMenu(e.clientX, e.clientY);
+    setAgentMenu({ x, y, id: a.id, restore: e.currentTarget instanceof HTMLElement ? e.currentTarget : null });
+  };
+  const closeAgentMenu = useCallback(() => setAgentMenu(null), []);
 
   // Easter eggs — presentation only. "Don't blink." after ten idle minutes
   // (never while any lane is busy), a lamp flash on a triple tap of the mark,
@@ -276,10 +393,12 @@ export function BotRail(props: BotRailProps) {
               return (
                 <button
                   key={`pin:${a.id}`}
-                  className={`bt-pin${isActive ? ' on' : ''}${pinDrag === a.id ? ' dragging' : ''}${pinDropBefore === a.id && pinDrag && pinDrag !== a.id ? ' drop-left' : ''}`}
+                  className={`bt-pin${isActive ? ' on' : ''}${a.muted ? ' muted' : ''}${pinDrag === a.id ? ' dragging' : ''}${pinDropBefore === a.id && pinDrag && pinDrag !== a.id ? ' drop-left' : ''}`}
                   onClick={() => props.onOpenAgent(a)}
-                  onContextMenu={(e) => { e.preventDefault(); props.onEditAgent(a); }}
-                  title={`${a.name} — ${a.role} (drag to reorder)`}
+                  onContextMenu={(e) => openAgentMenu(e, a)}
+                  aria-haspopup="menu"
+                  aria-expanded={agentMenu?.id === a.id}
+                  title={`${a.name} — ${a.role}${a.muted ? ' · muted' : ''} (right-click to mute, pin, or edit)`}
                   draggable
                   onDragStart={(e) => { setPinDrag(a.id); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', a.id); }}
                   onDragOver={(e) => {
@@ -293,7 +412,7 @@ export function BotRail(props: BotRailProps) {
                 >
                   <span className={`bt-pin-disc${liveAgents.has(a.id) ? ' has-presence' : ''}`} style={url ? undefined : { background: agentColor(a.name) }}>
                     {url ? <img src={url} alt={a.name} /> : agentMark(a)}
-                    {a.unread ? <span className="bt-pin-unread">{a.unread > 9 ? '9+' : a.unread}</span> : null}
+                    {a.muted ? <span className="bt-pin-mute" title="Notifications muted"><BellOff size={10} /></span> : a.unread ? <span className="bt-pin-unread">{a.unread > 9 ? '9+' : a.unread}</span> : null}
                   </span>
                   <span className="bt-pin-name">{a.name}</span>
                   <span className="bt-pin-role">{a.role}</span>
@@ -309,10 +428,12 @@ export function BotRail(props: BotRailProps) {
             return (
               <button
                 key={`agent:${a.id}`}
-                className={`bt-conv${isActive ? ' on' : ''}${dragId === a.id ? ' dragging' : ''}${dropBefore === a.id && dragId && dragId !== a.id ? ' drop-above' : ''}`}
+                className={`bt-conv${isActive ? ' on' : ''}${a.muted ? ' muted' : ''}${dragId === a.id ? ' dragging' : ''}${dropBefore === a.id && dragId && dragId !== a.id ? ' drop-above' : ''}`}
                 onClick={() => props.onOpenAgent(a)}
-                onContextMenu={(e) => { e.preventDefault(); props.onEditAgent(a); }}
-                title={`${a.name} — ${a.role} (right-click to edit)`}
+                onContextMenu={(e) => openAgentMenu(e, a)}
+                aria-haspopup="menu"
+                aria-expanded={agentMenu?.id === a.id}
+                title={`${a.name} — ${a.role}${a.muted ? ' · muted' : ''} (right-click to mute, pin, or edit)`}
                 draggable
                 onDragStart={(e) => { setDragId(a.id); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', a.id); }}
                 onDragOver={(e) => {
@@ -333,7 +454,7 @@ export function BotRail(props: BotRailProps) {
                     <span className="bt-conv-title">
                       {a.name} <span className="bt-role-chip">{a.role}</span>
                     </span>
-                    {a.unread ? <span className="bt-unread" title={`${a.unread} waiting`}>{a.unread > 9 ? '9+' : a.unread}</span> : null}
+                    {a.muted ? <span className="bt-conv-mute" title="Notifications muted"><BellOff size={13} /></span> : a.unread ? <span className="bt-unread" title={`${a.unread} waiting`}>{a.unread > 9 ? '9+' : a.unread}</span> : null}
                     {r.item ? <span className="bt-conv-day" title={`${new Date(r.item.updatedAt).toLocaleString()} · ${TIMEY_WIMEY}`}>{dayStamp(r.item.updatedAt)}</span> : null}
                     <span
                       className="bt-row-edit"
@@ -418,6 +539,16 @@ export function BotRail(props: BotRailProps) {
         </button>
         {idle && !anyBusy && !props.drawerOpen ? <div className="tardis-blink" aria-hidden="true">Don't blink.</div> : null}
       </div>
+      {agentMenu && menuAgent ? (
+        <AgentContextMenu
+          menu={agentMenu}
+          agent={menuAgent}
+          onMute={(a) => props.onPatchAgent(a, { muted: !a.muted })}
+          onPin={(a) => props.onPatchAgent(a, { pinned: !a.pinned })}
+          onEdit={props.onEditAgent}
+          onClose={closeAgentMenu}
+        />
+      ) : null}
     </aside>
   );
 }

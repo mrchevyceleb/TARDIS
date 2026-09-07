@@ -50,6 +50,8 @@ export type Agent = {
   voice?: string;
   /** Pinned to the top bubble strip (user choice, not activity). */
   pinned?: boolean;
+  /** Hide unread badges — for companions that work with the crew, not the user. */
+  muted?: boolean;
 };
 
 export type AgentBrain = { engine: string; model?: string; effort?: string; revision: number; updatedAt?: number };
@@ -259,7 +261,7 @@ export function ensureAgents(): void {
   }
 }
 
-export type AgentInput = { name: string; role?: string; engine?: string; model?: string; effort?: string; voice?: string; pinned?: boolean; scope?: string };
+export type AgentInput = { name: string; role?: string; engine?: string; model?: string; effort?: string; voice?: string; pinned?: boolean; muted?: boolean; scope?: string };
 
 export function createAgent(input: AgentInput): Agent {
   const agents = listAgents();
@@ -289,6 +291,7 @@ export function createAgent(input: AgentInput): Agent {
     createdAt: now,
     order: Math.max(0, ...agents.map((a) => a.order ?? 0)) + 1,
   };
+  if (input.muted) agent.muted = true;
   if (input.scope && input.scope.trim()) {
     writeFileSync(join(AGENTS_DIR, `${id}.md`), input.scope);
   }
@@ -350,6 +353,10 @@ export function updateAgent(
     voice: patch.voice !== undefined ? (patch.voice || cur.voice) : cur.voice,
     pinned: patch.pinned !== undefined ? patch.pinned : cur.pinned,
   };
+  if (patch.muted !== undefined) {
+    if (patch.muted) next.muted = true;
+    else delete next.muted;
+  }
   // Any deliberate brain change makes the prior live-lane stamp historical.
   if (brainChanged) delete next.cli;
   agents[idx] = next;
