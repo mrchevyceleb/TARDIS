@@ -57,6 +57,59 @@ test('resized monitor coordinates map to negative OS bounds; frames are one-use'
   assert.equal(actions.length, 1);
 });
 
+test('window-scoped capture and targeted keyboard tools never rely on global focus', async t => {
+  const root = { x: 0, y: 0, width: 800, height: 600 };
+  const window = { id: '0x00000042', title: 'Pi validation', bounds: { x: 100, y: 50, width: 400, height: 300 } };
+  const png = await sharp({ create: { width: 800, height: 600, channels: 3, background: '#ffffff' } }).png().toBuffer();
+  const actions: Record<string, any>[] = [];
+  const computer = new ComputerController({ approve: async () => true, adapter: {
+    capability: { supported: true }, inspect: async () => ({ displays: [{ id: 'screen', bounds: root }], windows: [window], activeWindow: window.id }),
+    capture: async () => ({ png, bounds: root }), act: async action => { actions.push(action); }, release: async () => {},
+  } });
+  t.after(() => computer.stop());
+  const { session } = await computer.handle('start', task);
+  const frame = await computer.handle('capture', { session, window: window.id });
+  assert.deepEqual({ width: frame.width, height: frame.height, windowId: frame.windowId }, { width: 400, height: 300, windowId: window.id });
+  await computer.handle('act', { session, frame: frame.id, action: 'click', x: 200, y: 150 });
+  assert.deepEqual(actions[0], { action: 'click', x: 300, y: 200, window: window.id, windowBounds: window.bounds });
+  await computer.handle('focus', { session, window: window.id });
+  const typed = await computer.handle('type', { session, operationId: 'type-1', window: window.id, text: 'check in' });
+  const replayed = await computer.handle('type', { session, operationId: 'type-1', window: window.id, text: 'check in' });
+  assert.equal(typed.operationId, 'type-1'); assert.equal(replayed.replayed, true);
+  await assert.rejects(computer.handle('type', { session, operationId: 'type-1', window: window.id, text: 'changed' }), /different keyboard input/);
+  await computer.handle('key', { session, operationId: 'key-1', window: window.id, keys: ['ENTER'] });
+  assert.deepEqual(actions.slice(1), [
+    { action: 'focus', window: window.id },
+    { action: 'type', window: window.id, text: 'check in' },
+    { action: 'key', window: window.id, keys: ['ENTER'] },
+  ]);
+  const keyboardFrame = await computer.handle('capture', { session, window: window.id });
+  await assert.rejects(computer.handle('act', { session, frame: keyboardFrame.id, action: 'type', text: 'wrong path' }), /computer_type/);
+  assert.equal(actions.length, 4);
+});
+
+test('concurrent and retried targeted keyboard operations execute at most once', async t => {
+  const root = { x: 0, y: 0, width: 100, height: 100 };
+  const window = { id: 'target', title: 'Target', bounds: root };
+  const png = await sharp({ create: { width: 100, height: 100, channels: 3, background: '#fff' } }).png().toBuffer();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let inputs = 0;
+  const computer = new ComputerController({ approve: async () => true, adapter: {
+    capability: { supported: true }, inspect: async () => ({ displays: [{ id: 'screen', bounds: root }], windows: [window], activeWindow: window.id }),
+    capture: async () => ({ png, bounds: root }), act: async action => { if (action.action === 'type') { inputs++; await gate; } }, release: async () => {},
+  } });
+  t.after(() => computer.stop());
+  const { session } = await computer.handle('start', task);
+  const args = { session, operationId: 'one-type', window: window.id, text: 'once' };
+  const first = computer.handle('type', args);
+  await new Promise(resolve => setImmediate(resolve));
+  await assert.rejects(computer.handle('type', args), /still running/);
+  release(); await first;
+  const replay = await computer.handle('type', args);
+  assert.equal(replay.replayed, true); assert.equal(inputs, 1);
+});
+
 test('all runner configurations include identical reserved device tools; turn identity is signed', () => {
   const env = localMcpServers('Test')['rivendell-device'].env;
   assert.deepEqual(localMcpBananaServers()['rivendell-device'].environment, env);

@@ -58,6 +58,11 @@ public static class DesktopInput {
       INPUT i = new INPUT(); i.type=1; i.u.key.scan=c; i.u.key.flags=4; Send(i); i.u.key.flags=6; Send(i);
     }
   }
+  public static long Foreground() { return GetForegroundWindow().ToInt64(); }
+  public static int[] Bounds(long id) {
+    RECT r; if (!GetWindowRect(new IntPtr(id),out r)) throw new Exception("Window geometry is unavailable.");
+    return new int[]{r.left,r.top,r.right-r.left,r.bottom-r.top};
+  }
   public static void Focus(long id) {
     var h=new IntPtr(id); if (IsIconic(h)) ShowWindow(h,9);
     if (GetForegroundWindow()==h) return;
@@ -81,6 +86,20 @@ public static class DesktopInput {
 '@
 [DesktopInput]::EnableDpi()
 Add-Type -AssemblyName System.Windows.Forms
+function Assert-TargetWindow([object]$request, [bool]$afterInput) {
+  if (!$request.window) { return }
+  if ([DesktopInput]::Foreground() -ne [long]$request.window) {
+    if ($afterInput) { throw 'The active window changed during input. Input may have run; inspect the current desktop before continuing.' }
+    throw 'The active window changed before input. No input was sent; inspect and focus the window again.'
+  }
+  if ($request.windowBounds) {
+    $bounds=[DesktopInput]::Bounds([long]$request.window)
+    if ($bounds[0] -ne [int]$request.windowBounds.x -or $bounds[1] -ne [int]$request.windowBounds.y -or $bounds[2] -ne [int]$request.windowBounds.width -or $bounds[3] -ne [int]$request.windowBounds.height) {
+      if ($afterInput) { throw 'The target window moved or resized during input. Input may have run; inspect before continuing.' }
+      throw 'Window moved or resized before input. No input was sent; capture that window again.'
+    }
+  }
+}
 try {
   $p = [Console]::In.ReadToEnd() | ConvertFrom-Json
   [DesktopInput]::CheckDesktop()
@@ -90,7 +109,7 @@ try {
       $displays = @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
         @{ id=$_.DeviceName; bounds=@{ x=$_.Bounds.X; y=$_.Bounds.Y; width=$_.Bounds.Width; height=$_.Bounds.Height }; scaleFactor=[DesktopInput]::ScaleAt($_.Bounds.X,$_.Bounds.Y) }
       })
-      $result = @{ displays=$displays; windows=@([DesktopInput]::Windows()) }
+      $result = @{ displays=$displays; windows=@([DesktopInput]::Windows()); activeWindow=[string][DesktopInput]::Foreground() }
     }
     'capture' {
       $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
@@ -105,8 +124,17 @@ try {
     }
     'release' { [DesktopInput]::Release() }
     'act' {
-      if ($p.action -in @('move','click','double_click','right_click','drag','scroll')) {
+      if ($p.window -and $p.action -ne 'focus') {
+        [DesktopInput]::Focus([long]$p.window)
+        if ($p.windowBounds) {
+          $b=[DesktopInput]::Bounds([long]$p.window)
+          if ($b[0] -ne [int]$p.windowBounds.x -or $b[1] -ne [int]$p.windowBounds.y -or $b[2] -ne [int]$p.windowBounds.width -or $b[3] -ne [int]$p.windowBounds.height) { throw 'Window moved or resized while it was being focused. No mouse input was sent; capture that window again.' }
+        }
+      }
+      $mouseAction = $p.action -in @('move','click','double_click','right_click','drag','scroll')
+      if ($mouseAction) {
         if (![DesktopInput]::SetCursorPos([int]$p.x, [int]$p.y)) { throw 'Cursor movement refused.' }
+        Assert-TargetWindow $p $false
       }
       switch ($p.action) {
         'move' {}
@@ -115,9 +143,15 @@ try {
         'double_click' { 1..2 | ForEach-Object { [DesktopInput]::Mouse(2,0); [DesktopInput]::Mouse(4,0); Start-Sleep -Milliseconds 80 } }
         'drag' { try { [DesktopInput]::Mouse(2,0); Start-Sleep -Milliseconds 80; [void][DesktopInput]::SetCursorPos([int]$p.toX,[int]$p.toY); Start-Sleep -Milliseconds 80 } finally { [DesktopInput]::Mouse(4,0) } }
         'scroll' { $flags=2048; $sign=1; if ($p.direction -in @('left','right')) { $flags=4096 }; if ($p.direction -in @('down','left')) { $sign=-1 }; [DesktopInput]::Mouse($flags, 120*[int]$p.amount*$sign) }
-        'type' { [DesktopInput]::Type([string]$p.text) }
+        'type' {
+          if (!$p.window) { throw 'Targeted typing requires a window id. Use computer_type.' }
+          [DesktopInput]::Type([string]$p.text)
+          Start-Sleep -Milliseconds 100
+          if ([DesktopInput]::Foreground() -ne [long]$p.window) { throw 'The active window changed while typing. Input may be incomplete; inspect before continuing.' }
+        }
         'focus' { [DesktopInput]::Focus([long]$p.window) }
         'key' {
+          if (!$p.window) { throw 'Targeted keys require a window id. Use computer_key.' }
           $names=@{ CTRL=17; ALT=18; SHIFT=16; META=91; ENTER=13; TAB=9; ESC=27; BACKSPACE=8; DELETE=46; SPACE=32; UP=38; DOWN=40; LEFT=37; RIGHT=39; HOME=36; END=35; PAGEUP=33; PAGEDOWN=34 }
           $held = New-Object 'System.Collections.Generic.List[UInt16]'
           try {
@@ -126,9 +160,12 @@ try {
               [DesktopInput]::Key([uint16]$vk,$false); $held.Add([uint16]$vk)
             }
           } finally { for ($i=$held.Count-1; $i -ge 0; $i--) { [DesktopInput]::Key($held[$i],$true) } }
+          Start-Sleep -Milliseconds 100
+          if ([DesktopInput]::Foreground() -ne [long]$p.window) { throw 'The active window changed after the key chord. Input may have run; inspect the current desktop before continuing.' }
         }
         default { throw 'Unknown action.' }
       }
+      if ($mouseAction -and $p.action -ne 'move') { Start-Sleep -Milliseconds 100; Assert-TargetWindow $p $true }
     }
     default { throw 'Unknown operation.' }
   }

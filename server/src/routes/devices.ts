@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Router } from 'express';
 import {
   DEVICE_DEFAULT_TIMEOUT_MS,
@@ -61,7 +62,7 @@ for (const op of ['stop', 'preview', 'resume'] as const) {
 devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
   if (!validComputerMcpToken(req.get('x-rivendell-computer-token'))) { res.status(403).json({ error: 'TARDIS computer MCP required.' }); return; }
   const op = String(req.params.op);
-  if (!['start', 'inspect', 'capture', 'act', 'step', 'stop'].includes(op)) { res.status(400).json({ error: 'Unknown computer operation.' }); return; }
+  if (!['start', 'inspect', 'capture', 'focus', 'type', 'key', 'act', 'step', 'stop'].includes(op)) { res.status(400).json({ error: 'Unknown computer operation.' }); return; }
   const body = req.body ?? {};
   let device = typeof body.device === 'string' ? body.device : '';
   let context: ReturnType<typeof readComputerContext> | undefined;
@@ -96,20 +97,28 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
       result = { ...result, device, deviceName: info.name };
     } else if (op === 'step') {
       if (typeof body.goal !== 'string' || !body.goal.trim() || body.goal.length > 1500) throw new Error('A short, single-step goal is required.');
-      result = await steps.run(device, body.session, body.stepId, JSON.stringify([body.goal, body.display ?? null]), async markInput => {
-        const frame = await call('capture', { session: body.session, display: body.display });
+      result = await steps.run(device, body.session, body.stepId, JSON.stringify([body.goal, body.display ?? null, body.window ?? null]), async markInput => {
+        const frame = await call('capture', { session: body.session, display: body.display, window: body.window });
         const grounded = await computerVision(frame.image, frame.width, frame.height, body.goal, false, ac.signal);
         if (grounded.action === null) return { acted: false, observation: String(grounded.summary ?? '').slice(0, 4000) };
         let actionFrame = frame;
-        if (Date.now() - Number(frame.capturedAt) > 25_000) {
-          actionFrame = await call('capture', { session: body.session, display: frame.displayId });
+        const refreshAfterMs = frame.windowId ? 80_000 : 25_000;
+        if (Date.now() - Number(frame.capturedAt) > refreshAfterMs) {
+          actionFrame = await call('capture', { session: body.session, ...(frame.windowId ? { window: frame.windowId } : { display: frame.displayId }) });
           if (actionFrame.image !== frame.image || JSON.stringify(actionFrame.bounds) !== JSON.stringify(frame.bounds)) {
             throw new Error('Screen changed during vision grounding. No action taken; inspect the current screen.');
           }
         }
+        const keyboard = grounded.action === 'type' || grounded.action === 'key' || grounded.action === 'focus';
+        if (keyboard && !actionFrame.windowId) throw new Error('Vision chose keyboard/focus input without an exact window. No global keyboard input was sent; retry on a window-scoped frame with the same stepId.');
         // Commit the non-replay outcome BEFORE input leaves this process.
         markInput();
-        const after = await call('act', { ...grounded, session: body.session, frame: actionFrame.id });
+        const operationId = keyboard
+          ? `vision-${createHash('sha256').update(JSON.stringify([body.stepId, grounded.action, grounded.text, grounded.keys])).digest('hex').slice(0, 32)}`
+          : undefined;
+        const after = keyboard
+          ? await call(String(grounded.action), { ...grounded, operationId, session: body.session, window: actionFrame.windowId })
+          : await call('act', { ...grounded, session: body.session, frame: actionFrame.id });
         markInput({ acted: true, capturedAt: after.capturedAt, observation: 'Input completed. Post-action observation is pending; do not repeat this step.' });
         let observation: string;
         try { observation = String((await computerVision(after.image, after.width, after.height, body.goal, true, ac.signal)).summary ?? ''); }

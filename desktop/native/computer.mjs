@@ -16,10 +16,18 @@ export function trustedComputerUrl(raw) {
     (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)));
 }
 
-const ACTIONS = new Set(['move', 'click', 'double_click', 'right_click', 'drag', 'scroll', 'type', 'key', 'focus']);
+const ACTIONS = new Set(['move', 'click', 'double_click', 'right_click', 'drag', 'scroll']);
 export const KEYS = new Set(['CTRL', 'ALT', 'SHIFT', 'META', 'ENTER', 'TAB', 'ESC', 'BACKSPACE', 'DELETE', 'SPACE', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'HOME', 'END', 'PAGEUP', 'PAGEDOWN', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ...Array.from({ length: 12 }, (_, i) => `F${i + 1}`)]);
-export function validateAction(input, frame, windows) {
-  if (!input || !ACTIONS.has(input.action)) throw new Error('Unknown desktop action.');
+export function validateText(value) {
+  if (typeof value !== 'string' || !value || value.length > 2000 || /[\x00-\x08\x0b-\x1f\x7f]/.test(value)) throw new Error('Text must be 1–2000 characters without control codes.');
+  return value;
+}
+export function validateKeys(value) {
+  if (!Array.isArray(value) || !value.length || value.length > 5 || value.some(k => !KEYS.has(k))) throw new Error('Invalid keys; use 1–5 named uppercase keys.');
+  return [...new Set(value)];
+}
+export function validateAction(input, frame) {
+  if (!input || !ACTIONS.has(input.action)) throw new Error('Unknown mouse action. Use computer_type/computer_key for keyboard input and computer_focus for focus.');
   const a = { action: input.action };
   if (['move', 'click', 'double_click', 'right_click', 'drag', 'scroll'].includes(a.action)) {
     for (const key of a.action === 'drag' ? ['x', 'y', 'toX', 'toY'] : ['x', 'y']) {
@@ -35,18 +43,6 @@ export function validateAction(input, frame, windows) {
     a.direction = input.direction;
     if (!Number.isInteger(input.amount) || input.amount < 1 || input.amount > 10) throw new Error('Scroll amount must be 1–10.');
     a.amount = input.amount;
-  }
-  if (a.action === 'type') {
-    if (typeof input.text !== 'string' || !input.text || input.text.length > 2000 || /[\x00-\x08\x0b-\x1f\x7f]/.test(input.text)) throw new Error('Text must be 1–2000 characters without control codes.');
-    a.text = input.text;
-  }
-  if (a.action === 'key') {
-    if (!Array.isArray(input.keys) || !input.keys.length || input.keys.length > 5 || input.keys.some(k => !KEYS.has(k))) throw new Error('Invalid keys; use named uppercase keys.');
-    a.keys = [...new Set(input.keys)];
-  }
-  if (a.action === 'focus') {
-    if (typeof input.window !== 'string' || !windows.some(w => w.id === input.window)) throw new Error('Window is no longer available. Inspect again.');
-    a.window = input.window;
   }
   return a;
 }
@@ -98,6 +94,70 @@ export class ComputerController {
   requireGrant(session) {
     if (!this.grant || this.grant.id !== session || Date.now() >= this.grant.expiresAt) throw new Error('No active desktop grant. Request control again; never work around a refusal.');
   }
+  keyboardOperation(op, params) {
+    if (op !== 'type' && op !== 'key') return null;
+    const id = params.operationId;
+    if (typeof id !== 'string' || !/^[a-zA-Z0-9._:-]{1,100}$/.test(id)) throw new Error('A unique operationId is required for targeted keyboard input. Reuse it only when retrying the exact same input.');
+    if (typeof params.window !== 'string' || !params.window) throw new Error('Targeted keyboard input requires an exact window id.');
+    const payload = op === 'type' ? { text: validateText(params.text) } : { keys: validateKeys(params.keys) };
+    const fingerprint = createHash('sha256').update(JSON.stringify([op, params.window, payload])).digest('hex');
+    const existing = this.grant.operations.get(id);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) throw new Error('operationId was already used for different keyboard input. Use a new id for a new operation.');
+      if (!existing.outcome) throw new Error('That keyboard operation is still running. Retry later with the SAME operationId; never submit equivalent input under a new id.');
+      return { replay: { ...existing.outcome, operationId: id, replayed: true,
+        message: 'Keyboard input already ran (or may have run) exactly once. Capture the window to inspect it; do not repeat under a new id.' } };
+    }
+    return { id, fingerprint, payload };
+  }
+  findWindow(info, id) {
+    const window = typeof id === 'string' ? info.windows.find(item => item.id === id) : undefined;
+    if (!window) throw new Error('Window is no longer available. Inspect windows again; do not guess its id or coordinates.');
+    return window;
+  }
+  async captureFrame(info, params, signal) {
+    if (params.window && params.display) throw new Error('Choose either a window or a display, not both.');
+    let current = info;
+    let window = params.window ? this.findWindow(current, params.window) : null;
+    // A full-desktop crop can only represent the named window if that exact
+    // window is raised and active. Focus first, then re-read its geometry; do
+    // not label overlapping pixels from another app as the target window.
+    if (window && current.activeWindow !== window.id) {
+      await this.adapter.act({ action: 'focus', window: window.id }, signal);
+      current = await this.adapter.inspect(signal);
+      window = this.findWindow(current, params.window);
+      if (current.activeWindow !== window.id) throw new Error('Window could not be verified active. No screenshot was returned.');
+    }
+    const display = window
+      ? current.displays.find(item => {
+          const centerX = window.bounds.x + window.bounds.width / 2;
+          const centerY = window.bounds.y + window.bounds.height / 2;
+          return centerX >= item.bounds.x && centerX < item.bounds.x + item.bounds.width && centerY >= item.bounds.y && centerY < item.bounds.y + item.bounds.height;
+        }) ?? current.displays[0]
+      : current.displays.find(item => item.id === (params.display ?? current.displays[0]?.id));
+    if (!display) throw new Error('Display unavailable. Inspect displays again.');
+    const bounds = window?.bounds ?? display.bounds;
+    const raw = await this.adapter.capture(signal);
+    if (raw.png.length < 24 || raw.png.readUInt32BE(16) * raw.png.readUInt32BE(20) > 100_000_000) throw new Error('Screenshot dimensions exceed the safe limit.');
+    const region = { left: bounds.x - raw.bounds.x, top: bounds.y - raw.bounds.y, width: bounds.width, height: bounds.height };
+    if (region.left < 0 || region.top < 0 || region.left + region.width > raw.bounds.width || region.top + region.height > raw.bounds.height) {
+      throw new Error('The selected window is partly outside the captured desktop. Move it fully on-screen and inspect again.');
+    }
+    if (window) {
+      const verified = await this.adapter.inspect(signal);
+      const finalWindow = this.findWindow(verified, window.id);
+      if (verified.activeWindow !== window.id || JSON.stringify(finalWindow.bounds) !== JSON.stringify(bounds)) {
+        throw new Error('Window focus or geometry changed while capturing. Pixels were discarded; inspect and capture again.');
+      }
+    }
+    const image = await this.encode(raw.png, region);
+    if (image.data.length > 2 * 1024 * 1024) throw new Error('Screenshot exceeds the safe transport size.');
+    this.frame = { id: randomUUID(), displayId: display.id, bounds, width: image.info.width, height: image.info.height,
+      capturedAt: Date.now(), layout: JSON.stringify(current.displays), image: image.data.toString('base64'),
+      ...(window ? { windowId: window.id, windowTitle: window.title } : {}) };
+    const { layout: _layout, ...result } = this.frame;
+    return result;
+  }
   async handle(op, params = {}) {
     if (op === 'end') { this.requireGrant(params.session); this.stop(); return { stopped: true }; }
     if (op === 'stop') { this.stop(true); return { stopped: true, paused: this.paused }; }
@@ -105,14 +165,28 @@ export class ComputerController {
     if (this.paused) throw new Error('Computer control is paused by the user. Do not retry, resume it yourself, or change permissions. The operator can use Resume control.');
     if (op === 'preview') {
       if (!this.grant || Date.now() >= this.grant.expiresAt || !this.frame) throw new Error('No active screen preview.');
-      const { image, width, height, capturedAt, displayId } = this.frame;
-      return { image, width, height, capturedAt, displayId };
+      const { image, width, height, capturedAt, displayId, windowId, windowTitle } = this.frame;
+      return { image, width, height, capturedAt, displayId, windowId, windowTitle };
     }
     if (!this.capability.supported) throw new Error(this.capability.reason);
     const limit = op === 'start' ? 60_000 : 30_000;
     const remaining = params.deadlineAt === undefined ? limit : Number(params.deadlineAt) - Date.now();
     if (!Number.isFinite(remaining) || remaining <= 0 || remaining > limit + 5000) throw new Error('Desktop request expired or machine clocks differ. No action taken.');
+    let keyboardSpec = null;
+    if (op === 'type' || op === 'key') {
+      this.requireGrant(params.session);
+      keyboardSpec = this.keyboardOperation(op, params);
+      if (keyboardSpec.replay) return keyboardSpec.replay;
+    }
     if (this.busy) throw new Error('This desktop is already handling a request. Do not replay input.');
+    let keyboardEntry = null;
+    let keyboardGrant = null;
+    if (keyboardSpec) {
+      if (this.grant.operations.size >= 256) throw new Error('This desktop grant reached its keyboard-operation limit. Start a new grant; do not replay uncertain input.');
+      keyboardEntry = { fingerprint: keyboardSpec.fingerprint };
+      keyboardGrant = this.grant;
+      keyboardGrant.operations.set(keyboardSpec.id, keyboardEntry); // reserve synchronously, before any await
+    }
     this.busy = true;
     const generation = this.generation;
     const ac = new AbortController();
@@ -133,7 +207,7 @@ export class ComputerController {
         const allowed = this.automatic() || await this.approve({ owner, label, purpose, minutes: 5 }, ac.signal);
         check();
         if (!allowed) throw new Error('The person at this computer declined desktop control. Stop; do not retry by another route.');
-        this.grant = { id: randomUUID(), owner, label, purpose, expiresAt: Date.now() + 5 * 60_000 };
+        this.grant = { id: randomUUID(), owner, label, purpose, expiresAt: Date.now() + 5 * 60_000, operations: new Map() };
         this.timer = setTimeout(() => this.stop(), 5 * 60_000);
         this.timer.unref?.();
         this.changed(this.status());
@@ -143,38 +217,58 @@ export class ComputerController {
       const info = await this.adapter.inspect(ac.signal);
       check();
       if (op === 'inspect') return info;
-      if (op !== 'capture' && op !== 'act') throw new Error('Unknown desktop operation.');
-      let displayId = params.display ?? info.displays[0]?.id;
-      if (op === 'act') {
-        const f = this.frame;
-        if (!f || f.id !== params.frame || Date.now() - f.capturedAt > 30_000 || f.layout !== JSON.stringify(info.displays)) throw new Error('Screenshot is stale or displays changed. Capture again before acting.');
-        const action = validateAction(params, f, info.windows);
-        displayId = f.displayId;
-        this.frame = null; // Consume BEFORE input, including uncertain failures.
-        this.requireGrant(params.session);
-        check();
-        inputAttempted = true;
-        this.inputActive = true;
+      if (op === 'capture') {
+        const result = await this.captureFrame(info, params, ac.signal);
+        check(); this.requireGrant(params.session); return result;
+      }
+      if (op === 'focus' || op === 'type' || op === 'key') {
+        const window = this.findWindow(info, params.window);
+        const action = op === 'focus' ? { action: 'focus', window: window.id }
+          : op === 'type' ? { action: 'type', window: window.id, text: keyboardSpec.payload.text }
+          : { action: 'key', window: window.id, keys: keyboardSpec.payload.keys };
+        this.frame = null;
+        this.requireGrant(params.session); check();
+        inputAttempted = op !== 'focus';
+        this.inputActive = inputAttempted;
         await this.adapter.act(action, ac.signal);
         this.inputActive = false;
+        if (keyboardEntry) keyboardEntry.outcome = { executed: true, windowId: window.id, windowTitle: window.title };
         check();
+        const after = await this.adapter.inspect(ac.signal);
+        const result = await this.captureFrame(after, { window: window.id }, ac.signal);
+        check(); this.requireGrant(params.session);
+        if (keyboardEntry) {
+          keyboardEntry.outcome = { ...keyboardEntry.outcome, capturedAt: result.capturedAt };
+          return { ...result, operationId: keyboardSpec.id };
+        }
+        return result;
       }
-      const after = op === 'act' ? await this.adapter.inspect(ac.signal) : info;
-      const display = after.displays.find(d => d.id === displayId);
-      if (!display) throw new Error('Display unavailable. Inspect displays and capture again.');
-      const raw = await this.adapter.capture(ac.signal);
+      if (op !== 'act') throw new Error('Unknown desktop operation.');
+      const f = this.frame;
+      const maxAge = f?.windowId ? 90_000 : 30_000;
+      if (!f || f.id !== params.frame || Date.now() - f.capturedAt > maxAge || f.layout !== JSON.stringify(info.displays)) throw new Error('Screenshot is stale or displays changed. Capture again before acting.');
+      if (f.windowId) {
+        const current = this.findWindow(info, f.windowId);
+        if (JSON.stringify(current.bounds) !== JSON.stringify(f.bounds)) throw new Error('Window moved or resized. Capture that window again before acting.');
+      }
+      const action = validateAction(params, f);
+      if (f.windowId) { action.window = f.windowId; action.windowBounds = f.bounds; }
+      this.frame = null; // Consume BEFORE input, including uncertain failures.
+      this.requireGrant(params.session); check();
+      inputAttempted = true;
+      this.inputActive = true;
+      await this.adapter.act(action, ac.signal);
+      this.inputActive = false;
       check();
-      const bounds = display.bounds;
-      if (raw.png.length < 24 || raw.png.readUInt32BE(16) * raw.png.readUInt32BE(20) > 100_000_000) throw new Error('Screenshot dimensions exceed the safe limit.');
-      const image = await this.encode(raw.png, { left: bounds.x - raw.bounds.x, top: bounds.y - raw.bounds.y, width: bounds.width, height: bounds.height });
-      check();
-      this.requireGrant(params.session);
-      if (image.data.length > 2 * 1024 * 1024) throw new Error('Screenshot exceeds the safe transport size.');
-      this.frame = { id: randomUUID(), displayId, bounds, width: image.info.width, height: image.info.height,
-        capturedAt: Date.now(), layout: JSON.stringify(after.displays), image: image.data.toString('base64') };
-      const { layout: _layout, ...result } = this.frame;
-      return result;
+      const after = await this.adapter.inspect(ac.signal);
+      const result = await this.captureFrame(after, f.windowId ? { window: f.windowId } : { display: f.displayId }, ac.signal);
+      check(); this.requireGrant(params.session); return result;
     } catch (error) {
+      if (keyboardEntry) {
+        if (inputAttempted) keyboardEntry.outcome ??= { executed: 'unknown', windowId: params.window,
+          message: `Keyboard input may already have run. Do not repeat it under a new operationId. ${error instanceof Error ? error.message : String(error)}`.slice(0, 1000) };
+        else keyboardGrant?.operations.delete(keyboardSpec.id);
+      }
       if (ac.signal.aborted) this.stop();
       if (inputAttempted) {
         this.inputActive = false;

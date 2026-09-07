@@ -33,7 +33,11 @@ export class ComputerStepJournal {
       entry.outcome = await perform(markInput);
       return { ...entry.outcome, stepId };
     } catch (error) {
-      if (entry.outcome) return { ...entry.outcome, stepId };
+      if (entry.outcome) {
+        const detail = error instanceof Error ? error.message : String(error);
+        entry.outcome = { ...entry.outcome, observation: `${entry.outcome.observation} Device detail: ${detail.slice(0, 800)}` };
+        return { ...entry.outcome, stepId };
+      }
       // Proven pre-input failure: allowing this id again cannot duplicate input.
       grant.steps.delete(stepId);
       throw error;

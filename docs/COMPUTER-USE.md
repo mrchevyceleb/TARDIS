@@ -121,17 +121,39 @@ on updates. Pairing pins reconnects after first use; it is not an account login.
 
 ## Workflows, vision and retry safety
 
-`computer_start` → `computer_inspect` → `computer_capture` → `computer_act` →
-verify → `computer_stop`. Use the normal browser profile and existing sessions
-for websites, including sign-in on user-authorized accounts. Never scrape
-unrelated credential stores, print passwords into chat, or bypass MFA/security
-challenges. External side effects remain draft/review-first.
+`computer_start` → `computer_inspect` → operate one exact window → verify →
+`computer_stop`. Use the normal browser profile and existing sessions for
+websites, including sign-in on user-authorized accounts. Never scrape unrelated
+credential stores, print passwords into chat, or bypass MFA/security challenges.
+External side effects remain draft/review-first.
 
-Capture returns a real MCP JPEG, monitor id, OS bounds, capture time and a
-one-use frame id. Coordinates are pixels in **that resized image**; the device
-maps them to OS coordinates, including negative-origin Windows monitors.
-Frames expire after 30 seconds or input. Uncertain input is never replayed
-automatically; transport failures explicitly say it may already have run.
+Prefer `computer_capture(window=<id>)`. It raises and verifies that exact window before
+cropping, discards pixels if focus/geometry changes during capture, then returns
+a readable window-only MCP JPEG, accurate bounds, capture time and one-use frame. Mouse coordinates are
+pixels in **that returned image**. The device verifies the window did not move,
+focuses it before clicking, maps coordinates into OS pixels, and returns the
+same window region. Whole-display frames expire after 30 seconds; exact-window
+frames after 90 seconds. Any input consumes a frame.
+
+On GNOME/X11, window positions come from X's actual client geometry. Do not use
+`wmctrl -lG` positions: client-side decorated GTK windows can report incorrect
+origins there even while their width/height look plausible. Windows uses
+per-monitor-v2 physical coordinates and supports negative virtual-screen origins.
+
+For terminals and Pi TUIs, **do not click the prompt**. Use
+`computer_focus(window)`; then
+`computer_type(window,operationId,text)`. These tools activate the exact native
+window and verify the OS active-window identity before and after keyboard input.
+`computer_type` does not press Enter and returns a window screenshot: verify the
+text is visibly in the prompt, then call
+`computer_key(window,new-operationId,["ENTER"])`. Keyboard input without an exact
+window is rejected. Every type/key id is atomically reserved before async work;
+a retry with the same id returns a cached outcome instead of typing/submitting
+twice, while changing its window/content is rejected. The device keeps up to
+256 keyboard outcomes for each five-minute grant without retaining screenshots.
+A short input-settle delay ensures the returned screenshot does not race queued
+key events. API success alone is not proof the target accepted text; the image
+is the proof. If the same focus/input goal fails twice, stop rather than guessing.
 
 Text-only engines use `computer_step` for at most one visually grounded action
 and a textual observation. Supply a unique `stepId` per new goal, and reuse
