@@ -182,7 +182,10 @@ async function callTool(name, args, signal) {
   if (name.startsWith('computer_')) {
     const op = name.slice('computer_'.length);
     if (!['start', 'inspect', 'capture', 'focus', 'type', 'key', 'act', 'step', 'stop'].includes(op)) throw new Error('Unknown computer tool.');
-    const result = await post(`computer/${op}`, args, signal);
+    // Keyboard/focus tools tunnel through the long-standing /act route so
+    // devices can roll forward before a busy TARDIS server safely restarts.
+    const compatibilityOp = op === 'focus' || op === 'type' || op === 'key';
+    const result = await post(`computer/${compatibilityOp ? 'act' : op}`, compatibilityOp ? { ...args, operation: op } : args, signal);
     if (typeof result.image === 'string') {
       const { image, ...metadata } = result;
       return [{ type: 'text', text: JSON.stringify(metadata) }, { type: 'image', data: image, mimeType: 'image/jpeg' }];

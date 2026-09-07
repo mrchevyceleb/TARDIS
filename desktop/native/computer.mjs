@@ -159,6 +159,10 @@ export class ComputerController {
     return result;
   }
   async handle(op, params = {}) {
+    // MCP keyboard tools tunnel through computer.act during a rolling server
+    // upgrade, so a new device/script can work while old in-memory routes
+    // drain healthy turns. The operation still uses every targeted guard.
+    if (op === 'act' && (params.operation === 'focus' || params.operation === 'type' || params.operation === 'key')) op = params.operation;
     if (op === 'end') { this.requireGrant(params.session); this.stop(); return { stopped: true }; }
     if (op === 'stop') { this.stop(true); return { stopped: true, paused: this.paused }; }
     if (op === 'resume') { if (this.paused) { this.paused = false; this.changed(this.status()); } return { resumed: true }; }
