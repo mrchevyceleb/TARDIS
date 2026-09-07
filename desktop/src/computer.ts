@@ -1,6 +1,7 @@
 import { BrowserWindow, globalShortcut, ipcMain, nativeImage, powerMonitor } from 'electron';
 import path from 'node:path';
-import { ComputerController, type ControlStatus } from '../native/computer.mjs';
+import { ComputerController, trustedComputerUrl, type ControlStatus } from '../native/computer.mjs';
+import { getSettings, saveSettings } from './settings.js';
 import { approveComputer, bridgeEnabled } from './approvals.js';
 
 const here = __dirname;
@@ -9,6 +10,7 @@ let indicator: BrowserWindow | null = null;
 let serverOrigin = '';
 let initialised = false;
 export const computer = new ComputerController({
+  automatic: () => Boolean(serverOrigin && getSettings().computerTrustedOrigin === serverOrigin),
   encode: async (png, region) => {
     const source = nativeImage.createFromBuffer(png, { scaleFactor: 1 });
     const size = source.getSize();
@@ -34,7 +36,7 @@ export const computer = new ComputerController({
         win.webContents.send('tardis:control-state', state.control);
         win.showInactive();
       });
-      win.on('closed', () => { if (indicator === win) { indicator = null; computer.stop(); } });
+      win.on('closed', () => { if (indicator === win) { indicator = null; computer.stop(true); } });
       void win.loadFile(path.join(here, '..', 'pages', 'control.html'));
     } else {
       const win = indicator; indicator = null; win?.destroy();
@@ -48,13 +50,23 @@ export function initComputerControls(origin: string): void {
   if (initialised) return;
   initialised = true;
   ipcMain.on('tardis:computer-stop-native', event => {
-    if (indicator && event.sender === indicator.webContents) computer.stop();
+    if (indicator && event.sender === indicator.webContents) computer.stop(true);
   });
-  if (!globalShortcut.register('CommandOrControl+Alt+Shift+Escape', () => computer.stop())) {
+  if (!globalShortcut.register('CommandOrControl+Alt+Shift+Escape', () => computer.stop(true))) {
     console.warn('[computer] Stop hotkey unavailable; native indicator and Ship menu remain available.');
   }
   powerMonitor.on('lock-screen', () => computer.stop());
   powerMonitor.on('suspend', () => computer.stop());
+}
+export function setComputerAutomatic(on: boolean, selectedServer = serverOrigin): void {
+  let origin: string | undefined;
+  if (on) {
+    try { if (!trustedComputerUrl(selectedServer)) return; origin = new URL(selectedServer).origin; } catch { return; }
+  }
+  saveSettings({ computerTrustedOrigin: origin });
+  computer.stop();
+  // Switching back to attended mode must permit a new native consent request.
+  if (!on) void computer.handle('resume').catch(error => console.error('[computer] could not clear pause:', error));
 }
 export async function handleComputer(op: string, params: Record<string, unknown>): Promise<unknown> {
   if (!bridgeEnabled()) throw new Error('Agents are disabled on this computer.');

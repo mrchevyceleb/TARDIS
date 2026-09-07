@@ -27,15 +27,15 @@ const DEVICE_ARG = {
 };
 
 const COMPUTER_ARGS = {
-  device: { type: 'string', description: 'Exact online computer id from device_list. Never infer a fallback machine.' },
+  device: { type: 'string', description: 'Exact online computer id. On computer_start only, omit to use the chat selection or operator-configured default. Other tools use the device returned by computer_start. Never infer a fallback.' },
   session: { type: 'string', description: 'The grant returned by computer_start for this task and device.' },
 };
 const computerTool = (name, description, properties, required) => ({ name, description,
-  inputSchema: { type: 'object', properties: { ...COMPUTER_ARGS, ...properties }, required: ['device', ...required], additionalProperties: false } });
+  inputSchema: { type: 'object', properties: { ...COMPUTER_ARGS, ...properties }, required: [...(name === 'computer_start' ? [] : ['device']), ...required], additionalProperties: false } });
 const TOOLS = [
-  computerTool('computer_start', 'Request five minutes of full desktop control. The native user approves. GUI control is broad trust, not a sandbox. A refusal is final; never retry through exec or another computer. Use your signed context from the current turn, including when delegated.', {
+  computerTool('computer_start', 'Acquire a five-minute desktop lease. On automatic-mode computers this happens without a popup: do it yourself for the assigned task, with no permission chatter. Omit device for the selected/default desktop. The result includes device and session for subsequent tools. Other computers may retain native consent. GUI control is broad trust, not a sandbox. Never bypass a pause/refusal or switch machines implicitly. Use the signed context from your current turn.', {
     context: { type: 'string', description: 'Current turn computer context, supplied by TARDIS in the prompt.' },
-    purpose: { type: 'string', description: 'The user-authorized task, shown verbatim on the machine (max 500 characters).' },
+    purpose: { type: 'string', description: 'The assigned task, shown in control status (max 500 characters).'  },
   }, ['context', 'purpose']),
   computerTool('computer_inspect', 'List monitors and visible native windows of the granted computer. Requires an unlocked graphical session.', {}, ['session']),
   computerTool('computer_capture', 'See the real desktop. Returns a JPEG image and a one-use frame id. All action coordinates are pixels in THIS resized image, not OS coordinates. Choose a display from computer_inspect. If your model cannot see tool images, use computer_step instead.', {
@@ -48,10 +48,11 @@ const TOOLS = [
     text: { type: 'string', maxLength: 2000 }, keys: { type: 'array', items: { type: 'string' }, description: 'Uppercase keys: CTRL,ALT,SHIFT,META,ENTER,TAB,ESC,SPACE,BACKSPACE,DELETE,arrows,HOME,END,PAGEUP,PAGEDOWN,A-Z,0-9,F1-F12.' },
     window: { type: 'string', description: 'Window id from computer_inspect for focus.' },
   }, ['session', 'frame', 'action']),
-  computerTool('computer_step', 'For text-only engines: a local vision model sees a fresh screenshot, grounds at most ONE small action, and describes the resulting screen as text. Not a blind image caption. Requires the operator-configured local vision model; errors mean stop, not guess. Repeat only after reading the result. It does not perform sends, purchases, deletes or terminal commands.', {
+  computerTool('computer_step', 'For text-only engines: a local vision model sees a fresh screenshot, grounds at most ONE small action, and describes the result as text. Use a unique stepId for each new step and reuse that SAME id on retries; cached outcomes prevent duplicate input after a lost reply. Never retry an uncertain operation with a new id. Normal navigation and authorized sign-in are allowed; external sends, purchases, deletes and terminal commands are not delegated to this vision helper.', {
+    stepId: { type: 'string', maxLength: 100, description: 'Unique within this grant, e.g. dashboard-open-1. Reuse for retries of the same goal, never for a different step.' },
     goal: { type: 'string', maxLength: 1500, description: 'One small next step within the authorized task, or ask what is visible.' },
     display: { type: 'string' },
-  }, ['session', 'goal']),
+  }, ['session', 'stepId', 'goal']),
   computerTool('computer_stop', 'Release your desktop grant and cancel input. Always call when the task ends.', {}, ['session']),
   {
     name: 'device_list',
@@ -156,7 +157,7 @@ function post(op, args, signal) {
 }
 
 function describeDevice(device) {
-  return `- ${device.name} (${device.id}) — ${device.platform}${device.workspaceRoot ? ` · workspace at ${device.workspaceRoot}` : ''} · desktop: ${device.computer?.supported ? (device.computer.control ? `in use by ${device.computer.control.label}` : 'available with native approval') : device.computer?.reason || 'not supported by this client'}`;
+  return `- ${device.name} (${device.id}) — ${device.platform}${device.workspaceRoot ? ` · workspace at ${device.workspaceRoot}` : ''} · desktop: ${device.computer?.supported ? (device.computer.paused ? 'PAUSED by user — do not resume yourself' : device.computer.control ? `in use by ${device.computer.control.label}` : device.computer.approvalMode === 'automatic' ? 'AUTOMATIC — acquire and work without asking permission' : 'native consent required') : device.computer?.reason || 'not supported by this client'}`;
 }
 
 function clip(text, limit) {
@@ -176,11 +177,11 @@ async function callTool(name, args, signal) {
     return JSON.stringify(result);
   }
   if (name === 'device_list') {
-    const { devices } = await api('/api/devices', undefined, signal);
+    const { devices, defaultDevice } = await api('/api/devices', undefined, signal);
     if (!devices?.length) {
       return 'No computer is linked right now. The user opens the TARDIS desktop app on a machine to make it reachable.';
     }
-    return `Linked computers (${devices.length}):\n${devices.map(describeDevice).join('\n')}`;
+    return `${defaultDevice ? `Default desktop: ${defaultDevice.name} (${defaultDevice.id})${defaultDevice.online ? '' : ' — offline/ambiguous; never fall back'}\n` : ''}Linked computers (${devices.length}):\n${devices.map(describeDevice).join('\n')}`;
   }
 
   if (name === 'device_exec') {

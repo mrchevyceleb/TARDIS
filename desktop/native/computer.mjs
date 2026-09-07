@@ -61,8 +61,10 @@ async function encodeScreenshot(png, region) {
 }
 
 export class ComputerController {
-  constructor({ approve, changed = () => {}, adapter = createAdapter(), encode = encodeScreenshot }) {
+  constructor({ approve, automatic = () => false, changed = () => {}, adapter = createAdapter(), encode = encodeScreenshot }) {
     this.approve = approve;
+    this.automatic = automatic;
+    this.paused = false;
     this.changed = changed;
     this.adapter = adapter;
     this.encode = encode;
@@ -77,9 +79,11 @@ export class ComputerController {
   status() {
     const g = this.grant;
     return { supported: this.capability.supported, reason: this.capability.reason,
+      approvalMode: this.automatic() ? 'automatic' : 'ask', paused: this.paused,
       control: g ? { owner: g.owner, label: g.label, purpose: g.purpose, expiresAt: g.expiresAt } : null };
   }
-  stop() {
+  stop(pause = false) {
+    if (pause && this.automatic()) this.paused = true;
     this.generation++;
     const hadInput = this.inputActive;
     this.inputActive = false;
@@ -96,7 +100,9 @@ export class ComputerController {
   }
   async handle(op, params = {}) {
     if (op === 'end') { this.requireGrant(params.session); this.stop(); return { stopped: true }; }
-    if (op === 'stop') { this.stop(); return { stopped: true }; }
+    if (op === 'stop') { this.stop(true); return { stopped: true, paused: this.paused }; }
+    if (op === 'resume') { if (this.paused) { this.paused = false; this.changed(this.status()); } return { resumed: true }; }
+    if (this.paused) throw new Error('Computer control is paused by the user. Do not retry, resume it yourself, or change permissions. The operator can use Resume control.');
     if (op === 'preview') {
       if (!this.grant || Date.now() >= this.grant.expiresAt || !this.frame) throw new Error('No active screen preview.');
       const { image, width, height, capturedAt, displayId } = this.frame;
@@ -120,11 +126,11 @@ export class ComputerController {
       await this.releasePending;
       check();
       if (op === 'start') {
-        if (this.grant) throw new Error(`Desktop in use by ${this.grant.label}. Wait or ask the user to Stop it.`);
+        if (this.grant) throw new Error(`Desktop in use by ${this.grant.label}. Wait for its owner to release control; do not take it over or ask the user to clear routine contention.`);
         const { owner, label, purpose } = params;
         if (typeof owner !== 'string' || !owner || typeof label !== 'string' || label.length > 100 || typeof purpose !== 'string' || !purpose.trim() || purpose.length > 500) throw new Error('A named owner and short task description are required.');
         await this.adapter.inspect(ac.signal);
-        const allowed = await this.approve({ owner, label, purpose, minutes: 5 }, ac.signal);
+        const allowed = this.automatic() || await this.approve({ owner, label, purpose, minutes: 5 }, ac.signal);
         check();
         if (!allowed) throw new Error('The person at this computer declined desktop control. Stop; do not retry by another route.');
         this.grant = { id: randomUUID(), owner, label, purpose, expiresAt: Date.now() + 5 * 60_000 };

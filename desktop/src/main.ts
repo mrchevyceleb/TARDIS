@@ -21,7 +21,7 @@ import { normalizeServerUrl, probeServer, sameOrigin } from './server.js';
 import { canAutoUpdate, checkForUpdatesInteractive, startUpdater } from './updater.js';
 import { chooseWorkspaceRoot, clearFetchedCopies, handleNativeScheme, openWorkspacePath, workspaceRoot } from './workspace.js';
 import { deviceId, refreshDeviceBridge, startDeviceBridge, stopDeviceBridge } from './bridge.js';
-import { computer } from './computer.js';
+import { computer, setComputerAutomatic } from './computer.js';
 import { bridgeEnabled, forgetApprovals, setBridgeEnabled } from './approvals.js';
 
 const pkg = require('../package.json') as { repository?: { url?: string } };
@@ -386,8 +386,10 @@ async function main(): Promise<void> {
       if (on) startDeviceBridge(serverUrl);
       else stopDeviceBridge();
     },
-    forgetApprovals,
-    stopComputer: () => computer.stop(),
+    forgetApprovals: () => { forgetApprovals(); setComputerAutomatic(false); },
+    stopComputer: () => computer.stop(true),
+    resumeComputer: () => { void computer.handle('resume'); },
+    setComputerAutomatic: on => setComputerAutomatic(on, serverUrl ?? ''),
     changeServer: () => void showConnect(),
     reloadServer: () => loadServer(),
     chooseWorkspace: () => void chooseWorkspace(),

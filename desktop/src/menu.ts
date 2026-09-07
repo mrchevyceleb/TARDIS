@@ -5,6 +5,8 @@ export interface MenuActions {
   setBridgeEnabled(on: boolean): void;
   forgetApprovals(): void;
   stopComputer(): void;
+  resumeComputer(): void;
+  setComputerAutomatic(on: boolean): void;
   changeServer(): void;
   reloadServer(): void;
   chooseWorkspace(): void;
@@ -58,6 +60,9 @@ export function installMenu(actions: MenuActions): void {
           click: (item) => actions.setBridgeEnabled(item.checked),
         },
         { label: 'Stop Computer Control', click: actions.stopComputer },
+        { label: 'Resume Computer Control', click: actions.resumeComputer },
+        { label: 'Automatic Computer Control for This Server', click: () => actions.setComputerAutomatic(true) },
+        { label: 'Require Computer Control Approval', click: () => actions.setComputerAutomatic(false) },
         { label: 'Forget Approvals', click: actions.forgetApprovals },
         { type: 'separator' },
         ...(isMac ? [{ role: 'close' } as MenuItemConstructorOptions] : [

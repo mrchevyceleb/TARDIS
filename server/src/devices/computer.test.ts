@@ -4,12 +4,13 @@ import sharp from 'sharp';
 import { ComputerController, trustedComputerUrl } from '../../../desktop/native/computer.mjs';
 import { localMcpServers, localMcpBananaServers, localMcpCodexArgs } from '../chat/local-mcp.ts';
 import { computerGuidance, readComputerContext } from './context.ts';
+import { ComputerStepJournal } from './stepJournal.ts';
 
-async function fixture(approve: () => Promise<boolean> = async () => true) {
+async function fixture(approve: () => Promise<boolean> = async () => true, automatic: () => boolean = () => false) {
   const bounds = { x: -3200, y: 0, width: 3200, height: 1600 };
   const png = await sharp({ create: { width: 3200, height: 1600, channels: 3, background: '#ffffff' } }).png().toBuffer();
   const actions: Record<string, any>[] = [];
-  const computer = new ComputerController({ approve, adapter: {
+  const computer = new ComputerController({ approve, automatic, adapter: {
     capability: { supported: true },
     inspect: async () => ({ displays: [{ id: 'left', bounds }], windows: [] }),
     capture: async () => ({ png, bounds }),
@@ -64,7 +65,49 @@ test('all runner configurations include identical reserved device tools; turn id
   const token = prompt.match(/do not echo\): ([\w.-]+)/)![1];
   assert.deepEqual(readComputerContext(token), { owner: 'agent:test', label: 'Test', human: true });
   assert.throws(() => readComputerContext(token + 'tampered'));
+  const peer = computerGuidance('agent:test', 'Test', false).match(/do not echo\): ([\w.-]+)/)![1];
+  assert.throws(() => readComputerContext(token), /superseded/);
+  assert.equal(readComputerContext(peer).human, false);
   assert.equal(trustedComputerUrl('http://example.test'), false);
   assert.equal(trustedComputerUrl('http://127.0.0.1:8091'), true);
   assert.equal(trustedComputerUrl('https://example.test'), true);
+});
+
+test('operator automatic mode never asks, but explicit Stop cannot be auto-reacquired', async t => {
+  let asked = 0;
+  const { computer } = await fixture(async () => { asked++; return false; }, () => true);
+  t.after(() => computer.stop());
+  const first = await computer.handle('start', task);
+  assert.equal(first.approvalMode, 'automatic');
+  await computer.handle('end', { session: first.session });
+  assert.equal(computer.status().paused, false);
+  await computer.handle('start', task);
+  await computer.handle('stop');
+  assert.equal(computer.status().paused, true);
+  await assert.rejects(computer.handle('start', { ...task, owner: 'another' }), /paused by the user/);
+  computer.stop(); // link reconnect cannot clear a human pause
+  await assert.rejects(computer.handle('start', task), /paused by the user/);
+  await computer.handle('resume');
+  await computer.handle('start', task);
+  assert.equal(asked, 0);
+});
+
+test('vision-step retries preserve committed outcomes and reject changed arguments', async () => {
+  const journal = new ComputerStepJournal();
+  journal.beginGrant('device', 'session');
+  let inputs = 0;
+  const first = await journal.run('device', 'session', 'click-1', 'goal', async mark => {
+    mark(); inputs++;
+    mark({ acted: true, observation: 'Input completed; inspect before continuing.' });
+    throw new Error('connection lost during post-action vision');
+  });
+  assert.equal(first.acted, true);
+  const retry = await journal.run('device', 'session', 'click-1', 'goal', async () => { inputs++; return { acted: true, observation: 'wrong' }; });
+  assert.equal(retry.replayed, true); assert.equal(inputs, 1);
+  await assert.rejects(journal.run('device', 'session', 'click-1', 'different', async () => first), /different goal/);
+  await assert.rejects(journal.run('device', 'session', 'pre-input', 'goal', async () => { throw new Error('vision offline'); }), /vision offline/);
+  const recovered = await journal.run('device', 'session', 'pre-input', 'goal', async () => ({ acted: false, observation: 'Already complete.' }));
+  assert.equal(recovered.acted, false);
+  journal.beginGrant('device', 'new-session');
+  await assert.rejects(journal.run('device', 'session', 'click-2', 'goal', async () => first), /Start a desktop grant/);
 });

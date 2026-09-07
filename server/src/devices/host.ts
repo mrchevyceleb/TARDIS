@@ -19,10 +19,8 @@ const requests = new Set<string>();
 let computerStartId = '';
 
 const computer = new ComputerController({
+  automatic: () => process.env.RIVENDELL_COMPUTER_UNATTENDED === 'true',
   approve: async (request, signal) => {
-    // Explicit operator opt-in for an unattended HOST only. Electron never
-    // inherits this environment setting and always asks its local user.
-    if (process.env.RIVENDELL_COMPUTER_UNATTENDED === 'true') return true;
     return new Promise<boolean>((resolve) => {
       execFile('zenity', ['--question', '--no-markup', '--title=TARDIS computer control',
         '--ok-label=Allow for 5 minutes', '--cancel-label=No',
@@ -35,13 +33,15 @@ const computer = new ComputerController({
     const previous = indicator;
     indicator = null;
     previous?.kill();
-    if (status.control) {
+    // Dedicated autonomous desktops can stay unobstructed. The console's
+    // controller indicator and Stop/Resume remain available on every client.
+    if (status.control && process.env.RIVENDELL_COMPUTER_INDICATOR !== 'false') {
       const child = spawn('zenity', ['--progress', '--pulsate', '--no-markup', '--title=TARDIS computer use', '--cancel-label=Stop control',
         `--text=${status.control.label} is controlling this desktop.\n${status.control.purpose}\nClose this window or press Stop to revoke immediately.`], { stdio: ['pipe', 'ignore', 'ignore'] });
       indicator = child;
       child.stdin?.write('1\n');
-      child.on('close', () => { if (indicator === child) { indicator = null; computer.stop(); } });
-      child.on('error', () => { if (indicator === child) { indicator = null; computer.stop(); } });
+      child.on('close', () => { if (indicator === child) { indicator = null; computer.stop(true); } });
+      child.on('error', () => { if (indicator === child) { indicator = null; computer.stop(true); } });
     }
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'computer-state', computer: status }));
   },
@@ -52,7 +52,7 @@ function connect(): void {
   const target = new URL('/ws/device', url); target.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(target, { maxPayload: 64 * 1024 }); socket = ws;
   ws.on('open', () => ws.send(JSON.stringify({ type: 'hello', deviceId: saved.id, registrationKey: saved.key, desktopId: desktopIdentity(),
-    name: process.env.RIVENDELL_COMPUTER_NAME || hostname(), platform: process.platform, version: 'computer-1', computer: computer.status() })));
+    name: process.env.RIVENDELL_COMPUTER_NAME || hostname(), platform: process.platform, version: 'computer-2', computer: computer.status() })));
   ws.on('message', raw => {
     let msg: Record<string, any>;
     try { msg = JSON.parse(String(raw)); } catch { return; }

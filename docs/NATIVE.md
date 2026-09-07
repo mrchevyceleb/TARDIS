@@ -83,9 +83,12 @@ The desktop app owns the local side of the workspace, so agent links open real f
 **Full desktop control** is also available on Windows and GNOME X11: agents
 can see monitors and operate native apps with mouse and keyboard through the
 same outbound link. The Computer section above the composer selects the target.
-A separate native warning grants five minutes of broad desktop access; use the
-floating Stop control window, Ship menu, or Ctrl/Command + Alt + Shift + Escape
-to revoke. GUI control is **not** confined by the structured file rules below.
+The machine owner can enable **Ship → Automatic Computer Control for This
+Server** to let agents work without approval popups, pinned to that server.
+Otherwise a native warning grants five minutes of access. The floating Stop
+window, Ship menu, or Ctrl/Command + Alt + Shift + Escape revoke local control;
+automatic control stays paused until Resume. GUI control is **not** confined
+by the structured file rules below.
 See [Computer use](COMPUTER-USE.md) for host setup, model/vision support,
 permissions, unsupported platforms and screenshot privacy.
 
@@ -100,7 +103,9 @@ While the desktop app is open, your companions can work on that machine: run a c
 Controls live in the *Ship* menu:
 
 - **Allow Agents on This Computer** turns the whole thing off and on. It is on by default.
-- **Forget Approvals** clears every "always allow" you have granted.
+- **Automatic Computer Control for This Server** enables prompt-free GUI work for the current server; **Require Computer Control Approval** removes that trust.
+- **Resume Computer Control** clears an explicit Stop pause without creating a grant.
+- **Forget Approvals** clears standing folder allowances and automatic computer trust.
 
 Remember that TARDIS has no login of its own, so anyone who can reach your server can ask your computer to do these things, and so can an agent that has been talked into it by something it read. The approval prompts are what stand in the way; treat a command you did not expect as a reason to say no.
 

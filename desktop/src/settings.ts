@@ -2,6 +2,7 @@
 // Electron userData directory; every read tolerates a missing or corrupt file.
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { trustedComputerUrl } from '../native/computer.mjs';
 
 export type ThemeName = 'dark' | 'light';
 
@@ -23,6 +24,8 @@ export interface Settings {
   deviceId?: string;
   /** Private device-generated pairing proof, never exposed to web content. */
   registrationKey?: string;
+  /** Machine-owner opt-in, pinned to one server origin. Never set by web IPC. */
+  computerTrustedOrigin?: string;
   /** Whether agents may use this computer at all. */
   bridgeEnabled?: boolean;
   /** Folders the user chose to always allow, keyed by mode. */
@@ -68,6 +71,9 @@ function sanitize(raw: unknown): Settings {
   if (typeof input.workspaceRoot === 'string' && input.workspaceRoot) out.workspaceRoot = input.workspaceRoot;
   if (typeof input.deviceId === 'string' && input.deviceId) out.deviceId = input.deviceId;
   if (typeof input.registrationKey === 'string' && /^[a-f0-9]{64}$/.test(input.registrationKey)) out.registrationKey = input.registrationKey;
+  if (typeof input.computerTrustedOrigin === 'string') {
+    try { if (trustedComputerUrl(input.computerTrustedOrigin)) out.computerTrustedOrigin = new URL(input.computerTrustedOrigin).origin; } catch { /* invalid saved origin is never trusted */ }
+  }
   if (typeof input.bridgeEnabled === 'boolean') out.bridgeEnabled = input.bridgeEnabled;
   out.allowedPaths = strings(input.allowedPaths);
   if (input.bounds && typeof input.bounds === 'object') {

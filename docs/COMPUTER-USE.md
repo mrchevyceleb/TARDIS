@@ -1,38 +1,83 @@
 # Computer use
 
-Every TARDIS engine receives the built-in `rivendell-device` MCP: Claude,
-Codex, Grok/Z.ai and Banana's OpenRouter, Fireworks and local models. Agent
-personas do not need individual MCP setup. Operator MCP mirroring cannot
-replace these reserved built-ins. Existing warm engines pick up changed MCP
-configuration at their next genuine process start; never kill busy turns to
-refresh tools.
+Every engine receives the built-in `rivendell-device` MCP: Claude, Codex,
+Grok/Z.ai and Banana's OpenRouter, Fireworks and local models. Shared turn
+guidance tells companions to operate desktop apps, browser sessions and agent
+management UIs themselves, instead of handing routine UI steps back to the user.
+Shell/API tools remain appropriate for non-UI work.
 
-## Targets
+## Automatic control and the default desktop
 
-- **Host desktop:** run `npm run computer:host` in the host's logged-in graphical
-  session. The companion is independent of the Electron app and controls the
-  real desktop, not a headless browser.
-- **This computer:** run the updated Electron app. It connects outbound to the
-  server; no port is opened on the computer. Windows input uses native Windows
-  APIs in a bundled helper, not Electron page events. No Python installation.
+Automatic mode is an explicit **machine-owner standing authorization**, not a
+confirmation for every click. After opt-in, agents acquire five-minute leases
+without approval popups. A lease coordinates access between agents; it is not
+an approval queue. On expiry, agents can acquire a new lease and inspect the
+screen before continuing. They must release control when finished.
 
-The Computer section above each chat composer selects a stable device id for
-that thread. Selection is server state, not an approval. The selection does
-not silently move to another machine when a device disconnects. Electron's
-read-only preload identity marks **This computer**; a browser alone cannot
-expose the user's OS desktop.
+For a dedicated Linux host, set these on the **companion service**:
 
-Current native adapters support **Windows** and **GNOME on X11**. macOS and
-Wayland explicitly report unavailable; they need platform permission/portal
-adapters rather than an X11 workaround. Windows UAC/secure desktops and locked
-sessions are not controllable. The host companion needs a logged-in desktop;
-SSH alone does not create one.
+```ini
+Environment=RIVENDELL_COMPUTER_UNATTENDED=true
+Environment=RIVENDELL_COMPUTER_INDICATOR=false
+```
 
-## Linux host setup
+The second setting keeps native progress windows from covering the apps being
+operated. Control status and Stop/Resume remain in the TARDIS console. Omit it
+to retain the host's native Stop window.
 
-Install the project dependencies and `xdotool`, `wmctrl`, `x11-xserver-utils`
-(`xrandr`), `gnome-screenshot`, `libglib2.0-bin` (`gdbus`) and `zenity` through
-your OS package manager. From a terminal in the graphical session:
+Set these on the **TARDIS server**, not just the companion:
+
+```ini
+Environment=RIVENDELL_COMPUTER_DEFAULT_DEVICE=<device-id>
+Environment=RIVENDELL_COMPUTER_ALLOW_BACKGROUND=true
+```
+
+Use the stable id from `device_list` or `/api/devices`. A unique device name is
+also accepted in the operator setting. `computer_start` can omit `device`:
+server-side resolution uses the chat's explicit selection first, then this
+default. It returns the actual `device` and `session` for subsequent calls.
+An offline/ambiguous default is an error, **never a reason to take over another
+computer**. The local Electron PC is an explicit target, not a fallback.
+
+The background flag is standing authorization for assigned peer/routine work.
+It is off by default; background starts are rejected otherwise. Contexts are
+signed caller identity, not permission to override a machine's mode. Only the
+most recently issued context for an owner is valid: a later peer turn cannot
+reuse that owner's earlier human context. Background work must still yield to
+human conversations and cannot preempt another controller.
+
+For an Electron computer, use **Ship → Automatic Computer Control for This
+Server**. Trust is stored locally as `computerTrustedOrigin`, pinned to the
+selected HTTPS/loopback origin, and is not writable through renderer IPC or a
+server request. **Require Computer Control Approval** removes that opt-in.
+Opening a different server does not inherit trust. Fresh installations ask for
+native consent until their own operator enables automatic mode.
+
+**Stop is not a request to retry.** The web Stop button, native Stop window,
+Ship menu and local hotkey revoke the grant. In automatic mode they also pause
+new grants until the operator selects **Resume control**. Agents must never
+resume themselves, change trust settings, or restart a companion to get around
+a pause/refusal. Pauses survive link reconnects; a new app/companion process
+initializes control afresh. The native Ctrl/Command + Alt + Shift + Escape
+shortcut stops **that local machine**; use the console's Stop button for a
+remote host.
+
+## Host and client setup
+
+- **Host desktop:** `npm run computer:host`, in the logged-in graphical session.
+  This is independent of Electron and controls the real desktop, not a headless
+  browser. It opens no inbound port.
+- **This computer:** run the updated Electron app. Windows input uses bundled
+  Windows APIs rather than page-only events. No Python installation is needed.
+
+Native input currently supports **Windows** and **GNOME X11**. macOS and
+Wayland report unavailable pending native permission/portal adapters. Locked
+sessions and Windows UAC/secure desktops are not controllable. SSH alone does
+not create a graphical session.
+
+Linux dependencies: `xdotool`, `wmctrl`, `x11-xserver-utils` (`xrandr`),
+`gnome-screenshot`, `libglib2.0-bin` (`gdbus`) and `zenity` for attended prompts
+or the optional native indicator. Then:
 
 ```bash
 npm install
@@ -40,11 +85,11 @@ npm run computer:host
 ```
 
 `DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS` and `XDG_SESSION_TYPE` must
-refer to that user's real desktop. Do not guess display numbers, use `xhost +`,
-or run the companion as root. The GNOME screensaver's lock check must work;
-otherwise input fails closed.
+refer to the actual user's desktop. Never guess display numbers, use `xhost +`,
+or run the companion as root. Keep machine clocks synchronized; requests have
+absolute deadlines so delayed packets cannot start expired work.
 
-For an optional always-on **user** service, adapt this example to your checkout:
+An optional **user** service (adapt the checkout path):
 
 ```ini
 [Unit]
@@ -62,96 +107,63 @@ RestartSec=3
 WantedBy=graphical-session.target
 ```
 
-Import the graphical environment into the user service manager from a desktop
-terminal if your desktop has not already done so:
+Import the graphical environment from a desktop terminal if necessary:
 
 ```bash
 systemctl --user import-environment DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS XDG_SESSION_TYPE
 ```
 
-Optional environment variables (none are enabled in a fresh clone):
+`RIVENDELL_COMPUTER_SERVER_URL` defaults to `http://127.0.0.1:8091`; any
+non-loopback address requires HTTPS. `RIVENDELL_COMPUTER_NAME` sets the host's
+friendly name. Identity/key state is private in `computer-host.json`; the
+server stores key hashes in `device-pairings.json`. Preserve client identity
+on updates. Pairing pins reconnects after first use; it is not an account login.
 
-| Variable | Meaning |
-| --- | --- |
-| `RIVENDELL_COMPUTER_SERVER_URL` | Server URL; defaults to `http://127.0.0.1:8091`. Non-loopback requires HTTPS. |
-| `RIVENDELL_COMPUTER_NAME` | Friendly host name; otherwise the OS hostname. |
-| `RIVENDELL_COMPUTER_UNATTENDED=true` | Explicit host-only opt-in to five-minute grants without an approval dialog. A native Stop indicator still appears. Never enabled implicitly. Electron ignores this setting. |
+## Workflows, vision and retry safety
 
-The companion stores its device identity/key in `computer-host.json` under
-the configured TARDIS state directory. The server stores hashes of registered
-keys in `device-pairings.json`. Keep the client key private. Restoring a client
-backup should include its identity; don't delete pairing state just to bypass
-a mismatch. Registration keys pin reconnects after first use; first use still
-relies on the private-network boundary and native consent, not account login.
+`computer_start` → `computer_inspect` → `computer_capture` → `computer_act` →
+verify → `computer_stop`. Use the normal browser profile and existing sessions
+for websites, including sign-in on user-authorized accounts. Never scrape
+unrelated credential stores, print passwords into chat, or bypass MFA/security
+challenges. External side effects remain draft/review-first.
 
-## Control and safety
+Capture returns a real MCP JPEG, monitor id, OS bounds, capture time and a
+one-use frame id. Coordinates are pixels in **that resized image**; the device
+maps them to OS coordinates, including negative-origin Windows monitors.
+Frames expire after 30 seconds or input. Uncertain input is never replayed
+automatically; transport failures explicitly say it may already have run.
 
-An agent requests a **five-minute, per-task grant** on an explicit computer.
-Electron always shows a native warning naming the agent, server and task.
-Neither the web renderer nor a saved checkbox can grant screen/input access.
-The native indicator, Ship → Stop Computer Control, or
-**Ctrl/Command + Alt + Shift + Escape** revoke it. Closing the indicator also
-stops control. On the Linux host, close/cancel the native progress window.
-Keep machine clocks synchronized: desktop requests carry an absolute deadline
-so a delayed network packet cannot start an expired approval. A cancelled
-pending grant reserves the physical desktop until the client acknowledges
-Stop, or that deadline plus a short clock margin expires.
-The web Stop button and explicit chat Stop also revoke control. Disconnect,
-lock/suspend (Electron), timeout and expiry invalidate the grant. The host
-checks lock state before each operation. Only one request runs at a time;
-competing agents get a busy answer, not interleaved keystrokes. Host and
-Electron clients on the same user desktop share a physical-desktop identity
-so the server also prevents parallel grants through both clients.
+Text-only engines use `computer_step` for at most one visually grounded action
+and a textual observation. Supply a unique `stepId` per new goal, and reuse
+that **same** id on retries. The server journals the outcome before dispatch:
+a lost response during post-action vision cannot execute the step again. A
+reused id with different arguments is rejected. The journal is bounded to 256
+steps per grant and reset on a new grant; never replay uncertain work under a
+new id/grant. Pre-input failures can safely retry the same id.
 
-**GUI control is broad desktop access, not a sandbox.** It can reach terminals,
-browser profiles, passwords displayed on screen, and files outside the
-workspace. The existing command/path protections still govern structured
-`device_exec/read/write/open` tools; they cannot constrain arbitrary GUI input.
-Approve only a requested task and keep private windows out of view. Agents are
-instructed to treat screen content as untrusted and seek explicit approval for
-commands, sends, purchases, deletes and sensitive access. These are behavioral
-requirements, not a claim that software can infer every click's consequences.
-Background work must yield to visible human conversations and may not bypass a
-busy desktop or denied request.
+Vision uses `RIVENDELL_VISION_BASE_URL` (default local LM Studio). Pin a fast
+model with `RIVENDELL_COMPUTER_VISION_MODEL`, or reuse an explicit
+`RIVENDELL_VISION_MODEL`. Auto mode prefers an already-loaded small VLM; it
+does not silently load another large model. A labeled pixel grid prevents
+confusion with internal image scaling. Slow grounding recaptures and requires
+identical pixels before acting. If vision is unavailable, agents must not guess.
 
-TARDIS still needs loopback or a trusted private proxy; **do not expose it to
-the public Internet**. Input APIs additionally require a per-server-process
-MCP credential and a signed per-turn identity for grant requests. No identity
-is held in Banana's shared MCP process. A delegated worker uses its parent's
-authorized context/grant; it must not invent a caller name. The trusted web UI
-can stop or preview an already-granted session, but cannot invoke input APIs.
+## Trust and privacy
 
-## Tool loop and vision
+GUI control is broad desktop access, **not a sandbox**. It can reach terminals,
+passwords on screen, browser sessions and files outside the workspace. The
+structured `device_exec/read/write/open` tools retain their existing approval
+and credential-path rules; GUI access is not a route around a refusal.
 
-`device_list` → `computer_start` → `computer_inspect` → `computer_capture` →
-`computer_act` → verify → `computer_stop`.
+Keep TARDIS on loopback or a trusted private proxy, never the public Internet.
+Input APIs require the TARDIS MCP credential plus signed identity for starts;
+no caller identity is held in Banana's shared MCP process. The web UI can
+stop/resume existing standing authority, but cannot enable a machine's
+automatic mode or forge an agent identity.
 
-Capture returns an actual MCP JPEG image with dimensions, monitor id, OS
-bounds, capture time and a one-use frame id. Coordinates are **pixels in that
-resized image**; the execution device maps them to OS pixels, including
-negative-origin monitors. Frames expire after 30 seconds and are invalidated
-when displays change or input is attempted. A failed/uncertain action is never
-replayed automatically. All key/drag operations are bounded; there is no
-unbounded key-down tool.
-
-Text-only engines use `computer_step` instead of guessing from a caption. The
-operator-configured local vision model sees a fresh screen, chooses at most
-one small action, and describes the screen afterward. The device applies the
-same grant/frame/action checks. If post-action vision fails, the response
-explicitly says input already ran. This path uses
-`RIVENDELL_VISION_BASE_URL` (default local LM Studio). Pin a fast grounding model
-with `RIVENDELL_COMPUTER_VISION_MODEL`, or reuse an explicit
-`RIVENDELL_VISION_MODEL`. Auto mode prefers an already-loaded small VLM and
-never silently loads another large model. A labeled pixel grid helps models
-avoid confusing internal image scaling with screenshot coordinates. Slow
-steps recapture and require identical pixels before acting; changed screens
-fail closed. Vision-disabled/unavailable states produce a clear error. It is not
-a generic autonomous task loop and does not perform sensitive external actions.
-
-Screenshots are downscaled, bounded and held only for the current grant;
-Linux temporary capture files are deleted. The console preview is a manual,
-last-frame view, not a hidden recording. TARDIS history keeps frame metadata
-but omits screen image payloads. **The selected model provider and its native
-CLI session storage may retain tool images**; this is outside the relay's
-retention policy. Don't share a screen containing data that provider may not
-receive.
+Screenshots are bounded and held for the current grant. Linux temporary files
+are removed; previews are manual last-frame views, not hidden recordings.
+TARDIS history omits screen image payloads, but **the selected provider and its
+native CLI session storage may retain tool images**. Only share screens that
+provider may receive. Tools and guidance become available to existing warm
+engines at their next genuine start; never restart busy turns to refresh them.

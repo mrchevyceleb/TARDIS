@@ -189,6 +189,7 @@ function computerStatus(value: unknown): ControlStatus {
   const v = value && typeof value === 'object' ? value as Record<string, any> : {};
   const c = v.control;
   return { supported: v.supported === true, reason: typeof v.reason === 'string' ? v.reason.slice(0, 500) : undefined,
+    approvalMode: v.approvalMode === 'automatic' ? 'automatic' : 'ask', paused: v.paused === true,
     control: c && typeof c.owner === 'string' && typeof c.label === 'string' && Number.isFinite(c.expiresAt)
       ? { owner: c.owner.slice(0, 200), label: c.label.slice(0, 100), purpose: String(c.purpose ?? '').slice(0, 500), expiresAt: c.expiresAt } : null };
 }
