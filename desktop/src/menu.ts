@@ -4,6 +4,7 @@ export interface MenuActions {
   bridgeEnabled: boolean;
   setBridgeEnabled(on: boolean): void;
   forgetApprovals(): void;
+  stopComputer(): void;
   changeServer(): void;
   reloadServer(): void;
   chooseWorkspace(): void;
@@ -56,6 +57,7 @@ export function installMenu(actions: MenuActions): void {
           checked: actions.bridgeEnabled,
           click: (item) => actions.setBridgeEnabled(item.checked),
         },
+        { label: 'Stop Computer Control', click: actions.stopComputer },
         { label: 'Forget Approvals', click: actions.forgetApprovals },
         { type: 'separator' },
         ...(isMac ? [{ role: 'close' } as MenuItemConstructorOptions] : [

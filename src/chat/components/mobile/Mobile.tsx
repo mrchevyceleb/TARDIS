@@ -130,6 +130,7 @@ export function Mobile({ s, picker, repo }: ShellViewProps) {
         {/* composer dock */}
         <div className="dock">
             <Composer
+              chatId={s.chatId}
               mobile
               value={s.value}
               onChange={s.setValue}

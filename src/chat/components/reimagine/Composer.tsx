@@ -9,11 +9,13 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CommandEntry } from '../../data/types';
 import { ArrowUp, Plus, SquarePen, StopSquare } from './icons';
 import { isEggPhrase } from '../../../theme/eggs';
+import { ComputerControl } from '../ComputerControl';
 
 export type SendImage = { mediaType: string; base64: string; previewDataUrl?: string };
 type PendingImage = { id: string; mediaType: string; base64: string; previewUrl: string };
 
 export type ComposerProps = {
+  chatId?: string;
   mobile?: boolean;
   value: string;
   onChange: (v: string) => void;
@@ -290,6 +292,7 @@ export function Composer(props: ComposerProps) {
           ))}
         </div>
       ) : null}
+      {props.chatId && <ComputerControl key={props.chatId} chatId={props.chatId} />}
       {props.attachMenu}
       <div className={`composer${images.length > 0 ? ' has-attach' : ''}`}>
         {images.length > 0 ? (

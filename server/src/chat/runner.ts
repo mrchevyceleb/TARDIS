@@ -5,7 +5,9 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { ASSISTANT_HUB_PATH } from './config.ts';
-import { DEVICE_MCP_SCRIPT, TEAM_MCP_SCRIPT } from '../config.ts';
+import { localMcpServers } from './local-mcp.ts';
+import { computerGuidance } from '../devices/context.ts';
+import { redactComputerImages } from '../devices/transcript.ts';
 import { getSessionId, setSessionId, setSessionSelection } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession, activeCodexSessions } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions } from './banana-runner.ts';
@@ -362,24 +364,10 @@ function withTeamMcp(configJson: string, chatId: string): string {
   try {
     if (!localMcpLogged) {
       localMcpLogged = true;
-      console.log(`[chat] rivendell-team MCP ${TEAM_MCP_SCRIPT}`);
-      console.log(`[chat] rivendell-device MCP ${DEVICE_MCP_SCRIPT}`);
+      console.log('[chat] built-in team and computer MCPs enabled');
     }
     const cfg = JSON.parse(configJson) as { mcpServers: Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> };
-    const name = agentForChatId(chatId)?.name;
-    const localUrl = `http://127.0.0.1:${process.env.PORT || '8091'}`;
-    cfg.mcpServers['rivendell-team'] = {
-      type: 'stdio',
-      command: 'node',
-      args: [TEAM_MCP_SCRIPT],
-      env: { RIVENDELL_TEAM_URL: localUrl, ...(name ? { RIVENDELL_AGENT_NAME: name } : {}) },
-    };
-    cfg.mcpServers['rivendell-device'] = {
-      type: 'stdio',
-      command: 'node',
-      args: [DEVICE_MCP_SCRIPT],
-      env: { RIVENDELL_TEAM_URL: localUrl },
-    };
+    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name));
     return JSON.stringify(cfg);
   } catch {
     return configJson;
@@ -980,7 +968,8 @@ class ClaudeSession {
           commandText,
         ].join('\n')
       : commandText;
-    const stdinText = seed ? `${seed}\n\n---\n\n${continuationText}` : continuationText;
+    const computerContext = computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation');
+    const stdinText = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${continuationText}`;
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];
@@ -1308,6 +1297,7 @@ class ClaudeSession {
   }
 
   private emit(msg: SessionEvent): void {
+    msg = redactComputerImages(msg);
     // Once intentional teardown begins, every remaining child frame belongs to
     // the retiring process. Do not allocate, persist, or deliver it.
     if (this.disposed || isPlumbingEvent(msg)) return;

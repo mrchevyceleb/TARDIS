@@ -20,7 +20,8 @@ import { installMenu } from './menu.js';
 import { normalizeServerUrl, probeServer, sameOrigin } from './server.js';
 import { canAutoUpdate, checkForUpdatesInteractive, startUpdater } from './updater.js';
 import { chooseWorkspaceRoot, clearFetchedCopies, handleNativeScheme, openWorkspacePath, workspaceRoot } from './workspace.js';
-import { refreshDeviceBridge, startDeviceBridge, stopDeviceBridge } from './bridge.js';
+import { deviceId, refreshDeviceBridge, startDeviceBridge, stopDeviceBridge } from './bridge.js';
+import { computer } from './computer.js';
 import { bridgeEnabled, forgetApprovals, setBridgeEnabled } from './approvals.js';
 
 const pkg = require('../package.json') as { repository?: { url?: string } };
@@ -329,6 +330,10 @@ function installIpc(): void {
     if (/^https?:\/\//i.test(value)) void shell.openExternal(value);
   });
 
+  ipcMain.on('tardis:device-id', event => {
+    event.returnValue = sameOrigin(event.senderFrame?.url ?? '', serverUrl) ? deviceId() : '';
+  });
+
   ipcMain.on('tardis:workspace-root', (event) => {
     event.returnValue = workspaceRoot() ?? '';
   });
@@ -382,6 +387,7 @@ async function main(): Promise<void> {
       else stopDeviceBridge();
     },
     forgetApprovals,
+    stopComputer: () => computer.stop(),
     changeServer: () => void showConnect(),
     reloadServer: () => loadServer(),
     chooseWorkspace: () => void chooseWorkspace(),

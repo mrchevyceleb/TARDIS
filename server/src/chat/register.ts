@@ -7,6 +7,7 @@ import { readChronicle } from './chronicle.ts';
 import { readCommands } from './commands.ts';
 import { clearThreadSessionIds, ensureStateDir } from './sessions.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
+import { stopComputersForOwner } from '../devices/bridge.ts';
 import {
   activeClaudeSessions,
   beginThreadReset,
@@ -392,7 +393,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
     const peer = (req.headers['x-forwarded-for'] as string | undefined)
       ?? req.socket?.remoteAddress ?? '?';
     console.warn(`[chat http] interrupt from ${peer} cli=${cli} repo=${body.repo} chatId=${chatId}`);
-    await interruptSession({ cli, repoPath: body.repo, chatId });
+    await Promise.all([interruptSession({ cli, repoPath: body.repo, chatId }), stopComputersForOwner(chatId)]);
     res.json({ ok: true, chatId });
   });
 
@@ -1202,7 +1203,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           bumpLaneGen(stopCli, stopRepo, stopChatId);
           if (stopBrain.cli !== stopCli) bumpLaneGen(stopBrain.cli, stopRepo, stopChatId);
           detachCurrentSession();
-          await interruptSession({ cli: stopCli, repoPath: stopRepo, chatId: stopChatId });
+          await Promise.all([interruptSession({ cli: stopCli, repoPath: stopRepo, chatId: stopChatId }), stopComputersForOwner(stopChatId)]);
           safeSend({ type: 'turnEnd' });
           return;
         }

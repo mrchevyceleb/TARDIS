@@ -16,7 +16,7 @@ import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRota
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
-import { noteAgentLane } from './agents.ts';
+import { agentForChatId, noteAgentLane } from './agents.ts';
 import {
   ASSISTANT_HUB_PATH,
   BANANA_COMMANDS_DIR,
@@ -24,7 +24,9 @@ import {
   BANANA_GLOBAL_INSTRUCTIONS_FILE,
   CLAUDE_COMMANDS_DIR,
 } from './config.ts';
-import { TEAM_MCP_SCRIPT } from '../config.ts';
+import { localMcpBananaServers } from './local-mcp.ts';
+import { computerGuidance } from '../devices/context.ts';
+import { redactComputerImages } from '../devices/transcript.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { ensureLocalLlmProxy, shutdownLocalLlmProxy } from './local-llm-proxy.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
@@ -1320,17 +1322,6 @@ function readClaudeMcpServers(
     }
   }
 
-  // Agent-to-agent team bus — injected directly (banana mirrors only Claude
-  // account/project configs, not ~/.codex/config.toml where the team server
-  // is also declared for codex).
-  if (!merged['rivendell-team']) {
-    merged['rivendell-team'] = {
-      type: 'local',
-      command: ['node', TEAM_MCP_SCRIPT],
-      environment: { RIVENDELL_TEAM_URL: `http://127.0.0.1:${process.env.PORT || '8091'}` },
-    };
-  }
-
   const names = Object.keys(merged);
   if (names.length) {
     console.log(`[banana-runner] mirrored ${names.length} MCP server(s) into Banana: ${names.join(', ')}`);
@@ -1363,7 +1354,7 @@ const BANANA_SERVE_CONFIG_PATH = join(homedir(), '.rivendell', 'banana-serve-con
 async function writeBananaServeConfig(configContent: string): Promise<string> {
   await mkdir(dirname(BANANA_SERVE_CONFIG_PATH), { recursive: true });
   const tmpPath = `${BANANA_SERVE_CONFIG_PATH}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmpPath, configContent, 'utf8');
+  await writeFile(tmpPath, configContent, { encoding: 'utf8', mode: 0o600 });
   await rename(tmpPath, BANANA_SERVE_CONFIG_PATH);
   return BANANA_SERVE_CONFIG_PATH;
 }
@@ -1684,7 +1675,7 @@ async function bananaConfigContent(opts: { projectPathHint?: string; cli?: CliKi
   const includeOpenrouter = openrouterProviderEnabled();
   // Mirror the configured MCP set into Banana so OpenRouter and Local models
   // keep the same tool surface as the Claude/Codex-backed companions.
-  const mirroredMcp = resolveMirroredMcp(opts);
+  const mirroredMcp = { ...resolveMirroredMcp(opts), ...localMcpBananaServers() };
   const override: any = {
     $schema: 'https://banana-code.dev/config.json',
   };
@@ -1805,6 +1796,7 @@ async function bananaConfigContent(opts: { projectPathHint?: string; cli?: CliKi
     merged.mcp = {
       ...mirroredMcp,
       ...existingMcp,
+      ...localMcpBananaServers(), // reserved built-ins cannot be shadowed by stale private config
     };
   }
   return JSON.stringify(merged);
@@ -2986,7 +2978,7 @@ export class BananaSession {
       peerFromRole: opts.peerFromRole,
       hidden: opts.hidden,
     });
-    const effectiveText = `${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${commandExpandedText}`;
+    const effectiveText = `${computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation')}\n\n${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${commandExpandedText}`;
     if (seed) {
       this.turn.recoveryRecapUsed = true;
       this.emit({
@@ -3907,6 +3899,7 @@ export class BananaSession {
   // ── emit helpers ───────────────────────────────────────────
 
   private emit(msg: SessionEvent): void {
+    msg = redactComputerImages(msg);
     if (isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
     const se: SeqEvent = { seq: this.reserveSeq(), ev: msg };

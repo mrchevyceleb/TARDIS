@@ -74,7 +74,7 @@ export class JsonStore<T extends StoredRecord> {
   private async write(items: T[]): Promise<void> {
     await mkdir(this.directory, { recursive: true });
     const temporaryPath = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
-    const handle = await open(temporaryPath, 'wx');
+    const handle = await open(temporaryPath, 'wx', 0o600);
     let handleOpen = true;
     try {
       await handle.writeFile(`${JSON.stringify(items, null, 2)}\n`, 'utf8');

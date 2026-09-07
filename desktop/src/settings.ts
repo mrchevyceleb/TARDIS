@@ -1,6 +1,6 @@
 // Tiny persisted settings for the desktop shell. One JSON file in the
 // Electron userData directory; every read tolerates a missing or corrupt file.
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 export type ThemeName = 'dark' | 'light';
@@ -21,6 +21,8 @@ export interface Settings {
   workspaceRoot?: string;
   /** Stable id for this machine on the ship's list of linked computers. */
   deviceId?: string;
+  /** Private device-generated pairing proof, never exposed to web content. */
+  registrationKey?: string;
   /** Whether agents may use this computer at all. */
   bridgeEnabled?: boolean;
   /** Folders the user chose to always allow, keyed by mode. */
@@ -49,7 +51,8 @@ export function saveSettings(patch: Partial<Settings>): Settings {
   cache = sanitize({ ...cache, ...patch });
   try {
     mkdirSync(path.dirname(settingsPath), { recursive: true });
-    writeFileSync(settingsPath, JSON.stringify(cache, null, 2) + '\n', 'utf8');
+    if (existsSync(settingsPath)) chmodSync(settingsPath, 0o600);
+    writeFileSync(settingsPath, JSON.stringify(cache, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
   } catch (error) {
     console.error('[tardis] could not save settings:', error);
   }
@@ -64,6 +67,7 @@ function sanitize(raw: unknown): Settings {
   if (input.theme === 'light' || input.theme === 'dark') out.theme = input.theme;
   if (typeof input.workspaceRoot === 'string' && input.workspaceRoot) out.workspaceRoot = input.workspaceRoot;
   if (typeof input.deviceId === 'string' && input.deviceId) out.deviceId = input.deviceId;
+  if (typeof input.registrationKey === 'string' && /^[a-f0-9]{64}$/.test(input.registrationKey)) out.registrationKey = input.registrationKey;
   if (typeof input.bridgeEnabled === 'boolean') out.bridgeEnabled = input.bridgeEnabled;
   out.allowedPaths = strings(input.allowedPaths);
   if (input.bounds && typeof input.bounds === 'object') {

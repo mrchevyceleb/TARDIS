@@ -13,6 +13,9 @@ files:
   - pages/**
   - build/icon.png
   - package.json
+  - native/**
+asarUnpack:
+  - native/**
 # Update metadata (latest*.yml) is generated for the GitHub provider; the
 # workflow attaches every file to the tagged release itself.
 publish:

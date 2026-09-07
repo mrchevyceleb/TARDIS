@@ -1,5 +1,23 @@
 import type { FileTreeNode, WorkspaceEditFileResponse, WorkspaceSaveResponse } from './types';
 
+export type LinkedComputer = {
+  id: string; name: string; platform: string;
+  computer?: { supported: boolean; reason?: string; control: { owner: string; label: string; purpose: string; expiresAt: number } | null };
+};
+export type ComputerPreview = { image: string; width: number; height: number; capturedAt: number; displayId: string };
+export function fetchComputers(chatId: string, signal?: AbortSignal) {
+  return apiJson<{ devices: LinkedComputer[]; target: string }>(`/api/devices?chatId=${encodeURIComponent(chatId)}`, { signal, cache: 'no-store' });
+}
+export function selectComputer(chatId: string, device: string) {
+  return apiJson<{ target: string }>('/api/devices/target', { method: 'PUT', body: JSON.stringify({ chatId, device }) });
+}
+export function stopComputer(device: string) {
+  return apiJson<{ stopped: boolean }>(`/api/devices/${encodeURIComponent(device)}/computer/stop`, { method: 'POST' });
+}
+export function previewComputer(device: string, signal?: AbortSignal) {
+  return apiJson<ComputerPreview>(`/api/devices/${encodeURIComponent(device)}/computer/preview`, { method: 'POST', signal, cache: 'no-store' });
+}
+
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,

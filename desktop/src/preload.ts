@@ -23,6 +23,7 @@ if (local) {
   contextBridge.exposeInMainWorld('tardisShell', {
     ...base,
     workspaceRoot: workspaceRoot || undefined,
+    deviceId: String(ipcRenderer.sendSync('tardis:device-id') ?? '') || undefined,
     openWorkspacePath: (relPath: string, kind: 'doc' | 'folder') => ipcRenderer.invoke('tardis:open-workspace', relPath, kind),
   });
   const report = () => {

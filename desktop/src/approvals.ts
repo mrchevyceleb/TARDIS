@@ -16,6 +16,7 @@ import { app, BrowserWindow, dialog } from 'electron';
 import { statSync } from 'node:fs';
 import path from 'node:path';
 import { getSettings, saveSettings } from './settings.js';
+import type { ControlRequest } from '../native/computer.mjs';
 
 export type Decision = 'allow' | 'deny';
 export type PathMode = 'read' | 'write' | 'open';
@@ -172,6 +173,22 @@ async function ask(options: Electron.MessageBoxOptions, deadline: number): Promi
   } finally {
     waiting -= 1;
   }
+}
+
+/** A short GUI grant is deliberately separate from file/command approvals.
+ * Native input can reach terminals and credential windows: do not pretend the
+ * path filters sandbox it. No renderer or saved setting can answer this. */
+export async function approveComputer(request: ControlRequest, origin: string, signal: AbortSignal): Promise<boolean> {
+  const cancel = () => cancelPendingApprovals();
+  signal.addEventListener('abort', cancel, { once: true });
+  try {
+    const answer = await ask({ type: 'warning', title: 'TARDIS computer control',
+      message: `${safeForDisplay(request.label)} wants to control this computer`,
+      detail: `${safeForDisplay(request.purpose)}\n\nServer: ${safeForDisplay(origin)}\n\nFor five minutes this shares visible screens with the agent's model and allows mouse/keyboard input in ANY application. GUI control is broad trust, not a sandbox: existing file restrictions cannot protect what is on screen. Only allow a task you requested. Use Stop control or Ctrl/⌘+Alt+Shift+Esc to revoke.`,
+      buttons: ['No', 'Allow for 5 minutes'], defaultId: 0, cancelId: 0, noLink: true, signal,
+    }, Date.now() + 60_000);
+    return !signal.aborted && answer === 1;
+  } finally { signal.removeEventListener('abort', cancel); }
 }
 
 /** Ask before running a command. Always: there is no standing grant for a

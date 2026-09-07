@@ -6,7 +6,7 @@
 // path that gets touched.
 import { app, shell } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { constants as fsConstants, realpathSync } from 'node:fs';
 import { lstat, mkdir, open, opendir, rename, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
@@ -20,6 +20,15 @@ import {
 } from './approvals.js';
 import { getSettings, saveSettings } from './settings.js';
 import { workspaceRoot } from './workspace.js';
+import { computer, handleComputer, initComputerControls, onComputerState } from './computer.js';
+import { desktopIdentity, trustedComputerUrl } from '../native/computer.mjs';
+
+const computerRequests = new Set<string>();
+let computerStartId = '';
+onComputerState(state => {
+  if (!state.control) computerStartId = '';
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'computer-state', computer: state }));
+});
 
 const RECONNECT_MIN_MS = 3_000;
 const RECONNECT_MAX_MS = 60_000;
@@ -48,12 +57,20 @@ let linkGeneration = 0;
 const running = new Map<string, ChildProcess>();
 
 /** A stable id for this machine, so a reconnect replaces its own link. */
-function deviceId(): string {
+export function deviceId(): string {
   const saved = getSettings().deviceId;
   if (saved) return saved;
   const fresh = randomUUID();
   saveSettings({ deviceId: fresh });
   return fresh;
+}
+
+function registrationKey(): string {
+  const saved = getSettings().registrationKey;
+  if (saved) return saved;
+  const key = randomBytes(32).toString('hex');
+  saveSettings({ registrationKey: key });
+  return key;
 }
 
 /** Resolve every symlink we can, so authorisation and the operation itself
@@ -109,6 +126,7 @@ function killTree(child: ChildProcess): void {
 }
 
 function cancelRequest(id: string): void {
+  if (computerRequests.has(id) || computerStartId === id) computer.stop();
   const child = running.get(id);
   if (!child) return;
   running.delete(id);
@@ -168,6 +186,16 @@ async function runCommand(id: string, command: string, cwd: string, timeoutMs: n
 
 async function handle(id: string, op: string, params: Record<string, unknown>): Promise<unknown> {
   if (!bridgeEnabled()) throw new Error('This computer is not accepting agent requests (Ship menu → Allow Agents on This Computer).');
+  if (op.startsWith('computer.')) {
+    if (!currentUrl || !trustedComputerUrl(currentUrl)) throw new Error('Desktop control requires HTTPS, except on loopback.');
+    computerRequests.add(id);
+    try {
+      const result = await handleComputer(op.slice(9), params);
+      if (op === 'computer.start' && computer.status().control) computerStartId = id;
+      return result;
+    }
+    finally { computerRequests.delete(id); }
+  }
   const budget = Number(params.timeoutMs) || 60_000;
   const deadline = Date.now() + budget;
   const root = workspaceRoot();
@@ -314,6 +342,9 @@ function connect(generation: number): void {
     ws.send(JSON.stringify({
       type: 'hello',
       deviceId: deviceId(),
+      ...(currentUrl && trustedComputerUrl(currentUrl) ? {
+        registrationKey: registrationKey(), desktopId: desktopIdentity(), computer: computer.status(),
+      } : {}), // Never transmit the pairing proof over non-loopback plaintext.
       name: os.hostname(),
       platform: process.platform,
       homeDir: os.homedir(),
@@ -336,6 +367,7 @@ function connect(generation: number): void {
     }
     if (msg.type === 'cancel') {
       cancelRequest(String(msg.id ?? ''));
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'cancelled', id: msg.id }));
       return;
     }
     if (msg.type !== 'request') return;
@@ -347,7 +379,7 @@ function connect(generation: number): void {
         ws.send(JSON.stringify({ type: 'reply', id, ...payload }));
       }
     };
-    if (inflight >= MAX_INFLIGHT) {
+    if (inflight >= MAX_INFLIGHT && op !== 'computer.stop' && op !== 'computer.end') {
       answer({ ok: false, error: 'That computer is already handling as many requests as it will take at once.' });
       return;
     }
@@ -375,6 +407,7 @@ function connect(generation: number): void {
 
 /** Nobody is listening any more: drop the dialogs and the work. */
 function stopEverything(): void {
+  computer.stop();
   cancelPendingApprovals();
   for (const id of [...running.keys()]) cancelRequest(id);
 }
@@ -399,6 +432,7 @@ export function startDeviceBridge(serverUrl: string | undefined): void {
   teardown();
   currentUrl = serverUrl;
   if (!serverUrl) return;
+  initComputerControls(new URL(serverUrl).origin);
   backoff = RECONNECT_MIN_MS;
   connect(linkGeneration);
 }

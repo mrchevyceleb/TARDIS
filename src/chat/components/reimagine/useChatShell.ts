@@ -89,6 +89,7 @@ export function useChatShell({ chat, picker }: ShellProps) {
 
   return {
     sticky, sparks,
+    chatId: chat.chatId,
     room, setRoom,
     value, setValue,
     chronicle: chronicle.events,

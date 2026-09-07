@@ -4,7 +4,10 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CODEX_APP_TURN_SCRIPT, PORT, TEAM_MCP_SCRIPT } from '../config.ts';
+import { CODEX_APP_TURN_SCRIPT } from '../config.ts';
+import { localMcpCodexArgs } from './local-mcp.ts';
+import { computerGuidance } from '../devices/context.ts';
+import { redactComputerImages } from '../devices/transcript.ts';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
@@ -698,7 +701,7 @@ export class CodexSession {
       peerFrom: opts.peerFrom,
       peerFromRole: opts.peerFromRole,
     });
-    const prompt = `${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
+    const prompt = `${computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation')}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
     // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
     // -c overrides rather than written into ~/.codex/config.toml so this stays
     // scoped to TARDIS.
@@ -710,14 +713,7 @@ export class CodexSession {
         '-c', `mcp_servers.rivendell-browser.args=${JSON.stringify([browserMcpEntry])}`,
       );
     }
-    browserMcpArgs.push(
-      // rivendell-team: agent-to-agent messaging (this thread's agent identity
-      // rides in via env so sends are attributed correctly).
-      '-c', 'mcp_servers.rivendell-team.command="node"',
-      '-c', `mcp_servers.rivendell-team.args=${JSON.stringify([TEAM_MCP_SCRIPT])}`,
-      '-c', `mcp_servers.rivendell-team.env.RIVENDELL_AGENT_NAME=${JSON.stringify(agentForChatId(this.chatId)?.name ?? 'Teammate')}`,
-      '-c', `mcp_servers.rivendell-team.env.RIVENDELL_TEAM_URL=${JSON.stringify(`http://127.0.0.1:${PORT}`)}`,
-    );
+    browserMcpArgs.push(...localMcpCodexArgs(agentForChatId(this.chatId)?.name ?? 'Teammate'));
     const appServerArgs = buildCodexAppServerArgs(browserMcpArgs);
 
     // Wait for OneDrive to release its sync lock on .codex/config.toml so
@@ -1060,6 +1056,7 @@ export class CodexSession {
   // ── private ────────────────────────────────────────────────
 
   private emit(msg: SessionEvent): void {
+    msg = redactComputerImages(msg);
     if (isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
     const se: SeqEvent = { seq: this.reserveSeq(), ev: msg };

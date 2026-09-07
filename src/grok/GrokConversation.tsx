@@ -113,6 +113,7 @@ export function GrokConversation(props: BotConversationProps) {
 
   const composer = (
     <Composer
+      chatId={s.chatId}
       value={s.value}
       onChange={s.setValue}
       onSend={s.send}

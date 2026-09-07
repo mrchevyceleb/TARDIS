@@ -80,9 +80,18 @@ The desktop app owns the local side of the workspace, so agent links open real f
 
 ## Letting agents use this computer
 
+**Full desktop control** is also available on Windows and GNOME X11: agents
+can see monitors and operate native apps with mouse and keyboard through the
+same outbound link. The Computer section above the composer selects the target.
+A separate native warning grants five minutes of broad desktop access; use the
+floating Stop control window, Ship menu, or Ctrl/Command + Alt + Shift + Escape
+to revoke. GUI control is **not** confined by the structured file rules below.
+See [Computer use](COMPUTER-USE.md) for host setup, model/vision support,
+permissions, unsupported platforms and screenshot privacy.
+
 While the desktop app is open, your companions can work on that machine: run a command, read or write a file, list a folder, or open something in its normal app. The app dials the server, so nothing listens for connections on your PC, and the machine appears to agents only while the app is running.
 
-**You approve every command, on the machine itself.** Each one shows a dialog with the exact command line and the folder it will run in, and the only answers are *Run once* and *No*. There is deliberately no "always allow this command": the same words run different code once a script or a package file changes, and an agent that has read a poisoned web page should never inherit a standing licence on your PC. A refusal is a normal answer, and companions are told to report it rather than work around it.
+**For the structured command tool, you approve every command on the machine itself.** Each one shows a dialog with the exact command line and the folder it will run in, and the only answers are *Run once* and *No*. There is deliberately no "always allow this command": the same words run different code once a script or a package file changes, and an agent that has read a poisoned web page should never inherit a standing licence on your PC. A refusal is a normal answer, and companions are told to report it rather than work around it.
 
 **Files are gentler.** Reading and writing inside your workspace folder needs no prompt. Anything outside asks first, and you can allow a folder for one kind of access: allowing reads in a folder never also allows writes or launches there. Writing a file your computer would run always asks, even inside the workspace.
 

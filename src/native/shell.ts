@@ -9,6 +9,8 @@ export interface TardisShellBridge {
   native: true;
   platform: string;
   version: string;
+  /** Public identity only; never a pairing key or permission grant. */
+  deviceId?: string;
   /** Local copy of the workspace on this machine, when the shell knows one. */
   workspaceRoot?: string;
   /** Open a workspace path with the machine's own apps (fetching a copy from

@@ -73,6 +73,7 @@ export function Conversation({ s, picker, repo }: ShellViewProps) {
             <div className="dock-inner">
               <CounselPopover picker={picker} open={counselOpen} onClose={() => setCounselOpen(false)} />
               <Composer
+                chatId={s.chatId}
                 value={s.value}
                 onChange={s.setValue}
                 onSend={s.send}

@@ -1961,6 +1961,7 @@ export function useChat(opts: {
   const automationBusy = useMemo(() => automationTurnInFlight(blocks), [blocks]);
 
   return {
+    chatId,
     blocks: visibleBlocks, status, error, send, steer, freshStart, stop, reconnect, usage, serverBrain, automationBusy,
     turnStartedAt,
     lastActivityRef: lastMessageAtRef, turnStartRef, compactingRef,

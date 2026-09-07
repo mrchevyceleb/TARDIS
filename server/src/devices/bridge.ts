@@ -17,10 +17,13 @@
 
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { Server as HttpServer } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
+import { JsonStore } from '../lib/jsonStore.ts';
+import { loadComputerTargets } from './context.ts';
+import type { ControlStatus } from '../../../desktop/native/computer.mjs';
 
-export type DeviceOp = 'exec' | 'read' | 'write' | 'ls' | 'open';
+export type DeviceOp = 'exec' | 'read' | 'write' | 'ls' | 'open' | `computer.${string}`;
 
 export type DeviceInfo = {
   id: string;
@@ -30,6 +33,8 @@ export type DeviceInfo = {
   workspaceRoot: string;
   version: string;
   connectedAt: string;
+  computer?: ControlStatus;
+  desktopId?: string;
 };
 
 export type DeviceReply =
@@ -39,16 +44,21 @@ export type DeviceReply =
 type Pending = {
   resolve: (reply: DeviceReply) => void;
   timer: NodeJS.Timeout;
+  op: DeviceOp;
+  cancel: (error: string) => void;
+  computerOwner?: string;
 };
 
 type Device = {
   info: DeviceInfo;
   socket: WebSocket;
   pending: Map<string, Pending>;
+  cancellations: Map<string, () => void>;
   lastSeen: number;
 };
 
 const devices = new Map<string, Device>();
+const startingDesktops = new Map<string, string>();
 const HEARTBEAT_MS = 30_000;
 export const DEVICE_DEFAULT_TIMEOUT_MS = 60_000;
 export const DEVICE_MAX_TIMEOUT_MS = 600_000;
@@ -91,7 +101,9 @@ export function callDevice(
   op: DeviceOp,
   params: Record<string, unknown>,
   timeoutMs = DEVICE_DEFAULT_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<DeviceReply> {
+  if (signal?.aborted) return Promise.resolve({ ok: false, error: 'Request cancelled.' });
   let info: DeviceInfo | undefined;
   try {
     info = findDevice(idOrName);
@@ -112,43 +124,100 @@ export function callDevice(
     return Promise.resolve({ ok: false, error: `${info.name} is no longer connected.` });
   }
 
+  const desktop = info.desktopId || info.id;
+  const starting = op === 'computer.start';
   const id = randomUUID();
-  const budget = Math.min(Math.max(1_000, timeoutMs), DEVICE_MAX_TIMEOUT_MS);
-  return new Promise<DeviceReply>((resolve) => {
-    const timer = setTimeout(() => {
-      device.pending.delete(id);
-      // Tell the machine to stop; otherwise the command keeps running there
-      // long after anyone is listening for its output.
-      try {
-        device.socket.send(JSON.stringify({ type: 'cancel', id }));
-      } catch { /* the link is already gone */ }
-      resolve({ ok: false, error: `${info!.name} did not answer within ${Math.round(budget / 1000)}s.` });
-    }, budget + 5_000);
+  if (starting) {
+    if (startingDesktops.has(desktop) || [...devices.values()].some(d => (d.info.desktopId || d.info.id) === desktop && d.info.computer?.control && d.info.computer.control.expiresAt > Date.now())) {
+      return Promise.resolve({ ok: false, error: 'This physical desktop is already in use or awaiting approval. Wait; do not use its other client to bypass the owner.' });
+    }
+    startingDesktops.set(desktop, id);
+  }
+  const ceiling = op.startsWith('computer.') ? (starting ? 60_000 : 30_000) : DEVICE_MAX_TIMEOUT_MS;
+  const budget = Math.min(Math.max(1_000, timeoutMs), ceiling);
+  const deadlineAt = Date.now() + budget;
+  return new Promise<DeviceReply>((done) => {
+    let finished = false;
+    const release = () => { if (startingDesktops.get(desktop) === id) startingDesktops.delete(desktop); };
+    const finish = (reply: DeviceReply, cancelled = false) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer); device.pending.delete(id);
+      signal?.removeEventListener('abort', cancel);
+      if (starting && cancelled) {
+        // Caller cancellation is not yet a machine acknowledgement. Hold the
+        // physical desktop until its client confirms Stop, or the wire's
+        // absolute request deadline has expired on that client (+ clock margin).
+        const acknowledge = () => { clearTimeout(guard); device.cancellations.delete(id); release(); };
+        const guard = setTimeout(acknowledge, Math.max(0, deadlineAt + 5000 - Date.now()));
+        guard.unref?.();
+        device.cancellations.set(id, acknowledge);
+      } else release();
+      done(reply);
+    };
+    const cancelWithError = (error: string) => {
+      if (finished) return;
+      finish({ ok: false, error: op === 'computer.act'
+        ? `Input may already have run. Do NOT replay it; reconnect and capture the current screen before deciding the next action. ${error}` : error }, true);
+      try { device.socket.send(JSON.stringify({ type: 'cancel', id })); } catch { /* deadline remains the fail-safe */ }
+    };
+    const cancel = () => cancelWithError('Request cancelled.');
+    const timer = setTimeout(() => cancelWithError(`${info!.name} did not answer within ${Math.round(budget / 1000)}s.`), budget + 5000);
     timer.unref?.();
-    device.pending.set(id, { resolve, timer });
+    device.pending.set(id, { resolve: reply => finish(reply), cancel: cancelWithError, op, timer,
+      ...(starting && typeof params.owner === 'string' ? { computerOwner: params.owner } : {}) });
+    signal?.addEventListener('abort', cancel, { once: true });
     try {
-      device.socket.send(JSON.stringify({ type: 'request', id, op, params: { ...params, timeoutMs: budget } }));
+      device.socket.send(JSON.stringify({ type: 'request', id, op, params: { ...params, timeoutMs: budget, deadlineAt } }));
     } catch (error) {
-      clearTimeout(timer);
-      device.pending.delete(id);
-      resolve({ ok: false, error: `Could not reach ${info.name}: ${(error as Error).message}` });
+      cancelWithError(`Could not reach ${info.name}: ${(error as Error).message}`);
     }
   });
 }
 
+export async function stopComputersForOwner(owner: string): Promise<void> {
+  await Promise.all([...devices.values()].filter(d => d.info.computer?.control?.owner === owner || [...d.pending.values()].some(p => p.computerOwner === owner))
+    .map(d => callDevice(d.info.id, 'computer.stop', {}, 3000)));
+}
+
 function settleAll(device: Device, error: string): void {
-  for (const [id, pending] of device.pending) {
-    clearTimeout(pending.timer);
-    try {
-      device.socket.send(JSON.stringify({ type: 'cancel', id }));
-    } catch { /* the link is already gone */ }
-    pending.resolve({ ok: false, error });
-  }
+  for (const pending of [...device.pending.values()]) pending.cancel(error);
   device.pending.clear();
 }
 
+function computerStatus(value: unknown): ControlStatus {
+  const v = value && typeof value === 'object' ? value as Record<string, any> : {};
+  const c = v.control;
+  return { supported: v.supported === true, reason: typeof v.reason === 'string' ? v.reason.slice(0, 500) : undefined,
+    control: c && typeof c.owner === 'string' && typeof c.label === 'string' && Number.isFinite(c.expiresAt)
+      ? { owner: c.owner.slice(0, 200), label: c.label.slice(0, 100), purpose: String(c.purpose ?? '').slice(0, 500), expiresAt: c.expiresAt } : null };
+}
+
 export function registerDeviceBridge(server: HttpServer): void {
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 4 * 1024 * 1024 });
+  // TOFU pin of a device-generated registration key. Never returned by the API.
+  // A device without the key cannot replace a paired machine, even if it knows
+  // the public device id. First use still requires native per-task consent.
+  const store = new JsonStore<{ id: string; hash: string }>('device-pairings.json', []);
+  const paired = new Map<string, string>();
+  const ready = Promise.all([store.list().then(rows => { for (const row of rows) paired.set(row.id, row.hash); }), loadComputerTargets()]);
+  void ready.catch(error => console.error('[devices] pairing state unavailable:', error));
+  let pairing: Promise<unknown> = Promise.resolve();
+  const pin = (id: string, key: unknown) => {
+    const work = pairing.then(async () => {
+      await ready;
+      const hash = typeof key === 'string' && /^[a-f0-9]{64}$/.test(key) ? createHash('sha256').update(key).digest('hex') : '';
+      if (paired.has(id) && paired.get(id) !== hash) throw new Error('Device pairing key does not match.');
+      if (hash && !paired.has(id)) {
+        const next = [...paired].map(([id, hash]) => ({ id, hash }));
+        await store.replace([...next, { id, hash }]);
+        paired.set(id, hash);
+      }
+      return Boolean(hash);
+    });
+    pairing = work.catch(() => {}); // one bad client must not poison later registrations
+    return work;
+  };
 
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -160,6 +229,7 @@ export function registerDeviceBridge(server: HttpServer): void {
     }
     wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
       let registered: Device | null = null;
+      let registering = false;
 
       let lastSeen = Date.now();
       const beat = setInterval(() => {
@@ -175,7 +245,7 @@ export function registerDeviceBridge(server: HttpServer): void {
       }, HEARTBEAT_MS);
       beat.unref?.();
 
-      ws.on('message', (raw) => {
+      ws.on('message', async (raw) => {
         lastSeen = Date.now();
         if (registered) registered.lastSeen = lastSeen;
         let msg: Record<string, unknown>;
@@ -186,18 +256,23 @@ export function registerDeviceBridge(server: HttpServer): void {
         }
 
         if (msg.type === 'hello') {
-          if (registered) {
+          if (registered || registering) {
             // One machine per link. Anything else is a client bug or an
             // attempt to hold several registry slots on one socket.
             ws.send(JSON.stringify({ type: 'error', message: 'already registered' }));
             return;
           }
           const id = String(msg.deviceId ?? '').trim();
-          if (!id) {
-            ws.send(JSON.stringify({ type: 'error', message: 'deviceId is required' }));
+          if (!id || id.length > 100) {
+            ws.send(JSON.stringify({ type: 'error', message: 'valid deviceId is required' }));
             ws.close();
             return;
           }
+          registering = true;
+          let hasKey = false;
+          try { hasKey = await pin(id, msg.registrationKey); }
+          catch { ws.close(1008, 'Device pairing failed'); return; }
+          if (ws.readyState !== ws.OPEN) return;
           // A reconnect replaces the old link for the same machine.
           const previous = devices.get(id);
           if (previous && previous.socket !== ws) {
@@ -212,14 +287,23 @@ export function registerDeviceBridge(server: HttpServer): void {
             workspaceRoot: String(msg.workspaceRoot ?? ''),
             version: String(msg.version ?? ''),
             connectedAt: new Date().toISOString(),
+            ...(hasKey && msg.computer ? { computer: computerStatus(msg.computer), desktopId: typeof msg.desktopId === 'string' && /^[a-f0-9]{64}$/.test(msg.desktopId) ? msg.desktopId : id } : {}),
           };
-          registered = { info, socket: ws, pending: new Map(), lastSeen: Date.now() };
+          registered = { info, socket: ws, pending: new Map(), cancellations: new Map(), lastSeen: Date.now() };
           devices.set(id, registered);
           ws.send(JSON.stringify({ type: 'ready' }));
           console.log(`[tardis] linked computer ${info.name} (${info.platform})`);
           return;
         }
 
+        if (msg.type === 'computer-state' && registered?.info.computer) {
+          registered.info.computer = computerStatus(msg.computer);
+          return;
+        }
+        if (msg.type === 'cancelled' && registered) {
+          registered.cancellations.get(String(msg.id ?? ''))?.();
+          return;
+        }
         if (msg.type === 'reply' && registered) {
           const pending = registered.pending.get(String(msg.id ?? ''));
           if (!pending) return;
