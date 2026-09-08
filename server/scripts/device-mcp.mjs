@@ -45,12 +45,12 @@ const TOOLS = [
   computerTool('computer_focus', 'Activate one exact window, verify the OS really focused it, and return a window-only screenshot. For terminals and Pi TUIs, follow this with computer_type directly—do NOT guess/click the prompt line.', {
     window: { type: 'string', description: 'Exact window id from computer_inspect.' },
   }, ['session', 'window']),
-  computerTool('computer_type', 'Reliably type ONCE into an exact native window: reserve operationId, activate/verify the window, type, re-verify focus, and return its screenshot. For a terminal/Pi TUI use this directly after computer_focus, never coordinate clicks. This does NOT press Enter. If a reply is lost, retry the SAME operationId; the device returns the cached outcome without typing twice.', {
+  computerTool('computer_type', 'Reliably type ONCE into an exact native window: reserve operationId, activate/verify the window, type, re-verify focus, and return its screenshot. For a terminal/Pi TUI use this directly after computer_focus, never coordinate clicks. This does NOT press Enter. Result metadata includes local OCR when available; use it with the screenshot to verify text. If a reply is lost, retry the SAME operationId. Even an invented second id with identical window/text is deduplicated within the grant.', {
     operationId: { type: 'string', maxLength: 100, description: 'Unique within this grant, e.g. pi-checkin-text-1. Reuse only to retry this exact same window/text.' },
     window: { type: 'string', description: 'Exact window id from computer_inspect.' },
     text: { type: 'string', maxLength: 2000 },
   }, ['session', 'operationId', 'window', 'text']),
-  computerTool('computer_key', 'Send one named key/chord ONCE to an exact verified active window, re-verify focus, then return its screenshot. Use ENTER after computer_type only when its screenshot visibly proves the text is correct. If a reply is lost, retry the SAME operationId; never resend Enter under a new id.', {
+  computerTool('computer_key', 'Send one named key/chord ONCE to an exact verified active window, re-verify focus, then return its screenshot. Use ENTER after computer_type only when its screenshot/OCR proves the text is correct. If a reply is lost, retry the SAME operationId; never resend Enter under a new id.', {
     operationId: { type: 'string', maxLength: 100, description: 'Unique within this grant, e.g. pi-checkin-submit-1. Reuse only to retry this exact same window/chord.' },
     window: { type: 'string', description: 'Exact window id from computer_inspect.' },
     keys: { type: 'array', minItems: 1, maxItems: 5, items: { type: 'string' }, description: 'Uppercase keys: CTRL,ALT,SHIFT,META,ENTER,TAB,ESC,SPACE,BACKSPACE,DELETE,arrows,HOME,END,PAGEUP,PAGEDOWN,A-Z,0-9,F1-F12.' },

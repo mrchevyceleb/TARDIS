@@ -9,9 +9,11 @@ export function redactComputerImages<T>(event: T): T {
     }
     if (value && typeof value === 'object') {
       return Object.fromEntries(Object.entries(value).map(([key, v]) => [key,
-        key === 'image' && value.displayId && value.capturedAt ? '[screenshot omitted]' : visit(v)]));
+        key === 'image' && value.displayId && value.capturedAt ? '[screenshot omitted]'
+          : key === 'ocrText' && value.displayId && value.capturedAt ? '[screen OCR omitted from TARDIS history]'
+          : visit(v)]));
     }
-    if (typeof value === 'string' && value.includes('"displayId"') && value.includes('"capturedAt"') && value.includes('"image"')) {
+    if (typeof value === 'string' && value.includes('"displayId"') && value.includes('"capturedAt"') && (value.includes('"image"') || value.includes('"ocrText"'))) {
       try { return JSON.stringify(visit(JSON.parse(value))); } catch { /* not serialized tool content */ }
     }
     return value;

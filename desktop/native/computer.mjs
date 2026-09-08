@@ -108,6 +108,17 @@ export class ComputerController {
       return { replay: { ...existing.outcome, operationId: id, replayed: true,
         message: 'Keyboard input already ran (or may have run) exactly once. Capture the window to inspect it; do not repeat under a new id.' } };
     }
+    if (op === 'type') {
+      // Models sometimes disregard the same-id retry contract when they cannot
+      // visually read a terminal. Exact text to the exact same window must not
+      // duplicate merely because they invented a second id.
+      const duplicate = [...this.grant.operations.entries()].find(([, entry]) => entry.fingerprint === fingerprint);
+      if (duplicate) {
+        if (!duplicate[1].outcome) throw new Error(`Identical text is already being typed under operationId ${duplicate[0]}. Do not send it again.`);
+        return { replay: { ...duplicate[1].outcome, operationId: id, matchedOperationId: duplicate[0], replayed: true,
+          message: 'Identical text was already typed once in this window. It was not typed again. Inspect OCR/window state; do not invent another retry id.' } };
+      }
+    }
     return { id, fingerprint, payload };
   }
   findWindow(info, id) {

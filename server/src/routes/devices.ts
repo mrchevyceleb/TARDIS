@@ -11,6 +11,7 @@ import {
 import { asyncHandler } from './helpers.ts';
 import { backgroundComputerAllowed, configuredDefaultComputer, computerTarget, readComputerContext, setComputerTarget, validComputerMcpToken } from '../devices/context.ts';
 import { ComputerStepJournal } from '../devices/stepJournal.ts';
+import { computerOcr } from '../devices/ocr.ts';
 import { computerVision } from '../chat/vision-adapter.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 
@@ -128,6 +129,13 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
     } else {
       result = await call(op === 'stop' ? 'end' : op, body);
       if (op === 'stop') steps.forget(device);
+    }
+    const keyboardResult = op === 'type' || op === 'key'
+      || (op === 'act' && (body.operation === 'type' || body.operation === 'key'));
+    const response = result as Record<string, any>;
+    if (keyboardResult && typeof response?.image === 'string') {
+      const ocrText = await computerOcr(response.image, ac.signal);
+      if (ocrText) result = { ...response, ocrText };
     }
     if (ac.signal.aborted) return;
     res.setHeader('Cache-Control', 'no-store');

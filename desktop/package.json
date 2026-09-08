@@ -1,7 +1,7 @@
 {
   "name": "tardis-desktop",
   "productName": "TARDIS",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Bigger on the inside. The desktop shell for a TARDIS server.",
   "license": "MIT",
   "private": true,

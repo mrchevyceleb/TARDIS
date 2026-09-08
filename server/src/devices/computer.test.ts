@@ -5,6 +5,7 @@ import { ComputerController, trustedComputerUrl } from '../../../desktop/native/
 import { localMcpServers, localMcpBananaServers, localMcpCodexArgs } from '../chat/local-mcp.ts';
 import { computerGuidance, readComputerContext } from './context.ts';
 import { ComputerStepJournal } from './stepJournal.ts';
+import { redactComputerImages } from './transcript.ts';
 
 async function fixture(approve: () => Promise<boolean> = async () => true, automatic: () => boolean = () => false) {
   const bounds = { x: -3200, y: 0, width: 3200, height: 1600 };
@@ -108,6 +109,8 @@ test('concurrent and retried targeted keyboard operations execute at most once',
   release(); await first;
   const replay = await computer.handle('type', args);
   assert.equal(replay.replayed, true); assert.equal(inputs, 1);
+  const inventedId = await computer.handle('type', { ...args, operationId: 'invented-retry-id' });
+  assert.equal(inventedId.replayed, true); assert.equal(inventedId.matchedOperationId, 'one-type'); assert.equal(inputs, 1);
 });
 
 test('all runner configurations include identical reserved device tools; turn identity is signed', () => {
@@ -124,6 +127,14 @@ test('all runner configurations include identical reserved device tools; turn id
   assert.equal(trustedComputerUrl('http://example.test'), false);
   assert.equal(trustedComputerUrl('http://127.0.0.1:8091'), true);
   assert.equal(trustedComputerUrl('https://example.test'), true);
+});
+
+test('screen OCR is available to the turn but omitted from durable TARDIS events', () => {
+  const event = { content: [{ type: 'text', text: JSON.stringify({ displayId: 'screen', capturedAt: 1, ocrText: 'PRIVATE SCREEN TEXT' }) }] };
+  const redacted = redactComputerImages(event);
+  const serialized = JSON.stringify(redacted);
+  assert.doesNotMatch(serialized, /PRIVATE SCREEN TEXT/);
+  assert.match(serialized, /screen OCR omitted/);
 });
 
 test('operator automatic mode never asks, but explicit Stop cannot be auto-reacquired', async t => {

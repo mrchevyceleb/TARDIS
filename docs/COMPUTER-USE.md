@@ -147,13 +147,15 @@ window and verify the OS active-window identity before and after keyboard input.
 `computer_type` does not press Enter and returns a window screenshot: verify the
 text is visibly in the prompt, then call
 `computer_key(window,new-operationId,["ENTER"])`. Keyboard input without an exact
-window is rejected. Every type/key id is atomically reserved before async work;
-a retry with the same id returns a cached outcome instead of typing/submitting
-twice, while changing its window/content is rejected. The device keeps up to
-256 keyboard outcomes for each five-minute grant without retaining screenshots.
-A short input-settle delay ensures the returned screenshot does not race queued
-key events. API success alone is not proof the target accepted text; the image
-is the proof. If the same focus/input goal fails twice, stop rather than guessing.
+window is rejected. Every type/key id is atomically reserved before async work; a retry with the
+same id returns a cached outcome instead of typing/submitting twice, while
+changing its window/content is rejected. Exact same-window text is also
+deduplicated if a model invents another id after misreading the screenshot.
+The device keeps up to 256 keyboard outcomes per five-minute grant without
+retaining screenshots. A short settle delay prevents the returned screenshot
+from racing queued events. When available, the Moria server adds bounded local
+Tesseract OCR to targeted keyboard results. Use the screenshot and OCR as proof;
+if OCR contains the exact marker, do not type it again. If the same focus/input goal fails twice, stop rather than guessing.
 
 Text-only engines use `computer_step` for at most one visually grounded action
 and a textual observation. Supply a unique `stepId` per new goal, and reuse
@@ -185,7 +187,9 @@ automatic mode or forge an agent identity.
 
 Screenshots are bounded and held for the current grant. Linux temporary files
 are removed; previews are manual last-frame views, not hidden recordings.
-TARDIS history omits screen image payloads, but **the selected provider and its
-native CLI session storage may retain tool images**. Only share screens that
-provider may receive. Tools and guidance become available to existing warm
+TARDIS history omits screen image payloads and derived OCR text. OCR is
+model-visible only for the current tool result and can be disabled with
+`RIVENDELL_COMPUTER_OCR=off`; if Tesseract is absent, keyboard tools continue
+without OCR. **The selected provider and its native CLI session may retain both
+screenshots and OCR text.** Only share screens that provider may receive. Tools and guidance become available to existing warm
 engines at their next genuine start; never restart busy turns to refresh them.
