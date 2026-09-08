@@ -121,6 +121,9 @@ export type ChatBlock =
       text: string;
       ts: number;
       folio?: string;
+      /** Provider-tagged tool-bound update vs completed answer. This is a
+       * presentation distinction, never a reason to hide user-facing text. */
+      presentation?: 'update' | 'answer';
       turnId?: string;
       /** Teammate message this response belongs to, when applicable. */
       peerId?: string;

@@ -558,10 +558,9 @@ function showTextCaret(b: Extract<ChatBlock, { kind: 'text' }>, streaming: boole
   return Boolean(b.open) && streaming;
 }
 
-/** Every provider `text` block is an intentional, user-facing message — the
- *  same prose a terminal client shows between tool calls. Never classify it as
- *  hidden thinking. Provider reasoning uses a distinct `thinking` block, while
- *  tool calls already have their own collapsible cards. */
+/** Preserve every user-facing text message, including between-tool updates.
+ * Provider metadata controls presentation, not visibility. Never guess that
+ * prose is private reasoning from its words or its position before a tool. */
 // A run of consecutive assistant blocks that share a turnId render under a
 // single "✦ TARDIS" header (the prototype's per-turn group).
 function ElrondGroup({
@@ -580,6 +579,8 @@ function ElrondGroup({
   const [acted, setActed] = useState(false);
   const first = blocks[0];
   const textBlocks = blocks.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text');
+  const isUpdate = collapseSteps && textBlocks.length > 0 && textBlocks.every((b) => b.presentation === 'update');
+  const isActivity = collapseSteps && textBlocks.length === 0;
   const copyText = () => {
     const src = textBlocks.filter(isAnswerProse);
     return (src.length ? src : textBlocks.filter(hasVisibleProse)).map((b) => b.text).join('\n\n');
@@ -609,12 +610,13 @@ function ElrondGroup({
     <div
       id={`msg-pin-${first.id}`}
       data-pin-block={first.id}
-      className={`msg m-elrond${acted ? ' acted' : ''}${isPinned ? ' pinned' : ''}`}
+      className={`msg m-elrond${isUpdate ? ' m-update' : ''}${isActivity ? ' m-activity' : ''}${acted ? ' acted' : ''}${isPinned ? ' pinned' : ''}`}
       onClick={mobile ? () => setActed((a) => !a) : undefined}
     >
       <div className="who">
         <span className="mini">✦</span> {BRAND} <span className="when">{timeLabel(first.ts)}</span>
       </div>
+      {isUpdate && <div className="update-label">Update</div>}
       {blocks.map((b) => {
         switch (b.kind) {
           case 'tool': {
@@ -780,14 +782,15 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         last.day = day;
         continue;
       }
-      // Grok mode (collapseSteps): one user prompt → one assistant response.
-      // A single outer turn can contain many provider message_start cycles as
-      // tools return. Merge those cycles into one chronological response group;
-      // prose remains visible and only consecutive tools are compacted. Studio
-      // mode keeps strict provider turnId grouping.
-      const merge = last && last.type === 'elrond' && (collapseSteps
-        ? true
-        : turnId && last.blocks[0] && (last.blocks[0] as { turnId?: string }).turnId === turnId);
+      // Keep actual provider messages separate. Flattening every tool round
+      // into one answer bubble made activity narration look like the reply.
+      // Codex can tag multiple messages within one turnId: split on phase too.
+      const priorText = last?.type === 'elrond'
+        ? last.blocks.findLast((block) => block.kind === 'text') : undefined;
+      const phaseChanged = b.kind === 'text' && priorText?.kind === 'text'
+        && b.presentation && priorText.presentation && b.presentation !== priorText.presentation;
+      const merge = last?.type === 'elrond' && turnId
+        && (last.blocks[0] as { turnId?: string }).turnId === turnId && !phaseChanged;
       if (merge) {
         last.blocks.push(b);
         last.day = day;

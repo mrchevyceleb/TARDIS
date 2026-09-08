@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatBlock, ChatImagePreview, CompanionId, Repo } from '../data/types';
 import { contextWindowForCodexModel } from '../codexModels';
-import { automationTurnInFlight, automationTurnPending, filterAutomationNoise } from '../utils/automationNoise';
+import { automationTurnInFlight, filterAutomationNoise } from '../utils/automationNoise';
 import { isAutomationPeer } from '../utils/routineNoise';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'streaming' | 'closed' | 'error';
@@ -107,7 +107,7 @@ function isSyntheticApiErrorEvent(ev: any): boolean {
 // invokes reducers twice for purity-checking.
 type ReducerCursor = { current: string; peerId?: string };
 
-function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlock[] {
+export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlock[] {
   if (!ev || typeof ev !== 'object') return blocks;
 
   if ((ev.type === 'stream_event' || ev.type === 'event') && ev.event) {
@@ -172,6 +172,25 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlo
       return b;
     });
     return [...closed, { kind: 'restart', id: id(), ts, reason }];
+  }
+
+  // Completed voice bubbles must not change the text runner's streaming IDs,
+  // busy state, or optimistic-send acknowledgement state.
+  if (ev.type === '_voice_transcript' && typeof ev.text === 'string'
+    && (ev.role === 'user' || ev.role === 'assistant')) {
+    const blockId = `voice-${ev.id}`;
+    if (blocks.some((block) => block.id === blockId)) return blocks;
+    const ts = typeof ev.ts === 'number' ? ev.ts : Date.now();
+    return ev.role === 'user'
+      ? [...blocks, { kind: 'user', id: blockId, text: ev.text, ts }]
+      : [...blocks, { kind: 'text', id: blockId, text: ev.text, ts, turnId: blockId, cbIndex: -1, open: false }];
+  }
+
+  // Voice handoffs are control envelopes for an already-visible spoken user
+  // request, not a second teammate conversation. Replies belong in main chat.
+  if (ev.type === 'peer_message' && ev.fromRole === 'voice') {
+    turnIdRef.peerId = undefined;
+    return blocks;
   }
 
   // Agent-to-agent delivery: a teammate's message landing in this thread.
@@ -297,6 +316,14 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlo
     return closed;
   }
 
+  if (ev.type === 'message_delta') {
+    const reason = ev.delta?.stop_reason;
+    const presentation = reason === 'tool_use' ? 'update' : reason === 'end_turn' ? 'answer' : undefined;
+    if (!presentation) return blocks;
+    return blocks.map((b) => b.kind === 'text' && b.turnId === turnIdRef.current
+      ? { ...b, presentation } : b);
+  }
+
   if (ev.type === 'content_block_start') {
     const idx: number = ev.index;
     const cb = ev.content_block;
@@ -308,6 +335,7 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlo
       const block: ChatBlock = {
         kind: 'text', id: id(), text: '', ts: Date.now(),
         turnId, peerId: turnIdRef.peerId, cbIndex: idx, open: true,
+        presentation: cb.phase === 'commentary' ? 'update' : cb.phase === 'final_answer' ? 'answer' : undefined,
       };
       return [...blocks, block];
     }
@@ -380,6 +408,10 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlo
   if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
     if (!turnIdRef.current) turnIdRef.current = `t${nextId++}`;
     const turnId = turnIdRef.current;
+    const presentation = ev.message.stop_reason === 'tool_use' ? 'update'
+      : ev.message.stop_reason === 'end_turn' ? 'answer' : undefined;
+    const annotated: ChatBlock[] = presentation ? blocks.map((b): ChatBlock => b.kind === 'text' && b.turnId === turnId
+      ? { ...b, presentation } : b) : blocks;
     const fullText = (ev.message.content as Array<any>)
       .filter((c) => c?.type === 'text' && typeof c.text === 'string')
       .map((c) => c.text)
@@ -388,10 +420,10 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlo
       if (isSyntheticApiErrorEvent(ev)) return blocks;
       const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '');
       if (!hasText) {
-        return [...blocks, { kind: 'text', id: id(), text: fullText, ts: Date.now(), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false }];
+        return [...annotated, { kind: 'text', id: id(), text: fullText, ts: Date.now(), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation }];
       }
     }
-    return blocks;
+    return annotated;
   }
 
   return blocks;
@@ -511,14 +543,12 @@ function cancelOutbound(key: string): QueuedOutbound[] {
   return queued;
 }
 
-// v7 discards snapshots whose receive cursor may have advanced before React
-// committed the matching durable blocks during a tab/device handoff.
-const CHAT_CACHE_VERSION = 'v7';
+// Rebuild once from durable events to recover provider message boundaries and
+// update/answer metadata missing from older flattened browser snapshots.
+const CHAT_CACHE_VERSION = 'v8';
 
 function blocksStorageKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
-  // v7 preserves only completed routine deliverables as labeled boundaries. The
-  // durable server log rebuilds each thread once; future snapshots contain
-  // only what the user could actually see.
+  // Browser snapshots are disposable; transcript history remains on the server.
   return `rivendell:chat-blocks:${CHAT_CACHE_VERSION}:${conversationKey(cli, repoPath, chatId)}`;
 }
 
@@ -1016,11 +1046,11 @@ export function useChat(opts: {
     if (!repo) return;
     const key = conversationKey(cli, repo.path, chatId);
     if (restoredKeyRef.current !== key) return;
-    // Keep the previous settled envelope while a routine is active or replaying.
-    // In gaps between content blocks no text/tool flag may be open; only ready
-    // proves the terminal turnEnd/ready boundary landed. Advancing sooner would
-    // strand its eventual deliverable without the automation boundary.
-    if (status !== 'ready' && automationTurnPending(blocks)) return;
+    // Cache only settled turns. A mid-message cursor without its live reducer
+    // state would resume after message_start, losing deltas and phase metadata.
+    // Keep the prior settled snapshot; durable replay restores the entire new
+    // turn after a reload, including its provider message boundary.
+    if (status !== 'ready') return;
     writeStoredState(cli, repo.path, chatId, blocks, appliedSeq, cacheResetAtRef.current);
   }, [blocks, appliedSeq, status, repo?.path, cli, chatId]);
 

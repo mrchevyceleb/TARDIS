@@ -332,6 +332,25 @@
 .bot-app .rc .prose em { color: var(--r-ink-soft); }
 .bot-app .rc .caret { width: 8px; height: 15px; border-radius: 2px; background: var(--r-elf-blue); box-shadow: 0 0 8px color-mix(in oklch, var(--r-elf-blue) 50%, transparent); }
 
+/* Between-tool messages stay readable, but are not part of the answer bubble.
+   Tools keep their own cards. No clipping, line clamps, or hidden prose. */
+.bot-app .rc .m-elrond.m-update {
+  background: transparent;
+  border-radius: 0;
+  border-inline-start: 2px solid var(--r-line);
+  padding: 4px 14px;
+  margin-inline-start: 8px;
+}
+.bot-app .rc .m-update .update-label {
+  color: var(--r-ink-soft);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  margin-bottom: -6px;
+}
+.bot-app .rc .m-update .prose { font-size: 14px; line-height: 1.5; color: var(--r-ink-soft); }
+.bot-app .rc .m-elrond.m-activity { background: transparent; padding: 0; }
+
 /* user bubble — right, brass-tinted panel */
 .bot-app .rc .m-user { align-items: flex-end; align-self: flex-end; max-width: 84%; }
 .bot-app .rc .bubble {

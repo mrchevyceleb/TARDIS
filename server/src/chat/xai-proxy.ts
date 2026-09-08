@@ -2,6 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { getXaiAuth } from '../routes/xai-oauth.ts';
+import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 
 // xAI's Anthropic-compatible endpoint (https://api.x.ai/v1/messages) rejects
 // `role: "system"` entries inside the `messages` array with a 400
@@ -92,7 +93,7 @@ function toSystemBlocks(value: unknown): Array<Record<string, unknown>> {
  *  coerce tool input_schema.required to an array. xAI's validator rejects a
  *  missing/null `required` ("/required: null is not of type array"); Anthropic
  *  accepts both. Returns the original string if the body isn't JSON. */
-function transformRequest(body: string): string {
+export function transformRequest(body: string): string {
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
@@ -115,7 +116,10 @@ function transformRequest(body: string): string {
       }
     }
     obj.messages = kept;
-    if (systemBlocks.length > 0) obj.system = systemBlocks;
+    // Apply at system priority on every request, including warm Claude-CLI
+    // processes. A user-turn reminder alone loses to CLI progress narration.
+    systemBlocks.push({ type: 'text', text: TRANSCRIPT_GUIDANCE });
+    obj.system = systemBlocks;
   }
   if (Array.isArray(obj.tools)) {
     for (const tool of obj.tools as Array<Record<string, unknown>>) {
