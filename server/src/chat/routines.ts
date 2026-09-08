@@ -91,22 +91,27 @@ export function deleteRoutine(id: string): boolean {
   return true;
 }
 
-/** Fire a routine now (manual run or scheduler). Marks lastRunAt even on
- *  skip so a busy agent doesn't backlog missed cycles. */
+/** Fire a routine now (manual run or scheduler). Only stamp lastRunAt on
+ *  actual delivery. A watched-thread or busy-engine skip must not consume
+ *  the daily slot; the scheduler retries after a short cooldown. */
 export async function runRoutine(id: string): Promise<{ ran: boolean; reason?: string }> {
   const routine = listRoutines().find((r) => r.id === id);
   if (!routine) return { ran: false, reason: 'routine not found' };
   const agent = listAgents().find((a) => a.id === routine.agentId);
   if (!agent) return { ran: false, reason: 'agent was deleted' };
-  const stamp = Date.now();
   const text = `[routine: ${routine.name}]\n${routine.prompt}\n\n(Scheduled automation. Do the work. If nothing happened, reply with exactly NO_UPDATE and nothing else; TARDIS suppresses that protocol token from chat. Never emit a provider end-of-sequence marker, an empty-message marker, "I checked," or a watermark recap. Only post in the thread when something shipped, failed, or needs the user.)`;
   const result = await sendToAgentHome(agent, text, {
     peerFrom: `⚙︎ ${routine.name}`,
     peerFromRole: 'automation',
     peerText: routine.name,
   });
-  markRun(id, stamp);
-  return result.delivered ? { ran: true } : { ran: false, reason: result.reason };
+  if (result.delivered) {
+    markRun(id, Date.now());
+    skipUntil.delete(id);
+    return { ran: true };
+  }
+  skipUntil.set(id, Date.now() + SKIP_COOLDOWN_MS);
+  return { ran: false, reason: result.reason };
 }
 
 function markRun(id: string, at: number): void {
@@ -117,6 +122,9 @@ function markRun(id: string, at: number): void {
     saveRoutines(routines);
   }
 }
+
+const SKIP_COOLDOWN_MS = 2 * 60 * 1000;
+const skipUntil = new Map<string, number>();
 
 // ---- schedule parsing / due checks -------------------------------------------
 
@@ -174,7 +182,28 @@ function cronFieldMatches(field: string, value: number, min: number, max: number
   return false;
 }
 
-function isDue(routine: Routine, now: number): boolean {
+function cronMatchesAt(fields: string[], at: Date): boolean {
+  const [minF, hourF, domF, monF, dowF] = fields;
+  return cronFieldMatches(minF, at.getMinutes(), 0, 59)
+    && cronFieldMatches(hourF, at.getHours(), 0, 23)
+    && (domF === '*' || cronFieldMatches(domF, at.getDate(), 1, 31))
+    && (monF === '*' || cronFieldMatches(monF, at.getMonth() + 1, 1, 12))
+    && (dowF === '*' || cronFieldMatches(dowF, at.getDay(), 0, 6));
+}
+
+/** Most recent matching cron minute at or before `now`, searching back 24h. */
+function mostRecentCronSlot(fields: string[], now: number): number | null {
+  const d = new Date(now);
+  d.setSeconds(0, 0);
+  for (let i = 0; i < 24 * 60; i++) {
+    if (cronMatchesAt(fields, d)) return d.getTime();
+    d.setMinutes(d.getMinutes() - 1);
+  }
+  return null;
+}
+
+export function routineIsDue(routine: Routine, now: number): boolean {
+  if ((skipUntil.get(routine.id) ?? 0) > now) return false;
   const sched = parseSchedule(routine.schedule);
   if (!sched) return false;
   const last = routine.lastRunAt ?? routine.createdAt;
@@ -187,21 +216,14 @@ function isDue(routine: Routine, now: number): boolean {
     const slot = todaySlot(sched.minutes);
     return now >= slot && last < slot;
   }
-  // cron: due when the current minute matches and we haven't run within it.
-  const d = new Date(now);
-  const minuteStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes()).getTime();
-  if (last >= minuteStart) return false;
-  const [minF, hourF, domF, monF, dowF] = sched.fields;
-  return cronFieldMatches(minF, d.getMinutes(), 0, 59)
-    && cronFieldMatches(hourF, d.getHours(), 0, 23)
-    && (domF === '*' || cronFieldMatches(domF, d.getDate(), 1, 31))
-    && (monF === '*' || cronFieldMatches(monF, d.getMonth() + 1, 1, 12))
-    && (dowF === '*' || cronFieldMatches(dowF, d.getDay(), 0, 6));
+  // cron: due if the most recent matching slot has not been delivered yet.
+  // A watched-thread skip must not burn that slot for the rest of the day.
+  const slot = mostRecentCronSlot(sched.fields, now);
+  return slot != null && last < slot;
 }
 
-/** Minute scheduler — started once at boot. Claims all due slots BEFORE any
- *  slow dispatch (a 60s cold engine start must not permanently starve later
- *  same-minute routines) and guards per-routine re-entry across ticks. */
+/** Minute scheduler — started once at boot. inFlight is the overlap guard so
+ *  a skipped delivery can retry; lastRunAt is stamped only after delivery. */
 const inFlight = new Set<string>();
 export function startRoutineScheduler(): void {
   const tick = async () => {
@@ -209,13 +231,12 @@ export function startRoutineScheduler(): void {
     const due: Routine[] = [];
     for (const routine of listRoutines()) {
       if (routine.paused || inFlight.has(routine.id)) continue;
-      if (isDue(routine, now)) {
-        markRun(routine.id, now); // claim the slot first (atomic vs. overlapping ticks)
-        due.push({ ...routine, lastRunAt: now });
+      if (routineIsDue(routine, now)) {
+        inFlight.add(routine.id);
+        due.push(routine);
       }
     }
     for (const routine of due) {
-      inFlight.add(routine.id);
       void (async () => {
         try {
           const result = await runRoutine(routine.id);
