@@ -8,6 +8,7 @@ import { readCommands } from './commands.ts';
 import { clearThreadSessionIds, ensureStateDir } from './sessions.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { stopComputersForOwner } from '../devices/bridge.ts';
+import { historicalDelivery, subscriptionReplayCursor } from './replayDelivery.ts';
 import {
   activeClaudeSessions,
   beginThreadReset,
@@ -827,7 +828,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       // so disk is authoritative through `latest` and only newer live events
       // may join the replay.
       const staleSessionThrough = repairedSessionThrough.get(session) ?? 0;
-      unsubscribe = session.subscribe(listener, Math.max(replaySince, staleSessionThrough));
+      unsubscribe = session.subscribe(listener, subscriptionReplayCursor(replaySince, staleSessionThrough));
       if (replaying) {
         const durableReplay: DispatchSeqEvent[] = events
           .filter((event) => event.seq > replaySince)
@@ -841,7 +842,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
             return true;
           });
         replaying = false;
-        for (const se of filterReplayEvents(merged)) dispatch(se);
+        for (const se of filterReplayEvents(merged)) {
+          const delivery = se.seq <= latest ? historicalDelivery(se) : se;
+          if (delivery) dispatch(delivery);
+        }
       }
       return session;
     };
@@ -873,7 +877,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
         const pending: DispatchSeqEvent[] = events
           .filter((event) => event.seq > replaySince)
           .map((event) => ({ seq: event.seq, ev: event.ev as any }));
-        for (const se of filterReplayEvents(pending)) dispatch(se);
+        for (const se of filterReplayEvents(pending)) {
+          const delivery = historicalDelivery(se);
+          if (delivery) dispatch(delivery);
+        }
       }
       return latest;
     };
