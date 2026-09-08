@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { accessSync, constants } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 function run(file, args, signal, input) {
@@ -31,9 +31,20 @@ function canonicalWindowId(value) {
   catch { return ''; }
 }
 
+// PATH lookup, not a hardcoded /usr/bin: these are operator-installed tools that
+// land in /usr/local/bin, ~/.local/bin or a Nix profile just as often, and run()
+// resolves them through PATH anyway. Hardcoding the prefix reports a working
+// install as a missing dependency and silently disables computer use.
+function onPath(name) {
+  return (process.env.PATH || '').split(delimiter).some(dir => {
+    if (!dir) return false;
+    try { accessSync(join(dir, name), constants.X_OK); return true; } catch { return false; }
+  });
+}
+
 class LinuxAdapter {
   constructor() {
-    const missing = ['xdotool', 'wmctrl', 'xrandr', 'gnome-screenshot', 'gdbus'].filter(name => !existsSync(`/usr/bin/${name}`));
+    const missing = ['xdotool', 'wmctrl', 'xrandr', 'maim', 'gdbus'].filter(name => !onPath(name));
     this.capability = { supported: Boolean(process.env.DISPLAY) && process.env.XDG_SESSION_TYPE !== 'wayland' && !missing.length,
       reason: process.env.XDG_SESSION_TYPE === 'wayland' ? 'Wayland desktop input requires a portal adapter; this build supports X11.' : !process.env.DISPLAY ? 'No graphical DISPLAY. Run the companion in the logged-in desktop session.' : missing.length ? `Install desktop dependencies: ${missing.join(', ')}` : undefined };
   }
@@ -76,7 +87,10 @@ class LinuxAdapter {
     const dir = await mkdtemp(join(tmpdir(), 'tardis-screen-'));
     try {
       const file = join(dir, 'screen.png');
-      await run('gnome-screenshot', ['-f', file], signal);
+      // maim, not gnome-screenshot: GNOME plays a shutter sound and flashes
+      // the screen on every capture, which is intolerable for an agent that
+      // screenshots in a loop (and gets forwarded over remote-desktop audio).
+      await run('maim', ['--hidecursor', file], signal);
       const png = await readFile(file);
       // GNOME/X11 captures the root framebuffer, whose origin is (0,0),
       // NOT a Windows-style monitor union. A primary monitor to the right

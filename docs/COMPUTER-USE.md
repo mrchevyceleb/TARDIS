@@ -76,7 +76,7 @@ sessions and Windows UAC/secure desktops are not controllable. SSH alone does
 not create a graphical session.
 
 Linux dependencies: `xdotool`, `wmctrl`, `x11-xserver-utils` (`xrandr`),
-`gnome-screenshot`, `libglib2.0-bin` (`gdbus`) and `zenity` for attended prompts
+`maim`, `libglib2.0-bin` (`gdbus`) and `zenity` for attended prompts
 or the optional native indicator. Then:
 
 ```bash
