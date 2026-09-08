@@ -48,7 +48,7 @@ function bumpEventLogRevision(ev?: SessionEvent): void {
     const type = (inner as { type?: string } | undefined)?.type;
     // One invalidation at semantic message/turn boundaries, not per streamed
     // token. Otherwise an active agent forces a full directory scan every poll.
-    if (!['_user_echo', 'peer_message', 'assistant', 'result', 'turnEnd', 'compacted'].includes(type ?? '')) return;
+    if (!['_user_echo', '_voice_transcript', 'peer_message', 'assistant', 'result', 'turnEnd', 'compacted'].includes(type ?? '')) return;
   }
   revision += 1;
 }
@@ -397,6 +397,17 @@ export function appendEventLogSync(key: string, persisted: PersistedEvent): bool
     console.warn('[event-log-store] sync append failed', key, (err as Error).message);
     return false;
   }
+}
+
+/** External conversation records use the same write chain as native output.
+ * A synchronous append outside it could land ahead of older queued frames. */
+export function appendEventLogDurable(key: string, persisted: PersistedEvent): Promise<void> {
+  observeNextSeq(key, persisted.seq + 1);
+  const next = (writeChains.get(key) ?? Promise.resolve()).then(() => {
+    if (!appendEventLogSync(key, persisted)) throw new Error('Could not save the call transcript to the conversation');
+  });
+  writeChains.set(key, next.catch(() => {}));
+  return next;
 }
 
 export function appendEventLog(key: string, persisted: PersistedEvent): void {

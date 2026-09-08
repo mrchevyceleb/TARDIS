@@ -2973,7 +2973,7 @@ export class BananaSession {
     const personaScope = personaPromptFor(this.chatId);
     const personaPrefix = personaScope ? `${personaScope}\n\n---\n\n` : '';
     const conversationGuidance = conversationGuidanceForTurn({
-      chatId: this.chatId,
+      chatId: this.chatId, logKey: this.logKey, historyThroughSeq,
       peerFrom: opts.peerFrom,
       peerFromRole: opts.peerFromRole,
       hidden: opts.hidden,
@@ -3898,6 +3898,12 @@ export class BananaSession {
 
   // ── emit helpers ───────────────────────────────────────────
 
+  ingestExternalEvent(se: SeqEvent): void {
+    this.eventLog.push(se);
+    if (this.eventLog.length > EVENT_BUFFER_SIZE) this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
+    for (const fn of this.listeners) fn(se);
+  }
+
   private emit(msg: SessionEvent): void {
     msg = redactComputerImages(msg);
     if (isPlumbingEvent(msg)) return;
@@ -3959,6 +3965,12 @@ function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
 
 /** Manager keyed by cwd + chat id, matching the claude/codex session maps. */
 const bananaSessions = new Map<string, BananaSession>();
+
+export function publishBananaExternalEvent(logKey: string, se: SeqEvent): void {
+  for (const session of bananaSessions.values()) {
+    if (session.logKey === logKey) session.ingestExternalEvent(se);
+  }
+}
 
 /** See markBusyLanesRestarting in runner.ts. */
 export function markBusyBananaLanesRestarting(signal: string): number {

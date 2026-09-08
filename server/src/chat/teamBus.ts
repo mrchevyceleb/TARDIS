@@ -532,11 +532,14 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
   const deliveryId = delivery.deliveryId ?? randomUUID();
   const deadline = Date.now() + RECIPIENT_IDLE_WAIT_MS;
   let waited = false;
-  const replyInstruction = waitForReply
+  const replyInstruction = from.role === 'voice'
+    ? '(This is the user continuing your own voice conversation. Reply directly to the user in this thread; your answer also returns to the call if it is still open. Do not team_message Voice. Ending the audio call does not cancel this work. External side effects remain draft/review-first.)'
+    : waitForReply
     ? `(Reply inline in this turn. Your final answer is returned automatically to ${from.name}; no second team_message call is needed.)`
     : `(Reply inline for the thread. If ${from.name} needs the result, use team_message(to: "${from.name}", text: ..., wait: false); busy teammates are queued automatically.)`;
   const prompt = [
-    `[message from teammate ${from.name}${from.role ? ` (${from.role})` : ''} — handoff ${hop}]`,
+    from.role === 'voice' ? '[continuation of the user’s voice request in your own thread]'
+      : `[message from teammate ${from.name}${from.role ? ` (${from.role})` : ''} — handoff ${hop}]`,
     text,
     '',
     replyInstruction,
@@ -832,6 +835,9 @@ export async function deliverTeamMessage(input: {
   from: string;
   to: string;
   text: string;
+  source?: 'voice';
+  /** Internal admission notification; fires only after the outbox is durable. */
+  onQueued?: () => void;
   hop?: number;
   wait?: boolean;
   signal?: AbortSignal;
@@ -842,7 +848,9 @@ export async function deliverTeamMessage(input: {
 
   const to = findAgent(input.to);
   if (!to) return { delivered: false, reason: `no teammate named "${input.to}" — call team_list first` };
-  const from = findAgent(input.from) ?? { id: 'unknown', name: input.from || 'Unknown', role: '', engine: '', home: '', createdAt: 0 };
+  const from = input.source === 'voice'
+    ? { id: `voice-${to.id}`, name: 'Voice', role: 'voice', engine: '', home: '', createdAt: 0 }
+    : findAgent(input.from) ?? { id: 'unknown', name: input.from || 'Unknown', role: '', engine: '', home: '', createdAt: 0 };
   if (to.id === from.id && input.from.trim().toLowerCase() === to.name.trim().toLowerCase()) {
     return { delivered: false, reason: 'that is you — no need to message yourself' };
   }
@@ -880,6 +888,10 @@ export async function deliverTeamMessage(input: {
     }));
   } catch (error) {
     return { delivered: false, to: to.name, hop, reason: `could not persist queued delivery: ${(error as Error).message}` };
+  }
+
+  try { input.onQueued?.(); } catch (error) {
+    console.warn('[team] admission observer failed:', (error as Error).message);
   }
 
   if (!waitForReply) {

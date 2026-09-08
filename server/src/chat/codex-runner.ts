@@ -697,7 +697,7 @@ export class CodexSession {
     }
     const personaScope = personaPromptFor(this.chatId);
     const conversationGuidance = conversationGuidanceForTurn({
-      chatId: this.chatId,
+      chatId: this.chatId, logKey: this.logKey, historyThroughSeq,
       peerFrom: opts.peerFrom,
       peerFromRole: opts.peerFromRole,
     });
@@ -1055,6 +1055,12 @@ export class CodexSession {
 
   // ── private ────────────────────────────────────────────────
 
+  ingestExternalEvent(se: SeqEvent): void {
+    this.eventLog.push(se);
+    if (this.eventLog.length > EVENT_BUFFER_SIZE) this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
+    for (const fn of this.listeners) fn(se);
+  }
+
   private emit(msg: SessionEvent): void {
     msg = redactComputerImages(msg);
     if (isPlumbingEvent(msg)) return;
@@ -1170,7 +1176,7 @@ export class CodexSession {
         event: {
           type: 'content_block_start',
           index: idx,
-          content_block: { type: 'text', text: '' },
+          content_block: { type: 'text', text: '', phase: ev.item.phase },
         },
       });
       this.emitClaudeEvent({
@@ -1277,6 +1283,12 @@ function latestThreadIdFromEvents(events: SeqEvent[]): string | null {
 
 /** Manager keyed by cwd + chat id, matching the claude session map. */
 const codexSessions = new Map<string, CodexSession>();
+
+export function publishCodexExternalEvent(logKey: string, se: SeqEvent): void {
+  for (const session of codexSessions.values()) {
+    if (session.logKey === logKey) session.ingestExternalEvent(se);
+  }
+}
 
 /** See markBusyLanesRestarting in runner.ts. */
 export function markBusyCodexLanesRestarting(signal: string): number {

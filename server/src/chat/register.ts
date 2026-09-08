@@ -11,6 +11,7 @@ import { stopComputersForOwner } from '../devices/bridge.ts';
 import { historicalDelivery, subscriptionReplayCursor } from './replayDelivery.ts';
 import {
   activeClaudeSessions,
+  subscribeExternalThreadEvents,
   beginThreadReset,
   dropSession,
   freshStart,
@@ -781,6 +782,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
         unsubscribe = null;
       }
     };
+
+    const stopExternalEvents = subscribeExternalThreadEvents((logKey, se) => {
+      // Warm views receive this through their runner. A cold attach has no
+      // process subscription, but must still show the call without a reload.
+      if (unsubscribe || !cliKind || !repoPath || laneLogKey(cliKind, repoPath, chatId) !== logKey) return;
+      void helloBarrier.then(() => {
+        if (!unsubscribe && cliKind && repoPath && laneLogKey(cliKind, repoPath, chatId) === logKey) dispatch(se);
+      });
+    });
 
     const bindSession = async (
       promise: Promise<AnySession>,
@@ -1928,6 +1938,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
     });
 
     ws.on('close', () => {
+      stopExternalEvents();
       socketThreads.delete(ws);
       clearInterval(heartbeat);
       clearInterval(keepalive);
