@@ -26,6 +26,7 @@ export const THREAD_VOICE_STYLE_ADDENDUM = [
   '',
   'Keep ordinary replies brief. For longer work, give short substantive updates at natural milestones, use tools normally,',
   'and finish with the outcome. If the caller hangs up, continue any accepted work in the thread.',
+  'Do not write a second Hall answer that restates or rephrases what you already said on the call.',
 ].join('\n');
 
 /** Legacy generic Jarvis persona. Named teammate calls use the thread-scoped

@@ -9,7 +9,7 @@ Shell/API tools remain appropriate for non-UI work.
 ## Automatic control and the default desktop
 
 Automatic mode is an explicit **machine-owner standing authorization**, not a
-confirmation for every click. After opt-in, agents acquire five-minute leases
+confirmation for every click. After opt-in, agents acquire forty-minute leases
 without approval popups. A lease coordinates access between agents; it is not
 an approval queue. On expiry, agents can acquire a new lease and inspect the
 screen before continuing. They must release control when finished.
@@ -151,7 +151,7 @@ window is rejected. Every type/key id is atomically reserved before async work; 
 same id returns a cached outcome instead of typing/submitting twice, while
 changing its window/content is rejected. Exact same-window text is also
 deduplicated if a model invents another id after misreading the screenshot.
-The device keeps up to 256 keyboard outcomes per five-minute grant without
+The device keeps up to 256 keyboard outcomes per forty-minute grant without
 retaining screenshots. A short settle delay prevents the returned screenshot
 from racing queued events. When available, the Moria server adds bounded local
 Tesseract OCR to targeted keyboard results. Use the screenshot and OCR as proof;

@@ -184,8 +184,8 @@ export async function approveComputer(request: ControlRequest, origin: string, s
   try {
     const answer = await ask({ type: 'warning', title: 'TARDIS computer control',
       message: `${safeForDisplay(request.label)} wants to control this computer`,
-      detail: `${safeForDisplay(request.purpose)}\n\nServer: ${safeForDisplay(origin)}\n\nFor five minutes this shares visible screens with the agent's model and allows mouse/keyboard input in ANY application. GUI control is broad trust, not a sandbox: existing file restrictions cannot protect what is on screen. Only allow a task you requested. Use Stop control or Ctrl/⌘+Alt+Shift+Esc to revoke.`,
-      buttons: ['No', 'Allow for 5 minutes'], defaultId: 0, cancelId: 0, noLink: true, signal,
+      detail: `${safeForDisplay(request.purpose)}\n\nServer: ${safeForDisplay(origin)}\n\nFor ${request.minutes} minutes this shares visible screens with the agent's model and allows mouse/keyboard input in ANY application. GUI control is broad trust, not a sandbox: existing file restrictions cannot protect what is on screen. Only allow a task you requested. Use Stop control or Ctrl/⌘+Alt+Shift+Esc to revoke.`,
+      buttons: ['No', `Allow for ${request.minutes} minutes`], defaultId: 0, cancelId: 0, noLink: true, signal,
     }, Date.now() + 60_000);
     return !signal.aborted && answer === 1;
   } finally { signal.removeEventListener('abort', cancel); }

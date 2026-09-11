@@ -16,6 +16,9 @@ export function trustedComputerUrl(raw) {
     (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)));
 }
 
+export const COMPUTER_GRANT_MINUTES = 40;
+export const COMPUTER_GRANT_MS = COMPUTER_GRANT_MINUTES * 60_000;
+
 const ACTIONS = new Set(['move', 'click', 'double_click', 'right_click', 'drag', 'scroll']);
 export const KEYS = new Set(['CTRL', 'ALT', 'SHIFT', 'META', 'ENTER', 'TAB', 'ESC', 'BACKSPACE', 'DELETE', 'SPACE', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'HOME', 'END', 'PAGEUP', 'PAGEDOWN', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ...Array.from({ length: 12 }, (_, i) => `F${i + 1}`)]);
 export function validateText(value) {
@@ -219,11 +222,11 @@ export class ComputerController {
         const { owner, label, purpose } = params;
         if (typeof owner !== 'string' || !owner || typeof label !== 'string' || label.length > 100 || typeof purpose !== 'string' || !purpose.trim() || purpose.length > 500) throw new Error('A named owner and short task description are required.');
         await this.adapter.inspect(ac.signal);
-        const allowed = this.automatic() || await this.approve({ owner, label, purpose, minutes: 5 }, ac.signal);
+        const allowed = this.automatic() || await this.approve({ owner, label, purpose, minutes: COMPUTER_GRANT_MINUTES }, ac.signal);
         check();
         if (!allowed) throw new Error('The person at this computer declined desktop control. Stop; do not retry by another route.');
-        this.grant = { id: randomUUID(), owner, label, purpose, expiresAt: Date.now() + 5 * 60_000, operations: new Map() };
-        this.timer = setTimeout(() => this.stop(), 5 * 60_000);
+        this.grant = { id: randomUUID(), owner, label, purpose, expiresAt: Date.now() + COMPUTER_GRANT_MS, operations: new Map() };
+        this.timer = setTimeout(() => this.stop(), COMPUTER_GRANT_MS);
         this.timer.unref?.();
         this.changed(this.status());
         return { session: this.grant.id, ...this.status() };

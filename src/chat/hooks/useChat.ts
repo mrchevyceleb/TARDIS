@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatBlock, ChatImagePreview, CompanionId, Repo } from '../data/types';
 import { contextWindowForCodexModel } from '../codexModels';
-import { automationTurnInFlight, automationTurnPending, filterAutomationNoise } from '../utils/automationNoise';
+import { automationTurnInFlight, filterAutomationNoise } from '../utils/automationNoise';
 import { isAutomationPeer } from '../utils/routineNoise';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'streaming' | 'closed' | 'error';
@@ -107,7 +107,7 @@ function isSyntheticApiErrorEvent(ev: any): boolean {
 // invokes reducers twice for purity-checking.
 type ReducerCursor = { current: string; peerId?: string };
 
-function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlock[] {
+export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlock[] {
   if (!ev || typeof ev !== 'object') return blocks;
 
   if ((ev.type === 'stream_event' || ev.type === 'event') && ev.event) {
@@ -172,6 +172,25 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlo
       return b;
     });
     return [...closed, { kind: 'restart', id: id(), ts, reason }];
+  }
+
+  // Completed voice bubbles must not change the text runner's streaming IDs,
+  // busy state, or optimistic-send acknowledgement state.
+  if (ev.type === '_voice_transcript' && typeof ev.text === 'string'
+    && (ev.role === 'user' || ev.role === 'assistant')) {
+    const blockId = `voice-${ev.id}`;
+    if (blocks.some((block) => block.id === blockId)) return blocks;
+    const ts = typeof ev.ts === 'number' ? ev.ts : Date.now();
+    return ev.role === 'user'
+      ? [...blocks, { kind: 'user', id: blockId, text: ev.text, ts }]
+      : [...blocks, { kind: 'text', id: blockId, text: ev.text, ts, turnId: blockId, cbIndex: -1, open: false }];
+  }
+
+  // Voice handoffs are control envelopes for an already-visible spoken user
+  // request, not a second teammate conversation. Replies belong in main chat.
+  if (ev.type === 'peer_message' && ev.fromRole === 'voice') {
+    turnIdRef.peerId = undefined;
+    return blocks;
   }
 
   // Agent-to-agent delivery: a teammate's message landing in this thread.
@@ -297,6 +316,14 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlo
     return closed;
   }
 
+  if (ev.type === 'message_delta') {
+    const reason = ev.delta?.stop_reason;
+    const presentation = reason === 'tool_use' ? 'update' : reason === 'end_turn' ? 'answer' : undefined;
+    if (!presentation) return blocks;
+    return blocks.map((b) => b.kind === 'text' && b.turnId === turnIdRef.current
+      ? { ...b, presentation } : b);
+  }
+
   if (ev.type === 'content_block_start') {
     const idx: number = ev.index;
     const cb = ev.content_block;
@@ -308,6 +335,7 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlo
       const block: ChatBlock = {
         kind: 'text', id: id(), text: '', ts: Date.now(),
         turnId, peerId: turnIdRef.peerId, cbIndex: idx, open: true,
+        presentation: cb.phase === 'commentary' ? 'update' : cb.phase === 'final_answer' ? 'answer' : undefined,
       };
       return [...blocks, block];
     }
@@ -380,6 +408,10 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlo
   if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
     if (!turnIdRef.current) turnIdRef.current = `t${nextId++}`;
     const turnId = turnIdRef.current;
+    const presentation = ev.message.stop_reason === 'tool_use' ? 'update'
+      : ev.message.stop_reason === 'end_turn' ? 'answer' : undefined;
+    const annotated: ChatBlock[] = presentation ? blocks.map((b): ChatBlock => b.kind === 'text' && b.turnId === turnId
+      ? { ...b, presentation } : b) : blocks;
     const fullText = (ev.message.content as Array<any>)
       .filter((c) => c?.type === 'text' && typeof c.text === 'string')
       .map((c) => c.text)
@@ -388,10 +420,10 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlo
       if (isSyntheticApiErrorEvent(ev)) return blocks;
       const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '');
       if (!hasText) {
-        return [...blocks, { kind: 'text', id: id(), text: fullText, ts: Date.now(), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false }];
+        return [...annotated, { kind: 'text', id: id(), text: fullText, ts: Date.now(), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation }];
       }
     }
-    return blocks;
+    return annotated;
   }
 
   return blocks;
@@ -511,14 +543,47 @@ function cancelOutbound(key: string): QueuedOutbound[] {
   return queued;
 }
 
-// v7 discards snapshots whose receive cursor may have advanced before React
-// committed the matching durable blocks during a tab/device handoff.
-const CHAT_CACHE_VERSION = 'v7';
+/** Steers already accepted by the socket. Module-level so leaving the thread
+ *  does not drop the optimistic bubble before `_user_echo`. */
+type PendingSteer = {
+  text: string;
+  images?: ChatSendImage[];
+  clientMsgId: string;
+  ts: number;
+};
+const pendingSteerQueue = new Map<string, PendingSteer[]>();
+
+function rememberPendingSteer(key: string, item: PendingSteer): void {
+  const q = pendingSteerQueue.get(key) ?? [];
+  if (q.some((steer) => steer.clientMsgId === item.clientMsgId)) return;
+  q.push(item);
+  pendingSteerQueue.set(key, q);
+}
+
+function forgetPendingSteer(key: string, clientMsgId: string): void {
+  const q = pendingSteerQueue.get(key);
+  if (!q?.length) return;
+  const next = q.filter((item) => item.clientMsgId !== clientMsgId);
+  if (!next.length) pendingSteerQueue.delete(key);
+  else pendingSteerQueue.set(key, next);
+}
+
+function pendingSteersFor(key: string): PendingSteer[] {
+  return pendingSteerQueue.get(key) ?? [];
+}
+
+function cancelPendingSteers(key: string): PendingSteer[] {
+  const queued = pendingSteerQueue.get(key) ?? [];
+  pendingSteerQueue.delete(key);
+  return queued;
+}
+
+// Rebuild once from durable events to recover provider message boundaries and
+// update/answer metadata missing from older flattened browser snapshots.
+const CHAT_CACHE_VERSION = 'v8';
 
 function blocksStorageKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
-  // v7 preserves only completed routine deliverables as labeled boundaries. The
-  // durable server log rebuilds each thread once; future snapshots contain
-  // only what the user could actually see.
+  // Browser snapshots are disposable; transcript history remains on the server.
   return `rivendell:chat-blocks:${CHAT_CACHE_VERSION}:${conversationKey(cli, repoPath, chatId)}`;
 }
 
@@ -579,12 +644,16 @@ function blocksForStorage(blocks: ChatBlock[]): ChatBlock[] {
       // open/running flag suppresses the typing indicator via hasOpen).
       if (block.kind === 'text' && block.open) return { ...block, open: false };
       if (block.kind === 'tool' && (block.open || block.running)) return { ...block, open: false, running: false };
-      if (block.kind === 'user' && block.images?.length) {
-        // URL-backed images (/api/chat/attachments/…) are cheap to keep —
-        // only bulky optimistic data: URLs get stripped from the snapshot.
-        const keepable = block.images.filter((img) => img.dataUrl.startsWith('/'));
+      if (block.kind === 'user' && (block.images?.length || block.deliveryState === 'queued')) {
+        // URL-backed images are cheap to keep. Optimistic data: URLs are not.
+        // Keep imageCount so a tab switch still shows that a picture was queued.
+        const keepable = (block.images ?? []).filter((img) => img.dataUrl.startsWith('/'));
         const { images: _images, ...rest } = block;
-        return { ...rest, images: keepable.length ? keepable : undefined, imageCount: block.imageCount ?? block.images.length };
+        return {
+          ...rest,
+          images: keepable.length ? keepable : undefined,
+          imageCount: block.imageCount ?? block.images?.length,
+        };
       }
       return block;
     });
@@ -755,8 +824,9 @@ export function useChat(opts: {
   /** True between a user send/steer and the next turnStart/turnEnd/error. */
   const pendingSendRef = useRef(false);
   /** Guidance waiting behind a natural turnEnd. Keep the UI streaming across
-   * that preceding turnEnd until the server accepts/rejects the queued steer. */
-  const queuedSteerRef = useRef<string | null>(null);
+   * that preceding turnEnd until the server accepts/rejects every queued steer.
+   * A Set, not a single id: stacked mid-turn messages must all stay queued. */
+  const queuedSteerRef = useRef<Set<string>>(new Set());
   // `chatId` already carries `__acct__<account>` when the lane is pinned.
   const restoreKey = enabled && repo ? conversationKey(cli, repo.path, chatId) : '';
   const restoreKeyRef = useRef(restoreKey);
@@ -764,11 +834,14 @@ export function useChat(opts: {
     restoreKeyRef.current = restoreKey;
     const snapshot = enabled && repo ? readStoredSnapshot(cli, repo.path, chatId) : null;
     const restored = restoreBlocksWithUniqueIds(snapshot?.blocks ?? []);
-    const queued = [...restored].reverse().find((block) => (
-      block.kind === 'user' && block.deliveryState === 'queued' && block.clientMsgId
-    ));
-    queuedSteerRef.current = queued?.kind === 'user' ? queued.clientMsgId ?? null : null;
-    pendingSendRef.current = Boolean(queuedSteerRef.current);
+    queuedSteerRef.current = new Set(
+      restored.flatMap((block) => (
+        block.kind === 'user' && block.deliveryState === 'queued' && block.clientMsgId
+          ? [block.clientMsgId]
+          : []
+      )),
+    );
+    pendingSendRef.current = queuedSteerRef.current.size > 0;
     setBlocks(restored);
     setAppliedSeq(snapshot?.seq ?? 0);
     cacheResetAtRef.current = snapshot?.resetAt ?? 0;
@@ -836,6 +909,7 @@ export function useChat(opts: {
     onInitialMessageSentRef.current?.();
   };
   const markBlockDelivered = (clientMsgId: string) => {
+    if (repo) forgetPendingSteer(conversationKey(cli, repo.path, chatId), clientMsgId);
     setBlocks((prev) => prev.map((block) => (
       block.kind === 'user'
       && block.clientMsgId === clientMsgId
@@ -876,16 +950,24 @@ export function useChat(opts: {
       ) return { ...block, deliveryState: 'failed' as const };
       return block;
     }));
-    const current = queuedSteerRef.current;
-    if (current && deliveredIds.has(current)) {
-      queuedSteerRef.current = null;
-      pendingSendRef.current = false;
-      setError(null);
-    } else if (current && hasQueuedState && !serverBusy && !queuedIds.has(current)) {
-      queuedSteerRef.current = null;
-      pendingSendRef.current = false;
+    const current = [...queuedSteerRef.current];
+    let droppedUnretained = false;
+    for (const id of current) {
+      if (deliveredIds.has(id)) {
+        if (repo) forgetPendingSteer(conversationKey(cli, repo.path, chatId), id);
+        queuedSteerRef.current.delete(id);
+      } else if (hasQueuedState && !serverBusy && !queuedIds.has(id)) {
+        if (repo) forgetPendingSteer(conversationKey(cli, repo.path, chatId), id);
+        queuedSteerRef.current.delete(id);
+        droppedUnretained = true;
+      }
+    }
+    pendingSendRef.current = queuedSteerRef.current.size > 0 || Boolean(peekOutbound(conversationKey(cli, repo?.path ?? '', chatId)));
+    if (droppedUnretained && queuedSteerRef.current.size === 0) {
       setError('Queued guidance was not retained by the server. Please send it again.');
       setStatus('ready');
+    } else if (current.some((id) => deliveredIds.has(id)) && queuedSteerRef.current.size === 0) {
+      setError(null);
     }
   };
   const flushOutbound = () => {
@@ -932,9 +1014,11 @@ export function useChat(opts: {
     const key = conversationKey(cli, repo.path, chatId);
     const owned = hasOutbound(key, clientMsgId)
       || sentOutboundRef.current?.clientMsgId === clientMsgId
-      || initialClientMsgIdRef.current === clientMsgId;
+      || initialClientMsgIdRef.current === clientMsgId
+      || pendingSteersFor(key).some((item) => item.clientMsgId === clientMsgId);
     if (!owned) return false;
     acknowledgeOutbound(key, clientMsgId);
+    forgetPendingSteer(key, clientMsgId);
     if (sentOutboundRef.current?.clientMsgId === clientMsgId) sentOutboundRef.current = null;
     settleInitialMessage(clientMsgId);
     setBlocks((prev) => prev.map((block) => (
@@ -943,9 +1027,9 @@ export function useChat(opts: {
         : block
     )));
     const hasMore = Boolean(peekOutbound(key));
-    pendingSendRef.current = hasMore || queuedSteerRef.current !== null;
+    pendingSendRef.current = hasMore || queuedSteerRef.current.size > 0;
     setError(message);
-    if (serverBusy || hasMore || queuedSteerRef.current !== null) {
+    if (serverBusy || hasMore || queuedSteerRef.current.size > 0) {
       markTurnStarted();
       setStatus('streaming');
       if (!serverBusy && hasMore) window.setTimeout(() => flushOutboundRef.current(), 0);
@@ -1016,11 +1100,10 @@ export function useChat(opts: {
     if (!repo) return;
     const key = conversationKey(cli, repo.path, chatId);
     if (restoredKeyRef.current !== key) return;
-    // Keep the previous settled envelope while a routine is active or replaying.
-    // In gaps between content blocks no text/tool flag may be open; only ready
-    // proves the terminal turnEnd/ready boundary landed. Advancing sooner would
-    // strand its eventual deliverable without the automation boundary.
-    if (status !== 'ready' && automationTurnPending(blocks)) return;
+    // Cache settled turns. Also cache while a user message is still queued so
+    // leaving the tab does not wipe the optimistic bubble (especially images).
+    const hasQueuedUser = blocks.some((block) => block.kind === 'user' && block.deliveryState === 'queued');
+    if (status !== 'ready' && !hasQueuedUser) return;
     writeStoredState(cli, repo.path, chatId, blocks, appliedSeq, cacheResetAtRef.current);
   }, [blocks, appliedSeq, status, repo?.path, cli, chatId]);
 
@@ -1039,12 +1122,53 @@ export function useChat(opts: {
     // the chat. Server replay then fills in events newer than what we have.
     const snapshot = readStoredSnapshot(cli, repo.path, chatId);
     const stored = restoreBlocksWithUniqueIds(snapshot?.blocks ?? []);
-    setBlocks(stored);
-    const restoredQueued = [...stored].reverse().find((block) => (
-      block.kind === 'user' && block.deliveryState === 'queued' && block.clientMsgId
-    ));
-    queuedSteerRef.current = restoredQueued?.kind === 'user' ? restoredQueued.clientMsgId ?? null : null;
-    pendingSendRef.current = Boolean(queuedSteerRef.current);
+    const key = conversationKey(cli, repo.path, chatId);
+    const remembered = pendingSteersFor(key);
+    const rememberedById = new Map(remembered.map((item) => [item.clientMsgId, item]));
+    const knownIds = new Set(
+      stored.flatMap((block) => (
+        block.kind === 'user' && block.clientMsgId ? [block.clientMsgId] : []
+      )),
+    );
+    const withRememberedImages = remembered.length
+      ? stored.map((block) => {
+        if (block.kind !== 'user' || !block.clientMsgId) return block;
+        const item = rememberedById.get(block.clientMsgId);
+        if (!item?.images?.length) return block;
+        return {
+          ...block,
+          images: imagePreviews(item.images) ?? block.images,
+          imageCount: item.images.length,
+          deliveryState: block.deliveryState ?? 'queued' as const,
+        };
+      })
+      : stored;
+    const restored = remembered.length
+      ? [
+        ...withRememberedImages,
+        ...remembered
+          .filter((item) => !knownIds.has(item.clientMsgId))
+          .map((item) => ({
+            kind: 'user' as const,
+            id: id(),
+            text: item.text,
+            images: imagePreviews(item.images),
+            imageCount: item.images?.length,
+            clientMsgId: item.clientMsgId,
+            deliveryState: 'queued' as const,
+            ts: item.ts,
+          })),
+      ]
+      : stored;
+    setBlocks(restored);
+    queuedSteerRef.current = new Set(
+      restored.flatMap((block) => (
+        block.kind === 'user' && block.deliveryState === 'queued' && block.clientMsgId
+          ? [block.clientMsgId]
+          : []
+      )),
+    );
+    pendingSendRef.current = queuedSteerRef.current.size > 0;
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
     clearTurnStarted();
@@ -1190,7 +1314,7 @@ export function useChat(opts: {
             // A server-owned steer can outlive the socket that accepted it.
             // Keep its visible queued state across reconnect; the durable
             // _user_echo will clear it when the next turn is actually admitted.
-            const steerQueued = queuedSteerRef.current !== null;
+            const steerQueued = queuedSteerRef.current.size > 0;
             setStatus(msg.busy || steerQueued ? 'streaming' : 'ready');
             if (!msg.busy && !steerQueued) {
               pendingSendRef.current = false;
@@ -1234,7 +1358,7 @@ export function useChat(opts: {
           cancelOutbound(conversationKey(cli, repo.path, chatId));
           sentOutboundRef.current = null;
           settleInitialMessage();
-          queuedSteerRef.current = null;
+          queuedSteerRef.current = new Set();
           pendingSendRef.current = false;
           setBlocks([]);
           setUsage(null);
@@ -1257,15 +1381,14 @@ export function useChat(opts: {
         else if (msg.type === 'turnStart') {
           if (!socketReady) return; // replayed control message from the hello buffer
           const beginsQueuedSteer = Boolean(
-            msg.clientMsgId && queuedSteerRef.current === msg.clientMsgId,
+            msg.clientMsgId && queuedSteerRef.current.has(msg.clientMsgId),
           );
-          if (beginsQueuedSteer) queuedSteerRef.current = null;
+          if (beginsQueuedSteer && msg.clientMsgId) queuedSteerRef.current.delete(msg.clientMsgId);
           if (beginsQueuedSteer || statusRef.current !== 'streaming' || turnStartRef.current === 0) {
-            markTurnStarted(Date.now(), true);
+            markTurnStarted(Date.now(), beginsQueuedSteer);
           }
           settleInitialMessage(msg.clientMsgId);
-          pendingSendRef.current = false;
-          turnStartRef.current = Date.now();
+          pendingSendRef.current = queuedSteerRef.current.size > 0;
           compactingRef.current = false;
           setError(null);
           setStatus('streaming');
@@ -1274,7 +1397,7 @@ export function useChat(opts: {
           if (!socketReady) return; // replayed control message from the hello buffer
           window.dispatchEvent(new Event('rivendell:history-changed'));
           compactingRef.current = false;
-          if (queuedSteerRef.current !== null) {
+          if (queuedSteerRef.current.size > 0) {
             // This closes the PRECEDING turn. The server still owns queued
             // guidance and will send a correlated turnStart or rejection.
             setStatus('streaming');
@@ -1321,7 +1444,7 @@ export function useChat(opts: {
           cancelOutbound(key);
           sentOutboundRef.current = null;
           settleInitialMessage();
-          queuedSteerRef.current = null;
+          queuedSteerRef.current = new Set();
           pendingSendRef.current = false;
           socketReadyRef.current = msg.remote !== true;
           setBlocks([]);
@@ -1342,7 +1465,7 @@ export function useChat(opts: {
           }
         }
         else if (msg.type === 'sessionClosed') {
-          queuedSteerRef.current = null;
+          queuedSteerRef.current = new Set();
           // The CLI idle-closed (or exited mid-turn). Don't strand the user on
           // a dead-looking "asleep" banner — re-bind transparently, exactly
           // like samwise-2. bindSession replies with a fresh ready/streaming.
@@ -1372,9 +1495,9 @@ export function useChat(opts: {
             }
             settleInitialMessage(ev.clientMsgId);
             setError(null);
-            if (queuedSteerRef.current === ev.clientMsgId) {
-              queuedSteerRef.current = null;
-              pendingSendRef.current = false;
+            if (queuedSteerRef.current.has(ev.clientMsgId)) {
+              queuedSteerRef.current.delete(ev.clientMsgId);
+              pendingSendRef.current = queuedSteerRef.current.size > 0;
             }
           }
           const innerType = evType === 'stream_event' ? ev?.event?.type : evType;
@@ -1500,8 +1623,8 @@ export function useChat(opts: {
             settleInitialMessage(msg.clientMsgId);
             setError(null);
             const hasMore = Boolean(peekOutbound(key));
-            pendingSendRef.current = hasMore || queuedSteerRef.current !== null;
-            if (msg.busy === true || hasMore || queuedSteerRef.current !== null) {
+            pendingSendRef.current = hasMore || queuedSteerRef.current.size > 0;
+            if (msg.busy === true || hasMore || queuedSteerRef.current.size > 0) {
               markTurnStarted();
               setStatus('streaming');
               if (msg.busy !== true && hasMore) window.setTimeout(() => flushOutboundRef.current(), 0);
@@ -1528,11 +1651,11 @@ export function useChat(opts: {
                 : block
             )));
           }
-          if (typeof msg.clientMsgId === 'string' && queuedSteerRef.current === msg.clientMsgId) {
-            queuedSteerRef.current = null;
-            pendingSendRef.current = false;
+          if (typeof msg.clientMsgId === 'string' && queuedSteerRef.current.has(msg.clientMsgId)) {
+            queuedSteerRef.current.delete(msg.clientMsgId);
+            pendingSendRef.current = queuedSteerRef.current.size > 0;
             setError(msg.message || 'Queued guidance was not delivered.');
-            setStatus(msg.busy ? 'streaming' : 'ready');
+            setStatus(msg.busy || queuedSteerRef.current.size > 0 ? 'streaming' : 'ready');
           }
         }
         else if (msg.type === 'error') {
@@ -1581,14 +1704,21 @@ export function useChat(opts: {
             statusRef.current === 'connecting' ||
             pendingSendRef.current;
           if (inFlight) {
-            if (msg.code === 'STEER_REJECTED' && (!msg.clientMsgId || queuedSteerRef.current === msg.clientMsgId)) {
-              queuedSteerRef.current = null;
+            if (msg.code === 'STEER_REJECTED' && (!msg.clientMsgId || queuedSteerRef.current.has(msg.clientMsgId))) {
+              if (typeof msg.clientMsgId === 'string') queuedSteerRef.current.delete(msg.clientMsgId);
+              else queuedSteerRef.current = new Set();
               if (typeof msg.clientMsgId === 'string') {
                 setBlocks((prev) => prev.map((block) => (
                   block.kind === 'user' && block.clientMsgId === msg.clientMsgId
                     ? { ...block, deliveryState: 'failed' as const }
                     : block
                 )));
+              }
+              pendingSendRef.current = queuedSteerRef.current.size > 0;
+              if (queuedSteerRef.current.size > 0) {
+                setError(msg.message);
+                setStatus('streaming');
+                return;
               }
             }
             pendingSendRef.current = false;
@@ -1608,16 +1738,13 @@ export function useChat(opts: {
         // Queued guidance is owned by the server after acceptance and survives
         // this transport. Do not falsely mark it canceled when a phone sleeps
         // or the user visits another teammate.
-        // We no longer know the server-side start time after a transport break.
-        // Keep the proof-of-life indicator, but label its clock "live" rather
-        // than showing a confidently wrong elapsed value on reconnect.
-        clearTurnStarted();
         const keepStreaming =
           (statusRef.current === 'streaming' || pendingSendRef.current) &&
           reconnectAttemptRef.current < 3;
         if (!keepStreaming) {
           pendingSendRef.current = false;
           setStatus('closed');
+          clearTurnStarted();
         }
         const attempt = Math.min(reconnectAttemptRef.current, 3);
         const delay = Math.min(1000 * 2 ** attempt, 8000);
@@ -1746,7 +1873,7 @@ export function useChat(opts: {
         cancelOutbound(conversationKey(cli, repo.path, chatId));
         sentOutboundRef.current = null;
         settleInitialMessage();
-        queuedSteerRef.current = null;
+        queuedSteerRef.current = new Set();
         pendingSendRef.current = false;
         socketReadyRef.current = false;
         cacheResetAtRef.current = snapshot.resetAt;
@@ -1803,7 +1930,7 @@ export function useChat(opts: {
       teardownRef.current = true;
       socketReadyRef.current = false;
       sentOutboundRef.current = null;
-      queuedSteerRef.current = null;
+      queuedSteerRef.current = new Set();
       pendingSendRef.current = false;
       forceReconnectRef.current = () => {};
       window.clearInterval(watchdog);
@@ -1886,9 +2013,13 @@ export function useChat(opts: {
     if (!repo) return;
     const key = conversationKey(cli, repo.path, chatId);
     const canceled = cancelOutbound(key);
-    const canceledIds = new Set(canceled.map((item) => item.clientMsgId));
+    const canceledSteers = cancelPendingSteers(key);
+    const canceledIds = new Set([
+      ...canceled.map((item) => item.clientMsgId),
+      ...canceledSteers.map((item) => item.clientMsgId),
+    ]);
     if (initialClientMsgIdRef.current) canceledIds.add(initialClientMsgIdRef.current);
-    if (canceledIds.size > 0 || queuedSteerRef.current !== null) {
+    if (canceledIds.size > 0 || queuedSteerRef.current.size > 0) {
       setBlocks((prev) => prev.map((block) => (
         block.kind === 'user'
         && (block.deliveryState === 'queued' || Boolean(block.clientMsgId && canceledIds.has(block.clientMsgId)))
@@ -1898,7 +2029,7 @@ export function useChat(opts: {
     }
     sentOutboundRef.current = null;
     settleInitialMessage(initialClientMsgIdRef.current ?? undefined);
-    queuedSteerRef.current = null;
+    queuedSteerRef.current = new Set();
     pendingSendRef.current = false;
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -1944,8 +2075,9 @@ export function useChat(opts: {
         ts: Date.now(),
       },
     ]);
-    queuedSteerRef.current = clientMsgId;
+    queuedSteerRef.current.add(clientMsgId);
     pendingSendRef.current = true;
+    rememberPendingSteer(key, { text, images, clientMsgId, ts: Date.now() });
     setError(null);
     ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), clientMsgId, model: modelRef.current, effort: effortRef.current, ...selectionIntent() }));
     lastMessageAtRef.current = Date.now();

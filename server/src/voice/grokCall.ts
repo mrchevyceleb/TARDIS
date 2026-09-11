@@ -7,33 +7,48 @@
 //                     {type:'audio', b64}        16 kHz PCM chunks
 //                     {type:'setVoice', voice}    swap the voice mid-call
 //                     {type:'stop'}
-//   server → client: {type:'state', state}       connecting|listening|working|speaking|ended
+//   server → client: {type:'state', state}       connecting|listening|thinking|working|speaking|ended
 //                     {type:'audio', b64}        24 kHz PCM deltas
 //                     {type:'transcript', role, text, replace?}
 //                     {type:'greeting'}
 //                     {type:'error', message}
 //                     {type:'ended', reason}
 //
-// No function tools on calls (v1): the voice agent talks; teammates' hands
-// stay in their threads. Instructions = the agent's scope document.
+// Calls use the same durable agent thread for execution. Ending audio never
+// cancels admitted tool work. Instructions = scope + shared voice/text history.
 
 import { WebSocket as WsClient, WebSocketServer } from 'ws';
 import type { Server as HttpServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
-import { listAgents } from '../chat/agents.ts';
+import { cliForAgentEngine, listAgents } from '../chat/agents.ts';
+import { ASSISTANT_HUB_PATH } from '../chat/config.ts';
+import { logKeyFor } from '../chat/threadKey.ts';
+import { eventLogRevision, flushEventLog } from '../chat/event-log-store.ts';
+import { deliverTeamMessage } from '../chat/teamBus.ts';
+import { VoiceWork, VOICE_WORK_TOOL } from './voiceWork.ts';
+import { publishExternalThreadEvent } from '../chat/runner.ts';
+import { callThreadContext, recordVoiceTranscript, VoiceTranscriptQueue } from './threadBridge.ts';
 import { personaScopeFor } from '../chat/personaPrompts.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 
 export const GROK_REALTIME_URL = 'wss://api.x.ai/v1/realtime?model=grok-voice-think-fast-2.0';
-export const GROK_VOICE_IDS = ['ara', 'eve', 'leo', 'rex', 'sal', 'atlas', 'aurora', 'luna', 'orion', 'carina'] as const;
+export const GROK_VOICE_IDS = [
+  'ara', 'eve', 'leo', 'rex', 'sal',
+  'altair', 'atlas', 'aurora', 'carina', 'castor', 'celeste', 'cosmo',
+  'helios', 'helix', 'iris', 'kepler', 'liora', 'lumen', 'luna', 'lux',
+  'naksh', 'orion', 'perseus', 'rigel', 'sirius', 'ursa', 'zagan', 'zenith',
+] as const;
 
 const CALL_RULES =
   'You are a named companion aboard the TARDIS, on a voice call with the user. Stay in character. ' +
   'Speak as I or me; never address yourself by your own name in the third person. Do not mention being an AI, Grok, or xAI unless asked. ' +
   'Keep spoken replies short and conversational — one or two sentences unless the user asks for depth. ' +
-  'If a request needs files, tools, or teammates, say you will handle it in the thread after the call and keep talking.';
+  'Voice and typing are one conversation. Use the shared thread context and continue the current topic naturally. ' +
+  'For searches, files, or any other tool work the user requested or approved, call run_in_thread BEFORE claiming you are starting it. This is your real agent brain and tools, not a different person. Never just promise to look something up. ' +
+  'After run_in_thread returns, do not invent a second spoken recap of work that already landed in the chat thread. One short spoken line is enough: working, queued, blocked, or the result. ' +
+  'Work continues in the same chat after End Call. If a tool returns queued or still working, say that honestly; do not invent a result. Never repeat a task already admitted. External side effects remain draft/review-first.';
 
 export function grokApiKey(): string {
   const env = process.env.GROK_API_KEY || process.env.XAI_API_KEY;
@@ -69,6 +84,7 @@ function sessionConfig(voice: string, instructions: string): Record<string, unkn
     instructions,
     voice,
     reasoning: { effort: 'none' },
+    tools: [VOICE_WORK_TOOL],
     audio: {
       input: { format: { type: 'audio/pcm', rate: 24000 } },
       output: { format: { type: 'audio/pcm', rate: 24000 } },
@@ -77,7 +93,7 @@ function sessionConfig(voice: string, instructions: string): Record<string, unkn
   };
 }
 
-type CallState = 'connecting' | 'listening' | 'working' | 'speaking' | 'ended';
+type CallState = 'connecting' | 'listening' | 'thinking' | 'working' | 'speaking' | 'ended';
 
 class GrokCall {
   private ws: WsClient | null = null;
@@ -88,19 +104,35 @@ class GrokCall {
   private greetingPhase: 'off' | 'pending' | 'playing' | 'done' = 'off';
   private greetingText = '';
   private voice: string;
+  private readonly transcripts: VoiceTranscriptQueue;
+  private lastContextCheck = 0;
+  private contextSeq = -1;
+  private toolCallIds = new Set<string>();
+  private toolResponsePending = false;
+  private threadWorkActive = false;
+  private finishingCall = false;
 
   constructor(
     private readonly client: WsClient,
-    private readonly instructions: string,
+    private instructions: string,
     private readonly greeting: string,
     voice: string,
+    private readonly logKey: string,
+    private readonly contextInstructions: () => string,
+    private readonly work: VoiceWork,
   ) {
+    this.transcripts = new VoiceTranscriptQueue((role, text) => {
+      void recordVoiceTranscript(this.logKey, role, text, (event) => publishExternalThreadEvent(this.logKey, event))
+        .catch((error: Error) => { this.send({ type: 'error', message: error.message }); this.close(); });
+      this.send({ type: 'transcript', role, text });
+    });
     this.voice = GROK_VOICE_IDS.includes(voice as (typeof GROK_VOICE_IDS)[number]) ? voice : 'ara';
     this.greetingText = this.greeting.trim();
     this.greetingPhase = this.greetingText ? 'pending' : 'off';
   }
 
   private send(msg: Record<string, unknown>): void {
+    if (this.closed && msg.type !== 'ended' && msg.type !== 'error') return;
     if (this.client.readyState === WsClient.OPEN) this.client.send(JSON.stringify(msg));
   }
 
@@ -127,24 +159,91 @@ class GrokCall {
           setTimeout(() => this.speakGreeting(), 450);
           setTimeout(() => this.finishGreeting(), 12000).unref?.();
         }
-        this.send({ type: 'state', state: 'listening' });
+        this.setCallState('listening');
         this.send({ type: 'greeting' });
         resolve();
       });
-      ws.on('message', (data) => this.handle(String(data)));
+      ws.on('message', (data) => {
+        try { this.handle(String(data)); }
+        catch (error) {
+          this.send({ type: 'error', message: (error as Error).message });
+          this.close();
+        }
+      });
       ws.on('error', (err) => {
         this.send({ type: 'error', message: err.message });
         resolve();
       });
       ws.on('close', () => {
-        if (this.assistantBuf) {
-          this.send({ type: 'transcript', role: 'assistant', text: this.assistantBuf });
-          this.assistantBuf = '';
-        }
+        try {
+          if (this.assistantBuf) {
+            this.transcripts.assistant(this.assistantBuf);
+            this.assistantBuf = '';
+          }
+          this.transcripts.finish();
+        } catch (error) { this.send({ type: 'error', message: (error as Error).message }); }
         this.send({ type: 'state', state: 'ended' });
         this.send({ type: 'ended', reason: 'line closed' });
+        void this.finishCall();
       });
     });
+  }
+
+  private async finishCall(): Promise<void> {
+    if (this.finishingCall) return;
+    this.finishingCall = true;
+    try {
+      await flushEventLog(this.logKey);
+      const result = await this.work.finish();
+      if (result && !result.delivered) throw new Error(result.reason || 'voice handoff failed');
+    } catch (error) {
+      // The audio socket may already be gone. Leave an honest visible failure
+      // in the durable chat instead of losing the user's request silently.
+      await recordVoiceTranscript(this.logKey, 'assistant',
+        `The call ended, but I could not start the remaining work: ${(error as Error).message}`,
+        (event) => publishExternalThreadEvent(this.logKey, event)).catch(console.error);
+    }
+  }
+
+  private continueAfterTool(): void {
+    if (!this.toolResponsePending || this.responseActive || this.closed || this.ws?.readyState !== WsClient.OPEN) return;
+    this.toolResponsePending = false;
+    this.sendGrok({ type: 'response.create' });
+  }
+
+  private setCallState(state: CallState): void {
+    if (this.closed) return;
+    // Thread work outlives the Grok response. Do not snap back to Listening
+    // while run_in_thread is still admitted.
+    if (state === 'listening' && this.threadWorkActive) state = 'working';
+    this.send({ type: 'state', state });
+  }
+
+  private async handleTool(msg: Record<string, unknown>): Promise<void> {
+    const callId = typeof msg.call_id === 'string' ? msg.call_id : '';
+    if (!callId || this.toolCallIds.has(callId)) return;
+    this.toolCallIds.add(callId);
+    this.threadWorkActive = true;
+    this.setCallState('working');
+    let result: { delivered: boolean; reason?: string; queued?: boolean };
+    try {
+      result = msg.name === 'run_in_thread'
+        ? await this.work.run(callId, String(msg.arguments ?? '{}'))
+        : { delivered: false, reason: 'Unknown voice tool' };
+    } catch (error) {
+      this.threadWorkActive = false;
+      throw error;
+    }
+    // Queued thread work is still running in Hall. Keep Working until the
+    // caller speaks again rather than snapping back to Listening.
+    if (!result.queued) this.threadWorkActive = false;
+    // This check controls speech only. The durable task has no socket abort.
+    if (this.closed || this.ws?.readyState !== WsClient.OPEN) return;
+    this.sendGrok({ type: 'conversation.item.create', item: {
+      type: 'function_call_output', call_id: callId, output: JSON.stringify(result),
+    } });
+    this.toolResponsePending = true;
+    this.continueAfterTool();
   }
 
   private micChunks = 0;
@@ -156,6 +255,16 @@ class GrokCall {
       this.micDropped += 1;
       if (this.micDropped === 50) console.log('[voice] 50 mic chunks dropped during greeting phase');
       return;
+    }
+    // Typing during a call refreshes context, but never triggers a response.
+    if (Date.now() - this.lastContextCheck > 1000) {
+      this.lastContextCheck = Date.now();
+      const seq = eventLogRevision();
+      if (seq !== this.contextSeq) {
+        this.contextSeq = seq;
+        this.instructions = this.contextInstructions();
+        this.sendGrok({ type: 'session.update', session: { instructions: this.instructions } });
+      }
     }
     this.micChunks += 1;
     if (this.micChunks === 1 || this.micChunks % 50 === 0) {
@@ -175,14 +284,21 @@ class GrokCall {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    try { this.ws?.close(); } catch { /* already gone */ }
+    // End playback immediately, but briefly drain the provider so an in-flight
+    // function request or ASR completion can finish being formed. No new audio
+    // is sent to the person; admitted work is independent of this grace period.
+    if (this.ws?.readyState === WsClient.OPEN) {
+      setTimeout(() => { try { this.ws?.close(); } catch { /* already gone */ } }, 3000).unref();
+    } else {
+      try { this.ws?.close(); } catch { /* already gone */ }
+    }
     this.send({ type: 'ended', reason: 'hangup' });
   }
 
   private finishGreeting(): void {
     if (this.greetingPhase === 'done' || this.greetingPhase === 'off') return;
     this.greetingPhase = 'done';
-    if (!this.closed && this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (!this.closed && this.ws && this.ws.readyState === WsClient.OPEN) {
       this.ws.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));
     }
   }
@@ -207,20 +323,29 @@ class GrokCall {
       console.log(`[voice] << ${type} ${raw.slice(0, 180)}`);
     }
 
+    if (type === 'response.function_call_arguments.done') {
+      void this.handleTool(msg).catch((error: Error) => {
+        this.send({ type: 'error', message: error.message });
+      });
+      return;
+    }
     if (type === 'response.output_audio.delta' || type === 'response.audio.delta') {
+      if (this.closed) return;
       const delta = typeof msg.delta === 'string' ? msg.delta : '';
       if (delta) {
         this.send({ type: 'audio', b64: delta });
-        this.send({ type: 'state', state: 'speaking' });
+        this.setCallState('speaking');
       }
       return;
     }
     if (type === 'input_audio_buffer.speech_started') {
       if (this.greetingPhase === 'pending' || this.greetingPhase === 'playing') return;
+      this.threadWorkActive = false;
+      this.setCallState('listening');
       this.send({ type: 'interrupt' }); // client drops queued playback NOW
       this.discardResponseText = true;
       if (this.assistantBuf) {
-        this.send({ type: 'transcript', role: 'assistant', text: this.assistantBuf, replace: true, interrupted: true });
+        this.transcripts.assistant(this.assistantBuf);
         this.assistantBuf = '';
       }
       this.discardResponseText = true;
@@ -230,13 +355,15 @@ class GrokCall {
       this.responseActive = true;
       this.discardResponseText = false;
       if (this.greetingPhase === 'pending') this.greetingPhase = 'playing';
+      else if (!this.threadWorkActive) this.setCallState('thinking');
       return;
     }
     if (type === 'response.output_audio.done' || type === 'response.audio.done') return;
     if (type === 'response.cancelled' || (type === 'response.done' && (msg.response as { status?: string })?.status === 'cancelled')) {
       this.assistantBuf = '';
       this.responseActive = false;
-      this.send({ type: 'state', state: 'listening' });
+      this.setCallState('listening');
+      this.continueAfterTool();
       return;
     }
     if (type === 'response.done') {
@@ -244,29 +371,39 @@ class GrokCall {
       if (Array.isArray(output) && output.length === 0 && (this.responseActive || this.assistantBuf) && this.greetingPhase !== 'pending' && this.greetingPhase !== 'playing') {
         this.assistantBuf = '';
         this.responseActive = false;
-        this.send({ type: 'state', state: 'listening' });
+        this.setCallState('listening');
+        this.continueAfterTool();
         return;
       }
       if (this.assistantBuf) {
-        this.send({ type: 'transcript', role: 'assistant', text: this.assistantBuf });
+        this.transcripts.assistant(this.assistantBuf);
         this.assistantBuf = '';
       } else if ((this.greetingPhase === 'playing' || this.greetingPhase === 'pending') && this.greetingText) {
         // force_message greeting: attribute the scripted line (Operly parity).
-        this.send({ type: 'transcript', role: 'assistant', text: this.greetingText });
+        this.transcripts.assistant(this.greetingText);
       }
       this.responseActive = false;
       if (this.greetingPhase === 'playing' || this.greetingPhase === 'pending') this.finishGreeting();
-      this.send({ type: 'state', state: 'listening' });
+      this.setCallState('listening');
+      this.continueAfterTool();
       return;
     }
-    if (type === 'conversation.item.input_audio_transcription.completed') {
-      const text = String((msg as { transcript?: string }).transcript || '').trim();
-      if (text) this.send({ type: 'transcript', role: 'user', text });
+    if (type === 'input_audio_buffer.committed') {
+      this.work.userItem(String(msg.item_id ?? ''));
+      this.transcripts.committed(String(msg.item_id ?? ''));
+      this.setCallState('thinking');
+      return;
+    }
+    if (type === 'conversation.item.input_audio_transcription.completed'
+      || type === 'conversation.item.input_audio_transcription.failed') {
+      const text = type.endsWith('.failed') ? '[Voice message could not be transcribed]' : String(msg.transcript ?? '').trim();
+      this.work.userItem(String(msg.item_id ?? ''));
+      this.transcripts.user(String(msg.item_id ?? ''), text);
       return;
     }
     if (type === 'response.output_text.delta' || type === 'response.audio_transcript.delta' || type === 'response.output_audio_transcript.delta') {
       const delta = typeof msg.delta === 'string' ? msg.delta : '';
-      if (delta && !this.discardResponseText) this.assistantBuf += delta;
+      if (delta && !this.discardResponseText && !this.closed) this.assistantBuf += delta;
       return;
     }
     if (type === 'error') {
@@ -299,9 +436,14 @@ export function registerVoiceCalls(server: HttpServer): void {
           if (!agent) { client.send(JSON.stringify({ type: 'error', message: 'unknown agent' })); return; }
           const scope = agent ? personaScopeFor(agent.home) : '';
           const name = agent?.name ?? 'TARDIS';
-          const instructions = [CALL_RULES, scope || `You are ${name}, a companion aboard the TARDIS.`].filter(Boolean).join('\n\n');
-          const greeting = `Hey — ${name} here. What's up?`;
-          call = new GrokCall(client, instructions, greeting, String(msg.voice ?? agent?.voice ?? 'ara'));
+          const logKey = logKeyFor(cliForAgentEngine(agent.engine), ASSISTANT_HUB_PATH, agent.home);
+          const contextInstructions = () => [CALL_RULES, scope || `You are ${name}, a companion aboard the TARDIS.`, callThreadContext(logKey)].filter(Boolean).join('\n\n');
+          const instructions = contextInstructions();
+          const greeting = callThreadContext(logKey) ? "I'm here — let's keep going." : `Hey — ${name} here. What's up?`;
+          const work = new VoiceWork((text, opts) => deliverTeamMessage({
+            from: 'Voice', to: agent.id, text, source: 'voice', wait: opts.wait, onQueued: opts.onQueued,
+          }));
+          call = new GrokCall(client, instructions, greeting, String(msg.voice ?? agent?.voice ?? 'ara'), logKey, contextInstructions, work);
           void call.connect();
           return;
         }

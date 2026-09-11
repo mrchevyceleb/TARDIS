@@ -336,10 +336,9 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
         <div className={`bt-scrim${drawerOpen ? ' show' : ''}`} onClick={() => setDrawerOpen(false)} />
 
         <main className="bt-main">
-          {(isMobile || railCollapsed) && !drawerOpen ? (
+          {(isMobile || railCollapsed) ? (
             <button
-              className="bt-menubtn"
-              style={{ position: 'absolute', top: 10, left: 10, zIndex: 26 }}
+              className={`bt-menubtn${drawerOpen ? ' is-open' : ''}`}
               onClick={() => {
                 (document.activeElement as HTMLElement | null)?.blur?.();
                 if (isMobile) setDrawerOpen(true);
@@ -347,6 +346,8 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
               }}
               aria-label="Open sidebar"
               title="Open sidebar"
+              aria-hidden={drawerOpen || undefined}
+              tabIndex={drawerOpen ? -1 : 0}
             >
               <Menu size={17} />
             </button>

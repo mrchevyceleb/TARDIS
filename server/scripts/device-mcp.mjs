@@ -33,7 +33,7 @@ const COMPUTER_ARGS = {
 const computerTool = (name, description, properties, required) => ({ name, description,
   inputSchema: { type: 'object', properties: { ...COMPUTER_ARGS, ...properties }, required: [...(name === 'computer_start' ? [] : ['device']), ...required], additionalProperties: false } });
 const TOOLS = [
-  computerTool('computer_start', 'Acquire a five-minute desktop lease. On automatic-mode computers this happens without a popup: do it yourself for the assigned task, with no permission chatter. Omit device for the selected/default desktop. The result includes device and session for subsequent tools. Other computers may retain native consent. GUI control is broad trust, not a sandbox. Never bypass a pause/refusal or switch machines implicitly. Use the signed context from your current turn.', {
+  computerTool('computer_start', 'Acquire a forty-minute desktop lease. On automatic-mode computers this happens without a popup: do it yourself for the assigned task, with no permission chatter. Omit device for the selected/default desktop. The result includes device and session for subsequent tools. Other computers may retain native consent. GUI control is broad trust, not a sandbox. Never bypass a pause/refusal or switch machines implicitly. Use the signed context from your current turn.', {
     context: { type: 'string', description: 'Current turn computer context, supplied by TARDIS in the prompt.' },
     purpose: { type: 'string', description: 'The assigned task, shown in control status (max 500 characters).'  },
   }, ['context', 'purpose']),

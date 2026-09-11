@@ -332,6 +332,25 @@
 .bot-app .rc .prose em { color: var(--r-ink-soft); }
 .bot-app .rc .caret { width: 8px; height: 15px; border-radius: 2px; background: var(--r-elf-blue); box-shadow: 0 0 8px color-mix(in oklch, var(--r-elf-blue) 50%, transparent); }
 
+/* Between-tool messages stay readable, but are not part of the answer bubble.
+   Tools keep their own cards. No clipping, line clamps, or hidden prose. */
+.bot-app .rc .m-elrond.m-update {
+  background: transparent;
+  border-radius: 0;
+  border-inline-start: 2px solid var(--r-line);
+  padding: 4px 14px;
+  margin-inline-start: 8px;
+}
+.bot-app .rc .m-update .update-label {
+  color: var(--r-ink-soft);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  margin-bottom: -6px;
+}
+.bot-app .rc .m-update .prose { font-size: 14px; line-height: 1.5; color: var(--r-ink-soft); }
+.bot-app .rc .m-elrond.m-activity { background: transparent; padding: 0; }
+
 /* user bubble — right, brass-tinted panel */
 .bot-app .rc .m-user { align-items: flex-end; align-self: flex-end; max-width: 84%; }
 .bot-app .rc .bubble {
@@ -813,7 +832,16 @@
   transition: opacity 0.22s ease, backdrop-filter 0.22s ease;
 }
 .bt-scrim.show { opacity: 1; pointer-events: auto; backdrop-filter: blur(2px); }
-.bt-menubtn { display: none; }
+.bt-menubtn {
+  display: none;
+  position: fixed;
+  top: calc(10px + env(safe-area-inset-top, 0px));
+  left: max(10px, env(safe-area-inset-left, 0px));
+  z-index: 26;
+  /* Keep a compositing layer so iOS Safari cannot drop this control
+     under the notch / collapsed browser chrome until the PWA is relaunched. */
+  transform: translateZ(0);
+}
 .bt-pane-toggle { display: grid; }
 
 @media (max-width: 1180px) {
@@ -839,10 +867,11 @@
     border-radius: 50%;
     color: var(--r-ink-mute);
   }
+  .bt-menubtn.is-open { visibility: hidden; pointer-events: none; }
   .bt-menubtn:hover { background: var(--r-line); color: var(--r-ink); }
   .bot-app .rc .m-elrond, .bot-app .rc .m-user { max-width: 88%; }
   .bt-plugins-pop { left: 8px; right: 8px; width: auto; }
-  .bt-head { padding-left: 50px; }
+  .bt-head { padding-left: calc(50px + env(safe-area-inset-left, 0px)); }
   .bt-dock { padding-left: 12px; padding-right: 12px; }
 }
 
@@ -1051,6 +1080,13 @@
   line-height: 1.4;
   word-break: break-word;
 }
+.bt-peer.routine-result {
+  width: min(720px, 94%);
+}
+.bt-peer.routine-result .bt-peer-preview {
+  -webkit-line-clamp: 6;
+  margin-left: 28px;
+}
 .bt-peer-body {
   max-height: min(52vh, 440px);
   overflow-y: auto;
@@ -1078,6 +1114,11 @@
   text-transform: uppercase;
 }
 .bt-peer-turn-text { white-space: pre-wrap; }
+.bt-peer.routine-result .bt-peer-body {
+  max-height: none;
+  overflow: visible;
+}
+.bt-peer.routine-result .bt-peer-turn-text { white-space: normal; }
 .bt-peer-response .m-elrond,
 .bot-app .rc .bt-peer-response .m-elrond { max-width: none; padding: 0; background: transparent; }
 .bt-peer-response .m-elrond .prose,
@@ -1186,12 +1227,13 @@
 }
 .bt-rt-input:focus { border-color: var(--r-tardis-lit); box-shadow: var(--r-glow-tardis); }
 .bt-rt-input textarea { resize: vertical; }
-.bt-rt-actions { display: flex; justify-content: flex-end; }
-.bt-rt-btn { padding: 6px 12px; border-radius: 999px; font-size: 12.5px; cursor: pointer; }
+.bt-rt-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.bt-rt-btn { padding: 6px 12px; border-radius: 999px; font-size: 12.5px; cursor: pointer; background: transparent; border: 1px solid var(--r-line-strong); color: var(--r-ink); }
 .bt-rt-btn.primary { background: var(--r-gold); color: var(--r-bg); }
 .bt-rt-btn.primary:disabled { opacity: 0.4; cursor: default; }
 .bt-rt-rowbtns { display: flex; gap: 2px; align-items: center; }
 .bt-routine.off > svg, .bt-routine.on > svg { flex: none; }
+.bt-routine.editing { outline: 1px solid var(--r-line-gold); border-radius: 12px; }
 
 /* ============================================================
    Pinned agent bubbles (user-pinned strip above the list)
@@ -1288,7 +1330,8 @@
     margin-left: -351px; /* width + border */
     pointer-events: none;
   }
-  .bot-app.rail-collapsed .bt-menubtn { display: grid; }
+  .bot-app.rail-collapsed .bt-menubtn { display: grid; place-items: center; }
+  .bot-app.rail-collapsed .bt-menubtn.is-open { visibility: hidden; pointer-events: none; }
   /* Hide the collapse button on touch layouts (the drawer X covers it). */
   .bt-rail-collapse { display: grid; }
 }

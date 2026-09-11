@@ -1,3 +1,5 @@
+export const COMPUTER_GRANT_MINUTES: number;
+export const COMPUTER_GRANT_MS: number;
 export type ControlStatus = { supported: boolean; reason?: string; approvalMode?: 'ask' | 'automatic'; paused?: boolean; control: { owner: string; label: string; purpose: string; expiresAt: number } | null };
 export type ControlRequest = { owner: string; label: string; purpose: string; minutes: number };
 export function trustedComputerUrl(raw: string): boolean;

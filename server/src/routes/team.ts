@@ -11,9 +11,13 @@ teamRouter.get('/', asyncHandler(async (_req, res) => {
 }));
 
 teamRouter.post('/message', asyncHandler(async (req, res) => {
-  const { from, to, text, hop, wait } = req.body ?? {};
+  const { from, to, text, hop, wait, source } = req.body ?? {};
   if (typeof to !== 'string' || typeof text !== 'string' || typeof from !== 'string') {
     res.status(400).json({ error: 'from, to and text are required' });
+    return;
+  }
+  if (source !== undefined && source !== 'voice') {
+    res.status(400).json({ error: 'unknown message source' });
     return;
   }
   const aborter = new AbortController();
@@ -22,7 +26,10 @@ teamRouter.post('/message', asyncHandler(async (req, res) => {
   res.once('close', abortWait);
   let result;
   try {
-    result = await deliverTeamMessage({ from, to, text, hop, wait, signal: aborter.signal });
+    result = await deliverTeamMessage({ from, to, text, hop, wait, source,
+      // A voice recovery outbox item must survive the HTTP caller leaving too.
+      signal: source === 'voice' ? undefined : aborter.signal,
+    });
   } finally {
     req.off('aborted', abortWait);
     res.off('close', abortWait);
