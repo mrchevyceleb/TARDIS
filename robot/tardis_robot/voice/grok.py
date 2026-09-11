@@ -188,8 +188,11 @@ class GrokVoiceSession:
                 elif kind == "state":
                     await self._set_state(str(msg.get("state", "")))
                 elif kind == "interrupt":
+                    # The agent was cut off: drop its queued audio and lift the
+                    # mic gate so the person talking is heard right away.
                     with self._play_lock:
                         self._play_buf.clear()
+                    self._speaking_until = 0.0
                 elif kind == "transcript":
                     if msg.get("role") == "user" and str(msg.get("text", "")).strip():
                         self._last_user = time.monotonic()
