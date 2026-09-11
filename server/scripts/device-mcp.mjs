@@ -15,6 +15,11 @@
  *   device_write — write a file there
  *   device_ls    — list a folder there
  *   device_open  — open a file or folder in its default app
+ *
+ * A linked robot body (the TARDIS robot companion, kind:'robot') rides on the
+ * same link and fronts /api/robots:
+ *   robot_list, robot_status, robot_say, robot_express, robot_eyes, robot_leds,
+ *   robot_move, robot_arms, robot_look, robot_sensors, robot_events, robot_stop
  */
 
 import { createInterface } from 'node:readline';
@@ -152,6 +157,50 @@ const TOOLS = [
   },
 ];
 
+const ROBOT_ARG = { type: 'string', description: 'Which robot, by name or id. Omit when only one is linked.' };
+const SIDE_ARG = { type: 'string', enum: ['both', 'left', 'right'], description: 'Which side (default both).' };
+const ROBOT_EXPRESSIONS = ['ADMIRING', 'AGGRAVATED', 'ANNOYED', 'ANXIOUS', 'ATTENTION', 'ATTENTION LEFT', 'ATTENTION RIGHT', 'AWAKE L', 'AWAKE R', 'BATTERY LOW', 'BLINK', 'BLINK BIG', 'BLINK SLOW', 'BUGGED', 'BUMP', 'CAUTIOUS', 'CAUTIOUS DOWN', 'CAUTIOUS LEFT', 'CAUTIOUS RIGHT', 'CAUTIOUS UP', 'CHAOTIC', 'CHEERFUL', 'CONCENTRATE', 'CONFUSED', 'CRAZY ABOUT', 'CRUSHED', 'DAMAGED', 'DEJECTED', 'DELIGHTED', 'DEMORALIZED', 'DEPRESSED', 'DISCOVER', 'DISAPPOINTED', 'DIZZY L', 'DIZZY R', 'DROWSY', 'EXCITED', 'FED UP', 'FINE', 'FLAME', 'FOCUS', 'FRIGHTENED', 'FRUSTRATED', 'FURIOUS', 'HAPPY', 'HEARTS', 'HOPELESS', 'HOSTILE', 'IMPATIENT', 'INJURED', 'IRRITATED', 'JEALOUS L', 'JEALOUS R', 'LOOK AHEAD', 'LOOK DOWN', 'LOOK LEFT', 'LOOK RIGHT', 'LOOK UP', 'MELANCHOLY', 'MIXED UP', 'NERVOUS', 'OFFENDED', 'OUTRAGED', 'OVERJOYED', 'PANICKY', 'PASSIONATE', 'PHOTO', 'PUZZLED', 'SCAN', 'SHOCKED', 'SHY', 'SLEEP', 'SLEEPY', 'SNEEZE', 'SPARKLING', 'SUNGLASS', 'THINK', 'THRILLED', 'TIRED', 'TROUBLED', 'UNCOMFORTABLE', 'UNHAPPY', 'UPSET', 'WAKE WORD', 'WORKOUT', 'ZOOM IN'];
+const ROBOT_COLORS = ['BLACK', 'WHITE', 'GRAY', 'SALMON', 'RED', 'DARK_RED', 'PINK', 'ORANGE', 'GOLD', 'YELLOW', 'PURPLE', 'MAGENTA', 'LIME', 'GREEN', 'DARK_GREEN', 'CYAN', 'SKY_BLUE', 'BLUE', 'DARK_BLUE', 'BROWN'];
+const robotTool = (name, description, properties = {}, required = []) => ({ name, description,
+  inputSchema: { type: 'object', properties: { robot: ROBOT_ARG, ...properties }, required, additionalProperties: false } });
+const ROBOT_TOOLS = [
+  robotTool('robot_list', 'List the physical robot bodies linked right now with battery, voice state and last expression. A robot is reachable while its TARDIS robot companion is running. Call this first when the user mentions the robot by name or asks it to do something in the room.'),
+  robotTool('robot_status', 'Fresh status from one robot: battery, charging, current expression, whether it is moving, voice session state, and any hardware errors.'),
+  robotTool('robot_say', "Speak text aloud from the robot's own speaker using its on-board voice, optionally with an eye animation at the same time. Do NOT use this during a live voice call: your spoken reply already plays there. Plain spoken prose only, up to 600 characters.", {
+    text: { type: 'string', maxLength: 600 },
+    expression: { type: 'string', enum: ROBOT_EXPRESSIONS, description: 'Optional eye animation to play while speaking.' },
+  }, ['text']),
+  robotTool('robot_express', 'Play one eye animation on the robot, e.g. HAPPY, THINK, PUZZLED, CAUTIOUS, EXCITED, SLEEPY, LOOK LEFT. Use it to react in the room; one per reply is plenty.', {
+    expression: { type: 'string', enum: ROBOT_EXPRESSIONS },
+    wait: { type: 'boolean', description: 'Wait for the animation to finish before returning (default false).' },
+  }, ['expression']),
+  robotTool('robot_eyes', 'Set the resting eye look: iris colour, background colour and iris shape.', {
+    color: { type: 'string', enum: ROBOT_COLORS }, background: { type: 'string', enum: ROBOT_COLORS },
+    shape: { type: 'string', enum: ['CLASSIC', 'MODERN', 'SPACE', 'ORBIT', 'GLOW', 'DIGI'] }, side: SIDE_ARG,
+  }),
+  robotTool('robot_leds', "Set the robot's body lights to a colour, optionally fading to a second colour over fadeMs.", {
+    color: { type: 'string', enum: ROBOT_COLORS }, fadeTo: { type: 'string', enum: ROBOT_COLORS },
+    fadeMs: { type: 'integer', minimum: 0, maximum: 10000 }, side: SIDE_ARG,
+  }, ['color']),
+  robotTool('robot_move', 'Drive straight by distanceMm (negative = backwards, max 1000) or turn by degrees (positive = counter-clockwise, max 360). Give one or the other. The robot refuses to drive off an edge and stops on obstacles; keep moves small on a desk.', {
+    distanceMm: { type: 'integer', minimum: -1000, maximum: 1000 }, degrees: { type: 'integer', minimum: -360, maximum: 360 },
+    speed: { type: 'integer', minimum: 1, maximum: 100, description: 'Percent (default 40).' },
+  }),
+  robotTool('robot_arms', "Move the robot's arms to an angle in degrees (0 = down, up to 180) at a speed percent.", {
+    angle: { type: 'integer', minimum: 0, maximum: 180 }, speed: { type: 'integer', minimum: 1, maximum: 100 }, side: SIDE_ARG,
+  }, ['angle']),
+  robotTool('robot_look', "Take a photo with the robot's camera and return it as an image you can look at. Use when asked what the robot can see or to check on something in the room.", {
+    width: { type: 'integer', minimum: 160, maximum: 1920, description: 'Longest side in pixels (default 960).' },
+  }),
+  robotTool('robot_sensors', "Read the robot's sensors now: touch pads, left/right distance in mm, edge/cliff detectors, IMU orientation, battery."),
+  robotTool('robot_events', 'What the robot noticed recently: touches, gestures, being picked up, edges, obstacles, low battery, voice summons. Use since to page past a seq you already handled.', {
+    since: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 100 },
+    names: { type: 'array', items: { type: 'string' }, description: 'Filter to these event names.' },
+  }),
+  robotTool('robot_stop', 'Immediately stop all robot motion (wheels and arms). Always safe to call.'),
+];
+TOOLS.push(...ROBOT_TOOLS);
+
 async function api(path, init, signal) {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
@@ -173,6 +222,19 @@ function describeDevice(device) {
   return `- ${device.name} (${device.id}) — ${device.platform}${device.workspaceRoot ? ` · workspace at ${device.workspaceRoot}` : ''} · desktop: ${device.computer?.supported ? (device.computer.paused ? 'PAUSED by user — do not resume yourself' : device.computer.control ? `in use by ${device.computer.control.label}` : device.computer.approvalMode === 'automatic' ? 'AUTOMATIC — acquire and work without asking permission' : 'native consent required') : device.computer?.reason || 'not supported by this client'}`;
 }
 
+function describeRobot(robot) {
+  const s = robot.robot ?? {};
+  const bits = [
+    s.battery !== undefined ? `battery ${s.battery}%${s.charging ? ' (charging)' : ''}` : null,
+    s.voice && s.voice !== 'off' ? `voice ${s.voice}` : null,
+    s.expression ? `expression ${s.expression}` : null,
+    s.moving ? 'moving' : null,
+    s.hardware ? s.hardware : null,
+    s.errors?.length ? `errors: ${s.errors.join('; ')}` : null,
+  ].filter(Boolean).join(' \u00b7 ');
+  return `- ${robot.name} (${robot.id})${bits ? ` \u2014 ${bits}` : ''}`;
+}
+
 function clip(text, limit) {
   if (typeof text !== 'string' || text.length <= limit) return text ?? '';
   return `${text.slice(0, limit)}\n… (${text.length - limit} more characters)`;
@@ -187,6 +249,41 @@ async function callTool(name, args, signal) {
     const compatibilityOp = op === 'focus' || op === 'type' || op === 'key';
     const result = await post(`computer/${compatibilityOp ? 'act' : op}`, compatibilityOp ? { ...args, operation: op } : args, signal);
     if (typeof result.image === 'string') {
+      const { image, ...metadata } = result;
+      return [{ type: 'text', text: JSON.stringify(metadata) }, { type: 'image', data: image, mimeType: 'image/jpeg' }];
+    }
+    return JSON.stringify(result);
+  }
+  if (name.startsWith('robot_')) {
+    const op = name.slice('robot_'.length);
+    const body = { robot: args.robot };
+    if (op === 'list') {
+      const { robots, eventAgent } = await api('/api/robots', undefined, signal);
+      if (!robots?.length) return 'No robot is linked right now. Start the TARDIS robot companion on the robot to make it reachable.';
+      return `Linked robots (${robots.length}):\n${robots.map(describeRobot).join('\n')}${eventAgent ? `\nNotable robot events are handed to ${eventAgent}.` : ''}`;
+    }
+    if (op === 'events') {
+      const q = new URLSearchParams();
+      if (args.robot) q.set('robot', args.robot);
+      if (args.since) q.set('since', String(args.since));
+      if (args.limit) q.set('limit', String(args.limit));
+      if (Array.isArray(args.names) && args.names.length) q.set('names', args.names.join(','));
+      const { events, latestEventSeq } = await api(`/api/robots/events?${q}`, undefined, signal);
+      if (!events?.length) return `No robot events yet (latest seq ${latestEventSeq}).`;
+      return `${events.map((e) => `#${e.seq} ${new Date(e.ts).toLocaleTimeString()} ${e.robotName}: ${e.name}${Object.keys(e.data ?? {}).length ? ` ${JSON.stringify(e.data)}` : ''}`).join('\n')}\n(latest seq ${latestEventSeq})`;
+    }
+    if (op === 'move') {
+      const hasDistance = args.distanceMm !== undefined && args.distanceMm !== null;
+      const hasDegrees = args.degrees !== undefined && args.degrees !== null;
+      if (hasDistance === hasDegrees) throw new Error('Give exactly one of distanceMm or degrees.');
+      const result = hasDistance
+        ? await api('/api/robots/drive', { method: 'POST', body: JSON.stringify({ ...body, distanceMm: args.distanceMm, speed: args.speed }) }, signal)
+        : await api('/api/robots/turn', { method: 'POST', body: JSON.stringify({ ...body, degrees: args.degrees, speed: args.speed }) }, signal);
+      return JSON.stringify(result);
+    }
+    const { robot: _robot, ...params } = args;
+    const result = await api(`/api/robots/${op}`, { method: 'POST', body: JSON.stringify({ ...body, ...params }) }, signal);
+    if (op === 'look' && typeof result.image === 'string') {
       const { image, ...metadata } = result;
       return [{ type: 'text', text: JSON.stringify(metadata) }, { type: 'image', data: image, mimeType: 'image/jpeg' }];
     }

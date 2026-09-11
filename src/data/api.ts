@@ -22,6 +22,28 @@ export function previewComputer(device: string, signal?: AbortSignal) {
   return apiJson<ComputerPreview>(`/api/devices/${encodeURIComponent(device)}/computer/preview`, { method: 'POST', signal, cache: 'no-store' });
 }
 
+// Linked robot bodies (robot companions dialled in with kind:'robot').
+export type RobotStatus = {
+  battery?: number; charging?: boolean; voice?: 'off' | 'idle' | 'listening' | 'thinking' | 'speaking' | 'connecting';
+  expression?: string; moving?: boolean; hardware?: string; sdk?: string; errors?: string[]; updatedAt: number;
+};
+export type LinkedRobot = { id: string; name: string; platform: string; version: string; capabilities?: string[]; robot?: RobotStatus };
+export type RobotEvent = { seq: number; robot: string; robotName: string; name: string; data: Record<string, unknown>; ts: number };
+export type RobotCommand = 'status' | 'say' | 'express' | 'eyes' | 'leds' | 'drive' | 'turn' | 'stop' | 'arms' | 'look' | 'sensors' | 'volume' | 'play' | 'sleep' | 'wake';
+export function fetchRobots(signal?: AbortSignal) {
+  return apiJson<{ robots: LinkedRobot[]; eventAgent: string | null; latestEventSeq: number }>('/api/robots', { signal, cache: 'no-store' });
+}
+export function fetchRobotEvents(opts: { robot?: string; since?: number; limit?: number } = {}, signal?: AbortSignal) {
+  const q = new URLSearchParams();
+  if (opts.robot) q.set('robot', opts.robot);
+  if (opts.since) q.set('since', String(opts.since));
+  if (opts.limit) q.set('limit', String(opts.limit));
+  return apiJson<{ events: RobotEvent[]; latestEventSeq: number }>(`/api/robots/events?${q}`, { signal, cache: 'no-store' });
+}
+export function robotCommand<T = Record<string, unknown>>(robot: string, command: RobotCommand, params: Record<string, unknown> = {}, signal?: AbortSignal) {
+  return apiJson<T & { robot: string; robotName: string }>(`/api/robots/${command}`, { method: 'POST', body: JSON.stringify({ robot, ...params }), signal });
+}
+
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
