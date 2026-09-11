@@ -24,7 +24,7 @@ import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
 import { getXaiOauthToken, getXaiOauthTokenSync, hasXaiOauthToken } from '../routes/xai-oauth.ts';
-import { isVoiceChatId, THREAD_VOICE_STYLE_ADDENDUM, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
+import { isRobotVoiceChatId, isVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STYLE_ADDENDUM, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { isThreadWatched } from './threadWatch.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
@@ -577,6 +577,9 @@ class ClaudeSession {
     // jarvis-agent worker) so it survives respawns/recycles with no protocol
     // changes — see voicePrompt.ts.
     const voice = isVoiceChatId(chatId);
+    // A robot body's Jarvis thread (`jarvis-robot-*`) adds the physical-presence
+    // guidance on top of the spoken register.
+    const voiceAddendum = voice ? [VOICE_STYLE_ADDENDUM, isRobotVoiceChatId(chatId) ? robotVoiceAddendum(chatId) : null].filter(Boolean).join('\n\n') : null;
     // Persona scope: the teammate's who-I-am/what-I-do document follows the
     // home thread's chatId — survives rebrains (any engine) and compaction
     // rotations (fresh spawns re-read the file).
@@ -584,10 +587,10 @@ class ClaudeSession {
     if (cli === 'assistant') {
       args.push(
         '--append-system-prompt',
-        [ASSISTANT_AGENT_PROMPT, voice ? VOICE_STYLE_ADDENDUM : null, personaScope].filter(Boolean).join('\n\n'),
+        [ASSISTANT_AGENT_PROMPT, voiceAddendum, personaScope].filter(Boolean).join('\n\n'),
       );
     } else {
-      const sys = [voice ? VOICE_STYLE_ADDENDUM : null, personaScope].filter(Boolean).join('\n\n');
+      const sys = [voiceAddendum, personaScope].filter(Boolean).join('\n\n');
       if (sys) args.push('--append-system-prompt', sys);
     }
 

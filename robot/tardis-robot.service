@@ -1,0 +1,21 @@
+[Unit]
+Description=TARDIS robot companion
+Documentation=https://github.com/mrchevyceleb/TARDIS/blob/main/docs/ROBOT.md
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The Doly SDK talks to GPIO/I2C/SPI and stops the stock Doly service, so the
+# companion runs as root like the SDK examples. Configuration lives in the
+# environment file written by install.sh.
+EnvironmentFile=/etc/tardis-robot.env
+WorkingDirectory=/opt/tardis-robot
+ExecStart=/opt/tardis-robot/venv/bin/tardis-robot
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

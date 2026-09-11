@@ -78,6 +78,7 @@ TARDIS starts without private service dependencies. Features activate only when 
 - A browser MCP bridge.
 - Railway redeploy controls.
 - LiveKit, ElevenLabs, and Picovoice for voice/Jarvis.
+- A robot companion (`robot/`, see `docs/ROBOT.md`) linking a physical body over `/ws/device`.
 
 External side effects are designed to stay draft/review-first.
 

@@ -1,0 +1,8 @@
+websockets>=12,<15
+numpy>=1.24
+# voice
+livekit>=1.0.0
+sounddevice>=0.4.6
+# wake word
+openwakeword>=0.6.0
+onnxruntime>=1.16

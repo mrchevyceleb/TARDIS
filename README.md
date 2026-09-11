@@ -19,6 +19,7 @@ TARDIS is a ship's mind with a crew of Companions: each companion gets a durable
 - **Human-first scheduling** — routines defer while a person is actively using a thread and remain draft/review-first for external side effects.
 - **Workspace desk** — browse and edit an `ASSISTANT-HUB`, open artifacts, pin messages, and use the classic Studio at `/studio`.
 - **Voice and PWA support** — installable desktop/mobile shell, live voice calls, optional Jarvis wake-word agent, and native Windows workspace links.
+- **Robot body** — link a desk robot (Doly reference) so companions can see, speak, emote and move in the room; see [docs/ROBOT.md](docs/ROBOT.md).
 - **Local operations** — health reporting, graceful shutdown markers, memory-aware process admission, and safe session prewarming.
 
 ## Requirements

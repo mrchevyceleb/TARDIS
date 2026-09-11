@@ -52,6 +52,12 @@ tmp/
 coverage/
 .gitleaks-report.*
 
+# Robot companion (Python)
+robot/.venv/
+robot/build/
+robot/*.egg-info/
+__pycache__/
+
 # Claude Code runtime
 .claude/
 
