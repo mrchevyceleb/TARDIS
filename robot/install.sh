@@ -26,7 +26,7 @@ fi
 echo "==> system packages"
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip libportaudio2 alsa-utils git rsync >/dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip libportaudio2 alsa-utils git rsync unzip >/dev/null
 fi
 
 echo "==> python environment at $PREFIX"
@@ -43,11 +43,19 @@ else
   rm -rf "$PREFIX/src" && mkdir -p "$PREFIX/src" && cp -a "$HERE/." "$PREFIX/src/" && rm -rf "$PREFIX/src/venv"
 fi
 "$PREFIX/venv/bin/pip" install --quiet "$PREFIX/src"
-echo "==> voice audio package (failure here only disables voice)"
-# Only the 'voice' extra by default: local audio I/O for the Grok voice call.
-# The 'wake' extra is intentionally left out (see pyproject) because openWakeWord
-# pulls a numpy that breaks the preinstalled OpenCV; summon by touch instead.
+echo "==> voice packages (audio + offline wake word; failure here only disables voice)"
 "$PREFIX/venv/bin/pip" install --quiet "$PREFIX/src[voice]" || echo "   voice extra did not install; the robot still links, without voice"
+# Offline wake-word model for "hey spark" (small English Vosk model, ~40 MB).
+WAKE_MODEL_DIR="$PREFIX/models/vosk-model-small-en-us-0.15"
+if [[ ! -d "$WAKE_MODEL_DIR" ]] && command -v curl >/dev/null 2>&1; then
+  echo "==> wake word model"
+  mkdir -p "$PREFIX/models"
+  if curl -fsSL -o "$PREFIX/models/vosk.zip" https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip; then
+    ( cd "$PREFIX/models" && unzip -q vosk.zip && rm -f vosk.zip ) || echo "   wake model unzip failed; touch summon still works"
+  else
+    echo "   wake model download failed; touch summon still works"
+  fi
+fi
 
 echo "==> configuration $ENV_FILE"
 if [[ ! -f "$ENV_FILE" ]]; then

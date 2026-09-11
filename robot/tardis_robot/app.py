@@ -15,7 +15,7 @@ from .link import DeviceLink
 from .ops import Ops
 from .voice.audio import make_audio
 from .voice.grok import GrokVoiceSession, grok_voice_available
-from .voice.wake import WakeListener, openwakeword_available
+from .voice.wake import WakeListener, vosk_available, wake_phrases
 
 log = logging.getLogger("tardis.robot")
 
@@ -112,8 +112,8 @@ class RobotApp:
             return
         self.voice = session
         log.info("voice ready as agent %s (idle %.0fs, gate %s)", self.config.agent_id, self.config.voice_idle_secs, self.config.voice_gate)
-        if self.config.wake_word.lower() != "off" and openwakeword_available():
-            wake = WakeListener(audio=self.audio, model=self.config.wake_word, threshold=self.config.wake_threshold, on_wake=self.summon)
+        if self.config.wake_word.lower() != "off" and vosk_available():
+            wake = WakeListener(model_dir=self.config.wake_model, phrases=wake_phrases(self.config.wake_word), on_wake=self.summon, device=self.config.audio_input)
             if await asyncio.to_thread(wake.load):
                 try:
                     wake.start(asyncio.get_running_loop())
