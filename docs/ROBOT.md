@@ -118,6 +118,48 @@ Settings (all in `/etc/tardis-robot.env`, documented in `robot/.env.example`):
 `TARDIS_EYE_BACKGROUND`, `TARDIS_TURN_SIGN` (flip if the Doly turns the wrong
 way), `TARDIS_SOUNDS_DIR`.
 
+## First boot checklist
+
+The Doly backend (`robot/tardis_robot/hardware/doly.py`) was written against
+the SDK documentation, so the first run on real hardware is a verification
+pass. Do the motion steps with the robot on a clear floor or a cleared desk
+away from the edge, at low speed, with a hand ready to lift it and the power
+switch within reach. Keep `journalctl -u tardis-robot -f` open:
+
+1. **Subsystems.** Lines from `tardis.hardware.doly` at startup report parts
+   of the body that did not initialise or run degraded (missing module,
+   unexpected enum or method name, missing settings). Read each one; not all
+   of them remove a capability. The ship advertises what came up:
+   `curl -s http://127.0.0.1:8091/api/robots` on the server lists the
+   capabilities and the backend's error list.
+2. **Turn direction.** `robot_move` with `degrees: 90` should turn left
+   (counter-clockwise seen from above), matching the tool description. If it
+   turns right, set `TARDIS_TURN_SIGN=1` and restart the service.
+3. **Stop.** Start a slow drive of a few hundred millimetres and call
+   `robot_stop` straight away. The wheels must stop and the log must not say
+   `drive halt failed` (neither the SDK abort nor a zero-speed `free_drive`
+   reached the SDK) or `still reports RUNNING` (a stop was sent but the drive
+   state never confirmed it). Either one means the backend's stop path needs
+   adjusting to the SDK before any longer moves.
+4. **Arms** need the Doly settings file (`read_settings`); a warning about it
+   disables them along with the IMU offsets.
+5. **Audio.** `arecord -l` and `aplay -l` list the devices. If the log says
+   `no audio device available`, set `TARDIS_AUDIO_INPUT` and
+   `TARDIS_AUDIO_OUTPUT` to a substring of the right names. If speech and a
+   Jarvis call fight over ALSA, set `TARDIS_VOICE=off` until the device
+   sharing is sorted.
+6. **Wake word.** The log shows `wake word ready` when the model loaded and
+   `wake word heard` on a trigger. "Hey Jarvis" (or a long touch on the head)
+   should change the eyes and open a `jarvis-robot-…` chat in the Hall. Tune
+   `TARDIS_WAKE_THRESHOLD` for false or missed triggers.
+7. **Camera.** `robot_look` returns a JPEG. The camera is opened on the first
+   call, so a failure shows up in the tool's reply: `opencv missing`,
+   `camera SDK unavailable`, `camera start failed` or `camera returned no
+   frame`.
+
+Re-running `install.sh` after a `git pull` upgrades the code in place and
+restarts the service. Robot-only fixes need no change on the server.
+
 ## Develop without a robot
 
 ```bash
