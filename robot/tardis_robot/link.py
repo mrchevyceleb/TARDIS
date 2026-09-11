@@ -164,8 +164,13 @@ class DeviceLink:
             reply = {"type": "reply", "id": request_id, "ok": False, "error": str(error) or error.__class__.__name__}
         finally:
             self._inflight.pop(request_id, None)
-        if not cancel.is_set():
-            await self._send(reply)
+        if cancel.is_set():
+            return
+        # A reply the link cannot carry must still be answered, or the server
+        # waits for its timeout with nothing to tell the agent.
+        if len(json.dumps(reply, separators=(",", ":"))) > MAX_PAYLOAD:
+            reply = {"type": "reply", "id": request_id, "ok": False, "error": f"{op} produced a result too large for the link; ask for a smaller size."}
+        await self._send(reply)
 
     async def _cancel_all(self, reason: str) -> None:
         for request_id, (task, cancel) in list(self._inflight.items()):

@@ -34,13 +34,14 @@ def main() -> int:
     logging.basicConfig(level=getattr(logging, config.log_level, logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stdout)
     if args.check:
         from .hardware import doly_sdk_available
+        from .identity import load_identity
         from .voice.audio import sounddevice_available
         from .voice.session import livekit_available
         from .voice.wake import openwakeword_available
 
         print(f"tardis-robot {__version__}")
         print(f"ship: {config.url}  ->  {config.ws_url}")
-        print(f"name: {config.name}  (voice identity {config.voice_identity})")
+        print(f"name: {config.name}  (voice identity {config.voice_identity(load_identity(config.state_dir).device_id)})")
         print(f"hardware: {config.hardware}  (doly sdk {'found' if doly_sdk_available() else 'not found'})")
         print(f"voice: {config.voice}  livekit={'yes' if livekit_available() else 'no'}  sounddevice={'yes' if sounddevice_available() else 'no'}  openwakeword={'yes' if openwakeword_available() else 'no'}")
         print(f"wake word: {config.wake_word} @ {config.wake_threshold}  touch summon: {config.touch_summon}")

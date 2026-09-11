@@ -15,6 +15,9 @@ import {
   robotCommandParams,
   robotCommandTimeout,
   robotEventAgent,
+  robotMotionAllowed,
+  ROBOT_MOTION_COMMANDS,
+  ROBOT_MOTION_DENIED,
   ROBOT_COLORS,
   ROBOT_EXPRESSIONS,
   ROBOT_IRIS_SHAPES,
@@ -25,7 +28,7 @@ export const robotsRouter = Router();
 
 robotsRouter.get('/', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ robots: listRobots(), eventAgent: robotEventAgent() || null, latestEventSeq: latestRobotEventSeq() });
+  res.json({ robots: listRobots(), eventAgent: robotEventAgent() || null, motionAllowed: robotMotionAllowed(), latestEventSeq: latestRobotEventSeq() });
 });
 
 /** Static vocabulary so a UI or agent can offer valid choices without guessing. */
@@ -35,10 +38,21 @@ robotsRouter.get('/catalogue', (_req, res) => {
 
 robotsRouter.get('/events', (req, res) => {
   const names = String(req.query.names ?? '').split(',').map((n) => n.trim()).filter(Boolean);
+  // `robot` may be a name or an id like everywhere else; an offline robot's
+  // events stay reachable by its id.
+  const ref = typeof req.query.robot === 'string' ? req.query.robot.trim() : '';
+  let robot: string | undefined = ref || undefined;
+  if (ref) {
+    try { robot = findRobot(ref)?.id ?? ref; }
+    catch (error) {
+      if (error instanceof AmbiguousDeviceError) { res.status(409).json({ error: error.message }); return; }
+      throw error;
+    }
+  }
   res.setHeader('Cache-Control', 'no-store');
   res.json({
     events: recentRobotEvents({
-      robot: typeof req.query.robot === 'string' ? req.query.robot : undefined,
+      robot,
       since: Number(req.query.since) || 0,
       limit: Number(req.query.limit) || 30,
       names,
@@ -72,6 +86,9 @@ robotsRouter.get('/events/stream', (req, res) => {
 robotsRouter.post('/:op', asyncHandler(async (req, res) => {
   const op = String(req.params.op);
   if (!isRobotCommand(op)) { res.status(400).json({ error: `Unknown robot command "${op}".` }); return; }
+  // Moving a body in a room is an external side effect: default-deny until
+  // the operator grants standing authorization. Stop is never gated.
+  if (ROBOT_MOTION_COMMANDS.has(op) && !robotMotionAllowed()) { res.status(403).json({ error: ROBOT_MOTION_DENIED }); return; }
   const body = (req.body ?? {}) as Record<string, unknown>;
   let robot;
   try { robot = findRobot(String(body.robot ?? '')); }

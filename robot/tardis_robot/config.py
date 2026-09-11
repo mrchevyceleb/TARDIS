@@ -74,10 +74,12 @@ class Config:
         keep = "".join(c if c.isalnum() else "-" for c in self.name.strip().lower())
         return "-".join(part for part in keep.split("-") if part) or "robot"
 
-    @property
-    def voice_identity(self) -> str:
-        # The server keys the Jarvis thread on this identity: `jarvis-robot-<slug>`.
-        return f"robot-{self.slug}"[:40]
+    def voice_identity(self, device_id: str) -> str:
+        """The server keys the Jarvis thread on this identity (`jarvis-robot-…`).
+        A slice of the stable device id keeps two robots with the same name in
+        separate threads and LiveKit identities."""
+        suffix = "".join(c for c in device_id if c.isalnum())[:6].lower() or "0"
+        return f"robot-{self.slug[:28]}-{suffix}"[:40]
 
 
 def load_config() -> Config:

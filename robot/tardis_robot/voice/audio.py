@@ -92,7 +92,9 @@ class SoundDeviceIO(AudioIO):
                 log.debug("input status: %s", status)
             cb = self._input_cb
             if cb is not None:
-                cb(np.ascontiguousarray(indata[:, 0]).astype(np.int16, copy=False))
+                # PortAudio reuses indata after the callback returns: always copy
+                # before the samples cross into the wake/LiveKit threads.
+                cb(np.array(indata[:, 0], dtype=np.int16, copy=True))
 
         self._in = self._sd.InputStream(samplerate=sample_rate, channels=CHANNELS, dtype="int16", blocksize=block, device=_device(self.input_device), callback=on_audio)
         self._in.start()  # type: ignore[attr-defined]

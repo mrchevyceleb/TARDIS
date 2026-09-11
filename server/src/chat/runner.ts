@@ -24,7 +24,7 @@ import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
 import { getXaiOauthToken, getXaiOauthTokenSync, hasXaiOauthToken } from '../routes/xai-oauth.ts';
-import { isRobotVoiceChatId, isVoiceChatId, ROBOT_VOICE_STYLE_ADDENDUM, THREAD_VOICE_STYLE_ADDENDUM, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
+import { isRobotVoiceChatId, isVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STYLE_ADDENDUM, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { isThreadWatched } from './threadWatch.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
@@ -580,7 +580,7 @@ class ClaudeSession {
     const voice = isVoiceChatId(chatId);
     // A robot body's Jarvis thread (`jarvis-robot-*`) adds the physical-presence
     // guidance on top of the spoken register.
-    const voiceAddendum = voice ? [VOICE_STYLE_ADDENDUM, isRobotVoiceChatId(chatId) ? ROBOT_VOICE_STYLE_ADDENDUM : null].filter(Boolean).join('\n\n') : null;
+    const voiceAddendum = voice ? [VOICE_STYLE_ADDENDUM, isRobotVoiceChatId(chatId) ? robotVoiceAddendum(chatId) : null].filter(Boolean).join('\n\n') : null;
     // Persona scope: the teammate's who-I-am/what-I-do document follows the
     // home thread's chatId — survives rebrains (any engine) and compaction
     // rotations (fresh spawns re-read the file).

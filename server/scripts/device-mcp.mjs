@@ -182,11 +182,11 @@ const ROBOT_TOOLS = [
     color: { type: 'string', enum: ROBOT_COLORS }, fadeTo: { type: 'string', enum: ROBOT_COLORS },
     fadeMs: { type: 'integer', minimum: 0, maximum: 10000 }, side: SIDE_ARG,
   }, ['color']),
-  robotTool('robot_move', 'Drive straight by distanceMm (negative = backwards, max 1000) or turn by degrees (positive = counter-clockwise, max 360). Give one or the other. The robot refuses to drive off an edge and stops on obstacles; keep moves small on a desk.', {
+  robotTool('robot_move', 'Drive straight by distanceMm (negative = backwards, max 1000) or turn by degrees (positive = counter-clockwise, max 360). Give one or the other. Needs standing motion authorization from the server operator (a 403 means it is off; do not work around it). The robot refuses to drive off an edge and stops on obstacles; keep moves small on a desk.', {
     distanceMm: { type: 'integer', minimum: -1000, maximum: 1000 }, degrees: { type: 'integer', minimum: -360, maximum: 360 },
     speed: { type: 'integer', minimum: 1, maximum: 100, description: 'Percent (default 40).' },
   }),
-  robotTool('robot_arms', "Move the robot's arms to an angle in degrees (0 = down, up to 180) at a speed percent.", {
+  robotTool('robot_arms', "Move the robot's arms to an angle in degrees (0 = down, up to 180) at a speed percent. Needs the operator's standing motion authorization on the server (a 403 means it is off).", {
     angle: { type: 'integer', minimum: 0, maximum: 180 }, speed: { type: 'integer', minimum: 1, maximum: 100 }, side: SIDE_ARG,
   }, ['angle']),
   robotTool('robot_look', "Take a photo with the robot's camera and return it as an image you can look at. Use when asked what the robot can see or to check on something in the room.", {
@@ -258,9 +258,9 @@ async function callTool(name, args, signal) {
     const op = name.slice('robot_'.length);
     const body = { robot: args.robot };
     if (op === 'list') {
-      const { robots, eventAgent } = await api('/api/robots', undefined, signal);
+      const { robots, eventAgent, motionAllowed } = await api('/api/robots', undefined, signal);
       if (!robots?.length) return 'No robot is linked right now. Start the TARDIS robot companion on the robot to make it reachable.';
-      return `Linked robots (${robots.length}):\n${robots.map(describeRobot).join('\n')}${eventAgent ? `\nNotable robot events are handed to ${eventAgent}.` : ''}`;
+      return `Linked robots (${robots.length}):\n${robots.map(describeRobot).join('\n')}\nMotion (robot_move/robot_arms): ${motionAllowed ? 'authorized by the operator' : 'DISABLED by operator policy'}.${eventAgent ? `\nNotable robot events are handed to ${eventAgent}.` : ''}`;
     }
     if (op === 'events') {
       const q = new URLSearchParams();
