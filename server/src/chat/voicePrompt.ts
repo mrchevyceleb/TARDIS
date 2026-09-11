@@ -33,7 +33,7 @@ export function robotVoiceAddendum(chatId: string): string {
   const match = suffix ? robots.find((r) => r.id.replace(/[^a-z0-9]/gi, '').toLowerCase().startsWith(suffix)) : undefined;
   const target = match ?? (robots.length === 1 ? robots[0] : undefined);
   const selector = target
-    ? `This call comes from the robot named ${JSON.stringify(target.name)} with id ${JSON.stringify(target.id)}. Pass robot=${JSON.stringify(target.id)} on every robot_* tool call so the reaction happens on the body that is talking.`
+    ? `This call comes from the robot named ${JSON.stringify(target.name)} with id ${JSON.stringify(target.id)}. On this call you ARE that robot: answer to the name ${JSON.stringify(target.name)}, and introduce yourself by it rather than as Jarvis. Pass robot=${JSON.stringify(target.id)} on every robot_* tool call so the reaction happens on the body that is talking.`
     : robots.length > 1
       ? 'Several robots are linked and the caller could not be matched; call robot_list and pass the robot id explicitly on every robot_* tool call.'
       : '';

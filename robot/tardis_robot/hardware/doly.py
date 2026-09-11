@@ -75,7 +75,13 @@ class DolyHardware(Hardware):
         self._tts_path = os.path.join(tempfile.gettempdir(), "tardis-robot-say.wav")
         self._sounds_dir = os.environ.get("TARDIS_SOUNDS_DIR", "/.doly/sounds")
         self._settings_loaded = False
+        self._imu_offsets: tuple[int, ...] = (0, 0, 0, 0, 0, 0)
         self._sdk_versions: list[str] = []
+        # Long-press and double-tap are derived here from raw Up/Down events;
+        # the SDK's own activities are only Patting and Disturb.
+        self._touch_lock = threading.Lock()
+        self._touch_down: dict[str, float] = {}
+        self._touch_last_tap: dict[str, float] = {}
 
     # ------------------------------------------------------------------ setup
     def start(self) -> None:
@@ -88,6 +94,14 @@ class DolyHardware(Hardware):
             self._fail("read_settings failed (arm calibration and IMU offsets unavailable)")
         else:
             self._settings_loaded = True
+            try:
+                rc, *values = helper.get_imu_offsets()
+                if rc >= 0 and len(values) == 6:
+                    self._imu_offsets = tuple(int(v) for v in values)
+                else:
+                    self._fail(f"get_imu_offsets rc={rc}; using zero IMU offsets")
+            except Exception as error:  # noqa: BLE001
+                self._fail(f"get_imu_offsets failed: {error}; using zero IMU offsets")
         self._init_eyes()
         self._init_leds()
         self._init_sound()
@@ -188,7 +202,7 @@ class DolyHardware(Hardware):
         if led is None:
             return
         try:
-            if led.init() != 0:
+            if led.init() < 0:
                 self._fail("led init failed")
                 self._mods["doly_led"] = None
                 return
@@ -235,12 +249,41 @@ class DolyHardware(Hardware):
                 self._fail("touch init failed")
                 self._mods["doly_touch"] = None
                 return
-            touch.on_touch(lambda side, state: self.emit("touch", {"side": _name(side).lower(), "state": _name(state).lower()}))
+            touch.on_touch(self._on_touch)
             touch.on_touch_activity(lambda side, activity: self.emit("touch_activity", {"side": _name(side).lower(), "activity": _name(activity).lower()}))
             self._version("touch", touch)
         except Exception as error:  # noqa: BLE001
             self._fail(f"touch unavailable: {error}")
             self._mods["doly_touch"] = None
+
+    LONG_PRESS_SECS = 1.0
+    DOUBLE_TAP_SECS = 0.6
+
+    def _on_touch(self, side: Any, state: Any) -> None:
+        """Forward the raw touch and derive 'long' / 'double_tap' activities,
+        which the reflex layer uses to summon and dismiss the voice."""
+        side_name = _name(side).lower()
+        state_name = _name(state).lower()
+        self.emit("touch", {"side": side_name, "state": state_name})
+        now = time.monotonic()
+        activity = None
+        with self._touch_lock:
+            if state_name == "down":
+                self._touch_down[side_name] = now
+            elif state_name == "up":
+                started = self._touch_down.pop(side_name, None)
+                if started is not None and now - started >= self.LONG_PRESS_SECS:
+                    activity = "long"
+                    self._touch_last_tap.pop(side_name, None)
+                elif started is not None:
+                    last = self._touch_last_tap.get(side_name)
+                    if last is not None and now - last <= self.DOUBLE_TAP_SECS:
+                        activity = "double_tap"
+                        self._touch_last_tap.pop(side_name, None)
+                    else:
+                        self._touch_last_tap[side_name] = now
+        if activity:
+            self.emit("touch_activity", {"side": side_name, "activity": activity})
 
     def _init_tof(self) -> None:
         tof = self._import("doly_tof")
@@ -279,20 +322,32 @@ class DolyHardware(Hardware):
                 self._fail("edge init failed")
                 self._mods["doly_edge"] = None
                 return
-            enable = getattr(edge, "enable_control", None)
-            if callable(enable):
-                enable()
+            # init() already starts the listening thread (enable_control is
+            # only needed after a disable_control).
             edge.on_change(self._on_edge)
+            edge.on_gap_detect(self._on_gap)
             self._version("edge", edge)
         except Exception as error:  # noqa: BLE001
             self._fail(f"edge unavailable: {error}")
             self._mods["doly_edge"] = None
 
+    @staticmethod
+    def _edge_states(sensors: Any) -> list[tuple[str, str]]:
+        return [(_name(getattr(s, "id", i)).lower(), _name(getattr(s, "state", "")).lower()) for i, s in enumerate(sensors)]
+
     def _on_edge(self, sensors: Any) -> None:
-        states = [(int(getattr(s, "id", i)), _name(getattr(s, "state", "")).lower()) for i, s in enumerate(sensors)]
-        triggered = [i for i, state in states if state not in ("", "low", "0", "off", "false", "none")]
+        # IR sensor GpioState: High = ground seen, Low = nothing under that
+        # corner, i.e. a drop-off.
+        states = self._edge_states(sensors)
+        triggered = [sensor for sensor, state in states if state == "low"]
         self.emit("edge", {"sensors": states, "triggered": triggered})
         if triggered and self.moving:
+            self.stop_motion()
+
+    def _on_gap(self, direction: Any) -> None:
+        where = _name(direction).lower()
+        self.emit("edge", {"gap": where, "triggered": [where]})
+        if self.moving:
             self.stop_motion()
 
     def _init_imu(self) -> None:
@@ -301,12 +356,7 @@ class DolyHardware(Hardware):
         if imu is None or helper is None:
             return
         try:
-            offsets = (0, 0, 0, 0, 0, 0)
-            if self._settings_loaded:
-                rc, *values = helper.get_imu_offsets()
-                if rc >= 0 and len(values) == 6:
-                    offsets = tuple(values)
-            if imu.init(1, *offsets) < 0:
+            if imu.init(1, *self._imu_offsets) < 0:
                 self._fail("imu init failed")
                 self._mods["doly_imu"] = None
                 return
@@ -322,7 +372,7 @@ class DolyHardware(Hardware):
             return
         try:
             battery.on_alarm(lambda capacity: self.emit("battery_alarm", {"battery": int(capacity)}))
-            if battery.init() != 0:
+            if battery.init() < 0:
                 self._fail("battery init failed")
                 self._mods["doly_battery"] = None
                 return
@@ -356,7 +406,8 @@ class DolyHardware(Hardware):
             return
         try:
             drive.on_error(lambda cmd_id, side, err: self.emit("drive_error", {"side": _name(side).lower(), "error": _name(err).lower()}))
-            if drive.init() != 0:
+            # Calibrated IMU offsets from the settings file; zeros when unavailable.
+            if drive.init(*self._imu_offsets) < 0:
                 self._fail("drive init failed")
                 self._mods["doly_drive"] = None
                 return
@@ -393,7 +444,8 @@ class DolyHardware(Hardware):
         edge = self._mods.get("doly_edge")
         if edge is not None:
             try:
-                out["edge"] = {"sensors": [(int(getattr(s, "id", i)), _name(getattr(s, "state", "")).lower()) for i, s in enumerate(edge.get_sensors())]}
+                # get_sensors filters by state: Low = no ground under that corner.
+                out["edge"] = {"noGround": [sensor for sensor, _ in self._edge_states(edge.get_sensors(_enum(edge.GpioState, "LOW")))]}
             except Exception as error:  # noqa: BLE001
                 out["edge"] = {"error": str(error)}
         imu = self._mods.get("doly_imu")
@@ -540,10 +592,11 @@ class DolyHardware(Hardware):
         self.moving = True
         outcome = "halt failed"
         try:
+            # go_distance takes a positive millimetre count plus a direction flag.
             with self._sdk_lock:
-                rc = drive.go_distance(self._next_id(), distance_mm, speed, True, True)
-            if isinstance(rc, int) and rc < 0:
-                raise RuntimeError(f"go_distance rc={rc}")
+                rc = drive.go_distance(self._next_id(), int(round(abs(distance_mm))), speed, distance_mm > 0, True)
+            if rc is False or (isinstance(rc, int) and rc < 0):
+                raise RuntimeError(f"go_distance rejected (rc={rc})")
             outcome = self._wait_drive(drive, abs(distance_mm) / 20.0 + 3.0)
         except Exception:
             # The command failed part way: make sure nothing is left rolling.
@@ -565,10 +618,13 @@ class DolyHardware(Hardware):
         self.moving = True
         outcome = "halt failed"
         try:
+            # from_center=True spins in place; the SDK example's -45 is
+            # counter-clockwise, hence the default TARDIS_TURN_SIGN of -1 for
+            # the tool's "positive = counter-clockwise" contract.
             with self._sdk_lock:
-                rc = drive.go_rotate(self._next_id(), degrees * TURN_SIGN, False, speed, True, True)
-            if isinstance(rc, int) and rc < 0:
-                raise RuntimeError(f"go_rotate rc={rc}")
+                rc = drive.go_rotate(self._next_id(), float(degrees * TURN_SIGN), True, speed, True, True)
+            if rc is False or (isinstance(rc, int) and rc < 0):
+                raise RuntimeError(f"go_rotate rejected (rc={rc})")
             outcome = self._wait_drive(drive, abs(degrees) / 30.0 + 3.0)
         except Exception:
             outcome = "stopped" if self._halt_drive(drive) else "halt failed"
@@ -699,7 +755,7 @@ class DolyHardware(Hardware):
         if edge is None:
             return False
         try:
-            return any(_name(getattr(s, "state", "")).lower() not in ("", "low", "0", "off", "false", "none") for s in edge.get_sensors())
+            return len(list(edge.get_sensors(_enum(edge.GpioState, "LOW")))) > 0
         except Exception:  # noqa: BLE001
             return False
 

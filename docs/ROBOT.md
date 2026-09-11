@@ -89,7 +89,7 @@ On the robot:
 ```bash
 git clone --depth 1 https://github.com/mrchevyceleb/TARDIS.git
 cd TARDIS/robot
-sudo ./install.sh https://your-server.your-tailnet.ts.net Doly
+sudo ./install.sh https://your-server.your-tailnet.ts.net Spark
 ```
 
 The installer creates a virtual environment under `/opt/tardis-robot` (with
@@ -120,9 +120,11 @@ way), `TARDIS_SOUNDS_DIR`.
 
 ## First boot checklist
 
-The Doly backend (`robot/tardis_robot/hardware/doly.py`) was written against
-the SDK documentation, so the first run on real hardware is a verification
-pass. Do the motion steps with the robot on a clear floor or a cleared desk
+The Doly backend (`robot/tardis_robot/hardware/doly.py`) was written without
+a robot. Its call signatures, enum names, expression names and sensor
+polarity are checked against the SDK's pybind11 binding sources by
+`robot/tests/test_doly_backend.py`, but timing, directions and audio need the
+real hardware, so the first run is a verification pass. Do the motion steps with the robot on a clear floor or a cleared desk
 away from the edge, at low speed, with a hand ready to lift it and the power
 switch within reach. Keep `journalctl -u tardis-robot -f` open:
 
@@ -133,8 +135,10 @@ switch within reach. Keep `journalctl -u tardis-robot -f` open:
    `curl -s http://127.0.0.1:8091/api/robots` on the server lists the
    capabilities and the backend's error list.
 2. **Turn direction.** `robot_move` with `degrees: 90` should turn left
-   (counter-clockwise seen from above), matching the tool description. If it
-   turns right, set `TARDIS_TURN_SIGN=1` and restart the service.
+   (counter-clockwise seen from above), matching the tool description. The
+   SDK calls its rotation sign "implementation-defined", so the default only
+   follows its example. If it turns right, set `TARDIS_TURN_SIGN=1` and
+   restart the service.
 3. **Stop.** Start a slow drive of a few hundred millimetres and call
    `robot_stop` straight away. The wheels must stop and the log must not say
    `drive halt failed` (neither the SDK abort nor a zero-speed `free_drive`
@@ -149,7 +153,10 @@ switch within reach. Keep `journalctl -u tardis-robot -f` open:
    Jarvis call fight over ALSA, set `TARDIS_VOICE=off` until the device
    sharing is sorted.
 6. **Wake word.** The log shows `wake word ready` when the model loaded and
-   `wake word heard` on a trigger. "Hey Jarvis" (or a long touch on the head)
+   `wake word heard` on a trigger. The bundled phrase is "hey Jarvis"; point
+   `TARDIS_WAKE_WORD` at a custom `.onnx` model to use the robot's own name.
+   Saying it (or holding a touch sensor for a second; a double tap ends the
+   call)
    should change the eyes and open a `jarvis-robot-…` chat in the Hall. Tune
    `TARDIS_WAKE_THRESHOLD` for false or missed triggers.
 7. **Camera.** `robot_look` returns a JPEG. The camera is opened on the first
