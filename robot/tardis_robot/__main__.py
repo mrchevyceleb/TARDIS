@@ -32,6 +32,10 @@ def main() -> int:
 
     config = load_config()
     logging.basicConfig(level=getattr(logging, config.log_level, logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stdout)
+    # LiveKit logs every unhandled agent byte/text stream at INFO on the root
+    # logger, several times a second during a call. Not actionable here.
+    logging.getLogger().addFilter(lambda record: not str(record.getMessage()).startswith("ignoring "))
+    logging.getLogger("livekit").setLevel(logging.WARNING)
     if args.check:
         from .hardware import doly_sdk_available
         from .identity import load_identity
