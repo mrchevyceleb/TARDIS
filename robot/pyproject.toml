@@ -11,16 +11,23 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
   "websockets>=12,<15",
-  "numpy>=1.24",
+  # <2 so the venv (created with --system-site-packages) keeps the system
+  # numpy that the preinstalled OpenCV was built against; numpy 2.x shadows it
+  # and breaks `import cv2` (numpy.core.multiarray failed to import).
+  "numpy>=1.24,<2",
 ]
 
 [project.optional-dependencies]
-# Live voice through Jarvis (LiveKit room + local audio I/O).
+# Voice: a Grok realtime call over the ship's /ws/voice socket. Needs only local
+# audio I/O; the transport is plain websockets (a core dependency).
 voice = [
-  "livekit>=1.0.0",
   "sounddevice>=0.4.6",
 ]
-# On-device wake word ("hey jarvis") for hands-free summons.
+# On-device wake word ("hey jarvis") for hands-free summons. OPTIONAL and NOT in
+# the default install: openWakeWord pulls scipy/numpy>=1.26, which shadows the
+# system numpy 1.24 that the preinstalled OpenCV needs and breaks the camera.
+# Touch-to-talk (a long press) is the default summon. Install this only with a
+# numpy/OpenCV combination that agrees.
 wake = [
   "openwakeword>=0.6.0",
   "onnxruntime>=1.16",
