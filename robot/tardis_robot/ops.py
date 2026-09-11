@@ -168,14 +168,24 @@ class Ops:
             await asyncio.to_thread(self.hw.stop_motion)
         except Exception as error:  # noqa: BLE001
             log.warning("stop_motion during cancel failed: %s", error)
-        if not task.done():
+        # We are often here BECAUSE this coroutine is being cancelled (link
+        # dropped, server cancel, timeout). A cancellation landing mid-wait must
+        # not be mistaken for the worker refusing to stop: keep waiting out the
+        # grace period, then re-raise the cancellation once.
+        deadline = time.monotonic() + 8.0
+        cancelled = False
+        while not task.done() and time.monotonic() < deadline:
             try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=8)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+                await asyncio.wait_for(asyncio.shield(task), timeout=max(0.05, deadline - time.monotonic()))
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception:  # noqa: BLE001 - the worker's own error surfaces to the caller elsewhere
+                break
         if not task.done():
-            log.error("motion worker did not stop; refusing further motion until it exits")
+            log.error("motion worker did not stop within the grace period; refusing further motion until it exits")
             self._stuck = task
+        if cancelled:
+            raise asyncio.CancelledError()
 
     async def drive(self, params: dict[str, Any], cancel: asyncio.Event) -> dict[str, Any]:
         distance = _num(params.get("distanceMm"), "distanceMm", -MAX_DISTANCE_MM, MAX_DISTANCE_MM)
