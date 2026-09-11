@@ -7,6 +7,8 @@
 // session-lifecycle path with zero protocol changes (same trick as the
 // `__acct__` account lanes).
 
+import { onlineRobots } from '../devices/robots.ts';
+
 export const VOICE_CHAT_PREFIX = 'jarvis';
 
 /** A robot companion summons Jarvis with identity `robot-<name>`, so its
@@ -20,6 +22,22 @@ export function isVoiceChatId(chatId: string): boolean {
 
 export function isRobotVoiceChatId(chatId: string): boolean {
   return chatId.startsWith(ROBOT_VOICE_CHAT_PREFIX);
+}
+
+/** The robot's voice identity ends with a slice of its device id; resolve it
+ *  back to the exact linked robot so tool calls from the call target the right
+ *  body even when several are online. */
+export function robotVoiceAddendum(chatId: string): string {
+  const suffix = chatId.slice(ROBOT_VOICE_CHAT_PREFIX.length).split('-').pop()?.toLowerCase() ?? '';
+  const robots = onlineRobots();
+  const match = suffix ? robots.find((r) => r.id.replace(/[^a-z0-9]/gi, '').toLowerCase().startsWith(suffix)) : undefined;
+  const target = match ?? (robots.length === 1 ? robots[0] : undefined);
+  const selector = target
+    ? `This call comes from the robot named ${JSON.stringify(target.name)} with id ${JSON.stringify(target.id)}. Pass robot=${JSON.stringify(target.id)} on every robot_* tool call so the reaction happens on the body that is talking.`
+    : robots.length > 1
+      ? 'Several robots are linked and the caller could not be matched; call robot_list and pass the robot id explicitly on every robot_* tool call.'
+      : '';
+  return [ROBOT_VOICE_STYLE_ADDENDUM, selector].filter(Boolean).join('\n');
 }
 
 /** Rides after VOICE_STYLE_ADDENDUM when the caller is a robot body. */

@@ -1,12 +1,17 @@
 """On-device wake word with openWakeWord ("hey jarvis" ships with it). Runs
 only while no call is active so the microphones are free for LiveKit during a
 conversation. Optional: without the package the robot still answers a long
-touch."""
+touch.
+
+The audio callback only hands frames to a queue; buffering and inference run
+on their own thread so the real-time capture thread is never blocked."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import queue
+import threading
 import time
 from typing import Any, Awaitable, Callable
 
@@ -37,7 +42,9 @@ class WakeListener:
         self.on_wake = on_wake
         self._model: Any = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._buffer = np.zeros(0, dtype=np.int16)
+        self._frames: queue.Queue[np.ndarray] = queue.Queue(maxsize=200)
+        self._worker: threading.Thread | None = None
+        self._stop = threading.Event()
         self._last_fire = 0.0
         self._listening = False
 
@@ -68,30 +75,64 @@ class WakeListener:
             return
         self._loop = loop
         self._listening = True
-        self._buffer = np.zeros(0, dtype=np.int16)
-        self.audio.start_input(self._on_audio, WAKE_RATE)
+        self._stop.clear()
+        with self._frames.mutex:
+            self._frames.queue.clear()
+        self._worker = threading.Thread(target=self._run, name="wake-word", daemon=True)
+        self._worker.start()
+        try:
+            self.audio.start_input(self._on_audio, WAKE_RATE)
+        except Exception:
+            # Microphone unavailable: roll back so a retry (or stop) is clean.
+            self._listening = False
+            self._stop.set()
+            self._worker = None
+            raise
 
     def stop(self) -> None:
         if not self._listening:
             return
         self._listening = False
         self.audio.stop_input()
+        self._stop.set()
+        worker, self._worker = self._worker, None
+        if worker is not None:
+            worker.join(timeout=2.0)
 
+    # Real-time capture thread: enqueue and return immediately.
     def _on_audio(self, frame: np.ndarray) -> None:
-        if self._model is None:
+        try:
+            self._frames.put_nowait(frame)
+        except queue.Full:
+            pass
+
+    # Worker thread: buffer to 80 ms chunks and run the model.
+    def _run(self) -> None:
+        model = self._model
+        if model is None:
             return
-        self._buffer = np.concatenate([self._buffer, frame])
-        while len(self._buffer) >= CHUNK:
-            chunk, self._buffer = self._buffer[:CHUNK], self._buffer[CHUNK:]
+        try:
+            model.reset()
+        except Exception:  # noqa: BLE001
+            pass
+        buffer = np.zeros(0, dtype=np.int16)
+        while not self._stop.is_set():
             try:
-                scores = self._model.predict(chunk)
-            except Exception as error:  # noqa: BLE001
-                log.debug("wake predict: %s", error)
-                return
-            score = max((float(v) for k, v in scores.items() if self.model_name in k), default=0.0)
-            if score >= self.threshold and time.monotonic() - self._last_fire > COOLDOWN_SECS:
-                self._last_fire = time.monotonic()
-                log.info("wake word heard (%.2f)", score)
-                loop = self._loop
-                if loop is not None:
-                    loop.call_soon_threadsafe(lambda: loop.create_task(self.on_wake()))
+                frame = self._frames.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            buffer = np.concatenate([buffer, frame])
+            while len(buffer) >= CHUNK and not self._stop.is_set():
+                chunk, buffer = buffer[:CHUNK], buffer[CHUNK:]
+                try:
+                    scores = model.predict(chunk)
+                except Exception as error:  # noqa: BLE001
+                    log.debug("wake predict: %s", error)
+                    continue
+                score = max((float(v) for k, v in scores.items() if self.model_name in k), default=0.0)
+                if score >= self.threshold and time.monotonic() - self._last_fire > COOLDOWN_SECS:
+                    self._last_fire = time.monotonic()
+                    log.info("wake word heard (%.2f)", score)
+                    loop = self._loop
+                    if loop is not None and not loop.is_closed():
+                        loop.call_soon_threadsafe(lambda: loop.create_task(self.on_wake()))

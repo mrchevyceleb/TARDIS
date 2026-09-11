@@ -26,7 +26,7 @@ fi
 echo "==> system packages"
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip libportaudio2 alsa-utils git >/dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip libportaudio2 alsa-utils git rsync >/dev/null
 fi
 
 echo "==> python environment at $PREFIX"
@@ -37,7 +37,11 @@ if [[ ! -x "$PREFIX/venv/bin/python" ]]; then
   python3 -m venv --system-site-packages "$PREFIX/venv"
 fi
 "$PREFIX/venv/bin/pip" install --quiet --upgrade pip
-rsync -a --delete --exclude venv --exclude '__pycache__' "$HERE/" "$PREFIX/src/"
+if command -v rsync >/dev/null 2>&1; then
+  rsync -a --delete --exclude venv --exclude '__pycache__' "$HERE/" "$PREFIX/src/"
+else
+  rm -rf "$PREFIX/src" && mkdir -p "$PREFIX/src" && cp -a "$HERE/." "$PREFIX/src/" && rm -rf "$PREFIX/src/venv"
+fi
 "$PREFIX/venv/bin/pip" install --quiet "$PREFIX/src"
 echo "==> optional voice + wake word packages (failures here only disable voice)"
 "$PREFIX/venv/bin/pip" install --quiet "$PREFIX/src[voice,wake]" || echo "   voice/wake extras did not install; the robot still links without voice"

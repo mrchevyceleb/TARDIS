@@ -27,7 +27,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { JsonStore } from '../lib/jsonStore.ts';
 import { loadComputerTargets } from './context.ts';
-import { forgetRobot, recordRobotEvent, robotStatus, setRobotStatus, type RobotStatus } from './robots.ts';
+import { forgetRobot, recordRobotEvent, robotStatus, safeRobotName, setRobotStatus, type RobotStatus } from './robots.ts';
 import type { ControlStatus } from '../../../desktop/native/computer.mjs';
 
 export type DeviceOp = 'exec' | 'read' | 'write' | 'ls' | 'open' | `computer.${string}` | `robot.${string}`;
@@ -316,11 +316,12 @@ export function registerDeviceBridge(server: HttpServer): void {
           // may not impersonate a body that agents will move and speak through.
           const kind: DeviceKind = msg.kind === 'robot' && hasKey ? 'robot' : 'computer';
           const capabilities = Array.isArray(msg.capabilities)
-            ? msg.capabilities.filter((c: unknown): c is string => typeof c === 'string' && c.length <= 40).slice(0, 64)
+            ? msg.capabilities.filter((c: unknown): c is string => typeof c === 'string' && /^[a-z0-9_-]{1,40}$/i.test(c)).slice(0, 64)
             : undefined;
           const info: DeviceInfo = {
             id,
-            name: String(msg.name ?? '').trim().slice(0, 60) || id,
+            // A robot's name is quoted into agent prompts; keep it one plain line.
+            name: kind === 'robot' ? safeRobotName(msg.name, id) : String(msg.name ?? '').trim() || id,
             platform: String(msg.platform ?? 'unknown'),
             homeDir: String(msg.homeDir ?? ''),
             workspaceRoot: String(msg.workspaceRoot ?? ''),

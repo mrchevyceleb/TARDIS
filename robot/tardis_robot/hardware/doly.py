@@ -99,6 +99,26 @@ class DolyHardware(Hardware):
         self._init_battery()
         self._init_arms()
         self._init_drive()
+        # Advertise only what actually came up, so companions never see a
+        # capability the body cannot deliver.
+        available = {
+            "say": self._mods.get("doly_tts") is not None and self._mods.get("doly_sound") is not None,
+            "play": self._mods.get("doly_sound") is not None,
+            "volume": self._mods.get("doly_sound") is not None,
+            "express": self._mods.get("doly_eye") is not None,
+            "eyes": self._mods.get("doly_eye") is not None,
+            "sleep": self._mods.get("doly_eye") is not None,
+            "leds": self._mods.get("doly_led") is not None,
+            "drive": self._mods.get("doly_drive") is not None,
+            "turn": self._mods.get("doly_drive") is not None,
+            "arms": self._mods.get("doly_arm") is not None,
+            "touch": self._mods.get("doly_touch") is not None,
+            "tof": self._mods.get("doly_tof") is not None,
+            "edge": self._mods.get("doly_edge") is not None,
+            "imu": self._mods.get("doly_imu") is not None,
+            "battery": self._mods.get("doly_battery") is not None,
+        }
+        self.capabilities = [name for name in type(self).capabilities if available.get(name, True)]
         log.info("doly body up: %s", ", ".join(self._sdk_versions) or "no version info")
 
     def stop(self) -> None:
@@ -510,83 +530,169 @@ class DolyHardware(Hardware):
         drive = self._mods.get("doly_drive")
         if drive is None:
             raise RuntimeError("drive unavailable")
+        distance_mm = max(-1000.0, min(1000.0, float(distance_mm)))
+        speed = max(1, min(100, int(speed)))
         if self._edge_triggered():
             return {"moved": False, "reason": "edge detected; refusing to drive"}
-        with self._sdk_lock:
-            rc = drive.go_distance(self._next_id(), float(distance_mm), int(speed), True, True)
-        if isinstance(rc, int) and rc < 0:
-            raise RuntimeError(f"go_distance rc={rc}")
-        done = self._wait_drive(drive, abs(distance_mm) / 20.0 + 3.0)
+        # Arm the abort flag and mark motion BEFORE the wheels start: a Stop or
+        # an obstacle callback that lands during the SDK call must count.
+        self._abort.clear()
+        self.moving = True
+        outcome = "halt failed"
+        try:
+            with self._sdk_lock:
+                rc = drive.go_distance(self._next_id(), distance_mm, speed, True, True)
+            if isinstance(rc, int) and rc < 0:
+                raise RuntimeError(f"go_distance rc={rc}")
+            outcome = self._wait_drive(drive, abs(distance_mm) / 20.0 + 3.0)
+        except Exception:
+            # The command failed part way: make sure nothing is left rolling.
+            outcome = "stopped" if self._halt_drive(drive) else "halt failed"
+            raise
+        finally:
+            # A halt that could not be confirmed keeps the body reported as moving.
+            self.moving = "halt failed" in outcome
         pos = drive.get_position()
-        return {"moved": done, "position": {"x": float(pos.x), "y": float(pos.y), "head": float(pos.head)}}
+        return {"moved": outcome == "done", **({} if outcome == "done" else {"reason": outcome}), "position": {"x": float(pos.x), "y": float(pos.y), "head": float(pos.head)}}
 
     def turn(self, degrees: float, speed: int) -> dict[str, Any]:
         drive = self._mods.get("doly_drive")
         if drive is None:
             raise RuntimeError("drive unavailable")
-        with self._sdk_lock:
-            rc = drive.go_rotate(self._next_id(), float(degrees) * TURN_SIGN, False, int(speed), True, True)
-        if isinstance(rc, int) and rc < 0:
-            raise RuntimeError(f"go_rotate rc={rc}")
-        done = self._wait_drive(drive, abs(degrees) / 30.0 + 3.0)
-        pos = drive.get_position()
-        return {"moved": done, "position": {"x": float(pos.x), "y": float(pos.y), "head": float(pos.head)}}
-
-    def _wait_drive(self, drive: Any, budget: float) -> bool:
-        running = _enum(drive.DriveState, "RUNNING")
+        degrees = max(-360.0, min(360.0, float(degrees)))
+        speed = max(1, min(100, int(speed)))
         self._abort.clear()
         self.moving = True
+        outcome = "halt failed"
         try:
-            end = time.monotonic() + budget
-            time.sleep(0.1)
-            while drive.get_state() == running and time.monotonic() < end:
-                if self._abort.is_set():
-                    return False
-                time.sleep(0.05)
-            return not self._abort.is_set()
+            with self._sdk_lock:
+                rc = drive.go_rotate(self._next_id(), degrees * TURN_SIGN, False, speed, True, True)
+            if isinstance(rc, int) and rc < 0:
+                raise RuntimeError(f"go_rotate rc={rc}")
+            outcome = self._wait_drive(drive, abs(degrees) / 30.0 + 3.0)
+        except Exception:
+            outcome = "stopped" if self._halt_drive(drive) else "halt failed"
+            raise
         finally:
-            self.moving = False
+            self.moving = "halt failed" in outcome
+        pos = drive.get_position()
+        return {"moved": outcome == "done", **({} if outcome == "done" else {"reason": outcome}), "position": {"x": float(pos.x), "y": float(pos.y), "head": float(pos.head)}}
+
+    def _wait_drive(self, drive: Any, budget: float) -> str:
+        """Block until the drive finishes. Returns 'done', 'stopped' (abort
+        honoured) or 'timeout' (deadline hit while still running; wheels are
+        halted before returning so the body never keeps rolling)."""
+        running = _enum(drive.DriveState, "RUNNING")
+        end = time.monotonic() + budget
+        time.sleep(0.1)
+        while time.monotonic() < end:
+            if self._abort.is_set():
+                return "stopped" if self._halt_drive(drive) else "halt failed; wheels may still be running"
+            if drive.get_state() != running:
+                return "stopped" if self._abort.is_set() else "done"
+            time.sleep(0.05)
+        return "timeout" if self._halt_drive(drive) else "timeout and halt failed; wheels may still be running"
+
+    def _halt_drive(self, drive: Any) -> bool:
+        """Stop the wheels. Tries the SDK abort AND zero free-drive on both
+        sides, independently, then confirms the drive reports not-running.
+        Returns False only when the wheels could not be confirmed stopped."""
+        commanded = False
+        try:
+            abort = getattr(drive, "abort", None) or getattr(drive, "Abort", None)
+            if callable(abort):
+                abort()
+                commanded = True
+        except Exception as error:  # noqa: BLE001
+            log.warning("drive abort: %s", error)
+        try:
+            drive.free_drive(0, False, True)
+            drive.free_drive(0, True, True)
+            commanded = True
+        except Exception as error:  # noqa: BLE001
+            log.warning("drive free_drive(0): %s", error)
+        if not commanded:
+            log.error("drive halt failed: no stop command reached the SDK")
+            return False
+        try:
+            running = _enum(drive.DriveState, "RUNNING")
+            end = time.monotonic() + 1.5
+            while time.monotonic() < end:
+                if drive.get_state() != running:
+                    return True
+                time.sleep(0.05)
+            log.error("drive still reports RUNNING after halt")
+            return False
+        except Exception as error:  # noqa: BLE001
+            log.warning("drive halt confirm: %s", error)
+            return True
+
+    def _halt_arms(self, arm: Any) -> bool:
+        """Stop the arms. Prefers the SDK abort; otherwise re-targets each arm
+        to where it is right now, which the servo controller treats as a stop.
+        Returns False when neither worked."""
+        both = _enum(arm.ArmSide, "BOTH")
+        try:
+            abort = getattr(arm, "abort", None) or getattr(arm, "Abort", None)
+            if callable(abort):
+                abort(both)
+                return True
+        except Exception as error:  # noqa: BLE001
+            log.warning("arm abort: %s", error)
+        try:
+            with self._sdk_lock:
+                for current in arm.get_current_angle(both):
+                    arm.set_angle(self._next_id(), current.side, speed=100, angle=int(round(float(current.angle))), with_brake=True)
+            return True
+        except Exception as error:  # noqa: BLE001
+            log.error("arm halt failed: %s", error)
+            return False
 
     def arms(self, angle: float, speed: int, side: str) -> dict[str, Any]:
         arm = self._mods.get("doly_arm")
         if arm is None:
             raise RuntimeError("arms unavailable")
+        angle = max(0.0, min(180.0, float(angle)))
+        speed = max(1, min(100, int(speed)))
         arm_side = _enum(arm.ArmSide, side)
-        with self._sdk_lock:
-            rc = arm.set_angle(self._next_id(), arm_side, speed=int(speed), angle=int(angle), with_brake=False)
-        if isinstance(rc, int) and rc < 0:
-            raise RuntimeError(f"set_angle rc={rc}")
-        completed = _enum(arm.ArmState, "COMPLETED")
-        end = time.monotonic() + 8.0
         self._abort.clear()
-        while arm.get_state(arm_side) != completed and time.monotonic() < end:
-            if self._abort.is_set():
-                return {"moved": False, "reason": "stopped"}
-            time.sleep(0.05)
+        self.moving = True
+        moved = False
+        try:
+            with self._sdk_lock:
+                rc = arm.set_angle(self._next_id(), arm_side, speed=speed, angle=int(angle), with_brake=False)
+            if isinstance(rc, int) and rc < 0:
+                raise RuntimeError(f"set_angle rc={rc}")
+            completed = _enum(arm.ArmState, "COMPLETED")
+            end = time.monotonic() + 8.0
+            while time.monotonic() < end:
+                if self._abort.is_set():
+                    self._halt_arms(arm)
+                    break
+                if arm.get_state(arm_side) == completed:
+                    moved = True
+                    break
+                time.sleep(0.05)
+            else:
+                self._halt_arms(arm)
+        finally:
+            self.moving = False
         angles = {_name(a.side).lower(): round(float(a.angle), 1) for a in arm.get_current_angle(_enum(arm.ArmSide, "BOTH"))}
-        return {"moved": True, "arms": angles}
+        return {"moved": moved, **({} if moved else {"reason": "stopped" if self._abort.is_set() else "timeout"}), "arms": angles}
 
     def stop_motion(self) -> None:
+        """Halt everything. Raises when a subsystem could not be commanded so a
+        caller never reports a stop that did not happen."""
         self._abort.set()
+        failed: list[str] = []
         drive = self._mods.get("doly_drive")
-        if drive is not None:
-            try:
-                abort = getattr(drive, "abort", None) or getattr(drive, "Abort", None)
-                if callable(abort):
-                    abort()
-                else:
-                    drive.free_drive(0, False, True)
-                    drive.free_drive(0, True, True)
-            except Exception as error:  # noqa: BLE001
-                log.warning("drive stop: %s", error)
+        if drive is not None and not self._halt_drive(drive):
+            failed.append("wheels")
         arm = self._mods.get("doly_arm")
-        if arm is not None:
-            try:
-                abort = getattr(arm, "abort", None) or getattr(arm, "Abort", None)
-                if callable(abort):
-                    abort(_enum(arm.ArmSide, "BOTH"))
-            except Exception as error:  # noqa: BLE001
-                log.warning("arm stop: %s", error)
+        if arm is not None and not self._halt_arms(arm):
+            failed.append("arms")
+        if failed:
+            raise RuntimeError(f"could not confirm a stop for: {', '.join(failed)}")
 
     def _edge_triggered(self) -> bool:
         edge = self._mods.get("doly_edge")

@@ -83,6 +83,9 @@ class VoiceSession:
 
         self._loop = asyncio.get_running_loop()
         self._closed = asyncio.Event()
+        # Never carry a previous call's microphone backlog into a new room.
+        self._mic_queue = asyncio.Queue(maxsize=200)
+        self._agent_speaking_until = 0.0
         await self._set_state("connecting")
         query = urllib.parse.urlencode({"identity": self.identity})
         try:
@@ -104,25 +107,31 @@ class VoiceSession:
             raise RuntimeError(f"voice room connect failed: {error}") from error
         log.info("joined voice room %s as %s", grant.get("room"), self.identity)
 
-        if self.aec:
-            try:
-                self._apm = rtc.AudioProcessingModule(echo_cancellation=True, noise_suppression=True, high_pass_filter=True, auto_gain_control=True)
-            except Exception as error:  # noqa: BLE001
-                log.warning("software AEC unavailable: %s", error)
-                self._apm = None
+        # Anything that fails from here on must tear the room down again, or a
+        # half-built session would sit in 'connecting' holding the microphone.
+        try:
+            if self.aec:
+                try:
+                    self._apm = rtc.AudioProcessingModule(echo_cancellation=True, noise_suppression=True, high_pass_filter=True, auto_gain_control=True)
+                except Exception as error:  # noqa: BLE001
+                    log.warning("software AEC unavailable: %s", error)
+                    self._apm = None
 
-        self._source = rtc.AudioSource(SAMPLE_RATE, 1)
-        track = rtc.LocalAudioTrack.create_audio_track("robot-mic", self._source)
-        options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
-        await room.local_participant.publish_track(track, options)
+            self._source = rtc.AudioSource(SAMPLE_RATE, 1)
+            track = rtc.LocalAudioTrack.create_audio_track("robot-mic", self._source)
+            options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
+            await room.local_participant.publish_track(track, options)
 
-        self._last_activity = time.monotonic()
-        self.audio.start_output(SAMPLE_RATE)
-        self.audio.start_input(self._mic_from_thread, SAMPLE_RATE)
-        self._tasks = [
-            self._loop.create_task(self._pump_mic()),
-            self._loop.create_task(self._idle_watch()),
-        ]
+            self._last_activity = time.monotonic()
+            self.audio.start_output(SAMPLE_RATE)
+            self.audio.start_input(self._mic_from_thread, SAMPLE_RATE)
+            self._tasks = [
+                self._loop.create_task(self._pump_mic()),
+                self._loop.create_task(self._idle_watch()),
+            ]
+        except Exception as error:  # noqa: BLE001
+            await self.stop("setup failed")
+            raise RuntimeError(f"voice setup failed: {error}") from error
         await self._set_state("idle")
 
     async def stop(self, reason: str = "hangup") -> None:
@@ -141,6 +150,7 @@ class VoiceSession:
         self._tasks = []
         self.audio.stop_input()
         self.audio.stop_output()
+        self._mic_queue = asyncio.Queue(maxsize=200)
         self._room = None
         if room is not None:
             try:

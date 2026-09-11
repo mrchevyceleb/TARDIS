@@ -26,9 +26,12 @@ export function RobotControl() {
   const [text, setText] = useState('');
   const [expression, setExpression] = useState('HAPPY');
   const [pending, setPending] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const alive = useRef(true);
+  const selectedRef = useRef('');
+  selectedRef.current = selected;
 
   useEffect(() => {
     alive.current = true;
@@ -42,9 +45,13 @@ export function RobotControl() {
         if (ac.signal.aborted) return;
         setRobots(data.robots);
         setError('');
-        if (data.robots.length) {
-          const recent = await fetchRobotEvents({ limit: 4 }, ac.signal);
-          if (!ac.signal.aborted) setEvents(recent.events.slice().reverse());
+        const target = data.robots.find((r) => r.id === selectedRef.current) ?? data.robots[0];
+        if (target) {
+          const recent = await fetchRobotEvents({ robot: target.id, limit: 4 }, ac.signal);
+          // The selection may have moved while this request was in flight;
+          // never paint one robot's events under another robot's name.
+          const stillCurrent = (data.robots.find((r) => r.id === selectedRef.current) ?? data.robots[0])?.id === target.id;
+          if (!ac.signal.aborted && stillCurrent) setEvents(recent.events.slice().reverse());
         } else setEvents([]);
       } catch (e) { if (!ac.signal.aborted) setError(errorText(e)); }
       finally { fetching = false; }
@@ -60,11 +67,21 @@ export function RobotControl() {
   const battery = status?.battery !== undefined ? `${status.battery}%${status.charging ? ' ⚡' : ''}` : '';
   const voice = status?.voice && status.voice !== 'off' ? status.voice : '';
 
-  const run = async (label: string, action: () => Promise<unknown>) => {
+  /** Runs one command; resolves true only when the robot accepted it. */
+  const run = async (label: string, action: () => Promise<unknown>): Promise<boolean> => {
     setPending(true); setError(''); setNotice('');
-    try { await action(); if (alive.current) setNotice(label); }
-    catch (e) { if (alive.current) setError(errorText(e)); }
+    try { await action(); if (alive.current) setNotice(label); return true; }
+    catch (e) { if (alive.current) setError(errorText(e)); return false; }
     finally { if (alive.current) setPending(false); }
+  };
+
+  // Stop is independent of every other request: a long say must never make
+  // the emergency button wait.
+  const stop = async () => {
+    setStopping(true); setError('');
+    try { await robotCommand(robot.id, 'stop'); if (alive.current) setNotice('Stopped.'); }
+    catch (e) { if (alive.current) setError(errorText(e)); }
+    finally { if (alive.current) setStopping(false); }
   };
 
   return <details className="robot-control">
@@ -75,7 +92,7 @@ export function RobotControl() {
     </summary>
     <div className="robot-control-body">
       {robots.length > 1 && <label>Robot
-        <select aria-label="Robot" value={robot.id} disabled={pending} onChange={(event) => setSelected(event.target.value)}>
+        <select aria-label="Robot" value={robot.id} disabled={pending} onChange={(event) => { setSelected(event.target.value); setEvents([]); }}>
           {robots.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
         </select>
       </label>}
@@ -94,19 +111,19 @@ export function RobotControl() {
       <form className="robot-control-row" onSubmit={(event) => {
         event.preventDefault();
         const spoken = text.trim();
-        if (!spoken) return;
-        void run('Spoken.', () => robotCommand(robot.id, 'say', { text: spoken })).then(() => { if (alive.current) setText(''); });
+        if (!spoken || pending) return;
+        void run('Spoken.', () => robotCommand(robot.id, 'say', { text: spoken })).then((ok) => { if (ok && alive.current) setText(''); });
       }}>
         <input aria-label="Say aloud on the robot" placeholder="Say aloud…" maxLength={600} value={text} disabled={pending} onChange={(event) => setText(event.target.value)} />
         <button type="submit" disabled={pending || !text.trim()}>Say</button>
       </form>
       <div className="robot-control-actions">
-        <button type="button" className="robot-stop" disabled={pending} onClick={() => void run('Stopped.', () => robotCommand(robot.id, 'stop'))}><Square size={12} aria-hidden="true" /> Stop motion</button>
+        <button type="button" className="robot-stop" disabled={stopping} onClick={() => void stop()}><Square size={12} aria-hidden="true" /> Stop motion</button>
       </div>
       {notice && <p className="robot-control-notice">{notice}</p>}
       {error && <p role="alert" className="robot-control-error">{error}</p>}
-      {events.length > 0 && <ul className="robot-control-events" aria-label="Recent robot events">
-        {events.map((event) => <li key={event.seq}><time dateTime={new Date(event.ts).toISOString()}>{new Date(event.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time> {describeEvent(event)}</li>)}
+      {events.length > 0 && <ul className="robot-control-events" aria-label={`Recent events from ${robot.name}`}>
+        {events.map((event) => <li key={event.seq}><time dateTime={new Date(event.ts).toISOString()}>{new Date(event.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>{robots.length > 1 ? ` ${event.robotName} · ` : ' '}{describeEvent(event)}</li>)}
       </ul>}
     </div>
   </details>;

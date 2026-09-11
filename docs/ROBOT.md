@@ -33,6 +33,21 @@ robot is linked it also carries:
 Turn prompts include a short `<rivendell-robot>` block only while a robot is
 online, so threads without one pay nothing.
 
+### Motion needs your say-so
+
+Moving a body around a room is an external side effect, so wheels and arms are
+off until the server operator grants standing authorization:
+
+```ini
+Environment=RIVENDELL_ROBOT_ALLOW_MOTION=true
+```
+
+Without it, `robot_move` and `robot_arms` return a clear refusal and the prompt
+block tells companions not to try. Expression, speech, lights, camera, sensors
+and `robot_stop` are always available. The robot itself still clamps every
+move, refuses to drive off an edge, halts on obstacles, and stops the moment
+its link to the ship drops.
+
 The console shows a **Robot** panel above the composer while a robot is
 linked, with battery, voice state, quick expressions, a say box, stop, and the
 last few events.
@@ -53,9 +68,10 @@ type every fifteen seconds. Off by default.
 With LiveKit and ElevenLabs configured on the server (see `.env.example`),
 the robot summons Jarvis on the wake word "hey Jarvis" or a long press on a
 touch pad, and ends the call on a double tap, on silence, or when the agent
-closes. Its Jarvis thread is `jarvis-robot-<name>`, which adds a robot-body
-addendum to the spoken persona: the model knows the words already play from
-the speaker and uses `robot_express` and friends for the physical side.
+closes. Its Jarvis thread is `jarvis-robot-<name>-<id>` (the id slice keeps two
+robots with the same name apart), which adds a robot-body addendum to the
+spoken persona: the model knows the words already play from the speaker and
+uses `robot_express` and friends for the physical side.
 
 The robot has no hardware echo cancellation, so the microphone is muted while
 the agent speaks (`TARDIS_VOICE_GATE=1`). Barge-in is therefore off. Set

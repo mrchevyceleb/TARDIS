@@ -24,6 +24,7 @@ class RobotApp:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.identity = load_identity(config.state_dir)
+        self.voice_identity = config.voice_identity(self.identity.device_id)
         self.hw = select_hardware(config.hardware, eye_color=config.eye_color, eye_background=config.eye_background, volume=config.volume)
         self.audio = make_audio(input_device=config.audio_input, output_device=config.audio_output)
         self.voice: VoiceSession | None = None
@@ -93,9 +94,18 @@ class RobotApp:
             else:
                 log.info("livekit not installed; voice off")
             return
+        # A real body with no working audio must not advertise a voice it
+        # cannot hear or speak with. The mock body may join with silent audio
+        # for development.
+        if self.audio.name == "null" and self.hw.name != "mock":
+            if self.config.voice == "on":
+                log.error("TARDIS_VOICE=on but no audio device is available (install sounddevice/libportaudio2 and check TARDIS_AUDIO_INPUT/OUTPUT)")
+            else:
+                log.info("no audio device available; voice off")
+            return
         session = VoiceSession(
             base_url=self.config.url,
-            identity=self.config.voice_identity,
+            identity=self.voice_identity,
             audio=self.audio,
             on_state=self.behaviors.on_voice_state,
             idle_secs=self.config.voice_idle_secs,
@@ -109,12 +119,15 @@ class RobotApp:
                 log.info("the ship has no LiveKit configured; voice off")
             return
         self.voice = session
-        log.info("voice ready as %s (idle %.0fs, gate %s, aec %s)", self.config.voice_identity, self.config.voice_idle_secs, self.config.voice_gate, self.config.voice_aec)
+        log.info("voice ready as %s (idle %.0fs, gate %s, aec %s)", self.voice_identity, self.config.voice_idle_secs, self.config.voice_gate, self.config.voice_aec)
         if self.config.wake_word.lower() != "off" and openwakeword_available():
             wake = WakeListener(audio=self.audio, model=self.config.wake_word, threshold=self.config.wake_threshold, on_wake=self.summon)
             if await asyncio.to_thread(wake.load):
-                self.wake = wake
-                wake.start(asyncio.get_running_loop())
+                try:
+                    wake.start(asyncio.get_running_loop())
+                    self.wake = wake
+                except Exception as error:  # noqa: BLE001 - an optional feature must never take the link down
+                    log.error("wake word disabled: microphone could not be opened (%s)", error)
 
     async def summon(self) -> None:
         if self.voice is None:
@@ -128,7 +141,7 @@ class RobotApp:
             return
         if self.wake:
             self.wake.stop()
-        await self.link.send_event("voice_summon", {"identity": self.config.voice_identity})
+        await self.link.send_event("voice_summon", {"identity": self.voice_identity})
         try:
             await self.voice.start()
         except Exception as error:  # noqa: BLE001
@@ -150,7 +163,10 @@ class RobotApp:
         while voice.active:
             await asyncio.sleep(0.5)
         if self.wake and not self._stopping.is_set():
-            self.wake.start(asyncio.get_running_loop())
+            try:
+                self.wake.start(asyncio.get_running_loop())
+            except Exception as error:  # noqa: BLE001
+                log.error("wake word could not resume after the call: %s", error)
 
     async def dismiss(self) -> None:
         if self.voice and self.voice.active:
@@ -166,6 +182,8 @@ class RobotApp:
                 pass
         log.info("starting %s body for %s", self.hw.name, self.config.name)
         await asyncio.to_thread(self.hw.start)
+        # The body only knows what actually came up after start(); advertise that.
+        self.link.capabilities = list(self.hw.capabilities)
         self.behaviors.attach(loop)
         await self._setup_voice()
         link_task = loop.create_task(self.link.run())

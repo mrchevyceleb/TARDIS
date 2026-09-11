@@ -31,7 +31,7 @@ export type LinkedRobot = { id: string; name: string; platform: string; version:
 export type RobotEvent = { seq: number; robot: string; robotName: string; name: string; data: Record<string, unknown>; ts: number };
 export type RobotCommand = 'status' | 'say' | 'express' | 'eyes' | 'leds' | 'drive' | 'turn' | 'stop' | 'arms' | 'look' | 'sensors' | 'volume' | 'play' | 'sleep' | 'wake';
 export function fetchRobots(signal?: AbortSignal) {
-  return apiJson<{ robots: LinkedRobot[]; eventAgent: string | null; latestEventSeq: number }>('/api/robots', { signal, cache: 'no-store' });
+  return apiJson<{ robots: LinkedRobot[]; eventAgent: string | null; motionAllowed: boolean; latestEventSeq: number }>('/api/robots', { signal, cache: 'no-store' });
 }
 export function fetchRobotEvents(opts: { robot?: string; since?: number; limit?: number } = {}, signal?: AbortSignal) {
   const q = new URLSearchParams();

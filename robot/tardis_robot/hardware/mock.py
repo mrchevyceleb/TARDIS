@@ -120,10 +120,11 @@ class MockHardware(Hardware):
 
     def arms(self, angle: float, speed: int, side: str) -> dict[str, Any]:
         log.info("arms %s -> %s° at %s%%", side, angle, speed)
-        self._motion(0.4)
+        done = self._motion(0.4)
         for s in (("left", "right") if side == "both" else (side,)):
-            self.arm_angle[s] = angle
-        return {"moved": True, "arms": dict(self.arm_angle)}
+            # A stopped arm ends part way, like the real servo would.
+            self.arm_angle[s] = angle if done else (self.arm_angle[s] + angle) / 2
+        return {"moved": done, **({} if done else {"reason": "stopped"}), "arms": dict(self.arm_angle)}
 
     def stop_motion(self) -> None:
         self._abort.set()
@@ -159,6 +160,9 @@ class MockHardware(Hardware):
             time.sleep(0.05)
 
     def _motion(self, seconds: float) -> bool:
+        # A Stop that lands while the command is being issued must not be
+        # erased: the flag is armed before motion begins and honoured
+        # throughout, never cleared once we are moving.
         self._abort.clear()
         self.moving = True
         try:
