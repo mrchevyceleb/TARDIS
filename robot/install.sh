@@ -43,11 +43,11 @@ else
   rm -rf "$PREFIX/src" && mkdir -p "$PREFIX/src" && cp -a "$HERE/." "$PREFIX/src/" && rm -rf "$PREFIX/src/venv"
 fi
 "$PREFIX/venv/bin/pip" install --quiet "$PREFIX/src"
-echo "==> optional voice + wake word packages (failures here only disable voice)"
-"$PREFIX/venv/bin/pip" install --quiet "$PREFIX/src[voice,wake]" || echo "   voice/wake extras did not install; the robot still links without voice"
-if "$PREFIX/venv/bin/python" -c "import openwakeword" >/dev/null 2>&1; then
-  "$PREFIX/venv/bin/python" -c "from openwakeword.utils import download_models; download_models(['hey_jarvis'])" >/dev/null 2>&1 || true
-fi
+echo "==> voice audio package (failure here only disables voice)"
+# Only the 'voice' extra by default: local audio I/O for the Grok voice call.
+# The 'wake' extra is intentionally left out (see pyproject) because openWakeWord
+# pulls a numpy that breaks the preinstalled OpenCV; summon by touch instead.
+"$PREFIX/venv/bin/pip" install --quiet "$PREFIX/src[voice]" || echo "   voice extra did not install; the robot still links, without voice"
 
 echo "==> configuration $ENV_FILE"
 if [[ ! -f "$ENV_FILE" ]]; then

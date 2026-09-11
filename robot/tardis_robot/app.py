@@ -14,7 +14,7 @@ from .identity import load_identity
 from .link import DeviceLink
 from .ops import Ops
 from .voice.audio import make_audio
-from .voice.session import VoiceSession, livekit_available
+from .voice.grok import GrokVoiceSession, grok_voice_available
 from .voice.wake import WakeListener, openwakeword_available
 
 log = logging.getLogger("tardis.robot")
@@ -27,7 +27,7 @@ class RobotApp:
         self.voice_identity = config.voice_identity(self.identity.device_id)
         self.hw = select_hardware(config.hardware, eye_color=config.eye_color, eye_background=config.eye_background, volume=config.volume)
         self.audio = make_audio(input_device=config.audio_input, output_device=config.audio_output)
-        self.voice: VoiceSession | None = None
+        self.voice: GrokVoiceSession | None = None
         self.wake: WakeListener | None = None
         self.ops = Ops(self.hw, name=config.name, speak_guard=self._speak_guard, voice_state=lambda: self.voice.state if self.voice else "off")
         self.behaviors = Behaviors(
@@ -88,38 +88,30 @@ class RobotApp:
         if self.config.voice == "off":
             log.info("voice off by configuration")
             return
-        if not livekit_available():
+        if not grok_voice_available():
             if self.config.voice == "on":
-                log.error("TARDIS_VOICE=on but the livekit package is missing (pip install 'tardis-robot[voice]')")
+                log.error("TARDIS_VOICE=on but the voice packages are missing (pip install 'tardis-robot[voice]')")
             else:
-                log.info("livekit not installed; voice off")
+                log.info("voice packages not installed; voice off")
             return
-        # A real body with no working audio must not advertise a voice it
-        # cannot hear or speak with. The mock body may join with silent audio
-        # for development.
-        if self.audio.name == "null" and self.hw.name != "mock":
-            if self.config.voice == "on":
-                log.error("TARDIS_VOICE=on but no audio device is available (install sounddevice/libportaudio2 and check TARDIS_AUDIO_INPUT/OUTPUT)")
-            else:
-                log.info("no audio device available; voice off")
-            return
-        session = VoiceSession(
-            base_url=self.config.url,
-            identity=self.voice_identity,
-            audio=self.audio,
+        session = GrokVoiceSession(
+            voice_ws_url=self.config.voice_ws_url,
+            http_url=self.config.url,
+            agent_id=self.config.agent_id,
             on_state=self.behaviors.on_voice_state,
             idle_secs=self.config.voice_idle_secs,
             gate=self.config.voice_gate,
-            aec=self.config.voice_aec,
+            input_device=self.config.audio_input,
+            output_device=self.config.audio_output,
         )
         if not await session.server_enabled():
             if self.config.voice == "on":
-                log.error("the ship has no LiveKit configured; voice cannot start")
+                log.error("voice cannot start: no agent %r on the ship", self.config.agent_id)
             else:
-                log.info("the ship has no LiveKit configured; voice off")
+                log.info("voice off: agent %r not found on the ship", self.config.agent_id)
             return
         self.voice = session
-        log.info("voice ready as %s (idle %.0fs, gate %s, aec %s)", self.voice_identity, self.config.voice_idle_secs, self.config.voice_gate, self.config.voice_aec)
+        log.info("voice ready as agent %s (idle %.0fs, gate %s)", self.config.agent_id, self.config.voice_idle_secs, self.config.voice_gate)
         if self.config.wake_word.lower() != "off" and openwakeword_available():
             wake = WakeListener(audio=self.audio, model=self.config.wake_word, threshold=self.config.wake_threshold, on_wake=self.summon)
             if await asyncio.to_thread(wake.load):

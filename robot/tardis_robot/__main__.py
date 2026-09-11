@@ -32,23 +32,19 @@ def main() -> int:
 
     config = load_config()
     logging.basicConfig(level=getattr(logging, config.log_level, logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stdout)
-    # LiveKit logs every unhandled agent byte/text stream at INFO on the root
-    # logger, several times a second during a call. Not actionable here.
     logging.getLogger().addFilter(lambda record: not str(record.getMessage()).startswith("ignoring "))
-    logging.getLogger("livekit").setLevel(logging.WARNING)
     if args.check:
         from .hardware import doly_sdk_available
-        from .identity import load_identity
         from .voice.audio import sounddevice_available
-        from .voice.session import livekit_available
+        from .voice.grok import grok_voice_available
         from .voice.wake import openwakeword_available
 
         print(f"tardis-robot {__version__}")
         print(f"ship: {config.url}  ->  {config.ws_url}")
-        print(f"name: {config.name}  (voice identity {config.voice_identity(load_identity(config.state_dir).device_id)})")
+        print(f"name: {config.name}  (voices as agent {config.agent_id})")
         print(f"hardware: {config.hardware}  (doly sdk {'found' if doly_sdk_available() else 'not found'})")
-        print(f"voice: {config.voice}  livekit={'yes' if livekit_available() else 'no'}  sounddevice={'yes' if sounddevice_available() else 'no'}  openwakeword={'yes' if openwakeword_available() else 'no'}")
-        print(f"wake word: {config.wake_word} @ {config.wake_threshold}  touch summon: {config.touch_summon}")
+        print(f"voice: {config.voice}  grok={'yes' if grok_voice_available() else 'no'}  sounddevice={'yes' if sounddevice_available() else 'no'}  ({config.voice_ws_url})")
+        print(f"wake word: {config.wake_word} @ {config.wake_threshold} (openwakeword {'yes' if openwakeword_available() else 'no'})  touch summon: {config.touch_summon}")
         print(f"state dir: {config.state_dir}")
         return 0
 
