@@ -6,20 +6,38 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CallPlayback, base64ToInt16Array, createMicProcessorUrl, int16ArrayToBase64 } from './audio';
 
-export type CallState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | 'ended' | 'error';
-export type VoiceId = 'ara' | 'eve' | 'leo' | 'rex' | 'sal' | 'atlas' | 'aurora' | 'luna' | 'orion' | 'carina';
-export const GROK_VOICES: { id: VoiceId; label: string }[] = [
+export type CallState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'working' | 'speaking' | 'ended' | 'error';
+export const GROK_VOICES = [
   { id: 'ara', label: 'Ara' },
   { id: 'eve', label: 'Eve' },
   { id: 'leo', label: 'Leo' },
   { id: 'rex', label: 'Rex' },
   { id: 'sal', label: 'Sal' },
+  { id: 'altair', label: 'Altair' },
   { id: 'atlas', label: 'Atlas' },
   { id: 'aurora', label: 'Aurora' },
-  { id: 'luna', label: 'Luna' },
-  { id: 'orion', label: 'Orion' },
   { id: 'carina', label: 'Carina' },
-];
+  { id: 'castor', label: 'Castor' },
+  { id: 'celeste', label: 'Celeste' },
+  { id: 'cosmo', label: 'Cosmo' },
+  { id: 'helios', label: 'Helios' },
+  { id: 'helix', label: 'Helix' },
+  { id: 'iris', label: 'Iris' },
+  { id: 'kepler', label: 'Kepler' },
+  { id: 'liora', label: 'Liora' },
+  { id: 'lumen', label: 'Lumen' },
+  { id: 'luna', label: 'Luna' },
+  { id: 'lux', label: 'Lux' },
+  { id: 'naksh', label: 'Naksh' },
+  { id: 'orion', label: 'Orion' },
+  { id: 'perseus', label: 'Perseus' },
+  { id: 'rigel', label: 'Rigel' },
+  { id: 'sirius', label: 'Sirius' },
+  { id: 'ursa', label: 'Ursa' },
+  { id: 'zagan', label: 'Zagan' },
+  { id: 'zenith', label: 'Zenith' },
+] as const;
+export type VoiceId = (typeof GROK_VOICES)[number]['id'];
 
 export type CallTurn = { role: 'user' | 'assistant'; text: string };
 
@@ -111,7 +129,9 @@ export function useGrokCall() {
       try { msg = JSON.parse(String(ev.data)); } catch { return; }
       if (msg.type === 'state') {
         const s = String(msg.state);
-        setState(s === 'working' ? 'thinking' : (s as CallState));
+        if (s === 'thinking' || s === 'working' || s === 'listening' || s === 'speaking' || s === 'connecting' || s === 'ended' || s === 'error') {
+          setState(s);
+        }
         if (s === 'listening') playback.armComplete();
         return;
       }

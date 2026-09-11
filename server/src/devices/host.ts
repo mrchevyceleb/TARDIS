@@ -23,7 +23,7 @@ const computer = new ComputerController({
   approve: async (request, signal) => {
     return new Promise<boolean>((resolve) => {
       execFile('zenity', ['--question', '--no-markup', '--title=TARDIS computer control',
-        '--ok-label=Allow for 5 minutes', '--cancel-label=No',
+        '--ok-label=Allow for 40 minutes', '--cancel-label=No',
         `--text=${request.label} requests full desktop access for:\n${request.purpose}\n\nConnected server: ${new URL(url).origin}\nThis shares visible screens with the agent's model and permits mouse/keyboard input in any app. File restrictions do not sandbox GUI control. Approve only if you requested this.`],
       { signal, timeout: 60_000 }, error => resolve(!error));
     });

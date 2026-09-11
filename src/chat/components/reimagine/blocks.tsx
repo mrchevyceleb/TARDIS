@@ -40,16 +40,17 @@ export function DayMark({ label }: { label: string }) {
 }
 
 function ActiveTurnIndicator({ since, phrases }: { since?: number; phrases: string[] }) {
-  const hasKnownStart = Boolean(since && since > 0);
-  const startedAtRef = useRef(hasKnownStart ? since as number : Date.now());
+  const startedAtRef = useRef(since && since > 0 ? since : 0);
+  if (since && since > 0 && (startedAtRef.current === 0 || since < startedAtRef.current)) {
+    startedAtRef.current = since;
+  }
+  const hasKnownStart = startedAtRef.current > 0;
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
-    startedAtRef.current = since && since > 0 ? since : Date.now();
-    setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [since]);
-  const elapsed = Math.max(0, now - startedAtRef.current);
+  }, []);
+  const elapsed = hasKnownStart ? Math.max(0, now - startedAtRef.current) : 0;
   const seconds = Math.floor(elapsed / 1000);
   const label = phrases[Math.floor(elapsed / 2800) % phrases.length] ?? 'Working';
   const clock = hasKnownStart
@@ -272,9 +273,11 @@ function PeerBubble({
   collapseSteps: boolean;
   pin?: ThreadPin;
 }) {
-  const [open, setOpen] = useState(false);
   const initial = (block.from || '?').trim().slice(0, 1).toUpperCase();
   const routineResult = block.fromRole === 'automation-result';
+  // Quiet routines stay hidden. Deliverable ones (dashboards, briefs) are
+  // something Matt has to read, so they start open in the thread.
+  const [open, setOpen] = useState(routineResult);
   const text = cleanPeerMessageText(block.text);
   const bodyId = `peer-message-${block.id}`;
   const hasResponse = responseBlocks.length > 0;
@@ -325,7 +328,9 @@ function PeerBubble({
         <div className="bt-peer-body" id={bodyId}>
           <section className="bt-peer-turn">
             <span className="bt-peer-turn-label">{block.from}</span>
-            <div className="bt-peer-turn-text">{text}</div>
+            {routineResult
+              ? <div className="bt-peer-turn-text prose"><Markdown>{text}</Markdown></div>
+              : <div className="bt-peer-turn-text">{text}</div>}
           </section>
           {hasResponse ? (
             <section className="bt-peer-turn bt-peer-response">
@@ -558,10 +563,9 @@ function showTextCaret(b: Extract<ChatBlock, { kind: 'text' }>, streaming: boole
   return Boolean(b.open) && streaming;
 }
 
-/** Every provider `text` block is an intentional, user-facing message — the
- *  same prose a terminal client shows between tool calls. Never classify it as
- *  hidden thinking. Provider reasoning uses a distinct `thinking` block, while
- *  tool calls already have their own collapsible cards. */
+/** Preserve every user-facing text message, including between-tool updates.
+ * Provider metadata controls presentation, not visibility. Never guess that
+ * prose is private reasoning from its words or its position before a tool. */
 // A run of consecutive assistant blocks that share a turnId render under a
 // single "✦ TARDIS" header (the prototype's per-turn group).
 function ElrondGroup({
@@ -580,6 +584,8 @@ function ElrondGroup({
   const [acted, setActed] = useState(false);
   const first = blocks[0];
   const textBlocks = blocks.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text');
+  const isUpdate = collapseSteps && textBlocks.length > 0 && textBlocks.every((b) => b.presentation === 'update');
+  const isActivity = collapseSteps && textBlocks.length === 0;
   const copyText = () => {
     const src = textBlocks.filter(isAnswerProse);
     return (src.length ? src : textBlocks.filter(hasVisibleProse)).map((b) => b.text).join('\n\n');
@@ -609,12 +615,13 @@ function ElrondGroup({
     <div
       id={`msg-pin-${first.id}`}
       data-pin-block={first.id}
-      className={`msg m-elrond${acted ? ' acted' : ''}${isPinned ? ' pinned' : ''}`}
+      className={`msg m-elrond${isUpdate ? ' m-update' : ''}${isActivity ? ' m-activity' : ''}${acted ? ' acted' : ''}${isPinned ? ' pinned' : ''}`}
       onClick={mobile ? () => setActed((a) => !a) : undefined}
     >
       <div className="who">
         <span className="mini">✦</span> {BRAND} <span className="when">{timeLabel(first.ts)}</span>
       </div>
+      {isUpdate && <div className="update-label">Update</div>}
       {blocks.map((b) => {
         switch (b.kind) {
           case 'tool': {
@@ -780,14 +787,15 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         last.day = day;
         continue;
       }
-      // Grok mode (collapseSteps): one user prompt → one assistant response.
-      // A single outer turn can contain many provider message_start cycles as
-      // tools return. Merge those cycles into one chronological response group;
-      // prose remains visible and only consecutive tools are compacted. Studio
-      // mode keeps strict provider turnId grouping.
-      const merge = last && last.type === 'elrond' && (collapseSteps
-        ? true
-        : turnId && last.blocks[0] && (last.blocks[0] as { turnId?: string }).turnId === turnId);
+      // Keep actual provider messages separate. Flattening every tool round
+      // into one answer bubble made activity narration look like the reply.
+      // Codex can tag multiple messages within one turnId: split on phase too.
+      const priorText = last?.type === 'elrond'
+        ? last.blocks.findLast((block) => block.kind === 'text') : undefined;
+      const phaseChanged = b.kind === 'text' && priorText?.kind === 'text'
+        && b.presentation && priorText.presentation && b.presentation !== priorText.presentation;
+      const merge = last?.type === 'elrond' && turnId
+        && (last.blocks[0] as { turnId?: string }).turnId === turnId && !phaseChanged;
       if (merge) {
         last.blocks.push(b);
         last.day = day;

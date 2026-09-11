@@ -2,14 +2,14 @@
 # Install the TARDIS robot companion on a Doly (Raspberry Pi OS) as a systemd
 # service. Run from the robot/ directory of a TARDIS checkout, as root:
 #
-#   sudo ./install.sh https://your-server.your-tailnet.ts.net [RobotName]
+#   sudo ./install.sh https://your-server.your-tailnet.ts.net [RobotName]   (default name: Spark)
 #
 # Re-running upgrades the code and keeps /etc/tardis-robot.env. The robot must
 # be able to reach the ship: put it on the same tailnet (see docs/ROBOT.md).
 set -euo pipefail
 
 SHIP_URL="${1:-${TARDIS_URL:-}}"
-ROBOT_NAME="${2:-${TARDIS_ROBOT_NAME:-Doly}}"
+ROBOT_NAME="${2:-${TARDIS_ROBOT_NAME:-Spark}}"
 PREFIX="${TARDIS_ROBOT_PREFIX:-/opt/tardis-robot}"
 ENV_FILE="/etc/tardis-robot.env"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

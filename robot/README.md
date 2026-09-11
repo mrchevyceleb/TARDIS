@@ -5,7 +5,7 @@ companions. Reference hardware is the [Doly](https://github.com/robotdoly/DOLY-D
 a mock body is included for development.
 
 ```bash
-sudo ./install.sh https://your-server.your-tailnet.ts.net Doly   # on the robot
+sudo ./install.sh https://your-server.your-tailnet.ts.net Spark   # on the robot
 tardis-robot --hardware mock --url http://127.0.0.1:8091          # anywhere
 ```
 

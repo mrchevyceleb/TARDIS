@@ -15,6 +15,7 @@ const STATE_LABEL: Record<string, string> = {
   connecting: 'Calling…',
   listening: 'Listening',
   thinking: 'Thinking',
+  working: 'Working',
   speaking: 'Speaking',
   ended: 'Call ended',
   error: 'Lost the line',
@@ -138,7 +139,7 @@ export function CallOverlay({ agent, initialVoice, onClose }: { agent: Agent; in
               className="riv-call-bar"
               style={{
                 animationDelay: `${i * 0.09}s`,
-                animationPlayState: call.state === 'speaking' || call.state === 'listening' ? 'running' : 'paused',
+                animationPlayState: call.state === 'speaking' || call.state === 'listening' || call.state === 'thinking' || call.state === 'working' ? 'running' : 'paused',
                 opacity: call.state === 'speaking' ? 0.55 + call.level * 0.45 : 0.25 + call.micLevel * 0.75,
               }}
             />

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
-import { ComputerController, trustedComputerUrl } from '../../../desktop/native/computer.mjs';
+import { ComputerController, COMPUTER_GRANT_MINUTES, COMPUTER_GRANT_MS, trustedComputerUrl } from '../../../desktop/native/computer.mjs';
 import { localMcpServers, localMcpBananaServers, localMcpCodexArgs } from '../chat/local-mcp.ts';
 import { computerGuidance, readComputerContext } from './context.ts';
 import { ComputerStepJournal } from './stepJournal.ts';
@@ -20,6 +20,11 @@ async function fixture(approve: () => Promise<boolean> = async () => true, autom
   return { computer, actions };
 }
 const task = { owner: 'agent:test', label: 'Test agent', purpose: 'Use a synthetic test window.' };
+
+test('desktop grants last forty minutes', () => {
+  assert.equal(COMPUTER_GRANT_MINUTES, 40);
+  assert.equal(COMPUTER_GRANT_MS, 40 * 60_000);
+});
 
 test('native grant is required, exclusive, scoped to its session and revocable', async t => {
   const { computer } = await fixture(); t.after(() => computer.stop());

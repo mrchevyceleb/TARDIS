@@ -9,8 +9,8 @@ import { localMcpServers } from './local-mcp.ts';
 import { computerGuidance } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import { getSessionId, setSessionId, setSessionSelection } from './sessions.ts';
-import { CodexSession, getOrCreateCodexSession, activeCodexSessions } from './codex-runner.ts';
-import { BananaSession, getOrCreateBananaSession, activeBananaSessions } from './banana-runner.ts';
+import { CodexSession, getOrCreateCodexSession, activeCodexSessions, publishCodexExternalEvent } from './codex-runner.ts';
+import { BananaSession, getOrCreateBananaSession, activeBananaSessions, publishBananaExternalEvent } from './banana-runner.ts';
 import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
 import { maybeAutoCompact, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
 import { shouldSkipEngineResume } from './threadWindow.ts';
@@ -29,6 +29,7 @@ import { isThreadWatched } from './threadWatch.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
+import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
@@ -587,10 +588,10 @@ class ClaudeSession {
     if (cli === 'assistant') {
       args.push(
         '--append-system-prompt',
-        [ASSISTANT_AGENT_PROMPT, voiceAddendum, personaScope].filter(Boolean).join('\n\n'),
+        [ASSISTANT_AGENT_PROMPT, voiceAddendum, personaScope, isAgentThread(chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n'),
       );
     } else {
-      const sys = [voiceAddendum, personaScope].filter(Boolean).join('\n\n');
+      const sys = [voiceAddendum, personaScope, isAgentThread(chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n');
       if (sys) args.push('--append-system-prompt', sys);
     }
 
@@ -955,7 +956,7 @@ class ClaudeSession {
     // ordinary follow-up. Supply the runtime fact inline so agent-home turns
     // continue immediately instead of acting like cold starts.
     const conversationGuidance = conversationGuidanceForTurn({
-      chatId: this.chatId,
+      chatId: this.chatId, logKey: this.logKey, historyThroughSeq,
       peerFrom: opts.peerFrom,
       peerFromRole: opts.peerFromRole,
     });
@@ -1320,6 +1321,14 @@ class ClaudeSession {
     // Don't persist events emitted after an intentional shutdown — they're the
     // dying child's trailing output and would repollute a freshly-cleared log.
     if (!durableUserEcho && !this.disposed) appendEventLog(this.logKey, persisted);
+    for (const fn of this.listeners) fn(se);
+  }
+
+  /** Already durable; do not persist again or touch native turn state. */
+  ingestExternalEvent(se: SeqEvent): void {
+    if (this.disposed) return;
+    this.eventLog.push(se);
+    if (this.eventLog.length > EVENT_BUFFER_SIZE) this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
     for (const fn of this.listeners) fn(se);
   }
 
@@ -2074,4 +2083,20 @@ export { ClaudeSession };
 // Convenience for index.ts: stable ids per WebSocket subscription.
 export function newSubscriberId(): string {
   return randomUUID();
+}
+
+const externalThreadListeners = new Set<(logKey: string, se: SeqEvent) => void>();
+export function subscribeExternalThreadEvents(fn: (logKey: string, se: SeqEvent) => void): () => void {
+  externalThreadListeners.add(fn);
+  return () => { externalThreadListeners.delete(fn); };
+}
+
+/** Fan out a voice event to warm engine views and cold log-only subscribers. */
+export function publishExternalThreadEvent(logKey: string, se: SeqEvent): void {
+  for (const session of sessions.values()) {
+    if (session.logKey === logKey) session.ingestExternalEvent(se);
+  }
+  publishCodexExternalEvent(logKey, se);
+  publishBananaExternalEvent(logKey, se);
+  for (const fn of externalThreadListeners) fn(logKey, se);
 }

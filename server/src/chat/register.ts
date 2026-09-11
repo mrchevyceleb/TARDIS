@@ -11,6 +11,7 @@ import { stopComputersForOwner } from '../devices/bridge.ts';
 import { historicalDelivery, subscriptionReplayCursor } from './replayDelivery.ts';
 import {
   activeClaudeSessions,
+  subscribeExternalThreadEvents,
   beginThreadReset,
   dropSession,
   freshStart,
@@ -422,10 +423,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
     }
   });
 
-  // Lane-scoped operation generations: a stop/steer from ANY socket (any device) bumps the lane's operation generation; a stale
-  // steer awaiting natural turn completion must not write after being superseded.
+  // Lane-scoped operation generations: Stop/Fresh/send from ANY socket bumps
+  // the generation so a stale waiter cannot write after cancel. A newer steer
+  // does not bump or abort. Stacked guidance waits in FIFO and delivers in order.
   const laneGenerations = new Map<string, number>();
-  const laneWaiters = new Map<string, AbortController>();
+  const laneWaiters = new Map<string, Set<AbortController>>();
+  const laneSteerTails = new Map<string, Promise<void>>();
   // Authoritative server ownership for human guidance waiting behind a turn.
   // Reconnects receive these ids in ready/working so a cached "queued" bubble
   // can never remain optimistic forever after a timeout or process restart.
@@ -522,13 +525,44 @@ export async function registerChat(app: express.Express, server: Server): Promis
     if (!cli || !repo) return [];
     return [...(pendingSteers.get(laneGenKey(cli, repo, id)) ?? [])];
   };
+  const addLaneWaiter = (key: string | null, ac: AbortController) => {
+    if (!key) return;
+    const set = laneWaiters.get(key) ?? new Set<AbortController>();
+    set.add(ac);
+    laneWaiters.set(key, set);
+  };
+  const removeLaneWaiter = (key: string | null, ac: AbortController) => {
+    if (!key) return;
+    const set = laneWaiters.get(key);
+    if (!set) return;
+    set.delete(ac);
+    if (set.size === 0) laneWaiters.delete(key);
+  };
+  const abortLaneWaiters = (key: string) => {
+    const set = laneWaiters.get(key);
+    if (!set) return;
+    for (const ac of set) ac.abort();
+    laneWaiters.delete(key);
+  };
   const bumpLaneGen = (cli: CliKind, repo: string, chatId: string): number => {
     const k = laneGenKey(cli, repo, chatId);
-    laneWaiters.get(k)?.abort();
-    laneWaiters.delete(k);
+    abortLaneWaiters(k);
     const n = (laneGenerations.get(k) ?? 0) + 1;
     laneGenerations.set(k, n);
     return n;
+  };
+  const peekLaneGen = (cli: CliKind, repo: string, chatId: string): number => (
+    laneGenerations.get(laneGenKey(cli, repo, chatId)) ?? 0
+  );
+  const threadSteerKey = (repo: string, chatId: string) => `${repo}|${chatId}`;
+  const enqueueThreadSteer = (repo: string, chatId: string, run: () => Promise<void>): void => {
+    const key = threadSteerKey(repo, chatId);
+    const prev = laneSteerTails.get(key) ?? Promise.resolve();
+    const next = prev.catch(() => {}).then(run);
+    laneSteerTails.set(key, next);
+    void next.finally(() => {
+      if (laneSteerTails.get(key) === next) laneSteerTails.delete(key);
+    });
   };
 
   // A repaired durable log can coexist with an older warm session buffer.
@@ -781,6 +815,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
         unsubscribe = null;
       }
     };
+
+    const stopExternalEvents = subscribeExternalThreadEvents((logKey, se) => {
+      // Warm views receive this through their runner. A cold attach has no
+      // process subscription, but must still show the call without a reload.
+      if (unsubscribe || !cliKind || !repoPath || laneLogKey(cliKind, repoPath, chatId) !== logKey) return;
+      void helloBarrier.then(() => {
+        if (!unsubscribe && cliKind && repoPath && laneLogKey(cliKind, repoPath, chatId) === logKey) dispatch(se);
+      });
+    });
 
     const bindSession = async (
       promise: Promise<AnySession>,
@@ -1231,15 +1274,16 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const authoritativeAgent = agentForChatId(chatId);
           let desiredSteerBrain = resolvedBrain(chatId, { cli: msg.cli, model: msg.model, effort: msg.effort });
           // Own cancellation from the first await through the final stdin
-          // write. Stop, Fresh, or a newer steer aborts this path. A socket
-          // close does NOT: accepted guidance must survive tab switches and
-          // reconnects, and its durable echo will reach whichever socket binds.
+          // write. Stop or Fresh aborts this path. A newer steer waits in
+          // line instead of superseding. A socket close does NOT: accepted
+          // guidance must survive tab switches and reconnects, and its
+          // durable echo will reach whichever socket binds.
           const steerAborter = new AbortController();
           ownedSteerWaiters.add(steerAborter);
           let waitKey: string | null = null;
           const releaseSteer = () => {
             ownedSteerWaiters.delete(steerAborter);
-            if (waitKey && laneWaiters.get(waitKey) === steerAborter) laneWaiters.delete(waitKey);
+            removeLaneWaiter(waitKey, steerAborter);
           };
           const rejectSteer = (message = 'Queued guidance was superseded or canceled before delivery.') => {
             deletePendingSteer(waitKey, msg.clientMsgId);
@@ -1253,12 +1297,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
           let steerModel = authoritativeAgent ? desiredSteerBrain.model : msg.model;
           let steerEffort = authoritativeAgent ? desiredSteerBrain.effort : msg.effort;
           const bound = sessionPromise;
-          // Register on the socket's current lane BEFORE awaiting its bind. A
-          // Stop/Fresh/new steer during a cold bind can now abort this operation.
+          // Register ownership before the FIFO wait so reconnects still see
+          // this id as queued. Stop/Fresh can abort it even while it waits.
           waitKey = laneGenKey(steerCli, steerRepo, chatId);
-          let laneGen = bumpLaneGen(steerCli, steerRepo, chatId);
-          laneWaiters.set(waitKey, steerAborter);
+          addLaneWaiter(waitKey, steerAborter);
           addPendingSteer(waitKey, msg.clientMsgId);
+          enqueueThreadSteer(steerRepo, chatId, async () => {
+          try {
+          if (steerAborter.signal.aborted) { rejectSteer(); releaseSteer(); return; }
+          let laneGen = peekLaneGen(steerCli, steerRepo, chatId);
           if (bound) {
             try {
               const current = await bound;
@@ -1282,11 +1329,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
           if (steerAborter.signal.aborted) { rejectSteer(); releaseSteer(); return; }
           const resolvedKey = laneGenKey(steerCli, steerRepo, chatId);
           if (resolvedKey !== waitKey) {
-            if (waitKey && laneWaiters.get(waitKey) === steerAborter) laneWaiters.delete(waitKey);
+            removeLaneWaiter(waitKey, steerAborter);
             deletePendingSteer(waitKey, msg.clientMsgId);
-            laneGen = bumpLaneGen(steerCli, steerRepo, chatId);
             waitKey = resolvedKey;
-            laneWaiters.set(waitKey, steerAborter);
+            laneGen = peekLaneGen(steerCli, steerRepo, chatId);
+            addLaneWaiter(waitKey, steerAborter);
             addPendingSteer(waitKey, msg.clientMsgId);
           }
           console.warn(`[chat ws#${wsId}] steer from ${peer} cli=${steerCli} repo=${steerRepo} chatId=${chatId}`);
@@ -1321,13 +1368,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
           );
           // Claude stream-json accepts same-turn input in a verified tool
           // window. Codex app-server accepts it through turn/steer throughout
-          // an active turn. A pending authoritative brain change must still
-          // wait for the natural boundary so guidance cannot land on the old
-          // model after a central reconfiguration.
+          // an active turn. Images cannot ride that channel (Codex drops them
+          // and Claude's tool-window stdin is text). Wait for a natural turn
+          // end, then send as a new turn so the picture actually arrives.
+          // A pending authoritative brain change must still wait for the
+          // natural boundary so guidance cannot land on the old model after a
+          // central reconfiguration.
+          const hasSteerImages = Boolean(msg.images && msg.images.length > 0);
           let nativeActiveSteer = Boolean(
             session
             && !needsAuthoritativeBoundary
-            && (!msg.images || msg.images.length === 0)
+            && !hasSteerImages
             && supportsNativeTurnSteer(steerCli)
             && (session as { canAcceptNativeHumanSteer?: () => boolean })
               .canAcceptNativeHumanSteer?.() === true,
@@ -1339,10 +1390,14 @@ export async function registerChat(app: express.Express, server: Server): Promis
               session,
               steerAborter.signal,
               remaining,
-              !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli),
+              !hasSteerImages && !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli),
             );
             if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') { rejectSteer(); releaseSteer(); return; }
-            if (boundary === 'steerable') { nativeActiveSteer = true; break; }
+            if (boundary === 'steerable') {
+              if (hasSteerImages) continue;
+              nativeActiveSteer = true;
+              break;
+            }
             if (boundary === 'closed') { session = null; break; }
             if (boundary === 'timeout') {
               rejectSteer('Guidance is still waiting for the current turn to finish. The running agent was not interrupted; try again later or use Stop.');
@@ -1388,11 +1443,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
             }
             const desiredKey = laneGenKey(steerCli, steerRepo, chatId);
             if (desiredKey !== waitKey) {
-              if (waitKey && laneWaiters.get(waitKey) === steerAborter) laneWaiters.delete(waitKey);
+              removeLaneWaiter(waitKey, steerAborter);
               deletePendingSteer(waitKey, msg.clientMsgId);
-              laneGen = bumpLaneGen(steerCli, steerRepo, chatId);
               waitKey = desiredKey;
-              laneWaiters.set(waitKey, steerAborter);
+              laneGen = peekLaneGen(steerCli, steerRepo, chatId);
+              addLaneWaiter(waitKey, steerAborter);
               addPendingSteer(waitKey, msg.clientMsgId);
             }
           }
@@ -1442,11 +1497,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
               steerEffort = latestBrain.effort;
               const desiredKey = laneGenKey(steerCli, steerRepo, chatId);
               if (desiredKey !== waitKey) {
-                if (waitKey && laneWaiters.get(waitKey) === steerAborter) laneWaiters.delete(waitKey);
+                removeLaneWaiter(waitKey, steerAborter);
                 deletePendingSteer(waitKey, msg.clientMsgId);
-                laneGen = bumpLaneGen(steerCli, steerRepo, chatId);
                 waitKey = desiredKey;
-                laneWaiters.set(waitKey, steerAborter);
+                laneGen = peekLaneGen(steerCli, steerRepo, chatId);
+                addLaneWaiter(waitKey, steerAborter);
                 addPendingSteer(waitKey, msg.clientMsgId);
               }
               session = await bindSession(getOrCreateSession({
@@ -1499,11 +1554,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
             steerEffort = desiredSteerBrain.effort;
             const desiredKey = laneGenKey(steerCli, steerRepo, chatId);
             if (desiredKey !== waitKey) {
-              if (waitKey && laneWaiters.get(waitKey) === steerAborter) laneWaiters.delete(waitKey);
+              removeLaneWaiter(waitKey, steerAborter);
               deletePendingSteer(waitKey, msg.clientMsgId);
-              laneGen = bumpLaneGen(steerCli, steerRepo, chatId);
               waitKey = desiredKey;
-              laneWaiters.set(waitKey, steerAborter);
+              laneGen = peekLaneGen(steerCli, steerRepo, chatId);
+              addLaneWaiter(waitKey, steerAborter);
               addPendingSteer(waitKey, msg.clientMsgId);
             }
             session = await bindSession(getOrCreateSession({
@@ -1569,6 +1624,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
           }
           // Guidance is never auto-resubmitted after acceptance: a cross-device
           // Stop/Fresh must not be undone by the stale-resume retry helper.
+          } catch (error) {
+            const stillPending = Boolean(
+              waitKey && msg.clientMsgId && pendingSteers.get(waitKey)?.has(msg.clientMsgId),
+            );
+            if (stillPending) {
+              rejectSteer(`Guidance could not be delivered: ${(error as Error).message}`);
+              releaseSteer();
+              safeSend({ type: 'turnEnd' });
+            }
+          }
+          });
           return;
         }
 
@@ -1662,7 +1728,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             if (claimedSendLanes.has(key)) return;
             const generation = bumpLaneGen(laneCli, sendRepo, chatId);
             claimedSendLanes.set(key, generation);
-            laneWaiters.set(key, sendAborter);
+            addLaneWaiter(key, sendAborter);
           };
           claimSendLane(sendCli);
           ownedSteerWaiters.add(sendAborter);
@@ -1670,9 +1736,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             || [...claimedSendLanes].some(([key, generation]) => laneGenerations.get(key) !== generation);
           const releaseSend = () => {
             ownedSteerWaiters.delete(sendAborter);
-            for (const key of claimedSendLanes.keys()) {
-              if (laneWaiters.get(key) === sendAborter) laneWaiters.delete(key);
-            }
+            for (const key of claimedSendLanes.keys()) removeLaneWaiter(key, sendAborter);
           };
           try {
           if (!sessionPromise && cliKind && repoPath) {
@@ -1928,14 +1992,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
     });
 
     ws.on('close', () => {
+      stopExternalEvents();
       socketThreads.delete(ws);
       clearInterval(heartbeat);
       clearInterval(keepalive);
       // Do not abort ownedSteerWaiters here. The server already accepted those
       // messages; they must cross the natural turn boundary even if a mobile
       // tab sleeps, navigates to another agent, or reconnects. releaseSteer()
-      // removes each waiter after delivery/rejection. Lane Stop/Fresh/new steer
-      // still aborts it through bumpLaneGen().
+      // removes each waiter after delivery/rejection. Lane Stop/Fresh still
+      // aborts them through bumpLaneGen(). Stacked steers wait in FIFO.
       unsubscribe?.();
       unsubscribe = null;
       const set = peerSockets.get(peerKey);

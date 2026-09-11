@@ -116,6 +116,10 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
   let pendingAssistant = '';
   let pendingAssistantSeq = 0;
   let haveAssistantEvent = false;
+  /** Assistant text already committed for earlier provider rounds. */
+  let priorRounds = '';
+  let roundText = '';
+  let voiceSplitPrefix = '';
   let afterAutomation = false;
 
   const takeStreamTail = (): string => {
@@ -132,6 +136,7 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
     pendingAssistant = '';
     pendingAssistantSeq = 0;
     haveAssistantEvent = false;
+    priorRounds = '';
     openText.clear();
   };
 
@@ -144,6 +149,7 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
     pendingAssistant = '';
     pendingAssistantSeq = 0;
     haveAssistantEvent = false;
+    priorRounds = '';
     afterAutomation = flushPending(body, seq, afterAutomation, turns);
   };
 
@@ -153,6 +159,21 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
     const inner = unwrapInner(se.ev);
     if (!inner) continue;
     const t = inner.type;
+
+    if (t === '_voice_transcript' && typeof inner.text === 'string'
+      && (inner.role === 'user' || inner.role === 'assistant')) {
+      // Commit text already shown BEFORE the voice message. Keep stream slots
+      // alive for later deltas, and subtract that prefix from a canonical
+      // response arriving later so it cannot repeat/reorder the pre-call text.
+      voiceSplitPrefix = roundText;
+      const indexes = [...openText.keys()];
+      const automation: boolean = afterAutomation;
+      flushAssistant();
+      afterAutomation = automation;
+      for (const index of indexes) openText.set(index, '');
+      turns.push({ role: inner.role, text: clipTurn(inner.text), seq });
+      continue;
+    }
 
     if (t === '_user_echo' && typeof inner.text === 'string') {
       flushAssistant();
@@ -204,9 +225,16 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
       }
       const texts = assistantTextBlocks(inner);
       if (texts.length) {
-        const joined = texts.join('\n').trim();
+        const canonical = texts.join('\n').trim();
+        roundText = canonical;
+        const joined = voiceSplitPrefix && canonical.startsWith(voiceSplitPrefix)
+          ? canonical.slice(voiceSplitPrefix.length).trimStart() : canonical;
         if (joined) {
-          pendingAssistant = haveAssistantEvent ? `${pendingAssistant}\n${joined}` : joined;
+          // Same round: append extra canonical blocks. New round: replace this
+          // round's streamed preview, keep earlier rounds.
+          pendingAssistant = haveAssistantEvent
+            ? (pendingAssistant ? `${pendingAssistant}\n${joined}` : joined)
+            : (priorRounds ? `${priorRounds}\n${joined}` : joined);
           pendingAssistantSeq = seq;
           haveAssistantEvent = true;
           openText.clear();
@@ -218,8 +246,19 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
     if (t === 'stream_event' && inner.event && typeof inner.event === 'object') {
       const stream = inner.event as { type?: unknown; index?: unknown; delta?: any; content_block?: any };
       if (stream.type === 'message_start') {
-        if (pendingAssistant || openText.size) flushAssistant();
-        pendingAssistantSeq = seq;
+        roundText = '';
+        voiceSplitPrefix = '';
+        // A new provider message is a tool round, not a new conversation turn.
+        // Fold in-flight stream text into the current assistant reply so block
+        // indexes can reset, but do not mint another visible turn — that is
+        // what made Grok/Claude compact every few tool cycles.
+        const trailing = takeStreamTail();
+        if (trailing) {
+          pendingAssistant = pendingAssistant ? `${pendingAssistant}\n${trailing}` : trailing;
+          pendingAssistantSeq = seq;
+        }
+        priorRounds = pendingAssistant;
+        haveAssistantEvent = false;
         continue;
       }
       if (haveAssistantEvent) continue;
@@ -229,6 +268,7 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
       }
       if (stream.type === 'content_block_delta' && typeof stream.index === 'number') {
         if (stream.delta?.type === 'text_delta' && typeof stream.delta.text === 'string' && openText.has(stream.index)) {
+          roundText += stream.delta.text;
           openText.set(stream.index, (openText.get(stream.index) ?? '') + stream.delta.text);
           pendingAssistantSeq = seq;
         }
@@ -248,7 +288,7 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
     }
   }
   flushAssistant();
-  return turns;
+  return turns.sort((a, b) => a.seq - b.seq);
 }
 
 export function splitWindow(turns: VisibleTurn[], size = WINDOW_TURNS): WindowSplit {

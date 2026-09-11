@@ -26,6 +26,7 @@
 .riv-call-dot-speaking { background: var(--r-emerald); }
 .riv-call-dot-connecting { background: var(--r-elf-blue); animation: riv-pulse 0.9s infinite; }
 .riv-call-dot-thinking { background: var(--r-elf-blue); animation: riv-pulse 0.6s infinite; }
+.riv-call-dot-working { background: var(--r-gold); animation: riv-pulse 0.7s infinite; }
 .riv-call-dot-ended, .riv-call-dot-error { background: var(--r-rose); }
 @keyframes riv-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
@@ -85,7 +86,9 @@
 .riv-call-voicegrid {
   margin-top: 10px;
   display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
-  max-width: 460px;
+  max-width: 560px;
+  max-height: 220px;
+  overflow-y: auto;
 }
 .riv-call-voicechip {
   background: var(--r-bg-raised); color: var(--r-ink-mute);

@@ -97,12 +97,18 @@ class Behaviors:
         elif name == "obstacle":
             await asyncio.to_thread(self.hw.express, "CAUTIOUS", False)
         elif name == "imu_gesture":
+            # Doly SDK gestures: Move, LongShake, ShortShake, Vibrate*, Shock*
+            # with a direction (Up/Down/Left/Right/Front/Back). A Move going
+            # Up is the robot being picked up.
             gesture = str(data.get("gesture", "")).lower()
-            if any(key in gesture for key in ("pick", "lift", "fall", "drop")):
+            direction = str(data.get("direction", "")).lower()
+            if (gesture == "move" and direction == "up") or any(key in gesture for key in ("pick", "lift", "fall", "drop")):
                 await asyncio.to_thread(self.hw.stop_motion)
                 await asyncio.to_thread(self.hw.express, "SHOCKED", False)
             elif "shake" in gesture:
                 await asyncio.to_thread(self.hw.express, "DIZZY L", False)
+            elif gesture.startswith("shock"):
+                await asyncio.to_thread(self.hw.express, "BUMP", False)
         elif name == "battery_alarm":
             await asyncio.to_thread(self.hw.express, "BATTERY LOW", False)
         elif name == "gesture" and not in_call:
