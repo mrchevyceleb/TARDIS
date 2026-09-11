@@ -37,14 +37,14 @@ def main() -> int:
         from .hardware import doly_sdk_available
         from .voice.audio import sounddevice_available
         from .voice.grok import grok_voice_available
-        from .voice.wake import openwakeword_available
+        from .voice.wake import vosk_available, wake_phrases
 
         print(f"tardis-robot {__version__}")
         print(f"ship: {config.url}  ->  {config.ws_url}")
         print(f"name: {config.name}  (voices as agent {config.agent_id})")
         print(f"hardware: {config.hardware}  (doly sdk {'found' if doly_sdk_available() else 'not found'})")
         print(f"voice: {config.voice}  grok={'yes' if grok_voice_available() else 'no'}  sounddevice={'yes' if sounddevice_available() else 'no'}  ({config.voice_ws_url})")
-        print(f"wake word: {config.wake_word} @ {config.wake_threshold} (openwakeword {'yes' if openwakeword_available() else 'no'})  touch summon: {config.touch_summon}")
+        print(f"wake word: {' / '.join(wake_phrases(config.wake_word)) or 'off'} (vosk {'yes' if vosk_available() else 'no'})  touch summon: {config.touch_summon}")
         print(f"state dir: {config.state_dir}")
         return 0
 

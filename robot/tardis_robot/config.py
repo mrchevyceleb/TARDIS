@@ -47,7 +47,8 @@ class Config:
     hardware: str = "auto"
     state_dir: Path = field(default_factory=lambda: Path.home() / ".config" / "tardis-robot")
     voice: str = "auto"
-    wake_word: str = "hey_jarvis"
+    wake_word: str = "hey spark"
+    wake_model: str = ""
     wake_threshold: float = 0.5
     touch_summon: bool = True
     voice_idle_secs: float = 45.0
@@ -112,7 +113,8 @@ def load_config() -> Config:
         hardware=os.environ.get("TARDIS_ROBOT_HARDWARE", "auto").strip().lower() or "auto",
         state_dir=Path(state_dir).expanduser() if state_dir else Path.home() / ".config" / "tardis-robot",
         voice=os.environ.get("TARDIS_VOICE", "auto").strip().lower() or "auto",
-        wake_word=os.environ.get("TARDIS_WAKE_WORD", "hey_jarvis").strip() or "off",
+        wake_word=os.environ.get("TARDIS_WAKE_WORD", "hey spark").strip() or "off",
+        wake_model=os.environ.get("TARDIS_WAKE_MODEL", "").strip(),
         wake_threshold=_num("TARDIS_WAKE_THRESHOLD", 0.5, 0.05, 0.99),
         touch_summon=_flag("TARDIS_TOUCH_SUMMON", True),
         voice_idle_secs=_num("TARDIS_VOICE_IDLE_SECS", 45, 10, 600),
