@@ -45,7 +45,8 @@ server/src/
 jarvis-agent/              optional standalone LiveKit voice worker
 desktop/                   Electron desktop shell (thin client, own package)
 android/                   Android WebView shell (Kotlin, Gradle)
-server/src/devices/        linked computers (desktop app dials in over /ws/device)
+server/src/devices/        linked computers and robots (dial in over /ws/device)
+robot/                     Python robot companion (Doly SDK or mock body; own package)
 supabase/migrations/       optional queue/event schema
 scripts/                   startup, Tailscale, PWA and native icons, Windows handler
 ```

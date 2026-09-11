@@ -9,9 +9,31 @@
 
 export const VOICE_CHAT_PREFIX = 'jarvis';
 
+/** A robot companion summons Jarvis with identity `robot-<name>`, so its
+ *  device thread is `jarvis-robot-<name>`. Same convention trick: the id alone
+ *  tells the runner the voice is coming out of a physical body. */
+export const ROBOT_VOICE_CHAT_PREFIX = `${VOICE_CHAT_PREFIX}-robot-`;
+
 export function isVoiceChatId(chatId: string): boolean {
   return chatId === VOICE_CHAT_PREFIX || chatId.startsWith(`${VOICE_CHAT_PREFIX}-`);
 }
+
+export function isRobotVoiceChatId(chatId: string): boolean {
+  return chatId.startsWith(ROBOT_VOICE_CHAT_PREFIX);
+}
+
+/** Rides after VOICE_STYLE_ADDENDUM when the caller is a robot body. */
+export const ROBOT_VOICE_STYLE_ADDENDUM = [
+  'ROBOT BODY. This voice call is coming through a small desk robot standing in the room with the user: it has',
+  'expressive eye displays, arms, coloured lights, wheels, touch sensors, distance sensors and a camera. The',
+  'user is looking at it while you talk. Your spoken words already play from its speaker; do NOT call robot_say',
+  'for anything you are saying in this reply.',
+  '',
+  'Use the robot_* tools for everything else physical: robot_express for an eye animation that fits the moment',
+  '(THINK while checking, HAPPY or DELIGHTED for good news, PUZZLED when unsure, CAUTIOUS for a warning),',
+  'robot_look when asked what you can see, robot_move or robot_arms for a small gesture when it adds something.',
+  'One expression per reply is plenty. Keep motion small; the robot guards its own edges.',
+].join('\n');
 
 // Appended to --append-system-prompt for voice sessions. Everything the model
 // says is spoken aloud by TTS, so the register is spoken prose, not chat

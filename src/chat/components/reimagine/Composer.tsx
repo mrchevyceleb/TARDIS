@@ -10,6 +10,7 @@ import type { CommandEntry } from '../../data/types';
 import { ArrowUp, Plus, SquarePen, StopSquare } from './icons';
 import { isEggPhrase } from '../../../theme/eggs';
 import { ComputerControl } from '../ComputerControl';
+import { RobotControl } from '../RobotControl';
 
 export type SendImage = { mediaType: string; base64: string; previewDataUrl?: string };
 type PendingImage = { id: string; mediaType: string; base64: string; previewUrl: string };
@@ -293,6 +294,7 @@ export function Composer(props: ComposerProps) {
         </div>
       ) : null}
       {props.chatId && <ComputerControl key={props.chatId} chatId={props.chatId} />}
+      {props.chatId && <RobotControl />}
       {props.attachMenu}
       <div className={`composer${images.length > 0 ? ' has-attach' : ''}`}>
         {images.length > 0 ? (

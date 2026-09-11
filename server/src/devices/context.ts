@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { JsonStore } from '../lib/jsonStore.ts';
+import { robotGuidance } from './robots.ts';
 
 // Only TARDIS-spawned MCPs can invoke input APIs. This is not a general app
 // login; it prevents a page on the trusted console from minting agent identity.
@@ -62,5 +63,8 @@ export function computerGuidance(chatId: string, label: string, human = true): s
       ? 'Standing operator permission covers assigned background/peer work on configured computers. Yield to human conversations; never preempt another controller.'
       : 'Background desktop starts are disabled by operator policy; do not reuse an earlier human context to evade that policy.',
     '</rivendell-computer>',
+    // A linked robot body rides on the same rivendell-device MCP; the block is
+    // empty (and free) whenever no robot is online.
+    robotGuidance(),
   ].filter(Boolean).join('\n');
 }

@@ -4,12 +4,18 @@
 // only routes requests and waits for the answer.
 //
 // Wire protocol (JSON over /ws/device):
-//   device → server  {type:'hello', deviceId, name, platform, homeDir, workspaceRoot, version}
+//   device → server  {type:'hello', deviceId, name, platform, homeDir, workspaceRoot, version,
+//                     kind?:'computer'|'robot', capabilities?:string[], robot?:{...status}}
 //                    {type:'reply', id, ok, result|error}
 //                    {type:'pong'}
+//                    {type:'robot-state', robot:{...status}}        (robots only)
+//                    {type:'event', event:{name, data}}             (robots only)
 //   server → device  {type:'ready'}
 //                    {type:'request', id, op, params}
 //                    {type:'ping'}
+//
+// A robot companion (robot/) is the same link with kind:'robot': it answers
+// robot.* requests and reports what its sensors notice. See devices/robots.ts.
 //
 // Same trust boundary as every other surface here: loopback or an origin the
 // operator configured. There is no app-layer auth, so the desktop app asks its
@@ -21,9 +27,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { JsonStore } from '../lib/jsonStore.ts';
 import { loadComputerTargets } from './context.ts';
+import { forgetRobot, recordRobotEvent, robotStatus, setRobotStatus, type RobotStatus } from './robots.ts';
 import type { ControlStatus } from '../../../desktop/native/computer.mjs';
 
-export type DeviceOp = 'exec' | 'read' | 'write' | 'ls' | 'open' | `computer.${string}`;
+export type DeviceOp = 'exec' | 'read' | 'write' | 'ls' | 'open' | `computer.${string}` | `robot.${string}`;
+
+export type DeviceKind = 'computer' | 'robot';
 
 export type DeviceInfo = {
   id: string;
@@ -33,9 +42,13 @@ export type DeviceInfo = {
   workspaceRoot: string;
   version: string;
   connectedAt: string;
+  kind: DeviceKind;
+  capabilities?: string[];
   computer?: ControlStatus;
   desktopId?: string;
 };
+
+export type RobotInfo = DeviceInfo & { kind: 'robot'; robot?: RobotStatus };
 
 export type DeviceReply =
   | { ok: true; result: unknown }
@@ -67,6 +80,25 @@ export function listDevices(): DeviceInfo[] {
   return [...devices.values()]
     .map((device) => device.info)
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Online robots with their latest self-reported status. */
+export function listRobots(): RobotInfo[] {
+  return listDevices()
+    .filter((info): info is DeviceInfo & { kind: 'robot' } => info.kind === 'robot')
+    .map((info) => ({ ...info, robot: robotStatus(info.id) }));
+}
+
+/** Resolve a robot by id or name. With no ref, the only online robot wins. */
+export function findRobot(idOrName: string): RobotInfo | undefined {
+  const robots = listRobots();
+  const needle = idOrName.trim().toLowerCase();
+  if (!needle) return robots.length === 1 ? robots[0] : undefined;
+  const byId = robots.find((r) => r.id.toLowerCase() === needle);
+  if (byId) return byId;
+  const byName = robots.filter((r) => r.name.toLowerCase() === needle);
+  if (byName.length > 1) throw new AmbiguousDeviceError(byName);
+  return byName[0];
 }
 
 /** Resolve a device by id or (case-insensitive) name. */
@@ -280,25 +312,42 @@ export function registerDeviceBridge(server: HttpServer): void {
             settleAll(previous, 'The link to this computer was replaced.');
             try { previous.socket.close(); } catch { /* already gone */ }
           }
+          // A robot must prove it holds its pairing key: an unpaired socket
+          // may not impersonate a body that agents will move and speak through.
+          const kind: DeviceKind = msg.kind === 'robot' && hasKey ? 'robot' : 'computer';
+          const capabilities = Array.isArray(msg.capabilities)
+            ? msg.capabilities.filter((c: unknown): c is string => typeof c === 'string' && c.length <= 40).slice(0, 64)
+            : undefined;
           const info: DeviceInfo = {
             id,
-            name: String(msg.name ?? '').trim() || id,
+            name: String(msg.name ?? '').trim().slice(0, 60) || id,
             platform: String(msg.platform ?? 'unknown'),
             homeDir: String(msg.homeDir ?? ''),
             workspaceRoot: String(msg.workspaceRoot ?? ''),
             version: String(msg.version ?? ''),
             connectedAt: new Date().toISOString(),
-            ...(hasKey && msg.computer ? { computer: computerStatus(msg.computer), desktopId: typeof msg.desktopId === 'string' && /^[a-f0-9]{64}$/.test(msg.desktopId) ? msg.desktopId : id } : {}),
+            kind,
+            ...(capabilities?.length ? { capabilities } : {}),
+            ...(kind === 'computer' && hasKey && msg.computer ? { computer: computerStatus(msg.computer), desktopId: typeof msg.desktopId === 'string' && /^[a-f0-9]{64}$/.test(msg.desktopId) ? msg.desktopId : id } : {}),
           };
           registered = { info, socket: ws, pending: new Map(), cancellations: new Map(), lastSeen: Date.now() };
           devices.set(id, registered);
+          if (kind === 'robot') setRobotStatus(info, msg.robot);
           ws.send(JSON.stringify({ type: 'ready' }));
-          console.log(`[tardis] linked computer ${info.name} (${info.platform})`);
+          console.log(`[tardis] linked ${kind} ${info.name} (${info.platform})`);
           return;
         }
 
         if (msg.type === 'computer-state' && registered?.info.computer) {
           registered.info.computer = computerStatus(msg.computer);
+          return;
+        }
+        if (msg.type === 'robot-state' && registered?.info.kind === 'robot') {
+          setRobotStatus(registered.info, msg.robot);
+          return;
+        }
+        if (msg.type === 'event' && registered?.info.kind === 'robot') {
+          recordRobotEvent(registered.info, msg.event);
           return;
         }
         if (msg.type === 'cancelled' && registered) {
@@ -324,7 +373,8 @@ export function registerDeviceBridge(server: HttpServer): void {
         settleAll(registered, `${registered.info.name} disconnected.`);
         if (devices.get(registered.info.id)?.socket === ws) {
           devices.delete(registered.info.id);
-          console.log(`[tardis] unlinked computer ${registered.info.name}`);
+          if (registered.info.kind === 'robot') forgetRobot(registered.info.id);
+          console.log(`[tardis] unlinked ${registered.info.kind} ${registered.info.name}`);
         }
         registered = null;
       };
