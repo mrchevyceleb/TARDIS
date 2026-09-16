@@ -11,19 +11,20 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
   "websockets>=12,<15",
-  "numpy>=1.24",
+  # <2 so the venv (created with --system-site-packages) keeps the system
+  # numpy that the preinstalled OpenCV was built against; numpy 2.x shadows it
+  # and breaks `import cv2` (numpy.core.multiarray failed to import).
+  "numpy>=1.24,<2",
 ]
 
 [project.optional-dependencies]
-# Live voice through Jarvis (LiveKit room + local audio I/O).
+# Voice: a Grok realtime call over the ship's /ws/voice socket plus an on-device
+# "hey spark" wake word. Local audio I/O (sounddevice) and an offline recognizer
+# (vosk); the call transport is plain websockets (a core dependency). Vosk needs
+# no numpy>=1.26, so it coexists with the preinstalled OpenCV the camera uses.
 voice = [
-  "livekit>=1.0.0",
   "sounddevice>=0.4.6",
-]
-# On-device wake word ("hey jarvis") for hands-free summons.
-wake = [
-  "openwakeword>=0.6.0",
-  "onnxruntime>=1.16",
+  "vosk>=0.3.44",
 ]
 
 [project.scripts]

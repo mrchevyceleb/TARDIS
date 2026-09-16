@@ -43,10 +43,12 @@ def _num(name: str, default: float, lo: float, hi: float) -> float:
 class Config:
     url: str
     name: str
+    agent: str = ""
     hardware: str = "auto"
     state_dir: Path = field(default_factory=lambda: Path.home() / ".config" / "tardis-robot")
     voice: str = "auto"
-    wake_word: str = "hey_jarvis"
+    wake_word: str = "hey spark"
+    wake_model: str = ""
     wake_threshold: float = 0.5
     touch_summon: bool = True
     voice_idle_secs: float = 45.0
@@ -68,6 +70,21 @@ class Config:
         if base.startswith("http://"):
             return "ws://" + base[len("http://"):] + "/ws/device"
         raise ValueError("TARDIS_URL must start with http:// or https://")
+
+    @property
+    def voice_ws_url(self) -> str:
+        base = self.url.rstrip("/")
+        if base.startswith("https://"):
+            return "wss://" + base[len("https://"):] + "/ws/voice"
+        if base.startswith("http://"):
+            return "ws://" + base[len("http://"):] + "/ws/voice"
+        raise ValueError("TARDIS_URL must start with http:// or https://")
+
+    @property
+    def agent_id(self) -> str:
+        """The TARDIS agent whose voice this body speaks with. Defaults to the
+        robot name slug, which matches an agent created with the same name."""
+        return (self.agent or self.slug).strip().lower()
 
     @property
     def slug(self) -> str:
@@ -92,10 +109,12 @@ def load_config() -> Config:
     return Config(
         url=url,
         name=os.environ.get("TARDIS_ROBOT_NAME", "").strip() or socket.gethostname() or "Robot",
+        agent=os.environ.get("TARDIS_ROBOT_AGENT", "").strip(),
         hardware=os.environ.get("TARDIS_ROBOT_HARDWARE", "auto").strip().lower() or "auto",
         state_dir=Path(state_dir).expanduser() if state_dir else Path.home() / ".config" / "tardis-robot",
         voice=os.environ.get("TARDIS_VOICE", "auto").strip().lower() or "auto",
-        wake_word=os.environ.get("TARDIS_WAKE_WORD", "hey_jarvis").strip() or "off",
+        wake_word=os.environ.get("TARDIS_WAKE_WORD", "hey spark").strip() or "off",
+        wake_model=os.environ.get("TARDIS_WAKE_MODEL", "").strip(),
         wake_threshold=_num("TARDIS_WAKE_THRESHOLD", 0.5, 0.05, 0.99),
         touch_summon=_flag("TARDIS_TOUCH_SUMMON", True),
         voice_idle_secs=_num("TARDIS_VOICE_IDLE_SECS", 45, 10, 600),

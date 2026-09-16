@@ -25,7 +25,9 @@ VOICE_EYES = {
     "connecting": "WAKE WORD",
     "listening": "ATTENTION",
     "thinking": "THINK",
+    "working": "THINK",
     "speaking": "CHEERFUL",
+    "ended": "LOOK AHEAD",
     "idle": "LOOK AHEAD",
     "off": "LOOK AHEAD",
 }
