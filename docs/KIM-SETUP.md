@@ -105,6 +105,21 @@ systemctl --user status tardis rallypoint-engine
 journalctl --user -u tardis -u rallypoint-engine -n 80
 ```
 
-GNOME/package installation and reboot behavior need an on-device check against
-the actual AMD vendor image. The script can be syntax-checked on another machine
-with `bash -n scripts/setup-kim.sh` without making any OS changes.
+### Linux rehearsal
+
+The installer was exercised on a clean Ubuntu 24.04 ARM64 VM with systemd,
+GNOME, an isolated PostgreSQL/PostgREST database and synthetic content. Installation,
+the Lavender/Light defaults, the desktop launcher, automatic service startup after
+reboot, and refusal to update running services passed. Browser checks against the
+real Linux services covered autosave, exact-version approval, approval invalidation
+after edits, disconnected publishing protection, reload persistence and mobile layout.
+
+The rehearsal used committed source snapshots in place of GitHub sign-in and did
+not copy anyone's subscription credentials. Separate live deployment checks verified
+Claude, Codex and Grok subscription completions. Media uploads and real publishing
+were not exercised in the isolated database.
+
+The actual AMD vendor image still needs an on-device check for x86 binaries,
+graphics/ROCm, peripherals and account sign-ins. ARM Linux testing does not certify
+that hardware. The script can also be syntax-checked without changing the OS:
+`bash -n scripts/setup-kim.sh`.
