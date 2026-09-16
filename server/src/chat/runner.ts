@@ -1375,6 +1375,26 @@ class ClaudeSession {
   }
 
   private handleEvent(ev: any): void {
+    // Monitor/background-task notifications can start a query inside the warm
+    // CLI without send(). Adopt that query before forwarding its first event,
+    // so health, Stop, queued input and reconnects agree that the lane is busy.
+    // Task notifications alone are not queries: an idle monitor stays idle.
+    const nativeQueryStarted = (ev?.type === 'system' && ev.subtype === 'status' && ev.status === 'requesting')
+      || (ev?.type === 'stream_event' && ev.event?.type === 'message_start')
+      || ev?.type === 'assistant';
+    if (!this.disposed && this.turnStartedAt === null && nativeQueryStarted) {
+      this.turnStartedAt = Date.now();
+      this.automationTurn = false;
+      this.activeToolIds.clear();
+      this.terminalNoticeEmitted = false;
+      this.syntheticApiErrorSeen = false;
+      this.streamTextBlocks.clear();
+      this.preparingTurnAborter = null;
+      this.turnPromptSubmitted = true;
+      this.userInterruptPending = false;
+      this.emit({ type: 'turnStart' });
+    }
+
     // Track the one phase where Claude Code can incorporate realtime stdin
     // without interrupting: after it emitted tool_use and before every matching
     // tool_result came back. A user message written during message generation
