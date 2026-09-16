@@ -1,3 +1,4 @@
+import { assertSubscriptionLane } from './subscription-policy.ts';
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
@@ -1966,6 +1967,7 @@ class BananaServer {
    *  on the serve); it is excluded from the "is a sibling turn live?" check so a
    *  chat can still pick up a config change for its OWN next turn. */
   async ensure(projectPathHint?: string, caller?: BananaSession): Promise<void> {
+    assertSubscriptionLane(caller?.cli);
     const configContent = await bananaConfigContent({ projectPathHint, cli: caller?.cli });
     // Compare on a canonical signature: ~/.claude.json and OpenRouter's catalog
     // can return semantically identical content with shuffled key/row order,
@@ -2687,6 +2689,7 @@ export class BananaSession {
   }
 
   async send(text: string, images?: ChatImage[], opts: BananaSendOptions = {}): Promise<void> {
+    assertSubscriptionLane(this.cli);
     if (opts.signal?.aborted) return;
     if (this.busy) {
       // Internal team delivery retries at the natural boundary. Do not leak a
@@ -4042,6 +4045,7 @@ export async function getOrCreateBananaSession(opts: {
   chatId?: string;
   cli?: CliKind;
 }): Promise<BananaSession> {
+  assertSubscriptionLane(opts.cli ?? 'banana');
   const cwd = opts.repoPath;
   const chatId = opts.chatId || 'main';
   const cli = opts.cli ?? 'banana';
@@ -4111,6 +4115,7 @@ export async function freshStartBanana(opts: {
   chatId?: string;
   cli?: CliKind;
 }): Promise<BananaSession> {
+  assertSubscriptionLane(opts.cli ?? 'banana');
   const cwd = opts.repoPath;
   const chatId = opts.chatId || 'main';
   const cli = opts.cli ?? 'banana';

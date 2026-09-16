@@ -1,3 +1,4 @@
+import { assertSubscriptionLane } from './subscription-policy.ts';
 import type express from 'express';
 import type { Server } from 'node:http';
 import { basename } from 'node:path';
@@ -38,12 +39,6 @@ import {
 } from './codex-runner.ts';
 import {
   activeBananaSessions,
-  listBananaOpenRouterModels,
-  listFireworksModels,
-  listLocalModels,
-  localFullCatalog,
-  localVllmStatus,
-  serveLocalModel,
   pruneIdleBananaSessions,
   shutdownAllBananaSessions,
 } from './banana-runner.ts';
@@ -303,74 +298,6 @@ export async function registerChat(app: express.Express, server: Server): Promis
         lastActivityAt: session.lastActivityAt,
       })),
     });
-  });
-
-  app.get('/api/banana/models', async (_req, res) => {
-    try {
-      res.json({ data: await listBananaOpenRouterModels() });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // Fireworks catalog for the Banana → Fireworks engine. Ids are bare account
-  // model ids (`accounts/fireworks/models/<name>`); the client prefixes
-  // `fireworks/`.
-  app.get('/api/fireworks/models', async (_req, res) => {
-    try {
-      res.json({ data: await listFireworksModels() });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // Local (vLLM) catalog for the Banana → Local engine. Ids are `local/<model>`.
-  app.get('/api/local/models', async (_req, res) => {
-    try {
-      res.json({ data: await listLocalModels() });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // Full local catalog for the swap/download picker: loaded model, cached models,
-  // and a curated FP8 list.
-  app.get('/api/local/catalog', async (_req, res) => {
-    try {
-      res.json(await localFullCatalog());
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // Live vLLM status (which model is loaded + ready) — polled by the picker
-  // while a swap/download is in flight.
-  app.get('/api/local/status', async (_req, res) => {
-    try {
-      res.json(await localVllmStatus());
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // Swap vLLM to a model (downloads from HF if needed), then auto-reload banana.
-  app.post('/api/local/serve', async (req, res) => {
-    const body = req.body as Partial<{ model: string; util: string; maxLen: string }>;
-    const model = typeof body.model === 'string' ? body.model.trim() : '';
-    if (!model) {
-      res.status(400).json({ error: 'model required' });
-      return;
-    }
-    try {
-      const result = await serveLocalModel(model, { util: body.util, maxLen: body.maxLen });
-      if (!result.ok) {
-        res.status(400).json(result);
-        return;
-      }
-      res.json(result);
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
   });
 
   app.post('/api/chat/interrupt', async (req, res) => {
@@ -995,6 +922,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       let reservedSendAdmission: { key: string; clientMsgId: string } | null = null;
       let unsubscribeSendAdmission: (() => void) | null = null;
       try {
+        if ('cli' in msg && msg.cli !== undefined && msg.type !== 'stop' && msg.type !== 'react') assertSubscriptionLane(msg.cli);
         if (msg.type === 'hello') {
           // Serialize only hello/replay operations. A second focus/pageshow
           // hello must not race the first subscription bind, but Stop/steer

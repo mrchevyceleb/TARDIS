@@ -1,7 +1,7 @@
 # Computer use
 
-Every engine receives the built-in `rivendell-device` MCP: Claude, Codex,
-Grok/Z.ai and Banana's OpenRouter, Fireworks and local models. Shared turn
+Every conversational engine receives the built-in `rivendell-device` MCP:
+Claude Code, Codex, and Grok subscriptions. Shared turn
 guidance tells companions to operate desktop apps, browser sessions and agent
 management UIs themselves, instead of handing routine UI steps back to the user.
 Shell/API tools remain appropriate for non-UI work.
@@ -181,7 +181,7 @@ and credential-path rules; GUI access is not a route around a refusal.
 
 Keep TARDIS on loopback or a trusted private proxy, never the public Internet.
 Input APIs require the TARDIS MCP credential plus signed identity for starts;
-no caller identity is held in Banana's shared MCP process. The web UI can
+Caller identity is scoped to the requesting turn. The web UI can
 stop/resume existing standing authority, but cannot enable a machine's
 automatic mode or forge an agent identity.
 

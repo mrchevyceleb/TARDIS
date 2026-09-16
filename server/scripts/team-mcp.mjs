@@ -24,6 +24,26 @@ const BASE = process.env.RIVENDELL_TEAM_URL || 'http://127.0.0.1:8091';
 
 const TOOLS = [
   {
+    name: 'content_list',
+    description: 'List content drafts and writing jobs in the TARDIS Content desk. Generated material is always a draft for human review.',
+    inputSchema: { type: 'object', properties: { brand: { type: 'string', enum: ['operly', 'r-link'] } }, additionalProperties: false },
+  },
+  {
+    name: 'content_get',
+    description: 'Read a content draft, its editable version, quality notes, and publication status. Use before requesting a revision.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false },
+  },
+  {
+    name: 'content_generate',
+    description: 'Create brand-aware blog or social drafts using your current subscription engine. The user reviews and approves the result in Content. Does not publish.',
+    inputSchema: { type: 'object', properties: { brand: { type: 'string', enum: ['operly', 'r-link'] }, brief: { type: 'string' }, kinds: { type: 'array', items: { type: 'string', enum: ['blog', 'social-pack'] }, minItems: 1 }, requestId: { type: 'string', description: 'Stable UUID for this requested batch; reuse it when retrying an uncertain response.' } }, required: ['brand', 'brief', 'kinds', 'requestId'], additionalProperties: false },
+  },
+  {
+    name: 'content_revise',
+    description: 'Revise the exact draft version after reading it with content_get. Uses your current subscription engine. Changes require a fresh human approval; this does not publish.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, version: { type: 'integer', minimum: 1 }, instruction: { type: 'string' } }, required: ['id', 'version', 'instruction'], additionalProperties: false },
+  },
+  {
     name: 'team_list',
     description:
       'List teammates plus ground-truth current activity (working, queued, or idle). ' +
@@ -106,6 +126,19 @@ function formatAgentStatus(agent) {
 }
 
 async function callTool(name, args, signal) {
+  if (name === 'content_list') {
+    const query = args.brand ? `?brand=${encodeURIComponent(args.brand)}` : '';
+    const [drafts, jobs] = await Promise.all([api(`/api/content/drafts${query}`, undefined, signal), api(`/api/content/jobs${query}`, undefined, signal)]);
+    return JSON.stringify({ ...drafts, ...jobs });
+  }
+  if (name === 'content_get') return JSON.stringify(await api(`/api/content/drafts/${encodeURIComponent(args.id)}`, undefined, signal));
+  if (name === 'content_generate' || name === 'content_revise') {
+    const agent = process.env.RIVENDELL_AGENT_NAME;
+    if (!agent) throw new Error('Create content from a named teammate so its subscription engine can be selected.');
+    const path = name === 'content_generate' ? '/api/content/generate' : `/api/content/drafts/${encodeURIComponent(args.id)}/revise`;
+    const body = name === 'content_generate' ? { ...args, agent } : { version: args.version, instruction: args.instruction, agent };
+    return JSON.stringify(await api(path, { method: 'POST', body: JSON.stringify(body) }, signal));
+  }
   if (name === 'team_list' || name === 'team_status') {
     const { agents } = await api('/api/team', undefined, signal);
     const needle = typeof args.name === 'string' ? args.name.trim().toLowerCase() : '';

@@ -29,13 +29,12 @@ import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 // swaps it for a freshly-refreshed subscription token on every request. That
 // kills the staleness bug at the root (nothing expirable is frozen into an
 // env) and doubles as caller identity, so a stray local process that finds the
-// port can't spend the operator's plan. Callers that don't present the secret (the
-// GROK_PERSONAL_API_KEY path) forward their own header untouched.
+// port can't spend the operator's plan. All other callers are rejected.
 //
 // Started once per server process on an ephemeral 127.0.0.1 port and reused by
 // every xAI chat session (xaiEnv points ANTHROPIC_BASE_URL at it).
 
-const XAI_UPSTREAM = process.env.RIVENDELL_XAI_UPSTREAM?.trim() || 'https://api.x.ai';
+const XAI_UPSTREAM = 'https://api.x.ai';
 const configuredFastRetries = Number(process.env.RIVENDELL_XAI_FAST_RETRIES ?? 2);
 const XAI_FAST_RETRIES = Number.isInteger(configuredFastRetries)
   ? Math.min(3, Math.max(0, configuredFastRetries))
@@ -210,7 +209,11 @@ function startServer(): Promise<string> {
         // presenting the proxy secret, which we then swap for a live token —
         // so a frozen env can never carry an expiring credential, and an
         // unrelated local process can't spend the operator's plan.
-        if (presentsProxySecret(headers['authorization'])) {
+        if (!presentsProxySecret(headers['authorization'])) {
+          fail(401, 'Subscription proxy authentication required.');
+          return;
+        }
+        {
           const auth = await getXaiAuth();
           if (aborted || res.writableEnded) return; // client vanished mid-refresh
           if (auth.mode !== 'oauth') {
@@ -229,8 +232,6 @@ function startServer(): Promise<string> {
           headers['authorization'] = `Bearer ${auth.token}`;
           delete headers['x-api-key']; // never let a stale key outrank the sub
         }
-        // Anything else (the GROK_PERSONAL_API_KEY path, or the
-        // RIVENDELL_XAI_BASE_URL override) forwards its own header untouched.
 
         const sendAttempt = (attempt: number) => {
           if (aborted || res.writableEnded) return;

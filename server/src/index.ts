@@ -1,9 +1,11 @@
 import express from 'express';
 import compression from 'compression';
 import { createServer } from 'node:http';
+import { contentRouter } from './routes/content.ts';
+import { contentGatewayRouter } from './routes/contentGateway.ts';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { ELROND_WORKSPACE_PATH, HOST, PORT, PREWARM_AGENTS, STATIC_DIR, WORKER_RUNNER } from './config.ts';
+import { ASSISTANT_ADMIN_BASE_URL, ASSISTANT_ADMIN_TOKEN, ELROND_WORKSPACE_PATH, HOST, PORT, PREWARM_AGENTS, STATIC_DIR, WORKER_RUNNER } from './config.ts';
 import { quiesceChat, registerChat } from './chat/register.ts';
 import { getOrCreateSession, isClaudeFamilyCli, type CliKind } from './chat/runner.ts';
 import { brainForAgent, cliForAgentEngine, ensureAgents, listAgents } from './chat/agents.ts';
@@ -27,7 +29,7 @@ import { emailRouter } from './routes/email.ts';
 import { familyRouter } from './routes/family.ts';
 import { docsRouter } from './routes/docs.ts';
 import { plRouter } from './routes/pl.ts';
-import { cronRouter } from './routes/cron.ts';
+import { cronRouter, pauseRetiredCronJobs } from './routes/cron.ts';
 import { messagesRouter } from './routes/messages.ts';
 import { pinsRouter } from './routes/pins.ts';
 import { weavingsRouter } from './routes/weavings.ts';
@@ -110,6 +112,8 @@ app.use('/internal', internalRouter);
 app.use('/xai-oauth', xaiOauthRouter);
 
 const server = createServer(app);
+app.use('/api/content', contentRouter);
+app.use('/internal/content/v1', contentGatewayRouter);
 // Start the xAI transform proxy before chat registers so its base URL is
 // resolved before any xAI chat session can spawn. Non-fatal: a failure logs
 // and xAI turns surface a clear error instead of crashing the server.
@@ -161,6 +165,9 @@ let tearingDown = false;
 let agentPrewarm: Promise<void> | null = null;
 
 server.listen(PORT, HOST, () => {
+  if (ASSISTANT_ADMIN_BASE_URL && ASSISTANT_ADMIN_TOKEN) {
+    void pauseRetiredCronJobs().catch(() => console.warn('[cron] Could not check retired TARDIS schedules at startup.'));
+  }
   console.log(`tardis listening on http://${HOST}:${PORT}`);
   void resumeQueuedTeamDeliveries().then((count) => {
     if (count > 0) console.log(`[team] resumed ${count} durable queued ${count === 1 ? 'delivery' : 'deliveries'}`);

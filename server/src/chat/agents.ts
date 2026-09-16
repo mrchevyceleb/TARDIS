@@ -1,3 +1,4 @@
+import { SUBSCRIPTION_ENGINES, assertSubscriptionEngine } from './subscription-policy.ts';
 // User-defined agents — the team an operator curates. One agent = one persistent
 // forever-thread + a scope document, running on any engine lane.
 //
@@ -56,9 +57,7 @@ export type Agent = {
 
 export type AgentBrain = { engine: string; model?: string; effort?: string; revision: number; updatedAt?: number };
 
-const VALID_ENGINES = new Set([
-  'claude', 'codex', 'banana', 'banana-local', 'banana-fireworks', 'zai', 'xai',
-]);
+const VALID_ENGINES = SUBSCRIPTION_ENGINES;
 
 export function cliForAgentEngine(engine: string): string {
   if (engine.startsWith('claude')) return 'claude';
@@ -70,13 +69,9 @@ export function cliForAgentEngine(engine: string): string {
 }
 
 export function defaultAgentBrain(engine: string): Omit<AgentBrain, 'revision' | 'updatedAt'> {
-  switch (cliForAgentEngine(engine)) {
+  switch (VALID_ENGINES.has(engine) ? engine : 'claude') {
     case 'claude': return { engine: 'claude', model: 'claude-opus-5', effort: 'xhigh' };
     case 'codex': return { engine: 'codex', model: 'gpt-5.6-sol', effort: 'low' };
-    case 'banana': return { engine: 'banana', model: 'openrouter/anthropic/claude-sonnet-5', effort: 'medium' };
-    case 'banana-fireworks': return { engine: 'banana-fireworks', model: 'fireworks/accounts/fireworks/models/glm-5p2', effort: 'medium' };
-    case 'banana-local': return { engine: 'banana-local', effort: 'medium' };
-    case 'zai': return { engine: 'zai', model: 'glm-5.3[1m]', effort: 'high' };
     case 'xai':
     default: return { engine: 'xai', model: 'grok-4.6', effort: 'max' };
   }
@@ -165,7 +160,10 @@ function lastPersistedSelection(agent: Agent, engine: string): { model?: string;
 }
 
 function normalizeAgentBrain(agent: Agent): Agent {
-  const engine = VALID_ENGINES.has(agent.engine) ? agent.engine : 'xai';
+  const migrated = !VALID_ENGINES.has(agent.engine);
+  const engine = migrated
+    ? ['codex-kim', 'codex-personal'].includes(agent.engine) ? 'codex' : 'claude'
+    : agent.engine;
   const defaults = defaultAgentBrain(engine);
   const persisted = !agent.model || !agent.effort ? lastPersistedSelection(agent, engine) : {};
   const model = normalizeBrainModel(engine, agent.model ?? persisted.model, defaults.model);
@@ -176,8 +174,9 @@ function normalizeAgentBrain(agent: Agent): Agent {
     model,
     effort,
     brainRevision: Number.isSafeInteger(agent.brainRevision) && (agent.brainRevision ?? 0) > 0
-      ? agent.brainRevision
+      ? agent.brainRevision! + (migrated ? 1 : 0)
       : 1,
+    ...(migrated ? { brainUpdatedAt: Date.now() } : {}),
   };
 }
 
@@ -264,12 +263,13 @@ export function ensureAgents(): void {
 export type AgentInput = { name: string; role?: string; engine?: string; model?: string; effort?: string; voice?: string; pinned?: boolean; muted?: boolean; scope?: string };
 
 export function createAgent(input: AgentInput): Agent {
+  if (input.engine !== undefined) assertSubscriptionEngine(input.engine);
   const agents = listAgents();
   const base = slugify(input.name);
   let id = base;
   let n = 2;
   while (agents.some((a) => a.id === id) || id === 'chief-of-staff' && false) id = `${base}-${n++}`;
-  const engine = input.engine && VALID_ENGINES.has(input.engine) ? input.engine : 'xai';
+  const engine = input.engine && VALID_ENGINES.has(input.engine) ? input.engine : 'claude';
   const defaults = defaultAgentBrain(engine);
   const now = Date.now();
   const agent: Agent = {
@@ -319,6 +319,7 @@ export function updateAgent(
   patch: Partial<AgentInput>,
   expectedBrainRevision?: number,
 ): Agent | null {
+  if (patch.engine !== undefined) assertSubscriptionEngine(patch.engine);
   const agents = listAgents();
   const idx = agents.findIndex((a) => a.id === id);
   if (idx < 0) return null;

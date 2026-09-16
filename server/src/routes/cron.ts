@@ -6,33 +6,74 @@ import {
   fetchAdminCronHistory,
   runAdminCronJob,
   updateAdminCronJob,
+  type RivendellCronJob,
 } from '../lib/assistantData.ts';
 import { emitScribe } from '../worker/scribe.ts';
 import { asyncHandler } from './helpers.ts';
 import { CRON_LOCAL_TRIGGER_URL } from '../config.ts';
+import { defaultAgentBrain } from '../chat/agents.ts';
 
 export const cronRouter = Router();
 
-const MODEL_REQUIRED_ENGINES = new Set(['banana-local', 'banana-fireworks']);
-const REMOVED_PERSONAL_ENGINES = new Set(['claude', 'codex-personal']);
+const CRON_SUBSCRIPTIONS = new Set(['assistant', 'claude', 'codex', 'codex-personal', 'xai']);
+// Only canonical scheduler identifiers may execute without an explicit edit.
+// Accepted input aliases are normalized by subscriptionCronPayload first.
+const CRON_RUNTIME_SUBSCRIPTIONS = new Set(['assistant', 'codex', 'xai']);
+
+export function isSubscriptionCronEngine(engine: string | undefined): boolean {
+  return Boolean(engine && CRON_RUNTIME_SUBSCRIPTIONS.has(engine));
+}
 
 function validateCronEnginePayload(body: unknown): string | null {
   if (!body || typeof body !== 'object') return 'request body must be an object';
   const payload = body as Record<string, unknown>;
-  const engine = typeof payload.engine === 'string' ? payload.engine.trim() : '';
-  if (REMOVED_PERSONAL_ENGINES.has(engine)) {
-    return `engine "${engine}" was removed; use ${engine === 'claude' ? 'assistant (Claude Code)' : 'codex'}`;
-  }
-  if (MODEL_REQUIRED_ENGINES.has(engine)) {
-    const modelId = typeof payload.modelId === 'string' ? payload.modelId.trim() : '';
-    if (!modelId) return `engine "${engine}" requires modelId`;
-  }
+  if (payload.engine !== undefined && (typeof payload.engine !== 'string' || !CRON_SUBSCRIPTIONS.has(payload.engine))) return 'Choose Claude Code, Codex, or Grok for scheduled work.';
   return null;
+}
+
+/** The remote scheduler's historical Claude identifier is `assistant`. Pin a
+ * supported engine so a missing field cannot trigger its metered API default. */
+export function subscriptionCronPayload(input: Partial<RivendellCronJob>, current?: RivendellCronJob): Partial<RivendellCronJob> {
+  const saved = input.engine ?? current?.engine;
+  const engine = saved && CRON_SUBSCRIPTIONS.has(saved) ? saved : 'assistant';
+  const canonical = engine === 'assistant' || engine === 'claude' ? 'claude' : engine === 'codex-personal' ? 'codex' : engine;
+  const defaults = defaultAgentBrain(canonical);
+  const changed = !saved || !CRON_SUBSCRIPTIONS.has(saved) || (input.engine !== undefined && input.engine !== current?.engine);
+  return {
+    ...current,
+    ...input,
+    status: input.status ?? (current?.paused ? 'paused' : 'active'),
+    engine: canonical === 'claude' ? 'assistant' : canonical,
+    aiModel: canonical === 'codex' ? 'codex' : 'claude',
+    ...(changed ? { modelId: input.modelId ?? defaults.model, reasoningEffort: input.reasoningEffort ?? defaults.effort } : {}),
+  };
+}
+
+/** Only explicit project ownership is enough to change an upstream schedule.
+ * `sourceLabel: Forge` is not ownership: the admin list also contains fleet work. */
+export function isTardisOwnedCron(job: RivendellCronJob): boolean {
+  return !job.readOnly && job.source === 'assistant-mcp' && (
+    /^(?:TARDIS|Rivendell)(?:\s|$)/i.test(job.name)
+    || /(?:^|[\\/])(?:TARDIS|Rivendell)(?:[\\/]|$)/i.test(job.repo ?? job.cwd ?? '')
+    || /\[(?:TARDIS|Rivendell) schedule\]/i.test(job.description ?? '')
+  );
+}
+
+/** Best-effort startup migration pauses retired app schedules instead of
+ * silently scheduling work on a different account. Explicit edits select a
+ * new subscription. Unrelated fleet schedules remain untouched. */
+export async function pauseRetiredCronJobs(jobs?: RivendellCronJob[]): Promise<RivendellCronJob[]> {
+  const rows = jobs ?? await fetchAdminCronJobs();
+  return Promise.all(rows.map(async (job) => {
+    if (!isTardisOwnedCron(job) || job.actionType !== 'ai_prompt' || job.paused || isSubscriptionCronEngine(job.engine)) return job;
+    try { return await updateAdminCronJob(job.id, { status: 'paused' }); }
+    catch { console.warn('[cron] Could not pause a retired TARDIS schedule; its upstream configuration needs attention.'); return job; }
+  }));
 }
 
 cronRouter.get('/', asyncHandler(async (_req, res) => {
   try {
-    res.json(await fetchAdminCronJobs());
+    res.json(await pauseRetiredCronJobs(await fetchAdminCronJobs()));
   } catch (err: any) {
     res.status(502).json({ error: `cron upstream failed: ${err?.message || 'unknown error'}` });
   }
@@ -57,7 +98,7 @@ cronRouter.post('/', asyncHandler(async (req, res) => {
     return;
   }
   try {
-    const job = await createAdminCronJob(req.body);
+    const job = await createAdminCronJob(subscriptionCronPayload(req.body));
     res.status(201).json(job);
   } catch (err: any) {
     res.status(502).json({ error: `cron create failed: ${err?.message || 'unknown error'}` });
@@ -70,14 +111,12 @@ cronRouter.post('/:id/run-now', asyncHandler(async (req, res) => {
     // runtime=local jobs can only be triggered on the local runner; the Railway
     // server refuses them ("runtime is local but this process is railway").
     // Look up the job's runtime and route accordingly.
-    let runtime = 'railway';
-    try {
-      const jobs = await fetchAdminCronJobs();
-      const job = jobs.find((j) => j.id === id);
-      if (job?.runtime) runtime = job.runtime;
-    } catch {
-      // Lookup failed — fall back to the Railway proxy below.
-    }
+    const jobs = await fetchAdminCronJobs();
+    const job = jobs.find((j) => j.id === id);
+    if (!job) { res.status(404).json({ error: 'cron job not found' }); return; }
+    if (job.readOnly) { res.status(403).json({ error: 'This schedule is managed externally.' }); return; }
+    if (!isSubscriptionCronEngine(job.engine)) { res.status(409).json({ error: 'This saved schedule uses a retired engine. Edit it and select a subscription before running it.' }); return; }
+    const runtime = job.runtime ?? 'railway';
 
     if (runtime === 'local') {
       const resp = await fetch(`${CRON_LOCAL_TRIGGER_URL}/run/${encodeURIComponent(id)}`, {
@@ -105,7 +144,10 @@ cronRouter.patch('/:id', asyncHandler(async (req, res) => {
     return;
   }
   try {
-    const job = await updateAdminCronJob(String(req.params.id), req.body);
+    const current = (await fetchAdminCronJobs()).find((job) => job.id === String(req.params.id));
+    if (!current) { res.status(404).json({ error: 'cron job not found' }); return; }
+    if (current.readOnly) { res.status(403).json({ error: 'This schedule is managed externally.' }); return; }
+    const job = await updateAdminCronJob(String(req.params.id), subscriptionCronPayload(req.body, current));
     if (!job) {
       res.status(404).json({ error: 'cron job not found' });
       return;

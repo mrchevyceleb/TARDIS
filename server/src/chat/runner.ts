@@ -1,3 +1,5 @@
+import { assertClaudeSubscription } from './subscription-auth.ts';
+import { assertSubscriptionLane, subscriptionEnvironment } from './subscription-policy.ts';
 import { execFileSync, spawn, type ChildProcessByStdio } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -23,7 +25,7 @@ import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/acco
 import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
-import { getXaiOauthToken, getXaiOauthTokenSync, hasXaiOauthToken } from '../routes/xai-oauth.ts';
+import { getXaiOauthToken } from '../routes/xai-oauth.ts';
 import { isRobotVoiceChatId, isVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STYLE_ADDENDUM, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
@@ -190,22 +192,7 @@ const ZAI_EFFORT = resolveZaiEffort(process.env.RIVENDELL_ZAI_EFFORT);
 const zaiCompactWindowForModel = (model: string): string =>
   resolveZaiModel(model, ZAI_MODEL) === ZAI_GLM51_MODEL ? ZAI_GLM51_COMPACT_WINDOW : ZAI_GLM_1M_COMPACT_WINDOW;
 
-function zaiEnv(model: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.OPENAI_API_KEY;
-  delete env.ANTHROPIC_API_KEY; // force token-based auth to Z.ai, not a metered Anthropic key
-  env.CLAUDE_CONFIG_DIR = ZAI_CONFIG_DIR;
-  env.ANTHROPIC_BASE_URL = ZAI_BASE_URL;
-  env.ANTHROPIC_AUTH_TOKEN = process.env.Z_AI_API_KEY || '';
-  env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = zaiCompactWindowForModel(model);
-  // Z.ai's coding-plan 429 is a fixed usage-window cap. Claude Code's default
-  // ten exponential retries leave Jessica "typing" for ~5 minutes. Keep one
-  // retry for a transient transport/5xx blip, then fail promptly so a manual
-  // retry after the provider reset remains the useful behavior.
-  env.CLAUDE_CODE_MAX_RETRIES = '1';
-  env.SAMWISE_ACCOUNT = 'zai';
-  return env;
-}
+
 
 // xAI coding plan — Grok 4.6 served over xAI's Anthropic-compatible endpoint
 // (https://api.x.ai/v1/messages). Same trick as Z.ai: run the stock `claude`
@@ -220,7 +207,6 @@ function zaiEnv(model: string): NodeJS.ProcessEnv {
 // model ids, modelContext defaults to 200K UNLESS CLAUDE_CODE_MAX_CONTEXT_TOKENS
 // is set. Without the max-context env, AUTO_COMPACT_WINDOW=500000 is silently
 // capped to 200K and compact fires around ~170K (observed 2026-07-15).
-const XAI_BASE_URL = process.env.RIVENDELL_XAI_BASE_URL?.trim() || '';
 const XAI_GROK46_MODEL = 'grok-4.6';
 const XAI_GROK45_MODEL = 'grok-4.5'; // legacy pin still accepted
 const XAI_COMPACT_WINDOW = '500000';
@@ -241,30 +227,10 @@ function resolveXaiEffort(e?: string, fallback = 'high'): string {
 const XAI_MODEL = resolveXaiModel(process.env.RIVENDELL_XAI_MODEL);
 const XAI_EFFORT = resolveXaiEffort(process.env.RIVENDELL_XAI_EFFORT);
 function xaiEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.OPENAI_API_KEY;
-  delete env.ANTHROPIC_API_KEY; // force token-based auth to xAI, not a metered Anthropic key
+  const env = subscriptionEnvironment(process.env);
   env.CLAUDE_CONFIG_DIR = XAI_CONFIG_DIR;
-  // The claude CLI emits a `role: "system"` message that xAI's Anthropic
-  // endpoint rejects (400 "Invalid message role"). A localhost transform
-  // proxy folds it into the top-level system field; ANTHROPIC_BASE_URL points
-  // at the proxy, which forwards to https://api.x.ai. RIVENDELL_XAI_BASE_URL
-  // (the proxy URL) is set at startup once the proxy is listening.
-  env.ANTHROPIC_BASE_URL = XAI_BASE_URL || xaiProxyBaseUrl();
-  // Prefer the SuperGrok subscription (flat-rate) over the metered
-  // GROK_PERSONAL_API_KEY.
-  //
-  // Deliberately NOT a real token: a child's env freezes at spawn, so any token
-  // put here is dead within ~6h while the session lives on — that was the
-  // "OAuth2 access token could not be validated" bug. Instead we seed the
-  // proxy's non-expiring per-process secret, and the proxy swaps it for a live
-  // token on every request. The RIVENDELL_XAI_BASE_URL override bypasses our
-  // proxy, so that path still needs a real (and, yes, expirable) token.
-  if (!XAI_BASE_URL && hasXaiOauthToken()) {
-    env.ANTHROPIC_AUTH_TOKEN = xaiProxySecret();
-  } else {
-    env.ANTHROPIC_AUTH_TOKEN = getXaiOauthTokenSync() || process.env.GROK_PERSONAL_API_KEY || '';
-  }
+  env.ANTHROPIC_BASE_URL = xaiProxyBaseUrl();
+  env.ANTHROPIC_AUTH_TOKEN = xaiProxySecret();
   // Both knobs required: MAX_CONTEXT tells Claude Code Grok is 500K (not the
   // 200K non-claude default); AUTO_COMPACT_WINDOW is the compact threshold.
   env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = XAI_COMPACT_WINDOW;
@@ -486,6 +452,7 @@ class ClaudeSession {
   private resolveReady!: (ok: boolean) => void;
 
   constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model?: string, effort?: string, seedFirst = false, switchedFrom: string | null = null) {
+    assertSubscriptionLane(cli);
     this.cli = cli;
     this.cwd = cwd;
     this.chatId = chatId;
@@ -605,16 +572,12 @@ class ClaudeSession {
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
     // login; everything else keeps the per-repo account-map resolution.
     const forcedAccount = accountFromChatId(chatId);
+    const spawnEnv = cli === 'xai' ? xaiEnv()
+      : forcedAccount ? accountEnvForAccount(forcedAccount, cwd) : accountEnv(cwd);
+    if (cli !== 'xai') assertClaudeSubscription(spawnEnv, cwd);
     this.child = spawn('claude', args, {
       cwd,
-      env:
-        cli === 'zai'
-          ? zaiEnv(this.spawnModel)
-          : cli === 'xai'
-            ? xaiEnv()
-            : forcedAccount
-              ? accountEnvForAccount(forcedAccount, cwd)
-              : accountEnv(cwd),
+      env: spawnEnv,
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessByStdio<Writable, Readable, Readable>;
@@ -781,6 +744,7 @@ class ClaudeSession {
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
   async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean } = {}): Promise<void> {
+    assertSubscriptionLane(this.cli);
     // Every caller (human, teammate, routine) shares this admission barrier.
     // A read-only MCP control warmup can never reject or absorb a real message.
     if (this.warmupPromise) await this.warmupPromise.catch(() => {});
@@ -1655,6 +1619,7 @@ export async function getOrCreateSession(opts: {
    *  replacement never reaches init → the "asleep"/"no session" storm. */
   recycleOnMismatch?: boolean;
 }): Promise<AnySession> {
+  assertSubscriptionLane(opts.cli);
   if (sessionsShuttingDown) throw new Error('TARDIS is shutting down');
   const chatId = opts.chatId || 'main';
   if (isThreadResetting({ cli: opts.cli, repoPath: opts.repoPath, chatId })) {
@@ -2007,6 +1972,7 @@ export async function freshStart(opts: {
   model?: string;
   effort?: string;
 }): Promise<AnySession> {
+  assertSubscriptionLane(opts.cli);
   const chatId = opts.chatId || 'main';
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
     const { freshStartCodex } = await import('./codex-runner.ts');

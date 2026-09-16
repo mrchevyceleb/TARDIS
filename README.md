@@ -3,7 +3,7 @@
 [![CI](https://github.com/mrchevyceleb/TARDIS/actions/workflows/ci.yml/badge.svg)](https://github.com/mrchevyceleb/TARDIS/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-gold.svg)](LICENSE)
 
-Bigger on the inside. A local-first, always-on multi-agent office for Claude Code, Codex, Grok, GLM, OpenRouter, Fireworks, and local models.
+Bigger on the inside. A local-first, always-on multi-agent office for Claude Code, Codex, and Grok subscriptions.
 
 TARDIS is a ship's mind with a crew of Companions: each companion gets a durable home thread, an editable role, model/effort controls, scheduled routines, and a shared team bus. Conversations survive browser changes, service restarts (regenerations), model switches, and rolling context compaction without turning the visible transcript into disposable model state.
 
@@ -13,7 +13,7 @@ TARDIS is a ship's mind with a crew of Companions: each companion gets a durable
 ## What it includes
 
 - **Persistent companions** — one forever-thread and editable persona per agent.
-- **Multi-engine conversations** — Claude Code, Codex, xAI Grok, Z.ai GLM, OpenRouter, Fireworks, and local OpenAI-compatible models.
+- **Multi-engine conversations** — Claude Code, Codex with ChatGPT, and Grok with SuperGrok OAuth; no metered API-key fallback.
 - **Agent collaboration** — companions can message one another through the ship's built-in team MCP.
 - **Durable memory** — append-only event logs, rolling compaction, restart recovery, and cross-device replay.
 - **Human-first scheduling** — routines defer while a person is actively using a thread and remain draft/review-first for external side effects.
@@ -26,11 +26,10 @@ TARDIS is a ship's mind with a crew of Companions: each companion gets a durable
 
 - Node.js 22.22+
 - npm 10+
-- At least one supported agent/provider:
-  - a locally authenticated `claude` CLI,
-  - a locally authenticated `codex` CLI,
-  - a Z.ai, xAI, OpenRouter, or Fireworks key,
-  - or an OpenAI-compatible local model server.
+- At least one subscription connection:
+  - a `claude` CLI signed into a Claude subscription,
+  - a `codex` CLI signed into ChatGPT,
+  - or a SuperGrok subscription connected through `/xai-oauth`.
 
 Optional integrations such as Supabase, LiveKit, Railway, an external MCP backend, and boot-time agent prewarming are disabled until configured.
 
@@ -81,9 +80,8 @@ Start with [`.env.example`](.env.example). Important groups:
 | Area | Variables |
 | --- | --- |
 | Core | `HOST`, `PORT`, `ELROND_WORKSPACE_PATH`, `RIVENDELL_STATE_DIR`, `RIVENDELL_PREWARM_AGENTS`, `RIVENDELL_ALLOWED_ORIGINS` |
-| Z.ai | `Z_AI_API_KEY`, `RIVENDELL_ZAI_MODEL` |
-| xAI | `GROK_PERSONAL_API_KEY` or the `/xai-oauth` connector |
-| Hosted models | `OPENROUTER_API_KEY`, `FIREWORKS_API_KEY` |
+| Grok subscription | `/xai-oauth` connector; optional `XAI_OAUTH_CLIENT_ID` |
+| Content engine | `RIVENDELL_CONTENT_TOKEN` (dedicated server secret; see [content gateway](docs/CONTENT-ENGINE.md)) |
 | External MCP | `ASSISTANT_MCP_URL`, `ASSISTANT_MCP_TOKEN`, `RIVENDELL_ASSISTANT_MCP_PROXY` |
 | Browser bridge | `RIVENDELL_BROWSER_MCP` |
 | CLI profiles | `RIVENDELL_ACCOUNT_MAP`, `RIVENDELL_DEFAULT_CLI_ACCOUNT` (optional explicit account routing) |
@@ -112,7 +110,7 @@ An external scheduler can surface read-only jobs in Forge by setting `RIVENDELL_
 
 ## Run it on your own home server
 
-TARDIS does not require specialized hardware. An always-on Linux mini PC, NAS with a normal Node.js environment, repurposed laptop, or private VM works well; a GPU is only needed for local models. The complete install, systemd, update, Tailscale, macOS, and Windows instructions are in **[Home server deployment](docs/DEPLOYMENT.md)**.
+TARDIS does not require specialized hardware. An always-on Linux mini PC, NAS with a normal Node.js environment, repurposed laptop, or private VM works well. Subscription engines do not require a local GPU. The complete install, systemd, update, Tailscale, macOS, and Windows instructions are in **[Home server deployment](docs/DEPLOYMENT.md)**.
 
 Build first, then run the Node server under your process manager:
 

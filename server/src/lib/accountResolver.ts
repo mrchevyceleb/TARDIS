@@ -1,3 +1,4 @@
+import { subscriptionEnvironment } from '../chat/subscription-policy.ts';
 // Optional source of truth for which Claude Code / Codex profile a workspace
 // uses. A fresh clone uses each CLI's normal profile. Operators can explicitly
 // opt into a map with RIVENDELL_ACCOUNT_MAP; TARDIS never discovers an
@@ -62,7 +63,7 @@ export function accountEnvForAccount(account: string, cwd: string): NodeJS.Proce
   const map = loadMap();
   const a = map ? map.accounts[account] : undefined;
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...subscriptionEnvironment(process.env),
     CLAUDE_CODE_MAX_RETRIES: claudeMaxRetries(),
   };
   // Bill the SUBSCRIPTION selected below (CLAUDE_CONFIG_DIR for claude, CODEX_HOME
@@ -97,7 +98,7 @@ export function accountEnv(cwd: string): NodeJS.ProcessEnv {
   const map = loadMap();
   const account = resolveAccount(cwd);
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...subscriptionEnvironment(process.env),
     CLAUDE_CODE_MAX_RETRIES: claudeMaxRetries(),
   };
   // Bill the SUBSCRIPTION selected below (CLAUDE_CONFIG_DIR for claude, CODEX_HOME

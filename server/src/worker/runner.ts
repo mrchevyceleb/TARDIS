@@ -1,3 +1,4 @@
+import { assertClaudeSubscription } from '../chat/subscription-auth.ts';
 import { spawn } from 'node:child_process';
 import type { RivendellJob } from '../data/mock.ts';
 import { WORKER_RUNNER } from '../config.ts';
@@ -26,10 +27,12 @@ export async function runJob(job: RivendellJob): Promise<DispatcherResult> {
 
   await emitScribe({ job_id: job.id, level: 'system', text: `spawning claude worker for ${job.skill}` });
 
+  const env = accountEnv(job.repo || process.cwd());
+  assertClaudeSubscription(env, job.repo || process.cwd());
   return new Promise((resolve, reject) => {
     const child = spawn('claude', ['-p', '--output-format', 'stream-json', '--dangerously-skip-permissions', '--model', CLAUDE_MODEL, '--effort', CLAUDE_EFFORT, prompt], {
       cwd: job.repo || process.cwd(),
-      env: accountEnv(job.repo || process.cwd()),
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 

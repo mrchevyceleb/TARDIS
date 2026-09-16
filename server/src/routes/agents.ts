@@ -6,6 +6,7 @@ import { asyncHandler } from './helpers.ts';
 import { AgentBrainConflictError, AgentBrainRevisionRequiredError, listAgents, createAgent, updateAgent, deleteAgent, setAgentAvatar, clearAgentAvatar, agentAvatarPath, reorderAgents } from '../chat/agents.ts';
 import { personaScopeFor } from '../chat/personaPrompts.ts';
 import { agentUnread, markAgentRead, agentLatestSeq } from '../chat/reads.ts';
+import { SubscriptionEngineError } from '../chat/subscription-policy.ts';
 
 const rawImage = express.raw({ type: 'image/*', limit: '6mb' });
 
@@ -38,7 +39,12 @@ agentsRouter.post('/', asyncHandler(async (req, res) => {
     res.status(400).json({ error: 'name is required' });
     return;
   }
-  res.status(201).json({ agent: createAgent({ name, role, engine, model, effort, voice, scope }) });
+  try {
+    res.status(201).json({ agent: createAgent({ name, role, engine, model, effort, voice, scope }) });
+  } catch (error) {
+    if (error instanceof SubscriptionEngineError) { res.status(400).json({ error: error.message }); return; }
+    throw error;
+  }
 }));
 
 agentsRouter.patch('/:id', asyncHandler(async (req, res) => {
@@ -64,6 +70,7 @@ agentsRouter.patch('/:id', asyncHandler(async (req, res) => {
     if (!agent) { res.status(404).json({ error: 'agent not found' }); return; }
     res.json({ agent });
   } catch (error) {
+    if (error instanceof SubscriptionEngineError) { res.status(400).json({ error: error.message }); return; }
     if (error instanceof AgentBrainConflictError) {
       res.status(409).json({ error: error.message, agent: error.current });
       return;

@@ -716,7 +716,7 @@ export class CodexSession {
       );
     }
     browserMcpArgs.push(...localMcpCodexArgs(agentForChatId(this.chatId)?.name ?? 'Teammate'));
-    const appServerArgs = buildCodexAppServerArgs(browserMcpArgs);
+    const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
 
     // Wait for OneDrive to release its sync lock on .codex/config.toml so
     // codex's own read at startup doesn't fail with EDEADLK and kill the turn.

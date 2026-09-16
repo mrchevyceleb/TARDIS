@@ -1,7 +1,10 @@
 import { Router } from 'express';
 import { asyncHandler } from './helpers.ts';
 import { ASSISTANT_ADMIN_TOKEN, ELROND_WORKSPACE_PATH } from '../config.ts';
-import { freshStartBanana } from '../chat/banana-runner.ts';
+import { getOrCreateSession, activeClaudeSessions, type CliKind } from '../chat/runner.ts';
+import { activeCodexSessions } from '../chat/codex-runner.ts';
+import { assertSubscriptionEngine } from '../chat/subscription-policy.ts';
+import { agentForChatId, brainForAgent } from '../chat/agents.ts';
 
 export const internalRouter = Router();
 
@@ -14,11 +17,8 @@ const WORKSPACE = ELROND_WORKSPACE_PATH;
 const RUN_TIMEOUT_MS = Number(process.env.RIVENDELL_CRON_LLM_TIMEOUT_MS) || 280_000;
 const DEBUG = process.env.RIVENDELL_CRON_LLM_DEBUG === '1';
 
-/** Internal headless agentic runner. Drives the BananaSession tool-use loop
- *  (banana-local → a local model server) for one prompt and returns the final text,
- *  so a local-runtime cron can take actions (call tools) on LM Studio instead
- *  of only getting a one-shot text answer.
- *
+/** Internal subscription-backed agentic runner. Existing durable history is
+ * retained; automation yields while a conversation is active. *
  *  POST /internal/cron-llm-run
  *    header: x-internal-token: <MCP_AUTH_TOKEN>
  *    body:   { prompt: string, cwd?: string, model?: string, chatId?: string }
@@ -32,7 +32,11 @@ internalRouter.post(
       res.status(401).json({ error: 'unauthorized' });
       return;
     }
-    const { prompt, cwd, model, chatId } = req.body || {};
+    const { prompt, cwd, model, chatId, engine = 'claude', effort } = req.body || {};
+    try { assertSubscriptionEngine(engine); } catch (error) { res.status(400).json({ ok: false, error: (error as Error).message }); return; }
+    if ([...activeClaudeSessions(), ...activeCodexSessions()].some((session) => session.busy)) {
+      res.status(409).json({ ok: false, error: 'Agent work is active. Scheduled work should retry after conversations finish.' }); return;
+    }
     if (typeof prompt !== 'string' || !prompt.trim()) {
       res.status(400).json({ error: 'prompt (string) is required' });
       return;
@@ -41,16 +45,14 @@ internalRouter.post(
     const sessionChatId = typeof chatId === 'string' && chatId.trim() ? chatId : 'cron-run';
     const started = Date.now();
 
-    // freshStartBanana clears any prior opencode session id + durable event log
-    // for this chatId and returns a brand-new session. Two reasons it's the right
-    // primitive here (vs getOrCreateBananaSession):
-    //   1. Local models have small context windows. A recurring cron reusing
-    //      turns would accumulate tool output and blow the window within a few
-    //      runs. Fresh context every run.
-    //   2. One stable chatId per job, recreated each run, so sessions never leak.
+    // Agent home threads keep their canonical brain; standalone cron threads
+    // use the requested subscription. No Fresh/reset and no history deletion.
+    const agent = agentForChatId(sessionChatId);
+    const brain = agent ? brainForAgent(agent) : { engine, model, effort };
     let session;
     try {
-      session = await freshStartBanana({ repoPath, chatId: sessionChatId, cli: 'banana-local' });
+      session = await getOrCreateSession({ repoPath, chatId: sessionChatId, cli: brain.engine as CliKind, model: brain.model, effort: brain.effort });
+      if (session.isBusy()) { res.status(409).json({ ok: false, error: 'This thread is busy; retry later.' }); return; }
     } catch (err: any) {
       res
         .status(502)
@@ -90,7 +92,7 @@ internalRouter.post(
         seenTypes.push(t);
       }
       if (ev.type === 'error') {
-        errMsg = typeof ev.message === 'string' ? ev.message : 'banana turn error';
+        errMsg = typeof ev.message === 'string' ? ev.message : 'subscription turn error';
         finish();
         return;
       }
@@ -119,7 +121,7 @@ internalRouter.post(
     try {
       // send() dispatches the prompt; the tool-use loop (auto tool execution)
       // then runs async, streaming events until turnEnd.
-      await session.send(prompt, undefined, model ? { model } : {});
+      await session.send(prompt, undefined, { model: brain.model, effort: brain.effort, peerFrom: 'automation' });
     } catch (err: any) {
       errMsg = `send failed: ${err?.message || err}`;
       finish();

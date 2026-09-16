@@ -19,8 +19,8 @@ Browser / installed PWA
                                 │
               ┌─────────────────┼─────────────────┐
               ▼                 ▼                 ▼
-         Claude Code          Codex        OpenAI-compatible
-        Claude/xAI/Z.ai                    hosted/local models
+         Claude Code          Codex             Grok
+        subscription       subscription      subscription
 ```
 
 The production server also serves the Vite build from `dist/`. Development uses Vite on port 5173 and proxies API/WebSocket traffic to port 8091.
@@ -39,13 +39,14 @@ TanStack Query owns request caching. Chat events are streamed over one WebSocket
 
 - `server/src/index.ts` — HTTP server, route mounting, startup, teammate prewarm, and graceful shutdown.
 - `server/src/chat/register.ts` — WebSocket protocol, attachment handling, session binding, send/steer/stop semantics, and replay.
-- `server/src/chat/runner.ts` — persistent Claude-family processes, including Claude, xAI, and Z.ai.
+- `server/src/chat/runner.ts` — persistent Claude Code and Grok subscription processes.
 - `server/src/chat/codex-runner.ts` — Codex process/session transport.
-- `server/src/chat/banana-runner.ts` — OpenRouter, Fireworks, and local OpenAI-compatible models.
+- `server/src/chat/banana-runner.ts` — retired engine compatibility for durable history; new turns are disabled.
 - `server/src/chat/event-log-store.ts` — append-only durable conversation events.
 - `server/src/chat/compaction.ts` and `threadWindow.ts` — rolling memory and bounded fresh-process primers.
 - `server/src/chat/teamBus.ts` — rate-limited agent-to-agent delivery.
 - `server/src/chat/routines.ts` — scheduled agent work with visible-human priority.
+- `server/src/chat/content-completion.ts` ? isolated subscription completions for the headless content engine; model tool decisions are returned as data.
 - `server/src/routes/` — HTTP APIs.
 - `server/src/worker/` — optional durable job queue and Scribe activity stream.
 
