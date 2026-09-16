@@ -264,6 +264,7 @@ export type AgentInput = { name: string; role?: string; engine?: string; model?:
 
 export function createAgent(input: AgentInput): Agent {
   if (input.engine !== undefined) assertSubscriptionEngine(input.engine);
+  mkdirSync(AGENTS_DIR, { recursive: true });
   const agents = listAgents();
   const base = slugify(input.name);
   let id = base;

@@ -7,7 +7,7 @@
       "project": ["src/**/*.{ts,tsx}"]
     },
     "server": {
-      "entry": ["scripts/team-mcp.mjs"],
+      "entry": ["scripts/team-mcp.mjs", "scripts/install-content-team.ts"],
       "project": ["src/**/*.ts"]
     },
     "jarvis-agent": {

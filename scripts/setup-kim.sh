@@ -6,6 +6,7 @@ umask 077
 say() { printf '\n%s\n' "$*"; }
 die() { printf '\nSetup stopped: %s\n' "$*" >&2; exit 1; }
 trap 'printf "\nSetup stopped at line %s. Fix the reported problem and rerun this script. No credentials were printed.\n" "$LINENO" >&2' ERR
+bundle_dir="${KIM_SETUP_BUNDLE_DIR:-}"
 
 [[ "$(uname -s)" == Linux ]] || die 'Run this on the new Linux computer, not Windows or macOS.'
 [[ $EUID -ne 0 ]] || die 'Log in as Kim and run without sudo. The script asks sudo only for system packages.'
@@ -15,6 +16,7 @@ trap 'printf "\nSetup stopped at line %s. Fix the reported problem and rerun thi
 case "${ID:-} ${ID_LIKE:-}" in *ubuntu*|*debian*) ;; *) die 'This setup supports Ubuntu/Debian vendor images. Keep the AMD image; install GNOME and prerequisites with its supported package manager.' ;; esac
 case "$(uname -m)" in x86_64) node_arch=x64 ;; aarch64|arm64) node_arch=arm64 ;; *) die 'A 64-bit x86 or ARM Linux machine is required.' ;; esac
 [[ -d /run/systemd/system ]] || die 'Boot the vendor Linux installation with systemd; a live installer or container is not supported.'
+[[ ! -d /run/live/medium && ! -d /rofs ]] || die 'This is a temporary live Linux session. Boot the installed vendor Linux first, then launch the USB kit so the installation persists.'
 command -v sudo >/dev/null || die 'Install sudo or ask the machine administrator to grant Kim sudo access.'
 
 # Check before changing packages, CLIs, configuration, or application files.
@@ -42,7 +44,7 @@ chmod 700 "$config_dir"
 
 say "Preparing ${PRETTY_NAME:-Linux} (${node_arch}). The vendor OS, kernel, and ROCm stack are kept."
 sudo apt-get update
-sudo apt-get install -y --no-install-recommends ca-certificates curl git xz-utils build-essential python3 gh xdg-utils dbus-user-session
+sudo apt-get install -y --no-install-recommends ca-certificates curl git xz-utils build-essential python3 gh xdg-utils dbus-user-session ffmpeg
 if ! command -v gnome-shell >/dev/null; then
   say 'Adding the GNOME desktop. Existing GPU drivers and vendor packages are not replaced.'
   sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gnome-shell gnome-session gnome-terminal nautilus gdm3 network-manager-gnome
@@ -68,25 +70,38 @@ fi
 [[ "$(node --version)" == "v${node_version}" ]] || die 'The isolated Node installation did not activate.'
 npm install --global --prefix "$runtime_dir/npm" pnpm@10.28.2 @anthropic-ai/claude-code@2.1.272 @openai/codex@0.154.0
 
-if ! gh auth status --hostname github.com >/dev/null 2>&1; then
+if [[ -n "$bundle_dir" ]]; then
+  [[ -f "$bundle_dir/tardis.bundle" && -f "$bundle_dir/rallypoint.bundle" && -f "$bundle_dir/SHA256SUMS" ]] || die 'USB source bundles are incomplete. Rebuild the kit.'
+  (cd "$bundle_dir"; sha256sum -c SHA256SUMS) || die 'USB integrity check failed. Recopy the kit.'
+  say 'Using the reviewed source included on this USB. GitHub sign-in can be completed later for updates.'
+elif ! gh auth status --hostname github.com >/dev/null 2>&1; then
   say 'Sign into the GitHub account that has access to both shared repositories.'
   gh auth login --hostname github.com --git-protocol https --web
 fi
+if [[ -z "$bundle_dir" ]]; then
 gh repo view mrchevyceleb/TARDIS --json name >/dev/null 2>&1 || die 'This GitHub account cannot access mrchevyceleb/TARDIS.'
 gh repo view R-Link-LLC/RallyPoint --json name >/dev/null 2>&1 || die 'This GitHub account needs access to private R-Link-LLC/RallyPoint. Grant access, then rerun.'
 gh auth setup-git --hostname github.com
+fi
 
 
 prepare_repo() {
-  local repo="$1" dest="$2" requested_ref="$3" output_var="$4" created=0 remote target
+  local repo="$1" dest="$2" requested_ref="$3" output_var="$4" created=0 remote target bundle
   [[ "$requested_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || die "Invalid Git ref for $repo."
   [[ ! -L "$dest" ]] || die "Refusing a symlink at $dest."
-  if [[ ! -e "$dest" ]]; then gh repo clone "$repo" "$dest" -- --filter=blob:none; created=1; fi
+  if [[ -n "$bundle_dir" ]]; then
+    if [[ "$repo" == mrchevyceleb/TARDIS ]]; then bundle="$bundle_dir/tardis.bundle"; else bundle="$bundle_dir/rallypoint.bundle"; fi
+  fi
+  if [[ ! -e "$dest" ]]; then
+    if [[ -n "${bundle:-}" ]]; then git clone "$bundle" "$dest"; git -C "$dest" remote set-url origin "https://github.com/$repo.git";
+    else gh repo clone "$repo" "$dest" -- --filter=blob:none; fi
+    created=1
+  fi
   [[ -d "$dest/.git" ]] || die "$dest is not a normal Git checkout."
   remote="$(git -C "$dest" remote get-url origin)"
   case "$remote" in "https://github.com/$repo"|"https://github.com/$repo.git"|"git@github.com:$repo.git") ;; *) die "Unexpected origin in $dest. Your checkout was left intact." ;; esac
   [[ -z "$(git -C "$dest" status --porcelain)" ]] || die "$dest has uncommitted files. Preserve or commit them before rerunning."
-  git -C "$dest" fetch origin "$requested_ref"
+  if [[ -n "${bundle:-}" ]]; then git -C "$dest" fetch "$bundle" "$requested_ref"; else git -C "$dest" fetch origin "$requested_ref"; fi
   target="$(git -C "$dest" rev-parse 'FETCH_HEAD^{commit}')"
   if [[ $created == 0 ]]; then
     git -C "$dest" merge-base --is-ancestor HEAD "$target" || die "$repo diverged or the requested version is older. Resolve it manually; setup never resets work."
@@ -99,6 +114,19 @@ prepare_repo mrchevyceleb/TARDIS "$tardis_dir" "${TARDIS_REF:-main}" tardis_targ
 prepare_repo R-Link-LLC/RallyPoint "$rally_dir" "${RALLYPOINT_REF:-main}" rally_target
 [[ -n "$(git -C "$tardis_dir" ls-tree "$tardis_target" server/src/routes/contentGateway.ts)" && -n "$(git -C "$rally_dir" ls-tree "$rally_target" apps/engine/src/headless.ts)" ]] || die 'These repository versions do not contain the content integration. Push the reviewed release and rerun with its commit refs.'
 
+if [[ ! -f "$config_dir/rallypoint.env" && -n "$bundle_dir" && -f "$bundle_dir/workspace.json" ]]; then
+  export KIM_SETUP_WORKSPACE_FILE="$bundle_dir/workspace.json"
+  python3 - <<'PY'
+import json,os
+from pathlib import Path
+source=json.loads(Path(os.environ['KIM_SETUP_WORKSPACE_FILE']).read_text(encoding='utf-8-sig'))
+values={key:source[key] for key in ('SUPABASE_URL','SUPABASE_SERVICE_KEY')}
+assert all(isinstance(v,str) and v for v in values.values()), 'USB workspace configuration is incomplete'
+path=Path(os.environ['KIM_SETUP_CONFIG_DIR'])/'rallypoint.env'
+with path.open('x') as out: out.write(''.join(k+'='+json.dumps(v)+'\n' for k,v in values.items()))
+path.chmod(0o600)
+PY
+fi
 if [[ ! -f "$config_dir/rallypoint.env" ]]; then
   say 'Enter the content database provisioned for Kim. Do not copy another installation’s .env or credentials.'
   if [[ -z "${KIM_SB_URL:-}" ]]; then read -r -p 'Supabase project URL: ' KIM_SB_URL; fi
@@ -146,6 +174,7 @@ git -C "$rally_dir" switch --detach "$rally_target"
 say 'Installing dependencies and building both shared applications.'
 (cd "$tardis_dir"; npm ci; npm run typecheck; VITE_TARDIS_STYLE=lavender VITE_TARDIS_THEME=light npm run build)
 (cd "$rally_dir"; pnpm install --frozen-lockfile; pnpm --filter @rallypoint/engine typecheck)
+(cd "$tardis_dir"; RALLYPOINT_REPO_PATH="$rally_dir" node --import tsx server/scripts/install-content-team.ts)
 mkdir -p "$HOME/ASSISTANT-HUB" "$HOME/.config/systemd/user" "$HOME/.local/share/applications"
 for service in tardis rallypoint-engine; do
   if [[ "$service" == tardis ]]; then app_dir="$tardis_dir"; command_line='exec npm start'; env_name=tardis
@@ -182,6 +211,34 @@ export PATH="$runtime_dir/npm/bin:$node_dir/bin:\$HOME/.local/bin:/usr/local/bin
 exec "\$@"
 EOF
 chmod 700 "$HOME/.local/bin/tardis-cli"
+cat > "$HOME/.local/bin/tardis-connect" <<'EOF'
+#!/usr/bin/env bash
+set -u
+while true; do
+  printf '\nFinish TARDIS Setup\n1. Sign into Claude Code\n2. Sign into Codex\n3. Connect Grok\n4. Connect brand publishing accounts\n5. Sign into GitHub for future updates\n6. Open TARDIS\n0. Done\n'
+  read -r -p 'Choose a step: ' step || exit
+  case "$step" in
+    1) "$HOME/.local/bin/tardis-cli" claude auth login ;;
+    2) "$HOME/.local/bin/tardis-cli" codex login ;;
+    3) xdg-open http://127.0.0.1:8091/xai-oauth ;;
+    4) xdg-open http://127.0.0.1:8091/content ;;
+    5) gh auth login --hostname github.com --git-protocol https --web && gh auth setup-git --hostname github.com ;;
+    6) xdg-open http://127.0.0.1:8091 ;;
+    0) exit ;;
+  esac
+done
+EOF
+chmod 700 "$HOME/.local/bin/tardis-connect"
+cat > "$HOME/.local/share/applications/tardis-setup.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Finish TARDIS Setup
+Comment=Connect subscriptions and brand accounts
+Exec=sh -c "$HOME/.local/bin/tardis-connect"
+Icon=preferences-system
+Terminal=true
+Categories=Office;
+EOF
 cat > "$HOME/.local/share/applications/tardis.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
@@ -191,6 +248,27 @@ Exec=xdg-open http://127.0.0.1:8091
 Icon=applications-office
 Terminal=false
 Categories=Office;
+EOF
+mkdir -p "$HOME/.config/autostart"
+cat > "$HOME/.local/bin/tardis-open" <<'EOF'
+#!/usr/bin/env bash
+for attempt in {1..60}; do
+  if curl --fail --silent --max-time 2 http://127.0.0.1:8091/api/health >/dev/null; then
+    exec xdg-open http://127.0.0.1:8091
+  fi
+  sleep 2
+done
+printf 'TARDIS is still starting. Open it from Applications in a moment.\n' >&2
+EOF
+chmod 700 "$HOME/.local/bin/tardis-open"
+cat > "$HOME/.config/autostart/tardis.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=TARDIS
+Exec=sh -c "$HOME/.local/bin/tardis-open"
+Icon=applications-office
+Terminal=false
+X-GNOME-Autostart-enabled=true
 EOF
 systemctl --user daemon-reload
 systemctl --user enable --now tardis.service rallypoint-engine.service

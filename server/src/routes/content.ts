@@ -33,6 +33,9 @@ const routes = [
   ['GET', /^\/connections\/(?:operly|r-link)$/],
   ['PUT', /^\/connections\/(?:operly|r-link)$/],
   ['POST', /^\/connections\/(?:operly|r-link)\/connect$/],
+  ['GET', /^\/connections\/(?:operly|r-link)\/ayrshare$/],
+  ['PUT', /^\/connections\/(?:operly|r-link)\/ayrshare$/],
+  ['POST', /^\/connections\/(?:operly|r-link)\/ayrshare\/(?:profile|connect)$/],
 ] as const;
 
 contentRouter.use(async (req, res) => {

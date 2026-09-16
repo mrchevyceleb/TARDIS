@@ -112,6 +112,13 @@
 .content-connection-actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
 .content-connection-setup details { border:1px solid var(--r-line); padding:15px; border-radius:12px; margin-bottom:18px; }
 .content-connection-setup summary { cursor:pointer; font-size:13px; }
+.content-ayrshare h3 { font-size:25px; letter-spacing:-.035em; margin:12px 0; }
+.content-account-list { display:grid; gap:8px; margin:20px 0; }
+.content-account-list > div { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:13px; border:1px solid var(--r-line); border-radius:12px; background:var(--r-bg); }
+.content-account-list span { display:flex; align-items:center; gap:9px; font-size:13px; }
+.content-account-list small { color:var(--r-ink-mute); text-align:right; overflow-wrap:anywhere; }
+.content-account-dot { width:7px; height:7px; border-radius:50%; background:var(--r-line-strong); margin:4px; }
+.content-account-list .connected { color:var(--content-accent); }
 @keyframes content-spin { to { transform:rotate(360deg); } }
 @media(max-width:700px) { .content-room { padding-top:32px; } .content-header { align-items:flex-start; flex-direction:column; gap:5px; } .content-toolbar { align-items:stretch; flex-direction:column; gap:12px; } .content-segment { align-self:flex-start; } .content-search input { flex:1; width:100%; } .content-steps { gap:6px; font-size:10px; } .content-steps span { gap:5px; } .content-connections summary { flex-wrap:wrap; } .content-connections summary > span:last-child { margin-left:14px; } .content-tabs { gap:17px; overflow-x:auto; } .content-tabs button { font-size:12px; white-space:nowrap; } .content-paper { padding:18px; } .content-desk-footer { flex-direction:column; align-items:stretch; } .content-desk-footer > div { justify-content:flex-end; } .content-edit-bar { gap:8px; } .content-edit-bar .content-button { padding:10px; font-size:11px; } .content-modal { padding:21px; } }
 @media(prefers-reduced-motion:reduce) { .content-room *, .content-modal * { animation:none !important; transition:none !important; } }

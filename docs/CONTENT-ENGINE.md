@@ -51,3 +51,23 @@ model access still apply; failures never switch to a paid API-key provider.
 Use current Claude Code and Codex versions supporting safe mode and
 `codex exec --ignore-user-config`. If Codex is not directly executable from
 the server's PATH, set `RIVENDELL_CODEX_BIN` to its native executable.
+
+## Publishing account setup
+
+Content → Connections uses Ayrshare for social account linking. Administrator
+setup accepts an API key and a separate brand Profile Key, or creates a new
+profile under the existing Ayrshare plan. Credentials stay in the engine's
+private `~/.rallypoint/ayrshare.json`; browsers receive only status and account
+names. `RALLYPOINT_AYRSHARE_PATH` overrides this file for isolated testing.
+
+Connect accounts requests a short-lived URL from Ayrshare's
+`POST /profiles/link-sessions`, opens it in a separate browser tab and refreshes
+verified account status when the user returns. No private signing key or email
+delivery is required. The supported publishing destinations remain Facebook,
+Instagram, LinkedIn and X. X needs developer credentials. An Ayrshare profile
+takes precedence over legacy GHL social settings, without silently falling back
+to another provider. GHL blogs remain a separate connection; email is draft-only.
+
+Provider reference: [Ayrshare link sessions](https://www.ayrshare.com/docs/apis/profiles/create-link-session),
+[profile creation](https://www.ayrshare.com/docs/apis/profiles/create-profile),
+[verified account details](https://www.ayrshare.com/docs/apis/user/profile-details).

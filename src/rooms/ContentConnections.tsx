@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ExternalLink, LoaderCircle, RefreshCw } from 'lucide-react';
 import { contentRequest } from '../data/api';
 import { CONTENT_BRANDS, CONTENT_CHANNELS, type ContentBrand } from '../data/content';
+import { AyrshareConnection } from './AyrshareConnection';
 
 type Choice = { id: string; name: string; platform?: string };
 type Connection = {
@@ -43,7 +44,9 @@ export function ContentConnections({ brand, onSaved }: { brand: ContentBrand; on
   };
   const choose = (field: 'blogId' | 'authorId' | 'userId', title: string, options: Choice[]) => <label className="content-field">{title}<select aria-label={title} value={selection[field]} disabled={busy} onChange={(e) => setSelection((old) => ({ ...old, [field]: e.target.value }))}><option value="">Choose {title.toLowerCase()}</option>{options.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>;
   return <div className="content-connection-setup">
-    <p className="content-hint">Connect {CONTENT_BRANDS[brand]} once. Then edit, approve, and publish here in TARDIS.</p>
+    <AyrshareConnection key={brand} brand={brand} onSaved={onSaved}/>
+    <details><summary>Blog publishing · GHL</summary>
+    <p className="content-hint">Ayrshare publishes social posts. Connect {CONTENT_BRANDS[brand]}’s GHL blog here when you have access. Email drafts can be prepared, but sending is not connected.</p>
     {error && <p className="content-notice error" role="alert">{error}</p>}
     {notice && <p className="content-notice" role="status">{notice}</p>}
     <details open={!connection?.configured}><summary>GHL connection settings</summary><p className="content-hint">Use this brand’s GHL location and a private integration token with Blog and Social Planner access. The token is stored privately on this computer.</p>
@@ -59,9 +62,10 @@ export function ContentConnections({ brand, onSaved }: { brand: ContentBrand; on
       {choose('authorId', 'Blog author', connection.authors || [])}
       {choose('userId', 'Publishing user', connection.users || [])}
       {['facebook', 'instagram', 'linkedin'].map((platform) => <label className="content-field" key={platform}>{CONTENT_CHANNELS[platform as keyof typeof CONTENT_CHANNELS]}<select value={selection.socialAccounts[platform] || ''} disabled={busy} onChange={(e) => setSelection((old) => ({ ...old, socialAccounts: { ...old.socialAccounts, [platform]: e.target.value } }))}><option value="">Choose an account</option>{(connection.accounts || []).filter((account) => account.platform === platform).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label>)}
-      <p className="content-hint">X needs a separate publishing connection; GHL no longer supports it. You can still create and review X drafts here.</p>
+      <p className="content-hint">Social destinations here are a legacy GHL option. Once an Ayrshare profile is configured, social posts use Ayrshare.</p>
       <button className="content-button primary" disabled={busy} onClick={() => void save()}>Save publishing destinations</button>
     </>}
     {!connection && !busy && <button className="content-button" onClick={() => void load()}>Try again</button>}
+    </details>
   </div>;
 }

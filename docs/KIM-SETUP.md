@@ -28,11 +28,33 @@ there is no Save step. The existing chat brightness toggle still works.
 
 The keys are `rivendell:style` and `rivendell:theme`. They are local preferences,
 not account identity or credentials; they are not synchronized across devices.
-This preset does not provision Linux, accounts, agents, or publishing access.
+The appearance preference itself does not provision accounts or publishing access.
+The installer below also provisions the six-agent content team.
 
 ## USB installation on the AMD computer
 
-Copy [`scripts/setup-kim.sh`](../scripts/setup-kim.sh) onto a USB stick. Keep the
+For the least typing, prepare a USB kit from the clean, reviewed repositories:
+
+```bash
+python scripts/build-kim-usb.py --rallypoint /path/to/RallyPoint --output /private/path/TARDIS-USB --workspace-config /private/path/workspace.json
+```
+
+The optional private `workspace.json` contains `SUPABASE_URL` and
+`SUPABASE_SERVICE_KEY` for the intended shared RallyPoint database. It is copied
+into the kit, so keep the kit private. Never commit or publish it. No chat history,
+personal settings, subscription tokens or unrelated credentials are copied.
+Without this file the installer asks for the database credentials.
+
+Copy the generated folder onto a USB. In the installed Linux, open that folder
+in Terminal and run `bash INSTALL.sh`. Enter the Linux password when asked.
+Source snapshots, checksums and release commits are included; GitHub login is
+deferred until future updates. Internet is still required for Linux packages and
+pinned runtimes. The kit never formats a disk, installs an OS or changes GPU
+drivers. It deliberately refuses a temporary live-USB session: installing there
+would disappear on reboot. This is a one-command vendor-preserving setup, not a
+bootable unattended OS image.
+
+Alternatively copy [`scripts/setup-kim.sh`](../scripts/setup-kim.sh) alone onto a USB stick. Keep the
 manufacturer's Linux installation and its AMD/ROCm stack. Finish its first boot,
 create Kim's normal user account, and connect to the internet. This installer
 supports Ubuntu/Debian on x86-64 or ARM64; other vendor distributions stop with
@@ -41,7 +63,7 @@ a clear message instead of replacing the OS.
 Before the visit, put the reviewed TARDIS and RallyPoint release commits on their
 shared GitHub repositories. Kim's GitHub account needs access to both
 `mrchevyceleb/TARDIS` and private `R-Link-LLC/RallyPoint`. Provision her intended
-content database and apply RallyPoint migrations through
+content database (the existing shared Operly/R-Link database may be used) and apply RallyPoint migrations through
 `0010_headless_content.sql`; have its URL and service-role key available privately.
 The script does not copy credentials or conversations from another installation.
 
@@ -57,14 +79,31 @@ repository permission, missing database credential, or unapplied migration stops
 setup clearly. Fix it and run the same command again.
 
 The script adds GNOME only when absent, enables graphical boot, installs isolated
-Node 22.22.0, pnpm 10.28.2, Claude Code 2.1.272 and Codex 0.154.0, builds TARDIS
+Node 22.22.0, pnpm 10.28.2, Claude Code 2.1.272, Codex 0.154.0 and FFmpeg, builds TARDIS
 with Lavender/Light defaults, and starts both loopback-only services. It generates
 new local gateway tokens and stores private configuration under
 `~/.config/tardis/` with user-only permissions. It adds **TARDIS** to GNOME's
 application launcher. If GNOME was newly installed, reboot when ready and choose
 the GNOME session; setup does not interrupt the machine with an automatic reboot.
+GNOME opens TARDIS after login once the server is healthy. Disable its entry in
+`~/.config/autostart/` if automatic opening is not wanted.
 
-Finish Kim's subscription logins from a terminal:
+The installer adds Chief of Staff, Operly / R-Link Coding Agent, Content
+Coordinator, Content Writer, Video Editor and Editor. The coding agent starts
+with Codex; the others with Claude. Each can switch among the three subscription
+engines. Existing agents and custom scopes are preserved. A one-time preset
+marker ensures future installs do not resurrect agents the user deleted.
+The Video Editor can work with supplied footage using FFmpeg; paid media
+generation and product repository access are separate setup steps.
+
+With the shared database, both installations see the same drafts, revisions,
+approval state and publication ledger. Their chats, agents and subscriptions
+remain local. A connected engine may claim jobs from this shared queue. Configure
+publishing credentials on the installation that will publish; they are stored
+locally and are not synchronized through the draft database.
+
+Open **Finish TARDIS Setup** from GNOME Applications for the sign-in menu, or
+finish Kim's subscription logins from a terminal:
 
 ```bash
 ~/.local/bin/tardis-cli claude auth login
@@ -72,11 +111,19 @@ Finish Kim's subscription logins from a terminal:
 ```
 
 Open `http://127.0.0.1:8091/xai-oauth` to connect her Grok subscription. Then open
-TARDIS **Content → Connections**, configure each brand's publishing connections,
+TARDIS **Content → Connections**, configure Ayrshare once for each brand,
 and verify the real accounts before sending anything. Create a draft, edit it,
 request a revision, and approve it. Publishing remains a separate explicit action.
 Account consent, subscription access, and publishing credentials require human
 sign-in; plugging in the USB alone cannot authorize them.
+
+For social accounts, an administrator first saves the Ayrshare API key and a
+distinct Profile Key per brand, or creates a brand profile under the existing
+Ayrshare plan. After that, **Connect accounts** opens Ayrshare's short-lived
+hosted sign-in page. Return to TARDIS to see verified account names. X requires
+X developer API credentials as well. GHL blog setup remains available separately;
+email sending is not implemented. No plan purchase or real publishing is
+performed by the installer.
 
 ## Versions, reruns, and maintenance
 
