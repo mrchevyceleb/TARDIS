@@ -200,6 +200,10 @@ configured support computer's IPv4 address, and TCP ports 2222/21118. Other
 interfaces and IPv6 cannot reach those ports. Existing firewall tables and SSH
 services are preserved. A newly installed distribution SSH service stays masked;
 the support service uses its own configuration and host key on port 2222.
+The managed firewall rules are reapplied after native nftables start/reload;
+stopping or restarting nftables also stops or restarts the support services.
+SSH independently checks the support computer's source address, and the RustDesk
+service has an independent network restriction to that address and loopback.
 RustDesk uses direct IP access, a localhost rendezvous setting, no LAN discovery,
 and an additional service network restriction against public relays. Screen help
 uses click-to-accept; file transfer, clipboard, terminal and tunneling features
@@ -232,6 +236,13 @@ allow-all rule. The local firewall adds a restriction, not an override of other 
 Before leaving: test SSH and `sudo`, an accepted and a rejected desktop connection,
 Pause, and reboot from the actual support computer. Real cross-tailnet authorization
 needs the owner's sign-in and device share; a sandbox test cannot complete that step.
+
+Installer recovery notes: an interruption after the RustDesk package installs but
+before the managed setup marker is written can require administrator inspection
+before rerunning (the installer refuses to adopt an ambiguous existing install).
+APT may update an existing OpenSSH package and restart its service; perform initial
+installation locally. A pre-existing Snap/static Tailscale install needs review:
+the support tools expect `/usr/bin/tailscale` and `tailscaled.service` from the DEB.
 
 References: [Tailscale device sharing](https://tailscale.com/docs/features/sharing),
 [RustDesk through Tailscale](https://tailscale.com/docs/solutions/access-remote-desktops-with-rustdesk),

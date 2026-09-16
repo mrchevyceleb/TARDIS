@@ -117,7 +117,7 @@ ListenAddress 0.0.0.0
 HostKey {key}
 PidFile /run/tardis-support/sshd.pid
 AuthorizedKeysFile {ROOT}/authorized_keys
-AllowUsers {ACCOUNT}
+AllowUsers {ACCOUNT}@{config['peerIp']}
 AuthenticationMethods publickey
 PasswordAuthentication no
 KbdInteractiveAuthentication no
@@ -134,18 +134,27 @@ PermitTunnel no
     write('/etc/systemd/system/tardis-support-firewall.service', '''[Unit]
 Description=TARDIS support network boundary
 After=nftables.service
+PartOf=nftables.service
 Before=tardis-support-sshd.service rustdesk.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/tardis-support firewall
+ExecReload=/usr/local/sbin/tardis-support firewall
 RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
+''', 0o644)
+    # Native nftables commonly starts with "flush ruleset". Append synchronous
+    # reapplication to its existing commands; PartOf handles service stop/restart.
+    write('/etc/systemd/system/nftables.service.d/tardis-support.conf', '''[Service]
+ExecStartPost=/usr/local/sbin/tardis-support firewall
+ExecReload=/usr/local/sbin/tardis-support firewall
 ''', 0o644)
     write('/etc/systemd/system/tardis-support-sshd.service', '''[Unit]
 Description=TARDIS key-only support SSH
 After=network.target tailscaled.service tardis-support-firewall.service
 Requires=tardis-support-firewall.service
+PartOf=tardis-support-firewall.service
 ConditionPathExists=/etc/tardis-support/enabled
 [Service]
 RuntimeDirectory=tardis-support
@@ -157,15 +166,15 @@ KillMode=control-group
 WantedBy=multi-user.target
 ''', 0o644)
     # Additional cgroup boundary: the RustDesk service cannot reach public relays.
-    write('/etc/systemd/system/rustdesk.service.d/tardis-support.conf', '''[Unit]
+    write('/etc/systemd/system/rustdesk.service.d/tardis-support.conf', f'''[Unit]
 After=tardis-support-firewall.service
 Requires=tardis-support-firewall.service
+PartOf=tardis-support-firewall.service
 ConditionPathExists=/etc/tardis-support/enabled
 [Service]
 IPAddressDeny=any
 IPAddressAllow=localhost
-IPAddressAllow=100.64.0.0/10
-IPAddressAllow=fd7a:115c:a1e0::/48
+IPAddressAllow={config['peerIp']}
 ''', 0o644)
     options = {'custom-rendezvous-server': '127.0.0.1', 'relay-server': '127.0.0.1',
                'direct-server': 'Y', 'direct-access-port': '21118', 'enable-lan-discovery': 'N',
