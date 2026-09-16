@@ -5,51 +5,38 @@ import { ChevronDown, Loader2, Play, Square, X } from 'lucide-react';
 import {
   DEFAULT_XAI_EFFORT,
   DEFAULT_XAI_MODEL,
-  DEFAULT_ZAI_EFFORT,
-  DEFAULT_ZAI_MODEL,
   WORKSPACE_COMPANIONS,
+  normalizeCompanion,
   XAI_EFFORTS,
   XAI_MODELS,
-  ZAI_EFFORTS,
-  ZAI_MODELS,
 } from '../chat/hooks/useCompanionPicker';
-import { CLAUDE_EFFORTS, CLAUDE_MODELS } from '../chat/components/CodexEnginePicker';
+import { CLAUDE_EFFORTS, CLAUDE_MODELS, normalizeClaudeModel } from '../chat/components/CodexEnginePicker';
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL, codexEffortsForModel, codexModelSpec } from '../chat/codexModels';
-import { FIREWORKS_PROVIDER, OPENROUTER_PROVIDER } from '../chat/hooks/useBananaModel';
 import { AgentUpdateConflictError, createAgent, updateAgentReq, deleteAgentReq, uploadAgentAvatar, removeAgentAvatar, agentAvatarUrl, DISC_INK, agentColor, type Agent } from './agents';
 import { GROK_VOICES } from '../voice/useGrokCall';
 
 type BrainModelOption = { id: string; label: string };
-
-const BANANA_EFFORTS = ['low', 'medium', 'high'];
 
 function defaultBrainSelection(engine: string): { model: string; effort: string } {
   if (engine === 'claude') return { model: CLAUDE_MODELS[0].id, effort: 'xhigh' };
   if (engine === 'codex') {
     return { model: DEFAULT_CODEX_MODEL, effort: codexModelSpec(DEFAULT_CODEX_MODEL).defaultEffort };
   }
-  if (engine === 'zai') return { model: DEFAULT_ZAI_MODEL, effort: DEFAULT_ZAI_EFFORT };
   if (engine === 'xai') return { model: DEFAULT_XAI_MODEL, effort: DEFAULT_XAI_EFFORT };
-  if (engine === 'banana') return { model: OPENROUTER_PROVIDER.defaultModel, effort: 'medium' };
-  if (engine === 'banana-fireworks') return { model: FIREWORKS_PROVIDER.defaultModel, effort: 'medium' };
   return { model: '', effort: 'medium' };
 }
 
 function effortOptions(engine: string, model: string): string[] {
   if (engine === 'claude') return CLAUDE_EFFORTS;
   if (engine === 'codex') return codexEffortsForModel(model);
-  if (engine === 'zai') return ZAI_EFFORTS;
   if (engine === 'xai') return XAI_EFFORTS;
-  return BANANA_EFFORTS;
+  return XAI_EFFORTS;
 }
 
 function staticModelOptions(engine: string): BrainModelOption[] {
   if (engine === 'claude') return CLAUDE_MODELS;
   if (engine === 'codex') return CODEX_MODELS;
-  if (engine === 'zai') return ZAI_MODELS;
   if (engine === 'xai') return XAI_MODELS;
-  if (engine === 'banana') return OPENROUTER_PROVIDER.tiers;
-  if (engine === 'banana-fireworks') return FIREWORKS_PROVIDER.tiers;
   return [];
 }
 
@@ -78,8 +65,6 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
   const [brainRevision, setBrainRevision] = useState(1);
   const [model, setModel] = useState(DEFAULT_XAI_MODEL);
   const [effort, setEffort] = useState(DEFAULT_XAI_EFFORT);
-  const [dynamicModels, setDynamicModels] = useState<Record<string, BrainModelOption[]>>({});
-  const [modelsLoading, setModelsLoading] = useState(false);
   const [voice, setVoice] = useState('ara');
   const [voiceListOpen, setVoiceListOpen] = useState(false);
   const [preview, setPreview] = useState<{ id: string; status: 'loading' | 'playing' } | null>(null);
@@ -111,9 +96,10 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     agentRef.current = agentId;
     setName(agent?.name ?? '');
     setRole(agent?.role ?? '');
-    const nextEngine = agent?.engine ?? 'xai';
+    const nextEngine = normalizeCompanion(agent?.engine);
     const defaults = defaultBrainSelection(nextEngine);
-    const nextModel = agent?.model ?? defaults.model;
+    const nextModel = agent?.engine === 'assistant' ? normalizeClaudeModel(agent.model)
+      : nextEngine === agent?.engine ? agent.model ?? defaults.model : defaults.model;
     const allowedEfforts = effortOptions(nextEngine, nextModel);
     setEngine(nextEngine);
     setBrainRevision(agent?.brainRevision ?? 1);
@@ -134,45 +120,6 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     if (reopened) nameRef.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, agentId]);
-
-  useEffect(() => {
-    if (!open) return;
-    const source = engine === 'banana'
-      ? { endpoint: '/api/banana/models', prefix: 'openrouter' }
-      : engine === 'banana-fireworks'
-        ? { endpoint: '/api/fireworks/models', prefix: 'fireworks' }
-        : engine === 'banana-local'
-          ? { endpoint: '/api/local/models', prefix: 'local' }
-          : null;
-    if (!source) {
-      setModelsLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setModelsLoading(true);
-    fetch(`${source.endpoint}?_=${Date.now()}`, { cache: 'no-store' })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`model catalog returned ${response.status}`);
-        return response.json() as Promise<{ data?: Array<{ id?: unknown; name?: unknown }> }>;
-      })
-      .then((payload) => {
-        if (cancelled) return;
-        const options = uniqueModels((payload.data ?? []).flatMap((entry) => {
-          if (typeof entry.id !== 'string' || !entry.id.trim()) return [];
-          const rawId = entry.id.trim();
-          const id = rawId.startsWith(`${source.prefix}/`) ? rawId : `${source.prefix}/${rawId}`;
-          const label = typeof entry.name === 'string' && entry.name.trim()
-            ? entry.name.trim()
-            : rawId.split('/').pop() || rawId;
-          return [{ id, label }];
-        }));
-        setDynamicModels((current) => ({ ...current, [engine]: options }));
-        setModel((current) => current || options[0]?.id || '');
-      })
-      .catch(() => { /* Preserve the current/default model if a catalog is offline. */ })
-      .finally(() => { if (!cancelled) setModelsLoading(false); });
-    return () => { cancelled = true; };
-  }, [open, engine]);
 
   const stopVoicePreview = () => {
     previewAudioRef.current?.pause();
@@ -290,7 +237,6 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
 
   const configuredModels = uniqueModels([
     ...staticModelOptions(engine),
-    ...(dynamicModels[engine] ?? []),
   ]);
   const modelOptions = model && !configuredModels.some((option) => option.id === model)
     ? [{ id: model, label: model }, ...configuredModels]
@@ -339,10 +285,12 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     } catch (e) {
       if (e instanceof AgentUpdateConflictError) {
         const current = e.current;
-        const defaults = defaultBrainSelection(current.engine);
-        const currentModel = current.model ?? defaults.model;
-        const options = effortOptions(current.engine, currentModel);
-        setEngine(current.engine);
+        const currentEngine = normalizeCompanion(current.engine);
+        const defaults = defaultBrainSelection(currentEngine);
+        const currentModel = current.engine === 'assistant' ? normalizeClaudeModel(current.model)
+          : currentEngine === current.engine ? current.model ?? defaults.model : defaults.model;
+        const options = effortOptions(currentEngine, currentModel);
+        setEngine(currentEngine);
         setModel(currentModel);
         setEffort(current.effort && options.includes(current.effort) ? current.effort : defaults.effort);
         setBrainRevision(current.brainRevision ?? 1);
@@ -441,9 +389,9 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
         <div className="bt-agent-brain-grid">
           <label className="bt-agent-field">
             <span>Model — the exact brain used everywhere</span>
-            <select value={model} onChange={(e) => chooseModel(e.target.value)} disabled={modelsLoading && modelOptions.length === 0}>
+            <select value={model} onChange={(e) => chooseModel(e.target.value)}>
               {modelOptions.length === 0 ? (
-                <option value="">{modelsLoading ? 'Loading models…' : 'No model available'}</option>
+                <option value="">No model available</option>
               ) : modelOptions.map((option) => (
                 <option key={option.id} value={option.id}>{option.label}</option>
               ))}
@@ -451,7 +399,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
           </label>
 
           <label className="bt-agent-field">
-            <span>{engine === 'banana-local' || engine === 'zai' || engine === 'xai' ? 'Thinking' : 'Reasoning effort'}</span>
+            <span>{engine === 'xai' ? 'Thinking' : 'Reasoning effort'}</span>
             <select value={effort} onChange={(e) => setEffort(e.target.value)}>
               {availableEfforts.map((option) => (
                 <option key={option} value={option}>{option[0].toUpperCase() + option.slice(1)}</option>

@@ -46,12 +46,15 @@ import { useLive } from '../chat/hooks/useLive';
 import type { HistoryItem } from './history';
 import { NativeOpenHelper } from '../components/NativeOpenHelper';
 import { ROOM_NAMES } from '../data/roomNames';
+import { AppearanceSettings } from '../theme/AppearanceSettings';
+import type { ThemeName, VisualStyle } from '../theme/applyTheme';
 import { TIMEY_WIMEY } from '../theme/voice';
 import { readSound, useIdle, useTripleTap, vworp, writeSound } from '../theme/eggs';
 
 export type RoomEntry = { key: string; label: string; icon: React.ReactNode };
 
 export const ROOM_ENTRIES: RoomEntry[] = [
+  { key: 'content', label: ROOM_NAMES.content.name, icon: <Pencil size={16} /> },
   { key: 'council', label: ROOM_NAMES.council.name, icon: <LayoutGrid size={16} /> },
   { key: 'dashboard', label: ROOM_NAMES.dashboard.name, icon: <Gauge size={16} /> },
   { key: 'tidings', label: ROOM_NAMES.tidings.name, icon: <Mail size={16} /> },
@@ -87,7 +90,10 @@ export type BotRailProps = {
   onNewAgent: () => void;
   activeRoom?: string;
   onOpenRoom: (key: string) => void;
-  theme: 'dark' | 'light';
+  theme: ThemeName;
+  visualStyle: VisualStyle;
+  onStyleChange: (style: VisualStyle) => void;
+  onThemeChange: (theme: ThemeName) => void;
   onToggleTheme: () => void;
   onOpenStudio: () => void;
   onHome: () => void;
@@ -211,6 +217,8 @@ function dayStamp(ts: number): string {
 export function BotRail(props: BotRailProps) {
   const [query, setQuery] = useState('');
   const [pluginsOpen, setPluginsOpen] = useState(false);
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
+  const appearanceTrigger = useRef<HTMLButtonElement>(null);
   const [agentMenu, setAgentMenu] = useState<AgentMenuState | null>(null);
   // Manual order drag-and-drop: the dragged agent id + where it would land.
   const [dragId, setDragId] = useState<string | null>(null);
@@ -523,7 +531,7 @@ export function BotRail(props: BotRailProps) {
               <AppWindow size={16} /> Studio IDE
             </button>
             <button className="bt-plug-row" onClick={() => { props.onToggleTheme(); setPluginsOpen(false); }}>
-              {props.theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />} {props.theme === 'dark' ? 'Classic console (light)' : 'Console room (dark)'}
+              {props.theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />} {props.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
             </button>
             <button className="bt-plug-row" onClick={() => { const next = !sound; setSound(next); writeSound(next); if (next) vworp(); }} aria-pressed={sound}>
               {sound ? <Volume2 size={16} /> : <VolumeX size={16} />} Sound {sound ? 'on' : 'off'}
@@ -531,12 +539,20 @@ export function BotRail(props: BotRailProps) {
             <NativeOpenHelper />
           </div>
         ) : null}
-        <button className="bt-foot-row" onClick={() => setPluginsOpen((o) => !o)} aria-haspopup="menu" aria-expanded={pluginsOpen}>
+        <button className="bt-foot-row" onClick={() => { setAppearanceOpen(false); setPluginsOpen((o) => !o); }} aria-haspopup="menu" aria-expanded={pluginsOpen}>
           <Plug size={17} /> Plugins
         </button>
-        <button className="bt-foot-row" title="The Doctor">
+        <button ref={appearanceTrigger} className="bt-foot-row" title="Your appearance settings" onClick={() => { setPluginsOpen(false); setAppearanceOpen((open) => !open); }} aria-haspopup="dialog" aria-expanded={appearanceOpen} aria-controls={appearanceOpen ? 'appearance-settings' : undefined}>
           <span className="bt-disc">Y</span> You
         </button>
+        {appearanceOpen ? <AppearanceSettings
+          theme={props.theme}
+          visualStyle={props.visualStyle}
+          onThemeChange={props.onThemeChange}
+          onStyleChange={props.onStyleChange}
+          onClose={(restoreFocus = true) => { setAppearanceOpen(false); if (restoreFocus) appearanceTrigger.current?.focus(); }}
+          triggerRef={appearanceTrigger}
+        /> : null}
         {idle && !anyBusy && !props.drawerOpen ? <div className="tardis-blink" aria-hidden="true">Don't blink.</div> : null}
       </div>
       {agentMenu && menuAgent ? (

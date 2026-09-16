@@ -24,7 +24,7 @@ import { normalizeWorkspacePath } from '../chat/utils/proxyLinks';
 import { useWorkspaceTree } from '../hooks/useRoomData';
 import { Evenstar, StarField } from '../theme/Ornaments';
 import { ROOM_NAMES } from '../data/roomNames';
-import { applyTheme } from '../theme/applyTheme';
+import { applyTheme, readTheme } from '../theme/applyTheme';
 import { FileTree } from './studio/FileTree';
 import { FileTab } from './studio/FileTab';
 import { ChatTab, type ChatTabApi } from './studio/ChatTab';
@@ -91,7 +91,7 @@ export function Studio() {
     // cover the content on first load.
     return typeof window !== 'undefined' && window.innerWidth <= 760;
   });
-  const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('rivendell:theme') === 'light' ? 'light' : 'dark'));
+  const [theme, setTheme] = useState(readTheme);
   const [zoom, setZoom] = useState<number>(() => {
     const v = Number(localStorage.getItem('rivendell:zoom'));
     return v >= 0.7 && v <= 2 ? v : 1;

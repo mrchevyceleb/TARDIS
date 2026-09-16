@@ -1,5 +1,20 @@
 import type { FileTreeNode, WorkspaceEditFileResponse, WorkspaceSaveResponse } from './types';
 
+export async function contentRequest<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (method === 'POST' && /\/(approve|publish)$/.test(path)) {
+    const intent = await contentRequest<{ token: string }>('/review-intent', 'POST', { path, version: (body as { version?: number } | undefined)?.version }, signal);
+    headers['X-Content-Review'] = intent.token;
+  }
+  const response = await fetch(`/api/content${path}`, {
+    method, signal, headers,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(data?.error || 'Could not reach the content desk. Please try again.');
+  return data as T;
+}
+
 export type LinkedComputer = {
   id: string; name: string; platform: string;
   computer?: { supported: boolean; reason?: string; approvalMode?: 'ask' | 'automatic'; paused?: boolean; control: { owner: string; label: string; purpose: string; expiresAt: number } | null };

@@ -38,7 +38,6 @@ export function ChatTab({
     chatId,
     enabled: Boolean(repo),
     model: picker.model,
-    contextWindowTokens: picker.isLocal ? picker.localContextWindow : undefined,
     effort: picker.effort,
     selectionRevision: picker.selectionRevision,
   });

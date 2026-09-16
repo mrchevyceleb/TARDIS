@@ -1,9 +1,7 @@
 // Shared types between mock + real-backend data shapes.
 
-// TARDIS binds each companion to a CLI/provider via this id. Claude Code
-// and Codex account choice comes from the selected repo's account-map rule.
-// The banana engine picker switches the effective cli to claude, banana
-// (OpenRouter), banana-fireworks, banana-local, zai, or xai.
+// Historical engine ids remain valid in durable transcripts and session stamps.
+// Selectable engines are restricted by WORKSPACE_COMPANIONS to subscriptions.
 export type CompanionId =
   | 'claude'
   | 'codex'

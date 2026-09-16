@@ -17,18 +17,18 @@ import {
   XCircle,
   Zap,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { apiJson } from '../data/api';
-import { CLAUDE_MODELS } from '../chat/components/CodexEnginePicker';
+import { CLAUDE_MODELS, DEFAULT_CLAUDE_MODEL } from '../chat/components/CodexEnginePicker';
 import {
   CODEX_MODELS,
   DEFAULT_CODEX_MODEL,
   codexModelSpec,
   normalizeCodexEffort,
 } from '../chat/codexModels';
-import { ZAI_MODELS, XAI_MODELS } from '../chat/hooks/useCompanionPicker';
+import { XAI_MODELS } from '../chat/hooks/useCompanionPicker';
 import type { CronAiModel, CronJob, CronRun } from '../data/types';
 import { Button, Chip, EmptyState, Surface } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
@@ -90,7 +90,7 @@ type CronDraft = {
 const emptyDraft: CronDraft = {
   name: '',
   engine: 'assistant',
-  model: 'claude-opus-4-8',
+  model: DEFAULT_CLAUDE_MODEL,
   effort: '',
   schedMode: 'simple',
   freq: 'daily',
@@ -111,22 +111,12 @@ const schedulePresets = [
   { label: 'M/F 7 AM', value: 'mon/fri 7am', cron: '0 7 * * 1,5' },
 ];
 
-// The engines available for scheduled work. Each one dispatches to a real
-// backend on the local cron runner (see assistant-mcp cron-engines.ts):
-//   assistant        → Claude Code CLI
-//   codex            → Codex CLI
-//   banana-local     → LM Studio local model (HTTP completion, on-box)
-//   zai              → GLM 5.3 via Z.ai (claude CLI redirected to z.ai)
-//   xai              → Grok 4.6 via xAI (claude CLI redirected to xAI + proxy)
-//   banana-fireworks → Fireworks models (HTTP completion, FIREWORKS_API_KEY)
-// The legacy `claude` cron id maps to the current `assistant` Claude Code lane.
+// Scheduled work uses the same three subscription engines as conversations.
+// The legacy cron id `assistant` is the Claude Code lane.
 const CRON_ENGINES: { id: string; label: string; hint: string }[] = [
-  { id: 'assistant', label: 'Claude Code', hint: 'Local authenticated CLI with tools' },
-  { id: 'codex', label: 'Codex', hint: 'Local authenticated CLI with tools' },
-  { id: 'banana-local', label: 'LM Studio · Local', hint: 'On-box local model · plain completion' },
-  { id: 'zai', label: 'GLM 5.3', hint: 'Z.ai GLM · agentic CLI with tools' },
-  { id: 'xai', label: 'Grok 4.6', hint: 'xAI Grok · agentic CLI with tools' },
-  { id: 'banana-fireworks', label: 'Fireworks', hint: 'Fireworks models · HTTP completion' },
+  { id: 'assistant', label: 'Claude Code', hint: 'Your authenticated subscription CLI with tools' },
+  { id: 'codex', label: 'Codex', hint: 'Your authenticated subscription CLI with tools' },
+  { id: 'xai', label: 'Grok', hint: 'Your Grok coding subscription with tools' },
 ];
 const KNOWN_ENGINES = new Set(CRON_ENGINES.map((e) => e.id));
 function engineLabel(id: string): string {
@@ -169,14 +159,13 @@ function prettifyEngineId(id: string): string {
   return cleaned || id;
 }
 
-// ── Per-engine model menus (no typing). Local LM Studio models are fetched live.
+// Subscription model menus.
 type ModelOpt = { id: string; label: string };
 function staticModelsForEngine(engine: string): ModelOpt[] {
-  if (engine === 'zai') return ZAI_MODELS;
   if (engine === 'xai') return XAI_MODELS;
   if (engine === 'codex') return CODEX_MODELS;
   if (engine === 'assistant') return CLAUDE_MODELS;
-  return []; // banana-local / banana-fireworks: fetched live
+  return [];
 }
 
 // ── Schedule builder: pick frequency + time + day, never type a cron string ──
@@ -268,8 +257,6 @@ export function Forge() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<CronDraft>(emptyDraft);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [localModels, setLocalModels] = useState<ModelOpt[]>([]);
-  const [fireworksModels, setFireworksModels] = useState<ModelOpt[]>([]);
   const [notice, setNotice] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
   // Synchronous in-flight guard for save. busyId (state) only blocks clicks
   // AFTER React re-renders, so a synchronous burst (rapid double-click, repeat
@@ -281,51 +268,12 @@ export function Forge() {
     if (kind === 'success') window.setTimeout(() => setNotice(null), 3500);
   }, []);
 
-  // Pull LM Studio's loaded models so the "Local" engine offers a dropdown, not a text box.
-  useEffect(() => {
-    let cancelled = false;
-    apiJson<{ data?: { id: string; name: string }[] }>('/api/local/models')
-      .then((res) => {
-        if (cancelled) return;
-        setLocalModels((res.data ?? []).map((m) => ({ id: m.id.replace(/^local\//, ''), label: m.name })));
-      })
-      .catch(() => { /* LM Studio offline — dropdown shows a placeholder */ });
-    return () => { cancelled = true; };
-  }, []);
-
-  // Pull the Fireworks catalog so the Fireworks engine offers a dropdown too.
-  // The /api/fireworks/models endpoint returns the same {id, name} shape.
-  useEffect(() => {
-    let cancelled = false;
-    apiJson<{ data?: { id: string; name: string }[] }>('/api/fireworks/models')
-      .then((res) => {
-        if (cancelled) return;
-        setFireworksModels((res.data ?? []).map((m) => ({ id: m.id, label: m.name })));
-      })
-      .catch(() => { /* Fireworks offline — dropdown shows a placeholder */ });
-    return () => { cancelled = true; };
-  }, []);
-
-  // When LM Studio / Fireworks models arrive and the engine is selected with no
-  // model yet, pick the first so the dropdown isn't blank.
-  useEffect(() => {
-    if (draft.engine === 'banana-local' && !draft.model && localModels.length) {
-      setDraft((d) => ({ ...d, model: localModels[0].id }));
-    }
-  }, [localModels, draft.engine, draft.model]);
-  useEffect(() => {
-    if (draft.engine === 'banana-fireworks' && !draft.model && fireworksModels.length) {
-      setDraft((d) => ({ ...d, model: fireworksModels[0].id }));
-    }
-  }, [fireworksModels, draft.engine, draft.model]);
-
-  const liveModels = draft.engine === 'banana-local' ? localModels : draft.engine === 'banana-fireworks' ? fireworksModels : null;
-  const modelOptions = liveModels ?? staticModelsForEngine(draft.engine);
+  const modelOptions = staticModelsForEngine(draft.engine);
   const codexEffortOptions = draft.engine === 'codex'
     ? codexModelSpec(draft.model).efforts
     : [];
   const initialSelectionFor = (engine: string): { model: string; effort: string } => {
-    const list = engine === 'banana-local' ? localModels : engine === 'banana-fireworks' ? fireworksModels : staticModelsForEngine(engine);
+    const list = staticModelsForEngine(engine);
     const model = engine === 'codex' ? DEFAULT_CODEX_MODEL : list[0]?.id ?? '';
     return {
       model,
@@ -350,8 +298,7 @@ export function Forge() {
   const pausedCount = jobs.filter((job) => job.status === 'paused').length;
   const failedCount = jobs.filter((job) => job.status === 'failed').length;
   const resolvedSchedule = resolveScheduleInput(draft.schedule);
-  const modelRequired = draft.engine === 'banana-local' || draft.engine === 'banana-fireworks';
-  const missingRequiredModel = modelRequired && !draft.model.trim();
+  const missingRequiredModel = !draft.model.trim();
   const cannotSave = !draft.name.trim() || !draft.prompt.trim() || !resolvedSchedule.valid || missingRequiredModel;
 
   const invalidate = async () => {
@@ -618,7 +565,7 @@ export function Forge() {
                   }}
                 >
                   {modelOptions.length === 0 && (
-                    <option value="">{draft.engine === 'banana-local' ? 'LM Studio offline' : draft.engine === 'banana-fireworks' ? 'Fireworks unavailable' : 'No models'}</option>
+                    <option value="">No models</option>
                   )}
                   {modelOptions.map((m) => (
                     <option key={m.id} value={m.id}>{m.label}</option>
@@ -731,7 +678,7 @@ export function Forge() {
               {cannotSave ? (
                 <p className="form-error">
                   {missingRequiredModel
-                    ? `Choose a ${draft.engine === 'banana-fireworks' ? 'Fireworks' : 'LM Studio'} model before saving.`
+                    ? 'Choose a model before saving.'
                     : 'Fill in the task title, schedule, and prompt before saving.'}
                 </p>
               ) : null}
@@ -950,8 +897,8 @@ function CronHistory({ runs, loading, error, readOnly, expanded, onToggle, onRef
 }
 
 function draftFromJob(job: CronJob): CronDraft {
-  // Clamp to one of the four known engines so editing a legacy/unknown job
-  // lands on a valid choice instead of a phantom dropdown value. A legacy
+  // Clamp to one of the three subscription engines so editing a legacy/unknown job
+  // lands on a valid choice instead of a phantom dropdown value.
   // A legacy `claude` job falls through to the current assistant lane.
   const fallback = job.aiModel === 'codex' ? 'codex' : 'assistant';
   const rawEngine = job.engine && KNOWN_ENGINES.has(job.engine) ? job.engine : fallback;
@@ -979,8 +926,6 @@ function draftFromJob(job: CronJob): CronDraft {
 }
 
 function validModelFor(engine: string, modelId: string | undefined): string {
-  // LM Studio / Fireworks model ids are dynamic (fetched live), so trust whatever was stored.
-  if (engine === 'banana-local' || engine === 'banana-fireworks') return modelId || '';
   const list = staticModelsForEngine(engine);
   if (modelId && list.some((m) => m.id === modelId)) return modelId;
   return engine === 'codex' ? DEFAULT_CODEX_MODEL : list[0]?.id ?? '';
@@ -1010,8 +955,7 @@ function normalizeDraft(draft: CronDraft): Partial<CronJob> {
     deliveryChannel: 'log_only',
     maxTokens: 2048,
     status: draft.status,
-    // Every engine runs on the local cron runner: CLI engines spawn the matching
-    // account (or Z.ai redirect); OpenRouter/Local go over HTTP from that process.
+    // Every engine runs through its authenticated CLI on the local cron runner.
     runtime: 'local',
     cwd: repo || undefined,
     permissionMode: undefined,

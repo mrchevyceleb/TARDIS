@@ -16,19 +16,32 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <title>TARDIS</title>
     <script>
-      // Apply the persisted theme BEFORE first paint so Classic-console users
-      // never see a dark flash. The React shells set it again in an effect.
-      try { var t = localStorage.getItem('rivendell:theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; if (t === 'light') { var m = document.querySelector('meta[name=theme-color]'); if (m) m.setAttribute('content', '#f4f1ea'); } } catch (e) {}
+      // Build defaults seed new installs; local choices always win. Keep this
+      // before first paint so neither style nor brightness flashes on reload.
+      var t = '%VITE_TARDIS_THEME%' === 'light' ? 'light' : 'dark';
+      var v = '%VITE_TARDIS_STYLE%' === 'lavender' ? 'lavender' : 'console';
+      try {
+        var savedTheme = localStorage.getItem('rivendell:theme');
+        var savedStyle = localStorage.getItem('rivendell:style');
+        if (savedTheme === 'light' || savedTheme === 'dark') t = savedTheme;
+        if (savedStyle === 'console' || savedStyle === 'lavender') v = savedStyle;
+      } catch (e) {}
+      document.documentElement.dataset.theme = t;
+      document.documentElement.dataset.style = v;
+      var bg = v === 'lavender' ? (t === 'light' ? '#faf8ff' : '#171321') : (t === 'light' ? '#f4f1ea' : '#08080a');
+      document.documentElement.style.setProperty('--boot-bg', bg);
+      var m = document.querySelector('meta[name=theme-color]');
+      if (m) m.setAttribute('content', bg);
     </script>
     <style>
       /* Boot: the box materialises. Pure CSS; it swallows input only while it
          is opaque (so a tap cannot land on an invisible control), releases as
          soon as it starts fading, and self-expires at 1.4s even if JS never
          runs. App.tsx fades it out once React has mounted. */
-      html { background: #08080a; }
-      html[data-theme="light"] { background: #f4f1ea; }
-      #boot { position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center; background: #08080a; pointer-events: auto; animation: boot-out .2s ease 1.4s forwards; }
-      html[data-theme="light"] #boot { background: #f4f1ea; }
+      html { background: var(--boot-bg, #08080a); }
+      html[data-theme="light"] { background: var(--boot-bg, #f4f1ea); }
+      #boot { position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center; background: var(--boot-bg, #08080a); pointer-events: auto; animation: boot-out .2s ease 1.4s forwards; }
+      html[data-theme="light"] #boot { background: var(--boot-bg, #f4f1ea); }
       #boot.out { animation: boot-out-now .2s ease both; pointer-events: none; }
       #boot svg { width: 46px; height: 46px; opacity: 0; animation: boot-lamp .7s ease-out both; filter: drop-shadow(0 0 12px rgba(242, 185, 95, .35)); }
       /* two soft pulses (~2.9 Hz on a 46px glyph, under the 3 Hz flash line) */

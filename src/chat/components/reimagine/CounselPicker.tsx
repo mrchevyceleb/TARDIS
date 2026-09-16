@@ -2,43 +2,26 @@
 // (§3.10). Reskins CompanionControls.tsx into a single "model chip" that opens
 // either a desktop popover ("Counsel of the house") or a mobile bottom sheet
 // ("The Counsel"). All state + persistence already live in useCompanionPicker;
-// this is presentation-only. CodexEnginePicker / ModelPicker / LocalModelPicker
-// slot into the expanded lane block for live model lists.
+// this is presentation-only, with subscription model and effort controls.
 
 import { useEffect } from 'react';
 import type { CompanionPicker } from '../../hooks/useCompanionPicker';
 import {
   WORKSPACE_COMPANIONS,
-  ZAI_MODELS,
-  ZAI_EFFORTS,
   XAI_MODELS,
   XAI_EFFORTS,
   companionAuthBlurb,
 } from '../../hooks/useCompanionPicker';
 import { CLAUDE_MODELS, CLAUDE_EFFORTS } from '../CodexEnginePicker';
 import { CODEX_MODELS, codexEffortsForModel } from '../../codexModels';
-import { ModelPicker } from '../ModelPicker';
-import { LocalModelPicker } from '../LocalModelPicker';
 import { StarSigil } from './icons';
-
-const REASONING_EFFORTS = ['low', 'medium', 'high'];
-// Local thinking labels map onto the stored low/medium/high values.
-const LOCAL_THINKING: Array<{ value: string; label: string }> = [
-  { value: 'low', label: 'off' },
-  { value: 'medium', label: 'auto' },
-  { value: 'high', label: 'on' },
-];
 
 type LaneMeta = { ring: string; short: string; word: string };
 
 const LANE_META: Record<string, LaneMeta> = {
-  claude: { ring: 'C', short: 'Claude Code · local profile', word: 'effort' },
-  codex: { ring: 'X', short: 'Codex · local profile', word: 'effort' },
-  banana: { ring: 'O', short: 'billed to your OpenRouter key', word: 'effort' },
-  'banana-fireworks': { ring: 'F', short: 'billed to your Fireworks key', word: 'effort' },
-  'banana-local': { ring: 'L', short: 'Local · no cloud cost', word: 'thinking' },
-  zai: { ring: 'Z', short: 'Z.ai coding plan', word: 'thinking' },
-  xai: { ring: 'G', short: 'xAI coding plan', word: 'thinking' },
+  claude: { ring: 'C', short: 'Claude Code subscription', word: 'effort' },
+  codex: { ring: 'X', short: 'Codex subscription', word: 'effort' },
+  xai: { ring: 'G', short: 'Grok coding subscription', word: 'thinking' },
 };
 
 function labelFor(id: string, list: Array<{ id: string; label: string }>): string {
@@ -50,17 +33,10 @@ function labelFor(id: string, list: Array<{ id: string; label: string }>): strin
 export function counselChipInfo(picker: CompanionPicker) {
   const meta = LANE_META[picker.companion] ?? { ring: '•', short: '', word: 'effort' };
   let name = picker.companion;
-  let effortRaw = picker.effort ?? '';
+  const effort = picker.effort ?? '';
   if (picker.isClaude) name = labelFor(picker.claudeModel, CLAUDE_MODELS);
   else if (picker.isCodex) name = labelFor(picker.codexModel, CODEX_MODELS);
-  else if (picker.isZai) name = labelFor(picker.zaiModel, ZAI_MODELS);
   else if (picker.isXai) name = labelFor(picker.xaiModel, XAI_MODELS);
-  else if (picker.isOpenRouter) name = picker.bananaModel.model || 'OpenRouter';
-  else if (picker.isFireworks) name = picker.fireworksModel.model || 'Fireworks';
-  else if (picker.isLocal) name = picker.localModel || 'Local';
-  // Local lane shows off/auto/on instead of the stored low/medium/high.
-  const effort =
-    picker.isLocal ? LOCAL_THINKING.find((t) => t.value === effortRaw)?.label ?? effortRaw : effortRaw;
   const lane = WORKSPACE_COMPANIONS.find((c) => c.id === picker.companion);
   const blurb = companionAuthBlurb(picker.cli, picker.account);
   return { ring: meta.ring, name, effort, word: meta.word, short: meta.short, blurb, laneLabel: lane?.label ?? name };
@@ -97,26 +73,21 @@ function EffortPills({
   options,
   current,
   onPick,
-  thinking,
 }: {
   options: string[];
   current: string;
   onPick: (v: string) => void;
-  thinking?: boolean;
 }) {
-  const labels = thinking
-    ? options.map((v) => LOCAL_THINKING.find((t) => t.value === v)?.label ?? v)
-    : options;
   return (
     <>
-      {options.map((v, i) => (
+      {options.map((v) => (
         <button
           key={v}
           type="button"
           className={`mini${current === v ? ' on' : ''}`}
           onClick={() => onPick(v)}
         >
-          {labels[i]}
+          {v}
         </button>
       ))}
     </>
@@ -196,23 +167,6 @@ function LaneControls({ picker }: { picker: CompanionPicker }) {
           />
         </>
       )}
-      {picker.isZai && (
-        <>
-          <span className="ctl-lab">model</span>
-          {ZAI_MODELS.map((m) => (
-            <button
-              key={m.id}
-              type="button"
-              className={`mini${picker.zaiModel === m.id ? ' on' : ''}`}
-              onClick={() => picker.setZaiModel(m.id)}
-            >
-              {m.label}
-            </button>
-          ))}
-          <span className="ctl-lab">thinking</span>
-          <EffortPills options={ZAI_EFFORTS} current={picker.zaiEffort} onPick={picker.setZaiEffort} />
-        </>
-      )}
       {picker.isXai && (
         <>
           <span className="ctl-lab">model</span>
@@ -228,49 +182,6 @@ function LaneControls({ picker }: { picker: CompanionPicker }) {
           ))}
           <span className="ctl-lab">thinking</span>
           <EffortPills options={XAI_EFFORTS} current={picker.xaiEffort} onPick={picker.setXaiEffort} />
-        </>
-      )}
-      {picker.isOpenRouter && (
-        <>
-          <span className="ctl-lab">model</span>
-          <span className="lane-note" style={{ paddingTop: 0, paddingBottom: 4 }}>
-            <ModelPicker state={picker.bananaModel} />
-          </span>
-          <span className="ctl-lab">effort</span>
-          <EffortPills options={REASONING_EFFORTS} current={picker.bananaEffort} onPick={picker.setBananaEffort} />
-        </>
-      )}
-      {picker.isFireworks && (
-        <>
-          <span className="ctl-lab">model</span>
-          <span className="lane-note" style={{ paddingTop: 0, paddingBottom: 4 }}>
-            <ModelPicker state={picker.fireworksModel} />
-          </span>
-          <span className="ctl-lab">effort</span>
-          <EffortPills options={REASONING_EFFORTS} current={picker.bananaEffort} onPick={picker.setBananaEffort} />
-        </>
-      )}
-      {picker.isLocal && (
-        <>
-          <span className="ctl-lab">model</span>
-          <span className="lane-note" style={{ paddingTop: 0, paddingBottom: 4 }}>
-            <LocalModelPicker
-              onActiveChange={(m) => picker.setLocalModel(m ?? '')}
-              onContextChange={picker.setLocalContextWindow}
-              onThinkingSupportChange={picker.setLocalSupportsThinking}
-            />
-          </span>
-          {picker.localSupportsThinking ? (
-            <>
-              <span className="ctl-lab">thinking</span>
-              <EffortPills
-                options={LOCAL_THINKING.map((t) => t.value)}
-                current={picker.bananaEffort}
-                onPick={picker.setBananaEffort}
-                thinking
-              />
-            </>
-          ) : null}
         </>
       )}
       <span className="lane-note">{counselChipInfo(picker).blurb}</span>

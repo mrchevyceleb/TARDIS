@@ -29,13 +29,14 @@ import { BotPanel, type ChatMeta } from './BotPanel';
 import { AgentEditor } from './AgentEditor';
 import { CallOverlay } from '../voice/CallOverlay';
 import { useKonami } from '../theme/eggs';
-import { applyTheme } from '../theme/applyTheme';
+import { applyTheme, readTheme, readVisualStyle } from '../theme/applyTheme';
 import { TAGLINE } from '../theme/voice';
 import { useAgents, reorderAgentIds, patchAgent, sameChatId, type Agent } from './agents';
 import { useChatHistory, type HistoryItem } from './history';
 import { OPEN_PANE_EVENT } from './messagePins';
 
 import { Council } from '../rooms/Council';
+import { Content } from '../rooms/Content';
 import { Dashboard } from '../rooms/Dashboard';
 import { Tidings } from '../rooms/Tidings';
 import { Calendar } from '../rooms/Calendar';
@@ -49,6 +50,7 @@ import { Annals } from '../rooms/Annals';
 import { Scribe } from '../rooms/Scribe';
 
 const ROOMS: Record<string, ComponentType> = {
+  content: Content,
   council: Council,
   dashboard: Dashboard,
   tidings: Tidings,
@@ -98,14 +100,13 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   const [railCollapsed, setRailCollapsed] = useState(() => localStorage.getItem('rivendell:rail-collapsed') === 'true');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [meta, setMeta] = useState<ChatMeta | null>(null);
-  const [theme, setTheme] = useState<'dark' | 'light'>(() =>
-    localStorage.getItem('rivendell:theme') === 'light' ? 'light' : 'dark',
-  );
+  const [theme, setTheme] = useState(readTheme);
+  const [visualStyle, setVisualStyle] = useState(readVisualStyle);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<Agent | undefined>(undefined);
   const [callAgent, setCallAgent] = useState<Agent | null>(null);
 
-  useEffect(() => { applyTheme(theme); }, [theme]);
+  useEffect(() => { applyTheme(theme, visualStyle); }, [theme, visualStyle]);
   useEffect(() => { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); }, [view]);
   useEffect(() => { localStorage.setItem(PANE_KEY, String(paneOpen)); }, [paneOpen]);
   useEffect(() => {
@@ -301,7 +302,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
 
   return (
     <StudioFilesContext.Provider value={fileActions}>
-      <div className={`bot-app${railCollapsed ? ' rail-collapsed' : ''}${regen ? ' regen' : ''}`} data-theme={theme}>
+      <div className={`bot-app${railCollapsed ? ' rail-collapsed' : ''}${regen ? ' regen' : ''}`} data-theme={theme} data-style={visualStyle}>
         <BotRail
           collapsed={railCollapsed}
           onToggleCollapse={() => setRailCollapsed((c) => !c)}
@@ -328,6 +329,9 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
           activeRoom={activeRoom}
           onOpenRoom={openRoom}
           theme={theme}
+          visualStyle={visualStyle}
+          onStyleChange={setVisualStyle}
+          onThemeChange={setTheme}
           onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
           onOpenStudio={openStudio}
           onHome={goHome}
