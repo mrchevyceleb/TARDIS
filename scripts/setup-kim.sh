@@ -261,6 +261,7 @@ done
 printf 'TARDIS is still starting. Open it from Applications in a moment.\n' >&2
 EOF
 chmod 700 "$HOME/.local/bin/tardis-open"
+if [[ ! -e "$HOME/.config/autostart/tardis.desktop" ]]; then
 cat > "$HOME/.config/autostart/tardis.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
@@ -270,6 +271,7 @@ Icon=applications-office
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
+fi
 systemctl --user daemon-reload
 systemctl --user enable --now tardis.service rallypoint-engine.service
 sudo loginctl enable-linger "$USER"

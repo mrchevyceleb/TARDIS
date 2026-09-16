@@ -58,6 +58,7 @@
 .content-job div span { color:var(--r-ink-mute); font-size:11px; }
 .content-job button { border:0; background:transparent; color:var(--r-ink-mute); font:inherit; font-size:11px; cursor:pointer; }
 .content-modal { --content-accent:var(--r-gold); width:min(520px,calc(100vw - 32px)); max-height:85dvh; overflow:auto; background:var(--r-bg-raised); color:var(--r-ink); border:1px solid var(--r-line-strong); border-radius:23px; padding:28px; box-shadow:0 25px 100px #0005; font-family:var(--r-body); }
+.content-modal { margin:auto; }
 .content-modal::backdrop { background:#09081299; backdrop-filter:blur(5px); }
 .content-modal-heading { display:flex; align-items:center; justify-content:space-between; gap:15px; margin-bottom:24px; }
 .content-modal-heading h2 { font-size:23px; font-weight:600; margin:0; letter-spacing:-.035em; }

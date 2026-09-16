@@ -26,7 +26,7 @@ for repo in (tardis, rallypoint):
 if output.exists():
     raise SystemExit('Choose a new output folder. The builder never overwrites an existing USB kit.')
 for repo in (tardis, rallypoint):
-    if output == repo or repo in output.parents and output.relative_to(repo).parts[0] not in ('.git', 'tmp'):
+    if output == repo or repo in output.parents and output.relative_to(repo).parts[0] != 'tmp':
         raise SystemExit('Use a private output folder outside tracked source, or inside tmp/.')
 workspace = None
 if args.workspace_config:

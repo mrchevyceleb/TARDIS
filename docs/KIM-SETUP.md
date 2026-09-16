@@ -33,7 +33,9 @@ The installer below also provisions the six-agent content team.
 
 ## USB installation on the AMD computer
 
-For the least typing, prepare a USB kit from the clean, reviewed repositories:
+For the least typing, prepare a USB kit from the clean, reviewed repositories.
+The packaging computer needs Python 3.11 or newer; this requirement applies to
+the kit builder, not the Linux installation script:
 
 ```bash
 python scripts/build-kim-usb.py --rallypoint /path/to/RallyPoint --output /private/path/TARDIS-USB --workspace-config /private/path/workspace.json

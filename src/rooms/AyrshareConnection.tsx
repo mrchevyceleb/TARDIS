@@ -21,12 +21,12 @@ export function AyrshareConnection({ brand, onSaved }: { brand: ContentBrand; on
   const base = `/connections/${brand}/ayrshare`;
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const result = await contentRequest<Status>(base, 'GET', undefined, signal);
-    setStatus(result); return result;
+    setStatus(result); setError(''); return result;
   }, [base]);
   useEffect(() => {
     const controller = new AbortController();
     void refresh(controller.signal).catch((e) => { if (!controller.signal.aborted) setError(e.message); }).finally(() => { if (!controller.signal.aborted) setBusy(''); });
-    const focus = () => { void refresh(controller.signal).then(onSaved).catch(() => {}); };
+    const focus = () => { void refresh(controller.signal).then(onSaved).catch((e) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Could not refresh account connections.'); }); };
     window.addEventListener('focus', focus);
     return () => { controller.abort(); window.removeEventListener('focus', focus); };
   }, [refresh, onSaved]);
