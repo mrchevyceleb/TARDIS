@@ -142,6 +142,30 @@ export function isAutomationPeerEvent(raw: unknown): boolean {
   return isRoutinePromptText(eventText(raw));
 }
 
+/** Grok/Claude persist tool results as `user` events. Those are not a human
+ *  message and must not end an automation turn for unread counting. */
+export function isToolResultUserEvent(raw: unknown): boolean {
+  if (eventType(raw) !== 'user') return false;
+  const inner = eventInner(raw);
+  const msg = inner?.message;
+  if (!msg || typeof msg !== 'object') return false;
+  const content = (msg as { content?: unknown }).content;
+  if (!Array.isArray(content) || content.length === 0) return false;
+  let sawTool = false;
+  for (const item of content) {
+    if (!item || typeof item !== 'object') return false;
+    const t = (item as { type?: unknown }).type;
+    if (t === 'tool_result') {
+      sawTool = true;
+      continue;
+    }
+    if (t === 'text' && typeof (item as { text?: unknown }).text === 'string'
+      && (item as { text: string }).text.trim()) return false;
+    if (t && t !== 'tool_result') return false;
+  }
+  return sawTool;
+}
+
 /** Skip this event when counting unread / picking a sidebar preview. */
 export function isRoutineNoiseEvent(raw: unknown, afterAutomation: boolean): boolean {
   const t = eventType(raw);
@@ -151,6 +175,11 @@ export function isRoutineNoiseEvent(raw: unknown, afterAutomation: boolean): boo
   if (t === 'assistant' || t === 'result') {
     const nonempty = texts.map((x) => x.trim()).filter(Boolean);
     const quietAll = nonempty.length === 0 || nonempty.every(isQuietRoutineReply);
+    const protocolNoop = nonempty.length > 0
+      && nonempty.every((x) => isExactNoUpdate(x) || isModelEosToken(x));
+    // Protocol idle tokens (exact NO_UPDATE / EOS) never badge, even if a
+    // tool-result `user` event already closed the automation turn.
+    if (protocolNoop) return true;
     if (afterAutomation && t === 'assistant' && quietAll) return true;
     if (t === 'result' && afterAutomation) return true;
     if (t === 'assistant' && !eventText(raw).trim()) return true;

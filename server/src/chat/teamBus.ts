@@ -11,7 +11,6 @@ import { ELROND_WORKSPACE_PATH } from '../config.ts';
 import { brainForAgent, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
 import { bareChatId, logKeyFor } from './threadKey.ts';
 import { extractVisibleTurns } from './threadWindow.ts';
-import { isThreadWatched } from './threadWatch.ts';
 import { JsonStore, type StoredRecord } from '../lib/jsonStore.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
@@ -426,34 +425,25 @@ export async function sendToAgentHome(
   text: string,
   opts: { peerFrom: string; peerFromRole?: string; peerText?: string },
 ): Promise<{ delivered: boolean; reason?: string }> {
-  const { chatKey } = agentLogKey(agent);
-  const watchedByHuman = () => opts.peerFromRole === 'automation'
-    && isThreadWatched(ELROND_WORKSPACE_PATH, chatKey);
-  // Human conversation always owns a visible home thread. Do not even spawn a
-  // routine engine while the user is there; the next scheduled cycle can retry.
-  if (watchedByHuman()) {
-    return { delivered: false, reason: 'agent thread is actively watched — routine deferred' };
-  }
   let session: SessionLike;
   let model: string | undefined;
   let effort: string | undefined;
+  let nativeSteer = false;
   try {
+    // Never skip because the agent is busy. Wait for idle or a steer window,
+    // same as teammate delivery. A watched Hall tab is not a skip.
     const admission = await getRecipientSessionForDelivery(
       agent,
-      Date.now() + 30_000,
+      Date.now() + RECIPIENT_IDLE_WAIT_MS,
       undefined,
-      true,
+      false,
     );
     session = admission.session;
     model = admission.model;
     effort = admission.effort;
+    nativeSteer = admission.nativeSteer;
   } catch (e) {
     return { delivered: false, reason: `engine unavailable: ${(e as Error).message}` };
-  }
-  // Recheck after the async bind: the user may have opened the thread while a
-  // cold engine was starting.
-  if (watchedByHuman()) {
-    return { delivered: false, reason: 'agent thread became active — routine deferred' };
   }
   const deliveryId = randomUUID();
   let echoed = false;
@@ -470,6 +460,7 @@ export async function sendToAgentHome(
       peerFromRole: opts.peerFromRole,
       peerText: opts.peerText,
       peerDeliveryId: deliveryId,
+      allowNativePeerSteer: nativeSteer,
       model,
       effort,
     });

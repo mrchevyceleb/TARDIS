@@ -17,6 +17,7 @@ import {
   isAutomationPeerEvent,
   isQuietRoutineReply,
   isRoutineNoiseEvent,
+  isToolResultUserEvent,
 } from './routineNoise.ts';
 
 const READS_FILE = join(STATE_DIR, 'agent-reads.json');
@@ -67,6 +68,7 @@ function isNonReplyResult(raw: unknown): boolean {
   const sub = typeof inner.subtype === 'string' ? inner.subtype : '';
   if (sub === 'error_during_execution' || sub === 'error') return true;
   const text = resultReplyText(raw);
+  if (isQuietRoutineReply(text)) return true;
   const dur = inner.duration_ms;
   if (typeof dur === 'number' && dur <= 0 && !text) return true;
   const turns = inner.num_turns;
@@ -159,6 +161,9 @@ export function agentUnread(agent: Agent): number {
         autoAfterRead = pastCursor;
         continue;
       }
+      // Tool results arrive as `user` events. They are still the automation
+      // turn, not a human message that should flush it.
+      if (isToolResultUserEvent(raw)) continue;
       if (t === '_user_echo' || t === 'user' || t === 'peer_message') {
         flushAuto();
         if (t === 'peer_message' && pastCursor) unread++;

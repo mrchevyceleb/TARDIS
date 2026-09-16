@@ -25,7 +25,6 @@ import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
 import { getXaiOauthToken, getXaiOauthTokenSync, hasXaiOauthToken } from '../routes/xai-oauth.ts';
 import { isRobotVoiceChatId, isVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STYLE_ADDENDUM, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
-import { isThreadWatched } from './threadWatch.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
@@ -806,9 +805,8 @@ class ClaudeSession {
       }
     }
     const automationRequest = opts.peerFromRole === 'automation';
-    if (automationRequest && (!startsNewTurn || isThreadWatched(this.cwd, this.chatId))) {
-      throw new Error('routine deferred because this thread is active');
-    }
+    // Routines never skip a live turn. If native admission already won above,
+    // steer into this turn. A visible Hall tab is not a skip.
     if (!startsNewTurn && this.automationTurn) {
       // Register normally waits for this boundary. Keep this admission guard
       // here too so a race can reject, but never hijack, the routine mission.

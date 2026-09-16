@@ -48,6 +48,20 @@ test('every-10-minute cron still matches the current minute', () => {
   assert.equal(routineIsDue(delivered, local(2026, 9, 8, 11, 3)), false);
 });
 
+test('every-5-minute cron is due on the next five-minute slot', () => {
+  const r = routine({
+    schedule: 'cron:*/5 7-22 * * *',
+    lastRunAt: local(2026, 9, 8, 11, 0),
+  });
+  assert.equal(routineIsDue(r, local(2026, 9, 8, 11, 5)), true);
+  assert.equal(routineIsDue(r, local(2026, 9, 8, 11, 4)), false);
+  const delivered = routine({
+    schedule: 'cron:*/5 7-22 * * *',
+    lastRunAt: local(2026, 9, 8, 11, 5) + 2_000,
+  });
+  assert.equal(routineIsDue(delivered, local(2026, 9, 8, 11, 7)), false);
+});
+
 test('parseSchedule still accepts the three schedule shapes', () => {
   assert.ok(parseSchedule('every:30m'));
   assert.ok(parseSchedule('weekdays:09:00'));
