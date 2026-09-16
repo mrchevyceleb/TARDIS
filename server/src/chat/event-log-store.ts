@@ -48,7 +48,7 @@ function bumpEventLogRevision(ev?: SessionEvent): void {
     const type = (inner as { type?: string } | undefined)?.type;
     // One invalidation at semantic message/turn boundaries, not per streamed
     // token. Otherwise an active agent forces a full directory scan every poll.
-    if (!['_user_echo', '_voice_transcript', 'peer_message', 'assistant', 'result', 'turnEnd', 'compacted'].includes(type ?? '')) return;
+    if (!['_user_echo', '_voice_transcript', 'peer_message', '_reaction', 'assistant', 'result', 'turnEnd', 'compacted'].includes(type ?? '')) return;
   }
   revision += 1;
 }

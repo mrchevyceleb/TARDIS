@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { ChatBlock } from '../../data/types';
+import { REACTION_EMOJIS } from '../../data/reactions';
 import { Markdown } from '../primitives/Markdown';
 import { ArtifactCard } from '../blocks/ArtifactCard';
 import { DocLinkCard } from '../blocks/DocLinkCard';
@@ -94,17 +95,23 @@ export function ActionsRow({
   getText,
   pinned,
   onTogglePin,
+  onReact,
+  mine,
 }: {
   getText: () => string;
   pinned?: boolean;
   onTogglePin?: () => void | Promise<void>;
+  onReact?: (emoji: string) => void;
+  mine?: string[];
 }) {
   const [copied, setCopied] = useState(false);
   const [localPinned, setLocalPinned] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const isPinned = onTogglePin ? Boolean(pinned) : localPinned;
+  const mineSet = new Set(mine ?? []);
   return (
-    <div className="acts">
+    <div className={`acts${pickerOpen ? ' react-open' : ''}`}>
       <button
         type="button"
         className={`act${copied ? ' copied' : ''}`}
@@ -121,6 +128,40 @@ export function ActionsRow({
       >
         {copied ? 'copied ✓' : 'copy'}
       </button>
+      {onReact ? (
+        <span className={`react-wrap${pickerOpen ? ' open' : ''}`}>
+          <button
+            type="button"
+            className="act"
+            aria-expanded={pickerOpen}
+            title="React"
+            onClick={(e) => {
+              e.stopPropagation();
+              setPickerOpen((open) => !open);
+            }}
+          >
+            react
+          </button>
+          {pickerOpen ? (
+            <span className="react-picker" role="listbox" aria-label="React with emoji">
+              {REACTION_EMOJIS.map((emoji) => (
+                <button
+                  key={emoji}
+                  type="button"
+                  className={`react-pick${mineSet.has(emoji) ? ' mine' : ''}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onReact(emoji);
+                    setPickerOpen(false);
+                  }}
+                >
+                  {emoji}
+                </button>
+              ))}
+            </span>
+          ) : null}
+        </span>
+      ) : null}
       <button
         type="button"
         className={`act${isPinned ? ' copied' : ''}`}
@@ -264,6 +305,7 @@ function PeerBubble({
   mobile,
   collapseSteps,
   pin,
+  onReact,
 }: {
   block: Extract<ChatBlock, { kind: 'peer' }>;
   responseBlocks: AssistantBlock[];
@@ -272,6 +314,7 @@ function PeerBubble({
   mobile: boolean;
   collapseSteps: boolean;
   pin?: ThreadPin;
+  onReact?: (targetSeq: number, emoji: string) => void;
 }) {
   const initial = (block.from || '?').trim().slice(0, 1).toUpperCase();
   const routineResult = block.fromRole === 'automation-result';
@@ -341,6 +384,7 @@ function PeerBubble({
                 mobile={mobile}
                 collapseSteps={collapseSteps}
                 pin={pin}
+                onReact={onReact}
               />
             </section>
           ) : null}
@@ -355,6 +399,7 @@ function PeerBubble({
           mobile={mobile}
           collapseSteps={collapseSteps}
           pin={pin}
+          onReact={onReact}
         />
       </div>
     ) : null}
@@ -559,6 +604,17 @@ function isAnswerProse(b: Extract<ChatBlock, { kind: 'text' }>): boolean {
   return t.length > 0 && !isProtocolNoopText(t);
 }
 
+/** Between-tool commentary. Hall already has tool cards and a live-turn pill.
+ *  Scratchpad "Update" bubbles are not the reply. */
+function isScratchUpdate(b: Extract<ChatBlock, { kind: 'text' }>): boolean {
+  return b.presentation === 'update';
+}
+
+function visibleAssistantBlocks(blocks: AssistantBlock[], collapseSteps: boolean): AssistantBlock[] {
+  if (!collapseSteps) return blocks;
+  return blocks.filter((b) => !(b.kind === 'text' && isScratchUpdate(b)));
+}
+
 function showTextCaret(b: Extract<ChatBlock, { kind: 'text' }>, streaming: boolean): boolean {
   return Boolean(b.open) && streaming;
 }
@@ -568,32 +624,70 @@ function showTextCaret(b: Extract<ChatBlock, { kind: 'text' }>, streaming: boole
  * prose is private reasoning from its words or its position before a tool. */
 // A run of consecutive assistant blocks that share a turnId render under a
 // single "✦ TARDIS" header (the prototype's per-turn group).
+function ReactionStrip({
+  reactions,
+  onReact,
+}: {
+  reactions: Array<{ emoji: string; from: string }>;
+  onReact?: (emoji: string) => void;
+}) {
+  if (!reactions.length) return null;
+  const counts = new Map<string, { count: number; mine: boolean }>();
+  for (const item of reactions) {
+    const current = counts.get(item.emoji) ?? { count: 0, mine: false };
+    current.count += 1;
+    if (item.from === 'Matt') current.mine = true;
+    counts.set(item.emoji, current);
+  }
+  return (
+    <div className="react-strip" aria-label="Reactions">
+      {[...counts.entries()].map(([emoji, rec]) => (
+        <button
+          key={emoji}
+          type="button"
+          className={`react-chip${rec.mine ? ' mine' : ''}`}
+          disabled={!onReact}
+          onClick={(e) => {
+            e.stopPropagation();
+            onReact?.(emoji);
+          }}
+        >
+          <span>{emoji}</span>
+          {rec.count > 1 ? <span className="react-count">{rec.count}</span> : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function ElrondGroup({
   blocks,
   streaming,
   mobile,
   collapseSteps = false,
   pin,
+  onReact,
 }: {
   blocks: AssistantBlock[];
   streaming: boolean;
   mobile: boolean;
   collapseSteps?: boolean;
   pin?: ThreadPin;
+  onReact?: (targetSeq: number, emoji: string) => void;
 }) {
   const [acted, setActed] = useState(false);
-  const first = blocks[0];
-  const textBlocks = blocks.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text');
-  const isUpdate = collapseSteps && textBlocks.length > 0 && textBlocks.every((b) => b.presentation === 'update');
+  const visible = visibleAssistantBlocks(blocks, collapseSteps);
+  if (!visible.length) return null;
+  const first = visible[0];
+  const textBlocks = visible.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text');
   const isActivity = collapseSteps && textBlocks.length === 0;
   const copyText = () => {
     const src = textBlocks.filter(isAnswerProse);
     return (src.length ? src : textBlocks.filter(hasVisibleProse)).map((b) => b.text).join('\n\n');
   };
   const isPinned = Boolean(pin?.pinnedBlockIds.includes(first.id));
-  // Grok mode collapses only consecutive tool calls. Assistant `text` blocks
-  // always render in their original position so a long-running turn remains a
-  // real conversation instead of hiding every message until the final result.
+  // Grok mode collapses consecutive tool calls and hides between-tool
+  // scratchpad ("Update") prose. The live-turn pill is the proof of life.
   const toolRuns = new Map<string, ToolBlock[]>();
   const toolRunSkip = new Set<string>();
   if (collapseSteps) {
@@ -605,7 +699,7 @@ function ElrondGroup({
       }
       run = [];
     };
-    for (const b of blocks) {
+    for (const b of visible) {
       if (b.kind === 'tool') run.push(b);
       else flush();
     }
@@ -615,14 +709,13 @@ function ElrondGroup({
     <div
       id={`msg-pin-${first.id}`}
       data-pin-block={first.id}
-      className={`msg m-elrond${isUpdate ? ' m-update' : ''}${isActivity ? ' m-activity' : ''}${acted ? ' acted' : ''}${isPinned ? ' pinned' : ''}`}
+      className={`msg m-elrond${isActivity ? ' m-activity' : ''}${acted ? ' acted' : ''}${isPinned ? ' pinned' : ''}`}
       onClick={mobile ? () => setActed((a) => !a) : undefined}
     >
       <div className="who">
         <span className="mini">✦</span> {BRAND} <span className="when">{timeLabel(first.ts)}</span>
       </div>
-      {isUpdate && <div className="update-label">Update</div>}
-      {blocks.map((b) => {
+      {visible.map((b) => {
         switch (b.kind) {
           case 'tool': {
             if (toolRunSkip.has(b.id)) return null;
@@ -646,18 +739,36 @@ function ElrondGroup({
             return null;
         }
       })}
-      {(textBlocks.some(isAnswerProse) || textBlocks.some(hasVisibleProse)) && !streaming ? (
-        <ActionsRow
-          getText={copyText}
-          pinned={isPinned}
-          onTogglePin={pin ? () => {
-            const src = textBlocks.filter(isAnswerProse);
-            const visible = src.length ? src : textBlocks.filter(hasVisibleProse);
-            const last = visible[visible.length - 1];
-            return pin.onToggle({ blockId: first.id, text: last?.text ?? copyText(), ts: first.ts });
-          } : undefined}
-        />
-      ) : null}
+      {(() => {
+        const answer = [...textBlocks].reverse().find((b) => isAnswerProse(b) && typeof b.seq === 'number')
+          ?? [...textBlocks].reverse().find((b) => hasVisibleProse(b) && typeof b.seq === 'number');
+        const targetSeq = answer?.seq;
+        const reactions = textBlocks.flatMap((b) => b.reactions ?? []);
+        const mine = reactions.filter((r) => r.from === 'Matt').map((r) => r.emoji);
+        const canReact = Boolean(onReact && targetSeq && !streaming);
+        return (
+          <>
+            <ReactionStrip
+              reactions={reactions}
+              onReact={canReact ? (emoji) => onReact!(targetSeq!, emoji) : undefined}
+            />
+            {(textBlocks.some(isAnswerProse) || textBlocks.some(hasVisibleProse)) && !streaming ? (
+              <ActionsRow
+                getText={copyText}
+                pinned={isPinned}
+                mine={mine}
+                onReact={canReact ? (emoji) => onReact!(targetSeq!, emoji) : undefined}
+                onTogglePin={pin ? () => {
+                  const src = textBlocks.filter(isAnswerProse);
+                  const visible = src.length ? src : textBlocks.filter(hasVisibleProse);
+                  const last = visible[visible.length - 1];
+                  return pin.onToggle({ blockId: first.id, text: last?.text ?? copyText(), ts: first.ts });
+                } : undefined}
+              />
+            ) : null}
+          </>
+        );
+      })()}
     </div>
   );
 }
@@ -675,6 +786,8 @@ export type ChatThreadProps = {
   collapseSteps?: boolean;
   /** Grok shell: persist pin into the focused agent's right-pane pocket. */
   pin?: ThreadPin;
+  /** Persist an emoji reaction on a finished assistant bubble. */
+  onReact?: (targetSeq: number, emoji: string) => void;
   /** Suppress the typing indicator entirely (silent automation turn running). */
   suppressTyping?: boolean;
   /** Wall-clock start of the active turn, used for visible proof-of-life time. */
@@ -684,7 +797,7 @@ export type ChatThreadProps = {
 // Renders the full feed: day marks on day changes, user bubbles, per-turn
 // assistant groups (tool cards + streaming prose), and the live-turn pill
 // while a turn is live but no content has landed yet.
-export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = false, pin, suppressTyping = false, workingSince }: ChatThreadProps) {
+export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = false, pin, onReact, suppressTyping = false, workingSince }: ChatThreadProps) {
   const streaming = status === 'streaming';
   // The indicator lives until something VISIBLE lands in the CURRENT turn.
   // Looking across the whole transcript made any historical terminal-error or
@@ -871,10 +984,11 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
           mobile={mobile}
           collapseSteps={collapseSteps}
           pin={pin}
+          onReact={onReact}
         />,
       );
     } else {
-      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} />);
+      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} />);
     }
   }
 

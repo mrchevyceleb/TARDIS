@@ -214,6 +214,7 @@ export function GrokConversation(props: BotConversationProps) {
               collapseSteps
               suppressTyping={s.automationBusy}
               workingSince={s.workingSince}
+              onReact={s.react}
               pin={agent ? {
                 pinnedBlockIds: messagePins.pins.map((p) => p.blockId),
                 onToggle: messagePins.toggle,

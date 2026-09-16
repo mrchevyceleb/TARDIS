@@ -369,7 +369,7 @@
    Negative margin cancels the parent flex gap while height is 0, so a
    collapsed .acts does not leave a phantom strip under short replies. */
 .bot-app .rc .acts { gap: 4px; height: 0; opacity: 0; overflow: hidden; margin-top: -10px; transition: height 0.18s ease, opacity 0.18s ease, margin-top 0.18s ease; }
-.bot-app .rc .m-elrond:hover .acts, .bot-app .rc .m-elrond.acted .acts, .bot-app .rc .m-elrond:focus-within .acts { height: 24px; opacity: 1; margin-top: 0; }
+.bot-app .rc .m-elrond:hover .acts, .bot-app .rc .m-elrond.acted .acts, .bot-app .rc .m-elrond:focus-within .acts, .bot-app .rc .acts.react-open { height: 24px; opacity: 1; margin-top: 0; overflow: visible; }
 .bot-app .rc .act {
   border: 0; font-family: var(--r-body); font-size: 12px;
   color: var(--r-ink-mute); padding: 3px 10px; border-radius: 999px;

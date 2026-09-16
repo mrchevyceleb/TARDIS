@@ -100,6 +100,20 @@ test('canonical assistant replaces that round\'s stream without dropping earlier
   ]);
 });
 
+test('Matt reactions attach to the nearest prior assistant turn', () => {
+  const turns = extractVisibleTurns([
+    echo(1, 'ship it'),
+    assistantText(2, 'Pushed.'),
+    {
+      seq: 3,
+      ev: { type: 'event', event: { type: '_reaction', targetSeq: 2, emoji: '👍', from: 'Matt', ts: 1 } },
+    },
+  ]);
+  assert.equal(turns[1]?.role, 'assistant');
+  assert.match(turns[1]?.text ?? '', /Pushed\./);
+  assert.match(turns[1]?.text ?? '', /Matt reacted 👍/);
+});
+
 test('later streamed round is kept after a canonical assistant round', () => {
   const turns = extractVisibleTurns([
     echo(1, 'look'),

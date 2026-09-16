@@ -12,6 +12,7 @@ import { historicalDelivery, subscriptionReplayCursor } from './replayDelivery.t
 import {
   activeClaudeSessions,
   subscribeExternalThreadEvents,
+  publishExternalThreadEvent,
   beginThreadReset,
   dropSession,
   freshStart,
@@ -29,6 +30,7 @@ import {
   type CliKind,
 } from './runner.ts';
 import { flushEventLog, loadEventLogSync, repairEventLogSequenceSync } from './event-log-store.ts';
+import { isReactionEmoji, recordReaction } from './reactions.ts';
 import {
   activeCodexSessions,
   pruneIdleCodexSessions,
@@ -68,7 +70,8 @@ type ClientSend = { type: 'send'; cli?: CliKind; repo?: string; chatId?: string;
 type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string; chatId?: string } & ClientSelection;
 type ClientStop = { type: 'stop'; cli: CliKind; repo: string; chatId?: string };
 type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string; voice?: boolean } & ClientSelection;
-type ClientMsg = ClientHello | ClientWatch | ClientSend | ClientFresh | ClientStop | ClientSteer;
+type ClientReact = { type: 'react'; cli?: CliKind; repo?: string; chatId?: string; targetSeq: number; emoji: string; removed?: boolean };
+type ClientMsg = ClientHello | ClientWatch | ClientSend | ClientFresh | ClientStop | ClientSteer | ClientReact;
 type ResumeWatchableSession = AnySession & {
   startedWithResume?: () => boolean;
   waitForInitOrExit?: (timeoutMs: number) => Promise<'initialized' | 'closed' | 'timeout'>;
@@ -1260,6 +1263,31 @@ export async function registerChat(app: express.Express, server: Server): Promis
 
         if (msg.type === 'watch') {
           if (watchedLane) setWatchVisible(watchedLane.repo, watchedLane.chatId, wsId, msg.visible !== false);
+          return;
+        }
+
+        if (msg.type === 'react') {
+          const reactChatId = normalizeChatId(msg.chatId ?? chatId);
+          const reactCli = (msg.cli ?? cliKind) as CliKind | null;
+          const reactRepo = msg.repo ?? repoPath;
+          if (!reactCli || !reactRepo) {
+            safeSend({ type: 'error', message: 'no session - send hello first', retryable: true });
+            return;
+          }
+          const emoji = typeof msg.emoji === 'string' ? msg.emoji.trim() : '';
+          const targetSeq = typeof msg.targetSeq === 'number' ? msg.targetSeq : 0;
+          if (!isReactionEmoji(emoji) || !Number.isFinite(targetSeq) || targetSeq <= 0) {
+            safeSend({ type: 'error', message: 'invalid reaction' });
+            return;
+          }
+          const logKey = laneLogKey(reactCli, reactRepo, reactChatId);
+          await recordReaction(
+            logKey,
+            targetSeq,
+            emoji,
+            { from: 'Matt', removed: msg.removed === true },
+            (event) => publishExternalThreadEvent(logKey, { seq: event.seq, ev: event.ev as any }),
+          );
           return;
         }
 

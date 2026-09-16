@@ -81,7 +81,7 @@
 /* ============================================================
    .rc shell root — ambient atmosphere + base resets
    ============================================================ */
-.rc { position: relative; z-index: 1; height: 100%; min-height: 0; color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.6; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+.rc { position: relative; z-index: 1; height: 100%; min-height: 0; overflow-x: hidden; color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.6; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
 .rc, .rc * { box-sizing: border-box; }
 .rc button { font: inherit; cursor: pointer; color: inherit; background: none; border: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 .rc h1, .rc h2, .rc h3 { font-family: var(--font-display); margin: 0; font-weight: 500; }
@@ -145,7 +145,8 @@
 
 /* action pills (copy / pin) */
 .rc .acts { display: flex; gap: 6px; height: 24px; opacity: 0; transition: opacity .18s ease; }
-.rc-desktop .m-elrond:hover .acts { opacity: 1; }
+.rc-desktop .m-elrond:hover .acts, .rc-desktop .m-elrond:focus-within .acts { opacity: 1; }
+.rc .m-elrond:has(.acts.react-open) { overflow: visible; }
 .rc-desktop .msg:hover .when { opacity: 1; }
 .rc-desktop .m-user .when, .rc-desktop .m-elrond .when { opacity: 0; transition: opacity .2s ease; }
 .rc .act { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px;
@@ -153,6 +154,28 @@
 .rc .act:hover { color: var(--fg); border-color: var(--border-strong); background: var(--surface-hover); }
 .rc .act:active { transform: scale(.94); }
 .rc .act.copied { color: var(--emerald); border-color: color-mix(in oklch, var(--emerald) 40%, transparent); }
+.rc .acts.react-open { opacity: 1; overflow: visible; }
+.rc-desktop .acts.react-open { height: 24px; }
+.rc .react-wrap { position: relative; display: inline-flex; }
+.rc .react-picker {
+  position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 6;
+  display: flex; gap: 2px; padding: 4px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface-raised);
+  box-shadow: 0 8px 24px color-mix(in oklch, var(--bg-deep) 55%, transparent);
+}
+.rc .react-pick {
+  width: 28px; height: 28px; border: 0; border-radius: 999px; background: transparent;
+  font-size: 15px; line-height: 1; cursor: pointer;
+}
+.rc .react-pick:hover, .rc .react-pick.mine { background: var(--surface-hover); }
+.rc .react-strip { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.rc .react-chip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--fg-soft);
+  font-size: 13px; line-height: 1.2; cursor: pointer;
+}
+.rc .react-chip.mine { border-color: var(--border-gold); color: var(--fg); }
+.rc .react-count { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
 
 /* emerald status chip ("✓ errand resumed · inkwell") */
 .rc .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
@@ -443,7 +466,7 @@
 .rc-desktop .crumb { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
 .rc-desktop .top .presence { margin-left: auto; }
 
-.rc-desktop .feed { flex: 1; min-height: 0; overflow-y: auto; padding: 26px 26px 30px; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+.rc-desktop .feed { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 26px 26px 30px; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .rc-desktop .feed-inner { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
 .rc-desktop .dock { position: relative; padding: 0 26px 18px; flex: none; }
 .rc-desktop .dock-inner { max-width: 760px; margin: 0 auto; position: relative; }
@@ -459,6 +482,7 @@
    ============================================================ */
 .rc-mobile { --radius-xl: 22px; }
 .rc-mobile .app { position: relative; display: flex; flex-direction: column; height: 100%;
+  overflow-x: hidden;
   background: radial-gradient(ellipse 500px 360px at 85% -5%, color-mix(in oklch, var(--accent) 7%, transparent), transparent 60%),
               radial-gradient(ellipse 420px 320px at 10% 108%, color-mix(in oklch, var(--gold) 5%, transparent), transparent 60%),
               var(--bg); }
@@ -477,7 +501,7 @@
 .rc-mobile .ribbon:hover .ribbon-track { animation-play-state: running; }
 .rc-mobile .ribbon { border-block: 1px solid var(--border); }
 
-.rc-mobile .feed { position: relative; z-index: 1; flex: 1; min-height: 0; overflow-y: auto; padding: 16px 16px 20px;
+.rc-mobile .feed { position: relative; z-index: 1; flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 16px 16px 20px;
   display: flex; flex-direction: column; gap: 18px; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .rc-mobile .daymark { gap: 12px; margin: 4px 0 0; }
 .rc-mobile .daymark span { font-size: 13.5px; }
@@ -488,7 +512,7 @@
 .rc-mobile .who { font-size: 15px; } .rc-mobile .who .mini { font-size: 10.5px; }
 .rc-mobile .prose { max-width: 95%; }
 .rc-mobile .acts { height: 0; opacity: 0; overflow: hidden; transition: all .22s var(--ease-out); }
-.rc-mobile .m-elrond.acted .acts { height: 26px; opacity: 1; }
+.rc-mobile .m-elrond.acted .acts, .rc-mobile .acts.react-open { height: 26px; opacity: 1; overflow: visible; }
 .rc-mobile .m-elrond.acted .when { opacity: 1; }
 .rc-mobile .tool { max-width: none; }
 .rc-mobile .tool-head { min-height: 44px; padding: 8px 14px; }
@@ -535,6 +559,7 @@
   padding: 0;
   margin: 2px 0 4px;
 }
+.rc .attach-tray:empty, .rc-mobile .attach-tray:empty { display: none; overflow: hidden; }
 .rc .attach-tray::-webkit-scrollbar, .rc-mobile .attach-tray::-webkit-scrollbar { display: none; }
 .rc .attach-thumb, .rc-mobile .attach-thumb { width: 34px; height: 34px; border-radius: 6px; }
 .rc .attach-x, .rc-mobile .attach-x { top: 1px; right: 1px; width: 14px; height: 14px; font-size: 10px; line-height: 12px; }

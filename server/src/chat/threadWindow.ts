@@ -121,6 +121,7 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
   let roundText = '';
   let voiceSplitPrefix = '';
   let afterAutomation = false;
+  const reactionState = new Map<string, { targetSeq: number; from: string; emoji: string }>();
 
   const takeStreamTail = (): string => {
     const chunks: string[] = [];
@@ -192,6 +193,18 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
       }
       turns.push({ role: 'user', text: clipTurn(text), seq });
       afterAutomation = false;
+      continue;
+    }
+
+    if (t === '_reaction') {
+      const targetSeq = typeof inner.targetSeq === 'number' && inner.targetSeq > 0 ? inner.targetSeq : 0;
+      const emoji = typeof inner.emoji === 'string' ? inner.emoji.trim() : '';
+      const from = typeof inner.from === 'string' && inner.from.trim() ? inner.from.trim() : 'Matt';
+      if (targetSeq && emoji) {
+        const key = `${targetSeq}\0${from}\0${emoji}`;
+        if (inner.removed === true) reactionState.delete(key);
+        else reactionState.set(key, { targetSeq, from, emoji });
+      }
       continue;
     }
 
@@ -288,7 +301,22 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
     }
   }
   flushAssistant();
-  return turns.sort((a, b) => a.seq - b.seq);
+  const sorted = turns.sort((a, b) => a.seq - b.seq);
+  if (reactionState.size === 0) return sorted;
+  const byTarget = new Map<number, Array<{ from: string; emoji: string }>>();
+  for (const rec of reactionState.values()) {
+    const list = byTarget.get(rec.targetSeq) ?? [];
+    list.push({ from: rec.from, emoji: rec.emoji });
+    byTarget.set(rec.targetSeq, list);
+  }
+  for (const [targetSeq, recs] of byTarget) {
+    const target = [...sorted].reverse().find((t) => t.seq <= targetSeq && t.role === 'assistant')
+      ?? sorted.find((t) => t.role === 'assistant' && t.seq > targetSeq);
+    if (!target) continue;
+    const note = recs.map((r) => `${r.from} reacted ${r.emoji}`).join('; ');
+    target.text = `${target.text}\n\n[${note}]`;
+  }
+  return sorted;
 }
 
 export function splitWindow(turns: VisibleTurn[], size = WINDOW_TURNS): WindowSplit {

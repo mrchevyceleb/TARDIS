@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatBlock, ChatImagePreview, CompanionId, Repo } from '../data/types';
+import { isReactionEmoji } from '../data/reactions';
 import { contextWindowForCodexModel } from '../codexModels';
 import { automationTurnInFlight, filterAutomationNoise } from '../utils/automationNoise';
 import { isAutomationPeer } from '../utils/routineNoise';
@@ -111,7 +112,10 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   if (!ev || typeof ev !== 'object') return blocks;
 
   if ((ev.type === 'stream_event' || ev.type === 'event') && ev.event) {
-    return reduce(blocks, ev.event, turnIdRef);
+    const inner = ev.event && typeof ev.event === 'object'
+      ? { ...ev.event, seq: ev.seq ?? ev.event.seq }
+      : ev.event;
+    return reduce(blocks, inner, turnIdRef);
   }
 
   if (ev.type === 'system' && (ev.subtype === 'commands_changed' || ev.subtype === 'hook_response' || ev.subtype === 'hook_started' || ev.subtype === 'hook_progress')) {
@@ -176,6 +180,44 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
 
   // Completed voice bubbles must not change the text runner's streaming IDs,
   // busy state, or optimistic-send acknowledgement state.
+  if (ev.type === '_reaction' && typeof ev.emoji === 'string' && typeof ev.targetSeq === 'number') {
+    const emoji = ev.emoji.trim();
+    const from = typeof ev.from === 'string' && ev.from.trim() ? ev.from.trim() : 'Matt';
+    const targetSeq = ev.targetSeq;
+    if (!emoji || !Number.isFinite(targetSeq) || targetSeq <= 0) return blocks;
+    let bestIdx = -1;
+    let bestSeq = -1;
+    for (let i = 0; i < blocks.length; i += 1) {
+      const b = blocks[i];
+      if (b.kind !== 'text' || typeof b.seq !== 'number') continue;
+      if (b.seq <= targetSeq && b.seq >= bestSeq) {
+        bestSeq = b.seq;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0) {
+      for (let i = 0; i < blocks.length; i += 1) {
+        const b = blocks[i];
+        if (b.kind === 'text' && typeof b.seq === 'number' && (bestIdx < 0 || b.seq < bestSeq)) {
+          bestSeq = b.seq;
+          bestIdx = i;
+        }
+      }
+    }
+    if (bestIdx < 0) return blocks;
+    const target = blocks[bestIdx];
+    if (target.kind !== 'text') return blocks;
+    const current = target.reactions ?? [];
+    const next = ev.removed === true
+      ? current.filter((r) => !(r.emoji === emoji && r.from === from))
+      : current.some((r) => r.emoji === emoji && r.from === from)
+        ? current
+        : [...current, { emoji, from }];
+    return blocks.map((b, i) => (
+      i === bestIdx ? { ...target, reactions: next.length ? next : undefined } : b
+    ));
+  }
+
   if (ev.type === '_voice_transcript' && typeof ev.text === 'string'
     && (ev.role === 'user' || ev.role === 'assistant')) {
     const blockId = `voice-${ev.id}`;
@@ -278,12 +320,15 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
 
   // Turn over (result) or killed (interrupted): nothing stays open/running.
   if (ev.type === 'result' || ev.type === '_interrupted') {
+    const resultSeq = typeof ev.seq === 'number' ? ev.seq : undefined;
     const finalTurnId = turnIdRef.current || `t${nextId++}`;
     const finalPeerId = turnIdRef.peerId;
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
     const closed = blocks.map((b) => {
-      if (b.kind === 'text' && b.open) return { ...b, open: false };
+      if (b.kind === 'text' && b.turnId === finalTurnId) {
+        return { ...b, open: false, seq: b.seq ?? resultSeq };
+      }
       if (b.kind === 'tool' && (b.open || b.running)) return { ...b, open: false, running: false };
       return b;
     });
@@ -311,6 +356,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         peerId: finalPeerId,
         cbIndex: -1,
         open: false,
+        seq: typeof ev.seq === 'number' ? ev.seq : undefined,
       }];
     }
     return closed;
@@ -336,6 +382,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         kind: 'text', id: id(), text: '', ts: Date.now(),
         turnId, peerId: turnIdRef.peerId, cbIndex: idx, open: true,
         presentation: cb.phase === 'commentary' ? 'update' : cb.phase === 'final_answer' ? 'answer' : undefined,
+        seq: typeof ev.seq === 'number' ? ev.seq : undefined,
       };
       return [...blocks, block];
     }
@@ -359,7 +406,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       if (b.kind !== 'text' && b.kind !== 'tool') return b;
       if (b.cbIndex !== idx || b.turnId !== turnId || !b.open) return b;
       if (delta?.type === 'text_delta' && b.kind === 'text' && typeof delta.text === 'string') {
-        return { ...b, text: b.text + delta.text };
+        return { ...b, text: b.text + delta.text, seq: typeof ev.seq === 'number' ? ev.seq : b.seq };
       }
       if (delta?.type === 'input_json_delta' && b.kind === 'tool' && typeof delta.partial_json === 'string') {
         return { ...b, args: b.args + delta.partial_json };
@@ -377,7 +424,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       if (b.kind === 'tool') {
         return [{ ...b, args: prettifyJson(b.args), open: false }];
       }
-      return [{ ...b, open: false }];
+      return [{ ...b, open: false, seq: typeof ev.seq === 'number' ? ev.seq : b.seq }];
     });
   }
 
@@ -410,8 +457,14 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const turnId = turnIdRef.current;
     const presentation = ev.message.stop_reason === 'tool_use' ? 'update'
       : ev.message.stop_reason === 'end_turn' ? 'answer' : undefined;
-    const annotated: ChatBlock[] = presentation ? blocks.map((b): ChatBlock => b.kind === 'text' && b.turnId === turnId
-      ? { ...b, presentation } : b) : blocks;
+    const annotated: ChatBlock[] = blocks.map((b): ChatBlock => {
+      if (b.kind !== 'text' || b.turnId !== turnId) return b;
+      return {
+        ...b,
+        ...(presentation ? { presentation } : {}),
+        seq: typeof ev.seq === 'number' ? ev.seq : b.seq,
+      };
+    });
     const fullText = (ev.message.content as Array<any>)
       .filter((c) => c?.type === 'text' && typeof c.text === 'string')
       .map((c) => c.text)
@@ -420,7 +473,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       if (isSyntheticApiErrorEvent(ev)) return blocks;
       const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '');
       if (!hasText) {
-        return [...annotated, { kind: 'text', id: id(), text: fullText, ts: Date.now(), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation }];
+        return [...annotated, { kind: 'text', id: id(), text: fullText, ts: Date.now(), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation, seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
       }
     }
     return annotated;
@@ -580,7 +633,7 @@ function cancelPendingSteers(key: string): PendingSteer[] {
 
 // Rebuild once from durable events to recover provider message boundaries and
 // update/answer metadata missing from older flattened browser snapshots.
-const CHAT_CACHE_VERSION = 'v8';
+const CHAT_CACHE_VERSION = 'v9';
 
 function blocksStorageKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
   // Browser snapshots are disposable; transcript history remains on the server.
@@ -1521,7 +1574,10 @@ export function useChat(opts: {
           ) {
             compactingRef.current = false;
           }
-          setBlocks((prev) => reduce(prev, msg.event, turnIdRef));
+          const streamed = msg.event && typeof msg.event === 'object'
+            ? { ...msg.event, seq: msg.seq ?? msg.event.seq }
+            : msg.event;
+          setBlocks((prev) => reduce(prev, streamed, turnIdRef));
           // Pick up the model id from claude's system/init event so the
           // context meter knows which window to divide against. Opus 4.7
           // with the `[1m]` suffix is 1M; defaults stay at 200K.
@@ -2085,6 +2141,28 @@ export function useChat(opts: {
     setStatus('streaming');
   };
 
+  const react = (targetSeq: number, emoji: string) => {
+    if (!repo || !isReactionEmoji(emoji) || !Number.isFinite(targetSeq) || targetSeq <= 0) return;
+    const target = blocks.find((block) => block.kind === 'text' && block.seq === targetSeq);
+    const removed = Boolean(
+      target?.kind === 'text'
+      && target.reactions?.some((item) => item.emoji === emoji && item.from === 'Matt'),
+    );
+    setBlocks((prev) => reduce(prev, { type: '_reaction', targetSeq, emoji, from: 'Matt', removed }, turnIdRef));
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'react',
+        cli,
+        repo: repo.path,
+        chatId,
+        targetSeq,
+        emoji,
+        removed,
+      }));
+    }
+  };
+
   const reconnect = () => forceReconnectRef.current();
 
   // Automation turns (routines) stay silent unless the turn produced a real
@@ -2094,7 +2172,7 @@ export function useChat(opts: {
 
   return {
     chatId,
-    blocks: visibleBlocks, status, error, send, steer, freshStart, stop, reconnect, usage, serverBrain, automationBusy,
+    blocks: visibleBlocks, status, error, send, steer, react, freshStart, stop, reconnect, usage, serverBrain, automationBusy,
     turnStartedAt,
     lastActivityRef: lastMessageAtRef, turnStartRef, compactingRef,
   };

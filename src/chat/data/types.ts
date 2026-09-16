@@ -129,6 +129,9 @@ export type ChatBlock =
       peerId?: string;
       cbIndex?: number;
       open?: boolean;
+      /** Durable event-log seq for this block. Used to pin emoji reactions. */
+      seq?: number;
+      reactions?: Array<{ emoji: string; from: string }>;
     }
   | {
       kind: 'tool';
