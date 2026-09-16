@@ -2,6 +2,8 @@
 """Build a private, portable USB setup folder from committed, clean repositories."""
 import argparse
 import hashlib
+import base64
+import ipaddress
 import json
 from pathlib import Path
 import subprocess
@@ -10,6 +12,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--rallypoint', type=Path, required=True)
 parser.add_argument('--output', type=Path, required=True, help='A new folder; existing folders are never overwritten')
 parser.add_argument('--workspace-config', type=Path, help='Private JSON with only SUPABASE_URL and SUPABASE_SERVICE_KEY')
+parser.add_argument('--support-public-key', type=Path, help='Support operator OpenSSH .pub file; never a private key')
+parser.add_argument('--support-peer-ip', help='Support computer Tailscale IPv4 address')
 args = parser.parse_args()
 tardis = Path(__file__).resolve().parents[1]
 rallypoint = args.rallypoint.resolve()
@@ -29,6 +33,19 @@ for repo in (tardis, rallypoint):
     if output == repo or repo in output.parents and output.relative_to(repo).parts[0] != 'tmp':
         raise SystemExit('Use a private output folder outside tracked source, or inside tmp/.')
 workspace = None
+support = None
+if bool(args.support_public_key) != bool(args.support_peer_ip):
+    raise SystemExit('Supply both --support-public-key and --support-peer-ip.')
+if args.support_public_key:
+    key = args.support_public_key.read_text(encoding='utf-8-sig').strip().split()
+    if len(key) < 2 or key[0] not in ('ssh-ed25519', 'ssh-rsa', 'ecdsa-sha2-nistp256'):
+        raise SystemExit('Supply only an OpenSSH public key, not a private key.')
+    base64.b64decode(key[1], validate=True)
+    address = ipaddress.ip_address(args.support_peer_ip)
+    if address.version != 4 or address not in ipaddress.ip_network('100.64.0.0/10'):
+        raise SystemExit('Support peer IP must be a Tailscale IPv4 address.')
+    subprocess.run(['ssh-keygen', '-lf', str(args.support_public_key)], check=True, stdout=subprocess.DEVNULL)
+    support = {'publicKey': ' '.join(key[:2]), 'peerIp': str(address)}
 if args.workspace_config:
     source = json.loads(args.workspace_config.read_text(encoding='utf-8-sig'))
     workspace = {key: source[key] for key in ('SUPABASE_URL', 'SUPABASE_SERVICE_KEY')}
@@ -45,8 +62,10 @@ for source, destination in ((tardis/'scripts/setup-kim.sh', 'setup-kim.sh'), (ta
 if workspace:
     path = output/'workspace.json'
     path.write_text(json.dumps(workspace), encoding='utf-8'); path.chmod(0o600)
+if support:
+    (output/'support.json').write_text(json.dumps(support), encoding='utf-8')
 (output/'release.json').write_text(json.dumps(commits, indent=2)+'\n', encoding='utf-8')
-names = ['tardis.bundle', 'rallypoint.bundle', 'setup-kim.sh', 'INSTALL.sh', 'release.json'] + (['workspace.json'] if workspace else [])
+names = ['tardis.bundle', 'rallypoint.bundle', 'setup-kim.sh', 'INSTALL.sh', 'release.json'] + (['workspace.json'] if workspace else []) + (['support.json'] if support else [])
 with (output/'SHA256SUMS').open('w', encoding='utf-8', newline='\n') as sums:
     for name in names:
         with (output/name).open('rb') as data: digest=hashlib.file_digest(data, 'sha256').hexdigest()
@@ -66,6 +85,14 @@ does not need a GitHub login during installation. Downloads still need internet.
 4. When setup finishes, reboot if GNOME was newly installed.
 5. Open TARDIS from Applications. Use Finish TARDIS Setup for subscription sign-ins,
    then Content > Connections for the brands' Ayrshare social account authorization.
+'''+('''6. Open TARDIS Remote Support. Sign into YOUR separate Tailscale account, share
+   only this computer with your support person, then enable support. It starts paused.
+   SSH enables administrator repairs using the supplied public key, only from the
+   support computer's Tailscale IP. RustDesk asks you to accept screen-help sessions.
+   Use Pause support to stop access. Revoke the device share in Tailscale to remove it.
+   Your support person connects with: ssh -p 2222 tardis-support@YOUR_TAILSCALE_IP
+   RustDesk uses YOUR_TAILSCALE_IP:21118 directly. No public RustDesk relay is used.
+''' if support else '')+'''
 
 This USB does not erase disks, replace the vendor OS, or change AMD drivers.
 It is an installer launched from Linux, not a bootable operating-system image.

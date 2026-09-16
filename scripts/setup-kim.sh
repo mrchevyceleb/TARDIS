@@ -211,11 +211,15 @@ export PATH="$runtime_dir/npm/bin:$node_dir/bin:\$HOME/.local/bin:/usr/local/bin
 exec "\$@"
 EOF
 chmod 700 "$HOME/.local/bin/tardis-cli"
+support_file="${KIM_SUPPORT_CONFIG:-${bundle_dir:+$bundle_dir/support.json}}"
+if [[ -f "${support_file:-}" || -f /etc/tardis-support/installed ]]; then
+  bash "$tardis_dir/scripts/setup-kim-support.sh" "${support_file:-}"
+fi
 cat > "$HOME/.local/bin/tardis-connect" <<'EOF'
 #!/usr/bin/env bash
 set -u
 while true; do
-  printf '\nFinish TARDIS Setup\n1. Sign into Claude Code\n2. Sign into Codex\n3. Connect Grok\n4. Connect brand publishing accounts\n5. Sign into GitHub for future updates\n6. Open TARDIS\n0. Done\n'
+  printf '\nFinish TARDIS Setup\n1. Sign into Claude Code\n2. Sign into Codex\n3. Connect Grok\n4. Connect brand publishing accounts\n5. Sign into GitHub for future updates\n6. Open TARDIS\n7. Tailscale and remote support\n0. Done\n'
   read -r -p 'Choose a step: ' step || exit
   case "$step" in
     1) "$HOME/.local/bin/tardis-cli" claude auth login ;;
@@ -224,6 +228,7 @@ while true; do
     4) xdg-open http://127.0.0.1:8091/content ;;
     5) gh auth login --hostname github.com --git-protocol https --web && gh auth setup-git --hostname github.com ;;
     6) xdg-open http://127.0.0.1:8091 ;;
+    7) if [[ -x "$HOME/.local/bin/tardis-support" ]]; then "$HOME/.local/bin/tardis-support"; else echo 'Use a USB kit prepared with a support public key and Tailscale IP.'; fi ;;
     0) exit ;;
   esac
 done

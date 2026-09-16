@@ -38,7 +38,7 @@ The packaging computer needs Python 3.11 or newer; this requirement applies to
 the kit builder, not the Linux installation script:
 
 ```bash
-python scripts/build-kim-usb.py --rallypoint /path/to/RallyPoint --output /private/path/TARDIS-USB --workspace-config /private/path/workspace.json
+python scripts/build-kim-usb.py --rallypoint /path/to/RallyPoint --output /private/path/TARDIS-USB --workspace-config /private/path/workspace.json --support-public-key /private/path/support.pub --support-peer-ip 100.100.10.20
 ```
 
 The optional private `workspace.json` contains `SUPABASE_URL` and
@@ -172,3 +172,67 @@ The actual AMD vendor image still needs an on-device check for x86 binaries,
 graphics/ROCm, peripherals and account sign-ins. ARM Linux testing does not certify
 that hardware. The script can also be syntax-checked without changing the OS:
 `bash -n scripts/setup-kim.sh`.
+
+## Separate tailnet and remote support
+
+The two support flags above are optional as a pair. Use the support computer's
+actual `tailscale ip -4` address and its OpenSSH **public** key. The builder puts
+only the public key and allowed source IP in `support.json`. No Tailscale login,
+auth key, SSH private key, or remote desktop password goes on the USB.
+
+With that file, installation adds Tailscale from its signed stable APT repository,
+checksum-pinned RustDesk 1.4.9, and a dedicated `tardis-support` SSH account. It
+starts **paused**. In GNOME, open **TARDIS Remote Support**, also available as
+step 7 of **Finish TARDIS Setup**:
+
+1. Sign into the machine owner's **own Tailscale account and separate tailnet**.
+2. In Tailscale Machines, share **only this workstation** using a single-use link.
+   The support person accepts from their own account. Do not invite them as a
+   tailnet member, share an exit node, or share their machines back.
+3. Enable support after checking the displayed tailnet and support computer IP.
+   This explicitly grants key-based **administrator access** for unattended repairs.
+4. For screen help, open RustDesk and accept the expected incoming connection.
+   GNOME/Wayland may also ask which screen to share. Stable RustDesk is not a
+   promise of unattended access to a Wayland login screen; SSH is the recovery path.
+
+Network access is restricted by a separate nftables table to `tailscale0`, the
+configured support computer's IPv4 address, and TCP ports 2222/21118. Other
+interfaces and IPv6 cannot reach those ports. Existing firewall tables and SSH
+services are preserved. A newly installed distribution SSH service stays masked;
+the support service uses its own configuration and host key on port 2222.
+RustDesk uses direct IP access, a localhost rendezvous setting, no LAN discovery,
+and an additional service network restriction against public relays. Screen help
+uses click-to-accept; file transfer, clipboard, terminal and tunneling features
+in RustDesk are disabled. TARDIS itself stays on loopback.
+
+**Connection details** displays commands for the support person:
+
+```bash
+ssh -p 2222 tardis-support@WORKSTATION_TAILSCALE_IP
+# Optional: inspect TARDIS from your own browser through this SSH tunnel:
+ssh -p 2222 -N -L 18091:127.0.0.1:8091 tardis-support@WORKSTATION_TAILSCALE_IP
+# Then browse http://127.0.0.1:18091
+```
+
+Connect RustDesk directly to `WORKSTATION_TAILSCALE_IP:21118`. The support account
+can use `sudo` without the owner's password while support is enabled. This is a
+trusted administrator relationship, not a sandbox around the owner's files.
+
+**Pause support** blocks the two ports, stops managed support services/sessions,
+and removes the account's sudo grant. It leaves Tailscale connected for the owner's
+devices. Revoke the machine share in Tailscale to remove the sharing relationship.
+Rerunning installation pauses support; it never silently re-enables it. To replace
+the support computer or key, an administrator must update the private root-owned
+`/etc/tardis-support/config.json` and rerun setup; never broaden this to every
+Tailscale address. Confirm the effective shared source IP if a tailnet IP collision
+causes Tailscale to remap an address. Existing restrictive Tailscale policies must
+allow the recipient to reach ports 2222 and 21118; do not replace policies with an
+allow-all rule. The local firewall adds a restriction, not an override of other rules.
+
+Before leaving: test SSH and `sudo`, an accepted and a rejected desktop connection,
+Pause, and reboot from the actual support computer. Real cross-tailnet authorization
+needs the owner's sign-in and device share; a sandbox test cannot complete that step.
+
+References: [Tailscale device sharing](https://tailscale.com/docs/features/sharing),
+[RustDesk through Tailscale](https://tailscale.com/docs/solutions/access-remote-desktops-with-rustdesk),
+[RustDesk Linux limitations](https://rustdesk.com/docs/en/client/linux/).
