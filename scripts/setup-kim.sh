@@ -24,7 +24,7 @@ command -v sudo >/dev/null || die 'Install sudo or ask the machine administrator
 # be atomically drained across two independently running apps by this installer.
 assert_services_stopped() {
   local unit state
-  for unit in tardis.service rallypoint-engine.service; do
+  for unit in tardis.service rallypoint-engine.service rallypoint-scan.service; do
     state="$(systemctl --user show "$unit" --property=ActiveState --value)" || die 'Cannot inspect user services. Run setup from Kim?s normal logged-in Linux session.'
     case "$state" in inactive|failed) ;; *) die "$unit is $state. Finish all agent/content work, stop both user services, then rerun setup. See docs/KIM-SETUP.md." ;; esac
   done
@@ -155,13 +155,18 @@ gateway = t.get('RIVENDELL_CONTENT_TOKEN') or r.get('TARDIS_CONTENT_TOKEN') or s
 engine = r.get('RALLYPOINT_ENGINE_TOKEN') or t.get('RALLYPOINT_ENGINE_TOKEN') or secrets.token_hex(32)
 t.update({'HOST':'127.0.0.1','PORT':'8091','ELROND_WORKSPACE_PATH':str(home/'ASSISTANT-HUB'), 'RIVENDELL_WORKER_ENABLED':'false', 'RIVENDELL_WORKER_RUNNER':'dry-run', 'RIVENDELL_PREWARM_AGENTS':'false', 'RIVENDELL_CONTENT_TOKEN':gateway, 'RALLYPOINT_ENGINE_TOKEN':engine, 'RALLYPOINT_ENGINE_URL':'http://127.0.0.1:8788', 'RIVENDELL_CODEX_BIN':str(home/'.local/share/tardis-runtime/npm/bin/codex')})
 r.update({'RALLYPOINT_ENGINE_TOKEN':engine,'TARDIS_CONTENT_TOKEN':gateway,'TARDIS_URL':'http://127.0.0.1:8091','TARDIS_MODEL':r.get('TARDIS_MODEL','claude'),'RALLYPOINT_ENGINE_PORT':'8788','MAX_CONCURRENT_JOBS':'2'})
-save(tpath,t); save(rpath,r)
+r.update({'RALLYPOINT_SCANNER_URL':'http://127.0.0.1:8787','SCAN_TRIGGER_SECRET':r.get('SCAN_TRIGGER_SECRET') or secrets.token_hex(32)})
+scan = dict(r, HOST='127.0.0.1', PORT='8787', CRON_SCHEDULE=r.get('CRON_SCHEDULE','0 0 * * *'), CRON_TIMEZONE=r.get('CRON_TIMEZONE','America/New_York'))
+save(tpath,t); save(rpath,r); save(root/'scanner.env',scan)
 try:
-    for table, columns in [('content_drafts','id,edit_revision,approved_revision'),('content_publications','id'),('generation_jobs','id')]:
+    for table, columns in [('content_drafts','id,edit_revision,approved_revision'),('content_publications','id'),('generation_jobs','id'),('ideas','id,signals'),('scan_runs','id,status')]:
         req=urllib.request.Request(r['SUPABASE_URL'].rstrip('/')+'/rest/v1/'+table+'?select='+columns+'&limit=0', headers={'apikey':r['SUPABASE_SERVICE_KEY'],'Authorization':'Bearer '+r['SUPABASE_SERVICE_KEY']})
         with urllib.request.urlopen(req,timeout=15) as response: response.read()
+    req=urllib.request.Request(r['SUPABASE_URL'].rstrip('/')+'/rest/v1/',headers={'apikey':r['SUPABASE_SERVICE_KEY'],'Authorization':'Bearer '+r['SUPABASE_SERVICE_KEY']})
+    with urllib.request.urlopen(req,timeout=15) as response: schema=json.load(response)
+    if not all('/rpc/'+name in schema.get('paths',{}) for name in ['headless_generate_idea','claim_content_scan']): raise ValueError('Missing scanner migration')
 except Exception:
-    sys.exit('Content storage is not ready. Check credentials and apply RallyPoint migrations through 0010_headless_content.sql, then rerun. No services started.')
+    sys.exit('Content storage is not ready. Check credentials and apply RallyPoint migrations through 0011_scanner_content_bridge.sql, then rerun. No services started.')
 PY
 unset KIM_SB_URL KIM_SB_SERVICE_KEY
 
@@ -173,12 +178,13 @@ git -C "$rally_dir" switch --detach "$rally_target"
 
 say 'Installing dependencies and building both shared applications.'
 (cd "$tardis_dir"; npm ci; npm run typecheck; VITE_TARDIS_STYLE=lavender VITE_TARDIS_THEME=light npm run build)
-(cd "$rally_dir"; pnpm install --frozen-lockfile; pnpm --filter @rallypoint/engine typecheck)
+(cd "$rally_dir"; pnpm install --frozen-lockfile; pnpm --filter @rallypoint/engine typecheck; pnpm --filter @rallypoint/worker typecheck)
 (cd "$tardis_dir"; RALLYPOINT_REPO_PATH="$rally_dir" node --import tsx server/scripts/install-content-team.ts)
 mkdir -p "$HOME/ASSISTANT-HUB" "$HOME/.config/systemd/user" "$HOME/.local/share/applications"
-for service in tardis rallypoint-engine; do
+for service in tardis rallypoint-engine rallypoint-scan; do
   if [[ "$service" == tardis ]]; then app_dir="$tardis_dir"; command_line='exec npm start'; env_name=tardis
-  else app_dir="$rally_dir"; command_line='exec pnpm start:engine'; env_name=rallypoint; fi
+  elif [[ "$service" == rallypoint-engine ]]; then app_dir="$rally_dir"; command_line='exec pnpm start:engine'; env_name=rallypoint
+  else app_dir="$rally_dir"; command_line='exec pnpm --filter @rallypoint/worker start'; env_name=scanner; fi
   cat > "$HOME/.local/bin/$service-run" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -278,7 +284,7 @@ X-GNOME-Autostart-enabled=true
 EOF
 fi
 systemctl --user daemon-reload
-systemctl --user enable --now tardis.service rallypoint-engine.service
+systemctl --user enable --now tardis.service rallypoint-engine.service rallypoint-scan.service
 sudo loginctl enable-linger "$USER"
 for attempt in {1..30}; do
   if curl --fail --silent http://127.0.0.1:8091/api/health >/dev/null; then break; fi
@@ -302,5 +308,6 @@ for attempt in range(15):
 PY
 say 'TARDIS is running at http://127.0.0.1:8091. Search Applications for TARDIS.'
 say "Finish subscription sign-in as Kim: $HOME/.local/bin/tardis-cli claude auth login, then $HOME/.local/bin/tardis-cli codex login. For Grok, open http://127.0.0.1:8091/xai-oauth."
+curl --fail --silent --connect-timeout 3 --max-time 10 --retry 10 --retry-connrefused --retry-delay 2 http://127.0.0.1:8787/health >/dev/null || die 'Research scanner did not start. Check journalctl --user -u rallypoint-scan.'
 say 'Open Content → Connections for each brand and connect publishing destinations. Test a draft and approval before publishing.'
 say 'If GNOME was just installed, reboot when ready and choose the GNOME session. Setup does not reboot the machine.'

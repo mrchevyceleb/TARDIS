@@ -24,7 +24,9 @@ contentRouter.post('/review-intent', (req, res) => {
   res.json({ token });
 });
 const routes = [
-  ['GET', /^\/(?:status|drafts|jobs)$/],
+  ['GET', /^\/(?:status|drafts|jobs|ideas|scanner)$/],
+  ['POST', /^\/scan$/],
+  ['POST', /^\/ideas\/[a-zA-Z0-9-]+\/generate$/],
   ['GET', /^\/drafts\/[a-zA-Z0-9-]+$/],
   ['PATCH', /^\/drafts\/[a-zA-Z0-9-]+$/],
   ['POST', /^\/generate$/],
@@ -57,7 +59,7 @@ contentRouter.use(async (req, res) => {
   res.once('close', abort);
   try {
     let body = req.method === 'GET' ? undefined : req.body;
-    if (body?.agent && (req.path === '/generate' || req.path.endsWith('/revise'))) {
+    if (body?.agent && (req.path.endsWith('/generate') || req.path.endsWith('/revise'))) {
       body = { ...body, ...contentBrainForAgent(String(body.agent)) };
       delete body.agent;
     }

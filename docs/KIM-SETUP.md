@@ -247,3 +247,21 @@ the support tools expect `/usr/bin/tailscale` and `tailscaled.service` from the 
 References: [Tailscale device sharing](https://tailscale.com/docs/features/sharing),
 [RustDesk through Tailscale](https://tailscale.com/docs/solutions/access-remote-desktops-with-rustdesk),
 [RustDesk Linux limitations](https://rustdesk.com/docs/en/client/linux/).
+
+### Research and the Coordinator
+
+The installer also enables `rallypoint-scan.service`, with a private loopback
+connection to the engine and a nightly midnight Eastern scan. Apply RallyPoint
+migrations through `0011_scanner_content_bridge.sql` before setup. Content → Ideas
+shows scanner health, recent runs, sourced ideas, and Create drafts. Both offices
+share this research; database claims prevent duplicate nightly scans and duplicate
+idea/format generation. Use the same scanner release in both offices.
+
+To automate drafting, add a routine to Content Coordinator, for example weekdays
+at 09:00: “Read content_ideas for Operly and R-Link. For each brand select up to
+three strong ideas from the last seven days with no existing writing jobs. Use
+content_generate_idea for blog and social-pack drafts, preserving the idea IDs.
+Report what needs review. If scans failed, report the failure; do not invent ideas
+or repeatedly request scans. Never approve or publish.” Choose the cadence and
+volume with Kim; setup does not silently enable a drafting routine. The scanner
+collects ideas automatically once her subscription is signed in.

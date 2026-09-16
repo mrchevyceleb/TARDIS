@@ -1,4 +1,10 @@
 export type ContentEngine = 'claude' | 'codex' | 'xai';
+export type ContentIdea = {
+  id: string; brand: ContentBrand; headline: string; description: string; score: number | null;
+  created_at: string; recommended_angle?: string; source: string;
+  signals: Array<{ url: string; date?: string; engagement?: string }>;
+  generation_jobs: Array<{ id: string; kind: string; status: string; draft_id?: string }>;
+};
 export type ContentBrand = 'operly' | 'r-link';
 export type ContentChannel = 'blog' | 'linkedin' | 'facebook' | 'instagram' | 'x';
 export type ContentImage = { slot: string; url: string; alt: string; prompt: string; aspect_ratio: '16:9' | '1:1' | '9:16' | '4:3' | '3:4'; status: 'ok' | 'failed' };
