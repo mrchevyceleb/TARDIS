@@ -3,6 +3,7 @@
 // only these display strings carry the theme, so renaming a room is one line.
 
 export type RoomId =
+  | 'setup'
   | 'integrations'
   | 'content'
   | 'hall'
@@ -30,6 +31,7 @@ export type RoomName = {
 };
 
 export const ROOM_NAMES: Record<RoomId, RoomName> = {
+  setup: { name: 'Start here', eyebrow: 'Your first day', tagline: 'Setup, first content and help' },
   integrations: { name: 'Integrations', eyebrow: 'Your office', tagline: 'Connections and approvals' },
   content: { name: 'Content', eyebrow: 'Content Studio', tagline: 'Create, review, and publish' },
   hall: { name: 'Console Room', eyebrow: 'Console Room', tagline: 'Live with TARDIS' },

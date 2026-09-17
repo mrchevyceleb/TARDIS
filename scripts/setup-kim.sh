@@ -229,7 +229,7 @@ cat > "$HOME/.local/bin/tardis-connect" <<'EOF'
 #!/usr/bin/env bash
 set -u
 while true; do
-  printf '\nFinish TARDIS Setup\n1. Sign into Claude Code\n2. Sign into Codex\n3. Connect Grok\n4. Connect brand publishing accounts\n5. Sign into GitHub for future updates\n6. Open TARDIS\n7. Tailscale and remote support\n0. Done\n'
+  printf '\nFinish TARDIS Setup\n1. Sign into Claude Code\n2. Sign into Codex\n3. Connect Grok\n4. Connect brand publishing accounts\n5. Sign into GitHub for future updates\n6. Open the guided Start here desk\n7. Tailscale and remote support\n8. Office integrations and approvals\n9. Help and service status\n0. Done\n'
   read -r -p 'Choose a step: ' step || exit
   case "$step" in
     1) "$HOME/.local/bin/tardis-cli" claude auth login ;;
@@ -237,13 +237,41 @@ while true; do
     3) xdg-open http://127.0.0.1:8091/xai-oauth ;;
     4) xdg-open http://127.0.0.1:8091/content ;;
     5) gh auth login --hostname github.com --git-protocol https --web && gh auth setup-git --hostname github.com ;;
-    6) xdg-open http://127.0.0.1:8091 ;;
+    6) xdg-open http://127.0.0.1:8091/setup ;;
     7) if [[ -x "$HOME/.local/bin/tardis-support" ]]; then "$HOME/.local/bin/tardis-support"; else echo 'Use a USB kit prepared with a support public key and Tailscale IP.'; fi ;;
+    8) xdg-open http://127.0.0.1:8091/integrations ;;
+    9) "$HOME/.local/bin/tardis-help" ;;
     0) exit ;;
   esac
 done
 EOF
 chmod 700 "$HOME/.local/bin/tardis-connect"
+cat > "$HOME/.local/bin/tardis-help" <<'EOF'
+#!/usr/bin/env bash
+printf '\nTARDIS Help\nThis tool shows status. It never stops or restarts agents.\n\n'
+for unit in tardis rallypoint-engine rallypoint-scan; do
+  printf '%s: ' "$unit"
+  systemctl --user is-active "$unit" || true
+done
+printf '\n1. Open guided setup and download a safe report\n2. View local service logs (private; do not share unreviewed)\n3. Open remote support\n0. Close\n'
+read -r -p 'Choose: ' choice
+case "$choice" in
+  1) xdg-open http://127.0.0.1:8091/setup#help ;;
+  2) journalctl --user -u tardis -u rallypoint-engine -u rallypoint-scan -n 80 --no-pager; read -r -p 'Press Enter to close.' ;;
+  3) if [[ -x "$HOME/.local/bin/tardis-support" ]]; then "$HOME/.local/bin/tardis-support"; else printf 'Remote support was not included in this kit.\n'; fi ;;
+esac
+EOF
+chmod 700 "$HOME/.local/bin/tardis-help"
+cat > "$HOME/.local/share/applications/tardis-help.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=TARDIS Help
+Comment=Check services and find help
+Exec=sh -c "$HOME/.local/bin/tardis-help"
+Icon=help-browser
+Terminal=true
+Categories=Office;
+EOF
 cat > "$HOME/.local/share/applications/tardis-setup.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
@@ -259,7 +287,7 @@ cat > "$HOME/.local/share/applications/tardis.desktop" <<'EOF'
 Type=Application
 Name=TARDIS
 Comment=Your agents and content desk
-Exec=xdg-open http://127.0.0.1:8091
+Exec=xdg-open http://127.0.0.1:8091/api/setup/launch
 Icon=applications-office
 Terminal=false
 Categories=Office;
@@ -269,7 +297,7 @@ cat > "$HOME/.local/bin/tardis-open" <<'EOF'
 #!/usr/bin/env bash
 for attempt in {1..60}; do
   if curl --fail --silent --max-time 2 http://127.0.0.1:8091/api/health >/dev/null; then
-    exec xdg-open http://127.0.0.1:8091
+    exec xdg-open http://127.0.0.1:8091/api/setup/launch
   fi
   sleep 2
 done

@@ -1,4 +1,5 @@
-import { Router } from 'express';
+import { Router, raw } from 'express';
+import sharp from 'sharp';
 import { randomBytes } from 'node:crypto';
 import { contentEngineRequest, contentBrainForAgent, ContentEngineError } from '../lib/contentEngine.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
@@ -24,6 +25,8 @@ contentRouter.post('/review-intent', (req, res) => {
   res.json({ token });
 });
 const routes = [
+  ['GET', /^\/media\/settings$/],
+  ['PUT', /^\/media\/settings$/],
   ['GET', /^\/(?:status|drafts|jobs|ideas|scanner)$/],
   ['POST', /^\/scan$/],
   ['POST', /^\/ideas\/[a-zA-Z0-9-]+\/generate$/],
@@ -40,8 +43,24 @@ const routes = [
   ['POST', /^\/connections\/(?:operly|r-link)\/ayrshare\/(?:profile|connect)$/],
 ] as const;
 
+contentRouter.post('/media/upload', raw({ type: 'application/octet-stream', limit: '10mb' }), async (req,res) => {
+  if (!trustedWebSocketOrigin(req) || req.headers['sec-fetch-site'] !== 'same-origin' || !req.headers.origin) { res.status(403).json({error:'Use the Content desk to upload images.'}); return; }
+  if (!Buffer.isBuffer(req.body)) { res.status(415).json({error:'Choose a JPEG, PNG or WebP image.'}); return; }
+  let bytes:Buffer;
+  try {
+    const input = sharp(req.body,{limitInputPixels:25_000_000,animated:false});
+    const metadata = await input.metadata();
+    if (!['jpeg','png','webp'].includes(metadata.format ?? '')) { res.status(415).json({error:'Choose a JPEG, PNG or WebP image.'}); return; }
+    bytes = await input.rotate().resize({width:2400,height:2400,fit:'inside',withoutEnlargement:true}).webp({quality:90}).toBuffer();
+  } catch { res.status(400).json({error:'This image could not be decoded. Choose a JPEG, PNG or WebP under 10 MB and 25 megapixels.'});return; }
+  try {
+    res.json(await contentEngineRequest('/media/upload','POST',{data:bytes.toString('base64')},AbortSignal.timeout(60000)));
+  } catch { res.status(502).json({error:'Could not upload this image. Check the content connection and storage, then try again.'}); }
+});
+
 contentRouter.use(async (req, res) => {
   if (!trustedWebSocketOrigin(req)) { res.status(403).json({ error: 'Untrusted request origin.' }); return; }
+  if (req.method === 'PUT' && req.path === '/media/settings' && (!req.headers.origin || req.headers['sec-fetch-site'] !== 'same-origin')) { res.status(403).json({error:'Use Start here to configure media.'}); return; }
   if (!routes.some(([method, path]) => method === req.method && path.test(req.path))) {
     res.status(404).json({ error: 'Unknown content action.' }); return;
   }

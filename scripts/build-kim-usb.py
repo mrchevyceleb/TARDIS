@@ -73,6 +73,9 @@ if support:
 (output/'release.json').write_text(json.dumps(commits, indent=2)+'\n', encoding='utf-8')
 names = ['tardis.bundle', 'rallypoint.bundle', 'setup-kim.sh', 'INSTALL.sh', 'release.json'] + (['workspace.json'] if workspace else []) + (['support.json'] if support else [])
 names += ['integrations.json'] if office else []
+for source, name in [('kim-start-here.html','START-HERE.html'),('kim-recovery.txt','RECOVERY.txt')]:
+    (output/name).write_text((tardis/'scripts'/source).read_text(encoding='utf-8'),encoding='utf-8',newline='\n')
+    names.append(name)
 with (output/'SHA256SUMS').open('w', encoding='utf-8', newline='\n') as sums:
     for name in names:
         with (output/name).open('rb') as data: digest=hashlib.file_digest(data, 'sha256').hexdigest()
@@ -115,4 +118,6 @@ print(f'USB kit ready: {output}')
 if office:
     with (output/'START-HERE.txt').open('a', encoding='utf-8') as guide:
         guide.write('\nPRIVATE INTEGRATIONS: The hosted office is preconfigured. Open Plugins > Integrations to connect accounts and review agent actions. Google OAuth application registration is required once before Gmail sign-in. Slack, Railway, Supabase, Brave and GHL need her authorized tokens. Private memory is separate from shared brand content. integrations.json contains administrator credentials; keep this kit private.\n')
+with (output/'START-HERE.txt').open('a',encoding='utf-8') as guide:
+    guide.write('\nOPEN START-HERE.html for the illustrated offline guide. After installation, TARDIS opens Start here with connection checks, a first-content walkthrough, media setup, optional daily drafting and safe diagnostics. RECOVERY.txt explains sign-ins, troubleshooting, updates and private backups.\n')
 print('Copy this folder to the USB. No disk was formatted.')

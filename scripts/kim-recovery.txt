@@ -1,0 +1,62 @@
+TARDIS SETUP — KEEP THIS GUIDE WITH THE USB
+
+BEFORE INSTALLING
+Use the computer's installed Linux. Complete AMD's welcome screens and updates.
+Run bash INSTALL.sh as your normal Linux user. Do not start it with sudo.
+Internet is required for packages and account sign-ins. The USB is not an OS installer.
+
+IF INSTALLATION STOPS
+Read the final message. The installer keeps a private log in
+~/.local/share/tardis-setup/. Fix the reported network, sign-in or storage issue,
+then run the same installer again. Do not delete your app or configuration folders.
+
+IF SERVICES ARE ALREADY RUNNING
+Do not stop or restart while agents or content jobs are working.
+If you are only finishing sign-ins, open Finish TARDIS Setup instead of reinstalling.
+For an attended update: finish all work first, check /api/health has busyTurns: 0
+and Content has no queued/running jobs, then run:
+  systemctl --user stop tardis rallypoint-engine rallypoint-scan
+  bash INSTALL.sh
+The installer refuses older or divergent versions and preserves existing data.
+Keep this USB for the initial version; use a newly prepared kit for future updates.
+
+IF TARDIS DOES NOT OPEN
+Open TARDIS Help from Applications. Check the three service states.
+It can show private logs without restarting anything.
+For terminal inspection:
+  systemctl --user status tardis rallypoint-engine rallypoint-scan
+  journalctl --user -u tardis -u rallypoint-engine -u rallypoint-scan -n 80
+Do not send raw logs without checking for private details. Prefer the safe report
+from Start here > Get help, which contains connection status only.
+
+CONTENT CONNECTIONS
+Claude/Codex/Grok sign-ins are personal to this computer. Test a writer in Start here.
+Brand guides and examples are bundled. Drafts and research use the shared brand database.
+Gmail/Slack/office memory use the separate office MCP. Connecting GHL in Integrations
+does not configure a blog publishing destination; use Content > Connections for that.
+Ayrshare needs its administrator key/profile setup before social sign-ins.
+Google OAuth needs a web application/client configured before Gmail sign-in.
+Automatic images and generated video require separately billed providers.
+Upload your own images in Content; the publishing links are public. Footage upload
+stores a private original in the local workspace for Video Editor. Larger clips can
+be copied to that workspace directly. Do not move confidential footage into a public bucket.
+
+FIRST CONTENT CHECK
+Use Start here to select a researched idea or your own sourced brief. Generate a blog
+and social pack, edit each, preview and approve. When all work is idle, reboot and
+return to the walkthrough. It checks saved draft revisions and approval state.
+For an uncertain publishing result, inspect the real destination before retrying.
+The installer does not publish a test post or enable daily drafting automatically.
+
+REMOTE SUPPORT
+Use your own Tailscale account and separate tailnet. Share only this workstation
+with your support person. Enable support in TARDIS Remote Support after checking
+the displayed details. Pause support to stop access; revoke the machine share to
+remove the relationship. The supplied SSH key is public, not a login credential.
+
+BACKUP
+The shared database stores content; conversations, subscriptions, agent settings,
+original footage and local configuration live on this computer. This USB is an
+installer, not a backup. Keep the computer's normal encrypted backup enabled and
+include ~/.rivendell, ~/.config/tardis, ~/.rallypoint and ~/ASSISTANT-HUB.
+Treat any backup containing those folders as private and credential-bearing.

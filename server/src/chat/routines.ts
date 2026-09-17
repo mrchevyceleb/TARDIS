@@ -43,7 +43,7 @@ function saveRoutines(routines: Routine[]): void {
   writeFileSync(ROUTINES_FILE, JSON.stringify({ routines }, null, 2));
 }
 
-export function createRoutine(input: { name: string; agentId: string; schedule: string; prompt: string }): Routine | null {
+export function createRoutine(input: { name: string; agentId: string; schedule: string; prompt: string; paused?: boolean }): Routine | null {
   if (!listAgents().some((a) => a.id === input.agentId)) return null;
   const routine: Routine = {
     id: `rt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
@@ -52,6 +52,7 @@ export function createRoutine(input: { name: string; agentId: string; schedule: 
     schedule: parseSchedule(input.schedule) ? input.schedule.trim() : 'daily:09:00',
     prompt: input.prompt.trim().slice(0, 8000),
     createdAt: Date.now(),
+    paused: input.paused ?? false,
   };
   if (!routine.prompt) return null;
   const routines = listRoutines();

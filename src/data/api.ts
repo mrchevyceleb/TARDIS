@@ -1,5 +1,16 @@
 import type { FileTreeNode, WorkspaceEditFileResponse, WorkspaceSaveResponse } from './types';
 
+export function setupRequest<T>(path: string, body?: unknown): Promise<T> {
+  return apiJson<T>(`/api/setup${path}`,body === undefined ? undefined : {method:'POST',body:JSON.stringify(body)});
+}
+export async function uploadContentImage(file: File): Promise<{url:string}> {
+  if(file.size > 10*1024*1024)throw new Error('Choose an image smaller than 10 MB.');
+  const response=await fetch('/api/content/media/upload',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file});
+  const data=await response.json().catch(()=>null);
+  if(!response.ok)throw new Error(data?.error || 'Image upload failed.');
+  return data;
+}
+
 export async function integrationRequest<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const response = await fetch(`/api/integrations${path}`, { method, headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const data = await response.json();

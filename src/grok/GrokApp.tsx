@@ -38,6 +38,7 @@ import { OPEN_PANE_EVENT } from './messagePins';
 import { Council } from '../rooms/Council';
 import { Content } from '../rooms/Content';
 import { Integrations } from '../rooms/Integrations';
+import { Setup } from '../rooms/Setup';
 import { Dashboard } from '../rooms/Dashboard';
 import { Tidings } from '../rooms/Tidings';
 import { Calendar } from '../rooms/Calendar';
@@ -51,6 +52,7 @@ import { Annals } from '../rooms/Annals';
 import { Scribe } from '../rooms/Scribe';
 
 const ROOMS: Record<string, ComponentType> = {
+  setup: Setup,
   integrations: Integrations,
   content: Content,
   council: Council,

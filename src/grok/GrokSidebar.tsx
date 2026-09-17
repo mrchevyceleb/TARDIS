@@ -55,6 +55,7 @@ export type RoomEntry = { key: string; label: string; icon: React.ReactNode };
 
 export const ROOM_ENTRIES: RoomEntry[] = [
   { key: 'integrations', label: ROOM_NAMES.integrations.name, icon: <Plug size={16} /> },
+  { key: 'setup', label: ROOM_NAMES.setup.name, icon: <Plug size={16} /> },
   { key: 'content', label: ROOM_NAMES.content.name, icon: <Pencil size={16} /> },
   { key: 'council', label: ROOM_NAMES.council.name, icon: <LayoutGrid size={16} /> },
   { key: 'dashboard', label: ROOM_NAMES.dashboard.name, icon: <Gauge size={16} /> },

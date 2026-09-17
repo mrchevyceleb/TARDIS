@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ArrowLeft, Check, CheckCheck, ChevronRight, Clock3, FileText, LoaderCircle, Plus, RefreshCw, Search, Send, Sparkles, X } from 'lucide-react';
-import { contentRequest } from '../data/api';
+import { contentRequest, uploadContentImage } from '../data/api';
 import { CONTENT_BRANDS, CONTENT_CHANNELS, CONTENT_ENGINES, type ContentImage, type ContentBrand, type ContentChannel, type ContentDraft, type ContentEngine, type ContentJob, type ContentStatus } from '../data/content';
 import './content.css';
 import { ContentConnections } from './ContentConnections';
@@ -24,13 +24,13 @@ const safeUrl = (url?: string) => { try { const parsed = new URL(url ?? ''); ret
 
 export function Content() {
   const cache = useQueryClient();
-  const [brand, setBrand] = useState<ContentBrand>('operly');
-  const [tab, setTab] = useState('review');
+  const [brand, setBrand] = useState<ContentBrand>(()=>new URLSearchParams(location.search).get('brand')==='r-link'?'r-link':'operly');
+  const [tab, setTab] = useState(()=>new URLSearchParams(location.search).get('tab')==='ideas'?'ideas':'review');
   const [search, setSearch] = useState('');
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(()=>{const id=new URLSearchParams(location.search).get('draft');return id&&/^[a-f0-9-]{36}$/.test(id)?id:null;});
   const [creating, setCreating] = useState(false);
   const [sourceIdea, setSourceIdea] = useState<ContentIdea | null>(null);
-  const [connecting, setConnecting] = useState(false);
+  const [connecting, setConnecting] = useState(()=>new URLSearchParams(location.search).get('connections')==='1');
   const [error, setError] = useState('');
   const [jobAction, setJobAction] = useState('');
   const drafts = useQuery({ queryKey: ['content', 'drafts', brand], queryFn: ({ signal }) => contentRequest<{ drafts: ContentDraft[] }>(`/drafts?brand=${brand}`, 'GET', undefined, signal), refetchInterval: 5000, retry: false });
@@ -54,6 +54,7 @@ export function Content() {
 
   if (selected && detail.data) return <DraftDesk key={selected} initial={detail.data.draft} status={status.data} onBack={() => { setSelected(null); refresh(); }} onSaved={refresh} />;
   return <section className="content-room">
+    <a className="content-hint" href="/setup">Start here · first content, media and help →</a>
     <header className="content-header"><div><span className="content-eyebrow"><Sparkles size={14} /> YOUR CONTENT STUDIO</span><h1>A little idea.<br /><span>A lot of possibilities.</span></h1><p>Create something worth sharing. Make it yours before it goes out.</p></div><button className="content-button primary" onClick={() => setCreating(true)}><Plus size={18} /> Create content</button></header>
     <div className="content-toolbar"><div className="content-segment" aria-label="Brand">{Object.entries(CONTENT_BRANDS).map(([value, name]) => <button key={value} aria-pressed={brand === value} onClick={() => setBrand(value as ContentBrand)}>{name}</button>)}</div><label className="content-search"><Search size={16} /><input aria-label="Search content" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Find a draft…" /></label></div>
     <div className="content-steps" aria-label="Content workflow"><span><i>1</i> Create</span><ChevronRight size={15}/><span><i>2</i> Make it yours</span><ChevronRight size={15}/><span><i>3</i> Approve & share</span></div>
@@ -97,9 +98,16 @@ function ImagePreview({ value }: { value?: ContentImage }) {
 function ImageEdit({ value, disabled, required, onChange }: { value?: ContentImage; disabled: boolean; required?: boolean; onChange: (value: ContentImage) => void }) {
   const [url, setUrl] = useState(value?.url || '');
   const [alt, setAlt] = useState(value?.alt || '');
+  const [uploading,setUploading]=useState(false),[uploadError,setUploadError]=useState('');
+  const upload=async(file?:File)=>{
+    if(!file||disabled||uploading)return;
+    if(!['image/jpeg','image/png','image/webp'].includes(file.type)){setUploadError('Choose a JPEG, PNG or WebP image.');return;}
+    setUploading(true);setUploadError('');
+    try{const result=await uploadContentImage(file);setUrl(result.url);}catch(e){setUploadError(messageOf(e));}finally{setUploading(false);}
+  };
   const valid = (() => { try { return new URL(url).protocol === 'https:'; } catch { return false; } })();
   useEffect(() => { setUrl(value?.url || ''); setAlt(value?.alt || ''); }, [value?.url, value?.alt]);
-  return <div className="content-image-editor"><ImagePreview value={value}/><details><summary>{value?.status === 'ok' ? 'Change image' : required ? 'Add an image before publishing' : 'Add an image (optional)'}</summary><p className="content-hint">Paste a public image link. Your change will need approval before publishing.</p><label className="content-field">Image link<input type="url" placeholder="https://…" value={url} disabled={disabled} onChange={(e) => setUrl(e.target.value)}/></label><label className="content-field">Image description<input value={alt} disabled={disabled} onChange={(e) => setAlt(e.target.value)}/></label><button className="content-button" disabled={disabled || !valid || !alt.trim() || (url === value?.url && alt === value?.alt)} onClick={() => onChange({ slot: value?.slot || 'featured', url: url.trim(), alt: alt.trim(), prompt: value?.prompt || '', aspect_ratio: value?.aspect_ratio || '1:1', status: 'ok' })}>Use this image</button></details></div>;
+  return <div className="content-image-editor"><ImagePreview value={value}/><details><summary>{value?.status === 'ok' ? 'Change image' : required ? 'Add an image before publishing' : 'Add an image (optional)'}</summary><p className="content-hint">Upload an image or paste a public link. Uploaded images get a public publishing link; only use media intended for public use. Changes need fresh approval.</p><div className="content-image-drop" onDragOver={e=>{e.preventDefault();}} onDrop={e=>{e.preventDefault();e.stopPropagation();void upload(e.dataTransfer.files[0]);}}><label className="content-field">Choose or drop an image (10 MB maximum)<input type="file" accept="image/jpeg,image/png,image/webp" disabled={disabled||uploading} onChange={e=>{void upload(e.target.files?.[0]);e.target.value='';}}/></label>{uploading&&<p role="status">Uploading your image…</p>}{uploadError&&<p role="alert">{uploadError}</p>}</div><label className="content-field">Image link<input type="url" placeholder="https://…" value={url} disabled={disabled||uploading} onChange={(e) => setUrl(e.target.value)}/></label><label className="content-field">Image description<input value={alt} disabled={disabled||uploading} onChange={(e) => setAlt(e.target.value)}/></label><button className="content-button" disabled={disabled || uploading || !valid || !alt.trim() || (url === value?.url && alt === value?.alt)} onClick={() => onChange({ slot: value?.slot || 'featured', url: url.trim(), alt: alt.trim(), prompt: value?.prompt || '', aspect_ratio: value?.aspect_ratio || '1:1', status: 'ok' })}>Use this image</button></details></div>;
 }
 
 function ContentModal({ title, onClose, children }: { title: string; onClose?: () => void; children: React.ReactNode }) {

@@ -292,3 +292,21 @@ Review the request and choose **Approve & run** or **Decline**. If an action fai
 or partially completes, inspect its results and the destination before retrying.
 Memory storage works without connecting these external accounts. Without an
 explicit office configuration, the optional hub stays disconnected.
+
+## Guided first day
+
+The USB includes `START-HERE.html` and `RECOVERY.txt` for offline instructions.
+After installation, TARDIS opens `/setup`: connection checks, explicit subscription
+tests, a saved blog/social walkthrough, media settings, a weekday routine and safe
+diagnostics. Choose **Open my team on future logins** when ready; the guide remains
+available under Plugins. **TARDIS Help** shows local service state without restarting.
+
+The walkthrough tracks saved drafts, edited revisions, approvals and persistence
+across a Linux reboot. Editorial review remains a human step. Daily drafting is off
+until enabled and runs in the computer's time zone. The scanner uses midnight Eastern.
+Image uploads are decoded, stripped of metadata and stored in the public
+`draft-images` bucket. Upload only publishing assets. Video footage stays in the
+local workspace for Video Editor; uploads are capped at 200 MB. Optional Google
+image and fal.ai video credentials are entered on this installation and are never
+included in browser status or diagnostic exports. Provider charges are separate.
+The AMD preinstalled generation applications are not automatically connected.
