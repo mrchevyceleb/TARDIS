@@ -9,7 +9,12 @@ import { readCommands } from './commands.ts';
 import { clearThreadSessionIds, ensureStateDir } from './sessions.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { stopComputersForOwner } from '../devices/bridge.ts';
-import { historicalDelivery, subscriptionReplayCursor } from './replayDelivery.ts';
+import {
+  clampReplayWindow,
+  collapseHistoricalToolArgs,
+  historicalDelivery,
+  subscriptionReplayCursor,
+} from './replayDelivery.ts';
 import {
   activeClaudeSessions,
   subscribeExternalThreadEvents,
@@ -816,10 +821,20 @@ export async function registerChat(app: express.Express, server: Server): Promis
             return true;
           });
         replaying = false;
-        for (const se of filterReplayEvents(merged)) {
-          const delivery = se.seq <= latest ? historicalDelivery(se) : se;
-          if (delivery) dispatch(delivery);
-        }
+        // Bound the history half only. Live events buffered during the bind
+        // are new to this socket and must all arrive.
+        // Collapse streamed tool-argument noise and trim old tool output first,
+        // so the replay window is spent on conversation rather than on
+        // redrawing old tool cards, and the byte budget measures what actually
+        // goes out. Live frames above `latest` are new to this socket and are
+        // neither rewritten nor dropped.
+        const history = clampReplayWindow(
+          collapseHistoricalToolArgs(filterReplayEvents(merged), latest)
+            .map((se) => (se.seq <= latest ? historicalDelivery(se) : se))
+            .filter((se): se is DispatchSeqEvent => se !== null),
+          latest,
+        );
+        for (const se of history) dispatch(se);
       }
       return session;
     };
@@ -851,10 +866,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
         const pending: DispatchSeqEvent[] = events
           .filter((event) => event.seq > replaySince)
           .map((event) => ({ seq: event.seq, ev: event.ev as any }));
-        for (const se of filterReplayEvents(pending)) {
-          const delivery = historicalDelivery(se);
-          if (delivery) dispatch(delivery);
-        }
+        const history = clampReplayWindow(
+          collapseHistoricalToolArgs(filterReplayEvents(pending), latest)
+            .map((se) => historicalDelivery(se))
+            .filter((se): se is DispatchSeqEvent => se !== null),
+          latest,
+        );
+        for (const se of history) dispatch(se);
       }
       return latest;
     };
