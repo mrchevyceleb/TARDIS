@@ -26,6 +26,7 @@ test('retired engines migrate with a new revision while preserving identity and 
 });
 
 test('subscription child environments cannot inherit metered credentials or provider redirects', () => {
+  assert.deepEqual(subscriptionEnvironment({ TARDIS_OFFICE_MCP_TOKEN:'agent', TARDIS_OFFICE_ADMIN_TOKEN:'admin', Tardis_Office_Admin_Token:'admin' }), { TARDIS_OFFICE_MCP_TOKEN:'agent' });
   const env = subscriptionEnvironment({ PATH: 'safe', ANTHROPIC_API_KEY: 'key', ANTHROPIC_AUTH_TOKEN: 'key', ANTHROPIC_BASE_URL: 'https://other.example', OPENAI_API_KEY: 'key', OPENAI_BASE_URL: 'https://other.example', OPENROUTER_API_KEY: 'key', FIREWORKS_API_KEY: 'key', GROK_PERSONAL_API_KEY: 'key', CLAUDE_CODE_USE_BEDROCK: '1' });
   assert.deepEqual(env, { PATH: 'safe' });
   assert.deepEqual(subscriptionEnvironment({ Path: 'safe', OpenAI_API_Key: 'key', Anthropic_Auth_Token: 'key', Fireworks_Api_Key: 'key' }), { Path: 'safe' });

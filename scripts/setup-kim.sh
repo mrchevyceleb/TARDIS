@@ -176,6 +176,10 @@ assert_services_stopped
 git -C "$tardis_dir" switch --detach "$tardis_target"
 git -C "$rally_dir" switch --detach "$rally_target"
 
+if [[ -n "$bundle_dir" && -f "$bundle_dir/integrations.json" ]]; then
+  python3 "$tardis_dir/scripts/office_config.py" "$bundle_dir/integrations.json" "$config_dir/tardis.env"
+fi
+
 say 'Installing dependencies and building both shared applications.'
 (cd "$tardis_dir"; npm ci; npm run typecheck; VITE_TARDIS_STYLE=lavender VITE_TARDIS_THEME=light npm run build)
 (cd "$rally_dir"; pnpm install --frozen-lockfile; pnpm --filter @rallypoint/engine typecheck; pnpm --filter @rallypoint/worker typecheck)

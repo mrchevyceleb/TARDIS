@@ -1,0 +1,36 @@
+.integration-room { max-width:1100px; margin:auto; padding:36px; color:var(--r-ink); height:100%; overflow:auto; }
+.integration-room header,.integration-card-title { display:flex; align-items:center; justify-content:space-between; gap:14px; }
+.integration-eyebrow { display:flex; gap:8px; align-items:center; font-size:11px; letter-spacing:.14em; color:var(--r-ink-mute); }
+.integration-room h1 { font-size:32px; letter-spacing:-.035em; margin:13px 0 6px; }
+.integration-room p { color:var(--r-ink-mute); font-size:13px; line-height:1.6; }
+.integration-room button,.integration-room a { display:inline-flex; align-items:center; justify-content:center; gap:7px; padding:10px 14px; border-radius:12px; border:1px solid var(--r-line); background:var(--r-bg-soft); color:var(--r-ink); font:inherit; font-size:12px; cursor:pointer; transition:transform .15s,box-shadow .15s; text-decoration:none; }
+.integration-room button:hover:not(:disabled),.integration-room a:hover { transform:translateY(-2px); box-shadow:0 4px 12px #8062b21a; }
+.integration-room button:disabled { opacity:.5; cursor:wait; }
+.integration-room button:focus-visible,.integration-room input:focus-visible,.integration-room a:focus-visible { outline:2px solid #9e79ce; outline-offset:3px; }
+.integration-private { display:flex; gap:14px; align-items:center; background:color-mix(in srgb,#9371bf 10%,var(--r-bg-raised)); border:1px solid var(--r-line); border-radius:18px; padding:20px; margin:24px 0; }
+.integration-private > svg { flex-shrink:0; color:#9870c4; }
+.integration-private p { margin:5px 0 0; }
+.integration-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+.integration-grid article,.integration-review { background:var(--r-bg-raised); border:1px solid var(--r-line); border-radius:18px; padding:23px; min-width:0; }
+.integration-card-title h2,.integration-card-title h3 { font-size:17px; margin:0; }
+.integration-card-title span { display:flex; align-items:center; gap:5px; color:var(--r-ink-mute); font-size:11px; white-space:nowrap; }
+.integration-room label { display:block; font-size:12px; margin:12px 0; }
+.integration-room input { box-sizing:border-box; width:100%; margin-top:6px; padding:11px; border-radius:10px; border:1px solid var(--r-line); background:var(--r-bg-soft); color:var(--r-ink); }
+.integration-room code { word-break:break-all; }
+.integration-actions { display:flex; flex-wrap:wrap; gap:9px; }
+.integration-actions button:first-child { background:#8661b4; color:white; border-color:transparent; }
+.integration-gmail { display:flex; flex-direction:column; gap:9px; align-items:flex-start; margin-top:16px; }
+.integration-gmail p { margin:0; overflow-wrap:anywhere; }
+.integration-gmail small,.integration-review time { font-size:11px; color:var(--r-ink-mute); }
+.integration-review-title { margin-top:40px; }
+.integration-review { margin:14px 0; }
+.integration-email-preview dl { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:8px 16px; font-size:13px; margin:18px 0; }
+.integration-email-preview dt { color:var(--r-ink-mute); }
+.integration-email-preview dd { margin:0; overflow-wrap:anywhere; }
+.integration-email-body { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.7; padding:20px; background:var(--r-bg-soft); border-radius:12px; font-size:14px; }
+.integration-review pre { overflow:auto; max-height:330px; padding:14px; border-radius:12px; background:var(--r-bg-soft); font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.integration-room .integration-error { color:var(--r-danger,#c85868); }
+.integration-notice { background:var(--r-bg-soft); padding:12px; border-radius:12px; }
+.integration-empty { text-align:center; padding:40px 14px; border:1px dashed var(--r-line); border-radius:18px; margin-top:24px; }
+@media(max-width:650px) { .integration-room { padding:22px 16px; } .integration-grid { grid-template-columns:1fr; } .integration-card-title { align-items:flex-start; flex-wrap:wrap; } }
+@media(prefers-reduced-motion:reduce) { .integration-room button,.integration-room a { transition:none; } }

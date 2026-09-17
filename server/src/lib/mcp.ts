@@ -29,8 +29,9 @@ export async function callMcp<T = unknown>(tool: string, payload: unknown): Prom
     throw new Error(`MCP ${tool} failed: ${response.status} ${await response.text()}`);
   }
 
-  const envelope = (await response.json()) as { content?: Array<{ type?: string; text?: string }> };
+  const envelope = (await response.json()) as { isError?: boolean; content?: Array<{ type?: string; text?: string }> };
   const text = envelope?.content?.[0]?.text;
+  if (envelope.isError) throw new Error(typeof text === 'string' ? text : `MCP ${tool} failed`);
   if (typeof text !== 'string') {
     return envelope as unknown as T;
   }

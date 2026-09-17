@@ -2,6 +2,7 @@ import express from 'express';
 import compression from 'compression';
 import { createServer } from 'node:http';
 import { contentRouter } from './routes/content.ts';
+import { integrationsRouter } from './routes/integrations.ts';
 import { contentGatewayRouter } from './routes/contentGateway.ts';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -113,6 +114,7 @@ app.use('/xai-oauth', xaiOauthRouter);
 
 const server = createServer(app);
 app.use('/api/content', contentRouter);
+app.use('/api/integrations', integrationsRouter);
 app.use('/internal/content/v1', contentGatewayRouter);
 // Start the xAI transform proxy before chat registers so its base URL is
 // resolved before any xAI chat session can spawn. Non-fatal: a failure logs

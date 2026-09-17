@@ -6,6 +6,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CODEX_APP_TURN_SCRIPT } from '../config.ts';
 import { localMcpCodexArgs } from './local-mcp.ts';
+import { officeMcpCodexArgs } from './office-mcp.ts';
 import { computerGuidance } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
@@ -715,7 +716,7 @@ export class CodexSession {
         '-c', `mcp_servers.rivendell-browser.args=${JSON.stringify([browserMcpEntry])}`,
       );
     }
-    browserMcpArgs.push(...localMcpCodexArgs(agentForChatId(this.chatId)?.name ?? 'Teammate'));
+    browserMcpArgs.push(...localMcpCodexArgs(agentForChatId(this.chatId)?.name ?? 'Teammate'), ...officeMcpCodexArgs());
     const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
 
     // Wait for OneDrive to release its sync lock on .codex/config.toml so

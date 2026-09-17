@@ -114,12 +114,14 @@ export const SUPABASE_SERVICE_ROLE_KEY =
 // Both endpoints share the same auth token, so co-locating them removes a
 // whole class of "callMcp not configured" silent failures.
 export const MCP_BASE_URL =
+  process.env.TARDIS_OFFICE_MCP_URL?.replace(/\/(?:mcp\/?)?$/, '') ||
   process.env.RAILWAY_MCP_URL ||
   process.env.ASSISTANT_MCP_URL ||
   process.env.MCP_BASE_URL ||
   ASSISTANT_ADMIN_BASE_URL;
 
 export const MCP_BEARER_TOKEN =
+  process.env.TARDIS_OFFICE_MCP_TOKEN ||
   process.env.ASSISTANT_MCP_TOKEN ||
   process.env.MCP_BEARER_TOKEN ||
   process.env.RAILWAY_MCP_TOKEN ||

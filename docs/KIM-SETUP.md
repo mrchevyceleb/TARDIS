@@ -66,7 +66,7 @@ Before the visit, put the reviewed TARDIS and RallyPoint release commits on thei
 shared GitHub repositories. Kim's GitHub account needs access to both
 `mrchevyceleb/TARDIS` and private `R-Link-LLC/RallyPoint`. Provision her intended
 content database (the existing shared Operly/R-Link database may be used) and apply RallyPoint migrations through
-`0010_headless_content.sql`; have its URL and service-role key available privately.
+`0011_scanner_content_bridge.sql`; have its URL and service-role key available privately.
 The script does not copy credentials or conversations from another installation.
 
 Open a terminal in the USB folder and run:
@@ -265,3 +265,30 @@ Report what needs review. If scans failed, report the failure; do not invent ide
 or repeatedly request scans. Never approve or publish.” Choose the cadence and
 volume with Kim; setup does not silently enable a drafting routine. The scanner
 collects ideas automatically once her subscription is signed in.
+
+## Private office integrations
+
+To include a separately hosted office MCP, add `--office-config /private/path/office.json`
+to the USB build command. That private JSON contains `TARDIS_OFFICE_MCP_URL`,
+`TARDIS_OFFICE_MCP_TOKEN` and `TARDIS_OFFICE_ADMIN_TOKEN`. Use an HTTPS service root
+and distinct agent/admin tokens of at least 32 characters. The builder includes
+these credentials in `integrations.json`; keep the entire kit private.
+Reruns preserve the installed connection and refuse to mix different office credentials.
+
+The hosted hub stores private memory and tool activity in its own database;
+shared brand content remains in RallyPoint. Claude, Codex and Grok receive the
+configured agent connection. Their subscription processes do not receive the
+separate admin token.
+
+Open **Plugins > Integrations** to connect Gmail, Slack, GoHighLevel, web search,
+Railway and Supabase. Gmail first needs a Google OAuth web application: register
+the redirect URI shown by the setup form, save its client ID and secret, then
+connect each account using Google sign-in. The other integrations need authorized
+tokens for the intended accounts. These account connections are not included
+in the installer.
+
+Agents prepare external changes for review in the same Integrations screen.
+Review the request and choose **Approve & run** or **Decline**. If an action fails
+or partially completes, inspect its results and the destination before retrying.
+Memory storage works without connecting these external accounts. Without an
+explicit office configuration, the optional hub stays disconnected.

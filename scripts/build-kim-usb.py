@@ -7,11 +7,13 @@ import ipaddress
 import json
 from pathlib import Path
 import subprocess
+from office_config import read_office_config
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--rallypoint', type=Path, required=True)
 parser.add_argument('--output', type=Path, required=True, help='A new folder; existing folders are never overwritten')
 parser.add_argument('--workspace-config', type=Path, help='Private JSON with only SUPABASE_URL and SUPABASE_SERVICE_KEY')
+parser.add_argument('--office-config', type=Path, help='Private JSON containing the hosted office URL and separate agent/admin tokens')
 parser.add_argument('--support-public-key', type=Path, help='Support operator OpenSSH .pub file; never a private key')
 parser.add_argument('--support-peer-ip', help='Support computer Tailscale IPv4 address')
 args = parser.parse_args()
@@ -33,6 +35,7 @@ for repo in (tardis, rallypoint):
     if output == repo or repo in output.parents and output.relative_to(repo).parts[0] != 'tmp':
         raise SystemExit('Use a private output folder outside tracked source, or inside tmp/.')
 workspace = None
+office = read_office_config(args.office_config) if args.office_config else None
 support = None
 if bool(args.support_public_key) != bool(args.support_peer_ip):
     raise SystemExit('Supply both --support-public-key and --support-peer-ip.')
@@ -62,10 +65,14 @@ for source, destination in ((tardis/'scripts/setup-kim.sh', 'setup-kim.sh'), (ta
 if workspace:
     path = output/'workspace.json'
     path.write_text(json.dumps(workspace), encoding='utf-8'); path.chmod(0o600)
+if office:
+    path = output/'integrations.json'
+    path.write_text(json.dumps(office), encoding='utf-8'); path.chmod(0o600)
 if support:
     (output/'support.json').write_text(json.dumps(support), encoding='utf-8')
 (output/'release.json').write_text(json.dumps(commits, indent=2)+'\n', encoding='utf-8')
 names = ['tardis.bundle', 'rallypoint.bundle', 'setup-kim.sh', 'INSTALL.sh', 'release.json'] + (['workspace.json'] if workspace else []) + (['support.json'] if support else [])
+names += ['integrations.json'] if office else []
 with (output/'SHA256SUMS').open('w', encoding='utf-8', newline='\n') as sums:
     for name in names:
         with (output/name).open('rb') as data: digest=hashlib.file_digest(data, 'sha256').hexdigest()
@@ -105,4 +112,7 @@ must be configured once by an administrator before brand owners can connect acco
 X additionally needs X developer credentials. Blogs/email are separate connections.
 '''+('\nPRIVATE KIT: workspace.json grants access to the shared content database. Keep this USB with the installation team; do not publish or upload the kit.\n' if workspace else ''), encoding='utf-8')
 print(f'USB kit ready: {output}')
+if office:
+    with (output/'START-HERE.txt').open('a', encoding='utf-8') as guide:
+        guide.write('\nPRIVATE INTEGRATIONS: The hosted office is preconfigured. Open Plugins > Integrations to connect accounts and review agent actions. Google OAuth application registration is required once before Gmail sign-in. Slack, Railway, Supabase, Brave and GHL need her authorized tokens. Private memory is separate from shared brand content. integrations.json contains administrator credentials; keep this kit private.\n')
 print('Copy this folder to the USB. No disk was formatted.')

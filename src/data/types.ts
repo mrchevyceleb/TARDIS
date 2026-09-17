@@ -1,4 +1,5 @@
 export type RoomKey =
+  | '/integrations'
   | '/content'
   | '/'
   | '/dashboard'
