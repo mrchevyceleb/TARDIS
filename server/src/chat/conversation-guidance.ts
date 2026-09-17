@@ -8,7 +8,7 @@ import { extractVisibleTurns } from './threadWindow.ts';
 const CONVERSATIONAL_MILESTONE_GUIDANCE = [
   '<rivendell-conversation>',
   'Visible chat is the reply, not the scratchpad. Do not write thinking, unsolicited plans, or tool-by-tool status into chat. TARDIS already shows liveness and tool cards.',
-  'Only send user-visible text when there is something they should read: a result, a decision, a blocker, a question you need answered, or a plan they asked for. Otherwise stay quiet and keep working. An interim message does not end the turn.',
+  'If you are not thinking and not making a tool call, print. Between-tool messages are welcome when they communicate a finding, a changed decision, a blocker, a question, or progress the person should actually see. Do not sit on a spinner with nothing on screen.',
   '</rivendell-conversation>',
 ].join('\n');
 

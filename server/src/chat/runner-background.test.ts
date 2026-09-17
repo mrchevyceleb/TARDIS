@@ -36,6 +36,23 @@ test('native monitor query becomes busy, admits tool-window steering, and ends n
   assert.equal(events.filter(e => e.type === 'turnStart').length, 2);
 });
 
+test('stream tool_use opens the native steer window without a completed assistant message', () => {
+  const { session } = harness();
+  session.handleEvent({ type: 'stream_event', event: { type: 'message_start' } });
+  assert.equal(session.isBusy(), true);
+  assert.equal(session.canAcceptNativeHumanSteer(), false);
+  session.handleEvent({
+    type: 'stream_event',
+    event: { type: 'content_block_start', content_block: { type: 'tool_use', id: 'tool-stream-1' } },
+  });
+  assert.equal(session.canAcceptNativeHumanSteer(), true);
+  session.handleEvent({
+    type: 'user',
+    message: { content: [{ type: 'tool_result', tool_use_id: 'tool-stream-1' }] },
+  });
+  assert.equal(session.canAcceptNativeHumanSteer(), false);
+});
+
 test('content starts native turns on older CLIs without resetting an admitted human turn', () => {
   for (const event of [
     { type: 'stream_event', event: { type: 'message_start' } },

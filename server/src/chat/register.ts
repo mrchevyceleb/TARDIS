@@ -118,11 +118,12 @@ function waitForSteerOrTurnEnd(
     try {
       unsubscribe = (session as unknown as {
         subscribe: (fn: (se: { ev?: { type?: string } }) => void, since?: number, count?: boolean) => () => void;
+        latestSeq?: () => number;
       }).subscribe((se) => {
         if (se.ev?.type === 'turnEnd') done('turn-complete');
         else if (se.ev?.type === 'closed') done('closed');
         else if (allowNativeSteer && sessionCanAcceptNativeSteer(session)) done('steerable');
-      }, -1, false);
+      }, session.latestSeq?.() ?? -1, false);
       // Close both check/subscribe races: the turn can end or the native steer
       // channel can become ready before the listener is attached.
       if (!sessionHasActiveBoundary(session)) done('turn-complete');
@@ -1339,13 +1340,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
             && (session as { canAcceptNativeHumanSteer?: () => boolean })
               .canAcceptNativeHumanSteer?.() === true,
           );
-          const steerDeadline = Date.now() + 30 * 60_000;
           while (!nativeActiveSteer && session && sessionHasActiveBoundary(session)) {
-            const remaining = Math.max(1, steerDeadline - Date.now());
             const boundary = await waitForSteerOrTurnEnd(
               session,
               steerAborter.signal,
-              remaining,
+              30 * 60_000,
               !hasSteerImages && !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli),
             );
             if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') { rejectSteer(); releaseSteer(); return; }
@@ -1356,9 +1355,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
             }
             if (boundary === 'closed') { session = null; break; }
             if (boundary === 'timeout') {
-              rejectSteer('Guidance is still waiting for the current turn to finish. The running agent was not interrupted; try again later or use Stop.');
-              releaseSteer();
-              return;
+              // Long tool stretch. Keep waiting for a tool window or turn end.
+              // Never drop the first steer.
+              continue;
             }
             // Some engines immediately start an internal continuation after
             // turnEnd. Loop until the session is genuinely idle.
@@ -1484,17 +1483,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
             const boundary = await waitForSteerOrTurnEnd(
               session,
               steerAborter.signal,
-              Math.max(1, steerDeadline - Date.now()),
+              30 * 60_000,
               true,
             );
             if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') { rejectSteer(); releaseSteer(); return; }
             if (boundary === 'steerable') continue;
             if (boundary === 'closed') { session = null; break; }
-            if (boundary === 'timeout') {
-              rejectSteer('Guidance is still waiting for a safe delivery point. The running agent was not interrupted; try again later or use Stop.');
-              releaseSteer();
-              return;
-            }
+            if (boundary === 'timeout') continue;
             nativeActiveSteer = false;
           }
           if (!session) {
@@ -1546,26 +1541,65 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // An idle/after-turn delivery starts a new turn. Native Claude steer
           // remains inside the already-running turn; its _user_echo carries the
           // clientMsgId that clears the client's queued state.
-          if (!nativeActiveSteer) safeSend({ type: 'turnStart', clientMsgId: msg.clientMsgId });
           logChatTurn(wsId, 'steer', steerCli, steerRepo, chatId, msg.text);
           ++turnGeneration;
+          const nativeWindowClosed = (error: unknown) =>
+            /native steering window closed|must reach a safe boundary/i.test((error as Error).message || '');
           try {
-            await (session as any).send(msg.text, msg.images, {
-              model: steerModel,
-              effort: steerEffort,
-              clientMsgId: msg.clientMsgId,
-              allowNativeHumanSteer: nativeActiveSteer,
-              voiceMode: msg.voice === true,
-              signal: steerAborter.signal,
-            });
-          } finally {
-            // Keep cross-device Stop/Fresh/newer guidance capable of aborting
-            // through attachment persistence and the vision adapter. The
-            // durable _user_echo is emitted before send resolves, so deleting
-            // authoritative ownership here cannot race ahead of acceptance.
-            deletePendingSteer(waitKey, msg.clientMsgId);
+            for (;;) {
+              if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
+              if (!nativeActiveSteer) safeSend({ type: 'turnStart', clientMsgId: msg.clientMsgId });
+              try {
+                await (session as any).send(msg.text, msg.images, {
+                  model: steerModel,
+                  effort: steerEffort,
+                  clientMsgId: msg.clientMsgId,
+                  allowNativeHumanSteer: nativeActiveSteer,
+                  voiceMode: msg.voice === true,
+                  signal: steerAborter.signal,
+                });
+                break;
+              } catch (error) {
+                if (!nativeActiveSteer || !nativeWindowClosed(error)) throw error;
+                // The tool window closed between admission and stdin. Do not
+                // drop the first steer. Wait for the next window or turn end.
+                nativeActiveSteer = false;
+                while (session && sessionHasActiveBoundary(session)) {
+                  const boundary = await waitForSteerOrTurnEnd(
+                    session,
+                    steerAborter.signal,
+                    30 * 60_000,
+                    !hasSteerImages && !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli),
+                  );
+                  if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') {
+                    rejectSteer();
+                    releaseSteer();
+                    return;
+                  }
+                  if (boundary === 'steerable') {
+                    nativeActiveSteer = true;
+                    break;
+                  }
+                  if (boundary === 'closed') { session = null; break; }
+                  if (boundary === 'timeout') continue;
+                  break;
+                }
+                if (!session) {
+                  rejectSteer('Guidance target closed before delivery — try again.');
+                  releaseSteer();
+                  safeSend({ type: 'turnEnd' });
+                  return;
+                }
+              }
+            }
+          } catch (error) {
+            rejectSteer(`Guidance could not be delivered: ${(error as Error).message}`);
             releaseSteer();
+            safeSend({ type: 'turnEnd' });
+            return;
           }
+          deletePendingSteer(waitKey, msg.clientMsgId);
+          releaseSteer();
           lastTurnModel = steerModel;
           lastTurnEffort = steerEffort;
           if (authoritativeAgent) {
@@ -1578,17 +1612,19 @@ export async function registerChat(app: express.Express, server: Server): Promis
               brainRevision: desiredSteerBrain.revision,
             });
           }
-          // Guidance is never auto-resubmitted after acceptance: a cross-device
-          // Stop/Fresh must not be undone by the stale-resume retry helper.
           } catch (error) {
+            // Guidance is never auto-resubmitted after acceptance: a cross-device
+            // Stop/Fresh must not be undone by the stale-resume retry helper.
+            // The inner send loop already reported and returned on delivery
+            // failure, so reaching here means bind/boundary work threw.
             const stillPending = Boolean(
               waitKey && msg.clientMsgId && pendingSteers.get(waitKey)?.has(msg.clientMsgId),
             );
             if (stillPending) {
               rejectSteer(`Guidance could not be delivered: ${(error as Error).message}`);
-              releaseSteer();
               safeSend({ type: 'turnEnd' });
             }
+            releaseSteer();
           }
           });
           return;

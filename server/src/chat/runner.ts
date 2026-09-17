@@ -1399,8 +1399,15 @@ class ClaudeSession {
     // without interrupting: after it emitted tool_use and before every matching
     // tool_result came back. A user message written during message generation
     // was observed to receive an echo yet be absent from every later response.
+    // Grok/xAI often never emits the completed assistant tool_use message, only
+    // stream content_block_start. Without that, steers wait out the whole turn.
     if (ev?.type === 'stream_event' && ev.event?.type === 'message_start') {
       this.activeToolIds.clear();
+    } else if (ev?.type === 'stream_event' && ev.event?.type === 'content_block_start') {
+      const block = ev.event.content_block;
+      if (block?.type === 'tool_use' && typeof block.id === 'string') {
+        this.activeToolIds.add(block.id);
+      }
     } else if (ev?.type === 'assistant' && Array.isArray(ev.message?.content)) {
       for (const block of ev.message.content) {
         if (block?.type === 'tool_use' && typeof block.id === 'string') {

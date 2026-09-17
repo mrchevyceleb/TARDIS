@@ -604,15 +604,8 @@ function isAnswerProse(b: Extract<ChatBlock, { kind: 'text' }>): boolean {
   return t.length > 0 && !isProtocolNoopText(t);
 }
 
-/** Between-tool commentary. Hall already has tool cards and a live-turn pill.
- *  Scratchpad "Update" bubbles are not the reply. */
-function isScratchUpdate(b: Extract<ChatBlock, { kind: 'text' }>): boolean {
-  return b.presentation === 'update';
-}
-
-function visibleAssistantBlocks(blocks: AssistantBlock[], collapseSteps: boolean): AssistantBlock[] {
-  if (!collapseSteps) return blocks;
-  return blocks.filter((b) => !(b.kind === 'text' && isScratchUpdate(b)));
+function visibleAssistantBlocks(blocks: AssistantBlock[], _collapseSteps: boolean): AssistantBlock[] {
+  return blocks;
 }
 
 function showTextCaret(b: Extract<ChatBlock, { kind: 'text' }>, streaming: boolean): boolean {
@@ -620,8 +613,8 @@ function showTextCaret(b: Extract<ChatBlock, { kind: 'text' }>, streaming: boole
 }
 
 /** Preserve every user-facing text message, including between-tool updates.
- * Provider metadata controls presentation, not visibility. Never guess that
- * prose is private reasoning from its words or its position before a tool. */
+ * Provider metadata controls presentation, not visibility. Thinking stays in
+ * the thinking channel. Plain text that is not a tool call prints. */
 // A run of consecutive assistant blocks that share a turnId render under a
 // single "✦ TARDIS" header (the prototype's per-turn group).
 function ReactionStrip({
@@ -686,8 +679,7 @@ function ElrondGroup({
     return (src.length ? src : textBlocks.filter(hasVisibleProse)).map((b) => b.text).join('\n\n');
   };
   const isPinned = Boolean(pin?.pinnedBlockIds.includes(first.id));
-  // Grok mode collapses consecutive tool calls and hides between-tool
-  // scratchpad ("Update") prose. The live-turn pill is the proof of life.
+  // Collapse consecutive tool cards. Between-tool text still prints.
   const toolRuns = new Map<string, ToolBlock[]>();
   const toolRunSkip = new Set<string>();
   if (collapseSteps) {
