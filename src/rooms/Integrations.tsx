@@ -11,7 +11,8 @@ const connections = [
   { id:'slack', name:'Slack', description:'Read conversations and prepare messages.', hint:'Use a Slack user token from her own Slack app and account.' },
   { id:'ghl', name:'GoHighLevel', description:'Work with contacts, opportunities and locations.', hint:'Use her GoHighLevel private integration token with access to the intended subaccount.' },
   { id:'web_search', name:'Web search', description:'Find sources for research and planning.', hint:'Use a Brave Search API subscription key.' },
-  { id:'doppler', name:'Doppler', description:'Use saved credentials from your connected project and config. Secret changes require your review.', hint:'In Doppler, open your project and config, then Access → Generate. Paste that config’s service token (dp.st.…). Enable write access only if your agents should save secrets. This does not automatically import existing connections.' },
+  { id:'doppler', name:'Doppler', description:'Use saved credentials from your connected project and config. Secret changes require your review.', hint:'Use a personal token (dp.pt.) with a project and config, or a service token (dp.st.) from your config’s Access tab. Agents use only the saved destination. Existing connections are not automatically imported.' },
+  { id:'vercel', name:'Vercel', description:'Inspect projects, deployments and build logs. Redeployments require your review.', hint:'Create an access token in your Vercel account settings, scoped to the intended team. Enter its Team ID below, or leave blank for a personal account.' },
   { id:'railway', name:'Railway', description:'Inspect and maintain her services.', hint:'Use a Railway API token scoped to the intended R-Link workspace.' },
   { id:'supabase', name:'Supabase', description:'Inspect and maintain authorized projects.', hint:'Use her Supabase management access token. This is separate from the private memory database.' },
 ];
@@ -39,6 +40,9 @@ export function Integrations() {
   const [editing,setEditing] = useState('');
   const [credential,setCredential] = useState('');
   const [clientId,setClientId] = useState('');
+  const [teamId,setTeamId] = useState('');
+  const [dopplerProject,setDopplerProject] = useState('');
+  const [dopplerConfig,setDopplerConfig] = useState('');
   const [busy,setBusy] = useState('');
   const [notice,setNotice] = useState('');
   const [error,setError] = useState('');
@@ -51,8 +55,14 @@ export function Integrations() {
     try { await work(); refresh(); } catch(e) { setError(message(e)); } finally { setBusy(''); }
   };
   const save = () => run('save',async () => {
-    await integrationRequest('/credentials','POST',editing === 'google' ? {integration:editing,clientId,clientSecret:credential} : {integration:editing,token:credential});
-    setCredential(''); setClientId(''); setEditing(''); setNotice('Connection settings saved. Your agents can use them now.');
+    const token = credential.trim();
+    if (!token) throw new Error('Paste your credential before saving.');
+    if (editing === 'doppler') {
+      if (!/^dp\.(st|pt)\./.test(token)) throw new Error('Use a Doppler personal token (dp.pt.) or service token (dp.st.).');
+      if ((token.startsWith('dp.pt.') || dopplerProject.trim() || dopplerConfig.trim()) && (!dopplerProject.trim() || !dopplerConfig.trim())) throw new Error('Enter both the Doppler project and config. Personal tokens require a destination.');
+    }
+    await integrationRequest('/credentials','POST',editing === 'google' ? {integration:editing,clientId:clientId.trim(),clientSecret:token} : {integration:editing,token,...(editing === 'vercel' ? {teamId:teamId.trim() || undefined} : {}),...(editing === 'doppler' ? {project:dopplerProject.trim() || undefined,config:dopplerConfig.trim() || undefined} : {})});
+    setCredential(''); setClientId(''); setTeamId(''); setDopplerProject(''); setDopplerConfig(''); setEditing(''); setNotice('Connection settings saved. Your agents can use them now.');
   });
   const connectGmail = () => run('gmail',async () => {
     const result = await integrationRequest<{url:string}>('/gmail/start','POST',{});
@@ -77,9 +87,12 @@ export function Integrations() {
         {editing === item.id ? <form onSubmit={e => { e.preventDefault(); void save(); }}>
           <p>{item.hint}</p>
           {item.id === 'google' && <><p>Google redirect URI: <code>{status.data.googleRedirectUri}</code></p><label>Client ID<input required value={clientId} onChange={e=>setClientId(e.target.value)} autoComplete="off"/></label></>}
+          {item.id === 'vercel' && <label>Team ID (optional)<input value={teamId} onChange={e=>setTeamId(e.target.value)} autoComplete="off" placeholder="team_…"/></label>}
+          {item.id === 'doppler' && <><label>Project<input value={dopplerProject} onChange={e=>setDopplerProject(e.target.value)} autoComplete="off" placeholder="Project slug"/></label><label>Config<input value={dopplerConfig} onChange={e=>setDopplerConfig(e.target.value)} autoComplete="off" placeholder="prd"/></label></>}
           <label>{item.id === 'google' ? 'Client secret' : 'Access token / API key'}<input type="password" required value={credential} onChange={e=>setCredential(e.target.value)} autoComplete="new-password"/></label>
-          <div className="integration-actions"><button type="submit" disabled={!!busy}>{busy === 'save' ? 'Saving…' : 'Save connection'}</button><button type="button" disabled={!!busy} onClick={()=>{setEditing('');setCredential('');setClientId('');}}>Cancel</button></div>
-        </form> : <button disabled={!!busy} onClick={()=>{setEditing(item.id);setCredential('');setClientId('');}}>{status.data.integrations[item.id] ? 'Update connection' : 'Set up'}</button>}
+          {error && <p role="alert" className="integration-error">{error}</p>}
+          <div className="integration-actions"><button type="submit" disabled={!!busy}>{busy === 'save' ? 'Saving…' : 'Save connection'}</button><button type="button" disabled={!!busy} onClick={()=>{setEditing('');setCredential('');setClientId('');setTeamId('');setDopplerProject('');setDopplerConfig('');setError('');}}>Cancel</button></div>
+        </form> : <button disabled={!!busy} onClick={()=>{setEditing(item.id);setCredential('');setClientId('');setTeamId('');setDopplerProject('');setDopplerConfig('');setError('');setNotice('');}}>{status.data.integrations[item.id] ? 'Update connection' : 'Set up'}</button>}
         {item.id === 'google' && status.data.integrations.google && <div className="integration-gmail">
           {status.data.gmailAccounts.map(account=><p key={account}><Mail size={13}/> {account}</p>)}
           <button disabled={!!busy} onClick={()=>void connectGmail()}>Connect a Gmail account</button>
