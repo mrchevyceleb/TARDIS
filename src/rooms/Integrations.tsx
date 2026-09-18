@@ -11,6 +11,7 @@ const connections = [
   { id:'slack', name:'Slack', description:'Read conversations and prepare messages.', hint:'Use a Slack user token from her own Slack app and account.' },
   { id:'ghl', name:'GoHighLevel', description:'Work with contacts, opportunities and locations.', hint:'Use her GoHighLevel private integration token with access to the intended subaccount.' },
   { id:'web_search', name:'Web search', description:'Find sources for research and planning.', hint:'Use a Brave Search API subscription key.' },
+  { id:'doppler', name:'Doppler', description:'Use saved credentials from your connected project and config. Secret changes require your review.', hint:'In Doppler, open your project and config, then Access → Generate. Paste that config’s service token (dp.st.…). Enable write access only if your agents should save secrets. This does not automatically import existing connections.' },
   { id:'railway', name:'Railway', description:'Inspect and maintain her services.', hint:'Use a Railway API token scoped to the intended R-Link workspace.' },
   { id:'supabase', name:'Supabase', description:'Inspect and maintain authorized projects.', hint:'Use her Supabase management access token. This is separate from the private memory database.' },
 ];
