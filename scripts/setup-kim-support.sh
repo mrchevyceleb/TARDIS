@@ -6,8 +6,25 @@ umask 077
 source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 support_file="${1:-}"
 . /etc/os-release
-[[ "$ID" == ubuntu || "$ID" == debian ]] || { echo 'Remote support currently requires Ubuntu or Debian.'; exit 1; }
-[[ "${VERSION_CODENAME:-}" =~ ^[a-z]+$ ]] || exit 1
+# Vendor release names are not necessarily upstream package-suite names.
+# AMD's Rex image uses Debian 13, so Tailscale must use debian/trixie.
+tailscale_distro="${ID:-}"
+tailscale_suite="${VERSION_CODENAME:-}"
+case "$tailscale_distro" in
+  ubuntu|debian) ;;
+  amd-ryzen-ai-developer-platform)
+    if [[ " ${ID_LIKE:-} " == *' debian '* && "${VERSION_ID:-}" == 1 && -r /etc/debian_version ]]; then
+      case "$(cat /etc/debian_version)" in
+        13|13.*) tailscale_distro=debian; tailscale_suite=trixie ;;
+        *) echo 'Unrecognized AMD Debian base; remote support needs an updated installer.'; exit 1 ;;
+      esac
+    else
+      echo 'Unrecognized AMD image; remote support needs an updated installer.'; exit 1
+    fi
+    ;;
+  *) echo 'Remote support requires Ubuntu, Debian, or the supported AMD vendor image.'; exit 1 ;;
+esac
+[[ "$tailscale_suite" =~ ^[a-z]+$ ]] || { echo 'Cannot identify the upstream package suite.'; exit 1; }
 
 # Never take over a pre-existing remote desktop installation or support identity.
 if [[ ! -f /etc/tardis-support/installed ]]; then
@@ -30,8 +47,8 @@ sudo systemctl daemon-reload
 sudo apt-get install -y --no-install-recommends openssh-server nftables
 if ! command -v tailscale >/dev/null; then
   download="$(mktemp -d)"
-  curl -fsSL "https://pkgs.tailscale.com/stable/$ID/$VERSION_CODENAME.noarmor.gpg" -o "$download/tailscale.gpg"
-  curl -fsSL "https://pkgs.tailscale.com/stable/$ID/$VERSION_CODENAME.tailscale-keyring.list" -o "$download/tailscale.list"
+  curl -fsSL "https://pkgs.tailscale.com/stable/$tailscale_distro/$tailscale_suite.noarmor.gpg" -o "$download/tailscale.gpg"
+  curl -fsSL "https://pkgs.tailscale.com/stable/$tailscale_distro/$tailscale_suite.tailscale-keyring.list" -o "$download/tailscale.list"
   sudo install -m 644 "$download/tailscale.gpg" /usr/share/keyrings/tailscale-archive-keyring.gpg
   sudo install -m 644 "$download/tailscale.list" /etc/apt/sources.list.d/tailscale.list
   sudo apt-get update
