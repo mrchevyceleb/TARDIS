@@ -37,7 +37,7 @@ import { useChatHistory, type HistoryItem } from './history';
 import { OPEN_PANE_EVENT } from './messagePins';
 
 import { Council } from '../rooms/Council';
-import { Content } from '../rooms/Content';
+import { ContentHome as Content } from '../rooms/ContentHome';
 import { Integrations } from '../rooms/Integrations';
 import { Setup } from '../rooms/Setup';
 import { Dashboard } from '../rooms/Dashboard';

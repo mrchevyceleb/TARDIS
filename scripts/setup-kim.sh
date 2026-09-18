@@ -44,7 +44,7 @@ chmod 700 "$config_dir"
 
 say "Preparing ${PRETTY_NAME:-Linux} (${node_arch}). The vendor OS, kernel, and ROCm stack are kept."
 sudo apt-get update
-sudo apt-get install -y --no-install-recommends ca-certificates curl git xz-utils build-essential python3 gh xdg-utils dbus-user-session ffmpeg
+sudo apt-get install -y --no-install-recommends ca-certificates curl git xz-utils build-essential python3 python3-venv gh xdg-utils dbus-user-session ffmpeg
 if ! command -v gnome-shell >/dev/null; then
   say 'Adding the GNOME desktop. Existing GPU drivers and vendor packages are not replaced.'
   sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gnome-shell gnome-session gnome-terminal nautilus gdm3 network-manager-gnome
@@ -153,7 +153,7 @@ if not r.get('SUPABASE_URL','').startswith('https://') or not r.get('SUPABASE_SE
     sys.exit('Missing content database credentials. Set them in the private rallypoint.env file and rerun.')
 gateway = t.get('RIVENDELL_CONTENT_TOKEN') or r.get('TARDIS_CONTENT_TOKEN') or secrets.token_hex(32)
 engine = r.get('RALLYPOINT_ENGINE_TOKEN') or t.get('RALLYPOINT_ENGINE_TOKEN') or secrets.token_hex(32)
-t.update({'HOST':'127.0.0.1','PORT':'8091','ELROND_WORKSPACE_PATH':str(home/'ASSISTANT-HUB'), 'RIVENDELL_WORKER_ENABLED':'false', 'RIVENDELL_WORKER_RUNNER':'dry-run', 'RIVENDELL_PREWARM_AGENTS':'false', 'RIVENDELL_CONTENT_TOKEN':gateway, 'RALLYPOINT_ENGINE_TOKEN':engine, 'RALLYPOINT_ENGINE_URL':'http://127.0.0.1:8788', 'RIVENDELL_CODEX_BIN':str(home/'.local/share/tardis-runtime/npm/bin/codex')})
+t.update({'HOST':'127.0.0.1','PORT':'8091','ELROND_WORKSPACE_PATH':str(home/'ASSISTANT-HUB'), 'RIVENDELL_WORKER_ENABLED':'false', 'RIVENDELL_WORKER_RUNNER':'dry-run', 'RIVENDELL_PREWARM_AGENTS':'false', 'CONTENT_TRANSCRIBE_PYTHON':str(home/'.local/share/tardis-runtime/voice/bin/python'), 'RIVENDELL_CONTENT_TOKEN':gateway, 'RALLYPOINT_ENGINE_TOKEN':engine, 'RALLYPOINT_ENGINE_URL':'http://127.0.0.1:8788', 'RIVENDELL_CODEX_BIN':str(home/'.local/share/tardis-runtime/npm/bin/codex')})
 r.update({'RALLYPOINT_ENGINE_TOKEN':engine,'TARDIS_CONTENT_TOKEN':gateway,'TARDIS_URL':'http://127.0.0.1:8091','TARDIS_MODEL':r.get('TARDIS_MODEL','claude'),'RALLYPOINT_ENGINE_PORT':'8788','MAX_CONCURRENT_JOBS':'2'})
 r.update({'RALLYPOINT_SCANNER_URL':'http://127.0.0.1:8787','SCAN_TRIGGER_SECRET':r.get('SCAN_TRIGGER_SECRET') or secrets.token_hex(32)})
 scan = dict(r, HOST='127.0.0.1', PORT='8787', CRON_SCHEDULE=r.get('CRON_SCHEDULE','0 0 * * *'), CRON_TIMEZONE=r.get('CRON_TIMEZONE','America/New_York'))
@@ -164,9 +164,9 @@ try:
         with urllib.request.urlopen(req,timeout=15) as response: response.read()
     req=urllib.request.Request(r['SUPABASE_URL'].rstrip('/')+'/rest/v1/',headers={'apikey':r['SUPABASE_SERVICE_KEY'],'Authorization':'Bearer '+r['SUPABASE_SERVICE_KEY']})
     with urllib.request.urlopen(req,timeout=15) as response: schema=json.load(response)
-    if not all('/rpc/'+name in schema.get('paths',{}) for name in ['headless_generate_idea','claim_content_scan']): raise ValueError('Missing scanner migration')
+    if not all('/rpc/'+name in schema.get('paths',{}) for name in ['headless_generate_idea','claim_content_scan','approve_content_package','headless_video_revision']): raise ValueError('Missing scanner migration')
 except Exception:
-    sys.exit('Content storage is not ready. Check credentials and apply RallyPoint migrations through 0011_scanner_content_bridge.sql, then rerun. No services started.')
+    sys.exit('Content storage is not ready. Check credentials and apply RallyPoint migrations through 0012_content_packages.sql, then rerun. No services started.')
 PY
 unset KIM_SB_URL KIM_SB_SERVICE_KEY
 
@@ -179,6 +179,11 @@ git -C "$rally_dir" switch --detach "$rally_target"
 if [[ -n "$bundle_dir" && -f "$bundle_dir/integrations.json" ]]; then
   python3 "$tardis_dir/scripts/office_config.py" "$bundle_dir/integrations.json" "$config_dir/tardis.env"
 fi
+
+say 'Preparing local voice editing. The speech model is downloaded once.'
+python3 -m venv "$runtime_dir/voice"
+"$runtime_dir/voice/bin/python" -m pip install 'faster-whisper==1.2.1'
+"$runtime_dir/voice/bin/python" "$tardis_dir/scripts/content-transcribe.py" --prepare
 
 say 'Installing dependencies and building both shared applications.'
 (cd "$tardis_dir"; npm ci; npm run typecheck; VITE_TARDIS_STYLE=lavender VITE_TARDIS_THEME=light npm run build)

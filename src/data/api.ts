@@ -20,8 +20,8 @@ export async function integrationRequest<T>(path: string, method = 'GET', body?:
 
 export async function contentRequest<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (method === 'POST' && /\/(approve|publish)$/.test(path)) {
-    const intent = await contentRequest<{ token: string }>('/review-intent', 'POST', { path, version: (body as { version?: number } | undefined)?.version }, signal);
+  if (method === 'POST' && /\/(approve|publish|schedule|resume)$/.test(path)) {
+    const intent = await contentRequest<{ token: string }>('/review-intent', 'POST', { path, version: (body as { version?: number } | undefined)?.version,...((path.endsWith('/schedule')||path.endsWith('/resume'))?{plan:body}:{}) }, signal);
     headers['X-Content-Review'] = intent.token;
   }
   const response = await fetch(`/api/content${path}`, {
@@ -29,7 +29,7 @@ export async function contentRequest<T>(path: string, method = 'GET', body?: unk
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const data = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(data?.error || 'Could not reach the content desk. Please try again.');
+  if (!response.ok) throw Object.assign(new Error(data?.error || 'Could not reach the content desk. Please try again.'),{status:response.status});
   return data as T;
 }
 
