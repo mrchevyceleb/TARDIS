@@ -13,7 +13,7 @@
 // Studio IDE stays at /studio.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
-import { Menu } from 'lucide-react';
+import { Menu, MessageSquare, Pencil } from 'lucide-react';
 import { apiJson } from '../data/api';
 import { useJarvis } from '../jarvis/JarvisProvider';
 import { useIsMobile } from '../chat/hooks/useMediaQuery';
@@ -30,7 +30,8 @@ import { AgentEditor } from './AgentEditor';
 import { CallOverlay } from '../voice/CallOverlay';
 import { useKonami } from '../theme/eggs';
 import { applyTheme, readTheme, readVisualStyle } from '../theme/applyTheme';
-import { TAGLINE } from '../theme/voice';
+import { TAGLINE, WORKSPACE_NAV } from '../theme/voice';
+import { ROOM_NAMES } from '../data/roomNames';
 import { useAgents, reorderAgentIds, patchAgent, sameChatId, type Agent } from './agents';
 import { useChatHistory, type HistoryItem } from './history';
 import { OPEN_PANE_EVENT } from './messagePins';
@@ -100,6 +101,8 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
     if (initialRoom && ROOMS[initialRoom]) return { kind: 'room', key: initialRoom };
     return readView();
   });
+  const lastChat = useRef<Extract<View, { kind: 'chat' }> | null>(view.kind === 'chat' ? view : null);
+  useEffect(() => { if (view.kind === 'chat') lastChat.current = view; }, [view]);
   const [paneOpen, setPaneOpen] = useState(() => localStorage.getItem(PANE_KEY) !== 'false');
   const [railCollapsed, setRailCollapsed] = useState(() => localStorage.getItem('rivendell:rail-collapsed') === 'true');
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -344,6 +347,18 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
         <div className={`bt-scrim${drawerOpen ? ' show' : ''}`} onClick={() => setDrawerOpen(false)} />
 
         <main className="bt-main">
+          <header className="bt-workspacebar">
+            <nav className="bt-workspace-switch" aria-label={WORKSPACE_NAV.label}>
+              <button type="button" aria-pressed={view.kind === 'chat'} onClick={() => {
+                if (view.kind === 'chat') return;
+                if (lastChat.current) { setView(lastChat.current); setDrawerOpen(false); }
+                else goHome();
+              }}><MessageSquare size={16} aria-hidden="true" />{WORKSPACE_NAV.chat}</button>
+              <button type="button" aria-pressed={activeRoom === 'content'} onClick={() => {
+                if (activeRoom !== 'content') openRoom('content');
+              }}><Pencil size={16} aria-hidden="true" />{ROOM_NAMES.content.name}</button>
+            </nav>
+          </header>
           {(isMobile || railCollapsed) ? (
             <button
               className={`bt-menubtn${drawerOpen ? ' is-open' : ''}`}

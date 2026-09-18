@@ -3,6 +3,7 @@
 
 export const BRAND = 'TARDIS';
 export const TAGLINE = 'Bigger on the inside.';
+export const WORKSPACE_NAV = { label: 'Workspace view', chat: 'Chat' };
 
 /** Shown in the live-turn pill, rotating every ~3 s. Each still means "working". */
 export const THINKING_PHRASES = [
