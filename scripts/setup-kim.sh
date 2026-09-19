@@ -165,8 +165,11 @@ try:
     req=urllib.request.Request(r['SUPABASE_URL'].rstrip('/')+'/rest/v1/',headers={'apikey':r['SUPABASE_SERVICE_KEY'],'Authorization':'Bearer '+r['SUPABASE_SERVICE_KEY']})
     with urllib.request.urlopen(req,timeout=15) as response: schema=json.load(response)
     if not all('/rpc/'+name in schema.get('paths',{}) for name in ['headless_generate_idea','claim_content_scan','approve_content_package','headless_video_revision']): raise ValueError('Missing scanner migration')
+    req=urllib.request.Request(r['SUPABASE_URL'].rstrip('/')+'/rest/v1/rpc/content_storage_version', data=b'{}', headers={'Content-Type':'application/json','apikey':r['SUPABASE_SERVICE_KEY'],'Authorization':'Bearer '+r['SUPABASE_SERVICE_KEY']})
+    with urllib.request.urlopen(req,timeout=15) as response: storage_version=json.load(response)
+    if not isinstance(storage_version,int) or storage_version<13: raise ValueError('Missing email draft migration')
 except Exception:
-    sys.exit('Content storage is not ready. Check credentials and apply RallyPoint migrations through 0012_content_packages.sql, then rerun. No services started.')
+    sys.exit('Content storage is not ready. Check credentials and apply RallyPoint migrations through 0013_email_drafts.sql, then rerun. No services started.')
 PY
 unset KIM_SB_URL KIM_SB_SERVICE_KEY
 
