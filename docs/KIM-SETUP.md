@@ -105,14 +105,18 @@ publishing credentials on the installation that will publish; they are stored
 locally and are not synchronized through the draft database.
 
 Open **Finish TARDIS Setup** from GNOME Applications for the sign-in menu, or
-finish Kim's subscription logins from a terminal:
+finish Kim's subscription logins from a new terminal:
 
 ```bash
-~/.local/bin/tardis-cli claude auth login
-~/.local/bin/tardis-cli codex login
+claude auth login
+codex login
+grok login
 ```
 
-Open `http://127.0.0.1:8091/xai-oauth` to connect her Grok subscription. Then open
+`grok login` is a browser launcher for `http://127.0.0.1:8091/xai-oauth`,
+not a standalone Grok CLI. Existing terminal windows must be reopened after setup.
+The setup preserves existing shell configuration and saves backups before adding
+the runtime paths. Then open
 TARDIS **Content → Connections**, configure Ayrshare once for each brand,
 and verify the real accounts before sending anything. Create a draft, edit it,
 request a revision, and approve it. Publishing remains a separate explicit action.

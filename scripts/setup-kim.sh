@@ -229,6 +229,7 @@ export PATH="$runtime_dir/npm/bin:$node_dir/bin:\$HOME/.local/bin:/usr/local/bin
 exec "\$@"
 EOF
 chmod 700 "$HOME/.local/bin/tardis-cli"
+python3 "$tardis_dir/scripts/setup-kim-terminal.py" "$node_dir"
 support_file="${KIM_SUPPORT_CONFIG:-${bundle_dir:+$bundle_dir/support.json}}"
 if [[ -f "${support_file:-}" || -f /etc/tardis-support/installed ]]; then
   bash "$tardis_dir/scripts/setup-kim-support.sh" "${support_file:-}"
