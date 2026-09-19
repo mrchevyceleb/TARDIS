@@ -6,6 +6,7 @@ export const integrationsRouter = Router();
 const routes: Array<[string, RegExp]> = [
   ['GET', /^\/(status|approvals)$/], ['POST', /^\/credentials$/],
   ['POST', /^\/gmail\/start$/], ['DELETE', /^\/gmail\/account$/],
+  ['GET', /^\/github\/status$/], ['DELETE', /^\/github$/],
   ['POST', /^\/approvals\/[a-f0-9-]{36}$/],
 ];
 integrationsRouter.use(async (req,res) => {
