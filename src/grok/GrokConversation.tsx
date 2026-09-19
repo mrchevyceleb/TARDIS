@@ -20,6 +20,7 @@ import { BotMark } from './GrokLogo';
 import { agentMark, DISC_INK, agentColor, agentAvatarUrl, type Agent } from './agents';
 import { useAgentMessagePins } from './messagePins';
 import { BRAND, THINKING_PHRASES, composerPlaceholders } from '../theme/voice';
+import { useMediaQuery } from '../chat/hooks/useMediaQuery';
 
 export type BotConversationProps = ShellViewProps & {
   agentRecord?: Agent;
@@ -35,6 +36,7 @@ export type BotConversationProps = ShellViewProps & {
 
 export function GrokConversation(props: BotConversationProps) {
   const { s, picker } = props;
+  const isMobile = useMediaQuery('(max-width: 760px), (pointer: coarse) and (max-width: 1180px)');
   const [counselOpen, setCounselOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -206,6 +208,7 @@ export function GrokConversation(props: BotConversationProps) {
         <main className="bt-feed" ref={s.sticky.scrollRef} onScroll={s.sticky.onScroll}>
           <div className="bt-feed-inner">
             <ChatThread
+              mobile={isMobile}
               blocks={s.blocks}
               status={s.status}
               contentRef={s.sticky.contentRef}

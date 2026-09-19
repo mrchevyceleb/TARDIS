@@ -175,7 +175,13 @@ export function useStickyScroll() {
     window.addEventListener('blur', settle);
     document.addEventListener('visibilitychange', settle);
 
+    // Keyboard/browser chrome and composer growth resize the viewport without
+    // changing the transcript. Keep its bottom anchored only while following.
+    const viewportObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(pin);
+    viewportObserver?.observe(node);
+
     scrollTeardownRef.current = () => {
+      viewportObserver?.disconnect();
       node.removeEventListener('wheel', onWheel);
       node.removeEventListener('touchstart', takeover);
       node.removeEventListener('keydown', onKey);

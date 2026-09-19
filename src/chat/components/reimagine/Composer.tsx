@@ -302,10 +302,12 @@ export function Composer(props: ComposerProps) {
           ))}
         </div>
       ) : null}
-      {props.chatId && <ComputerControl key={props.chatId} chatId={props.chatId} />}
-      {props.chatId && <RobotControl />}
       {props.attachMenu}
-      {props.chatId&&<div className="composer-dictation-slot"><ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating}/></div>}
+      {props.chatId && <div className="composer-tools">
+        <ComputerControl key={props.chatId} chatId={props.chatId} />
+        <RobotControl />
+        <div className="composer-dictation-slot"><ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating}/></div>
+      </div>}
       <div className={`composer${images.length > 0 ? ' has-attach' : ''}`}>
         {images.length > 0 ? (
           <div className="attach-tray">

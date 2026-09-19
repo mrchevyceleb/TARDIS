@@ -16,7 +16,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType }
 import { Menu, MessageSquare, Pencil } from 'lucide-react';
 import { apiJson } from '../data/api';
 import { useJarvis } from '../jarvis/JarvisProvider';
-import { useIsMobile } from '../chat/hooks/useMediaQuery';
+import { useMediaQuery } from '../chat/hooks/useMediaQuery';
+import { useMobileViewport } from './useMobileViewport';
 import { useRepos } from '../chat/hooks/useRepos';
 import { useProxyViewer } from '../hooks/useProxyViewer';
 import { StudioFilesContext, type StudioFileActions } from '../shell/studio/studioFiles';
@@ -92,7 +93,10 @@ function readView(): View {
 export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   const jarvis = useJarvis();
   const viewer = useProxyViewer();
-  const isMobile = useIsMobile();
+  const isMobile = useMediaQuery('(max-width: 760px), (pointer: coarse) and (max-width: 1180px)');
+  const overlayPane = useMediaQuery('(max-width: 1180px)');
+  const appRef = useRef<HTMLDivElement>(null);
+  useMobileViewport(appRef);
   const { repos } = useRepos();
   const history = useChatHistory();
   const { agents, reload: reloadAgents } = useAgents();
@@ -103,7 +107,10 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   });
   const lastChat = useRef<Extract<View, { kind: 'chat' }> | null>(view.kind === 'chat' ? view : null);
   useEffect(() => { if (view.kind === 'chat') lastChat.current = view; }, [view]);
-  const [paneOpen, setPaneOpen] = useState(() => localStorage.getItem(PANE_KEY) !== 'false');
+  const [desktopPaneOpen, setDesktopPaneOpen] = useState(() => localStorage.getItem(PANE_KEY) !== 'false');
+  const [mobilePaneOpen, setMobilePaneOpen] = useState(false);
+  const paneOpen = overlayPane ? mobilePaneOpen : desktopPaneOpen;
+  const setPaneOpen = overlayPane ? setMobilePaneOpen : setDesktopPaneOpen;
   const [railCollapsed, setRailCollapsed] = useState(() => localStorage.getItem('rivendell:rail-collapsed') === 'true');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [meta, setMeta] = useState<ChatMeta | null>(null);
@@ -115,12 +122,34 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
 
   useEffect(() => { applyTheme(theme, visualStyle); }, [theme, visualStyle]);
   useEffect(() => { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); }, [view]);
-  useEffect(() => { localStorage.setItem(PANE_KEY, String(paneOpen)); }, [paneOpen]);
+  useEffect(() => { localStorage.setItem(PANE_KEY, String(desktopPaneOpen)); }, [desktopPaneOpen]);
+  // A desktop preference must never reopen a sheet over a phone conversation.
+  // Leaving a workspace also dismisses its transient viewers and navigation.
+  const closeViewer = viewer.close;
+  useEffect(() => {
+    setMobilePaneOpen(false);
+    setDrawerOpen(false);
+    setEditorOpen(false);
+    closeViewer();
+  }, [view, overlayPane, closeViewer]);
   useEffect(() => {
     const open = () => setPaneOpen(true);
     window.addEventListener(OPEN_PANE_EVENT, open);
     return () => window.removeEventListener(OPEN_PANE_EVENT, open);
-  }, []);
+  }, [setPaneOpen]);
+  useEffect(() => {
+    if (!overlayPane || !mobilePaneOpen) return;
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    document.querySelector<HTMLButtonElement>('.bt-pane-close')?.focus({ preventScroll: true });
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMobilePaneOpen(false);
+        document.querySelector<HTMLButtonElement>('.bt-pane-toggle')?.focus({ preventScroll: true });
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [overlayPane, mobilePaneOpen]);
   useEffect(() => { localStorage.setItem('rivendell:rail-collapsed', String(railCollapsed)); }, [railCollapsed]);
   // Esc also collapses the desktop rail (quick focus-the-chat shortcut).
   useEffect(() => {
@@ -309,7 +338,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
 
   return (
     <StudioFilesContext.Provider value={fileActions}>
-      <div className={`bot-app${railCollapsed ? ' rail-collapsed' : ''}${regen ? ' regen' : ''}`} data-theme={theme} data-style={visualStyle}>
+      <div ref={appRef} className={`bot-app${railCollapsed ? ' rail-collapsed' : ''}${regen ? ' regen' : ''}`} data-theme={theme} data-style={visualStyle}>
         <BotRail
           collapsed={railCollapsed}
           onToggleCollapse={() => setRailCollapsed((c) => !c)}
@@ -364,6 +393,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
               className={`bt-menubtn${drawerOpen ? ' is-open' : ''}`}
               onClick={() => {
                 (document.activeElement as HTMLElement | null)?.blur?.();
+                setMobilePaneOpen(false);
                 if (isMobile) setDrawerOpen(true);
                 else setRailCollapsed(false);
               }}
@@ -404,6 +434,9 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
           ) : null}
         </main>
 
+        {view.kind === 'chat' && overlayPane && paneOpen ? (
+          <button className="bt-pane-scrim" aria-label="Close agent panel" onClick={() => setMobilePaneOpen(false)} />
+        ) : null}
         {view.kind === 'chat' ? (
           <BotPanel
             className={`bt-pane-mount${paneOpen ? ' open' : ''}`}

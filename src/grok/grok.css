@@ -23,6 +23,15 @@
   position: relative;
 }
 
+@media (pointer: coarse) {
+  .bot-app {
+    position: fixed;
+    inset-inline: 0;
+    top: var(--bt-viewport-top, 0px);
+    height: var(--bt-viewport-height, 100dvh);
+  }
+}
+
 .bot-app ::selection { background: color-mix(in srgb, var(--r-gold) 30%, transparent); color: var(--r-ink); }
 
 /* ============================================================
@@ -293,9 +302,9 @@
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--r-gold) 45%, transparent);
 }
 .bt-workspace-switch button:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; }
-.bot-app.rail-collapsed .bt-workspacebar { padding-left: max(54px, env(safe-area-inset-left, 0px)); }
-@media (max-width: 760px) {
-  .bt-workspacebar { padding-left: max(54px, env(safe-area-inset-left, 0px)); }
+.bot-app.rail-collapsed .bt-workspacebar { padding-left: calc(62px + env(safe-area-inset-left, 0px)); }
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
+  .bt-workspacebar { padding-left: calc(62px + env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
 }
 
 .bt-head {
@@ -861,7 +870,8 @@
 .bt-scrim.show { opacity: 1; pointer-events: auto; backdrop-filter: blur(2px); }
 .bt-menubtn {
   display: none;
-  position: fixed;
+  width: 44px; height: 44px;
+  position: absolute;
   top: calc(10px + env(safe-area-inset-top, 0px));
   left: max(10px, env(safe-area-inset-left, 0px));
   z-index: 26;
@@ -875,11 +885,12 @@
   .bt-pane { display: none; }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
   .bt-rail {
-    position: fixed; top: 0; left: 0; bottom: 0;
+    position: absolute; top: 0; left: 0; bottom: 0;
     transform: translateX(-102%);
     width: 300px;
+    padding-left: env(safe-area-inset-left, 0px);
     box-shadow: 0 0 60px rgba(0, 0, 0, 0.5);
     transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.28s ease;
     will-change: transform;
@@ -888,18 +899,42 @@
     z-index: 30;
   }
   .bt-rail.drawer-open { transform: none; }
+  .bt-rail:not(.drawer-open) { visibility: hidden; pointer-events: none; }
   .bt-menubtn {
     display: grid; place-items: center;
-    width: 32px; height: 32px;
+    width: 44px; height: 44px;
     border-radius: 50%;
     color: var(--r-ink-mute);
   }
   .bt-menubtn.is-open { visibility: hidden; pointer-events: none; }
   .bt-menubtn:hover { background: var(--r-line); color: var(--r-ink); }
-  .bot-app .rc .m-elrond, .bot-app .rc .m-user { max-width: 88%; }
+  .bot-app .rc .m-elrond, .bot-app .rc .m-user { max-width: 94%; }
   .bt-plugins-pop { left: 8px; right: 8px; width: auto; }
-  .bt-head { padding-left: max(16px, env(safe-area-inset-left, 0px)); }
-  .bt-dock { padding-left: 12px; padding-right: 12px; }
+  .bt-head { padding: 4px max(12px, env(safe-area-inset-right, 0px)) 4px max(12px, env(safe-area-inset-left, 0px)); gap: 4px; }
+  .bt-head-agent { min-width: 0; padding-left: 0; gap: 7px; }
+  .bt-head-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bt-head-actions { flex: none; }
+  .bt-iconbtn { width: 44px; height: 44px; }
+  .bt-feed { padding: 12px max(14px, env(safe-area-inset-right, 0px)) 4px max(14px, env(safe-area-inset-left, 0px)); overscroll-behavior-y: contain; }
+  .bt-dock { padding: 4px max(12px, env(safe-area-inset-right, 0px)) max(8px, env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px)); }
+  .bt-dock-inner .composer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-bottom: 4px; }
+  .bt-dock-inner .computer-control, .bt-dock-inner .robot-control { flex: 1 1 140px; min-width: 0; margin: 0; }
+  .bt-dock-inner .computer-control > summary, .bt-dock-inner .robot-control > summary { min-height: 44px; padding: 6px 0; box-sizing: border-box; }
+  .bt-dock-inner details[open] { flex-basis: 100%; order: 1; }
+  .bt-dock-inner .computer-control-body, .bt-dock-inner .robot-control-body { max-height: min(260px, 35dvh); overflow-y: auto; }
+  .bt-dock-inner .composer-dictation-slot { margin: 0 0 0 auto; }
+  .bt-dock-inner .composer-dictation-slot:has(.dictation-panel), .bt-dock-inner .composer-dictation-slot:has(.dictation-notice) { flex-basis: 100%; }
+  .bt-dock-inner .dictation-button { min-height: 44px; }
+  .bot-app .rc .composer { min-height: 60px; padding: 4px 6px; border-radius: 26px; }
+  .bot-app .rc .composer textarea { font-size: 16px; padding: 9px 4px; max-height: min(148px, 24dvh); }
+  .bot-app .rc .composer textarea::placeholder { font-size: 16px; }
+  .bot-app .rc .grok-attach, .bot-app .rc .send, .bot-app .rc .bt-mic { min-width: 44px; height: 44px; }
+  .bot-app .rc .model-chip { min-height: 44px; padding-inline: 6px; max-width: 90px; }
+  .bot-app .rc .model-chip > span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bot-app .rc .pop { max-width: calc(100vw - 24px); max-height: min(430px, calc(var(--bt-viewport-height, 100dvh) - 160px)); overflow-y: auto; }
+  .bt-room { overscroll-behavior-y: contain; }
+  .bt-room-wrap { padding: 8px max(16px, env(safe-area-inset-right, 0px)) max(20px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); }
+  .bot-app input, .bot-app textarea, .bot-app select { font-size: 16px; }
 }
 
 /* ============================================================
@@ -1212,18 +1247,21 @@
   .bt-pane-mount:not(.open) { display: none; }
 }
 @media (max-width: 1180px) {
+  .bt-pane-scrim { position: absolute; inset: calc(65px + env(safe-area-inset-top, 0px)) 0 0; z-index: 25; background: rgb(0 0 0 / 25%); border: 0; }
   .bt-pane-mount {
     display: flex;
-    position: fixed; top: calc(65px + env(safe-area-inset-top, 0px)); right: 0; bottom: 0;
+    position: absolute; top: calc(65px + env(safe-area-inset-top, 0px)); right: 0; bottom: 0;
     width: min(340px, 88vw);
     transform: translateX(103%);
     transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
     will-change: transform;
     box-shadow: -20px 0 60px rgba(0, 0, 0, 0.5);
     padding-top: 0;
+    padding-right: env(safe-area-inset-right, 0px);
     z-index: 30;
   }
   .bt-pane-mount.open { transform: none; }
+  .bt-pane-mount:not(.open) { visibility: hidden; pointer-events: none; }
   .bt-pane-close { display: grid; }
 }
 
@@ -1362,7 +1400,8 @@
   /* Hide the collapse button on touch layouts (the drawer X covers it). */
   .bt-rail-collapse { display: grid; }
 }
-@media (max-width: 760px) {
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
+  .bot-app.rail-collapsed .bt-rail { margin-left: 0; }
   .bt-rail-collapse { display: none; }
 }
 
