@@ -20,7 +20,7 @@ test('content gateway requires its dedicated credential before generation and bo
   await new Promise<void>((resolve) => server.once('listening', resolve));
   const address = server.address() as { port: number };
   const url = `http://127.0.0.1:${address.port}/internal/content/v1/chat/completions`;
-  const send = (token = 'test-content-token', model = 'claude') => fetch(url, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Draft' }] }) });
+  const send = (token = 'test-content-token', model = 'claude',signal?:AbortSignal) => fetch(url, { method: 'POST', signal, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Draft' }] }) });
   try {
     for (const method of ['POST', 'PATCH']) {
       const endpoint = `http://127.0.0.1:${address.port}/api/agents${method === 'PATCH' ? '/synthetic-agent' : ''}`;
@@ -32,8 +32,19 @@ test('content gateway requires its dedicated credential before generation and bo
     assert.equal(calls, 0);
     const first = send(); const second = send();
     while (calls < 2) await new Promise((resolve) => setTimeout(resolve, 5));
-    assert.equal((await send()).status, 429);
+    const third = send();
+    const cancelled=new AbortController();
+    const fourth=send('test-content-token','claude',cancelled.signal);
+    const cancelledResult=assert.rejects(fourth);
+    await new Promise(resolve => setTimeout(resolve,30));
+    assert.equal(calls,2);
+    cancelled.abort();await cancelledResult;
+    await new Promise(resolve=>setTimeout(resolve,20));
+    release[0]();
+    while (calls < 3) await new Promise(resolve => setTimeout(resolve,5));
     release.forEach((done) => done());
+    assert.equal((await third).status,200);
+    assert.equal(calls,3);
     assert.equal((await first).status, 200);
     const data = await (await second).json() as { choices: Array<{ message: { content: string } }> };
     assert.equal(data.choices[0].message.content, 'draft');

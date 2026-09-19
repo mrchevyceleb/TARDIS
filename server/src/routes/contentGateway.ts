@@ -6,6 +6,30 @@ import { completeSubscription, validateCompletionRequest } from '../chat/content
 export function createContentGateway(complete = completeSubscription): Router {
   const router = Router();
   let active = 0;
+  const waiting: Array<() => void> = [];
+  const acquire = (signal: AbortSignal): Promise<() => void> => new Promise((resolve, reject) => {
+    const abort = () => {
+      const index = waiting.indexOf(start);
+      if (index >= 0) waiting.splice(index, 1);
+      reject(signal.reason ?? new Error('Content request cancelled.'));
+    };
+    const start = () => {
+      signal.removeEventListener('abort', abort);
+      if (signal.aborted) { abort(); return; }
+      active++;
+      let released = false;
+      resolve(() => {
+        if (released) return;
+        released = true;
+        active--;
+        waiting.shift()?.();
+      });
+    };
+    if (signal.aborted) { abort(); return; }
+    if (active < 2) { start(); return; }
+    if (waiting.length >= 32) { reject(new Error('Content queue is full. Retry shortly.')); return; }
+    waiting.push(start); signal.addEventListener('abort', abort, {once: true});
+  });
   router.use((req, res, next) => {
     const token = process.env.RIVENDELL_CONTENT_TOKEN?.trim();
     if (!token) { res.status(503).json({ error: { message: 'Content gateway is not configured.' } }); return; }
@@ -24,25 +48,30 @@ export function createContentGateway(complete = completeSubscription): Router {
     let request;
     try { request = validateCompletionRequest(req.body); }
     catch (error) { res.status(400).json({ error: { message: (error as Error).message } }); return; }
-    if (active >= 2) { res.setHeader('Retry-After', '10'); res.status(429).json({ error: { message: 'Content generation is busy. Retry shortly.' } }); return; }
-    active++;
     const controller = new AbortController();
     let timedOut = false;
-    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 240_000);
+    let release: (() => void) | undefined;
+    let timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 120_000);
     const disconnected = () => { if (!res.writableEnded) controller.abort(); };
     res.once('close', disconnected);
     try {
+      release = await acquire(controller.signal);
+      clearTimeout(timeout);
+      timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 240_000);
       const message = await complete(request, controller.signal);
       if (!res.destroyed) res.json({
         id: `chatcmpl-${randomUUID()}`, object: 'chat.completion', created: Math.floor(Date.now() / 1000), model: request.model,
         choices: [{ index: 0, message, finish_reason: message.tool_calls?.length ? 'tool_calls' : 'stop' }],
       });
     } catch (error) {
-      if (!res.destroyed) res.status(timedOut ? 504 : 502).json({ error: { message: timedOut ? 'Content generation timed out.' : (error as Error).message } });
+      if (!res.destroyed) {
+        if (!release) res.setHeader('Retry-After', '10');
+        res.status(!release ? 429 : timedOut ? 504 : 502).json({ error: { message: timedOut ? (!release ? 'Content is waiting for a writer. Retry shortly.' : 'Content generation timed out.') : (error as Error).message } });
+      }
     } finally {
       clearTimeout(timeout);
       res.off('close', disconnected);
-      active--;
+      release?.();
     }
   });
   return router;

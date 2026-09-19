@@ -19,7 +19,7 @@ export type ContentDraft = {
   id: string; idea_id?:string; brand: ContentBrand; kind: string; version: number; generation_version?:number; package_plan_id?:string|null; publish_channels?:string[]|null;publish_scheduled_at?:string|null; status: string;
   title: string | null; body_markdown: string; channels: string[];
   seo: { title: string; description: string; keyword: string } | null;
-  payload: { posts?: ContentPost[]; featured_image?: ContentImage; image?: ContentImage; inline_images?: ContentImage[]; video_url?:string; beats?:Array<{beat:number;on_screen_text:string;visual_prompt:string}>; [key: string]: unknown };
+  payload: { posts?: ContentPost[]; featured_image?: ContentImage; image?: ContentImage; inline_images?: ContentImage[]; video_url?:string; beats?:Array<{beat:number;on_screen_text:string;visual_prompt:string;duration_seconds?:number;clip?:{status:'ok'|'failed';url?:string}}>; [key: string]: unknown };
   quality?: Record<string, unknown> | null; created_at: string; edited_at?: string | null;
   publications?: Array<{ channel: string; status: string; public_url?: string; provider_id?:string|null; detail?: string; scheduled_at?: string | null }>;
 };
