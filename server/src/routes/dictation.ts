@@ -4,6 +4,21 @@ import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { transcribeContent, transcriptionReady } from '../lib/contentTranscription.ts';
 import { completeSubscription, validateCompletionRequest } from '../chat/content-completion.ts';
 
+export function dictationText(content:string|null):string {
+  let text=content?.trim()??'';
+  // Some CLI structured-output versions repeat their completion envelope in
+  // content. Unwrap only that exact protocol shape, never arbitrary user JSON.
+  for(let depth=0;depth<3;depth++) {
+    const candidate=text.replace(/^```(?:json)?\s*\n([\s\S]*?)\n```$/,'$1').trim();
+    let value:unknown;try{value=JSON.parse(candidate);}catch{break;}
+    if(!value||typeof value!=='object'||Array.isArray(value))break;
+    const message=value as {content?:unknown;tool_calls?:unknown};
+    if(typeof message.content!=='string'||!Array.isArray(message.tool_calls)||message.tool_calls.length||Object.keys(value).some(key=>!['content','tool_calls','role'].includes(key)))break;
+    text=message.content.trim();
+  }
+  return text;
+}
+
 export async function cleanDictation(text: string, signal: AbortSignal): Promise<{text:string;warning?:string}> {
   if (!text.trim()) return {text:''};
   try {
@@ -12,7 +27,7 @@ export async function cleanDictation(text: string, signal: AbortSignal): Promise
       {role:'user',content:JSON.stringify({dictation:text})},
     ]});
     const result=await completeSubscription(request,signal);
-    const cleaned=result.content?.trim();
+    const cleaned=dictationText(result.content);
     if(!cleaned || cleaned.length < text.length * .45 || cleaned.length > text.length * 2 + 200) throw new Error('Cleanup changed too much');
     return {text:cleaned};
   } catch {

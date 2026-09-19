@@ -1,7 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
-import { createDictationRouter } from './dictation.ts';
+import { createDictationRouter,dictationText } from './dictation.ts';
+
+test('dictation inserts words rather than repeated CLI completion envelopes',()=>{
+ const text='Create three posts. Save the email as a draft. Do not send anything.';
+ const wrapped=JSON.stringify({content:text,tool_calls:[]});
+ assert.equal(dictationText(wrapped),text);
+ assert.equal(dictationText(JSON.stringify({content:wrapped,tool_calls:[]})),text);
+ assert.equal(dictationText('```json\n'+wrapped+'\n```'),text);
+ assert.equal(dictationText(text),text);
+ assert.equal(dictationText('{"name":"Example","count":3}'),'{"name":"Example","count":3}');
+});
 
 test('dictation requires same-origin audio and reuses a successful section without repeating transcription',async()=>{
  let calls=0,cleanups=0,busy=true;
