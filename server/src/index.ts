@@ -2,6 +2,7 @@ import express from 'express';
 import compression from 'compression';
 import { createServer } from 'node:http';
 import { contentRouter } from './routes/content.ts';
+import { dictationRouter } from './routes/dictation.ts';
 import { integrationsRouter } from './routes/integrations.ts';
 import { setupRouter } from './routes/setup.ts';
 import { contentGatewayRouter } from './routes/contentGateway.ts';
@@ -115,6 +116,7 @@ app.use('/xai-oauth', xaiOauthRouter);
 
 const server = createServer(app);
 app.use('/api/content', contentRouter);
+app.use('/api/dictation', dictationRouter);
 app.use('/api/integrations', integrationsRouter);
 app.use('/api/setup', setupRouter);
 app.use('/internal/content/v1', contentGatewayRouter);
