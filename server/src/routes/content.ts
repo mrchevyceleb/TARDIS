@@ -40,7 +40,7 @@ const routes = [
   ['GET', /^\/drafts\/[a-zA-Z0-9-]+$/],
   ['PATCH', /^\/drafts\/[a-zA-Z0-9-]+$/],
   ['POST', /^\/generate$/],
-  ['POST', /^\/drafts\/[a-zA-Z0-9-]+\/(?:revise|approve|publish|recover)$/],
+  ['POST', /^\/drafts\/[a-zA-Z0-9-]+\/(?:revise|approve|publish|recover|images)$/],
   ['POST', /^\/jobs\/[a-zA-Z0-9-]+\/(?:retry|cancel)$/],
   ['GET', /^\/connections\/(?:operly|r-link)$/],
   ['PUT', /^\/connections\/(?:operly|r-link)$/],

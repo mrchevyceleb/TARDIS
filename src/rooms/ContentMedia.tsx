@@ -5,13 +5,13 @@ import { contentRequest, uploadWorkspaceFile } from '../data/api';
 export function ContentMedia() {
   const cache=useQueryClient();
   const query=useQuery({queryKey:['content','media'],queryFn:()=>contentRequest<{imagesEnabled:boolean;videosEnabled:boolean}>('/media/settings'),retry:false});
-  const [google,setGoogle]=useState(''),[fal,setFal]=useState('');
+  const [fal,setFal]=useState('');
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
   const save=async(kind:'images'|'videos',enabled:boolean)=>{
     setBusy(true);setError('');setNotice('');
     try {
-      await contentRequest('/media/settings','PUT',kind==='images'?{imagesEnabled:enabled,...(google.trim()?{googleApiKey:google.trim()}:{})}:{videosEnabled:enabled,...(fal.trim()?{falApiKey:fal.trim()}:{})});
-      setGoogle('');setFal(''); await cache.invalidateQueries({queryKey:['content','media']}); setNotice('Media settings saved. New jobs use these settings.');
+      await contentRequest('/media/settings','PUT',kind==='images'?{imagesEnabled:enabled,...(fal.trim()?{falApiKey:fal.trim()}:{})}:{videosEnabled:enabled,...(fal.trim()?{falApiKey:fal.trim()}:{})});
+      setFal(''); await cache.invalidateQueries({queryKey:['content','media']}); setNotice('Media settings saved. New jobs use these settings.');
     }catch(e){setError(e instanceof Error?e.message:'Could not save media settings.');}finally{setBusy(false);}
   };
   const upload=async(file?:File)=>{
@@ -26,16 +26,15 @@ export function ContentMedia() {
     }catch(e){setError(e instanceof Error?e.message:'Could not save footage.');}finally{setBusy(false);}
   };
   return <div className="setup-media">
-    <p>Start with your own images and footage. In a draft, choose <strong>Add an image</strong> and upload or drop a JPEG, PNG or WebP. Images are stored at a public link for publishing; upload only media intended for public use.</p>
+    <p>Blog and email drafts include generated artwork. You can also use your own images and footage. In a draft, choose <strong>Add an image</strong> and upload or drop a JPEG, PNG or WebP. Images are stored at a public link for publishing; upload only media intended for public use.</p>
     <label className="content-field">Add original video footage (up to 200 MB)<input type="file" accept="video/*" disabled={busy} onChange={e=>{void upload(e.target.files?.[0]);e.target.value='';}}/></label>
     <p className="content-hint">Video Editor can work with footage using FFmpeg. Your AMD’s preinstalled generation apps are separate; this setup does not automatically connect them.</p>
-    <details><summary>Optional paid image and video generation</summary>
-      <p>These providers bill separately from your AI subscriptions. Saving a key does not generate anything. Enabling images adds generated artwork to new content jobs. Generated video uses the existing RallyPoint video workflow; the TARDIS Content desk currently creates blog and social drafts.</p>
+    <details><summary>Image and video generation</summary>
+      <p>One fal.ai key connects Nano Banana 2 images and MiniMax H3 video. New drafts generate artwork automatically when images are enabled. Blogs and emails require images before export. Providers bill separately from your AI subscriptions.</p>
       {query.isPending?<p>Checking media settings…</p>:query.error?<p role="alert">Media settings are unavailable. Check the content engine.</p>:<>
-        <label className="content-field">Google AI Studio key<input type="password" autoComplete="new-password" value={google} onChange={e=>setGoogle(e.target.value)} placeholder="Leave blank to keep an existing key" disabled={busy}/></label>
+        <label className="content-field">fal.ai key for images and video<input type="password" autoComplete="new-password" value={fal} onChange={e=>setFal(e.target.value)} placeholder="Leave blank to keep an existing key" disabled={busy}/></label>
         <p>Automatic images: <strong>{query.data?.imagesEnabled?'Enabled':'Off'}</strong></p>
         <div className="setup-actions"><button disabled={busy} onClick={()=>void save('images',true)}>Save and enable images</button><button disabled={busy} onClick={()=>void save('images',false)}>Turn images off</button></div>
-        <label className="content-field">fal.ai key<input type="password" autoComplete="new-password" value={fal} onChange={e=>setFal(e.target.value)} placeholder="Leave blank to keep an existing key" disabled={busy}/></label>
         <p>Generated video provider: <strong>{query.data?.videosEnabled?'Enabled':'Off'}</strong></p>
         <div className="setup-actions"><button disabled={busy} onClick={()=>void save('videos',true)}>Save and enable video provider</button><button disabled={busy} onClick={()=>void save('videos',false)}>Turn video provider off</button></div>
       </>}
