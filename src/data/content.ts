@@ -5,12 +5,13 @@ export type ContentIdea = {
   signals: Array<{ url: string; date?: string; engagement?: string }>;
   generation_jobs: Array<{ id: string; kind: string; status: string; draft_id?: string }>;
 };
-export type ContentBrand = 'operly' | 'r-link';
-export type ContentChannel = 'blog' | 'email' | 'video' | 'linkedin' | 'facebook' | 'instagram' | 'x';
+export type ContentBrand = 'operly' | 'r-link' | 'kim-garst';
+export type ContentChannel = 'blog' | 'email' | 'video' | 'linkedin' | 'facebook' | 'instagram' | 'x' | 'threads' | 'bluesky' | 'google' | 'pinterest' | 'community' | 'youtube' | 'tiktok';
 export type ContentImage = { slot: string; url: string; alt: string; prompt: string; aspect_ratio: '16:9' | '1:1' | '9:16' | '4:3' | '3:4'; status: 'ok' | 'failed' };
 export type ContentPost = { platform: string; text: string; visual_note?: string; image?: ContentImage; [key: string]: unknown };
 export function missingContentImages(draft: Pick<ContentDraft, 'kind' | 'payload' | 'body_markdown'>): boolean {
   const ready = (image?: ContentImage) => image?.status === 'ok' && /^https:\/\//.test(image.url);
+  if (draft.kind === 'social-pack') return !draft.payload.posts?.length || draft.payload.posts.some(post => !ready(post.image));
   if (draft.kind === 'email') return !ready(draft.payload.image);
   if (draft.kind === 'blog') return !ready(draft.payload.featured_image) || ['inline-1','inline-2','inline-3'].some(slot => !draft.payload.inline_images?.some(image => image.slot === slot && ready(image) && draft.body_markdown.includes(`](${image.url})`)));
   return false;
@@ -28,6 +29,9 @@ export type ContentStatus = {
   engines: unknown;
   brands: Array<{ brand: ContentBrand; channels: Array<{ channel: string; status: string; detail?: string; schedulingSupported?: boolean }> }>;
 };
-export const CONTENT_BRANDS: Record<ContentBrand, string> = { operly: 'Operly', 'r-link': 'R-Link' };
-export const CONTENT_CHANNELS: Record<ContentChannel, string> = { blog: 'Blog', email:'Email',video:'Video',linkedin: 'LinkedIn', facebook: 'Facebook', instagram: 'Instagram', x: 'X' };
+export const CONTENT_BRANDS: Record<ContentBrand, string> = { operly: 'Operly', 'r-link': 'R-Link', 'kim-garst': 'Kim Garst' };
+export const CONTENT_CHANNELS: Record<ContentChannel, string> = { blog: 'Blog', email:'Email',video:'Video',linkedin: 'LinkedIn', facebook: 'Facebook', instagram: 'Instagram', x: 'X',threads:'Threads',bluesky:'Bluesky',google:'Google Business Profile',pinterest:'Pinterest',community:'GHL Community',youtube:'YouTube',tiktok:'TikTok' };
 export const CONTENT_ENGINES: Record<ContentEngine, string> = { claude: 'Claude Code', codex: 'Codex', xai: 'Grok' };
+
+export const CONTENT_VIDEO_CHANNELS = ['instagram','facebook','linkedin','youtube','tiktok','threads','bluesky','pinterest','community','x'];
+export const CONTENT_GHL_CHANNELS = ['facebook','instagram','linkedin','threads','bluesky','google','pinterest','youtube','tiktok','community'];

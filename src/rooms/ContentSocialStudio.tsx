@@ -3,8 +3,8 @@ import { Bookmark, ChevronDown, Globe2, Heart, Image, MessageCircle, MoreHorizon
 import { CONTENT_BRANDS, CONTENT_CHANNELS, type ContentBrand, type ContentPost, type ContentChannel, type ContentImage } from '../data/content';
 import './content-studio.css';
 
-const networkNames = ['linkedin','instagram','facebook','x'];
-const limits: Record<string,number> = {linkedin:3000,instagram:2200,facebook:63206,x:280};
+const networkNames = ['linkedin','instagram','facebook','x','threads','bluesky','google','pinterest','community'];
+const limits: Record<string,number> = {linkedin:3000,instagram:2200,facebook:63206,x:280,threads:500,bluesky:300,google:1500,pinterest:800,community:100000};
 const publicImage = (image?:ContentImage) => image?.status==='ok' && /^https:\/\//.test(image.url) ? image.url : undefined;
 
 export function ContentSocialStudio({brand,posts,disabled,onChange,onRevise,renderImageEditor}:{
@@ -23,20 +23,20 @@ export function ContentSocialStudio({brand,posts,disabled,onChange,onRevise,rend
   const name=CONTENT_BRANDS[brand],channel=CONTENT_CHANNELS[platform as ContentChannel]??platform;
   const image=publicImage(post.image),max=limits[platform]??3000;
   const long=post.text.length>280,shown=expanded||!long?post.text:post.text.slice(0,280).trimEnd();
-  const initials=brand==='operly'?'o.':'r.';
+  const initials=brand==='operly'?'o.':brand==='r-link'?'r.':'KG';
   const text=<div className="social-post-copy"><p>{shown}{!expanded&&long?'…':''}</p>{long&&<button className="social-expand" onClick={()=>setExpanded(!expanded)}>{expanded?'Show less':'…see more'}</button>}</div>;
-  const artwork=image?<img className="social-post-image" src={image} alt={post.image?.alt??''} referrerPolicy="no-referrer"/>:<div className="social-art-empty"><Image size={28}/><strong>{platform==='instagram'?'An image belongs here':'Your post, as text'}</strong><span>{platform==='instagram'?'Add an image before scheduling.':'Add artwork in the editor if this post needs it.'}</span></div>;
+  const artwork=image?<img className="social-post-image" src={image} alt={post.image?.alt??''} referrerPolicy="no-referrer"/>:<div className="social-art-empty"><Image size={28}/><strong>Image needed</strong><span>Generate the required artwork before publishing.</span></div>;
   return <div className="social-studio">
     <header className="studio-heading"><div><span className="content-eyebrow">SOCIAL STUDIO</span><h2>See it in the feed.</h2><p>Fine-tune each post. Your changes save automatically.</p></div><span className="studio-count">{posts.length} posts</span></header>
-    <nav className="social-networks" aria-label="Social network">{platforms.map(p=><button key={p} aria-pressed={platform===p} onClick={()=>{setNetwork(p);setVariant(0);setExpanded(false);}}><span className={`network-mark ${p}`} aria-hidden="true">{p==='linkedin'?'in':p==='instagram'?'◎':p==='facebook'?'f':'𝕏'}</span>{CONTENT_CHANNELS[p as ContentChannel]}<small>{posts.filter(post=>post.platform===p).length}</small></button>)}</nav>
+    <nav className="social-networks" aria-label="Social network">{platforms.map(p=><button key={p} aria-pressed={platform===p} onClick={()=>{setNetwork(p);setVariant(0);setExpanded(false);}}><span className={`network-mark ${p}`} aria-hidden="true">{p==='linkedin'?'in':p==='instagram'?'◎':p==='facebook'?'f':p==='x'?'X':(CONTENT_CHANNELS[p as ContentChannel]??p).slice(0,2)}</span>{CONTENT_CHANNELS[p as ContentChannel]}<small>{posts.filter(post=>post.platform===p).length}</small></button>)}</nav>
     <div className="social-studio-grid">
       <section className="social-preview-stage" aria-label={`${channel} post preview`}>
         <div className="studio-preview-toolbar"><span><i/> Draft preview</span><div className="studio-device-switch"><button aria-label="Phone preview" aria-pressed={device==='phone'} onClick={()=>setDevice('phone')}><Smartphone size={15}/></button><button aria-label="Desktop preview" aria-pressed={device==='desktop'} onClick={()=>setDevice('desktop')}><Monitor size={15}/></button></div></div>
         <div className={`social-preview-width ${device}`}>
-          <div className={`social-network-chrome ${platform}`}><span>{platform==='instagram'?'Instagram':platform==='facebook'?'facebook':platform==='linkedin'?'LinkedIn':'𝕏'}</span><span aria-hidden="true"><MoreHorizontal size={20}/></span></div>
+          <div className={`social-network-chrome ${platform}`}><span>{platform==='instagram'?'Instagram':platform==='facebook'?'facebook':platform==='linkedin'?'LinkedIn':channel}</span><span aria-hidden="true"><MoreHorizontal size={20}/></span></div>
           <article className={`social-native-post ${platform}`}>
             <header className="social-post-author"><div className={`social-avatar ${brand}`}>{initials}</div><div><strong>{name}</strong><span>{platform==='x'?`@${brand.replace('-','')}`:platform==='instagram'?'Original post':'Brand page'} {platform!=='instagram'&&<Globe2 size={10}/>}</span></div><MoreHorizontal size={19} aria-hidden="true"/></header>
-            {platform==='instagram'?<>{artwork}<div className="social-instagram-actions" aria-hidden="true"><Heart/><MessageCircle/><Send/><Bookmark/></div>{text}</>:<>{text}{image&&artwork}</>}
+            {platform==='instagram'?<>{artwork}<div className="social-instagram-actions" aria-hidden="true"><Heart/><MessageCircle/><Send/><Bookmark/></div>{text}</>:<>{text}{artwork}</>}
             {platform!=='instagram'&&<div className="social-native-actions" aria-hidden="true">{platform==='x'?<><MessageCircle/><Repeat2/><Heart/><Bookmark/><Send/></>:<><span><ThumbsUp/> {platform==='linkedin'?'Like':'Like'}</span><span><MessageCircle/> Comment</span><span><Repeat2/> {platform==='linkedin'?'Repost':'Share'}</span></>}</div>}
           </article>
         </div>
