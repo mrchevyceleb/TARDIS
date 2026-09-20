@@ -34,8 +34,21 @@ test('ASR arriving after the answer preserves user/answer order and dedupes user
   assert.deepEqual(seen, ['user:How is the calendar?', 'assistant:The calendar is fixed']);
   queue.committed('audio-2');
   queue.assistant('Please repeat that');
+  assert.equal(queue.pending, 1);
   queue.finish();
-  assert.deepEqual(seen.slice(-2), ['user:[Voice message could not be transcribed]', 'assistant:Please repeat that']);
+  assert.equal(queue.pending, 0);
+  assert.deepEqual(seen, ['user:How is the calendar?', 'assistant:The calendar is fixed', 'assistant:Please repeat that']);
+});
+
+test('hangup discards an unfinished trailing audio slot without inventing a user message', () => {
+  const seen: string[] = [];
+  const queue = new VoiceTranscriptQueue((role, text) => seen.push(`${role}:${text}`));
+  queue.user('spoken', 'Remember Friday at two');
+  queue.assistant('Friday at two, understood');
+  queue.committed('trailing-noise');
+  queue.finish();
+  queue.user('trailing-noise', '');
+  assert.deepEqual(seen, ['user:Remember Friday at two', 'assistant:Friday at two, understood']);
 });
 
 test('spoken turns persist, publish, and reach a warm native text continuation without switching engines', async () => {

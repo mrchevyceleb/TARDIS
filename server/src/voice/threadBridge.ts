@@ -61,8 +61,14 @@ export class VoiceTranscriptQueue {
     this.entries.push({ role: 'assistant', text });
     this.flush();
   }
+  get pending(): number {
+    return this.entries.filter((entry) => entry.role === 'user' && entry.text === undefined).length;
+  }
   finish(): void {
-    for (const entry of this.entries) entry.text ??= '[Voice message could not be transcribed]';
+    // A committed audio slot is not proof of spoken words: VAD can commit
+    // trailing silence/noise as the caller hangs up. Never fabricate a user
+    // message (and long-term memory) from an unfinished transcription.
+    for (const entry of this.entries) entry.text ??= '';
     this.flush();
   }
   private flush(): void {

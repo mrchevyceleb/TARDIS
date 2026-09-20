@@ -250,7 +250,7 @@ class GrokCall {
   private micDropped = 0;
 
   sendMic(base64: string): void {
-    if (!this.ws || this.ws.readyState !== WsClient.OPEN) return;
+    if (this.closed || !this.ws || this.ws.readyState !== WsClient.OPEN) return;
     if (this.greetingPhase === 'pending' || this.greetingPhase === 'playing') {
       this.micDropped += 1;
       if (this.micDropped === 50) console.log('[voice] 50 mic chunks dropped during greeting phase');
@@ -288,7 +288,15 @@ class GrokCall {
     // function request or ASR completion can finish being formed. No new audio
     // is sent to the person; admitted work is independent of this grace period.
     if (this.ws?.readyState === WsClient.OPEN) {
-      setTimeout(() => { try { this.ws?.close(); } catch { /* already gone */ } }, 3000).unref();
+      // Finish VAD even when End Call cuts off the microphone before the
+      // provider receives its usual 400 ms of silence after the last words.
+      if (this.micChunks > 0) {
+        this.ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: Buffer.alloc(24000 * 2 * 0.6).toString('base64') }));
+      }
+      // Keep the full grace period after microphone use: the final commit
+      // itself can arrive late, before the queue has a pending slot to count.
+      const graceMs = this.micChunks > 0 || this.transcripts.pending > 0 ? 10_000 : 3000;
+      setTimeout(() => { try { this.ws?.close(); } catch { /* already gone */ } }, graceMs).unref();
     } else {
       try { this.ws?.close(); } catch { /* already gone */ }
     }
@@ -396,7 +404,10 @@ class GrokCall {
     }
     if (type === 'conversation.item.input_audio_transcription.completed'
       || type === 'conversation.item.input_audio_transcription.failed') {
-      const text = type.endsWith('.failed') ? '[Voice message could not be transcribed]' : String(msg.transcript ?? '').trim();
+      // Provider failure text is diagnostic information, not something the
+      // caller said. Resolve the slot so successful replies aren't blocked.
+      if (type.endsWith('.failed')) console.warn('[voice] provider could not transcribe an audio segment');
+      const text = type.endsWith('.failed') ? '' : String(msg.transcript ?? '').trim();
       this.work.userItem(String(msg.item_id ?? ''));
       this.transcripts.user(String(msg.item_id ?? ''), text);
       return;
