@@ -113,11 +113,18 @@ export const SUPABASE_SERVICE_ROLE_KEY =
 // Default MCP base URL to the same Railway server that serves /admin/api.
 // Both endpoints share the same auth token, so co-locating them removes a
 // whole class of "callMcp not configured" silent failures.
+// callMcp appends `/tools/call`, which the assistant server mounts at its
+// ROOT, not under `/mcp`. Only the TARDIS_OFFICE_MCP_URL branch used to strip
+// a trailing `/mcp`; on a box configured through ASSISTANT_MCP_URL (…/mcp)
+// every callMcp went to `/mcp/tools/call` and 404'd — silently breaking the
+// compaction memory hook and any routine gate. Normalise whichever wins.
+const stripMcpSuffix = (url: string | undefined): string | undefined =>
+  url?.trim().replace(/\/+$/, '').replace(/\/mcp$/, '') || undefined;
 export const MCP_BASE_URL =
-  process.env.TARDIS_OFFICE_MCP_URL?.replace(/\/(?:mcp\/?)?$/, '') ||
-  process.env.RAILWAY_MCP_URL ||
-  process.env.ASSISTANT_MCP_URL ||
-  process.env.MCP_BASE_URL ||
+  stripMcpSuffix(process.env.TARDIS_OFFICE_MCP_URL) ||
+  stripMcpSuffix(process.env.RAILWAY_MCP_URL) ||
+  stripMcpSuffix(process.env.ASSISTANT_MCP_URL) ||
+  stripMcpSuffix(process.env.MCP_BASE_URL) ||
   ASSISTANT_ADMIN_BASE_URL;
 
 export const MCP_BEARER_TOKEN =

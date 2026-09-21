@@ -15,6 +15,8 @@ import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 import { listAgents, type Agent } from './agents.ts';
 import { sendToAgentHome } from './teamBus.ts';
+import { jevConfigured } from '../lib/jev.ts';
+import { runRoutineGate, type RoutineGateConfig } from './routineGate.ts';
 
 export type Routine = {
   id: string;
@@ -25,6 +27,11 @@ export type Routine = {
   paused?: boolean;
   lastRunAt?: number;
   createdAt: number;
+  /** Declarative pre-check run BEFORE the agent turn (see routineGate.ts):
+   *  what to fetch, what to drop, what Jev should judge, and what justifies
+   *  waking the agent. Absent, or with Jev unconfigured, the routine fires
+   *  its plain turn exactly as before. */
+  gate?: RoutineGateConfig;
 };
 
 const ROUTINES_FILE = join(STATE_DIR, 'routines.json');
@@ -95,18 +102,43 @@ export function deleteRoutine(id: string): boolean {
 /** Fire a routine now (manual run or scheduler). Only stamp lastRunAt on
  *  actual delivery. A watched-thread or busy-engine skip must not consume
  *  the daily slot; the scheduler retries after a short cooldown. */
-export async function runRoutine(id: string): Promise<{ ran: boolean; reason?: string }> {
+export async function runRoutine(id: string): Promise<{ ran: boolean; reason?: string; gated?: string }> {
   const routine = listRoutines().find((r) => r.id === id);
   if (!routine) return { ran: false, reason: 'routine not found' };
   const agent = listAgents().find((a) => a.id === routine.agentId);
   if (!agent) return { ran: false, reason: 'agent was deleted' };
-  const text = `[routine: ${routine.name}]\n${routine.prompt}\n\n(Scheduled automation. Do the work. If nothing happened, reply with exactly NO_UPDATE and nothing else; TARDIS suppresses that protocol token from chat. Never emit a provider end-of-sequence marker, an empty-message marker, "I checked," or a watermark recap. Only post in the thread when something shipped, failed, or needs the user.)`;
+  // Gate first. A quiet result consumes the slot exactly like a delivered
+  // NO_UPDATE turn would, without the turn. Any gate failure falls OPEN to
+  // the plain agent turn: the sweep must never silently stop because Jev or
+  // the MCP had a bad minute.
+  let findings = '';
+  let commitGate: (() => void) | null = null;
+  if (routine.gate && jevConfigured()) {
+    try {
+      const outcome = await runRoutineGate(routine.id, routine.gate);
+      if (!outcome.wake) {
+        outcome.commit();
+        markRun(id, Date.now());
+        skipUntil.delete(id);
+        return { ran: true, gated: `quiet — ${outcome.summary}` };
+      }
+      findings = `\n\n${outcome.digest}`;
+      // Watermarks advance only once the agent has actually received the
+      // items; a dropped delivery must not lose what caused the wake.
+      commitGate = outcome.commit;
+      console.log(`[routines] ${routine.name} gate woke the agent — ${outcome.summary}`);
+    } catch (err) {
+      console.warn(`[routines] ${routine.name} gate failed, running the full turn instead:`, (err as Error).message);
+    }
+  }
+  const text = `[routine: ${routine.name}]\n${routine.prompt}${findings}\n\n(Scheduled automation. Do the work. If nothing happened, reply with exactly NO_UPDATE and nothing else; TARDIS suppresses that protocol token from chat. Never emit a provider end-of-sequence marker, an empty-message marker, "I checked," or a watermark recap. Only post in the thread when something shipped, failed, or needs the user.)`;
   const result = await sendToAgentHome(agent, text, {
     peerFrom: `⚙︎ ${routine.name}`,
     peerFromRole: 'automation',
     peerText: routine.name,
   });
   if (result.delivered) {
+    commitGate?.();
     markRun(id, Date.now());
     skipUntil.delete(id);
     return { ran: true };
@@ -241,7 +273,7 @@ export function startRoutineScheduler(): void {
       void (async () => {
         try {
           const result = await runRoutine(routine.id);
-          console.log(`[routines] ${routine.name} → ${result.ran ? 'fired' : `skipped (${result.reason})`}`);
+          console.log(`[routines] ${routine.name} → ${result.gated ? `gated (${result.gated})` : result.ran ? 'fired' : `skipped (${result.reason})`}`);
         } catch (err) {
           console.warn(`[routines] ${routine.name} failed:`, (err as Error).message);
         } finally {
