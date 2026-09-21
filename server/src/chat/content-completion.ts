@@ -142,6 +142,11 @@ async function codexTextProxy(signal: AbortSignal): Promise<{ url: string; close
 export async function completeSubscription(request: CompletionRequest, signal: AbortSignal): Promise<CompletionMessage> {
   const [engine, selectedModel] = request.model.split('/');
   assertSubscriptionEngine(engine);
+  // Dispatch below branches on xAI and Claude and otherwise falls through to
+  // the Codex proxy, so any engine added to the chat allow-list without a
+  // branch here would quietly send its prompt to OpenAI under the Codex
+  // subscription. Refuse instead of answering as the wrong provider.
+  if (engine === 'zai') throw new Error('GLM cannot serve content completions yet. Choose Claude, Codex, or Grok.');
   const model = selectedModel ?? defaultAgentBrain(engine).model!;
   if (engine === 'xai') {
     const auth = await getXaiAuth();

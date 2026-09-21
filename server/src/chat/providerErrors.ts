@@ -26,7 +26,26 @@ function rawAssistantText(inner: Record<string, any>): string {
 }
 
 export function isSyntheticApiErrorText(text: string): boolean {
-  return /^\s*API Error:\s*(?:Request rejected|.*\(\d{3}\))/i.test(text);
+  // Three shapes ship: the stock "Request rejected", a trailing "(429)", and a
+  // leading "API Error: 429 …". Missing the third left its text unscrubbed —
+  // raw protocol prose could reach durable history — while the turn was still
+  // reported as a dead local runner.
+  return /^\s*API Error:\s*(?:Request rejected|\d{3}\b|.*\(\d{3}\))/i.test(text);
+}
+
+/** The reason out of a synthetic API-error message, and nothing else.
+ *
+ *  Claude Code can end a turn with a synthetic `API Error: …` assistant
+ *  message and then a `result` carrying no `api_error_status` at all. That
+ *  result alone is indistinguishable from a dead local runner, so the turn was
+ *  reported as one — burying the actual cause, which is the only part the user
+ *  can act on. Keep the status code or the stock phrase; drop the echoed
+ *  payload, which can carry request metadata. */
+export function syntheticApiErrorReason(text: string): string | null {
+  if (!isSyntheticApiErrorText(text)) return null;
+  if (/Request rejected/i.test(text)) return 'the request was rejected upstream';
+  const status = /\((\d{3})\)/.exec(text) ?? /API Error:\s*(\d{3})\b/i.exec(text);
+  return status ? `HTTP ${status[1]}` : null;
 }
 
 /** Claude Code turns an upstream failure into a fake assistant message. It is
@@ -123,7 +142,11 @@ export function terminalProviderError(cli: string, raw: unknown): TerminalProvid
 /** Normalize non-provider terminal outcomes without persisting their raw
  * result payload. These are runner states, not evidence that the API provider
  * failed, so keep the copy accurate and category-based. */
-export function terminalExecutionError(cli: string, raw: unknown): TerminalProviderError | null {
+export function terminalExecutionError(
+  cli: string,
+  raw: unknown,
+  syntheticReason?: string | null,
+): TerminalProviderError | null {
   const inner = unwrapEvent(raw);
   if (!inner || inner.type !== 'result' || inner.is_error !== true) return null;
   if (typeof inner.api_error_status === 'number') return null;
@@ -147,6 +170,15 @@ export function terminalExecutionError(cli: string, raw: unknown): TerminalProvi
   if (/budget|spend limit|cost limit/i.test(signal)) {
     return {
       message: `${provider}'s runner reached its configured budget for this turn. Try a smaller request.`,
+      code,
+      retryable: true,
+    };
+  }
+  // A synthetic API error proves the turn died upstream, not in the local
+  // runner, even though this result carries no status of its own.
+  if (syntheticReason) {
+    return {
+      message: `${provider} could not answer this turn (${syntheticReason}). Try again or switch brains.`,
       code,
       retryable: true,
     };

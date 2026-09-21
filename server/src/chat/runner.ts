@@ -32,7 +32,8 @@ import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
-import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
+import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
+import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiPlanWindowResetsAt, type ZaiMode } from './zaiQuota.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
 
@@ -147,7 +148,6 @@ const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', '
 // the standard 200K variant, which made Claude Code auto-compact far too early
 // (observed ~109K) even with CLAUDE_CODE_AUTO_COMPACT_WINDOW=1M. Per Z.ai's
 // Claude Code docs the id itself must carry `[1m]`.
-const ZAI_BASE_URL = process.env.RIVENDELL_ZAI_BASE_URL?.trim() || 'https://api.z.ai/api/anthropic';
 const ZAI_GLM53_MODEL = 'glm-5.3[1m]';
 const ZAI_GLM53_FLASH_MODEL = 'glm-5.3-flash[1m]';
 const ZAI_GLM52_MODEL = 'glm-5.2[1m]';
@@ -193,7 +193,36 @@ const ZAI_EFFORT = resolveZaiEffort(process.env.RIVENDELL_ZAI_EFFORT);
 const zaiCompactWindowForModel = (model: string): string =>
   resolveZaiModel(model, ZAI_MODEL) === ZAI_GLM51_MODEL ? ZAI_GLM51_COMPACT_WINDOW : ZAI_GLM_1M_COMPACT_WINDOW;
 
+function zaiEnv(model: string, credential: ReturnType<typeof zaiCredentials>): NodeJS.ProcessEnv {
+  const env = subscriptionEnvironment(process.env);
+  env.CLAUDE_CONFIG_DIR = ZAI_CONFIG_DIR;
+  // Resolved once per spawn by the caller, not at import: an exhausted
+  // coding-plan window swings GLM onto Fireworks and back on its own, and the
+  // base URL, token, and `--model` id all have to describe the same provider.
+  env.ANTHROPIC_BASE_URL = credential.baseUrl;
+  env.ANTHROPIC_AUTH_TOKEN = credential.token;
+  const window = zaiCompactWindowForModel(model);
+  // Same two knobs as xAI: MAX_CONTEXT tells Claude Code the real window for a
+  // non-claude-* id; AUTO_COMPACT_WINDOW is the compact threshold.
+  env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = window;
+  env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = window;
+  env.CLAUDE_CODE_MAX_RETRIES =
+    process.env.RIVENDELL_ZAI_MAX_RETRIES?.trim()
+    || process.env.CLAUDE_CODE_MAX_RETRIES?.trim()
+    || '1';
+  env.SAMWISE_ACCOUNT = 'zai';
+  return env;
+}
 
+/** Copy for the turn that hit the wall. The switch itself is silent from here
+ *  on out; only this one failed turn needs the user to send again. */
+function zaiFallbackNotice(): string {
+  const resetsAt = zaiPlanWindowResetsAt();
+  const when = resetsAt
+    ? new Date(resetsAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+    : '';
+  return `GLM's coding-plan window is full, and Z.ai will not bill a plan overage to credits. Running GLM on Fireworks${when ? ` until the plan window resets (about ${when})` : ''}. Send again to continue.`;
+}
 
 // xAI coding plan — Grok 4.6 served over xAI's Anthropic-compatible endpoint
 // (https://api.x.ai/v1/messages). Same trick as Z.ai: run the stock `claude`
@@ -409,10 +438,19 @@ class ClaudeSession {
    *  tears the child down once, and flips isAlive() false so the next
    *  getOrCreateSession respawns against fresh credentials. */
   private authFailed = false;
+  /** Provider this GLM child spawned against. A process cannot be re-pointed
+   *  once running — its base URL and token are frozen into its environment — so
+   *  when zaiModeFor() disagrees with this, the child is stale and has to be
+   *  replaced before it can serve another turn. Always 'plan' off the GLM lane. */
+  private readonly zaiMode: ZaiMode;
   /** A 401 can arrive as both api_retry and result. Persist one notice per turn. */
   private terminalNoticeEmitted = false;
   /** The CLI may stream API-error prose before flagging its synthetic message. */
   private syntheticApiErrorSeen = false;
+  /** Why the upstream call failed, out of the synthetic API-error message. The
+   *  accompanying `result` often carries no status, so this is the only
+   *  surviving evidence of the real cause. */
+  private syntheticApiErrorReason: string | null = null;
   /** Text-block seqs for the current Claude stream. A later synthetic marker
    * lets us surgically remove only its protocol prose from durable storage. */
   private streamTextBlocks = new Map<number, { text: string; seqs: number[] }>();
@@ -523,6 +561,10 @@ class ClaudeSession {
     const disallowedTools = cli === 'xai'
       ? 'AskUserQuestion WebSearch WebFetch SendMessage ListAgents ReadAgentMemory WriteAgentMemory'
       : 'AskUserQuestion SendMessage ListAgents ReadAgentMemory WriteAgentMemory';
+    // One resolution per spawn: `--model`, the base URL, and the token must all
+    // describe the same provider even if the plan window flips mid-construction.
+    const zaiCredential = cli === 'zai' ? zaiCredentials(this.spawnModel) : null;
+    this.zaiMode = zaiCredential?.mode ?? 'plan';
     const args: string[] = [
       '-p',
       '--input-format', 'stream-json',
@@ -537,7 +579,7 @@ class ClaudeSession {
       // actually reply to in the composer. (Same fix as samwise-2.)
       '--disallowedTools', disallowedTools,
       '--dangerously-skip-permissions',
-      '--model', this.spawnModel,
+      '--model', zaiCredential?.wireModel ?? this.spawnModel,
       '--effort', this.spawnEffort,
     ];
     if (resumeId) args.push('--resume', resumeId);
@@ -574,8 +616,9 @@ class ClaudeSession {
     // login; everything else keeps the per-repo account-map resolution.
     const forcedAccount = accountFromChatId(chatId);
     const spawnEnv = cli === 'xai' ? xaiEnv()
+      : cli === 'zai' ? zaiEnv(this.spawnModel, zaiCredential!)
       : forcedAccount ? accountEnvForAccount(forcedAccount, cwd) : accountEnv(cwd);
-    if (cli !== 'xai') assertClaudeSubscription(spawnEnv, cwd);
+    if (cli !== 'xai' && cli !== 'zai') assertClaudeSubscription(spawnEnv, cwd);
     this.child = spawn('claude', args, {
       cwd,
       env: spawnEnv,
@@ -785,6 +828,7 @@ class ClaudeSession {
       this.activeToolIds.clear();
       this.terminalNoticeEmitted = false;
       this.syntheticApiErrorSeen = false;
+      this.syntheticApiErrorReason = null;
       this.streamTextBlocks.clear();
       this.preparingTurnAborter = preparationAborter;
       this.turnPromptSubmitted = false;
@@ -829,8 +873,8 @@ class ClaudeSession {
 
     // Z.ai GLM models are text-only over the Anthropic-compatible endpoint, so a
     // native image payload is dropped (or errors). Route pasted images through
-    // the local LM Studio vision model and inject a text description instead.
-    // claude/assistant keep full native vision — they never adapt.
+    // the vision adapter (Fireworks GLM 5.3 Flash by default) and inject a text
+    // description instead. claude/assistant keep full native vision — they never adapt.
     let promptText = text;
     let outImages = images;
     let visionNote: string | undefined;
@@ -1102,6 +1146,13 @@ class ClaudeSession {
     return this.disposed;
   }
 
+  /** True when GLM has moved between the Z.ai coding plan and Fireworks since
+   *  this child spawned. Its provider is frozen in its environment, so it can
+   *  only be replaced, never re-pointed. */
+  hasStaleZaiProvider(): boolean {
+    return this.cli === 'zai' && zaiModeFor(this.spawnModel) !== this.zaiMode;
+  }
+
   /** The warm child's OAuth token is dead (401/403). Retrying in-process can't
    *  recover it — its cached refresh token was rotated out. Tear the child down
    *  so the next getOrCreateSession respawns a fresh process that re-reads
@@ -1221,6 +1272,18 @@ class ClaudeSession {
     // Queue behind the stream appends and ahead of the terminal notice append.
     // The exact-seq rewrite also leaves a safe high-watermark if needed.
     void removeEventLogEvents(this.logKey, targets);
+  }
+
+  /** Pull the reason out of the synthetic assistant message before
+   *  scrubSyntheticStreamText drops its text from the log. */
+  private captureSyntheticReason(ev: any): string | null {
+    const content = ev?.message?.content;
+    const text = typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? content.filter((b: any) => b?.type === 'text' && typeof b.text === 'string').map((b: any) => b.text).join('\n')
+        : '';
+    return text ? syntheticApiErrorReason(text) : null;
   }
 
   private persistAppliedSelection(): void {
@@ -1389,6 +1452,7 @@ class ClaudeSession {
       this.activeToolIds.clear();
       this.terminalNoticeEmitted = false;
       this.syntheticApiErrorSeen = false;
+      this.syntheticApiErrorReason = null;
       this.streamTextBlocks.clear();
       this.preparingTurnAborter = null;
       this.turnPromptSubmitted = true;
@@ -1474,6 +1538,7 @@ class ClaudeSession {
     const syntheticApiError = isSyntheticApiErrorEvent(ev);
     if (syntheticApiError) {
       this.syntheticApiErrorSeen = true;
+      this.syntheticApiErrorReason ??= this.captureSyntheticReason(ev);
       this.scrubSyntheticStreamText();
     }
     const expectedUserInterrupt = ev?.type === 'result' && this.userInterruptPending;
@@ -1481,12 +1546,42 @@ class ClaudeSession {
       ? terminalProviderError(this.cli, ev)
       : null;
     const terminal = providerTerminal
-      ?? (ev?.type === 'result' && !expectedUserInterrupt ? terminalExecutionError(this.cli, ev) : null);
+      ?? (ev?.type === 'result' && !expectedUserInterrupt
+        ? terminalExecutionError(this.cli, ev, this.syntheticApiErrorReason)
+        : null);
+    // Z.ai meters the coding plan in fixed windows, so an exhausted window is
+    // never a balance problem and topping up credits cannot clear it. Attribute
+    // the failure to the provider THIS child is actually talking to: a 1308
+    // from the plan opens the Fireworks window, while any provider failure on
+    // Fireworks benches it instead of re-reporting the plan as exhausted.
+    if (this.cli === 'zai') {
+      if (this.zaiMode === 'fireworks') {
+        // Only an account-wide failure condemns Fireworks. Benching on a
+        // request-specific 400/413/422 would send every GLM lane back to the
+        // plan window we already know is closed. Checked on any event that
+        // carries a status, so a mid-turn api_retry counts too.
+        if (isZaiFallbackProviderFailure(ev)) noteZaiFallbackFailure();
+      } else {
+        // Record on any 429 that reports it, including a mid-turn api_retry.
+        noteZaiPlanQuota(ev);
+      }
+    }
+    // The provider moved out from under this child, in either direction. Its
+    // base URL and token are frozen in its environment, so it must be replaced
+    // — but only at a result, where the turn is already over, and regardless of
+    // whether that particular result repeated the quota signature.
+    const zaiStale = this.cli === 'zai' && ev?.type === 'result'
+      && zaiModeFor(this.spawnModel) !== this.zaiMode;
     if (terminal) {
       // Never persist the raw failed result: provider payloads can include
       // request metadata or echoed prompt fragments. The normalized notice is
       // the durable transcript record; turnEnd below remains the boundary.
-      this.emitTerminalNotice(terminal, this.syntheticApiErrorSeen);
+      this.emitTerminalNotice(
+        zaiStale && zaiModeFor(this.spawnModel) === 'fireworks'
+          ? { ...terminal, message: zaiFallbackNotice(), retryable: true }
+          : terminal,
+        this.syntheticApiErrorSeen,
+      );
     } else {
       this.emit({ type: 'event', event: ev });
     }
@@ -1494,11 +1589,12 @@ class ClaudeSession {
       this.streamTextBlocks.clear();
     }
 
-    if (terminal && ev.api_error_status === 401) {
-      // Only 401 benefits from killing an OAuth-backed warm process. Fixed-key
-      // engines still report the durable notice and respawn on a later send.
-      this.failAuth();
-    }
+    // Only 401 benefits from killing an OAuth-backed warm process. Fixed-key
+    // engines still report the durable notice and respawn on a later send.
+    // Deferred to after the turnEnd emit below for the same reason as the
+    // provider switch: shutdown() flips `disposed`, and emit() then drops the
+    // boundary, leaving every attached client streaming until its watchdog.
+    const authFailPending = Boolean(terminal) && ev?.api_error_status === 401;
 
     // A mid-turn API retry storm is otherwise invisible. A 401 means the
     // credential is dead: retrying in-process cannot fix it, so leave a durable
@@ -1516,6 +1612,18 @@ class ClaudeSession {
           message: `${provider} could not authenticate. Check its account or API key, then try again.`,
           code: String(ev.error_status),
         }, true);
+        // This one dies mid-turn, so no `result` is coming to close it out.
+        // Emit the boundary here, before failAuth() disposes the session and
+        // emit() starts dropping frames, or attached clients stream forever.
+        if (this.turnStartedAt !== null) {
+          this.turnStartedAt = null;
+          this.automationTurn = false;
+          this.activeToolIds.clear();
+          this.preparingTurnAborter = null;
+          this.turnPromptSubmitted = false;
+          this.userInterruptPending = false;
+          this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
+        }
         this.failAuth();
       } else {
         const attempt = ev.attempt ? ` (attempt ${ev.attempt}/${ev.max_retries ?? '?'})` : '';
@@ -1534,6 +1642,12 @@ class ClaudeSession {
       this.turnPromptSubmitted = false;
       this.userInterruptPending = false;
       this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
+      // Only now, with the turn boundary already delivered, retire a child
+      // whose provider moved. shutdown() flips `disposed`, after which emit()
+      // drops every remaining frame — retiring any earlier would swallow the
+      // turnEnd above and leave the client streaming forever.
+      if (authFailPending) this.failAuth();
+      else if (zaiStale) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
       const seeded = this.pendingSeedAck;
       const resultFailed = ev.is_error === true || typeof ev.api_error_status === 'number';
       const failed = seeded && resultFailed;
@@ -1691,6 +1805,14 @@ export async function getOrCreateSession(opts: {
         sessions.delete(key);
         continue;
       }
+      // A GLM child whose provider moved while it sat idle cannot be re-pointed
+      // in place. Retire it here rather than waiting for its own failing turn,
+      // so every lane picks up the switch — not just the one that hit the 429.
+      if (opts.cli === 'zai' && !existing.isBusy() && existing.hasStaleZaiProvider()) {
+        existing.shutdown('zai provider switch');
+        sessions.delete(key);
+        continue;
+      }
       // Recycle only an IDLE session whose model/effort differs, and only when
       // the caller explicitly opted in (a real authoritative turn). session_id
       // is preserved so the replacement --resumes the same conversation. A
@@ -1718,7 +1840,19 @@ export async function getOrCreateSession(opts: {
     // can't start, surfacing a clear error instead of a silent wrong-provider spawn.
     await ensureXaiProxy();
   }
-  return await spawnSessionOnce(opts.cli, cwd, chatId, key, wantModel, wantEffort);
+  const spawned = await spawnSessionOnce(opts.cli, cwd, chatId, key, wantModel, wantEffort);
+  // A child freezes its provider at construction, then waits to be ready.
+  // Another GLM thread can flip the mode during that wait, so revalidate
+  // before handing it out: callers that send after a single lookup (team bus,
+  // routines) would otherwise burn a turn on a provider already known to be
+  // exhausted. One retry only — a mode flipping every spawn is a bug, not a
+  // reason to loop.
+  if (opts.cli === 'zai' && spawned.hasStaleZaiProvider() && !spawned.isBusy()) {
+    spawned.shutdown('zai provider switch during spawn');
+    if (sessions.get(key) === spawned) sessions.delete(key);
+    return await spawnSessionOnce(opts.cli, cwd, chatId, key, wantModel, wantEffort);
+  }
+  return spawned;
   } finally {
     finishLookup();
   }
@@ -1893,6 +2027,7 @@ async function spawnSession(
   assertMemoryAvailableForSpawn(cli);
   const session = new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, seedFirst, switchedFrom);
   sessions.set(key, session);
+  notifySessionCreated(session.logKey, session);
 
   session.subscribe((se) => {
     if (se.ev.type === 'closed' && sessions.get(key) === session) {
@@ -2078,6 +2213,30 @@ export function newSubscriberId(): string {
 }
 
 const externalThreadListeners = new Set<(logKey: string, se: SeqEvent) => void>();
+/** Fires when a lane gets a new live process.
+ *
+ *  Retiring a session (model change, engine change, auth failure, provider
+ *  switch) unsubscribes every bound socket. The socket that sends next rebinds
+ *  on its own, but a passive tab or second device has nothing to trigger a
+ *  rebind and goes silently deaf to the replacement. This lets those sockets
+ *  re-attach the moment a replacement exists, without spawning one themselves. */
+const sessionCreatedListeners = new Set<(logKey: string, session: ClaudeSession) => void>();
+
+export function subscribeSessionCreated(
+  fn: (logKey: string, session: ClaudeSession) => void,
+): () => void {
+  sessionCreatedListeners.add(fn);
+  return () => sessionCreatedListeners.delete(fn);
+}
+
+function notifySessionCreated(logKey: string, session: ClaudeSession): void {
+  for (const fn of sessionCreatedListeners) {
+    try { fn(logKey, session); } catch (err) {
+      console.warn('[chat] session-created listener failed:', (err as Error).message);
+    }
+  }
+}
+
 export function subscribeExternalThreadEvents(fn: (logKey: string, se: SeqEvent) => void): () => void {
   externalThreadListeners.add(fn);
   return () => { externalThreadListeners.delete(fn); };

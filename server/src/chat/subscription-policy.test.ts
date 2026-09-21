@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { assertSubscriptionLane, subscriptionEnvironment } from './subscription-policy.ts';
 import { brainForAgent } from './agents.ts';
-import { validateCompletionMessage, validateCompletionRequest } from './content-completion.ts';
+import { completeSubscription, validateCompletionMessage, validateCompletionRequest } from './content-completion.ts';
 import { subscriptionCronPayload, isTardisOwnedCron, isSubscriptionCronEngine } from '../routes/cron.ts';
 
 test('retired engines migrate with a new revision while preserving identity and supported brains', () => {
@@ -13,8 +13,12 @@ test('retired engines migrate with a new revision while preserving identity and 
   assert.ok(brain.updatedAt);
   assert.equal(agent.home, 'bot-writer');
   assert.throws(() => assertSubscriptionLane('banana-fireworks'));
-  assert.throws(() => assertSubscriptionLane('zai'));
+  assert.doesNotThrow(() => assertSubscriptionLane('zai'));
   assert.doesNotThrow(() => assertSubscriptionLane('assistant'));
+  const glm = brainForAgent({ ...agent, engine: 'zai', model: 'glm-5.3-flash', effort: 'max' });
+  assert.equal(glm.engine, 'zai');
+  assert.equal(glm.model, 'glm-5.3-flash[1m]');
+  assert.equal(glm.effort, 'max');
   const stable = brainForAgent({ ...agent, ...brain, brainRevision: brain.revision, brainUpdatedAt: brain.updatedAt });
   assert.equal(stable.revision, 8);
   for (const engine of ['codex-kim', 'codex-personal']) {
@@ -27,7 +31,7 @@ test('retired engines migrate with a new revision while preserving identity and 
 
 test('subscription child environments cannot inherit metered credentials or provider redirects', () => {
   assert.deepEqual(subscriptionEnvironment({ TARDIS_OFFICE_MCP_TOKEN:'agent', TARDIS_OFFICE_ADMIN_TOKEN:'admin', Tardis_Office_Admin_Token:'admin' }), { TARDIS_OFFICE_MCP_TOKEN:'agent' });
-  const env = subscriptionEnvironment({ PATH: 'safe', ANTHROPIC_API_KEY: 'key', ANTHROPIC_AUTH_TOKEN: 'key', ANTHROPIC_BASE_URL: 'https://other.example', OPENAI_API_KEY: 'key', OPENAI_BASE_URL: 'https://other.example', OPENROUTER_API_KEY: 'key', FIREWORKS_API_KEY: 'key', GROK_PERSONAL_API_KEY: 'key', CLAUDE_CODE_USE_BEDROCK: '1' });
+  const env = subscriptionEnvironment({ PATH: 'safe', ANTHROPIC_API_KEY: 'key', ANTHROPIC_AUTH_TOKEN: 'key', ANTHROPIC_BASE_URL: 'https://other.example', OPENAI_API_KEY: 'key', OPENAI_BASE_URL: 'https://other.example', OPENROUTER_API_KEY: 'key', FIREWORKS_API_KEY: 'key', GROK_PERSONAL_API_KEY: 'key', Z_AI_API_KEY: 'key', RIVENDELL_ZAI_FALLBACK_API_KEY: 'key', CLAUDE_CODE_USE_BEDROCK: '1' });
   assert.deepEqual(env, { PATH: 'safe' });
   assert.deepEqual(subscriptionEnvironment({ Path: 'safe', OpenAI_API_Key: 'key', Anthropic_Auth_Token: 'key', Fireworks_Api_Key: 'key' }), { Path: 'safe' });
 });
@@ -56,5 +60,8 @@ test('content gateway validates model lanes and returns only declared tool decis
   assert.throws(() => validateCompletionMessage({ content: null, tool_calls: [{ name: 'shell', arguments: '{}' }] }, request));
   assert.throws(() => validateCompletionMessage({ content: 'skipped', tool_calls: [] }, request));
   assert.throws(() => validateCompletionRequest({ ...request, model: 'banana-fireworks/paid' }));
+  // Accepted by the chat allow-list, but the completion path has no GLM
+  // branch — it must refuse, not fall through to the Codex proxy.
+  assert.rejects(() => completeSubscription({ ...request, model: 'zai/glm-5.3' }, new AbortController().signal));
   assert.throws(() => validateCompletionRequest({ ...request, stream: true }));
 });
