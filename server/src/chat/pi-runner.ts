@@ -65,7 +65,9 @@ function piBinary(): string {
  *  the provider catalogs, the bash safety guards, and our MCP bridge. */
 function piExtensions(): string[] {
   const ext = join(PI_AGENT_DIR, 'extensions');
-  const wanted = ['auto-provider-models.ts', 'bash-timeout-guard.ts', 'bash-self-kill-guard.ts'];
+  // pi-grok registers the `xai-oauth` provider (SuperGrok); without it every
+  // Grok spawn dies with "Unknown provider".
+  const wanted = ['auto-provider-models.ts', 'pi-grok/index.ts', 'bash-timeout-guard.ts', 'bash-self-kill-guard.ts'];
   const configured = process.env.RIVENDELL_PI_EXTENSIONS?.split(',').map((s) => s.trim()).filter(Boolean);
   const files = (configured ?? wanted).map((f) => (f.startsWith('/') ? f : join(ext, f))).filter(existsSync);
   return [...files, TEAM_EXTENSION];
@@ -207,6 +209,7 @@ export class PiSession {
   private markInit(sessionId?: string): void {
     if (this.initSeen) return;
     this.initSeen = true;
+    console.log(`[chat ${this.cli}/pi] ready ${this.provider.provider}/${this.provider.model} session=${this.piSessionId.slice(0, 8)}`);
     void setSessionId(this.cli, this.cwd, this.piSessionId, this.chatId);
     this.emit({ type: 'event', event: { type: 'system', subtype: 'init', cwd: this.cwd, session_id: sessionId ?? this.piSessionId, model: this.provider.model, harness: 'pi' } });
     this.resolveReady(true);
