@@ -45,9 +45,13 @@ export function useAgentMessagePins(agentId: string | undefined): {
     pull();
     const onChange = () => pull();
     window.addEventListener(MESSAGE_PINS_CHANGED, onChange);
+    // Agents pin from the server side (team_pin), which raises no browser
+    // event; poll at the desk's usual cadence so their notes appear.
+    const iv = window.setInterval(pull, 20_000);
     return () => {
       alive = false;
       window.removeEventListener(MESSAGE_PINS_CHANGED, onChange);
+      window.clearInterval(iv);
     };
   }, [agentId]);
 

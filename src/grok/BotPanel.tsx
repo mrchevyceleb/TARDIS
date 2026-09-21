@@ -370,6 +370,12 @@ export function BotPanel({ meta, onOpenForge, onClose, className = '', agent }: 
             <div className="bt-pane-empty">Pins hid for a second — I’ll try again in a moment.</div>
           ) : visiblePins.length ? visiblePins.map((p) => (
             <div key={p.id} className="bt-msgpin">
+              {p.blockId.startsWith('note-') ? (
+                // An agent's own note (team_pin): there is no bubble to jump to.
+                <div className="bt-msgpin-body" title="Pinned by the agent">
+                  <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty note'}</span>
+                </div>
+              ) : (
               <button
                 type="button"
                 className="bt-msgpin-body"
@@ -378,6 +384,7 @@ export function BotPanel({ meta, onOpenForge, onClose, className = '', agent }: 
               >
                 <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty bubble'}</span>
               </button>
+              )}
               <button
                 type="button"
                 className="bt-iconbtn bt-msgpin-unpin"

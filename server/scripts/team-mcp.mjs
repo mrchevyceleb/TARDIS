@@ -99,6 +99,34 @@ const TOOLS = [
     },
   },
   {
+    name: 'team_pin',
+    description:
+      "Pin a short note to YOUR desk (the right pane Matt opens next to your chat, under 'Pinned from <you>'). " +
+      'Use it for decisions waiting on him, open questions, or a link he should keep. This is the only way an agent can pin; ' +
+      'editing the Pins room or message-pins.json by hand does not show up there.',
+    inputSchema: {
+      type: 'object',
+      properties: { text: { type: 'string', description: 'One short note, plain text.' } },
+      required: ['text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_pins',
+    description: 'List what is currently pinned on your desk, with ids for team_unpin.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'team_unpin',
+    description: 'Remove one of your desk pins by id (from team_pins).',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'team_recent',
     description:
       "Read a teammate's recent thread messages (their last exchanges) — check what they " +
@@ -174,6 +202,24 @@ async function callTool(name, args, signal) {
     if (!matches.length) return `No teammate named ${JSON.stringify(args.name)}. Call team_list for the roster.`;
     const heading = name === 'team_status' ? 'Ground-truth activity right now' : `Teammates (${agents.length})`;
     return `${heading}:\n${matches.map(formatAgentStatus).join('\n')}\n\nWORKING NOW means a live agent turn exists. IDLE means no turn is running; do not describe intended, assigned, or outstanding work as in progress.`;
+  }
+  if (name === 'team_pin' || name === 'team_pins' || name === 'team_unpin') {
+    const agent = process.env.RIVENDELL_AGENT_NAME;
+    if (!agent) throw new Error('Only a named teammate has a desk to pin to.');
+    if (name === 'team_pin') {
+      const result = await api('/api/message-pins/note', { method: 'POST', body: JSON.stringify({ agent, text: args.text }) }, signal);
+      return result?.pin ? `Pinned to your desk (id ${result.pin.id}).` : 'Nothing pinned.';
+    }
+    const { agents } = await api('/api/team', undefined, signal);
+    const me = agents.find((a) => a.name.trim().toLowerCase() === agent.trim().toLowerCase() || a.id === agent);
+    if (!me) throw new Error(`No teammate record for ${agent}.`);
+    if (name === 'team_unpin') {
+      await api(`/api/message-pins/${encodeURIComponent(args.id)}`, { method: 'DELETE' }, signal);
+      return `Unpinned ${args.id}.`;
+    }
+    const { pins } = await api(`/api/message-pins?agentId=${encodeURIComponent(me.id)}`, undefined, signal);
+    if (!pins?.length) return 'Nothing is pinned on your desk.';
+    return pins.map((p) => `- [${p.id}] ${p.text}`).join('\n');
   }
   if (name === 'team_message') {
     const result = await api('/api/team/message', {
