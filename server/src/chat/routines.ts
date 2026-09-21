@@ -102,18 +102,29 @@ export function deleteRoutine(id: string): boolean {
 /** Fire a routine now (manual run or scheduler). Only stamp lastRunAt on
  *  actual delivery. A watched-thread or busy-engine skip must not consume
  *  the daily slot; the scheduler retries after a short cooldown. */
-export async function runRoutine(id: string): Promise<{ ran: boolean; reason?: string; gated?: string }> {
+export async function runRoutine(id: string, opts: { manual?: boolean } = {}): Promise<{ ran: boolean; reason?: string; gated?: string; agent?: string }> {
   const routine = listRoutines().find((r) => r.id === id);
   if (!routine) return { ran: false, reason: 'routine not found' };
   const agent = listAgents().find((a) => a.id === routine.agentId);
   if (!agent) return { ran: false, reason: 'agent was deleted' };
+  const outcome = await runRoutineFor(routine, agent, opts);
+  // The scheduler logs its own outcomes; a manual press used to vanish
+  // without a trace, which read as a silent failure.
+  if (opts.manual) console.log(`[routines] ${routine.name} (manual) → ${outcome.gated ? `gated (${outcome.gated})` : outcome.ran ? `fired → ${agent.name}` : `skipped (${outcome.reason})`}`);
+  return { ...outcome, agent: agent.name };
+}
+
+async function runRoutineFor(routine: Routine, agent: Agent, opts: { manual?: boolean }): Promise<{ ran: boolean; reason?: string; gated?: string }> {
+  const id = routine.id;
   // Gate first. A quiet result consumes the slot exactly like a delivered
   // NO_UPDATE turn would, without the turn. Any gate failure falls OPEN to
   // the plain agent turn: the sweep must never silently stop because Jev or
   // the MCP had a bad minute.
   let findings = '';
   let commitGate: (() => void) | null = null;
-  if (routine.gate && jevConfigured()) {
+  // Pressing Run means "run the agent", not "check whether the agent should
+  // run": a manual press skips the gate entirely.
+  if (routine.gate && jevConfigured() && !opts.manual) {
     try {
       const outcome = await runRoutineGate(routine.id, routine.gate);
       if (!outcome.wake) {

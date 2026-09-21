@@ -36,5 +36,5 @@ routinesRouter.delete('/:id', asyncHandler(async (req, res) => {
 
 routinesRouter.post('/:id/run', asyncHandler(async (req, res) => {
   const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-  res.json(await runRoutine(id));
+  res.json(await runRoutine(id, { manual: true }));
 }));

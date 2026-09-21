@@ -161,6 +161,8 @@ export function BotPanel({ meta, onOpenForge, onClose, className = '', agent }: 
   const viewer = useProxyViewer();
   const { data: cronJobs } = useCronJobs();
   const messagePins = useAgentMessagePins(agent?.id);
+  /** Outcome of a manual Run, per routine, shown briefly under the row. */
+  const [runStatus, setRunStatus] = useState<Record<string, string>>({});
   const visiblePins = agent ? messagePins.pins.filter((p) => p.agentId === agent.id) : [];
   const [latest, setLatest] = useState<ArtifactMeta | null>(null);
   const [routines, setRoutines] = useState<Array<{ id: string; name: string; agentName: string; agentId: string; schedule: string; prompt: string; paused?: boolean; lastRunAt?: number }>>([]);
@@ -337,6 +339,7 @@ export function BotPanel({ meta, onOpenForge, onClose, className = '', agent }: 
               <span className="bt-routine-sched" style={{ display: 'block' }}>{humanizeRoutine(r.schedule)}</span>
               {!agent ? <span className="bt-routine-sched" style={{ display: 'block' }}>→ {r.agentName}</span> : null}
               {r.paused ? <span className="bt-routine-paused" style={{ display: 'block' }}>Paused</span> : null}
+              {runStatus[r.id] ? <span className="bt-routine-sched" style={{ display: 'block', color: runStatus[r.id].startsWith('Sent') ? 'var(--r-mint, #7ee0a9)' : runStatus[r.id].startsWith('Not run') || runStatus[r.id].startsWith('Failed') ? 'var(--r-rose)' : undefined }}>{runStatus[r.id]}</span> : null}
             </span>
             <span className="bt-rt-rowbtns">
               <button className="bt-iconbtn" title="Edit" aria-label={`Edit ${r.name}`}
@@ -344,7 +347,17 @@ export function BotPanel({ meta, onOpenForge, onClose, className = '', agent }: 
                 <Pencil size={13} />
               </button>
               <button className="bt-iconbtn" title="Run now" aria-label="Run now"
-                onClick={() => { void apiJson(`/api/routines/${encodeURIComponent(r.id)}/run`, { method: 'POST' }).then(reloadRoutines); }}>
+                onClick={() => {
+                  setRunStatus((m) => ({ ...m, [r.id]: 'Running…' }));
+                  void apiJson<{ ran: boolean; reason?: string; gated?: string; agent?: string }>(`/api/routines/${encodeURIComponent(r.id)}/run`, { method: 'POST' })
+                    .then((out) => {
+                      const text = out.gated ? `Checked, nothing new (${out.gated})` : out.ran ? `Sent to ${out.agent ?? 'the agent'}` : `Not run: ${out.reason ?? 'unknown'}`;
+                      setRunStatus((m) => ({ ...m, [r.id]: text }));
+                      reloadRoutines();
+                    })
+                    .catch((err: Error) => setRunStatus((m) => ({ ...m, [r.id]: `Failed: ${err.message}` })));
+                  window.setTimeout(() => setRunStatus((m) => { const { [r.id]: _gone, ...rest } = m; return rest; }), 12_000);
+                }}>
                 <Play size={13} />
               </button>
               <button className="bt-iconbtn" title={r.paused ? 'Resume' : 'Pause'} aria-label={r.paused ? 'Resume' : 'Pause'}
