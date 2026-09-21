@@ -134,6 +134,7 @@ export class PiSession {
   private nextRpcId = 1;
   private turnUsage = { input: 0, output: 0, cacheRead: 0, cost: 0 };
   private turnFailed: { message: string; code?: string } | null = null;
+  private currentMsgId: string | null = null;
 
   constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model: string, effort: string, seedFirst = false, switchedFrom: string | null = null) {
     assertSubscriptionLane(cli);
@@ -282,15 +283,51 @@ export class PiSession {
         return;
       }
       case 'message_update': {
+        // Mirror the Anthropic stream lifecycle exactly: the client opens a
+        // turn on message_start, a block on content_block_start (tool cards get
+        // their name there), appends on delta, closes on stop, and reads
+        // stop_reason off message_delta. Deltas alone leave one orphan block.
         const d = ev.assistantMessageEvent;
         if (!d) return;
-        if (d.type === 'text_delta' || d.type === 'thinking_delta') {
-          this.emit({ type: 'event', event: { type: 'stream_event', event: {
-            type: 'content_block_delta', index: d.contentIndex,
-            delta: d.type === 'text_delta' ? { type: 'text_delta', text: d.delta } : { type: 'thinking_delta', thinking: d.delta },
-          }, session_id: this.piSessionId } });
+        const sid = this.piSessionId;
+        const stream = (event: Record<string, unknown>) => this.emit({ type: 'event', event: { type: 'stream_event', event, session_id: sid } });
+        switch (d.type) {
+          case 'start':
+            this.currentMsgId = randomUUID();
+            stream({ type: 'message_start', message: { id: this.currentMsgId, type: 'message', role: 'assistant', content: [], model: this.provider.model, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } } });
+            return;
+          case 'text_start':
+            stream({ type: 'content_block_start', index: d.contentIndex, content_block: { type: 'text', text: '' } });
+            return;
+          case 'text_delta':
+            stream({ type: 'content_block_delta', index: d.contentIndex, delta: { type: 'text_delta', text: d.delta } });
+            return;
+          case 'text_end':
+            stream({ type: 'content_block_stop', index: d.contentIndex });
+            return;
+          case 'thinking_start':
+            stream({ type: 'content_block_start', index: d.contentIndex, content_block: { type: 'thinking', thinking: '' } });
+            return;
+          case 'thinking_delta':
+            stream({ type: 'content_block_delta', index: d.contentIndex, delta: { type: 'thinking_delta', thinking: d.delta } });
+            return;
+          case 'thinking_end':
+            stream({ type: 'content_block_stop', index: d.contentIndex });
+            return;
+          case 'toolcall_end': {
+            // Pi only knows the call's name and arguments at the end, so the
+            // whole tool block is opened, filled and closed here.
+            const call = d.toolCall ?? {};
+            const id = String(call.id ?? '');
+            this.activeToolIds.add(id);
+            stream({ type: 'content_block_start', index: d.contentIndex, content_block: { type: 'tool_use', id, name: String(call.name ?? ''), input: {} } });
+            stream({ type: 'content_block_delta', index: d.contentIndex, delta: { type: 'input_json_delta', partial_json: JSON.stringify(call.arguments ?? {}) } });
+            stream({ type: 'content_block_stop', index: d.contentIndex });
+            return;
+          }
+          default:
+            return;
         }
-        return;
       }
       case 'message_end': {
         const m = ev.message;
@@ -312,9 +349,16 @@ export class PiSession {
         if (m.stopReason === 'error' || m.stopReason === 'aborted') {
           this.turnFailed = { message: String(m.errorMessage ?? m.stopReason), code: m.stopReason };
         }
+        // Pi: stop | toolUse | length | error | aborted  ->  Anthropic vocabulary
+        const stopReason = m.stopReason === 'toolUse' ? 'tool_use' : m.stopReason === 'stop' ? 'end_turn' : m.stopReason === 'length' ? 'max_tokens' : null;
+        const usage = { input_tokens: u.input ?? 0, output_tokens: u.output ?? 0, cache_read_input_tokens: u.cacheRead ?? 0, cache_creation_input_tokens: 0 };
+        const msgId = this.currentMsgId ?? randomUUID();
         if (content.length) {
-          this.emit({ type: 'event', event: { type: 'assistant', message: { id: `pi-${Date.now()}`, role: 'assistant', model: m.model ?? this.provider.model, content, stop_reason: m.stopReason ?? null, usage: { input_tokens: u.input ?? 0, output_tokens: u.output ?? 0, cache_read_input_tokens: u.cacheRead ?? 0 } }, session_id: this.piSessionId } });
+          this.emit({ type: 'event', event: { type: 'assistant', parent_tool_use_id: null, session_id: this.piSessionId, uuid: randomUUID(), timestamp: new Date().toISOString(), message: { id: msgId, type: 'message', role: 'assistant', model: m.model ?? this.provider.model, content, stop_reason: stopReason, stop_sequence: null, usage } } });
         }
+        this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: stopReason, stop_sequence: null }, usage }, session_id: this.piSessionId } });
+        this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_stop' }, session_id: this.piSessionId } });
+        this.currentMsgId = null;
         return;
       }
       case 'tool_execution_end': {
@@ -322,7 +366,7 @@ export class PiSession {
         const result = ev.result ?? {};
         const parts = Array.isArray(result.content) ? result.content : [];
         const text = parts.filter((c: any) => c?.type === 'text').map((c: any) => String(c.text ?? '')).join('\n');
-        this.emit({ type: 'event', event: { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: String(ev.toolCallId), content: text || (typeof result === 'string' ? result : JSON.stringify(result).slice(0, 4000)), is_error: ev.isError === true }] }, session_id: this.piSessionId } });
+        this.emit({ type: 'event', event: { type: 'user', parent_tool_use_id: null, session_id: this.piSessionId, uuid: randomUUID(), timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: String(ev.toolCallId), content: text || (typeof result === 'string' ? result : JSON.stringify(result).slice(0, 4000)), is_error: ev.isError === true }] } } });
         return;
       }
       case 'agent_end': {
