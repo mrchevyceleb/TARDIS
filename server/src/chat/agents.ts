@@ -74,7 +74,7 @@ export function defaultAgentBrain(engine: string): Omit<AgentBrain, 'revision' |
     case 'codex': return { engine: 'codex', model: 'gpt-5.6-sol', effort: 'low' };
     case 'zai': return { engine: 'zai', model: 'glm-5.3[1m]', effort: 'high' };
     case 'xai':
-    default: return { engine: 'xai', model: 'grok-4.6', effort: 'max' };
+    default: return { engine: 'xai', model: 'grok-4.7', effort: 'max' };
   }
 }
 
@@ -115,7 +115,7 @@ function normalizeBrainModel(engine: string, value: unknown, fallback?: string):
   if (engine === 'zai') model = ZAI_MODEL_ALIASES[model] ?? model;
   const valid = engine === 'claude' ? CLAUDE_BRAIN_MODELS.has(model)
     : engine === 'codex' ? Object.prototype.hasOwnProperty.call(CODEX_BRAIN_EFFORTS, model)
-    : engine === 'xai' ? model === 'grok-4.6' || model === 'grok-4.5'
+    : engine === 'xai' ? model === 'grok-4.7' || model === 'grok-4.6' || model === 'grok-4.5'
     : engine === 'zai' ? ZAI_BRAIN_MODELS.has(model)
     : engine === 'banana' ? model.startsWith('openrouter/')
     : engine === 'banana-fireworks' ? model.startsWith('fireworks/')

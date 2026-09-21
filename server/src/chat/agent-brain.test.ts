@@ -16,7 +16,7 @@ const baseAgent = (patch: Partial<Agent>): Agent => ({
 test('legacy agents receive one canonical server brain', () => {
   assert.deepEqual(brainForAgent(baseAgent({})), {
     engine: 'xai',
-    model: 'grok-4.6',
+    model: 'grok-4.7',
     effort: 'max',
     revision: 1,
     updatedAt: undefined,
@@ -37,7 +37,7 @@ test('agent brain rejects a model from a different engine and ignores stale cli'
     brainRevision: 4,
   }));
   assert.equal(cliForAgentEngine(brain.engine), 'xai');
-  assert.equal(brain.model, 'grok-4.6');
+  assert.equal(brain.model, 'grok-4.7');
   assert.equal(brain.effort, 'low');
   assert.equal(brain.revision, 4);
 

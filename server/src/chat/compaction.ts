@@ -566,7 +566,7 @@ async function generateCompact(previous: string, overflow: VisibleTurn[]): Promi
       Authorization: `Bearer ${xaiProxySecret()}`,
     },
     body: JSON.stringify({
-      model: 'grok-4.6',
+      model: 'grok-4.7',
       max_tokens: COMPACT_MAX_TOKENS,
       system: COMPACT_SYSTEM,
       messages: [{ role: 'user', content: userContent }],

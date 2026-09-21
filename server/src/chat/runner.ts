@@ -237,15 +237,16 @@ function zaiFallbackNotice(): string {
 // model ids, modelContext defaults to 200K UNLESS CLAUDE_CODE_MAX_CONTEXT_TOKENS
 // is set. Without the max-context env, AUTO_COMPACT_WINDOW=500000 is silently
 // capped to 200K and compact fires around ~170K (observed 2026-07-15).
+const XAI_GROK47_MODEL = 'grok-4.7'; // 500K context, May 2026 cutoff (docs.x.ai/developers/models)
 const XAI_GROK46_MODEL = 'grok-4.6';
 const XAI_GROK45_MODEL = 'grok-4.5'; // legacy pin still accepted
 const XAI_COMPACT_WINDOW = '500000';
 const XAI_CONFIG_DIR = join(homedir(), '.claude-xai');
-const VALID_XAI_MODELS = new Set([XAI_GROK46_MODEL, XAI_GROK45_MODEL]);
+const VALID_XAI_MODELS = new Set([XAI_GROK47_MODEL, XAI_GROK46_MODEL, XAI_GROK45_MODEL]);
 // xAI's Anthropic endpoint accepts Claude Code's full effort range and maps it
 // onto Grok's thinking budget; the UI offers a focused subset.
 const VALID_XAI_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
-function resolveXaiModel(m?: string, fallback = XAI_GROK46_MODEL): string {
+function resolveXaiModel(m?: string, fallback = XAI_GROK47_MODEL): string {
   const trimmed = m?.trim();
   if (trimmed && VALID_XAI_MODELS.has(trimmed)) return trimmed;
   return fallback;

@@ -105,12 +105,14 @@ export function readStoredZaiEffort(): string {
 }
 
 // xAI coding-plan models (Anthropic-compatible, run through the claude CLI
-// redirected to https://api.x.ai). Grok 4.6 is the current coding-plan model.
-export const DEFAULT_XAI_MODEL = 'grok-4.6';
+// redirected to https://api.x.ai). Grok 4.7 (500K context, May 2026 cutoff)
+// is the current coding-plan model; 4.6 and 4.5 stay selectable.
+export const DEFAULT_XAI_MODEL = 'grok-4.7';
 // Grok's top thinking budget. TARDIS defaults the whole picker to xAI Grok
-// 4.6 at max thinking, so this is the out-of-the-box reasoning level too.
+// 4.7 at max thinking, so this is the out-of-the-box reasoning level too.
 export const DEFAULT_XAI_EFFORT = 'max';
 export const XAI_MODELS: { id: string; label: string }[] = [
+  { id: 'grok-4.7', label: 'Grok 4.7' },
   { id: 'grok-4.6', label: 'Grok 4.6' },
   { id: 'grok-4.5', label: 'Grok 4.5' },
 ];
@@ -130,10 +132,10 @@ export function normalizeXaiEffort(effort: string): string {
 
 export function readStoredXaiModel(): string {
   if (typeof window === 'undefined') return DEFAULT_XAI_MODEL;
-  // One-time bump: everyone who was on the old default (4.5) moves to 4.6.
-  // 4.5 stays in the picker if someone re-selects it after this migration.
+  // One-time bump: anyone still on an older default (4.5 or 4.6) moves to
+  // 4.7. Both stay in the picker if someone re-selects them afterwards.
   let raw = localStorage.getItem('rivendell:xai-model') || DEFAULT_XAI_MODEL;
-  if (raw === 'grok-4.5') {
+  if (raw === 'grok-4.5' || raw === 'grok-4.6') {
     raw = DEFAULT_XAI_MODEL;
     localStorage.setItem('rivendell:xai-model', raw);
   }
