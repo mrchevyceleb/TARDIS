@@ -135,6 +135,9 @@ export class PiSession {
   private turnUsage = { input: 0, output: 0, cacheRead: 0, cost: 0 };
   private turnFailed: { message: string; code?: string } | null = null;
   private currentMsgId: string | null = null;
+  /** Final assistant text of the turn; the client's `result.result` recovery
+   *  path re-renders it if the streamed blocks never made it on screen. */
+  private lastAssistantText = '';
 
   constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model: string, effort: string, seedFirst = false, switchedFrom: string | null = null) {
     assertSubscriptionLane(cli);
@@ -280,6 +283,7 @@ export class PiSession {
       case 'agent_start': {
         this.turnUsage = { input: 0, output: 0, cacheRead: 0, cost: 0 };
         this.turnFailed = null;
+        this.lastAssistantText = '';
         return;
       }
       case 'message_update': {
@@ -353,6 +357,8 @@ export class PiSession {
         const stopReason = m.stopReason === 'toolUse' ? 'tool_use' : m.stopReason === 'stop' ? 'end_turn' : m.stopReason === 'length' ? 'max_tokens' : null;
         const usage = { input_tokens: u.input ?? 0, output_tokens: u.output ?? 0, cache_read_input_tokens: u.cacheRead ?? 0, cache_creation_input_tokens: 0 };
         const msgId = this.currentMsgId ?? randomUUID();
+        const textOut = content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('');
+        if (textOut.trim()) this.lastAssistantText = textOut;
         if (content.length) {
           this.emit({ type: 'event', event: { type: 'assistant', parent_tool_use_id: null, session_id: this.piSessionId, uuid: randomUUID(), timestamp: new Date().toISOString(), message: { id: msgId, type: 'message', role: 'assistant', model: m.model ?? this.provider.model, content, stop_reason: stopReason, stop_sequence: null, usage } } });
         }
@@ -395,7 +401,8 @@ export class PiSession {
         this.emit({ type: 'event', event: { type: '_terminal_error', message, code: failed.code, retryable: failed.code !== 'aborted', ts: Date.now() } });
       }
     }
-    this.emit({ type: 'event', event: { type: 'result', subtype: failed ? 'error' : 'success', is_error: Boolean(failed), session_id: this.piSessionId, total_cost_usd: this.turnUsage.cost, usage: { input_tokens: this.turnUsage.input, output_tokens: this.turnUsage.output, cache_read_input_tokens: this.turnUsage.cacheRead } } });
+    this.emit({ type: 'event', event: { type: 'result', subtype: failed ? 'error' : 'success', is_error: Boolean(failed), ...(failed ? {} : { result: this.lastAssistantText }), session_id: this.piSessionId, total_cost_usd: this.turnUsage.cost, usage: { input_tokens: this.turnUsage.input, output_tokens: this.turnUsage.output, cache_read_input_tokens: this.turnUsage.cacheRead } } });
+    this.lastAssistantText = '';
     this.turnStartedAt = null;
     this.automationTurn = false;
     this.activeToolIds.clear();
