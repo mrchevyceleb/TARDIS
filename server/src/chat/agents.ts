@@ -74,7 +74,7 @@ export function defaultAgentBrain(engine: string): Omit<AgentBrain, 'revision' |
     case 'codex': return { engine: 'codex', model: 'gpt-5.6-sol', effort: 'low' };
     case 'zai': return { engine: 'zai', model: 'glm-5.3[1m]', effort: 'high' };
     case 'xai':
-    default: return { engine: 'xai', model: 'grok-4.7', effort: 'max' };
+    default: return { engine: 'xai', model: 'grok-4.7', effort: 'xhigh' };
   }
 }
 
@@ -124,9 +124,15 @@ function normalizeBrainModel(engine: string, value: unknown, fallback?: string):
   return valid ? model : fallback;
 }
 
+// Grok's real tiers; `max` was never one, it was clamped downstream. Keep it
+// as an alias so brains saved before the fix resolve instead of resetting.
+const XAI_BRAIN_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
+
 function normalizeBrainEffort(engine: string, model: string | undefined, value: unknown, fallback?: string): string | undefined {
-  const effort = cleanBrainValue(value);
+  let effort = cleanBrainValue(value);
+  if (engine === 'xai' && effort === 'max') effort = 'xhigh';
   const allowed = engine === 'codex' && model ? CODEX_BRAIN_EFFORTS[model]
+    : engine === 'xai' ? XAI_BRAIN_EFFORTS
     : engine === 'zai' ? new Set(['high', 'max'])
     : engine.startsWith('banana') ? BANANA_BRAIN_EFFORTS
     : STANDARD_BRAIN_EFFORTS;

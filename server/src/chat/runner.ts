@@ -244,16 +244,19 @@ const XAI_GROK45_MODEL = 'grok-4.5'; // legacy pin still accepted
 const XAI_COMPACT_WINDOW = '500000';
 const XAI_CONFIG_DIR = join(homedir(), '.claude-xai');
 const VALID_XAI_MODELS = new Set([XAI_GROK47_MODEL, XAI_GROK46_MODEL, XAI_GROK45_MODEL]);
-// xAI's Anthropic endpoint accepts Claude Code's full effort range and maps it
-// onto Grok's thinking budget; the UI offers a focused subset.
-const VALID_XAI_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+// Grok 4.6 / 4.7 expose exactly these reasoning tiers (verified 2026-09-21
+// against api.x.ai: `none` and `max` are rejected). `max` is kept only as a
+// legacy alias for xhigh so brains pinned before the fix keep working.
+const VALID_XAI_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
+const XAI_LEGACY_EFFORTS: Record<string, string> = { max: 'xhigh' };
 function resolveXaiModel(m?: string, fallback = XAI_GROK47_MODEL): string {
   const trimmed = m?.trim();
   if (trimmed && VALID_XAI_MODELS.has(trimmed)) return trimmed;
   return fallback;
 }
-function resolveXaiEffort(e?: string, fallback = 'high'): string {
-  const effort = e?.trim();
+function resolveXaiEffort(e?: string, fallback = 'xhigh'): string {
+  const raw = e?.trim();
+  const effort = raw ? XAI_LEGACY_EFFORTS[raw] ?? raw : raw;
   return effort && VALID_XAI_EFFORTS.has(effort) ? effort : fallback;
 }
 const XAI_MODEL = resolveXaiModel(process.env.RIVENDELL_XAI_MODEL);
@@ -582,7 +585,8 @@ class ClaudeSession {
       '--disallowedTools', disallowedTools,
       '--dangerously-skip-permissions',
       '--model', zaiCredential?.wireModel ?? this.spawnModel,
-      '--effort', this.spawnEffort,
+      // The claude binary's --effort has no `minimal`; only the Pi harness does.
+      '--effort', this.spawnEffort === 'minimal' ? 'low' : this.spawnEffort,
     ];
     if (resumeId) args.push('--resume', resumeId);
     // Voice mode is derived from the chatId (`jarvis-*`, set by the

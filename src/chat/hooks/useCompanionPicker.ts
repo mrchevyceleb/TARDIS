@@ -108,9 +108,10 @@ export function readStoredZaiEffort(): string {
 // redirected to https://api.x.ai). Grok 4.7 (500K context, May 2026 cutoff)
 // is the current coding-plan model; 4.6 and 4.5 stay selectable.
 export const DEFAULT_XAI_MODEL = 'grok-4.7';
-// Grok's top thinking budget. TARDIS defaults the whole picker to xAI Grok
-// 4.7 at max thinking, so this is the out-of-the-box reasoning level too.
-export const DEFAULT_XAI_EFFORT = 'max';
+// Grok's top real tier. xAI's 4.6/4.7 accept minimal|low|medium|high|xhigh
+// and reject `max` (verified 2026-09-21); `max` used to be offered here and
+// was silently clamped. Stored `max` migrates to xhigh below.
+export const DEFAULT_XAI_EFFORT = 'xhigh';
 export const XAI_MODELS: { id: string; label: string }[] = [
   { id: 'grok-4.7', label: 'Grok 4.7' },
   { id: 'grok-4.6', label: 'Grok 4.6' },
@@ -120,13 +121,14 @@ export const XAI_MODELS: { id: string; label: string }[] = [
 // maps it onto Grok's thinking budget. Keep every selectable tier visible;
 // collapsing this to High/Max made Low, Medium, and XHigh unreachable even
 // though the server already validates and forwards them.
-export const XAI_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+export const XAI_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh'];
 
 export function normalizeXaiModel(model: string): string {
   return XAI_MODELS.some((entry) => entry.id === model) ? model : DEFAULT_XAI_MODEL;
 }
 
 export function normalizeXaiEffort(effort: string): string {
+  if (effort === 'max') return 'xhigh';
   return XAI_EFFORTS.includes(effort) ? effort : DEFAULT_XAI_EFFORT;
 }
 

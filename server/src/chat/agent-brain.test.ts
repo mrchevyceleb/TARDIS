@@ -17,10 +17,14 @@ test('legacy agents receive one canonical server brain', () => {
   assert.deepEqual(brainForAgent(baseAgent({})), {
     engine: 'xai',
     model: 'grok-4.7',
-    effort: 'max',
+    effort: 'xhigh',
     revision: 1,
     updatedAt: undefined,
   });
+  // `max` was offered for Grok before the tiers were verified against xAI;
+  // a brain saved with it resolves to the real top tier instead of resetting.
+  assert.equal(brainForAgent(baseAgent({ engine: 'xai', effort: 'max' })).effort, 'xhigh');
+  assert.equal(brainForAgent(baseAgent({ engine: 'xai', effort: 'minimal' })).effort, 'minimal');
   assert.deepEqual(defaultAgentBrain('claude'), {
     engine: 'claude',
     model: 'claude-opus-5',
