@@ -14,6 +14,10 @@
  *  there on metered Fireworks tokens and returns to the plan on its own.
  */
 
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { STATE_DIR } from '../config.ts';
+
 export type ZaiMode = 'plan' | 'fireworks';
 
 // Z.ai's documented plan-exhaustion codes (docs.z.ai/api-reference/api-code).
@@ -68,7 +72,19 @@ function fallbackCooldownMs(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 15 * 60 * 1000;
 }
 
-let planExhaustedUntilMs = 0;
+// The window survives restarts. Without this every restart forgot it and the
+// first GLM turn on each lane burned itself rediscovering the closed plan.
+const QUOTA_STATE_FILE = join(STATE_DIR, 'zai-quota.json');
+function readPersistedWindow(): number {
+  try {
+    const raw = JSON.parse(readFileSync(QUOTA_STATE_FILE, 'utf8')) as { planExhaustedUntilMs?: number };
+    return typeof raw.planExhaustedUntilMs === 'number' && raw.planExhaustedUntilMs > Date.now() ? raw.planExhaustedUntilMs : 0;
+  } catch { return 0; }
+}
+function persistWindow(untilMs: number): void {
+  try { mkdirSync(STATE_DIR, { recursive: true }); writeFileSync(QUOTA_STATE_FILE, JSON.stringify({ planExhaustedUntilMs: untilMs })); } catch { /* best effort */ }
+}
+let planExhaustedUntilMs = readPersistedWindow();
 let fallbackBenchedUntilMs = 0;
 
 function quotaDetail(ev: unknown): string {
@@ -98,6 +114,12 @@ function windowMsFromDetail(detail: string): number {
     const delta = resetMs - sentMs;
     if (delta > 0 && delta <= MAX_WINDOW_MS) return delta;
   }
+  // Some transports (Pi) surface the message without the request id. Z.ai's
+  // clock has measured as UTC+8 every time it was checked; use that offset
+  // rather than a one-hour guess, overridable if it ever moves.
+  const offsetMs = Number(process.env.RIVENDELL_ZAI_CLOCK_OFFSET_MS?.trim() || 8 * 60 * 60 * 1000);
+  const delta = resetMs - offsetMs - Date.now();
+  if (delta > 0 && delta <= MAX_WINDOW_MS) return delta;
   return defaultCooldownMs();
 }
 
@@ -117,6 +139,7 @@ export function noteZaiPlanQuota(ev: unknown): boolean {
   const until = Date.now() + windowMsFromDetail(quotaDetail(ev)) + WINDOW_BUFFER_MS;
   if (until > planExhaustedUntilMs) {
     planExhaustedUntilMs = until;
+    persistWindow(until);
     console.warn(`[chat zai] coding-plan window exhausted until ${new Date(until).toISOString()}`);
   }
   return true;
