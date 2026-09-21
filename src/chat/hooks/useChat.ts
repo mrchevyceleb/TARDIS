@@ -1661,7 +1661,8 @@ export function useChat(opts: {
           const key = conversationKey(cli, repo.path, chatId);
           const owned = hasOutbound(key, msg.clientMsgId)
             || sentOutboundRef.current?.clientMsgId === msg.clientMsgId
-            || initialClientMsgIdRef.current === msg.clientMsgId;
+            || initialClientMsgIdRef.current === msg.clientMsgId
+            || queuedSteerRef.current.has(msg.clientMsgId);
           if (!owned) return;
           if (msg.state === 'pending') {
             pendingSendRef.current = true;

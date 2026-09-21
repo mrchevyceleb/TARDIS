@@ -565,13 +565,16 @@ function ToolsCard({ blocks }: { blocks: ToolBlock[] }) {
   const counts = new Map<string, number>();
   for (const b of blocks) counts.set(b.tool, (counts.get(b.tool) ?? 0) + 1);
   const summary = [...counts.entries()].map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(' · ');
+  const sameName = counts.size === 1 ? blocks[0].tool : null;
+  const title = sameName ?? `${blocks.length} tool calls`;
   const oldestRunning = blocks.find((b) => b.running);
+  const doneMeta = `${blocks.length} call${blocks.length === 1 ? '' : 's'} · done`;
   return (
     <div className={`tool tools-run${running ? ' running' : ' done'}${open ? ' open' : ''}`}>
       <button type="button" className="tool-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
         {running ? <span className="vortex tstar" aria-hidden="true" /> : <StarSigil className="tstar" />}
-        <span className="tool-title">{blocks.length} tool calls</span>
-        <span className="tool-meta">{running && oldestRunning ? <RunningMeta since={oldestRunning.ts} /> : 'done'}</span>
+        <span className="tool-title">{title}</span>
+        <span className="tool-meta">{running && oldestRunning ? <RunningMeta since={oldestRunning.ts} /> : doneMeta}</span>
         <ChevronDown className="tool-chev" />
       </button>
       {open ? null : <div className="tools-summary">{summary}</div>}
@@ -679,7 +682,9 @@ function ElrondGroup({
     return (src.length ? src : textBlocks.filter(hasVisibleProse)).map((b) => b.text).join('\n\n');
   };
   const isPinned = Boolean(pin?.pinnedBlockIds.includes(first.id));
-  // Collapse consecutive tool cards. Between-tool text still prints.
+  // Collapse consecutive tool cards into one dropdown. Empty/noop text between
+  // tool rounds used to break the run, which stacked a Bash card per call.
+  // Real between-tool prose still prints and still splits the run.
   const toolRuns = new Map<string, ToolBlock[]>();
   const toolRunSkip = new Set<string>();
   if (collapseSteps) {
@@ -693,6 +698,7 @@ function ElrondGroup({
     };
     for (const b of visible) {
       if (b.kind === 'tool') run.push(b);
+      else if (b.kind === 'text' && (!b.text.trim() || isProtocolNoopText(b.text))) continue;
       else flush();
     }
     flush();
@@ -789,7 +795,7 @@ export type ChatThreadProps = {
 // Renders the full feed: day marks on day changes, user bubbles, per-turn
 // assistant groups (tool cards + streaming prose), and the live-turn pill
 // while a turn is live but no content has landed yet.
-export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = false, pin, onReact, suppressTyping = false, workingSince }: ChatThreadProps) {
+export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, suppressTyping = false, workingSince }: ChatThreadProps) {
   const streaming = status === 'streaming';
   // The indicator lives until something VISIBLE lands in the CURRENT turn.
   // Looking across the whole transcript made any historical terminal-error or
@@ -910,10 +916,33 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     }
   }
 
+  // Each provider tool round often gets a fresh turnId, so consecutive Bash
+  // cards used to land as separate bubbles and never hit ToolsCard. Fold
+  // adjacent tool-only groups into one dropdown. Groups with real prose stay
+  // put so agent text is not swallowed.
+  const isToolOnlyElrond = (g: (typeof groups)[number]): g is Extract<(typeof groups)[number], { type: 'elrond' }> => (
+    g.type === 'elrond'
+    && g.blocks.length > 0
+    && g.blocks.every((block) => (
+      block.kind === 'tool'
+      || (block.kind === 'text' && (!block.text.trim() || isProtocolNoopText(block.text)))
+    ))
+  );
+  const coalescedGroups: typeof groups = [];
+  for (const g of groups) {
+    const prev = coalescedGroups[coalescedGroups.length - 1];
+    if (prev && isToolOnlyElrond(prev) && isToolOnlyElrond(g)) {
+      prev.blocks.push(...g.blocks);
+      prev.day = g.day;
+      continue;
+    }
+    coalescedGroups.push(g);
+  }
+
   const nodes: ReactNode[] = [];
   let pendingAutomation = false;
   let hideThinking = false;
-  for (const g of groups) {
+  for (const g of coalescedGroups) {
     if (g.type === 'peer' && isAutomationPeer(g.block.from, g.block.fromRole, g.block.text)) {
       pendingAutomation = true;
       hideThinking = true;

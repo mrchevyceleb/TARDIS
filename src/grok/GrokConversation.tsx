@@ -135,7 +135,6 @@ export function GrokConversation(props: BotConversationProps) {
       }
       attachButton={<AttachButton onClick={() => attachRef.current()} />}
       openFileInputRef={attachRef}
-      idleAction={micDisc}
       modelChip={<ModelChip picker={picker} onClick={() => setCounselOpen((o) => !o)} />}
       onMellon={(rect) => s.sparks.burst(rect.left + rect.width / 2, rect.top + rect.height / 2)}
     />
@@ -149,6 +148,7 @@ export function GrokConversation(props: BotConversationProps) {
           <span className="bt-head-name">{agentName}</span>
         </div>
         <div className="bt-head-actions">
+          {micDisc}
           <button className="bt-iconbtn" onClick={props.onOpenAgentEditor} title={agent ? `Edit ${agent.name}` : 'Companion settings'} aria-label={agent ? `Edit ${agent.name}` : 'Companion settings'}>
             <SquarePen size={15} />
           </button>

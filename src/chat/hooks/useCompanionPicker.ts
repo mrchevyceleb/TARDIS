@@ -9,7 +9,7 @@ import {
 import { CLAUDE_EFFORTS, DEFAULT_CLAUDE_MODEL, normalizeClaudeModel } from '../components/CodexEnginePicker';
 
 // Companion + model/effort selection for an embedded chat (the Workspace room).
-// The three subscription engines share one flat list.
+// The subscription engines share one flat list.
 // Claude Code and Codex use their normal local CLI profiles unless the server
 // operator explicitly configures an account map.
 //
@@ -28,6 +28,7 @@ export const WORKSPACE_COMPANIONS: {
   { id: 'claude', cli: 'claude', label: 'Claude Code' },
   { id: 'codex', cli: 'codex', label: 'Codex' },
   { id: 'xai', cli: 'xai', label: 'Grok' },
+  { id: 'zai', cli: 'zai', label: 'GLM' },
 ];
 
 // Optional named profile for custom/private picker extensions. Public entries
@@ -43,6 +44,7 @@ export function companionAuthBlurb(cli: CompanionId, account: RepoAccount | null
     case 'claude':         return `Claude Code, signed in as ${who}.`;
     case 'codex':           return `Codex, signed in as ${who}.`;
     case 'xai':              return 'Grok via your configured coding subscription.';
+    case 'zai':              return 'GLM via your Z.ai coding plan.';
     default:                 return '';
   }
 }
@@ -53,10 +55,53 @@ function readLS(key: string, fallback: string): string {
 }
 
 /** Legacy stamps remain readable; new selections use subscription engines only. */
-export function normalizeCompanion(engine: string | undefined): 'claude' | 'codex' | 'xai' {
+export function normalizeCompanion(engine: string | undefined): 'claude' | 'codex' | 'xai' | 'zai' {
   if (engine === 'claude' || engine === 'assistant' || engine === 'claude-kim') return 'claude';
   if (engine === 'codex' || engine === 'codex-kim') return 'codex';
+  if (engine === 'zai') return 'zai';
   return 'xai';
+}
+
+// Z.ai coding-plan models (Anthropic-compatible, run through the claude CLI).
+// GLM 5.3 / 5.2 ids MUST carry the `[1m]` suffix to get the 1M context window;
+// the bare ids serve the 200K variant and compact far too early.
+export const DEFAULT_ZAI_MODEL = 'glm-5.3[1m]';
+export const DEFAULT_ZAI_EFFORT = 'high';
+export const ZAI_MODELS: { id: string; label: string }[] = [
+  { id: DEFAULT_ZAI_MODEL, label: 'GLM 5.3' },
+  { id: 'glm-5.3-flash[1m]', label: 'GLM 5.3 Flash' },
+  { id: 'glm-5.2[1m]', label: 'GLM 5.2' },
+  { id: 'glm-5.1', label: 'GLM 5.1' },
+];
+export const ZAI_EFFORTS = ['high', 'max'];
+
+export function normalizeZaiModel(model: string): string {
+  const normalized =
+    model === 'glm-5.3' ? DEFAULT_ZAI_MODEL
+    : model === 'glm-5.3-flash' ? 'glm-5.3-flash[1m]'
+    : model === 'glm-5.2' ? 'glm-5.2[1m]'
+    : model;
+  return ZAI_MODELS.some((entry) => entry.id === normalized) ? normalized : DEFAULT_ZAI_MODEL;
+}
+
+export function normalizeZaiEffort(effort: string): string {
+  return ZAI_EFFORTS.includes(effort) ? effort : DEFAULT_ZAI_EFFORT;
+}
+
+export function readStoredZaiModel(): string {
+  if (typeof window === 'undefined') return DEFAULT_ZAI_MODEL;
+  const raw = localStorage.getItem('rivendell:zai-model') || DEFAULT_ZAI_MODEL;
+  const model = normalizeZaiModel(raw);
+  if (model !== raw) localStorage.setItem('rivendell:zai-model', model);
+  return model;
+}
+
+export function readStoredZaiEffort(): string {
+  if (typeof window === 'undefined') return DEFAULT_ZAI_EFFORT;
+  const raw = localStorage.getItem('rivendell:zai-effort') || DEFAULT_ZAI_EFFORT;
+  const effort = normalizeZaiEffort(raw);
+  if (effort !== raw) localStorage.setItem('rivendell:zai-effort', effort);
+  return effort;
 }
 
 // xAI coding-plan models (Anthropic-compatible, run through the claude CLI
@@ -135,6 +180,8 @@ export function useCompanionPicker(storageKey: string) {
   const [codexEffort, setCodexEffortState] = useState(() => readStoredCodexEffort(codexModel));
   const [xaiModel, setXaiModelState] = useState(readStoredXaiModel);
   const [xaiEffort, setXaiEffortState] = useState(readStoredXaiEffort);
+  const [zaiModel, setZaiModelState] = useState(readStoredZaiModel);
+  const [zaiEffort, setZaiEffortState] = useState(readStoredZaiEffort);
   // Process-local, intentionally not persisted. A new device starts at zero,
   // while every actual picker click advances only that lane's revision—even if
   // the clicked value matches what that device already displayed.
@@ -187,6 +234,18 @@ export function useCompanionPicker(storageKey: string) {
     setXaiEffortState(effort);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:xai-effort', effort);
   };
+  const setZaiModel = (v: string) => {
+    markSelectionChanged('zai');
+    const model = normalizeZaiModel(v);
+    setZaiModelState(model);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:zai-model', model);
+  };
+  const setZaiEffort = (v: string) => {
+    markSelectionChanged('zai');
+    const effort = normalizeZaiEffort(v);
+    setZaiEffortState(effort);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:zai-effort', effort);
+  };
 
   /** Apply the server-owned brain without marking it as a device-local picker
    * action. Used by agent chats so cross-device updates converge without
@@ -224,6 +283,15 @@ export function useCompanionPicker(storageKey: string) {
         localStorage.setItem('rivendell:xai-model', nextModel);
         localStorage.setItem('rivendell:xai-effort', nextEffort);
       }
+    } else if (lane === 'zai') {
+      const nextModel = normalizeZaiModel(model ?? '');
+      const nextEffort = normalizeZaiEffort(effort ?? '');
+      setZaiModelState(nextModel);
+      setZaiEffortState(nextEffort);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rivendell:zai-model', nextModel);
+        localStorage.setItem('rivendell:zai-effort', nextEffort);
+      }
     }
   }, [storageKey]);
 
@@ -231,16 +299,18 @@ export function useCompanionPicker(storageKey: string) {
   const isClaude = cli === 'assistant' || cli === 'claude';
   const isCodex = cli === 'codex';
   const isXai = cli === 'xai';
-  const model = isXai ? xaiModel : isCodex ? codexModel : claudeModel;
-  const effort = isXai ? xaiEffort : isCodex ? codexEffort : claudeEffort;
+  const isZai = cli === 'zai';
+  const model = isZai ? zaiModel : isXai ? xaiModel : isCodex ? codexModel : claudeModel;
+  const effort = isZai ? zaiEffort : isXai ? xaiEffort : isCodex ? codexEffort : claudeEffort;
 
   return {
     companion, setCompanion, applyAuthoritativeBrain,
     cli, account, model, effort, selectionRevision: selectionRevisions[companion] ?? 0,
     brainPending: false,
-    isClaude, isCodex, isXai,
+    isClaude, isCodex, isXai, isZai,
     claudeModel, setClaudeModel, claudeEffort, setClaudeEffort,
     codexModel, setCodexModel, codexEffort, setCodexEffort,
     xaiModel, setXaiModel, xaiEffort, setXaiEffort,
+    zaiModel, setZaiModel, zaiEffort, setZaiEffort,
   };
 }

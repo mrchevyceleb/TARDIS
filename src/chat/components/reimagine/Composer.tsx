@@ -11,6 +11,7 @@ import { ArrowUp, Plus, SquarePen, StopSquare } from './icons';
 import { isEggPhrase } from '../../../theme/eggs';
 import { ComputerControl } from '../ComputerControl';
 import { RobotControl } from '../RobotControl';
+import { ChatDictation } from '../../dictation/ChatDictation';
 
 export type SendImage = { mediaType: string; base64: string; previewDataUrl?: string };
 type PendingImage = { id: string; mediaType: string; base64: string; previewUrl: string };
@@ -79,6 +80,13 @@ export function Composer(props: ComposerProps) {
   const [popDismissed, setPopDismissed] = useState(false);
   const [images, setImages] = useState<PendingImage[]>([]);
   const [phIdx, setPhIdx] = useState(0);
+  const [dictating,setDictating]=useState(false);
+  const latest=useRef(props);latest.current=props;
+  const insertDictation=(text:string)=>{
+    const current=taRef.current?.value??latest.current.value;
+    latest.current.onChange(current?`${current.trimEnd()}\n\n${text}`:text);
+    taRef.current?.focus();
+  };
 
   // grok.com rotates the empty-composer placeholder every few seconds.
   const phrases = props.placeholders;
@@ -150,6 +158,7 @@ export function Composer(props: ComposerProps) {
     });
 
   const submit = (allowStop = false) => {
+    if(dictating)return;
     // Read the DOM value, not only the controlled prop. Android keyboards can
     // fire Enter/pointer-up before React commits the final input event; the old
     // stale empty prop took the Stop branch and killed the warm agent even
@@ -272,7 +281,7 @@ export function Composer(props: ComposerProps) {
   );
 
   const trailingBtn = (extraClass = '') =>
-    !ready && !props.busy && props.idleAction ? props.idleAction : sendBtn(extraClass);
+    dictating ? null : !ready && !props.busy && props.idleAction ? props.idleAction : sendBtn(extraClass);
 
   return (
     <>
@@ -296,7 +305,7 @@ export function Composer(props: ComposerProps) {
       {props.chatId && <ComputerControl key={props.chatId} chatId={props.chatId} />}
       {props.chatId && <RobotControl />}
       {props.attachMenu}
-      <div className={`composer${images.length > 0 ? ' has-attach' : ''}`}>
+      <div className={`composer${images.length > 0 ? ' has-attach' : ''}${dictating ? ' dictating' : ''}`}>
         {images.length > 0 ? (
           <div className="attach-tray">
             {images.map((img) => (
@@ -314,7 +323,7 @@ export function Composer(props: ComposerProps) {
           ref={taRef}
           rows={1}
           value={props.value}
-          placeholder={props.busy ? 'Reply — it will send next…' : props.placeholder ?? phrases?.[phIdx] ?? 'Where to, Doctor?'}
+          placeholder={dictating ? 'Listening…' : props.busy ? 'Reply — it will send next…' : props.placeholder ?? phrases?.[phIdx] ?? 'Where to, Doctor?'}
           aria-label="Message"
           onChange={(e) => {
             setPopDismissed(false);
@@ -358,6 +367,7 @@ export function Composer(props: ComposerProps) {
                 className="freshbtn"
                 title="Start a fresh thread"
                 aria-label="Start a fresh thread"
+                disabled={dictating}
                 onClick={props.onFresh}
               >
                 <SquarePen />
@@ -374,10 +384,14 @@ export function Composer(props: ComposerProps) {
                 </span>
               )
             )}
+            {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating} />}
             {trailingBtn()}
           </div>
         ) : (
-          trailingBtn()
+          <>
+            {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating} />}
+            {trailingBtn()}
+          </>
         )}
       </div>
       {acceptImages ? (

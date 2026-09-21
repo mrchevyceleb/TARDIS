@@ -5,10 +5,14 @@ import { ChevronDown, Loader2, Play, Square, X } from 'lucide-react';
 import {
   DEFAULT_XAI_EFFORT,
   DEFAULT_XAI_MODEL,
+  DEFAULT_ZAI_EFFORT,
+  DEFAULT_ZAI_MODEL,
   WORKSPACE_COMPANIONS,
   normalizeCompanion,
   XAI_EFFORTS,
   XAI_MODELS,
+  ZAI_EFFORTS,
+  ZAI_MODELS,
 } from '../chat/hooks/useCompanionPicker';
 import { CLAUDE_EFFORTS, CLAUDE_MODELS, normalizeClaudeModel } from '../chat/components/CodexEnginePicker';
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL, codexEffortsForModel, codexModelSpec } from '../chat/codexModels';
@@ -23,6 +27,7 @@ function defaultBrainSelection(engine: string): { model: string; effort: string 
     return { model: DEFAULT_CODEX_MODEL, effort: codexModelSpec(DEFAULT_CODEX_MODEL).defaultEffort };
   }
   if (engine === 'xai') return { model: DEFAULT_XAI_MODEL, effort: DEFAULT_XAI_EFFORT };
+  if (engine === 'zai') return { model: DEFAULT_ZAI_MODEL, effort: DEFAULT_ZAI_EFFORT };
   return { model: '', effort: 'medium' };
 }
 
@@ -30,6 +35,7 @@ function effortOptions(engine: string, model: string): string[] {
   if (engine === 'claude') return CLAUDE_EFFORTS;
   if (engine === 'codex') return codexEffortsForModel(model);
   if (engine === 'xai') return XAI_EFFORTS;
+  if (engine === 'zai') return ZAI_EFFORTS;
   return XAI_EFFORTS;
 }
 
@@ -37,6 +43,7 @@ function staticModelOptions(engine: string): BrainModelOption[] {
   if (engine === 'claude') return CLAUDE_MODELS;
   if (engine === 'codex') return CODEX_MODELS;
   if (engine === 'xai') return XAI_MODELS;
+  if (engine === 'zai') return ZAI_MODELS;
   return [];
 }
 
@@ -399,7 +406,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
           </label>
 
           <label className="bt-agent-field">
-            <span>{engine === 'xai' ? 'Thinking' : 'Reasoning effort'}</span>
+            <span>{engine === 'xai' ? 'Thinking' : engine === 'zai' ? 'Effort' : 'Reasoning effort'}</span>
             <select value={effort} onChange={(e) => setEffort(e.target.value)}>
               {availableEfforts.map((option) => (
                 <option key={option} value={option}>{option[0].toUpperCase() + option.slice(1)}</option>

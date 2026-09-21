@@ -35,6 +35,16 @@ function proxyUrlTransform(url: string): string {
 
 const REMARK_PLUGINS = [[remarkGfm, { singleTilde: false }]] as const;
 
+/** CommonMark treats "33607. Hello" as an ordered list starting at 33607.
+ *  Chat then used to drop `start` and show "1. Hello", eating zip codes,
+ *  years, and ticket numbers. Escape 4+ digit markers outside fences. */
+export function protectChatMarkdownLists(input: string): string {
+  return input.split(/(```[\s\S]*?```|~~~[\s\S]*?~~~)/).map((part, i) => {
+    if (i % 2 === 1) return part;
+    return part.replace(/(^|\r?\n)(\d{4,})([.)])(?=\s|$)/g, '$1$2\\$3');
+  }).join('');
+}
+
 type WorkspaceTarget = { kind: 'doc' | 'folder'; path: string };
 
 const INLINE_CODE_STYLE = {
@@ -187,8 +197,13 @@ const MD_COMPONENTS: Components = {
   ul: ({ children }) => (
     <ul style={{ margin: '4px 0 8px', paddingLeft: 22, listStyle: 'disc' }}>{children}</ul>
   ),
-  ol: ({ children }) => (
-    <ol style={{ margin: '4px 0 8px', paddingLeft: 22, listStyle: 'decimal' }}>{children}</ol>
+  ol: ({ children, start }) => (
+    <ol
+      start={typeof start === 'number' && start > 1 ? start : undefined}
+      style={{ margin: '4px 0 8px', paddingLeft: 22, listStyle: 'decimal' }}
+    >
+      {children}
+    </ol>
   ),
   li: ({ children }) => (
     <li style={{ margin: '2px 0', lineHeight: 1.55 }}>{children}</li>
@@ -293,7 +308,7 @@ const MD_COMPONENTS: Components = {
 };
 
 function MarkdownInner({ children }: { children: string }) {
-  const annotated = annotateWorkspaceMentions(children);
+  const annotated = annotateWorkspaceMentions(protectChatMarkdownLists(children));
   return (
     <div className="sw-md">
       <ReactMarkdown

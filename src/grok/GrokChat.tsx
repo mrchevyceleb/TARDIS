@@ -10,6 +10,8 @@ import {
   normalizeCompanion,
   normalizeXaiEffort,
   normalizeXaiModel,
+  normalizeZaiEffort,
+  normalizeZaiModel,
   useCompanionPicker,
 } from '../chat/hooks/useCompanionPicker';
 import { normalizeCodexEffort, normalizeCodexModel } from '../chat/codexModels';
@@ -38,6 +40,9 @@ function canonicalBrain(brain: BrainDraft): BrainDraft {
   if (engine === 'codex') {
     const nextModel = normalizeCodexModel(model ?? '');
     return { engine, model: nextModel, effort: normalizeCodexEffort(nextModel, effort ?? '') };
+  }
+  if (engine === 'zai') {
+    return { engine, model: normalizeZaiModel(model ?? ''), effort: normalizeZaiEffort(effort ?? '') };
   }
   return { engine, model: normalizeXaiModel(model ?? ''), effort: normalizeXaiEffort(effort ?? '') };
 }
@@ -78,12 +83,14 @@ export function GrokChat(props: GrokChatProps) {
         const modelKey = seed === 'claude' ? 'rivendell:claude-model'
           : seed === 'codex' ? 'rivendell:codex-model'
           : seed === 'xai' ? 'rivendell:xai-model'
+          : seed === 'zai' ? 'rivendell:zai-model'
           : null;
         if (model && modelKey) localStorage.setItem(modelKey, model);
         if (effort) {
           const effortKey = seed === 'claude' ? 'rivendell:claude-effort'
             : seed === 'codex' ? 'rivendell:codex-effort'
             : seed === 'xai' ? 'rivendell:xai-effort'
+            : seed === 'zai' ? 'rivendell:zai-effort'
             : null;
           if (effortKey) localStorage.setItem(effortKey, effort);
         }
@@ -167,12 +174,14 @@ export function GrokChat(props: GrokChatProps) {
       engine === 'claude' ? picker.claudeModel
       : engine === 'codex' ? picker.codexModel
       : engine === 'xai' ? picker.xaiModel
+      : engine === 'zai' ? picker.zaiModel
       : undefined
     );
     const effort = effortOverride ?? (
       engine === 'claude' ? picker.claudeEffort
       : engine === 'codex' ? picker.codexEffort
       : engine === 'xai' ? picker.xaiEffort
+      : engine === 'zai' ? picker.zaiEffort
       : undefined
     );
     return { engine, model, effort };
@@ -233,6 +242,8 @@ export function GrokChat(props: GrokChatProps) {
     }),
     setXaiModel: (value: string) => persistBrain({ engine: 'xai', model: normalizeXaiModel(value) }),
     setXaiEffort: (value: string) => persistBrain({ engine: 'xai', effort: normalizeXaiEffort(value) }),
+    setZaiModel: (value: string) => persistBrain({ engine: 'zai', model: normalizeZaiModel(value) }),
+    setZaiEffort: (value: string) => persistBrain({ engine: 'zai', effort: normalizeZaiEffort(value) }),
   };
 
   const s = useChatShell({ chat, picker: pickerForUi });

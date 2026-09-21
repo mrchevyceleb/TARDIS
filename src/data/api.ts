@@ -1,5 +1,18 @@
 import type { FileTreeNode, WorkspaceEditFileResponse, WorkspaceSaveResponse } from './types';
 
+export async function dictationChunk(id:string,audio:Blob,signal:AbortSignal):Promise<{text:string;warning?:string}> {
+  const combined=AbortSignal.any([signal,AbortSignal.timeout(240_000)]);
+  for(;;) {
+    const response=await fetch('/api/dictation/chunks',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Dictation-Chunk':id},body:audio,signal:combined});
+    const data=await response.json().catch(()=>null);
+    if(response.ok)return data;
+    if(response.status!==409&&response.status!==429)throw new Error(data?.error||'Transcription failed. Your recording is saved for retry.');
+    if(response.status===409&&!/Another recording/.test(data?.error??''))throw new Error(data?.error||'Recording conflict.');
+    await new Promise<void>((resolve,reject)=>{const abort=()=>{clearTimeout(timer);reject(combined.reason);};const timer=setTimeout(()=>{combined.removeEventListener('abort',abort);resolve();},2000);combined.addEventListener('abort',abort,{once:true});if(combined.aborted)abort();});
+  }
+}
+
+
 export async function contentRequest<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (method === 'POST' && /\/(approve|publish)$/.test(path)) {

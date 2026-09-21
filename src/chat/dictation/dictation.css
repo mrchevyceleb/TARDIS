@@ -1,0 +1,30 @@
+.chat-dictation{color:inherit;flex-shrink:0}
+.dictation-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:36px;border:1px solid color-mix(in srgb,currentColor 17%,transparent);border-radius:12px;padding:6px 10px;background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:12px}
+.dictation-button:hover{background:color-mix(in srgb,currentColor 7%,transparent)}
+.dictation-button:focus-visible,.dictation-discard:focus-visible,.dictation-mic:focus-visible{outline:2px solid #9a78e8;outline-offset:3px}
+.dictation-panel{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px;border:1px solid #9a78e866;border-radius:14px;background:color-mix(in srgb,#9a78e8 9%,transparent);max-width:100%}
+.dictation-panel p{flex-basis:100%;margin:0;font-size:12px}
+.dictation-status{display:flex;align-items:center;flex-wrap:wrap;gap:7px;font-size:13px}
+.dictation-status small,.dictation-panel>small{font-size:11px;opacity:.75}
+.dictation-dot{width:8px;height:8px;border-radius:100%;background:#dc5571;animation:dictation-blink 1.4s ease-in-out infinite}
+@keyframes dictation-blink{50%{opacity:.35}}
+.dictation-discard{display:grid;place-items:center;border:0;background:none;color:inherit;cursor:pointer;min-width:32px;min-height:32px;margin-left:auto}
+.dictation-notice{flex-basis:100%;display:block;max-width:440px;font-size:11px}
+.dictation-spin{animation:dictation-spin 1s linear infinite}
+@keyframes dictation-spin{to{transform:rotate(360deg)}}
+/* Inline trigger: one compact mic inside the composer pill, no extra row. */
+.chat-dictation-inline{display:inline-flex;align-self:center;flex:none}
+.composer .chat-dictation{align-self:center}
+.dictation-mic{display:grid;place-items:center;width:40px;height:40px;min-width:40px;padding:0;border:0;border-radius:50%;background:transparent;color:inherit;opacity:.72;cursor:pointer;transition:transform .15s ease,opacity .15s ease,background .15s ease}
+.dictation-mic:hover{opacity:1}
+.dictation-mic:active{transform:scale(.88)}
+.dictation-mic:disabled{cursor:default;opacity:.6}
+.dictation-mic.is-live{opacity:1;color:#fda4b4;background:color-mix(in srgb,#dc5571 18%,transparent);animation:dictation-pulse 1.6s ease-in-out infinite}
+.dictation-mic.needs-attention{opacity:1;color:#e8b34a}
+@keyframes dictation-pulse{50%{box-shadow:0 0 0 7px color-mix(in srgb,#dc5571 12%,transparent)}}
+.composer.dictating{border-color:color-mix(in srgb,#dc5571 45%,transparent)}
+/* Working panel floats above the pill through a portal; the pill keeps its
+   rounded clip, the panel never gets cut. */
+.dictation-float{position:fixed;z-index:80;box-shadow:0 12px 32px #00000055;background:color-mix(in srgb,#9a78e8 12%,var(--surface-raised,#232333))}
+@media(max-width:640px){.dictation-panel .dictation-button{min-height:42px}.dictation-panel{gap:8px}}
+@media(prefers-reduced-motion:reduce){.dictation-spin,.dictation-dot,.dictation-mic.is-live{animation:none}}
