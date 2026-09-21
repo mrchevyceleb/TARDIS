@@ -34,6 +34,7 @@ import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiPlanWindowResetsAt, type ZaiMode } from './zaiQuota.ts';
+import { PiSession, usePiHarness } from './pi-runner.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
 
@@ -1690,7 +1691,7 @@ export function markBusyLanesRestarting(signal: string): number {
 
 // ── Session manager ────────────────────────────────────────────────
 
-const sessions = new Map<string, ClaudeSession>();
+const sessions = new Map<string, LaneSession>();
 let sessionsShuttingDown = false;
 const resettingThreadLogs = new Set<string>();
 const inFlightSessionLookups = new Map<string, Set<Promise<void>>>();
@@ -1746,7 +1747,9 @@ function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
 }
 
 // Returned by getOrCreateSession — common interface across all runners.
-export type AnySession = ClaudeSession | CodexSession | BananaSession;
+export type AnySession = ClaudeSession | PiSession | CodexSession | BananaSession;
+/** The claude-family registry holds both harnesses for the zai/xai lanes. */
+export type LaneSession = ClaudeSession | PiSession;
 
 export async function getOrCreateSession(opts: {
   cli: CliKind;
@@ -1834,7 +1837,7 @@ export async function getOrCreateSession(opts: {
     sessions.delete(key);
   }
 
-  if (opts.cli === 'xai') {
+  if (opts.cli === 'xai' && !usePiHarness('xai')) {
     // The xAI engine runs through a localhost transform proxy; never spawn
     // without it (an empty ANTHROPIC_BASE_URL would fall back to Anthropic and
     // leak the Grok credential to the wrong provider). Throws if the proxy
@@ -1938,7 +1941,7 @@ const BREAKER_COOLDOWN_MS = 60_000;
  *  and the send-reconcile firing on the same socket within a few ms) can each
  *  fall through to a spawn — the second would orphan the first process. Share a
  *  single in-flight spawn per key so only one process is ever created. */
-const pendingSpawns = new Map<string, Promise<ClaudeSession>>();
+const pendingSpawns = new Map<string, Promise<LaneSession>>();
 
 async function spawnSessionOnce(
   cli: CliKind,
@@ -1947,7 +1950,7 @@ async function spawnSessionOnce(
   key: string,
   model: string,
   effort: string,
-): Promise<ClaudeSession> {
+): Promise<LaneSession> {
   const inFlight = pendingSpawns.get(key);
   if (inFlight) return inFlight;
   const spawnPromise = (async () => {
@@ -2010,7 +2013,7 @@ async function spawnSession(
   effort?: string,
   seedFirst = false,
   switchedFrom: string | null = null,
-): Promise<ClaudeSession> {
+): Promise<LaneSession> {
   if (sessionsShuttingDown) throw new Error('TARDIS is shutting down');
   const breaker = spawnFailures.get(key);
   if (breaker && Date.now() >= breaker.until) {
@@ -2026,7 +2029,11 @@ async function spawnSession(
     );
   }
   assertMemoryAvailableForSpawn(cli);
-  const session = new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, seedFirst, switchedFrom);
+  // GLM and Grok run in the Pi harness by default: the persona is the whole
+  // system prompt there, and the providers are spoken to natively.
+  const session: LaneSession = usePiHarness(cli)
+    ? new PiSession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort), seedFirst, switchedFrom)
+    : new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, seedFirst, switchedFrom);
   sessions.set(key, session);
   notifySessionCreated(session.logKey, session);
 
@@ -2221,16 +2228,16 @@ const externalThreadListeners = new Set<(logKey: string, se: SeqEvent) => void>(
  *  on its own, but a passive tab or second device has nothing to trigger a
  *  rebind and goes silently deaf to the replacement. This lets those sockets
  *  re-attach the moment a replacement exists, without spawning one themselves. */
-const sessionCreatedListeners = new Set<(logKey: string, session: ClaudeSession) => void>();
+const sessionCreatedListeners = new Set<(logKey: string, session: LaneSession) => void>();
 
 export function subscribeSessionCreated(
-  fn: (logKey: string, session: ClaudeSession) => void,
+  fn: (logKey: string, session: LaneSession) => void,
 ): () => void {
   sessionCreatedListeners.add(fn);
   return () => sessionCreatedListeners.delete(fn);
 }
 
-function notifySessionCreated(logKey: string, session: ClaudeSession): void {
+function notifySessionCreated(logKey: string, session: LaneSession): void {
   for (const fn of sessionCreatedListeners) {
     try { fn(logKey, session); } catch (err) {
       console.warn('[chat] session-created listener failed:', (err as Error).message);
