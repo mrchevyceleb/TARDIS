@@ -257,13 +257,26 @@ class GrokCall {
       return;
     }
     // Typing during a call refreshes context, but never triggers a response.
+    //
+    // eventLogRevision() is a SINGLE GLOBAL counter bumped at every turn
+    // boundary on every thread, so with other agents working it changes
+    // constantly — while this call's instructions, built from its own thread,
+    // almost never do. Re-sending session.update on the counter alone
+    // reconfigured the realtime session about once a second for the life of
+    // the call, so turn detection never settled and no response ever formed:
+    // mic chunks flowed for minutes with nothing coming back. Compare the
+    // instruction TEXT, which is what actually has to reach the provider.
     if (Date.now() - this.lastContextCheck > 1000) {
       this.lastContextCheck = Date.now();
       const seq = eventLogRevision();
       if (seq !== this.contextSeq) {
         this.contextSeq = seq;
-        this.instructions = this.contextInstructions();
-        this.sendGrok({ type: 'session.update', session: { instructions: this.instructions } });
+        const next = this.contextInstructions();
+        if (next !== this.instructions) {
+          this.instructions = next;
+          console.log('[voice] call context changed — updating session instructions');
+          this.sendGrok({ type: 'session.update', session: { instructions: next } });
+        }
       }
     }
     this.micChunks += 1;
