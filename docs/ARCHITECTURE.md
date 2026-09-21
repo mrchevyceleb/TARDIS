@@ -86,3 +86,21 @@ External side effects are designed to stay draft/review-first.
 ## Trust boundary
 
 There is no built-in user login. The intended boundary is the local machine or a trusted private reverse proxy such as Tailscale Serve. The default bind address is loopback. See [DEPLOYMENT.md](DEPLOYMENT.md) and [../SECURITY.md](../SECURITY.md).
+
+## Engine harnesses
+
+Every subscription engine is driven as a child process that writes the same
+claude-shaped event vocabulary into the same durable thread log:
+
+| Engine | Harness | Why |
+|---|---|---|
+| Claude | `claude` binary (`runner.ts`) | native |
+| Codex | `codex` binary (`codex-runner.ts`) | native |
+| GLM, Grok | Pi, `--mode rpc` (`pi-runner.ts`) | the persona is the whole system prompt; native `zai` / `fireworks` / `xai-oauth` providers; images pass through |
+
+`RIVENDELL_GLM_HARNESS=claude` or `RIVENDELL_XAI_HARNESS=claude` reverts a lane
+to the claude binary (Anthropic-compatible endpoints, xAI transform proxy).
+`RIVENDELL_PI_XAI_PROVIDER` picks Pi's Grok provider (`xai-oauth` for the
+SuperGrok subscription via the pi-grok extension, `xai` for the API key).
+Pi spawns load no discovered extensions; `server/pi/tardis-team-mcp.ts`
+mounts the lane's MCP servers from `RIVENDELL_PI_MCP`.

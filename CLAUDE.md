@@ -39,6 +39,7 @@ src/
 server/src/
   index.ts                 app lifecycle and route mounting
   chat/                    runners, sessions, durable logs, compaction, team bus
+                           (pi-runner.ts drives GLM/Grok in the Pi harness; runner.ts the claude binary)
   routes/                  /api/* and local control surfaces
   worker/                  optional queue and Scribe stream
   lib/                     persistence, workspace, integrations
@@ -49,6 +50,7 @@ server/src/devices/        linked computers and robots (dial in over /ws/device)
 robot/                     Python robot companion (Doly SDK or mock body; own package)
 supabase/migrations/       optional queue/event schema
 scripts/                   startup, Tailscale, PWA and native icons, Windows handler
+server/pi/                 Pi extensions TARDIS loads into its own Pi spawns (team MCP bridge)
 ```
 
 ## Architecture rules
