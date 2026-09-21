@@ -581,15 +581,15 @@
 
 .bot-app .rc .composer {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
   align-items: center;
   column-gap: 4px;
   row-gap: 0;
   border: 1px solid var(--r-line);
   border-radius: 999px;
   background: var(--r-bg-raised);
-  padding: 8px 10px;
-  min-height: 64px;
+  padding: 7px 10px;
+  min-height: 0;
   box-sizing: border-box;
   transition: border-color 0.16s ease, background 0.16s ease, border-radius 0.16s ease;
 }
@@ -618,11 +618,13 @@
 .bot-app .rc .composer.has-attach > .grok-attach,
 .bot-app .rc .composer.has-attach textarea,
 .bot-app .rc .composer.has-attach .model-chip,
+.bot-app .rc .composer.has-attach .chat-dictation,
 .bot-app .rc .composer.has-attach .send,
 .bot-app .rc .composer.has-attach .bt-mic,
 .bot-app .rc .composer:has(.attach-tray) > .grok-attach,
 .bot-app .rc .composer:has(.attach-tray) textarea,
 .bot-app .rc .composer:has(.attach-tray) .model-chip,
+.bot-app .rc .composer:has(.attach-tray) .chat-dictation,
 .bot-app .rc .composer:has(.attach-tray) .send,
 .bot-app .rc .composer:has(.attach-tray) .bt-mic {
   grid-row: 2;
@@ -632,9 +634,14 @@
   min-width: 0;
   width: 100%;
   font-size: 15px; line-height: 1.5;
-  padding: 10px 8px;
+  padding: 7px 8px;
   max-height: 148px;
 }
+/* Dictation mic owns column 4; the trailing send disc takes column 5. Without
+   the explicit columns the auto-placed dictation node pushed the send/disc
+   onto a second grid row, inflating the pill. */
+.bot-app .rc .composer .chat-dictation { grid-column: 4; }
+.bot-app .rc .composer .dictation-mic { width: 34px; height: 34px; min-width: 34px; }
 .bot-app .rc .composer textarea::placeholder {
   font-family: var(--r-body); font-style: normal;
   font-size: 15px; color: var(--r-ink-faint);
@@ -669,9 +676,9 @@
 .bot-app .rc .model-chip:hover { background: var(--r-line); color: var(--r-ink); }
 .bot-app .rc .model-chip .ring, .bot-app .rc .model-chip .eff { display: none; }
 
-/* trailing disc: brass; empty → mic, ready → arrow, busy → stop */
+/* trailing disc: brass; ready → arrow, busy → stop */
 .bot-app .rc .send {
-  grid-column: 4;
+  grid-column: 5;
   margin-left: 0;
   width: 36px; height: 36px;
   border: 0; border-radius: 50%;
@@ -689,16 +696,16 @@
 .bot-app .rc .send.steer { background: var(--r-amber); color: var(--r-bg); box-shadow: none; }
 .bot-app .rc .steer-cue { color: var(--r-ink-mute); }
 
-/* mic disc (idle-empty state) */
+/* mic disc — voice chat launcher, lives in the agent header (bt-head-actions) */
 .bot-app .rc .bt-mic {
-  grid-column: 4;
-  width: 36px; height: 36px;
+  width: 32px; height: 32px;
   border-radius: 50%;
   background: var(--r-gold);
   color: var(--r-bg);
   display: grid; place-items: center;
   transition: transform 0.15s ease, box-shadow 0.15s ease;
   flex: none;
+  margin-right: 6px;
 }
 .bot-app .rc .bt-mic:hover { transform: scale(1.05); }
 .bot-app .rc .bt-mic:active { transform: scale(0.94); }

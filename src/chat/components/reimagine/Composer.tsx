@@ -302,13 +302,10 @@ export function Composer(props: ComposerProps) {
           ))}
         </div>
       ) : null}
+      {props.chatId && <ComputerControl key={props.chatId} chatId={props.chatId} />}
+      {props.chatId && <RobotControl />}
       {props.attachMenu}
-      {props.chatId && <div className="composer-tools">
-        <ComputerControl key={props.chatId} chatId={props.chatId} />
-        <RobotControl />
-        <div className="composer-dictation-slot"><ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating}/></div>
-      </div>}
-      <div className={`composer${images.length > 0 ? ' has-attach' : ''}`}>
+      <div className={`composer${images.length > 0 ? ' has-attach' : ''}${dictating ? ' dictating' : ''}`}>
         {images.length > 0 ? (
           <div className="attach-tray">
             {images.map((img) => (
@@ -326,7 +323,7 @@ export function Composer(props: ComposerProps) {
           ref={taRef}
           rows={1}
           value={props.value}
-          placeholder={props.busy ? 'Reply — it will send next…' : props.placeholder ?? phrases?.[phIdx] ?? 'Where to, Doctor?'}
+          placeholder={dictating ? 'Listening…' : props.busy ? 'Reply — it will send next…' : props.placeholder ?? phrases?.[phIdx] ?? 'Where to, Doctor?'}
           aria-label="Message"
           onChange={(e) => {
             setPopDismissed(false);
@@ -387,10 +384,14 @@ export function Composer(props: ComposerProps) {
                 </span>
               )
             )}
+            {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating} />}
             {trailingBtn()}
           </div>
         ) : (
-          trailingBtn()
+          <>
+            {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating} />}
+            {trailingBtn()}
+          </>
         )}
       </div>
       {acceptImages ? (

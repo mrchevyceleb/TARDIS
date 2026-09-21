@@ -1,4 +1,5 @@
-import { useEffect,useRef,useState } from 'react';
+import { useEffect,useLayoutEffect,useRef,useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Mic,Square,LoaderCircle,X,RotateCcw } from 'lucide-react';
 import { capture } from './capture';
 import { loadRecording,saveRecording,loadSection,saveSection,finishSection,clearRecording,type Recording,type Section } from './store';
@@ -81,16 +82,38 @@ export function ChatDictation({chatId,onText,onActive}:{chatId:string;onText:(te
  // eslint-disable-next-line react-hooks/exhaustive-deps
  },[]);
  useEffect(()=>{if(phase!=='recording')return;const id=setInterval(()=>setSeconds(s=>s+1),1000);return()=>clearInterval(id);},[phase]);
+
+ // Inline trigger lives inside the composer pill; the working panel floats
+ // above it through a portal so the pill's overflow never clips it.
+ const pillRef=useRef<HTMLDivElement|null>(null),[anchor,setAnchor]=useState<{right:number;top:number}|null>(null);
+ const panelOpen=phase!=='idle';
+ useLayoutEffect(()=>{
+  if(!panelOpen){setAnchor(null);return;}
+  const measure=()=>{const el=pillRef.current;if(!el)return;const r=el.getBoundingClientRect();setAnchor({right:r.right,top:r.top});};
+  measure();
+  window.addEventListener('scroll',measure,true);window.addEventListener('resize',measure);
+  return()=>{window.removeEventListener('scroll',measure,true);window.removeEventListener('resize',measure);};
+ },[panelOpen]);
+
  const recording=phase==='recording',busy=phase==='starting'||phase==='finishing';
- return <div className={`chat-dictation ${recording?'is-recording':''}`}>
-  {phase==='idle'?<button type="button" className="dictation-button" onClick={()=>void start()} aria-label="Dictate a message" title="Record, clean up with AI, and insert into your message"><Mic size={17}/><span>Dictate</span></button>:<div className="dictation-panel" role="group" aria-label="Message dictation">
+ const trigger=recording
+  ?<button type="button" className="dictation-mic is-live" onClick={()=>void finish()} aria-label="Stop dictation and insert text" title="Stop & insert"><Square size={14}/></button>
+  :busy
+   ?<button type="button" className="dictation-mic" disabled aria-label="Dictation working"><LoaderCircle size={17} className="dictation-spin"/></button>
+   :phase==='recover'||phase==='error'
+    ?<button type="button" className="dictation-mic needs-attention" onClick={()=>void retry()} aria-label={phase==='recover'?'Recover saved dictation':'Retry dictation'} title={phase==='recover'?'Recover & insert':'Retry & insert'}><RotateCcw size={16}/></button>
+    :<button type="button" className="dictation-mic" onClick={()=>void start()} aria-label="Dictate a message" title="Dictate into your message"><Mic size={18}/></button>;
+ const width=Math.min(320,window.innerWidth-24);
+ const panelStyle=anchor?{left:Math.min(Math.max(anchor.right-width,12),window.innerWidth-12-width),bottom:window.innerHeight-anchor.top+10,width}:undefined;
+ return <>
+  <div ref={pillRef} className={`chat-dictation chat-dictation-inline${recording?' is-recording':''}`}>{trigger}</div>
+  {panelOpen&&anchor&&createPortal(<div className={`dictation-panel dictation-float${recording?' is-recording':''}`} role="group" aria-label="Message dictation" style={panelStyle}>
    <div className="dictation-status" role="status">{recording?<><span className="dictation-dot"/>Recording {Math.floor(seconds/60)}:{String(seconds%60).padStart(2,'0')}</>:busy?<><LoaderCircle size={16} className="dictation-spin"/>{phase==='starting'?'Opening microphone…':'Transcribing & cleaning up…'}</>:phase==='recover'?'Unfinished dictation saved on this device.':'Dictation needs attention.'}{processed>0&&<small>{processed} section{processed===1?'':'s'} ready</small>}</div>
-   {recording&&<><small>Keep this page open. Stop when you’re done.</small><button type="button" className="dictation-button" onClick={()=>void finish()}><Square size={15}/>Stop & insert</button></>}
-   {recording&&error&&<><small>Still recording. Speech is saved on this device while transcription waits.</small><button type="button" className="dictation-button" onClick={()=>void retry()}>Retry transcription</button></>}
+   {recording&&<button type="button" className="dictation-button" onClick={()=>void finish()}><Square size={15}/>Stop & insert</button>}
    {(phase==='recover'||phase==='error')&&<button type="button" className="dictation-button" onClick={()=>void retry()}><RotateCcw size={15}/>{phase==='recover'?'Recover & insert':'Retry & insert'}</button>}
    {!busy&&<button type="button" className="dictation-discard" onClick={()=>void discard()} aria-label="Discard dictation"><X size={16}/></button>}
    {error&&<p role="alert">{error}</p>}
-  </div>}
-  {notice&&<small role="status" className="dictation-notice">{notice}</small>}
- </div>;
+   {notice&&<small role="status" className="dictation-notice">{notice}</small>}
+  </div>,document.body)}
+ </>;
 }
