@@ -10,6 +10,8 @@ import {
   WORKSPACE_COMPANIONS,
   XAI_MODELS,
   XAI_EFFORTS,
+  ZAI_MODELS,
+  ZAI_EFFORTS,
   companionAuthBlurb,
 } from '../../hooks/useCompanionPicker';
 import { CLAUDE_MODELS, CLAUDE_EFFORTS } from '../CodexEnginePicker';
@@ -22,6 +24,7 @@ const LANE_META: Record<string, LaneMeta> = {
   claude: { ring: 'C', short: 'Claude Code subscription', word: 'effort' },
   codex: { ring: 'X', short: 'Codex subscription', word: 'effort' },
   xai: { ring: 'G', short: 'Grok coding subscription', word: 'thinking' },
+  zai: { ring: 'Z', short: 'Z.ai coding plan', word: 'effort' },
 };
 
 function labelFor(id: string, list: Array<{ id: string; label: string }>): string {
@@ -37,6 +40,7 @@ export function counselChipInfo(picker: CompanionPicker) {
   if (picker.isClaude) name = labelFor(picker.claudeModel, CLAUDE_MODELS);
   else if (picker.isCodex) name = labelFor(picker.codexModel, CODEX_MODELS);
   else if (picker.isXai) name = labelFor(picker.xaiModel, XAI_MODELS);
+  else if (picker.isZai) name = labelFor(picker.zaiModel, ZAI_MODELS);
   const lane = WORKSPACE_COMPANIONS.find((c) => c.id === picker.companion);
   const blurb = companionAuthBlurb(picker.cli, picker.account);
   return { ring: meta.ring, name, effort, word: meta.word, short: meta.short, blurb, laneLabel: lane?.label ?? name };
@@ -182,6 +186,23 @@ function LaneControls({ picker }: { picker: CompanionPicker }) {
           ))}
           <span className="ctl-lab">thinking</span>
           <EffortPills options={XAI_EFFORTS} current={picker.xaiEffort} onPick={picker.setXaiEffort} />
+        </>
+      )}
+      {picker.isZai && (
+        <>
+          <span className="ctl-lab">model</span>
+          {ZAI_MODELS.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              className={`mini${picker.zaiModel === m.id ? ' on' : ''}`}
+              onClick={() => picker.setZaiModel(m.id)}
+            >
+              {m.label}
+            </button>
+          ))}
+          <span className="ctl-lab">effort</span>
+          <EffortPills options={ZAI_EFFORTS} current={picker.zaiEffort} onPick={picker.setZaiEffort} />
         </>
       )}
       <span className="lane-note">{counselChipInfo(picker).blurb}</span>

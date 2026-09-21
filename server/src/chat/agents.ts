@@ -72,6 +72,7 @@ export function defaultAgentBrain(engine: string): Omit<AgentBrain, 'revision' |
   switch (VALID_ENGINES.has(engine) ? engine : 'claude') {
     case 'claude': return { engine: 'claude', model: 'claude-opus-5', effort: 'xhigh' };
     case 'codex': return { engine: 'codex', model: 'gpt-5.6-sol', effort: 'low' };
+    case 'zai': return { engine: 'zai', model: 'glm-5.3[1m]', effort: 'high' };
     case 'xai':
     default: return { engine: 'xai', model: 'grok-4.6', effort: 'max' };
   }
