@@ -28,7 +28,6 @@ import { fileURLToPath } from 'node:url';
 import type { Readable, Writable } from 'node:stream';
 import { STATE_DIR } from '../config.ts';
 import { assertSubscriptionLane, subscriptionEnvironment } from './subscription-policy.ts';
-import { localMcpServers } from './local-mcp.ts';
 import { computerGuidance } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import { setSessionId } from './sessions.ts';
@@ -43,7 +42,7 @@ import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { noteZaiPlanQuota, zaiModeFor, type ZaiMode } from './zaiQuota.ts';
-import type { CliKind, SeqEvent, SessionEvent } from './runner.ts';
+import { laneMcpServers, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
 const PI_SESSION_DIR = join(STATE_DIR, 'pi-sessions');
@@ -172,7 +171,9 @@ export class PiSession {
     const env = subscriptionEnvironment(process.env);
     Object.assign(env, this.provider.env);
     env.PI_CODING_AGENT_DIR = PI_AGENT_DIR;
-    env.RIVENDELL_PI_MCP = JSON.stringify(localMcpServers(agentForChatId(chatId)?.name));
+    // The full lane set, not just the built-ins: without the assistant-mcp
+    // proxy a Pi lane had no email, Slack or calendar tools at all.
+    env.RIVENDELL_PI_MCP = JSON.stringify(laneMcpServers(agentForChatId(chatId)?.name));
     env.SAMWISE_ACCOUNT = cli;
 
     const args = [

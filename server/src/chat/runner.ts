@@ -355,6 +355,14 @@ if (BROWSER_MCP_ENTRY && existsSync(BROWSER_MCP_ENTRY)) {
 }
 const ASSISTANT_MCP_CONFIG = JSON.stringify({ mcpServers: optionalMcpServers });
 
+/** Every stdio MCP server a lane gets, for harnesses that mount servers
+ *  themselves (the Pi bridge): the operator's optional backends (assistant-mcp
+ *  proxy, browser) plus the built-in team and device servers. Same set the
+ *  claude binary receives through --mcp-config. */
+export function laneMcpServers(agentName?: string): Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> {
+  return { ...optionalMcpServers, ...localMcpServers(agentName) };
+}
+
 
 /** Add the local MCP servers to any mcp-config JSON: rivendell-team
  *  (agent-to-agent messaging, stamped with the calling agent's name so the
