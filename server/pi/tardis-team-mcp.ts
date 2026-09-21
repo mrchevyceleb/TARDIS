@@ -46,13 +46,25 @@ class StdioMcp {
         } catch { /* not JSON-RPC, ignore */ }
       }
     });
-    child.on('exit', () => {
-      for (const rpc of this.pending.values()) rpc.reject(new Error(`${this.name} MCP exited`));
+    // A spawn failure (ENOENT, EACCES, EMFILE) and a broken pipe both arrive
+    // as `error` events; unhandled, either one takes the whole Pi process
+    // down with it. Fail this client's calls instead and let the others live.
+    const fail = (why: string) => {
+      for (const rpc of this.pending.values()) rpc.reject(new Error(`${this.name} ${why}`));
       this.pending.clear();
-      this.child = null;
-    });
+      if (this.child === child) this.child = null;
+    };
+    child.on('error', (err) => fail(`MCP failed: ${err.message}`));
+    child.stdin!.on('error', (err) => fail(`MCP stdin: ${err.message}`));
+    child.on('exit', () => fail('MCP exited'));
     this.child = child;
     return child;
+  }
+
+  private send(child: ChildProcess, msg: unknown, onError: (e: Error) => void): void {
+    const stdin = child.stdin;
+    if (!stdin || stdin.destroyed || !stdin.writable) { onError(new Error(`${this.name} MCP stdin closed`)); return; }
+    stdin.write(JSON.stringify(msg) + '\n', (err) => { if (err) onError(err); });
   }
 
   private call(method: string, params: unknown, timeoutMs = 60_000): Promise<any> {
@@ -61,22 +73,34 @@ class StdioMcp {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`${this.name} ${method} timed out`)); }, timeoutMs);
       this.pending.set(id, { id, resolve: (v) => { clearTimeout(timer); resolve(v); }, reject: (e) => { clearTimeout(timer); reject(e); } });
-      child.stdin!.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+      this.send(child, { jsonrpc: '2.0', id, method, params }, (err) => {
+        if (this.pending.delete(id)) { clearTimeout(timer); reject(err); }
+      });
     });
   }
   private notify(method: string, params: unknown): void {
-    this.start().stdin!.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
+    this.send(this.start(), { jsonrpc: '2.0', method, params }, () => { /* the next call reports it */ });
   }
 
+  /** initialize + tools/list. Both calls are short: a healthy server answers
+   *  in well under a second, and the whole handshake has to fit inside the
+   *  readiness budget TARDIS gives the Pi process (see HANDSHAKE_BUDGET_MS). */
   async connect(): Promise<Array<{ name: string; description?: string; inputSchema?: unknown }>> {
     await this.call('initialize', {
       protocolVersion: '2024-11-05',
       capabilities: {},
       clientInfo: { name: 'tardis-pi', version: '1' },
-    }, 20_000);
+    }, 10_000);
     this.notify('notifications/initialized', {});
-    const result = await this.call('tools/list', {}, 20_000);
+    const result = await this.call('tools/list', {}, 10_000);
     return Array.isArray(result?.tools) ? result.tools : [];
+  }
+
+  /** Drop the child so the next call starts a fresh one. */
+  reset(): void {
+    const child = this.child;
+    this.child = null;
+    if (child && child.exitCode === null) child.kill();
   }
 
   callTool(name: string, args: unknown): Promise<any> {
@@ -84,38 +108,68 @@ class StdioMcp {
   }
 }
 
-export default function (pi: ExtensionAPI) {
+/** TARDIS probes readiness with `get_state` and gives the whole Pi start
+ *  45s; earlier extensions load first. Every server connects in parallel,
+ *  so this is the most any one of them may hold the factory. A straggler
+ *  is not abandoned: it keeps connecting and registers its tools when it
+ *  arrives, which is still better than never. */
+const HANDSHAKE_BUDGET_MS = 25_000;
+const RETRY_DELAY_MS = 1_500;
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Pi awaits an async factory, and `get_state` (TARDIS's readiness probe)
+ *  only answers once every extension has loaded. Awaiting the connections
+ *  here is what makes "ready" mean "the lane's tools exist": a prompt that
+ *  arrives the same second the process spawns still sees them. One failing
+ *  server never blocks the rest, and a server that dies mid-handshake (or
+ *  a proxy still warming up) gets one more try. */
+export default async function (pi: ExtensionAPI) {
   const raw = process.env.RIVENDELL_PI_MCP;
   if (!raw) return;
   let servers: Record<string, StdioServer>;
   try { servers = JSON.parse(raw); } catch { return; }
 
-  for (const [serverName, spec] of Object.entries(servers)) {
+  const mount = async (serverName: string, spec: StdioServer): Promise<void> => {
     const client = new StdioMcp(serverName, spec);
     const prefix = spec.prefix ?? '';
-    void client.connect().then((tools) => {
-      for (const tool of tools) {
-        pi.registerTool({
-          name: `${prefix}${tool.name}`,
-          label: tool.name,
-          description: tool.description ?? `${serverName}: ${tool.name}`,
-          parameters: (tool.inputSchema as any) ?? { type: 'object', properties: {} },
-          async execute(_id, params) {
-            const result = await client.callTool(tool.name, params);
-            const content = Array.isArray(result?.content) ? result.content : [];
-            const text = content
-              .filter((c: any) => c?.type === 'text')
-              .map((c: any) => ({ type: 'text' as const, text: String(c.text ?? '') }));
-            return {
-              content: text.length ? text : [{ type: 'text', text: '(no output)' }],
-              details: { raw: result },
-              isError: result?.isError === true,
-            };
-          },
-        });
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const tools = await client.connect();
+        for (const tool of tools) {
+          pi.registerTool({
+            name: `${prefix}${tool.name}`,
+            label: tool.name,
+            description: tool.description ?? `${serverName}: ${tool.name}`,
+            parameters: (tool.inputSchema as any) ?? { type: 'object', properties: {} },
+            async execute(_id, params) {
+              const result = await client.callTool(tool.name, params);
+              const content = Array.isArray(result?.content) ? result.content : [];
+              const text = content
+                .filter((c: any) => c?.type === 'text')
+                .map((c: any) => ({ type: 'text' as const, text: String(c.text ?? '') }));
+              return {
+                content: text.length ? text : [{ type: 'text', text: '(no output)' }],
+                details: { raw: result },
+                isError: result?.isError === true,
+              };
+            },
+          });
+        }
+        console.error(`[tardis-team-mcp] ${serverName}: ${tools.length} tools${attempt > 1 ? ' (retry)' : ''}`);
+        return;
+      } catch (err) {
+        lastError = err as Error;
+        client.reset();
+        if (attempt < 2) await sleep(RETRY_DELAY_MS);
       }
-    }).catch((err: Error) => {
-      console.error(`[tardis-team-mcp] ${serverName}: ${err.message}`);
-    });
-  }
+    }
+    console.error(`[tardis-team-mcp] ${serverName}: FAILED, tools unavailable: ${lastError?.message}`);
+  };
+
+  const pendingNames = new Set(Object.keys(servers));
+  const all = Promise.all(Object.entries(servers).map(([name, spec]) => mount(name, spec).finally(() => pendingNames.delete(name))));
+  await Promise.race([all, sleep(HANDSHAKE_BUDGET_MS)]);
+  if (pendingNames.size) console.error(`[tardis-team-mcp] still connecting past ${HANDSHAKE_BUDGET_MS}ms: ${[...pendingNames].join(', ')}`);
 }
