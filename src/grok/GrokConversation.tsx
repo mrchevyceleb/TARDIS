@@ -49,7 +49,9 @@ export function GrokConversation(props: BotConversationProps) {
   // Fresh array each name change only — the Composer's rotation keys on identity.
   const placeholders = useMemo(() => composerPlaceholders(agentName), [agentName]);
 
-  const empty = s.blocks.length === 0 && !s.busy;
+  // While hydrating, the cached thread may be stale. Don't treat it as an
+  // empty conversation either — that would flash the zero state.
+  const empty = !s.hydrating && s.blocks.length === 0 && !s.busy;
 
   // Files sent to the ship (drag and drop) announce their workspace path here.
   useEffect(() => {
@@ -209,7 +211,7 @@ export function GrokConversation(props: BotConversationProps) {
           <div className="bt-feed-inner">
             <ChatThread
               mobile={isMobile}
-              blocks={s.blocks}
+              blocks={s.hydrating ? [] : s.blocks}
               status={s.status}
               contentRef={s.sticky.contentRef}
               bottomRef={s.sticky.bottomRef}

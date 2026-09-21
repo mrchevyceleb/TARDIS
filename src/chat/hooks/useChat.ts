@@ -6,6 +6,10 @@ import { automationTurnInFlight, filterAutomationNoise } from '../utils/automati
 import { isAutomationPeer } from '../utils/routineNoise';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'streaming' | 'closed' | 'error';
+
+/** Longest an agent switch waits for server history before falling back to
+ *  the cached thread. Past this a blank pane reads as broken. */
+const HYDRATION_CAP_MS = 300;
 type ChatSendImage = { mediaType: string; base64: string; previewDataUrl?: string };
 
 export type ServerBrainState = {
@@ -906,6 +910,12 @@ export function useChat(opts: {
   statusRef.current = status;
   const [error, setError] = useState<string | null>(null);
   const [serverBrain, setServerBrain] = useState<ServerBrainState | null>(null);
+  /** True from an agent switch until the server's replay has landed. The
+   *  cached snapshot is painted underneath, but the transcript hides it while
+   *  this is set so a stale thread is never shown and then corrected. Capped
+   *  by a timer so a slow or unreachable server still shows the cache rather
+   *  than an indefinite skeleton. */
+  const [hydrating, setHydrating] = useState(false);
   const [usage, setUsage] = useState<ContextUsage | null>(null);
   // Window size for the active CLI. Seeded from the per-CLI default and
   // refined by the `system/init` event (claude) or by the safety ratchet
@@ -1171,6 +1181,8 @@ export function useChat(opts: {
     windowTokensRef.current = windowForCli(cli, modelRef.current, contextWindowTokens);
     setUsage(null);
     setServerBrain(null);
+    setHydrating(true);
+    const hydrationCap = setTimeout(() => setHydrating(false), HYDRATION_CAP_MS);
     // Restore prior blocks from localStorage so a page reload doesn't wipe
     // the chat. Server replay then fills in events newer than what we have.
     const snapshot = readStoredSnapshot(cli, repo.path, chatId);
@@ -1328,6 +1340,10 @@ export function useChat(opts: {
         }
         if (msg.type === 'ready') {
           socketReady = true;
+          // `ready` is sent after the replay on both the warm and cold paths,
+          // so the visible thread is now server truth, not the cache.
+          clearTimeout(hydrationCap);
+          setHydrating(false);
           if (typeof msg.resetAt === 'number' && Number.isFinite(msg.resetAt)) {
             cacheResetAtRef.current = Math.max(cacheResetAtRef.current, msg.resetAt);
           }
@@ -1985,6 +2001,7 @@ export function useChat(opts: {
 
     return () => {
       teardownRef.current = true;
+      clearTimeout(hydrationCap);
       socketReadyRef.current = false;
       sentOutboundRef.current = null;
       queuedSteerRef.current = new Set();
@@ -2174,6 +2191,7 @@ export function useChat(opts: {
   return {
     chatId,
     blocks: visibleBlocks, status, error, send, steer, react, freshStart, stop, reconnect, usage, serverBrain, automationBusy,
+    hydrating,
     turnStartedAt,
     lastActivityRef: lastMessageAtRef, turnStartRef, compactingRef,
   };

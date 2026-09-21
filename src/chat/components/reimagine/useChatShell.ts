@@ -100,6 +100,7 @@ export function useChatShell({ chat, picker }: ShellProps) {
     fresh: chat.freshStart,
     pickChronicle,
     blocks: chat.blocks as ChatBlock[],
+    hydrating: chat.hydrating,
     status: chat.status,
     error: chat.error,
     automationBusy: chat.automationBusy,
