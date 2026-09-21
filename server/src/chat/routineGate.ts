@@ -58,6 +58,11 @@ export type GateSource = {
   fields?: string[];
   /** Deterministic noise filters, applied before anything else. */
   drop?: GateRule[];
+  /** A failing optional source is logged and left out of this tick instead
+   *  of failing the whole gate open. Use for a source the agent could not
+   *  read either (e.g. a mailbox whose token is dead), so the gate stays
+   *  useful for the rest. Never for the source the routine exists for. */
+  optional?: boolean;
 };
 
 export type GateRule = {
@@ -354,11 +359,19 @@ export async function runRoutineGate(routineId: string, config: RoutineGateConfi
   const routineState = state[routineId] ?? {};
   const labels = new Map(config.sources.map((s) => [s.id, s.label ?? s.id]));
 
-  const fetched = await Promise.all(config.sources.map(async (source) => {
-    const all = normalizeItems(source, await fetchSource(source));
-    const fresh = applyWatermark(source, all, routineState[source.id]);
-    return { source, all, fresh };
-  }));
+  const skipped: string[] = [];
+  const fetched = (await Promise.all(config.sources.map(async (source) => {
+    try {
+      const all = normalizeItems(source, await fetchSource(source));
+      const fresh = applyWatermark(source, all, routineState[source.id]);
+      return { source, all, fresh };
+    } catch (err) {
+      if (!source.optional) throw err;
+      skipped.push(source.id);
+      console.warn(`[routines] gate ${routineId}: optional source ${source.id} skipped — ${(err as Error).message.slice(0, 160)}`);
+      return null;
+    }
+  }))).filter((f): f is NonNullable<typeof f> => f !== null);
   const items = fetched.flatMap((f) => f.fresh);
 
   const questions = buildQuestions(items, config);
@@ -391,7 +404,8 @@ export async function runRoutineGate(routineId: string, config: RoutineGateConfi
   };
 
   const wake = decision.wake.length > 0;
-  const perSource = fetched.map((f) => `${labels.get(f.source.id)}:${f.fresh.length}/${f.all.length}`).join(' ');
+  const perSource = fetched.map((f) => `${labels.get(f.source.id)}:${f.fresh.length}/${f.all.length}`).join(' ')
+    + (skipped.length ? ` (skipped: ${skipped.join(', ')})` : '');
   return {
     wake,
     digest: wake ? buildDigest(config, decision, labels) : '',
