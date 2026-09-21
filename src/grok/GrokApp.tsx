@@ -39,6 +39,7 @@ import { OPEN_PANE_EVENT } from './messagePins';
 
 import { Council } from '../rooms/Council';
 import { ContentHome as Content } from '../rooms/ContentHome';
+import { useDeploymentFlags } from '../data/deploymentFlags';
 import { Integrations } from '../rooms/Integrations';
 import { Setup } from '../rooms/Setup';
 import { Dashboard } from '../rooms/Dashboard';
@@ -91,6 +92,7 @@ function readView(): View {
 }
 
 export function GrokApp({ initialRoom }: { initialRoom?: string }) {
+  const flags = useDeploymentFlags();
   const jarvis = useJarvis();
   const viewer = useProxyViewer();
   const isMobile = useMediaQuery('(max-width: 760px), (pointer: coarse) and (max-width: 1180px)');
@@ -383,9 +385,9 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
                 if (lastChat.current) { setView(lastChat.current); setDrawerOpen(false); }
                 else goHome();
               }}><MessageSquare size={16} aria-hidden="true" />{WORKSPACE_NAV.chat}</button>
-              <button type="button" aria-pressed={activeRoom === 'content'} onClick={() => {
+              {flags.contentRoom && <button type="button" aria-pressed={activeRoom === 'content'} onClick={() => {
                 if (activeRoom !== 'content') openRoom('content');
-              }}><Pencil size={16} aria-hidden="true" />{ROOM_NAMES.content.name}</button>
+              }}><Pencil size={16} aria-hidden="true" />{ROOM_NAMES.content.name}</button>}
             </nav>
           </header>
           {(isMobile || railCollapsed) ? (

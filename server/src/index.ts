@@ -65,6 +65,9 @@ app.use((_req, res, next) => {
 app.use(compression({ threshold: 1024 }));
 app.use(express.json({ limit: '25mb' }));
 
+const CONTENT_ROOM_ENABLED =
+  (process.env.RIVENDELL_CONTENT_ROOM?.trim().toLowerCase() ?? '') !== 'off';
+
 app.get('/api/health', (_req, res) => {
   const busyTurns =
     activeClaudeSessions().filter((s) => s.busy).length +
@@ -79,6 +82,11 @@ app.get('/api/health', (_req, res) => {
     /** In-flight turns right now. A restart kills them mid-flight — deploys
      *  MUST check this is 0 (or accept the tombstone) before bouncing. */
     busyTurns,
+    /** The Content rooms are a per-deployment surface, not core TARDIS. An
+     *  instance that does not run the content engine hides them entirely.
+     *  Opt-out rather than opt-in so an existing deployment keeps working
+     *  until its own env says otherwise. */
+    contentRoom: CONTENT_ROOM_ENABLED,
     ts: Date.now(),
   });
 });

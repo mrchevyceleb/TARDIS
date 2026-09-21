@@ -46,6 +46,7 @@ import { useLive } from '../chat/hooks/useLive';
 import type { HistoryItem } from './history';
 import { NativeOpenHelper } from '../components/NativeOpenHelper';
 import { ROOM_NAMES } from '../data/roomNames';
+import { useDeploymentFlags } from '../data/deploymentFlags';
 import { AppearanceSettings } from '../theme/AppearanceSettings';
 import type { ThemeName, VisualStyle } from '../theme/applyTheme';
 import { TIMEY_WIMEY } from '../theme/voice';
@@ -217,6 +218,7 @@ function dayStamp(ts: number): string {
 }
 
 export function BotRail(props: BotRailProps) {
+  const flags = useDeploymentFlags();
   const [query, setQuery] = useState('');
   const [pluginsOpen, setPluginsOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
@@ -523,7 +525,7 @@ export function BotRail(props: BotRailProps) {
         {pluginsOpen ? (
           <div className="bt-plugins-pop" role="menu">
             <div className="bt-plug-h">Rooms</div>
-            {ROOM_ENTRIES.map((r) => (
+            {ROOM_ENTRIES.filter((r) => r.key !== 'content' || flags.contentRoom).map((r) => (
               <button key={r.key} className="bt-plug-row" onClick={() => { props.onOpenRoom(r.key); setPluginsOpen(false); }}>
                 {r.icon} {r.label}
               </button>
