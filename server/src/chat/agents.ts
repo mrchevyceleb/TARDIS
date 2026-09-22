@@ -87,6 +87,8 @@ const CLAUDE_BRAIN_MODELS = new Set(['claude-opus-5-5', 'claude-opus-5', 'claude
 const ZAI_BRAIN_MODELS = new Set(['glm-5.3[1m]', 'glm-5.3-flash[1m]', 'glm-5.2[1m]', 'glm-5.1']);
 const CODEX_BRAIN_EFFORTS: Record<string, ReadonlySet<string>> = {
   'gpt-6-astra': new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
+  'gpt-6-sol': new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
+  'gpt-6-luna': new Set(['low', 'medium', 'high', 'xhigh', 'max']),
   'gpt-5.6-sol': new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
   'gpt-5.6-luna': new Set(['low', 'medium', 'high', 'xhigh', 'max']),
   'gpt-5.5': new Set(['low', 'medium', 'high', 'xhigh']),
@@ -95,6 +97,8 @@ const CODEX_BRAIN_EFFORTS: Record<string, ReadonlySet<string>> = {
 };
 const CODEX_DEFAULT_EFFORT: Record<string, string> = {
   'gpt-6-astra': 'medium',
+  'gpt-6-sol': 'medium',
+  'gpt-6-luna': 'medium',
   'gpt-5.6-sol': 'low',
   'gpt-5.6-luna': 'medium',
   'gpt-5.5': 'medium',

@@ -11,6 +11,14 @@ const CODEX_MODEL_CAPABILITIES: Record<string, CodexModelCapability> = {
     defaultEffort: 'medium',
     efforts: new Set([...STANDARD_CODEX_EFFORTS, 'max', 'ultra']),
   },
+  'gpt-6-sol': {
+    defaultEffort: 'medium',
+    efforts: new Set([...STANDARD_CODEX_EFFORTS, 'max', 'ultra']),
+  },
+  'gpt-6-luna': {
+    defaultEffort: 'medium',
+    efforts: new Set([...STANDARD_CODEX_EFFORTS, 'max']),
+  },
   'gpt-5.6-sol': {
     defaultEffort: 'low',
     efforts: new Set([...STANDARD_CODEX_EFFORTS, 'max', 'ultra']),

@@ -13,13 +13,27 @@ const MAX_EFFORTS: CodexEffort[] = [...STANDARD_EFFORTS, 'max'];
 
 export const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
 
-// Synced with Codex CLI 0.153.4's model catalog on 2026-09-04.
+// Synced with Codex CLI 0.155.1's model catalog on 2026-09-22.
 export const CODEX_MODELS: CodexModelSpec[] = [
   {
     id: 'gpt-6-astra',
     label: 'GPT-6-Astra',
     defaultEffort: 'medium',
     efforts: [...MAX_EFFORTS, 'ultra'],
+    contextWindow: 272_000,
+  },
+  {
+    id: 'gpt-6-sol',
+    label: 'GPT-6 Sol',
+    defaultEffort: 'medium',
+    efforts: [...MAX_EFFORTS, 'ultra'],
+    contextWindow: 272_000,
+  },
+  {
+    id: 'gpt-6-luna',
+    label: 'GPT-6 Luna',
+    defaultEffort: 'medium',
+    efforts: MAX_EFFORTS,
     contextWindow: 272_000,
   },
   {
