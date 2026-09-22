@@ -146,6 +146,7 @@ export function terminalExecutionError(
   cli: string,
   raw: unknown,
   syntheticReason?: string | null,
+  lastTurnText?: string | null,
 ): TerminalProviderError | null {
   const inner = unwrapEvent(raw);
   if (!inner || inner.type !== 'result' || inner.is_error !== true) return null;
@@ -154,7 +155,10 @@ export function terminalExecutionError(
   const provider = providerLabel(cli);
   const detail = resultDetail(inner);
   const subtype = typeof inner.subtype === 'string' ? inner.subtype : '';
-  const signal = `${subtype}\n${detail}`;
+  // The CLI reports several failures as ordinary assistant text plus a bare
+  // failed result, so the streamed turn text is part of the classification
+  // signal. Without it they all collapse into "dead local runner".
+  const signal = `${subtype}\n${detail}\n${lastTurnText ?? ''}`;
   const code = /^[a-z0-9_-]{1,64}$/i.test(subtype) ? subtype : 'execution_error';
 
   if (/cancel|interrupt|aborted/i.test(signal)) {
@@ -171,6 +175,24 @@ export function terminalExecutionError(
     return {
       message: `${provider}'s runner reached its configured budget for this turn. Try a smaller request.`,
       code,
+      retryable: true,
+    };
+  }
+  // Two warm-process failures that read as crashes but are not: the CLI's
+  // OAuth refresh lock colliding with a sibling process, and a model tool
+  // call that fails to parse even after the CLI's own retry nudge. Both are
+  // retryable and neither means the runner died.
+  if (/failed to refresh (?:the )?oauth token|another claude code process is refreshing/i.test(signal)) {
+    return {
+      message: `${provider}'s login token refresh collided with another ${provider} process. It clears on its own in a minute; send again.`,
+      code: 'oauth_refresh_collision',
+      retryable: true,
+    };
+  }
+  if (/tool call could not be parsed|failed to produce a valid tool call/i.test(signal)) {
+    return {
+      message: `${provider} sent a malformed tool call twice, so the turn stopped early. What finished is kept; send again to continue.`,
+      code: 'tool_call_unparseable',
       retryable: true,
     };
   }

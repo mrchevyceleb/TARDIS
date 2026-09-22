@@ -1561,7 +1561,12 @@ class ClaudeSession {
       : null;
     const terminal = providerTerminal
       ?? (ev?.type === 'result' && !expectedUserInterrupt
-        ? terminalExecutionError(this.cli, ev, this.syntheticApiErrorReason)
+        ? terminalExecutionError(
+            this.cli,
+            ev,
+            this.syntheticApiErrorReason,
+            [...this.streamTextBlocks.values()].map((block) => block.text).join('\n'),
+          )
         : null);
     // Z.ai meters the coding plan in fixed windows, so an exhausted window is
     // never a balance problem and topping up credits cannot clear it. Attribute
