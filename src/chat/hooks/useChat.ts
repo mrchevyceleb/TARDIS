@@ -345,11 +345,18 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const finalText = ev.type === 'result' && ev.is_error !== true && typeof ev.result === 'string'
       ? ev.result.trim()
       : '';
+    const sameReply = (left: string, right: string) => left.replace(/\s+/g, ' ').trim() === right.replace(/\s+/g, ' ').trim();
+    // Only this turn when we still know it. A replay (or a result that lands
+    // after the cursor was cleared) has no turn id, and an exact match then
+    // misses a reply the stream already showed with different line breaks.
+    // That paints the same answer twice. A closing copy is never a new bubble
+    // once any visible text already contains it.
     const finalTurnParts = closed
-      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && b.turnId === finalTurnId)
+      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && (!finalTurnId || b.turnId === finalTurnId))
       .map((b) => b.text);
-    const finalAlreadyRendered = finalTurnParts.some((part) => part.trim() === finalText)
-      || ['', '\n', '\n\n'].some((separator) => finalTurnParts.join(separator).trim() === finalText);
+    const finalAlreadyRendered = finalTurnParts.some((part) => sameReply(part, finalText))
+      || ['', '\n', '\n\n'].some((separator) => sameReply(finalTurnParts.join(separator), finalText))
+      || closed.some((b) => b.kind === 'text' && b.text.trim().length > 0 && sameReply(b.text, finalText));
     if (finalText && !finalAlreadyRendered) {
       return [...closed, {
         kind: 'text',
