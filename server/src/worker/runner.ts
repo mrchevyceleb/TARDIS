@@ -10,7 +10,7 @@ import { engineDefault } from '../lib/engineConfig.ts';
 // Model + reasoning effort the headless worker spawns claude with. Opus 4.7+ uses
 // adaptive thinking and ignores MAX_THINKING_TOKENS; the live lever is the
 // `--effort` flag (low|medium|high|xhigh|max). "max" is the top tier.
-const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', 'claude-opus-4-8', 'xhigh');
+const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', 'claude-opus-5-5', 'xhigh');
 
 export async function runJob(job: RivendellJob): Promise<DispatcherResult> {
   if (WORKER_RUNNER !== 'claude') {

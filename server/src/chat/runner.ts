@@ -139,7 +139,7 @@ export function wrapSlashArgs(text: string): string {
 // Model + reasoning effort every `claude` spawn runs with. Single source of
 // truth. Opus 4.7+ uses adaptive thinking and ignores MAX_THINKING_TOKENS; the
 // live lever is the `--effort` flag (low|medium|high|xhigh|max). "max" is top.
-const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', 'claude-opus-4-8', 'xhigh');
+const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', 'claude-opus-5-5', 'xhigh');
 
 // Z.ai coding plan — GLM models served over the Anthropic-compatible endpoint.
 // Runs through the same `claude` binary with the base URL + auth token

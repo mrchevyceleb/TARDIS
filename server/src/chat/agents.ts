@@ -70,7 +70,7 @@ export function cliForAgentEngine(engine: string): string {
 
 export function defaultAgentBrain(engine: string): Omit<AgentBrain, 'revision' | 'updatedAt'> {
   switch (VALID_ENGINES.has(engine) ? engine : 'claude') {
-    case 'claude': return { engine: 'claude', model: 'claude-opus-5', effort: 'xhigh' };
+    case 'claude': return { engine: 'claude', model: 'claude-opus-5-5', effort: 'xhigh' };
     case 'codex': return { engine: 'codex', model: 'gpt-5.6-sol', effort: 'low' };
     case 'zai': return { engine: 'zai', model: 'glm-5.3[1m]', effort: 'high' };
     case 'xai':
@@ -83,7 +83,7 @@ function cleanBrainValue(value: unknown): string | undefined {
   return value.trim().slice(0, 180) || undefined;
 }
 
-const CLAUDE_BRAIN_MODELS = new Set(['claude-opus-5', 'claude-fable-5-1', 'claude-fable-5']);
+const CLAUDE_BRAIN_MODELS = new Set(['claude-opus-5-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-fable-5']);
 const ZAI_BRAIN_MODELS = new Set(['glm-5.3[1m]', 'glm-5.3-flash[1m]', 'glm-5.2[1m]', 'glm-5.1']);
 const CODEX_BRAIN_EFFORTS: Record<string, ReadonlySet<string>> = {
   'gpt-6-astra': new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
