@@ -388,6 +388,9 @@ Rules for the document you produce:
 - SECURITY: never retain passwords, passcodes, OTPs, API keys, access/auth tokens, cookies, private keys, or other credential values. Replace every value with [redacted secret]. Keep only the fact that a credential exists and where the user intentionally stored it (for example, a vault service/account name).
 - The last ~50 visible turns stay in the live working window and are NOT your job — only merge what just aged out of that window.`;
 
+/** Upper bound on batches folded in one catch-up pass (~400 turns). */
+const MAX_CATCHUP_BATCHES = 8;
+
 const inFlight = new Set<string>();
 const compactEpoch = new Map<string, number>();
 
@@ -649,12 +652,14 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
     let compactText = previous;
     const total = rec?.userTurnsTotal ?? countUserEchoes(events);
 
-    for (let batch = 0; batch < 1; batch++) {
+    for (let batch = 0; batch < MAX_CATCHUP_BATCHES; batch++) {
       overflowNew = overflow.filter((t) => t.seq > lastCompactedSeq);
       if (overflowNew.length === 0) break;
-      // One overwrite consumes exactly one 50-message batch. Catch-up overflow
-      // remains durable and is folded by later batches rather than silently
-      // changing cadence after downtime.
+      // Each overwrite folds one 50-message batch. A backlog (a lane that ran
+      // without compaction, or downtime) is folded here in one pass, so the
+      // user sees one compaction instead of one on every other turn until it
+      // catches up. Only whole batches: a partial tail waits for its 50.
+      if (batch > 0 && !shouldCompactOverflow(overflowNew)) break;
       const overflowBatch = takeOverflowBatch(overflowNew.slice(0, COMPACT_BATCH_TURNS));
       if (overflowBatch.length === 0) break;
       console.warn(

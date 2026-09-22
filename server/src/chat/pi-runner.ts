@@ -32,7 +32,7 @@ import { computerGuidance } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import { setSessionId } from './sessions.ts';
 import { appendEventLog, appendEventLogSync, flushEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
-import { noteUserTurn, peekEnginePrimerThroughSeq } from './compaction.ts';
+import { maybeAutoCompact, noteUserTurn, peekEnginePrimerThroughSeq } from './compaction.ts';
 import { isAgentThread, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
@@ -412,6 +412,29 @@ export class PiSession {
     this.emit({ type: 'turnEnd', sessionId: this.piSessionId });
     const stale = this.hasStaleZaiProvider();
     if (stale) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
+    // Keep the rolling memory current on Pi lanes too. Without this a GLM or
+    // Grok stretch never compacted, so switching the lane back to Claude or
+    // Codex found hundreds of aged-out turns to fold at once.
+    else if (!failed) void this.maybeCompact();
+  }
+
+  /** Forever-thread compaction check, see compaction.ts. Pi keeps its own live
+   *  context, so like the Claude lane the saved compact only seeds the next
+   *  genuine process start; the warm session is never rotated for it. */
+  private async maybeCompact(): Promise<void> {
+    try {
+      await maybeAutoCompact({
+        key: this.logKey,
+        cli: this.cli,
+        chatId: this.chatId,
+        events: this.eventLog,
+        isBusy: () => this.turnStartedAt !== null,
+        emit: (ev) => this.emit(ev as SessionEvent),
+        rotate: () => !this.disposed && this.isAlive(),
+      });
+    } catch (err) {
+      console.warn(`[chat ${this.cli}/pi] compaction check failed for ${this.logKey}:`, (err as Error).message);
+    }
   }
 
   private onExit(code: number | null, signal: NodeJS.Signals | null): void {
