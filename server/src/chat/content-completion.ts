@@ -174,7 +174,10 @@ export async function completeSubscription(request: CompletionRequest, signal: A
       assertClaudeSubscription(env, cwd);
       // Fall back to the engine's default brain effort so a model-less request
       // never silently runs at the model's own (lower) default, e.g. Opus 5.5 medium.
-      const effort = request.reasoning_effort ?? brain.effort;
+      // Only when the brain also chose the model: an explicitly picked model
+      // (dictation cleanup's claude/haiku) must not inherit Opus's xhigh, which
+      // made every dictated section think for seconds.
+      const effort = request.reasoning_effort ?? (selectedModel ? undefined : brain.effort);
       const output = await runCli('claude', ['-p', '--safe-mode', '--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence', '--output-format', 'json', '--model', model, '--json-schema', JSON.stringify(schema), ...(effort ? ['--effort', effort] : [])], cwd, env, prompt, signal);
       const result = JSON.parse(output);
       if (result.is_error) throw new Error('Claude subscription generation failed.');
