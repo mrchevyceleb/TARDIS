@@ -12,6 +12,7 @@
  *   team_status  — authoritative current teammate activity
  *   team_message — durable async handoff; waits only when explicitly requested
  *   team_recent  — recent visible messages from a teammate's thread
+ *   routine_*    — list, create, update, run, delete TARDIS routines
  *
  * The server uses active-cycle detection and rate limits rather than a hard
  * chain-depth ceiling. Teammates can keep a legitimate collaboration going;
@@ -21,6 +22,8 @@
 import { createInterface } from 'node:readline';
 
 const BASE = process.env.RIVENDELL_TEAM_URL || 'http://127.0.0.1:8091';
+// Spawned by the TARDIS server on its own host, so this is the scheduler's zone.
+const SERVER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'server-local';
 
 const TOOLS = [
   {
@@ -141,6 +144,72 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'routine_list',
+    description: 'List TARDIS routines (scheduled prompts that fire into an agent\'s own thread). Defaults to yours; pass all:true for every agent\'s.',
+    inputSchema: {
+      type: 'object',
+      properties: { all: { type: 'boolean', description: 'List every agent\'s routines, not just yours' } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'routine_create',
+    description:
+      'Create a TARDIS routine: on a schedule, TARDIS sends `prompt` into the agent\'s own thread as a new turn, and it shows in the Automations panel. ' +
+      'This is the way to schedule recurring agent work; do not build assistant-mcp crons or shell timers for it. ' +
+      'Each run is a real turn that spends tokens, so only create one when Matt asked for it. ' +
+      'Write the prompt as instructions to your future self; TARDIS already tells each run to reply NO_UPDATE when nothing happened. ' +
+      'After creating, call routine_run once to prove it works.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Short name shown in the panel, e.g. "CFT Google Ads pull"' },
+        schedule: { type: 'string', description: `When it fires, in server-local time (${SERVER_TZ}): every:30m, every:2h, daily:09:00, weekdays:09:00, or cron:<5-field cron> (e.g. cron:0 9 * * 3 for Wednesdays 9am).` },
+        prompt: { type: 'string', description: 'What the agent should do each run' },
+        agent: { type: 'string', description: 'Teammate name or id to own it (default: you)' },
+        paused: { type: 'boolean', description: 'Create it paused (default false)' },
+      },
+      required: ['name', 'schedule', 'prompt'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'routine_update',
+    description: 'Change a routine by id (from routine_list): rename, reschedule, rewrite the prompt, or pause/resume with paused.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        name: { type: 'string' },
+        schedule: { type: 'string', description: `When it fires, in server-local time (${SERVER_TZ}): every:30m, every:2h, daily:09:00, weekdays:09:00, or cron:<5-field cron> (e.g. cron:0 9 * * 3 for Wednesdays 9am).` },
+        prompt: { type: 'string' },
+        paused: { type: 'boolean' },
+      },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'routine_run',
+    description: 'Fire a routine now, same as pressing Run in the panel. The prompt lands in the owner\'s thread (queued if that agent is mid-turn).',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'routine_delete',
+    description: 'Delete a routine by id. Prefer routine_update paused:true if it may come back.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 async function api(path, init, signal) {
@@ -166,6 +235,22 @@ function formatAgentStatus(agent) {
       ? `QUEUED · no live turn · ${agent.queuedMessages} handoff${agent.queuedMessages === 1 ? '' : 's'}`
       : 'IDLE';
   return `- ${agent.name} (${agent.id}) — ${agent.role} [${activity} · ${agent.engine}${agent.model ? ` · ${agent.model}` : ''}${agent.effort ? ` · ${agent.effort}` : ''}]`;
+}
+
+function describeRoutine(r) {
+  const last = r.lastRunAt ? new Date(r.lastRunAt).toLocaleString('en-US') : 'never';
+  return `- [${r.id}] ${r.name} · ${r.agentName ?? r.agentId} · ${r.schedule}${r.paused ? ' · PAUSED' : ''} · last run ${last}\n  ${r.prompt.replace(/\s+/g, ' ').slice(0, 160)}`;
+}
+
+async function resolveAgent(nameOrId, signal) {
+  const { agents } = await api('/api/team', undefined, signal);
+  const needle = String(nameOrId ?? '').trim().toLowerCase();
+  const byId = agents.find((a) => a.id.toLowerCase() === needle);
+  if (byId) return byId;
+  const byName = agents.filter((a) => a.name.trim().toLowerCase() === needle);
+  if (byName.length === 1) return byName[0];
+  if (byName.length > 1) throw new Error(`More than one teammate is named ${JSON.stringify(nameOrId)} (${byName.map((a) => a.id).join(', ')}). Pass the id.`);
+  throw new Error(`No teammate named ${JSON.stringify(nameOrId)}. Call team_list for the roster.`);
 }
 
 async function callTool(name, args, signal) {
@@ -251,6 +336,48 @@ async function callTool(name, args, signal) {
     const { messages } = await api(`/api/team/recent?name=${encodeURIComponent(args.name)}&limit=${args.limit ?? 8}`, undefined, signal);
     if (!messages?.length) return `No recent messages for ${args.name}.`;
     return messages.map((m) => `${m.who === 'agent' ? args.name : m.who === 'peer' ? '→ teammate msg' : 'user'}: ${m.text}`).join('\n');
+  }
+  if (name.startsWith('routine_')) {
+    const self = process.env.RIVENDELL_AGENT_NAME;
+    if (name === 'routine_list') {
+      const { routines } = await api('/api/routines', undefined, signal);
+      let mine = routines;
+      if (!args.all) {
+        if (!self) throw new Error('Pass all:true, or call this from a named teammate.');
+        const me = await resolveAgent(self, signal);
+        mine = routines.filter((r) => r.agentId === me.id);
+      }
+      if (!mine.length) return args.all ? 'No routines.' : 'You have no routines. Pass all:true to see everyone\'s.';
+      return mine.map(describeRoutine).join('\n');
+    }
+    if (name === 'routine_create') {
+      const owner = args.agent ?? self;
+      if (!owner) throw new Error('Pass agent: the teammate who should own it.');
+      const agent = await resolveAgent(owner, signal);
+      const { routine } = await api('/api/routines', {
+        method: 'POST',
+        body: JSON.stringify({ name: args.name, agentId: agent.id, schedule: args.schedule, prompt: args.prompt, paused: args.paused === true }),
+      }, signal);
+      return `Created for ${agent.name}:\n${describeRoutine({ ...routine, agentName: agent.name })}\nCall routine_run with id ${routine.id} to prove it works.`;
+    }
+    if (name === 'routine_update') {
+      const patch = {};
+      for (const key of ['name', 'schedule', 'prompt', 'paused']) if (args[key] !== undefined) patch[key] = args[key];
+      if (!Object.keys(patch).length) throw new Error('Nothing to change.');
+      const { routine } = await api(`/api/routines/${encodeURIComponent(args.id)}`, { method: 'PATCH', body: JSON.stringify(patch) }, signal);
+      // The update already landed; the re-read only adds the owner's name.
+      const listed = await api('/api/routines', undefined, signal).then((b) => b.routines.find((r) => r.id === routine.id), () => null);
+      return `Updated:\n${describeRoutine(listed ?? routine)}`;
+    }
+    if (name === 'routine_run') {
+      const result = await api(`/api/routines/${encodeURIComponent(args.id)}/run`, { method: 'POST' }, signal);
+      if (result.gated) return `Ran its pre-check only: ${result.gated}`;
+      return result.ran ? `Fired into ${result.agent}'s thread.` : `Did not fire: ${result.reason}`;
+    }
+    if (name === 'routine_delete') {
+      const { deleted } = await api(`/api/routines/${encodeURIComponent(args.id)}`, { method: 'DELETE' }, signal);
+      return deleted ? `Deleted ${args.id}.` : `No routine ${args.id}.`;
+    }
   }
   throw new Error(`unknown tool: ${name}`);
 }
