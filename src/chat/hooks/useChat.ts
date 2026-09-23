@@ -112,12 +112,20 @@ function isSyntheticApiErrorEvent(ev: any): boolean {
 // invokes reducers twice for purity-checking.
 type ReducerCursor = { current: string; peerId?: string };
 
+/** When a streamed event happened. Server-stamped `at` wins; a sequenced
+ *  event without one is pre-timestamp history, so its time is unknown and the
+ *  label is hidden rather than showing the replay time. */
+function eventTime(ev: any): { ts: number; tsApprox?: true } {
+  if (typeof ev?.at === 'number' && Number.isFinite(ev.at) && ev.at > 0) return { ts: ev.at };
+  return typeof ev?.seq === 'number' ? { ts: Date.now(), tsApprox: true } : { ts: Date.now() };
+}
+
 export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlock[] {
   if (!ev || typeof ev !== 'object') return blocks;
 
   if ((ev.type === 'stream_event' || ev.type === 'event') && ev.event) {
     const inner = ev.event && typeof ev.event === 'object'
-      ? { ...ev.event, seq: ev.seq ?? ev.event.seq }
+      ? { ...ev.event, seq: ev.seq ?? ev.event.seq, at: ev.at ?? ev.event.at }
       : ev.event;
     return reduce(blocks, inner, turnIdRef);
   }
@@ -362,7 +370,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         kind: 'text',
         id: id(),
         text: finalText,
-        ts: Date.now(),
+        ...eventTime(ev),
         turnId: finalTurnId,
         peerId: finalPeerId,
         cbIndex: -1,
@@ -390,7 +398,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const turnId = turnIdRef.current;
     if (cb?.type === 'text') {
       const block: ChatBlock = {
-        kind: 'text', id: id(), text: '', ts: Date.now(),
+        kind: 'text', id: id(), text: '', ...eventTime(ev),
         turnId, peerId: turnIdRef.peerId, cbIndex: idx, open: true,
         presentation: cb.phase === 'commentary' ? 'update' : cb.phase === 'final_answer' ? 'answer' : undefined,
         seq: typeof ev.seq === 'number' ? ev.seq : undefined,
@@ -401,7 +409,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       const block: ChatBlock = {
         kind: 'tool', id: id(),
         toolUseId: cb.id, tool: cb.name, args: '',
-        running: true, ts: Date.now(),
+        running: true, ...eventTime(ev),
         turnId, peerId: turnIdRef.peerId, cbIndex: idx, open: true,
       };
       return [...blocks, block];
@@ -484,7 +492,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       if (isSyntheticApiErrorEvent(ev)) return blocks;
       const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '');
       if (!hasText) {
-        return [...annotated, { kind: 'text', id: id(), text: fullText, ts: Date.now(), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation, seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
+        return [...annotated, { kind: 'text', id: id(), text: fullText, ...eventTime(ev), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation, seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
       }
     }
     return annotated;
@@ -1598,7 +1606,7 @@ export function useChat(opts: {
             compactingRef.current = false;
           }
           const streamed = msg.event && typeof msg.event === 'object'
-            ? { ...msg.event, seq: msg.seq ?? msg.event.seq }
+            ? { ...msg.event, seq: msg.seq ?? msg.event.seq, at: msg.at ?? msg.event.at }
             : msg.event;
           setBlocks((prev) => reduce(prev, streamed, turnIdRef));
           // Pick up the model id from claude's system/init event so the

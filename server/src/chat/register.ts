@@ -243,7 +243,7 @@ function activeSelectionOf(session: AnySession | null | undefined): { model?: st
   return selected ?? {};
 }
 
-type DispatchSeqEvent = { seq: number; ev: any };
+type DispatchSeqEvent = { seq: number; ev: any; at?: number };
 
 function isBananaTaggedError(se: DispatchSeqEvent): boolean {
   if (se.ev?.type !== 'error') return false;
@@ -749,7 +749,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             { cli: cliKind, repo: repoPath, chatId, logKey, clientMsgId: admittedClientMsgId },
           );
         }
-        safeSend({ type: 'stream', event: sev.event, seq: se.seq });
+        safeSend({ type: 'stream', event: sev.event, seq: se.seq, at: se.at });
       } else if (sev.type === 'turnStart') {
         busy = true;
         safeSend({ type: 'turnStart', seq: se.seq });

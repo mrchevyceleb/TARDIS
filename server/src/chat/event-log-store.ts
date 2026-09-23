@@ -30,6 +30,8 @@ export type PersistedEvent = {
   eng?: string;
   /** Model id that produced this event, when the engine reports one. */
   mdl?: string;
+  /** Wall-clock ms when the event was emitted (absent on older lines). */
+  at?: number;
 };
 
 export const EVENT_LOG_DIR = join(STATE_DIR, 'event-logs');
@@ -206,6 +208,7 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
         const event: PersistedEvent = { seq: parsed.seq, ev: parsed.ev as SessionEvent };
         if (typeof parsed.eng === 'string' && parsed.eng) event.eng = parsed.eng;
         if (typeof parsed.mdl === 'string' && parsed.mdl) event.mdl = parsed.mdl;
+        if (typeof parsed.at === 'number' && Number.isFinite(parsed.at)) event.at = parsed.at;
         events.push(event);
         eventChars.push(line.length);
       }

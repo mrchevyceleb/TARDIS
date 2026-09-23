@@ -16,8 +16,10 @@ import { isAutomationPeer, isNoopToken, shouldHideAutomationTurn } from '../../u
 import { BRAND, REGEN_QUOTES, THINKING_PHRASES, TIMEY_WIMEY } from '../../../theme/voice';
 
 export function timeLabel(ts: number): string {
+  if (!Number.isFinite(ts) || ts <= 0) return '';
   const d = new Date(ts);
-  return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+  if (!Number.isFinite(d.getTime())) return '';
+  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hourCycle: 'h12' });
 }
 
 function dayLabel(ts: number): string {
@@ -353,6 +355,7 @@ function PeerBubble({
           <span className="bt-peer-disc">{initial}</span>
           <span className="bt-peer-name">{block.from}</span>
           <span className="bt-peer-role">{role}</span>
+          {!block.tsApprox && timeLabel(block.ts) ? <span className="bt-peer-when">{timeLabel(block.ts)}</span> : null}
           {hasResponse || responseBusy ? (
             <span className={`bt-peer-status${responseBusy ? ' working' : ''}`} role="status" aria-live="polite">
               <i aria-hidden="true" /> {responseBusy
@@ -711,7 +714,7 @@ function ElrondGroup({
       onClick={mobile ? () => setActed((a) => !a) : undefined}
     >
       <div className="who">
-        <span className="mini">✦</span> {BRAND} <span className="when">{timeLabel(first.ts)}</span>
+        <span className="mini">✦</span> {BRAND} {'tsApprox' in first && first.tsApprox ? null : <span className="when">{timeLabel(first.ts)}</span>}
       </div>
       {visible.map((b) => {
         switch (b.kind) {

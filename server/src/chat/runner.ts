@@ -412,7 +412,9 @@ const ASSISTANT_AGENT_PROMPT =
 // dozen turns before reconnecting; old events fall off the tail.
 const EVENT_BUFFER_SIZE = 2000;
 
-export type SeqEvent = { seq: number; ev: SessionEvent };
+/** `at` = wall-clock ms when the event was emitted, so replayed history can
+ *  show real times (absent on events logged before 2026-09-23). */
+export type SeqEvent = { seq: number; ev: SessionEvent; at?: number };
 
 class ClaudeSession {
   readonly key: string;
@@ -1346,7 +1348,7 @@ class ClaudeSession {
     // the retiring process. Do not allocate, persist, or deliver it.
     if (this.disposed || isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
-    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg };
+    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now() };
     const persisted = { ...se, eng: this.cli, mdl: this.spawnModel };
     const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
     // A user echo is the admission commit. Persist it synchronously before any
@@ -1693,6 +1695,7 @@ export function markBusyLanesRestarting(signal: string): number {
       // SYNC write: a dying process can't be trusted to flush an async queue.
       const written = appendEventLogSync(session.logKey, {
         seq: session.reserveSeq(),
+        at: Date.now(),
         ev: restartMarkerEvent(signal) as never,
         eng: session.cli,
         mdl: session.spawnModel,

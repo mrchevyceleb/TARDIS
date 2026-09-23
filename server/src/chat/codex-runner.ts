@@ -1068,7 +1068,7 @@ export class CodexSession {
     msg = redactComputerImages(msg);
     if (isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
-    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg };
+    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now() };
     const persisted = { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) };
     const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
     if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) {
@@ -1302,6 +1302,7 @@ export function markBusyCodexLanesRestarting(signal: string): number {
       const session = s as unknown as { logKey: string; reserveSeq(): number; cli: string };
       if (appendEventLogSync(session.logKey, {
         seq: session.reserveSeq(),
+        at: Date.now(),
         ev: restartMarkerEvent(signal) as never,
         eng: session.cli,
       })) marked++;

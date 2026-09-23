@@ -591,7 +591,7 @@ export class PiSession {
     msg = redactComputerImages(msg);
     if (this.disposed || isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
-    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg };
+    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now() };
     const persisted = { ...se, eng: this.cli, mdl: this.spawnModel };
     const durableUserEcho = msg.type === 'event' && (msg as any).event?.type === '_user_echo';
     if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) throw new Error('could not durably accept the user message');

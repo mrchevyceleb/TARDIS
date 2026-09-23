@@ -165,6 +165,7 @@ export function filterAutomationNoise(blocks: ChatBlock[]): ChatBlock[] {
         fromRole: 'automation-result',
         text: deliverable.text,
         ts: deliverable.ts,
+        ...(deliverable.tsApprox ? { tsApprox: true } : {}),
       });
     }
     i = j;

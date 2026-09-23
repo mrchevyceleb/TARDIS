@@ -72,6 +72,8 @@ export type ChatBlock =
       deliveryId?: string;
       text: string;
       ts: number;
+      /** Time unknown (history logged before events were time-stamped). */
+      tsApprox?: boolean;
     }
   | {
       /** Auto-compaction marker — the thread's model context rotated with a
@@ -118,6 +120,8 @@ export type ChatBlock =
       id: string;
       text: string;
       ts: number;
+      /** Time unknown (history logged before events were time-stamped). */
+      tsApprox?: boolean;
       folio?: string;
       /** Provider-tagged tool-bound update vs completed answer. This is a
        * presentation distinction, never a reason to hide user-facing text. */
@@ -140,6 +144,8 @@ export type ChatBlock =
       result?: string;
       running: boolean;
       ts: number;
+      /** Time unknown (history logged before events were time-stamped). */
+      tsApprox?: boolean;
       turnId?: string;
       /** Teammate message this tool activity belongs to, when applicable. */
       peerId?: string;
