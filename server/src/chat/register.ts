@@ -890,7 +890,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       if (replaying) {
         const durableReplay: DispatchSeqEvent[] = events
           .filter((event) => event.seq > replaySince)
-          .map((event) => ({ seq: event.seq, ev: event.ev as any }));
+          .map((event) => ({ seq: event.seq, ev: event.ev as any, at: event.at }));
         const seenSeq = new Set<number>();
         const merged = [...durableReplay, ...liveReplay]
           .sort((a, b) => a.seq - b.seq)
@@ -944,7 +944,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       if (replaySince >= 0) {
         const pending: DispatchSeqEvent[] = events
           .filter((event) => event.seq > replaySince)
-          .map((event) => ({ seq: event.seq, ev: event.ev as any }));
+          .map((event) => ({ seq: event.seq, ev: event.ev as any, at: event.at }));
         const history = clampReplayWindow(
           collapseHistoricalToolArgs(filterReplayEvents(pending), latest)
             .map((se) => historicalDelivery(se))
