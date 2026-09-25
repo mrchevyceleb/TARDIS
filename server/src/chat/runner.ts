@@ -30,7 +30,7 @@ import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts'
 import { getXaiOauthToken } from '../routes/xai-oauth.ts';
 import { isRobotVoiceChatId, isVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STYLE_ADDENDUM, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
-import { saveChatAttachments } from '../routes/chatAttachments.ts';
+import { chatAttachmentPath, saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
@@ -817,7 +817,7 @@ class ClaudeSession {
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
-  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean } = {}): Promise<void> {
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
     // Every caller (human, teammate, routine) shares this admission barrier.
     // A read-only MCP control warmup can never reject or absorb a real message.
@@ -911,6 +911,17 @@ class ClaudeSession {
     let promptText = text;
     let outImages = images;
     let visionNote: string | undefined;
+    // A screenshot steered into a running turn cannot ride the tool-window
+    // stdin as an image block, and waiting for the turn to end held Matt's
+    // screenshots for 20+ minutes. Hand the saved files over by path instead
+    // so the agent can open them immediately.
+    if (opts.imagesAsFiles && images?.length && !opts.peerFrom) {
+      const paths = attachments.map((a) => chatAttachmentPath(a.id));
+      promptText = paths.length
+        ? `${text}\n\n[Matt attached ${paths.length === 1 ? 'a screenshot' : `${paths.length} screenshots`}. Open ${paths.length === 1 ? 'it' : 'them'} with the Read tool before replying: ${paths.join(', ')}]`
+        : `${text}\n\n[Matt attached ${images.length === 1 ? 'a screenshot' : 'screenshots'} that could not be saved. Ask him to resend if it matters.]`;
+      outImages = undefined;
+    }
     if (this.cli === 'zai' && images && images.length) {
       const result = await adaptImagesForTextModel({ text, images, modelSupportsImages: false });
       if (result.adapted) {

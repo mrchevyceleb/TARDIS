@@ -13,6 +13,11 @@ import { STATE_DIR } from '../config.ts';
 import { asyncHandler } from './helpers.ts';
 
 const ATTACH_DIR = join(STATE_DIR, 'attachments');
+
+/** Absolute path of a saved attachment id, for handing a file to an agent. */
+export function chatAttachmentPath(id: string): string {
+  return join(ATTACH_DIR, id);
+}
 // A pasted screenshot is a few hundred KB; 12 MB per image leaves room for
 // full-res photos without letting a runaway client fill the disk.
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;

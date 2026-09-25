@@ -1477,7 +1477,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // A pending authoritative brain change must still wait for the
           // natural boundary so guidance cannot land on the old model after a
           // central reconfiguration.
-          const hasSteerImages = Boolean(msg.images && msg.images.length > 0);
+          // Claude-family engines take steered screenshots as saved files (see
+          // runner imagesAsFiles), so only other engines wait for a turn end.
+          const steerImagesAsFiles = Boolean(msg.images && msg.images.length > 0) && isClaudeFamilyCli(steerCli);
+          const hasSteerImages = Boolean(msg.images && msg.images.length > 0) && !steerImagesAsFiles;
           let nativeActiveSteer = Boolean(
             session
             && !needsAuthoritativeBoundary
@@ -1701,6 +1704,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                   clientMsgId: msg.clientMsgId,
                   allowNativeHumanSteer: nativeActiveSteer,
                   voiceMode: msg.voice === true,
+                  imagesAsFiles: nativeActiveSteer && steerImagesAsFiles,
                   signal: steerAborter.signal,
                 });
                 break;
