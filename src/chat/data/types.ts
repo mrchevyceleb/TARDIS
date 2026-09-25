@@ -106,6 +106,17 @@ export type ChatBlock =
       ts: number;
     }
   | {
+      /** Background work (shells, subagents) that a Stop, restart or reset
+       *  ended, or that is holding off a model change. Plain-words note,
+       *  rendered as a divider, never a bubble. */
+      kind: 'background';
+      id: string;
+      state: 'ended' | 'kept';
+      text: string;
+      tasks: string[];
+      ts: number;
+    }
+  | {
       /** Brain change mid-thread. The conversation continues; only the engine
        *  that will answer the next turn changed. */
       kind: 'switch';

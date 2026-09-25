@@ -173,6 +173,17 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     }];
   }
 
+  if (ev.type === '_background_work' && typeof ev.text === 'string' && ev.text) {
+    return [...blocks, {
+      kind: 'background',
+      id: id(),
+      state: ev.state === 'kept' ? 'kept' : 'ended',
+      text: ev.text,
+      tasks: Array.isArray(ev.tasks) ? ev.tasks.filter((task: unknown): task is string => typeof task === 'string') : [],
+      ts: typeof ev.ts === 'number' ? ev.ts : Date.now(),
+    }];
+  }
+
   // Service-restart marker (assistant-shaped so the agent reads it in seeds;
   // rendered as a divider, not a bubble). Killed the in-flight turn, so close
   // its open/running blocks too — otherwise a dead tool card ticks "working"
@@ -1585,11 +1596,14 @@ export function useChat(opts: {
             }
           }
           const innerType = evType === 'stream_event' ? ev?.event?.type : evType;
-          const provesActiveTurn = evType === '_user_echo'
+          // A background subagent's own frames (parent_tool_use_id) arrive while
+          // the lane is idle. They never open a turn on the server, so they
+          // must not flip this view to "working" either.
+          const provesActiveTurn = !ev?.parent_tool_use_id && (evType === '_user_echo'
             || evType === 'assistant'
             || innerType === 'message_start'
             || innerType === 'content_block_start'
-            || innerType === 'content_block_delta';
+            || innerType === 'content_block_delta');
           if (socketReady && provesActiveTurn) {
             setError(null);
             markTurnStarted();

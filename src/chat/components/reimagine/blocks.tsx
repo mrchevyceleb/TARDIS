@@ -482,6 +482,19 @@ function SwitchDivider({ block }: { block: Extract<ChatBlock, { kind: 'switch' }
   );
 }
 
+function BackgroundNote({ block }: { block: Extract<ChatBlock, { kind: 'background' }> }) {
+  const title = block.state === 'kept'
+    ? 'Background work runs inside this session, so switching models now would end it. The switch waits for it to finish, or for your next message after 15 minutes.'
+    : 'This background work ended without reporting back. The agent is told on its next turn.';
+  return (
+    <div className="compact-mark background-mark" title={title}>
+      <span className="compact-line" />
+      <span className="compact-label">{block.text}</span>
+      <span className="compact-line" />
+    </div>
+  );
+}
+
 // ── user bubble ───────────────────────────────────────────────────────────
 function UserBubble({ block }: { block: Extract<ChatBlock, { kind: 'user' }> }) {
   const images = block.images ?? [];
@@ -846,6 +859,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     | { type: 'restart'; block: Extract<ChatBlock, { kind: 'restart' }>; day: string }
     | { type: 'terminal-error'; block: Extract<ChatBlock, { kind: 'terminal-error' }>; day: string }
     | { type: 'switch'; block: Extract<ChatBlock, { kind: 'switch' }>; day: string }
+    | { type: 'background'; block: Extract<ChatBlock, { kind: 'background' }>; day: string }
     | { type: 'peer'; block: Extract<ChatBlock, { kind: 'peer' }>; responseBlocks: AssistantBlock[]; responseTurnId?: string | null; day: string }
   > = [];
   type PeerGroup = Extract<(typeof groups)[number], { type: 'peer' }>;
@@ -867,6 +881,10 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     }
     if (b.kind === 'switch') {
       groups.push({ type: 'switch', block: b, day: lastDay || day });
+      continue;
+    }
+    if (b.kind === 'background') {
+      groups.push({ type: 'background', block: b, day: lastDay || day });
       continue;
     }
     if (b.kind === 'user') {
@@ -951,7 +969,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       hideThinking = true;
       continue;
     }
-    if (g.type === 'user' || g.type === 'compact' || g.type === 'restart' || g.type === 'terminal-error' || g.type === 'switch' || g.type === 'peer') {
+    if (g.type === 'user' || g.type === 'compact' || g.type === 'restart' || g.type === 'terminal-error' || g.type === 'switch' || g.type === 'background' || g.type === 'peer') {
       pendingAutomation = false;
       hideThinking = false;
     }
@@ -997,6 +1015,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       nodes.push(<TerminalErrorCard key={g.block.id} block={g.block} />);
     } else if (g.type === 'switch') {
       nodes.push(<SwitchDivider key={g.block.id} block={g.block} />);
+    } else if (g.type === 'background') {
+      nodes.push(<BackgroundNote key={g.block.id} block={g.block} />);
     } else if (g.type === 'peer') {
       nodes.push(
         <PeerBubble

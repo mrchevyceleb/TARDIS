@@ -487,6 +487,14 @@
   color: var(--r-rose);
   font-weight: 500;
 }
+/* Background work a Stop/restart ended (or a model switch is waiting on).
+   Task names are the point, so let the line wrap instead of ellipsizing. */
+.background-mark .compact-label {
+  white-space: normal;
+  text-align: center;
+  max-width: 78%;
+  color: var(--r-ink-mute);
+}
 /* Regeneration — same agent, new face. A golden energy sweep runs twice on
    mount, then rests; never infinite inside a long transcript. */
 .compact-mark.regen-mark .compact-line { position: relative; overflow: hidden; }
