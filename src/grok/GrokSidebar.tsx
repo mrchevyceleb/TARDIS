@@ -326,6 +326,9 @@ export function BotRail(props: BotRailProps) {
     document.body.classList.toggle('bt-rail-resizing', resizingRail);
     return () => document.body.classList.remove('bt-rail-resizing');
   }, [resizingRail]);
+  // A drag in progress when the rail unmounts still drops its listeners.
+  const endRailResizeRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => endRailResizeRef.current?.(), []);
   const startRailResize = (e: ReactPointerEvent<HTMLDivElement>) => {
     const rail = railRef.current;
     if (e.button !== 0 || !rail) return;
@@ -336,8 +339,10 @@ export function BotRail(props: BotRailProps) {
     const end = () => {
       handle.removeEventListener('pointermove', move);
       for (const type of ['pointerup', 'pointercancel', 'lostpointercapture'] as const) handle.removeEventListener(type, end);
+      endRailResizeRef.current = null;
       setResizingRail(false);
     };
+    endRailResizeRef.current = end;
     handle.setPointerCapture(e.pointerId);
     handle.addEventListener('pointermove', move);
     for (const type of ['pointerup', 'pointercancel', 'lostpointercapture'] as const) handle.addEventListener(type, end);
