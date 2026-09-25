@@ -71,7 +71,8 @@ function completionOutputSchema(request: CompletionRequest) {
 }
 
 function killChild(child: ChildProcess): void {
-  if (!child.pid) return;
+  // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
+  if (!child.pid || child.pid <= 1) return;
   if (process.platform === 'win32') {
     const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
     killer.on('error', () => { try { child.kill('SIGKILL'); } catch {} });

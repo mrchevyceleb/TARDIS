@@ -610,10 +610,10 @@ function pickServePort(previous?: number): number {
 }
 
 function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
+  if (!child.pid || child.pid <= 1) return;
   try { child.kill(signal); } catch {}
-  if (child.pid) {
-    try { process.kill(-child.pid, signal); } catch {}
-  }
+  try { process.kill(-child.pid, signal); } catch {}
 }
 
 // ── OpenRouter (direct) + Fireworks ──────────────────────────────────────

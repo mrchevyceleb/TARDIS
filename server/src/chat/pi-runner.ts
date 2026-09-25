@@ -583,8 +583,11 @@ export class PiSession {
     this.disposed = true;
     console.log(`[chat ${this.cli}/pi] shutdown key=${this.key} reason=${reason}`);
     try { this.child.stdin.end(); } catch { /* closed */ }
-    try { process.kill(-this.child.pid!, 'SIGTERM'); } catch { try { this.child.kill('SIGTERM'); } catch { /* gone */ } }
-    setTimeout(() => { try { process.kill(-this.child.pid!, 'SIGKILL'); } catch { /* gone */ } }, 3000).unref();
+    // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
+    const pid = this.child.pid;
+    if (!pid || pid <= 1) return;
+    try { process.kill(-pid, 'SIGTERM'); } catch { try { this.child.kill('SIGTERM'); } catch { /* gone */ } }
+    setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } }, 3000).unref();
   }
 
   private emit(msg: SessionEvent): void {

@@ -48,11 +48,11 @@ const CODEX_BIN = resolveCodexBin();
 console.log(`[chat codex] binary: ${CODEX_BIN}`);
 
 function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
-  const descendants = child.pid ? collectDescendantPids(child.pid) : [];
+  // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
+  if (!child.pid || child.pid <= 1) return;
+  const descendants = collectDescendantPids(child.pid);
   try { child.kill(signal); } catch {}
-  if (child.pid) {
-    try { process.kill(-child.pid, signal); } catch {}
-  }
+  try { process.kill(-child.pid, signal); } catch {}
   for (const pid of descendants.reverse()) {
     try { process.kill(pid, signal); } catch {}
   }
@@ -85,7 +85,7 @@ function collectDescendantPids(pid: number): number[] {
     const children = out
       .split(/\s+/)
       .map((value) => Number(value))
-      .filter((value) => Number.isInteger(value) && value > 0);
+      .filter((value) => Number.isInteger(value) && value > 1);
     return children.flatMap((childPid) => [childPid, ...collectDescendantPids(childPid)]);
   } catch {
     return [];
