@@ -326,7 +326,12 @@ function PeerBubble({
   const text = cleanPeerMessageText(block.text);
   const bodyId = `peer-message-${block.id}`;
   const hasResponse = responseBlocks.length > 0;
-  const publicResponseBlocks = responseBlocks.filter((item) => item.kind !== 'tool');
+  // A settled NO_UPDATE / empty reply renders nothing, so it must not leave an
+  // empty timestamped bubble under the peer card.
+  const publicResponseBlocks = responseBlocks.filter((item) => (
+    item.kind !== 'tool'
+    && !(item.kind === 'text' && !item.open && (!item.text.trim() || isProtocolNoopText(item.text)))
+  ));
   const responseToolCount = responseBlocks.filter((item) => item.kind === 'tool').length;
   // The peer boundary, not individual content-block open flags, owns progress.
   // Providers can briefly close one block before opening the next; the exchange
