@@ -148,7 +148,7 @@
 .rc-desktop .m-elrond:hover .acts, .rc-desktop .m-elrond:focus-within .acts { opacity: 1; }
 .rc .m-elrond:has(.acts.react-open) { overflow: visible; }
 .rc-desktop .msg:hover .when { opacity: 1; }
-.rc-desktop .m-user .when, .rc-desktop .m-elrond .when { opacity: 0; transition: opacity .2s ease; }
+.rc-desktop .m-user .when, .rc-desktop .m-elrond .when { opacity: .75; transition: opacity .2s ease; }
 .rc .act { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px;
   border: 1px solid var(--border); font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); transition: all .15s ease; }
 .rc .act:hover { color: var(--fg); border-color: var(--border-strong); background: var(--surface-hover); }
@@ -513,6 +513,7 @@
 .rc-mobile .prose { max-width: 95%; }
 .rc-mobile .acts { height: 0; opacity: 0; overflow: hidden; transition: all .22s var(--ease-out); }
 .rc-mobile .m-elrond.acted .acts, .rc-mobile .acts.react-open { height: 26px; opacity: 1; overflow: visible; }
+.rc-mobile .m-elrond .when { opacity: .85; }
 .rc-mobile .m-elrond.acted .when { opacity: 1; }
 .rc-mobile .tool { max-width: none; }
 .rc-mobile .tool-head { min-height: 44px; padding: 8px 14px; }

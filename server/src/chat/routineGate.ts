@@ -235,21 +235,28 @@ export function applyWatermark(source: GateSource, items: GateItem[], state: Sou
   return items.filter((i) => !seen.has(i.id));
 }
 
-/** An item whose wake score landed just under its threshold is not a "no",
- *  it is "not yet": a deadline mail scored 0.6 today may be 0.9 tomorrow. Keep
- *  those out of the seen set so the next tick judges them again with a newer
- *  `now`, instead of acknowledging them forever. */
+/** An item whose wake score landed under its threshold is not handled.
+ *  A deadline mail scored 0.6 today may be 0.9 tomorrow, and a mention scored
+ *  as "no reply needed" is exactly how a real ask gets swallowed: the search
+ *  saw it, the watermark jumped, and nobody was told. Keep every sub-threshold
+ *  wake item out of the watermark so the next tick judges it again. A clear
+ *  no still comes back, which is the cost of not losing one. */
 export const RECONSIDER_BAND = 0.25;
 export function shouldReconsider(item: GateItem, config: RoutineGateConfig, scores: Record<string, number>): boolean {
   return config.judges.some((j) => j.action === 'wake' && (j.sources?.includes(item.source) ?? true)
-    && scores[j.id] !== undefined && scores[j.id] < j.threshold && scores[j.id] >= j.threshold - RECONSIDER_BAND);
+    && scores[j.id] !== undefined && scores[j.id] < j.threshold);
 }
 
-export function nextSourceState(source: GateSource, judged: GateItem[], all: GateItem[], prior: SourceState | undefined): SourceState {
+export function nextSourceState(source: GateSource, judged: GateItem[], all: GateItem[], prior: SourceState | undefined, held?: ReadonlySet<GateItem>): SourceState {
   const mode = source.watermark ?? 'id';
   if (mode === 'none') return prior ?? {};
   if (mode === 'ts') {
-    const newest = all.map((i) => i.ts).filter((t): t is string => Boolean(t)).sort().at(-1);
+    // A timestamp watermark covers everything up to the newest item. Holding
+    // one item open means the mark stops at the newest item we actually
+    // settled, so the held one (and anything after it) comes back next tick.
+    const open = held && [...held].some((it) => it.source === source.id);
+    const pool = open ? judged.filter((it) => !held!.has(it)) : all;
+    const newest = pool.map((i) => i.ts).filter((t): t is string => Boolean(t)).sort().at(-1);
     const hw = prior?.tsHighWater;
     return { tsHighWater: newest && (!hw || newest > hw) ? newest : hw ?? new Date().toISOString() };
   }
@@ -396,9 +403,13 @@ export async function runRoutineGate(routineId: string, config: RoutineGateConfi
     if (opts.dryRun) return;
     const latest = readState();
     const next: Record<string, SourceState> = { ...(latest[routineId] ?? {}) };
+    // Wake items are not handled until the digest is delivered. Holding them
+    // out of the watermark means a run that sees a mention and then dies
+    // before reporting it will see the same mention next tick.
+    const held = new Set(decision.wake);
     for (const f of fetched) {
-      const settled = f.fresh.filter((it) => !shouldReconsider(it, config, decision.scores.get(it) ?? {}));
-      next[f.source.id] = nextSourceState(f.source, settled, f.all, next[f.source.id]);
+      const settled = f.fresh.filter((it) => !held.has(it) && !shouldReconsider(it, config, decision.scores.get(it) ?? {}));
+      next[f.source.id] = nextSourceState(f.source, settled, f.all, next[f.source.id], held);
     }
     writeState({ ...latest, [routineId]: next });
   };

@@ -48,7 +48,7 @@ import { internalRouter } from './routes/internal.ts';
 import { xaiOauthRouter } from './routes/xai-oauth.ts';
 import { primeXaiOauthToken } from './chat/runner.ts';
 import { migrateAgentThreadLogs } from './chat/threadMigrate.ts';
-import { markBusyLanesRestarting, activeClaudeSessions } from './chat/runner.ts';
+import { markBackgroundWorkEndedByRestart, markBusyLanesRestarting, activeClaudeSessions } from './chat/runner.ts';
 import { flushAllEventChains } from './chat/event-log-store.ts';
 import { markBusyCodexLanesRestarting, activeCodexSessions } from './chat/codex-runner.ts';
 import { markBusyBananaLanesRestarting, activeBananaSessions } from './chat/banana-runner.ts';
@@ -69,10 +69,14 @@ const CONTENT_ROOM_ENABLED =
   (process.env.RIVENDELL_CONTENT_ROOM?.trim().toLowerCase() ?? '') !== 'off';
 
 app.get('/api/health', (_req, res) => {
+  const claudeSessions = activeClaudeSessions();
   const busyTurns =
-    activeClaudeSessions().filter((s) => s.busy).length +
+    claudeSessions.filter((s) => s.busy).length +
     activeCodexSessions().filter((s) => s.busy).length +
     activeBananaSessions().filter((s) => s.busy).length;
+  const backgroundLanes = claudeSessions
+    .filter((s) => s.backgroundTasks?.length)
+    .map((s) => ({ cli: s.cli, chatId: s.chatId, tasks: s.backgroundTasks!.length }));
   res.json({
     ok: true,
     app: 'rivendell',
@@ -82,6 +86,11 @@ app.get('/api/health', (_req, res) => {
     /** In-flight turns right now. A restart kills them mid-flight — deploys
      *  MUST check this is 0 (or accept the tombstone) before bouncing. */
     busyTurns,
+    /** Background shells/subagents running inside Claude lanes. A restart ends
+     *  them too (each lane gets a note naming what ended), so check this with
+     *  busyTurns before bouncing. */
+    backgroundTasks: backgroundLanes.reduce((sum, lane) => sum + lane.tasks, 0),
+    backgroundLanes,
     /** The Content rooms are a per-deployment surface, not core TARDIS. An
      *  instance that does not run the content engine hides them entirely.
      *  Opt-out rather than opt-in so an existing deployment keeps working
@@ -254,6 +263,12 @@ const tearDown = (signal: NodeJS.Signals) => {
     if (marked > 0) console.warn(`[tardis] marked ${marked} busy lane(s) with the restart tombstone`);
   } catch (err) {
     console.warn('[tardis] restart tombstone failed:', (err as Error).message);
+  }
+  try {
+    const noted = markBackgroundWorkEndedByRestart();
+    if (noted > 0) console.warn(`[tardis] noted ended background work in ${noted} lane(s)`);
+  } catch (err) {
+    console.warn('[tardis] background-work note failed:', (err as Error).message);
   }
   // Stop all sessions NOW so no new events enqueue after the flush below.
   stopWorkerQueue();

@@ -11,7 +11,7 @@
 // [+] creates a companion (name/role/engine/scope). Every row = a companion and
 // its ONE persistent forever-thread. Scratch threads surface via search only.
 
-import { useCallback, useMemo, useRef, useState, useEffect, type KeyboardEvent as ReactKeyEvent, type MouseEvent } from 'react';
+import { useCallback, useMemo, useRef, useState, useEffect, type CSSProperties, type KeyboardEvent as ReactKeyEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Activity,
@@ -217,6 +217,29 @@ function dayStamp(ts: number): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+/** Drop target meaning "after the last pinned bubble". */
+const PINS_END = '__pins_end__';
+
+// Desktop rail width, dragged from its right edge and kept per browser.
+const RAIL_WIDTH_KEY = 'rivendell:rail-width';
+const RAIL_MIN = 280;
+const RAIL_MAX = 560;
+const RAIL_DEFAULT = 350;
+const RAIL_KEY_STEP = 16;
+
+function clampRailWidth(width: number): number {
+  return Math.min(RAIL_MAX, Math.max(RAIL_MIN, Math.round(width)));
+}
+
+function storedRailWidth(): number {
+  try {
+    const saved = Number(localStorage.getItem(RAIL_WIDTH_KEY));
+    return Number.isFinite(saved) && saved > 0 ? clampRailWidth(saved) : RAIL_DEFAULT;
+  } catch {
+    return RAIL_DEFAULT;
+  }
+}
+
 export function BotRail(props: BotRailProps) {
   const flags = useDeploymentFlags();
   const [query, setQuery] = useState('');
@@ -291,6 +314,41 @@ export function BotRail(props: BotRailProps) {
     return set;
   }, [live, props.agents, props.hubRepo]);
 
+  const railRef = useRef<HTMLElement | null>(null);
+  const [railWidth, setRailWidth] = useState(storedRailWidth);
+  const [resizingRail, setResizingRail] = useState(false);
+  // Save once a drag settles, not on every pointer move.
+  useEffect(() => {
+    if (resizingRail) return;
+    try { localStorage.setItem(RAIL_WIDTH_KEY, String(railWidth)); } catch { /* private mode */ }
+  }, [railWidth, resizingRail]);
+  useEffect(() => {
+    document.body.classList.toggle('bt-rail-resizing', resizingRail);
+    return () => document.body.classList.remove('bt-rail-resizing');
+  }, [resizingRail]);
+  // A drag in progress when the rail unmounts still drops its listeners.
+  const endRailResizeRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => endRailResizeRef.current?.(), []);
+  const startRailResize = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const rail = railRef.current;
+    if (e.button !== 0 || !rail) return;
+    e.preventDefault();
+    const handle = e.currentTarget;
+    const left = rail.getBoundingClientRect().left;
+    const move = (ev: PointerEvent) => setRailWidth(clampRailWidth(ev.clientX - left));
+    const end = () => {
+      handle.removeEventListener('pointermove', move);
+      for (const type of ['pointerup', 'pointercancel', 'lostpointercapture'] as const) handle.removeEventListener(type, end);
+      endRailResizeRef.current = null;
+      setResizingRail(false);
+    };
+    endRailResizeRef.current = end;
+    handle.setPointerCapture(e.pointerId);
+    handle.addEventListener('pointermove', move);
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture'] as const) handle.addEventListener(type, end);
+    setResizingRail(true);
+  };
+
   // Pinned bubble strip (manual, user-pinned; order follows the drag order).
   const pins = useMemo(
     () => props.agents.filter((a) => a.pinned),
@@ -302,13 +360,23 @@ export function BotRail(props: BotRailProps) {
   // bubble's position in the FULL order (list rows keep their relative order).
   const [pinDrag, setPinDrag] = useState<string | null>(null);
   const [pinDropBefore, setPinDropBefore] = useState<string | null>(null);
+  // The strip wraps into rows, so a bubble's right half means "before the
+  // next pin" (PINS_END after the last one), which makes every slot reachable.
+  const pinDropTarget = (index: number, e: React.DragEvent) => {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    if (e.clientX < rect.left + rect.width / 2) return pins[index].id;
+    return pins[index + 1]?.id ?? PINS_END;
+  };
   const commitPinReorder = () => {
     if (!pinDrag || !pinDropBefore || pinDrag === pinDropBefore) {
       setPinDrag(null); setPinDropBefore(null); return;
     }
     const next = [...agentIds];
     const from = next.indexOf(pinDrag);
-    const to = next.indexOf(pinDropBefore);
+    const lastPin = pins.at(-1);
+    const to = pinDropBefore === PINS_END
+      ? (lastPin ? next.indexOf(lastPin.id) + 1 : -1)
+      : next.indexOf(pinDropBefore);
     if (from < 0 || to < 0) { setPinDrag(null); setPinDropBefore(null); return; }
     next.splice(from, 1);
     next.splice(from < to ? to - 1 : to, 0, pinDrag);
@@ -361,7 +429,7 @@ export function BotRail(props: BotRailProps) {
   };
 
   return (
-    <aside className={`bt-rail${props.drawerOpen ? ' drawer-open' : ''}`}>
+    <aside className={`bt-rail${props.drawerOpen ? ' drawer-open' : ''}`} ref={railRef} style={{ '--bt-rail-w': `${railWidth}px` } as CSSProperties}>
       <div className="bt-rail-head">
         <button className={`bt-mark-btn${lampFlash ? ' flash' : ''}`} onClick={() => { props.onHome(); onLampTap(); }} title="TARDIS home" aria-label="TARDIS home">
           <BotMark size={26} />
@@ -399,13 +467,16 @@ export function BotRail(props: BotRailProps) {
       <div className="bt-rail-scroll">
         {pins.length && !query.trim() ? (
           <div className="bt-pins" role="group" aria-label="Pinned companions">
-            {pins.map((a) => {
+            {pins.map((a, index) => {
               const isActive = props.activeChat && sameChatId(props.activeChat.chatId, a.home);
               const url = agentAvatarUrl(a);
+              const dropHere = pinDrag && pinDrag !== a.id;
+              const dropLeft = dropHere && pinDropBefore === a.id;
+              const dropRight = dropHere && pinDropBefore === PINS_END && index === pins.length - 1;
               return (
                 <button
                   key={`pin:${a.id}`}
-                  className={`bt-pin${isActive ? ' on' : ''}${a.muted ? ' muted' : ''}${pinDrag === a.id ? ' dragging' : ''}${pinDropBefore === a.id && pinDrag && pinDrag !== a.id ? ' drop-left' : ''}`}
+                  className={`bt-pin${isActive ? ' on' : ''}${a.muted ? ' muted' : ''}${pinDrag === a.id ? ' dragging' : ''}${dropLeft ? ' drop-left' : ''}${dropRight ? ' drop-right' : ''}`}
                   onClick={() => props.onOpenAgent(a)}
                   onContextMenu={(e) => openAgentMenu(e, a)}
                   aria-haspopup="menu"
@@ -416,8 +487,9 @@ export function BotRail(props: BotRailProps) {
                   onDragOver={(e) => {
                     if (!pinDrag || pinDrag === a.id) return;
                     e.preventDefault();
-                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                    setPinDropBefore(e.clientX < rect.left + rect.width / 2 ? a.id : null);
+                    const target = pinDropTarget(index, e);
+                    // Dropping right beside itself changes nothing.
+                    setPinDropBefore(target === pinDrag ? null : target);
                   }}
                   onDrop={(e) => { e.preventDefault(); commitPinReorder(); }}
                   onDragEnd={() => { setPinDrag(null); setPinDropBefore(null); }}
@@ -569,6 +641,24 @@ export function BotRail(props: BotRailProps) {
           onClose={closeAgentMenu}
         />
       ) : null}
+      <div
+        className={`bt-rail-resize${resizingRail ? ' on' : ''}`}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        aria-valuemin={RAIL_MIN}
+        aria-valuemax={RAIL_MAX}
+        aria-valuenow={railWidth}
+        tabIndex={0}
+        title="Drag to resize, double-click to reset"
+        onPointerDown={startRailResize}
+        onDoubleClick={() => setRailWidth(RAIL_DEFAULT)}
+        onKeyDown={(e) => {
+          if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+          e.preventDefault();
+          setRailWidth((w) => clampRailWidth(w + (e.key === 'ArrowRight' ? RAIL_KEY_STEP : -RAIL_KEY_STEP)));
+        }}
+      />
     </aside>
   );
 }

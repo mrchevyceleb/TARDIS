@@ -16,8 +16,10 @@ import { isAutomationPeer, isNoopToken, shouldHideAutomationTurn } from '../../u
 import { BRAND, REGEN_QUOTES, THINKING_PHRASES, TIMEY_WIMEY } from '../../../theme/voice';
 
 export function timeLabel(ts: number): string {
+  if (!Number.isFinite(ts) || ts <= 0) return '';
   const d = new Date(ts);
-  return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+  if (!Number.isFinite(d.getTime())) return '';
+  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hourCycle: 'h12' });
 }
 
 function dayLabel(ts: number): string {
@@ -324,7 +326,12 @@ function PeerBubble({
   const text = cleanPeerMessageText(block.text);
   const bodyId = `peer-message-${block.id}`;
   const hasResponse = responseBlocks.length > 0;
-  const publicResponseBlocks = responseBlocks.filter((item) => item.kind !== 'tool');
+  // A settled NO_UPDATE / empty reply renders nothing, so it must not leave an
+  // empty timestamped bubble under the peer card.
+  const publicResponseBlocks = responseBlocks.filter((item) => (
+    item.kind !== 'tool'
+    && !(item.kind === 'text' && !showTextCaret(item, streaming) && (!item.text.trim() || isProtocolNoopText(item.text)))
+  ));
   const responseToolCount = responseBlocks.filter((item) => item.kind === 'tool').length;
   // The peer boundary, not individual content-block open flags, owns progress.
   // Providers can briefly close one block before opening the next; the exchange
@@ -353,6 +360,7 @@ function PeerBubble({
           <span className="bt-peer-disc">{initial}</span>
           <span className="bt-peer-name">{block.from}</span>
           <span className="bt-peer-role">{role}</span>
+          {!block.tsApprox && timeLabel(block.ts) ? <span className="bt-peer-when">{timeLabel(block.ts)}</span> : null}
           {hasResponse || responseBusy ? (
             <span className={`bt-peer-status${responseBusy ? ' working' : ''}`} role="status" aria-live="polite">
               <i aria-hidden="true" /> {responseBusy
@@ -474,6 +482,19 @@ function SwitchDivider({ block }: { block: Extract<ChatBlock, { kind: 'switch' }
     <div className="compact-mark switch-mark" title={`This thread stayed put. ${to} will answer from here on${block.model ? ` (${block.model})` : ''}.`}>
       <span className="compact-line" />
       <span className="compact-label">Switched {from} → {to}{model}</span>
+      <span className="compact-line" />
+    </div>
+  );
+}
+
+function BackgroundNote({ block }: { block: Extract<ChatBlock, { kind: 'background' }> }) {
+  const title = block.state === 'kept'
+    ? 'Background work runs inside this session, so switching models now would end it. The switch waits for it to finish, or for your next message after 15 minutes.'
+    : 'This background work ended without reporting back. The agent is told on its next turn.';
+  return (
+    <div className="compact-mark background-mark" title={title}>
+      <span className="compact-line" />
+      <span className="compact-label">{block.text}</span>
       <span className="compact-line" />
     </div>
   );
@@ -711,7 +732,7 @@ function ElrondGroup({
       onClick={mobile ? () => setActed((a) => !a) : undefined}
     >
       <div className="who">
-        <span className="mini">✦</span> {BRAND} <span className="when">{timeLabel(first.ts)}</span>
+        <span className="mini">✦</span> {BRAND} {'tsApprox' in first && first.tsApprox ? null : <span className="when">{timeLabel(first.ts)}</span>}
       </div>
       {visible.map((b) => {
         switch (b.kind) {
@@ -843,6 +864,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     | { type: 'restart'; block: Extract<ChatBlock, { kind: 'restart' }>; day: string }
     | { type: 'terminal-error'; block: Extract<ChatBlock, { kind: 'terminal-error' }>; day: string }
     | { type: 'switch'; block: Extract<ChatBlock, { kind: 'switch' }>; day: string }
+    | { type: 'background'; block: Extract<ChatBlock, { kind: 'background' }>; day: string }
     | { type: 'peer'; block: Extract<ChatBlock, { kind: 'peer' }>; responseBlocks: AssistantBlock[]; responseTurnId?: string | null; day: string }
   > = [];
   type PeerGroup = Extract<(typeof groups)[number], { type: 'peer' }>;
@@ -864,6 +886,10 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     }
     if (b.kind === 'switch') {
       groups.push({ type: 'switch', block: b, day: lastDay || day });
+      continue;
+    }
+    if (b.kind === 'background') {
+      groups.push({ type: 'background', block: b, day: lastDay || day });
       continue;
     }
     if (b.kind === 'user') {
@@ -948,7 +974,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       hideThinking = true;
       continue;
     }
-    if (g.type === 'user' || g.type === 'compact' || g.type === 'restart' || g.type === 'terminal-error' || g.type === 'switch' || g.type === 'peer') {
+    if (g.type === 'user' || g.type === 'compact' || g.type === 'restart' || g.type === 'terminal-error' || g.type === 'switch' || g.type === 'background' || g.type === 'peer') {
       pendingAutomation = false;
       hideThinking = false;
     }
@@ -994,6 +1020,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       nodes.push(<TerminalErrorCard key={g.block.id} block={g.block} />);
     } else if (g.type === 'switch') {
       nodes.push(<SwitchDivider key={g.block.id} block={g.block} />);
+    } else if (g.type === 'background') {
+      nodes.push(<BackgroundNote key={g.block.id} block={g.block} />);
     } else if (g.type === 'peer') {
       nodes.push(
         <PeerBubble

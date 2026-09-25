@@ -112,12 +112,20 @@ function isSyntheticApiErrorEvent(ev: any): boolean {
 // invokes reducers twice for purity-checking.
 type ReducerCursor = { current: string; peerId?: string };
 
+/** When a streamed event happened. Server-stamped `at` wins; a sequenced
+ *  event without one is pre-timestamp history, so its time is unknown and the
+ *  label is hidden rather than showing the replay time. */
+function eventTime(ev: any): { ts: number; tsApprox?: true } {
+  if (typeof ev?.at === 'number' && Number.isFinite(ev.at) && ev.at > 0) return { ts: ev.at };
+  return typeof ev?.seq === 'number' ? { ts: Date.now(), tsApprox: true } : { ts: Date.now() };
+}
+
 export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlock[] {
   if (!ev || typeof ev !== 'object') return blocks;
 
   if ((ev.type === 'stream_event' || ev.type === 'event') && ev.event) {
     const inner = ev.event && typeof ev.event === 'object'
-      ? { ...ev.event, seq: ev.seq ?? ev.event.seq }
+      ? { ...ev.event, seq: ev.seq ?? ev.event.seq, at: ev.at ?? ev.event.at }
       : ev.event;
     return reduce(blocks, inner, turnIdRef);
   }
@@ -161,6 +169,17 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       from: typeof ev.from === 'string' ? ev.from : 'unknown',
       to: typeof ev.to === 'string' ? ev.to : 'unknown',
       model: typeof ev.model === 'string' ? ev.model : undefined,
+      ts: typeof ev.ts === 'number' ? ev.ts : Date.now(),
+    }];
+  }
+
+  if (ev.type === '_background_work' && typeof ev.text === 'string' && ev.text) {
+    return [...blocks, {
+      kind: 'background',
+      id: id(),
+      state: ev.state === 'kept' ? 'kept' : 'ended',
+      text: ev.text,
+      tasks: Array.isArray(ev.tasks) ? ev.tasks.filter((task: unknown): task is string => typeof task === 'string') : [],
       ts: typeof ev.ts === 'number' ? ev.ts : Date.now(),
     }];
   }
@@ -345,17 +364,24 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const finalText = ev.type === 'result' && ev.is_error !== true && typeof ev.result === 'string'
       ? ev.result.trim()
       : '';
+    const sameReply = (left: string, right: string) => left.replace(/\s+/g, ' ').trim() === right.replace(/\s+/g, ' ').trim();
+    // Only this turn when we still know it. A replay (or a result that lands
+    // after the cursor was cleared) has no turn id, and an exact match then
+    // misses a reply the stream already showed with different line breaks.
+    // That paints the same answer twice. A closing copy is never a new bubble
+    // once any visible text already contains it.
     const finalTurnParts = closed
-      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && b.turnId === finalTurnId)
+      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && (!finalTurnId || b.turnId === finalTurnId))
       .map((b) => b.text);
-    const finalAlreadyRendered = finalTurnParts.some((part) => part.trim() === finalText)
-      || ['', '\n', '\n\n'].some((separator) => finalTurnParts.join(separator).trim() === finalText);
+    const finalAlreadyRendered = finalTurnParts.some((part) => sameReply(part, finalText))
+      || ['', '\n', '\n\n'].some((separator) => sameReply(finalTurnParts.join(separator), finalText))
+      || closed.some((b) => b.kind === 'text' && b.text.trim().length > 0 && sameReply(b.text, finalText));
     if (finalText && !finalAlreadyRendered) {
       return [...closed, {
         kind: 'text',
         id: id(),
         text: finalText,
-        ts: Date.now(),
+        ...eventTime(ev),
         turnId: finalTurnId,
         peerId: finalPeerId,
         cbIndex: -1,
@@ -383,7 +409,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const turnId = turnIdRef.current;
     if (cb?.type === 'text') {
       const block: ChatBlock = {
-        kind: 'text', id: id(), text: '', ts: Date.now(),
+        kind: 'text', id: id(), text: '', ...eventTime(ev),
         turnId, peerId: turnIdRef.peerId, cbIndex: idx, open: true,
         presentation: cb.phase === 'commentary' ? 'update' : cb.phase === 'final_answer' ? 'answer' : undefined,
         seq: typeof ev.seq === 'number' ? ev.seq : undefined,
@@ -394,7 +420,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       const block: ChatBlock = {
         kind: 'tool', id: id(),
         toolUseId: cb.id, tool: cb.name, args: '',
-        running: true, ts: Date.now(),
+        running: true, ...eventTime(ev),
         turnId, peerId: turnIdRef.peerId, cbIndex: idx, open: true,
       };
       return [...blocks, block];
@@ -477,7 +503,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       if (isSyntheticApiErrorEvent(ev)) return blocks;
       const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '');
       if (!hasText) {
-        return [...annotated, { kind: 'text', id: id(), text: fullText, ts: Date.now(), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation, seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
+        return [...annotated, { kind: 'text', id: id(), text: fullText, ...eventTime(ev), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation, seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
       }
     }
     return annotated;
@@ -1570,11 +1596,14 @@ export function useChat(opts: {
             }
           }
           const innerType = evType === 'stream_event' ? ev?.event?.type : evType;
-          const provesActiveTurn = evType === '_user_echo'
+          // A background subagent's own frames (parent_tool_use_id) arrive while
+          // the lane is idle. They never open a turn on the server, so they
+          // must not flip this view to "working" either.
+          const provesActiveTurn = !ev?.parent_tool_use_id && (evType === '_user_echo'
             || evType === 'assistant'
             || innerType === 'message_start'
             || innerType === 'content_block_start'
-            || innerType === 'content_block_delta';
+            || innerType === 'content_block_delta');
           if (socketReady && provesActiveTurn) {
             setError(null);
             markTurnStarted();
@@ -1591,7 +1620,7 @@ export function useChat(opts: {
             compactingRef.current = false;
           }
           const streamed = msg.event && typeof msg.event === 'object'
-            ? { ...msg.event, seq: msg.seq ?? msg.event.seq }
+            ? { ...msg.event, seq: msg.seq ?? msg.event.seq, at: msg.at ?? msg.event.at }
             : msg.event;
           setBlocks((prev) => reduce(prev, streamed, turnIdRef));
           // Pick up the model id from claude's system/init event so the

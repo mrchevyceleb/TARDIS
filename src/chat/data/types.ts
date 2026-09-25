@@ -72,6 +72,8 @@ export type ChatBlock =
       deliveryId?: string;
       text: string;
       ts: number;
+      /** Time unknown (history logged before events were time-stamped). */
+      tsApprox?: boolean;
     }
   | {
       /** Auto-compaction marker — the thread's model context rotated with a
@@ -104,6 +106,17 @@ export type ChatBlock =
       ts: number;
     }
   | {
+      /** Background work (shells, subagents) that a Stop, restart or reset
+       *  ended, or that is holding off a model change. Plain-words note,
+       *  rendered as a divider, never a bubble. */
+      kind: 'background';
+      id: string;
+      state: 'ended' | 'kept';
+      text: string;
+      tasks: string[];
+      ts: number;
+    }
+  | {
       /** Brain change mid-thread. The conversation continues; only the engine
        *  that will answer the next turn changed. */
       kind: 'switch';
@@ -118,6 +131,8 @@ export type ChatBlock =
       id: string;
       text: string;
       ts: number;
+      /** Time unknown (history logged before events were time-stamped). */
+      tsApprox?: boolean;
       folio?: string;
       /** Provider-tagged tool-bound update vs completed answer. This is a
        * presentation distinction, never a reason to hide user-facing text. */
@@ -140,6 +155,8 @@ export type ChatBlock =
       result?: string;
       running: boolean;
       ts: number;
+      /** Time unknown (history logged before events were time-stamped). */
+      tsApprox?: boolean;
       turnId?: string;
       /** Teammate message this tool activity belongs to, when applicable. */
       peerId?: string;

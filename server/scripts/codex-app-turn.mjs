@@ -112,11 +112,10 @@ function normalizeUsage(tokenUsage) {
 }
 
 function signalApp(signal) {
-  if (!app || app.exitCode !== null) return;
+  // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
+  if (!app || app.exitCode !== null || !app.pid || app.pid <= 1) return;
   try { app.kill(signal); } catch {}
-  if (app.pid) {
-    try { process.kill(-app.pid, signal); } catch {}
-  }
+  try { process.kill(-app.pid, signal); } catch {}
 }
 
 function maybeExit() {
