@@ -19,6 +19,8 @@ test('resolves model-specific Codex efforts', () => {
     model: 'gpt-5.6-luna',
     effort: 'max',
   });
+  assert.deepEqual(resolveCodexSelection('gpt-6-sol', 'ultra'), { model: 'gpt-6-sol', effort: 'ultra' });
+  assert.deepEqual(resolveCodexSelection('gpt-6-luna', 'ultra'), { model: 'gpt-6-luna', effort: 'medium' });
   assert.deepEqual(resolveCodexSelection('gpt-5.6-luna', 'ultra'), {
     model: 'gpt-5.6-luna',
     effort: 'medium',

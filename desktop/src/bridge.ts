@@ -112,7 +112,8 @@ function looksBinary(buffer: Buffer): boolean {
 }
 
 function killTree(child: ChildProcess): void {
-  if (child.pid === undefined) return;
+  // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
+  if (child.pid === undefined || child.pid <= 1) return;
   if (process.platform === 'win32') {
     spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
     return;

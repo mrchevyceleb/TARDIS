@@ -34,6 +34,32 @@ test('voice handoff control stays out of chat and its reply is not nested as a t
   assert.equal(blocks[0].kind === 'text' && blocks[0].peerId, undefined);
 });
 
+test('a closing copy of a reply already on screen does not paint a second bubble', () => {
+  const cursor = { current: '' };
+  const reply = "Friday isn't freedom.\n\nThat's why the weekday plan never holds.";
+  let blocks = reduce([], { type: 'message_start' }, cursor);
+  blocks = reduce(blocks, { type: 'content_block_start', index: 1, content_block: { type: 'text' } }, cursor);
+  blocks = reduce(blocks, { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: reply } }, cursor);
+  blocks = reduce(blocks, { type: 'content_block_stop', index: 1 }, cursor);
+  blocks = reduce(blocks, { type: 'assistant', message: { stop_reason: 'end_turn', content: [{ type: 'text', text: reply }] } }, cursor);
+  // The cursor can already be gone by the time the terminal copy arrives,
+  // which is the replay that doubled Julia's bubble.
+  cursor.current = '';
+  blocks = reduce(blocks, { type: 'result', subtype: 'success', is_error: false, result: reply.replace(/\n\n/g, '\n') }, cursor);
+  const texts = blocks.filter(b => b.kind === 'text').map(b => b.kind === 'text' ? b.text : '');
+  assert.equal(texts.length, 1);
+  assert.equal(texts[0], reply);
+});
+
+test('a real final answer still appears when the stream never delivered it', () => {
+  const cursor = { current: '' };
+  let blocks = reduce([], { type: 'message_start' }, cursor);
+  cursor.current = '';
+  blocks = reduce(blocks, { type: 'result', subtype: 'success', is_error: false, result: 'The short version.' }, cursor);
+  assert.equal(blocks.filter(b => b.kind === 'text').length, 1);
+  assert.equal(blocks[0].kind === 'text' && blocks[0].text, 'The short version.');
+});
+
 test('streamed updates acquire the same metadata as canonical-only replay', () => {
   const cursor = { current: '' };
   let blocks = reduce([], { type: 'message_start' }, cursor);

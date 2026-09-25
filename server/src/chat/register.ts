@@ -243,7 +243,7 @@ function activeSelectionOf(session: AnySession | null | undefined): { model?: st
   return selected ?? {};
 }
 
-type DispatchSeqEvent = { seq: number; ev: any };
+type DispatchSeqEvent = { seq: number; ev: any; at?: number };
 
 function isBananaTaggedError(se: DispatchSeqEvent): boolean {
   if (se.ev?.type !== 'error') return false;
@@ -749,7 +749,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             { cli: cliKind, repo: repoPath, chatId, logKey, clientMsgId: admittedClientMsgId },
           );
         }
-        safeSend({ type: 'stream', event: sev.event, seq: se.seq });
+        safeSend({ type: 'stream', event: sev.event, seq: se.seq, at: se.at });
       } else if (sev.type === 'turnStart') {
         busy = true;
         safeSend({ type: 'turnStart', seq: se.seq });
@@ -890,7 +890,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       if (replaying) {
         const durableReplay: DispatchSeqEvent[] = events
           .filter((event) => event.seq > replaySince)
-          .map((event) => ({ seq: event.seq, ev: event.ev as any }));
+          .map((event) => ({ seq: event.seq, ev: event.ev as any, at: event.at }));
         const seenSeq = new Set<number>();
         const merged = [...durableReplay, ...liveReplay]
           .sort((a, b) => a.seq - b.seq)
@@ -944,7 +944,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       if (replaySince >= 0) {
         const pending: DispatchSeqEvent[] = events
           .filter((event) => event.seq > replaySince)
-          .map((event) => ({ seq: event.seq, ev: event.ev as any }));
+          .map((event) => ({ seq: event.seq, ev: event.ev as any, at: event.at }));
         const history = clampReplayWindow(
           collapseHistoricalToolArgs(filterReplayEvents(pending), latest)
             .map((se) => historicalDelivery(se))

@@ -3,14 +3,17 @@ import { CODEX_MODELS, codexEffortsForModel } from '../codexModels';
 // Model + reasoning-effort selector for Codex. The chosen values ride the WS
 // send/steer payload and reach `codex -m` / `-c model_reasoning_effort`.
 export const CLAUDE_MODELS = [
+  { id: 'claude-opus-5-5', label: 'Opus 5.5' },
   { id: 'claude-opus-5', label: 'Opus 5' },
   { id: 'claude-fable-5-1', label: 'Fable 5.1' },
   { id: 'claude-fable-5', label: 'Fable 5' },
 ];
+// Opus 5.5 keeps the same five real effort tiers (low → max); its own default
+// is medium, but TARDIS always passes --effort explicitly per brain.
 export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
-// Default Claude model when nothing (valid) is stored. Opus 5 is the flagship.
-export const DEFAULT_CLAUDE_MODEL = 'claude-opus-5';
+// Default Claude model when nothing (valid) is stored. Opus 5.5 is the flagship.
+export const DEFAULT_CLAUDE_MODEL = 'claude-opus-5-5';
 
 // Coerce a stored/legacy Claude model id onto the current option set so a stale
 // value (e.g. the retired `claude-opus-4-8`) can never leave the <select> on a

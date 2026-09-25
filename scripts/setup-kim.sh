@@ -68,7 +68,7 @@ if [[ ! -x "$node_dir/bin/node" ]]; then
   rmdir -- "$download_dir"
 fi
 [[ "$(node --version)" == "v${node_version}" ]] || die 'The isolated Node installation did not activate.'
-npm install --global --prefix "$runtime_dir/npm" pnpm@10.28.2 @anthropic-ai/claude-code@2.1.272 @openai/codex@0.154.0
+npm install --global --prefix "$runtime_dir/npm" pnpm@10.28.2 @anthropic-ai/claude-code@2.1.272 @openai/codex@0.155.1
 
 if [[ -n "$bundle_dir" ]]; then
   [[ -f "$bundle_dir/tardis.bundle" && -f "$bundle_dir/rallypoint.bundle" && -f "$bundle_dir/SHA256SUMS" ]] || die 'USB source bundles are incomplete. Rebuild the kit.'
