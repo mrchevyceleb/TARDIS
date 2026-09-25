@@ -38,7 +38,7 @@
    LEFT RAIL — personas + conversations
    ============================================================ */
 .bt-rail {
-  width: 350px;
+  width: var(--bt-rail-w, 350px);
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
@@ -1331,17 +1331,15 @@
    Pinned agent bubbles (user-pinned strip above the list)
    ============================================================ */
 .bt-pins {
-  display: flex;
+  /* Wraps into rows, so every pin stays visible at any rail width. */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
   gap: 4px;
   padding: 10px 8px 12px;
-  overflow-x: auto;
-  scrollbar-width: none;
   border-bottom: 1px solid var(--r-line);
 }
-.bt-pins::-webkit-scrollbar { display: none; }
 .bt-pin {
-  flex: none;
-  width: 92px;
+  min-width: 0;
   display: flex; flex-direction: column; align-items: center;
   gap: 6px;
   padding: 10px 4px 8px;
@@ -1419,7 +1417,7 @@
 @media (min-width: 761px) {
   .bt-rail { transition: margin-left 0.25s cubic-bezier(0.16, 1, 0.3, 1); }
   .bot-app.rail-collapsed .bt-rail {
-    margin-left: -351px; /* width + border */
+    margin-left: calc(-1 * var(--bt-rail-w, 350px) - 1px); /* width + border */
     pointer-events: none;
   }
   .bot-app.rail-collapsed .bt-menubtn { display: grid; place-items: center; }
@@ -1435,6 +1433,42 @@
 /* drag-to-reorder pinned bubbles */
 .bt-pin.dragging { opacity: 0.4; }
 .bt-pin.drop-left { box-shadow: -3px 0 0 0 var(--r-gold); border-radius: 16px; }
+.bt-pin.drop-right { box-shadow: 3px 0 0 0 var(--r-gold); border-radius: 16px; }
+
+/* Desktop rail resize handle on the rail's right edge. */
+.bt-rail-resize { display: none; }
+@media (min-width: 761px) {
+  .bt-rail { position: relative; }
+  .bt-rail-resize {
+    display: block;
+    position: absolute; top: 0; bottom: 0; right: -4px;
+    width: 8px;
+    cursor: col-resize;
+    touch-action: none;
+    z-index: 1;
+  }
+  .bt-rail-resize::after {
+    content: '';
+    position: absolute; top: 0; bottom: 0; left: 3px;
+    width: 2px;
+    background: transparent;
+    transition: background 0.15s ease, box-shadow 0.15s ease;
+  }
+  .bt-rail-resize:hover::after,
+  .bt-rail-resize:focus-visible::after,
+  .bt-rail-resize.on::after {
+    background: var(--r-gold);
+    box-shadow: 0 0 8px color-mix(in oklch, var(--r-gold) 60%, transparent);
+  }
+  .bt-rail-resize:focus-visible { outline: none; }
+  .bot-app.rail-collapsed .bt-rail-resize { display: none; }
+}
+/* Touch layouts keep the fixed-width drawer. */
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
+  .bt-rail { position: absolute; }
+  .bt-rail-resize { display: none; }
+}
+body.bt-rail-resizing { cursor: col-resize; user-select: none; }
 
 /* agent-scoped message pins in the right pane (not Library/Pins) */
 .bt-msgpin {
