@@ -1316,15 +1316,22 @@ class ClaudeSession {
       : null;
   }
 
-  /** Labels of the background work Claude reported stopped since Stop. */
-  private takeStopWatch(): string[] {
+  /** Labels of the background work Claude reported stopped since a Stop that
+   *  is still settling. Read-only; takeStopWatch() consumes it. */
+  settlingStopLabels(): string[] {
     const watch = this.stopWatch;
-    this.stopWatch = null;
     if (!watch) return [];
-    if (watch.timer) clearTimeout(watch.timer);
     return [...watch.stopped]
       .map((id) => watch.before.get(id))
       .filter((label): label is string => Boolean(label));
+  }
+
+  /** Labels of the background work Claude reported stopped since Stop. */
+  private takeStopWatch(): string[] {
+    const labels = this.settlingStopLabels();
+    if (this.stopWatch?.timer) clearTimeout(this.stopWatch.timer);
+    this.stopWatch = null;
+    return labels;
   }
 
   /** The process survived Stop. Claude reports what its interrupt stopped
@@ -2391,7 +2398,9 @@ export async function freshStart(opts: {
   const pending = pendingSpawns.get(key);
   if (pending) await pending.catch(() => null);
   const existing = sessions.get(key);
-  // Clearing the log below erases the kill note, so repeat it on the new thread.
+  // Clearing the log below erases the kill notes, so repeat them on the new
+  // thread: what a still-settling Stop ended, then what this fresh start ends.
+  const stoppedBeforeFresh = existing instanceof ClaudeSession ? existing.settlingStopLabels() : [];
   const endedByFresh = existing instanceof ClaudeSession ? existing.backgroundWork() : [];
   if (existing) {
     if (existing instanceof ClaudeSession) existing.shutdown('freshStart', 'fresh');
@@ -2410,7 +2419,10 @@ export async function freshStart(opts: {
   await clearEventLog(logKey);
   if (opts.cli === 'xai') await ensureXaiProxy();
   const fresh = await spawnSession(opts.cli, cwd, chatId, null, key, 0, opts.model, opts.effort);
-  if (fresh instanceof ClaudeSession) fresh.noteBackgroundWorkEndedBefore('fresh', endedByFresh);
+  if (fresh instanceof ClaudeSession) {
+    fresh.noteBackgroundWorkEndedBefore('stop', stoppedBeforeFresh);
+    fresh.noteBackgroundWorkEndedBefore('fresh', endedByFresh);
+  }
   return fresh;
 }
 
