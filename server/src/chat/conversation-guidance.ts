@@ -8,6 +8,7 @@ import { extractVisibleTurns } from './threadWindow.ts';
 const CONVERSATIONAL_MILESTONE_GUIDANCE = [
   '<rivendell-conversation>',
   'Visible chat is the reply, not the scratchpad. Do not write thinking, unsolicited plans, or tool-by-tool status into chat. TARDIS already shows liveness and tool cards.',
+  'Tool results are yours alone. Reading an image file shows it to you, never to the human. If the human needs to see an image, give the file path in your reply, and never call something "in the chat" or "attached" unless you posted it yourself.',
   'If you are not thinking and not making a tool call, print. Between-tool messages are welcome when they communicate a finding, a changed decision, a blocker, a question, or progress the person should actually see. Do not sit on a spinner with nothing on screen.',
   '</rivendell-conversation>',
 ].join('\n');

@@ -610,10 +610,10 @@ function pickServePort(previous?: number): number {
 }
 
 function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
+  if (!child.pid || child.pid <= 1) return;
   try { child.kill(signal); } catch {}
-  if (child.pid) {
-    try { process.kill(-child.pid, signal); } catch {}
-  }
+  try { process.kill(-child.pid, signal); } catch {}
 }
 
 // ── OpenRouter (direct) + Fireworks ──────────────────────────────────────
@@ -3911,7 +3911,7 @@ export class BananaSession {
     msg = redactComputerImages(msg);
     if (isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
-    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg };
+    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now() };
     const persisted = { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) };
     const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
     if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) {
@@ -3984,6 +3984,7 @@ export function markBusyBananaLanesRestarting(signal: string): number {
       const session = s as unknown as { logKey: string; reserveSeq(): number; cli: string };
       if (appendEventLogSync(session.logKey, {
         seq: session.reserveSeq(),
+        at: Date.now(),
         ev: restartMarkerEvent(signal) as never,
         eng: session.cli,
       })) marked++;

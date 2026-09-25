@@ -22,6 +22,7 @@ import { personaPromptFor } from './personaPrompts.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { crashTombstoneEvent, crashTombstoneText, restartMarkerEvent } from './crashTombstone.ts';
+import { BACKGROUND_MODEL_HOLD_MINUTES, backgroundEndedGuidance, backgroundTaskLabel, backgroundWorkEvent, type BackgroundWorkCause } from './backgroundWork.ts';
 import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
@@ -39,11 +40,11 @@ import { PiSession, usePiHarness } from './pi-runner.ts';
 export { MemoryPressureSpawnError } from './memory.ts';
 
 function terminateProcessTree(child: ChildProcessByStdio<Writable, Readable, Readable>, signal: NodeJS.Signals): void {
-  const descendants = child.pid ? collectDescendantPids(child.pid) : [];
+  // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
+  if (!child.pid || child.pid <= 1) return;
+  const descendants = collectDescendantPids(child.pid);
   try { child.kill(signal); } catch {}
-  if (child.pid) {
-    try { process.kill(-child.pid, signal); } catch {}
-  }
+  try { process.kill(-child.pid, signal); } catch {}
   for (const pid of descendants.reverse()) {
     try { process.kill(pid, signal); } catch {}
   }
@@ -55,7 +56,7 @@ function collectDescendantPids(pid: number): number[] {
     const children = out
       .split(/\s+/)
       .map((value) => Number(value))
-      .filter((value) => Number.isInteger(value) && value > 0);
+      .filter((value) => Number.isInteger(value) && value > 1);
     return children.flatMap((childPid) => [childPid, ...collectDescendantPids(childPid)]);
   } catch {
     return [];
@@ -139,7 +140,7 @@ export function wrapSlashArgs(text: string): string {
 // Model + reasoning effort every `claude` spawn runs with. Single source of
 // truth. Opus 4.7+ uses adaptive thinking and ignores MAX_THINKING_TOKENS; the
 // live lever is the `--effort` flag (low|medium|high|xhigh|max). "max" is top.
-const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', 'claude-opus-4-8', 'xhigh');
+const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', 'claude-opus-5-5', 'xhigh');
 
 // Z.ai coding plan — GLM models served over the Anthropic-compatible endpoint.
 // Runs through the same `claude` binary with the base URL + auth token
@@ -412,7 +413,9 @@ const ASSISTANT_AGENT_PROMPT =
 // dozen turns before reconnecting; old events fall off the tail.
 const EVENT_BUFFER_SIZE = 2000;
 
-export type SeqEvent = { seq: number; ev: SessionEvent };
+/** `at` = wall-clock ms when the event was emitted, so replayed history can
+ *  show real times (absent on events logged before 2026-09-23). */
+export type SeqEvent = { seq: number; ev: SessionEvent; at?: number };
 
 class ClaudeSession {
   readonly key: string;
@@ -498,6 +501,19 @@ class ClaudeSession {
    *  must NOT re-create the jsonl after freshStart's clearEventLog removed it
    *  (that would resurrect a reset thread on a later full replay). */
   private disposed = false;
+  /** Background work alive inside this CLI (backgrounded shells, background
+   *  subagents), task id -> plain description. It wakes the agent only while
+   *  this process lives, so automatic kills wait for it and deliberate ones
+   *  name it. Lazy, like stopWatch: prototype-built test sessions skip field
+   *  initializers. */
+  private backgroundTasks?: Map<string, string>;
+  /** Open while an explicit Stop settles: the background work alive when Stop
+   *  was pressed, and which of it Claude reported stopped. */
+  private stopWatch?: { before: Map<string, string>; stopped: Set<string>; timer: NodeJS.Timeout | null } | null;
+  /** A model/effort recycle held for background work: when the hold began
+   *  (it is bounded) and the selection already announced, so each send during
+   *  the same background run does not repeat the note. */
+  private keptForBackground?: { since: number; noted: string };
   private startupWaiters = new Set<(state: 'initialized' | 'closed') => void>();
   /** Resolves true once init is received, false if the process exits before init. */
   readonly ready: Promise<boolean>;
@@ -863,6 +879,9 @@ class ClaudeSession {
     const seed = wantSeed
       ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
       : '';
+    // Background work a kill ended since the last message: tell the agent once,
+    // on the next turn, so it stops waiting for a notification that can't come.
+    const backgroundEnded = startsNewTurn ? backgroundEndedGuidance(fallbackHistory) : '';
     if (sendAborted()) {
       abandonUnsentTurn();
       return;
@@ -994,7 +1013,7 @@ class ClaudeSession {
         ].join('\n')
       : commandText;
     const computerContext = computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation');
-    const stdinText = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${continuationText}`;
+    const stdinText = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${continuationText}`;
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];
@@ -1056,8 +1075,16 @@ class ClaudeSession {
     }
   }
 
-  /** Tear down the underlying process. */
-  shutdown(reason = 'unspecified'): void {
+  /** Tear down the underlying process. Background work dies with it, so name
+   *  that work in the thread first, while emit() still accepts frames. */
+  shutdown(reason = 'unspecified', ended: BackgroundWorkCause = 'other'): void {
+    // A Stop still settling has already dropped what Claude stopped from the
+    // live list. Name those as the Stop's, then what this shutdown ends.
+    const stopped = this.takeStopWatch();
+    if (!this.disposed) {
+      this.postBackgroundWork('ended', 'stop', stopped);
+      this.endBackgroundWork(ended);
+    }
     this.disposed = true;
     const idleMs = Date.now() - this.lastActivityAtMs;
     console.warn(
@@ -1117,6 +1144,9 @@ class ClaudeSession {
       });
 
       this.userInterruptPending = true;
+      // Claude's own interrupt stops background subagents. Remember what was
+      // running so the note can name what this Stop ended.
+      this.openStopWatch();
       this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
       const requestId = `interrupt-${randomUUID()}`;
       try {
@@ -1132,7 +1162,10 @@ class ClaudeSession {
       }
 
       const result = await outcome;
-      if (result === 'ended' && this.isAlive()) return true;
+      if (result === 'ended' && this.isAlive()) {
+        this.settleStopWatch();
+        return true;
+      }
 
       console.warn(`[chat ${this.cli}] warm interrupt ${result}; falling back to process stop (${reason})`);
       this.userInterruptPending = false;
@@ -1144,7 +1177,10 @@ class ClaudeSession {
         this.turnPromptSubmitted = false;
         this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
       }
-      this.shutdown(`${reason}-${result}`);
+      // The process stop ends everything still running, on top of whatever
+      // Claude's interrupt already stopped.
+      this.endBackgroundWork('stop', this.takeStopWatch());
+      this.shutdown(`${reason}-${result}`, 'stop');
       return false;
     };
 
@@ -1191,6 +1227,124 @@ class ClaudeSession {
   /** True while this session is actively processing a turn (between user send and result event). */
   isBusy(): boolean {
     return this.turnStartedAt !== null;
+  }
+
+  /** Plain descriptions of the background work still running in this process. */
+  backgroundWork(): string[] {
+    return [...(this.backgroundTasks?.values() ?? [])];
+  }
+
+  hasBackgroundWork(): boolean {
+    return (this.backgroundTasks?.size ?? 0) > 0;
+  }
+
+  /** Should a model/effort recycle keep waiting for background work? Yes for
+   *  up to BACKGROUND_MODEL_HOLD_MINUTES from the first hold, saying so once
+   *  per wanted selection. After that the change wins: a watcher can run for
+   *  hours, and the user asked for the new model. */
+  keepForBackgroundWork(selection: string, now = Date.now()): boolean {
+    if (!this.hasBackgroundWork()) return false;
+    const held = this.keptForBackground;
+    if (held && now - held.since >= BACKGROUND_MODEL_HOLD_MINUTES * 60_000) return false;
+    if (held?.noted === selection) return true;
+    this.keptForBackground = { since: held?.since ?? now, noted: selection };
+    this.postBackgroundWork('kept', 'model', this.backgroundWork());
+    return true;
+  }
+
+  /** Repeat a kill note on the replacement thread when the old log was cleared. */
+  noteBackgroundWorkEndedBefore(cause: BackgroundWorkCause, tasks: string[]): void {
+    this.postBackgroundWork('ended', cause, tasks);
+  }
+
+  /** Service shutdown: a dying server cannot trust the async append chain, so
+   *  the note goes to disk synchronously and shows in the lane after restart. */
+  writeBackgroundEndedSync(cause: BackgroundWorkCause): boolean {
+    const tasks = this.backgroundWork();
+    if (tasks.length === 0 || this.disposed) return false;
+    const written = appendEventLogSync(this.logKey, {
+      seq: this.reserveSeq(),
+      at: Date.now(),
+      ev: { type: 'event', event: backgroundWorkEvent('ended', cause, tasks) },
+      eng: this.cli,
+      mdl: this.spawnModel,
+    });
+    // Keep the list on a failed write so shutdown's own note still names it.
+    if (written) this.backgroundTasks?.clear();
+    return written;
+  }
+
+  /** A process kill ends all background work. Name it (plus `extra`, work
+   *  already stopped on the way here) in one note, then forget it. */
+  private endBackgroundWork(cause: BackgroundWorkCause, extra: string[] = []): void {
+    const tasks = [...new Set([...extra, ...this.backgroundWork()])];
+    this.backgroundTasks?.clear();
+    this.postBackgroundWork('ended', cause, tasks);
+  }
+
+  private postBackgroundWork(state: 'ended' | 'kept', cause: BackgroundWorkCause, tasks: string[]): void {
+    if (tasks.length === 0 || this.disposed) return;
+    this.emit({ type: 'event', event: backgroundWorkEvent(state, cause, tasks) });
+  }
+
+  /** Claude Code reports background work three ways: the full list on every
+   *  change (authoritative), a start for work launched in the background, and
+   *  a notification when a task finishes, fails or is stopped. */
+  private trackBackgroundTasks(ev: any): void {
+    if (ev?.type !== 'system') return;
+    if (ev.subtype === 'background_tasks_changed' && Array.isArray(ev.tasks)) {
+      const next = new Map<string, string>();
+      for (const task of ev.tasks) {
+        if (typeof task?.task_id === 'string') next.set(task.task_id, backgroundTaskLabel(task));
+      }
+      this.backgroundTasks = next;
+    } else if (typeof ev.task_id !== 'string') {
+      return;
+    } else if (ev.subtype === 'task_started' && ev.is_backgrounded === true) {
+      (this.backgroundTasks ??= new Map()).set(ev.task_id, backgroundTaskLabel(ev));
+    } else if (ev.subtype === 'task_notification') {
+      this.backgroundTasks?.delete(ev.task_id);
+      if (ev.status === 'stopped') this.stopWatch?.stopped.add(ev.task_id);
+    }
+    if (!this.hasBackgroundWork()) this.keptForBackground = undefined;
+  }
+
+  private openStopWatch(): void {
+    if (this.stopWatch?.timer) clearTimeout(this.stopWatch.timer);
+    this.stopWatch = this.hasBackgroundWork()
+      ? { before: new Map(this.backgroundTasks), stopped: new Set(), timer: null }
+      : null;
+  }
+
+  /** Labels of the background work Claude reported stopped since a Stop that
+   *  is still settling. Read-only; takeStopWatch() consumes it. */
+  settlingStopLabels(): string[] {
+    const watch = this.stopWatch;
+    if (!watch) return [];
+    return [...watch.stopped]
+      .map((id) => watch.before.get(id))
+      .filter((label): label is string => Boolean(label));
+  }
+
+  /** Labels of the background work Claude reported stopped since Stop. */
+  private takeStopWatch(): string[] {
+    const labels = this.settlingStopLabels();
+    if (this.stopWatch?.timer) clearTimeout(this.stopWatch.timer);
+    this.stopWatch = null;
+    return labels;
+  }
+
+  /** The process survived Stop. Claude reports what its interrupt stopped
+   *  just before the canceled result; allow a moment for stragglers, then
+   *  name it. Everything else keeps running and can still wake the agent. */
+  private settleStopWatch(): void {
+    const watch = this.stopWatch;
+    if (!watch || watch.timer) return;
+    watch.timer = setTimeout(() => {
+      if (this.stopWatch !== watch) return;
+      this.postBackgroundWork('ended', 'stop', this.takeStopWatch());
+    }, 1000);
+    watch.timer.unref?.();
   }
 
   /** Scheduled turns yield to human messages at their natural boundary. */
@@ -1346,7 +1500,7 @@ class ClaudeSession {
     // the retiring process. Do not allocate, persist, or deliver it.
     if (this.disposed || isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
-    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg };
+    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now() };
     const persisted = { ...se, eng: this.cli, mdl: this.spawnModel };
     const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
     // A user echo is the admission commit. Persist it synchronously before any
@@ -1457,9 +1611,15 @@ class ClaudeSession {
     // CLI without send(). Adopt that query before forwarding its first event,
     // so health, Stop, queued input and reconnects agree that the lane is busy.
     // Task notifications alone are not queries: an idle monitor stays idle.
-    const nativeQueryStarted = (ev?.type === 'system' && ev.subtype === 'status' && ev.status === 'requesting')
+    // Neither is a background subagent talking to itself (its frames carry
+    // parent_tool_use_id). Adopting those showed the lane busy while the agent
+    // sat idle, and Stop then waited for a result no query would send and
+    // killed the process, ending every other background task with it.
+    const sidechain = Boolean(ev?.parent_tool_use_id);
+    const nativeQueryStarted = !sidechain && (
+      (ev?.type === 'system' && ev.subtype === 'status' && ev.status === 'requesting')
       || (ev?.type === 'stream_event' && ev.event?.type === 'message_start')
-      || ev?.type === 'assistant';
+      || ev?.type === 'assistant');
     if (!this.disposed && this.turnStartedAt === null && nativeQueryStarted) {
       this.turnStartedAt = Date.now();
       this.automationTurn = false;
@@ -1480,26 +1640,30 @@ class ClaudeSession {
     // was observed to receive an echo yet be absent from every later response.
     // Grok/xAI often never emits the completed assistant tool_use message, only
     // stream content_block_start. Without that, steers wait out the whole turn.
-    if (ev?.type === 'stream_event' && ev.event?.type === 'message_start') {
-      this.activeToolIds.clear();
-    } else if (ev?.type === 'stream_event' && ev.event?.type === 'content_block_start') {
-      const block = ev.event.content_block;
-      if (block?.type === 'tool_use' && typeof block.id === 'string') {
-        this.activeToolIds.add(block.id);
-      }
-    } else if (ev?.type === 'assistant' && Array.isArray(ev.message?.content)) {
-      for (const block of ev.message.content) {
+    // A subagent's own tool calls are not the main agent's tool window.
+    if (!sidechain) {
+      if (ev?.type === 'stream_event' && ev.event?.type === 'message_start') {
+        this.activeToolIds.clear();
+      } else if (ev?.type === 'stream_event' && ev.event?.type === 'content_block_start') {
+        const block = ev.event.content_block;
         if (block?.type === 'tool_use' && typeof block.id === 'string') {
           this.activeToolIds.add(block.id);
         }
-      }
-    } else if (ev?.type === 'user' && Array.isArray(ev.message?.content)) {
-      for (const block of ev.message.content) {
-        if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-          this.activeToolIds.delete(block.tool_use_id);
+      } else if (ev?.type === 'assistant' && Array.isArray(ev.message?.content)) {
+        for (const block of ev.message.content) {
+          if (block?.type === 'tool_use' && typeof block.id === 'string') {
+            this.activeToolIds.add(block.id);
+          }
+        }
+      } else if (ev?.type === 'user' && Array.isArray(ev.message?.content)) {
+        for (const block of ev.message.content) {
+          if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+            this.activeToolIds.delete(block.tool_use_id);
+          }
         }
       }
     }
+    this.trackBackgroundTasks(ev);
 
     if (
       ev?.type === 'control_response'
@@ -1561,7 +1725,12 @@ class ClaudeSession {
       : null;
     const terminal = providerTerminal
       ?? (ev?.type === 'result' && !expectedUserInterrupt
-        ? terminalExecutionError(this.cli, ev, this.syntheticApiErrorReason)
+        ? terminalExecutionError(
+            this.cli,
+            ev,
+            this.syntheticApiErrorReason,
+            [...this.streamTextBlocks.values()].map((block) => block.text).join('\n'),
+          )
         : null);
     // Z.ai meters the coding plan in fixed windows, so an exhausted window is
     // never a balance problem and topping up credits cannot clear it. Attribute
@@ -1660,8 +1829,10 @@ class ClaudeSession {
       // whose provider moved. shutdown() flips `disposed`, after which emit()
       // drops every remaining frame — retiring any earlier would swallow the
       // turnEnd above and leave the client streaming forever.
+      // A stale GLM child with background work stays until that work drains:
+      // its completion wakes a turn here, and that turn's result retires it.
       if (authFailPending) this.failAuth();
-      else if (zaiStale) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
+      else if (zaiStale && !this.hasBackgroundWork()) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
       const seeded = this.pendingSeedAck;
       const resultFailed = ev.is_error === true || typeof ev.api_error_status === 'number';
       const failed = seeded && resultFailed;
@@ -1688,6 +1859,7 @@ export function markBusyLanesRestarting(signal: string): number {
       // SYNC write: a dying process can't be trusted to flush an async queue.
       const written = appendEventLogSync(session.logKey, {
         seq: session.reserveSeq(),
+        at: Date.now(),
         ev: restartMarkerEvent(signal) as never,
         eng: session.cli,
         mdl: session.spawnModel,
@@ -1696,6 +1868,24 @@ export function markBusyLanesRestarting(signal: string): number {
       console.warn(`[tardis] restart tombstone ${written ? 'written' : 'FAILED'} for ${session.logKey}`);
     } catch (err) {
       console.warn(`[tardis] restart tombstone failed for ${s.key}:`, (err as Error).message);
+    }
+  }
+  return marked;
+}
+
+/** On service shutdown: background work dies with every process. Name it in
+ *  each affected lane, synchronously, so the note is there after the restart
+ *  and the agent's next turn is told not to wait for it. */
+export function markBackgroundWorkEndedByRestart(): number {
+  let marked = 0;
+  for (const s of sessions.values()) {
+    if (!(s instanceof ClaudeSession) || !s.hasBackgroundWork()) continue;
+    try {
+      const written = s.writeBackgroundEndedSync('restart');
+      if (written) marked++;
+      console.warn(`[tardis] background-work note ${written ? 'written' : 'FAILED'} for ${s.logKey}`);
+    } catch (err) {
+      console.warn(`[tardis] background-work note failed for ${s.key}:`, (err as Error).message);
     }
   }
   return marked;
@@ -1751,6 +1941,12 @@ export function beginThreadReset(opts: { cli: CliKind; repoPath: string; chatId?
 
 export function isThreadResetting(opts: { cli: CliKind; repoPath: string; chatId?: string }): boolean {
   return resettingThreadLogs.has(trackedThreadLogKey(opts));
+}
+
+/** Live background work in a lane's process. Automatic kills wait for it:
+ *  it can only wake the agent while that exact process lives. */
+function holdsBackgroundWork(session: AnySession): boolean {
+  return session instanceof ClaudeSession && session.hasBackgroundWork();
 }
 
 function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
@@ -1817,14 +2013,17 @@ export async function getOrCreateSession(opts: {
       if (!existing.isBusy() && priorEngine && priorEngine !== opts.cli) {
         // This native session predates turns from another brain on the shared
         // agent thread. Recreate it so the next turn seeds current context.
-        existing.shutdown('cross-engine context refresh');
+        if (existing instanceof ClaudeSession) existing.shutdown('cross-engine context refresh', 'engine');
+        else existing.shutdown('cross-engine context refresh');
         sessions.delete(key);
+        // The replacement reads the log from disk: land the kill note first.
+        await flushEventLog(existing.logKey);
         continue;
       }
       // A GLM child whose provider moved while it sat idle cannot be re-pointed
       // in place. Retire it here rather than waiting for its own failing turn,
       // so every lane picks up the switch — not just the one that hit the 429.
-      if (opts.cli === 'zai' && !existing.isBusy() && existing.hasStaleZaiProvider()) {
+      if (opts.cli === 'zai' && !existing.isBusy() && !holdsBackgroundWork(existing) && existing.hasStaleZaiProvider()) {
         existing.shutdown('zai provider switch');
         sessions.delete(key);
         continue;
@@ -1841,9 +2040,16 @@ export async function getOrCreateSession(opts: {
         opts.recycleOnMismatch === true &&
         !matches &&
         !existing.isBusy();
+      // The switch waits (bounded) for background work, which dies with this process.
+      if (recyclable && existing instanceof ClaudeSession && existing.keepForBackgroundWork(`${wantModel}|${wantEffort}`)) {
+        return existing;
+      }
       if (!recyclable) return existing;
-      existing.shutdown('model/effort change');
+      if (existing instanceof ClaudeSession) existing.shutdown('model/effort change', 'model');
+      else existing.shutdown('model/effort change');
       sessions.delete(key);
+      // The replacement reads the log from disk: land the kill note first.
+      await flushEventLog(existing.logKey);
       continue;
     }
     sessions.delete(key);
@@ -1892,8 +2098,11 @@ function retireOtherEnginesOnThread(cli: CliKind, repoPath: string, chatId: stri
     if (session.cli === cli || session.logKey !== logKey) return;
     if (!session.isAlive()) return;
     if (typeof session.isBusy === 'function' && session.isBusy()) return;
+    // Background work does NOT hold it: a kept engine would wake later and
+    // write into a thread another engine now owns. End it and name it.
     console.warn(`[chat ${cli}] retiring ${session.cli} on ${logKey} — one engine per thread`);
-    session.shutdown('model switch');
+    if (session instanceof ClaudeSession) session.shutdown('model switch', 'engine');
+    else session.shutdown('model switch');
     drop?.();
   };
   for (const [key, session] of [...sessions]) {
@@ -1924,7 +2133,8 @@ export function peekClaudeSession(opts: {
   if (!live || !live.isAlive()) return null;
   const priorEngine = lastEngineOf(loadEventLogSync(live.logKey).events);
   if (!live.isBusy() && priorEngine && priorEngine !== opts.cli) {
-    live.shutdown('cross-engine context refresh');
+    if (live instanceof ClaudeSession) live.shutdown('cross-engine context refresh', 'engine');
+    else live.shutdown('cross-engine context refresh');
     sessions.delete(key);
     return null;
   }
@@ -2095,7 +2305,10 @@ async function spawnSession(
 export function shutdownAllSessions(): void {
   sessionsShuttingDown = true;
   console.warn(`[chat] shutdownAllSessions called (${sessions.size} session(s))`);
-  for (const s of sessions.values()) s.shutdown('shutdownAllSessions');
+  for (const s of sessions.values()) {
+    if (s instanceof ClaudeSession) s.shutdown('shutdownAllSessions', 'restart');
+    else s.shutdown('shutdownAllSessions');
+  }
   sessions.clear();
 }
 
@@ -2107,6 +2320,9 @@ export type LiveSession = {
   sessionId: string | null;
   /** ms since epoch of the most recent event (or spawn time if no events yet). */
   lastActivityAt: number;
+  /** Background tasks running inside the process (Claude lanes only). A
+   *  restart ends them, so deploys check this alongside busy turns. */
+  backgroundTasks?: string[];
 };
 
 export function activeClaudeSessions(): LiveSession[] {
@@ -2119,6 +2335,7 @@ export function activeClaudeSessions(): LiveSession[] {
       busy: s.isBusy(),
       sessionId: s.sessionId(),
       lastActivityAt: s.lastActivityAt(),
+      ...(s instanceof ClaudeSession && s.hasBackgroundWork() ? { backgroundTasks: s.backgroundWork() } : {}),
     });
   }
   return out;
@@ -2132,13 +2349,21 @@ export function activeChatSessions(): LiveSession[] {
   ];
 }
 
+/** Background work holds off the idle reaper, up to this many TTLs of quiet.
+ *  Past that it is almost certainly a forgotten server or watcher, and the
+ *  process it pins is worth more than the note that says it was ended. */
+const BACKGROUND_IDLE_TTL_MULTIPLE = 3;
+
 export function pruneIdleClaudeSessions(ttlMs: number, now = Date.now()): number {
   let pruned = 0;
   for (const [key, session] of sessions) {
     if (session.isBusy()) continue;
     if (session.listenerCount() > 0) continue;
-    if (now - session.lastActivityAt() < ttlMs) continue;
-    session.shutdown('idle-prune');
+    const idleMs = now - session.lastActivityAt();
+    if (idleMs < ttlMs) continue;
+    if (holdsBackgroundWork(session) && idleMs < ttlMs * BACKGROUND_IDLE_TTL_MULTIPLE) continue;
+    if (session instanceof ClaudeSession) session.shutdown('idle-prune', 'idle');
+    else session.shutdown('idle-prune');
     sessions.delete(key);
     pruned += 1;
   }
@@ -2173,8 +2398,13 @@ export async function freshStart(opts: {
   const pending = pendingSpawns.get(key);
   if (pending) await pending.catch(() => null);
   const existing = sessions.get(key);
+  // Clearing the log below erases the kill notes, so repeat them on the new
+  // thread: what a still-settling Stop ended, then what this fresh start ends.
+  const stoppedBeforeFresh = existing instanceof ClaudeSession ? existing.settlingStopLabels() : [];
+  const endedByFresh = existing instanceof ClaudeSession ? existing.backgroundWork() : [];
   if (existing) {
-    existing.shutdown('freshStart');
+    if (existing instanceof ClaudeSession) existing.shutdown('freshStart', 'fresh');
+    else existing.shutdown('freshStart');
     sessions.delete(key);
   }
   await setSessionId(opts.cli, cwd, '', chatId); // drop the stored id so we don't --resume
@@ -2188,7 +2418,12 @@ export async function freshStart(opts: {
   await clearThreadMemory(logKey, chatId);
   await clearEventLog(logKey);
   if (opts.cli === 'xai') await ensureXaiProxy();
-  return spawnSession(opts.cli, cwd, chatId, null, key, 0, opts.model, opts.effort);
+  const fresh = await spawnSession(opts.cli, cwd, chatId, null, key, 0, opts.model, opts.effort);
+  if (fresh instanceof ClaudeSession) {
+    fresh.noteBackgroundWorkEndedBefore('stop', stoppedBeforeFresh);
+    fresh.noteBackgroundWorkEndedBefore('fresh', endedByFresh);
+  }
+  return fresh;
 }
 
 export function dropSession(cli: CliKind, repoPath: string, chatId = 'main'): void {
@@ -2196,7 +2431,8 @@ export function dropSession(cli: CliKind, repoPath: string, chatId = 'main'): vo
   const key = keyOf(cli, cwd, chatId);
   const s = sessions.get(key);
   if (s) {
-    s.shutdown('dropSession');
+    if (s instanceof ClaudeSession) s.shutdown('dropSession', 'closed');
+    else s.shutdown('dropSession');
     sessions.delete(key);
   }
 }

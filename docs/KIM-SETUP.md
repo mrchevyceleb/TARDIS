@@ -81,7 +81,7 @@ repository permission, missing database credential, or unapplied migration stops
 setup clearly. Fix it and run the same command again.
 
 The script adds GNOME only when absent, enables graphical boot, installs isolated
-Node 22.22.0, pnpm 10.28.2, Claude Code 2.1.272, Codex 0.154.0 and FFmpeg, builds TARDIS
+Node 22.22.0, pnpm 10.28.2, Claude Code 2.1.272, Codex 0.155.1 and FFmpeg, builds TARDIS
 with Lavender/Light defaults, and starts both loopback-only services. It generates
 new local gateway tokens and stores private configuration under
 `~/.config/tardis/` with user-only permissions. It adds **TARDIS** to GNOME's

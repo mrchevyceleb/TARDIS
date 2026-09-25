@@ -32,7 +32,7 @@ import { computerGuidance } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import { setSessionId } from './sessions.ts';
 import { appendEventLog, appendEventLogSync, flushEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
-import { noteUserTurn, peekEnginePrimerThroughSeq } from './compaction.ts';
+import { maybeAutoCompact, noteUserTurn, peekEnginePrimerThroughSeq } from './compaction.ts';
 import { isAgentThread, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
@@ -235,6 +235,7 @@ export class PiSession {
       // Grok in particular likes to narrate a next step ("I'm looking at X now") and then end its turn with the step undone.
       'Never end a turn on a stated intention. If you say you are checking, looking at, or about to do something, do it with tools in this same turn before you stop. The only things worth stopping for are a question the person must answer or a teammate reply you are waiting on, and say which.',
       'External side effects stay draft-first unless the person explicitly asked you to send, post or deploy.',
+      'Nothing you start in the background can report back to you. A backgrounded shell, nohup job or watcher never wakes you when it finishes, and it may be stopped when your turn ends. Run what you need the result of in the foreground, or poll it to completion inside this turn. If something must outlive the turn, tell the person what is running, where its output goes, and that you will not see it finish.',
     ].join('\n');
     return [persona, voiceAddendum, operating, isAgentThread(this.chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n');
   }
@@ -412,6 +413,29 @@ export class PiSession {
     this.emit({ type: 'turnEnd', sessionId: this.piSessionId });
     const stale = this.hasStaleZaiProvider();
     if (stale) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
+    // Keep the rolling memory current on Pi lanes too. Without this a GLM or
+    // Grok stretch never compacted, so switching the lane back to Claude or
+    // Codex found hundreds of aged-out turns to fold at once.
+    else if (!failed) void this.maybeCompact();
+  }
+
+  /** Forever-thread compaction check, see compaction.ts. Pi keeps its own live
+   *  context, so like the Claude lane the saved compact only seeds the next
+   *  genuine process start; the warm session is never rotated for it. */
+  private async maybeCompact(): Promise<void> {
+    try {
+      await maybeAutoCompact({
+        key: this.logKey,
+        cli: this.cli,
+        chatId: this.chatId,
+        events: this.eventLog,
+        isBusy: () => this.turnStartedAt !== null,
+        emit: (ev) => this.emit(ev as SessionEvent),
+        rotate: () => !this.disposed && this.isAlive(),
+      });
+    } catch (err) {
+      console.warn(`[chat ${this.cli}/pi] compaction check failed for ${this.logKey}:`, (err as Error).message);
+    }
   }
 
   private onExit(code: number | null, signal: NodeJS.Signals | null): void {
@@ -560,15 +584,18 @@ export class PiSession {
     this.disposed = true;
     console.log(`[chat ${this.cli}/pi] shutdown key=${this.key} reason=${reason}`);
     try { this.child.stdin.end(); } catch { /* closed */ }
-    try { process.kill(-this.child.pid!, 'SIGTERM'); } catch { try { this.child.kill('SIGTERM'); } catch { /* gone */ } }
-    setTimeout(() => { try { process.kill(-this.child.pid!, 'SIGKILL'); } catch { /* gone */ } }, 3000).unref();
+    // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
+    const pid = this.child.pid;
+    if (!pid || pid <= 1) return;
+    try { process.kill(-pid, 'SIGTERM'); } catch { try { this.child.kill('SIGTERM'); } catch { /* gone */ } }
+    setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } }, 3000).unref();
   }
 
   private emit(msg: SessionEvent): void {
     msg = redactComputerImages(msg);
     if (this.disposed || isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
-    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg };
+    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now() };
     const persisted = { ...se, eng: this.cli, mdl: this.spawnModel };
     const durableUserEcho = msg.type === 'event' && (msg as any).event?.type === '_user_echo';
     if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) throw new Error('could not durably accept the user message');

@@ -25,9 +25,10 @@ test('legacy agents receive one canonical server brain', () => {
   // a brain saved with it resolves to the real top tier instead of resetting.
   assert.equal(brainForAgent(baseAgent({ engine: 'xai', effort: 'max' })).effort, 'xhigh');
   assert.equal(brainForAgent(baseAgent({ engine: 'xai', effort: 'minimal' })).effort, 'minimal');
+  assert.equal(brainForAgent(baseAgent({ engine: 'claude', model: 'claude-opus-5-5' })).model, 'claude-opus-5-5');
   assert.deepEqual(defaultAgentBrain('claude'), {
     engine: 'claude',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     effort: 'xhigh',
   });
 });
