@@ -330,7 +330,7 @@ function PeerBubble({
   // empty timestamped bubble under the peer card.
   const publicResponseBlocks = responseBlocks.filter((item) => (
     item.kind !== 'tool'
-    && !(item.kind === 'text' && !item.open && (!item.text.trim() || isProtocolNoopText(item.text)))
+    && !(item.kind === 'text' && !showTextCaret(item, streaming) && (!item.text.trim() || isProtocolNoopText(item.text)))
   ));
   const responseToolCount = responseBlocks.filter((item) => item.kind === 'tool').length;
   // The peer boundary, not individual content-block open flags, owns progress.
