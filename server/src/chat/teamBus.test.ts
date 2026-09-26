@@ -52,6 +52,24 @@ test('queued delivery wakes when a long busy turn enters a safe steering window'
   assert.equal(unsubscribed, true);
 });
 
+test('a steering window the caller cannot admit is not a boundary', async () => {
+  // Regression: the admission gate refuses a steer when the live turn runs a
+  // superseded brain. Reporting 'steerable' anyway resolved with no delay, and
+  // the caller's retry loop then pinned the event loop until the 30m deadline.
+  const session: Parameters<typeof waitForDeliveryBoundary>[0] = {
+    send: async () => {},
+    isBusy: () => true,
+    canAcceptNativeHumanSteer: () => true,
+    latestSeq: () => 12,
+    subscribe: () => () => {},
+    key: 'codex|workspace|bot-kip',
+    logKey: 'thread|workspace|bot-kip',
+  };
+
+  assert.equal(await waitForDeliveryBoundary(session, 40, undefined, () => false), 'timeout');
+  assert.equal(await waitForDeliveryBoundary(session, 40, undefined, () => true), 'steerable');
+});
+
 test('team availability reports process truth separately from queued work', () => {
   const agent: Agent = {
     id: 'christina',

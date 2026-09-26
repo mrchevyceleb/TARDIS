@@ -248,15 +248,24 @@ export type DeliveryBoundary = 'idle' | 'steerable' | 'closed' | 'timeout' | 'ab
  * tool-execution steering window. Listening to every emitted event matters:
  * waiting only for turnEnd strands the first queued handoff behind a long turn,
  * and that FIFO tail then makes every later (including urgent) handoff look
- * locked out even while the recipient executes dozens of tools. */
+ * locked out even while the recipient executes dozens of tools.
+ *
+ * `acceptSteer` must mirror the caller's admission test, and is re-evaluated at
+ * every decision point rather than captured, so a window that opens or closes
+ * mid-wait is judged against current state. A steering window the caller will
+ * refuse is not a boundary: reporting it resolves this promise with no delay,
+ * and a caller that loops on the refusal then spins the event loop flat out for
+ * the whole wait window. When the caller cannot steer, only a real turnEnd or
+ * closed ends the wait. */
 export function waitForDeliveryBoundary(
   session: SessionLike,
   timeoutMs: number,
   signal?: AbortSignal,
+  acceptSteer: () => boolean = () => true,
 ): Promise<DeliveryBoundary> {
   if (signal?.aborted) return Promise.resolve('aborted');
   if (session.isBusy?.() !== true) return Promise.resolve('idle');
-  if (session.canAcceptNativeHumanSteer?.() === true) return Promise.resolve('steerable');
+  if (acceptSteer() && session.canAcceptNativeHumanSteer?.() === true) return Promise.resolve('steerable');
   const sinceSeq = session.latestSeq();
   return new Promise((resolve) => {
     let settled = false;
@@ -281,7 +290,7 @@ export function waitForDeliveryBoundary(
       const stop = session.subscribe((event) => {
         if (event.ev?.type === 'turnEnd') done('idle');
         else if (event.ev?.type === 'closed') done('closed');
-        else if (session.canAcceptNativeHumanSteer?.() === true) done('steerable');
+        else if (acceptSteer() && session.canAcceptNativeHumanSteer?.() === true) done('steerable');
       }, sinceSeq, false);
       unsubscribe = stop;
       if (settled) stop();
@@ -292,7 +301,7 @@ export function waitForDeliveryBoundary(
     // Close both check/subscribe races: the turn can finish, or a tool can
     // begin, between the initial snapshots and listener registration.
     if (session.isBusy?.() !== true) done('idle');
-    else if (session.canAcceptNativeHumanSteer?.() === true) done('steerable');
+    else if (acceptSteer() && session.canAcceptNativeHumanSteer?.() === true) done('steerable');
   });
 }
 
@@ -377,13 +386,21 @@ async function getRecipientSessionForDelivery(
     // Same-turn steer is cheap and keeps babysitter/cron jobs from waiting for
     // a 40-minute Codex turn to finish. Prefer it even when the caller asked
     // to defer-if-busy (routines, MCP fire-and-forget).
-    const selected = session.activeSelection?.() ?? {
-      model: session.spawnModel,
-      effort: session.spawnEffort,
+    // One source of truth for "would this caller admit a steer right now?" —
+    // shared with the wait below so the two can never disagree. It re-reads the
+    // live selection and the agent's current brain on every call, so a rebrain
+    // mid-wait is picked up at the next session event instead of staying pinned
+    // to a snapshot taken before the wait began.
+    const steerAdmissible = () => {
+      const selected = session.activeSelection?.() ?? {
+        model: session.spawnModel,
+        effort: session.spawnEffort,
+      };
+      const brain = agentLogKey(findAgent(agent.id) ?? agent);
+      return (!brain.model || selected.model === brain.model)
+        && (!brain.effort || selected.effort === brain.effort);
     };
-    const brainMatches = (!model || selected.model === model)
-      && (!effort || selected.effort === effort);
-    if (brainMatches && session.canAcceptNativeHumanSteer?.() === true) {
+    if (steerAdmissible() && session.canAcceptNativeHumanSteer?.() === true) {
       return { session, waited, nativeSteer: true, model, effort };
     }
     // A synchronous MCP tool call must never sit behind somebody else's long
@@ -392,7 +409,15 @@ async function getRecipientSessionForDelivery(
     // sender immediately. Only defer when we cannot steer this turn.
     if (deferIfBusy) throw new Error(`${agent.name} is busy; durable delivery will continue automatically`);
     waited = true;
-    const outcome = await waitForDeliveryBoundary(session, Math.max(1, deadline - Date.now()), signal);
+    // Only a steering window this caller would actually admit counts as a
+    // boundary. A turn still running a superseded brain can only be joined
+    // once it ends, so wait for that instead of re-testing the same refusal.
+    const outcome = await waitForDeliveryBoundary(
+      session,
+      Math.max(1, deadline - Date.now()),
+      signal,
+      steerAdmissible,
+    );
     if (outcome === 'aborted') throw new Error('sender stopped before delivery');
     if (outcome === 'timeout') break;
     // Re-resolve after every idle, closed, or steerable boundary. A closed
