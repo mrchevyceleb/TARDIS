@@ -907,12 +907,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
         // redrawing old tool cards, and the byte budget measures what actually
         // goes out. Live frames above `latest` are new to this socket and are
         // neither rewritten nor dropped.
-        const history = clampReplayWindow(
-          collapseHistoricalToolArgs(filterReplayEvents(merged), latest)
-            .map((se) => (se.seq <= latest ? historicalDelivery(se) : se))
-            .filter((se): se is DispatchSeqEvent => se !== null),
-          latest,
-        );
+        const full = collapseHistoricalToolArgs(filterReplayEvents(merged), latest)
+          .map((se) => (se.seq <= latest ? historicalDelivery(se) : se))
+          .filter((se): se is DispatchSeqEvent => se !== null);
+        const history = clampReplayWindow(full, latest);
+        // A browser that already holds history (sinceSeq > 0) and fell further
+        // behind than the replay window would keep its old blocks, skip the
+        // clamped middle, and show a silent hole. Tell it to drop the stale
+        // copy and rebuild from the window instead.
+        if (replaySince > 0 && history.length < full.length) {
+          safeSend({ type: 'replayGap' });
+        }
         for (const se of history) dispatch(se);
       }
       return session;
@@ -945,12 +950,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
         const pending: DispatchSeqEvent[] = events
           .filter((event) => event.seq > replaySince)
           .map((event) => ({ seq: event.seq, ev: event.ev as any, at: event.at }));
-        const history = clampReplayWindow(
-          collapseHistoricalToolArgs(filterReplayEvents(pending), latest)
-            .map((se) => historicalDelivery(se))
-            .filter((se): se is DispatchSeqEvent => se !== null),
-          latest,
-        );
+        const full = collapseHistoricalToolArgs(filterReplayEvents(pending), latest)
+          .map((se) => historicalDelivery(se))
+          .filter((se): se is DispatchSeqEvent => se !== null);
+        const history = clampReplayWindow(full, latest);
+        if (replaySince > 0 && history.length < full.length) {
+          safeSend({ type: 'replayGap' });
+        }
         for (const se of history) dispatch(se);
       }
       return latest;

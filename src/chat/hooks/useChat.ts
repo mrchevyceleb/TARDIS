@@ -1529,6 +1529,18 @@ export function useChat(opts: {
           }
           writeStoredState(cli, repo.path, chatId, [], 0, cacheResetAtRef.current);
         }
+        else if (msg.type === 'replayGap') {
+          // This device fell further behind than one replay window. Its stored
+          // copy would leave a silent hole before the replayed slice, so drop
+          // it and rebuild from the window. Unlike replayReset, the thread was
+          // not reset: pending outbound messages stay queued.
+          setBlocks([]);
+          turnIdRef.current = '';
+          turnIdRef.peerId = undefined;
+          lastSeqRef.current = 0;
+          setAppliedSeq(0);
+          writeStoredState(cli, repo.path, chatId, [], 0, cacheResetAtRef.current);
+        }
         else if (msg.type === 'sessionRebound') {
           lastSeqRef.current = 0;
           setAppliedSeq(0);
