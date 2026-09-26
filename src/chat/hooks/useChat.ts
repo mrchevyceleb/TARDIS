@@ -188,6 +188,15 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     }];
   }
 
+  // A historical turn ended (replay keeps the boundary; live turns reset via
+  // the turnEnd control message). The next block starts a fresh turn.
+  if (ev.type === '_turn_boundary') {
+    turnIdRef.current = '';
+    turnIdRef.peerId = undefined;
+    if (!blocks.some((b) => b.kind === 'text' && b.open)) return blocks;
+    return blocks.map((b) => (b.kind === 'text' && b.open ? { ...b, open: false } : b));
+  }
+
   // Service-restart marker (assistant-shaped so the agent reads it in seeds;
   // rendered as a divider, not a bubble). Killed the in-flight turn, so close
   // its open/running blocks too — otherwise a dead tool card ticks "working"

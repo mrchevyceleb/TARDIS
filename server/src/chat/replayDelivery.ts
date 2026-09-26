@@ -206,7 +206,11 @@ export function clampReplayWindow<T extends { seq: number; ev: unknown }>(
 export function historicalDelivery<T extends { seq: number; ev: unknown }>(frame: T): T | null {
   const event = frame.ev as Record<string, any> | null;
   if (!event || typeof event !== 'object') return frame;
-  if (['closed', 'turnStart', 'turnEnd'].includes(event.type)) return null;
+  if (['closed', 'turnStart'].includes(event.type)) return null;
+  // Keep where each historical turn ended, as an inert marker. Dropping it let
+  // a device catching up glue separate turns into one bubble, so a later quiet
+  // routine reply ("NO_UPDATE") hid a real report from an earlier turn.
+  if (event.type === 'turnEnd') return { ...frame, ev: { type: 'event', event: { type: '_turn_boundary' } } };
   if (event.type === 'event') {
     const slim = trimHistoricalToolOutput(event);
     return slim === event ? frame : { ...frame, ev: slim };
