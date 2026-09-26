@@ -23,6 +23,7 @@ import { GrokConversation } from './GrokConversation';
 import type { ChatMeta } from './BotPanel';
 import type { Agent } from './agents';
 import { markAgentRead, updateAgentReq } from './agents';
+import { onPresenceChange, userPresent } from '../chat/utils/userPresence';
 
 type BrainDraft = { engine: string; model?: string; effort?: string };
 
@@ -267,27 +268,25 @@ export function GrokChat(props: GrokChatProps) {
     return () => window.clearInterval(iv);
   }, [onMeta, agentLabel, picker.model, chat.status, chat.usage?.fraction, chat.compactingRef]);
 
-  // Unread badge hygiene: while this agent's thread is on a visible tab, keep
-  // the server's read marker at the log head. A backgrounded tab must not
-  // clear badges for replies it never showed — visibilityState covers that.
-  // document.hasFocus() is too strict (devtools / another pane steals focus
-  // and the badge sticks while the user is looking at the thread).
+  // Unread badge hygiene: while someone is actually looking at this agent's
+  // thread, keep the server's read marker at the log head. "Looking" is
+  // userPresent(): a visible window that has focus or saw real input in the
+  // last two minutes. An Electron window left open behind others (or with
+  // nobody at the machine) must not clear badges meant for other devices.
   useEffect(() => {
     if (!props.agent) return;
     const agentId = props.agent.id;
     const post = () => {
-      if (document.visibilityState === 'visible') void markAgentRead(agentId);
+      if (userPresent()) void markAgentRead(agentId);
     };
     post();
     const t = window.setTimeout(post, 400);
     const iv = window.setInterval(post, 4000);
-    document.addEventListener('visibilitychange', post);
-    window.addEventListener('focus', post);
+    const unsubscribe = onPresenceChange((present) => { if (present) post(); });
     return () => {
       window.clearTimeout(t);
       window.clearInterval(iv);
-      document.removeEventListener('visibilitychange', post);
-      window.removeEventListener('focus', post);
+      unsubscribe();
     };
   }, [props.agent?.id, chat.status]);
 

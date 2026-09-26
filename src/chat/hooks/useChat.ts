@@ -4,6 +4,7 @@ import { isReactionEmoji } from '../data/reactions';
 import { contextWindowForCodexModel } from '../codexModels';
 import { automationTurnInFlight, filterAutomationNoise } from '../utils/automationNoise';
 import { isAutomationPeer } from '../utils/routineNoise';
+import { onPresenceChange, userPresent } from '../utils/userPresence';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'streaming' | 'closed' | 'error';
 
@@ -1394,7 +1395,7 @@ export function useChat(opts: {
           model: modelRef.current,
           effort: effortRef.current,
           ...selectionIntent(),
-          visible: document.visibilityState === 'visible',
+          visible: userPresent(),
         }));
       };
       ws.onmessage = (e) => {
@@ -1997,7 +1998,7 @@ export function useChat(opts: {
             model: modelRef.current,
             effort: effortRef.current,
             ...selectionIntent(),
-            visible: document.visibilityState === 'visible',
+            visible: userPresent(),
           }));
           return;
         } catch {
@@ -2027,15 +2028,19 @@ export function useChat(opts: {
         reconcileNow();
       }, 150);
     };
-    const onVisibility = () => {
-      // Tell the server whether this tab counts as watching (unread badges
-      // must not clear for backgrounded tabs, on any device).
+    // Tell the server whether this tab counts as watching: a person is here
+    // (userPresent), not just a visible window. Unread badges must not clear
+    // for backgrounded or idle windows, on any device.
+    const sendWatch = (present: boolean) => {
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
-        try { ws.send(JSON.stringify({ type: 'watch', visible: document.visibilityState === 'visible' })); } catch { /* socket racing close */ }
+        try { ws.send(JSON.stringify({ type: 'watch', visible: present })); } catch { /* socket racing close */ }
       }
+    };
+    const onVisibility = () => {
       if (document.visibilityState === 'visible') reconcile();
     };
+    const stopPresence = onPresenceChange(sendWatch);
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('focus', reconcile);
     window.addEventListener('online', reconcile);
@@ -2125,6 +2130,7 @@ export function useChat(opts: {
         reconcileTimer = null;
       }
       document.removeEventListener('visibilitychange', onVisibility);
+      stopPresence();
       window.removeEventListener('focus', reconcile);
       window.removeEventListener('online', reconcile);
       window.removeEventListener('pageshow', reconcile);
