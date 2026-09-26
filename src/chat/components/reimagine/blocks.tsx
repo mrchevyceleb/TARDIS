@@ -688,6 +688,41 @@ function ReactionStrip({
   );
 }
 
+function RoutineResultBubble({
+  block,
+  streaming,
+  mobile,
+  collapseSteps,
+  pin,
+  onReact,
+}: {
+  block: Extract<ChatBlock, { kind: 'peer' }>;
+  streaming: boolean;
+  mobile: boolean;
+  collapseSteps: boolean;
+  pin?: ThreadPin;
+  onReact?: (targetSeq: number, emoji: string) => void;
+}) {
+  const text = cleanPeerMessageText(block.text);
+  const asMessage: AssistantBlock[] = [{
+    kind: 'text',
+    id: `${block.id}-routine`,
+    text,
+    ts: block.ts,
+    ...(block.tsApprox ? { tsApprox: true } : {}),
+    presentation: 'answer',
+    open: false,
+  } as AssistantBlock];
+  return (
+    <div className="routine-result-message">
+      <div className="bt-peer-role" style={{ fontSize: 11, opacity: 0.65, margin: '0 0 4px 2px' }}>
+        ⚙ {block.from} · routine update
+      </div>
+      <ElrondGroup blocks={asMessage} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} />
+    </div>
+  );
+}
+
 function ElrondGroup({
   blocks,
   streaming,
@@ -1035,6 +1070,21 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       nodes.push(<SwitchDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'background') {
       nodes.push(<BackgroundNote key={g.block.id} block={g.block} />);
+    } else if (g.type === 'peer' && g.block.fromRole === 'automation-result') {
+      // A routine's deliverable is the agent talking to Matt, so it reads as a
+      // normal message with a small routine label, not a folded card he has to
+      // open. Quiet routine turns never reach here (they produce no result).
+      nodes.push(
+        <RoutineResultBubble
+          key={g.block.id}
+          block={g.block}
+          streaming={streaming}
+          mobile={mobile}
+          collapseSteps={collapseSteps}
+          pin={pin}
+          onReact={onReact}
+        />,
+      );
     } else if (g.type === 'peer') {
       nodes.push(
         <PeerBubble
