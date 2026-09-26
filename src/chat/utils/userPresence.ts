@@ -8,16 +8,20 @@
  * so an idle desktop sitting on a thread (Trenzalore on Riley's chat) kept
  * swallowing every badge meant for Matt's other devices.
  *
- * Present = visible AND (the window has focus OR real input in the last two
- * minutes). The recent-input path still covers devtools or another pane taking
- * focus while the user is reading and scrolling the thread.
+ * Present = visible AND (real input in the last two minutes OR (the window
+ * has focus AND input in the last ten minutes)). Focus alone is not enough: a
+ * forgotten window can just as easily be the focused app. The recent-input
+ * path still covers devtools or another pane taking focus while someone reads
+ * and scrolls the thread. Someone reading without touching anything for ten
+ * minutes gets a badge that clears on their next touch.
  */
 
 export const PRESENCE_IDLE_MS = 2 * 60_000
+export const FOCUSED_IDLE_MS = 10 * 60_000
 
 // No input yet: loading or restarting the app is not a person arriving.
-// A focused window is present anyway; an unfocused one waits for real input.
-let lastInputAt = 0
+// performance.now() is monotonic, so a clock change cannot stretch the window.
+let lastInputAt = Number.NEGATIVE_INFINITY
 let installed = false
 let lastPresent: boolean | null = null
 let idleTimer: number | null = null
@@ -26,7 +30,8 @@ const listeners = new Set<(present: boolean) => void>()
 export function userPresent(): boolean {
   if (typeof document === 'undefined') return true
   if (document.visibilityState !== 'visible') return false
-  return document.hasFocus() || Date.now() - lastInputAt < PRESENCE_IDLE_MS
+  const sinceInput = performance.now() - lastInputAt
+  return sinceInput < PRESENCE_IDLE_MS || (document.hasFocus() && sinceInput < FOCUSED_IDLE_MS)
 }
 
 /** Recompute; tell listeners on a change and arm the idle flip. */
@@ -34,9 +39,11 @@ function check() {
   const present = userPresent()
   if (idleTimer !== null) window.clearTimeout(idleTimer)
   idleTimer = null
-  // Unfocused but recently used: re-check the moment that input goes stale.
-  if (present && !document.hasFocus()) {
-    idleTimer = window.setTimeout(check, Math.max(0, lastInputAt + PRESENCE_IDLE_MS - Date.now()) + 50)
+  // Present only because of recent input: re-check when it goes stale. Input
+  // in between just moves lastInputAt; this check then re-arms from it.
+  if (present && listeners.size > 0) {
+    const idleAfter = document.hasFocus() ? FOCUSED_IDLE_MS : PRESENCE_IDLE_MS
+    idleTimer = window.setTimeout(check, Math.min(idleAfter, Math.max(0, lastInputAt + idleAfter - performance.now())) + 50)
   }
   if (present === lastPresent) return
   lastPresent = present
@@ -44,13 +51,16 @@ function check() {
 }
 
 function onInput() {
-  lastInputAt = Date.now()
-  if (lastPresent !== true || idleTimer !== null) check()
+  lastInputAt = performance.now()
+  // Already present: the armed idle check re-reads lastInputAt when it fires.
+  if (lastPresent !== true) check()
 }
 
 const INPUT_EVENTS = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart'] as const
 const INPUT_OPTIONS = { capture: true, passive: true } as const
 
+// Installed once for the app's lifetime (a few passive listeners): the click
+// or key that opens a chat happens before that chat subscribes, and must count.
 function install() {
   if (installed || typeof window === 'undefined') return
   installed = true
@@ -59,28 +69,20 @@ function install() {
   window.addEventListener('blur', check)
   document.addEventListener('visibilitychange', check)
   lastPresent = userPresent()
-  check()
 }
-
-/** The last subscriber left: drop the global listeners and the idle timer. */
-function uninstall() {
-  if (!installed) return
-  installed = false
-  for (const type of INPUT_EVENTS) window.removeEventListener(type, onInput, INPUT_OPTIONS)
-  window.removeEventListener('focus', check)
-  window.removeEventListener('blur', check)
-  document.removeEventListener('visibilitychange', check)
-  if (idleTimer !== null) window.clearTimeout(idleTimer)
-  idleTimer = null
-  lastPresent = null
-}
+install()
 
 /** Subscribe to presence flips (present -> idle and back). Returns an unsubscribe. */
 export function onPresenceChange(listener: (present: boolean) => void): () => void {
-  listeners.add(listener)
   install()
+  listeners.add(listener)
+  check()
   return () => {
     listeners.delete(listener)
-    if (listeners.size === 0) uninstall()
+    // Nobody left to tell: no idle timer needed until the next subscriber.
+    if (listeners.size === 0 && idleTimer !== null) {
+      window.clearTimeout(idleTimer)
+      idleTimer = null
+    }
   }
 }
