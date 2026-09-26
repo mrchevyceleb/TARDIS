@@ -112,7 +112,10 @@ function visionBaseUrl(): string {
 }
 
 const FIREWORKS_VISION_MODEL = 'accounts/fireworks/models/deepseek-v4p1-flash';
-const REMOTE_REASONING_EFFORT = (process.env.AUTOMATION_REASONING_EFFORT || 'high').trim();
+const REMOTE_REASONING_EFFORT = (() => {
+  const v = (process.env.AUTOMATION_REASONING_EFFORT || '').trim().toLowerCase();
+  return ['low', 'medium', 'high'].includes(v) ? v : 'high';
+})();
 
 function isLocalVisionBase(baseUrl: string): boolean {
   try {
