@@ -51,6 +51,7 @@ export function Conversation({ s, picker, repo }: ShellViewProps) {
                 bottomRef={s.sticky.bottomRef}
                 suppressTyping={s.automationBusy}
                 workingSince={s.workingSince}
+                backgroundWork={s.backgroundWork}
                 onReact={s.react}
               />
               {s.error ? (

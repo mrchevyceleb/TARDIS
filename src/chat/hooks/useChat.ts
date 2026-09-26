@@ -122,6 +122,10 @@ function eventTime(ev: any): { ts: number; tsApprox?: true } {
 
 export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlock[] {
   if (!ev || typeof ev !== 'object') return blocks;
+  // A subagent's own frames (parent_tool_use_id) are its private work, not
+  // the main agent speaking. Rendering them put a background helper's notes
+  // in the thread as if the agent had said them.
+  if (ev.parent_tool_use_id) return blocks;
 
   if ((ev.type === 'stream_event' || ev.type === 'event') && ev.event) {
     const inner = ev.event && typeof ev.event === 'object'
@@ -959,6 +963,54 @@ export function useChat(opts: {
   /** When the current turn started — ref powers watchdog math; state powers UI. */
   const turnStartRef = useRef<number>(0);
   const [turnStartedAt, setTurnStartedAt] = useState(0);
+  /** Background shells/subagents still running after the visible turn ended,
+   *  keyed by task id. Mirrors the server's tracking from the same events. */
+  const backgroundTasksRef = useRef<Map<string, string>>(new Map());
+  const backgroundLaneRef = useRef<string>('');
+  const [backgroundWork, setBackgroundWork] = useState<string[]>([]);
+  const backgroundStartedRef = useRef<Map<string, number>>(new Map());
+  const syncBackgroundWork = () => {
+    // A lifecycle event can be lost (crash, dropped socket). Never claim work
+    // older than three hours is still running.
+    const cutoff = Date.now() - 3 * 60 * 60 * 1000;
+    for (const [taskId, at] of backgroundStartedRef.current) {
+      if (at < cutoff || !backgroundTasksRef.current.has(taskId)) {
+        backgroundStartedRef.current.delete(taskId);
+        if (at < cutoff) backgroundTasksRef.current.delete(taskId);
+      }
+    }
+    setBackgroundWork([...backgroundTasksRef.current.values()]);
+  };
+  const trackBackgroundEvent = (ev: any): void => {
+    if (!ev || typeof ev !== 'object') return;
+    if ((ev.type === 'event' || ev.type === 'stream_event') && ev.event && typeof ev.event === 'object') {
+      trackBackgroundEvent(ev.event);
+      return;
+    }
+    if (ev.type === '_service_restart' || (ev.type === 'assistant' && ev._serviceRestart)) {
+      if (backgroundTasksRef.current.size) { backgroundTasksRef.current = new Map(); syncBackgroundWork(); }
+      return;
+    }
+    if (ev.type !== 'system') return;
+    const label = (task: any) => {
+      const raw = typeof task?.description === 'string' ? task.description.split('\n')[0].trim() : '';
+      if (raw) return raw.length > 80 ? `${raw.slice(0, 79).trimEnd()}…` : raw;
+      return task?.task_type === 'local_bash' ? 'a background command' : task?.task_type === 'local_agent' ? 'a background helper' : 'a background task';
+    };
+    if (ev.subtype === 'background_tasks_changed' && Array.isArray(ev.tasks)) {
+      const next = new Map<string, string>();
+      for (const task of ev.tasks) if (typeof task?.task_id === 'string') next.set(task.task_id, label(task));
+      backgroundTasksRef.current = next;
+      for (const taskId of next.keys()) if (!backgroundStartedRef.current.has(taskId)) backgroundStartedRef.current.set(taskId, Date.now());
+      syncBackgroundWork();
+    } else if (typeof ev.task_id === 'string' && ev.subtype === 'task_started' && ev.is_backgrounded === true) {
+      backgroundTasksRef.current.set(ev.task_id, label(ev));
+      if (!backgroundStartedRef.current.has(ev.task_id)) backgroundStartedRef.current.set(ev.task_id, Date.now());
+      syncBackgroundWork();
+    } else if (typeof ev.task_id === 'string' && ev.subtype === 'task_notification') {
+      if (backgroundTasksRef.current.delete(ev.task_id)) syncBackgroundWork();
+    }
+  };
   const markTurnStarted = (at = Date.now(), force = false) => {
     if (!force && turnStartRef.current > 0) return;
     turnStartRef.current = at;
@@ -1207,6 +1259,15 @@ export function useChat(opts: {
     windowTokensRef.current = windowForCli(cli, modelRef.current, contextWindowTokens);
     setUsage(null);
     setServerBrain(null);
+    // A reconnect to the same lane keeps what we know; the replay only carries
+    // newer events. A different lane starts clean.
+    const backgroundLane = conversationKey(cli, repo.path, chatId);
+    if (backgroundLaneRef.current !== backgroundLane) {
+      backgroundLaneRef.current = backgroundLane;
+      backgroundTasksRef.current = new Map();
+      backgroundStartedRef.current = new Map();
+      setBackgroundWork([]);
+    }
     setHydrating(true);
     const hydrationCap = setTimeout(() => setHydrating(false), HYDRATION_CAP_MS);
     // Restore prior blocks from localStorage so a page reload doesn't wipe
@@ -1622,6 +1683,7 @@ export function useChat(opts: {
           const streamed = msg.event && typeof msg.event === 'object'
             ? { ...msg.event, seq: msg.seq ?? msg.event.seq, at: msg.at ?? msg.event.at }
             : msg.event;
+          trackBackgroundEvent(msg.event);
           setBlocks((prev) => reduce(prev, streamed, turnIdRef));
           // Pick up the model id from claude's system/init event so the
           // context meter knows which window to divide against. Opus 4.7
@@ -2222,6 +2284,7 @@ export function useChat(opts: {
     blocks: visibleBlocks, status, error, send, steer, react, freshStart, stop, reconnect, usage, serverBrain, automationBusy,
     hydrating,
     turnStartedAt,
+    backgroundWork,
     lastActivityRef: lastMessageAtRef, turnStartRef, compactingRef,
   };
 }

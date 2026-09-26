@@ -109,6 +109,7 @@ export function Mobile({ s, picker, repo }: ShellViewProps) {
             mobile
             suppressTyping={s.automationBusy}
             workingSince={s.workingSince}
+            backgroundWork={s.backgroundWork}
             onReact={s.react}
           />
           {s.error ? (

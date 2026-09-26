@@ -69,6 +69,17 @@ function ActiveTurnIndicator({ since, phrases }: { since?: number; phrases: stri
   );
 }
 
+function BackgroundWorkIndicator({ tasks }: { tasks: string[] }) {
+  const label = tasks.length === 1 ? tasks[0] : `${tasks.length} background tasks`;
+  return (
+    <div className="active-turn" role="status" aria-label="Still working in the background">
+      <span className="vortex active-turn-star" aria-hidden="true" />
+      <span className="active-turn-label">Working in the background: {label}</span>
+      <span className="active-turn-dots" aria-hidden="true"><i /><i /><i /></span>
+    </div>
+  );
+}
+
 function TurnCompleteIndicator() {
   return (
     <div className="turn-complete" role="status" aria-label="Turn complete">
@@ -811,12 +822,14 @@ export type ChatThreadProps = {
   suppressTyping?: boolean;
   /** Wall-clock start of the active turn, used for visible proof-of-life time. */
   workingSince?: number;
+  /** Background shells/subagents still running after the turn ended. */
+  backgroundWork?: string[];
 };
 
 // Renders the full feed: day marks on day changes, user bubbles, per-turn
 // assistant groups (tool cards + streaming prose), and the live-turn pill
 // while a turn is live but no content has landed yet.
-export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, suppressTyping = false, workingSince }: ChatThreadProps) {
+export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, suppressTyping = false, workingSince, backgroundWork = [] }: ChatThreadProps) {
   const streaming = status === 'streaming';
   // The indicator lives until something VISIBLE lands in the CURRENT turn.
   // Looking across the whole transcript made any historical terminal-error or
@@ -1046,6 +1059,10 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     // proof-of-life row visible for the ENTIRE turn, even after user-facing
     // prose or completed tool cards have appeared.
     nodes.push(<ActiveTurnIndicator key="active-turn" since={workingSince} phrases={phrases} />);
+  } else if (!latestQueued && status === 'ready' && backgroundWork.length > 0) {
+    // The turn ended but a background helper or command is still running.
+    // "Turn complete" here read as "nothing is happening".
+    nodes.push(<BackgroundWorkIndicator key="background-work" tasks={backgroundWork} />);
   } else if (!latestQueued && status === 'ready' && hasAssistantAfterLastUser && !hasCurrentTerminalFailure) {
     // Absence of animation must mean something explicit. This permanent,
     // low-emphasis terminal marker distinguishes "finished" from "stalled".
