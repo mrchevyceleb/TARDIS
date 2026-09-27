@@ -5,7 +5,8 @@ import { COMPUTER_MCP_TOKEN } from '../devices/context.ts';
  * one server across threads: computer identity comes from signed turn context,
  * never a mutable process-wide RIVENDELL_AGENT_NAME. */
 export function localMcpServers(agentName?: string) {
-  const base = { RIVENDELL_TEAM_URL: `http://127.0.0.1:${PORT}` };
+  const ownerName = process.env.RIVENDELL_OWNER_NAME?.trim();
+  const base = { RIVENDELL_TEAM_URL: `http://127.0.0.1:${PORT}`, ...(ownerName ? { RIVENDELL_OWNER_NAME: ownerName } : {}) };
   return {
     'rivendell-team': { type: 'stdio', command: 'node', args: [TEAM_MCP_SCRIPT],
       env: { ...base, ...(agentName ? { RIVENDELL_AGENT_NAME: agentName } : {}) } },

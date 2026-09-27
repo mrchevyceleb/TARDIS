@@ -1,0 +1,383 @@
+// Desk: one place for what needs the owner ("Needs you") and what every agent
+// is working on (the Board). Agents write here through the team MCP; the room
+// polls so their updates land without a refresh.
+
+import { Check, ChevronDown, ClipboardList, ExternalLink, Inbox, LayoutGrid, MessageSquare, Pencil, Plus, RotateCcw, Trash2, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { FormEvent, KeyboardEvent } from 'react';
+import { Button, Chip } from '../components/Primitives';
+import { RoomHeader } from '../components/RoomHeader';
+import { ROOM_NAMES } from '../data/roomNames';
+import {
+  ageLabel,
+  agoText,
+  deskApi,
+  dueLabel,
+  openAgentThread,
+  sortOpenTodos,
+  useDesk,
+  useDeskWrite,
+  type DeskCard,
+  type DeskPriority,
+  type DeskSnapshot,
+  type DeskTodo,
+} from '../data/desk';
+import { showToast } from '../native/shell';
+import type { Agent } from '../grok/agents';
+import { ActorChip, PRIORITY_LABEL, errorText, linkLabel, priorityClass, useDeskAgents } from './deskParts';
+import { DeskBoard } from './DeskBoard';
+import { DeskCardDrawer } from './DeskCardDrawer';
+import './desk.css';
+
+type Tab = 'needs' | 'board';
+const TAB_KEY = 'rivendell:desk-tab';
+
+export function Desk() {
+  const desk = useDesk();
+  const agents = useDeskAgents();
+  const [tab, setTab] = useState<Tab>(() => (localStorage.getItem(TAB_KEY) === 'board' ? 'board' : 'needs'));
+  const [openCardId, setOpenCardId] = useState<string | null>(null);
+  useEffect(() => { localStorage.setItem(TAB_KEY, tab); }, [tab]);
+
+  const data = desk.data;
+  const openTodos = useMemo(() => sortOpenTodos((data?.todos ?? []).filter((t) => t.status === 'open')), [data]);
+  const liveCards = useMemo(() => (data?.cards ?? []).filter((c) => !c.archived), [data]);
+  const moving = liveCards.filter((c) => c.column === 'in_progress' || c.column === 'up_next').length;
+  const parked = liveCards.filter((c) => c.column === 'pipeline').length;
+  const waiting = liveCards.filter((c) => c.column === 'waiting').length;
+  const openCard = openCardId ? data?.cards.find((c) => c.id === openCardId) ?? null : null;
+
+  const subtitle = data
+    ? [
+        openTodos.length ? `${openTodos.length} need${openTodos.length === 1 ? 's' : ''} you` : 'Nothing needs you',
+        `${moving} in motion`,
+        waiting ? `${waiting} waiting on you` : null,
+        parked ? `${parked} parked` : null,
+      ].filter(Boolean).join(' · ')
+    : 'Loading the desk';
+
+  return (
+    <div className="desk-room">
+      <RoomHeader eyebrow={ROOM_NAMES.desk.eyebrow} title="Desk" subtitle={subtitle} />
+      <div className="desk-tabs" role="tablist" aria-label="Desk view">
+        <button type="button" role="tab" aria-selected={tab === 'needs'} onClick={() => setTab('needs')}>
+          <Inbox size={15} aria-hidden="true" /> Needs you
+          {openTodos.length ? <span className="desk-count">{openTodos.length}</span> : null}
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'board'} onClick={() => setTab('board')}>
+          <LayoutGrid size={15} aria-hidden="true" /> Board
+          {liveCards.length ? <span className="desk-count is-quiet">{liveCards.filter((c) => c.column !== 'done').length}</span> : null}
+        </button>
+      </div>
+
+      {desk.isError && !data ? (
+        <div className="desk-error" role="alert">
+          Could not load the desk. {(desk.error as Error)?.message?.slice(0, 200)}
+          <Button tone="ghost" onClick={() => void desk.refetch()}><RotateCcw size={14} /> Retry</Button>
+        </div>
+      ) : null}
+
+      {data ? (
+        tab === 'needs'
+          ? <NeedsYou desk={data} agents={agents} onOpenCard={setOpenCardId} />
+          : <DeskBoard desk={data} agents={agents} onOpenCard={setOpenCardId} />
+      ) : null}
+
+      {openCard && data ? (
+        <DeskCardDrawer
+          key={openCard.id}
+          card={openCard}
+          desk={data}
+          agents={agents}
+          onClose={() => setOpenCardId(null)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+// ---- Needs you ----------------------------------------------------------------------
+
+type TodoDraft = { title: string; detail: string; due: string; priority: DeskPriority; link: string };
+const emptyTodo: TodoDraft = { title: '', detail: '', due: '', priority: 'normal', link: '' };
+
+function NeedsYou({ desk, agents, onOpenCard }: { desk: DeskSnapshot; agents: Agent[]; onOpenCard: (id: string) => void }) {
+  const write = useDeskWrite();
+  const [draft, setDraft] = useState<TodoDraft>(emptyTodo);
+  const [more, setMore] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [justDone, setJustDone] = useState<string | null>(null);
+  const cardsById = useMemo(() => new Map(desk.cards.map((c) => [c.id, c])), [desk.cards]);
+  const open = useMemo(() => sortOpenTodos(desk.todos.filter((t) => t.status === 'open')), [desk.todos]);
+  const done = useMemo(
+    () => desk.todos
+      .filter((t) => t.status === 'done')
+      .sort((a, b) => (b.completedAt ?? b.updatedAt).localeCompare(a.completedAt ?? a.updatedAt)),
+    [desk.todos],
+  );
+
+  const add = async (event: FormEvent) => {
+    event.preventDefault();
+    const title = draft.title.trim();
+    if (!title || adding) return;
+    setAdding(true);
+    const payload = { title, detail: draft.detail, due: draft.due, priority: draft.priority, link: draft.link };
+    try {
+      await write(() => deskApi.addTodo(payload), (d) => ({
+        ...d,
+        todos: [{
+          id: `pending-${Date.now()}`, title, detail: draft.detail.trim() || undefined, due: draft.due || undefined,
+          priority: draft.priority, link: draft.link.trim() || undefined, from: d.owner, status: 'open',
+          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        }, ...d.todos],
+      }));
+      setDraft(emptyTodo);
+      setMore(false);
+    } catch (error) {
+      showToast(`Could not add it: ${errorText(error)}`);
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const setStatus = async (todo: DeskTodo, status: 'open' | 'done') => {
+    if (status === 'done') {
+      setJustDone(todo.id);
+      window.setTimeout(() => setJustDone((id) => (id === todo.id ? null : id)), 700);
+    }
+    const now = new Date().toISOString();
+    try {
+      await write(
+        () => (status === 'done' ? deskApi.completeTodo(todo.id) : deskApi.reopenTodo(todo.id)),
+        (d) => ({
+          ...d,
+          todos: d.todos.map((t) => (t.id === todo.id
+            ? { ...t, status, completedAt: status === 'done' ? now : undefined, updatedAt: now }
+            : t)),
+        }),
+      );
+    } catch (error) {
+      showToast(`Could not update it: ${errorText(error)}`);
+    }
+  };
+
+  const remove = async (todo: DeskTodo) => {
+    try {
+      await write(() => deskApi.deleteTodo(todo.id), (d) => ({ ...d, todos: d.todos.filter((t) => t.id !== todo.id) }));
+    } catch (error) {
+      showToast(`Could not delete it: ${errorText(error)}`);
+    }
+  };
+
+  const save = async (todo: DeskTodo, next: TodoDraft) => {
+    const patch = { title: next.title.trim(), detail: next.detail, due: next.due, priority: next.priority, link: next.link.trim() };
+    if (!patch.title) return;
+    try {
+      await write(() => deskApi.updateTodo(todo.id, patch), (d) => ({
+        ...d,
+        todos: d.todos.map((t) => (t.id === todo.id
+          ? { ...t, title: patch.title, detail: patch.detail.trim() || undefined, due: patch.due || undefined, priority: patch.priority, link: patch.link || undefined }
+          : t)),
+      }));
+      setEditingId(null);
+    } catch (error) {
+      showToast(`Could not save it: ${errorText(error)}`);
+    }
+  };
+
+  const rowProps = { agents, cardsById, onOpenCard, onStatus: setStatus, onDelete: remove };
+
+  return (
+    <section className="desk-needs" aria-label="Needs you">
+      <form className="desk-add" onSubmit={add}>
+        <div className="desk-add-row">
+          <Plus size={16} aria-hidden="true" className="desk-add-icon" />
+          <input
+            value={draft.title}
+            onChange={(e) => setDraft({ ...draft, title: e.target.value })}
+            placeholder="Add something that needs you"
+            aria-label="New item"
+            maxLength={200}
+          />
+          <button type="button" className={`desk-mini-btn${more ? ' is-on' : ''}`} onClick={() => setMore((m) => !m)} aria-expanded={more} title="Details, due date, priority">
+            <ChevronDown size={15} aria-hidden="true" />
+            <span className="desk-hide-sm">Details</span>
+          </button>
+          <Button tone="gold" type="submit" disabled={!draft.title.trim() || adding}>Add</Button>
+        </div>
+        {more ? <TodoFields draft={draft} onChange={setDraft} /> : null}
+      </form>
+
+      {open.length ? (
+        <ul className="desk-todo-list">
+          {open.map((todo) => (
+            editingId === todo.id
+              ? <TodoEditor key={todo.id} todo={todo} onCancel={() => setEditingId(null)} onSave={(next) => void save(todo, next)} />
+              : <TodoRow key={todo.id} todo={todo} {...rowProps} popping={justDone === todo.id} onEdit={() => setEditingId(todo.id)} />
+          ))}
+        </ul>
+      ) : (
+        <div className="desk-empty">
+          <Check size={20} aria-hidden="true" />
+          <div>
+            <strong>All clear.</strong>
+            <span>Nothing needs you right now. Agents add items here when only you can unblock them.</span>
+          </div>
+        </div>
+      )}
+
+      {done.length ? (
+        <details className="desk-done">
+          <summary>
+            <ChevronDown size={15} aria-hidden="true" /> Done <span className="desk-count is-quiet">{done.length}</span>
+          </summary>
+          <ul className="desk-todo-list is-done">
+            {done.slice(0, 60).map((todo) => (
+              <TodoRow key={todo.id} todo={todo} {...rowProps} onEdit={undefined} />
+            ))}
+          </ul>
+          {done.length > 60 ? <p className="desk-muted">Showing the latest 60 of {done.length}.</p> : null}
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+function TodoFields({ draft, onChange }: { draft: TodoDraft; onChange: (next: TodoDraft) => void }) {
+  return (
+    <div className="desk-fields">
+      <label className="is-wide">
+        Details
+        <textarea value={draft.detail} onChange={(e) => onChange({ ...draft, detail: e.target.value })} rows={2} maxLength={4000} placeholder="Context, what is needed back" />
+      </label>
+      <label>
+        Due
+        <input type="date" value={draft.due} onChange={(e) => onChange({ ...draft, due: e.target.value })} />
+      </label>
+      <label>
+        Priority
+        <select value={draft.priority} onChange={(e) => onChange({ ...draft, priority: e.target.value as DeskPriority })}>
+          <option value="high">High</option>
+          <option value="normal">Normal</option>
+          <option value="low">Low</option>
+        </select>
+      </label>
+      <label className="is-wide">
+        Link
+        <input value={draft.link} onChange={(e) => onChange({ ...draft, link: e.target.value })} placeholder="https://… or thread:agent-id" maxLength={2000} />
+      </label>
+    </div>
+  );
+}
+
+function TodoEditor({ todo, onCancel, onSave }: { todo: DeskTodo; onCancel: () => void; onSave: (next: TodoDraft) => void }) {
+  const [draft, setDraft] = useState<TodoDraft>({
+    title: todo.title, detail: todo.detail ?? '', due: todo.due ?? '', priority: todo.priority, link: todo.link ?? '',
+  });
+  const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onCancel(); };
+  return (
+    <li className="desk-todo is-editing" onKeyDown={onKey}>
+      <form onSubmit={(e) => { e.preventDefault(); onSave(draft); }}>
+        <input className="desk-edit-title" value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} aria-label="Title" maxLength={200} />
+        <TodoFields draft={draft} onChange={setDraft} />
+        <div className="desk-edit-actions">
+          <Button tone="ghost" type="button" onClick={onCancel}><X size={14} /> Cancel</Button>
+          <Button tone="gold" type="submit" disabled={!draft.title.trim()}><Check size={14} /> Save</Button>
+        </div>
+      </form>
+    </li>
+  );
+}
+
+function TodoRow({
+  todo, agents, cardsById, onOpenCard, onStatus, onDelete, onEdit, popping,
+}: {
+  todo: DeskTodo;
+  agents: Agent[];
+  cardsById: Map<string, DeskCard>;
+  onOpenCard: (id: string) => void;
+  onStatus: (todo: DeskTodo, status: 'open' | 'done') => void;
+  onDelete: (todo: DeskTodo) => void;
+  onEdit?: () => void;
+  popping?: boolean;
+}) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const timer = useRef(0);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const isDone = todo.status === 'done';
+  const due = isDone ? null : dueLabel(todo.due);
+  const card = todo.cardId ? cardsById.get(todo.cardId) : undefined;
+  const threadId = todo.link?.startsWith('thread:') ? todo.link.slice('thread:'.length) : null;
+
+  const askDelete = () => {
+    if (confirmDelete) { onDelete(todo); return; }
+    setConfirmDelete(true);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setConfirmDelete(false), 3000);
+  };
+
+  return (
+    <li className={`desk-todo ${priorityClass(todo.priority)}${isDone ? ' is-done' : ''}${popping ? ' is-popping' : ''}`}>
+      <button
+        type="button"
+        className="desk-check"
+        onClick={() => onStatus(todo, isDone ? 'open' : 'done')}
+        aria-label={isDone ? `Reopen ${todo.title}` : `Mark ${todo.title} done`}
+        title={isDone ? 'Reopen' : 'Done'}
+      >
+        <Check size={14} aria-hidden="true" />
+      </button>
+      <div className="desk-todo-body">
+        <div className="desk-todo-title">
+          <span className="priority-dot" title={`${PRIORITY_LABEL[todo.priority]} priority`} />
+          {onEdit ? (
+            <button type="button" className="desk-todo-text" onClick={onEdit} title="Edit">{todo.title}</button>
+          ) : (
+            <span className="desk-todo-text">{todo.title}</span>
+          )}
+        </div>
+        {todo.detail ? <p className="desk-todo-detail">{todo.detail}</p> : null}
+        <div className="desk-todo-meta">
+          <ActorChip actor={todo.from} prefix="from" />
+          {due ? <Chip tone={due.tone}>{due.text}</Chip> : null}
+          {todo.cardId ? (
+            <button type="button" className="desk-link-chip" onClick={() => onOpenCard(todo.cardId!)} disabled={!card} title={card ? 'Open the card' : 'That card is gone'}>
+              <ClipboardList size={12} aria-hidden="true" />
+              <span>{card ? card.title : 'card removed'}</span>
+            </button>
+          ) : null}
+          {threadId ? (
+            <button type="button" className="desk-link-chip" onClick={() => openAgentThread(threadId)} title="Open the thread">
+              <MessageSquare size={12} aria-hidden="true" />
+              <span>{linkLabel(todo.link!, agents)}</span>
+            </button>
+          ) : todo.link ? (
+            <a className="desk-link-chip" href={todo.link} target="_blank" rel="noreferrer noopener" title={todo.link}>
+              <ExternalLink size={12} aria-hidden="true" />
+              <span>{linkLabel(todo.link, agents)}</span>
+            </a>
+          ) : null}
+          <span className="desk-age" title={new Date(isDone ? todo.completedAt ?? todo.updatedAt : todo.createdAt).toLocaleString()}>
+            {isDone ? `done ${agoText(todo.completedAt ?? todo.updatedAt)}` : ageLabel(todo.createdAt)}
+          </span>
+        </div>
+      </div>
+      <div className="desk-todo-actions">
+        {onEdit ? (
+          <button type="button" className="desk-icon-btn desk-edit-btn" onClick={onEdit} aria-label="Edit" title="Edit"><Pencil size={14} /></button>
+        ) : null}
+        <button
+          type="button"
+          className={`desk-icon-btn is-danger${confirmDelete ? ' is-confirm' : ''}`}
+          onClick={askDelete}
+          aria-label={confirmDelete ? 'Tap again to delete' : 'Delete'}
+          title={confirmDelete ? 'Tap again to delete' : 'Delete'}
+        >
+          <Trash2 size={14} />
+          {confirmDelete ? <span>Delete?</span> : null}
+        </button>
+      </div>
+    </li>
+  );
+}

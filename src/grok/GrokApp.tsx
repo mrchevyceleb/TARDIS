@@ -13,7 +13,7 @@
 // Studio IDE stays at /studio.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
-import { Menu, MessageSquare, Pencil } from 'lucide-react';
+import { ClipboardList, Menu, MessageSquare, Pencil } from 'lucide-react';
 import { apiJson } from '../data/api';
 import { useJarvis } from '../jarvis/JarvisProvider';
 import { useMediaQuery } from '../chat/hooks/useMediaQuery';
@@ -38,6 +38,8 @@ import { useChatHistory, type HistoryItem } from './history';
 import { OPEN_PANE_EVENT } from './messagePins';
 
 import { Council } from '../rooms/Council';
+import { Desk } from '../rooms/Desk';
+import { OPEN_AGENT_EVENT, useDeskSummary } from '../data/desk';
 import { ContentHome as Content } from '../rooms/ContentHome';
 import { useDeploymentFlags } from '../data/deploymentFlags';
 import { Integrations } from '../rooms/Integrations';
@@ -58,6 +60,7 @@ const ROOMS: Record<string, ComponentType> = {
   setup: Setup,
   integrations: Integrations,
   content: Content,
+  desk: Desk,
   council: Council,
   dashboard: Dashboard,
   tidings: Tidings,
@@ -309,6 +312,26 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
     setDrawerOpen(false);
   }, [agents]);
 
+  // Desk links ("thread:<agentId>") open that agent's home thread.
+  useEffect(() => {
+    const onOpenAgent = (event: Event) => {
+      const id = (event as CustomEvent<string>).detail;
+      const target = agents.find((a) => a.id === id);
+      if (target) openAgent(target);
+      else toastEgg('That teammate is no longer aboard.');
+    };
+    window.addEventListener(OPEN_AGENT_EVENT, onOpenAgent);
+    return () => window.removeEventListener(OPEN_AGENT_EVENT, onOpenAgent);
+  }, [agents, openAgent, toastEgg]);
+
+  // A deployment that turns the Desk off never strands a device inside it.
+  useEffect(() => {
+    if (!flags.deskRoom && view.kind === 'room' && view.key === 'desk') goHome();
+  }, [flags.deskRoom, view, goHome]);
+
+  const deskSummary = useDeskSummary(flags.deskRoom);
+  const needsYou = deskSummary.data?.openTodos ?? 0;
+
   const openStudio = useCallback(() => { window.location.assign('/studio'); }, []);
   const onMeta = useCallback((m: ChatMeta) => setMeta(m), []);
 
@@ -385,6 +408,15 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
                 if (lastChat.current) { setView(lastChat.current); setDrawerOpen(false); }
                 else goHome();
               }}><MessageSquare size={16} aria-hidden="true" />{WORKSPACE_NAV.chat}</button>
+              {flags.deskRoom && <button
+                type="button"
+                aria-pressed={activeRoom === 'desk'}
+                aria-label={needsYou ? `${ROOM_NAMES.desk.name}, ${needsYou} need${needsYou === 1 ? 's' : ''} you` : ROOM_NAMES.desk.name}
+                onClick={() => { if (activeRoom !== 'desk') openRoom('desk'); }}
+              >
+                <ClipboardList size={16} aria-hidden="true" />{ROOM_NAMES.desk.name}
+                {needsYou ? <span className={`bt-ws-badge${(deskSummary.data?.highTodos ?? 0) > 0 ? ' is-hot' : ''}`} aria-hidden="true">{needsYou > 99 ? '99+' : needsYou}</span> : null}
+              </button>}
               {flags.contentRoom && <button type="button" aria-pressed={activeRoom === 'content'} onClick={() => {
                 if (activeRoom !== 'content') openRoom('content');
               }}><Pencil size={16} aria-hidden="true" />{ROOM_NAMES.content.name}</button>}

@@ -165,13 +165,13 @@ export async function uploadWorkspaceFile(path: string, file: Blob): Promise<Wor
 
 /** Per-deployment surfaces the server chooses to expose. Read once at boot;
  *  a failed probe leaves everything on so a health blip cannot blank the UI. */
-export async function fetchDeploymentFlags(): Promise<{ contentRoom: boolean }> {
+export async function fetchDeploymentFlags(): Promise<{ contentRoom: boolean; deskRoom: boolean }> {
   try {
     const response = await fetch('/api/health');
-    if (!response.ok) return { contentRoom: true };
-    const data = await response.json() as { contentRoom?: boolean };
-    return { contentRoom: data.contentRoom !== false };
+    if (!response.ok) return { contentRoom: true, deskRoom: true };
+    const data = await response.json() as { contentRoom?: boolean; deskRoom?: boolean };
+    return { contentRoom: data.contentRoom !== false, deskRoom: data.deskRoom !== false };
   } catch {
-    return { contentRoom: true };
+    return { contentRoom: true, deskRoom: true };
   }
 }

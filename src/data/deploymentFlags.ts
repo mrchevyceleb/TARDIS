@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
 import { fetchDeploymentFlags } from './api';
 
-export type DeploymentFlags = { contentRoom: boolean };
+export type DeploymentFlags = { contentRoom: boolean; deskRoom: boolean };
 
 /** Resolved once per page load and shared by every caller. The server decides
  *  which optional surfaces this deployment runs; nothing here is per-user. */
-const DEFAULTS: DeploymentFlags = { contentRoom: true };
+const DEFAULTS: DeploymentFlags = { contentRoom: true, deskRoom: true };
 let cached: DeploymentFlags | null = null;
 let inFlight: Promise<DeploymentFlags> | null = null;
 

@@ -8,7 +8,7 @@ import { setupRouter } from './routes/setup.ts';
 import { contentGatewayRouter } from './routes/contentGateway.ts';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { ASSISTANT_ADMIN_BASE_URL, ASSISTANT_ADMIN_TOKEN, ELROND_WORKSPACE_PATH, HOST, PORT, PREWARM_AGENTS, STATIC_DIR, WORKER_RUNNER } from './config.ts';
+import { ASSISTANT_ADMIN_BASE_URL, ASSISTANT_ADMIN_TOKEN, DESK_ROOM_ENABLED, ELROND_WORKSPACE_PATH, HOST, PORT, PREWARM_AGENTS, STATIC_DIR, WORKER_RUNNER } from './config.ts';
 import { quiesceChat, registerChat } from './chat/register.ts';
 import { getOrCreateSession, isClaudeFamilyCli, type CliKind } from './chat/runner.ts';
 import { brainForAgent, cliForAgentEngine, ensureAgents, listAgents } from './chat/agents.ts';
@@ -17,6 +17,7 @@ import { agentsRouter } from './routes/agents.ts';
 import { teamRouter } from './routes/team.ts';
 import { routinesRouter } from './routes/routines.ts';
 import { messagePinsRouter } from './routes/messagePins.ts';
+import { deskRouter } from './routes/desk.ts';
 import { registerVoiceCalls } from './voice/grokCall.ts';
 import { registerDeviceBridge } from './devices/bridge.ts';
 import { voicePreviewRouter } from './voice/preview.ts';
@@ -96,6 +97,9 @@ app.get('/api/health', (_req, res) => {
      *  Opt-out rather than opt-in so an existing deployment keeps working
      *  until its own env says otherwise. */
     contentRoom: CONTENT_ROOM_ENABLED,
+    /** The Desk room (Needs you + agent work board). On by default;
+     *  RIVENDELL_DESK_ROOM=off hides it. */
+    deskRoom: DESK_ROOM_ENABLED,
     ts: Date.now(),
   });
 });
@@ -121,6 +125,7 @@ app.use('/api/agents', agentsRouter);
 app.use('/api/team', teamRouter);
 app.use('/api/routines', routinesRouter);
 app.use('/api/message-pins', messagePinsRouter);
+app.use('/api/desk', deskRouter);
 app.use('/api/jarvis', jarvisRouter);
 app.use('/api/voice-preview', voicePreviewRouter);
 app.use('/api/chat/attachments', chatAttachmentsRouter);

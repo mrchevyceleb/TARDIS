@@ -302,6 +302,18 @@
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--r-gold) 45%, transparent);
 }
 .bt-workspace-switch button:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; }
+.bt-workspace-switch button:active { transform: scale(0.97); }
+/* Desk: open "Needs you" count; rose and breathing when any is high priority. */
+.bt-ws-badge {
+  min-width: 19px; height: 19px; padding: 0 6px; margin-left: -2px; border-radius: 999px;
+  display: inline-grid; place-items: center;
+  font-size: 11px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums;
+  background: var(--r-gold); color: var(--r-on-accent);
+}
+.bt-ws-badge.is-hot { background: var(--r-rose); color: #fff; animation: bt-breathe 2.4s ease-in-out infinite; }
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
+  .bt-workspace-switch button { padding: 0 14px; }
+}
 .bot-app.rail-collapsed .bt-workspacebar { padding-left: calc(62px + env(safe-area-inset-left, 0px)); }
 @media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
   .bt-workspacebar { padding-left: calc(62px + env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }

@@ -13,6 +13,8 @@
  *   team_message — durable async handoff; waits only when explicitly requested
  *   team_recent  — recent visible messages from a teammate's thread
  *   routine_*    — list, create, update, run, delete TARDIS routines
+ *   desk_todo_*  — the owner's "Needs you" list on the Desk
+ *   board_*      — the Desk board of agent work (cards, moves, comments)
  *
  * The server uses active-cycle detection and rate limits rather than a hard
  * chain-depth ceiling. Teammates can keep a legitimate collaboration going;
@@ -24,6 +26,12 @@ import { createInterface } from 'node:readline';
 const BASE = process.env.RIVENDELL_TEAM_URL || 'http://127.0.0.1:8091';
 // Spawned by the TARDIS server on its own host, so this is the scheduler's zone.
 const SERVER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'server-local';
+// The human the Desk's "Needs you" list belongs to.
+const OWNER = process.env.RIVENDELL_OWNER_NAME?.trim() || 'Matt';
+const DESK_COLUMNS = ['pipeline', 'up_next', 'in_progress', 'waiting', 'done'];
+const DESK_COLUMN_TITLES = { pipeline: 'Pipeline', up_next: 'Up next', in_progress: 'In progress', waiting: `Waiting on ${OWNER}`, done: 'Done' };
+const DESK_PRIORITIES = ['low', 'normal', 'high'];
+const FROM_PROP = { type: 'string', description: 'Your own teammate name. Only needed if TARDIS has not already identified you.' };
 
 const TOOLS = [
   {
@@ -210,6 +218,168 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'desk_todo_add',
+    description:
+      `Put an item on ${OWNER}'s "Needs you" list on the Desk. Use it ONLY for something that needs ${OWNER} personally: a decision, a login or 2FA code, an approval, a payment, or an account or physical action only he can take. ` +
+      'Not for your own work (that is a board card) and not for FYI updates. Write the title as the action he must take, put context in detail, and pass cardId when it unblocks a board card (then move that card to waiting). ' +
+      'Check desk_todos first so you do not add a duplicate. Returns the id; call desk_todo_complete once it is resolved.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: `The action ${OWNER} needs to take, short (e.g. "Approve the App Store submission for Operly 2.2")` },
+        detail: { type: 'string', description: 'Context, what you already tried, exactly what you need back' },
+        due: { type: 'string', description: 'Date it is needed by, YYYY-MM-DD (or today / tomorrow)' },
+        priority: { type: 'string', enum: DESK_PRIORITIES, description: 'high only when work is blocked or a deadline is close (default normal)' },
+        link: { type: 'string', description: 'Optional http(s) URL, or thread:<agentId> to point at a teammate thread' },
+        cardId: { type: 'string', description: 'The board card this unblocks (from board_cards)' },
+        from: FROM_PROP,
+      },
+      required: ['title'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'desk_todos',
+    description: `List ${OWNER}'s "Needs you" items with ids (default: open ones). Check it before adding an item, and to see whether something you asked for was answered.`,
+    inputSchema: {
+      type: 'object',
+      properties: { status: { type: 'string', enum: ['open', 'done', 'all'] } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'desk_todo_update',
+    description: 'Change a Needs-you item by id: sharpen the title or detail, change due, priority, link or cardId. Pass an empty string to clear due, link, detail or cardId.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        title: { type: 'string' },
+        detail: { type: 'string' },
+        due: { type: 'string', description: 'YYYY-MM-DD, today, tomorrow, or empty to clear' },
+        priority: { type: 'string', enum: DESK_PRIORITIES },
+        link: { type: 'string' },
+        cardId: { type: 'string' },
+        status: { type: 'string', enum: ['open', 'done'] },
+      },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'desk_todo_complete',
+    description: `Mark a Needs-you item done once it is resolved (${OWNER} answered, the login worked, it no longer matters). An optional note is added as a comment on the linked card.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        note: { type: 'string', description: 'One line on how it was resolved' },
+        from: FROM_PROP,
+      },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'board_cards',
+    description:
+      'List cards on the Desk board with ids, grouped by column (Pipeline, Up next, In progress, Waiting on ' + OWNER + ', Done). ' +
+      'Call it BEFORE board_card_create so you reuse an existing card instead of making a duplicate, and when picking work back up. Done cards are hidden unless includeDone is true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        owner: { type: 'string', description: 'me, a teammate name, ' + OWNER + ', or all (default all)' },
+        column: { type: 'string', enum: DESK_COLUMNS },
+        project: { type: 'string', description: 'Exact project, e.g. Operly' },
+        includeDone: { type: 'boolean' },
+        from: FROM_PROP,
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'board_card_get',
+    description: 'Read one board card in full: description, links, the whole comment thread (including anything ' + OWNER + ' wrote), and linked Needs-you items.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'board_card_create',
+    description:
+      'Create a Desk board card for a real piece of work (more than a quick answer) so ' + OWNER + ' can see it. You own it by default and it starts in in_progress. ' +
+      'Use pipeline for something parked or not started that must not be forgotten (say why in the description). Returns the id; keep it moving with board_card_move and board_card_comment.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Short outcome-style title, e.g. "Submit Operly 2.2 to the App Store"' },
+        description: { type: 'string', description: 'Goal, scope, and anything a teammate would need to pick it up' },
+        column: { type: 'string', enum: DESK_COLUMNS, description: 'Default in_progress' },
+        owner: { type: 'string', description: 'Default you. A teammate name, or ' + OWNER + ' for work only he can do' },
+        project: { type: 'string', description: 'Free text, e.g. Operly, Studio, TARDIS, Personal' },
+        priority: { type: 'string', enum: DESK_PRIORITIES },
+        links: { type: 'array', items: { type: 'string' }, description: 'PR, issue, or doc URLs' },
+        force: { type: 'boolean', description: 'Create even if an open card already has this exact title' },
+        from: FROM_PROP,
+      },
+      required: ['title'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'board_card_move',
+    description:
+      'Move a board card to another column: in_progress when you start, waiting when it needs ' + OWNER + ' (also add a desk_todo_add), pipeline when parked (give the reason in note), done when finished and verified. ' +
+      'The optional note is added as a comment.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        column: { type: 'string', enum: DESK_COLUMNS },
+        note: { type: 'string', description: 'One line: why it moved' },
+        from: FROM_PROP,
+      },
+      required: ['id', 'column'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'board_card_comment',
+    description: 'Add a short progress note to a board card (one or two lines): a milestone reached, a PR opened, a blocker found. Not a running log of every step.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        text: { type: 'string' },
+        from: FROM_PROP,
+      },
+      required: ['id', 'text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'board_card_update',
+    description: 'Edit a board card: title, description, owner (hand it to a teammate or ' + OWNER + '), project, priority, or links (the full new list; add a PR URL here). Use board_card_move to change columns.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        title: { type: 'string' },
+        description: { type: 'string' },
+        owner: { type: 'string' },
+        project: { type: 'string' },
+        priority: { type: 'string', enum: DESK_PRIORITIES },
+        links: { type: 'array', items: { type: 'string' } },
+        from: FROM_PROP,
+      },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 async function api(path, init, signal) {
@@ -251,6 +421,55 @@ async function resolveAgent(nameOrId, signal) {
   if (byName.length === 1) return byName[0];
   if (byName.length > 1) throw new Error(`More than one teammate is named ${JSON.stringify(nameOrId)} (${byName.map((a) => a.id).join(', ')}). Pass the id.`);
   throw new Error(`No teammate named ${JSON.stringify(nameOrId)}. Call team_list for the roster.`);
+}
+
+function ago(iso) {
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms)) return '';
+  const minutes = Math.max(0, Math.floor(ms / 60_000));
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function span(iso) {
+  return ago(iso).replace(/ ago$/, '');
+}
+
+function clipLine(text, max) {
+  const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+function describeTodo(t) {
+  const bits = [
+    t.status === 'done' ? `DONE ${ago(t.completedAt ?? t.updatedAt)}` : null,
+    `from ${t.from?.name ?? '?'}`,
+    t.due ? `due ${t.due}` : null,
+    t.cardId ? `card ${t.cardId}` : null,
+    t.link ? t.link : null,
+    `added ${ago(t.createdAt)}`,
+  ].filter(Boolean);
+  return `- [${t.id}] (${t.priority}) ${t.title} · ${bits.join(' · ')}${t.detail ? `\n  ${clipLine(t.detail, 200)}` : ''}`;
+}
+
+function describeCard(c) {
+  const last = c.comments?.length ? c.comments[c.comments.length - 1] : null;
+  const bits = [
+    `owner ${c.owner?.name ?? '?'}`,
+    c.project || null,
+    c.priority !== 'normal' ? c.priority : null,
+    c.comments?.length ? `${c.comments.length} comment${c.comments.length === 1 ? '' : 's'}` : null,
+    `updated ${ago(c.updatedAt)}`,
+    c.archived ? 'ARCHIVED' : null,
+  ].filter(Boolean);
+  const lastLine = last ? `\n  last: ${last.author?.name ?? '?'}: ${clipLine(last.text, 160)}` : '';
+  return `- [${c.id}] ${c.title} · ${bits.join(' · ')}${lastLine}`;
+}
+
+function normTitle(text) {
+  return String(text ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 async function callTool(name, args, signal) {
@@ -305,6 +524,122 @@ async function callTool(name, args, signal) {
     const { pins } = await api(`/api/message-pins?agentId=${encodeURIComponent(me.id)}`, undefined, signal);
     if (!pins?.length) return 'Nothing is pinned on your desk.';
     return pins.map((p) => `- [${p.id}] ${p.text}`).join('\n');
+  }
+  if (name.startsWith('desk_') || name.startsWith('board_')) {
+    const self = process.env.RIVENDELL_AGENT_NAME || (typeof args.from === 'string' ? args.from.trim() : '');
+    const writes = !['desk_todos', 'board_cards', 'board_card_get'].includes(name);
+    if (writes && !self) throw new Error('Pass from: your teammate name, so the Desk can credit you.');
+    const post = (path, body) => api(path, { method: 'POST', body: JSON.stringify(body) }, signal);
+    const comment = (id, text) => post(`/api/desk/cards/${encodeURIComponent(id)}/comments`, { text, agent: self });
+    if (name === 'desk_todo_add') {
+      const { todo } = await post('/api/desk/todos', {
+        title: args.title, detail: args.detail, due: args.due, priority: args.priority, link: args.link, cardId: args.cardId, agent: self,
+      });
+      return `Added to ${OWNER}'s Needs-you list:\n${describeTodo(todo)}\nComplete it with desk_todo_complete once it is resolved.`;
+    }
+    if (name === 'desk_todos') {
+      const status = args.status ?? 'open';
+      const { todos } = await api(`/api/desk/todos?status=${encodeURIComponent(status)}`, undefined, signal);
+      if (!todos?.length) return status === 'open' ? `Nothing is waiting on ${OWNER}.` : 'No items.';
+      return todos.map(describeTodo).join('\n');
+    }
+    if (name === 'desk_todo_update') {
+      const patch = {};
+      for (const key of ['title', 'detail', 'due', 'priority', 'link', 'cardId', 'status']) if (args[key] !== undefined) patch[key] = args[key];
+      if (!Object.keys(patch).length) throw new Error('Nothing to change.');
+      const { todo } = await api(`/api/desk/todos/${encodeURIComponent(args.id)}`, { method: 'PATCH', body: JSON.stringify(patch) }, signal);
+      return `Updated:\n${describeTodo(todo)}`;
+    }
+    if (name === 'desk_todo_complete') {
+      const { todo } = await post(`/api/desk/todos/${encodeURIComponent(args.id)}/complete`, {});
+      let extra = '';
+      if (args.note && todo.cardId) {
+        try {
+          await comment(todo.cardId, `Resolved: ${todo.title}. ${args.note}`);
+        } catch (error) {
+          extra = ` (could not comment on ${todo.cardId}: ${error.message})`;
+        }
+      }
+      return `Completed [${todo.id}] ${todo.title}.${todo.cardId ? ` Move card ${todo.cardId} on if it was waiting on this.` : ''}${extra}`;
+    }
+    if (name === 'board_cards') {
+      const params = new URLSearchParams();
+      const owner = typeof args.owner === 'string' ? args.owner.trim() : '';
+      if (owner && owner.toLowerCase() !== 'all') {
+        if (['me', 'self', 'mine'].includes(owner.toLowerCase()) && !self) throw new Error('Pass from, or name the owner.');
+        params.set('owner', ['me', 'self', 'mine'].includes(owner.toLowerCase()) ? self : owner);
+      }
+      if (args.column) params.set('column', args.column);
+      if (args.project) params.set('project', args.project);
+      if (args.includeDone) params.set('includeDone', '1');
+      const { cards } = await api(`/api/desk/cards?${params}`, undefined, signal);
+      if (!cards?.length) return 'No matching cards on the board.';
+      return DESK_COLUMNS
+        .map((column) => {
+          const list = cards.filter((c) => c.column === column);
+          return list.length ? `${DESK_COLUMN_TITLES[column]} (${list.length}):\n${list.map(describeCard).join('\n')}` : '';
+        })
+        .filter(Boolean)
+        .join('\n\n');
+    }
+    if (name === 'board_card_get') {
+      const { card, todos } = await api(`/api/desk/cards/${encodeURIComponent(args.id)}`, undefined, signal);
+      const lines = [
+        `[${card.id}] ${card.title}`,
+        `In ${DESK_COLUMN_TITLES[card.column] ?? card.column} for ${span(card.columnSince)} · owner ${card.owner.name} · ${card.priority}${card.project ? ` · ${card.project}` : ''}${card.archived ? ' · ARCHIVED' : ''}`,
+        card.description ? `\n${card.description}` : '',
+        card.links?.length ? `\nLinks:\n${card.links.map((l) => `- ${l}`).join('\n')}` : '',
+        todos?.length ? `\nNeeds-you items:\n${todos.map(describeTodo).join('\n')}` : '',
+        card.comments?.length
+          ? `\nComments (${card.comments.length}${card.comments.length > 30 ? ', latest 30' : ''}):\n${card.comments.slice(-30).map((c) => `- ${c.author.name}, ${ago(c.at)}: ${c.text}`).join('\n')}`
+          : '\nNo comments yet.',
+      ];
+      return lines.filter(Boolean).join('\n');
+    }
+    if (name === 'board_card_create') {
+      if (!args.force) {
+        const { cards } = await api('/api/desk/cards', undefined, signal);
+        const wanted = normTitle(args.title);
+        const dupe = wanted ? cards.find((c) => normTitle(c.title) === wanted) : null;
+        if (dupe) return `Not created: an open card already has this title.\n${describeCard(dupe)}\nUse that one (board_card_move / board_card_comment), or pass force:true if this really is separate work.`;
+      }
+      const { card } = await post('/api/desk/cards', {
+        title: args.title,
+        description: args.description,
+        column: args.column ?? 'in_progress',
+        owner: args.owner && !['me', 'self'].includes(String(args.owner).trim().toLowerCase()) ? args.owner : undefined,
+        project: args.project,
+        priority: args.priority,
+        links: args.links,
+        agent: self,
+      });
+      return `Created [${card.id}] ${card.title} in ${DESK_COLUMN_TITLES[card.column]}, owner ${card.owner.name}.`;
+    }
+    if (name === 'board_card_move') {
+      const { card } = await post(`/api/desk/cards/${encodeURIComponent(args.id)}/move`, { column: args.column });
+      let extra = '';
+      if (args.note) {
+        try {
+          await comment(card.id, args.note);
+        } catch (error) {
+          extra = ` (note not saved: ${error.message})`;
+        }
+      }
+      const hint = card.column === 'waiting' ? ` If ${OWNER} has to act, make sure a desk_todo_add points at this card.` : '';
+      return `Moved [${card.id}] ${card.title} to ${DESK_COLUMN_TITLES[card.column]}.${hint}${extra}`;
+    }
+    if (name === 'board_card_comment') {
+      const { card } = await comment(args.id, args.text);
+      return `Commented on [${card.id}] ${card.title} (${card.comments.length} comment${card.comments.length === 1 ? '' : 's'}).`;
+    }
+    if (name === 'board_card_update') {
+      const patch = {};
+      for (const key of ['title', 'description', 'owner', 'project', 'priority', 'links']) if (args[key] !== undefined) patch[key] = args[key];
+      if (typeof patch.owner === 'string' && ['me', 'self'].includes(patch.owner.trim().toLowerCase())) patch.owner = self;
+      if (!Object.keys(patch).length) throw new Error('Nothing to change.');
+      const { card } = await api(`/api/desk/cards/${encodeURIComponent(args.id)}`, { method: 'PATCH', body: JSON.stringify(patch) }, signal);
+      return `Updated:\n${describeCard(card)}`;
+    }
   }
   if (name === 'team_message') {
     const result = await api('/api/team/message', {

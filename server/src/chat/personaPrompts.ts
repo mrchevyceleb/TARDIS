@@ -6,6 +6,7 @@ import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import { agentForChatId } from './agents.ts';
+import { DESK_OWNER_NAME, DESK_ROOM_ENABLED } from '../config.ts';
 
 export const PERSONAS_DIR = join(STATE_DIR, 'personas');
 
@@ -18,6 +19,18 @@ const TEAM_STATUS_GUIDANCE = [
   '“WORKING NOW” means a live turn exists. “IDLE” means no turn is running. A message you meant to send, a handoff that was accepted, or a possible follow-up is not proof that work is underway.',
   'Use precise states: active now, queued, assigned but idle, merely proposed, or completed. If you want a teammate to start, actually send the handoff; do not report it as active until current evidence says it is.',
   '</rivendell-team-status>',
+].join('\n');
+
+/** Keeps the Desk (the owner's one view of what needs them and what every
+ *  agent is doing) true. Tools live in the rivendell-team MCP. */
+const DESK_GUIDANCE = [
+  '<rivendell-desk>',
+  `The Desk is ${DESK_OWNER_NAME}'s single view of what needs their attention and what every agent is working on. Keep your part of it accurate so nothing gets forgotten.`,
+  '- Real task (anything beyond a quick answer): call board_cards first and reuse a matching card instead of creating a duplicate; otherwise board_card_create (you are the owner, column in_progress). As it moves, add a one or two line board_card_comment at real milestones and board_card_move it; move it to done when finished and verified.',
+  '- Paused, parked, or blocked on something outside this turn: board_card_move it to pipeline with a one-line comment saying why and what restarts it. Never just drop it.',
+  `- Need ${DESK_OWNER_NAME} personally (a decision, a login or 2FA code, an approval, a payment, anything only he can do): desk_todo_add with the cardId, then move the card to waiting. When it is resolved, desk_todo_complete it and move the card on.`,
+  '- Skip the board for one-line answers, chit-chat, and routine runs that found nothing. Keep titles short and comments brief.',
+  '</rivendell-desk>',
 ].join('\n');
 
 function readScopeFile(file: string): string {
@@ -39,7 +52,7 @@ export function personaPromptFor(chatId: string): string {
   const agent = agentForChatId(chatId);
   if (!agent) return '';
   const scope = readScopeFile(`${agent.id}.md`);
-  return [scope, TEAM_STATUS_GUIDANCE].filter(Boolean).join('\n\n');
+  return [scope, TEAM_STATUS_GUIDANCE, DESK_ROOM_ENABLED ? DESK_GUIDANCE : null].filter(Boolean).join('\n\n');
 }
 
 /** Scope text for an agent record's home (REST use). */

@@ -22,6 +22,7 @@ import {
   AppWindow,
   BookOpen,
   CalendarDays,
+  ClipboardList,
   Coins,
   Gauge,
   Hammer,
@@ -58,6 +59,7 @@ export const ROOM_ENTRIES: RoomEntry[] = [
   { key: 'integrations', label: ROOM_NAMES.integrations.name, icon: <Plug size={16} /> },
   { key: 'setup', label: ROOM_NAMES.setup.name, icon: <Plug size={16} /> },
   { key: 'content', label: ROOM_NAMES.content.name, icon: <Pencil size={16} /> },
+  { key: 'desk', label: ROOM_NAMES.desk.name, icon: <ClipboardList size={16} /> },
   { key: 'council', label: ROOM_NAMES.council.name, icon: <LayoutGrid size={16} /> },
   { key: 'dashboard', label: ROOM_NAMES.dashboard.name, icon: <Gauge size={16} /> },
   { key: 'tidings', label: ROOM_NAMES.tidings.name, icon: <Mail size={16} /> },
@@ -597,7 +599,7 @@ export function BotRail(props: BotRailProps) {
         {pluginsOpen ? (
           <div className="bt-plugins-pop" role="menu">
             <div className="bt-plug-h">Rooms</div>
-            {ROOM_ENTRIES.filter((r) => r.key !== 'content' || flags.contentRoom).map((r) => (
+            {ROOM_ENTRIES.filter((r) => (r.key !== 'content' || flags.contentRoom) && (r.key !== 'desk' || flags.deskRoom)).map((r) => (
               <button key={r.key} className="bt-plug-row" onClick={() => { props.onOpenRoom(r.key); setPluginsOpen(false); }}>
                 {r.icon} {r.label}
               </button>

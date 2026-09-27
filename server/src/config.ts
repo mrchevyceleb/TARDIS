@@ -45,6 +45,16 @@ export const PORT = Number(process.env.PORT || process.env.RIVENDELL_PORT) || 80
 // trusted network interface (Tailscale Serve can still proxy to 127.0.0.1).
 export const HOST = process.env.HOST || '127.0.0.1';
 export const STATE_DIR = process.env.RIVENDELL_STATE_DIR || join(homedir(), '.rivendell');
+/** The Desk: what needs the owner, plus the board of agent work. On unless
+ *  RIVENDELL_DESK_ROOM is off/0/false/no, which hides the room and drops the
+ *  per-agent Desk guidance (the API and tools stay harmless either way). */
+export const DESK_ROOM_ENABLED = !['off', '0', 'false', 'no'].includes(
+  (process.env.RIVENDELL_DESK_ROOM ?? '').trim().toLowerCase(),
+);
+/** Who the Desk treats as the human owner (the "Needs you" person). */
+export const DESK_OWNER_NAME = (process.env.RIVENDELL_OWNER_NAME ?? '').trim().slice(0, 40) || 'Matt';
+/** desk.json lives in STATE_DIR unless pointed elsewhere (temp runs, tests). */
+export const DESK_FILE = process.env.RIVENDELL_DESK_FILE?.trim() || join(STATE_DIR, 'desk.json');
 export const STATIC_DIR = process.env.RIVENDELL_STATIC_DIR || resolve(APP_ROOT, 'dist');
 export const ELROND_WORKSPACE_PATH =
   process.env.ELROND_WORKSPACE_PATH ||
