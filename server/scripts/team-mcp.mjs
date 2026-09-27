@@ -319,7 +319,7 @@ const TOOLS = [
         title: { type: 'string', description: 'Short outcome-style title, e.g. "Submit Operly 2.2 to the App Store"' },
         description: { type: 'string', description: 'Goal, scope, and anything a teammate would need to pick it up' },
         column: { type: 'string', enum: DESK_COLUMNS, description: 'Default in_progress' },
-        owner: { type: 'string', description: 'Default you. A teammate name, or ' + OWNER + ' for work only he can do' },
+        owner: { type: 'string', description: 'Default you. A teammate name, or ' + OWNER + ' for work only they can do' },
         project: { type: 'string', description: 'Free text, e.g. Operly, Studio, TARDIS, Personal' },
         priority: { type: 'string', enum: DESK_PRIORITIES },
         links: { type: 'array', items: { type: 'string' }, description: 'PR, issue, or doc URLs' },

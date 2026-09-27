@@ -28,7 +28,7 @@ const DESK_GUIDANCE = [
   `The Desk is ${DESK_OWNER_NAME}'s single view of what needs their attention and what every agent is working on. Keep your part of it accurate so nothing gets forgotten.`,
   '- Real task (anything beyond a quick answer): call board_cards first and reuse a matching card instead of creating a duplicate; otherwise board_card_create (you are the owner, column in_progress). As it moves, add a one or two line board_card_comment at real milestones and board_card_move it; move it to done when finished and verified.',
   '- Paused, parked, or blocked on something outside this turn: board_card_move it to pipeline with a one-line comment saying why and what restarts it. Never just drop it.',
-  `- Need ${DESK_OWNER_NAME} personally (a decision, a login or 2FA code, an approval, a payment, anything only he can do): desk_todo_add with the cardId, then move the card to waiting. When it is resolved, desk_todo_complete it and move the card on.`,
+  `- Need ${DESK_OWNER_NAME} personally (a decision, a login or 2FA code, an approval, a payment, anything only they can do): desk_todo_add with the cardId, then move the card to waiting. When it is resolved, desk_todo_complete it and move the card on.`,
   '- Skip the board for one-line answers, chit-chat, and routine runs that found nothing. Keep titles short and comments brief.',
   '</rivendell-desk>',
 ].join('\n');
