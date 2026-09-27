@@ -90,6 +90,10 @@
 }
 .desk-edit-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 8px 6px 2px; }
 .desk-muted { margin: 8px 0 0; color: var(--r-ink-faint); font-size: 12px; }
+.desk-error.is-stale {
+  color: var(--r-amber); border-color: color-mix(in srgb, var(--r-amber) 40%, var(--r-line));
+  background: color-mix(in srgb, var(--r-amber) 8%, transparent);
+}
 .desk-error {
   display: flex; align-items: center; gap: 12px; margin: 12px 4px; padding: 12px 14px;
   border: 1px solid color-mix(in srgb, var(--r-rose) 40%, var(--r-line)); border-radius: 12px;
@@ -275,6 +279,12 @@ span.desk-todo-text { cursor: default; }
 .desk-card.is-archived { opacity: 0.55; filter: saturate(0.6); }
 .desk-card.is-stale { box-shadow: 0 8px 18px rgba(0, 0, 0, 0.2), inset 0 0 0 1px color-mix(in srgb, var(--r-amber) 32%, transparent); }
 .desk-card-head { display: flex; align-items: flex-start; gap: 6px; }
+.desk-card-title {
+  flex: 1; min-width: 0; padding: 0; border: 0; background: none;
+  color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.desk-card-title:hover strong { color: var(--r-gold); }
+.desk-card-title:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 3px; border-radius: 4px; }
 .desk-grip { flex: none; margin-top: 2px; color: var(--r-ink-faint); opacity: 0.55; transition: opacity 0.15s ease; }
 .desk-card:hover .desk-grip { opacity: 1; }
 .desk-card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; }
@@ -338,10 +348,15 @@ span.desk-todo-text { cursor: default; }
 .desk-table tbody tr:last-child td { border-bottom: 0; }
 .desk-table tbody tr { cursor: pointer; transition: background 0.12s ease; }
 .desk-table tbody tr:hover { background: var(--r-bg-raised); }
-.desk-table tbody tr:focus-visible { outline: 2px solid var(--r-gold); outline-offset: -2px; }
+.desk-table tbody tr:focus-within { background: var(--r-bg-raised); }
 .desk-table tbody tr.is-archived { opacity: 0.55; }
 .desk-table .priority-dot { display: inline-block; margin-right: 8px; vertical-align: middle; }
-.desk-table-title { color: var(--r-ink); font-weight: 550; margin-right: 6px; }
+.desk-table-title {
+  padding: 0; border: 0; background: none; cursor: pointer; font: inherit;
+  color: var(--r-ink); font-weight: 550; margin-right: 6px; text-align: left;
+}
+.desk-table-title:hover { color: var(--r-gold); }
+.desk-table-title:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; border-radius: 4px; }
 
 /* ---------- card drawer ---------- */
 .desk-drawer-layer { position: fixed; inset: 0; z-index: 70; display: flex; justify-content: flex-end; }

@@ -311,6 +311,7 @@
   background: var(--r-gold); color: var(--r-on-accent);
 }
 .bt-ws-badge.is-hot { background: var(--r-rose); color: #fff; animation: bt-breathe 2.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .bt-ws-badge.is-hot { animation: none; } }
 @media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
   .bt-workspace-switch button { padding: 0 14px; }
 }

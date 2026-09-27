@@ -21,6 +21,7 @@ import {
   type DeskPriority,
   type DeskSnapshot,
   type DeskTodo,
+  type TodoPatch,
 } from '../data/desk';
 import { showToast } from '../native/shell';
 import type { Agent } from '../grok/agents';
@@ -74,6 +75,12 @@ export function Desk() {
         <div className="desk-error" role="alert">
           Could not load the desk. {(desk.error as Error)?.message?.slice(0, 200)}
           <Button tone="ghost" onClick={() => void desk.refetch()}><RotateCcw size={14} /> Retry</Button>
+        </div>
+      ) : null}
+
+      {desk.isError && data ? (
+        <div className="desk-error is-stale" role="status">
+          Can't reach the desk right now. Showing what it looked like {agoText(new Date(desk.dataUpdatedAt).toISOString())}; it refreshes on its own when the connection is back.
         </div>
       ) : null}
 
@@ -171,13 +178,29 @@ function NeedsYou({ desk, agents, onOpenCard }: { desk: DeskSnapshot; agents: Ag
   };
 
   const save = async (todo: DeskTodo, next: TodoDraft) => {
-    const patch = { title: next.title.trim(), detail: next.detail, due: next.due, priority: next.priority, link: next.link.trim() };
-    if (!patch.title) return;
+    const title = next.title.trim();
+    if (!title) return;
+    // Only the fields edited here; an agent may have changed the others.
+    const before: TodoDraft = { title: todo.title, detail: todo.detail ?? '', due: todo.due ?? '', priority: todo.priority, link: todo.link ?? '' };
+    const patch: TodoPatch = {};
+    if (title !== before.title) patch.title = title;
+    if (next.detail !== before.detail) patch.detail = next.detail;
+    if (next.due !== before.due) patch.due = next.due;
+    if (next.priority !== before.priority) patch.priority = next.priority;
+    if (next.link.trim() !== before.link) patch.link = next.link.trim();
+    if (!Object.keys(patch).length) { setEditingId(null); return; }
     try {
       await write(() => deskApi.updateTodo(todo.id, patch), (d) => ({
         ...d,
         todos: d.todos.map((t) => (t.id === todo.id
-          ? { ...t, title: patch.title, detail: patch.detail.trim() || undefined, due: patch.due || undefined, priority: patch.priority, link: patch.link || undefined }
+          ? {
+              ...t,
+              ...(patch.title !== undefined ? { title } : {}),
+              ...(patch.detail !== undefined ? { detail: next.detail.trim() || undefined } : {}),
+              ...(patch.due !== undefined ? { due: next.due || undefined } : {}),
+              ...(patch.priority !== undefined ? { priority: next.priority } : {}),
+              ...(patch.link !== undefined ? { link: patch.link || undefined } : {}),
+            }
           : t)),
       }));
       setEditingId(null);
@@ -213,7 +236,7 @@ function NeedsYou({ desk, agents, onOpenCard }: { desk: DeskSnapshot; agents: Ag
         <ul className="desk-todo-list">
           {open.map((todo) => (
             editingId === todo.id
-              ? <TodoEditor key={todo.id} todo={todo} onCancel={() => setEditingId(null)} onSave={(next) => void save(todo, next)} />
+              ? <TodoEditor key={todo.id} todo={todo} onCancel={() => setEditingId(null)} onSave={(next) => save(todo, next)} />
               : <TodoRow key={todo.id} todo={todo} {...rowProps} popping={justDone === todo.id} onEdit={() => setEditingId(todo.id)} />
           ))}
         </ul>
@@ -271,19 +294,26 @@ function TodoFields({ draft, onChange }: { draft: TodoDraft; onChange: (next: To
   );
 }
 
-function TodoEditor({ todo, onCancel, onSave }: { todo: DeskTodo; onCancel: () => void; onSave: (next: TodoDraft) => void }) {
+function TodoEditor({ todo, onCancel, onSave }: { todo: DeskTodo; onCancel: () => void; onSave: (next: TodoDraft) => Promise<void> }) {
   const [draft, setDraft] = useState<TodoDraft>({
     title: todo.title, detail: todo.detail ?? '', due: todo.due ?? '', priority: todo.priority, link: todo.link ?? '',
   });
+  const [saving, setSaving] = useState(false);
   const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onCancel(); };
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (saving) return;
+    setSaving(true);
+    try { await onSave(draft); } finally { setSaving(false); }
+  };
   return (
     <li className="desk-todo is-editing" onKeyDown={onKey}>
-      <form onSubmit={(e) => { e.preventDefault(); onSave(draft); }}>
+      <form onSubmit={(e) => void submit(e)}>
         <input className="desk-edit-title" value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} aria-label="Title" maxLength={200} />
         <TodoFields draft={draft} onChange={setDraft} />
         <div className="desk-edit-actions">
           <Button tone="ghost" type="button" onClick={onCancel}><X size={14} /> Cancel</Button>
-          <Button tone="gold" type="submit" disabled={!draft.title.trim()}><Check size={14} /> Save</Button>
+          <Button tone="gold" type="submit" disabled={!draft.title.trim() || saving}><Check size={14} /> {saving ? 'Saving…' : 'Save'}</Button>
         </div>
       </form>
     </li>

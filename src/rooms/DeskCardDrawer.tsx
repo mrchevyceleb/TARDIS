@@ -13,6 +13,7 @@ import {
   dueLabel,
   openAgentThread,
   useDeskWrite,
+  type CardPatch,
   type DeskCard,
   type DeskColumn,
   type DeskPriority,
@@ -109,8 +110,25 @@ export function DeskCardDrawer({
   // from also firing while the drawer is open.
   const closeRequest = useRef(requestClose);
   closeRequest.current = requestClose;
+  const panelRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Tab') {
+        // Keep keyboard focus inside the drawer while it is open.
+        const panel = panelRef.current;
+        if (!panel) return;
+        const items = Array.from(panel.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        )).filter((el) => el.offsetParent !== null);
+        if (!items.length) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+        if (!active || !panel.contains(active)) { event.preventDefault(); first.focus(); }
+        else if (event.shiftKey && active === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus(); }
+        return;
+      }
       if (event.key !== 'Escape') return;
       event.stopPropagation();
       closeRequest.current();
@@ -128,29 +146,30 @@ export function DeskCardDrawer({
     if (!dirty || busy) return;
     const title = draft.title.trim();
     if (!title) { showToast('A card needs a title.'); return; }
+    // Send only what the owner changed, so a field an agent updated while the
+    // drawer was open is never overwritten with the stale value shown here.
+    const patch: CardPatch = {};
+    if (draft.title !== base.title) patch.title = title;
+    if (draft.description !== base.description) patch.description = draft.description;
+    if (draft.project !== base.project) patch.project = draft.project;
+    if (draft.priority !== base.priority) patch.priority = draft.priority;
+    if (JSON.stringify(draft.links) !== JSON.stringify(base.links)) patch.links = draft.links;
+    if (draft.owner !== base.owner) patch.owner = draft.owner;
     setBusy('save');
-    const ownerChanged = draft.owner !== base.owner;
     try {
       const ownerLabel = owners.find((o) => o.value === draft.owner)?.label ?? card.owner.name;
-      const { card: saved } = await write(() => deskApi.updateCard(card.id, {
-        title,
-        description: draft.description,
-        project: draft.project,
-        priority: draft.priority,
-        links: draft.links,
-        ...(ownerChanged ? { owner: draft.owner } : {}),
-      }), (d) => ({
+      const { card: saved } = await write(() => deskApi.updateCard(card.id, patch), (d) => ({
         ...d,
         cards: d.cards.map((c) => (c.id === card.id ? {
           ...c,
-          title,
-          description: draft.description.trim() || undefined,
-          project: draft.project.trim() || undefined,
-          priority: draft.priority,
-          links: draft.links,
-          owner: ownerChanged
-            ? (draft.owner === 'owner' ? d.owner : { kind: 'agent', id: draft.owner, name: ownerLabel })
-            : c.owner,
+          ...(patch.title !== undefined ? { title } : {}),
+          ...(patch.description !== undefined ? { description: draft.description.trim() || undefined } : {}),
+          ...(patch.project !== undefined ? { project: draft.project.trim() || undefined } : {}),
+          ...(patch.priority !== undefined ? { priority: draft.priority } : {}),
+          ...(patch.links !== undefined ? { links: draft.links } : {}),
+          ...(patch.owner !== undefined
+            ? { owner: draft.owner === 'owner' ? d.owner : { kind: 'agent' as const, id: draft.owner, name: ownerLabel } }
+            : {}),
         } : c)),
       }));
       const next = toDraft(saved);
@@ -207,6 +226,7 @@ export function DeskCardDrawer({
   };
 
   const setArchived = async (archived: boolean) => {
+    if (archived && dirty && !window.confirm('Archive this card and discard your unsaved changes?')) return;
     try {
       await write(() => deskApi.archiveCard(card.id, archived), (d) => ({
         ...d,
@@ -255,7 +275,7 @@ export function DeskCardDrawer({
   return (
     <div className="desk-drawer-layer">
       <button type="button" className="desk-drawer-scrim" aria-label="Close card" tabIndex={-1} onClick={requestClose} />
-      <aside className={`desk-drawer ${priorityClass(card.priority)}`} role="dialog" aria-modal="true" aria-label={`Card: ${card.title}`} data-col={card.column}>
+      <aside ref={panelRef} className={`desk-drawer ${priorityClass(card.priority)}`} role="dialog" aria-modal="true" aria-label={`Card: ${card.title}`} data-col={card.column}>
         <header className="desk-drawer-head">
           <div>
             <p className="r-eyebrow-gold">

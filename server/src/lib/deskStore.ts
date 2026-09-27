@@ -6,7 +6,7 @@
 // Only this server writes the file; the team MCP reaches it over HTTP.
 
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { DESK_FILE } from '../config.ts';
 
@@ -115,8 +115,10 @@ export function parseDue(value: unknown): string | null {
   if (!raw) return '';
   if (raw === 'today') return localDay(0);
   if (raw === 'tomorrow') return localDay(1);
-  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  // A bare date, or the date part of a full ISO timestamp (agents often send one).
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|t)/);
   if (!match) return null;
+  if (raw.length > 10 && !Number.isFinite(Date.parse(value.trim()))) return null;
   const [, y, m, d] = match;
   const date = new Date(Number(y), Number(m) - 1, Number(d));
   if (date.getFullYear() !== Number(y) || date.getMonth() !== Number(m) - 1 || date.getDate() !== Number(d)) return null;
@@ -234,7 +236,9 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
 
 // ---- persistence ------------------------------------------------------------
 
-let cache: { data: DeskData; mtimeMs: number; size: number } | null = null;
+/** `repaired` marks a file that loaded with records it could not keep; the
+ *  first write after that snapshots the original beside it before replacing. */
+let cache: { data: DeskData; mtimeMs: number; size: number; repaired: boolean } | null = null;
 let chain: Promise<unknown> = Promise.resolve();
 
 function emptyDesk(): DeskData {
@@ -262,21 +266,76 @@ async function load(): Promise<DeskData> {
     // on the next write. Fail loudly until someone repairs or moves it.
     throw new DeskError(500, `desk.json is not valid JSON; refusing to overwrite it (${DESK_FILE})`);
   }
-  const obj = (parsed && typeof parsed === 'object' ? parsed : {}) as Record<string, unknown>;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new DeskError(500, `desk.json is not a desk object; refusing to overwrite it (${DESK_FILE})`);
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (obj.version !== undefined && obj.version !== 1) {
+    throw new DeskError(500, `desk.json is version ${JSON.stringify(obj.version)}, newer than this server understands; refusing to overwrite it (${DESK_FILE})`);
+  }
+  for (const key of ['todos', 'cards'] as const) {
+    if (obj[key] !== undefined && !Array.isArray(obj[key])) {
+      throw new DeskError(500, `desk.json "${key}" is not a list; refusing to overwrite it (${DESK_FILE})`);
+    }
+  }
   const now = new Date().toISOString();
+  const rawTodos = (obj.todos as unknown[] | undefined) ?? [];
+  const rawCards = (obj.cards as unknown[] | undefined) ?? [];
   const data: DeskData = {
     version: 1,
     rev: typeof obj.rev === 'number' && Number.isFinite(obj.rev) ? obj.rev : 0,
-    todos: Array.isArray(obj.todos) ? obj.todos.map((t) => normalizeTodo(t, now)).filter((t): t is DeskTodo => Boolean(t)) : [],
-    cards: Array.isArray(obj.cards) ? obj.cards.map((c) => normalizeCard(c, now)).filter((c): c is DeskCard => Boolean(c)) : [],
+    todos: rawTodos.map((t) => normalizeTodo(t, now)).filter((t): t is DeskTodo => Boolean(t)),
+    cards: rawCards.map((c) => normalizeCard(c, now)).filter((c): c is DeskCard => Boolean(c)),
   };
-  cache = { data, mtimeMs: info.mtimeMs, size: info.size };
+  // Anything normalisation changed (a dropped record, a coerced field, a
+  // missing timestamp) means the next write would lose the original, so keep
+  // a copy of it first. Files this server wrote itself compare equal.
+  const repaired = canonicalJson({ todos: rawTodos, cards: rawCards }) !== canonicalJson({ todos: data.todos, cards: data.cards });
+  if (repaired) console.warn(`[desk] ${DESK_FILE} had entries it had to repair; the original is kept as a .bak on the next write`);
+  cache = { data, mtimeMs: info.mtimeMs, size: info.size, repaired };
   return data;
+}
+
+/** JSON with object keys sorted, so key order never counts as a change. */
+function canonicalJson(value: unknown): string {
+  const sort = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sort);
+    if (v && typeof v === 'object') {
+      return Object.fromEntries(Object.keys(v as object).sort()
+        .filter((k) => (v as Record<string, unknown>)[k] !== undefined)
+        .map((k) => [k, sort((v as Record<string, unknown>)[k])]));
+    }
+    return v;
+  };
+  return JSON.stringify(sort(value));
+}
+
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+/** Atomic replace. Windows can briefly refuse to replace a file another
+ *  process has open; retry the rename rather than ever writing in place. */
+async function replaceFile(tmp: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(tmp, DESK_FILE);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? '';
+      if (process.platform !== 'win32' || !RENAME_RETRY_CODES.has(code) || attempt >= 6) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)));
+    }
+  }
 }
 
 async function save(data: DeskData): Promise<void> {
   const dir = dirname(DESK_FILE);
   await mkdir(dir, { recursive: true });
+  if (cache?.repaired) {
+    await copyFile(DESK_FILE, `${DESK_FILE}.${new Date().toISOString().replace(/[:.]/g, '-')}.bak`).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+    cache.repaired = false;
+  }
   const tmp = `${DESK_FILE}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   const handle = await open(tmp, 'wx', 0o600);
   let handleOpen = true;
@@ -285,21 +344,14 @@ async function save(data: DeskData): Promise<void> {
     await handle.sync();
     await handle.close();
     handleOpen = false;
-    try {
-      await rename(tmp, DESK_FILE);
-    } catch {
-      // Windows can refuse to replace an open file; overwrite in place so a
-      // failed rename never leaves the desk deleted.
-      await writeFile(DESK_FILE, await readFile(tmp));
-      await rm(tmp, { force: true });
-    }
+    await replaceFile(tmp);
   } catch (error) {
     if (handleOpen) await handle.close().catch(() => {});
     await rm(tmp, { force: true }).catch(() => {});
     throw error;
   }
   const info = await stat(DESK_FILE);
-  cache = { data, mtimeMs: info.mtimeMs, size: info.size };
+  cache = { data, mtimeMs: info.mtimeMs, size: info.size, repaired: false };
 }
 
 function withLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -402,14 +454,23 @@ function pruneTodos(data: DeskData): void {
   if (data.todos.length >= DESK_LIMITS.todos) throw new DeskError(409, 'The Needs-you list is full; complete or delete some items first.');
 }
 
+/** Only finished cards (Done, archived or not) that no Needs-you item points
+ *  at are ever dropped; archived work that never finished stays. */
 function pruneCards(data: DeskData): void {
   if (data.cards.length < DESK_LIMITS.cards) return;
+  const referenced = new Set(data.todos.filter((t) => t.cardId).map((t) => t.cardId));
   const finished = data.cards
-    .filter((c) => c.archived || c.column === 'done')
+    .filter((c) => c.column === 'done' && !referenced.has(c.id))
     .sort((a, b) => Number(Boolean(b.archived)) - Number(Boolean(a.archived)) || a.updatedAt.localeCompare(b.updatedAt));
   const drop = new Set(finished.slice(0, data.cards.length - DESK_LIMITS.cards + 1).map((c) => c.id));
   data.cards = data.cards.filter((c) => !drop.has(c.id));
-  if (data.cards.length >= DESK_LIMITS.cards) throw new DeskError(409, 'The board is full; archive some cards first.');
+  if (data.cards.length >= DESK_LIMITS.cards) throw new DeskError(409, 'The board is full; move finished cards to Done or archive them first.');
+}
+
+/** Case- and spacing-insensitive title key; punctuation still counts, so
+ *  "C++ port" and "C# port" stay distinct. Unicode letters are kept. */
+export function normalizeTitleKey(text: string): string {
+  return text.normalize('NFKC').toLocaleLowerCase('en-US').replace(/\s+/g, ' ').replace(/[\s.!?,;:]+$/u, '').trim();
 }
 
 /** Insert `card` into `column` at `index` among that column's live cards. */
@@ -515,8 +576,17 @@ export type CardInput = {
   title?: unknown; description?: unknown; column?: unknown; priority?: unknown; project?: unknown; links?: unknown; index?: unknown;
 };
 
-export function createCard(input: CardInput, owner: DeskActor, by: DeskActor): Promise<DeskCard> {
+export const DUPLICATE_CARD_PREFIX = 'An open card already has this title';
+
+/** `dedupe` refuses a second open card with the same title, checked inside the
+ *  lock so two agents starting the same work at once cannot both create one. */
+export function createCard(input: CardInput, owner: DeskActor, by: DeskActor, opts: { dedupe?: boolean } = {}): Promise<DeskCard> {
   return mutate((data, now) => {
+    if (opts.dedupe) {
+      const wanted = normalizeTitleKey(requireTitle(input.title));
+      const dupe = wanted ? data.cards.find((c) => !c.archived && c.column !== 'done' && normalizeTitleKey(c.title) === wanted) : undefined;
+      if (dupe) throw new DeskError(409, `${DUPLICATE_CARD_PREFIX}: [${dupe.id}] ${dupe.title} (owner ${dupe.owner.name}, ${dupe.column}).`);
+    }
     const card: DeskCard = {
       id: newId('card', (id) => data.cards.some((c) => c.id === id)),
       title: requireTitle(input.title),

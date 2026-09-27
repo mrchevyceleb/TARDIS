@@ -191,7 +191,7 @@ deskRouter.post('/cards', route(async (req, res) => {
   const input = body(req);
   const by = resolveAuthor(input.agent);
   const owner = resolveOwner(input.owner, by)!;
-  res.status(201).json({ card: await createCard(input, owner, by) });
+  res.status(201).json({ card: await createCard(input, owner, by, { dedupe: input.dedupe === true }) });
 }));
 
 deskRouter.patch('/cards/:id', route(async (req, res) => {

@@ -3,7 +3,7 @@
 
 import { ArrowDown, ArrowUp, Archive, GripVertical, LayoutGrid, List, MessageSquare, Plus, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import type { DragEvent, FormEvent, KeyboardEvent } from 'react';
+import type { DragEvent, FormEvent } from 'react';
 import { Button, Chip } from '../components/Primitives';
 import { useMediaQuery } from '../chat/hooks/useMediaQuery';
 import {
@@ -102,6 +102,9 @@ export function useCardMover() {
 
 export function DeskBoard({ desk, agents, onOpenCard }: Props) {
   const isMobile = useMediaQuery('(max-width: 760px)');
+  // Touch browsers cannot run the HTML5 drag flow, whatever their width
+  // (an Android phone in landscape, a tablet): give them the Move picker.
+  const touch = useMediaQuery('(pointer: coarse)');
   const move = useCardMover();
   const [layout, setLayout] = useState<Layout>(() => (localStorage.getItem(LAYOUT_KEY) === 'list' ? 'list' : 'board'));
   const [filters, setFilters] = useState<Filters>(readFilters);
@@ -153,9 +156,9 @@ export function DeskBoard({ desk, agents, onOpenCard }: Props) {
     card,
     desk,
     needsYou: openTodoCounts.get(card.id) ?? 0,
-    draggable: !isMobile,
+    draggable: !isMobile && !touch,
     dragging: dragId === card.id,
-    showMove: isMobile,
+    showMove: isMobile || touch,
     onOpen: () => onOpenCard(card.id),
     onMove: (column: DeskColumn) => void move(desk, card.id, column, null),
     onDragStart: (event: DragEvent) => {
@@ -344,19 +347,13 @@ function BoardCard({
   onDrop: (event: DragEvent) => void;
 }) {
   const age = cardAge(card);
-  const onKey = (event: KeyboardEvent) => {
-    if (event.target !== event.currentTarget) return;
-    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen(); }
-  };
+  // The title is the keyboard/AT entry point; a click anywhere else on the
+  // card (outside its own controls) opens it too, for mouse and touch.
   return (
     <article
       className={`task-card desk-card ${priorityClass(card.priority)}${dragging ? ' is-dragging' : ''}${card.archived ? ' is-archived' : ''}${age.stale ? ' is-stale' : ''}`}
-      tabIndex={0}
-      role="button"
-      aria-label={`${card.title}, ${columnTitle(desk, card.column)}, owner ${card.owner.name}`}
       draggable={draggable}
-      onClick={(event) => { if (!(event.target as HTMLElement).closest('select, label, a')) onOpen(); }}
-      onKeyDown={onKey}
+      onClick={(event) => { if (!(event.target as HTMLElement).closest('select, label, a, button')) onOpen(); }}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onDragOver={onDragOver}
@@ -364,7 +361,9 @@ function BoardCard({
     >
       <div className="desk-card-head">
         {draggable ? <GripVertical size={14} aria-hidden="true" className="desk-grip" /> : null}
-        <strong>{card.title}</strong>
+        <button type="button" className="desk-card-title" onClick={onOpen} title={`Open: ${card.title} (${columnTitle(desk, card.column)}, owner ${card.owner.name})`}>
+          <strong>{card.title}</strong>
+        </button>
       </div>
       <div className="desk-card-meta">
         <ActorChip actor={card.owner} />
@@ -465,14 +464,12 @@ function CardList({
                   return (
                     <tr
                       key={card.id}
-                      tabIndex={0}
                       className={`${card.archived ? 'is-archived' : ''}${age.stale ? ' is-stale' : ''}`}
-                      onClick={() => onOpen(card.id)}
-                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(card.id); } }}
+                      onClick={(e) => { if (!(e.target as HTMLElement).closest('button, a')) onOpen(card.id); }}
                     >
                       <td>
                         <span className={`priority-dot ${priorityClass(card.priority)}`} aria-hidden="true" />
-                        <span className="desk-table-title">{card.title}</span>
+                        <button type="button" className="desk-table-title" onClick={() => onOpen(card.id)}>{card.title}</button>
                         {needsYou.get(card.id) ? <span className="desk-needs-pill">needs you</span> : null}
                       </td>
                       <td><ActorChip actor={card.owner} /></td>

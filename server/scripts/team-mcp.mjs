@@ -323,7 +323,7 @@ const TOOLS = [
         project: { type: 'string', description: 'Free text, e.g. Operly, Studio, TARDIS, Personal' },
         priority: { type: 'string', enum: DESK_PRIORITIES },
         links: { type: 'array', items: { type: 'string' }, description: 'PR, issue, or doc URLs' },
-        force: { type: 'boolean', description: 'Create even if an open card already has this exact title' },
+        force: { type: 'boolean', description: 'Create even if an open card already has the same title (case and trailing punctuation ignored)' },
         from: FROM_PROP,
       },
       required: ['title'],
@@ -468,10 +468,6 @@ function describeCard(c) {
   return `- [${c.id}] ${c.title} · ${bits.join(' · ')}${lastLine}`;
 }
 
-function normTitle(text) {
-  return String(text ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-}
-
 async function callTool(name, args, signal) {
   if (name === 'content_ideas') {
     const query = `?brand=${encodeURIComponent(args.brand)}`;
@@ -527,7 +523,8 @@ async function callTool(name, args, signal) {
   }
   if (name.startsWith('desk_') || name.startsWith('board_')) {
     const self = process.env.RIVENDELL_AGENT_NAME || (typeof args.from === 'string' ? args.from.trim() : '');
-    const writes = !['desk_todos', 'board_cards', 'board_card_get'].includes(name);
+    // desk_todo_update records no author, so it works without an identity too.
+    const writes = !['desk_todos', 'board_cards', 'board_card_get', 'desk_todo_update'].includes(name);
     if (writes && !self) throw new Error('Pass from: your teammate name, so the Desk can credit you.');
     const post = (path, body) => api(path, { method: 'POST', body: JSON.stringify(body) }, signal);
     const comment = (id, text) => post(`/api/desk/cards/${encodeURIComponent(id)}/comments`, { text, agent: self });
@@ -597,22 +594,28 @@ async function callTool(name, args, signal) {
       return lines.filter(Boolean).join('\n');
     }
     if (name === 'board_card_create') {
-      if (!args.force) {
-        const { cards } = await api('/api/desk/cards', undefined, signal);
-        const wanted = normTitle(args.title);
-        const dupe = wanted ? cards.find((c) => normTitle(c.title) === wanted) : null;
-        if (dupe) return `Not created: an open card already has this title.\n${describeCard(dupe)}\nUse that one (board_card_move / board_card_comment), or pass force:true if this really is separate work.`;
+      let created;
+      try {
+        created = await post('/api/desk/cards', {
+          title: args.title,
+          description: args.description,
+          column: args.column ?? 'in_progress',
+          owner: args.owner && !['me', 'self'].includes(String(args.owner).trim().toLowerCase()) ? args.owner : undefined,
+          project: args.project,
+          priority: args.priority,
+          links: args.links,
+          agent: self,
+          // The server checks for an open card with the same title inside its
+          // write lock, so two agents cannot race past each other.
+          dedupe: args.force !== true,
+        });
+      } catch (error) {
+        if (String(error.message).startsWith('An open card already has this title')) {
+          return `Not created. ${error.message}\nUse that card (board_card_move / board_card_comment), or pass force:true if this really is separate work.`;
+        }
+        throw error;
       }
-      const { card } = await post('/api/desk/cards', {
-        title: args.title,
-        description: args.description,
-        column: args.column ?? 'in_progress',
-        owner: args.owner && !['me', 'self'].includes(String(args.owner).trim().toLowerCase()) ? args.owner : undefined,
-        project: args.project,
-        priority: args.priority,
-        links: args.links,
-        agent: self,
-      });
+      const { card } = created;
       return `Created [${card.id}] ${card.title} in ${DESK_COLUMN_TITLES[card.column]}, owner ${card.owner.name}.`;
     }
     if (name === 'board_card_move') {
