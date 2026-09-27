@@ -221,7 +221,7 @@ const TOOLS = [
   {
     name: 'desk_todo_add',
     description:
-      `Put an item on ${OWNER}'s "Needs you" list on the Desk. Use it ONLY for something that needs ${OWNER} personally: a decision, a login or 2FA code, an approval, a payment, or an account or physical action only he can take. ` +
+      `Put an item on ${OWNER}'s "Needs you" list on the Desk. Use it ONLY for something that needs ${OWNER} personally: a decision, a login or 2FA code, an approval, a payment, or an account or physical action only they can take. ` +
       'Not for your own work (that is a board card) and not for FYI updates. Write the title as the action he must take, put context in detail, and pass cardId when it unblocks a board card (then move that card to waiting). ' +
       'Check desk_todos first so you do not add a duplicate. Returns the id; call desk_todo_complete once it is resolved.',
     inputSchema: {
