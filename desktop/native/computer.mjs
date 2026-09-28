@@ -225,8 +225,9 @@ export class ComputerController {
   async captureWindowFrame(info, params, signal) {
     const window = this.findWindow(info, params.window);
     const raw = await this.adapter.windowCapture(window.id, signal);
+    const { png: _capturePng, ...captureRest } = raw;
     const result = await this.windowFrame(info, window, raw);
-    return { ...result, process: raw.process };
+    return { ...captureRest, ...result };
   }
   async handle(op, params = {}) {
     // MCP keyboard tools tunnel through computer.act during a rolling server
@@ -310,7 +311,7 @@ export class ComputerController {
         if (params.focus !== undefined && focus === undefined) throw new Error("uia focus must be 'interactive' when provided.");
         const tree = await this.adapter.uiaTree(window.id, focus, ac.signal);
         check(); this.requireGrant(params.session);
-        return { window: window.id, title: window.title, process: tree.process, elements: tree.elements, truncated: tree.truncated === true, ...(tree.focus === true ? { focus: 'interactive' } : {}) };
+        return { window: window.id, title: window.title, ...tree, ...(tree.focus === true ? { focus: 'interactive' } : {}) };
       }
       if (op === 'uia_focus') {
         if (typeof params.window !== 'string' || !params.window) throw new Error('uia_focus requires an exact window id.');
@@ -319,9 +320,10 @@ export class ComputerController {
         validateElementRef(params.element);
         this.requireGrant(params.session); check();
         const raw = await this.adapter.uiaFocus(window.id, String(params.element), params.name === undefined ? undefined : String(params.name), ac.signal);
+        const { png: _focusPng, ...focusRest } = raw;
         const result = await this.windowFrame(info, window, raw);
         check(); this.requireGrant(params.session);
-        return result;
+        return { ...focusRest, ...result };
       }
       if (backgroundInput) {
         const method = op === 'uia_value' ? 'uiaValue' : op === 'uia_invoke' ? 'uiaInvoke' : 'uiaKey';
@@ -363,7 +365,8 @@ export class ComputerController {
         if (keyboardEntry) keyboardEntry.outcome = { executed: true, windowId: window.id, windowTitle: window.title, capturedAt: this.frame.capturedAt };
         check(); this.requireGrant(params.session);
         const { layout: _backgroundLayout, ...result } = this.frame;
-        return { ...result, ...(raw.postedTo ? { postedTo: raw.postedTo } : {}), operationId: keyboardSpec.id };
+        const { png: _inputPng, ...inputRest } = raw;
+        return { ...inputRest, ...result, operationId: keyboardSpec.id };
       }
       if (op === 'focus' || op === 'type' || op === 'key') {
         const window = this.findWindow(info, params.window);

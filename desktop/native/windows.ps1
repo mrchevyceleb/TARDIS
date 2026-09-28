@@ -559,6 +559,18 @@ try {
       }
       $valuePattern = $null
       try { $valuePattern = $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern) -as [System.Windows.Automation.ValuePattern] } catch { $valuePattern = $null }
+      # Writes go into EMPTY fields only. The Claude composer's SetValue
+      # inserts at the caret rather than replacing, and the posted
+      # END+backspace clear did not clear a leftover draft either (both
+      # verified live on a real chat), so any readable non-empty field
+      # refuses rather than corrupting a person's draft.
+      $fieldText = ''
+      if ($valuePattern) {
+        try { $fieldText = [string]$valuePattern.Current.Value } catch { $fieldText = '' }
+        if (-not [string]::IsNullOrWhiteSpace($fieldText)) {
+          throw "needs foreground: the field already holds $($fieldText.Length) characters (a draft). Background text cannot replace it safely on this composer: SetValue inserts at the caret (verified live) and the posted clear did not clear it either. Use an empty field or composer, or have the person clear the draft."
+        }
+      }
       $postedTo = 0
       $post = [bool]$p.post
       $append = [bool]$p.append
@@ -590,29 +602,9 @@ try {
           } else { 'the element exposes no ValuePattern and did not take background keyboard focus' }
           throw "needs foreground: $why, so background text cannot land on it. Try computer_uia_focus on the element first, focus the window and use computer_type, or have the person click into the field."
         }
-        # Replacement semantics: posted characters APPEND, so measure the
-        # field's current text through ValuePattern and clear it first (END,
-        # then one BACKSPACE per character). Append mode skips the clear.
-        $current = ''
-        $canMeasure = $false
-        if ($valuePattern) {
-          try { $current = [string]$valuePattern.Current.Value; $canMeasure = $true } catch { $canMeasure = $false }
-        }
-        if (-not $append -and -not $canMeasure) {
-          throw 'needs foreground: the element''s current text cannot be read (no usable ValuePattern), so a posted replacement cannot clear what is already there. Use append only when the field is known empty, or have the person clear it.'
-        }
-        # Backspace-clearing counts text units: values with multi-unit
-        # characters (surrogate pairs, combining marks) or beyond the size cap
-        # cannot be cleared exactly, so refuse rather than over-delete.
-        if (-not $append -and $current.Length -gt 8000) {
-          throw 'needs foreground: the field holds more than 8000 characters, more than background clearing can replace exactly. Have the person clear it, or append into an empty field.'
-        }
-        if (-not $append -and [regex]::IsMatch($current, '[\uD800-\uDFFF\p{M}]')) {
-          throw 'needs foreground: the field holds multi-unit characters (emoji, accents) that background backspace-clearing cannot count exactly. Have the person clear it, or append into an empty field.'
-        }
-        if (-not $append -and [regex]::IsMatch($current, '[\r\n\t]')) {
-          throw 'needs foreground: the field holds multiline text, which background END+backspace clearing cannot replace exactly (END only reaches the end of one line). Have the person clear it, or append into an empty field.'
-        }
+        # The empty-field contract is enforced before either path above, so
+        # there is nothing to clear here: posted characters land at the caret
+        # of an empty (or append-acknowledged, unreadable) field.
         # Post to the focused element's own native window handle when it has
         # one: classic Win32 controls never receive characters posted to their
         # top-level parent.
@@ -625,10 +617,6 @@ try {
           throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No text was sent. Inspect the current desktop and report which step did this.'
         }
         $script:InputAttempted = $true
-        if (-not $append -and $current.Length -gt 0) {
-          [DesktopInput]::PostKey($target, 35)
-          for ($i = 0; $i -lt [Math]::Min($current.Length, 8000); $i++) { [DesktopInput]::PostKey($target, 8) }
-        }
         [DesktopInput]::PostText($target, [string]$p.text)
       }
       Start-Sleep -Milliseconds 250
