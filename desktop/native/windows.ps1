@@ -144,6 +144,12 @@ public static class DesktopInput {
   }
   public static void Release() { Mouse(4,0); Mouse(16,0); foreach (ushort k in new ushort[]{16,17,18,91}) Key(k,true); }
   public static bool IsMinimized(long id) { return IsIconic(new IntPtr(id)); }
+  public static bool SameProcess(long a, long b) {
+    uint pa, pb;
+    GetWindowThreadProcessId(new IntPtr(a), out pa);
+    GetWindowThreadProcessId(new IntPtr(b), out pb);
+    return pa != 0 && pa == pb;
+  }
   [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr h, EnumProc callback, IntPtr p);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int count);
   /** Chromium takes keyboard messages on its Chrome_RenderWidgetHostHWND
@@ -439,16 +445,27 @@ function Add-ForegroundEvidence([hashtable]$Result, [long]$Before, [long]$Target
   $Result.foregroundBefore = $Before
   $Result.foregroundAfter = [DesktopInput]::Foreground()
   if ($Result.foregroundAfter -ne $Before) {
-    if ($Result.foregroundAfter -eq $Target) {
+    if ($Result.foregroundAfter -eq $Target -or [DesktopInput]::SameProcess($Result.foregroundAfter, $Target)) {
       $Result.foregroundStolen = $true
-      $Result.warning = "This op raised the target window over the person's work (foreground went from $Before to $($Result.foregroundAfter)). Tell the person to click back into their work, and report which op did this: background use of it is unsafe until fixed."
+      $Result.warning = "This op raised the target window (or another window of its app) over the person's work (foreground went from $Before to $($Result.foregroundAfter)). Tell the person to click back into their work, and report which op did this: background use of it is unsafe until fixed."
     } else {
       # A switch to an unrelated window is most likely the person alt-tabbing
       # during the op, not this op raising anything.
       $Result.foregroundChanged = $true
-      $Result.note = "The OS foreground changed during the op (from $Before to $($Result.foregroundAfter)), but not to the target window: most likely the person switched apps. Capture before the next op to see the current state."
+      $Result.note = "The OS foreground changed during the op (from $Before to $($Result.foregroundAfter)), but not to the target app: most likely the person switched apps. Capture before the next op to see the current state."
     }
   }
+}
+
+# True when the OS foreground moved onto the target window or another window
+# of the same process (a raise our op caused). A move to an unrelated window
+# is most likely the person switching apps mid-op, which background ops are
+# built to tolerate, so it returns false and work proceeds.
+function Test-ForegroundRaisedTarget([long]$Before, [long]$Target) {
+  $after = [DesktopInput]::Foreground()
+  if ($after -eq $Before) { return $false }
+  if ($after -eq $Target) { return $true }
+  return [DesktopInput]::SameProcess($after, $Target)
 }
 
 function Assert-TargetWindow([object]$request, [bool]$afterInput) {
@@ -537,7 +554,7 @@ try {
       if ([string]::IsNullOrWhiteSpace([string]$p.name) -and -not [string]::IsNullOrWhiteSpace($resolved.Name)) {
         throw ("the element at that ref is named '{0}'; pass that name from the snapshot so the action can verify the ref is still current" -f $resolved.Name)
       }
-      if ([DesktopInput]::Foreground() -ne $fg) {
+      if (Test-ForegroundRaisedTarget $fg $hwnd) {
         throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No text was sent. Inspect the current desktop and report which step did this.'
       }
       $valuePattern = $null
@@ -546,7 +563,7 @@ try {
       $post = [bool]$p.post
       $append = [bool]$p.append
       if (-not $post -and -not $append -and $valuePattern -and -not $valuePattern.Current.IsReadOnly) {
-        if ([DesktopInput]::Foreground() -ne $fg) {
+        if (Test-ForegroundRaisedTarget $fg $hwnd) {
           throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No text was sent. Inspect the current desktop and report which step did this.'
         }
         $script:InputAttempted = $true
@@ -604,7 +621,7 @@ try {
         if ($target -eq 0) { $target = [DesktopInput]::ChromiumInputChild($hwnd) }
         if ($target -eq 0) { $target = $hwnd }
         $postedTo = $target
-        if ([DesktopInput]::Foreground() -ne $fg) {
+        if (Test-ForegroundRaisedTarget $fg $hwnd) {
           throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No text was sent. Inspect the current desktop and report which step did this.'
         }
         $script:InputAttempted = $true
@@ -655,7 +672,7 @@ try {
       if ([string]::IsNullOrWhiteSpace([string]$p.name) -and -not [string]::IsNullOrWhiteSpace($resolved.Name)) {
         throw ("the element at that ref is named '{0}'; pass that name from the snapshot so the action can verify the ref is still current" -f $resolved.Name)
       }
-      if ([DesktopInput]::Foreground() -ne $fg) {
+      if (Test-ForegroundRaisedTarget $fg $hwnd) {
         throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No click was sent. Inspect the current desktop and report which step did this.'
       }
       $invokePattern = $null
@@ -665,7 +682,7 @@ try {
         try { $ct = ([string]$el.Current.ControlType.ProgrammaticName) -replace '^ControlType\.', '' } catch { $ct = 'unknown' }
         throw "needs foreground: the element at that ref ($ct) exposes no InvokePattern, so it cannot be activated in the background. Only real input can activate it; focus the window and use computer_act."
       }
-      if ([DesktopInput]::Foreground() -ne $fg) {
+      if (Test-ForegroundRaisedTarget $fg $hwnd) {
         throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No click was sent. Inspect the current desktop and report which step did this.'
       }
       $script:InputAttempted = $true
@@ -699,7 +716,7 @@ try {
       $target = [UiaWindow]::FocusedHandle($hwnd, 8000)
       if ($target -eq 0) { $target = [DesktopInput]::ChromiumInputChild($hwnd) }
       if ($target -eq 0) { $target = $hwnd }
-      if ([DesktopInput]::Foreground() -ne $fg) {
+      if (Test-ForegroundRaisedTarget $fg $hwnd) {
         throw 'needs foreground: preparing this key raised a window (the OS foreground changed). No key was posted. Inspect the current desktop and report which step did this.'
       }
       $script:InputAttempted = $true
@@ -759,16 +776,11 @@ try {
   $result | ConvertTo-Json -Depth 8 -Compress
 } catch {
   $err = @{ error=$_.Exception.Message; inputAttempted=([bool]$script:InputAttempted) }
-  # Post-input failures used to discard all foreground evidence, which is
-  # exactly when an op may have raised the window and its verification
-  # capture failed. Keep the evidence on the error response too.
-  if ($script:OpForegroundBefore -ne 0) {
-    $err.foregroundBefore = $script:OpForegroundBefore
-    $err.foregroundAfter = [DesktopInput]::Foreground()
-    if ($err.foregroundAfter -ne $script:OpForegroundBefore) {
-      if ($hwnd -and $err.foregroundAfter -eq [long]$hwnd) { $err.foregroundStolen = $true }
-      else { $err.foregroundChanged = $true }
-    }
+  # Post-input failures are exactly when the raise evidence matters most
+  # (the action ran, then the verification capture failed): keep the same
+  # evidence and attribution on the error response as on success.
+  if ($script:OpForegroundBefore -ne 0 -and $hwnd) {
+    Add-ForegroundEvidence $err $script:OpForegroundBefore ([long]$hwnd)
   }
   $err | ConvertTo-Json -Compress
   exit 1
