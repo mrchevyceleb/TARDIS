@@ -594,7 +594,11 @@ function Restore-IfStolen([long]$Before, [long]$Target) {
   $ok = [DesktopInput]::RestoreForeground($Before, $Target)
   $priorDetail = [string][DesktopInput]::LastRestoreDetail
   $reAsserted = $false
-  if ($ok) {
+  # A personMoved verdict means the person's own switch stands: no further
+  # restore pass against their choice, even if the app re-asserts over it
+  # (a second pass would put the OLD window back over their newer one).
+  $personMoved = ([string][DesktopInput]::LastRestoreOutcome -eq 'personMoved')
+  if ($ok -and -not $personMoved) {
     Start-Sleep -Milliseconds 120
     # A late re-assert (the app activates its window again once the restore
     # settles, e.g. a palette taking focus) lands exactly here, after the
@@ -612,12 +616,18 @@ function Restore-IfStolen([long]$Before, [long]$Target) {
   # Evidence comes from the LAST call, but a second pass resets the C#
   # fields: when it only ran because the app re-asserted a restore that DID
   # land, "restored, re-asserted, denied again" is appReAsserted, never plain
-  # osDenied, and the first pass's evidence must survive.
+  # osDenied, and the first pass's evidence must survive. A restored verdict
+  # can also be re-stolen during the settle sleep: the final foreground
+  # decides, not the call's own verdict.
   $lastOutcome = [string][DesktopInput]::LastRestoreOutcome
   $lastDetail = [string][DesktopInput]::LastRestoreDetail
   if ($reAsserted -and $lastOutcome -eq 'osDenied') {
     $lastOutcome = 'appReAsserted'
     $lastDetail = $priorDetail + ' then re-asserted; second pass: ' + $lastDetail
+  }
+  if ($lastOutcome -eq 'restored' -and (Test-ForegroundRaisedTarget $Before $Target)) {
+    $lastOutcome = 'appReAsserted'
+    $lastDetail = $lastDetail + ' re-asserted after restored'
   }
   $script:OpRestoreOutcome = $lastOutcome
   $script:OpRestoreDetail = $lastDetail
@@ -688,6 +698,12 @@ function Add-ForegroundEvidence([hashtable]$Result, [long]$Before, [long]$Target
       # This branch only runs after a VERIFIED restore got re-stolen, so a
       # denied second pass is still the app re-asserting, never plain osDenied.
       if ($script:OpRestoreOutcome -eq 'osDenied') { $script:OpRestoreOutcome = 'appReAsserted' }
+      # A restored verdict can be re-stolen during the settle sleep right
+      # after it: the final foreground decides, not the call's own verdict.
+      if ($script:OpRestoreOutcome -eq 'restored' -and (Test-ForegroundRaisedTarget $Before $Target)) {
+        $script:OpRestoreOutcome = 'appReAsserted'
+        $script:OpRestoreDetail = $script:OpRestoreDetail + ' re-asserted after restored'
+      }
       if (($Result.foregroundAfter -eq $Before) -or (-not (Test-ForegroundRaisedTarget $Before $Target))) {
         $Result.foregroundRestored = $true
         $Result.note = "This op raised the target window over the person's work, the adapter restored their foreground, and the app raised it once more before being restored again. Safe to continue; the person may notice a brief flash."
@@ -722,9 +738,16 @@ function Add-ForegroundEvidence([hashtable]$Result, [long]$Before, [long]$Target
       }
       $script:OpRestoreOutcome = [string][DesktopInput]::LastRestoreOutcome
       $script:OpRestoreDetail = [string][DesktopInput]::LastRestoreDetail
-      # Same rule as the verified branch: a switch already landed here, so a
-      # denied second pass is still the app re-asserting, never plain osDenied.
-      if ($script:OpRestoreOutcome -eq 'osDenied') { $script:OpRestoreOutcome = 'appReAsserted' }
+      # NOT the verified branch's rule: this call is the FIRST restore attempt
+      # in this op (the raise landed after the input-time check), so a genuine
+      # osDenied stays osDenied; masking it would hide exactly the
+      # distinction this evidence exists to expose. A restored verdict can
+      # still be re-stolen during the settle sleep right after it: the final
+      # foreground decides, not the call's own verdict.
+      if ($script:OpRestoreOutcome -eq 'restored' -and (Test-ForegroundRaisedTarget $Before $Target)) {
+        $script:OpRestoreOutcome = 'appReAsserted'
+        $script:OpRestoreDetail = $script:OpRestoreDetail + ' re-asserted after restored'
+      }
       if (($Result.foregroundAfter -eq $Before) -or (-not (Test-ForegroundRaisedTarget $Before $Target))) {
         $Result.foregroundRestored = $true
         if ($Result.foregroundAfter -ne $Before) {
