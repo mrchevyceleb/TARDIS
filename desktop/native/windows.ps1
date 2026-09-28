@@ -157,7 +157,25 @@ $script:UiaError = ''
 try {
   Add-Type -AssemblyName UIAutomationClient
   Add-Type -AssemblyName UIAutomationTypes
-  Add-Type -ReferencedAssemblies @('UIAutomationClient.dll','UIAutomationTypes.dll','System.dll') -TypeDefinition @'
+  # Add-Type's compiler cannot resolve the UIA assemblies by simple name:
+  # they live in the WPF subdirectory of the .NET runtime directory, not at
+  # the framework root (System.Drawing resolves only because it sits at the
+  # root). Pass the full paths instead, or every uia op refuses with a
+  # "Metadata file 'UIAutomationClient.dll' could not be found" compile
+  # error, as it did on the first 0.3.6 run. WindowsBase supplies the
+  # System.Windows.Rect that BoundingRectangle (and every bounds row) needs.
+  $rt = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+  $uiaRefs = @(
+    (Join-Path $rt 'WPF\UIAutomationClient.dll'),
+    (Join-Path $rt 'WPF\UIAutomationTypes.dll'),
+    (Join-Path $rt 'WPF\WindowsBase.dll'),
+    (Join-Path $rt 'System.dll')
+  )
+  $missing = @($uiaRefs | Where-Object { -not (Test-Path -LiteralPath $_) })
+  if ($missing.Count -gt 0) {
+    throw "UI Automation assemblies not found: $($missing -join ', ')."
+  }
+  Add-Type -ReferencedAssemblies $uiaRefs -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.Windows.Automation;
@@ -224,12 +242,12 @@ public static class UiaWindow {
     if (depth >= maxDepth) {
       // A depth-capped tree must not read as complete just because the
       // element budget was not reached.
-      if (sw.ElapsedMilliseconds <= budgetMs) { try { if (Walker.GetFirstChildElement(el) != null) state.DepthHit = true; } catch { } }
+      if (sw.ElapsedMilliseconds <= budgetMs) { try { if (Walker.GetFirstChild(el) != null) state.DepthHit = true; } catch { } }
       return;
     }
     if (rows.Count >= maxElements || sw.ElapsedMilliseconds > budgetMs) return;
     AutomationElement child;
-    try { child = Walker.GetFirstChildElement(el); } catch { return; }
+    try { child = Walker.GetFirstChild(el); } catch { return; }
     int index = 0;
     while (child != null) {
       if (rows.Count >= maxElements || sw.ElapsedMilliseconds > budgetMs) return;
@@ -237,7 +255,7 @@ public static class UiaWindow {
       string nextPath = path + "/" + index;
       try { var row = Row(current, nextPath); if (row != null) rows.Add(row); } catch { }
       Walk(current, nextPath, depth + 1, maxElements, maxDepth, budgetMs, sw, rows, state);
-      try { child = Walker.GetNextSiblingElement(current); } catch { return; }
+      try { child = Walker.GetNextSibling(current); } catch { return; }
       index++;
     }
   }
@@ -281,23 +299,23 @@ public static class UiaWindow {
     if (sw.ElapsedMilliseconds > budgetMs) return null;
     try { if (el.Current.HasKeyboardFocus) return el; } catch { }
     AutomationElement child;
-    try { child = Walker.GetFirstChildElement(el); } catch { return null; }
+    try { child = Walker.GetFirstChild(el); } catch { return null; }
     while (child != null) {
       var hit = FindFocused(child, sw, budgetMs);
       if (hit != null) return hit;
       var current = child;
-      try { child = Walker.GetNextSiblingElement(current); } catch { return null; }
+      try { child = Walker.GetNextSibling(current); } catch { return null; }
     }
     return null;
   }
   static AutomationElement Nth(AutomationElement parent, int index) {
     try {
-      var child = Walker.GetFirstChildElement(parent);
+      var child = Walker.GetFirstChild(parent);
       int i = 0;
       while (child != null) {
         if (i == index) return child;
         var current = child;
-        try { child = Walker.GetNextSiblingElement(current); } catch { return null; }
+        try { child = Walker.GetNextSibling(current); } catch { return null; }
         i++;
       }
     } catch { }
