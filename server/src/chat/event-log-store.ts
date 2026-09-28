@@ -178,57 +178,71 @@ function innermostEvent(ev: unknown): Record<string, unknown> | null {
   return event && typeof event === 'object' ? event : null;
 }
 
-/** The most recent durable _user_echo receipts, scanning the FULL log files
- *  newest-first (live log, then the archive), not loadEventLogSync's trimmed
- *  replay window. A busy lane pushes a delivered steer's echo out of the
- *  MAX_EVENTS_PER_LOG window within minutes, which made reconnects drop the
- *  receipt and raise a false "Queued guidance was not retained" banner
+// Receipt scans read whole files, so memoize per file on (mtime, size) —
+// the same validation loadEventLogSync's cache uses. The cached value is
+// that file's complete newest-first receipt id list, which is tiny (dozens
+// of ids over tens of thousands of events), so every hello and admission
+// check reuses one read per file change instead of re-reading megabytes.
+interface ReceiptScan { mtimeMs: number; size: number; ids: string[] }
+const receiptScans = new Map<string, ReceiptScan>();
+const RECEIPT_SCAN_CACHE_MAX = 256;
+function receiptIdsForFile(path: string): string[] {
+  let mtimeMs: number;
+  let size: number;
+  try { const st = statSync(path); mtimeMs = st.mtimeMs; size = st.size; } catch { return []; }
+  const cached = receiptScans.get(path);
+  if (cached && cached.mtimeMs === mtimeMs && cached.size === size) return cached.ids;
+  const ids: string[] = [];
+  let raw: string;
+  try { raw = readFileSync(path, 'utf8'); } catch { return []; }
+  const lines = raw.split('\n');
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    // Cheap prefilter: only lines mentioning _user_echo can be receipts, so
+    // the vast majority of lines skip JSON parsing entirely.
+    if (!line || line.indexOf('_user_echo') === -1) continue;
+    try {
+      const parsed = JSON.parse(line) as { ev?: unknown };
+      const event = innermostEvent(parsed?.ev);
+      const clientMsgId = event?.type === '_user_echo' && typeof event.clientMsgId === 'string'
+        ? event.clientMsgId
+        : null;
+      if (clientMsgId && !ids.includes(clientMsgId)) ids.push(clientMsgId);
+    } catch { /* partial tail line; the next append rewrites it */ }
+  }
+  const scan = { mtimeMs, size, ids };
+  receiptScans.set(path, scan);
+  while (receiptScans.size > RECEIPT_SCAN_CACHE_MAX) {
+    const oldest = receiptScans.keys().next().value;
+    if (oldest === undefined) break;
+    receiptScans.delete(oldest);
+  }
+  return ids;
+}
+
+/** The most recent durable _user_echo receipts, newest-first across the
+ *  FULL live log and the archive — not loadEventLogSync's trimmed replay
+ *  window. A busy lane pushes a delivered steer's echo out of the
+ *  MAX_EVENTS_PER_LOG window within minutes, which made reconnects drop
+ *  the receipt and raise a false "Queued guidance was not retained" banner
  *  (verified live: the durable log held 39 receipts while a reconnecting
  *  socket was handed exactly one). */
 export function recentUserEchoClientMsgIds(key: string, limit = 128): string[] {
   const ids: string[] = [];
   const seen = new Set<string>();
-  for (const path of [logPath(key), archivePath(key)]) {
+  for (const id of [...receiptIdsForFile(logPath(key)), ...receiptIdsForFile(archivePath(key))]) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
     if (ids.length >= limit) break;
-    let raw: string;
-    try { raw = readFileSync(path, 'utf8'); } catch { continue; }
-    const lines = raw.split('\n');
-    for (let index = lines.length - 1; index >= 0 && ids.length < limit; index -= 1) {
-      const line = lines[index];
-      if (!line) continue;
-      try {
-        const parsed = JSON.parse(line) as { ev?: unknown };
-        const event = innermostEvent(parsed?.ev);
-        const clientMsgId = event?.type === '_user_echo' && typeof event.clientMsgId === 'string'
-          ? event.clientMsgId
-          : null;
-        if (!clientMsgId || seen.has(clientMsgId)) continue;
-        seen.add(clientMsgId);
-        ids.push(clientMsgId);
-      } catch { /* partial tail line; the next append rewrites it */ }
-    }
   }
   return ids;
 }
 
 /** Whether one specific _user_echo receipt exists anywhere in the durable
- *  log files, scanning newest-first with an early exit. */
+ *  log files, from the same cached receipt scans. */
 export function durableUserEchoClientMsgId(key: string, clientMsgId: string): boolean {
-  for (const path of [logPath(key), archivePath(key)]) {
-    let raw: string;
-    try { raw = readFileSync(path, 'utf8'); } catch { continue; }
-    const lines = raw.split('\n');
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      const line = lines[index];
-      if (!line || !line.includes(clientMsgId)) continue;
-      try {
-        const parsed = JSON.parse(line) as { ev?: unknown };
-        const event = innermostEvent(parsed?.ev);
-        if (event?.type === '_user_echo' && event.clientMsgId === clientMsgId) return true;
-      } catch { /* partial tail line */ }
-    }
-  }
-  return false;
+  return recentUserEchoClientMsgIds(key, Number.MAX_SAFE_INTEGER).includes(clientMsgId);
 }
 
 export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextSeq: number } {
