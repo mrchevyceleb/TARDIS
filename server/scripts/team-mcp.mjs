@@ -160,10 +160,10 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        pid: { type: 'number', description: 'PID to watch; resolves when the process exits' },
+        pid: { type: 'integer', minimum: 1, description: 'PID to watch; resolves when the process exits' },
         file: { type: 'string', description: 'Absolute file path to watch; resolves when it appears or grows' },
         command: { type: 'string', description: 'Shell command the server runs detached; resolves with its exit code' },
-        timeoutMin: { type: 'number', description: 'Report a timeout after this many minutes (1-1440, default 60)' },
+        timeoutMin: { type: 'integer', minimum: 1, maximum: 1440, description: 'Report a timeout after this many minutes (1-1440, default 60)' },
         note: { type: 'string', description: 'Short label for the wake message, e.g. "scanner build"' },
       },
       required: ['note'],

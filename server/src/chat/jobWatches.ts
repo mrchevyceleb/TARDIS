@@ -16,7 +16,8 @@
 
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { statSync, readFileSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import { JsonStore } from '../lib/jsonStore.ts';
 import { listAgents } from './agents.ts';
 import { sendToAgentHome } from './teamBus.ts';
@@ -42,6 +43,10 @@ export type JobWatch = {
   baselineSize?: number | null;
   /** command watches: the server already spawned it. */
   spawned?: boolean;
+  /** Linux /proc starttime of the watched pid, captured at arm time — the
+   *  cheap pid-reuse guard: a reused pid no longer matches, so the wake
+   *  resolves honestly instead of following an unrelated process. */
+  pidStart?: number | null;
   /** Set once the job resolved but the wake could not land yet (busy lane).
    *  The tick retries this exact text so retries and restarts never re-derive
    *  or degrade the outcome. */
@@ -103,6 +108,32 @@ function pidAlive(pid: number): boolean {
   }
 }
 
+/** /proc/<pid>/stat starttime (field 22). null when /proc cannot answer
+ *  (non-Linux), which falls back to existence-only checking. */
+function pidStart(pid: number): number | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // comm can contain spaces and parens; everything after the last ')' is
+    // whitespace-split fields, where fields[0] is state (field 3).
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const start = Number(fields[19]);
+    return Number.isFinite(start) && start > 0 ? start : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Alive AND still the same process we armed (start guard when known). */
+function pidMatches(pid: number, start: number | null | undefined): boolean {
+  if (!pidAlive(pid)) return false;
+  if (start == null) return true;
+  return pidStart(pid) === start;
+}
+
+function exitText(code: number | null, signal: NodeJS.Signals | null): string {
+  return `finished: exit ${code ?? 'unknown'}${signal ? ` (signal ${signal})` : ''}`;
+}
+
 export type CreateJobWatchInput = {
   agentId: string;
   note: unknown;
@@ -120,21 +151,28 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
   if (!note) throw new Error('note is required (a short label for the wake message)');
   const picked = (['pid', 'file', 'command'] as const).filter((key) => input[key] !== undefined && input[key] !== null && String(input[key]).trim() !== '');
   if (picked.length !== 1) throw new Error('pass exactly one of pid, file, or command');
-  const timeoutMin = Math.min(MAX_TIMEOUT_MIN, Math.max(MIN_TIMEOUT_MIN, Math.round(Number(input.timeoutMin ?? 60)) || 60));
+  let timeoutMin = 60;
+  if (input.timeoutMin !== undefined && input.timeoutMin !== null && String(input.timeoutMin).trim() !== '') {
+    const raw = Number(input.timeoutMin);
+    if (!Number.isFinite(raw) || raw < MIN_TIMEOUT_MIN || raw > MAX_TIMEOUT_MIN) {
+      throw new Error(`timeoutMin must be ${MIN_TIMEOUT_MIN}-${MAX_TIMEOUT_MIN} minutes`);
+    }
+    timeoutMin = Math.round(raw);
+  }
   const deadline = Date.now() + timeoutMin * 60_000;
 
   if (picked[0] === 'pid') {
-    const pid = Math.trunc(Number(input.pid));
-    if (!Number.isInteger(pid) || pid <= 0) throw new Error('pid must be a positive integer');
+    const pid = Number(input.pid);
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('pid must be a positive integer');
     if (!pidAlive(pid)) throw new Error(`process ${pid} has already exited — there is nothing left to watch`);
     return serialize(() => store.create({
-      agentId: input.agentId, note, kind: 'pid' as const, pid, timeoutMin, deadline,
+      agentId: input.agentId, note, kind: 'pid' as const, pid, pidStart: pidStart(pid), timeoutMin, deadline,
     }));
   }
 
   if (picked[0] === 'file') {
     const file = String(input.file).trim();
-    if (!file.startsWith('/')) throw new Error('file must be an absolute path on this host');
+    if (!isAbsolute(file)) throw new Error('file must be an absolute path on this host');
     let baselineSize: number | null;
     try {
       baselineSize = statSync(file).size;
@@ -153,25 +191,50 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
   // With shell:true spawn() itself almost never fails synchronously (sh -c
   // gets the pid); a spawn failure surfaces via 'error' with pid undefined.
   if (typeof child.pid !== 'number') throw new Error('the command could not be started');
-  // Pre-assign the id so the exit listener can find the record, and arm the
-  // listener only after the record is durable — inside the same serialized
-  // mutation, before any event-loop turn the exit event could fire on.
+  // Listen IMMEDIATELY: a fast command can exit while the record is still
+  // being written (the exit event would fire with no listener and be lost),
+  // and an unlistened 'error' would crash the process. The outcome is
+  // buffered and resolved once the record is durable.
+  let buffered: string | null = null;
+  const onExit = (code: number | null, signal: NodeJS.Signals | null) => { buffered = exitText(code, signal); };
+  const onError = (err: Error) => { buffered = `failed to run: ${err.message}`; };
+  child.once('exit', onExit);
+  child.once('error', onError);
+  const pid = child.pid;
+  const start = pidStart(pid);
   const id = randomUUID();
-  return serialize(async () => {
-    const created = await store.create({
-      id, agentId: input.agentId, note, kind: 'command' as const, command, pid: child.pid, timeoutMin, deadline, spawned: true,
-    });
-    armChild(created.id, child);
+  try {
+    const created = await serialize(() => store.create({
+      id, agentId: input.agentId, note, kind: 'command' as const, command, pid, pidStart: start, timeoutMin, deadline, spawned: true,
+    }));
+    if (buffered === null) {
+      // Not exited yet: swap the buffer listeners for the durable arm. If the
+      // exit event is queued but undispatched, it lands on the new listener.
+      child.removeListener('exit', onExit);
+      child.removeListener('error', onError);
+      armChild(created.id, child);
+    } else {
+      // Already exited during the write: nothing left to arm, resolve now.
+      void resolveWatchById(created.id, buffered);
+    }
     return created;
-  });
+  } catch (err) {
+    // Persistence failed: no watch will ever wake for this command, so don't
+    // leave it running untracked. Kill the detached process group.
+    child.removeListener('exit', onExit);
+    child.removeListener('error', onError);
+    try { process.kill(-pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { /* already gone */ } }
+    throw err;
+  }
 }
+
 
 /** Command child: listen for exit while this process lives. */
 function armChild(id: string, child: ChildProcess): void {
   children.set(id, child);
   child.once('exit', (code, signal) => {
     children.delete(id);
-    void resolveWatchById(id, `finished: exit ${code ?? 'unknown'}${signal ? ` (signal ${signal})` : ''}`);
+    void resolveWatchById(id, exitText(code, signal));
   });
   child.once('error', (err) => {
     children.delete(id);
@@ -206,7 +269,9 @@ function checkWatch(watch: JobWatch, now: number): string | null {
     return `timed out after ${watch.timeoutMin}m. The watch gave up — check the job yourself; nothing further will arrive.`;
   }
   if (watch.kind === 'pid' && typeof watch.pid === 'number') {
-    return pidAlive(watch.pid) ? null : `finished: process ${watch.pid} exited`;
+    if (pidMatches(watch.pid, watch.pidStart)) return null;
+    if (pidAlive(watch.pid)) return `finished: process ${watch.pid} exited (its pid was reused by another process)`;
+    return `finished: process ${watch.pid} exited`;
   }
   if (watch.kind === 'file' && watch.file) {
     try {
@@ -221,7 +286,7 @@ function checkWatch(watch: JobWatch, now: number): string | null {
   if (watch.kind === 'command' && watch.spawned && !children.has(watch.id)) {
     // Restarted server (or the child already drained): no live child handle.
     // resolvedText carries the real outcome when there was one.
-    if (typeof watch.pid === 'number' && !pidAlive(watch.pid)) {
+    if (typeof watch.pid === 'number' && !pidMatches(watch.pid, watch.pidStart)) {
       return `finished: the process exited. Exit code unknown — the server restarted while the job ran.`;
     }
     return null;
@@ -242,6 +307,14 @@ async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
       console.warn(`[job-watches] ${watch.note}: agent was deleted; dropping the wake`);
       await serialize(() => store.delete(watch.id));
       return false;
+    }
+    // Persist the outcome BEFORE the delivery attempt: sendToAgentHome can
+    // wait for an admission boundary for up to 30 minutes, and a restart
+    // during that window must not lose the real exit code to the degraded
+    // unknown-code path.
+    if (watch.resolvedText !== outcome) {
+      await serialize(() => store.update(watch.id, { resolvedText: outcome }));
+      watch = { ...watch, resolvedText: outcome };
     }
     const detail = watch.kind === 'command' && watch.command
       ? `command: ${watch.command.slice(0, 120)}`
@@ -266,7 +339,7 @@ async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
       await serialize(() => store.delete(watch.id));
       return false;
     }
-    await serialize(() => store.update(watch.id, { resolvedText: outcome }));
+    // resolvedText is already persisted above; the tick retries it.
     retryUntil.set(watch.id, Date.now() + RETRY_MS);
     console.warn(`[job-watches] ${watch.note}: wake not delivered (${result.reason}); will retry`);
     return false;

@@ -403,7 +403,7 @@ export function deleteAgent(id: string): boolean {
   if (next.length === agents.length) return false;
   saveAgents(next);
   deleteRoutinesForAgent(id);
-  void deleteJobWatchesForAgent(id);
+  deleteJobWatchesForAgent(id).catch((err) => console.warn('[job-watches] cascade for a deleted agent failed:', (err as Error).message));
   try { deleteMessagePinsForAgent(id); } catch { /* pin pocket is ancillary to the agent record */ }
   clearAvatarFiles(id);
   try { unlinkSync(join(AGENTS_DIR, `${id}.md`)); } catch { /* scope file optional */ }
