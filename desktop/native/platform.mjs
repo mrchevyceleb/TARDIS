@@ -193,26 +193,37 @@ class WindowsAdapter {
   // the window, move the cursor or send real input. The uia tree walk gets a
   // longer budget than other ops because the first walk of a Chromium window
   // builds its accessibility tree on demand.
+  // Background ops pass their whole result through: the native script's
+  // evidence fields (foregroundBefore/foregroundAfter/foregroundStolen,
+  // postedTo, pruned, focus, process) must reach the agent, not just the
+  // whitelisted png/bounds pair. A live round proved the whitelist was
+  // silently dropping exactly the fields that say whether an op raised a
+  // window over the person's work.
   async windowCapture(window, signal) {
     const result = await this.call('window_capture', { window }, signal);
-    return { png: Buffer.from(result.png, 'base64'), bounds: result.bounds, process: result.process };
+    const { png, ...rest } = result;
+    return { ...rest, png: Buffer.from(png, 'base64') };
   }
   uiaTree(window, focus, signal) { return this.call('uia', { window, ...(focus ? { focus } : {}) }, signal, 25_000); }
   async uiaValue(window, element, text, name, post, append, signal) {
     const result = await this.call('uia_value', { window, element, text, ...(name ? { name } : {}), post: post === true, append: append === true }, signal, 25_000);
-    return { png: Buffer.from(result.png, 'base64'), bounds: result.bounds, ...(result.postedTo ? { postedTo: result.postedTo } : {}) };
+    const { png, ...rest } = result;
+    return { ...rest, png: Buffer.from(png, 'base64') };
   }
   async uiaFocus(window, element, name, signal) {
     const result = await this.call('uia_focus', { window, element, ...(name ? { name } : {}) }, signal, 25_000);
-    return { png: Buffer.from(result.png, 'base64'), bounds: result.bounds };
+    const { png, ...rest } = result;
+    return { ...rest, png: Buffer.from(png, 'base64') };
   }
   async uiaInvoke(window, element, name, signal) {
     const result = await this.call('uia_invoke', { window, element, ...(name ? { name } : {}) }, signal, 25_000);
-    return { png: Buffer.from(result.png, 'base64'), bounds: result.bounds };
+    const { png, ...rest } = result;
+    return { ...rest, png: Buffer.from(png, 'base64') };
   }
   async uiaKey(window, keys, signal) {
     const result = await this.call('uia_key', { window, keys }, signal, 25_000);
-    return { png: Buffer.from(result.png, 'base64'), bounds: result.bounds, ...(result.postedTo ? { postedTo: result.postedTo } : {}) };
+    const { png, ...rest } = result;
+    return { ...rest, png: Buffer.from(png, 'base64') };
   }
   act(action, signal) { return this.call('act', action, signal); }
   release() { return this.call('release'); }
