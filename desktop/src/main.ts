@@ -4,6 +4,7 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   nativeTheme,
   screen,
@@ -11,6 +12,7 @@ import {
   shell,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
+  type MessageBoxOptions,
 } from 'electron';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -18,7 +20,7 @@ import { pathToFileURL } from 'node:url';
 import { getSettings, initSettings, saveSettings, type Settings, type ThemeName, type WindowBounds } from './settings.js';
 import { installMenu } from './menu.js';
 import { normalizeServerUrl, probeServer, sameOrigin } from './server.js';
-import { canAutoUpdate, checkForUpdatesInteractive, startUpdater } from './updater.js';
+import { canAutoUpdate, checkForUpdatesInteractive, onUpdateReady, pendingUpdateVersion, restartToUpdate, startUpdater } from './updater.js';
 import { chooseWorkspaceRoot, clearFetchedCopies, handleNativeScheme, openWorkspacePath, workspaceRoot } from './workspace.js';
 import { deviceId, refreshDeviceBridge, startDeviceBridge, stopDeviceBridge } from './bridge.js';
 import { computer, setComputerAutomatic } from './computer.js';
@@ -371,16 +373,11 @@ function scheduleScreenshot(target: string): void {
   });
 }
 
-async function main(): Promise<void> {
-  if (process.platform === 'win32') app.setAppUserModelId(APP_ID);
-  const settings = initSettings(app.getPath('userData'));
-  serverUrl = cliServer() ?? settings.serverUrl;
-  nativeTheme.themeSource = settings.theme ?? 'dark';
-
-  installPermissions();
-  installIpc();
+function rebuildMenu(): void {
   installMenu({
     bridgeEnabled: bridgeEnabled(),
+    updateReady: pendingUpdateVersion() !== null,
+    restartToUpdate: () => restartToUpdate(),
     setBridgeEnabled: (on: boolean) => {
       setBridgeEnabled(on);
       if (on) startDeviceBridge(serverUrl);
@@ -399,10 +396,54 @@ async function main(): Promise<void> {
     openReleases: () => void shell.openExternal(RELEASES_URL),
     openRepository: () => void shell.openExternal(REPO_URL),
   });
+}
+
+/** Quitting should not be the only way to install an update: offer a
+ *  restart once per downloaded version per session. */
+let offeredRestart = '';
+async function offerRestart(version: string): Promise<void> {
+  if (offeredRestart === version) return;
+  offeredRestart = version;
+  const options: MessageBoxOptions = {
+    type: 'info',
+    title: 'TARDIS',
+    message: `TARDIS ${version} is downloaded and ready.`,
+    detail: 'Restart to update installs it now and relaunches TARDIS on the new version. It also installs automatically the next time TARDIS quits (details in updater.log).',
+    buttons: ['Restart to update', 'Later'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  };
+  try {
+    const answer = win && !win.isDestroyed() ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options);
+    if (answer.response === 0) restartToUpdate();
+  } catch {
+    // The prompt could not be shown (window destroyed, shutdown): allow it
+    // to be offered again later; the menu item remains regardless.
+    offeredRestart = '';
+  }
+}
+
+async function main(): Promise<void> {
+  if (process.platform === 'win32') app.setAppUserModelId(APP_ID);
+  const settings = initSettings(app.getPath('userData'));
+  serverUrl = cliServer() ?? settings.serverUrl;
+  nativeTheme.themeSource = settings.theme ?? 'dark';
+
+  installPermissions();
+  installIpc();
+  rebuildMenu();
 
   win = createWindow(settings);
   if (process.env.TARDIS_SHOT) scheduleScreenshot(process.env.TARDIS_SHOT);
   loadServer();
+  // A downloaded update gets a Restart to update item in the Ship menu plus
+  // a one-time prompt, and every updater event lands in updater.log: an
+  // update once sat uninstalled through a full quit with no trace anywhere.
+  onUpdateReady(version => {
+    rebuildMenu();
+    void offerRestart(version);
+  });
   startUpdater();
   // The link is what lets agents use this machine; it is refused entirely
   // while the Ship menu switch is off.
