@@ -2181,6 +2181,9 @@ export async function getOrCreateSession(opts: {
       if (opts.cli === 'zai' && !existing.isBusy() && !holdsBackgroundWork(existing) && existing.hasStaleZaiProvider()) {
         existing.shutdown('zai provider switch');
         sessions.delete(key);
+        // Same as a disposed child above: let it exit before a replacement
+        // resumes its native session.
+        await waitForChildExit(existing, 5_000);
         continue;
       }
       // Recycle only an IDLE session whose model/effort differs, and only when
@@ -2605,7 +2608,7 @@ export function dropSession(cli: CliKind, repoPath: string, chatId = 'main'): vo
 export async function interruptSession(opts: { cli: CliKind; repoPath: string; chatId?: string }): Promise<void> {
   const chatId = opts.chatId || 'main';
   // Stop also means "do not pick the cut turn back up on your own".
-  cancelProviderContinue(trackedThreadLogKey({ ...opts, chatId }));
+  cancelProviderContinue(trackedThreadLogKey({ ...opts, chatId }), { stopped: true });
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
     const { interruptCodex } = await import('./codex-runner.ts');
     await interruptCodex({ repoPath: opts.repoPath, chatId, cli: opts.cli });

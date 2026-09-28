@@ -79,9 +79,11 @@ export function pendingProviderCut(events: ReadonlyArray<Seqish>): ProviderCut |
     const outer = events[i]?.ev;
     const inner = outer?.type === 'event' ? outer.event : null;
     const type = inner?.type;
+    // A background subagent's own frames are not the lane reaching the model.
+    if (inner?.parent_tool_use_id) continue;
     // Model output, a provider-accepted prompt, or a finished turn after the
-    // cut: some later turn picked it up.
-    if (type === 'assistant' || type === 'stream_event' || type === 'peer_delivery_accepted') return null;
+    // cut: some later turn picked it up. An explicit Stop settles it too.
+    if (type === 'assistant' || type === 'stream_event' || type === 'peer_delivery_accepted' || type === '_interrupted') return null;
     if (type === 'result' && inner.is_error !== true) return null;
     if (type === '_terminal_error' && inner.providerCut && typeof inner.providerCut === 'object') {
       const { from, to } = inner.providerCut as { from?: unknown; to?: unknown };
@@ -126,6 +128,9 @@ type RetiringSession = {
   isDisposed(): boolean;
   processExited(): boolean;
   hasStaleZaiProvider(): boolean;
+  isBusy(): boolean;
+  /** Claude lanes only; a Pi child is never kept for background work. */
+  hasBackgroundWork?(): boolean;
   subscribe(fn: (se: SeqEvent) => void, sinceSeq?: number, countSubscriber?: boolean): () => void;
 };
 
@@ -234,15 +239,20 @@ export function markPendingProviderContinuesInterrupted(): number {
   return marked;
 }
 
-/** Stop and Fresh cancel a continue that has not started yet. */
-export function cancelProviderContinue(logKey: string): void {
+/** Stop and Fresh cancel a continue that has not run yet. A Stop also marks
+ *  the thread, so the cut is not picked back up by the next message or a
+ *  reload that still shows "continuing". Fresh wipes the thread instead. */
+export function cancelProviderContinue(logKey: string, opts: { stopped?: boolean } = {}): void {
   jobs.delete(logKey);
+  let cancelled: Job | null = null;
   for (const job of [...runningJobs]) {
     if (job.logKey !== logKey) continue;
     job.cancelled = true;
     runningJobs.delete(job);
+    cancelled = job;
     console.warn(`[chat ${job.cli}] automatic continue on ${logKey} cancelled`);
   }
+  if (cancelled && opts.stopped) void postThreadEvent(cancelled, { type: '_interrupted', ts: Date.now() });
 }
 
 function mergeOrigins(a: TurnOrigin, b: TurnOrigin): TurnOrigin {
@@ -285,7 +295,9 @@ async function waitForRetirement(job: Job): Promise<boolean> {
     const old = job.retiring;
     if (old.processExited()) return true;
     const kept = !old.isDisposed();
-    if (kept && !old.hasStaleZaiProvider()) return true;
+    // Kept for background work: done once its provider healed on its own, or
+    // once the work drained and it sits idle (the lookup retires it then).
+    if (kept && (!old.hasStaleZaiProvider() || (!old.isBusy() && !old.hasBackgroundWork?.()))) return true;
     const limit = kept ? BACKGROUND_HOLD_MS : EXIT_WAIT_MS;
     const left = started + limit - Date.now();
     // A disposed child past its SIGKILL backstop is gone in every way that
@@ -457,6 +469,23 @@ async function postProviderCutNotice(job: Job, message: string): Promise<void> {
     await saved;
   } catch (err) {
     console.warn(`[chat ${job.cli}] could not post the provider-cut notice on ${job.logKey}: ${(err as Error).message}`);
+  }
+}
+
+/** Append a standalone event to a job's thread: through the live session
+ *  (it owns the seq allocator) or, with none, straight to the durable log. */
+async function postThreadEvent(job: Job, event: Record<string, unknown>): Promise<void> {
+  try {
+    const runner = await import('./runner.ts');
+    const live = runner.liveLaneSession(job.logKey);
+    if (live && !live.isBusy() && live.postNotice(event)) return;
+    if (live) return; // a turn is running; it already settles the cut
+    const persisted = { seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event' as const, event }, eng: job.cli, mdl: job.model };
+    const saved = appendEventLogDurable(job.logKey, persisted);
+    runner.publishExternalThreadEvent(job.logKey, persisted);
+    await saved;
+  } catch (err) {
+    console.warn(`[chat ${job.cli}] could not mark ${job.logKey}: ${(err as Error).message}`);
   }
 }
 
