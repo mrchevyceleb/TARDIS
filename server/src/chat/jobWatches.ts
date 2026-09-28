@@ -108,16 +108,18 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-/** /proc/<pid>/stat starttime (field 22). null when /proc cannot answer
- *  (non-Linux), which falls back to existence-only checking. */
+/** /proc/<pid>/stat starttime (field 22, clock ticks since boot — pid 1
+ *  legitimately reads 0). null when /proc cannot answer (non-Linux), which
+ *  falls back to existence-only checking. */
 function pidStart(pid: number): number | null {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
     // comm can contain spaces and parens; everything after the last ')' is
-    // whitespace-split fields, where fields[0] is state (field 3).
+    // whitespace-split fields, where fields[0] is state (field 3), so
+    // starttime (field 22) is fields[19].
     const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
     const start = Number(fields[19]);
-    return Number.isFinite(start) && start > 0 ? start : null;
+    return Number.isFinite(start) && start >= 0 ? start : null;
   } catch {
     return null;
   }
@@ -147,23 +149,26 @@ export type CreateJobWatchInput = {
  *  plain reason on bad input (the route maps it to 4xx). */
 export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWatch> {
   if (!listAgents().some((a) => a.id === input.agentId)) throw new Error('unknown agentId');
-  const note = String(input.note ?? '').trim().replace(/\s+/g, ' ').slice(0, 120);
+  if (typeof input.note !== 'string') throw new Error('note is required (a short label for the wake message)');
+  const note = input.note.trim().replace(/\s+/g, ' ').slice(0, 120);
   if (!note) throw new Error('note is required (a short label for the wake message)');
-  const picked = (['pid', 'file', 'command'] as const).filter((key) => input[key] !== undefined && input[key] !== null && String(input[key]).trim() !== '');
+  const picked = (['pid', 'file', 'command'] as const).filter((key) => {
+    const value = input[key];
+    if (key === 'pid') return typeof value === 'number';
+    return typeof value === 'string' && value.trim() !== '';
+  });
   if (picked.length !== 1) throw new Error('pass exactly one of pid, file, or command');
-  let timeoutMin = 60;
-  if (input.timeoutMin !== undefined && input.timeoutMin !== null && String(input.timeoutMin).trim() !== '') {
-    const raw = Number(input.timeoutMin);
-    if (!Number.isFinite(raw) || raw < MIN_TIMEOUT_MIN || raw > MAX_TIMEOUT_MIN) {
-      throw new Error(`timeoutMin must be ${MIN_TIMEOUT_MIN}-${MAX_TIMEOUT_MIN} minutes`);
+  if (input.timeoutMin !== undefined && input.timeoutMin !== null) {
+    if (typeof input.timeoutMin !== 'number' || !Number.isSafeInteger(input.timeoutMin) || input.timeoutMin < MIN_TIMEOUT_MIN || input.timeoutMin > MAX_TIMEOUT_MIN) {
+      throw new Error(`timeoutMin must be an integer ${MIN_TIMEOUT_MIN}-${MAX_TIMEOUT_MIN} minutes`);
     }
-    timeoutMin = Math.round(raw);
   }
+  const timeoutMin: number = typeof input.timeoutMin === 'number' ? input.timeoutMin : 60;
   const deadline = Date.now() + timeoutMin * 60_000;
 
   if (picked[0] === 'pid') {
-    const pid = Number(input.pid);
-    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('pid must be a positive integer');
+    if (typeof input.pid !== 'number' || !Number.isSafeInteger(input.pid) || input.pid <= 0) throw new Error('pid must be a positive integer');
+    const pid = input.pid;
     if (!pidAlive(pid)) throw new Error(`process ${pid} has already exited — there is nothing left to watch`);
     return serialize(() => store.create({
       agentId: input.agentId, note, kind: 'pid' as const, pid, pidStart: pidStart(pid), timeoutMin, deadline,
@@ -171,7 +176,8 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
   }
 
   if (picked[0] === 'file') {
-    const file = String(input.file).trim();
+    if (typeof input.file !== 'string') throw new Error('file must be an absolute path on this host');
+    const file = input.file.trim();
     if (!isAbsolute(file)) throw new Error('file must be an absolute path on this host');
     let baselineSize: number | null;
     try {
@@ -185,21 +191,23 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
   }
 
   // command: the server runs it detached right now.
-  const command = String(input.command).trim();
-  if (!command) throw new Error('command must be a shell command');
+  if (typeof input.command !== 'string' || !input.command.trim()) throw new Error('command must be a shell command');
+  const command = input.command.trim();
   const child = spawn(command, { shell: true, detached: true, stdio: 'ignore' });
-  // With shell:true spawn() itself almost never fails synchronously (sh -c
-  // gets the pid); a spawn failure surfaces via 'error' with pid undefined.
-  if (typeof child.pid !== 'number') throw new Error('the command could not be started');
-  // Listen IMMEDIATELY: a fast command can exit while the record is still
-  // being written (the exit event would fire with no listener and be lost),
-  // and an unlistened 'error' would crash the process. The outcome is
-  // buffered and resolved once the record is durable.
+  // Listen IMMEDIATELY, before anything else: a spawn failure (EAGAIN/EMFILE,
+  // no pid) emits an async 'error' that would crash the process with no
+  // listener, and a fast command can exit while the record is still being
+  // written. The outcome is buffered and resolved once the record is durable.
   let buffered: string | null = null;
   const onExit = (code: number | null, signal: NodeJS.Signals | null) => { buffered = exitText(code, signal); };
   const onError = (err: Error) => { buffered = `failed to run: ${err.message}`; };
   child.once('exit', onExit);
   child.once('error', onError);
+  if (typeof child.pid !== 'number') {
+    // The async 'error' is already listened (nothing can resolve this watch);
+    // nothing was started, so there is nothing to clean up.
+    throw new Error('the command could not be started');
+  }
   const pid = child.pid;
   const start = pidStart(pid);
   const id = randomUUID();
@@ -215,7 +223,7 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
       armChild(created.id, child);
     } else {
       // Already exited during the write: nothing left to arm, resolve now.
-      void resolveWatchById(created.id, buffered);
+      resolveWatchById(created.id, buffered);
     }
     return created;
   } catch (err) {
@@ -228,26 +236,44 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
   }
 }
 
+/** One resolution → one wake. The gate is fully synchronous (the set add
+ *  happens before any await), so the tick, the exit listeners, and the
+ *  buffered path can never double-deliver or steal each other's outcome. */
+function beginDelivery(id: string): boolean {
+  if (delivering.has(id)) return false;
+  delivering.add(id);
+  return true;
+}
+
 
 /** Command child: listen for exit while this process lives. */
 function armChild(id: string, child: ChildProcess): void {
   children.set(id, child);
   child.once('exit', (code, signal) => {
     children.delete(id);
-    void resolveWatchById(id, exitText(code, signal));
+    resolveWatchById(id, exitText(code, signal));
   });
   child.once('error', (err) => {
     children.delete(id);
-    void resolveWatchById(id, `failed to run: ${err.message}`);
+    resolveWatchById(id, `failed to run: ${err.message}`);
   });
   child.unref();
 }
 
-/** Resolve a persisted watch by id (exit-listener path). */
-async function resolveWatchById(id: string, outcome: string): Promise<void> {
-  const watch = (await store.list()).find((w) => w.id === id);
-  if (!watch) return; // deleted meanwhile: nothing to say
-  await deliverWake(watch, outcome);
+/** Resolve a persisted watch by id (exit-listener / buffered path). Gated,
+ *  self-catching, and never rejects unobserved. */
+function resolveWatchById(id: string, outcome: string): void {
+  if (!beginDelivery(id)) return;
+  void (async () => {
+    try {
+      const watch = (await store.list()).find((w) => w.id === id);
+      if (watch) await deliverWake(watch, outcome); // caller holds the gate
+    } catch (err) {
+      console.warn(`[job-watches] resolution for ${id} failed:`, (err as Error).message);
+    } finally {
+      delivering.delete(id);
+    }
+  })();
 }
 
 /** Cascade: an agent's watches die with it (no ghost retry loops). */
@@ -297,10 +323,15 @@ function checkWatch(watch: JobWatch, now: number): string | null {
 /** One resolution → one wake, then the watch is removed. On delivery failure
  *  (agent busy past the 30-minute admission wait, engine down) the outcome
  *  is persisted and retried every RETRY_MS; UNDELIVERABLE_GRACE past the
- *  deadline it is dropped with a log line so it can never loop forever. */
+ *  deadline it is dropped with a log line so it can never loop forever.
+ *
+ *  The CALLER holds the delivery gate (beginDelivery) and clears it — the
+ *  tick, resolveWatchById, and the buffered path all go through the same
+ *  synchronous gate, so two paths can never deliver the same watch. This
+ *  function never rejects: a bookkeeping failure logs and schedules a
+ *  retry (resolvedText carries the outcome) instead of escaping as an
+ *  unhandled rejection. */
 async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
-  if (delivering.has(watch.id)) return false;
-  delivering.add(watch.id);
   try {
     const agent = listAgents().find((a) => a.id === watch.agentId);
     if (!agent) {
@@ -343,8 +374,13 @@ async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
     retryUntil.set(watch.id, Date.now() + RETRY_MS);
     console.warn(`[job-watches] ${watch.note}: wake not delivered (${result.reason}); will retry`);
     return false;
-  } finally {
-    delivering.delete(watch.id);
+  } catch (err) {
+    // Store bookkeeping failed mid-delivery: log it, keep the record
+    // (resolvedText carries the outcome when its write landed), and let the
+    // tick retry rather than escaping as an unhandled rejection.
+    retryUntil.set(watch.id, Date.now() + RETRY_MS);
+    console.warn(`[job-watches] ${watch.note}: delivery bookkeeping failed:`, (err as Error).message);
+    return false;
   }
 }
 
@@ -362,7 +398,13 @@ export function startJobWatchScheduler(): void {
     for (const watch of watches) {
       if (delivering.has(watch.id) || (retryUntil.get(watch.id) ?? 0) > now) continue;
       const outcome = watch.resolvedText ?? checkWatch(watch, now);
-      if (outcome) void deliverWake(watch, outcome);
+      // Gate synchronously: checkWatch is cheap and sync, so no exit listener
+      // can interleave between the resolution and the gate.
+      if (outcome && beginDelivery(watch.id)) {
+        void deliverWake(watch, outcome)
+          .catch((err) => console.warn(`[job-watches] ${watch.note}: delivery failed:`, (err as Error).message))
+          .finally(() => delivering.delete(watch.id));
+      }
     }
   };
   const iv = setInterval(() => { void tick(); }, TICK_MS);
