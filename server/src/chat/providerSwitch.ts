@@ -71,15 +71,17 @@ const PROVIDER_CUT_GUIDANCE = [
 
 type Seqish = { ev?: any } | null | undefined;
 
-/** The provider cut that ended this thread's last turn, if no message has
- *  reached the thread since. */
+/** The provider cut that ended this thread's last turn, until a later turn
+ *  actually reaches the model. An echoed message whose prompt never got
+ *  submitted does not settle it; that retry still needs the guidance. */
 export function pendingProviderCut(events: ReadonlyArray<Seqish>): ProviderCut | null {
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const outer = events[i]?.ev;
     const inner = outer?.type === 'event' ? outer.event : null;
     const type = inner?.type;
-    if (type === '_user_echo' || type === 'peer_message' || type === PROVIDER_CONTINUE_EVENT) return null;
-    // A later turn that finished (a native wake, say) settled the cut.
+    // Model output, a provider-accepted prompt, or a finished turn after the
+    // cut: some later turn picked it up.
+    if (type === 'assistant' || type === 'stream_event' || type === 'peer_delivery_accepted') return null;
     if (type === 'result' && inner.is_error !== true) return null;
     if (type === '_terminal_error' && inner.providerCut && typeof inner.providerCut === 'object') {
       const { from, to } = inner.providerCut as { from?: unknown; to?: unknown };
@@ -153,14 +155,19 @@ export type ProviderContinueRequest = {
 
 type Job = ProviderContinueRequest & { cancelled: boolean; started: boolean };
 
+/** Newest job per thread (the one a fresh cut can fold into). */
 const jobs = new Map<string, Job>();
+/** Every job still running, so Stop, Fresh and shutdown reach older ones too. */
+const runningJobs = new Set<Job>();
 /** A kept-for-background-work child can hold the continue this long. */
 const BACKGROUND_HOLD_MS = 6 * 60 * 60_000;
 /** A retired child gets SIGKILL after 3s; this only bounds a missing exit. */
 const EXIT_WAIT_MS = 15_000;
 
-/** A failure notice waits this long for a busy lane's turn to end. */
-const NOTICE_IDLE_WAIT_MS = 30 * 60_000;
+/** A failure notice waits this long for a busy lane to go idle. */
+const NOTICE_IDLE_WAIT_MS = 6 * 60 * 60_000;
+/** The continue waits this long behind queued or competing turns. */
+const COMPETING_WAIT_MS = 30 * 60_000;
 
 function waitForTurnEnd(session: ContinuableSession, timeoutMs: number): Promise<void> {
   return new Promise((resolve) => {
@@ -188,10 +195,17 @@ export function scheduleProviderContinue(request: ProviderContinueRequest): void
     existing.origin = mergeOrigins(existing.origin, request.origin);
     return;
   }
-  const job: Job = { ...request, cancelled: false, started: false };
+  // A job already past its wait keeps watching its own cut; the new one
+  // inherits its teammates so a later failure still tells them.
+  const origin = existing && !existing.cancelled
+    ? mergeOrigins(request.origin, { peers: existing.origin.peers, human: false, automation: request.origin.automation })
+    : request.origin;
+  const job: Job = { ...request, origin, cancelled: false, started: false };
   jobs.set(request.logKey, job);
+  runningJobs.add(job);
   console.warn(`[chat ${request.cli}] provider switched mid-turn on ${request.logKey} (${request.cut.from} -> ${request.cut.to}); continuing automatically`);
   void runJob(job).finally(() => {
+    runningJobs.delete(job);
     if (jobs.get(job.logKey) === job) jobs.delete(job.logKey);
   });
 }
@@ -201,9 +215,13 @@ export function scheduleProviderContinue(request: ProviderContinueRequest): void
  *  restart. */
 export function markPendingProviderContinuesInterrupted(): number {
   let marked = 0;
-  for (const job of [...jobs.values()]) {
+  const noted = new Set<string>();
+  for (const job of [...runningJobs]) {
     job.cancelled = true;
+    runningJobs.delete(job);
     jobs.delete(job.logKey);
+    if (noted.has(job.logKey)) continue;
+    noted.add(job.logKey);
     const label = job.cut.to === 'fireworks' ? 'Fireworks' : 'the Z.ai coding plan';
     const event = providerCutNoticeEvent(`TARDIS restarted before GLM could continue on ${label}. Send again to continue.`, job.cut, { unread: true });
     try {
@@ -218,11 +236,13 @@ export function markPendingProviderContinuesInterrupted(): number {
 
 /** Stop and Fresh cancel a continue that has not started yet. */
 export function cancelProviderContinue(logKey: string): void {
-  const job = jobs.get(logKey);
-  if (!job) return;
-  job.cancelled = true;
   jobs.delete(logKey);
-  console.warn(`[chat ${job.cli}] automatic continue on ${logKey} cancelled`);
+  for (const job of [...runningJobs]) {
+    if (job.logKey !== logKey) continue;
+    job.cancelled = true;
+    runningJobs.delete(job);
+    console.warn(`[chat ${job.cli}] automatic continue on ${logKey} cancelled`);
+  }
 }
 
 function mergeOrigins(a: TurnOrigin, b: TurnOrigin): TurnOrigin {
@@ -276,17 +296,30 @@ async function waitForRetirement(job: Job): Promise<boolean> {
   return false;
 }
 
-async function supersededSince(job: Job, session?: ContinuableSession): Promise<string | null> {
-  if (humanQueued(job.logKey)) return 'a queued human message takes the turn';
-  if (session?.isBusy()) return 'another message already took the turn';
+/** Where this job's cut stands in the durable thread: still waiting for a
+ *  turn to pick it up, settled by a later turn that reached the model, or
+ *  owned by a newer cut (which has its own outcome). */
+async function cutState(job: Job): Promise<'pending' | 'settled' | 'superseded' | 'stopped'> {
   try { await flushEventLog(job.logKey); } catch { /* best effort */ }
-  const later = loadEventLogSync(job.logKey).events.some((event) => {
-    if (event.seq <= job.noticeSeq) return false;
-    const outer = event.ev as { type?: string; event?: { type?: string } };
-    const type = outer?.type === 'event' ? outer.event?.type : undefined;
-    return type === '_user_echo' || type === 'peer_message' || type === PROVIDER_CONTINUE_EVENT;
-  });
-  return later ? 'a newer message already resumed the thread' : null;
+  const events = loadEventLogSync(job.logKey).events;
+  for (let i = events.length - 1; i >= 0 && events[i].seq > job.noticeSeq; i -= 1) {
+    const outer = events[i].ev as { type?: string; event?: { type?: string; providerCut?: unknown; unread?: unknown } };
+    if (outer?.type === 'event' && outer.event?.type === '_terminal_error' && outer.event.providerCut) {
+      // A newer cut that is continuing owns the work (and our teammates, see
+      // scheduleProviderContinue). One that stopped leaves them to us.
+      return outer.event.unread === true ? 'stopped' : 'superseded';
+    }
+  }
+  return pendingProviderCut(events) ? 'pending' : 'settled';
+}
+
+/** Resolve on a busy lane's next turn boundary (or `timeoutMs`), otherwise
+ *  after a short real delay. Always yields to the timer queue: a queued human
+ *  steer on an idle lane is still spawning, and a promise-only retry loop
+ *  would starve the very event loop it is waiting on. */
+function waitForBoundaryOrDelay(session: ContinuableSession | null, timeoutMs: number): Promise<void> {
+  if (session?.isBusy()) return waitForTurnEnd(session, timeoutMs);
+  return new Promise((resolve) => { const t = setTimeout(resolve, 250); t.unref?.(); });
 }
 
 async function runJob(job: Job): Promise<void> {
@@ -299,64 +332,88 @@ async function runJob(job: Job): Promise<void> {
       await stopJob(job, `Background work kept the old GLM session busy too long to continue on ${label}. Send again to continue.`, 'GLM could not switch providers while background work held its old session');
       return;
     }
-    const earlier = await supersededSince(job);
-    if (job.cancelled) return;
-    if (earlier) {
-      console.warn(`[chat ${job.cli}] automatic continue on ${job.logKey} skipped: ${earlier}`);
-      return;
-    }
-    let { model, effort } = job;
-    const agent = agentForChatId(job.chatId);
-    if (agent) {
-      // Brains are server-authoritative. A switch while the old child exited
-      // wins over the continue; the next message goes to the new brain.
-      const brain = brainForAgent(agent);
-      if (cliForAgentEngine(brain.engine) !== job.cli) {
-        await stopJob(job, `This thread switched brains before GLM could continue on ${label}. Send again to continue.`, 'the agent switched brains before GLM could continue');
+    const runner = await import('./runner.ts');
+    const deadline = Date.now() + COMPETING_WAIT_MS;
+    let session: ContinuableSession | null = null;
+    let writes = 0;
+    // A queued human message or another turn may take the lane first. It
+    // carries the cut guidance, so the job only watches: the cut counts as
+    // settled once a later turn actually reached the model. If that turn never
+    // got there (a failed submit, a Stop-free abort), the continue still runs.
+    while (!job.cancelled) {
+      const state = await cutState(job);
+      if (job.cancelled) return;
+      if (state === 'stopped') {
+        // The turn that took the lane was cut too and nothing will finish it;
+        // its notice is already on the thread. Tell this cut's teammates.
+        await notifyHandoffSenders(job.chatId, job.origin, 'GLM\'s model provider failed again before the work could continue');
         return;
       }
-      model = brain.model ?? model;
-      effort = brain.effort ?? effort;
-    }
-    const runner = await import('./runner.ts');
-    const session = await runner.getOrCreateSession({
-      cli: job.cli,
-      repoPath: job.cwd,
-      chatId: job.chatId,
-      model,
-      effort,
-    }) as unknown as ContinuableSession;
-    if (job.cancelled) return;
-    const claimed = await supersededSince(job, session);
-    if (job.cancelled) return;
-    if (claimed) {
-      console.warn(`[chat ${job.cli}] automatic continue on ${job.logKey} skipped: ${claimed}`);
+      if (state !== 'pending') {
+        console.warn(`[chat ${job.cli}] automatic continue on ${job.logKey} not needed: ${state === 'settled' ? 'a later turn picked the cut work up' : 'a newer cut owns the thread'}`);
+        return;
+      }
+      const live = (session?.isAlive() ? session : null) ?? (runner.liveLaneSession(job.logKey) as unknown as ContinuableSession | null);
+      if (humanQueued(job.logKey) || live?.isBusy()) {
+        if (Date.now() >= deadline) {
+          await stopJob(job, `GLM could not continue on ${label}: the thread stayed busy too long. Send again to continue.`, `GLM could not continue on ${label} while the thread stayed busy`);
+          return;
+        }
+        await waitForBoundaryOrDelay(live, 2_000);
+        continue;
+      }
+      if (!session || !session.isAlive()) {
+        let { model, effort } = job;
+        const agent = agentForChatId(job.chatId);
+        if (agent) {
+          // Brains are server-authoritative. A switch while the old child
+          // exited wins over the continue; the next message goes to the new brain.
+          const brain = brainForAgent(agent);
+          if (cliForAgentEngine(brain.engine) !== job.cli) {
+            await stopJob(job, `This thread switched brains before GLM could continue on ${label}. Send again to continue.`, 'the agent switched brains before GLM could continue');
+            return;
+          }
+          model = brain.model ?? model;
+          effort = brain.effort ?? effort;
+        }
+        session = await runner.getOrCreateSession({
+          cli: job.cli,
+          repoPath: job.cwd,
+          chatId: job.chatId,
+          model,
+          effort,
+        }) as unknown as ContinuableSession;
+        // The spawn awaited: re-check the thread before writing.
+        continue;
+      }
+      const id = randomUUID();
+      let echoed = false;
+      let accepted = false;
+      const target: ContinuableSession = session;
+      const unsubscribe = target.subscribe((se) => {
+        const outer = se.ev as { type?: string; event?: { type?: string; id?: string; deliveryId?: string } };
+        if (outer?.type !== 'event') return;
+        if (outer.event?.type === PROVIDER_CONTINUE_EVENT && outer.event.id === id) echoed = true;
+        // Both runners emit this only once the prompt really reached the
+        // provider (stdin write / RPC accepted), same as a teammate delivery.
+        if (outer.event?.type === 'peer_delivery_accepted' && outer.event.deliveryId === id) accepted = true;
+      }, target.latestSeq(), false);
+      try {
+        await target.send(PROVIDER_CONTINUE_PROMPT, undefined, {
+          providerContinue: { id, origin: job.origin, cut: job.cut },
+          peerDeliveryId: id,
+        });
+      } finally {
+        unsubscribe();
+      }
+      if (accepted || job.cancelled) return;
+      // Never opened: another turn won the lane between the check and the
+      // write. Watch that one instead (bounded, so a runner that keeps
+      // declining without going busy cannot spin this loop).
+      if (!echoed && ++writes < 3) continue;
+      await stopJob(job, `GLM could not continue on ${label}. Send again to continue.`, `GLM could not continue on ${label} after the switch`);
       return;
     }
-    const id = randomUUID();
-    let echoed = false;
-    let accepted = false;
-    const unsubscribe = session.subscribe((se) => {
-      const outer = se.ev as { type?: string; event?: { type?: string; id?: string; deliveryId?: string } };
-      if (outer?.type !== 'event') return;
-      if (outer.event?.type === PROVIDER_CONTINUE_EVENT && outer.event.id === id) echoed = true;
-      // Both runners emit this only once the prompt really reached the
-      // provider (stdin write / RPC accepted), same as a teammate delivery.
-      if (outer.event?.type === 'peer_delivery_accepted' && outer.event.deliveryId === id) accepted = true;
-    }, session.latestSeq(), false);
-    try {
-      await session.send(PROVIDER_CONTINUE_PROMPT, undefined, {
-        providerContinue: { id, origin: job.origin, cut: job.cut },
-        peerDeliveryId: id,
-      });
-    } finally {
-      unsubscribe();
-    }
-    if (accepted || job.cancelled) return;
-    // Never opened: the lane went busy between the check and the write, and
-    // that turn carries the cut guidance, so nothing is lost.
-    if (!echoed && session.isBusy()) return;
-    await stopJob(job, `GLM could not continue on ${label}. Send again to continue.`, `GLM could not continue on ${label} after the switch`);
   } catch (err) {
     if (job.cancelled) return;
     const message = (err as Error)?.message ?? String(err);
@@ -377,15 +434,23 @@ async function stopJob(job: Job, message: string, reason: string): Promise<void>
 async function postProviderCutNotice(job: Job, message: string): Promise<void> {
   try {
     const runner = await import('./runner.ts');
-    let live = runner.liveLaneSession(job.logKey);
-    // Never drop a failure notice into the middle of someone else's turn: the
-    // UI and the team bus would read it as that turn failing.
-    if (live?.isBusy()) {
-      await waitForTurnEnd(live, NOTICE_IDLE_WAIT_MS);
-      live = runner.liveLaneSession(job.logKey);
-    }
+    const deadline = Date.now() + NOTICE_IDLE_WAIT_MS;
     const event = providerCutNoticeEvent(message, job.cut, { unread: true });
-    if (live?.postNotice(event)) return;
+    // Never drop a failure notice into the middle of someone else's turn: the
+    // UI and the team bus would read it as that turn failing. The idle check
+    // and the post share one synchronous slice, so no turn can start between.
+    for (;;) {
+      const live = runner.liveLaneSession(job.logKey);
+      if (!live?.isBusy()) {
+        if (live?.postNotice(event)) return;
+        break;
+      }
+      if (Date.now() >= deadline) {
+        console.warn(`[chat ${job.cli}] provider-cut notice on ${job.logKey} dropped: the thread never went idle`);
+        return;
+      }
+      await waitForTurnEnd(live as unknown as ContinuableSession, Math.min(60_000, deadline - Date.now()));
+    }
     const persisted = { seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event' as const, event }, eng: job.cli, mdl: job.model };
     const saved = appendEventLogDurable(job.logKey, persisted);
     runner.publishExternalThreadEvent(job.logKey, persisted);
