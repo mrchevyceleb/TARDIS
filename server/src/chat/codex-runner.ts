@@ -526,10 +526,11 @@ export class CodexSession {
         // A caller that did not win native admission must wait for a boundary;
         // never turn concurrent stdin into implicit steering.
         if (!opts.peerFrom) {
-          this.emit({
-            type: 'error',
-            message: 'Codex is still answering. Queue guidance or wait for the current turn.',
-          });
+          // The register layer counts a resolved send() as delivered. Emitting
+          // an error event and returning used to make a busy-turn human send
+          // look delivered while the text never reached Codex. Throw instead
+          // so the caller rejects the steer honestly.
+          throw new Error('Codex is still answering. Queue guidance or wait for the current turn.');
         }
         return;
       }

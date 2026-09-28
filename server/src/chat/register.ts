@@ -1387,6 +1387,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
               return;
             }
             deletePendingSteer(waitKey, msg.clientMsgId);
+            // Surface the reason server-side too: a rejected steer used to
+            // vanish with no log line at all, which is how a register bug hid
+            // for hours looking like "queued".
+            console.warn(
+              `[chat ws#${wsId}] steer rejected from ${peer} cli=${steerCli} repo=${steerRepo} chatId=${chatId} clientMsgId=${msg.clientMsgId ?? 'none'}: ${message}`,
+            );
             safeSend({ type: 'steerRejected', clientMsgId: msg.clientMsgId, message, busy });
           };
           // Pin to the engine already bound on this socket. Counsel picker
@@ -1451,7 +1457,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
           console.warn(`[chat ws#${wsId}] steer from ${peer} cli=${steerCli} repo=${steerRepo} chatId=${chatId}`);
           // Lane-scoped supersession: recheck after every await so a stopped,
           // reset, disconnected, or superseded steer never writes later.
-          const laneGenStale = () => !waitKey || laneGenerations.get(waitKey) !== laneGen;
+          // An unbumped lane has no map entry while peekLaneGen reports 0, so
+          // comparing the raw entry made every steer to a lane that never saw
+          // a browser send/Stop/Fresh since startup look superseded and get
+          // silently rejected in under a millisecond.
+          const laneGenStale = () => !waitKey || (laneGenerations.get(waitKey) ?? 0) !== laneGen;
           // STRICTLY NON-DESTRUCTIVE steer: every engine finishes its current
           // turn naturally. No control interrupt and no process signal occurs.
           let session: AnySession | null = bound ? await bound.catch(() => null) : null;
