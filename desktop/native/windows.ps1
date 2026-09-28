@@ -180,6 +180,25 @@ using System;
 using System.Collections.Generic;
 using System.Windows.Automation;
 public static class UiaWindow {
+  // Named row/bounds classes instead of anonymous types. Windows PowerShell
+  // compiles every Add-Type -TypeDefinition into its own assembly, and the C#
+  // compiler numbers anonymous types per compilation, so the second block's
+  // 4-member bounds shape collides on load with the first block's identical
+  // shape: "Cannot add type. The type name '<>f__AnonymousType0`4' already
+  // exists." DesktopInput above owns that shape; UiaWindow names its own.
+  public class UiaBounds { public int x { get; set; } public int y { get; set; } public int width { get; set; } public int height { get; set; } }
+  public class UiaRow {
+    public string path { get; set; }
+    public string name { get; set; }
+    public string controlType { get; set; }
+    public string automationId { get; set; }
+    public string[] patterns { get; set; }
+    public bool focusable { get; set; }
+    public bool focused { get; set; }
+    public UiaBounds bounds { get; set; }
+  }
+  public class UiaSnapshot { public UiaRow[] elements { get; set; } public bool truncated { get; set; } }
+  public class UiaResolved { public string Name { get; set; } public AutomationElement Element { get; set; } }
   static readonly TreeWalker Walker = TreeWalker.ControlViewWalker;
   static string Trim(string s, int max) {
     if (string.IsNullOrEmpty(s)) return "";
@@ -209,7 +228,7 @@ public static class UiaWindow {
     }
     return names.ToArray();
   }
-  static object Row(AutomationElement el, string path) {
+  static UiaRow Row(AutomationElement el, string path) {
     var cur = el.Current;
     string name = Trim(cur.Name, 140);
     string ct = cur.ControlType == null ? "" : cur.ControlType.ProgrammaticName;
@@ -218,27 +237,27 @@ public static class UiaWindow {
     bool focusable = cur.IsKeyboardFocusable, focused = cur.HasKeyboardFocus;
     if (name.Length == 0 && pats.Length == 0 && !focusable && !focused) return null; // silent layout node
     var rect = cur.BoundingRectangle;
-    object bounds = null;
-    if (!rect.IsEmpty) bounds = new {
+    UiaBounds bounds = null;
+    if (!rect.IsEmpty) bounds = new UiaBounds {
       x = (int)Math.Round(rect.X), y = (int)Math.Round(rect.Y),
       width = (int)Math.Round(rect.Width), height = (int)Math.Round(rect.Height),
     };
-    return new {
-      path, name, controlType = ct, automationId = Trim(cur.AutomationId, 80),
-      patterns = pats, focusable, focused, bounds,
+    return new UiaRow {
+      path = path, name = name, controlType = ct, automationId = Trim(cur.AutomationId, 80),
+      patterns = pats, focusable = focusable, focused = focused, bounds = bounds,
     };
   }
   public static object Snapshot(long hwnd, int maxElements, int maxDepth, int budgetMs) {
     var root = Root(hwnd);
-    var rows = new List<object>();
+    var rows = new List<UiaRow>();
     var state = new WalkState();
     var sw = System.Diagnostics.Stopwatch.StartNew();
     Walk(root, "0", 0, maxElements, maxDepth, budgetMs, sw, rows, state);
     bool truncated = rows.Count >= maxElements || sw.ElapsedMilliseconds > budgetMs || state.DepthHit;
-    return new { elements = rows.ToArray(), truncated };
+    return new UiaSnapshot { elements = rows.ToArray(), truncated = truncated };
   }
   class WalkState { public bool DepthHit; }
-  static void Walk(AutomationElement el, string path, int depth, int maxElements, int maxDepth, int budgetMs, System.Diagnostics.Stopwatch sw, List<object> rows, WalkState state) {
+  static void Walk(AutomationElement el, string path, int depth, int maxElements, int maxDepth, int budgetMs, System.Diagnostics.Stopwatch sw, List<UiaRow> rows, WalkState state) {
     if (depth >= maxDepth) {
       // A depth-capped tree must not read as complete just because the
       // element budget was not reached.
@@ -283,7 +302,7 @@ public static class UiaWindow {
     string expected = Trim(expectName, 140);
     if (!string.IsNullOrEmpty(expected) && shown != expected)
       throw new Exception("The element at that ref changed (expected '" + Trim(expected, 80) + "', found '" + Trim(shown, 80) + "'). Snapshot the window again and use the fresh ref.");
-    return new { Name = name, Element = el };
+    return new UiaResolved { Name = name, Element = el };
   }
   /** The focused element's own native window handle, when it has one, so
    *  posted messages reach the element that holds keyboard focus rather than
