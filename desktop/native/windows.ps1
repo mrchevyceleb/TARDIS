@@ -143,6 +143,7 @@ public static class DesktopInput {
     }
   }
   public static void Release() { Mouse(4,0); Mouse(16,0); foreach (ushort k in new ushort[]{16,17,18,91}) Key(k,true); }
+  public static bool IsMinimized(long id) { return IsIconic(new IntPtr(id)); }
 }
 '@
 [DesktopInput]::EnableDpi()
@@ -228,15 +229,24 @@ public static class UiaWindow {
     }
     return names.ToArray();
   }
-  static UiaRow Row(AutomationElement el, string path) {
+  static UiaRow Row(AutomationElement el, string path, System.Windows.Rect windowRect, bool focusMode) {
     var cur = el.Current;
     string name = Trim(cur.Name, 140);
     string ct = cur.ControlType == null ? "" : cur.ControlType.ProgrammaticName;
     if (ct.StartsWith("ControlType.")) ct = ct.Substring("ControlType.".Length);
     string[] pats = PatternNames(el);
     bool focusable = cur.IsKeyboardFocusable, focused = cur.HasKeyboardFocus;
+    if (focusMode && pats.Length == 0 && !focusable && !focused) return null; // plain text row
     if (name.Length == 0 && pats.Length == 0 && !focusable && !focused) return null; // silent layout node
     var rect = cur.BoundingRectangle;
+    // Scrolled-away rows sit far outside the window rect (measured y around
+    // -16115 on a real chat window): their bounds are not actionable and they
+    // crowd the element budget so the composer and buttons never appear in
+    // the snapshot. Skip rows entirely outside the window; their raw index
+    // path stays addressable, and uia reads work while minimized anyway.
+    if (!windowRect.IsEmpty && !rect.IsEmpty
+      && (rect.X + rect.Width <= windowRect.X || rect.X >= windowRect.X + windowRect.Width
+       || rect.Y + rect.Height <= windowRect.Y || rect.Y >= windowRect.Y + windowRect.Height)) return null;
     UiaBounds bounds = null;
     if (!rect.IsEmpty) bounds = new UiaBounds {
       x = (int)Math.Round(rect.X), y = (int)Math.Round(rect.Y),
@@ -247,17 +257,19 @@ public static class UiaWindow {
       patterns = pats, focusable = focusable, focused = focused, bounds = bounds,
     };
   }
-  public static object Snapshot(long hwnd, int maxElements, int maxDepth, int budgetMs) {
+  public static object Snapshot(long hwnd, int maxElements, int maxDepth, int budgetMs, bool focusMode) {
     var root = Root(hwnd);
+    var windowRect = new System.Windows.Rect();
+    try { windowRect = root.Current.BoundingRectangle; } catch { }
     var rows = new List<UiaRow>();
     var state = new WalkState();
     var sw = System.Diagnostics.Stopwatch.StartNew();
-    Walk(root, "0", 0, maxElements, maxDepth, budgetMs, sw, rows, state);
+    Walk(root, "0", 0, maxElements, maxDepth, budgetMs, sw, rows, state, windowRect, focusMode);
     bool truncated = rows.Count >= maxElements || sw.ElapsedMilliseconds > budgetMs || state.DepthHit;
     return new UiaSnapshot { elements = rows.ToArray(), truncated = truncated };
   }
   class WalkState { public bool DepthHit; }
-  static void Walk(AutomationElement el, string path, int depth, int maxElements, int maxDepth, int budgetMs, System.Diagnostics.Stopwatch sw, List<UiaRow> rows, WalkState state) {
+  static void Walk(AutomationElement el, string path, int depth, int maxElements, int maxDepth, int budgetMs, System.Diagnostics.Stopwatch sw, List<UiaRow> rows, WalkState state, System.Windows.Rect windowRect, bool focusMode) {
     if (depth >= maxDepth) {
       // A depth-capped tree must not read as complete just because the
       // element budget was not reached.
@@ -272,8 +284,8 @@ public static class UiaWindow {
       if (rows.Count >= maxElements || sw.ElapsedMilliseconds > budgetMs) return;
       var current = child;
       string nextPath = path + "/" + index;
-      try { var row = Row(current, nextPath); if (row != null) rows.Add(row); } catch { }
-      Walk(current, nextPath, depth + 1, maxElements, maxDepth, budgetMs, sw, rows, state);
+      try { var row = Row(current, nextPath, windowRect, focusMode); if (row != null) rows.Add(row); } catch { }
+      Walk(current, nextPath, depth + 1, maxElements, maxDepth, budgetMs, sw, rows, state, windowRect, focusMode);
       try { child = Walker.GetNextSibling(current); } catch { return; }
       index++;
     }
@@ -417,7 +429,10 @@ try {
       if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
       if (!$p.window) { throw 'uia requires a window id.' }
       $hwnd = [long]$p.window
-      $snap = [UiaWindow]::Snapshot($hwnd, 300, 40, 8000)
+      # focus=interactive drops plain text rows, so the composer and buttons
+      # fit the element budget even in text-heavy chat windows.
+      $focusMode = ([string]$p.focus -eq 'interactive')
+      $snap = [UiaWindow]::Snapshot($hwnd, 300, 40, 8000, $focusMode)
       # Chromium apps build their accessibility tree only when they notice a
       # UIA client, so the very first snapshot can come back sparse even
       # though the window is fine. Walk once more and keep the fuller result.
@@ -425,15 +440,16 @@ try {
       # PowerShell startup, UIA init and serialization.
       if (@($snap.elements).Count -lt 8 -and -not [bool]$snap.truncated) {
         Start-Sleep -Milliseconds 700
-        $snap2 = [UiaWindow]::Snapshot($hwnd, 300, 40, 8000)
+        $snap2 = [UiaWindow]::Snapshot($hwnd, 300, 40, 8000, $focusMode)
         if (@($snap2.elements).Count -gt @($snap.elements).Count) { $snap = $snap2 }
       }
-      $result = @{ process=[DesktopInput]::ProcessImage($hwnd); elements=@($snap.elements); truncated=[bool]$snap.truncated }
+      $result = @{ process=[DesktopInput]::ProcessImage($hwnd); elements=@($snap.elements); truncated=[bool]$snap.truncated; focus=[bool]$focusMode }
     }
     'uia_value' {
       if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
       if (!$p.window -or !$p.element) { throw 'uia_value requires a window id and an element ref from computer_uia.' }
       $hwnd = [long]$p.window
+      if ([DesktopInput]::IsMinimized($hwnd)) { throw 'needs foreground: the window is minimized. Background actions are unreliable on a minimized window and cannot be visually verified (a live sidebar invoke did nothing). Have the person restore the window; covered is fine.' }
       $resolved = [UiaWindow]::Resolve($hwnd, [string]$p.element, [string]$p.name)
       $el = $resolved.Element
       if ([string]::IsNullOrWhiteSpace([string]$p.name) -and -not [string]::IsNullOrWhiteSpace($resolved.Name)) {
@@ -538,6 +554,7 @@ try {
       if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
       if (!$p.window -or !$p.element) { throw 'uia_invoke requires a window id and an element ref from computer_uia.' }
       $hwnd = [long]$p.window
+      if ([DesktopInput]::IsMinimized($hwnd)) { throw 'needs foreground: the window is minimized. Background actions are unreliable on a minimized window and cannot be visually verified (a live sidebar invoke did nothing). Have the person restore the window; covered is fine.' }
       $resolved = [UiaWindow]::Resolve($hwnd, [string]$p.element, [string]$p.name)
       $el = $resolved.Element
       if ([string]::IsNullOrWhiteSpace([string]$p.name) -and -not [string]::IsNullOrWhiteSpace($resolved.Name)) {
@@ -570,6 +587,7 @@ try {
       elseif ($k -match '^[A-Z0-9]$') { $vk = [int][char]$k }
       else { throw "needs foreground: uia_key cannot post '$k': single non-modifier keys only (ENTER, TAB, ESC, SPACE, BACKSPACE, DELETE, arrows, HOME, END, PAGEUP, PAGEDOWN, A-Z, 0-9, F1-F12). Modifier chords need the real keyboard; focus the window and use computer_key." }
       $hwnd = [long]$p.window
+      if ([DesktopInput]::IsMinimized($hwnd)) { throw 'needs foreground: the window is minimized. Background actions are unreliable on a minimized window and cannot be visually verified. Have the person restore the window; covered is fine.' }
       # Posted keys target the window's focused element: prefer that
       # element's own native window handle over the top-level parent.
       $target = [UiaWindow]::FocusedHandle($hwnd, 8000)
