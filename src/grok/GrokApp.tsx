@@ -477,7 +477,8 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
           ) : RoomView && activeRoom === 'desk' ? (
             <DeskChatOpenContext.Provider value={deskChat.open && Boolean(deskAgent && hubRepo)}>
               <div className={`desk-split${deskChat.open && deskAgent && hubRepo ? ' chat-open' : ''}${isMobile ? ' is-phone' : ''}`}>
-                <div className="bt-room r-scroll" key={activeRoom}>
+                {/* The phone sheet is modal: the Desk behind it is inert. */}
+                <div className="bt-room r-scroll" key={activeRoom} inert={isMobile && deskChat.open && Boolean(deskAgent && hubRepo)}>
                   <div className="bt-room-wrap bt-fade">
                     <RoomView />
                   </div>

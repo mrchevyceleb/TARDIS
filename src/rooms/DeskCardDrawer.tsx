@@ -59,12 +59,14 @@ function Linkified({ text }: { text: string }) {
 }
 
 export function DeskCardDrawer({
-  card, desk, agents, onClose,
+  card, desk, agents, onClose, onDirtyChange,
 }: {
   card: DeskCard;
   desk: DeskSnapshot;
   agents: Agent[];
   onClose: () => void;
+  /** Lets the room ask before a chat reference navigates away from edits. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const write = useDeskWrite();
   const move = useCardMover();
@@ -88,6 +90,7 @@ export function DeskCardDrawer({
   const closeRef = useRef<HTMLButtonElement>(null);
   const threadRef = useRef<HTMLOListElement>(null);
   const dirty = !sameDraft(draft, base);
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
 
   // Agents keep writing while the drawer is open. Follow their edits unless
   // the owner has unsaved changes of their own.
@@ -120,12 +123,16 @@ export function DeskCardDrawer({
   // from also firing while the drawer is open.
   const closeRequest = useRef(requestClose);
   closeRequest.current = requestClose;
+  const chatOpenRef = useRef(chatOpen);
+  chatOpenRef.current = chatOpen;
   const panelRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const onKey = (event: globalThis.KeyboardEvent) => {
       if ((event.target as Element | null)?.closest?.('.desk-chat')) return;
       if (event.key === 'Tab') {
-        // Keep keyboard focus inside the drawer while it is open.
+        // Keep keyboard focus inside the drawer while it is open. With the
+        // chat open beside it the drawer is not modal, so Tab moves freely.
+        if (chatOpenRef.current) return;
         const panel = panelRef.current;
         if (!panel) return;
         const items = Array.from(panel.querySelectorAll<HTMLElement>(

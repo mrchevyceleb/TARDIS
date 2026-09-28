@@ -55,11 +55,16 @@ export function useDeskChat(isMobile: boolean) {
     };
   }, [isMobile, setOpen]);
 
+  /** Open from a button: focus follows into the panel. */
+  const openChat = useCallback(() => {
+    setOpen(true);
+    setFocusTick((n) => n + 1);
+  }, [setOpen]);
   const removeChip = useCallback((id: string) => setChips((prev) => prev.filter((c) => c.id !== id)), []);
   const dropLastChip = useCallback(() => setChips((prev) => prev.slice(0, -1)), []);
   const clearChips = useCallback(() => setChips([]), []);
 
-  return { open, setOpen, chips, removeChip, dropLastChip, clearChips, focusTick };
+  return { open, setOpen, openChat, chips, removeChip, dropLastChip, clearChips, focusTick };
 }
 
 export type DeskChatState = ReturnType<typeof useDeskChat>;
@@ -87,12 +92,17 @@ export function DeskChatDock(props: DockProps) {
   const panelRef = useRef<HTMLElement>(null);
   const openerRef = useRef<HTMLButtonElement>(null);
 
-  // A Discuss click lands the cursor in the composer, ready for the question.
-  // Phones skip it: the keyboard would cover the chip before it is seen.
+  // Opening (or a Discuss click) moves focus into the panel: the composer on
+  // desktop, ready for the question; the Back button on phones, so the soft
+  // keyboard does not cover the chip before it is seen.
   useEffect(() => {
-    if (!state.focusTick || !state.open || isMobile) return;
+    if (!state.focusTick || !state.open) return;
     const raf = window.requestAnimationFrame(() => {
-      panelRef.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus({ preventScroll: true });
+      const panel = panelRef.current;
+      const target = isMobile
+        ? panel?.querySelector<HTMLElement>('.desk-chat-close')
+        : panel?.querySelector<HTMLElement>('textarea');
+      target?.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(raf);
   }, [state.focusTick, state.open, isMobile]);
@@ -108,7 +118,7 @@ export function DeskChatDock(props: DockProps) {
         ref={openerRef}
         type="button"
         className="desk-chat-fab"
-        onClick={() => state.setOpen(true)}
+        onClick={state.openChat}
         aria-label={`Chat with ${agent.name} here`}
         title={`Chat with ${agent.name} without leaving the Desk`}
       >
@@ -132,7 +142,7 @@ export function DeskChatDock(props: DockProps) {
       <button type="button" className="bt-iconbtn" onClick={props.onOpenInChat} title="Open in Chat" aria-label={`Open ${agent.name} in Chat`}>
         <Maximize2 size={15} />
       </button>
-      <button type="button" className="bt-iconbtn" onClick={close} title={isMobile ? 'Back to the Desk' : 'Hide chat'} aria-label={isMobile ? 'Back to the Desk' : 'Hide chat'}>
+      <button type="button" className="bt-iconbtn desk-chat-close" onClick={close} title={isMobile ? 'Back to the Desk' : 'Hide chat'} aria-label={isMobile ? 'Back to the Desk' : 'Hide chat'}>
         {isMobile ? <ChevronDown size={18} /> : <PanelRightClose size={15} />}
       </button>
     </div>
@@ -149,7 +159,17 @@ export function DeskChatDock(props: DockProps) {
   ));
 
   return (
-    <aside ref={panelRef} className={`desk-chat${isMobile ? ' is-sheet' : ''}`} aria-label={`Chat with ${agent.name}`}>
+    <aside
+      ref={panelRef}
+      className={`desk-chat${isMobile ? ' is-sheet' : ''}`}
+      aria-label={`Chat with ${agent.name}`}
+      // On phones the sheet covers the Desk: a modal dialog, Escape goes back.
+      role={isMobile ? 'dialog' : undefined}
+      aria-modal={isMobile || undefined}
+      onKeyDown={isMobile ? (event) => {
+        if (event.key === 'Escape' && !event.nativeEvent.isComposing) { event.stopPropagation(); close(); }
+      } : undefined}
+    >
       <GrokChat
         key={`${agent.home}:${props.repo.path}`}
         chatId={agent.home}

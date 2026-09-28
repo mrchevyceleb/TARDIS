@@ -1,7 +1,7 @@
 // Desk references in chat: `[desk:card-…]` / `[desk:todo-…]` tokens render as
 // live pills with the card or Needs-you title. A click opens the Desk on it.
 
-import { Fragment, type MouseEvent } from 'react';
+import { Fragment, useEffect, useRef, type MouseEvent } from 'react';
 import { useDeploymentFlags } from '../../../data/deploymentFlags';
 import { focusDeskRef, hasDeskRef, splitDeskRefs, useDeskLookup, type DeskRef } from '../../../data/desk';
 
@@ -12,7 +12,18 @@ export function DeskRefPill({ target }: { target: DeskRef }) {
   const card = target.kind === 'card' ? data?.cards.find((c) => c.id === target.id) : undefined;
   const todo = target.kind === 'todo' ? data?.todos.find((t) => t.id === target.id) : undefined;
   const gone = Boolean(data) && !card && !todo;
-  const live = flags.deskRoom && !gone;
+  // The shared snapshot may predate this reference (an agent just made the
+  // card). Revalidate once before calling it removed; the Desk re-checks too,
+  // so the pill stays clickable either way.
+  const revalidated = useRef(false);
+  const { refetch, isFetching } = lookup;
+  useEffect(() => {
+    if (!gone || revalidated.current || isFetching) return;
+    revalidated.current = true;
+    // Many pills can hit this in one commit; join one fetch instead of restarting it.
+    void refetch({ cancelRefetch: false });
+  }, [gone, isFetching, refetch]);
+  const live = flags.deskRoom;
   const noun = target.kind === 'card' ? 'Card' : 'Needs-you item';
   const title = card?.title ?? todo?.title ?? (gone ? `${noun} removed` : target.id);
   const done = card ? card.column === 'done' : todo?.status === 'done';
@@ -22,7 +33,7 @@ export function DeskRefPill({ target }: { target: DeskRef }) {
   const hint = !flags.deskRoom
     ? target.id
     : gone
-      ? `That ${target.kind === 'card' ? 'card' : 'item'} is no longer on the Desk`
+      ? `That ${target.kind === 'card' ? 'card' : 'item'} is not on the Desk right now`
       : `Open on the Desk${where ? ` · ${where}` : ''}`;
 
   const open = (event: MouseEvent<HTMLButtonElement>) => {

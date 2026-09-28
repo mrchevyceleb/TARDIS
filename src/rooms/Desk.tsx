@@ -50,32 +50,48 @@ export function Desk() {
 
   // A chat pill asked to show a card or Needs-you item. It may arrive before
   // this room has mounted or loaded, so the request waits in peekDeskFocus.
-  const [focusRef, setFocusRef] = useState<DeskRef | null>(peekDeskFocus);
+  // A reference missing from a snapshot older than the click is re-fetched
+  // before it is called gone (an agent may have just created it).
+  const [focusReq, setFocusReq] = useState<{ ref: DeskRef; at: number } | null>(() => {
+    const ref = peekDeskFocus();
+    return ref ? { ref, at: Date.now() } : null;
+  });
+  const drawerDirty = useRef(false);
   useEffect(() => {
     const onFocus = (event: Event) => {
       const ref = (event as CustomEvent<DeskRef>).detail;
-      if (ref?.id) setFocusRef({ ...ref });
+      if (ref?.id) setFocusReq({ ref: { ...ref }, at: Date.now() });
     };
     window.addEventListener(DESK_FOCUS_EVENT, onFocus);
     return () => window.removeEventListener(DESK_FOCUS_EVENT, onFocus);
   }, []);
+  const { dataUpdatedAt, errorUpdatedAt, isFetching, refetch } = desk;
   useEffect(() => {
-    if (!focusRef || !data) return;
-    clearDeskFocus(focusRef);
-    setFocusRef(null);
-    if (focusRef.kind === 'card') {
-      if (data.cards.some((c) => c.id === focusRef.id)) setOpenCardId(focusRef.id);
-      else showToast('That card is no longer on the Desk.');
+    if (!focusReq || !data) return;
+    const { ref, at } = focusReq;
+    const found = ref.kind === 'card' ? data.cards.some((c) => c.id === ref.id) : data.todos.some((t) => t.id === ref.id);
+    if (!found && dataUpdatedAt < at && errorUpdatedAt < at) {
+      if (!isFetching) void refetch();
       return;
     }
-    if (data.todos.some((t) => t.id === focusRef.id)) {
-      setOpenCardId(null);
-      setTab('needs');
-      setFlash({ id: focusRef.id, at: Date.now() });
-    } else {
-      showToast('That item is no longer on the Desk.');
+    clearDeskFocus(ref);
+    setFocusReq(null);
+    if (!found) {
+      showToast(ref.kind === 'card' ? 'That card is no longer on the Desk.' : 'That item is no longer on the Desk.');
+      return;
     }
-  }, [focusRef, data]);
+    // Moving off a card with unsaved edits asks first, like closing it does.
+    const leaving = openCardId && !(ref.kind === 'card' && ref.id === openCardId);
+    if (leaving && drawerDirty.current && !window.confirm('Discard your unsaved changes to this card?')) return;
+    if (leaving) drawerDirty.current = false;
+    if (ref.kind === 'card') {
+      setOpenCardId(ref.id);
+      return;
+    }
+    setOpenCardId(null);
+    setTab('needs');
+    setFlash({ id: ref.id, at: Date.now() });
+  }, [focusReq, data, dataUpdatedAt, errorUpdatedAt, isFetching, refetch, openCardId]);
   const openTodos = useMemo(() => sortOpenTodos((data?.todos ?? []).filter((t) => t.status === 'open')), [data]);
   const liveCards = useMemo(() => (data?.cards ?? []).filter((c) => !c.archived), [data]);
   const moving = liveCards.filter((c) => c.column === 'in_progress' || c.column === 'up_next').length;
@@ -128,10 +144,11 @@ export function Desk() {
       {openCard && data ? (
         <DeskCardDrawer
           key={openCard.id}
+          onDirtyChange={(dirty) => { drawerDirty.current = dirty; }}
           card={openCard}
           desk={data}
           agents={agents}
-          onClose={() => setOpenCardId(null)}
+          onClose={() => { drawerDirty.current = false; setOpenCardId(null); }}
         />
       ) : null}
     </div>
