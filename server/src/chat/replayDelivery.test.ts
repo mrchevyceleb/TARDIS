@@ -11,6 +11,12 @@ test('a no-replay rebind never subscribes from sequence zero', () => {
 
 test('old close/502/turn controls cannot tear down the current session during replay', () => {
   const notice = { seq: 3, ev: { type: 'event', event: { type: '_terminal_error', code: '502', message: 'Previous request failed.' } } };
+  // Since 956d7f7 a replayed turnEnd stays as an inert _turn_boundary marker:
+  // dropping it entirely let a catching-up device glue separate turns into
+  // one bubble, so a later quiet routine reply hid a real earlier report.
+  // It arrives event-shaped as a render marker — never a live session
+  // control, which is this test's point.
+  const boundary = { seq: 4, ev: { type: 'event', event: { type: '_turn_boundary' } } };
   const frames = [
     { seq: 1, ev: { type: 'turnStart' } },
     { seq: 2, ev: { type: 'error', code: '502', message: 'Old transport failure' } },
@@ -18,7 +24,7 @@ test('old close/502/turn controls cannot tear down the current session during re
     { seq: 4, ev: { type: 'turnEnd' } },
     { seq: 5, ev: { type: 'closed', code: 0 } },
   ];
-  assert.deepEqual(frames.map(historicalDelivery).filter(Boolean), [notice]);
+  assert.deepEqual(frames.map(historicalDelivery).filter(Boolean), [notice, boundary]);
   // A current live close is not run through historicalDelivery by the binder.
   const latest = 5;
   const live = { seq: 6, ev: { type: 'closed', code: 1 } };
