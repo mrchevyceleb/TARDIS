@@ -310,6 +310,28 @@ public static class UiaWindow {
   $script:UiaError = $_.Exception.Message
 }
 
+# Background keyboard focus via UIA only. SetFocus can, on some providers,
+# activate the element's window and steal the person's real foreground: that
+# is exactly what background control must never do, so verify the foreground
+# window is unchanged and refuse when it is not.
+function Assert-BackgroundSetFocus([object]$element, [long]$hwnd) {
+  $before = [DesktopInput]::Foreground()
+  if ($before -eq $hwnd) {
+    throw 'needs foreground: the person is actively using this window (it is the foreground window), so background focus would redirect their live typing. Wait for them to leave the window, or use real input with their knowledge.'
+  }
+  try { $element.SetFocus() } catch {
+    throw "needs foreground: the element refused background keyboard focus ($($_.Exception.Message)). Real input is required to focus it."
+  }
+  # Sample immediately (a provider that activates persists through at least
+  # one pump cycle) and again after the settle: either mismatch refuses.
+  $rightAfter = [DesktopInput]::Foreground()
+  Start-Sleep -Milliseconds 200
+  $after = [DesktopInput]::Foreground()
+  if ($rightAfter -ne $before -or $after -ne $before) {
+    throw 'needs foreground: the OS foreground changed while giving the element background focus (the app may have activated its window, or the person switched apps in that instant). Stop; do not retry this element, verify what is focused now, and prefer real input for it.'
+  }
+}
+
 function Assert-TargetWindow([object]$request, [bool]$afterInput) {
   if (!$request.window) { return }
   if ([DesktopInput]::Foreground() -ne [long]$request.window) {
@@ -358,7 +380,17 @@ try {
       if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
       if (!$p.window) { throw 'uia requires a window id.' }
       $hwnd = [long]$p.window
-      $snap = [UiaWindow]::Snapshot($hwnd, 300, 40, 12000)
+      $snap = [UiaWindow]::Snapshot($hwnd, 300, 40, 8000)
+      # Chromium apps build their accessibility tree only when they notice a
+      # UIA client, so the very first snapshot can come back sparse even
+      # though the window is fine. Walk once more and keep the fuller result.
+      # Both walk budgets must fit the adapter's process timeout with room for
+      # PowerShell startup, UIA init and serialization.
+      if (@($snap.elements).Count -lt 8 -and -not [bool]$snap.truncated) {
+        Start-Sleep -Milliseconds 700
+        $snap2 = [UiaWindow]::Snapshot($hwnd, 300, 40, 8000)
+        if (@($snap2.elements).Count -gt @($snap.elements).Count) { $snap = $snap2 }
+      }
       $result = @{ process=[DesktopInput]::ProcessImage($hwnd); elements=@($snap.elements); truncated=[bool]$snap.truncated }
     }
     'uia_value' {
@@ -373,15 +405,55 @@ try {
       $valuePattern = $null
       try { $valuePattern = $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern) -as [System.Windows.Automation.ValuePattern] } catch { $valuePattern = $null }
       $postedTo = 0
-      if ($valuePattern -and -not $valuePattern.Current.IsReadOnly) {
+      $post = [bool]$p.post
+      $append = [bool]$p.append
+      if (-not $post -and -not $append -and $valuePattern -and -not $valuePattern.Current.IsReadOnly) {
         $script:InputAttempted = $true
         $valuePattern.SetValue([string]$p.text)
       } else {
+        # Rich editors can render SetValue text while their own input handling
+        # never sees it (a Send button stays disabled), so the posted-characters
+        # path is the reliable one for them. Characters only land on an element
+        # that holds keyboard focus: give it background keyboard focus via UIA
+        # SetFocus first (not real input, and verified not to change the OS
+        # foreground).
+        if ([regex]::IsMatch([string]$p.text, '[\r\n\t]')) {
+          throw 'posted characters cannot carry newlines or tabs: a posted ENTER would submit and a posted TAB would move focus. Send single-line text only.'
+        }
         $focused = $false
         try { $focused = [bool]$el.Current.HasKeyboardFocus } catch { $focused = $false }
         if (-not $focused) {
-          $why = if ($valuePattern) { 'the element is read-only and does not hold the window''s keyboard focus' } else { 'the element exposes no ValuePattern and does not hold the window''s keyboard focus' }
-          throw "needs foreground: $why, so background text cannot land on it. Focus the window and use computer_type, or have the person click into the field first."
+          Assert-BackgroundSetFocus $el $hwnd
+          try { $focused = [bool]$el.Current.HasKeyboardFocus } catch { $focused = $false }
+        }
+        if (-not $focused) {
+          $why = if ($post) { 'the element did not take background keyboard focus (UIA SetFocus refused or did not stick)'
+          } elseif ($valuePattern) { 'the element is read-only and did not take background keyboard focus'
+          } else { 'the element exposes no ValuePattern and did not take background keyboard focus' }
+          throw "needs foreground: $why, so background text cannot land on it. Try computer_uia_focus on the element first, focus the window and use computer_type, or have the person click into the field."
+        }
+        # Replacement semantics: posted characters APPEND, so measure the
+        # field's current text through ValuePattern and clear it first (END,
+        # then one BACKSPACE per character). Append mode skips the clear.
+        $current = ''
+        $canMeasure = $false
+        if ($valuePattern) {
+          try { $current = [string]$valuePattern.Current.Value; $canMeasure = $true } catch { $canMeasure = $false }
+        }
+        if (-not $append -and -not $canMeasure) {
+          throw 'needs foreground: the element''s current text cannot be read (no usable ValuePattern), so a posted replacement cannot clear what is already there. Use append only when the field is known empty, or have the person clear it.'
+        }
+        # Backspace-clearing counts text units: values with multi-unit
+        # characters (surrogate pairs, combining marks) or beyond the size cap
+        # cannot be cleared exactly, so refuse rather than over-delete.
+        if (-not $append -and $current.Length -gt 8000) {
+          throw 'needs foreground: the field holds more than 8000 characters, more than background clearing can replace exactly. Have the person clear it, or append into an empty field.'
+        }
+        if (-not $append -and [regex]::IsMatch($current, '[\uD800-\uDFFF\p{M}]')) {
+          throw 'needs foreground: the field holds multi-unit characters (emoji, accents) that background backspace-clearing cannot count exactly. Have the person clear it, or append into an empty field.'
+        }
+        if (-not $append -and [regex]::IsMatch($current, '[\r\n\t]')) {
+          throw 'needs foreground: the field holds multiline text, which background END+backspace clearing cannot replace exactly (END only reaches the end of one line). Have the person clear it, or append into an empty field.'
         }
         # Post to the focused element's own native window handle when it has
         # one: classic Win32 controls never receive characters posted to their
@@ -391,12 +463,39 @@ try {
         if ($target -eq 0) { $target = $hwnd }
         $postedTo = $target
         $script:InputAttempted = $true
+        if (-not $append -and $current.Length -gt 0) {
+          [DesktopInput]::PostKey($target, 35)
+          for ($i = 0; $i -lt [Math]::Min($current.Length, 8000); $i++) { [DesktopInput]::PostKey($target, 8) }
+        }
         [DesktopInput]::PostText($target, [string]$p.text)
       }
       Start-Sleep -Milliseconds 250
       $bytes = [DesktopInput]::PrintWindowBytes($hwnd)
       $b = [DesktopInput]::Bounds($hwnd)
       $result = @{ png=[Convert]::ToBase64String($bytes); bounds=@{ x=$b[0]; y=$b[1]; width=$b[2]; height=$b[3] }; postedTo=$postedTo }
+    }
+    'uia_focus' {
+      if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
+      if (!$p.window -or !$p.element) { throw 'uia_focus requires a window id and an element ref from computer_uia.' }
+      $hwnd = [long]$p.window
+      $resolved = [UiaWindow]::Resolve($hwnd, [string]$p.element, [string]$p.name)
+      $el = $resolved.Element
+      if ([string]::IsNullOrWhiteSpace([string]$p.name) -and -not [string]::IsNullOrWhiteSpace($resolved.Name)) {
+        throw ("the element at that ref is named '{0}'; pass that name from the snapshot so the action can verify the ref is still current" -f $resolved.Name)
+      }
+      # UIA SetFocus is not real input: no keystrokes, no cursor move, and
+      # Assert-BackgroundSetFocus verifies it did not change the OS
+      # foreground. It fails cleanly when the provider refuses it.
+      Assert-BackgroundSetFocus $el $hwnd
+      $focused = $false
+      try { $focused = [bool]$el.Current.HasKeyboardFocus } catch { $focused = $false }
+      if (-not $focused) {
+        throw "needs foreground: the element did not take background keyboard focus. The person must click into it, or use computer_focus on the whole window."
+      }
+      Start-Sleep -Milliseconds 100
+      $bytes = [DesktopInput]::PrintWindowBytes($hwnd)
+      $b = [DesktopInput]::Bounds($hwnd)
+      $result = @{ png=[Convert]::ToBase64String($bytes); bounds=@{ x=$b[0]; y=$b[1]; width=$b[2]; height=$b[3] } }
     }
     'uia_invoke' {
       if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }

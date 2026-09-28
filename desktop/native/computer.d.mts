@@ -17,7 +17,8 @@ export class ComputerController {
     // window_capture/uia ops refuse cleanly when these are missing.
     windowCapture?(window: string, signal: AbortSignal): Promise<{ png: Buffer; bounds: { x: number; y: number; width: number; height: number }; process?: string }>;
     uiaTree?(window: string, signal: AbortSignal): Promise<{ process?: string; elements: any[]; truncated: boolean }>;
-    uiaValue?(window: string, element: string, text: string, name: string | undefined, signal: AbortSignal): Promise<{ png: Buffer; bounds: { x: number; y: number; width: number; height: number }; postedTo?: number }>;
+    uiaValue?(window: string, element: string, text: string, name: string | undefined, post: boolean, append: boolean, signal: AbortSignal): Promise<{ png: Buffer; bounds: { x: number; y: number; width: number; height: number }; postedTo?: number }>;
+    uiaFocus?(window: string, element: string, name: string | undefined, signal: AbortSignal): Promise<{ png: Buffer; bounds: { x: number; y: number; width: number; height: number } }>;
     uiaInvoke?(window: string, element: string, name: string | undefined, signal: AbortSignal): Promise<{ png: Buffer; bounds: { x: number; y: number; width: number; height: number } }>;
     uiaKey?(window: string, keys: string[], signal: AbortSignal): Promise<{ png: Buffer; bounds: { x: number; y: number; width: number; height: number }; postedTo?: number }>;
   } });

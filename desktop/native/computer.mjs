@@ -119,11 +119,19 @@ export class ComputerController {
     const id = params.operationId;
     if (typeof id !== 'string' || !/^[a-zA-Z0-9._:-]{1,100}$/.test(id)) throw new Error('A unique operationId is required for targeted keyboard input. Reuse it only when retrying the exact same input.');
     if (typeof params.window !== 'string' || !params.window) throw new Error('Targeted keyboard input requires an exact window id.');
-    const payload = op === 'type' ? { text: validateText(params.text) }
-      : op === 'key' ? { keys: validateKeys(params.keys) }
-      : op === 'uia_value' ? { element: validateElementRef(params.element), text: validateWindowText(params.text) }
-      : op === 'uia_invoke' ? { element: validateElementRef(params.element) }
-      : { keys: validateUiaKeys(params.keys) };
+    let payload;
+    if (op === 'uia_value') {
+      const text = validateWindowText(params.text);
+      // Posted characters cannot carry newlines or tabs: a posted ENTER
+      // would submit and a posted TAB would move focus.
+      if ((params.post === true || params.append === true) && /[\r\n\t]/.test(text)) throw new Error('Posted characters cannot carry newlines or tabs: a posted ENTER would submit and a posted TAB would move focus. Send single-line text, or leave post/append off so SetValue carries them.');
+      payload = { element: validateElementRef(params.element), text, post: params.post === true, append: params.append === true };
+    } else {
+      payload = op === 'type' ? { text: validateText(params.text) }
+        : op === 'key' ? { keys: validateKeys(params.keys) }
+        : op === 'uia_invoke' ? { element: validateElementRef(params.element) }
+        : { keys: validateUiaKeys(params.keys) };
+    }
     const fingerprint = createHash('sha256').update(JSON.stringify([op, params.window, payload])).digest('hex');
     const existing = this.grant.operations.get(id);
     if (existing) {
@@ -193,12 +201,10 @@ export class ComputerController {
     const { layout: _layout, ...result } = this.frame;
     return result;
   }
-  /** Background capture of one exact window: PrintWindow renders covered or
-   *  non-focused windows without touching the foreground, the cursor or the
-   *  keyboard. The frame is window-scoped exactly like a focused capture. */
-  async captureWindowFrame(info, params, signal) {
-    const window = this.findWindow(info, params.window);
-    const raw = await this.adapter.windowCapture(window.id, signal);
+  /** Encode a PrintWindow capture returned by an adapter op into a
+   *  window-scoped frame, shared by the background capture, focus and input
+   *  ops. */
+  async windowFrame(info, window, raw) {
     if (raw.png.length < 24 || raw.png.readUInt32BE(16) * raw.png.readUInt32BE(20) > 100_000_000) throw new Error('Screenshot dimensions exceed the safe limit.');
     const image = await this.encode(raw.png, { left: 0, top: 0, width: raw.png.readUInt32BE(16), height: raw.png.readUInt32BE(20) });
     if (image.data.length > 2 * 1024 * 1024) throw new Error('Screenshot exceeds the safe transport size.');
@@ -210,6 +216,16 @@ export class ComputerController {
     this.frame = { id: randomUUID(), displayId: display.id, bounds: raw.bounds, width: image.info.width, height: image.info.height,
       capturedAt: Date.now(), layout: JSON.stringify(info.displays), image: image.data.toString('base64'), windowId: window.id, windowTitle: window.title };
     const { layout: _layout, ...result } = this.frame;
+    return result;
+  }
+
+  /** Background capture of one exact window: PrintWindow renders covered or
+   *  non-focused windows without touching the foreground, the cursor or the
+   *  keyboard. The frame is window-scoped exactly like a focused capture. */
+  async captureWindowFrame(info, params, signal) {
+    const window = this.findWindow(info, params.window);
+    const raw = await this.adapter.windowCapture(window.id, signal);
+    const result = await this.windowFrame(info, window, raw);
     return { ...result, process: raw.process };
   }
   async handle(op, params = {}) {
@@ -294,6 +310,17 @@ export class ComputerController {
         check(); this.requireGrant(params.session);
         return { window: window.id, title: window.title, process: tree.process, elements: tree.elements, truncated: tree.truncated === true };
       }
+      if (op === 'uia_focus') {
+        if (typeof params.window !== 'string' || !params.window) throw new Error('uia_focus requires an exact window id.');
+        if (typeof this.adapter.uiaFocus !== 'function') throw new Error('Background window control is not supported by this desktop adapter (Windows only in this build).');
+        const window = this.findWindow(info, params.window);
+        validateElementRef(params.element);
+        this.requireGrant(params.session); check();
+        const raw = await this.adapter.uiaFocus(window.id, String(params.element), params.name === undefined ? undefined : String(params.name), ac.signal);
+        const result = await this.windowFrame(info, window, raw);
+        check(); this.requireGrant(params.session);
+        return result;
+      }
       if (backgroundInput) {
         const method = op === 'uia_value' ? 'uiaValue' : op === 'uia_invoke' ? 'uiaInvoke' : 'uiaKey';
         if (typeof this.adapter[method] !== 'function') throw new Error('Background window control is not supported by this desktop adapter (Windows only in this build).');
@@ -306,7 +333,7 @@ export class ComputerController {
         let raw;
         try {
           raw = op === 'uia_value'
-            ? await this.adapter.uiaValue(window.id, keyboardSpec.payload.element, keyboardSpec.payload.text, params.name === undefined ? undefined : String(params.name), ac.signal)
+            ? await this.adapter.uiaValue(window.id, keyboardSpec.payload.element, keyboardSpec.payload.text, params.name === undefined ? undefined : String(params.name), keyboardSpec.payload.post, keyboardSpec.payload.append, ac.signal)
             : op === 'uia_invoke'
               ? await this.adapter.uiaInvoke(window.id, keyboardSpec.payload.element, params.name === undefined ? undefined : String(params.name), ac.signal)
               : await this.adapter.uiaKey(window.id, keyboardSpec.payload.keys, ac.signal);
@@ -327,16 +354,7 @@ export class ComputerController {
         inputAttempted = true;
         if (keyboardEntry) keyboardEntry.outcome = { executed: true, windowId: window.id, windowTitle: window.title };
         try {
-          if (raw.png.length < 24 || raw.png.readUInt32BE(16) * raw.png.readUInt32BE(20) > 100_000_000) throw new Error('Screenshot dimensions exceed the safe limit.');
-          const image = await this.encode(raw.png, { left: 0, top: 0, width: raw.png.readUInt32BE(16), height: raw.png.readUInt32BE(20) });
-          if (image.data.length > 2 * 1024 * 1024) throw new Error('Screenshot exceeds the safe transport size.');
-          const display = info.displays.find(item => {
-            const centerX = raw.bounds.x + raw.bounds.width / 2;
-            const centerY = raw.bounds.y + raw.bounds.height / 2;
-            return centerX >= item.bounds.x && centerX < item.bounds.x + item.bounds.width && centerY >= item.bounds.y && centerY < item.bounds.y + item.bounds.height;
-          }) ?? info.displays[0];
-          this.frame = { id: randomUUID(), displayId: display.id, bounds: raw.bounds, width: image.info.width, height: image.info.height,
-            capturedAt: Date.now(), layout: JSON.stringify(info.displays), image: image.data.toString('base64'), windowId: window.id, windowTitle: window.title };
+          await this.windowFrame(info, window, raw);
         } catch (error) {
           throw new Error(`The window action ran, but its verification capture failed: ${error instanceof Error ? error.message : String(error)} Do NOT replay the action; run computer_window_capture and inspect the window.`);
         }

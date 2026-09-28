@@ -74,22 +74,29 @@ const TOOLS = [
   computerTool('computer_window_capture', 'Capture ONE exact window WITHOUT focusing or raising it, even while it is covered by other windows or the person is using the machine (PrintWindow). No focus steal, no cursor move, no keyboard. Returns a readable, window-relative JPEG, one-use frame and the owning process name. Rare apps render stale or blank when covered; verify important reads with computer_uia or a second capture. Windows only.', {
     window: { type: 'string', description: 'Exact window id from computer_inspect.' },
   }, ['session', 'window']),
-  computerTool('computer_uia', 'List the UI Automation elements of one exact window with no focus change and no input: refs (e.g. "0/3/2"), names, control types, bounds, value/invoke patterns, and which element holds keyboard focus. browser_snapshot-like grounding for a native window. Use a fresh ref for computer_uia_value / computer_uia_invoke; truncated=true means the tree was capped, so narrow your target and snapshot again. Windows only.', {
+  computerTool('computer_uia', 'List the UI Automation elements of one exact window with no focus change and no input: refs (e.g. "0/3/2"), names, control types, bounds, value/invoke patterns, and which element holds keyboard focus. browser_snapshot-like grounding for a native window. Use a fresh ref for computer_uia_value / computer_uia_invoke; truncated=true means the tree was capped, so narrow your target and snapshot again. Chromium apps build their accessibility tree on first contact, so the tool retries once when a first snapshot comes back sparse; a still-sparse result means snapshotting again. Windows only.', {
     window: { type: 'string', description: 'Exact window id from computer_inspect.' },
   }, ['session', 'window']),
-  computerTool('computer_uia_value', 'Set text on one exact UIA element (a chat composer or input box) without focus, the real keyboard or the cursor, ONCE per operationId. Uses ValuePattern.SetValue when available; if the element has no ValuePattern it posts characters instead, but only when that exact element holds the window\'s keyboard focus. Anything that only takes real input refuses with "needs foreground". The element\'s name from the snapshot is required and verified before acting (pass "" only when the snapshot row itself had no name). Returns a fresh background window capture to verify what landed.', {
-    operationId: { type: 'string', maxLength: 100, description: 'Unique within this grant, e.g. claude-composer-1. Reuse only to retry this exact same window/element/text.' },
+  computerTool('computer_uia_focus', 'Give one exact UIA element background keyboard focus via UIA SetFocus: no real input, no OS foreground change, no cursor move. Use it to click into a chat composer before posting characters (computer_uia_value), since a rich editor only tracks input on its focused element. Verifies the element really took focus and returns a fresh background window capture; refuses with "needs foreground" when the provider will not take background focus. Windows only.', {
     window: { type: 'string', description: 'Exact window id from computer_inspect.' },
     element: { type: 'string', description: 'Element ref from computer_uia, e.g. "0/3/2".' },
     name: { type: 'string', description: 'The element\'s name from the snapshot ("" only if it had none); verified before acting.' },
-    text: { type: 'string', maxLength: 8000, description: 'Full replacement text for the element (1-8000 chars).' },
-  }, ['session', 'operationId', 'window', 'element', 'name', 'text']),
+  }, ['session', 'window', 'element', 'name']),
   computerTool('computer_uia_invoke', 'Activate one exact UIA element (a button such as Send) without the real mouse, focus or cursor, ONCE per operationId. Only elements that expose InvokePattern work in the background; anything else refuses honestly with "needs foreground". The element\'s name from the snapshot is required and verified before acting (pass "" only when the snapshot row itself had no name). Returns a fresh background window capture to verify the click landed.', {
     operationId: { type: 'string', maxLength: 100, description: 'Unique within this grant, e.g. claude-send-1. Reuse only to retry this exact same window/element.' },
     window: { type: 'string', description: 'Exact window id from computer_inspect.' },
     element: { type: 'string', description: 'Element ref from computer_uia, e.g. "0/2/5".' },
     name: { type: 'string', description: 'The element\'s name from the snapshot ("" only if it had none); verified before acting.' },
   }, ['session', 'operationId', 'window', 'element', 'name']),
+  computerTool('computer_uia_value', 'Set text on one exact UIA element (a chat composer or input box) without focus, the real keyboard or the cursor, ONCE per operationId. Uses ValuePattern.SetValue when available; otherwise (or with post:true) it gives the element background keyboard focus via UIA SetFocus (verified not to change the OS foreground) and posts the text as characters, which is the reliable path for rich editors that render SetValue text without their own input handling seeing it (e.g. a Send button stays disabled). The posted path replaces the field: it reads the current text through ValuePattern, clears it (END + one BACKSPACE per character) and posts the new text; append:true skips the clear and appends instead (only when you know the field state). Anything that only takes real input refuses with "needs foreground". The element\'s name from the snapshot is required and verified before acting (pass "" only when the snapshot row itself had no name). Returns a fresh background window capture to verify what landed.', {
+    operationId: { type: 'string', maxLength: 100, description: 'Unique within this grant, e.g. claude-composer-1. Reuse only to retry this exact same window/element/text/post mode.' },
+    window: { type: 'string', description: 'Exact window id from computer_inspect.' },
+    element: { type: 'string', description: 'Element ref from computer_uia, e.g. "0/3/2".' },
+    name: { type: 'string', description: 'The element\'s name from the snapshot ("" only if it had none); verified before acting.' },
+    post: { type: 'boolean', description: 'Force the posted-characters path even when the element exposes ValuePattern (background SetFocus + WM_CHAR text). Use for rich editors that ignore SetValue. Single-line text only: posted newlines/tabs are refused.' },
+    append: { type: 'boolean', description: 'Append to the field instead of clearing it first (no END/BACKSPACE clear). Use only when you know what the field already holds; refuses to replace when the current text cannot be read.' },
+    text: { type: 'string', maxLength: 8000, description: 'Full replacement text for the element (1-8000 chars).' },
+  }, ['session', 'operationId', 'window', 'element', 'name', 'text']),
   computerTool('computer_uia_key', 'Post ONE named key (e.g. ENTER to send a message typed with computer_uia_value) to the window\'s focused element (its own HWND when it has one, else the window) without stealing focus, ONCE per operationId. Single non-modifier keys only; modifier chords need the real keyboard and are refused. Posted keys are queued, not confirmed: the returned background window capture is the verification. Windows only.', {
     operationId: { type: 'string', maxLength: 100, description: 'Unique within this grant, e.g. claude-enter-1. Reuse only to retry this exact same window/key.' },
     window: { type: 'string', description: 'Exact window id from computer_inspect.' },
@@ -267,7 +274,7 @@ function clip(text, limit) {
 async function callTool(name, args, signal) {
   if (name.startsWith('computer_')) {
     const op = name.slice('computer_'.length);
-    if (!['start', 'inspect', 'capture', 'window_capture', 'uia', 'uia_value', 'uia_invoke', 'uia_key', 'focus', 'type', 'key', 'act', 'step', 'stop'].includes(op)) throw new Error('Unknown computer tool.');
+    if (!['start', 'inspect', 'capture', 'window_capture', 'uia', 'uia_value', 'uia_focus', 'uia_invoke', 'uia_key', 'focus', 'type', 'key', 'act', 'step', 'stop'].includes(op)) throw new Error('Unknown computer tool.');
     // Keyboard/focus tools tunnel through the long-standing /act route so
     // devices can roll forward before a busy TARDIS server safely restarts.
     const compatibilityOp = op === 'focus' || op === 'type' || op === 'key';

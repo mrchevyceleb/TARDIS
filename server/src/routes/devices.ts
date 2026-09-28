@@ -63,7 +63,7 @@ for (const op of ['stop', 'preview', 'resume'] as const) {
 devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
   if (!validComputerMcpToken(req.get('x-rivendell-computer-token'))) { res.status(403).json({ error: 'TARDIS computer MCP required.' }); return; }
   const op = String(req.params.op);
-  if (!['start', 'inspect', 'capture', 'window_capture', 'uia', 'uia_value', 'uia_invoke', 'uia_key', 'focus', 'type', 'key', 'act', 'step', 'stop'].includes(op)) { res.status(400).json({ error: 'Unknown computer operation.' }); return; }
+  if (!['start', 'inspect', 'capture', 'window_capture', 'uia', 'uia_value', 'uia_focus', 'uia_invoke', 'uia_key', 'focus', 'type', 'key', 'act', 'step', 'stop'].includes(op)) { res.status(400).json({ error: 'Unknown computer operation.' }); return; }
   const body = req.body ?? {};
   let device = typeof body.device === 'string' ? body.device : '';
   let context: ReturnType<typeof readComputerContext> | undefined;
