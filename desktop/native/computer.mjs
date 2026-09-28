@@ -306,9 +306,11 @@ export class ComputerController {
         if (typeof params.window !== 'string' || !params.window) throw new Error('uia requires an exact window id.');
         if (typeof this.adapter.uiaTree !== 'function') throw new Error('Background window control is not supported by this desktop adapter (Windows only in this build).');
         const window = this.findWindow(info, params.window);
-        const tree = await this.adapter.uiaTree(window.id, ac.signal);
+        const focus = params.focus === 'interactive' ? 'interactive' : undefined;
+        if (params.focus !== undefined && focus === undefined) throw new Error("uia focus must be 'interactive' when provided.");
+        const tree = await this.adapter.uiaTree(window.id, focus, ac.signal);
         check(); this.requireGrant(params.session);
-        return { window: window.id, title: window.title, process: tree.process, elements: tree.elements, truncated: tree.truncated === true };
+        return { window: window.id, title: window.title, process: tree.process, elements: tree.elements, truncated: tree.truncated === true, ...(tree.focus === true ? { focus: 'interactive' } : {}) };
       }
       if (op === 'uia_focus') {
         if (typeof params.window !== 'string' || !params.window) throw new Error('uia_focus requires an exact window id.');
