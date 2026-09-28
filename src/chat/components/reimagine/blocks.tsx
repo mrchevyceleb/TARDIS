@@ -461,10 +461,10 @@ function RestartDivider({ block }: { block: Extract<ChatBlock, { kind: 'restart'
 
 function TerminalErrorCard({ block }: { block: Extract<ChatBlock, { kind: 'terminal-error' }> }) {
   return (
-    <div className="terminal-error" role="alert">
+    <div className="terminal-error" role={block.continuing ? 'status' : 'alert'}>
       <span className="terminal-error-mark" aria-hidden="true">!</span>
       <span>
-        <strong>Couldn’t answer this turn</strong>
+        <strong>{block.continuing ? 'Switched model provider' : 'Couldn’t answer this turn'}</strong>
         <span className="terminal-error-copy">{block.message}</span>
       </span>
     </div>
@@ -888,7 +888,9 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     : blocks.slice(currentTurnStart);
   const currentBoundary = currentTurnStart > 0 ? blocks[currentTurnStart - 1] : undefined;
   const activePeerId = streaming && currentBoundary?.kind === 'peer' ? currentBoundary.id : null;
-  const hasCurrentTerminalFailure = currentBlocks.some((block) => block.kind === 'terminal-error');
+  // A provider-switch notice with the agent continuing is not a failure: the
+  // continued turn still needs its liveness row and its completion marker.
+  const hasCurrentTerminalFailure = currentBlocks.some((block) => block.kind === 'terminal-error' && !block.continuing);
   const latestQueued = [...blocks].reverse().find((block) => (
     block.kind === 'user' && block.deliveryState === 'queued'
   ));

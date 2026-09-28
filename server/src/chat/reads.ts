@@ -19,6 +19,7 @@ import {
   isRoutineNoiseEvent,
   isToolResultUserEvent,
 } from './routineNoise.ts';
+import { PROVIDER_CONTINUE_EVENT } from './providerSwitch.ts';
 
 const READS_FILE = join(STATE_DIR, 'agent-reads.json');
 
@@ -164,6 +165,22 @@ export function agentUnread(agent: Agent): number {
       // Tool results arrive as `user` events. They are still the automation
       // turn, not a human message that should flush it.
       if (isToolResultUserEvent(raw)) continue;
+      // A turn a GLM provider cut, that nothing will finish on its own, is
+      // waiting on the user even though no reply text exists.
+      if (t === '_terminal_error') {
+        if (pastCursor && eventInner(raw)?.unread === true) unread++;
+        continue;
+      }
+      // The automatic continue of a cut routine turn is still that routine:
+      // its quiet NO_UPDATE must not badge.
+      if (t === PROVIDER_CONTINUE_EVENT) {
+        if (eventInner(raw)?.automation === true) {
+          flushAuto();
+          afterAutomation = true;
+          autoAfterRead = pastCursor;
+        }
+        continue;
+      }
       if (t === '_user_echo' || t === 'user' || t === 'peer_message') {
         flushAuto();
         if (t === 'peer_message' && pastCursor) unread++;

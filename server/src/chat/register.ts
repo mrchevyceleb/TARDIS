@@ -53,6 +53,7 @@ import { listChatHistory } from './history.ts';
 import { watchThread, unwatchThread, setWatchVisible } from './threadWatch.ts';
 import { agentForChatId, brainForAgent, cliForAgentEngine } from './agents.ts';
 import { loadThreadResetEpochs, persistThreadResetEpoch } from './threadResetStore.ts';
+import { setQueuedHumanProbe } from './providerSwitch.ts';
 
 type ClientSelection = {
   model?: string;
@@ -511,6 +512,20 @@ export async function registerChat(app: express.Express, server: Server): Promis
       deletePendingSteer(steer.laneKey, steer.clientMsgId);
     }
   };
+  // The automatic continue after a GLM provider cut must never jump ahead of
+  // a person: a steer waiting for this thread, or a send being admitted,
+  // takes the turn instead (it carries the cut guidance). Stop-held steers
+  // wait for the next send and do not count; they would strand the thread.
+  setQueuedHumanProbe((logKey) => {
+    for (const [key, ids] of pendingSteers) {
+      const first = key.indexOf('|');
+      const last = key.lastIndexOf('|');
+      if (first <= 0 || last <= first) continue;
+      if (laneLogKey(key.slice(0, first) as CliKind, key.slice(first + 1, last), key.slice(last + 1)) !== logKey) continue;
+      for (const id of ids) if (!heldClientIds.has(id)) return true;
+    }
+    return Boolean(pendingAdmissionForLogKey(logKey));
+  });
   const addLaneWaiter = (key: string | null, ac: AbortController) => {
     if (!key) return;
     const set = laneWaiters.get(key) ?? new Set<AbortController>();

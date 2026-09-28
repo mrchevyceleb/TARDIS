@@ -197,6 +197,111 @@ export function zaiPlanWindowResetsAt(): number {
   return Date.now() < planExhaustedUntilMs ? planExhaustedUntilMs : 0;
 }
 
+/** Whether a fresh GLM spawn on `mode` can serve a turn right now. Fireworks
+ *  is usable exactly when zaiModeFor() picks it; the plan needs its key and an
+ *  open window (a benched Fireworks also resolves to 'plan', closed or not). */
+export function zaiProviderUsable(model: string, mode: ZaiMode): boolean {
+  if (mode === 'fireworks') return zaiModeFor(model) === 'fireworks';
+  return Boolean(planKey()) && Date.now() >= planExhaustedUntilMs;
+}
+
+function fallbackUnavailableReason(model: string): string {
+  if (!FIREWORKS_MODELS[model]) return 'this GLM model has no Fireworks fallback';
+  if (!fireworksKey()) return 'no Fireworks key is configured';
+  if (Date.now() < fallbackBenchedUntilMs) return 'Fireworks is benched after its own failure';
+  return 'Fireworks is unavailable';
+}
+
+function planReopensCopy(): string {
+  const resetsAt = zaiPlanWindowResetsAt();
+  if (!resetsAt) return '';
+  const when = new Date(resetsAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  return ` The plan window reopens about ${when}.`;
+}
+
+/** How a failed GLM turn ended, as seen by the child that ran it. */
+export type ZaiTurnCut = {
+  /** Provider the child was spawned on. */
+  from: ZaiMode;
+  /** Provider the next spawn would use. */
+  to: ZaiMode;
+  /** This turn's own provider refused it: the plan window closed under it, or
+   *  Fireworks failed account-wide. */
+  providerFailed: boolean;
+  /** This turn was already the automatic continue of an earlier cut turn. */
+  continuation: boolean;
+};
+
+/** `continue`: respawn on `to` and continue the turn automatically.
+ *  `stopped`: no automatic continue will run. `message` replaces the turn's
+ *  failure notice when set; `reason` is the short cause for a teammate. */
+export type ZaiTurnOutcome =
+  | { kind: 'continue'; message: string }
+  | { kind: 'stopped'; message?: string; reason: string };
+
+/** Decide what a failed GLM turn does next. Null means the failure had nothing
+ *  to do with the provider and the ordinary notice stands. At most one
+ *  automatic continue per cut: a continuation that fails is never continued
+ *  again, so two failing providers cannot loop. */
+export function zaiTurnOutcome(
+  model: string,
+  cut: ZaiTurnCut,
+  opts: { heldForBackground?: boolean } = {},
+): ZaiTurnOutcome | null {
+  const switched = cut.from !== cut.to;
+  if (!switched && !cut.providerFailed && !cut.continuation) return null;
+  const reopens = planReopensCopy();
+  if (cut.continuation) {
+    if (!cut.providerFailed) return { kind: 'stopped', reason: 'the automatic continue after a model provider switch failed too' };
+    const provider = cut.from === 'fireworks' ? 'Fireworks' : 'The Z.ai coding plan';
+    return {
+      kind: 'stopped',
+      message: `${provider} failed too, right after GLM switched to it, so this turn stopped instead of retrying in a loop.${reopens} Send again to continue, or switch brains.`,
+      reason: `GLM's model provider failed twice in a row (${provider === 'Fireworks' ? 'Fireworks' : 'the coding plan'} after the switch)`,
+    };
+  }
+  if (switched && cut.providerFailed && zaiProviderUsable(model, cut.to)) {
+    const resetsAt = zaiPlanWindowResetsAt();
+    const when = resetsAt
+      ? new Date(resetsAt).toLocaleString(undefined, { hour: 'numeric', minute: '2-digit' })
+      : '';
+    const lead = cut.to === 'fireworks' ? "GLM's plan window is full." : 'Fireworks failed for GLM.';
+    const target = cut.to === 'fireworks' ? 'Fireworks' : 'the Z.ai coding plan';
+    if (opts.heldForBackground) {
+      return {
+        kind: 'continue',
+        message: `${lead} Background work is still running in this session, so GLM moves to ${target} and continues once it finishes.`,
+      };
+    }
+    return {
+      kind: 'continue',
+      message: cut.to === 'fireworks'
+        ? `${lead} Switched to Fireworks and continuing${when ? ` (back on the plan around ${when})` : ''}.`
+        : `${lead} Switched back to the Z.ai coding plan and continuing.`,
+    };
+  }
+  if (cut.providerFailed && cut.from === 'plan') {
+    const why = fallbackUnavailableReason(model);
+    return {
+      kind: 'stopped',
+      message: `GLM's plan window is full and ${why}, so this turn stopped.${reopens} Send again then, or switch brains.`,
+      reason: `GLM's coding-plan window is full and ${why}`,
+    };
+  }
+  if (cut.providerFailed) {
+    return {
+      kind: 'stopped',
+      message: `Fireworks failed for GLM and the coding-plan window is still full, so this turn stopped.${reopens} Send again then, or switch brains.`,
+      reason: 'Fireworks failed for GLM while its coding-plan window is full',
+    };
+  }
+  return {
+    kind: 'stopped',
+    message: `GLM moved to ${cut.to === 'fireworks' ? 'Fireworks' : 'the Z.ai coding plan'} while this turn was failing. Send again to continue.`,
+    reason: 'GLM switched model providers while the turn was failing',
+  };
+}
+
 /** Tests only. */
 export function resetZaiQuotaState(): void {
   planExhaustedUntilMs = 0;

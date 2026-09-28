@@ -34,7 +34,8 @@ import { chatAttachmentPath, saveChatAttachments } from '../routes/chatAttachmen
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
-import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiPlanWindowResetsAt, type ZaiMode } from './zaiQuota.ts';
+import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
+import { cancelProviderContinue, emptyTurnOrigin, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { PiSession, usePiHarness } from './pi-runner.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
@@ -214,16 +215,6 @@ function zaiEnv(model: string, credential: ReturnType<typeof zaiCredentials>): N
     || '1';
   env.SAMWISE_ACCOUNT = 'zai';
   return env;
-}
-
-/** Copy for the turn that hit the wall. The switch itself is silent from here
- *  on out; only this one failed turn needs the user to send again. */
-function zaiFallbackNotice(): string {
-  const resetsAt = zaiPlanWindowResetsAt();
-  const when = resetsAt
-    ? new Date(resetsAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
-    : '';
-  return `GLM's coding-plan window is full, and Z.ai will not bill a plan overage to credits. Running GLM on Fireworks${when ? ` until the plan window resets (about ${when})` : ''}. Send again to continue.`;
 }
 
 // xAI coding plan — Grok 4.6 served over xAI's Anthropic-compatible endpoint
@@ -417,6 +408,8 @@ const EVENT_BUFFER_SIZE = 2000;
  *  show real times (absent on events logged before 2026-09-23). */
 export type SeqEvent = { seq: number; ev: SessionEvent; at?: number };
 
+type ZaiCutDecision = { outcome: ZaiTurnOutcome; cut: ProviderCut; origin: TurnOrigin };
+
 class ClaudeSession {
   readonly key: string;
   /** Durable-history key. Equals `key` for ordinary lanes; for an agent home
@@ -459,6 +452,16 @@ class ClaudeSession {
    *  when zaiModeFor() disagrees with this, the child is stale and has to be
    *  replaced before it can serve another turn. Always 'plan' off the GLM lane. */
   private readonly zaiMode: ZaiMode;
+  /** Who the current turn is for. A GLM turn cut by a provider switch is
+   *  continued in the same role, or its teammate is told it did not run.
+   *  Lazy like stopWatch: prototype-built test sessions skip initializers. */
+  private turnOrigin?: TurnOrigin;
+  /** The current turn is itself the automatic continue of a cut turn, so a
+   *  second cut stops instead of looping. */
+  private turnIsContinuation = false;
+  /** This GLM turn's own provider refused it (closed plan window, or an
+   *  account-wide Fireworks failure). */
+  private zaiTurnProviderFailed = false;
   /** A 401 can arrive as both api_retry and result. Persist one notice per turn. */
   private terminalNoticeEmitted = false;
   /** The CLI may stream API-error prose before flagging its synthetic message. */
@@ -817,7 +820,7 @@ class ClaudeSession {
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
-  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean } = {}): Promise<void> {
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
     // Every caller (human, teammate, routine) shares this admission barrier.
     // A read-only MCP control warmup can never reject or absorb a real message.
@@ -827,6 +830,10 @@ class ClaudeSession {
       throw new Error('session has exited');
     }
     const startsNewTurn = this.turnStartedAt === null;
+    // The automatic continue only ever opens a turn. If anything else already
+    // holds the lane, that turn carries the cut guidance instead.
+    const continuing = opts.providerContinue;
+    if (continuing && !startsNewTurn) return;
     // Concurrent stdin is never implicit. Register/teamBus must opt into the
     // native path after observing a tool window, and we revalidate that window
     // here in the same event-loop slice as the eventual stdin.write. This shuts
@@ -842,7 +849,7 @@ class ClaudeSession {
         throw new Error('the native steering window closed before delivery');
       }
     }
-    const automationRequest = opts.peerFromRole === 'automation';
+    const automationRequest = continuing ? continuing.origin.automation : opts.peerFromRole === 'automation';
     // Routines never skip a live turn. If native admission already won above,
     // steer into this turn. A visible Hall tab is not a skip.
     if (!startsNewTurn && this.automationTurn) {
@@ -855,6 +862,11 @@ class ClaudeSession {
     if (startsNewTurn) {
       this.turnStartedAt = Date.now();
       this.automationTurn = automationRequest;
+      this.turnOrigin = continuing
+        ? { peers: [...continuing.origin.peers], human: continuing.origin.human, automation: continuing.origin.automation }
+        : emptyTurnOrigin();
+      this.turnIsContinuation = Boolean(continuing);
+      this.zaiTurnProviderFailed = false;
       this.activeToolIds.clear();
       this.terminalNoticeEmitted = false;
       this.syntheticApiErrorSeen = false;
@@ -882,6 +894,9 @@ class ClaudeSession {
     // Background work a kill ended since the last message: tell the agent once,
     // on the next turn, so it stops waiting for a notification that can't come.
     const backgroundEnded = startsNewTurn ? backgroundEndedGuidance(fallbackHistory) : '';
+    // A message that reaches a thread whose last turn a provider switch cut
+    // off (before, or instead of, the automatic continue) finishes that work.
+    const providerCut = startsNewTurn && !continuing ? providerCutGuidance(fallbackHistory) : '';
     if (sendAborted()) {
       abandonUnsentTurn();
       return;
@@ -952,7 +967,23 @@ class ClaudeSession {
 
     // Echo only now: this is the durable admission boundary reconnecting
     // clients and the team outbox trust.
-    if (opts.peerFrom) {
+    if (continuing) {
+      this.emit({ type: 'turnStart' });
+      this.emit({
+        type: 'event',
+        event: {
+          type: PROVIDER_CONTINUE_EVENT,
+          id: continuing.id,
+          from: continuing.cut.from,
+          to: continuing.cut.to,
+          ...(continuing.origin.automation ? { automation: true } : {}),
+          ts: Date.now(),
+        },
+      });
+    } else if (opts.peerFrom) {
+      const origin = this.turnOrigin ??= emptyTurnOrigin();
+      noteTurnPeer(origin, opts.peerFrom, opts.peerFromRole, opts.peerText ?? text);
+      if (startsNewTurn && opts.peerFromRole === 'automation') origin.automation = true;
       if (startsNewTurn) this.emit({ type: 'turnStart' });
       this.emit({
         type: 'event',
@@ -987,6 +1018,7 @@ class ClaudeSession {
       });
       noteUserTurn(this.logKey); // forever-thread compaction cadence (monotonic)
       noteAgentLane(this.chatId, this.cli); // historical lane diagnostics
+      (this.turnOrigin ??= emptyTurnOrigin()).human = true;
     }
     if (visionNote) {
       console.log(`[chat zai] vision adapter: ${visionNote}`);
@@ -1009,7 +1041,9 @@ class ClaudeSession {
     const conversationGuidance = conversationGuidanceForTurn({
       chatId: this.chatId, logKey: this.logKey, historyThroughSeq,
       peerFrom: opts.peerFrom,
-      peerFromRole: opts.peerFromRole,
+      peerFromRole: continuing?.origin.automation ? 'automation' : opts.peerFromRole,
+      // A continue keeps the voice of the turn it finishes.
+      hidden: Boolean(continuing && !continuing.origin.human),
     });
     const continuationText = isAgentThread(this.chatId)
       ? [
@@ -1023,8 +1057,9 @@ class ClaudeSession {
           commandText,
         ].join('\n')
       : commandText;
-    const computerContext = computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation');
-    const stdinText = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${continuationText}`;
+    const humanTurn = continuing ? continuing.origin.human : !opts.peerFrom && opts.peerFromRole !== 'automation';
+    const computerContext = computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn);
+    const stdinText = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuationText}`;
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];
@@ -1480,6 +1515,7 @@ class ClaudeSession {
   private emitTerminalNotice(
     terminal: TerminalProviderError,
     discardSynthetic = this.syntheticApiErrorSeen,
+    extra?: Record<string, unknown>,
   ): void {
     if (this.terminalNoticeEmitted) return;
     this.terminalNoticeEmitted = true;
@@ -1491,9 +1527,74 @@ class ClaudeSession {
         code: terminal.code,
         retryable: terminal.retryable,
         discardSynthetic: discardSynthetic || undefined,
+        ...extra,
         ts: Date.now(),
       },
     });
+  }
+
+  /** GLM only: what a failed turn does next, with the turn's origin
+   *  snapshotted, or null when the provider had nothing to do with it. */
+  private zaiCutOutcome(heldForBackground: boolean): ZaiCutDecision | null {
+    if (this.cli !== 'zai') return null;
+    const cut: ProviderCut = { from: this.zaiMode, to: zaiModeFor(this.spawnModel) };
+    const outcome = zaiTurnOutcome(this.spawnModel, {
+      ...cut,
+      providerFailed: this.zaiTurnProviderFailed,
+      continuation: this.turnIsContinuation,
+    }, { heldForBackground });
+    if (!outcome) return null;
+    const origin = this.turnOrigin ?? emptyTurnOrigin();
+    return { outcome, cut, origin: { peers: [...origin.peers], human: origin.human, automation: origin.automation } };
+  }
+
+  private zaiCutTerminal(terminal: TerminalProviderError, decision: ZaiCutDecision): TerminalProviderError {
+    const message = decision.outcome.message ?? terminal.message;
+    return decision.outcome.kind === 'continue'
+      ? { message, code: 'provider_switch' }
+      : { ...terminal, message, retryable: true };
+  }
+
+  /** `continuing` renders the notice as a switch; `unread` badges a cut that
+   *  nothing will finish on its own. `providerCut` lets the next turn (and
+   *  its respawn) know the cut is still open. */
+  private zaiCutNoticeFields(decision: ZaiCutDecision): Record<string, unknown> {
+    return decision.outcome.kind === 'continue'
+      ? { providerCut: decision.cut, continuing: true }
+      : { providerCut: decision.cut, unread: true };
+  }
+
+  /** After the cut turn's boundary: queue its one automatic continue, or tell
+   *  the teammate whose handoff it was that it did not run. */
+  private afterZaiCut(decision: ZaiCutDecision, noticeSeq: number): void {
+    if (decision.outcome.kind === 'continue') {
+      scheduleProviderContinue({
+        cli: this.cli,
+        cwd: this.cwd,
+        chatId: this.chatId,
+        logKey: this.logKey,
+        model: this.spawnModel,
+        effort: this.spawnEffort,
+        noticeSeq,
+        cut: decision.cut,
+        origin: decision.origin,
+        retiring: this,
+      });
+    } else {
+      void notifyHandoffSenders(this.chatId, decision.origin, decision.outcome.reason);
+    }
+  }
+
+  /** True once the child process is gone, not merely asked to go. */
+  processExited(): boolean {
+    return this.child.exitCode !== null || this.child.signalCode !== null;
+  }
+
+  /** Append a standalone notice to this thread (between turns). */
+  postNotice(event: Record<string, unknown>): boolean {
+    if (this.disposed) return false;
+    this.emit({ type: 'event', event });
+    return true;
   }
 
   private notifyClosed(code: number | null, signal: NodeJS.Signals | null): void {
@@ -1634,6 +1735,9 @@ class ClaudeSession {
     if (!this.disposed && this.turnStartedAt === null && nativeQueryStarted) {
       this.turnStartedAt = Date.now();
       this.automationTurn = false;
+      this.turnOrigin = emptyTurnOrigin();
+      this.turnIsContinuation = false;
+      this.zaiTurnProviderFailed = false;
       this.activeToolIds.clear();
       this.terminalNoticeEmitted = false;
       this.syntheticApiErrorSeen = false;
@@ -1754,10 +1858,13 @@ class ClaudeSession {
         // request-specific 400/413/422 would send every GLM lane back to the
         // plan window we already know is closed. Checked on any event that
         // carries a status, so a mid-turn api_retry counts too.
-        if (isZaiFallbackProviderFailure(ev)) noteZaiFallbackFailure();
-      } else {
+        if (isZaiFallbackProviderFailure(ev)) {
+          noteZaiFallbackFailure();
+          this.zaiTurnProviderFailed = true;
+        }
+      } else if (noteZaiPlanQuota(ev)) {
         // Record on any 429 that reports it, including a mid-turn api_retry.
-        noteZaiPlanQuota(ev);
+        this.zaiTurnProviderFailed = true;
       }
     }
     // The provider moved out from under this child, in either direction. Its
@@ -1766,16 +1873,22 @@ class ClaudeSession {
     // whether that particular result repeated the quota signature.
     const zaiStale = this.cli === 'zai' && ev?.type === 'result'
       && zaiModeFor(this.spawnModel) !== this.zaiMode;
+    // A failed GLM turn the provider cut: continue it automatically on the new
+    // provider, or say plainly that nothing will. Decided (and the turn's
+    // origin snapshotted) before turnEnd, whose subscribers may admit the next
+    // turn synchronously.
+    const zaiCut = terminal && this.turnStartedAt !== null ? this.zaiCutOutcome(zaiStale && this.hasBackgroundWork()) : null;
+    let zaiCutNoticeSeq = 0;
     if (terminal) {
       // Never persist the raw failed result: provider payloads can include
       // request metadata or echoed prompt fragments. The normalized notice is
       // the durable transcript record; turnEnd below remains the boundary.
       this.emitTerminalNotice(
-        zaiStale && zaiModeFor(this.spawnModel) === 'fireworks'
-          ? { ...terminal, message: zaiFallbackNotice(), retryable: true }
-          : terminal,
+        zaiCut ? this.zaiCutTerminal(terminal, zaiCut) : terminal,
         this.syntheticApiErrorSeen,
+        zaiCut ? this.zaiCutNoticeFields(zaiCut) : undefined,
       );
+      zaiCutNoticeSeq = this.nextSeq - 1;
     } else {
       this.emit({ type: 'event', event: ev });
     }
@@ -1801,11 +1914,24 @@ class ClaudeSession {
       const fatalAuth = ev.error_status === 401;
       const tokenBacked = this.cli === 'zai' || this.cli === 'xai';
       if (fatalAuth) {
-        const provider = tokenBacked ? (this.cli === 'xai' ? 'xAI' : 'Z.ai') : 'Claude';
-        this.emitTerminalNotice({
+        const provider = tokenBacked
+          ? (this.cli === 'xai' ? 'xAI' : this.zaiMode === 'fireworks' ? 'Fireworks' : 'Z.ai')
+          : 'Claude';
+        const authTerminal: TerminalProviderError = {
           message: `${provider} could not authenticate. Check its account or API key, then try again.`,
           code: String(ev.error_status),
-        }, true);
+        };
+        // A dead Fireworks key mid-turn benches Fireworks (above); treat it
+        // like any other GLM provider cut, so it continues or says why not.
+        const authCut = this.turnStartedAt !== null
+          ? this.zaiCutOutcome(zaiModeFor(this.spawnModel) !== this.zaiMode && this.hasBackgroundWork())
+          : null;
+        this.emitTerminalNotice(
+          authCut ? this.zaiCutTerminal(authTerminal, authCut) : authTerminal,
+          true,
+          authCut ? this.zaiCutNoticeFields(authCut) : undefined,
+        );
+        const authCutNoticeSeq = this.nextSeq - 1;
         // This one dies mid-turn, so no `result` is coming to close it out.
         // Emit the boundary here, before failAuth() disposes the session and
         // emit() starts dropping frames, or attached clients stream forever.
@@ -1819,6 +1945,7 @@ class ClaudeSession {
           this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
         }
         this.failAuth();
+        if (authCut) this.afterZaiCut(authCut, authCutNoticeSeq);
       } else {
         const attempt = ev.attempt ? ` (attempt ${ev.attempt}/${ev.max_retries ?? '?'})` : '';
         this.emit({ type: 'error', message: `API ${ev.error} ${ev.error_status}${attempt} — retrying…`, code: String(ev.error_status), retryable: true });
@@ -1844,6 +1971,7 @@ class ClaudeSession {
       // its completion wakes a turn here, and that turn's result retires it.
       if (authFailPending) this.failAuth();
       else if (zaiStale && !this.hasBackgroundWork()) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
+      if (zaiCut) this.afterZaiCut(zaiCut, zaiCutNoticeSeq);
       const seeded = this.pendingSeedAck;
       const resultFailed = ev.is_error === true || typeof ev.api_error_status === 'number';
       const failed = seeded && resultFailed;
@@ -1947,11 +2075,23 @@ export function beginThreadReset(opts: { cli: CliKind; repoPath: string; chatId?
   const logKey = trackedThreadLogKey(opts);
   if (resettingThreadLogs.has(logKey)) return null;
   resettingThreadLogs.add(logKey);
+  cancelProviderContinue(logKey);
   return () => { resettingThreadLogs.delete(logKey); };
 }
 
 export function isThreadResetting(opts: { cli: CliKind; repoPath: string; chatId?: string }): boolean {
   return resettingThreadLogs.has(trackedThreadLogKey(opts));
+}
+
+function waitForChildExit(session: LaneSession, timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    let unsubscribe: () => void = () => {};
+    const done = () => { clearTimeout(timer); unsubscribe(); resolve(); };
+    const timer = setTimeout(done, timeoutMs);
+    timer.unref?.();
+    unsubscribe = session.subscribe((se) => { if (se.ev.type === 'closed') done(); }, -1, false);
+    if (session.processExited()) done();
+  });
 }
 
 /** Live background work in a lane's process. Automatic kills wait for it:
@@ -2012,6 +2152,10 @@ export async function getOrCreateSession(opts: {
     const existing = sessions.get(key);
     if (!existing) break;
     if (!existing.isAlive()) {
+      // A child retired a moment ago (provider switch, auth failure) may still
+      // be exiting. Let it go before a replacement resumes the same native
+      // session id; its SIGKILL backstop bounds this at ~3s.
+      if (existing.isDisposed() && !existing.processExited()) await waitForChildExit(existing, 5_000);
       if (sessions.get(key) === existing) sessions.delete(key);
       continue;
     }
@@ -2208,6 +2352,10 @@ async function spawnSessionOnce(
       cwd,
       sessionId: resumeId,
     });
+    // Right after a provider cut, only the native session still holds the cut
+    // turn's tool calls; reseeding from visible text would make the agent
+    // redo finished work. Same context the retired child had a moment ago.
+    const resumeAfterCut = Boolean(resumeId) && preferResumeAfterProviderCut(restored.events);
     if (switchedFrom) {
       console.warn(
         `[chat ${cli}] model switch on ${logKey}: ${switchedFrom} → ${cli} — seeding compact+50 from the thread log, not resuming`,
@@ -2215,6 +2363,10 @@ async function spawnSessionOnce(
       if (resumeId) await setSessionId(cli, cwd, '', chatId);
       resumeId = null;
       seedFirst = true;
+    } else if (resumeId && resumeAfterCut && (isRotationOwed(logKey) || skipResume)) {
+      console.warn(
+        `[chat ${cli}] provider cut on ${logKey}: resuming ${resumeId.slice(0, 8)} so the cut turn's tool history survives`,
+      );
     } else if (resumeId && (isRotationOwed(logKey) || skipResume)) {
       const why = isRotationOwed(logKey) ? 'overflow-compact owed' : 'seed compact+50 (do not replay jsonl/tool dump)';
       console.warn(
@@ -2452,6 +2604,8 @@ export function dropSession(cli: CliKind, repoPath: string, chatId = 'main'): vo
  *  saved session_id so the next message resumes the conversation. */
 export async function interruptSession(opts: { cli: CliKind; repoPath: string; chatId?: string }): Promise<void> {
   const chatId = opts.chatId || 'main';
+  // Stop also means "do not pick the cut turn back up on your own".
+  cancelProviderContinue(trackedThreadLogKey({ ...opts, chatId }));
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
     const { interruptCodex } = await import('./codex-runner.ts');
     await interruptCodex({ repoPath: opts.repoPath, chatId, cli: opts.cli });
@@ -2502,6 +2656,14 @@ function notifySessionCreated(logKey: string, session: LaneSession): void {
       console.warn('[chat] session-created listener failed:', (err as Error).message);
     }
   }
+}
+
+/** The live Claude-family session writing to this durable thread, if any. */
+export function liveLaneSession(logKey: string): LaneSession | null {
+  for (const session of sessions.values()) {
+    if (session.logKey === logKey && session.isAlive()) return session;
+  }
+  return null;
 }
 
 export function subscribeExternalThreadEvents(fn: (logKey: string, se: SeqEvent) => void): () => void {

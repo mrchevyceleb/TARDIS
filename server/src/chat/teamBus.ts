@@ -26,7 +26,7 @@ type SessionLike = {
   subscribe: (
     fn: (event: {
       seq?: number;
-      ev?: { type?: string; event?: { type?: string; deliveryId?: string } };
+      ev?: { type?: string; event?: { type?: string; deliveryId?: string; continuing?: boolean; unread?: boolean; message?: string } };
     }) => void,
     sinceSeq?: number,
     countSubscriber?: boolean,
@@ -597,6 +597,8 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
     let admittedSeq: number | null = null;
     let providerAccepted = false;
     let chainActivated = false;
+    /** A GLM provider cut ended this turn: continuing on its own, or not. */
+    const providerCut: { seen: { continuing: boolean; message: string } | null } = { seen: null };
     const maybeActivateChain = () => {
       if (chainActivated || !providerAccepted || admittedSeq === null) return;
       chainActivated = true;
@@ -631,6 +633,14 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
           providerAccepted = true;
           maybeActivateChain();
           return;
+        }
+        if (
+          inner?.type === '_terminal_error'
+          && admittedSeq !== null
+          && (event.seq ?? 0) > admittedSeq
+          && (inner.continuing === true || inner.unread === true)
+        ) {
+          providerCut.seen = { continuing: inner.continuing === true, message: typeof inner.message === 'string' ? inner.message : '' };
         }
         if (event.ev?.type === 'turnEnd' && providerAccepted && admittedSeq !== null && (event.seq ?? 0) > admittedSeq) {
           finishWait({ kind: 'completed', endSeq: event.seq ?? session.latestSeq() });
@@ -713,7 +723,11 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
           await new Promise((resolve) => setTimeout(resolve, 1500));
           result.reply = await readLastReply(session.logKey, admittedSeq, outcome.endSeq).catch(() => undefined);
         }
-        if (!result.reply) result.reason = 'reply not captured (check the thread) — delivered';
+        if (providerCut.seen?.continuing) {
+          result.reason = `${to.name}'s model provider switched mid-turn, so any reply here is partial. ${to.name} is continuing automatically and the rest will land in its thread`;
+        } else if (providerCut.seen) {
+          result.reason = `${to.name}'s turn stopped before finishing: ${providerCut.seen.message}`;
+        } else if (!result.reply) result.reason = 'reply not captured (check the thread) — delivered';
       } else if (outcome.kind === 'timeout') {
         result.reason = `${to.name} is still working after ${Math.round(REPLY_WAIT_MS / 60_000)} minutes — delivery remains in their thread`;
       } else if (outcome.kind === 'closed') {

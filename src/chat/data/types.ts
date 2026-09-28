@@ -103,6 +103,9 @@ export type ChatBlock =
       message: string;
       code?: string;
       retryable?: boolean;
+      /** The model provider switched mid-turn and the agent is continuing on
+       * its own; a notice, not a failure the user has to act on. */
+      continuing?: boolean;
       ts: number;
     }
   | {

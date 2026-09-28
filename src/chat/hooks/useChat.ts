@@ -171,6 +171,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       message: ev.message,
       code: typeof ev.code === 'string' ? ev.code : undefined,
       retryable: ev.retryable === true || undefined,
+      continuing: ev.continuing === true || undefined,
       ts,
     }];
   }

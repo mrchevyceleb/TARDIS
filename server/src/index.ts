@@ -50,6 +50,7 @@ import { xaiOauthRouter } from './routes/xai-oauth.ts';
 import { primeXaiOauthToken } from './chat/runner.ts';
 import { migrateAgentThreadLogs } from './chat/threadMigrate.ts';
 import { markBackgroundWorkEndedByRestart, markBusyLanesRestarting, activeClaudeSessions } from './chat/runner.ts';
+import { markPendingProviderContinuesInterrupted } from './chat/providerSwitch.ts';
 import { flushAllEventChains } from './chat/event-log-store.ts';
 import { markBusyCodexLanesRestarting, activeCodexSessions } from './chat/codex-runner.ts';
 import { markBusyBananaLanesRestarting, activeBananaSessions } from './chat/banana-runner.ts';
@@ -274,6 +275,12 @@ const tearDown = (signal: NodeJS.Signals) => {
     if (noted > 0) console.warn(`[tardis] noted ended background work in ${noted} lane(s)`);
   } catch (err) {
     console.warn('[tardis] background-work note failed:', (err as Error).message);
+  }
+  try {
+    const cut = markPendingProviderContinuesInterrupted();
+    if (cut > 0) console.warn(`[tardis] noted ${cut} GLM continue(s) the restart interrupted`);
+  } catch (err) {
+    console.warn('[tardis] provider-continue note failed:', (err as Error).message);
   }
   // Stop all sessions NOW so no new events enqueue after the flush below.
   stopWorkerQueue();

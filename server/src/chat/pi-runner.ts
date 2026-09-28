@@ -41,7 +41,8 @@ import { isRobotVoiceChatId, isVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STY
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
-import { noteZaiPlanQuota, zaiModeFor, type ZaiMode } from './zaiQuota.ts';
+import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiModeFor, zaiTurnOutcome, type ZaiMode } from './zaiQuota.ts';
+import { emptyTurnOrigin, noteTurnPeer, notifyHandoffSenders, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { laneMcpServers, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
@@ -137,6 +138,10 @@ export class PiSession {
   /** Final assistant text of the turn; the client's `result.result` recovery
    *  path re-renders it if the streamed blocks never made it on screen. */
   private lastAssistantText = '';
+  /** Who the current turn is for (see ClaudeSession.turnOrigin). */
+  private turnOrigin: TurnOrigin = emptyTurnOrigin();
+  /** The current turn is the automatic continue of a provider-cut turn. */
+  private turnIsContinuation = false;
 
   constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model: string, effort: string, seedFirst = false, switchedFrom: string | null = null) {
     assertSubscriptionLane(cli);
@@ -391,19 +396,43 @@ export class PiSession {
   private finishTurn(): void {
     if (this.turnStartedAt === null) return;
     const failed = this.turnFailed;
+    let cut: { outcome: NonNullable<ReturnType<typeof zaiTurnOutcome>>; cut: ProviderCut; origin: TurnOrigin; noticeSeq: number } | null = null;
     if (failed) {
       const detail = failed.message;
-      // The same quota detector the claude lane uses; a Pi GLM turn reports the
-      // Z.ai body verbatim in errorMessage.
-      if (this.zaiMode === 'plan') noteZaiPlanQuota({ type: 'result', api_error_status: /429|1308|1310|limit/i.test(detail) ? 429 : undefined, result: detail });
+      // The same detectors the claude lane uses; a Pi GLM turn reports the
+      // provider's error body verbatim in errorMessage. A plan-window refusal
+      // opens the Fireworks window; an account-wide Fireworks failure benches it.
+      let providerFailed = false;
+      if (this.cli === 'zai' && failed.code !== 'aborted') {
+        if (this.zaiMode === 'plan') {
+          providerFailed = noteZaiPlanQuota({ type: 'result', api_error_status: /429|1308|1310|limit/i.test(detail) ? 429 : undefined, result: detail });
+        } else {
+          // Pi's providers lead the message with the HTTP status ("429: {...}",
+          // "401 Incorrect API key").
+          const status = /^\s*(?:[A-Za-z]*Error:\s*)?(\d{3})\b/.exec(detail);
+          if (status && isZaiFallbackProviderFailure({ api_error_status: Number(status[1]) })) {
+            noteZaiFallbackFailure();
+            providerFailed = true;
+          }
+        }
+        const turnCut: ProviderCut = { from: this.zaiMode, to: zaiModeFor(this.spawnModel) };
+        const outcome = zaiTurnOutcome(this.spawnModel, { ...turnCut, providerFailed, continuation: this.turnIsContinuation });
+        if (outcome) cut = { outcome, cut: turnCut, origin: { peers: [...this.turnOrigin.peers], human: this.turnOrigin.human, automation: this.turnOrigin.automation }, noticeSeq: 0 };
+      }
       if (!this.terminalNoticeEmitted) {
         this.terminalNoticeEmitted = true;
         const label = this.cli === 'xai' ? 'Grok' : 'GLM';
-        const message = failed.code === 'aborted'
+        const plain = failed.code === 'aborted'
           ? 'This turn was cancelled before it finished.'
           : `${label} could not answer this turn (${detail.slice(0, 160)}). Try again or switch brains.`;
-        this.emit({ type: 'event', event: { type: '_terminal_error', message, code: failed.code, retryable: failed.code !== 'aborted', ts: Date.now() } });
+        const message = cut?.outcome.message ?? plain;
+        const fields = !cut ? {}
+          : cut.outcome.kind === 'continue' ? { providerCut: cut.cut, continuing: true }
+          : { providerCut: cut.cut, unread: true };
+        const continuing = cut?.outcome.kind === 'continue';
+        this.emit({ type: 'event', event: { type: '_terminal_error', message, code: continuing ? 'provider_switch' : failed.code, retryable: continuing ? undefined : failed.code !== 'aborted', ...fields, ts: Date.now() } });
       }
+      if (cut) cut.noticeSeq = this.latestSeq();
     }
     this.emit({ type: 'event', event: { type: 'result', subtype: failed ? 'error' : 'success', is_error: Boolean(failed), ...(failed ? {} : { result: this.lastAssistantText }), session_id: this.piSessionId, total_cost_usd: this.turnUsage.cost, usage: { input_tokens: this.turnUsage.input, output_tokens: this.turnUsage.output, cache_read_input_tokens: this.turnUsage.cacheRead } } });
     this.lastAssistantText = '';
@@ -417,6 +446,24 @@ export class PiSession {
     // Grok stretch never compacted, so switching the lane back to Claude or
     // Codex found hundreds of aged-out turns to fold at once.
     else if (!failed) void this.maybeCompact();
+    // Only once the boundary is out and a stale child is retiring: continue the
+    // cut turn on the new provider, or tell its teammate it did not run.
+    if (cut?.outcome.kind === 'continue') {
+      scheduleProviderContinue({
+        cli: this.cli,
+        cwd: this.cwd,
+        chatId: this.chatId,
+        logKey: this.logKey,
+        model: this.spawnModel,
+        effort: this.spawnEffort,
+        noticeSeq: cut.noticeSeq,
+        cut: cut.cut,
+        origin: cut.origin,
+        retiring: this,
+      });
+    } else if (cut) {
+      void notifyHandoffSenders(this.chatId, cut.origin, cut.outcome.reason);
+    }
   }
 
   /** Forever-thread compaction check, see compaction.ts. Pi keeps its own live
@@ -471,6 +518,14 @@ export class PiSession {
   lastActivityAt(): number { return this.lastActivityAtMs; }
   isAlive(): boolean { return this.child.exitCode === null && !this.disposed; }
   isDisposed(): boolean { return this.disposed; }
+  /** True once the pi process is gone, not merely asked to go. */
+  processExited(): boolean { return this.child.exitCode !== null || this.child.signalCode !== null; }
+  /** Append a standalone notice to this thread (between turns). */
+  postNotice(event: Record<string, unknown>): boolean {
+    if (this.disposed) return false;
+    this.emit({ type: 'event', event });
+    return true;
+  }
   isBusy(): boolean { return this.turnStartedAt !== null; }
   isAutomationTurn(): boolean { return this.turnStartedAt !== null && this.automationTurn; }
   /** Pi's `steer` is delivered at the next tool boundary — always safe. */
@@ -491,24 +546,32 @@ export class PiSession {
     for (const fn of this.listeners) fn(se);
   }
 
-  async send(text: string, images?: ChatImage[], opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean } = {}): Promise<void> {
+  async send(text: string, images?: ChatImage[], opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean; providerContinue?: ProviderContinueOpts } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
     if (opts.signal?.aborted) return;
     if (!this.isAlive()) throw new Error('session has exited');
     await this.ready;
     const startsNewTurn = this.turnStartedAt === null;
+    // The automatic continue only ever opens a turn; whatever already holds
+    // the lane carries the cut guidance instead.
+    const continuing = opts.providerContinue;
+    if (continuing && !startsNewTurn) return;
     if (!startsNewTurn) {
       if (opts.peerFrom && !opts.allowNativePeerSteer) return;
       if (!opts.peerFrom && !opts.allowNativeHumanSteer) throw new Error('the current turn must reach a safe boundary before guidance is delivered');
       if (this.automationTurn && !opts.peerFrom) throw new Error('human message is waiting for the automation turn to finish');
     }
-    const automationRequest = opts.peerFromRole === 'automation';
+    const automationRequest = continuing ? continuing.origin.automation : opts.peerFromRole === 'automation';
     if (startsNewTurn) {
       this.turnStartedAt = Date.now();
       this.automationTurn = automationRequest;
       this.activeToolIds.clear();
       this.terminalNoticeEmitted = false;
       this.turnFailed = null;
+      this.turnOrigin = continuing
+        ? { peers: [...continuing.origin.peers], human: continuing.origin.human, automation: continuing.origin.automation }
+        : emptyTurnOrigin();
+      this.turnIsContinuation = Boolean(continuing);
     }
     const abandon = () => {
       if (!startsNewTurn || this.turnStartedAt === null) return;
@@ -518,6 +581,9 @@ export class PiSession {
     const historyThroughSeq = this.latestSeq();
     const wantSeed = this.seedWindowOnNextTurn;
     const seed = wantSeed ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, this.eventLog.slice()) : '';
+    // A message that reaches a thread whose last turn a provider switch cut
+    // off (before, or instead of, the automatic continue) finishes that work.
+    const providerCut = startsNewTurn && !continuing ? providerCutGuidance(this.eventLog) : '';
     if (opts.signal?.aborted) { abandon(); return; }
 
     let attachments: Array<{ id: string; mediaType: string }> = [];
@@ -536,7 +602,12 @@ export class PiSession {
       if (opts.signal?.aborted || !this.isAlive()) { abandon(); return; }
     }
 
-    if (opts.peerFrom) {
+    if (continuing) {
+      this.emit({ type: 'turnStart' });
+      this.emit({ type: 'event', event: { type: PROVIDER_CONTINUE_EVENT, id: continuing.id, from: continuing.cut.from, to: continuing.cut.to, ...(continuing.origin.automation ? { automation: true } : {}), ts: Date.now() } });
+    } else if (opts.peerFrom) {
+      noteTurnPeer(this.turnOrigin, opts.peerFrom, opts.peerFromRole, opts.peerText ?? text);
+      if (startsNewTurn && automationRequest) this.turnOrigin.automation = true;
       if (startsNewTurn) this.emit({ type: 'turnStart' });
       this.emit({ type: 'event', event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}), ts: Date.now() } });
     } else {
@@ -545,14 +616,21 @@ export class PiSession {
       this.emit({ type: 'event', event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, ts: Date.now() } });
       noteUserTurn(this.logKey);
       noteAgentLane(this.chatId, this.cli);
+      this.turnOrigin.human = true;
     }
 
-    const guidance = conversationGuidanceForTurn({ chatId: this.chatId, logKey: this.logKey, historyThroughSeq, peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole });
+    const guidance = conversationGuidanceForTurn({
+      chatId: this.chatId, logKey: this.logKey, historyThroughSeq, peerFrom: opts.peerFrom,
+      peerFromRole: continuing?.origin.automation ? 'automation' : opts.peerFromRole,
+      // A continue keeps the voice of the turn it finishes.
+      hidden: Boolean(continuing && !continuing.origin.human),
+    });
     const continuation = isAgentThread(this.chatId)
       ? ['<rivendell-continuation>', `Warm continuation of the existing conversation. Host time: ${new Date().toString()}.`, 'Do not repeat session-start rituals.', '</rivendell-continuation>', ...(guidance ? ['', guidance] : []), ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []), '', promptText].join('\n')
       : promptText;
-    const computerContext = computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation');
-    const message = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${continuation}`;
+    const humanTurn = continuing ? continuing.origin.human : !opts.peerFrom && opts.peerFromRole !== 'automation';
+    const computerContext = computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn);
+    const message = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuation}`;
     const piImages = outImages?.map((img) => ({ type: 'image', data: img.base64, mimeType: img.mediaType }));
 
     const command = startsNewTurn
