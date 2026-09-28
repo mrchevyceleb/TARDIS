@@ -5,6 +5,7 @@
 
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { listAgents } from '../chat/agents.ts';
+import { deliverTeamMessage } from '../chat/teamBus.ts';
 import { DESK_OWNER_NAME } from '../config.ts';
 import {
   DESK_COLUMNS,
@@ -23,6 +24,7 @@ import {
   updateTodo,
   type DeskActor,
   type DeskCard,
+  type DeskComment,
 } from '../lib/deskStore.ts';
 
 export const deskRouter = Router();
@@ -204,10 +206,45 @@ deskRouter.post('/cards/:id/move', route(async (req, res) => {
   res.json({ card: await moveCard(param(req, 'id'), input.column, input.index) });
 }));
 
+export type CommentNotice = { delivered: boolean; to?: string; reason?: string };
+
+/** The human commented on a card: wake its owner through the team bus (the
+ *  durable queue team_message uses), so they answer now instead of the next
+ *  time they happen to read the board. Cards the owner holds, or whose agent
+ *  is gone, go to the Chief of Staff. */
+export async function notifyCardOwner(card: DeskCard, comment: DeskComment): Promise<CommentNotice> {
+  const agents = listAgents();
+  const owner = card.owner.kind === 'agent'
+    ? agents.find((a) => a.id === card.owner.id) ?? findAgent(card.owner.name)
+    : undefined;
+  const recipient = owner ?? agents.find((a) => a.id === 'chief-of-staff') ?? agents[0];
+  if (!recipient) return { delivered: false, reason: 'no teammate to tell' };
+  const whose = owner ? 'your' : card.owner.kind === 'owner' ? 'their own' : `${card.owner.name}'s`;
+  const text = [
+    `${DESK_OWNER_NAME} commented on ${whose} Desk card [desk:${card.id}] "${card.title}":`,
+    '',
+    comment.text,
+    '',
+    `Read the card with board_card_get (id ${card.id}) if you need the context, then answer on it with board_card_comment. Move or update the card if this changes the plan.`,
+  ].join('\n');
+  try {
+    const result = await deliverTeamMessage({ from: DESK_OWNER_NAME, to: recipient.id, text, wait: false, source: 'desk' });
+    return { delivered: result.delivered, to: result.to ?? recipient.name, ...(result.delivered ? {} : { reason: result.reason }) };
+  } catch (error) {
+    console.warn(`[desk] could not tell ${recipient.name} about a comment on ${card.id}: ${(error as Error).message}`);
+    return { delivered: false, to: recipient.name, reason: 'delivery failed' };
+  }
+}
+
 deskRouter.post('/cards/:id/comments', route(async (req, res) => {
   const input = body(req);
-  const result = await commentCard(param(req, 'id'), input.text, resolveAuthor(input.agent));
-  res.status(201).json(result);
+  // The Desk UI never names an author; the team MCP always does. Only a real
+  // owner comment wakes anyone, so agents answering on the card cannot loop.
+  const fromOwnerUi = input.agent === undefined || input.agent === null;
+  const author = resolveAuthor(input.agent);
+  const result = await commentCard(param(req, 'id'), input.text, author);
+  const notified = fromOwnerUi && author.kind === 'owner' ? await notifyCardOwner(result.card, result.comment) : undefined;
+  res.status(201).json(notified ? { ...result, notified } : result);
 }));
 
 deskRouter.delete('/cards/:id/comments/:commentId', route(async (req, res) => {

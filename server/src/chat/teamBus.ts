@@ -550,11 +550,14 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
   let waited = false;
   const replyInstruction = from.role === 'voice'
     ? '(This is the user continuing your own voice conversation. Reply in this thread. Do not team_message Voice. Ending the audio call does not cancel this work. External side effects remain draft/review-first. The call already has a spoken line. Do not write a second, different Hall answer unless the caller needs a result, blocker, or question they cannot hear.)'
+    : from.role === 'desk'
+    ? `(${from.name} is the human owner, not a teammate, and reads the answer on the Desk card. Reply there with board_card_comment. Do not team_message ${from.name}.)`
     : waitForReply
     ? `(Reply inline in this turn. Your final answer is returned automatically to ${from.name}; no second team_message call is needed.)`
     : `(Reply inline for the thread. If ${from.name} needs the result, use team_message(to: "${from.name}", text: ..., wait: false); busy teammates are queued automatically.)`;
   const prompt = [
     from.role === 'voice' ? '[continuation of the user’s voice request in your own thread]'
+      : from.role === 'desk' ? `[comment from ${from.name} on the Desk]`
       : `[message from teammate ${from.name}${from.role ? ` (${from.role})` : ''} — handoff ${hop}]`,
     text,
     '',
@@ -851,7 +854,9 @@ export async function deliverTeamMessage(input: {
   from: string;
   to: string;
   text: string;
-  source?: 'voice';
+  /** voice: the user's own call continuing in the thread. desk: the human
+   *  owner commenting on a Desk card (`from` is their display name). */
+  source?: 'voice' | 'desk';
   /** Internal admission notification; fires only after the outbox is durable. */
   onQueued?: () => void;
   hop?: number;
@@ -866,6 +871,9 @@ export async function deliverTeamMessage(input: {
   if (!to) return { delivered: false, reason: `no teammate named "${input.to}" — call team_list first` };
   const from = input.source === 'voice'
     ? { id: `voice-${to.id}`, name: 'Voice', role: 'voice', engine: '', home: '', createdAt: 0 }
+    : input.source === 'desk'
+    // Agent ids are slugs, so the colon keeps this from ever resolving to one.
+    ? { id: 'desk:owner', name: input.from.trim() || 'Owner', role: 'desk', engine: '', home: '', createdAt: 0 }
     : findAgent(input.from) ?? { id: 'unknown', name: input.from || 'Unknown', role: '', engine: '', home: '', createdAt: 0 };
   if (to.id === from.id && input.from.trim().toLowerCase() === to.name.trim().toLowerCase()) {
     return { delivered: false, reason: 'that is you — no need to message yourself' };

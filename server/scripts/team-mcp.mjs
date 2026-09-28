@@ -241,10 +241,13 @@ const TOOLS = [
   },
   {
     name: 'desk_todos',
-    description: `List ${OWNER}'s "Needs you" items with ids (default: open ones). Check it before adding an item, and to see whether something you asked for was answered.`,
+    description: `List ${OWNER}'s "Needs you" items with ids (default: open ones). Check it before adding an item, and to see whether something you asked for was answered. Pass id to read one item in full (for a [desk:todo-…] reference).`,
     inputSchema: {
       type: 'object',
-      properties: { status: { type: 'string', enum: ['open', 'done', 'all'] } },
+      properties: {
+        status: { type: 'string', enum: ['open', 'done', 'all'] },
+        id: { type: 'string', description: 'One item by id, open or done' },
+      },
       additionalProperties: false,
     },
   },
@@ -535,6 +538,13 @@ async function callTool(name, args, signal) {
       return `Added to ${OWNER}'s Needs-you list:\n${describeTodo(todo)}\nComplete it with desk_todo_complete once it is resolved.`;
     }
     if (name === 'desk_todos') {
+      if (typeof args.id === 'string' && args.id.trim()) {
+        const id = args.id.trim().replace(/^\[?desk:/i, '').replace(/\]$/, '');
+        const { todos } = await api('/api/desk/todos?status=all', undefined, signal);
+        const todo = todos?.find((t) => t.id === id);
+        if (!todo) return `No Needs-you item with id ${id}. It may have been deleted.`;
+        return `${describeTodo({ ...todo, detail: undefined })}${todo.detail ? `\n\n${todo.detail}` : ''}`;
+      }
       const status = args.status ?? 'open';
       const { todos } = await api(`/api/desk/todos?status=${encodeURIComponent(status)}`, undefined, signal);
       if (!todos?.length) return status === 'open' ? `Nothing is waiting on ${OWNER}.` : 'No items.';
@@ -580,7 +590,9 @@ async function callTool(name, args, signal) {
         .join('\n\n');
     }
     if (name === 'board_card_get') {
-      const { card, todos } = await api(`/api/desk/cards/${encodeURIComponent(args.id)}`, undefined, signal);
+      // Accept a pasted chat reference ([desk:card-…]) as well as a bare id.
+      const id = String(args.id ?? '').trim().replace(/^\[?desk:/i, '').replace(/\]$/, '');
+      const { card, todos } = await api(`/api/desk/cards/${encodeURIComponent(id)}`, undefined, signal);
       const lines = [
         `[${card.id}] ${card.title}`,
         `In ${DESK_COLUMN_TITLES[card.column] ?? card.column} for ${span(card.columnSince)} · owner ${card.owner.name} · ${card.priority}${card.project ? ` · ${card.project}` : ''}${card.archived ? ' · ARCHIVED' : ''}`,

@@ -30,6 +30,7 @@ const DESK_GUIDANCE = [
   '- Paused, parked, or blocked on something outside this turn: board_card_move it to pipeline with a one-line comment saying why and what restarts it. Never just drop it.',
   `- Need ${DESK_OWNER_NAME} personally (a decision, a login or 2FA code, an approval, a payment, anything only they can do): desk_todo_add with the cardId, then move the card to waiting. When it is resolved, desk_todo_complete it and move the card on.`,
   '- Skip the board for one-line answers, chit-chat, and routine runs that found nothing. Keep titles short and comments brief.',
+  '- A message containing [desk:card-…] or [desk:todo-…] points at the Desk: read it first (board_card_get or desk_todos with that id) before answering, and post a short board_card_comment if your answer changes the card.',
   '</rivendell-desk>',
 ].join('\n');
 
