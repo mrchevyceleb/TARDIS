@@ -1546,3 +1546,27 @@ body.bt-rail-resizing { cursor: col-resize; user-select: none; }
   .bt-msgpin-idle { animation: none; }
   .bt-msgpin:hover, .bt-msgpin:active { transform: none; }
 }
+
+/* ============================================================
+   Desk references in chat: live pills that open the Desk
+   (.rc variant outranks the chat kit's bare-button reset)
+   ============================================================ */
+.desk-ref-pill, .rc .desk-ref-pill {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
+  vertical-align: baseline; margin: 1px 2px; padding: 1px 10px 1px 7px;
+  border-radius: 999px; border: 1px solid var(--r-line-gold);
+  background: color-mix(in srgb, var(--r-gold) 12%, var(--r-bg-raised));
+  color: var(--r-ink); font: inherit; font-size: 0.88em; font-weight: 550; line-height: 1.55;
+  white-space: nowrap; cursor: pointer;
+  transition: transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.14s ease, box-shadow 0.14s ease;
+}
+.desk-ref-pill:hover { transform: translateY(-1px) rotate(-0.6deg); border-color: var(--r-gold); box-shadow: 0 4px 14px color-mix(in srgb, var(--r-gold) 22%, transparent); }
+.desk-ref-pill:active { transform: scale(0.96); }
+.desk-ref-pill:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; }
+.desk-ref-pill[data-kind='todo'] { border-color: color-mix(in srgb, var(--r-rose) 45%, transparent); background: color-mix(in srgb, var(--r-rose) 10%, var(--r-bg-raised)); }
+.desk-ref-pill.is-done .desk-ref-title { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--r-ink) 45%, transparent); opacity: 0.75; }
+.desk-ref-pill[aria-disabled='true'] { cursor: default; opacity: 0.6; border-style: dashed; transform: none; box-shadow: none; }
+.desk-ref-title { min-width: 0; max-width: 34ch; overflow: hidden; text-overflow: ellipsis; }
+.desk-ref-pin { font-size: 0.92em; }
+@media (max-width: 760px) { .desk-ref-title { max-width: 24ch; } }
+@media (prefers-reduced-motion: reduce) { .desk-ref-pill, .desk-ref-pill:hover { transition: none; transform: none; } }

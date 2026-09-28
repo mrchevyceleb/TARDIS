@@ -10,6 +10,7 @@ import {
   ageLabel,
   agoText,
   deskApi,
+  discussOnDesk,
   dueLabel,
   openAgentThread,
   useDeskWrite,
@@ -21,7 +22,7 @@ import {
 } from '../data/desk';
 import { showToast } from '../native/shell';
 import type { Agent } from '../grok/agents';
-import { ActorChip, errorText, linkLabel, priorityClass } from './deskParts';
+import { ActorChip, DiscussButton, errorText, linkLabel, priorityClass, useDeskChatOpen } from './deskParts';
 import { columnTitle, ownerKey, ownerOptions, projectOptions, useCardMover } from './DeskBoard';
 
 type Draft = { title: string; description: string; owner: string; project: string; priority: DeskPriority; links: string[] };
@@ -67,6 +68,15 @@ export function DeskCardDrawer({
 }) {
   const write = useDeskWrite();
   const move = useCardMover();
+  // With the Desk chat open beside it, the drawer is not a modal: the chat
+  // keeps its own keyboard and stays reachable.
+  const chatOpen = useDeskChatOpen();
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
   const current = useMemo(() => toDraft(card), [card]);
   const [base, setBase] = useState<Draft>(current);
   const [draft, setDraft] = useState<Draft>(current);
@@ -113,6 +123,7 @@ export function DeskCardDrawer({
   const panelRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const onKey = (event: globalThis.KeyboardEvent) => {
+      if ((event.target as Element | null)?.closest?.('.desk-chat')) return;
       if (event.key === 'Tab') {
         // Keep keyboard focus inside the drawer while it is open.
         const panel = panelRef.current;
@@ -138,6 +149,9 @@ export function DeskCardDrawer({
   }, []);
 
   const owners = useMemo(() => ownerOptions(desk, agents), [desk, agents]);
+  // Who an owner comment pings: the card's agent, else the Chief of Staff.
+  const pinged = (card.owner.kind === 'agent' && agents.some((a) => a.id === card.owner.id) ? card.owner.name : undefined)
+    ?? (agents.find((a) => a.id === 'chief-of-staff') ?? agents[0])?.name;
   const projects = useMemo(() => projectOptions(desk), [desk]);
   const linkedTodos = desk.todos.filter((t) => t.cardId === card.id);
 
@@ -199,13 +213,16 @@ export function DeskCardDrawer({
     if (!text || busy) return;
     setBusy('comment');
     try {
-      await write(() => deskApi.comment(card.id, text), (d) => ({
+      const { notified } = await write(() => deskApi.comment(card.id, text), (d) => ({
         ...d,
         cards: d.cards.map((c) => (c.id === card.id
           ? { ...c, comments: [...c.comments, { id: `pending-${Date.now()}`, author: d.owner, text, at: new Date().toISOString() }] }
           : c)),
       }));
       setComment('');
+      setNotice(notified?.to
+        ? notified.delivered ? `Sent to ${notified.to}. The reply lands here.` : `Saved, but ${notified.to} was not pinged. Try again in a minute.`
+        : null);
     } catch (error) {
       showToast(`Could not post the comment: ${errorText(error)}`);
     } finally {
@@ -275,7 +292,7 @@ export function DeskCardDrawer({
   return (
     <div className="desk-drawer-layer">
       <button type="button" className="desk-drawer-scrim" aria-label="Close card" tabIndex={-1} onClick={requestClose} />
-      <aside ref={panelRef} className={`desk-drawer ${priorityClass(card.priority)}`} role="dialog" aria-modal="true" aria-label={`Card: ${card.title}`} data-col={card.column}>
+      <aside ref={panelRef} className={`desk-drawer ${priorityClass(card.priority)}`} role="dialog" aria-modal={!chatOpen} aria-label={`Card: ${card.title}`} data-col={card.column}>
         <header className="desk-drawer-head">
           <div>
             <p className="r-eyebrow-gold">
@@ -283,7 +300,10 @@ export function DeskCardDrawer({
             </p>
             <h2>{card.title}</h2>
           </div>
-          <button ref={closeRef} type="button" className="desk-icon-btn" onClick={requestClose} aria-label="Close"><X size={17} /></button>
+          <div className="desk-drawer-head-actions">
+            <DiscussButton subject={card.title} label="Discuss" onClick={() => discussOnDesk({ kind: 'card', id: card.id, title: card.title })} />
+            <button ref={closeRef} type="button" className="desk-icon-btn" onClick={requestClose} aria-label="Close"><X size={17} /></button>
+          </div>
         </header>
 
         <div className="desk-drawer-body">
@@ -432,13 +452,14 @@ export function DeskCardDrawer({
                 onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void sendComment(); } }}
                 rows={2}
                 maxLength={4000}
-                placeholder="Leave a note for whoever picks this up"
+                placeholder={pinged ? `Leave a note. ${pinged} gets pinged and answers here.` : 'Leave a note for whoever picks this up'}
                 aria-label="New comment"
               />
               <Button tone="gold" type="submit" disabled={!comment.trim() || busy === 'comment'} aria-label="Post comment">
                 <Send size={14} />
               </Button>
             </form>
+            {notice ? <p className="desk-muted desk-comment-notice" role="status">{notice}</p> : null}
           </section>
         </div>
 

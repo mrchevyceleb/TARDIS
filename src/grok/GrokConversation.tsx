@@ -8,7 +8,7 @@
 //
 // Same useChatShell brain as the Studio; presentation is pure Grok Bot.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Mic, PanelRightClose, PanelRightOpen, RotateCcw, Settings, Share2, SquarePen } from 'lucide-react';
 import type { ShellViewProps } from '../chat/components/reimagine/useChatShell';
 import { ChatThread } from '../chat/components/reimagine/blocks';
@@ -22,7 +22,20 @@ import { useAgentMessagePins } from './messagePins';
 import { BRAND, THINKING_PHRASES, composerPlaceholders } from '../theme/voice';
 import { useMediaQuery } from '../chat/hooks/useMediaQuery';
 
+/** Docked beside a room (the Desk chat): its own compact header, and
+ *  reference chips that ride along with the next message. */
+export type ConversationDock = {
+  header: ReactNode;
+  chips?: ReactNode;
+  chipCount: number;
+  onBackspaceEmpty?: () => void;
+  /** Returns the text to send (chip tokens added) and clears the chips. */
+  takeOutgoing: (text: string) => string;
+  placeholder?: string;
+};
+
 export type BotConversationProps = ShellViewProps & {
+  dock?: ConversationDock;
   agentRecord?: Agent;
   paneOpen: boolean;
   onTogglePane: () => void;
@@ -115,17 +128,22 @@ export function GrokConversation(props: BotConversationProps) {
     </button>
   );
 
+  const dock = props.dock;
   const composer = (
     <Composer
       chatId={s.chatId}
       value={s.value}
       onChange={s.setValue}
-      onSend={s.send}
+      onSend={dock ? (text, images) => s.send(dock.takeOutgoing(text), images) : s.send}
       onStop={s.stop}
-      onSteer={s.steer}
+      onSteer={dock ? (text, images) => s.steer(dock.takeOutgoing(text), images) : s.steer}
       busy={s.busy}
       commands={s.commands}
       placeholders={placeholders}
+      placeholder={dock && dock.chipCount > 0 ? dock.placeholder : undefined}
+      refChips={dock?.chips}
+      refCount={dock?.chipCount ?? 0}
+      onBackspaceEmpty={dock?.onBackspaceEmpty}
       leadingSlot={
         <button
           type="button"
@@ -145,8 +163,8 @@ export function GrokConversation(props: BotConversationProps) {
   );
 
   return (
-    <div className="rc rc-desktop bt-conv-wrap bt-fade">
-      <div className="bt-head">
+    <div className={`rc rc-desktop bt-conv-wrap bt-fade${dock ? ' is-docked' : ''}`}>
+      {dock ? dock.header : <div className="bt-head">
         <div className="bt-head-agent" title={agent ? `${agent.name} — ${agent.role}` : agentName}>
           <span className="bt-disc" style={agent ? { color: DISC_INK, background: agentColor(agent.name) } : undefined}>{agent && agentAvatarUrl(agent) ? <img className="bt-disc-img" src={agentAvatarUrl(agent) ?? undefined} alt={agent.name} /> : agentMark(agent, agentName.slice(0, 1))}</span>
           <span className="bt-head-name">{agentName}</span>
@@ -198,7 +216,7 @@ export function GrokConversation(props: BotConversationProps) {
             {props.paneOpen ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
           </button>
         </div>
-      </div>
+      </div>}
 
       {empty ? (
         <div className="bt-empty">

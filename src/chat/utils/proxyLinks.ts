@@ -7,6 +7,7 @@
 // doubles as something the user can paste into Win+R when needed.
 
 import { nativeShell, showToast } from '../../native/shell';
+import { deskRefPattern, hasDeskRef, type DeskRef } from '../../data/desk';
 
 const LABEL = 'ASSISTANT-HUB';
 // Inside the desktop shell the local workspace is whatever that machine has
@@ -216,6 +217,28 @@ export function annotateWorkspaceMentions(input: string): string {
   return annotateMarkdownOutsideCode(input);
 }
 
+/** Desk references (`[desk:card-…]`) in agent markdown become
+ *  `rivendell-desk:` links, which the Markdown anchor renders as live pills.
+ *  Code spans and fences are left alone. */
+export function annotateDeskRefs(input: string): string {
+  if (!hasDeskRef(input)) return input;
+  return annotateMarkdownOutsideCode(input, (plain) => plain.replace(
+    deskRefPattern(),
+    (match: string, id: string, _kind: string, offset: number, whole: string) =>
+      whole[offset + match.length] === '(' ? match : `[${id}](${DESK_HREF_PREFIX}${id})`,
+  ));
+}
+
+export const DESK_HREF_PREFIX = 'rivendell-desk:';
+
+/** `rivendell-desk:card-15a412` back to a reference. */
+export function parseDeskHref(href: string | undefined): DeskRef | null {
+  if (!href?.startsWith(DESK_HREF_PREFIX)) return null;
+  const id = href.slice(DESK_HREF_PREFIX.length);
+  const match = id.match(/^(card|todo)-[a-z0-9][a-z0-9_-]{0,78}$/i);
+  return match ? { kind: match[1].toLowerCase() as DeskRef['kind'], id } : null;
+}
+
 export function parseWorkspaceMentionText(value: string): { kind: 'doc' | 'folder'; path: string; display: string } | null {
   const trimmed = value.trim();
   const proxyMarkdownLink = trimmed.match(/^\[([^\]]+)]\((rivendell-(?:doc|folder):[^)]+)\)$/);
@@ -252,7 +275,9 @@ function annotatePlainWorkspaceMentions(input: string): string {
   });
 }
 
-function annotateMarkdownOutsideCode(input: string): string {
+type PlainAnnotator = (plain: string) => string;
+
+function annotateMarkdownOutsideCode(input: string, annotate: PlainAnnotator = annotatePlainWorkspaceMentions): string {
   const chunks = input.split(/(\r?\n)/);
   let output = '';
   let fence: { char: '`' | '~'; length: number } | null = null;
@@ -275,20 +300,20 @@ function annotateMarkdownOutsideCode(input: string): string {
       continue;
     }
 
-    output += annotateInlineOutsideCodeSpans(line) + newline;
+    output += annotateInlineOutsideCodeSpans(line, annotate) + newline;
   }
 
   return output;
 }
 
-function annotateInlineOutsideCodeSpans(line: string): string {
+function annotateInlineOutsideCodeSpans(line: string, annotate: PlainAnnotator): string {
   let output = '';
   let cursor = 0;
 
   while (cursor < line.length) {
     const start = line.indexOf('`', cursor);
     if (start < 0) {
-      output += annotatePlainWorkspaceMentions(line.slice(cursor));
+      output += annotate(line.slice(cursor));
       break;
     }
 
@@ -298,11 +323,11 @@ function annotateInlineOutsideCodeSpans(line: string): string {
     const close = findClosingTickRun(line, ticksEnd, tickCount);
 
     if (close < 0) {
-      output += annotatePlainWorkspaceMentions(line.slice(cursor));
+      output += annotate(line.slice(cursor));
       break;
     }
 
-    output += annotatePlainWorkspaceMentions(line.slice(cursor, start));
+    output += annotate(line.slice(cursor, start));
     output += line.slice(start, close + tickCount);
     cursor = close + tickCount;
   }

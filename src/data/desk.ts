@@ -59,18 +59,99 @@ export function openAgentThread(agentId: string): void {
   window.dispatchEvent(new CustomEvent<string>(OPEN_AGENT_EVENT, { detail: agentId }));
 }
 
+// ---- references from chat ------------------------------------------------------------
+// A chat message points at the Desk with a plain-text token, `[desk:card-15a412]`
+// or `[desk:todo-71aaeb]`. Agents read it as text and resolve it with
+// board_card_get / desk_todos; the chat renders it as a live pill.
+
+export type DeskRefKind = 'card' | 'todo';
+export type DeskRef = { kind: DeskRefKind; id: string };
+/** A reference waiting in the composer, with the title it had when picked. */
+export type DeskChip = DeskRef & { title: string };
+
+const DESK_REF_SOURCE = String.raw`\[desk:((card|todo)-[a-z0-9][a-z0-9_-]{0,78})\]`;
+/** Fresh global regex each call, so callers never share lastIndex. */
+export function deskRefPattern(): RegExp {
+  return new RegExp(DESK_REF_SOURCE, 'gi');
+}
+
+export function deskRefToken(ref: Pick<DeskRef, 'id'>): string {
+  return `[desk:${ref.id}]`;
+}
+
+/** Text or a reference, in order, for rendering a message. */
+export function splitDeskRefs(text: string): Array<string | DeskRef> {
+  const out: Array<string | DeskRef> = [];
+  let last = 0;
+  for (const match of text.matchAll(deskRefPattern())) {
+    const start = match.index ?? 0;
+    if (start > last) out.push(text.slice(last, start));
+    out.push({ kind: match[2].toLowerCase() as DeskRefKind, id: match[1] });
+    last = start + match[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+export function hasDeskRef(text: string): boolean {
+  return deskRefPattern().test(text);
+}
+
+/** The message as sent: reference tokens on the first line, then the question. */
+export function composeDeskMessage(chips: Array<Pick<DeskRef, 'id'>>, text: string): string {
+  const body = text.trim();
+  if (!chips.length) return body;
+  const tokens = chips.map(deskRefToken).join(' ');
+  return body ? `${tokens}\n${body}` : tokens;
+}
+
+/** "Discuss" on a card or Needs-you row: open the Desk chat with a chip. */
+export const DESK_DISCUSS_EVENT = 'rivendell:desk-discuss';
+export function discussOnDesk(chip: DeskChip): void {
+  window.dispatchEvent(new CustomEvent<DeskChip>(DESK_DISCUSS_EVENT, { detail: chip }));
+}
+
+/** Clicking a pill: open the Desk on that card or Needs-you item. The request
+ *  waits here until the Desk has mounted and loaded its data. */
+export const DESK_FOCUS_EVENT = 'rivendell:desk-focus';
+let pendingFocus: DeskRef | null = null;
+export function focusDeskRef(ref: DeskRef): void {
+  pendingFocus = ref;
+  window.dispatchEvent(new CustomEvent<DeskRef>(DESK_FOCUS_EVENT, { detail: ref }));
+}
+export function peekDeskFocus(): DeskRef | null {
+  return pendingFocus;
+}
+export function clearDeskFocus(ref: DeskRef): void {
+  if (pendingFocus && pendingFocus.id === ref.id) pendingFocus = null;
+}
+
 const DESK_KEY = ['desk'] as const;
 const SUMMARY_KEY = ['desk-summary'] as const;
+const fetchDesk = ({ signal }: { signal: AbortSignal }) => apiJson<DeskSnapshot>('/api/desk', { signal, cache: 'no-store' });
 
 /** Full desk, polled while the room is open. Agents write here from their own
  *  turns, so a short interval plus refetch-on-focus keeps it live. */
 export function useDesk() {
   return useQuery({
     queryKey: DESK_KEY,
-    queryFn: ({ signal }) => apiJson<DeskSnapshot>('/api/desk', { signal, cache: 'no-store' }),
+    queryFn: fetchDesk,
     refetchInterval: 10_000,
     refetchOnWindowFocus: 'always',
     staleTime: 2_000,
+    retry: 1,
+  });
+}
+
+/** Same snapshot for chat pills, without a poll of its own: every pill shares
+ *  one cached fetch, and the Desk room keeps it fresh while it is open. */
+export function useDeskLookup(enabled: boolean) {
+  return useQuery({
+    queryKey: DESK_KEY,
+    queryFn: fetchDesk,
+    enabled,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
     retry: 1,
   });
 }
@@ -114,6 +195,9 @@ const json = (method: string, body?: unknown): RequestInit => ({
 });
 const enc = encodeURIComponent;
 
+/** Who an owner comment was sent to, so they can answer on the card. */
+export type CommentNotice = { delivered: boolean; to?: string; reason?: string };
+
 export type TodoPatch = Partial<{ title: string; detail: string; due: string; priority: DeskPriority; link: string; cardId: string; status: 'open' | 'done' }>;
 export type CardPatch = Partial<{ title: string; description: string; owner: string; project: string; priority: DeskPriority; links: string[]; column: DeskColumn }>;
 
@@ -126,7 +210,7 @@ export const deskApi = {
   createCard: (input: CardPatch & { title: string; index?: number }) => apiJson<{ card: DeskCard }>('/api/desk/cards', json('POST', input)),
   updateCard: (id: string, patch: CardPatch) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${enc(id)}`, json('PATCH', patch)),
   moveCard: (id: string, column: DeskColumn, index?: number) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${enc(id)}/move`, json('POST', { column, index })),
-  comment: (id: string, text: string) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${enc(id)}/comments`, json('POST', { text })),
+  comment: (id: string, text: string) => apiJson<{ card: DeskCard; notified?: CommentNotice }>(`/api/desk/cards/${enc(id)}/comments`, json('POST', { text })),
   deleteComment: (id: string, commentId: string) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${enc(id)}/comments/${enc(commentId)}`, json('DELETE')),
   archiveCard: (id: string, archived: boolean) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${enc(id)}/archive`, json('POST', { archived })),
 };

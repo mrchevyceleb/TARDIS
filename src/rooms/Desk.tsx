@@ -9,23 +9,28 @@ import { Button, Chip } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
 import { ROOM_NAMES } from '../data/roomNames';
 import {
+  DESK_FOCUS_EVENT,
   ageLabel,
   agoText,
+  clearDeskFocus,
   deskApi,
+  discussOnDesk,
   dueLabel,
   openAgentThread,
+  peekDeskFocus,
   sortOpenTodos,
   useDesk,
   useDeskWrite,
   type DeskCard,
   type DeskPriority,
+  type DeskRef,
   type DeskSnapshot,
   type DeskTodo,
   type TodoPatch,
 } from '../data/desk';
 import { showToast } from '../native/shell';
 import type { Agent } from '../grok/agents';
-import { ActorChip, PRIORITY_LABEL, errorText, linkLabel, priorityClass, useDeskAgents } from './deskParts';
+import { ActorChip, DiscussButton, PRIORITY_LABEL, errorText, linkLabel, priorityClass, useDeskAgents } from './deskParts';
 import { DeskBoard } from './DeskBoard';
 import { DeskCardDrawer } from './DeskCardDrawer';
 import './desk.css';
@@ -38,9 +43,39 @@ export function Desk() {
   const agents = useDeskAgents();
   const [tab, setTab] = useState<Tab>(() => (localStorage.getItem(TAB_KEY) === 'board' ? 'board' : 'needs'));
   const [openCardId, setOpenCardId] = useState<string | null>(null);
+  const [flash, setFlash] = useState<{ id: string; at: number } | null>(null);
   useEffect(() => { localStorage.setItem(TAB_KEY, tab); }, [tab]);
 
   const data = desk.data;
+
+  // A chat pill asked to show a card or Needs-you item. It may arrive before
+  // this room has mounted or loaded, so the request waits in peekDeskFocus.
+  const [focusRef, setFocusRef] = useState<DeskRef | null>(peekDeskFocus);
+  useEffect(() => {
+    const onFocus = (event: Event) => {
+      const ref = (event as CustomEvent<DeskRef>).detail;
+      if (ref?.id) setFocusRef({ ...ref });
+    };
+    window.addEventListener(DESK_FOCUS_EVENT, onFocus);
+    return () => window.removeEventListener(DESK_FOCUS_EVENT, onFocus);
+  }, []);
+  useEffect(() => {
+    if (!focusRef || !data) return;
+    clearDeskFocus(focusRef);
+    setFocusRef(null);
+    if (focusRef.kind === 'card') {
+      if (data.cards.some((c) => c.id === focusRef.id)) setOpenCardId(focusRef.id);
+      else showToast('That card is no longer on the Desk.');
+      return;
+    }
+    if (data.todos.some((t) => t.id === focusRef.id)) {
+      setOpenCardId(null);
+      setTab('needs');
+      setFlash({ id: focusRef.id, at: Date.now() });
+    } else {
+      showToast('That item is no longer on the Desk.');
+    }
+  }, [focusRef, data]);
   const openTodos = useMemo(() => sortOpenTodos((data?.todos ?? []).filter((t) => t.status === 'open')), [data]);
   const liveCards = useMemo(() => (data?.cards ?? []).filter((c) => !c.archived), [data]);
   const moving = liveCards.filter((c) => c.column === 'in_progress' || c.column === 'up_next').length;
@@ -86,7 +121,7 @@ export function Desk() {
 
       {data ? (
         tab === 'needs'
-          ? <NeedsYou desk={data} agents={agents} onOpenCard={setOpenCardId} />
+          ? <NeedsYou desk={data} agents={agents} onOpenCard={setOpenCardId} flash={flash} />
           : <DeskBoard desk={data} agents={agents} onOpenCard={setOpenCardId} />
       ) : null}
 
@@ -108,8 +143,15 @@ export function Desk() {
 type TodoDraft = { title: string; detail: string; due: string; priority: DeskPriority; link: string };
 const emptyTodo: TodoDraft = { title: '', detail: '', due: '', priority: 'normal', link: '' };
 
-function NeedsYou({ desk, agents, onOpenCard }: { desk: DeskSnapshot; agents: Agent[]; onOpenCard: (id: string) => void }) {
+function NeedsYou({ desk, agents, onOpenCard, flash }: {
+  desk: DeskSnapshot;
+  agents: Agent[];
+  onOpenCard: (id: string) => void;
+  flash: { id: string; at: number } | null;
+}) {
   const write = useDeskWrite();
+  const doneRef = useRef<HTMLDetailsElement>(null);
+  const [lit, setLit] = useState<string | null>(null);
   const [draft, setDraft] = useState<TodoDraft>(emptyTodo);
   const [more, setMore] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -209,6 +251,25 @@ function NeedsYou({ desk, agents, onOpenCard }: { desk: DeskSnapshot; agents: Ag
     }
   };
 
+  // Scroll to a Needs-you item a chat pill pointed at and light it up. Done
+  // items live in the folded list, so open it first.
+  const flashDone = Boolean(flash && done.some((t) => t.id === flash.id));
+  useEffect(() => {
+    if (!flash) return;
+    if (flashDone && doneRef.current) doneRef.current.open = true;
+    const raf = window.requestAnimationFrame(() => {
+      document.querySelector(`[data-todo-id="${CSS.escape(flash.id)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    });
+    setLit(flash.id);
+    const timer = window.setTimeout(() => setLit((id) => (id === flash.id ? null : id)), 2400);
+    return () => { window.cancelAnimationFrame(raf); window.clearTimeout(timer); };
+  }, [flash, flashDone]);
+  const doneShown = useMemo(() => {
+    const shown = done.slice(0, 60);
+    const extra = flash && !shown.some((t) => t.id === flash.id) ? done.find((t) => t.id === flash.id) : undefined;
+    return extra ? [...shown, extra] : shown;
+  }, [done, flash]);
+
   const rowProps = { agents, cardsById, onOpenCard, onStatus: setStatus, onDelete: remove };
 
   return (
@@ -237,7 +298,7 @@ function NeedsYou({ desk, agents, onOpenCard }: { desk: DeskSnapshot; agents: Ag
           {open.map((todo) => (
             editingId === todo.id
               ? <TodoEditor key={todo.id} todo={todo} onCancel={() => setEditingId(null)} onSave={(next) => save(todo, next)} />
-              : <TodoRow key={todo.id} todo={todo} {...rowProps} popping={justDone === todo.id} onEdit={() => setEditingId(todo.id)} />
+              : <TodoRow key={todo.id} todo={todo} {...rowProps} popping={justDone === todo.id} lit={lit === todo.id} onEdit={() => setEditingId(todo.id)} />
           ))}
         </ul>
       ) : (
@@ -251,13 +312,13 @@ function NeedsYou({ desk, agents, onOpenCard }: { desk: DeskSnapshot; agents: Ag
       )}
 
       {done.length ? (
-        <details className="desk-done">
+        <details className="desk-done" ref={doneRef}>
           <summary>
             <ChevronDown size={15} aria-hidden="true" /> Done <span className="desk-count is-quiet">{done.length}</span>
           </summary>
           <ul className="desk-todo-list is-done">
-            {done.slice(0, 60).map((todo) => (
-              <TodoRow key={todo.id} todo={todo} {...rowProps} onEdit={undefined} />
+            {doneShown.map((todo) => (
+              <TodoRow key={todo.id} todo={todo} {...rowProps} lit={lit === todo.id} onEdit={undefined} />
             ))}
           </ul>
           {done.length > 60 ? <p className="desk-muted">Showing the latest 60 of {done.length}.</p> : null}
@@ -321,7 +382,7 @@ function TodoEditor({ todo, onCancel, onSave }: { todo: DeskTodo; onCancel: () =
 }
 
 function TodoRow({
-  todo, agents, cardsById, onOpenCard, onStatus, onDelete, onEdit, popping,
+  todo, agents, cardsById, onOpenCard, onStatus, onDelete, onEdit, popping, lit,
 }: {
   todo: DeskTodo;
   agents: Agent[];
@@ -331,6 +392,7 @@ function TodoRow({
   onDelete: (todo: DeskTodo) => void;
   onEdit?: () => void;
   popping?: boolean;
+  lit?: boolean;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const timer = useRef(0);
@@ -348,7 +410,7 @@ function TodoRow({
   };
 
   return (
-    <li className={`desk-todo ${priorityClass(todo.priority)}${isDone ? ' is-done' : ''}${popping ? ' is-popping' : ''}`}>
+    <li data-todo-id={todo.id} className={`desk-todo ${priorityClass(todo.priority)}${isDone ? ' is-done' : ''}${popping ? ' is-popping' : ''}${lit ? ' is-lit' : ''}`}>
       <button
         type="button"
         className="desk-check"
@@ -394,6 +456,7 @@ function TodoRow({
         </div>
       </div>
       <div className="desk-todo-actions">
+        <DiscussButton subject={todo.title} onClick={() => discussOnDesk({ kind: 'todo', id: todo.id, title: todo.title })} />
         {onEdit ? (
           <button type="button" className="desk-icon-btn desk-edit-btn" onClick={onEdit} aria-label="Edit" title="Edit"><Pencil size={14} /></button>
         ) : null}
@@ -411,3 +474,4 @@ function TodoRow({
     </li>
   );
 }
+

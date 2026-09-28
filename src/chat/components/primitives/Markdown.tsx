@@ -2,14 +2,18 @@ import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markd
 import remarkGfm from 'remark-gfm';
 import { memo, useCallback, useContext, type MouseEvent, type ReactNode } from 'react';
 import {
+  DESK_HREF_PREFIX,
+  annotateDeskRefs,
   annotateWorkspaceMentions,
   openExternalHttpLink,
+  parseDeskHref,
   openWorkspaceLink,
   parseProxyHref,
   parseWorkspaceMentionText,
 } from '../../utils/proxyLinks';
 import { ProxyViewerContext } from '../../../hooks/useProxyViewer';
 import { useStudioFiles, viewerPreferred } from '../../../shell/studio/studioFiles';
+import { DeskRefPill } from './DeskRef';
 
 // Literary-styled wrapper around react-markdown. Agent replies arrive as
 // markdown; this renderer leans on the gold/silver theme tokens so emphasis
@@ -29,7 +33,7 @@ import { useStudioFiles, viewerPreferred } from '../../../shell/studio/studioFil
 // Whitelist our internal proxy schemes so the `a` override below sees them
 // and can render in-app cards instead of empty external links.
 function proxyUrlTransform(url: string): string {
-  if (url.startsWith('rivendell-doc:') || url.startsWith('rivendell-folder:')) return url;
+  if (url.startsWith('rivendell-doc:') || url.startsWith('rivendell-folder:') || url.startsWith(DESK_HREF_PREFIX)) return url;
   return defaultUrlTransform(url);
 }
 
@@ -137,6 +141,12 @@ function MarkdownCode(props: any) {
 }
 
 function MarkdownAnchor({ href, children }: { href?: string; children?: ReactNode }) {
+  const deskRef = parseDeskHref(href);
+  if (deskRef) return <DeskRefPill target={deskRef} />;
+  return <MarkdownLink href={href}>{children}</MarkdownLink>;
+}
+
+function MarkdownLink({ href, children }: { href?: string; children?: ReactNode }) {
   const proxyTarget = parseProxyHref(href);
   const openTarget = useWorkspaceTargetOpener(proxyTarget);
 
@@ -308,7 +318,7 @@ const MD_COMPONENTS: Components = {
 };
 
 function MarkdownInner({ children }: { children: string }) {
-  const annotated = annotateWorkspaceMentions(protectChatMarkdownLists(children));
+  const annotated = annotateDeskRefs(annotateWorkspaceMentions(protectChatMarkdownLists(children)));
   return (
     <div className="sw-md">
       <ReactMarkdown

@@ -204,8 +204,11 @@ span.desk-todo-text { cursor: default; }
 }
 .desk-todo-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px; }
 .desk-todo-meta .r-chip { padding: 1px 7px; font-size: 10.5px; }
-.desk-todo-actions { display: flex; gap: 2px; opacity: 0; transition: opacity 0.15s ease; }
-.desk-todo:hover .desk-todo-actions, .desk-todo:focus-within .desk-todo-actions { opacity: 1; }
+/* Row actions show on hover; Discuss stays faintly visible so it is findable. */
+.desk-todo-actions { display: flex; gap: 2px; }
+.desk-todo-actions > * { opacity: 0; transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease; }
+.desk-todo-actions > .desk-discuss-btn { opacity: 0.55; }
+.desk-todo:hover .desk-todo-actions > *, .desk-todo:focus-within .desk-todo-actions > * { opacity: 1; }
 
 .desk-empty {
   display: flex; align-items: center; gap: 14px; padding: 18px;
@@ -460,12 +463,14 @@ span.desk-todo-text { cursor: default; }
 @keyframes desk-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
 @keyframes desk-drawer-in { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) {
-  .desk-todo, .desk-todo.is-popping, .desk-check, .desk-empty > svg, .desk-drawer, .desk-thread li, .desk-needs-pill { animation: none; }
+  .desk-todo, .desk-todo.is-popping, .desk-todo.is-lit, .desk-check, .desk-empty > svg, .desk-drawer, .desk-thread li, .desk-needs-pill,
+  .desk-chat, .desk-chip, .desk-chat-fab svg { animation: none; }
+  .desk-chat-fab:hover { transform: none; }
 }
 
 /* touch devices have no hover: keep row actions visible */
 @media (hover: none) {
-  .desk-todo-actions { opacity: 1; }
+  .desk-todo-actions > *, .desk-card-head .desk-discuss-btn { opacity: 1; }
   .desk-thread-del { opacity: 0.7; }
   .desk-card:hover, .desk-todo:hover { transform: none; }
 }
@@ -501,4 +506,111 @@ span.desk-todo-text { cursor: default; }
   .desk-drawer-head { padding: calc(12px + env(safe-area-inset-top, 0px)) 14px 10px; }
   .desk-drawer-body { padding: 12px 14px 20px; }
   .desk-drawer-foot { padding: 10px 14px calc(10px + env(safe-area-inset-bottom, 0px)); }
+}
+
+/* ---------- Discuss buttons ---------- */
+.desk-discuss-btn:hover, .desk-discuss-btn:focus-visible { color: var(--r-gold); background: color-mix(in srgb, var(--r-gold) 12%, transparent); }
+.desk-discuss-btn:active svg { transform: scale(0.85); }
+.desk-discuss-btn svg { transition: transform 0.14s ease; }
+.desk-discuss-btn.has-label { padding: 0 10px 0 8px; gap: 6px; font-size: 13px; font-weight: 600; border-color: var(--r-line-gold); color: var(--r-ink); }
+.desk-card-head .desk-discuss-btn { flex: none; min-width: 26px; height: 26px; margin: -3px -4px 0 0; opacity: 0.5; transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease; }
+.desk-card:hover .desk-card-head .desk-discuss-btn, .desk-card-head .desk-discuss-btn:focus-visible { opacity: 1; }
+.desk-table .desk-discuss-btn { min-width: 24px; height: 24px; margin-left: 4px; vertical-align: middle; opacity: 0.5; }
+.desk-table tr:hover .desk-discuss-btn, .desk-table .desk-discuss-btn:focus-visible { opacity: 1; }
+.desk-drawer-head-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.desk-comment-notice { margin: 8px 0 0; font-size: 12px; }
+
+/* A chat pill pointed here: glow once so the eye finds it. */
+.desk-todo.is-lit { animation: desk-lit 2.4s ease-out; }
+@keyframes desk-lit {
+  0%, 30% { box-shadow: 0 0 0 2px var(--r-gold), 0 0 26px color-mix(in srgb, var(--r-gold) 40%, transparent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+/* ---------- Desk chat: the Chief of Staff's thread beside the Desk ---------- */
+.desk-split { --desk-chat-w: clamp(340px, 32vw, 440px); flex: 1; min-height: 0; display: flex; position: relative; }
+.desk-split > .bt-room { flex: 1; min-width: 0; }
+.desk-split .bt-room-wrap { padding-bottom: 96px; }
+/* The card drawer opens beside the chat, not over it. */
+.desk-split.chat-open:not(.is-phone) .desk-drawer-layer { right: var(--desk-chat-w); }
+
+.desk-chat {
+  flex: 0 0 var(--desk-chat-w); width: var(--desk-chat-w); min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; position: relative;
+  border-left: 1px solid var(--r-line-gold);
+  background: linear-gradient(180deg, var(--r-bg-soft), var(--r-bg));
+  animation: desk-chat-in 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.desk-chat::before {
+  content: ''; position: absolute; inset: 0 0 auto; height: 2px; z-index: 1; pointer-events: none;
+  background: linear-gradient(90deg, var(--r-gold), transparent 75%);
+}
+.desk-chat .bt-conv-wrap { flex: 1; min-height: 0; }
+.desk-chat .bt-feed { padding: 12px 14px 16px; }
+.desk-chat .bt-dock { padding: 6px 12px calc(12px + env(safe-area-inset-bottom, 0px)); }
+.desk-chat .bt-empty { padding: 0 24px 6vh; text-align: center; }
+.desk-chat .bt-empty .bt-empty-title { font-size: 16px; }
+.bot-app .desk-chat .rc .m-elrond, .bot-app .desk-chat .rc .m-user { max-width: 94%; }
+.bot-app .desk-chat .rc .m-elrond { padding: 8px 14px; }
+.bot-app .desk-chat .rc .bubble { padding: 8px 14px; font-size: 15px; }
+.bot-app .desk-chat .rc .prose { font-size: 15px; }
+.bot-app .desk-chat .rc .jump { right: 14px; bottom: 110px; }
+.desk-chat .bt-toast { bottom: 120px; }
+
+.desk-chat-head { display: flex; align-items: center; gap: 8px; flex: none; padding: 10px 8px 9px 14px; border-bottom: 1px solid var(--r-line); }
+.desk-chat-head .bt-disc { width: 30px; height: 30px; font-size: 12px; flex: none; transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.desk-chat-head .bt-disc:hover { transform: rotate(-8deg) scale(1.08); }
+.desk-chat-name { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.desk-chat-name strong { font-size: 14px; font-weight: 600; color: var(--r-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desk-chat-name span { font-size: 11px; color: var(--r-ink-faint); }
+
+/* Reference chips in the composer tray (wrap instead of scrolling). */
+.bot-app .rc .composer .attach-tray.has-refs { flex-wrap: wrap; overflow: visible; gap: 6px; padding: 2px 2px 0; }
+.desk-chip {
+  display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; height: 28px;
+  padding: 0 3px 0 9px; border-radius: 999px; font-size: 12.5px; font-weight: 550; color: var(--r-ink);
+  border: 1px solid var(--r-line-gold); background: color-mix(in srgb, var(--r-gold) 13%, var(--r-bg-raised));
+  animation: desk-chip-in 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.desk-chip[data-kind='todo'] { border-color: color-mix(in srgb, var(--r-rose) 42%, transparent); background: color-mix(in srgb, var(--r-rose) 10%, var(--r-bg-raised)); }
+.desk-chip-title { min-width: 0; max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desk-chip-x, .rc .desk-chip-x { display: grid; place-items: center; width: 22px; height: 22px; flex: none; border-radius: 50%; color: var(--r-ink-mute); transition: background 0.14s ease, color 0.14s ease, transform 0.14s ease; }
+.desk-chip-x:hover { background: var(--r-line); color: var(--r-ink); transform: rotate(90deg); }
+@keyframes desk-chip-in { from { opacity: 0; transform: translateY(6px) scale(0.85); } to { opacity: 1; transform: none; } }
+
+/* "Ask <agent>" floater while the chat is closed. */
+.desk-chat-fab {
+  position: absolute; right: 22px; bottom: calc(20px + env(safe-area-inset-bottom, 0px)); z-index: 12;
+  display: inline-flex; align-items: center; gap: 8px; min-height: 46px; padding: 0 18px 0 15px; border-radius: 999px;
+  background: var(--r-gold); color: var(--r-on-accent); font-size: 14px; font-weight: 650;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.18s ease;
+}
+.desk-chat-fab:hover { transform: translateY(-3px) scale(1.04); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.42), 0 0 0 4px color-mix(in srgb, var(--r-gold) 22%, transparent); }
+.desk-chat-fab:active { transform: scale(0.96); }
+.desk-chat-fab:focus-visible { outline: 2px solid var(--r-ink); outline-offset: 3px; }
+.desk-chat-fab svg { animation: desk-bob 3.2s ease-in-out infinite; }
+.desk-chat-fab-count {
+  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; display: inline-grid; place-items: center;
+  background: var(--r-on-accent); color: var(--r-gold); font-size: 11px; font-weight: 700;
+}
+@keyframes desk-chat-in { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
+
+/* Narrow desktop windows: the chat floats over the board instead of squeezing it. */
+@media (max-width: 1180px) {
+  .desk-split:not(.is-phone) .desk-chat { position: absolute; top: 0; right: 0; bottom: 0; z-index: 30; box-shadow: -24px 0 60px rgba(0, 0, 0, 0.45); }
+}
+
+/* Phones: a full-screen sheet that tracks the keyboard like the app does. */
+.desk-chat.is-sheet {
+  position: fixed; left: 0; right: 0; top: var(--bt-viewport-top, 0px); height: var(--bt-viewport-height, 100dvh);
+  width: auto; z-index: 80; border-left: 0; background: var(--r-bg);
+  animation-name: desk-sheet-in;
+}
+.desk-chat.is-sheet .desk-chat-head { padding: calc(8px + env(safe-area-inset-top, 0px)) max(8px, env(safe-area-inset-right, 0px)) 8px max(14px, env(safe-area-inset-left, 0px)); }
+.desk-chat.is-sheet .bt-dock { padding: 4px max(12px, env(safe-area-inset-right, 0px)) max(8px, env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px)); }
+.desk-split.is-phone .desk-chat-fab { right: max(16px, env(safe-area-inset-right, 0px)); bottom: max(16px, env(safe-area-inset-bottom, 0px)); }
+@keyframes desk-sheet-in { from { opacity: 0.4; transform: translateY(40px); } to { opacity: 1; transform: none; } }
+@media (max-width: 760px) {
+  .desk-chip-title { max-width: 58vw; }
 }

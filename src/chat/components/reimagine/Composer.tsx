@@ -49,6 +49,13 @@ export type ComposerProps = {
       empty and idle (the white mic disc). Typing flips it back to send. */
   idleAction?: React.ReactNode;
   onMellon?: (sendRect: DOMRect) => void;
+  /** Reference chips (Desk cards, Needs-you items) shown in the tray above
+      the textarea. They count as content, so a chip alone can be sent; the
+      parent adds their tokens to the outgoing text. */
+  refChips?: React.ReactNode;
+  refCount?: number;
+  /** Backspace in an empty draft: drop the last chip. */
+  onBackspaceEmpty?: () => void;
 };
 
 async function fileToImage(f: File): Promise<PendingImage | null> {
@@ -165,7 +172,8 @@ export function Composer(props: ComposerProps) {
     // though the user had plainly typed a reply.
     const v = (taRef.current?.value ?? props.value).trim();
     const imgs = payload();
-    const hasLiveContent = Boolean(v || imgs?.length);
+    const refs = (props.refCount ?? 0) > 0;
+    const hasLiveContent = Boolean(v || imgs?.length || refs);
     // While the backend still owns a turn, any text OR image is queued guidance.
     // Only an explicit click/tap on an empty red Stop button may cancel.
     // Keyboard Enter with an empty/stale draft is a no-op, never an interrupt.
@@ -184,7 +192,7 @@ export function Composer(props: ComposerProps) {
       }
       return;
     }
-    if (!v && !imgs?.length) return;
+    if (!v && !imgs?.length && !refs) return;
     props.onSend(v, imgs);
     props.onChange('');
     clearImages();
@@ -215,6 +223,11 @@ export function Composer(props: ComposerProps) {
         return;
       }
     }
+    if (e.key === 'Backspace' && props.onBackspaceEmpty && (props.refCount ?? 0) > 0 && !e.currentTarget.value && !e.repeat) {
+      e.preventDefault();
+      props.onBackspaceEmpty();
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       e.preventDefault();
@@ -223,7 +236,8 @@ export function Composer(props: ComposerProps) {
   };
 
   const trimmed = props.value.trim();
-  const hasContent = trimmed.length > 0 || images.length > 0;
+  const refCount = props.refCount ?? 0;
+  const hasContent = trimmed.length > 0 || images.length > 0 || refCount > 0;
   const ready = hasContent && !props.busy;
   // Text and image-only drafts both queue safely. An attached image must never
   // leave the button in destructive Stop mode.
@@ -305,9 +319,10 @@ export function Composer(props: ComposerProps) {
       {props.chatId && <ComputerControl key={props.chatId} chatId={props.chatId} />}
       {props.chatId && <RobotControl />}
       {props.attachMenu}
-      <div className={`composer${images.length > 0 ? ' has-attach' : ''}${dictating ? ' dictating' : ''}`}>
-        {images.length > 0 ? (
-          <div className="attach-tray">
+      <div className={`composer${images.length > 0 || refCount > 0 ? ' has-attach' : ''}${dictating ? ' dictating' : ''}`}>
+        {images.length > 0 || refCount > 0 ? (
+          <div className={`attach-tray${refCount > 0 ? ' has-refs' : ''}`}>
+            {refCount > 0 ? props.refChips : null}
             {images.map((img) => (
               <div key={img.id} className="attach-thumb">
                 <img src={img.previewUrl} alt="attached" />

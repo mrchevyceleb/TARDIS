@@ -8,6 +8,7 @@ import type { ReactNode } from 'react';
 import type { ChatBlock } from '../../data/types';
 import { REACTION_EMOJIS } from '../../data/reactions';
 import { Markdown } from '../primitives/Markdown';
+import { DeskRefText } from '../primitives/DeskRef';
 import { ArtifactCard } from '../blocks/ArtifactCard';
 import { DocLinkCard } from '../blocks/DocLinkCard';
 import { FolderLinkCard } from '../blocks/FolderLinkCard';
@@ -392,7 +393,7 @@ function PeerBubble({
             <span className="bt-peer-turn-label">{block.from}</span>
             {routineResult
               ? <div className="bt-peer-turn-text prose"><Markdown>{text}</Markdown></div>
-              : <div className="bt-peer-turn-text">{text}</div>}
+              : <div className="bt-peer-turn-text"><DeskRefText text={text} /></div>}
           </section>
           {hasResponse ? (
             <section className="bt-peer-turn bt-peer-response">
@@ -550,7 +551,7 @@ function UserBubble({ block }: { block: Extract<ChatBlock, { kind: 'user' }> }) 
             : `${missing} image${missing === 1 ? '' : 's'} attached`}
         </span>
       ) : null}
-      <div className="bubble">{block.text}</div>
+      <div className="bubble"><DeskRefText text={block.text} /></div>
       {block.deliveryState ? (
         <span className={`delivery-state ${block.deliveryState}`} role={block.deliveryState === 'failed' ? 'alert' : 'status'}>
           {block.deliveryState === 'queued' ? 'Queued · will run next' : 'Not delivered'}

@@ -11,6 +11,7 @@ import {
   PRIORITY_RANK,
   ageLabel,
   deskApi,
+  discussOnDesk,
   hoursSince,
   useDeskWrite,
   type DeskCard,
@@ -20,7 +21,7 @@ import {
 } from '../data/desk';
 import { showToast } from '../native/shell';
 import type { Agent } from '../grok/agents';
-import { ActorChip, PRIORITY_LABEL, errorText, priorityClass } from './deskParts';
+import { ActorChip, DiscussButton, PRIORITY_LABEL, errorText, priorityClass } from './deskParts';
 
 type Props = { desk: DeskSnapshot; agents: Agent[]; onOpenCard: (id: string) => void };
 type Layout = 'board' | 'list';
@@ -364,6 +365,7 @@ function BoardCard({
         <button type="button" className="desk-card-title" onClick={onOpen} title={`Open: ${card.title} (${columnTitle(desk, card.column)}, owner ${card.owner.name})`}>
           <strong>{card.title}</strong>
         </button>
+        <DiscussButton subject={card.title} onClick={() => discussOnDesk({ kind: 'card', id: card.id, title: card.title })} />
       </div>
       <div className="desk-card-meta">
         <ActorChip actor={card.owner} />
@@ -471,6 +473,7 @@ function CardList({
                         <span className={`priority-dot ${priorityClass(card.priority)}`} aria-hidden="true" />
                         <button type="button" className="desk-table-title" onClick={() => onOpen(card.id)}>{card.title}</button>
                         {needsYou.get(card.id) ? <span className="desk-needs-pill">needs you</span> : null}
+                        <DiscussButton subject={card.title} onClick={() => discussOnDesk({ kind: 'card', id: card.id, title: card.title })} />
                       </td>
                       <td><ActorChip actor={card.owner} /></td>
                       <td className="desk-hide-sm">{card.project ?? ''}</td>

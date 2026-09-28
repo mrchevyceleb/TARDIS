@@ -19,7 +19,7 @@ import { CLAUDE_EFFORTS, normalizeClaudeModel } from '../chat/components/CodexEn
 import { useChatShell } from '../chat/components/reimagine/useChatShell';
 import { companionAgentLabel } from '../shell/studio/ChatTab';
 import type { CompanionId, Repo } from '../chat/data/types';
-import { GrokConversation } from './GrokConversation';
+import { GrokConversation, type ConversationDock } from './GrokConversation';
 import type { ChatMeta } from './BotPanel';
 import type { Agent } from './agents';
 import { markAgentRead, updateAgentReq } from './agents';
@@ -65,6 +65,8 @@ export type GrokChatProps = {
   onOpenAgentEditor: () => void;
   onAgentBrainSaved: () => void;
   onMeta: (meta: ChatMeta) => void;
+  /** Docked beside a room instead of filling the center pane. */
+  dock?: ConversationDock;
 };
 
 export function GrokChat(props: GrokChatProps) {
@@ -154,8 +156,11 @@ export function GrokChat(props: GrokChatProps) {
     props.onAgentBrainSaved();
   }, [chat.serverBrain, picker.applyAuthoritativeBrain, props.agent, props.onAgentBrainSaved]);
 
-  // Esc stops a streaming turn.
+  // Esc stops a streaming turn. Not when docked: there Escape belongs to the
+  // room (closing a card), and only an explicit Stop may end a turn.
+  const docked = Boolean(props.dock);
   useEffect(() => {
+    if (docked) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && chat.status === 'streaming') {
         const target = e.target as HTMLElement | null;
@@ -165,7 +170,7 @@ export function GrokChat(props: GrokChatProps) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [chat.status, chat.stop]);
+  }, [chat.status, chat.stop, docked]);
 
   const agentId = props.agent?.id;
   const persistGen = useRef(0);
@@ -305,6 +310,7 @@ export function GrokChat(props: GrokChatProps) {
       onToggleTheme={props.onToggleTheme}
       onOpenStudio={props.onOpenStudio}
       onOpenAgentEditor={props.onOpenAgentEditor}
+      dock={props.dock}
     />
   );
 }

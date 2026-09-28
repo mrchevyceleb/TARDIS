@@ -1,6 +1,8 @@
 // Small shared pieces for the Desk room (Needs you + Board + card drawer).
 
 import { useQuery } from '@tanstack/react-query';
+import { createContext, useContext } from 'react';
+import { MessageCircle } from 'lucide-react';
 import { apiJson } from '../data/api';
 import type { DeskActor, DeskPriority } from '../data/desk';
 import { agentColor, DISC_INK, type Agent } from '../grok/agents';
@@ -66,4 +68,27 @@ export function errorText(error: unknown): string {
     if (parsed?.error) return parsed.error;
   } catch { /* plain text */ }
   return raw.slice(0, 200);
+}
+
+/** Opens the Desk chat with this card or item as a reference chip. */
+export function DiscussButton({ onClick, subject, label }: { onClick: () => void; subject: string; label?: string }) {
+  return (
+    <button
+      type="button"
+      className={`desk-icon-btn desk-discuss-btn${label ? ' has-label' : ''}`}
+      onClick={(event) => { event.stopPropagation(); onClick(); }}
+      aria-label={`Discuss ${subject} in chat`}
+      title="Discuss in chat"
+    >
+      <MessageCircle size={14} aria-hidden="true" />
+      {label ? <span>{label}</span> : null}
+    </button>
+  );
+}
+
+/** True while the Desk chat is open beside the room. The card drawer stops
+ *  acting as a modal then, so the chat stays usable. */
+export const DeskChatOpenContext = createContext(false);
+export function useDeskChatOpen(): boolean {
+  return useContext(DeskChatOpenContext);
 }

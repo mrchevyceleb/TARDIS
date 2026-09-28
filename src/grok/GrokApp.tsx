@@ -39,7 +39,8 @@ import { OPEN_PANE_EVENT } from './messagePins';
 
 import { Council } from '../rooms/Council';
 import { Desk } from '../rooms/Desk';
-import { OPEN_AGENT_EVENT, useDeskSummary } from '../data/desk';
+import { DeskChatDock, DeskChatOpenContext, useDeskChat } from '../rooms/DeskChat';
+import { DESK_FOCUS_EVENT, OPEN_AGENT_EVENT, useDeskSummary } from '../data/desk';
 import { ContentHome as Content } from '../rooms/ContentHome';
 import { useDeploymentFlags } from '../data/deploymentFlags';
 import { Integrations } from '../rooms/Integrations';
@@ -332,6 +333,20 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   const deskSummary = useDeskSummary(flags.deskRoom);
   const needsYou = deskSummary.data?.openTodos ?? 0;
 
+  // The Desk chat is the Chief of Staff's own thread, docked beside the Desk.
+  const deskChat = useDeskChat(isMobile);
+  const deskAgent = agents.find((a) => a.id === 'chief-of-staff') ?? agents[0];
+  // A Desk pill clicked anywhere (Chat, or the Desk chat itself) opens the
+  // Desk; the room picks up which card or item to show.
+  useEffect(() => {
+    if (!flags.deskRoom) return;
+    const onFocus = () => {
+      if (view.kind !== 'room' || view.key !== 'desk') openRoom('desk');
+    };
+    window.addEventListener(DESK_FOCUS_EVENT, onFocus);
+    return () => window.removeEventListener(DESK_FOCUS_EVENT, onFocus);
+  }, [flags.deskRoom, view, openRoom]);
+
   const openStudio = useCallback(() => { window.location.assign('/studio'); }, []);
   const onMeta = useCallback((m: ChatMeta) => setMeta(m), []);
 
@@ -459,6 +474,32 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
               onOpenStudio={openStudio}
               onMeta={onMeta}
             />
+          ) : RoomView && activeRoom === 'desk' ? (
+            <DeskChatOpenContext.Provider value={deskChat.open && Boolean(deskAgent && hubRepo)}>
+              <div className={`desk-split${deskChat.open && deskAgent && hubRepo ? ' chat-open' : ''}${isMobile ? ' is-phone' : ''}`}>
+                <div className="bt-room r-scroll" key={activeRoom}>
+                  <div className="bt-room-wrap bt-fade">
+                    <RoomView />
+                  </div>
+                </div>
+                {deskAgent && hubRepo ? (
+                  <DeskChatDock
+                    state={deskChat}
+                    agent={deskAgent}
+                    repo={hubRepo}
+                    isMobile={isMobile}
+                    theme={theme}
+                    onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+                    onOpenStudio={openStudio}
+                    onOpenInChat={() => openAgent(deskAgent)}
+                    onEditAgent={() => { setEditTarget(deskAgent); setEditorOpen(true); }}
+                    onAgentBrainSaved={reloadAgents}
+                    onVoice={() => setCallAgent(deskAgent)}
+                    voiceActive={jarvis.wakeActive}
+                  />
+                ) : null}
+              </div>
+            </DeskChatOpenContext.Provider>
           ) : RoomView ? (
             <div className="bt-room r-scroll" key={activeRoom}>
               <div className="bt-room-wrap bt-fade">
