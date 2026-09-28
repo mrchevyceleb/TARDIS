@@ -67,6 +67,8 @@ export type GrokChatProps = {
   onMeta: (meta: ChatMeta) => void;
   /** Docked beside a room instead of filling the center pane. */
   dock?: ConversationDock;
+  /** The repo list is still loading, so there is no lane to connect to yet. */
+  reposLoading?: boolean;
 };
 
 export function GrokChat(props: GrokChatProps) {
@@ -297,7 +299,8 @@ export function GrokChat(props: GrokChatProps) {
 
   return (
     <GrokConversation
-      s={s}
+      // No repo yet on first load: catching up, not an empty conversation.
+      s={!repo && props.reposLoading ? { ...s, hydrating: true } : s}
       picker={pickerForUi}
       repo={repo}
       agent={agentLabel}

@@ -103,7 +103,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   const overlayPane = useMediaQuery('(max-width: 1180px)');
   const appRef = useRef<HTMLDivElement>(null);
   useMobileViewport(appRef);
-  const { repos } = useRepos();
+  const { repos, status: reposStatus } = useRepos();
   const history = useChatHistory();
   const { agents, reload: reloadAgents } = useAgents();
 
@@ -465,6 +465,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
               lane={view.lane}
               agent={agent}
               repo={chatRepo}
+              reposLoading={reposStatus === 'loading'}
               paneOpen={paneOpen}
               onTogglePane={() => setPaneOpen((o) => !o)}
               onOpenAgentEditor={() => { setEditTarget(agent); setEditorOpen(true); }}

@@ -47,6 +47,19 @@ export type BotConversationProps = ShellViewProps & {
   onOpenAgentEditor: () => void;
 };
 
+/** Placeholder while a switched-to chat waits for the server's replay, so the
+ *  pane is never blank and never shows the stale saved copy. It fades in late,
+ *  so a fast switch goes straight to the real thread without a flicker. */
+function ThreadCatchingUp() {
+  return (
+    <div className="bt-catchup" aria-hidden="true">
+      <span className="bt-catchup-line" />
+      <span className="bt-catchup-line is-self" />
+      <span className="bt-catchup-line is-long" />
+    </div>
+  );
+}
+
 export function GrokConversation(props: BotConversationProps) {
   const { s, picker } = props;
   const isMobile = useMediaQuery('(max-width: 760px), (pointer: coarse) and (max-width: 1180px)');
@@ -227,6 +240,7 @@ export function GrokConversation(props: BotConversationProps) {
       ) : (
         <main className="bt-feed" ref={s.sticky.scrollRef} onScroll={s.sticky.onScroll}>
           <div className="bt-feed-inner">
+            {s.hydrating ? <ThreadCatchingUp /> : null}
             <ChatThread
               mobile={isMobile}
               blocks={s.hydrating ? [] : s.blocks}

@@ -354,6 +354,17 @@
 .bt-empty .bt-empty-title { font-family: var(--r-display); font-size: 18px; font-weight: 500; color: var(--r-ink-soft); }
 .bt-empty svg { color: var(--r-tardis-lit); }
 
+/* catching up: a switched-to chat waiting on the server's replay */
+.bt-catchup { display: flex; flex-direction: column; gap: 14px; padding-top: 6px; animation: bt-fade 0.24s ease-out 0.12s both; }
+.bt-catchup-line {
+  display: block; width: 46%; height: 38px; border-radius: 14px; opacity: 0.6;
+  background: linear-gradient(90deg, var(--r-line) 0%, var(--r-line-strong) 50%, var(--r-line) 100%);
+  background-size: 200% 100%;
+  animation: bt-shimmer 1.6s linear infinite;
+}
+.bt-catchup-line.is-self { align-self: flex-end; width: 32%; }
+.bt-catchup-line.is-long { width: 62%; height: 64px; }
+
 /* the `.rc` kit, re-anatomied for bubbles-in-cards */
 .bot-app .rc { position: static; display: flex; flex-direction: column; }
 .bot-app .rc .sky { display: none; }

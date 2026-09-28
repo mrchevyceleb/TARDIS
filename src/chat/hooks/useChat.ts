@@ -8,9 +8,17 @@ import { onPresenceChange, userPresent } from '../utils/userPresence';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'streaming' | 'closed' | 'error';
 
-/** Longest an agent switch waits for server history before falling back to
- *  the cached thread. Past this a blank pane reads as broken. */
-const HYDRATION_CAP_MS = 300;
+/** Longest a chat switch waits for the server's replay before showing the
+ *  saved copy instead. The saved copy is only written while a chat is open, so
+ *  it is always behind; showing it is a last resort, not a head start. Moria
+ *  answers most hellos in ~300ms and a cold lane in ~1s, so 300ms (the old
+ *  cap) let four switches in ten paint stale history and then jump. A closed
+ *  or failed socket falls back immediately rather than waiting this out. */
+const HYDRATION_FALLBACK_MS = 2500;
+/** With no saved copy there is nothing stale to show, so a slow replay keeps
+ *  the placeholder longer (a cold lane has taken 5.5s), but never forever:
+ *  a socket that neither answers nor closes still ends in the usual view. */
+const HYDRATION_EMPTY_FALLBACK_MS = 8000;
 type ChatSendImage = { mediaType: string; base64: string; previewDataUrl?: string };
 
 export type ServerBrainState = {
@@ -924,11 +932,24 @@ export function useChat(opts: {
    * that preceding turnEnd until the server accepts/rejects every queued steer.
    * A Set, not a single id: stacked mid-turn messages must all stay queued. */
   const queuedSteerRef = useRef<Set<string>>(new Set());
+  /** True from a chat switch until the server's replay has landed. The
+   *  cached snapshot is loaded underneath, but the transcript hides it while
+   *  this is set so a stale thread is never shown and then corrected. Starts
+   *  true: every switch remounts this hook, and a false first render would
+   *  paint the stale cache for a frame before the connect effect runs. Ends on
+   *  `ready`, on a closed socket or failed hello, or after the fallback
+   *  timer. A new chat opened with a message has no history to hide, so it
+   *  never hydrates. */
+  const [hydrating, setHydrating] = useState(() => Boolean(enabled && repo && !initialMessage));
   // `chatId` already carries `__acct__<account>` when the lane is pinned.
   const restoreKey = enabled && repo ? conversationKey(cli, repo.path, chatId) : '';
   const restoreKeyRef = useRef(restoreKey);
   if (restoreKeyRef.current !== restoreKey) {
     restoreKeyRef.current = restoreKey;
+    // Same instance, different lane: hide the other lane's cache from this
+    // render on, not from the effect's commit one frame later. A lane with
+    // no connection to wait for never hydrates.
+    setHydrating(Boolean(restoreKey));
     const snapshot = enabled && repo ? readStoredSnapshot(cli, repo.path, chatId) : null;
     const restored = restoreBlocksWithUniqueIds(snapshot?.blocks ?? []);
     queuedSteerRef.current = new Set(
@@ -950,12 +971,6 @@ export function useChat(opts: {
   statusRef.current = status;
   const [error, setError] = useState<string | null>(null);
   const [serverBrain, setServerBrain] = useState<ServerBrainState | null>(null);
-  /** True from an agent switch until the server's replay has landed. The
-   *  cached snapshot is painted underneath, but the transcript hides it while
-   *  this is set so a stale thread is never shown and then corrected. Capped
-   *  by a timer so a slow or unreachable server still shows the cache rather
-   *  than an indefinite skeleton. */
-  const [hydrating, setHydrating] = useState(false);
   const [usage, setUsage] = useState<ContextUsage | null>(null);
   // Window size for the active CLI. Seeded from the per-CLI default and
   // refined by the `system/init` event (claude) or by the safety ratchet
@@ -1236,6 +1251,8 @@ export function useChat(opts: {
       if (prev.some((block) => block.kind === 'user' && block.clientMsgId === clientMsgId)) return prev;
       return [...prev, { kind: 'user', id: id(), text: initialMessage, clientMsgId, ts: Date.now() }];
     });
+    // A new chat opened with a message has no stale history to hide.
+    setHydrating(false);
     pendingSendRef.current = true;
     markTurnStarted(Date.now(), true);
     setError(null);
@@ -1278,8 +1295,20 @@ export function useChat(opts: {
       backgroundStartedRef.current = new Map();
       setBackgroundWork([]);
     }
-    setHydrating(true);
-    const hydrationCap = setTimeout(() => setHydrating(false), HYDRATION_CAP_MS);
+    // Wait for the server's replay, not a fixed short cap. The saved copy is
+    // shown only if the server cannot answer: a closed socket or the fallback
+    // timer armed below. The initial-message effect above has already run for
+    // this commit; its chat is new and its first message must show at once.
+    let hydrationPending = !initialSendInFlightRef.current;
+    let hydrationFallback: ReturnType<typeof setTimeout> | null = null;
+    setHydrating(hydrationPending);
+    const endHydration = () => {
+      if (!hydrationPending) return;
+      hydrationPending = false;
+      if (hydrationFallback !== null) clearTimeout(hydrationFallback);
+      hydrationFallback = null;
+      setHydrating(false);
+    };
     // Restore prior blocks from localStorage so a page reload doesn't wipe
     // the chat. Server replay then fills in events newer than what we have.
     const snapshot = readStoredSnapshot(cli, repo.path, chatId);
@@ -1323,6 +1352,14 @@ export function useChat(opts: {
       ]
       : stored;
     setBlocks(restored);
+    // Nothing saved means nothing to fall back to: a slow replay keeps the
+    // catching-up placeholder longer rather than claiming an empty thread.
+    if (hydrationPending) {
+      hydrationFallback = setTimeout(
+        endHydration,
+        restored.length > 0 ? HYDRATION_FALLBACK_MS : HYDRATION_EMPTY_FALLBACK_MS,
+      );
+    }
     queuedSteerRef.current = new Set(
       restored.flatMap((block) => (
         block.kind === 'user' && block.deliveryState === 'queued' && block.clientMsgId
@@ -1439,8 +1476,7 @@ export function useChat(opts: {
           socketReady = true;
           // `ready` is sent after the replay on both the warm and cold paths,
           // so the visible thread is now server truth, not the cache.
-          clearTimeout(hydrationCap);
-          setHydrating(false);
+          endHydration();
           if (typeof msg.resetAt === 'number' && Number.isFinite(msg.resetAt)) {
             cacheResetAtRef.current = Math.max(cacheResetAtRef.current, msg.resetAt);
           }
@@ -1847,6 +1883,11 @@ export function useChat(opts: {
         else if (msg.type === 'error') {
           const handshakePending = msg.code === 'HANDSHAKE_PENDING'
             || msg.message === 'no session - send hello first';
+          // A hello that failed server-side answers with a live (unsequenced)
+          // error and no `ready`, on a socket that stays open. No replay is
+          // coming. A replayed historical error carries its seq; the replay
+          // is still in progress, so keep waiting for `ready`.
+          if (!socketReady && !handshakePending && typeof msg.seq !== 'number') endHydration();
           if (handshakePending) {
             // Engine switches can leave an OPEN socket a few milliseconds ahead
             // of its hello/replay. Keep the unacknowledged outbound item, hide
@@ -1921,6 +1962,9 @@ export function useChat(opts: {
         // Only the socket currently owned by wsRef drives reconnects. An
         // orphan closing later must not open yet another connection.
         if (wsRef.current && wsRef.current !== ws) return;
+        // No replay is coming on this socket. Show the saved copy (with the
+        // reconnecting marker) rather than a skeleton through the backoff.
+        endHydration();
         // Queued guidance is owned by the server after acceptance and survives
         // this transport. Do not falsely mark it canceled when a phone sleeps
         // or the user visits another teammate.
@@ -2118,7 +2162,8 @@ export function useChat(opts: {
 
     return () => {
       teardownRef.current = true;
-      clearTimeout(hydrationCap);
+      hydrationPending = false;
+      if (hydrationFallback !== null) clearTimeout(hydrationFallback);
       socketReadyRef.current = false;
       sentOutboundRef.current = null;
       queuedSteerRef.current = new Set();
@@ -2159,6 +2204,9 @@ export function useChat(opts: {
       ...prev,
       { kind: 'user', id: id(), text, images: imagePreviews(images), imageCount: images?.length, clientMsgId, ts: Date.now() },
     ]);
+    // Someone typing into a chat that is still catching up must see their
+    // own message land, even if that means showing the saved copy early.
+    setHydrating(false);
     const key = conversationKey(cli, repo.path, chatId);
     const inFlight = pendingSendRef.current || statusRef.current === 'streaming';
     enqueueOutbound(key, { text, images, clientMsgId });
