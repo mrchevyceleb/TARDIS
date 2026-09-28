@@ -66,8 +66,27 @@ test('a steering window the caller cannot admit is not a boundary', async () => 
     logKey: 'thread|workspace|bot-kip',
   };
 
-  assert.equal(await waitForDeliveryBoundary(session, 40, undefined, () => false), 'timeout');
-  assert.equal(await waitForDeliveryBoundary(session, 40, undefined, () => true), 'steerable');
+  // The timeout path arms only an UNREF'd timer (production: a 30-minute
+  // admission wait must never hold the server open). Under node 22 (CI's pin)
+  // a test process whose event loop otherwise drains cancels the pending
+  // test with "Promise resolution is still pending but the event loop has
+  // already resolved" and the rest of this file's queued tests with it, so
+  // the first timeout await below cancelled tests 49-51 on every CI run.
+  // A REF'd watchdog both holds the loop for the duration of the wait (so
+  // this test owns its own liveness instead of borrowing ambient handles
+  // from earlier tests) and fails loudly if a regression ever makes the wait
+  // stop settling, instead of hanging into another cancelled-by-parent
+  // cascade.
+  let watchdog: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    watchdog = setTimeout(() => reject(new Error('the boundary wait never settled (5s watchdog)')), 5_000);
+  });
+  try {
+    assert.equal(await Promise.race([waitForDeliveryBoundary(session, 40, undefined, () => false), deadline]), 'timeout');
+    assert.equal(await Promise.race([waitForDeliveryBoundary(session, 40, undefined, () => true), deadline]), 'steerable');
+  } finally {
+    clearTimeout(watchdog);
+  }
 });
 
 test('team availability reports process truth separately from queued work', () => {
