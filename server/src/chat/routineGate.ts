@@ -254,8 +254,11 @@ export function nextSourceState(source: GateSource, judged: GateItem[], all: Gat
     // A timestamp watermark covers everything up to the newest item. Holding
     // one item open means the mark stops at the newest item we actually
     // settled, so the held one (and anything after it) comes back next tick.
-    const open = held && [...held].some((it) => it.source === source.id);
-    const pool = open ? judged.filter((it) => !held!.has(it)) : all;
+    const heldTs = held ? [...held].filter((it) => it.source === source.id).map((it) => it.ts).filter((t): t is string => Boolean(t)).sort() : [];
+    const open = heldTs.length > 0;
+    // Stop strictly below the oldest held item, so it and everything after it
+    // is fetched again even when a newer item already settled.
+    const pool = open ? judged.filter((it) => !held!.has(it) && it.ts !== undefined && it.ts < heldTs[0]) : all;
     const newest = pool.map((i) => i.ts).filter((t): t is string => Boolean(t)).sort().at(-1);
     const hw = prior?.tsHighWater;
     return { tsHighWater: newest && (!hw || newest > hw) ? newest : hw ?? new Date().toISOString() };
@@ -409,7 +412,8 @@ export async function runRoutineGate(routineId: string, config: RoutineGateConfi
     // tick. Holding delivered wake items froze ts watermarks for sources where
     // every item wakes: the comms sweep re-listed five days of Slack every
     // five minutes (Sep 28 2026) and buried the new messages.
-    const held = new Set(items.filter((it) => shouldReconsider(it, config, decision.scores.get(it) ?? {})));
+    const woke = new Set(decision.wake);
+    const held = new Set(items.filter((it) => !woke.has(it) && shouldReconsider(it, config, decision.scores.get(it) ?? {})));
     for (const f of fetched) {
       const settled = f.fresh.filter((it) => !held.has(it));
       next[f.source.id] = nextSourceState(f.source, settled, f.all, next[f.source.id], held);
