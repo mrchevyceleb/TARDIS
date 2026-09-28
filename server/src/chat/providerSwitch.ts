@@ -159,6 +159,22 @@ const BACKGROUND_HOLD_MS = 6 * 60 * 60_000;
 /** A retired child gets SIGKILL after 3s; this only bounds a missing exit. */
 const EXIT_WAIT_MS = 15_000;
 
+/** A failure notice waits this long for a busy lane's turn to end. */
+const NOTICE_IDLE_WAIT_MS = 30 * 60_000;
+
+function waitForTurnEnd(session: ContinuableSession, timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    let unsubscribe: () => void = () => {};
+    const done = () => { clearTimeout(timer); unsubscribe(); resolve(); };
+    const timer = setTimeout(done, timeoutMs);
+    timer.unref?.();
+    unsubscribe = session.subscribe((se) => {
+      if (se.ev?.type === 'turnEnd' || se.ev?.type === 'closed') done();
+    }, -1, false);
+    if (!session.isBusy()) done();
+  });
+}
+
 /** Queue the one automatic continue for a cut turn. A second cut on the same
  *  thread before it runs (a kept child waking and failing again) folds in. */
 export function scheduleProviderContinue(request: ProviderContinueRequest): void {
@@ -318,22 +334,28 @@ async function runJob(job: Job): Promise<void> {
       return;
     }
     const id = randomUUID();
-    let admitted = false;
+    let echoed = false;
+    let accepted = false;
     const unsubscribe = session.subscribe((se) => {
-      const outer = se.ev as { type?: string; event?: { type?: string; id?: string } };
-      if (outer?.type === 'event' && outer.event?.type === PROVIDER_CONTINUE_EVENT && outer.event.id === id) admitted = true;
+      const outer = se.ev as { type?: string; event?: { type?: string; id?: string; deliveryId?: string } };
+      if (outer?.type !== 'event') return;
+      if (outer.event?.type === PROVIDER_CONTINUE_EVENT && outer.event.id === id) echoed = true;
+      // Both runners emit this only once the prompt really reached the
+      // provider (stdin write / RPC accepted), same as a teammate delivery.
+      if (outer.event?.type === 'peer_delivery_accepted' && outer.event.deliveryId === id) accepted = true;
     }, session.latestSeq(), false);
     try {
       await session.send(PROVIDER_CONTINUE_PROMPT, undefined, {
         providerContinue: { id, origin: job.origin, cut: job.cut },
+        peerDeliveryId: id,
       });
     } finally {
       unsubscribe();
     }
-    if (admitted || job.cancelled) return;
-    // The lane went busy between the check and the write: that turn carries
-    // the cut guidance, so nothing is lost.
-    if (session.isBusy()) return;
+    if (accepted || job.cancelled) return;
+    // Never opened: the lane went busy between the check and the write, and
+    // that turn carries the cut guidance, so nothing is lost.
+    if (!echoed && session.isBusy()) return;
     await stopJob(job, `GLM could not continue on ${label}. Send again to continue.`, `GLM could not continue on ${label} after the switch`);
   } catch (err) {
     if (job.cancelled) return;
@@ -353,10 +375,16 @@ async function stopJob(job: Job, message: string, reason: string): Promise<void>
  *  Written through the live session when there is one (it owns the seq
  *  allocator for its thread), straight to the log otherwise. */
 async function postProviderCutNotice(job: Job, message: string): Promise<void> {
-  const event = providerCutNoticeEvent(message, job.cut, { unread: true });
   try {
     const runner = await import('./runner.ts');
-    const live = runner.liveLaneSession(job.logKey);
+    let live = runner.liveLaneSession(job.logKey);
+    // Never drop a failure notice into the middle of someone else's turn: the
+    // UI and the team bus would read it as that turn failing.
+    if (live?.isBusy()) {
+      await waitForTurnEnd(live, NOTICE_IDLE_WAIT_MS);
+      live = runner.liveLaneSession(job.logKey);
+    }
+    const event = providerCutNoticeEvent(message, job.cut, { unread: true });
     if (live?.postNotice(event)) return;
     const persisted = { seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event' as const, event }, eng: job.cli, mdl: job.model };
     const saved = appendEventLogDurable(job.logKey, persisted);
