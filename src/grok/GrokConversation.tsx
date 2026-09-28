@@ -17,7 +17,7 @@ import { Composer, AttachButton } from '../chat/components/reimagine/Composer';
 import { CounselPopover, ModelChip } from '../chat/components/reimagine/CounselPicker';
 import { Plus } from '../chat/components/reimagine/icons';
 import { BotMark } from './GrokLogo';
-import { agentMark, DISC_INK, agentColor, agentAvatarUrl, type Agent } from './agents';
+import { agentMark, DISC_INK, agentColor, agentAvatarUrl, chatColorOf, type Agent } from './agents';
 import { useAgentMessagePins } from './messagePins';
 import { BRAND, THINKING_PHRASES, composerPlaceholders } from '../theme/voice';
 import { useMediaQuery } from '../chat/hooks/useMediaQuery';
@@ -166,7 +166,7 @@ export function GrokConversation(props: BotConversationProps) {
     <div className={`rc rc-desktop bt-conv-wrap bt-fade${dock ? ' is-docked' : ''}`}>
       {dock ? dock.header : <div className="bt-head">
         <div className="bt-head-agent" title={agent ? `${agent.name} — ${agent.role}` : agentName}>
-          <span className="bt-disc" style={agent ? { color: DISC_INK, background: agentColor(agent.name) } : undefined}>{agent && agentAvatarUrl(agent) ? <img className="bt-disc-img" src={agentAvatarUrl(agent) ?? undefined} alt={agent.name} /> : agentMark(agent, agentName.slice(0, 1))}</span>
+          <span className="bt-disc" data-chat-color={chatColorOf(agent)} style={agent ? { color: DISC_INK, background: agentColor(agent.name) } : undefined}>{agent && agentAvatarUrl(agent) ? <img className="bt-disc-img" src={agentAvatarUrl(agent) ?? undefined} alt={agent.name} /> : agentMark(agent, agentName.slice(0, 1))}</span>
           <span className="bt-head-name">{agentName}</span>
         </div>
         <div className="bt-head-actions">

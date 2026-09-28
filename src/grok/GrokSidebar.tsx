@@ -17,6 +17,7 @@ import {
   Activity,
   Bell,
   BellOff,
+  Check,
   PanelLeftClose,
   Pencil,
   AppWindow,
@@ -42,7 +43,7 @@ import {
   X,
 } from 'lucide-react';
 import { BotMark } from './GrokLogo';
-import { agentMark, DISC_INK, agentColor, agentAvatarUrl, sameChatId, type Agent } from './agents';
+import { agentMark, DISC_INK, agentColor, agentAvatarUrl, sameChatId, CHAT_COLORS, chatColorOf, type Agent, type AgentFlagPatch, type ChatColor } from './agents';
 import { useLive } from '../chat/hooks/useLive';
 import type { HistoryItem } from './history';
 import { NativeOpenHelper } from '../components/NativeOpenHelper';
@@ -91,7 +92,7 @@ export type BotRailProps = {
   onOpenChat: (item: HistoryItem) => void;
   onOpenAgent: (a: Agent) => void;
   onEditAgent: (a: Agent) => void;
-  onPatchAgent: (a: Agent, patch: { muted?: boolean; pinned?: boolean }) => void;
+  onPatchAgent: (a: Agent, patch: AgentFlagPatch) => void;
   onNewAgent: () => void;
   activeRoom?: string;
   onOpenRoom: (key: string) => void;
@@ -106,7 +107,7 @@ export type BotRailProps = {
 
 type AgentMenuState = { x: number; y: number; id: string; restore: HTMLElement | null };
 
-function clampMenu(x: number, y: number, w = 240, h = 160): { x: number; y: number } {
+function clampMenu(x: number, y: number, w = 256, h = 220): { x: number; y: number } {
   return {
     x: Math.max(8, Math.min(x, window.innerWidth - w - 8)),
     y: Math.max(8, Math.min(y, window.innerHeight - h - 8)),
@@ -114,31 +115,65 @@ function clampMenu(x: number, y: number, w = 240, h = 160): { x: number; y: numb
 }
 
 function menuItems(root: HTMLElement | null): HTMLButtonElement[] {
-  return root ? [...root.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')] : [];
+  return root ? [...root.querySelectorAll<HTMLButtonElement>('[role="menuitem"], [role="menuitemradio"]')] : [];
 }
+
+function swatchItems(root: HTMLElement | null): HTMLButtonElement[] {
+  return menuItems(root).filter((b) => b.dataset.swatch !== undefined);
+}
+
+/** Up/Down stops: every row, with the swatch strip counted once (its
+ *  checked swatch). Left/Right move along the strip itself. */
+function menuStops(root: HTMLElement | null): HTMLButtonElement[] {
+  const swatches = swatchItems(root);
+  const lead = swatches.find((b) => b.getAttribute('aria-checked') === 'true') ?? swatches[0];
+  return menuItems(root).filter((b) => b.dataset.swatch === undefined || b === lead);
+}
+
+/** ", red label" for tooltips and screen readers; empty when uncolored. */
+function colorLabel(a: Agent): string {
+  const key = chatColorOf(a);
+  const label = key ? CHAT_COLORS.find((c) => c.key === key)?.label : undefined;
+  return label ? `, ${label.toLowerCase()} label` : '';
+}
+
+/** Touch has no right-click, so holding a row this long opens the same menu. */
+const LONG_PRESS_MS = 450;
+const LONG_PRESS_SLOP = 10;
 
 function AgentContextMenu({
   menu,
   agent,
   onMute,
   onPin,
+  onColor,
   onEdit,
   onClose,
+  swallowPressRelease,
 }: {
   menu: AgentMenuState;
   agent: Agent;
   onMute: (a: Agent) => void;
   onPin: (a: Agent) => void;
+  onColor: (a: Agent, color: ChatColor | null) => void;
   onEdit: (a: Agent) => void;
   onClose: () => void;
+  /** True when this click is the finger lifting from the long-press that
+   *  opened the menu (it can land on an item under the finger). */
+  swallowPressRelease: (e: MouseEvent) => boolean;
 }) {
+  const current = chatColorOf(agent);
+  const pickColor = (color: ChatColor | null) => {
+    if ((color ?? undefined) !== current) onColor(agent, color);
+    onClose();
+  };
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const node = ref.current;
     if (node) {
-      const box = node.getBoundingClientRect();
-      const left = Math.max(8, Math.min(menu.x, window.innerWidth - box.width - 8));
-      const top = Math.max(8, Math.min(menu.y, window.innerHeight - box.height - 8));
+      // Layout size, not getBoundingClientRect: the open animation scales the box.
+      const left = Math.max(8, Math.min(menu.x, window.innerWidth - node.offsetWidth - 8));
+      const top = Math.max(8, Math.min(menu.y, window.innerHeight - node.offsetHeight - 8));
       if (left !== menu.x) node.style.left = `${left}px`;
       if (top !== menu.y) node.style.top = `${top}px`;
       menuItems(node)[0]?.focus();
@@ -167,9 +202,20 @@ function AgentContextMenu({
   }, [onClose, menu.x, menu.y, menu.restore]);
 
   const onMenuKey = (e: ReactKeyEvent<HTMLDivElement>) => {
-    const items = menuItems(ref.current);
+    const focused = document.activeElement as HTMLButtonElement;
+    const swatches = swatchItems(ref.current);
+    const onSwatch = swatches.includes(focused);
+    if (onSwatch && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      e.preventDefault();
+      e.stopPropagation();
+      const step = e.key === 'ArrowRight' ? 1 : -1;
+      swatches[(swatches.indexOf(focused) + step + swatches.length) % swatches.length]?.focus();
+      return;
+    }
+    const items = menuStops(ref.current);
     if (!items.length) return;
-    const i = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement));
+    const at = onSwatch ? items.findIndex((b) => b.dataset.swatch !== undefined) : items.indexOf(focused);
+    const i = Math.max(0, at);
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End' || e.key === 'Tab') {
       e.preventDefault();
       e.stopPropagation();
@@ -189,6 +235,11 @@ function AgentContextMenu({
       role="menu"
       aria-label={`${agent.name} actions`}
       onContextMenu={(e) => e.preventDefault()}
+      onClickCapture={(e) => {
+        if (!swallowPressRelease(e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+      }}
       onKeyDown={onMenuKey}
     >
       <button type="button" role="menuitem" className="bt-plug-row" onClick={() => { onMute(agent); onClose(); }}>
@@ -203,6 +254,38 @@ function AgentContextMenu({
         <Pencil size={16} />
         Edit
       </button>
+      <div className="bt-ctx-sep" role="separator" />
+      <div className="bt-ctx-colors" role="group" aria-label="Color label">
+        <span className="bt-ctx-colors-h" aria-hidden="true">Color</span>
+        <div className="bt-ctx-swatches">
+          {CHAT_COLORS.map((c) => (
+            <button
+              key={c.key}
+              type="button"
+              role="menuitemradio"
+              aria-checked={current === c.key}
+              aria-label={c.label}
+              title={c.label}
+              className="bt-swatch"
+              data-swatch=""
+              data-chat-color={c.key}
+              onClick={() => pickColor(c.key)}
+            >
+              {current === c.key ? <Check size={13} strokeWidth={3} aria-hidden="true" /> : null}
+            </button>
+          ))}
+          <button
+            type="button"
+            role="menuitemradio"
+            aria-checked={!current}
+            aria-label="No color"
+            title="No color"
+            className="bt-swatch bt-swatch-none"
+            data-swatch=""
+            onClick={() => pickColor(null)}
+          />
+        </div>
+      </div>
     </div>,
     document.querySelector('.bot-app') ?? document.body,
   );
@@ -262,6 +345,55 @@ export function BotRail(props: BotRailProps) {
     setAgentMenu({ x, y, id: a.id, restore: e.currentTarget instanceof HTMLElement ? e.currentTarget : null });
   };
   const closeAgentMenu = useCallback(() => setAgentMenu(null), []);
+
+  // Long-press (touch and pen) opens the same menu. The tap that ends the
+  // press must not also open the chat, and must not start a reorder drag.
+  const pressRef = useRef<{ timer: number; x: number; y: number; pointer: number } | null>(null);
+  const pressOpened = useRef(false);
+  const cancelPress = useCallback(() => {
+    if (pressRef.current) window.clearTimeout(pressRef.current.timer);
+    pressRef.current = null;
+  }, []);
+  useEffect(() => cancelPress, [cancelPress]);
+  // The opening press ends at the next pointerdown, wherever it lands.
+  useEffect(() => {
+    if (!agentMenu) return;
+    const reset = () => { pressOpened.current = false; };
+    document.addEventListener('pointerdown', reset, true);
+    return () => document.removeEventListener('pointerdown', reset, true);
+  }, [agentMenu]);
+  const pressProps = (a: Agent) => ({
+    onPointerDown: (e: ReactPointerEvent<HTMLButtonElement>) => {
+      cancelPress();
+      pressOpened.current = false;
+      const target = e.currentTarget;
+      // Native drag stays mouse-only. On touch (iOS Safari especially) a held
+      // draggable row lifts into a drag before the menu timer can fire.
+      target.draggable = e.pointerType === 'mouse';
+      if (e.pointerType === 'mouse' || !e.isPrimary) return;
+      const { clientX: x, clientY: y, pointerId } = e;
+      const timer = window.setTimeout(() => {
+        pressRef.current = null;
+        pressOpened.current = true;
+        setAgentMenu({ ...clampMenu(x, y), id: a.id, restore: target });
+        try { navigator.vibrate?.(8); } catch { /* haptics are optional */ }
+      }, LONG_PRESS_MS);
+      pressRef.current = { timer, x, y, pointer: pointerId };
+    },
+    onPointerMove: (e: ReactPointerEvent<HTMLButtonElement>) => {
+      const p = pressRef.current;
+      if (p && p.pointer === e.pointerId && Math.hypot(e.clientX - p.x, e.clientY - p.y) > LONG_PRESS_SLOP) cancelPress();
+    },
+    onPointerUp: (e: ReactPointerEvent<HTMLButtonElement>) => { cancelPress(); e.currentTarget.draggable = true; },
+    onPointerCancel: (e: ReactPointerEvent<HTMLButtonElement>) => { cancelPress(); e.currentTarget.draggable = true; },
+  });
+  /** True (once) when this click is the release of a long-press. Keyboard
+   *  clicks (detail 0) always go through. */
+  const swallowPressClick = (e: MouseEvent) => {
+    const swallow = pressOpened.current && e.detail !== 0;
+    pressOpened.current = false;
+    return swallow;
+  };
 
   // Easter eggs — presentation only. "Don't blink." after ten idle minutes
   // (never while any lane is busy), a lamp flash on a triple tap of the mark,
@@ -479,13 +611,19 @@ export function BotRail(props: BotRailProps) {
                 <button
                   key={`pin:${a.id}`}
                   className={`bt-pin${isActive ? ' on' : ''}${a.muted ? ' muted' : ''}${pinDrag === a.id ? ' dragging' : ''}${dropLeft ? ' drop-left' : ''}${dropRight ? ' drop-right' : ''}`}
-                  onClick={() => props.onOpenAgent(a)}
+                  data-chat-color={chatColorOf(a)}
+                  onClick={(e) => { if (!swallowPressClick(e)) props.onOpenAgent(a); }}
                   onContextMenu={(e) => openAgentMenu(e, a)}
+                  {...pressProps(a)}
                   aria-haspopup="menu"
                   aria-expanded={agentMenu?.id === a.id}
-                  title={`${a.name} — ${a.role}${a.muted ? ' · muted' : ''} (right-click to mute, pin, or edit)`}
+                  title={`${a.name} · ${a.role}${colorLabel(a)}${a.muted ? ' · muted' : ''} (right-click or long-press to mute, pin, color, or edit)`}
                   draggable
-                  onDragStart={(e) => { setPinDrag(a.id); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', a.id); }}
+                  onDragStart={(e) => {
+                    if (pressOpened.current) { e.preventDefault(); return; }
+                    cancelPress();
+                    setPinDrag(a.id); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', a.id);
+                  }}
                   onDragOver={(e) => {
                     if (!pinDrag || pinDrag === a.id) return;
                     e.preventDefault();
@@ -502,6 +640,7 @@ export function BotRail(props: BotRailProps) {
                   </span>
                   <span className="bt-pin-name">{a.name}</span>
                   <span className="bt-pin-role">{a.role}</span>
+                  {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
                 </button>
               );
             })}
@@ -515,13 +654,19 @@ export function BotRail(props: BotRailProps) {
               <button
                 key={`agent:${a.id}`}
                 className={`bt-conv${isActive ? ' on' : ''}${a.muted ? ' muted' : ''}${dragId === a.id ? ' dragging' : ''}${dropBefore === a.id && dragId && dragId !== a.id ? ' drop-above' : ''}`}
-                onClick={() => props.onOpenAgent(a)}
+                data-chat-color={chatColorOf(a)}
+                onClick={(e) => { if (!swallowPressClick(e)) props.onOpenAgent(a); }}
                 onContextMenu={(e) => openAgentMenu(e, a)}
+                {...pressProps(a)}
                 aria-haspopup="menu"
                 aria-expanded={agentMenu?.id === a.id}
-                title={`${a.name} — ${a.role}${a.muted ? ' · muted' : ''} (right-click to mute, pin, or edit)`}
+                title={`${a.name} · ${a.role}${colorLabel(a)}${a.muted ? ' · muted' : ''} (right-click or long-press to mute, pin, color, or edit)`}
                 draggable
-                onDragStart={(e) => { setDragId(a.id); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', a.id); }}
+                onDragStart={(e) => {
+                  if (pressOpened.current) { e.preventDefault(); return; }
+                  cancelPress();
+                  setDragId(a.id); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', a.id);
+                }}
                 onDragOver={(e) => {
                   if (!dragId || dragId === a.id) return;
                   e.preventDefault();
@@ -554,6 +699,7 @@ export function BotRail(props: BotRailProps) {
                     </span>
                   </span>
                   <span className="bt-conv-sub">{r.item?.preview ?? 'No work yet — give them something real.'}</span>
+                  {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
                 </span>
               </button>
             );
@@ -639,8 +785,10 @@ export function BotRail(props: BotRailProps) {
           agent={menuAgent}
           onMute={(a) => props.onPatchAgent(a, { muted: !a.muted })}
           onPin={(a) => props.onPatchAgent(a, { pinned: !a.pinned })}
+          onColor={(a, color) => props.onPatchAgent(a, { color })}
           onEdit={props.onEditAgent}
           onClose={closeAgentMenu}
+          swallowPressRelease={swallowPressClick}
         />
       ) : null}
       <div

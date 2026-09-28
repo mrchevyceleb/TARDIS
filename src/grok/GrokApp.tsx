@@ -392,11 +392,13 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
           onOpenAgent={openAgent}
           onEditAgent={(a) => { setEditTarget(a); setEditorOpen(true); }}
           onPatchAgent={(a, patch) => {
-            const previous = { muted: Boolean(a.muted), pinned: Boolean(a.pinned), unread: a.unread };
+            const previous = { muted: Boolean(a.muted), pinned: Boolean(a.pinned), unread: a.unread, color: a.color };
             void patchAgent(a.id, patch, previous).then(() => reloadAgents()).catch(() => {
               const action = patch.muted !== undefined
                 ? (patch.muted ? 'mute' : 'unmute')
-                : (patch.pinned ? 'pin' : 'unpin');
+                : patch.pinned !== undefined
+                  ? (patch.pinned ? 'pin' : 'unpin')
+                  : 'change the color of';
               showToast(`Could not ${action} ${a.name}`);
             });
           }}
