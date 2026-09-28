@@ -1,4 +1,4 @@
-import { BrowserWindow, globalShortcut, ipcMain, nativeImage, powerMonitor } from 'electron';
+import { BrowserWindow, globalShortcut, ipcMain, nativeImage, powerMonitor, screen } from 'electron';
 import path from 'node:path';
 import { ComputerController, trustedComputerUrl, type ControlStatus } from '../native/computer.mjs';
 import { getSettings, saveSettings } from './settings.js';
@@ -26,8 +26,16 @@ export const computer = new ComputerController({
     if (state.control) {
       indicator?.destroy();
       const win = new BrowserWindow({ width: 430, height: 110, resizable: false, minimizable: false,
-        alwaysOnTop: true, title: 'TARDIS computer control', show: false,
+        alwaysOnTop: true, skipTaskbar: true, autoHideMenuBar: true, title: 'TARDIS computer control', show: false,
         webPreferences: { preload: path.join(here, 'control-preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false } });
+      // The indicator is a safety surface, not an interruption: dock it in a
+      // corner of the display the person is working on, off the taskbar, with
+      // no menu bar, instead of popping up in the middle of their screen.
+      try {
+        const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+        const bounds = win.getBounds();
+        win.setPosition(area.x + area.width - bounds.width - 16, area.y + area.height - bounds.height - 16);
+      } catch { /* corner placement is best-effort */ }
       indicator = win;
       win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
       win.webContents.on('will-navigate', event => event.preventDefault());
