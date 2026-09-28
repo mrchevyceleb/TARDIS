@@ -5,13 +5,28 @@ import { tmpdir } from 'node:os';
 import { join, dirname, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-function run(file, args, signal, input) {
+function run(file, args, signal, input, timeoutMs = 20_000) {
   return new Promise((resolve, reject) => {
-    const child = execFile(file, args, { signal, timeout: 20_000, maxBuffer: 40 * 1024 * 1024, windowsHide: true, encoding: 'utf8' }, (err, stdout) => {
+    const child = execFile(file, args, { signal, timeout: timeoutMs, maxBuffer: 40 * 1024 * 1024, windowsHide: true, encoding: 'utf8' }, (err, stdout) => {
       if (!err) { resolve(stdout); return; }
       let message = err.message;
-      try { const out = JSON.parse(stdout); if (typeof out.error === 'string') message = out.error; } catch { /* not adapter JSON */ }
-      reject(new Error(`${file}: ${message}`));
+      let attempted;
+      // The native script reports whether input had already been attempted
+      // when it failed, so background window actions stay honest about replay.
+      // attempted stays undefined (unknown, conservatively may-have-run)
+      // unless the script explicitly printed a boolean: an unparseable stdout
+      // (timeout, kill) or an older script must never read as a definite
+      // pre-input refusal.
+      try {
+        const out = JSON.parse(String(stdout).replace(/^\uFEFF/, '').trim());
+        if (typeof out.error === 'string') {
+          message = out.error;
+          if (typeof out.inputAttempted === 'boolean') attempted = out.inputAttempted;
+        }
+      } catch { /* not adapter JSON */ }
+      const error = new Error(`${file}: ${message}`);
+      error.attempted = attempted;
+      reject(error);
     });
     child.stdin?.end(input);
   });
@@ -165,15 +180,36 @@ class LinuxAdapter {
 
 class WindowsAdapter {
   capability = { supported: true };
-  async call(op, args = {}, signal) {
+  async call(op, args = {}, signal, timeoutMs) {
     const script = join(dirname(fileURLToPath(import.meta.url)), 'windows.ps1').replace(/([\\/])app\.asar([\\/])/, '$1app.asar.unpacked$2');
-    const out = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script], signal, JSON.stringify({ op, ...args }));
+    const out = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script], signal, JSON.stringify({ op, ...args }), timeoutMs);
     const result = JSON.parse(out.replace(/^\uFEFF/, '').trim());
     if (result.error) throw new Error(result.error);
     return result;
   }
   inspect(signal) { return this.call('inspect', {}, signal); }
   async capture(signal) { const result = await this.call('capture', {}, signal); return { png: Buffer.from(result.png, 'base64'), bounds: result.bounds }; }
+  // Background window control: PrintWindow capture and UIA input never focus
+  // the window, move the cursor or send real input. The uia tree walk gets a
+  // longer budget than other ops because the first walk of a Chromium window
+  // builds its accessibility tree on demand.
+  async windowCapture(window, signal) {
+    const result = await this.call('window_capture', { window }, signal);
+    return { png: Buffer.from(result.png, 'base64'), bounds: result.bounds, process: result.process };
+  }
+  uiaTree(window, signal) { return this.call('uia', { window }, signal, 25_000); }
+  async uiaValue(window, element, text, name, signal) {
+    const result = await this.call('uia_value', { window, element, text, ...(name ? { name } : {}) }, signal, 25_000);
+    return { png: Buffer.from(result.png, 'base64'), bounds: result.bounds, ...(result.postedTo ? { postedTo: result.postedTo } : {}) };
+  }
+  async uiaInvoke(window, element, name, signal) {
+    const result = await this.call('uia_invoke', { window, element, ...(name ? { name } : {}) }, signal, 25_000);
+    return { png: Buffer.from(result.png, 'base64'), bounds: result.bounds };
+  }
+  async uiaKey(window, keys, signal) {
+    const result = await this.call('uia_key', { window, keys }, signal, 25_000);
+    return { png: Buffer.from(result.png, 'base64'), bounds: result.bounds, ...(result.postedTo ? { postedTo: result.postedTo } : {}) };
+  }
   act(action, signal) { return this.call('act', action, signal); }
   release() { return this.call('release'); }
 }

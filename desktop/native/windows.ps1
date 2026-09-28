@@ -81,11 +81,235 @@ public static class DesktopInput {
       if (s.Length>0 && GetWindowRect(h,out r)) result.Add(new { id=h.ToInt64().ToString(), title=s.ToString(), bounds=new { x=r.left,y=r.top,width=r.right-r.left,height=r.bottom-r.top } }); return true; }, IntPtr.Zero);
     return result.ToArray();
   }
+
+  // --- Background window control: never SetForegroundWindow, never SendInput,
+  // --- never SetCursorPos. PrintWindow + posted messages + UIA only.
+  [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+  [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] static extern ushort MapVirtualKey(ushort vk, uint type);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern bool QueryFullProcessImageName(IntPtr h, uint flags, StringBuilder s, ref uint size);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  public static string ProcessImage(long id) {
+    uint pid; GetWindowThreadProcessId(new IntPtr(id), out pid);
+    if (pid == 0) return "";
+    IntPtr h = OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+    if (h == IntPtr.Zero) return "";
+    try { var s = new StringBuilder(1024); uint size = 1024; return QueryFullProcessImageName(h, 0, s, ref size) ? System.IO.Path.GetFileName(s.ToString()) : ""; }
+    finally { CloseHandle(h); }
+  }
+  public static byte[] PrintWindowBytes(long id) {
+    IntPtr h = new IntPtr(id);
+    if (!IsWindow(h)) throw new Exception("The window no longer exists. Inspect windows again.");
+    if (IsIconic(h)) throw new Exception("The window is minimized. Background capture needs it restored; ask the person at the machine.");
+    RECT r; if (!GetWindowRect(h, out r)) throw new Exception("Window geometry is unavailable.");
+    int w = r.right - r.left, ht = r.bottom - r.top;
+    if (w < 1 || ht < 1 || w > 8000 || ht > 8000) throw new Exception("The window has no capturable background size.");
+    using (var bmp = new System.Drawing.Bitmap(w, ht)) {
+      using (var g = System.Drawing.Graphics.FromImage(bmp)) {
+        g.Clear(System.Drawing.Color.White); // rounded window corners render transparent otherwise
+        IntPtr dc = g.GetHdc();
+        try { if (!PrintWindow(h, dc, 2)) throw new Exception("The window refused a background capture; it may only render in the foreground."); }
+        finally { g.ReleaseHdc(dc); }
+      }
+      using (var ms = new System.IO.MemoryStream()) { bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png); return ms.ToArray(); }
+    }
+  }
+  static void Post(IntPtr h, uint msg, IntPtr w, IntPtr l) { if (!PostMessage(h, msg, w, l)) throw new Exception("The window refused a posted message (queue full or gone)."); }
+  // Arrows, Delete, Home/End, PageUp/Down and friends need the extended-key
+  // bit in lParam, or Win32 controls read them as their numpad duplicates.
+  static bool IsExtendedKey(ushort vk) {
+    return vk == 0x21 || vk == 0x22 || vk == 0x23 || vk == 0x24 || vk == 0x25 || vk == 0x26 || vk == 0x27 || vk == 0x28
+      || vk == 0x2D || vk == 0x2E || vk == 0x6A;
+  }
+  public static void PostKey(long id, ushort vk) {
+    IntPtr h = new IntPtr(id);
+    ushort scan = MapVirtualKey(vk, 0);
+    uint ext = IsExtendedKey(vk) ? 0x01000000u : 0u;
+    Post(h, 0x100, (IntPtr)vk, (IntPtr)(1u | ((uint)scan << 16) | ext));                     // WM_KEYDOWN
+    if (vk == 13 || vk == 9 || vk == 27 || vk == 32 || vk == 8) Post(h, 0x102, (IntPtr)vk, IntPtr.Zero); // WM_CHAR for producing keys
+    else if (vk >= 0x30 && vk <= 0x39) Post(h, 0x102, (IntPtr)vk, IntPtr.Zero);              // digits
+    else if (vk >= 0x41 && vk <= 0x5A) Post(h, 0x102, (IntPtr)(vk + 32), IntPtr.Zero);        // lowercase letter
+    Post(h, 0x101, (IntPtr)vk, (IntPtr)(ext | ((uint)scan << 16) | (1u << 30) | (1u << 31))); // WM_KEYUP
+  }
+  public static void PostText(long id, string text) {
+    IntPtr h = new IntPtr(id);
+    foreach (char c in text) {
+      if (c == '\r') continue;
+      if (c == '\n' || c == '\t') { PostKey(id, (ushort)(c == '\n' ? 13 : 9)); continue; }
+      Post(h, 0x102, (IntPtr)(int)c, IntPtr.Zero);                                            // WM_CHAR
+    }
+  }
   public static void Release() { Mouse(4,0); Mouse(16,0); foreach (ushort k in new ushort[]{16,17,18,91}) Key(k,true); }
 }
 '@
 [DesktopInput]::EnableDpi()
 Add-Type -AssemblyName System.Windows.Forms
+
+# Background window control uses UI Automation. Optional at runtime: if this
+# compile ever fails on a machine, only the uia ops refuse; every other op keeps
+# working. No op below may SetForegroundWindow, SendInput or SetCursorPos.
+$script:InputAttempted = $false
+$script:UiaReady = $false
+$script:UiaError = ''
+try {
+  Add-Type -AssemblyName UIAutomationClient
+  Add-Type -AssemblyName UIAutomationTypes
+  Add-Type -ReferencedAssemblies @('UIAutomationClient.dll','UIAutomationTypes.dll','System.dll') -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Windows.Automation;
+public static class UiaWindow {
+  static readonly TreeWalker Walker = TreeWalker.ControlViewWalker;
+  static string Trim(string s, int max) {
+    if (string.IsNullOrEmpty(s)) return "";
+    s = s.Replace('\n', ' ').Replace('\r', ' ').Replace('\t', ' ');
+    return s.Length <= max ? s : s.Substring(0, max);
+  }
+  static AutomationElement Root(long hwnd) {
+    AutomationElement el = null;
+    try { el = AutomationElement.FromHandle(new IntPtr(hwnd)); }
+    catch { throw new Exception("The window no longer exists. Inspect windows again."); }
+    if (el == null) throw new Exception("The window no longer exists. Inspect windows again.");
+    try { var t = el.Current.ControlType; }
+    catch (ElementNotAvailableException) { throw new Exception("The window closed before its elements could be read. Inspect windows again."); }
+    return el;
+  }
+  static string[] PatternNames(AutomationElement el) {
+    AutomationPattern[] pats;
+    try { pats = el.GetSupportedPatterns(); } catch { return new string[0]; }
+    var names = new List<string>();
+    foreach (var p in pats) {
+      if (p == ValuePattern.Pattern) names.Add("value");
+      else if (p == InvokePattern.Pattern) names.Add("invoke");
+      else if (p == TogglePattern.Pattern) names.Add("toggle");
+      else if (p == ExpandCollapsePattern.Pattern) names.Add("expand");
+      else if (p == SelectionItemPattern.Pattern) names.Add("select");
+      else if (p == TextPattern.Pattern) names.Add("text");
+    }
+    return names.ToArray();
+  }
+  static object Row(AutomationElement el, string path) {
+    var cur = el.Current;
+    string name = Trim(cur.Name, 140);
+    string ct = cur.ControlType == null ? "" : cur.ControlType.ProgrammaticName;
+    if (ct.StartsWith("ControlType.")) ct = ct.Substring("ControlType.".Length);
+    string[] pats = PatternNames(el);
+    bool focusable = cur.IsKeyboardFocusable, focused = cur.HasKeyboardFocus;
+    if (name.Length == 0 && pats.Length == 0 && !focusable && !focused) return null; // silent layout node
+    var rect = cur.BoundingRectangle;
+    object bounds = null;
+    if (!rect.IsEmpty) bounds = new {
+      x = (int)Math.Round(rect.X), y = (int)Math.Round(rect.Y),
+      width = (int)Math.Round(rect.Width), height = (int)Math.Round(rect.Height),
+    };
+    return new {
+      path, name, controlType = ct, automationId = Trim(cur.AutomationId, 80),
+      patterns = pats, focusable, focused, bounds,
+    };
+  }
+  public static object Snapshot(long hwnd, int maxElements, int maxDepth, int budgetMs) {
+    var root = Root(hwnd);
+    var rows = new List<object>();
+    var state = new WalkState();
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    Walk(root, "0", 0, maxElements, maxDepth, budgetMs, sw, rows, state);
+    bool truncated = rows.Count >= maxElements || sw.ElapsedMilliseconds > budgetMs || state.DepthHit;
+    return new { elements = rows.ToArray(), truncated };
+  }
+  class WalkState { public bool DepthHit; }
+  static void Walk(AutomationElement el, string path, int depth, int maxElements, int maxDepth, int budgetMs, System.Diagnostics.Stopwatch sw, List<object> rows, WalkState state) {
+    if (depth >= maxDepth) {
+      // A depth-capped tree must not read as complete just because the
+      // element budget was not reached.
+      if (sw.ElapsedMilliseconds <= budgetMs) { try { if (Walker.GetFirstChildElement(el) != null) state.DepthHit = true; } catch { } }
+      return;
+    }
+    if (rows.Count >= maxElements || sw.ElapsedMilliseconds > budgetMs) return;
+    AutomationElement child;
+    try { child = Walker.GetFirstChildElement(el); } catch { return; }
+    int index = 0;
+    while (child != null) {
+      if (rows.Count >= maxElements || sw.ElapsedMilliseconds > budgetMs) return;
+      var current = child;
+      string nextPath = path + "/" + index;
+      try { var row = Row(current, nextPath); if (row != null) rows.Add(row); } catch { }
+      Walk(current, nextPath, depth + 1, maxElements, maxDepth, budgetMs, sw, rows, state);
+      try { child = Walker.GetNextSiblingElement(current); } catch { return; }
+      index++;
+    }
+  }
+  public static object Resolve(long hwnd, string path, string expectName) {
+    var el = Root(hwnd);
+    if (string.IsNullOrEmpty(path) || path == "0") throw new Exception("The window root is not an element ref. Use a snapshot ref like \"0/3/2\".");
+    var parts = path.Split('/');
+    // Refs name the window root first ("0/3/2" = root, child 3, child 2).
+    // Descending into segment 0 as a child index would resolve refs to the
+    // wrong element entirely.
+    if (parts[0] != "0") throw new Exception("Invalid element ref: refs start at the window root (\"0\"). Snapshot the window again with computer_uia.");
+    for (int p = 1; p < parts.Length; p++) {
+      int i;
+      if (!int.TryParse(parts[p], out i) || i < 0) throw new Exception("Invalid element ref. Snapshot the window again with computer_uia.");
+      var next = Nth(el, i);
+      if (next == null) throw new Exception("Element not found at ref " + path + ": the window changed. Snapshot it again.");
+      el = next;
+    }
+    string name = "";
+    try { name = el.Current.Name; } catch (ElementNotAvailableException) { throw new Exception("The element closed before the action. Snapshot the window again."); }
+    // Compare the SAME canonicalized name the snapshot emitted (capped and
+    // newline/tab-flattened), so a long or multiline accessible name never
+    // reads as a stale ref.
+    string shown = Trim(name, 140);
+    string expected = Trim(expectName, 140);
+    if (!string.IsNullOrEmpty(expected) && shown != expected)
+      throw new Exception("The element at that ref changed (expected '" + Trim(expected, 80) + "', found '" + Trim(shown, 80) + "'). Snapshot the window again and use the fresh ref.");
+    return new { Name = name, Element = el };
+  }
+  /** The focused element's own native window handle, when it has one, so
+   *  posted messages reach the element that holds keyboard focus rather than
+   *  only the top-level window. Returns 0 when it cannot be resolved. */
+  public static long FocusedHandle(long hwnd, int budgetMs) {
+    var root = Root(hwnd);
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    var el = FindFocused(root, sw, budgetMs);
+    if (el == null) return 0;
+    try { return el.Current.NativeWindowHandle; } catch { return 0; }
+  }
+  static AutomationElement FindFocused(AutomationElement el, System.Diagnostics.Stopwatch sw, int budgetMs) {
+    if (sw.ElapsedMilliseconds > budgetMs) return null;
+    try { if (el.Current.HasKeyboardFocus) return el; } catch { }
+    AutomationElement child;
+    try { child = Walker.GetFirstChildElement(el); } catch { return null; }
+    while (child != null) {
+      var hit = FindFocused(child, sw, budgetMs);
+      if (hit != null) return hit;
+      var current = child;
+      try { child = Walker.GetNextSiblingElement(current); } catch { return null; }
+    }
+    return null;
+  }
+  static AutomationElement Nth(AutomationElement parent, int index) {
+    try {
+      var child = Walker.GetFirstChildElement(parent);
+      int i = 0;
+      while (child != null) {
+        if (i == index) return child;
+        var current = child;
+        try { child = Walker.GetNextSiblingElement(current); } catch { return null; }
+        i++;
+      }
+    } catch { }
+    return null;
+  }
+}
+'@
+  $script:UiaReady = $true
+} catch {
+  $script:UiaError = $_.Exception.Message
+}
+
 function Assert-TargetWindow([object]$request, [bool]$afterInput) {
   if (!$request.window) { return }
   if ([DesktopInput]::Foreground() -ne [long]$request.window) {
@@ -123,6 +347,104 @@ try {
       } finally { $g.Dispose(); $bitmap.Dispose(); $stream.Dispose() }
     }
     'release' { [DesktopInput]::Release() }
+    'window_capture' {
+      if (!$p.window) { throw 'window_capture requires a window id.' }
+      $hwnd = [long]$p.window
+      $bytes = [DesktopInput]::PrintWindowBytes($hwnd)
+      $b = [DesktopInput]::Bounds($hwnd)
+      $result = @{ png=[Convert]::ToBase64String($bytes); bounds=@{ x=$b[0]; y=$b[1]; width=$b[2]; height=$b[3] }; process=[DesktopInput]::ProcessImage($hwnd) }
+    }
+    'uia' {
+      if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
+      if (!$p.window) { throw 'uia requires a window id.' }
+      $hwnd = [long]$p.window
+      $snap = [UiaWindow]::Snapshot($hwnd, 300, 40, 12000)
+      $result = @{ process=[DesktopInput]::ProcessImage($hwnd); elements=@($snap.elements); truncated=[bool]$snap.truncated }
+    }
+    'uia_value' {
+      if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
+      if (!$p.window -or !$p.element) { throw 'uia_value requires a window id and an element ref from computer_uia.' }
+      $hwnd = [long]$p.window
+      $resolved = [UiaWindow]::Resolve($hwnd, [string]$p.element, [string]$p.name)
+      $el = $resolved.Element
+      if ([string]::IsNullOrWhiteSpace([string]$p.name) -and -not [string]::IsNullOrWhiteSpace($resolved.Name)) {
+        throw ("the element at that ref is named '{0}'; pass that name from the snapshot so the action can verify the ref is still current" -f $resolved.Name)
+      }
+      $valuePattern = $null
+      try { $valuePattern = $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern) -as [System.Windows.Automation.ValuePattern] } catch { $valuePattern = $null }
+      $postedTo = 0
+      if ($valuePattern -and -not $valuePattern.Current.IsReadOnly) {
+        $script:InputAttempted = $true
+        $valuePattern.SetValue([string]$p.text)
+      } else {
+        $focused = $false
+        try { $focused = [bool]$el.Current.HasKeyboardFocus } catch { $focused = $false }
+        if (-not $focused) {
+          $why = if ($valuePattern) { 'the element is read-only and does not hold the window''s keyboard focus' } else { 'the element exposes no ValuePattern and does not hold the window''s keyboard focus' }
+          throw "needs foreground: $why, so background text cannot land on it. Focus the window and use computer_type, or have the person click into the field first."
+        }
+        # Post to the focused element's own native window handle when it has
+        # one: classic Win32 controls never receive characters posted to their
+        # top-level parent.
+        $target = 0
+        try { $target = [long]$el.Current.NativeWindowHandle } catch { $target = 0 }
+        if ($target -eq 0) { $target = $hwnd }
+        $postedTo = $target
+        $script:InputAttempted = $true
+        [DesktopInput]::PostText($target, [string]$p.text)
+      }
+      Start-Sleep -Milliseconds 250
+      $bytes = [DesktopInput]::PrintWindowBytes($hwnd)
+      $b = [DesktopInput]::Bounds($hwnd)
+      $result = @{ png=[Convert]::ToBase64String($bytes); bounds=@{ x=$b[0]; y=$b[1]; width=$b[2]; height=$b[3] }; postedTo=$postedTo }
+    }
+    'uia_invoke' {
+      if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
+      if (!$p.window -or !$p.element) { throw 'uia_invoke requires a window id and an element ref from computer_uia.' }
+      $hwnd = [long]$p.window
+      $resolved = [UiaWindow]::Resolve($hwnd, [string]$p.element, [string]$p.name)
+      $el = $resolved.Element
+      if ([string]::IsNullOrWhiteSpace([string]$p.name) -and -not [string]::IsNullOrWhiteSpace($resolved.Name)) {
+        throw ("the element at that ref is named '{0}'; pass that name from the snapshot so the action can verify the ref is still current" -f $resolved.Name)
+      }
+      $invokePattern = $null
+      try { $invokePattern = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern) -as [System.Windows.Automation.InvokePattern] } catch { $invokePattern = $null }
+      if (-not $invokePattern) {
+        $ct = 'unknown'
+        try { $ct = ([string]$el.Current.ControlType.ProgrammaticName) -replace '^ControlType\.', '' } catch { $ct = 'unknown' }
+        throw "needs foreground: the element at that ref ($ct) exposes no InvokePattern, so it cannot be activated in the background. Only real input can activate it; focus the window and use computer_act."
+      }
+      $script:InputAttempted = $true
+      $invokePattern.Invoke()
+      Start-Sleep -Milliseconds 300
+      $bytes = [DesktopInput]::PrintWindowBytes($hwnd)
+      $b = [DesktopInput]::Bounds($hwnd)
+      $result = @{ png=[Convert]::ToBase64String($bytes); bounds=@{ x=$b[0]; y=$b[1]; width=$b[2]; height=$b[3] } }
+    }
+    'uia_key' {
+      if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
+      if (!$p.window -or !$p.keys) { throw 'uia_key requires a window id and one key.' }
+      $keys = @($p.keys)
+      if ($keys.Count -ne 1) { throw 'uia_key posts exactly one key. Modifier chords need the real keyboard; focus the window and use computer_key.' }
+      $names=@{ ENTER=13; TAB=9; ESC=27; SPACE=32; BACKSPACE=8; DELETE=46; UP=38; DOWN=40; LEFT=37; RIGHT=39; HOME=36; END=35; PAGEUP=33; PAGEDOWN=34 }
+      $k = [string]$keys[0]
+      $vk = 0
+      if ($names.ContainsKey($k)) { $vk = [int]$names[$k] }
+      elseif ($k -match '^F([1-9]|1[0-2])$') { $vk = 111 + [int]$Matches[1] }
+      elseif ($k -match '^[A-Z0-9]$') { $vk = [int][char]$k }
+      else { throw "needs foreground: uia_key cannot post '$k': single non-modifier keys only (ENTER, TAB, ESC, SPACE, BACKSPACE, DELETE, arrows, HOME, END, PAGEUP, PAGEDOWN, A-Z, 0-9, F1-F12). Modifier chords need the real keyboard; focus the window and use computer_key." }
+      $hwnd = [long]$p.window
+      # Posted keys target the window's focused element: prefer that
+      # element's own native window handle over the top-level parent.
+      $target = [UiaWindow]::FocusedHandle($hwnd, 8000)
+      if ($target -eq 0) { $target = $hwnd }
+      $script:InputAttempted = $true
+      [DesktopInput]::PostKey($target, [uint16]$vk)
+      Start-Sleep -Milliseconds 250
+      $bytes = [DesktopInput]::PrintWindowBytes($hwnd)
+      $b = [DesktopInput]::Bounds($hwnd)
+      $result = @{ png=[Convert]::ToBase64String($bytes); bounds=@{ x=$b[0]; y=$b[1]; width=$b[2]; height=$b[3] }; postedTo=$target }
+    }
     'act' {
       if ($p.window -and $p.action -ne 'focus') {
         [DesktopInput]::Focus([long]$p.window)
@@ -171,6 +493,6 @@ try {
   }
   $result | ConvertTo-Json -Depth 8 -Compress
 } catch {
-  @{ error=$_.Exception.Message } | ConvertTo-Json -Compress
+  @{ error=$_.Exception.Message; inputAttempted=([bool]$script:InputAttempted) } | ConvertTo-Json -Compress
   exit 1
 }
