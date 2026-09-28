@@ -30,7 +30,29 @@ export type Agent = {
   pinned?: boolean;
   /** Hide unread badges — companions that work with the crew, not the user. */
   muted?: boolean;
+  /** Sidebar color label, synced through the server so every device agrees. */
+  color?: ChatColor;
 };
+
+/** Sidebar color labels. The keys mirror AGENT_COLORS on the server; the
+ *  shades live in grok.css (--bt-cc-*) so each theme can tune them. */
+export const CHAT_COLORS = [
+  { key: 'red', label: 'Red' },
+  { key: 'orange', label: 'Orange' },
+  { key: 'amber', label: 'Amber' },
+  { key: 'green', label: 'Green' },
+  { key: 'teal', label: 'Teal' },
+  { key: 'blue', label: 'Blue' },
+  { key: 'violet', label: 'Violet' },
+  { key: 'pink', label: 'Pink' },
+] as const;
+export type ChatColor = typeof CHAT_COLORS[number]['key'];
+
+/** The agent's color label when it is one we know how to paint. */
+export function chatColorOf(a: Agent | undefined): ChatColor | undefined {
+  const color = a?.color;
+  return color && CHAT_COLORS.some((c) => c.key === color) ? color : undefined;
+}
 
 export function useAgents(): { agents: Agent[]; reload: () => void } {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -90,7 +112,7 @@ export class AgentUpdateConflictError extends Error {
   }
 }
 
-export async function updateAgentReq(id: string, patch: { name?: string; role?: string; engine?: string; model?: string; effort?: string; brainRevision?: number; voice?: string; pinned?: boolean; muted?: boolean; scope?: string }): Promise<Agent> {
+export async function updateAgentReq(id: string, patch: { name?: string; role?: string; engine?: string; model?: string; effort?: string; brainRevision?: number; voice?: string; pinned?: boolean; muted?: boolean; color?: ChatColor | null; scope?: string }): Promise<Agent> {
   const response = await fetch(`/api/agents/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -118,14 +140,19 @@ export async function reorderAgentIds(ids: string[]): Promise<Agent[]> {
   return r.agents ?? [];
 }
 
-/** Mute, pin, or similar flags — optimistic, then confirmed by the next poll. */
+export type AgentFlagPatch = { muted?: boolean; pinned?: boolean; color?: ChatColor | null };
+
+/** Mute, pin, color, or similar flags. Optimistic, then confirmed by the next poll. */
 export async function patchAgent(
   id: string,
-  patch: { muted?: boolean; pinned?: boolean },
-  previous?: Pick<Agent, 'muted' | 'pinned' | 'unread'>,
+  patch: AgentFlagPatch,
+  previous?: Pick<Agent, 'muted' | 'pinned' | 'unread' | 'color'>,
 ): Promise<Agent> {
+  // null clears the color on the server; locally that is just "no color".
+  const local: Partial<Agent> = { ...patch, color: patch.color === null ? undefined : patch.color };
+  if (patch.color === undefined) delete local.color;
   window.dispatchEvent(new CustomEvent('rivendell:agent-patch', {
-    detail: { id, patch: { ...patch, ...(patch.muted ? { unread: 0 } : {}) } },
+    detail: { id, patch: { ...local, ...(patch.muted ? { unread: 0 } : {}) } },
   }));
   try {
     return await updateAgentReq(id, patch);

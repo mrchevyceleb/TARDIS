@@ -1546,3 +1546,152 @@ body.bt-rail-resizing { cursor: col-resize; user-select: none; }
   .bt-msgpin-idle { animation: none; }
   .bt-msgpin:hover, .bt-msgpin:active { transform: none; }
 }
+
+/* ============================================================
+   Chat color labels (right-click or long-press a companion)
+   One accent per chat: a stripe + faint tint on list rows, a ring +
+   faint tint on pinned tiles. The keys mirror CHAT_COLORS in agents.ts.
+   ============================================================ */
+.bot-app {
+  --bt-cc-red: #ef6461;
+  --bt-cc-orange: #f28c48;
+  --bt-cc-amber: #e8b949;
+  --bt-cc-green: #57c27a;
+  --bt-cc-teal: #3dbdb3;
+  --bt-cc-blue: #5b98f0;
+  --bt-cc-violet: #a283f0;
+  --bt-cc-pink: #ec72b0;
+  --bt-cc-check: #16161c;
+}
+.bot-app[data-theme="light"] {
+  --bt-cc-red: #cf3e3b;
+  --bt-cc-orange: #cc661c;
+  --bt-cc-amber: #a87a06;
+  --bt-cc-green: #2e9651;
+  --bt-cc-teal: #12867e;
+  --bt-cc-blue: #2f6ccf;
+  --bt-cc-violet: #7a55d4;
+  --bt-cc-pink: #c64a8c;
+  --bt-cc-check: #ffffff;
+}
+[data-chat-color="red"] { --bt-chat: var(--bt-cc-red); }
+[data-chat-color="orange"] { --bt-chat: var(--bt-cc-orange); }
+[data-chat-color="amber"] { --bt-chat: var(--bt-cc-amber); }
+[data-chat-color="green"] { --bt-chat: var(--bt-cc-green); }
+[data-chat-color="teal"] { --bt-chat: var(--bt-cc-teal); }
+[data-chat-color="blue"] { --bt-chat: var(--bt-cc-blue); }
+[data-chat-color="violet"] { --bt-chat: var(--bt-cc-violet); }
+[data-chat-color="pink"] { --bt-chat: var(--bt-cc-pink); }
+
+/* Long-press should open the menu, not the iOS callout or a text selection. */
+.bt-pin, .bt-conv {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.bt-pin img, .bt-conv img { -webkit-touch-callout: none; }
+
+/* List rows: the tint rides on background-image so the existing hover and
+   selected background colors still show underneath it. */
+.bot-app .bt-conv[data-chat-color] {
+  position: relative;
+  background-image: linear-gradient(90deg,
+    color-mix(in oklch, var(--bt-chat) 13%, transparent),
+    color-mix(in oklch, var(--bt-chat) 3%, transparent) 75%);
+}
+.bot-app .bt-conv[data-chat-color]::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 12px; bottom: 12px;
+  width: 4px;
+  border-radius: 0 4px 4px 0;
+  background: var(--bt-chat);
+  transition: top 0.16s ease, bottom 0.16s ease, box-shadow 0.16s ease;
+}
+.bot-app .bt-conv[data-chat-color]:hover::before { top: 9px; bottom: 9px; }
+/* Selected: the color stripe replaces the lit stripe, grows, and glows. */
+.bot-app .bt-conv.on[data-chat-color] {
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--bt-chat) 30%, transparent);
+  background-image: linear-gradient(90deg,
+    color-mix(in oklch, var(--bt-chat) 22%, transparent),
+    color-mix(in oklch, var(--bt-chat) 7%, transparent) 80%);
+}
+.bot-app .bt-conv.on[data-chat-color]::before {
+  top: 6px; bottom: 6px;
+  box-shadow: 0 0 10px color-mix(in oklch, var(--bt-chat) 65%, transparent);
+}
+.bot-app .bt-conv.drop-above[data-chat-color] { box-shadow: 0 -2px 0 0 var(--r-gold); }
+
+/* Pinned tiles: a ring around the avatar (gap in the rail color so it reads
+   on any avatar) and a soft wash behind the tile. */
+.bot-app .bt-pin[data-chat-color] {
+  background-image: radial-gradient(120% 95% at 50% 32%,
+    color-mix(in oklch, var(--bt-chat) 15%, transparent),
+    color-mix(in oklch, var(--bt-chat) 4%, transparent));
+}
+.bot-app .bt-pin[data-chat-color] .bt-pin-disc {
+  box-shadow: 0 0 0 2px var(--r-bg-soft), 0 0 0 4px var(--bt-chat);
+}
+.bot-app .bt-pin.on[data-chat-color] .bt-pin-disc {
+  box-shadow: 0 0 0 2px var(--r-bg-soft), 0 0 0 4px var(--bt-chat),
+    0 0 16px 2px color-mix(in oklch, var(--bt-chat) 45%, transparent);
+}
+.bot-app .bt-pin.on[data-chat-color] {
+  background-image: radial-gradient(120% 95% at 50% 32%,
+    color-mix(in oklch, var(--bt-chat) 24%, transparent),
+    color-mix(in oklch, var(--bt-chat) 7%, transparent));
+}
+
+/* Open chat header: the same ring, smaller. */
+.bt-head-agent .bt-disc[data-chat-color] {
+  box-shadow: 0 0 0 2px var(--r-bg), 0 0 0 3.5px var(--bt-chat);
+}
+
+/* Context menu color strip */
+.bt-agent-ctx { width: 256px; }
+.bt-ctx-sep { height: 1px; margin: 6px 8px; background: var(--r-line); }
+.bt-ctx-colors { padding: 2px 10px 8px; }
+.bt-ctx-colors-h {
+  display: block;
+  padding: 2px 2px 8px;
+  font-family: var(--r-sign);
+  font-size: 9.5px;
+  color: var(--r-ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+.bt-ctx-swatches {
+  display: grid;
+  grid-template-columns: repeat(9, 1fr);
+  justify-items: center;
+  gap: 2px;
+}
+.bt-swatch {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--bt-chat);
+  color: var(--bt-cc-check);
+  cursor: pointer;
+  transition: transform 0.14s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.14s ease;
+}
+.bt-swatch:hover { transform: scale(1.18); }
+.bt-swatch:active { transform: scale(0.9); }
+.bt-swatch:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--r-bg-card), 0 0 0 4px var(--r-ink);
+}
+.bt-swatch-none {
+  background:
+    linear-gradient(135deg, transparent calc(50% - 1px), var(--r-ink-faint) calc(50% - 1px), var(--r-ink-faint) calc(50% + 1px), transparent calc(50% + 1px));
+  border: 1.5px solid var(--r-line-strong);
+}
+.bt-swatch-none[aria-checked="true"] { border-color: var(--r-ink-mute); }
+@media (pointer: coarse) {
+  .bt-agent-ctx { width: min(310px, calc(100vw - 16px)); }
+  .bt-swatch { width: 26px; height: 26px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bt-swatch, .bot-app .bt-conv[data-chat-color]::before { transition: none; }
+  .bt-swatch:hover, .bt-swatch:active { transform: none; }
+}
