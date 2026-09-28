@@ -11,6 +11,7 @@ import { readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, readdirSy
 import { join } from 'node:path';
 import { SESSIONS_FILE, STATE_DIR } from './config.ts';
 import { deleteRoutinesForAgent } from './routines.ts';
+import { deleteJobWatchesForAgent } from './jobWatches.ts';
 import { deleteMessagePinsForAgent } from '../lib/messagePinStore.ts';
 
 const AGENTS_DIR = join(STATE_DIR, 'personas');
@@ -402,6 +403,7 @@ export function deleteAgent(id: string): boolean {
   if (next.length === agents.length) return false;
   saveAgents(next);
   deleteRoutinesForAgent(id);
+  deleteJobWatchesForAgent(id).catch((err) => console.warn('[job-watches] cascade for a deleted agent failed:', (err as Error).message));
   try { deleteMessagePinsForAgent(id); } catch { /* pin pocket is ancillary to the agent record */ }
   clearAvatarFiles(id);
   try { unlinkSync(join(AGENTS_DIR, `${id}.md`)); } catch { /* scope file optional */ }
