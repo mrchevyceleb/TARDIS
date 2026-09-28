@@ -351,7 +351,7 @@ export class ComputerController {
           if (error && error.attempted !== false) {
             inputAttempted = true;
             const wrapped = new Error(`Window action may already have run; do NOT replay it. Capture the window to verify. ${error instanceof Error ? error.message : String(error)}`);
-            for (const key of ['attempted', 'foregroundBefore', 'foregroundAfter', 'foregroundStolen', 'foregroundRestored', 'foregroundChanged', 'warning', 'note']) {
+            for (const key of ['attempted', 'foregroundBefore', 'foregroundAfter', 'foregroundStolen', 'foregroundRestored', 'foregroundChanged', 'foregroundRestoreOutcome', 'foregroundRestoreDetail', 'warning', 'note']) {
               if (error[key] !== undefined) wrapped[key] = error[key];
             }
             throw wrapped;

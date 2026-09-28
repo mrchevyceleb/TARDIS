@@ -27,7 +27,7 @@ function run(file, args, signal, input, timeoutMs = 20_000) {
           // failure (the verification capture, a restore refusal) is exactly
           // when foregroundStolen/foregroundRestored matter most, and the
           // agent-facing error message must carry the warning too.
-          for (const key of ['foregroundBefore', 'foregroundAfter', 'foregroundStolen', 'foregroundRestored', 'foregroundChanged']) {
+          for (const key of ['foregroundBefore', 'foregroundAfter', 'foregroundStolen', 'foregroundRestored', 'foregroundChanged', 'foregroundRestoreOutcome', 'foregroundRestoreDetail']) {
             if (out[key] !== undefined) (extra ??= {})[key] = out[key];
           }
           if (typeof out.warning === 'string') {

@@ -544,6 +544,10 @@ function Assert-BackgroundSetFocus([object]$element, [long]$hwnd) {
   if ($before -eq $hwnd) {
     throw 'needs foreground: the person is actively using this window (it is the foreground window), so background focus would redirect their live typing. Wait for them to leave the window, or use real input with their knowledge.'
   }
+  # Reaching this element can take seconds of walking; the person may have
+  # resumed typing during it, so the idle guard re-checks right before the
+  # irreversible SetFocus (the top-of-op check is fail-fast, not final).
+  Assert-PersonIdleForBackgroundInput
   try { $element.SetFocus() } catch {
     throw "needs foreground: the element refused background keyboard focus ($($_.Exception.Message)). Real input is required to focus it."
   }
@@ -588,12 +592,15 @@ function Restore-IfStolen([long]$Before, [long]$Target) {
   }
   $script:OpStolenAtInput = $true
   $ok = [DesktopInput]::RestoreForeground($Before, $Target)
+  $priorDetail = [string][DesktopInput]::LastRestoreDetail
+  $reAsserted = $false
   if ($ok) {
     Start-Sleep -Milliseconds 120
     # A late re-assert (the app activates its window again once the restore
     # settles, e.g. a palette taking focus) lands exactly here, after the
     # in-call retries: one more bounded pass closes the common case.
     if (([DesktopInput]::Foreground() -ne $Before) -and (Test-ForegroundRaisedTarget $Before $Target)) {
+      $reAsserted = $true
       $ok = [DesktopInput]::RestoreForeground($Before, $Target)
       if ($ok) { Start-Sleep -Milliseconds 120 }
     }
@@ -602,10 +609,18 @@ function Restore-IfStolen([long]$Before, [long]$Target) {
     # on that rather than stealing from them again).
     if (([DesktopInput]::Foreground() -eq $Before) -or (-not (Test-ForegroundRaisedTarget $Before $Target))) { $script:OpRestoredAtInput = $true }
   }
-  # RestoreForeground carries the per-attempt evidence; surface it for the
-  # result layer whatever the outcome.
-  $script:OpRestoreOutcome = [string][DesktopInput]::LastRestoreOutcome
-  $script:OpRestoreDetail = [string][DesktopInput]::LastRestoreDetail
+  # Evidence comes from the LAST call, but a second pass resets the C#
+  # fields: when it only ran because the app re-asserted a restore that DID
+  # land, "restored, re-asserted, denied again" is appReAsserted, never plain
+  # osDenied, and the first pass's evidence must survive.
+  $lastOutcome = [string][DesktopInput]::LastRestoreOutcome
+  $lastDetail = [string][DesktopInput]::LastRestoreDetail
+  if ($reAsserted -and $lastOutcome -eq 'osDenied') {
+    $lastOutcome = 'appReAsserted'
+    $lastDetail = $priorDetail + ' then re-asserted; second pass: ' + $lastDetail
+  }
+  $script:OpRestoreOutcome = $lastOutcome
+  $script:OpRestoreDetail = $lastDetail
 }
 
 # The loud-path twin of the safe notes: the op raised the person's foreground
@@ -670,6 +685,9 @@ function Add-ForegroundEvidence([hashtable]$Result, [long]$Before, [long]$Target
       }
       $script:OpRestoreOutcome = [string][DesktopInput]::LastRestoreOutcome
       $script:OpRestoreDetail = [string][DesktopInput]::LastRestoreDetail
+      # This branch only runs after a VERIFIED restore got re-stolen, so a
+      # denied second pass is still the app re-asserting, never plain osDenied.
+      if ($script:OpRestoreOutcome -eq 'osDenied') { $script:OpRestoreOutcome = 'appReAsserted' }
       if (($Result.foregroundAfter -eq $Before) -or (-not (Test-ForegroundRaisedTarget $Before $Target))) {
         $Result.foregroundRestored = $true
         $Result.note = "This op raised the target window over the person's work, the adapter restored their foreground, and the app raised it once more before being restored again. Safe to continue; the person may notice a brief flash."
@@ -704,6 +722,9 @@ function Add-ForegroundEvidence([hashtable]$Result, [long]$Before, [long]$Target
       }
       $script:OpRestoreOutcome = [string][DesktopInput]::LastRestoreOutcome
       $script:OpRestoreDetail = [string][DesktopInput]::LastRestoreDetail
+      # Same rule as the verified branch: a switch already landed here, so a
+      # denied second pass is still the app re-asserting, never plain osDenied.
+      if ($script:OpRestoreOutcome -eq 'osDenied') { $script:OpRestoreOutcome = 'appReAsserted' }
       if (($Result.foregroundAfter -eq $Before) -or (-not (Test-ForegroundRaisedTarget $Before $Target))) {
         $Result.foregroundRestored = $true
         if ($Result.foregroundAfter -ne $Before) {
@@ -750,7 +771,7 @@ function Assert-PersonIdleForBackgroundInput {
   $idleMs = [DesktopInput]::LastInputMs()
   if ($idleMs -ge 0 -and $idleMs -lt 60000) {
     $idleSecs = [int][math]::Floor($idleMs / 1000)
-    throw "needs foreground: the person used this desktop ${idleSecs}s ago (within the 60s activity guard). Background input can still raise the target app's window over their work (the restore is not yet proven to hold on a live app), so it refuses by design until the restore is verified. Read-only background ops (computer_uia, computer_window_capture) still work. Wait until the person has been idle for a minute, then retry with a FRESH operationId."
+    throw "needs foreground: the person used this desktop ${idleSecs}s ago (within the 60s activity guard). Background input can still raise the target app's window over their work (the restore is not yet proven to hold on a live app), so it refuses by design until the restore is verified. Read-only background ops (computer_uia, computer_window_capture) still work. Wait until the person has been idle for a minute, then retry (with a fresh operationId where the tool takes one)."
   }
 }
 
@@ -865,6 +886,7 @@ try {
         if (Test-ForegroundRaisedTarget $fg $hwnd) {
           throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No text was sent. Inspect the current desktop and report which step did this.'
         }
+        Assert-PersonIdleForBackgroundInput
         $script:InputAttempted = $true
         $valuePattern.SetValue([string]$p.text)
         # Chromium activates its window on SetValue (verified live): restore
@@ -906,6 +928,7 @@ try {
         if (Test-ForegroundRaisedTarget $fg $hwnd) {
           throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No text was sent. Inspect the current desktop and report which step did this.'
         }
+        Assert-PersonIdleForBackgroundInput
         $script:InputAttempted = $true
         [DesktopInput]::PostText($target, [string]$p.text)
         Restore-IfStolen $fg $hwnd
@@ -966,6 +989,7 @@ try {
       if (Test-ForegroundRaisedTarget $fg $hwnd) {
         throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No click was sent. Inspect the current desktop and report which step did this.'
       }
+      Assert-PersonIdleForBackgroundInput
       $script:InputAttempted = $true
       $invokePattern.Invoke()
       # Invoke raises Chromium windows too (verified live on the Send
@@ -1004,6 +1028,7 @@ try {
       if (Test-ForegroundRaisedTarget $fg $hwnd) {
         throw 'needs foreground: preparing this key raised a window (the OS foreground changed). No key was posted. Inspect the current desktop and report which step did this.'
       }
+      Assert-PersonIdleForBackgroundInput
       $script:InputAttempted = $true
       [DesktopInput]::PostKey($target, [uint16]$vk)
       Restore-IfStolen $fg $hwnd
