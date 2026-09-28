@@ -1,5 +1,5 @@
 import { appendFile, mkdir, rm } from 'node:fs/promises';
-import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import type { SessionEvent } from './runner.ts';
@@ -107,10 +107,18 @@ function archivePath(key: string): string {
 // unread pass; parsing them per call is pure event-loop burn. Callers mutate the
 // array they receive (a live session appends to its own event log), so the
 // cached array stays private and every caller gets a shallow copy.
-const parsedCache = new Map<
-  string,
-  { mtimeMs: number; size: number; events: PersistedEvent[]; nextSeq: number; bytes: number }
->();
+type ParsedEntry = {
+  mtimeMs: number;
+  size: number;
+  events: PersistedEvent[];
+  /** Source-text length of each entry in `events`, index-aligned. */
+  eventChars: number[];
+  highWater: number;
+  nextSeq: number;
+  bytes: number;
+  cursor: AppendCursor;
+};
+const parsedCache = new Map<string, ParsedEntry>();
 const PARSED_CACHE_MAX = 128;
 // An entry count is not a memory bound. The retained MAX_EVENTS_PER_LOG window
 // of this box's biggest lanes is 8-11 MB of JSON *each*, so 128 of them is
@@ -120,7 +128,12 @@ const PARSED_CACHE_MAX = 128;
 // objects typically run 2-4x their source text. 32 MB of text is therefore
 // roughly 65-130 MB of heap - deliberately conservative for a process that is
 // never restarted.
-const PARSED_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+// Raised from 32 MB (Sep 28 2026): with ~14 busy agent lanes at 8-11 MB of
+// retained text each, a 32 MB budget held three or four of them, so the 3 s
+// sidebar poll evicted and re-parsed every other lane from scratch on each
+// pass (2.9-4.2 s of blocking work that chat switches queued behind).
+// 192 MB of text is well under 1 GB of heap on an 8 GB-heap server.
+const PARSED_CACHE_MAX_BYTES = 192 * 1024 * 1024;
 let parsedCacheBytes = 0;
 
 // Agent home threads are engine-neutral, so several native session objects can
@@ -165,6 +178,98 @@ function evictParsedCache(): void {
   if (parsedCacheBytes < 0) parsedCacheBytes = 0;
 }
 
+// Incremental reads. Between rare rewrites (sequence repair, compaction,
+// clear) a log only grows by appends, and every rewrite replaces the file by
+// rename or truncation. So when a file has only grown since the last read (same
+// inode, not shorter, and the bytes just before where we stopped are
+// unchanged) only the appended bytes need reading. A lane far past the replay
+// cap (86 MB for a busy agent) otherwise costs about 1 s of blocking parse on
+// every hello and every sidebar poll.
+const TAIL_FINGERPRINT_BYTES = 64;
+
+type AppendCursor = { ino: number; consumed: number; fingerprint: Buffer };
+
+function readRange(fd: number, start: number, end: number): Buffer {
+  const length = Math.max(0, end - start);
+  const buf = Buffer.alloc(length);
+  let read = 0;
+  while (read < length) {
+    const n = readSync(fd, buf, read, length - read, start + read);
+    if (n <= 0) break;
+    read += n;
+  }
+  return read === length ? buf : buf.subarray(0, read);
+}
+
+function fingerprintAt(fd: number, end: number): Buffer {
+  return readRange(fd, Math.max(0, end - TAIL_FINGERPRINT_BYTES), end);
+}
+
+type LogRead = { text: string; fragment: string; cursor: AppendCursor; size: number; mtimeMs: number };
+
+/** Complete lines (text) plus any trailing line without a newline yet
+ * (fragment). The fragment is never consumed, so it is re-read once complete.
+ * With a cursor, returns only what was appended after it, or null when the
+ * file was rewritten or truncated underneath the cursor. */
+function readLog(path: string, cursor?: AppendCursor): LogRead | null {
+  let fd = -1;
+  try {
+    fd = openSync(path, 'r');
+    const st = fstatSync(fd);
+    let from = 0;
+    if (cursor) {
+      if (st.ino !== cursor.ino || st.size < cursor.consumed) return null;
+      if (!fingerprintAt(fd, cursor.consumed).equals(cursor.fingerprint)) return null;
+      from = cursor.consumed;
+    }
+    const chunk = readRange(fd, from, st.size);
+    const completeEnd = chunk.lastIndexOf(0x0a) + 1;
+    const consumed = from + completeEnd;
+    return {
+      text: chunk.toString('utf8', 0, completeEnd),
+      fragment: chunk.toString('utf8', completeEnd),
+      cursor: { ino: st.ino, consumed, fingerprint: fingerprintAt(fd, consumed) },
+      size: from + chunk.length,
+      mtimeMs: st.mtimeMs,
+    };
+  } catch {
+    return null;
+  } finally {
+    if (fd >= 0) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+  }
+}
+
+/** Parse persisted lines into events. High-water comes from every valid
+ * persisted record, including plumbing dropped from the replay window, so
+ * nextSeq can never collide with an on-disk seq. */
+function parseLogLines(
+  text: string,
+  into: { events: PersistedEvent[]; eventChars: number[]; highWater: number },
+): void {
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (typeof parsed?.seq === 'number' && parsed?.ev) {
+        if (parsed.seq > into.highWater) into.highWater = parsed.seq;
+        if (isPlumbingEvent(parsed.ev)) continue;
+        const event: PersistedEvent = { seq: parsed.seq, ev: parsed.ev as SessionEvent };
+        if (typeof parsed.eng === 'string' && parsed.eng) event.eng = parsed.eng;
+        if (typeof parsed.mdl === 'string' && parsed.mdl) event.mdl = parsed.mdl;
+        if (typeof parsed.at === 'number' && Number.isFinite(parsed.at)) event.at = parsed.at;
+        into.events.push(event);
+        // Source-text length, so the cache can charge itself the EXACT
+        // retained tail (the biggest events cluster at the end of a lane).
+        into.eventChars.push(line.length);
+      }
+    } catch {
+      // skip malformed lines (interrupted append, etc.)
+    }
+  }
+}
+
 export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextSeq: number } {
   const path = logPath(key);
   let mtimeMs: number;
@@ -183,64 +288,57 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
     parsedCache.set(path, cached);
     return { events: cached.events.slice(), nextSeq: observeNextSeq(key, cached.nextSeq) };
   }
-  let raw: string;
-  try {
-    raw = readFileSync(path, 'utf8');
-  } catch {
-    return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
-  }
-  const events: PersistedEvent[] = [];
-  // Source-text length of each kept event, so the cache can charge itself the
-  // EXACT retained tail. Pro-rating the whole file by event count under-counts
-  // badly on a long lane, where the biggest events cluster at the end.
-  const eventChars: number[] = [];
-  // High-water comes from every valid persisted record, including plumbing we
-  // drop from the replay window. Filtering first would let nextSeq collide
-  // with an on-disk seq when the file ends on commands_changed / hook_*.
-  let highWater = 0;
-  for (const line of raw.split('\n')) {
-    if (!line) continue;
-    try {
-      const parsed = JSON.parse(line);
-      if (typeof parsed?.seq === 'number' && parsed?.ev) {
-        if (parsed.seq > highWater) highWater = parsed.seq;
-        if (isPlumbingEvent(parsed.ev)) continue;
-        const event: PersistedEvent = { seq: parsed.seq, ev: parsed.ev as SessionEvent };
-        if (typeof parsed.eng === 'string' && parsed.eng) event.eng = parsed.eng;
-        if (typeof parsed.mdl === 'string' && parsed.mdl) event.mdl = parsed.mdl;
-        if (typeof parsed.at === 'number' && Number.isFinite(parsed.at)) event.at = parsed.at;
-        events.push(event);
-        eventChars.push(line.length);
-      }
-    } catch {
-      // skip malformed lines (interrupted append, etc.)
-    }
-  }
+
+  // Grown since the cached read: parse only the appended bytes. Anything else
+  // (never read, evicted, rewritten, truncated) is a full read.
+  const appended = cached ? readLog(path, cached.cursor) : null;
+  const read = appended ?? readLog(path);
+  if (!read) return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
+  const state = appended && cached
+    ? { events: cached.events, eventChars: cached.eventChars, highWater: cached.highWater }
+    : { events: [] as PersistedEvent[], eventChars: [] as number[], highWater: 0 };
+  parseLogLines(read.text, state);
   // Trim to the most recent window so a long-lived session that crashed
   // mid-turn doesn't keep replaying ancient events forever.
-  const trimmed = events.length > MAX_EVENTS_PER_LOG
-    ? events.slice(events.length - MAX_EVENTS_PER_LOG)
-    : events;
+  if (state.events.length > MAX_EVENTS_PER_LOG) {
+    const drop = state.events.length - MAX_EVENTS_PER_LOG;
+    state.events.splice(0, drop);
+    state.eventChars.splice(0, drop);
+  }
   // High-water + 1 from the FULL file, not last-line + 1 and not only the
   // trimmed window: concurrent writers can append a duplicate lower seq,
   // and trimming oldest lines must not rewind the allocator.
-  const nextSeq = highWater + 1;
-  // Charge the cache for exactly what we retained, so a handful of multi-MB
-  // lanes cannot quietly hold hundreds of MB. `trimmed` is always a suffix of
-  // `events`, so this window is in range.
+  const nextSeq = state.highWater + 1;
   let retainedBytes = 0;
-  for (let i = eventChars.length - trimmed.length; i < eventChars.length; i += 1) {
-    retainedBytes += eventChars[i];
-  }
-  const prior = parsedCache.get(path);
-  if (prior) parsedCacheBytes -= prior.bytes;
+  for (const chars of state.eventChars) retainedBytes += chars;
+  if (cached) parsedCacheBytes -= cached.bytes;
   parsedCache.delete(path);
-  parsedCache.set(path, { mtimeMs, size, events: trimmed, nextSeq, bytes: retainedBytes });
+  parsedCache.set(path, {
+    mtimeMs: read.mtimeMs,
+    // With an unterminated trailing line the cache must not serve exact hits:
+    // the fragment is not cached, so an unchanged file would silently drop it.
+    // -1 never matches, which sends the next call through the (cheap)
+    // incremental path that re-reads just the fragment.
+    size: read.fragment ? -1 : read.size,
+    events: state.events,
+    eventChars: state.eventChars,
+    highWater: state.highWater,
+    nextSeq,
+    bytes: retainedBytes,
+    cursor: read.cursor,
+  });
   parsedCacheBytes += retainedBytes;
   // A single log bigger than the whole budget evicts itself here: callers still
   // get their data, it just is not retained.
   evictParsedCache();
-  return { events: trimmed.slice(), nextSeq: observeNextSeq(key, nextSeq) };
+
+  // A complete record that is not newline-terminated yet (rare) still counts
+  // for this caller, as it did before incremental reads; it is not cached.
+  const tail = { events: [] as PersistedEvent[], eventChars: [] as number[], highWater: 0 };
+  if (read.fragment) parseLogLines(read.fragment, tail);
+  const events = state.events.concat(tail.events);
+  const trimmed = events.length > MAX_EVENTS_PER_LOG ? events.slice(events.length - MAX_EVENTS_PER_LOG) : events;
+  return { events: trimmed, nextSeq: observeNextSeq(key, Math.max(nextSeq, tail.highWater + 1)) };
 }
 
 export function normalizeEventLogSequence(lines: readonly string[]): {
@@ -285,6 +383,54 @@ export function normalizeEventLogSequence(lines: readonly string[]): {
   return { lines: normalized, repaired, latestSeq: previous };
 }
 
+// Per-log verification cursor for repairEventLogSequenceSync. Every hello runs
+// the repair check; re-reading and double-parsing a whole busy lane (~1 s for
+// 86 MB) on each one is what made chat switches wait. Only bytes appended since
+// the last verified point need checking, as long as the file was not rewritten.
+const repairCursors = new Map<string, AppendCursor & { previous: number }>();
+
+/** Check appended lines for a sequence regression without rewriting. Returns
+ * null on any regression (the caller falls back to the full repair). */
+function verifyAppendedSequence(
+  text: string,
+  fragment: string,
+  previous: number,
+): { previousComplete: number; latestSeq: number } | null {
+  let prev = previous;
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    let seq: unknown;
+    try { seq = JSON.parse(line)?.seq; } catch { continue; }
+    if (typeof seq !== 'number' || !Number.isFinite(seq)) continue;
+    if (seq <= prev) return null;
+    prev = seq;
+  }
+  const previousComplete = prev;
+  if (fragment) {
+    let seq: unknown;
+    try { seq = JSON.parse(fragment)?.seq; } catch { seq = undefined; }
+    if (typeof seq === 'number' && Number.isFinite(seq)) {
+      if (seq <= prev) return null;
+      prev = seq;
+    }
+  }
+  return { previousComplete, latestSeq: prev };
+}
+
+/** Last numeric seq among complete lines (the file is monotonic when this is
+ * called, so the last one is also the highest). */
+function lastCompleteSeq(text: string): number {
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (!lines[i]) continue;
+    try {
+      const seq = JSON.parse(lines[i])?.seq;
+      if (typeof seq === 'number' && Number.isFinite(seq)) return seq;
+    } catch { /* keep looking */ }
+  }
+  return 0;
+}
+
 /** Repair sequence regressions left by older per-engine allocators.
  *
  * File order is the durable chronology. Keep every already-monotonic number and
@@ -293,12 +439,28 @@ export function normalizeEventLogSequence(lines: readonly string[]): {
  */
 export function repairEventLogSequenceSync(key: string): { repaired: boolean; latestSeq: number } {
   const path = logPath(key);
-  let raw: string;
-  try {
-    raw = readFileSync(path, 'utf8');
-  } catch {
+
+  // Fast path: nothing was rewritten since the last verified point and the
+  // appended lines are already in order.
+  const known = repairCursors.get(path);
+  if (known) {
+    const appended = readLog(path, known);
+    if (appended) {
+      const verdict = verifyAppendedSequence(appended.text, appended.fragment, known.previous);
+      if (verdict) {
+        repairCursors.set(path, { ...appended.cursor, previous: verdict.previousComplete });
+        observeNextSeq(key, verdict.latestSeq + 1);
+        return { repaired: false, latestSeq: verdict.latestSeq };
+      }
+    }
+  }
+  repairCursors.delete(path);
+
+  const whole = readLog(path);
+  if (!whole) {
     return { repaired: false, latestSeq: latestEventLogSeq(key) };
   }
+  const raw = whole.text + whole.fragment;
 
   const normalized = normalizeEventLogSequence(raw.split('\n'));
   if (normalized.repaired) {
@@ -324,6 +486,10 @@ export function repairEventLogSequenceSync(key: string): { repaired: boolean; la
     parsedCache.delete(path);
     if (parsedCacheBytes < 0) parsedCacheBytes = 0;
     bumpEventLogRevision();
+    // The rewrite changed the inode; the next call re-verifies from scratch
+    // and sets a fresh cursor.
+  } else {
+    repairCursors.set(path, { ...whole.cursor, previous: lastCompleteSeq(whole.text) });
   }
 
   // Advance the allocator, but report the DURABLE repaired boundary. The
