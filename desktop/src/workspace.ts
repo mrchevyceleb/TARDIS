@@ -4,12 +4,13 @@
 // file is not here yet the shell fetches a copy from the ship.
 import { app, dialog, net, shell, type BrowserWindow } from 'electron';
 import { createWriteStream, existsSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
+import { lstat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
-import { isLaunchable } from './approvals.js';
+import { isLaunchable, isSecretPath } from './approvals.js';
 import { getSettings, saveSettings } from './settings.js';
 
 export const WORKSPACE_LABEL = 'ASSISTANT-HUB';
@@ -156,6 +157,50 @@ export async function clearFetchedCopies(win: BrowserWindow | null): Promise<voi
 async function openLocal(target: string): Promise<OpenResult> {
   const problem = await shell.openPath(target);
   return problem ? { ok: false, error: problem } : { ok: true, where: 'local' };
+}
+
+/** Open an absolute machine path the way Matt asked for in chat: the
+ *  folder opens in Explorer, the file is revealed in its folder. Nothing
+ *  ever launches, secret paths are refused, and a missing path reports
+ *  quietly as not found on this PC. */
+export async function openMachinePath(absPath: string): Promise<OpenResult> {
+  const clean = absPath.trim();
+  // Absolute local path only: a drive path or a real UNC share. Never a URL,
+  // a relative fragment, a Windows device namespace (\\?\ and \\.\ route to
+  // raw devices), or anything that could smuggle a scheme past this.
+  const isUnc = /^\\\\[^\\\n\r]+\\[^\\\n\r]+/.test(clean);
+  if (clean.startsWith('\\\\?\\') || clean.startsWith('\\\\.\\')
+    || (!isUnc && !/^[A-Za-z]:[\\/]/.test(clean))) {
+    return { ok: false, error: 'That is not an absolute machine path.' };
+  }
+  if (isSecretPath(clean)) return { ok: false, error: 'That path holds credentials; this computer never shares it.' };
+  // lstat (never stat) and asynchronous: symlinks are refused so a swapped
+  // link can never redirect the open, and a stalled share cannot block the
+  // main process while Windows resolves it.
+  let info;
+  try { info = await lstat(clean); } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { ok: false, error: `Not found on this PC: ${clean}` };
+    return { ok: false, error: `That path could not be reached on this PC (${code ?? 'unknown error'}).` };
+  }
+  if (info.isSymbolicLink()) return { ok: false, error: 'Symbolic links are never opened from chat.' };
+  if (info.isDirectory()) {
+    // Re-validate the target immediately before the open so a target swapped
+    // between the check and the open still cannot be dispatched as a file.
+    try {
+      const recheck = await lstat(clean);
+      if (recheck.isSymbolicLink() || !recheck.isDirectory()) {
+        return { ok: false, error: 'That path changed while it was being opened. Try again.' };
+      }
+    } catch { return { ok: false, error: 'That path changed while it was being opened. Try again.' }; }
+    const problem = await shell.openPath(clean);
+    return problem ? { ok: false, error: problem } : { ok: true, where: 'local' };
+  }
+  if (info.isFile()) {
+    shell.showItemInFolder(clean);
+    return { ok: true, where: 'local' };
+  }
+  return { ok: false, error: 'That path is neither a folder nor a regular file.' };
 }
 
 export async function openWorkspacePath(rel: string, kind: LinkKind, serverUrl: string | undefined): Promise<OpenResult> {

@@ -176,7 +176,7 @@ const TOOLS = [
   {
     name: 'device_open',
     description:
-      "Open a file or folder on the user's computer in whatever app they normally use for it. Use this to put something in front of the user rather than describing where it is.",
+      "Open a file or folder on the user's computer in whatever app they normally use for it. Use this to put something in front of the user rather than describing where it is. Under Automatic Computer Control on that machine, folders open in Explorer and files are revealed in their folder with no prompt; executables are still refused.",
     inputSchema: {
       type: 'object',
       properties: {

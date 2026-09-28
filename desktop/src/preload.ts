@@ -25,6 +25,7 @@ if (local) {
     workspaceRoot: workspaceRoot || undefined,
     deviceId: String(ipcRenderer.sendSync('tardis:device-id') ?? '') || undefined,
     openWorkspacePath: (relPath: string, kind: 'doc' | 'folder') => ipcRenderer.invoke('tardis:open-workspace', relPath, kind),
+    openMachinePath: (absPath: string) => ipcRenderer.invoke('tardis:open-machine-path', absPath),
   });
   const report = () => {
     const theme = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';

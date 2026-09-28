@@ -16,6 +16,10 @@ export interface TardisShellBridge {
   /** Open a workspace path with the machine's own apps (fetching a copy from
    *  the ship when the file is not synced locally). */
   openWorkspacePath?: (relPath: string, kind: WorkspaceLinkKind) => Promise<NativeOpenResult>;
+  /** Open an absolute machine path: the folder in Explorer, or the file
+   *  revealed in its folder. Never launches anything; reports not-found
+   *  quietly. */
+  openMachinePath?: (absPath: string) => Promise<NativeOpenResult>;
 }
 
 export function nativeShell(): TardisShellBridge | null {
