@@ -241,12 +241,35 @@ function readLog(path: string, cursor?: AppendCursor): LogRead | null {
   }
 }
 
+/** clientMsgId of a durable `_user_echo` (the receipt that a person's message
+ * was admitted), unwrapping event/stream_event envelopes. */
+function userEchoClientMsgIdOf(raw: unknown): string | null {
+  let event: any = raw;
+  while (
+    event
+    && typeof event === 'object'
+    && (event.type === 'event' || event.type === 'stream_event')
+    && event.event
+  ) event = event.event;
+  return event?.type === '_user_echo' && typeof event.clientMsgId === 'string' ? event.clientMsgId : null;
+}
+
+// Delivery receipts per log, oldest to newest, collected from EVERY line the
+// reader parses, not just the trimmed replay window. A busy lane pushes a
+// natively delivered steer's _user_echo out of the MAX_EVENTS_PER_LOG window
+// within minutes, and a reconnect then reported it missing, which raised the
+// false "Queued guidance was not retained" banner. Kept alongside the parsed
+// cache but outside its eviction: any evicted or rewritten log is re-read in
+// full, which rebuilds its receipts.
+const RECEIPTS_PER_LOG = 1024;
+const echoReceipts = new Map<string, string[]>();
+
 /** Parse persisted lines into events. High-water comes from every valid
  * persisted record, including plumbing dropped from the replay window, so
  * nextSeq can never collide with an on-disk seq. */
 function parseLogLines(
   text: string,
-  into: { events: PersistedEvent[]; eventChars: number[]; highWater: number },
+  into: { events: PersistedEvent[]; eventChars: number[]; highWater: number; echoIds?: string[] },
 ): void {
   for (const line of text.split('\n')) {
     if (!line) continue;
@@ -255,6 +278,10 @@ function parseLogLines(
       if (typeof parsed?.seq === 'number' && parsed?.ev) {
         if (parsed.seq > into.highWater) into.highWater = parsed.seq;
         if (isPlumbingEvent(parsed.ev)) continue;
+        if (into.echoIds) {
+          const echoId = userEchoClientMsgIdOf(parsed.ev);
+          if (echoId) into.echoIds.push(echoId);
+        }
         const event: PersistedEvent = { seq: parsed.seq, ev: parsed.ev as SessionEvent };
         if (typeof parsed.eng === 'string' && parsed.eng) event.eng = parsed.eng;
         if (typeof parsed.mdl === 'string' && parsed.mdl) event.mdl = parsed.mdl;
@@ -294,10 +321,13 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
   const appended = cached ? readLog(path, cached.cursor) : null;
   const read = appended ?? readLog(path);
   if (!read) return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
-  const state = appended && cached
-    ? { events: cached.events, eventChars: cached.eventChars, highWater: cached.highWater }
-    : { events: [] as PersistedEvent[], eventChars: [] as number[], highWater: 0 };
+  const incremental = Boolean(appended && cached);
+  const state = incremental && cached
+    ? { events: cached.events, eventChars: cached.eventChars, highWater: cached.highWater, echoIds: echoReceipts.get(path) ?? [] }
+    : { events: [] as PersistedEvent[], eventChars: [] as number[], highWater: 0, echoIds: [] as string[] };
   parseLogLines(read.text, state);
+  if (state.echoIds.length > RECEIPTS_PER_LOG) state.echoIds.splice(0, state.echoIds.length - RECEIPTS_PER_LOG);
+  echoReceipts.set(path, state.echoIds);
   // Trim to the most recent window so a long-lived session that crashed
   // mid-turn doesn't keep replaying ancient events forever.
   if (state.events.length > MAX_EVENTS_PER_LOG) {
@@ -339,6 +369,30 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
   const events = state.events.concat(tail.events);
   const trimmed = events.length > MAX_EVENTS_PER_LOG ? events.slice(events.length - MAX_EVENTS_PER_LOG) : events;
   return { events: trimmed, nextSeq: observeNextSeq(key, Math.max(nextSeq, tail.highWater + 1)) };
+}
+
+/** Newest-first, de-duplicated clientMsgIds of durable user echoes, i.e. the
+ * delivery receipts a reconnecting client reconciles its pending sends
+ * against. Reads only what was appended since the last call. */
+export function recentUserEchoClientMsgIds(key: string, limit = 128): string[] {
+  loadEventLogSync(key);
+  const receipts = echoReceipts.get(logPath(key)) ?? [];
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (let index = receipts.length - 1; index >= 0 && ids.length < limit; index -= 1) {
+    const id = receipts[index];
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+/** Whether a durable user echo exists for this clientMsgId (the send was
+ * admitted), within the last RECEIPTS_PER_LOG receipts of the live log. */
+export function durableUserEchoClientMsgId(key: string, clientMsgId: string): boolean {
+  loadEventLogSync(key);
+  return (echoReceipts.get(logPath(key)) ?? []).includes(clientMsgId);
 }
 
 export function normalizeEventLogSequence(lines: readonly string[]): {
