@@ -152,21 +152,20 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
   if (typeof input.note !== 'string') throw new Error('note is required (a short label for the wake message)');
   const note = input.note.trim().replace(/\s+/g, ' ').slice(0, 120);
   if (!note) throw new Error('note is required (a short label for the wake message)');
-  const picked = (['pid', 'file', 'command'] as const).filter((key) => {
-    const value = input[key];
-    if (key === 'pid') return typeof value === 'number';
-    return typeof value === 'string' && value.trim() !== '';
-  });
-  if (picked.length !== 1) throw new Error('pass exactly one of pid, file, or command');
-  if (input.timeoutMin !== undefined && input.timeoutMin !== null) {
-    if (typeof input.timeoutMin !== 'number' || !Number.isSafeInteger(input.timeoutMin) || input.timeoutMin < MIN_TIMEOUT_MIN || input.timeoutMin > MAX_TIMEOUT_MIN) {
-      throw new Error(`timeoutMin must be an integer ${MIN_TIMEOUT_MIN}-${MAX_TIMEOUT_MIN} minutes`);
-    }
+  // Selection is by PRESENCE, then the present one is type-checked: a
+  // malformed sibling selector (pid as a string next to a valid file) is
+  // rejected instead of being silently ignored.
+  const present = (['pid', 'file', 'command'] as const).filter((key) => input[key] !== undefined);
+  if (present.length !== 1) throw new Error('pass exactly one of pid, file, or command');
+  const target = present[0];
+  if (input.timeoutMin !== undefined
+    && (typeof input.timeoutMin !== 'number' || !Number.isSafeInteger(input.timeoutMin) || input.timeoutMin < MIN_TIMEOUT_MIN || input.timeoutMin > MAX_TIMEOUT_MIN)) {
+    throw new Error(`timeoutMin must be an integer ${MIN_TIMEOUT_MIN}-${MAX_TIMEOUT_MIN} minutes`);
   }
   const timeoutMin: number = typeof input.timeoutMin === 'number' ? input.timeoutMin : 60;
   const deadline = Date.now() + timeoutMin * 60_000;
 
-  if (picked[0] === 'pid') {
+  if (target === 'pid') {
     if (typeof input.pid !== 'number' || !Number.isSafeInteger(input.pid) || input.pid <= 0) throw new Error('pid must be a positive integer');
     const pid = input.pid;
     if (!pidAlive(pid)) throw new Error(`process ${pid} has already exited — there is nothing left to watch`);
@@ -175,8 +174,8 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
     }));
   }
 
-  if (picked[0] === 'file') {
-    if (typeof input.file !== 'string') throw new Error('file must be an absolute path on this host');
+  if (target === 'file') {
+    if (typeof input.file !== 'string' || !input.file.trim()) throw new Error('file must be an absolute path on this host');
     const file = input.file.trim();
     if (!isAbsolute(file)) throw new Error('file must be an absolute path on this host');
     let baselineSize: number | null;
@@ -261,13 +260,17 @@ function armChild(id: string, child: ChildProcess): void {
 }
 
 /** Resolve a persisted watch by id (exit-listener / buffered path). Gated,
- *  self-catching, and never rejects unobserved. */
+ *  self-catching, and never rejects unobserved. The FIRST recorded
+ *  resolution owns the record: a command exit after a recorded timeout (or
+ *  any later event) must not overwrite it — the timeout wake already told
+ *  the agent to check the job itself, so "nothing further will arrive"
+ *  stays true and one resolution stays one wake. */
 function resolveWatchById(id: string, outcome: string): void {
   if (!beginDelivery(id)) return;
   void (async () => {
     try {
       const watch = (await store.list()).find((w) => w.id === id);
-      if (watch) await deliverWake(watch, outcome); // caller holds the gate
+      if (watch && watch.resolvedText === undefined) await deliverWake(watch, outcome); // caller holds the gate
     } catch (err) {
       console.warn(`[job-watches] resolution for ${id} failed:`, (err as Error).message);
     } finally {
@@ -276,16 +279,34 @@ function resolveWatchById(id: string, outcome: string): void {
   })();
 }
 
+/** Terminal cleanup for a watch record: forget cooldowns and detach any
+ *  in-memory child tracking (the job itself keeps running — only its
+ *  listeners go, so a deleted watch can never resolve later, and no
+ *  cooldown or child entry leaks forever). */
+function forgetWatch(id: string): void {
+  retryUntil.delete(id);
+  const child = children.get(id);
+  if (child) {
+    children.delete(id);
+    child.removeAllListeners('exit');
+    child.removeAllListeners('error');
+  }
+}
+
 /** Cascade: an agent's watches die with it (no ghost retry loops). */
 export async function deleteJobWatchesForAgent(agentId: string): Promise<void> {
   await serialize(async () => {
     const watches = await store.list();
+    const removed = watches.filter((w) => w.agentId === agentId);
     await store.replace(watches.filter((w) => w.agentId !== agentId));
+    for (const w of removed) forgetWatch(w.id);
   });
 }
 
 export async function deleteJobWatch(id: string): Promise<boolean> {
-  return serialize(() => store.delete(id));
+  const deleted = await serialize(() => store.delete(id));
+  if (deleted) forgetWatch(id);
+  return deleted;
 }
 
 /** Fresh resolution detail for a watch on this tick, or null to keep
@@ -337,6 +358,7 @@ async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
     if (!agent) {
       console.warn(`[job-watches] ${watch.note}: agent was deleted; dropping the wake`);
       await serialize(() => store.delete(watch.id));
+      forgetWatch(watch.id);
       return false;
     }
     // Persist the outcome BEFORE the delivery attempt: sendToAgentHome can
@@ -362,12 +384,14 @@ async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
     });
     if (result.delivered) {
       await serialize(() => store.delete(watch.id));
+      forgetWatch(watch.id);
       console.log(`[job-watches] ${watch.note} → woke ${agent.name}: ${outcome}`);
       return true;
     }
     if (Date.now() > watch.deadline + UNDELIVERABLE_GRACE_MS) {
       console.warn(`[job-watches] ${watch.note}: wake undeliverable (${result.reason}); dropping`);
       await serialize(() => store.delete(watch.id));
+      forgetWatch(watch.id);
       return false;
     }
     // resolvedText is already persisted above; the tick retries it.
