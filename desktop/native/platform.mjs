@@ -197,7 +197,7 @@ class WindowsAdapter {
     const result = await this.call('window_capture', { window }, signal);
     return { png: Buffer.from(result.png, 'base64'), bounds: result.bounds, process: result.process };
   }
-  uiaTree(window, signal) { return this.call('uia', { window }, signal, 25_000); }
+  uiaTree(window, focus, signal) { return this.call('uia', { window, ...(focus ? { focus } : {}) }, signal, 25_000); }
   async uiaValue(window, element, text, name, post, append, signal) {
     const result = await this.call('uia_value', { window, element, text, ...(name ? { name } : {}), post: post === true, append: append === true }, signal, 25_000);
     return { png: Buffer.from(result.png, 'base64'), bounds: result.bounds, ...(result.postedTo ? { postedTo: result.postedTo } : {}) };
