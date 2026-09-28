@@ -201,38 +201,67 @@ public static class DesktopInput {
    *  over themselves (aborting the restore when they moved off the raised
    *  target mid-restore — restoring on top of THEIR switch would be a new
    *  steal). False when the raised window still holds the foreground. */
+  public static string LastRestoreDetail = "";
+  public static string LastRestoreOutcome = "";
   public static bool RestoreForeground(long prev, long raisedTarget) {
+    // Detail carries every attempt's attach results, SetForegroundWindow
+    // return and settled foreground handle; Outcome is one of restored /
+    // personMoved / holdingKey / noForeground / noPrev / osDenied /
+    // appReAsserted / exception. A restore that fails on a real machine
+    // (the 18:13 live round was unattributable) is diagnosable from the op
+    // result alone instead of live guessing.
+    LastRestoreDetail = ""; LastRestoreOutcome = "";
     try {
       var prevH = new IntPtr(prev);
-      if (prevH == IntPtr.Zero) return false;
-      var now = GetForegroundWindow();
-      if (now == prevH) return true; // already back (a person race we can accept)
-      // The person took the foreground off the raised target themselves: leave
-      // their choice alone (restoring would steal from THEM).
-      if (now != IntPtr.Zero && now.ToInt64() != raisedTarget && !SameProcess(now.ToInt64(), raisedTarget)) return true;
-      if (now == IntPtr.Zero) return false;
-      if (AnyPhysicalKeyDown()) return false; // never break a live chord mid-restore
-      uint nowPid; var nowThread = GetWindowThreadProcessId(now, out nowPid);
-      uint prevPid; var prevThread = GetWindowThreadProcessId(prevH, out prevPid);
-      var ourThread = GetCurrentThreadId();
-      bool nowAttached = false, prevAttached = false;
-      try {
-        if (nowThread != 0 && nowThread != ourThread) nowAttached = AttachThreadInput(ourThread, nowThread, true);
-        if (prevThread != 0 && prevThread != ourThread) prevAttached = AttachThreadInput(ourThread, prevThread, true);
-        // Abort if the person moved the foreground between the snapshot above
-        // and the attach: same rule as the pre-attach check.
-        var latest = GetForegroundWindow();
-        if (latest != IntPtr.Zero && latest != now && latest.ToInt64() != raisedTarget && !SameProcess(latest.ToInt64(), raisedTarget)) return true;
-        SetForegroundWindow(prevH);
-      } finally {
-        if (prevAttached) AttachThreadInput(ourThread, prevThread, false);
-        if (nowAttached) AttachThreadInput(ourThread, nowThread, false);
+      if (prevH == IntPtr.Zero) { LastRestoreOutcome = "noPrev"; return false; }
+      bool everSwitched = false;
+      // Up to three bounded attempts: Chromium surfaces that activate on
+      // background actions (a palette opening, a focused composer) often
+      // assert their window again within ~100ms of losing the foreground,
+      // and the OS foreground lock can briefly deny a switch right after a
+      // raise; a short gap and a retry outlasts both.
+      for (int attempt = 1; attempt <= 3; attempt++) {
+        var now = GetForegroundWindow();
+        if (now == prevH) { LastRestoreOutcome = "restored"; return true; } // already back (a race we accept)
+        // The person took the foreground off the raised target themselves:
+        // leave their choice alone (restoring would steal from THEM).
+        if (now != IntPtr.Zero && now.ToInt64() != raisedTarget && !SameProcess(now.ToInt64(), raisedTarget)) { LastRestoreOutcome = "personMoved"; return true; }
+        if (now == IntPtr.Zero) { LastRestoreOutcome = "noForeground"; return false; }
+        if (AnyPhysicalKeyDown()) { LastRestoreOutcome = "holdingKey"; return false; } // never break a live chord mid-restore
+        uint nowPid; var nowThread = GetWindowThreadProcessId(now, out nowPid);
+        uint prevPid; var prevThread = GetWindowThreadProcessId(prevH, out prevPid);
+        var ourThread = GetCurrentThreadId();
+        bool nowAttached = false, prevAttached = false;
+        try {
+          if (nowThread != 0 && nowThread != ourThread) nowAttached = AttachThreadInput(ourThread, nowThread, true);
+          if (prevThread != 0 && prevThread != ourThread) prevAttached = AttachThreadInput(ourThread, prevThread, true);
+          LastRestoreDetail += "attempt " + attempt + ": attachNow=" + (nowAttached ? 1 : 0) + " attachPrev=" + (prevAttached ? 1 : 0);
+          // Abort if the person moved the foreground between the snapshot above
+          // and the attach: same rule as the pre-attach check.
+          var latest = GetForegroundWindow();
+          if (latest != IntPtr.Zero && latest != now && latest.ToInt64() != raisedTarget && !SameProcess(latest.ToInt64(), raisedTarget)) { LastRestoreDetail += " personMovedDuringAttach"; LastRestoreOutcome = "personMoved"; return true; }
+          var switched = SetForegroundWindow(prevH);
+          if (switched) everSwitched = true;
+          LastRestoreDetail += " setFg=" + (switched ? 1 : 0) + ";";
+        } finally {
+          if (prevAttached) AttachThreadInput(ourThread, prevThread, false);
+          if (nowAttached) AttachThreadInput(ourThread, nowThread, false);
+        }
+        System.Threading.Thread.Sleep(80); // focus changes settle asynchronously
+        var settled = GetForegroundWindow();
+        if (settled == prevH) { LastRestoreDetail += " settled=prev;"; LastRestoreOutcome = "restored"; return true; }
+        LastRestoreDetail += " settled=" + settled.ToInt64() + ";";
+        if (settled != IntPtr.Zero && settled.ToInt64() != raisedTarget && !SameProcess(settled.ToInt64(), raisedTarget)) { LastRestoreOutcome = "personMoved"; return true; }
+        if (attempt < 3) System.Threading.Thread.Sleep(60);
       }
-      System.Threading.Thread.Sleep(30); // focus changes settle asynchronously
-      var final = GetForegroundWindow();
-      if (final == prevH) return true;
-      return final != IntPtr.Zero && final.ToInt64() != raisedTarget && !SameProcess(final.ToInt64(), raisedTarget);
-    } catch { return false; }
+      // The two honest failures: the OS refused every switch (the foreground
+      // lock; nothing ever moved), or the app re-asserted its window after a
+      // switch that did land. Three is the cap: a longer raise war only adds
+      // flashes over the person's work, so the honest end is the loud warning
+      // plus this evidence.
+      LastRestoreOutcome = everSwitched ? "appReAsserted" : "osDenied";
+      return false;
+    } catch (Exception e) { LastRestoreDetail += " exception=" + e.Message; LastRestoreOutcome = "exception"; return false; }
   }
   [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr h, EnumProc callback, IntPtr p);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int count);
@@ -558,12 +587,44 @@ function Restore-IfStolen([long]$Before, [long]$Target) {
     return
   }
   $script:OpStolenAtInput = $true
-  if ([DesktopInput]::RestoreForeground($Before, $Target)) {
+  $ok = [DesktopInput]::RestoreForeground($Before, $Target)
+  if ($ok) {
     Start-Sleep -Milliseconds 120
+    # A late re-assert (the app activates its window again once the restore
+    # settles, e.g. a palette taking focus) lands exactly here, after the
+    # in-call retries: one more bounded pass closes the common case.
+    if (([DesktopInput]::Foreground() -ne $Before) -and (Test-ForegroundRaisedTarget $Before $Target)) {
+      $ok = [DesktopInput]::RestoreForeground($Before, $Target)
+      if ($ok) { Start-Sleep -Milliseconds 120 }
+    }
     # Acceptable outcomes: the person's window is back, or THEY moved the
     # foreground off the raised target themselves (RestoreForeground aborts
     # on that rather than stealing from them again).
     if (([DesktopInput]::Foreground() -eq $Before) -or (-not (Test-ForegroundRaisedTarget $Before $Target))) { $script:OpRestoredAtInput = $true }
+  }
+  # RestoreForeground carries the per-attempt evidence; surface it for the
+  # result layer whatever the outcome.
+  $script:OpRestoreOutcome = [string][DesktopInput]::LastRestoreOutcome
+  $script:OpRestoreDetail = [string][DesktopInput]::LastRestoreDetail
+}
+
+# The loud-path twin of the safe notes: the op raised the person's foreground
+# and the restore could not hold it. The outcome says WHY (Windows denied
+# every switch outright vs the app re-asserting its window after a switch
+# that landed), and the detail string carries every attempt's evidence so
+# a failed restore on a real machine is diagnosable from the op result
+# alone. foregroundRestored is set false explicitly: its absence at 18:13
+# left the failure state ambiguous.
+function Add-RestoreFailureEvidence([hashtable]$Result, [long]$Before) {
+  $Result.foregroundRestored = $false
+  $Result.foregroundRestoreOutcome = [string]$script:OpRestoreOutcome
+  $Result.foregroundRestoreDetail = [string]$script:OpRestoreDetail
+  if ($script:OpRestoreOutcome -eq 'osDenied') {
+    $Result.warning = "This op raised the target window over the person's work and Windows DENIED every restore attempt (the foreground lock; no switch ever landed: $($script:OpRestoreDetail)). Tell the person to click back into their work and report which op did this: background use of it is unsafe until fixed."
+  } elseif ($script:OpRestoreOutcome -eq 'appReAsserted') {
+    $Result.warning = "This op raised the target window over the person's work; restores did switch back but the app re-asserted its window after each (raise war stopped at the retry cap: $($script:OpRestoreDetail)). Tell the person to click back into their work and report which op did this: background use of it is unsafe until fixed."
+  } else {
+    $Result.warning = "This op raised the target window (or another window of its app) over the person's work and could NOT restore it (foreground went from $Before to $($Result.foregroundAfter); restore outcome: $($script:OpRestoreOutcome), $($script:OpRestoreDetail)). Tell the person to click back into their work, and report which op did this: background use of it is unsafe until fixed."
   }
 }
 
@@ -607,11 +668,13 @@ function Add-ForegroundEvidence([hashtable]$Result, [long]$Before, [long]$Target
         Start-Sleep -Milliseconds 120
         $Result.foregroundAfter = [DesktopInput]::Foreground()
       }
+      $script:OpRestoreOutcome = [string][DesktopInput]::LastRestoreOutcome
+      $script:OpRestoreDetail = [string][DesktopInput]::LastRestoreDetail
       if (($Result.foregroundAfter -eq $Before) -or (-not (Test-ForegroundRaisedTarget $Before $Target))) {
         $Result.foregroundRestored = $true
         $Result.note = "This op raised the target window over the person's work, the adapter restored their foreground, and the app raised it once more before being restored again. Safe to continue; the person may notice a brief flash."
       } else {
-        $Result.warning = "This op raised the target window over the person's work and could NOT keep their foreground window restored (the app re-raised it; foreground ended on $($Result.foregroundAfter)). Tell the person to click back into their work, and report which op did this: background use of it is unsafe until fixed."
+        Add-RestoreFailureEvidence $Result $Before
       }
       return
     }
@@ -623,7 +686,7 @@ function Add-ForegroundEvidence([hashtable]$Result, [long]$Before, [long]$Target
       $Result.note = "This op raised the target window over the person's work; the immediate restore did not verify, but their foreground window is back by the end of the op. Safe to continue."
       return
     }
-    $Result.warning = "This op raised the target window (or another window of its app) over the person's work and could NOT restore it (foreground went from $Before to $($Result.foregroundAfter)). Tell the person to click back into their work, and report which op did this: background use of it is unsafe until fixed."
+    Add-RestoreFailureEvidence $Result $Before
     return
   }
   if ($Result.foregroundAfter -ne $Before) {
@@ -639,6 +702,8 @@ function Add-ForegroundEvidence([hashtable]$Result, [long]$Before, [long]$Target
         Start-Sleep -Milliseconds 120
         $Result.foregroundAfter = [DesktopInput]::Foreground()
       }
+      $script:OpRestoreOutcome = [string][DesktopInput]::LastRestoreOutcome
+      $script:OpRestoreDetail = [string][DesktopInput]::LastRestoreDetail
       if (($Result.foregroundAfter -eq $Before) -or (-not (Test-ForegroundRaisedTarget $Before $Target))) {
         $Result.foregroundRestored = $true
         if ($Result.foregroundAfter -ne $Before) {
@@ -648,7 +713,7 @@ function Add-ForegroundEvidence([hashtable]$Result, [long]$Before, [long]$Target
           $Result.note = "This op raised the target window late (after its input) and the adapter restored the person's foreground window. Safe to continue; the person may notice a brief flash."
         }
       } else {
-        $Result.warning = "This op raised the target window (or another window of its app) over the person's work and could NOT restore it (foreground went from $Before to $($Result.foregroundAfter)). Tell the person to click back into their work, and report which op did this: background use of it is unsafe until fixed."
+        Add-RestoreFailureEvidence $Result $Before
       }
     } else {
       # A switch to an unrelated window is most likely the person alt-tabbing
@@ -668,6 +733,25 @@ function Test-ForegroundRaisedTarget([long]$Before, [long]$Target) {
   if ($after -eq $Before) { return $false }
   if ($after -eq $Target) { return $true }
   return [DesktopInput]::SameProcess($after, $Target)
+}
+
+# Background INPUT ops (uia_value, uia_focus, uia_invoke, uia_key) can raise
+# the target app's window over the person's work (Chromium activates on
+# background UIA actions, verified live on the Claude app), and while the
+# person is actively using the desktop even a millisecond flash can swallow
+# a keystroke mid-typing. Until the restore is proven to hold on a live
+# app, every background input op refuses while the person had input within
+# the last 60s, exactly like the foreground tools. Read-only ops (uia
+# snapshot, window_capture) stay open: verified live never to raise.
+# Background ops never inject input, so unlike the act path there is no
+# TARDIS-own-input case to discriminate here. Fails open when the idle
+# query itself is unavailable.
+function Assert-PersonIdleForBackgroundInput {
+  $idleMs = [DesktopInput]::LastInputMs()
+  if ($idleMs -ge 0 -and $idleMs -lt 60000) {
+    $idleSecs = [int][math]::Floor($idleMs / 1000)
+    throw "needs foreground: the person used this desktop ${idleSecs}s ago (within the 60s activity guard). Background input can still raise the target app's window over their work (the restore is not yet proven to hold on a live app), so it refuses by design until the restore is verified. Read-only background ops (computer_uia, computer_window_capture) still work. Wait until the person has been idle for a minute, then retry with a FRESH operationId."
+  }
 }
 
 function Assert-TargetWindow([object]$request, [bool]$afterInput) {
@@ -749,6 +833,7 @@ try {
       if (!$p.window -or !$p.element) { throw 'uia_value requires a window id and an element ref from computer_uia.' }
       $hwnd = [long]$p.window
       if ([DesktopInput]::IsMinimized($hwnd)) { throw 'needs foreground: the window is minimized. Background actions are unreliable on a minimized window and cannot be visually verified (a live sidebar invoke did nothing). Have the person restore the window; covered is fine.' }
+      Assert-PersonIdleForBackgroundInput
       $fg = [DesktopInput]::Foreground()
       $script:OpForegroundBefore = $fg
       $resolved = [UiaWindow]::Resolve($hwnd, [string]$p.element, [string]$p.name)
@@ -835,6 +920,7 @@ try {
       if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
       if (!$p.window -or !$p.element) { throw 'uia_focus requires a window id and an element ref from computer_uia.' }
       $hwnd = [long]$p.window
+      Assert-PersonIdleForBackgroundInput
       $resolved = [UiaWindow]::Resolve($hwnd, [string]$p.element, [string]$p.name)
       $el = $resolved.Element
       if ([string]::IsNullOrWhiteSpace([string]$p.name) -and -not [string]::IsNullOrWhiteSpace($resolved.Name)) {
@@ -859,6 +945,7 @@ try {
       if (!$p.window -or !$p.element) { throw 'uia_invoke requires a window id and an element ref from computer_uia.' }
       $hwnd = [long]$p.window
       if ([DesktopInput]::IsMinimized($hwnd)) { throw 'needs foreground: the window is minimized. Background actions are unreliable on a minimized window and cannot be visually verified (a live sidebar invoke did nothing). Have the person restore the window; covered is fine.' }
+      Assert-PersonIdleForBackgroundInput
       $fg = [DesktopInput]::Foreground()
       $script:OpForegroundBefore = $fg
       $resolved = [UiaWindow]::Resolve($hwnd, [string]$p.element, [string]$p.name)
@@ -904,6 +991,7 @@ try {
       else { throw "needs foreground: uia_key cannot post '$k': single non-modifier keys only (ENTER, TAB, ESC, SPACE, BACKSPACE, DELETE, arrows, HOME, END, PAGEUP, PAGEDOWN, A-Z, 0-9, F1-F12). Modifier chords need the real keyboard; focus the window and use computer_key." }
       $hwnd = [long]$p.window
       if ([DesktopInput]::IsMinimized($hwnd)) { throw 'needs foreground: the window is minimized. Background actions are unreliable on a minimized window and cannot be visually verified. Have the person restore the window; covered is fine.' }
+      Assert-PersonIdleForBackgroundInput
       $fg = [DesktopInput]::Foreground()
       $script:OpForegroundBefore = $fg
       # Posted keys target the window's focused element: prefer that
