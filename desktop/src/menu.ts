@@ -2,6 +2,9 @@ import { app, Menu, type MenuItemConstructorOptions } from 'electron';
 
 export interface MenuActions {
   bridgeEnabled: boolean;
+  /** A downloaded update is waiting; show the Restart to Update item. */
+  updateReady: boolean;
+  restartToUpdate(): void;
   setBridgeEnabled(on: boolean): void;
   forgetApprovals(): void;
   stopComputer(): void;
@@ -28,6 +31,7 @@ export function installMenu(actions: MenuActions): void {
           { role: 'about' },
           { label: version, enabled: false },
           { type: 'separator' },
+          ...(actions.updateReady ? [{ label: 'Restart to Update…', click: actions.restartToUpdate } as MenuItemConstructorOptions] : []),
           { label: 'Check for Updates…', click: actions.checkForUpdates },
           { type: 'separator' },
           { role: 'services' },
@@ -66,6 +70,7 @@ export function installMenu(actions: MenuActions): void {
         { label: 'Forget Approvals', click: actions.forgetApprovals },
         { type: 'separator' },
         ...(isMac ? [{ role: 'close' } as MenuItemConstructorOptions] : [
+          ...(actions.updateReady ? [{ label: 'Restart to Update…', click: actions.restartToUpdate } as MenuItemConstructorOptions] : []),
           { label: 'Check for Updates…', click: actions.checkForUpdates },
           { type: 'separator' } as MenuItemConstructorOptions,
           { role: 'quit' } as MenuItemConstructorOptions,
