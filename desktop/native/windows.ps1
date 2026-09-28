@@ -602,17 +602,28 @@ function Restore-IfStolen([long]$Before, [long]$Target) {
     Start-Sleep -Milliseconds 120
     # A late re-assert (the app activates its window again once the restore
     # settles, e.g. a palette taking focus) lands exactly here, after the
-    # in-call retries: one more bounded pass closes the common case.
+    # in-call retries: one more bounded pass closes the common case. The
+    # person may also have clicked into the raised window during the settle
+    # (their input is newer than this op): never override their deliberate
+    # switch with another pass; their choice stands.
     if (([DesktopInput]::Foreground() -ne $Before) -and (Test-ForegroundRaisedTarget $Before $Target)) {
-      $reAsserted = $true
-      $ok = [DesktopInput]::RestoreForeground($Before, $Target)
-      if ($ok) { Start-Sleep -Milliseconds 120 }
+      $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $script:StartedAt
+      if ([DesktopInput]::LastInputMs() -lt ($elapsed + 1500)) {
+        $script:OpPersonTookOver = $true
+      } else {
+        $reAsserted = $true
+        $ok = [DesktopInput]::RestoreForeground($Before, $Target)
+        if ($ok) { Start-Sleep -Milliseconds 120 }
+      }
     }
-    # Acceptable outcomes: the person's window is back, or THEY moved the
-    # foreground off the raised target themselves (RestoreForeground aborts
-    # on that rather than stealing from them again).
-    if (([DesktopInput]::Foreground() -eq $Before) -or (-not (Test-ForegroundRaisedTarget $Before $Target))) { $script:OpRestoredAtInput = $true }
   }
+  # Acceptable outcomes, checked once after every path (including the
+  # personMoved skip, which previously left OpRestoredAtInput unset and
+  # misreported the person's own switch as a restore failure): the person's
+  # window is back, or THEY moved the foreground off the raised target
+  # themselves (RestoreForeground aborts on that rather than stealing from
+  # them again).
+  if (([DesktopInput]::Foreground() -eq $Before) -or (-not (Test-ForegroundRaisedTarget $Before $Target))) { $script:OpRestoredAtInput = $true }
   # Evidence comes from the LAST call, but a second pass resets the C#
   # fields: when it only ran because the app re-asserted a restore that DID
   # land, "restored, re-asserted, denied again" is appReAsserted, never plain
@@ -689,7 +700,12 @@ function Add-ForegroundEvidence([hashtable]$Result, [long]$Before, [long]$Target
         }
         return
       }
-      if ([DesktopInput]::RestoreForeground($Before, $Target)) {
+      # The person may have clicked into the raised window during the settle
+      # (their input is newer than this op): never override their deliberate
+      # switch with another restore pass.
+      $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $script:StartedAt
+      $personSwitch = ([DesktopInput]::LastInputMs() -lt ($elapsed + 1500))
+      if (-not $personSwitch -and [DesktopInput]::RestoreForeground($Before, $Target)) {
         Start-Sleep -Milliseconds 120
         $Result.foregroundAfter = [DesktopInput]::Foreground()
       }
@@ -732,7 +748,11 @@ function Add-ForegroundEvidence([hashtable]$Result, [long]$Before, [long]$Target
       # themselves (RestoreForeground aborts on that instead of stealing from
       # them again).
       $Result.foregroundStolen = $true
-      if ([DesktopInput]::RestoreForeground($Before, $Target)) {
+      # Same person rule as every retry: their input newer than this op
+      # means their deliberate switch stands; never override it.
+      $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $script:StartedAt
+      $personSwitch = ([DesktopInput]::LastInputMs() -lt ($elapsed + 1500))
+      if (-not $personSwitch -and [DesktopInput]::RestoreForeground($Before, $Target)) {
         Start-Sleep -Milliseconds 120
         $Result.foregroundAfter = [DesktopInput]::Foreground()
       }
