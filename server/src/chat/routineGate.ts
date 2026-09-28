@@ -403,12 +403,15 @@ export async function runRoutineGate(routineId: string, config: RoutineGateConfi
     if (opts.dryRun) return;
     const latest = readState();
     const next: Record<string, SourceState> = { ...(latest[routineId] ?? {}) };
-    // Wake items are not handled until the digest is delivered. Holding them
-    // out of the watermark means a run that sees a mention and then dies
-    // before reporting it will see the same mention next tick.
-    const held = new Set(decision.wake);
+    // commit() only runs once the agent has received the digest (a quiet run
+    // has no wake items), so woken items are delivered and settled here. A run
+    // that dies before delivery never commits, so its items come back next
+    // tick. Holding delivered wake items froze ts watermarks for sources where
+    // every item wakes: the comms sweep re-listed five days of Slack every
+    // five minutes (Sep 28 2026) and buried the new messages.
+    const held = new Set(items.filter((it) => shouldReconsider(it, config, decision.scores.get(it) ?? {})));
     for (const f of fetched) {
-      const settled = f.fresh.filter((it) => !held.has(it) && !shouldReconsider(it, config, decision.scores.get(it) ?? {}));
+      const settled = f.fresh.filter((it) => !held.has(it));
       next[f.source.id] = nextSourceState(f.source, settled, f.all, next[f.source.id], held);
     }
     writeState({ ...latest, [routineId]: next });
