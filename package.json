@@ -1,7 +1,7 @@
 {
   "name": "tardis",
   "private": true,
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Bigger on the inside. A local-first, always-on multi-agent office for Claude Code, Codex, and Grok subscriptions.",
   "license": "MIT",
   "repository": {
