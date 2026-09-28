@@ -941,6 +941,12 @@ export function useChat(opts: {
    *  timer. A new chat opened with a message has no history to hide, so it
    *  never hydrates. */
   const [hydrating, setHydrating] = useState(() => Boolean(enabled && repo && !initialMessage));
+  /** Queued bubbles as of the latest hello: restored from the saved copy or
+   *  the in-memory steer queue, or sent on an earlier socket. That hello's
+   *  `ready` settles them. One the server neither holds nor delivered was
+   *  rejected while nobody was watching, or lost in transit or with a server
+   *  restart, and must not say "will run next" forever on a busy lane. */
+  const settleOnReadyRef = useRef<Set<string>>(new Set());
   // `chatId` already carries `__acct__<account>` when the lane is pinned.
   const restoreKey = enabled && repo ? conversationKey(cli, repo.path, chatId) : '';
   const restoreKeyRef = useRef(restoreKey);
@@ -1088,8 +1094,17 @@ export function useChat(opts: {
    * `queuedClientMsgIds` contains guidance still waiting for a boundary;
    * `deliveredClientMsgIds` contains durable _user_echo receipts. A missing
    * queue id while the lane is busy can mean it is the ACTIVE turn, never a
-   * failure. Older servers omit receipt fields, so only arrays are authoritative. */
-  const reconcileQueuedState = (rawQueuedIds: unknown, rawDeliveredIds: unknown, serverBusy: boolean) => {
+   * failure. Older servers omit receipt fields, so only arrays are authoritative.
+   * `settledIds` are bubbles the server has had every chance to hold or
+   * deliver (see settleOnReadyRef): missing from both, they are lost even
+   * while the lane is busy. That needs both lists, or an active turn's steer
+   * (dequeued, receipt unknown) would look lost. */
+  const reconcileQueuedState = (
+    rawQueuedIds: unknown,
+    rawDeliveredIds: unknown,
+    serverBusy: boolean,
+    settledIds?: ReadonlySet<string>,
+  ) => {
     const hasQueuedState = Array.isArray(rawQueuedIds);
     const hasDeliveredState = Array.isArray(rawDeliveredIds);
     if (!hasQueuedState && !hasDeliveredState) return;
@@ -1110,7 +1125,7 @@ export function useChat(opts: {
       }
       if (
         hasQueuedState
-        && !serverBusy
+        && (!serverBusy || (hasDeliveredState && settledIds?.has(block.clientMsgId)))
         && block.deliveryState === 'queued'
         && !queuedIds.has(block.clientMsgId)
       ) return { ...block, deliveryState: 'failed' as const };
@@ -1122,7 +1137,7 @@ export function useChat(opts: {
       if (deliveredIds.has(id)) {
         if (repo) forgetPendingSteer(conversationKey(cli, repo.path, chatId), id);
         queuedSteerRef.current.delete(id);
-      } else if (hasQueuedState && !serverBusy && !queuedIds.has(id)) {
+      } else if (hasQueuedState && (!serverBusy || (hasDeliveredState && settledIds?.has(id))) && !queuedIds.has(id)) {
         if (repo) forgetPendingSteer(conversationKey(cli, repo.path, chatId), id);
         queuedSteerRef.current.delete(id);
         droppedUnretained = true;
@@ -1131,7 +1146,7 @@ export function useChat(opts: {
     pendingSendRef.current = queuedSteerRef.current.size > 0 || Boolean(peekOutbound(conversationKey(cli, repo?.path ?? '', chatId)));
     if (droppedUnretained && queuedSteerRef.current.size === 0) {
       setError('Queued guidance was not retained by the server. Please send it again.');
-      setStatus('ready');
+      setStatus(serverBusy ? 'streaming' : 'ready');
     } else if (current.some((id) => deliveredIds.has(id)) && queuedSteerRef.current.size === 0) {
       setError(null);
     }
@@ -1422,6 +1437,7 @@ export function useChat(opts: {
 
       ws.onopen = () => {
         if (!isCurrentConnection()) return;
+        settleOnReadyRef.current = new Set(queuedSteerRef.current);
         ws.send(JSON.stringify({
           type: 'hello',
           cli,
@@ -1496,12 +1512,18 @@ export function useChat(opts: {
               pending: msg.brainPending === true,
             });
           }
-          reconcileQueuedState(msg.queuedClientMsgIds, msg.deliveredClientMsgIds, msg.busy === true);
+          // Clear stale errors first, so a settlement warning below survives.
+          setError(null);
+          // `ready` follows the replay, so its lists are the server's whole
+          // account of every bubble queued when the hello went out. Settle
+          // those; guidance sent after the hello is tracked live.
+          const settledIds = settleOnReadyRef.current;
+          settleOnReadyRef.current = new Set();
+          reconcileQueuedState(msg.queuedClientMsgIds, msg.deliveredClientMsgIds, msg.busy === true, settledIds);
           // If the server says we attached to a busy session (Sam is mid-turn
           // because the user reconnected from a phone unlock or tab switch),
           // jump straight to 'streaming' so the UI shows tending instead of
           // looking idle while events stream in via replay.
-          setError(null);
           reconnectAttemptRef.current = 0;
           // Every composer and threshold send waits in the same stable-ID FIFO
           // until this ready boundary, then remains there until durable echo.
@@ -1867,6 +1889,10 @@ export function useChat(opts: {
         }
         else if (msg.type === 'steerRejected') {
           if (typeof msg.clientMsgId === 'string') {
+            // Drop it from the in-memory steer queue too, or switching away and
+            // back restores it as "Queued · will run next" on a busy lane.
+            if (repo) forgetPendingSteer(conversationKey(cli, repo.path, chatId), msg.clientMsgId);
+            settleOnReadyRef.current.delete(msg.clientMsgId);
             setBlocks((prev) => prev.map((block) => (
               block.kind === 'user' && block.clientMsgId === msg.clientMsgId
                 ? { ...block, deliveryState: 'failed' as const }
@@ -1932,8 +1958,15 @@ export function useChat(opts: {
             pendingSendRef.current;
           if (inFlight) {
             if (msg.code === 'STEER_REJECTED' && (!msg.clientMsgId || queuedSteerRef.current.has(msg.clientMsgId))) {
-              if (typeof msg.clientMsgId === 'string') queuedSteerRef.current.delete(msg.clientMsgId);
-              else queuedSteerRef.current = new Set();
+              // Same cleanup as steerRejected: a remount must not restore it.
+              const steerKey = conversationKey(cli, repo.path, chatId);
+              if (typeof msg.clientMsgId === 'string') {
+                forgetPendingSteer(steerKey, msg.clientMsgId);
+                queuedSteerRef.current.delete(msg.clientMsgId);
+              } else {
+                for (const queuedId of queuedSteerRef.current) forgetPendingSteer(steerKey, queuedId);
+                queuedSteerRef.current = new Set();
+              }
               if (typeof msg.clientMsgId === 'string') {
                 setBlocks((prev) => prev.map((block) => (
                   block.kind === 'user' && block.clientMsgId === msg.clientMsgId
@@ -2032,6 +2065,7 @@ export function useChat(opts: {
           // Ignore replayed control events locally, but keep transport-ready:
           // the server serializes any send behind this re-hello's completion.
           socketReady = false;
+          settleOnReadyRef.current = new Set(queuedSteerRef.current);
           live.send(JSON.stringify({
             type: 'hello',
             cli,
