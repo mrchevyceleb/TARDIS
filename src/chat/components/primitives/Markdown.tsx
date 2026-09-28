@@ -4,8 +4,10 @@ import { memo, useCallback, useContext, type MouseEvent, type ReactNode } from '
 import {
   DESK_HREF_PREFIX,
   annotateDeskRefs,
+  annotateMachinePaths,
   annotateWorkspaceMentions,
   openExternalHttpLink,
+  openMachineLink,
   parseDeskHref,
   openWorkspaceLink,
   parseProxyHref,
@@ -33,7 +35,7 @@ import { DeskRefPill } from './DeskRef';
 // Whitelist our internal proxy schemes so the `a` override below sees them
 // and can render in-app cards instead of empty external links.
 function proxyUrlTransform(url: string): string {
-  if (url.startsWith('rivendell-doc:') || url.startsWith('rivendell-folder:') || url.startsWith(DESK_HREF_PREFIX)) return url;
+  if (url.startsWith('rivendell-doc:') || url.startsWith('rivendell-folder:') || url.startsWith('rivendell-machine:') || url.startsWith(DESK_HREF_PREFIX)) return url;
   return defaultUrlTransform(url);
 }
 
@@ -49,7 +51,7 @@ export function protectChatMarkdownLists(input: string): string {
   }).join('');
 }
 
-type WorkspaceTarget = { kind: 'doc' | 'folder'; path: string };
+type WorkspaceTarget = { kind: 'doc' | 'folder' | 'machine'; path: string };
 
 const INLINE_CODE_STYLE = {
   fontFamily: 'var(--r-mono)',
@@ -76,6 +78,11 @@ function useWorkspaceTargetOpener(target: WorkspaceTarget | null): () => void {
 
   return useCallback(() => {
     if (!kind || path === undefined) return;
+
+    // Absolute machine paths are the OS's, not the workspace's: the desktop
+    // shell on that PC opens the folder in Explorer or reveals the file,
+    // with a quiet toast when it does not exist there.
+    if (kind === 'machine') { openMachineLink(path); return; }
 
     // Inside the Studio shell, keep it in-app: folders reveal in the file tree,
     // renderable docs (html/pdf/images/media) open in the overlay, and text,
@@ -162,6 +169,7 @@ function MarkdownLink({ href, children }: { href?: string; children?: ReactNode 
         onClick={onClick}
         className="sw-md-proxy-link"
         data-proxy-kind={proxyTarget.kind}
+        title={proxyTarget.kind === 'machine' ? 'Open folder / reveal file on this PC' : undefined}
       >
         {children}
       </a>
@@ -318,7 +326,7 @@ const MD_COMPONENTS: Components = {
 };
 
 function MarkdownInner({ children }: { children: string }) {
-  const annotated = annotateDeskRefs(annotateWorkspaceMentions(protectChatMarkdownLists(children)));
+  const annotated = annotateDeskRefs(annotateWorkspaceMentions(annotateMachinePaths(protectChatMarkdownLists(children))));
   return (
     <div className="sw-md">
       <ReactMarkdown

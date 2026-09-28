@@ -21,7 +21,7 @@ import { getSettings, initSettings, saveSettings, type Settings, type ThemeName,
 import { installMenu } from './menu.js';
 import { normalizeServerUrl, probeServer, sameOrigin } from './server.js';
 import { canAutoUpdate, checkForUpdatesInteractive, onUpdateReady, pendingUpdateVersion, restartToUpdate, startUpdater } from './updater.js';
-import { chooseWorkspaceRoot, clearFetchedCopies, handleNativeScheme, openWorkspacePath, workspaceRoot } from './workspace.js';
+import { chooseWorkspaceRoot, clearFetchedCopies, handleNativeScheme, openMachinePath, openWorkspacePath, workspaceRoot } from './workspace.js';
 import { deviceId, refreshDeviceBridge, startDeviceBridge, stopDeviceBridge } from './bridge.js';
 import { computer, setComputerAutomatic } from './computer.js';
 import { bridgeEnabled, forgetApprovals, setBridgeEnabled } from './approvals.js';
@@ -338,6 +338,13 @@ function installIpc(): void {
 
   ipcMain.on('tardis:workspace-root', (event) => {
     event.returnValue = workspaceRoot() ?? '';
+  });
+
+  ipcMain.handle('tardis:open-machine-path', (event, rawPath: unknown) => {
+    // Only the trusted server origin may ask; the click itself is Matt's,
+    // and the handler only ever opens a folder or reveals a file.
+    if (!sameOrigin(event.senderFrame?.url ?? '', serverUrl)) return { ok: false, error: 'Not allowed from this page.' };
+    return openMachinePath(String(rawPath ?? ''));
   });
 
   ipcMain.handle('tardis:open-workspace', (event, rel: unknown, kind: unknown) => {

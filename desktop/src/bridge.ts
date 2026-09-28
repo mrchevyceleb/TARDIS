@@ -17,6 +17,7 @@ import {
   bridgeEnabled,
   cancelPendingApprovals,
   isSecretPath,
+  wouldRun,
 } from './approvals.js';
 import { getSettings, saveSettings } from './settings.js';
 import { workspaceRoot } from './workspace.js';
@@ -303,6 +304,43 @@ async function handle(id: string, op: string, params: Record<string, unknown>): 
   }
 
   if (op === 'open') {
+    // Under Automatic Computer Control the person has already trusted this
+    // server's agents with the machine: folders open in Explorer and files
+    // are revealed in their folder with no per-click prompt. Nothing ever
+    // launches from an agent request; executables stay refused either way.
+    if (computer.status().approvalMode === 'automatic' && !wouldRun(target)) {
+      stillTheSamePath(target);
+      let info;
+      try { info = await lstat(target); } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') throw new Error('That path does not exist on this computer.');
+        throw new Error(`That path could not be reached on this computer (${code ?? 'unknown error'}).`);
+      }
+      // Symlinks are refused so a swapped link can never redirect the open,
+      // and the target is revalidated immediately before the open so a
+      // target swapped between the check and the open cannot be dispatched
+      // as a file either.
+      if (info.isSymbolicLink()) throw new Error('Symbolic links are never opened from agent requests.');
+      if (info.isDirectory()) {
+        try {
+          const recheck = await lstat(target);
+          if (recheck.isSymbolicLink() || !recheck.isDirectory()) {
+            throw new Error('That path changed while it was being opened. Try again.');
+          }
+        } catch (error) {
+          if (error instanceof Error && error.message.startsWith('That path changed')) throw error;
+          throw new Error('That path changed while it was being opened. Try again.');
+        }
+        const problem = await shell.openPath(target);
+        if (problem) throw new Error(problem);
+        return { path: target, opened: 'folder' };
+      }
+      if (info.isFile()) {
+        shell.showItemInFolder(target);
+        return { path: target, revealed: true };
+      }
+      throw new Error('That path is neither a folder nor a regular file.');
+    }
     if (await approvePath(target, 'open', root, deadline) === 'deny') {
       throw new Error('The person at that computer declined to open this, or it is a file the computer would run.');
     }

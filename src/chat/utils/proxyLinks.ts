@@ -157,6 +157,21 @@ export function openExternalHttpLink(href: string): boolean {
 // we fire the `rivendell://` handler; on phones, Macs, or Windows machines that
 // haven't run the installer yet, we fall back to a path that always works —
 // Tailscale-served HTTP for files, the in-app Library room for folders.
+/** Open an absolute machine path the way Matt asked for: the folder in
+ *  Explorer, or the file revealed in its folder, from the desktop shell on
+ *  the machine he is on. Never launches anything; a quiet toast when the
+ *  path does not exist on this PC. */
+export function openMachineLink(absPath: string): void {
+  const shellBridge = nativeShell();
+  if (shellBridge?.openMachinePath) {
+    shellBridge.openMachinePath(absPath)
+      .then((result) => { if (!result.ok && result.error) showToast(result.error); })
+      .catch((error: unknown) => showToast(error instanceof Error ? error.message : 'Could not open that path.'));
+    return;
+  }
+  showToast('Machine paths open in the TARDIS desktop app on that PC.');
+}
+
 export function openWorkspaceLink(relPath: string, kind: 'doc' | 'folder'): void {
   const shell = nativeShell();
   if (shell?.openWorkspacePath) {
@@ -212,6 +227,93 @@ const MENTION_PATTERN = new RegExp(
 
 const TRAILING_PUNCT = /[\s).,;:!?\]'"`>]+$/;
 
+// Absolute machine paths outside the workspace (C:\Users\...\Desktop and
+// friends) become `rivendell-machine:` links: the desktop shell opens the
+// folder in Explorer or reveals the file in its folder, with a quiet toast
+// when the path does not exist on that PC. Workspace-prefixed paths stay
+// workspace mentions (they carry fetch-and-open semantics).
+const MACHINE_PATH_PATTERN = new RegExp(
+  String.raw`\b[A-Za-z]:\\[^\n\r]+?${STOP_LOOKAHEAD}`,
+  'g',
+);
+
+export function annotateMachinePaths(input: string): string {
+  if (!/[A-Za-z]:\\/.test(input)) return input;
+  return annotateMarkdownOutsideCode(input, (plain: string): string => {
+    // A manual exec loop, not String.replace: the lazy matcher's prose
+    // lookahead cuts at closers, which strands common Windows names like
+    // "C:\\Downloads\\Report (1).pdf". An absorbed opener run is either
+    // path-like ("Report (1)", no spaces inside) or prose ("(see log)"):
+    // path-like runs take their closer and extension chain back from the
+    // following text (which requires consuming past the match, something a
+    // replace callback cannot do without duplicating the remainder), and
+    // prose runs are trimmed off the path.
+    const workspacePrefix = WIN_WORKSPACE_PREFIX.toLowerCase();
+    let out = '';
+    let last = 0;
+    MACHINE_PATH_PATTERN.lastIndex = 0;
+    for (let m = MACHINE_PATH_PATTERN.exec(plain); m !== null; m = MACHINE_PATH_PATTERN.exec(plain)) {
+      const match = m[0];
+      const offset = m.index;
+      let end = offset + match.length;
+      let clean = match;
+      const trailingMatch = match.match(TRAILING_PUNCT);
+      let trailing = trailingMatch ? trailingMatch[0] : '';
+      if (trailing) clean = match.slice(0, match.length - trailing.length);
+      const openRun = clean.match(/[([][^()[\]\n\r]*$/);
+      if (openRun) {
+        if (openRun[0].includes(' ')) {
+          // Prose parenthetical: the path ends before it.
+          clean = clean.slice(0, openRun.index);
+          const retrim = clean.match(TRAILING_PUNCT);
+          if (retrim) clean = clean.slice(0, clean.length - retrim[0].length);
+          // Move the consumption point back to the trimmed path end, so
+          // the prose parenthetical's closer is not mistaken for a markdown
+          // link target's.
+          end = offset + clean.length;
+        } else {
+          const opens = (clean.match(/[([]/g) ?? []).length;
+          const closes = (clean.match(/[)\]]/g) ?? []).length;
+          const rest = plain.slice(end);
+          let take = 0;
+          while (take < opens - closes && (rest[take] === ')' || rest[take] === ']')) take += 1;
+          if (take > 0) {
+            clean += rest.slice(0, take);
+            end += take;
+            trailing = '';
+            // The prose lookahead cut at the closer, so a file extension
+            // that follows it ("Report (1).pdf") got stranded outside the
+            // match. Absorb the extension chain back onto the path.
+            const extension = rest.slice(take).match(/^((?:\.[A-Za-z0-9_-]+)+)/);
+            if (extension) { clean += extension[1]; end += extension[1].length; }
+          }
+        }
+      }
+      // Bounded workspace exclusion, computed from the final cleaned path:
+      // only the workspace root itself or a child under a separator stays a
+      // workspace mention (its siblings like C:\...\ASSISTANT-HUB-old\x are
+      // machine paths, and trailing punctuation never changes the verdict).
+      const lower = clean.toLowerCase();
+      const isWorkspace = lower === workspacePrefix
+        || lower.startsWith(`${workspacePrefix}\\`)
+        || lower.startsWith(`${workspacePrefix}/`);
+      // Skip anything already inside a markdown link label or target: the
+      // agent may have written its own links around these paths. Checked
+      // after the closer re-attachment, so a path's own closing paren is not
+      // mistaken for a link target's.
+      const before = offset > 0 ? plain[offset - 1] : '';
+      const after = plain[end] ?? '';
+      const insideLink = before === '[' || before === '(' || after === ']' || after === ')';
+      if (!isWorkspace && !insideLink && clean.length > 3) {
+        out += plain.slice(last, offset) + `[${clean}](rivendell-machine:${encodeURIComponent(clean)})`;
+        last = end;
+      }
+      MACHINE_PATH_PATTERN.lastIndex = end;
+    }
+    return out + plain.slice(last);
+  });
+}
+
 export function annotateWorkspaceMentions(input: string): string {
   if (!mentionsWorkspace(input)) return input;
   return annotateMarkdownOutsideCode(input);
@@ -244,8 +346,10 @@ export function parseWorkspaceMentionText(value: string): { kind: 'doc' | 'folde
   const proxyMarkdownLink = trimmed.match(/^\[([^\]]+)]\((rivendell-(?:doc|folder):[^)]+)\)$/);
   if (proxyMarkdownLink) {
     const target = parseProxyHref(proxyMarkdownLink[2]);
-    if (!target) return null;
-    return { ...target, display: proxyMarkdownLink[1] || toWindowsDisplay(target.path) };
+    if (!target || target.kind === 'machine') return null;
+    // Direct fields, not a spread: TS spreads use the declared type, which
+    // would smuggle the 'machine' kind back into this doc/folder-only view.
+    return { kind: target.kind, path: target.path, display: proxyMarkdownLink[1] || toWindowsDisplay(target.path) };
   }
 
   const clean = trimmed.replace(TRAILING_PUNCT, '');
@@ -368,8 +472,12 @@ function toWindowsDisplay(rel: string): string {
   return `${WIN_WORKSPACE_PREFIX}${LOCAL_SEP}${rel.split('/').join(LOCAL_SEP)}`;
 }
 
-export function parseProxyHref(href: string | undefined): { kind: 'doc' | 'folder'; path: string } | null {
+export function parseProxyHref(href: string | undefined): { kind: 'doc' | 'folder' | 'machine'; path: string } | null {
   if (!href) return null;
+  if (href.startsWith('rivendell-machine:')) {
+    const abs = decodeProxyPath(href.slice('rivendell-machine:'.length));
+    return abs && /^[A-Za-z]:[\\/]/.test(abs) ? { kind: 'machine', path: abs } : null;
+  }
   if (href.startsWith('rivendell-doc:')) {
     const path = normalizeWorkspacePath(decodeProxyPath(href.slice('rivendell-doc:'.length)));
     return path === null ? null : { kind: 'doc', path };
