@@ -36,7 +36,7 @@ import {
   type AnySession,
   type CliKind,
 } from './runner.ts';
-import { flushEventLog, loadEventLogSync, repairEventLogSequenceSync } from './event-log-store.ts';
+import { durableUserEchoClientMsgId, flushEventLog, loadEventLogSync, recentUserEchoClientMsgIds, repairEventLogSequenceSync } from './event-log-store.ts';
 import { isReactionEmoji, recordReaction } from './reactions.ts';
 import {
   activeCodexSessions,
@@ -397,23 +397,18 @@ export async function registerChat(app: express.Express, server: Server): Promis
       ? event.clientMsgId
       : null;
   };
+  // Delivery receipts must come from the FULL durable log files, not
+  // loadEventLogSync's trimmed replay window: a busy lane pushes a natively
+  // delivered steer's _user_echo out of MAX_EVENTS_PER_LOG within minutes,
+  // and a reconnect then honestly reported the receipt as missing, raising
+  // the false "Queued guidance was not retained" banner (verified live on
+  // the Chief chat: 39 durable receipts, one handed back on reconnect).
   const durableSendAccepted = (cli: CliKind, repo: string, chatId: string, clientMsgId: string): boolean => (
-    loadEventLogSync(laneLogKey(cli, repo, chatId)).events.some(
-      (event) => userEchoClientMsgId(event.ev) === clientMsgId,
-    )
+    durableUserEchoClientMsgId(laneLogKey(cli, repo, chatId), clientMsgId)
   );
-  const recentDeliveredClientMsgIds = (cli: CliKind, repo: string, chatId: string, limit = 128): string[] => {
-    const ids: string[] = [];
-    const seen = new Set<string>();
-    const events = loadEventLogSync(laneLogKey(cli, repo, chatId)).events;
-    for (let index = events.length - 1; index >= 0 && ids.length < limit; index -= 1) {
-      const clientMsgId = userEchoClientMsgId(events[index]?.ev);
-      if (!clientMsgId || seen.has(clientMsgId)) continue;
-      seen.add(clientMsgId);
-      ids.push(clientMsgId);
-    }
-    return ids;
-  };
+  const recentDeliveredClientMsgIds = (cli: CliKind, repo: string, chatId: string, limit = 128): string[] => (
+    recentUserEchoClientMsgIds(laneLogKey(cli, repo, chatId), limit)
+  );
   const rememberSendAdmission = (
     key: string,
     state: SendAdmission['state'],
