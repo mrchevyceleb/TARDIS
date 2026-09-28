@@ -315,7 +315,11 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
   parsedCache.delete(path);
   parsedCache.set(path, {
     mtimeMs: read.mtimeMs,
-    size: read.size,
+    // With an unterminated trailing line the cache must not serve exact hits:
+    // the fragment is not cached, so an unchanged file would silently drop it.
+    // -1 never matches, which sends the next call through the (cheap)
+    // incremental path that re-reads just the fragment.
+    size: read.fragment ? -1 : read.size,
     events: state.events,
     eventChars: state.eventChars,
     highWater: state.highWater,
