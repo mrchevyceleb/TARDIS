@@ -346,10 +346,15 @@ export class ComputerController {
           // input (needs foreground, stale ref, missing pattern): the entry is
           // freed and a corrected retry is welcome. undefined means the script
           // died without a verdict (timeout/kill), which is conservatively
-          // may-have-run.
+          // may-have-run. Either way the native error's foreground-steal
+          // evidence must survive the wrap.
           if (error && error.attempted !== false) {
             inputAttempted = true;
-            throw new Error(`Window action may already have run; do NOT replay it. Capture the window to verify. ${error instanceof Error ? error.message : String(error)}`);
+            const wrapped = new Error(`Window action may already have run; do NOT replay it. Capture the window to verify. ${error instanceof Error ? error.message : String(error)}`);
+            for (const key of ['attempted', 'foregroundBefore', 'foregroundAfter', 'foregroundStolen', 'foregroundRestored', 'foregroundChanged', 'warning', 'note']) {
+              if (error[key] !== undefined) wrapped[key] = error[key];
+            }
+            throw wrapped;
           }
           throw error;
         }
@@ -411,6 +416,15 @@ export class ComputerController {
       const result = await this.captureFrame(after, f.windowId ? { window: f.windowId } : { display: f.displayId }, ac.signal);
       check(); this.requireGrant(params.session); return result;
     } catch (error) {
+      // The native layer explicitly reported a refusal BEFORE any input ran
+      // (the person-activity guard, a validation refusal): never poison the
+      // reserved operationId as may-have-run, and never run the release
+      // keystrokes (release injects real input — actively harmful while the
+      // person is working). A corrected retry with the same id is welcome.
+      if (inputAttempted && error && error.attempted === false) {
+        inputAttempted = false;
+        this.inputActive = false;
+      }
       if (keyboardEntry) {
         if (inputAttempted) keyboardEntry.outcome ??= { executed: 'unknown', windowId: params.window,
           message: `Keyboard input may already have run. Do not repeat it under a new operationId. ${error instanceof Error ? error.message : String(error)}`.slice(0, 1000) };
