@@ -12,6 +12,7 @@
  *   team_status  — authoritative current teammate activity
  *   team_message — durable async handoff; waits only when explicitly requested
  *   team_recent  — recent visible messages from a teammate's thread
+ *   watch_job    — wake yourself when a long background job (pid/file/command) resolves
  *   routine_*    — list, create, update, run, delete TARDIS routines
  *   desk_todo_*  — the owner's "Needs you" list on the Desk
  *   board_*      — the Desk board of agent work (cards, moves, comments)
@@ -149,6 +150,23 @@ const TOOLS = [
         limit: { type: 'number', description: 'How many messages (default 8)' },
       },
       required: ['name'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'watch_job',
+    description:
+      'Watch a long background job — exactly one of pid (a process you already started, e.g. via nohup … & echo $!), file (an absolute path that should appear or grow), or command (a shell command the server runs detached). When it resolves — the process exits, the file appears or grows, the command exits — or after timeoutMin (default 60), TARDIS delivers a message into your own thread as a new turn, exactly like a teammate message. Use this for long jobs instead of blocking your turn on a foreground wait; the wake survives a TARDIS restart.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: { type: 'number', description: 'PID to watch; resolves when the process exits' },
+        file: { type: 'string', description: 'Absolute file path to watch; resolves when it appears or grows' },
+        command: { type: 'string', description: 'Shell command the server runs detached; resolves with its exit code' },
+        timeoutMin: { type: 'number', description: 'Report a timeout after this many minutes (1-1440, default 60)' },
+        note: { type: 'string', description: 'Short label for the wake message, e.g. "scanner build"' },
+      },
+      required: ['note'],
       additionalProperties: false,
     },
   },
@@ -686,6 +704,29 @@ async function callTool(name, args, signal) {
     const { messages } = await api(`/api/team/recent?name=${encodeURIComponent(args.name)}&limit=${args.limit ?? 8}`, undefined, signal);
     if (!messages?.length) return `No recent messages for ${args.name}.`;
     return messages.map((m) => `${m.who === 'agent' ? args.name : m.who === 'peer' ? '→ teammate msg' : 'user'}: ${m.text}`).join('\n');
+  }
+  if (name === 'watch_job') {
+    const self = process.env.RIVENDELL_AGENT_NAME;
+    if (!self) throw new Error('Watch jobs from a named teammate so the wake can find your thread.');
+    const picked = ['pid', 'file', 'command'].filter((key) => args[key] !== undefined && args[key] !== null && String(args[key]).trim() !== '');
+    if (picked.length !== 1) throw new Error('Pass exactly one of pid, file, or command.');
+    const agent = await resolveAgent(self, signal);
+    const body = { agentId: agent.id, note: args.note, timeoutMin: args.timeoutMin, [picked[0]]: args[picked[0]] };
+    let watch;
+    try {
+      ({ watch } = await api('/api/team/watch', { method: 'POST', body: JSON.stringify(body) }, signal));
+    } catch (error) {
+      if (String(error.message).includes('already exited')) {
+        return `Not watching: ${error.message}. The job is done; read its output now instead of arming a wake.`;
+      }
+      throw error;
+    }
+    const subject = picked[0] === 'pid' ? `pid ${watch.pid}` : picked[0] === 'file' ? `file ${watch.file}` : `command: ${watch.command}`;
+    const timeout = `up to ${watch.timeoutMin}m`;
+    return [
+      `Watching for ${agent.name}: ${subject}, ${timeout}.`,
+      `A wake lands in your own thread as a new turn when it finishes or times out. This is the ONLY notification you get — after arming it, never block your turn on a foreground wait. Work on something else or end the turn.`,
+    ].join('\n');
   }
   if (name.startsWith('routine_')) {
     const self = process.env.RIVENDELL_AGENT_NAME;

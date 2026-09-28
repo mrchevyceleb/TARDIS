@@ -3,6 +3,7 @@
 import { Router } from 'express';
 import { asyncHandler } from './helpers.ts';
 import { deliverTeamMessage, teamRoster, teamRecent } from '../chat/teamBus.ts';
+import { createJobWatch, deleteJobWatch, jobWatchesWithAgents } from '../chat/jobWatches.ts';
 
 export const teamRouter = Router();
 
@@ -42,4 +43,30 @@ teamRouter.get('/recent', asyncHandler(async (req, res) => {
   const name = String(req.query.name ?? '');
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 8));
   res.json({ messages: await teamRecent(name, limit) });
+}));
+
+// /watch — background job watches (watch_job tool): the server watches a
+// pid / file / command and wakes the calling agent's own thread when it
+// resolves or times out. Same delivery path as a routine.
+teamRouter.get('/watch', asyncHandler(async (_req, res) => {
+  res.json({ watches: await jobWatchesWithAgents() });
+}));
+
+teamRouter.post('/watch', asyncHandler(async (req, res) => {
+  const { agentId, note, pid, file, command, timeoutMin } = req.body ?? {};
+  if (typeof agentId !== 'string' || !agentId.trim()) {
+    res.status(400).json({ error: 'agentId is required' });
+    return;
+  }
+  try {
+    const watch = await createJobWatch({ agentId, note, pid, file, command, timeoutMin });
+    res.status(201).json({ watch });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+}));
+
+teamRouter.delete('/watch/:id', asyncHandler(async (req, res) => {
+  const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  res.json({ deleted: await deleteJobWatch(id) });
 }));

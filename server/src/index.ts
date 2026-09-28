@@ -23,6 +23,7 @@ import { registerDeviceBridge } from './devices/bridge.ts';
 import { voicePreviewRouter } from './voice/preview.ts';
 import { chatAttachmentsRouter } from './routes/chatAttachments.ts';
 import { startRoutineScheduler } from './chat/routines.ts';
+import { startJobWatchScheduler } from './chat/jobWatches.ts';
 import { ensureXaiProxy, shutdownXaiProxy } from './chat/xai-proxy.ts';
 import { registerScribeSocket } from './worker/scribe.ts';
 import { startWorkerQueue, stopWorkerQueue } from './worker/queue.ts';
@@ -165,6 +166,7 @@ const stopChat = await registerChat(app, server);
 registerVoiceCalls(server);
 registerDeviceBridge(server);
 startRoutineScheduler(); // agent-scoped routine scheduler (30s tick)
+startJobWatchScheduler(); // background job watches (10s tick): pid/file/command → agent wake
 registerScribeSocket(server);
 startWorkerQueue();
 startWorkspaceWatcher();

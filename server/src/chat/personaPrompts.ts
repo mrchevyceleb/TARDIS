@@ -21,6 +21,14 @@ const TEAM_STATUS_GUIDANCE = [
   '</rivendell-team-status>',
 ].join('\n');
 
+/** Long jobs get watched, not blocked on. Tool lives in the rivendell-team
+ *  MCP (watch_job); the wake lands in the agent's own thread as a turn. */
+const WATCH_JOB_GUIDANCE = [
+  '<rivendell-watch-job>',
+  'Long jobs (builds, renders, scans, big migrations): start them detached (for example nohup with &), then call watch_job with exactly one of pid, file, or command plus a short note. TARDIS wakes your own thread as a new turn when the job resolves or after timeoutMin. Never park your turn on a foreground wait for something long-running; nothing backgrounded can wake you on its own.',
+  '</rivendell-watch-job>',
+].join('\n');
+
 /** Keeps the Desk (the owner's one view of what needs them and what every
  *  agent is doing) true. Tools live in the rivendell-team MCP. */
 const DESK_GUIDANCE = [
@@ -53,7 +61,7 @@ export function personaPromptFor(chatId: string): string {
   const agent = agentForChatId(chatId);
   if (!agent) return '';
   const scope = readScopeFile(`${agent.id}.md`);
-  return [scope, TEAM_STATUS_GUIDANCE, DESK_ROOM_ENABLED ? DESK_GUIDANCE : null].filter(Boolean).join('\n\n');
+  return [scope, TEAM_STATUS_GUIDANCE, WATCH_JOB_GUIDANCE, DESK_ROOM_ENABLED ? DESK_GUIDANCE : null].filter(Boolean).join('\n\n');
 }
 
 /** Scope text for an agent record's home (REST use). */
