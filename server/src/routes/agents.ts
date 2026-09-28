@@ -3,7 +3,7 @@
 import { Router } from 'express';
 import express from 'express';
 import { asyncHandler } from './helpers.ts';
-import { AgentBrainConflictError, AgentBrainRevisionRequiredError, listAgents, createAgent, updateAgent, deleteAgent, setAgentAvatar, clearAgentAvatar, agentAvatarPath, reorderAgents } from '../chat/agents.ts';
+import { AGENT_COLORS, AgentBrainConflictError, AgentBrainRevisionRequiredError, isAgentColor, listAgents, createAgent, updateAgent, deleteAgent, setAgentAvatar, clearAgentAvatar, agentAvatarPath, reorderAgents } from '../chat/agents.ts';
 import { personaScopeFor } from '../chat/personaPrompts.ts';
 import { agentUnread, markAgentRead, agentLatestSeq } from '../chat/reads.ts';
 import { SubscriptionEngineError } from '../chat/subscription-policy.ts';
@@ -48,10 +48,14 @@ agentsRouter.post('/', asyncHandler(async (req, res) => {
 }));
 
 agentsRouter.patch('/:id', asyncHandler(async (req, res) => {
-  const { name, role, engine, model, effort, brainRevision, voice, pinned, muted, scope } = req.body ?? {};
+  const { name, role, engine, model, effort, brainRevision, voice, pinned, muted, color, scope } = req.body ?? {};
   const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   if (muted !== undefined && typeof muted !== 'boolean') {
     res.status(400).json({ error: 'muted must be a boolean' });
+    return;
+  }
+  if (color !== undefined && color !== null && !isAgentColor(color)) {
+    res.status(400).json({ error: `color must be null or one of ${AGENT_COLORS.join(', ')}` });
     return;
   }
   try {
@@ -63,6 +67,7 @@ agentsRouter.patch('/:id', asyncHandler(async (req, res) => {
       {
         name, role, engine, model, effort, voice, pinned,
         muted,
+        color,
         scope,
       },
       expectedRevision,

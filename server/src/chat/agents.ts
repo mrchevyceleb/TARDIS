@@ -53,7 +53,18 @@ export type Agent = {
   pinned?: boolean;
   /** Hide unread badges — for companions that work with the crew, not the user. */
   muted?: boolean;
+  /** Sidebar color label (a key from AGENT_COLORS). Absent means no color. */
+  color?: AgentColor;
 };
+
+/** Sidebar color labels. Keys only; the client owns the actual shades so
+ *  each theme can tune them. Mirrored in src/grok/agents.ts. */
+export const AGENT_COLORS = ['red', 'orange', 'amber', 'green', 'teal', 'blue', 'violet', 'pink'] as const;
+export type AgentColor = typeof AGENT_COLORS[number];
+
+export function isAgentColor(value: unknown): value is AgentColor {
+  return typeof value === 'string' && (AGENT_COLORS as readonly string[]).includes(value);
+}
 
 export type AgentBrain = { engine: string; model?: string; effort?: string; revision: number; updatedAt?: number };
 
@@ -271,7 +282,7 @@ export function ensureAgents(): void {
   }
 }
 
-export type AgentInput = { name: string; role?: string; engine?: string; model?: string; effort?: string; voice?: string; pinned?: boolean; muted?: boolean; scope?: string };
+export type AgentInput = { name: string; role?: string; engine?: string; model?: string; effort?: string; voice?: string; pinned?: boolean; muted?: boolean; color?: AgentColor | null; scope?: string };
 
 export function createAgent(input: AgentInput): Agent {
   if (input.engine !== undefined) assertSubscriptionEngine(input.engine);
@@ -369,6 +380,11 @@ export function updateAgent(
   if (patch.muted !== undefined) {
     if (patch.muted) next.muted = true;
     else delete next.muted;
+  }
+  // null clears the label; anything unknown is refused by the route first.
+  if (patch.color !== undefined) {
+    if (isAgentColor(patch.color)) next.color = patch.color;
+    else delete next.color;
   }
   // Any deliberate brain change makes the prior live-lane stamp historical.
   if (brainChanged) delete next.cli;
