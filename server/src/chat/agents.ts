@@ -94,7 +94,7 @@ function cleanBrainValue(value: unknown): string | undefined {
   return value.trim().slice(0, 180) || undefined;
 }
 
-const CLAUDE_BRAIN_MODELS = new Set(['claude-opus-5-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-fable-5']);
+const CLAUDE_BRAIN_MODELS = new Set(['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-fable-5']);
 const ZAI_BRAIN_MODELS = new Set(['glm-5.3[1m]', 'glm-5.3-flash[1m]', 'glm-5.2[1m]', 'glm-5.1']);
 const CODEX_BRAIN_EFFORTS: Record<string, ReadonlySet<string>> = {
   'gpt-6-astra': new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),

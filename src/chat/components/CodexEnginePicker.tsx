@@ -4,6 +4,7 @@ import { CODEX_MODELS, codexEffortsForModel } from '../codexModels';
 // send/steer payload and reach `codex -m` / `-c model_reasoning_effort`.
 export const CLAUDE_MODELS = [
   { id: 'claude-opus-5-5', label: 'Opus 5.5' },
+  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
   { id: 'claude-opus-5', label: 'Opus 5' },
   { id: 'claude-fable-5-1', label: 'Fable 5.1' },
   { id: 'claude-fable-5', label: 'Fable 5' },
