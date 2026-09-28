@@ -130,6 +130,13 @@ function menuStops(root: HTMLElement | null): HTMLButtonElement[] {
   return menuItems(root).filter((b) => b.dataset.swatch === undefined || b === lead);
 }
 
+/** ", red label" for tooltips and screen readers; empty when uncolored. */
+function colorLabel(a: Agent): string {
+  const key = chatColorOf(a);
+  const label = key ? CHAT_COLORS.find((c) => c.key === key)?.label : undefined;
+  return label ? `, ${label.toLowerCase()} label` : '';
+}
+
 /** Touch has no right-click, so holding a row this long opens the same menu. */
 const LONG_PRESS_MS = 450;
 const LONG_PRESS_SLOP = 10;
@@ -164,9 +171,9 @@ function AgentContextMenu({
   useEffect(() => {
     const node = ref.current;
     if (node) {
-      const box = node.getBoundingClientRect();
-      const left = Math.max(8, Math.min(menu.x, window.innerWidth - box.width - 8));
-      const top = Math.max(8, Math.min(menu.y, window.innerHeight - box.height - 8));
+      // Layout size, not getBoundingClientRect: the open animation scales the box.
+      const left = Math.max(8, Math.min(menu.x, window.innerWidth - node.offsetWidth - 8));
+      const top = Math.max(8, Math.min(menu.y, window.innerHeight - node.offsetHeight - 8));
       if (left !== menu.x) node.style.left = `${left}px`;
       if (top !== menu.y) node.style.top = `${top}px`;
       menuItems(node)[0]?.focus();
@@ -359,8 +366,11 @@ export function BotRail(props: BotRailProps) {
     onPointerDown: (e: ReactPointerEvent<HTMLButtonElement>) => {
       cancelPress();
       pressOpened.current = false;
-      if (e.pointerType === 'mouse' || !e.isPrimary) return;
       const target = e.currentTarget;
+      // Native drag stays mouse-only. On touch (iOS Safari especially) a held
+      // draggable row lifts into a drag before the menu timer can fire.
+      target.draggable = e.pointerType === 'mouse';
+      if (e.pointerType === 'mouse' || !e.isPrimary) return;
       const { clientX: x, clientY: y, pointerId } = e;
       const timer = window.setTimeout(() => {
         pressRef.current = null;
@@ -374,8 +384,8 @@ export function BotRail(props: BotRailProps) {
       const p = pressRef.current;
       if (p && p.pointer === e.pointerId && Math.hypot(e.clientX - p.x, e.clientY - p.y) > LONG_PRESS_SLOP) cancelPress();
     },
-    onPointerUp: cancelPress,
-    onPointerCancel: cancelPress,
+    onPointerUp: (e: ReactPointerEvent<HTMLButtonElement>) => { cancelPress(); e.currentTarget.draggable = true; },
+    onPointerCancel: (e: ReactPointerEvent<HTMLButtonElement>) => { cancelPress(); e.currentTarget.draggable = true; },
   });
   /** True (once) when this click is the release of a long-press. Keyboard
    *  clicks (detail 0) always go through. */
@@ -607,7 +617,7 @@ export function BotRail(props: BotRailProps) {
                   {...pressProps(a)}
                   aria-haspopup="menu"
                   aria-expanded={agentMenu?.id === a.id}
-                  title={`${a.name} · ${a.role}${a.muted ? ' · muted' : ''} (right-click or long-press to mute, pin, color, or edit)`}
+                  title={`${a.name} · ${a.role}${colorLabel(a)}${a.muted ? ' · muted' : ''} (right-click or long-press to mute, pin, color, or edit)`}
                   draggable
                   onDragStart={(e) => {
                     if (pressOpened.current) { e.preventDefault(); return; }
@@ -630,6 +640,7 @@ export function BotRail(props: BotRailProps) {
                   </span>
                   <span className="bt-pin-name">{a.name}</span>
                   <span className="bt-pin-role">{a.role}</span>
+                  {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
                 </button>
               );
             })}
@@ -649,7 +660,7 @@ export function BotRail(props: BotRailProps) {
                 {...pressProps(a)}
                 aria-haspopup="menu"
                 aria-expanded={agentMenu?.id === a.id}
-                title={`${a.name} · ${a.role}${a.muted ? ' · muted' : ''} (right-click or long-press to mute, pin, color, or edit)`}
+                title={`${a.name} · ${a.role}${colorLabel(a)}${a.muted ? ' · muted' : ''} (right-click or long-press to mute, pin, color, or edit)`}
                 draggable
                 onDragStart={(e) => {
                   if (pressOpened.current) { e.preventDefault(); return; }
@@ -688,6 +699,7 @@ export function BotRail(props: BotRailProps) {
                     </span>
                   </span>
                   <span className="bt-conv-sub">{r.item?.preview ?? 'No work yet — give them something real.'}</span>
+                  {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
                 </span>
               </button>
             );

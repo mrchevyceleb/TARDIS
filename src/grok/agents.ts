@@ -1,7 +1,7 @@
 // Client agent model — the team the user curates, served from /api/agents.
 // One agent = one persistent forever-thread + a scope document + an engine.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiJson } from '../data/api';
 import type { ReactNode } from 'react';
 
@@ -54,11 +54,22 @@ export function chatColorOf(a: Agent | undefined): ChatColor | undefined {
   return color && CHAT_COLORS.some((c) => c.key === color) ? color : undefined;
 }
 
+type AgentPatchDetail = { id: string; patch: Partial<Agent>; onlyIf?: Partial<Agent> };
+
+/** Flags compare loosely: the server omits false/0 that the client writes. */
+function sameFlag(a: unknown, b: unknown): boolean {
+  return a === b || (!a && !b);
+}
+
 export function useAgents(): { agents: Agent[]; reload: () => void } {
   const [agents, setAgents] = useState<Agent[]>([]);
+  // Bumped by every optimistic patch. A poll that was already in flight
+  // carries pre-patch data, so it is dropped instead of undoing the patch.
+  const patchEpoch = useRef(0);
   const reload = useCallback(() => {
+    const epoch = patchEpoch.current;
     apiJson<{ agents: Agent[] }>('/api/agents')
-      .then((r) => setAgents(r.agents ?? []))
+      .then((r) => { if (epoch === patchEpoch.current) setAgents(r.agents ?? []); })
       .catch(() => { /* agents are best-effort until the server answers */ });
   }, []);
   useEffect(() => {
@@ -70,11 +81,20 @@ export function useAgents(): { agents: Agent[]; reload: () => void } {
       setAgents((prev) => prev.map((a) => (a.id === id ? { ...a, unread: 0 } : a)));
     };
     const onPatch = (e: Event) => {
-      const detail = (e as CustomEvent<{ id: string; patch: Partial<Agent> }>).detail;
+      const detail = (e as CustomEvent<AgentPatchDetail>).detail;
       if (!detail?.id || !detail.patch) return;
+      patchEpoch.current += 1;
       setAgents((prev) => prev.map((a) => {
         if (a.id !== detail.id) return a;
-        const next = { ...a, ...detail.patch };
+        // A rollback only undoes fields that still hold its optimistic value,
+        // so a newer choice made while the failed request ran survives.
+        const onlyIf = detail.onlyIf;
+        const patch = onlyIf
+          ? Object.fromEntries(Object.entries(detail.patch).filter(([key]) => (
+            sameFlag(a[key as keyof Agent], onlyIf[key as keyof Agent])
+          )))
+          : detail.patch;
+        const next = { ...a, ...patch };
         if (next.muted) next.unread = 0;
         return next;
       }));
@@ -149,16 +169,19 @@ export async function patchAgent(
   previous?: Pick<Agent, 'muted' | 'pinned' | 'unread' | 'color'>,
 ): Promise<Agent> {
   // null clears the color on the server; locally that is just "no color".
-  const local: Partial<Agent> = { ...patch, color: patch.color === null ? undefined : patch.color };
-  if (patch.color === undefined) delete local.color;
-  window.dispatchEvent(new CustomEvent('rivendell:agent-patch', {
-    detail: { id, patch: { ...local, ...(patch.muted ? { unread: 0 } : {}) } },
-  }));
+  const optimistic: Partial<Agent> = { ...patch, color: patch.color === null ? undefined : patch.color };
+  if (patch.color === undefined) delete optimistic.color;
+  if (patch.muted) optimistic.unread = 0;
+  window.dispatchEvent(new CustomEvent<AgentPatchDetail>('rivendell:agent-patch', { detail: { id, patch: optimistic } }));
   try {
     return await updateAgentReq(id, patch);
   } catch (err) {
     if (previous) {
-      window.dispatchEvent(new CustomEvent('rivendell:agent-patch', { detail: { id, patch: previous } }));
+      // Undo only what this request changed, and only where it still shows.
+      const undo = Object.fromEntries(
+        Object.keys(optimistic).filter((key) => key in previous).map((key) => [key, previous[key as keyof typeof previous]]),
+      ) as Partial<Agent>;
+      window.dispatchEvent(new CustomEvent<AgentPatchDetail>('rivendell:agent-patch', { detail: { id, patch: undo, onlyIf: optimistic } }));
     }
     throw err;
   }
