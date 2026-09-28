@@ -16,7 +16,7 @@ export class ComputerController {
     // Windows background window control. Absent on other adapters; the
     // window_capture/uia ops refuse cleanly when these are missing.
     windowCapture?(window: string, signal: AbortSignal): Promise<{ png: Buffer; bounds: { x: number; y: number; width: number; height: number }; process?: string }>;
-    uiaTree?(window: string, signal: AbortSignal): Promise<{ process?: string; elements: any[]; truncated: boolean }>;
+    uiaTree?(window: string, focus: 'interactive' | undefined, signal: AbortSignal): Promise<{ process?: string; elements: any[]; truncated: boolean; focus?: boolean }>;
     uiaValue?(window: string, element: string, text: string, name: string | undefined, post: boolean, append: boolean, signal: AbortSignal): Promise<{ png: Buffer; bounds: { x: number; y: number; width: number; height: number }; postedTo?: number }>;
     uiaFocus?(window: string, element: string, name: string | undefined, signal: AbortSignal): Promise<{ png: Buffer; bounds: { x: number; y: number; width: number; height: number } }>;
     uiaInvoke?(window: string, element: string, name: string | undefined, signal: AbortSignal): Promise<{ png: Buffer; bounds: { x: number; y: number; width: number; height: number } }>;

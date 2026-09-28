@@ -143,6 +143,38 @@ public static class DesktopInput {
     }
   }
   public static void Release() { Mouse(4,0); Mouse(16,0); foreach (ushort k in new ushort[]{16,17,18,91}) Key(k,true); }
+  public static bool IsMinimized(long id) { return IsIconic(new IntPtr(id)); }
+  public static bool SameProcess(long a, long b) {
+    uint pa, pb;
+    GetWindowThreadProcessId(new IntPtr(a), out pa);
+    GetWindowThreadProcessId(new IntPtr(b), out pb);
+    return pa != 0 && pa == pb;
+  }
+  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr h, EnumProc callback, IntPtr p);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int count);
+  /** Chromium takes keyboard messages on its Chrome_RenderWidgetHostHWND
+   *  child, not on the top-level window: posted keys aimed at a focused
+   *  element with no HWND of its own must hop through that child. Verified
+   *  live: ENTER posted to the top-level HWND of the Claude app did nothing
+   *  while the composer held keyboard focus. A window can hold several such
+   *  children (webviews, popups, DevTools); prefer visible ones and take the
+   *  largest by area, which is the main content surface. The heuristic is
+   *  honest: the verification capture shows whether the key landed. */
+  public static long ChromiumInputChild(long id) {
+    long best = 0; long bestArea = 0;
+    EnumChildWindows(new IntPtr(id), (h, p) => {
+      var s = new StringBuilder(256);
+      if (GetClassName(h, s, 256) > 0 && s.ToString() == "Chrome_RenderWidgetHostHWND") {
+        RECT r;
+        if (IsWindowVisible(h) && GetWindowRect(h, out r)) {
+          long area = (long)(r.right - r.left) * (r.bottom - r.top);
+          if (area > bestArea) { bestArea = area; best = h.ToInt64(); }
+        }
+      }
+      return true;
+    }, IntPtr.Zero);
+    return best;
+  }
 }
 '@
 [DesktopInput]::EnableDpi()
@@ -152,6 +184,7 @@ Add-Type -AssemblyName System.Windows.Forms
 # compile ever fails on a machine, only the uia ops refuse; every other op keeps
 # working. No op below may SetForegroundWindow, SendInput or SetCursorPos.
 $script:InputAttempted = $false
+$script:OpForegroundBefore = 0
 $script:UiaReady = $false
 $script:UiaError = ''
 try {
@@ -197,7 +230,7 @@ public static class UiaWindow {
     public bool focused { get; set; }
     public UiaBounds bounds { get; set; }
   }
-  public class UiaSnapshot { public UiaRow[] elements { get; set; } public bool truncated { get; set; } }
+  public class UiaSnapshot { public UiaRow[] elements { get; set; } public bool truncated { get; set; } public int pruned { get; set; } }
   public class UiaResolved { public string Name { get; set; } public AutomationElement Element { get; set; } }
   static readonly TreeWalker Walker = TreeWalker.ControlViewWalker;
   static string Trim(string s, int max) {
@@ -214,6 +247,12 @@ public static class UiaWindow {
     catch (ElementNotAvailableException) { throw new Exception("The window closed before its elements could be read. Inspect windows again."); }
     return el;
   }
+  static bool HasActionablePattern(string[] pats) {
+    foreach (var p in pats) {
+      if (p == "value" || p == "invoke" || p == "toggle" || p == "expand" || p == "select") return true;
+    }
+    return false;
+  }
   static string[] PatternNames(AutomationElement el) {
     AutomationPattern[] pats;
     try { pats = el.GetSupportedPatterns(); } catch { return new string[0]; }
@@ -228,15 +267,26 @@ public static class UiaWindow {
     }
     return names.ToArray();
   }
-  static UiaRow Row(AutomationElement el, string path) {
+  static UiaRow Row(AutomationElement el, string path, System.Windows.Rect windowRect, bool focusMode) {
     var cur = el.Current;
     string name = Trim(cur.Name, 140);
     string ct = cur.ControlType == null ? "" : cur.ControlType.ProgrammaticName;
     if (ct.StartsWith("ControlType.")) ct = ct.Substring("ControlType.".Length);
     string[] pats = PatternNames(el);
     bool focusable = cur.IsKeyboardFocusable, focused = cur.HasKeyboardFocus;
+    // Only actionable patterns count as interactive: static Chromium text can
+    // expose Text or Scroll patterns, which would still crowd the budget.
+    if (focusMode && !HasActionablePattern(pats) && !focusable && !focused) return null; // plain text row
     if (name.Length == 0 && pats.Length == 0 && !focusable && !focused) return null; // silent layout node
     var rect = cur.BoundingRectangle;
+    // Scrolled-away rows sit far outside the window rect (measured y around
+    // -16115 on a real chat window): their bounds are not actionable and they
+    // crowd the element budget so the composer and buttons never appear in
+    // the snapshot. Skip rows entirely outside the window; their raw index
+    // path stays addressable, and uia reads work while minimized anyway.
+    if (!windowRect.IsEmpty && !rect.IsEmpty
+      && (rect.X + rect.Width <= windowRect.X || rect.X >= windowRect.X + windowRect.Width
+       || rect.Y + rect.Height <= windowRect.Y || rect.Y >= windowRect.Y + windowRect.Height)) return null;
     UiaBounds bounds = null;
     if (!rect.IsEmpty) bounds = new UiaBounds {
       x = (int)Math.Round(rect.X), y = (int)Math.Round(rect.Y),
@@ -247,17 +297,21 @@ public static class UiaWindow {
       patterns = pats, focusable = focusable, focused = focused, bounds = bounds,
     };
   }
-  public static object Snapshot(long hwnd, int maxElements, int maxDepth, int budgetMs) {
+  public static object Snapshot(long hwnd, int maxElements, int maxDepth, int budgetMs, bool focusMode, bool skipRectFilter) {
     var root = Root(hwnd);
+    var windowRect = new System.Windows.Rect();
+    // A minimized window reports sentinel or empty coordinates, which would
+    // silently discard every useful row; reads while minimized stay unfiltered.
+    if (!skipRectFilter) { try { windowRect = root.Current.BoundingRectangle; } catch { } }
     var rows = new List<UiaRow>();
     var state = new WalkState();
     var sw = System.Diagnostics.Stopwatch.StartNew();
-    Walk(root, "0", 0, maxElements, maxDepth, budgetMs, sw, rows, state);
+    Walk(root, "0", 0, maxElements, maxDepth, budgetMs, sw, rows, state, windowRect, focusMode);
     bool truncated = rows.Count >= maxElements || sw.ElapsedMilliseconds > budgetMs || state.DepthHit;
-    return new UiaSnapshot { elements = rows.ToArray(), truncated = truncated };
+    return new UiaSnapshot { elements = rows.ToArray(), truncated = truncated, pruned = state.Pruned };
   }
-  class WalkState { public bool DepthHit; }
-  static void Walk(AutomationElement el, string path, int depth, int maxElements, int maxDepth, int budgetMs, System.Diagnostics.Stopwatch sw, List<UiaRow> rows, WalkState state) {
+  class WalkState { public bool DepthHit; public int Pruned; }
+  static void Walk(AutomationElement el, string path, int depth, int maxElements, int maxDepth, int budgetMs, System.Diagnostics.Stopwatch sw, List<UiaRow> rows, WalkState state, System.Windows.Rect windowRect, bool focusMode) {
     if (depth >= maxDepth) {
       // A depth-capped tree must not read as complete just because the
       // element budget was not reached.
@@ -272,8 +326,20 @@ public static class UiaWindow {
       if (rows.Count >= maxElements || sw.ElapsedMilliseconds > budgetMs) return;
       var current = child;
       string nextPath = path + "/" + index;
-      try { var row = Row(current, nextPath); if (row != null) rows.Add(row); } catch { }
-      Walk(current, nextPath, depth + 1, maxElements, maxDepth, budgetMs, sw, rows, state);
+      try { var row = Row(current, nextPath, windowRect, focusMode); if (row != null) rows.Add(row); } catch { }
+      // Prune subtrees entirely outside the window rect: a positioned element
+      // fully off-screen carries only off-screen descendants, and walking
+      // every scrolled-away message can burn the whole time budget before the
+      // composer ever appears. Nodes with no geometry stay traversed.
+      bool prune = false;
+      try {
+        var childRect = current.Current.BoundingRectangle;
+        prune = !windowRect.IsEmpty && !childRect.IsEmpty
+          && (childRect.X + childRect.Width <= windowRect.X || childRect.X >= windowRect.X + windowRect.Width
+           || childRect.Y + childRect.Height <= windowRect.Y || childRect.Y >= windowRect.Y + windowRect.Height);
+        if (prune) state.Pruned++;
+      } catch { }
+      if (!prune) Walk(current, nextPath, depth + 1, maxElements, maxDepth, budgetMs, sw, rows, state, windowRect, focusMode);
       try { child = Walker.GetNextSibling(current); } catch { return; }
       index++;
     }
@@ -369,6 +435,39 @@ function Assert-BackgroundSetFocus([object]$element, [long]$hwnd) {
   }
 }
 
+# Every background op records the OS foreground before and after it ran: the
+# whole point of background control is never raising a window over the
+# person's work, and a live round proved something in the UIA path can do it.
+# When the foreground changed, the result says so loudly. The op cannot undo
+# the raise (the Windows foreground lock denies a background process the
+# restore), so the agent must tell the person and avoid the raising op.
+function Add-ForegroundEvidence([hashtable]$Result, [long]$Before, [long]$Target) {
+  $Result.foregroundBefore = $Before
+  $Result.foregroundAfter = [DesktopInput]::Foreground()
+  if ($Result.foregroundAfter -ne $Before) {
+    if ($Result.foregroundAfter -eq $Target -or [DesktopInput]::SameProcess($Result.foregroundAfter, $Target)) {
+      $Result.foregroundStolen = $true
+      $Result.warning = "This op raised the target window (or another window of its app) over the person's work (foreground went from $Before to $($Result.foregroundAfter)). Tell the person to click back into their work, and report which op did this: background use of it is unsafe until fixed."
+    } else {
+      # A switch to an unrelated window is most likely the person alt-tabbing
+      # during the op, not this op raising anything.
+      $Result.foregroundChanged = $true
+      $Result.note = "The OS foreground changed during the op (from $Before to $($Result.foregroundAfter)), but not to the target app: most likely the person switched apps. Capture before the next op to see the current state."
+    }
+  }
+}
+
+# True when the OS foreground moved onto the target window or another window
+# of the same process (a raise our op caused). A move to an unrelated window
+# is most likely the person switching apps mid-op, which background ops are
+# built to tolerate, so it returns false and work proceeds.
+function Test-ForegroundRaisedTarget([long]$Before, [long]$Target) {
+  $after = [DesktopInput]::Foreground()
+  if ($after -eq $Before) { return $false }
+  if ($after -eq $Target) { return $true }
+  return [DesktopInput]::SameProcess($after, $Target)
+}
+
 function Assert-TargetWindow([object]$request, [bool]$afterInput) {
   if (!$request.window) { return }
   if ([DesktopInput]::Foreground() -ne [long]$request.window) {
@@ -409,35 +508,54 @@ try {
     'window_capture' {
       if (!$p.window) { throw 'window_capture requires a window id.' }
       $hwnd = [long]$p.window
+      $fg = [DesktopInput]::Foreground()
+      $script:OpForegroundBefore = $fg
       $bytes = [DesktopInput]::PrintWindowBytes($hwnd)
       $b = [DesktopInput]::Bounds($hwnd)
       $result = @{ png=[Convert]::ToBase64String($bytes); bounds=@{ x=$b[0]; y=$b[1]; width=$b[2]; height=$b[3] }; process=[DesktopInput]::ProcessImage($hwnd) }
+      Add-ForegroundEvidence $result $fg $hwnd
     }
     'uia' {
       if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
       if (!$p.window) { throw 'uia requires a window id.' }
       $hwnd = [long]$p.window
-      $snap = [UiaWindow]::Snapshot($hwnd, 300, 40, 8000)
+      $fg = [DesktopInput]::Foreground()
+      $script:OpForegroundBefore = $fg
+      # focus=interactive drops plain text rows, so the composer and buttons
+      # fit the element budget even in text-heavy chat windows.
+      $focusMode = ([string]$p.focus -eq 'interactive')
+      # A minimized window reports sentinel coordinates, so keep its reads
+      # unfiltered (actions already refuse up front on minimized windows).
+      $skipRectFilter = [DesktopInput]::IsMinimized($hwnd)
+      $snap = [UiaWindow]::Snapshot($hwnd, 300, 40, 8000, $focusMode, $skipRectFilter)
       # Chromium apps build their accessibility tree only when they notice a
       # UIA client, so the very first snapshot can come back sparse even
-      # though the window is fine. Walk once more and keep the fuller result.
+      # though the window is fine. Walk once more and keep the fuller result
+      # (interactive-only trees are legitimately small, so no retry there).
       # Both walk budgets must fit the adapter's process timeout with room for
       # PowerShell startup, UIA init and serialization.
-      if (@($snap.elements).Count -lt 8 -and -not [bool]$snap.truncated) {
+      if (-not $focusMode -and @($snap.elements).Count -lt 8 -and -not [bool]$snap.truncated) {
         Start-Sleep -Milliseconds 700
-        $snap2 = [UiaWindow]::Snapshot($hwnd, 300, 40, 8000)
+        $snap2 = [UiaWindow]::Snapshot($hwnd, 300, 40, 8000, $focusMode, $skipRectFilter)
         if (@($snap2.elements).Count -gt @($snap.elements).Count) { $snap = $snap2 }
       }
-      $result = @{ process=[DesktopInput]::ProcessImage($hwnd); elements=@($snap.elements); truncated=[bool]$snap.truncated }
+      $result = @{ process=[DesktopInput]::ProcessImage($hwnd); elements=@($snap.elements); truncated=[bool]$snap.truncated; focus=[bool]$focusMode; pruned=[int]$snap.pruned }
+      Add-ForegroundEvidence $result $fg $hwnd
     }
     'uia_value' {
       if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
       if (!$p.window -or !$p.element) { throw 'uia_value requires a window id and an element ref from computer_uia.' }
       $hwnd = [long]$p.window
+      if ([DesktopInput]::IsMinimized($hwnd)) { throw 'needs foreground: the window is minimized. Background actions are unreliable on a minimized window and cannot be visually verified (a live sidebar invoke did nothing). Have the person restore the window; covered is fine.' }
+      $fg = [DesktopInput]::Foreground()
+      $script:OpForegroundBefore = $fg
       $resolved = [UiaWindow]::Resolve($hwnd, [string]$p.element, [string]$p.name)
       $el = $resolved.Element
       if ([string]::IsNullOrWhiteSpace([string]$p.name) -and -not [string]::IsNullOrWhiteSpace($resolved.Name)) {
         throw ("the element at that ref is named '{0}'; pass that name from the snapshot so the action can verify the ref is still current" -f $resolved.Name)
+      }
+      if (Test-ForegroundRaisedTarget $fg $hwnd) {
+        throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No text was sent. Inspect the current desktop and report which step did this.'
       }
       $valuePattern = $null
       try { $valuePattern = $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern) -as [System.Windows.Automation.ValuePattern] } catch { $valuePattern = $null }
@@ -445,6 +563,9 @@ try {
       $post = [bool]$p.post
       $append = [bool]$p.append
       if (-not $post -and -not $append -and $valuePattern -and -not $valuePattern.Current.IsReadOnly) {
+        if (Test-ForegroundRaisedTarget $fg $hwnd) {
+          throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No text was sent. Inspect the current desktop and report which step did this.'
+        }
         $script:InputAttempted = $true
         $valuePattern.SetValue([string]$p.text)
       } else {
@@ -497,8 +618,12 @@ try {
         # top-level parent.
         $target = 0
         try { $target = [long]$el.Current.NativeWindowHandle } catch { $target = 0 }
+        if ($target -eq 0) { $target = [DesktopInput]::ChromiumInputChild($hwnd) }
         if ($target -eq 0) { $target = $hwnd }
         $postedTo = $target
+        if (Test-ForegroundRaisedTarget $fg $hwnd) {
+          throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No text was sent. Inspect the current desktop and report which step did this.'
+        }
         $script:InputAttempted = $true
         if (-not $append -and $current.Length -gt 0) {
           [DesktopInput]::PostKey($target, 35)
@@ -510,6 +635,7 @@ try {
       $bytes = [DesktopInput]::PrintWindowBytes($hwnd)
       $b = [DesktopInput]::Bounds($hwnd)
       $result = @{ png=[Convert]::ToBase64String($bytes); bounds=@{ x=$b[0]; y=$b[1]; width=$b[2]; height=$b[3] }; postedTo=$postedTo }
+      Add-ForegroundEvidence $result $fg $hwnd
     }
     'uia_focus' {
       if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
@@ -538,10 +664,16 @@ try {
       if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
       if (!$p.window -or !$p.element) { throw 'uia_invoke requires a window id and an element ref from computer_uia.' }
       $hwnd = [long]$p.window
+      if ([DesktopInput]::IsMinimized($hwnd)) { throw 'needs foreground: the window is minimized. Background actions are unreliable on a minimized window and cannot be visually verified (a live sidebar invoke did nothing). Have the person restore the window; covered is fine.' }
+      $fg = [DesktopInput]::Foreground()
+      $script:OpForegroundBefore = $fg
       $resolved = [UiaWindow]::Resolve($hwnd, [string]$p.element, [string]$p.name)
       $el = $resolved.Element
       if ([string]::IsNullOrWhiteSpace([string]$p.name) -and -not [string]::IsNullOrWhiteSpace($resolved.Name)) {
         throw ("the element at that ref is named '{0}'; pass that name from the snapshot so the action can verify the ref is still current" -f $resolved.Name)
+      }
+      if (Test-ForegroundRaisedTarget $fg $hwnd) {
+        throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No click was sent. Inspect the current desktop and report which step did this.'
       }
       $invokePattern = $null
       try { $invokePattern = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern) -as [System.Windows.Automation.InvokePattern] } catch { $invokePattern = $null }
@@ -550,12 +682,16 @@ try {
         try { $ct = ([string]$el.Current.ControlType.ProgrammaticName) -replace '^ControlType\.', '' } catch { $ct = 'unknown' }
         throw "needs foreground: the element at that ref ($ct) exposes no InvokePattern, so it cannot be activated in the background. Only real input can activate it; focus the window and use computer_act."
       }
+      if (Test-ForegroundRaisedTarget $fg $hwnd) {
+        throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No click was sent. Inspect the current desktop and report which step did this.'
+      }
       $script:InputAttempted = $true
       $invokePattern.Invoke()
       Start-Sleep -Milliseconds 300
       $bytes = [DesktopInput]::PrintWindowBytes($hwnd)
       $b = [DesktopInput]::Bounds($hwnd)
       $result = @{ png=[Convert]::ToBase64String($bytes); bounds=@{ x=$b[0]; y=$b[1]; width=$b[2]; height=$b[3] } }
+      Add-ForegroundEvidence $result $fg $hwnd
     }
     'uia_key' {
       if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
@@ -570,16 +706,26 @@ try {
       elseif ($k -match '^[A-Z0-9]$') { $vk = [int][char]$k }
       else { throw "needs foreground: uia_key cannot post '$k': single non-modifier keys only (ENTER, TAB, ESC, SPACE, BACKSPACE, DELETE, arrows, HOME, END, PAGEUP, PAGEDOWN, A-Z, 0-9, F1-F12). Modifier chords need the real keyboard; focus the window and use computer_key." }
       $hwnd = [long]$p.window
+      if ([DesktopInput]::IsMinimized($hwnd)) { throw 'needs foreground: the window is minimized. Background actions are unreliable on a minimized window and cannot be visually verified. Have the person restore the window; covered is fine.' }
+      $fg = [DesktopInput]::Foreground()
+      $script:OpForegroundBefore = $fg
       # Posted keys target the window's focused element: prefer that
-      # element's own native window handle over the top-level parent.
+      # element's own native window handle, then Chromium's render-widget
+      # child (Chromium ignores key messages posted to the top-level window),
+      # then the top-level parent.
       $target = [UiaWindow]::FocusedHandle($hwnd, 8000)
+      if ($target -eq 0) { $target = [DesktopInput]::ChromiumInputChild($hwnd) }
       if ($target -eq 0) { $target = $hwnd }
+      if (Test-ForegroundRaisedTarget $fg $hwnd) {
+        throw 'needs foreground: preparing this key raised a window (the OS foreground changed). No key was posted. Inspect the current desktop and report which step did this.'
+      }
       $script:InputAttempted = $true
       [DesktopInput]::PostKey($target, [uint16]$vk)
       Start-Sleep -Milliseconds 250
       $bytes = [DesktopInput]::PrintWindowBytes($hwnd)
       $b = [DesktopInput]::Bounds($hwnd)
       $result = @{ png=[Convert]::ToBase64String($bytes); bounds=@{ x=$b[0]; y=$b[1]; width=$b[2]; height=$b[3] }; postedTo=$target }
+      Add-ForegroundEvidence $result $fg $hwnd
     }
     'act' {
       if ($p.window -and $p.action -ne 'focus') {
@@ -629,6 +775,13 @@ try {
   }
   $result | ConvertTo-Json -Depth 8 -Compress
 } catch {
-  @{ error=$_.Exception.Message; inputAttempted=([bool]$script:InputAttempted) } | ConvertTo-Json -Compress
+  $err = @{ error=$_.Exception.Message; inputAttempted=([bool]$script:InputAttempted) }
+  # Post-input failures are exactly when the raise evidence matters most
+  # (the action ran, then the verification capture failed): keep the same
+  # evidence and attribution on the error response as on success.
+  if ($script:OpForegroundBefore -ne 0 -and $hwnd) {
+    Add-ForegroundEvidence $err $script:OpForegroundBefore ([long]$hwnd)
+  }
+  $err | ConvertTo-Json -Compress
   exit 1
 }
