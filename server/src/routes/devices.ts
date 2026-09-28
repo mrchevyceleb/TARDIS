@@ -63,7 +63,7 @@ for (const op of ['stop', 'preview', 'resume'] as const) {
 devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
   if (!validComputerMcpToken(req.get('x-rivendell-computer-token'))) { res.status(403).json({ error: 'TARDIS computer MCP required.' }); return; }
   const op = String(req.params.op);
-  if (!['start', 'inspect', 'capture', 'focus', 'type', 'key', 'act', 'step', 'stop'].includes(op)) { res.status(400).json({ error: 'Unknown computer operation.' }); return; }
+  if (!['start', 'inspect', 'capture', 'window_capture', 'uia', 'uia_value', 'uia_invoke', 'uia_key', 'focus', 'type', 'key', 'act', 'step', 'stop'].includes(op)) { res.status(400).json({ error: 'Unknown computer operation.' }); return; }
   const body = req.body ?? {};
   let device = typeof body.device === 'string' ? body.device : '';
   let context: ReturnType<typeof readComputerContext> | undefined;
@@ -130,7 +130,7 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
       result = await call(op === 'stop' ? 'end' : op, body);
       if (op === 'stop') steps.forget(device);
     }
-    const keyboardResult = op === 'type' || op === 'key'
+    const keyboardResult = op === 'type' || op === 'key' || op === 'uia_value' || op === 'uia_invoke' || op === 'uia_key'
       || (op === 'act' && (body.operation === 'type' || body.operation === 'key'));
     const response = result as Record<string, any>;
     if (keyboardResult && typeof response?.image === 'string') {

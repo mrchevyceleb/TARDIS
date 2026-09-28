@@ -71,6 +71,30 @@ const TOOLS = [
     display: { type: 'string', description: 'Display id; omit when window is provided.' },
     window: { type: 'string', description: 'Preferred exact window id for readable, window-relative grounding.' },
   }, ['session', 'stepId', 'goal']),
+  computerTool('computer_window_capture', 'Capture ONE exact window WITHOUT focusing or raising it, even while it is covered by other windows or the person is using the machine (PrintWindow). No focus steal, no cursor move, no keyboard. Returns a readable, window-relative JPEG, one-use frame and the owning process name. Rare apps render stale or blank when covered; verify important reads with computer_uia or a second capture. Windows only.', {
+    window: { type: 'string', description: 'Exact window id from computer_inspect.' },
+  }, ['session', 'window']),
+  computerTool('computer_uia', 'List the UI Automation elements of one exact window with no focus change and no input: refs (e.g. "0/3/2"), names, control types, bounds, value/invoke patterns, and which element holds keyboard focus. browser_snapshot-like grounding for a native window. Use a fresh ref for computer_uia_value / computer_uia_invoke; truncated=true means the tree was capped, so narrow your target and snapshot again. Windows only.', {
+    window: { type: 'string', description: 'Exact window id from computer_inspect.' },
+  }, ['session', 'window']),
+  computerTool('computer_uia_value', 'Set text on one exact UIA element (a chat composer or input box) without focus, the real keyboard or the cursor, ONCE per operationId. Uses ValuePattern.SetValue when available; if the element has no ValuePattern it posts characters instead, but only when that exact element holds the window\'s keyboard focus. Anything that only takes real input refuses with "needs foreground". The element\'s name from the snapshot is required and verified before acting (pass "" only when the snapshot row itself had no name). Returns a fresh background window capture to verify what landed.', {
+    operationId: { type: 'string', maxLength: 100, description: 'Unique within this grant, e.g. claude-composer-1. Reuse only to retry this exact same window/element/text.' },
+    window: { type: 'string', description: 'Exact window id from computer_inspect.' },
+    element: { type: 'string', description: 'Element ref from computer_uia, e.g. "0/3/2".' },
+    name: { type: 'string', description: 'The element\'s name from the snapshot ("" only if it had none); verified before acting.' },
+    text: { type: 'string', maxLength: 8000, description: 'Full replacement text for the element (1-8000 chars).' },
+  }, ['session', 'operationId', 'window', 'element', 'name', 'text']),
+  computerTool('computer_uia_invoke', 'Activate one exact UIA element (a button such as Send) without the real mouse, focus or cursor, ONCE per operationId. Only elements that expose InvokePattern work in the background; anything else refuses honestly with "needs foreground". The element\'s name from the snapshot is required and verified before acting (pass "" only when the snapshot row itself had no name). Returns a fresh background window capture to verify the click landed.', {
+    operationId: { type: 'string', maxLength: 100, description: 'Unique within this grant, e.g. claude-send-1. Reuse only to retry this exact same window/element.' },
+    window: { type: 'string', description: 'Exact window id from computer_inspect.' },
+    element: { type: 'string', description: 'Element ref from computer_uia, e.g. "0/2/5".' },
+    name: { type: 'string', description: 'The element\'s name from the snapshot ("" only if it had none); verified before acting.' },
+  }, ['session', 'operationId', 'window', 'element', 'name']),
+  computerTool('computer_uia_key', 'Post ONE named key (e.g. ENTER to send a message typed with computer_uia_value) to the window\'s focused element (its own HWND when it has one, else the window) without stealing focus, ONCE per operationId. Single non-modifier keys only; modifier chords need the real keyboard and are refused. Posted keys are queued, not confirmed: the returned background window capture is the verification. Windows only.', {
+    operationId: { type: 'string', maxLength: 100, description: 'Unique within this grant, e.g. claude-enter-1. Reuse only to retry this exact same window/key.' },
+    window: { type: 'string', description: 'Exact window id from computer_inspect.' },
+    keys: { type: 'array', minItems: 1, maxItems: 1, items: { type: 'string' }, description: 'One uppercase non-modifier key: ENTER,TAB,ESC,SPACE,BACKSPACE,DELETE,arrows,HOME,END,PAGEUP,PAGEDOWN,A-Z,0-9,F1-F12.' },
+  }, ['session', 'operationId', 'window', 'keys']),
   computerTool('computer_stop', 'Release your desktop grant and cancel input. Always call when the task ends.', {}, ['session']),
   {
     name: 'device_list',
@@ -243,7 +267,7 @@ function clip(text, limit) {
 async function callTool(name, args, signal) {
   if (name.startsWith('computer_')) {
     const op = name.slice('computer_'.length);
-    if (!['start', 'inspect', 'capture', 'focus', 'type', 'key', 'act', 'step', 'stop'].includes(op)) throw new Error('Unknown computer tool.');
+    if (!['start', 'inspect', 'capture', 'window_capture', 'uia', 'uia_value', 'uia_invoke', 'uia_key', 'focus', 'type', 'key', 'act', 'step', 'stop'].includes(op)) throw new Error('Unknown computer tool.');
     // Keyboard/focus tools tunnel through the long-standing /act route so
     // devices can roll forward before a busy TARDIS server safely restarts.
     const compatibilityOp = op === 'focus' || op === 'type' || op === 'key';

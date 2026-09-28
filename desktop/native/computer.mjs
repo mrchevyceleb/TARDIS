@@ -29,6 +29,23 @@ export function validateKeys(value) {
   if (!Array.isArray(value) || !value.length || value.length > 5 || value.some(k => !KEYS.has(k))) throw new Error('Invalid keys; use 1–5 named uppercase keys.');
   return [...new Set(value)];
 }
+// Background window input validates tighter than foreground input: posted
+// messages cannot carry modifier chords, and element refs must come from a
+// fresh computer_uia snapshot of that same window.
+export function validateElementRef(value) {
+  if (typeof value !== 'string' || !/^0(\/\d{1,4}){1,40}$/.test(value) || value.length > 260) throw new Error('Element ref must be a snapshot path below the window root, like "0/3/2". Call computer_uia for a fresh one.');
+  return value;
+}
+export function validateUiaKeys(value) {
+  if (!Array.isArray(value) || value.length !== 1) throw new Error('Background key input posts exactly one key. Modifier chords need the real keyboard; focus the window and use computer_key.');
+  const key = value[0];
+  if (!KEYS.has(key) || ['CTRL', 'ALT', 'SHIFT', 'META'].includes(key)) throw new Error(`Background key input cannot post ${key}: single non-modifier keys only. Modifier chords need the real keyboard; focus the window and use computer_key.`);
+  return [key];
+}
+export function validateWindowText(value) {
+  if (typeof value !== 'string' || !value || value.length > 8000 || /[\x00-\x08\x0b-\x1f\x7f]/.test(value)) throw new Error('Text must be 1–8000 characters without control codes.');
+  return value;
+}
 export function validateAction(input, frame) {
   if (!input || !ACTIONS.has(input.action)) throw new Error('Unknown mouse action. Use computer_type/computer_key for keyboard input and computer_focus for focus.');
   const a = { action: input.action };
@@ -98,11 +115,15 @@ export class ComputerController {
     if (!this.grant || this.grant.id !== session || Date.now() >= this.grant.expiresAt) throw new Error('No active desktop grant. Request control again; never work around a refusal.');
   }
   keyboardOperation(op, params) {
-    if (op !== 'type' && op !== 'key') return null;
+    if (op !== 'type' && op !== 'key' && op !== 'uia_value' && op !== 'uia_invoke' && op !== 'uia_key') return null;
     const id = params.operationId;
     if (typeof id !== 'string' || !/^[a-zA-Z0-9._:-]{1,100}$/.test(id)) throw new Error('A unique operationId is required for targeted keyboard input. Reuse it only when retrying the exact same input.');
     if (typeof params.window !== 'string' || !params.window) throw new Error('Targeted keyboard input requires an exact window id.');
-    const payload = op === 'type' ? { text: validateText(params.text) } : { keys: validateKeys(params.keys) };
+    const payload = op === 'type' ? { text: validateText(params.text) }
+      : op === 'key' ? { keys: validateKeys(params.keys) }
+      : op === 'uia_value' ? { element: validateElementRef(params.element), text: validateWindowText(params.text) }
+      : op === 'uia_invoke' ? { element: validateElementRef(params.element) }
+      : { keys: validateUiaKeys(params.keys) };
     const fingerprint = createHash('sha256').update(JSON.stringify([op, params.window, payload])).digest('hex');
     const existing = this.grant.operations.get(id);
     if (existing) {
@@ -111,7 +132,7 @@ export class ComputerController {
       return { replay: { ...existing.outcome, operationId: id, replayed: true,
         message: 'Keyboard input already ran (or may have run) exactly once. Capture the window to inspect it; do not repeat under a new id.' } };
     }
-    if (op === 'type') {
+    if (op === 'type' || op === 'uia_value') {
       // Models sometimes disregard the same-id retry contract when they cannot
       // visually read a terminal. Exact text to the exact same window must not
       // duplicate merely because they invented a second id.
@@ -172,6 +193,25 @@ export class ComputerController {
     const { layout: _layout, ...result } = this.frame;
     return result;
   }
+  /** Background capture of one exact window: PrintWindow renders covered or
+   *  non-focused windows without touching the foreground, the cursor or the
+   *  keyboard. The frame is window-scoped exactly like a focused capture. */
+  async captureWindowFrame(info, params, signal) {
+    const window = this.findWindow(info, params.window);
+    const raw = await this.adapter.windowCapture(window.id, signal);
+    if (raw.png.length < 24 || raw.png.readUInt32BE(16) * raw.png.readUInt32BE(20) > 100_000_000) throw new Error('Screenshot dimensions exceed the safe limit.');
+    const image = await this.encode(raw.png, { left: 0, top: 0, width: raw.png.readUInt32BE(16), height: raw.png.readUInt32BE(20) });
+    if (image.data.length > 2 * 1024 * 1024) throw new Error('Screenshot exceeds the safe transport size.');
+    const display = info.displays.find(item => {
+      const centerX = raw.bounds.x + raw.bounds.width / 2;
+      const centerY = raw.bounds.y + raw.bounds.height / 2;
+      return centerX >= item.bounds.x && centerX < item.bounds.x + item.bounds.width && centerY >= item.bounds.y && centerY < item.bounds.y + item.bounds.height;
+    }) ?? info.displays[0];
+    this.frame = { id: randomUUID(), displayId: display.id, bounds: raw.bounds, width: image.info.width, height: image.info.height,
+      capturedAt: Date.now(), layout: JSON.stringify(info.displays), image: image.data.toString('base64'), windowId: window.id, windowTitle: window.title };
+    const { layout: _layout, ...result } = this.frame;
+    return { ...result, process: raw.process };
+  }
   async handle(op, params = {}) {
     // MCP keyboard tools tunnel through computer.act during a rolling server
     // upgrade, so a new device/script can work while old in-memory routes
@@ -190,8 +230,9 @@ export class ComputerController {
     const limit = op === 'start' ? 60_000 : 30_000;
     const remaining = params.deadlineAt === undefined ? limit : Number(params.deadlineAt) - Date.now();
     if (!Number.isFinite(remaining) || remaining <= 0 || remaining > limit + 5000) throw new Error('Desktop request expired or machine clocks differ. No action taken.');
+    const backgroundInput = op === 'uia_value' || op === 'uia_invoke' || op === 'uia_key';
     let keyboardSpec = null;
-    if (op === 'type' || op === 'key') {
+    if (op === 'type' || op === 'key' || backgroundInput) {
       this.requireGrant(params.session);
       keyboardSpec = this.keyboardOperation(op, params);
       if (keyboardSpec.replay) return keyboardSpec.replay;
@@ -238,6 +279,71 @@ export class ComputerController {
       if (op === 'capture') {
         const result = await this.captureFrame(info, params, ac.signal);
         check(); this.requireGrant(params.session); return result;
+      }
+      if (op === 'window_capture') {
+        if (typeof params.window !== 'string' || !params.window) throw new Error('window_capture requires an exact window id.');
+        if (typeof this.adapter.windowCapture !== 'function') throw new Error('Background window capture is not supported by this desktop adapter (Windows only in this build).');
+        const result = await this.captureWindowFrame(info, params, ac.signal);
+        check(); this.requireGrant(params.session); return result;
+      }
+      if (op === 'uia') {
+        if (typeof params.window !== 'string' || !params.window) throw new Error('uia requires an exact window id.');
+        if (typeof this.adapter.uiaTree !== 'function') throw new Error('Background window control is not supported by this desktop adapter (Windows only in this build).');
+        const window = this.findWindow(info, params.window);
+        const tree = await this.adapter.uiaTree(window.id, ac.signal);
+        check(); this.requireGrant(params.session);
+        return { window: window.id, title: window.title, process: tree.process, elements: tree.elements, truncated: tree.truncated === true };
+      }
+      if (backgroundInput) {
+        const method = op === 'uia_value' ? 'uiaValue' : op === 'uia_invoke' ? 'uiaInvoke' : 'uiaKey';
+        if (typeof this.adapter[method] !== 'function') throw new Error('Background window control is not supported by this desktop adapter (Windows only in this build).');
+        const window = this.findWindow(info, params.window);
+        this.frame = null;
+        this.requireGrant(params.session); check();
+        // Background window input never touches the real mouse or keyboard, so
+        // verify-after is a PrintWindow capture of the same window returned by
+        // the adapter, not a focus-and-verify capture.
+        let raw;
+        try {
+          raw = op === 'uia_value'
+            ? await this.adapter.uiaValue(window.id, keyboardSpec.payload.element, keyboardSpec.payload.text, params.name === undefined ? undefined : String(params.name), ac.signal)
+            : op === 'uia_invoke'
+              ? await this.adapter.uiaInvoke(window.id, keyboardSpec.payload.element, params.name === undefined ? undefined : String(params.name), ac.signal)
+              : await this.adapter.uiaKey(window.id, keyboardSpec.payload.keys, ac.signal);
+        } catch (error) {
+          // attempted === false means the native script refused BEFORE any
+          // input (needs foreground, stale ref, missing pattern): the entry is
+          // freed and a corrected retry is welcome. undefined means the script
+          // died without a verdict (timeout/kill), which is conservatively
+          // may-have-run.
+          if (error && error.attempted !== false) {
+            inputAttempted = true;
+            throw new Error(`Window action may already have run; do NOT replay it. Capture the window to verify. ${error instanceof Error ? error.message : String(error)}`);
+          }
+          throw error;
+        }
+        // The window action itself definitely ran; later failures are
+        // post-input, and the reserved operationId replays this outcome.
+        inputAttempted = true;
+        if (keyboardEntry) keyboardEntry.outcome = { executed: true, windowId: window.id, windowTitle: window.title };
+        try {
+          if (raw.png.length < 24 || raw.png.readUInt32BE(16) * raw.png.readUInt32BE(20) > 100_000_000) throw new Error('Screenshot dimensions exceed the safe limit.');
+          const image = await this.encode(raw.png, { left: 0, top: 0, width: raw.png.readUInt32BE(16), height: raw.png.readUInt32BE(20) });
+          if (image.data.length > 2 * 1024 * 1024) throw new Error('Screenshot exceeds the safe transport size.');
+          const display = info.displays.find(item => {
+            const centerX = raw.bounds.x + raw.bounds.width / 2;
+            const centerY = raw.bounds.y + raw.bounds.height / 2;
+            return centerX >= item.bounds.x && centerX < item.bounds.x + item.bounds.width && centerY >= item.bounds.y && centerY < item.bounds.y + item.bounds.height;
+          }) ?? info.displays[0];
+          this.frame = { id: randomUUID(), displayId: display.id, bounds: raw.bounds, width: image.info.width, height: image.info.height,
+            capturedAt: Date.now(), layout: JSON.stringify(info.displays), image: image.data.toString('base64'), windowId: window.id, windowTitle: window.title };
+        } catch (error) {
+          throw new Error(`The window action ran, but its verification capture failed: ${error instanceof Error ? error.message : String(error)} Do NOT replay the action; run computer_window_capture and inspect the window.`);
+        }
+        if (keyboardEntry) keyboardEntry.outcome = { executed: true, windowId: window.id, windowTitle: window.title, capturedAt: this.frame.capturedAt };
+        check(); this.requireGrant(params.session);
+        const { layout: _backgroundLayout, ...result } = this.frame;
+        return { ...result, ...(raw.postedTo ? { postedTo: raw.postedTo } : {}), operationId: keyboardSpec.id };
       }
       if (op === 'focus' || op === 'type' || op === 'key') {
         const window = this.findWindow(info, params.window);
@@ -288,7 +394,9 @@ export class ComputerController {
         else keyboardGrant?.operations.delete(keyboardSpec.id);
       }
       if (ac.signal.aborted) this.stop();
-      if (inputAttempted) {
+      // Background window input never touches the real mouse or keyboard, so a
+      // possibly-run failure must not inject release keystrokes either.
+      if (inputAttempted && !backgroundInput) {
         this.inputActive = false;
         this.releasePending = this.adapter.release().catch(() => {});
         throw new Error(`Input may already have run; do NOT replay it. Capture to verify. ${error.message}`);
