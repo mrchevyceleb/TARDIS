@@ -1236,19 +1236,35 @@ try {
       # A dropdown-style button (Chromium: the header Remote Control button, a
       # menu trigger) exposes only ExpandCollapse, no Invoke. Expand() opens its
       # popup in the background; the items inside it then show up in the next
-      # snapshot and can be invoked normally. Only Expand: Collapse and Toggle
-      # stay out of this path.
+      # snapshot and can be invoked normally. Only Expand: Collapse stays out
+      # of this path.
       $expandPattern = $null
       if (-not $invokePattern) {
         try { $expandPattern = $el.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern) -as [System.Windows.Automation.ExpandCollapsePattern] } catch { $expandPattern = $null }
       }
+      # A checkbox / switch (Chromium: the Remote Control switch) exposes only
+      # Toggle. Toggle() flips it once (the operationId guarantees one flip); the
+      # state before and after ride the result so the caller can verify.
+      $togglePattern = $null
       if (-not $invokePattern -and -not $expandPattern) {
+        try { $togglePattern = $el.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern) -as [System.Windows.Automation.TogglePattern] } catch { $togglePattern = $null }
+      }
+      if (-not $invokePattern -and -not $expandPattern -and -not $togglePattern) {
         $ct = 'unknown'
         try { $ct = ([string]$el.Current.ControlType.ProgrammaticName) -replace '^ControlType\.', '' } catch { $ct = 'unknown' }
-        throw "needs foreground: the element at that ref ($ct) exposes neither InvokePattern nor ExpandCollapsePattern, the only patterns this op supports, so it cannot be activated in the background. Use another route for it (real input via computer_act, when the person is idle)."
+        throw "needs foreground: the element at that ref ($ct) exposes none of InvokePattern, ExpandCollapsePattern or TogglePattern, the only patterns this op supports, so it cannot be activated in the background. Use another route for it (real input via computer_act, when the person is idle)."
+      }
+      $toggleBefore = ''
+      if ($togglePattern) {
+        try { $toggleBefore = [string]$togglePattern.Current.ToggleState } catch { $toggleBefore = '' }
+        # Read fresh, right before acting. An unreadable or tri-state switch has
+        # no defined "flip", so it refuses rather than guess.
+        if ($toggleBefore -ne 'On' -and $toggleBefore -ne 'Off') {
+          throw "needs foreground: the switch's state is unreadable or indeterminate ('$toggleBefore'), so a background toggle could not be verified. Nothing was changed. Use another route for it (real input via computer_act, when the person is idle)."
+        }
       }
       $expandBefore = ''
-      if (-not $invokePattern) {
+      if ($expandPattern) {
         try { $expandBefore = [string]$expandPattern.Current.ExpandCollapseState } catch { $expandBefore = '' }
         if ($expandBefore -eq 'LeafNode') { throw 'needs foreground: the element exposes ExpandCollapsePattern but has nothing to expand (LeafNode). Only real input can activate it; focus the window and use computer_act.' }
       }
@@ -1268,9 +1284,12 @@ try {
         try {
           if ($invokePattern) {
             $invokePattern.Invoke()
-          } else {
+          } elseif ($expandPattern) {
             $expandPattern.Expand()
             $activated = 'expand'
+          } else {
+            $togglePattern.Toggle()
+            $activated = 'toggle'
           }
         } finally {
           Restore-IfStolen $fg $hwnd
@@ -1280,7 +1299,13 @@ try {
       $bytes = [DesktopInput]::PrintWindowBytes($hwnd)
       $b = [DesktopInput]::Bounds($hwnd)
       $result = @{ png=[Convert]::ToBase64String($bytes); bounds=@{ x=$b[0]; y=$b[1]; width=$b[2]; height=$b[3] }; activated=$activated }
-      if ($activated -ne 'invoke') { $result.expandCollapseStateBefore = $expandBefore }
+      if ($activated -eq 'expand' -or $activated -eq 'already-expanded') { $result.expandCollapseStateBefore = $expandBefore }
+      if ($activated -eq 'toggle') {
+        $result.toggleStateBefore = $toggleBefore
+        $toggleAfter = ''
+        try { $toggleAfter = [string]$togglePattern.Current.ToggleState } catch { $toggleAfter = '' }
+        $result.toggleStateAfter = $toggleAfter
+      }
       Add-ForegroundEvidence $result $fg $hwnd
     }
     'uia_key' {
