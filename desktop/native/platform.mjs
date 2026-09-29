@@ -11,6 +11,7 @@ function run(file, args, signal, input, timeoutMs = 20_000) {
       if (!err) { resolve(stdout); return; }
       let message = err.message;
       let attempted;
+      let extra;
       // The native script reports whether input had already been attempted
       // when it failed, so background window actions stay honest about replay.
       // attempted stays undefined (unknown, conservatively may-have-run)
@@ -22,10 +23,24 @@ function run(file, args, signal, input, timeoutMs = 20_000) {
         if (typeof out.error === 'string') {
           message = out.error;
           if (typeof out.inputAttempted === 'boolean') attempted = out.inputAttempted;
+          // Foreground-steal evidence must survive the error path: a post-input
+          // failure (the verification capture, a restore refusal) is exactly
+          // when foregroundStolen/foregroundRestored matter most, and the
+          // agent-facing error message must carry the warning too.
+          for (const key of ['foregroundBefore', 'foregroundAfter', 'foregroundStolen', 'foregroundRestored', 'foregroundChanged', 'foregroundRestoreOutcome', 'foregroundRestoreDetail']) {
+            if (out[key] !== undefined) (extra ??= {})[key] = out[key];
+          }
+          if (typeof out.warning === 'string') {
+            (extra ??= {}).warning = out.warning;
+            message = `${message} ${out.warning}`;
+          } else if (typeof out.note === 'string' && out.foregroundRestored === true) {
+            (extra ??= {}).note = out.note;
+          }
         }
       } catch { /* not adapter JSON */ }
       const error = new Error(`${file}: ${message}`);
       error.attempted = attempted;
+      if (extra) Object.assign(error, extra);
       reject(error);
     });
     child.stdin?.end(input);
@@ -180,9 +195,17 @@ class LinuxAdapter {
 
 class WindowsAdapter {
   capability = { supported: true };
+  // GetLastInputInfo counts this process's own SendInput, so a foreground
+  // sequence (type -> Enter, multiple clicks) would refuse itself mid-sequence
+  // under the 60s person-activity guard. The adapter remembers when its own
+  // last injecting op ended and passes it down as agentInputAt; the guard
+  // treats a last-input event at-or-before that moment as ours, not the
+  // person's.
+  lastAgentInputAt = 0;
   async call(op, args = {}, signal, timeoutMs) {
     const script = join(dirname(fileURLToPath(import.meta.url)), 'windows.ps1').replace(/([\\/])app\.asar([\\/])/, '$1app.asar.unpacked$2');
-    const out = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script], signal, JSON.stringify({ op, ...args }), timeoutMs);
+    const request = { op, ...args, ...(this.lastAgentInputAt ? { agentInputAt: this.lastAgentInputAt } : {}) };
+    const out = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script], signal, JSON.stringify(request), timeoutMs);
     const result = JSON.parse(out.replace(/^\uFEFF/, '').trim());
     if (result.error) throw new Error(result.error);
     return result;
@@ -205,6 +228,34 @@ class WindowsAdapter {
     return { ...rest, png: Buffer.from(png, 'base64') };
   }
   uiaTree(window, focus, signal) { return this.call('uia', { window, ...(focus ? { focus } : {}) }, signal, 25_000); }
+  // act and release are the only ops that inject real input on Windows; mark
+  // the injection moment so the next op's person-activity guard can discount
+  // it. Only when input actually ran or may have run: a native refusal BEFORE
+  // any input (attempted === false, e.g. the person-activity guard itself)
+  // must not mark, or the next request would misread the person's recent
+  // input as ours and skip the guard exactly when it matters most.
+  async act(action, signal) {
+    try {
+      const result = await this.call('act', action, signal);
+      this.lastAgentInputAt = Date.now();
+      return result;
+    } catch (error) {
+      if (!error || error.attempted !== false) this.lastAgentInputAt = Date.now();
+      throw error;
+    }
+  }
+  async release() {
+    try {
+      const result = await this.call('release');
+      this.lastAgentInputAt = Date.now();
+      return result;
+    } catch (error) {
+      // release injects key/button releases up front: any failure is
+      // may-have-run, so always mark.
+      this.lastAgentInputAt = Date.now();
+      throw error;
+    }
+  }
   async uiaValue(window, element, text, name, post, append, signal) {
     const result = await this.call('uia_value', { window, element, text, ...(name ? { name } : {}), post: post === true, append: append === true }, signal, 25_000);
     const { png, ...rest } = result;
@@ -225,8 +276,6 @@ class WindowsAdapter {
     const { png, ...rest } = result;
     return { ...rest, png: Buffer.from(png, 'base64') };
   }
-  act(action, signal) { return this.call('act', action, signal); }
-  release() { return this.call('release'); }
 }
 export function createAdapter() {
   if (process.platform === 'linux') return new LinuxAdapter();
