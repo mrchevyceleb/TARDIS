@@ -1233,24 +1233,47 @@ try {
       }
       $invokePattern = $null
       try { $invokePattern = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern) -as [System.Windows.Automation.InvokePattern] } catch { $invokePattern = $null }
+      # A dropdown-style button (Chromium: the header Remote Control button, a
+      # menu trigger) exposes only ExpandCollapse, no Invoke. Expand() opens its
+      # popup in the background; the items inside it then show up in the next
+      # snapshot and can be invoked normally. Only Expand: Collapse and Toggle
+      # stay out of this path.
+      $expandPattern = $null
       if (-not $invokePattern) {
+        try { $expandPattern = $el.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern) -as [System.Windows.Automation.ExpandCollapsePattern] } catch { $expandPattern = $null }
+      }
+      if (-not $invokePattern -and -not $expandPattern) {
         $ct = 'unknown'
         try { $ct = ([string]$el.Current.ControlType.ProgrammaticName) -replace '^ControlType\.', '' } catch { $ct = 'unknown' }
-        throw "needs foreground: the element at that ref ($ct) exposes no InvokePattern, so it cannot be activated in the background. Only real input can activate it; focus the window and use computer_act."
+        throw "needs foreground: the element at that ref ($ct) exposes neither InvokePattern nor ExpandCollapsePattern, so it cannot be activated in the background. Only real input can activate it; focus the window and use computer_act."
+      }
+      $expandBefore = ''
+      if (-not $invokePattern) {
+        try { $expandBefore = [string]$expandPattern.Current.ExpandCollapseState } catch { $expandBefore = '' }
+        if ($expandBefore -eq 'LeafNode') { throw 'needs foreground: the element exposes ExpandCollapsePattern but has nothing to expand (LeafNode). Only real input can activate it; focus the window and use computer_act.' }
       }
       if (Test-ForegroundRaisedTarget $fg $hwnd) {
         throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No click was sent. Inspect the current desktop and report which step did this.'
       }
       Assert-PersonIdleForBackgroundInput
       $script:InputAttempted = $true
-      $invokePattern.Invoke()
-      # Invoke raises Chromium windows too (verified live on the Send
+      $activated = 'invoke'
+      if ($invokePattern) {
+        $invokePattern.Invoke()
+      } elseif ($expandBefore -eq 'Expanded') {
+        $activated = 'already-expanded'
+      } else {
+        $expandPattern.Expand()
+        $activated = 'expand'
+      }
+      # Invoke/Expand raise Chromium windows too (verified live on the Send
       # button): restore the person's foreground immediately.
       Restore-IfStolen $fg $hwnd
       Start-Sleep -Milliseconds 300
       $bytes = [DesktopInput]::PrintWindowBytes($hwnd)
       $b = [DesktopInput]::Bounds($hwnd)
-      $result = @{ png=[Convert]::ToBase64String($bytes); bounds=@{ x=$b[0]; y=$b[1]; width=$b[2]; height=$b[3] } }
+      $result = @{ png=[Convert]::ToBase64String($bytes); bounds=@{ x=$b[0]; y=$b[1]; width=$b[2]; height=$b[3] }; activated=$activated }
+      if ($activated -ne 'invoke') { $result.expandCollapseStateBefore = $expandBefore }
       Add-ForegroundEvidence $result $fg $hwnd
     }
     'uia_key' {
