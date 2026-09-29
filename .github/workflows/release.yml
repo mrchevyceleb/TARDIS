@@ -32,6 +32,14 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
       - run: npm ci --prefix desktop
+      - name: Build the macOS control helper (universal)
+        if: runner.os == 'macOS'
+        working-directory: desktop/native
+        run: |
+          swiftc -O -swift-version 5 -target arm64-apple-macos14 macos.swift -o macos-helper-arm64
+          swiftc -O -swift-version 5 -target x86_64-apple-macos14 macos.swift -o macos-helper-x64
+          lipo -create macos-helper-arm64 macos-helper-x64 -output macos-helper
+          rm macos-helper-arm64 macos-helper-x64
       - name: Build installers
         run: npm run dist --prefix desktop
         env:

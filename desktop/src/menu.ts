@@ -10,6 +10,8 @@ export interface MenuActions {
   stopComputer(): void;
   resumeComputer(): void;
   setComputerAutomatic(on: boolean): void;
+  /** macOS only: raises the Screen Recording and Accessibility prompts. */
+  setupComputerControl(): void;
   changeServer(): void;
   reloadServer(): void;
   chooseWorkspace(): void;
@@ -67,6 +69,7 @@ export function installMenu(actions: MenuActions): void {
         { label: 'Resume Computer Control', click: actions.resumeComputer },
         { label: 'Automatic Computer Control for This Server', click: () => actions.setComputerAutomatic(true) },
         { label: 'Require Computer Control Approval', click: () => actions.setComputerAutomatic(false) },
+        ...(isMac ? [{ label: 'Set Up Computer Control on This Mac…', click: actions.setupComputerControl } as MenuItemConstructorOptions] : []),
         { label: 'Forget Approvals', click: actions.forgetApprovals },
         { type: 'separator' },
         ...(isMac ? [{ role: 'close' } as MenuItemConstructorOptions] : [

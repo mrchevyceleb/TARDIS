@@ -51,6 +51,19 @@ jobs:
         working-directory: android
         run: ./gradlew --no-daemon :app:assembleDebug
 
+  macos-helper:
+    name: macOS helper
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compile the helper for both Mac architectures
+        working-directory: desktop/native
+        run: |
+          swiftc -O -swift-version 5 -target arm64-apple-macos14 macos.swift -o /tmp/macos-helper-arm64
+          swiftc -O -swift-version 5 -target x86_64-apple-macos14 macos.swift -o /tmp/macos-helper-x64
+
   secrets:
     runs-on: ubuntu-latest
     steps:

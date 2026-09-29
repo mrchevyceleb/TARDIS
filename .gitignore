@@ -9,6 +9,8 @@ build/
 # Native shells
 desktop/dist/
 desktop/out/
+# Built by CI (and by hand while testing) from desktop/native/macos.swift
+desktop/native/macos-helper
 !desktop/build/
 android/.gradle/
 android/.kotlin/
