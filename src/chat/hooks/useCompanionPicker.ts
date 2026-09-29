@@ -1,10 +1,13 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { CompanionId } from '../data/types';
 import {
+  codexModelSpec,
   normalizeCodexEffort,
   normalizeCodexModel,
   readStoredCodexEffort,
   readStoredCodexModel,
+  isCodexCatalogLoaded,
+  useCodexCatalogVersion,
 } from '../codexModels';
 import { CLAUDE_EFFORTS, DEFAULT_CLAUDE_MODEL, normalizeClaudeModel } from '../components/CodexEnginePicker';
 
@@ -182,6 +185,23 @@ export function useCompanionPicker(storageKey: string) {
   const [claudeEffort, setClaudeEffortState] = useState(() => normalizeClaudeEffort(readLS('rivendell:claude-effort', 'xhigh')));
   const [codexModel, setCodexModelState] = useState(readStoredCodexModel);
   const [codexEffort, setCodexEffortState] = useState(() => readStoredCodexEffort(codexModel));
+  // When the CLI's catalog lands, a stored model it does not offer gives way to
+  // one it does (and an effort the model lacks to its default).
+  const codexCatalogVersion = useCodexCatalogVersion();
+  useEffect(() => {
+    if (!isCodexCatalogLoaded()) return;
+    const model = normalizeCodexModel(codexModel);
+    // A replaced model starts on its own default effort; the old effort belonged
+    // to the model that is gone.
+    const effort = model === codexModel ? normalizeCodexEffort(model, codexEffort) : codexModelSpec(model).defaultEffort;
+    if (model === codexModel && effort === codexEffort) return;
+    setCodexModelState(model);
+    setCodexEffortState(effort);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('rivendell:codex-model', model);
+      localStorage.setItem('rivendell:codex-effort', effort);
+    }
+  }, [codexCatalogVersion]);
   const [xaiModel, setXaiModelState] = useState(readStoredXaiModel);
   const [xaiEffort, setXaiEffortState] = useState(readStoredXaiEffort);
   const [zaiModel, setZaiModelState] = useState(readStoredZaiModel);

@@ -10,6 +10,7 @@ import { SUBSCRIPTION_ENGINES, assertSubscriptionEngine } from './subscription-p
 import { readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { SESSIONS_FILE, STATE_DIR } from './config.ts';
+import { codexCapability } from './codex-models.ts';
 import { deleteRoutinesForAgent } from './routines.ts';
 import { deleteJobWatchesForAgent } from './jobWatches.ts';
 import { deleteMessagePinsForAgent } from '../lib/messagePinStore.ts';
@@ -97,26 +98,6 @@ function cleanBrainValue(value: unknown): string | undefined {
 
 const CLAUDE_BRAIN_MODELS = new Set(['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-fable-5']);
 const ZAI_BRAIN_MODELS = new Set(['glm-5.3[1m]', 'glm-5.3-flash[1m]', 'glm-5.2[1m]', 'glm-5.1']);
-const CODEX_BRAIN_EFFORTS: Record<string, ReadonlySet<string>> = {
-  'gpt-6-astra': new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
-  'gpt-6-sol': new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
-  'gpt-6-luna': new Set(['low', 'medium', 'high', 'xhigh', 'max']),
-  'gpt-5.6-sol': new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
-  'gpt-5.6-luna': new Set(['low', 'medium', 'high', 'xhigh', 'max']),
-  'gpt-5.5': new Set(['low', 'medium', 'high', 'xhigh']),
-  'gpt-5.3-codex': new Set(['low', 'medium', 'high', 'xhigh']),
-  'gpt-5.3-codex-spark': new Set(['low', 'medium', 'high', 'xhigh']),
-};
-const CODEX_DEFAULT_EFFORT: Record<string, string> = {
-  'gpt-6-astra': 'medium',
-  'gpt-6-sol': 'medium',
-  'gpt-6-luna': 'medium',
-  'gpt-5.6-sol': 'low',
-  'gpt-5.6-luna': 'medium',
-  'gpt-5.5': 'medium',
-  'gpt-5.3-codex': 'high',
-  'gpt-5.3-codex-spark': 'high',
-};
 const STANDARD_BRAIN_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const BANANA_BRAIN_EFFORTS = new Set(['low', 'medium', 'high']);
 const ZAI_MODEL_ALIASES: Record<string, string> = {
@@ -130,7 +111,7 @@ function normalizeBrainModel(engine: string, value: unknown, fallback?: string):
   if (!model) return fallback;
   if (engine === 'zai') model = ZAI_MODEL_ALIASES[model] ?? model;
   const valid = engine === 'claude' ? CLAUDE_BRAIN_MODELS.has(model)
-    : engine === 'codex' ? Object.prototype.hasOwnProperty.call(CODEX_BRAIN_EFFORTS, model)
+    : engine === 'codex' ? codexCapability(model) !== undefined
     : engine === 'xai' ? model === 'grok-4.7' || model === 'grok-4.6' || model === 'grok-4.5'
     : engine === 'zai' ? ZAI_BRAIN_MODELS.has(model)
     : engine === 'banana' ? model.startsWith('openrouter/')
@@ -147,13 +128,13 @@ const XAI_BRAIN_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh'])
 function normalizeBrainEffort(engine: string, model: string | undefined, value: unknown, fallback?: string): string | undefined {
   let effort = cleanBrainValue(value);
   if (engine === 'xai' && effort === 'max') effort = 'xhigh';
-  const allowed = engine === 'codex' && model ? CODEX_BRAIN_EFFORTS[model]
+  const allowed = engine === 'codex' && model ? new Set(codexCapability(model)?.efforts)
     : engine === 'xai' ? XAI_BRAIN_EFFORTS
     : engine === 'zai' ? new Set(['high', 'max'])
     : engine.startsWith('banana') ? BANANA_BRAIN_EFFORTS
     : STANDARD_BRAIN_EFFORTS;
   const canonicalFallback = engine === 'codex' && model
-    ? CODEX_DEFAULT_EFFORT[model] ?? fallback
+    ? codexCapability(model)?.defaultEffort ?? fallback
     : fallback;
   return effort && allowed?.has(effort) ? effort : canonicalFallback;
 }

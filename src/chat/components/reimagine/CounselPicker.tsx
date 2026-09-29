@@ -15,7 +15,7 @@ import {
   companionAuthBlurb,
 } from '../../hooks/useCompanionPicker';
 import { CLAUDE_MODELS, CLAUDE_EFFORTS } from '../CodexEnginePicker';
-import { CODEX_MODELS, codexEffortsForModel } from '../../codexModels';
+import { CODEX_MODELS, codexEffortsForModel, useCodexModels } from '../../codexModels';
 import { StarSigil } from './icons';
 
 type LaneMeta = { ring: string; short: string; word: string };
@@ -131,6 +131,7 @@ function LaneList({ picker }: { picker: CompanionPicker }) {
 
 // The active lane's model + effort controls, expanded in place.
 function LaneControls({ picker }: { picker: CompanionPicker }) {
+  useCodexModels();
   return (
     <div className="lane-ctl">
       {picker.isClaude && (
