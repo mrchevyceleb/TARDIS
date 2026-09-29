@@ -173,8 +173,38 @@ public static class DesktopInput {
    *  navigation/edit keys, digits, letters, Win keys, numpad, F-keys, OEM
    *  punctuation). The high bit is the physically-down state; toggle-key
    *  lock states live in the low bit and are ignored. */
+  // Keys already reported down at the late idle recheck (person proven idle
+  // 60s, so they are stale bits, not a held chord): the restore's chord gate
+  // ignores exactly these, and still aborts on any key that goes down later.
+  static System.Collections.Generic.HashSet<int> StaleKeySet = new System.Collections.Generic.HashSet<int>();
+  static System.Collections.Generic.List<int> DownKeys() {
+    var keys = new System.Collections.Generic.List<int>();
+    int[][] ranges = new int[][] {
+      new int[]{0x01,0x06}, new int[]{0x08,0x12}, new int[]{0x14,0x28},
+      new int[]{0x30,0x39}, new int[]{0x41,0x5A}, new int[]{0x5B,0x5C},
+      new int[]{0x60,0x87}, new int[]{0xBA,0xC2}, new int[]{0xDB,0xE2}
+    };
+    foreach (int[] r in ranges)
+      for (int vk = r[0]; vk <= r[1]; vk++)
+        if ((GetAsyncKeyState(vk) & 0x8000) != 0) keys.Add(vk);
+    return keys;
+  }
+  /** Called when the person is proven idle (the op-level guard passed): any
+   *  key down with no input event for 5s+ is a stale state. Marks nothing when
+   *  the idle clock is unknown or recent (fails closed to the old gate). */
+  public static void MarkStaleKeys() {
+    StaleKeySet.Clear();
+    var idle = LastInputMs();
+    if (idle < 5000) return;
+    foreach (int vk in DownKeys()) StaleKeySet.Add(vk);
+  }
+  static string StaleKeysReport() {
+    var sb = new System.Text.StringBuilder();
+    foreach (int vk in StaleKeySet) { if (sb.Length > 0) sb.Append(','); sb.Append(vk.ToString("X2")); }
+    return sb.ToString();
+  }
   static bool AnyPhysicalKeyDown() {
-    Func<int, bool> down = vk => (GetAsyncKeyState(vk) & 0x8000) != 0;
+    Func<int, bool> down = vk => !StaleKeySet.Contains(vk) && (GetAsyncKeyState(vk) & 0x8000) != 0;
     for (int vk = 0x01; vk <= 0x06; vk++) if (down(vk)) return true;   // mouse buttons
     for (int vk = 0x08; vk <= 0x12; vk++) if (down(vk)) return true;   // backspace/tab/enter/caps/shift/ctrl/alt
     for (int vk = 0x14; vk <= 0x28; vk++) if (down(vk)) return true;  // caps/esc/space..pgdn + arrows
@@ -233,6 +263,7 @@ public static class DesktopInput {
     // (the 18:13 live round was unattributable) is diagnosable from the op
     // result alone instead of live guessing.
     LastRestoreDetail = ""; LastRestoreOutcome = "";
+    if (StaleKeySet.Count > 0) LastRestoreDetail = " ignoringStaleKeys=" + StaleKeysReport();
     try {
       var prevH = new IntPtr(prev);
       if (prevH == IntPtr.Zero) { LastRestoreOutcome = "noPrev"; return false; }
@@ -900,6 +931,10 @@ function Assert-PersonIdleForBackgroundInput {
     $idleSecs = [int][math]::Floor($idleMs / 1000)
     throw "needs foreground: the person used this desktop ${idleSecs}s ago (within the 60s activity guard). Background input can still raise the target app's window over their work (the restore is not yet proven to hold on a live app), so it refuses by design until the restore is verified. Read-only background ops (computer_uia, computer_window_capture) still work. Wait until the person has been idle for a minute, then retry (with a fresh operationId where the tool takes one)."
   }
+  # Passed: record which keys are already down as stale bits (a no-op unless
+  # the idle clock proves 5s+ without input), so the restore's chord gate does
+  # not mistake them for a live chord once the app's own raise resets the clock.
+  [DesktopInput]::MarkStaleKeys()
 }
 
 function Assert-TargetWindow([object]$request, [bool]$afterInput) {
