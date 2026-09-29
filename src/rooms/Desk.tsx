@@ -2,9 +2,9 @@
 // is working on (the Board). Agents write here through the team MCP; the room
 // polls so their updates land without a refresh.
 
-import { Check, ChevronDown, ClipboardList, ExternalLink, Inbox, LayoutGrid, MessageSquare, Pencil, Plus, RotateCcw, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, ClipboardList, ExternalLink, Inbox, LayoutGrid, MessageSquare, Pencil, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { FormEvent, KeyboardEvent } from 'react';
+import type { FormEvent, KeyboardEvent, MouseEvent } from 'react';
 import { Button, Chip } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
 import { ROOM_NAMES } from '../data/roomNames';
@@ -30,7 +30,7 @@ import {
 } from '../data/desk';
 import { showToast } from '../native/shell';
 import type { Agent } from '../grok/agents';
-import { ActorChip, DiscussButton, PRIORITY_LABEL, errorText, linkLabel, priorityClass, useDeskAgents } from './deskParts';
+import { ActorChip, DiscussButton, PRIORITY_LABEL, errorText, linkLabel, linkifyText, priorityClass, useDeskAgents } from './deskParts';
 import { DeskBoard } from './DeskBoard';
 import { DeskCardDrawer } from './DeskCardDrawer';
 import './desk.css';
@@ -173,6 +173,24 @@ function NeedsYou({ desk, agents, onOpenCard, flash }: {
   const [more, setMore] = useState(false);
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // Rows opened to read in full. Kept here (by todo id) so a row stays open
+  // through the poll refresh, an edit, and a move between Needs you and Done.
+  const [openIds, setOpenIds] = useState<Set<string>>(() => new Set());
+  const toggleOpen = (id: string) => setOpenIds((prev) => {
+    const next = new Set(prev);
+    if (!next.delete(id)) next.add(id);
+    return next;
+  });
+  // Forget ids whose todo is gone or lost its details, so the set cannot grow
+  // for ever and a detail added later does not spring open by itself.
+  useEffect(() => {
+    setOpenIds((prev) => {
+      if (!prev.size) return prev;
+      const readable = new Set(desk.todos.filter((t) => t.detail).map((t) => t.id));
+      const kept = [...prev].filter((id) => readable.has(id));
+      return kept.length === prev.size ? prev : new Set(kept);
+    });
+  }, [desk.todos]);
   const [justDone, setJustDone] = useState<string | null>(null);
   const cardsById = useMemo(() => new Map(desk.cards.map((c) => [c.id, c])), [desk.cards]);
   const open = useMemo(() => sortOpenTodos(desk.todos.filter((t) => t.status === 'open')), [desk.todos]);
@@ -287,7 +305,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash }: {
     return extra ? [...shown, extra] : shown;
   }, [done, flash]);
 
-  const rowProps = { agents, cardsById, onOpenCard, onStatus: setStatus, onDelete: remove };
+  const rowProps = { agents, cardsById, onOpenCard, onStatus: setStatus, onDelete: remove, openIds, onToggleOpen: toggleOpen };
 
   return (
     <section className="desk-needs" aria-label="Needs you">
@@ -399,7 +417,7 @@ function TodoEditor({ todo, onCancel, onSave }: { todo: DeskTodo; onCancel: () =
 }
 
 function TodoRow({
-  todo, agents, cardsById, onOpenCard, onStatus, onDelete, onEdit, popping, lit,
+  todo, agents, cardsById, onOpenCard, onStatus, onDelete, onEdit, popping, lit, openIds, onToggleOpen,
 }: {
   todo: DeskTodo;
   agents: Agent[];
@@ -410,6 +428,8 @@ function TodoRow({
   onEdit?: () => void;
   popping?: boolean;
   lit?: boolean;
+  openIds: Set<string>;
+  onToggleOpen: (id: string) => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const timer = useRef(0);
@@ -419,6 +439,31 @@ function TodoRow({
   const card = todo.cardId ? cardsById.get(todo.cardId) : undefined;
   const threadId = todo.link?.startsWith('thread:') ? todo.link.slice('thread:'.length) : null;
 
+  // A row with details opens in place to read them in full. Clicking the title,
+  // the details, or empty space toggles it; the checkbox, chips, links, and
+  // buttons keep their own jobs, a drag-select never toggles, and clicking the
+  // open details (to select or copy) leaves them open.
+  const hasDetail = Boolean(todo.detail);
+  const open = hasDetail && openIds.has(todo.id);
+  const detailId = `desk-todo-detail-${todo.id}`;
+  const onBodyClick = (event: MouseEvent<HTMLDivElement>) => {
+    if (!hasDetail) return;
+    const target = event.target as HTMLElement;
+    const control = target.closest('a, button, input, select, textarea');
+    if (control && !control.classList.contains('desk-todo-text')) return;
+    const meta = target.closest('.desk-todo-meta');
+    if (meta && target !== meta) return;
+    if (open && target.closest('.desk-todo-detail')) return;
+    // A click that ends a drag-select inside this row must not toggle it. A
+    // keyboard press on the title (detail 0) always does, and a selection made
+    // elsewhere on the page is not this row's business.
+    if (event.detail !== 0) {
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed && selection.toString() && event.currentTarget.contains(selection.anchorNode)) return;
+    }
+    onToggleOpen(todo.id);
+  };
+
   const askDelete = () => {
     if (confirmDelete) { onDelete(todo); return; }
     setConfirmDelete(true);
@@ -427,7 +472,7 @@ function TodoRow({
   };
 
   return (
-    <li data-todo-id={todo.id} className={`desk-todo ${priorityClass(todo.priority)}${isDone ? ' is-done' : ''}${popping ? ' is-popping' : ''}${lit ? ' is-lit' : ''}`}>
+    <li data-todo-id={todo.id} className={`desk-todo ${priorityClass(todo.priority)}${isDone ? ' is-done' : ''}${popping ? ' is-popping' : ''}${lit ? ' is-lit' : ''}${hasDetail ? ' has-detail' : ''}${open ? ' is-open' : ''}`}>
       <button
         type="button"
         className="desk-check"
@@ -437,16 +482,37 @@ function TodoRow({
       >
         <Check size={14} aria-hidden="true" />
       </button>
-      <div className="desk-todo-body">
+      <div className="desk-todo-body" onClick={onBodyClick}>
         <div className="desk-todo-title">
           <span className="priority-dot" title={`${PRIORITY_LABEL[todo.priority]} priority`} />
-          {onEdit ? (
-            <button type="button" className="desk-todo-text" onClick={onEdit} title="Edit">{todo.title}</button>
+          {hasDetail ? (
+            <button
+              type="button"
+              className="desk-todo-text"
+              aria-expanded={open}
+              aria-controls={open ? detailId : undefined}
+              title={open ? 'Hide details' : 'Show details'}
+            >
+              <ChevronRight size={14} aria-hidden="true" className="desk-todo-chev" />
+              {todo.title}
+            </button>
           ) : (
             <span className="desk-todo-text">{todo.title}</span>
           )}
         </div>
-        {todo.detail ? <p className="desk-todo-detail">{todo.detail}</p> : null}
+        {hasDetail ? (open ? (
+          <p id={detailId} className="desk-todo-detail is-open">{linkifyText(todo.detail!)}</p>
+        ) : (
+          // The clamped preview is for eyes only; the disclosure button announces
+          // the state, and the full text is read once the row is open.
+          <p className="desk-todo-detail" aria-hidden="true">{todo.detail}</p>
+        )) : null}
+        {open && onEdit ? (
+          <button type="button" className="desk-mini-btn desk-todo-edit" onClick={onEdit}>
+            <Pencil size={13} aria-hidden="true" />
+            <span>Edit</span>
+          </button>
+        ) : null}
         <div className="desk-todo-meta">
           <ActorChip actor={todo.from} prefix="from" />
           {due ? <Chip tone={due.tone}>{due.text}</Chip> : null}
