@@ -15,7 +15,7 @@ import {
   ZAI_MODELS,
 } from '../chat/hooks/useCompanionPicker';
 import { CLAUDE_EFFORTS, CLAUDE_MODELS, normalizeClaudeModel } from '../chat/components/CodexEnginePicker';
-import { CODEX_MODELS, DEFAULT_CODEX_MODEL, codexEffortsForModel, codexModelSpec } from '../chat/codexModels';
+import { CODEX_MODELS, DEFAULT_CODEX_MODEL, codexEffortsForModel, codexModelSpec, useCodexModels } from '../chat/codexModels';
 import { AgentUpdateConflictError, createAgent, updateAgentReq, deleteAgentReq, uploadAgentAvatar, removeAgentAvatar, agentAvatarUrl, DISC_INK, agentColor, type Agent } from './agents';
 import { GROK_VOICES } from '../voice/useGrokCall';
 
@@ -66,6 +66,7 @@ export type AgentEditorProps = {
 };
 
 export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentEditorProps) {
+  useCodexModels();
   const [name, setName] = useState('');
   const [role, setRole] = useState('');
   const [engine, setEngine] = useState('xai');

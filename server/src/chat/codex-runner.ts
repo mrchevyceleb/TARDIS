@@ -21,28 +21,12 @@ import { agentForChatId, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
-import { resolveCodexSelection } from './codex-models.ts';
+import { resolveCodexBin, resolveCodexSelection } from './codex-models.ts';
 import { buildCodexAppServerArgs, shouldRetryEmptyCodexTurn } from './codex-args.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { THREAD_VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
-
-/**
- * Which codex binary to run.
- *
- * Do NOT rely on bare 'codex' resolving through PATH here. TARDIS is started
- * by npm, which prepends every ancestor node_modules/.bin, so a stale
- * @openai/codex in ~/node_modules shadows the real install and every turn fails
- * with a 400 the transcript never shows. Prefer the standalone install, allow an
- * explicit override, and only then fall back to PATH.
- */
-function resolveCodexBin(): string {
-  const explicit = process.env.RIVENDELL_CODEX_BIN;
-  if (explicit) return explicit;
-  const standalone = join(homedir(), '.local', 'bin', 'codex');
-  return existsSync(standalone) ? standalone : 'codex';
-}
 
 const CODEX_BIN = resolveCodexBin();
 console.log(`[chat codex] binary: ${CODEX_BIN}`);

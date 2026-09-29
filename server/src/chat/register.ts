@@ -9,6 +9,7 @@ import { readCommands } from './commands.ts';
 import { clearThreadSessionIds, ensureStateDir } from './sessions.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { stopComputersForOwner } from '../devices/bridge.ts';
+import { codexCatalogPayload, startCodexCatalog } from './codex-models.ts';
 import {
   clampReplayWindow,
   collapseHistoricalToolArgs,
@@ -284,6 +285,14 @@ export function quiesceChat(): void {
 
 export async function registerChat(app: express.Express, server: Server): Promise<() => void> {
   await ensureStateDir();
+  // The Codex model picker follows the CLI's own catalog. Give the first read a
+  // moment (it is local and quick) so early turns are checked against it.
+  await startCodexCatalog();
+
+  app.get('/api/codex/models', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(codexCatalogPayload());
+  });
 
   app.get('/api/repos', async (_req, res) => {
     try {

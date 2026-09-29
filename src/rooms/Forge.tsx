@@ -26,6 +26,7 @@ import {
   CODEX_MODELS,
   DEFAULT_CODEX_MODEL,
   codexModelSpec,
+  useCodexModels,
   normalizeCodexEffort,
 } from '../chat/codexModels';
 import { XAI_MODELS } from '../chat/hooks/useCompanionPicker';
@@ -251,6 +252,7 @@ function parseCron(cron: string): SchedParts | null {
 const isWorkspaceRoot = (cwd: string) => /(?:^|[\\/])ASSISTANT-HUB[\\/]?$/.test(cwd);
 
 export function Forge() {
+  useCodexModels();
   const { data: jobs = [], refetch } = useCronJobs();
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);

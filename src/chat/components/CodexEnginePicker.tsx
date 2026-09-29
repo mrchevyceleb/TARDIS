@@ -1,4 +1,4 @@
-import { CODEX_MODELS, codexEffortsForModel } from '../codexModels';
+import { codexEffortsForModel, useCodexCliStatus, useCodexModels } from '../codexModels';
 
 // Model + reasoning-effort selector for Codex. The chosen values ride the WS
 // send/steer payload and reach `codex -m` / `-c model_reasoning_effort`.
@@ -35,7 +35,9 @@ export function CodexEnginePicker(props: {
   effortAriaLabel?: string;
   effortLabel?: string;
 }) {
-  const models = props.models ?? CODEX_MODELS;
+  const live = useCodexModels();
+  const cli = useCodexCliStatus();
+  const models = props.models ?? live;
   const efforts = props.efforts ?? codexEffortsForModel(props.model);
   const base = {
     fontSize: 12.5,
@@ -71,6 +73,14 @@ export function CodexEnginePicker(props: {
           <option key={e} value={e}>{`${props.effortLabel ?? 'effort'} · ${e}`}</option>
         ))}
       </select>
+      {cli.outdated && (
+        <span
+          style={{ fontSize: 11.5, opacity: 0.75, cursor: 'help' }}
+          title={`Codex CLI ${cli.version ?? '?'} is behind ${cli.latest ?? 'the latest release'}. Models this account offers may be hidden until the CLI is updated.`}
+        >
+          CLI outdated
+        </span>
+      )}
     </>
   );
 }
