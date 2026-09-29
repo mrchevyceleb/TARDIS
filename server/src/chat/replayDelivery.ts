@@ -56,10 +56,14 @@ function trimHistoricalToolOutput(event: Record<string, any>): Record<string, an
   // each screenshot at ~670KB, and five of them inside one minute blew the
   // replay byte budget: the clamp then cut everything before them and a device
   // returning after hours (sinceSeq far behind) was told to drop its saved
-  // history and rebuild from a seven-minute window.
-  const hasRawResult = 'tool_use_result' in inner;
-  const { tool_use_result: _rawResult, ...rest } = inner;
-  const content = rest.message?.content;
+  // history and rebuild from a seven-minute window. Only dropped where the
+  // event also carries the mirrored tool_result, so a producer that ships the
+  // raw object alone keeps its only copy.
+  const content = inner.message?.content;
+  const mirrored = Array.isArray(content) && content.some((item: any) => item?.type === 'tool_result');
+  const hasRawResult = mirrored && 'tool_use_result' in inner;
+  const { tool_use_result: _rawResult, ...stripped } = inner;
+  const rest = hasRawResult ? stripped : inner;
   let changed = hasRawResult;
   let trimmedContent = content;
   if (Array.isArray(content)) {
