@@ -899,7 +899,7 @@ try {
       $displays = @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
         @{ id=$_.DeviceName; bounds=@{ x=$_.Bounds.X; y=$_.Bounds.Y; width=$_.Bounds.Width; height=$_.Bounds.Height }; scaleFactor=[DesktopInput]::ScaleAt($_.Bounds.X,$_.Bounds.Y) }
       })
-      $result = @{ displays=$displays; windows=@([DesktopInput]::Windows()); activeWindow=[string][DesktopInput]::Foreground() }
+      $result = @{ displays=$displays; windows=@([DesktopInput]::Windows()); activeWindow=[string][DesktopInput]::Foreground(); personIdleMs=[DesktopInput]::LastInputMs() }
     }
     'capture' {
       $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
