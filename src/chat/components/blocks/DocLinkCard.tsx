@@ -1,13 +1,16 @@
-import { Eye, ExternalLink, FileText } from 'lucide-react';
+import { Eye, ExternalLink, FileText, MonitorUp } from 'lucide-react';
 import { useProxyViewer } from '../../../hooks/useProxyViewer';
 import { useStudioFiles, viewerPreferred } from '../../../shell/studio/studioFiles';
-import { buildLinkUrls, normalizeWorkspacePath, openWorkspaceLink } from '../../utils/proxyLinks';
+import { buildLinkUrls, canOpenOnThisPc, normalizeWorkspacePath, openWorkspaceLink, opensOnThisPcByClick } from '../../utils/proxyLinks';
 
 // Click = open the document inside TARDIS: text/code/markdown lands in the
-// editor, browser-renderable files render in the in-app overlay. The two side
-// buttons cover the alternates: Browser opens the file via Tailscale-served HTTP
-// (any device), Preview forces the in-app overlay. Outside the Studio shell it
-// falls back to the native rivendell:// handler.
+// editor, browser-renderable files render in the in-app overlay. The side
+// buttons cover the alternates: Open on PC (desktop shell only) opens the file
+// in the PC's own app, Browser opens the file via Tailscale-served HTTP (any
+// device), Preview forces the in-app overlay. In the desktop shell a plain
+// click on a file that belongs in a real app (web pages, PDFs, images, media,
+// Office files, spreadsheets) opens it on the PC too. Outside the Studio shell
+// it falls back to the native rivendell:// handler.
 export function DocLinkCard({ path, title }: { path: string; title?: string }) {
   const viewer = useProxyViewer();
   const studio = useStudioFiles();
@@ -16,8 +19,12 @@ export function DocLinkCard({ path, title }: { path: string; title?: string }) {
   const { browserUrl, windowsPath } = buildLinkUrls(safePath, 'doc');
   const display = title || safePath.split('/').pop() || safePath;
 
+  const onThisPc = normalizedPath !== null && canOpenOnThisPc(normalizedPath, 'doc');
+  const clickOpensOnPc = normalizedPath !== null && opensOnThisPcByClick(normalizedPath, 'doc');
+
   const openPrimary = () => {
     if (normalizedPath === null) return;
+    if (clickOpensOnPc) { openWorkspaceLink(normalizedPath, 'doc'); return; }
     if (studio) {
       if (viewerPreferred(normalizedPath)) { viewer.open({ source: 'doc', path: normalizedPath, title }); return; }
       studio.openFile(normalizedPath, title);
@@ -32,7 +39,9 @@ export function DocLinkCard({ path, title }: { path: string; title?: string }) {
         type="button"
         className="chat-link-card"
         onClick={openPrimary}
-        title={studio ? `Open ${display} in TARDIS` : `Open ${display} natively (${windowsPath})`}
+        title={clickOpensOnPc
+          ? `Open ${display} on this PC`
+          : studio ? `Open ${display} in TARDIS` : `Open ${display} natively (${windowsPath})`}
       >
         <FileText size={16} />
         <span className="chat-link-card-text">
@@ -41,6 +50,21 @@ export function DocLinkCard({ path, title }: { path: string; title?: string }) {
         </span>
       </button>
       <span className="chat-link-card-actions">
+        {onThisPc ? (
+          <button
+            type="button"
+            className="chat-link-card-action chat-link-card-action-pc"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (normalizedPath !== null) openWorkspaceLink(normalizedPath, 'doc');
+            }}
+            title="Open in your PC's app"
+            aria-label={`Open ${display} on this PC`}
+          >
+            <MonitorUp size={13} />
+            <span>Open on PC</span>
+          </button>
+        ) : null}
         <a
           className="chat-link-card-action"
           href={browserUrl}

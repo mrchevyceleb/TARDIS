@@ -1,16 +1,18 @@
-import { FolderOpen, FolderTree } from 'lucide-react';
+import { FolderOpen, FolderOutput, FolderTree } from 'lucide-react';
 import { useStudioFiles } from '../../../shell/studio/studioFiles';
-import { buildLinkUrls, normalizeWorkspacePath, openWorkspaceLink } from '../../utils/proxyLinks';
+import { buildLinkUrls, canOpenOnThisPc, fileManagerName, normalizeWorkspacePath, openWorkspaceLink } from '../../utils/proxyLinks';
 
 // Click reveals the folder in TARDIS's own file tree. The side button does
-// the same explicitly. Outside the Studio shell it falls back to opening the
-// folder in Windows Explorer via the rivendell:// handler.
+// the same explicitly. In the desktop shell a second button opens the folder in
+// the PC's own file manager. Outside the Studio shell it falls back to opening
+// the folder in Windows Explorer via the rivendell:// handler.
 export function FolderLinkCard({ path, title }: { path: string; title?: string }) {
   const studio = useStudioFiles();
   const normalizedPath = normalizeWorkspacePath(path);
   const safePath = normalizedPath ?? path;
   const display = title || (safePath === '' ? 'ASSISTANT-HUB' : safePath.split('/').pop() || safePath);
   const { windowsPath } = buildLinkUrls(safePath, 'folder');
+  const onThisPc = normalizedPath !== null && canOpenOnThisPc(normalizedPath, 'folder');
 
   const openPrimary = () => {
     if (normalizedPath === null) return;
@@ -33,6 +35,21 @@ export function FolderLinkCard({ path, title }: { path: string; title?: string }
         </span>
       </button>
       <span className="chat-link-card-actions">
+        {onThisPc ? (
+          <button
+            type="button"
+            className="chat-link-card-action chat-link-card-action-pc"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (normalizedPath !== null) openWorkspaceLink(normalizedPath, 'folder');
+            }}
+            title={`Open in ${fileManagerName()}`}
+            aria-label={`Open ${display} in ${fileManagerName()}`}
+          >
+            <FolderOutput size={13} />
+            <span>{fileManagerName() === 'Explorer' ? 'Explorer' : 'Open folder'}</span>
+          </button>
+        ) : null}
         <button
           type="button"
           className="chat-link-card-action"

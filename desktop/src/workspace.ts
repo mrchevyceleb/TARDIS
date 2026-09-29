@@ -10,7 +10,7 @@ import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
-import { isLaunchable, isSecretPath } from './approvals.js';
+import { isLaunchable, isSecretPath, oddFileName, wouldRun } from './approvals.js';
 import { getSettings, saveSettings } from './settings.js';
 
 export const WORKSPACE_LABEL = 'ASSISTANT-HUB';
@@ -19,6 +19,9 @@ export interface OpenResult {
   ok: boolean;
   where?: 'local' | 'fetched' | 'browser';
   error?: string;
+  /** A policy refusal (a program, a secret, a symlink, a mismatched link):
+   *  the console shows the reason and must not try another way to open it. */
+  refused?: boolean;
 }
 
 // One download per workspace path at a time; a second click joins the first.
@@ -154,7 +157,29 @@ export async function clearFetchedCopies(win: BrowserWindow | null): Promise<voi
   }
 }
 
-async function openLocal(target: string): Promise<OpenResult> {
+/** Open a file or folder in the workspace with the machine's own apps. A link
+ *  never runs a program: a folder link must point at a real folder, and a file
+ *  is refused when opening it would run it (scripts, installers, shortcuts, an
+ *  execute bit, no extension) or when it is a symbolic link. */
+async function openLocal(target: string, kind: LinkKind): Promise<OpenResult> {
+  let info;
+  try { info = await lstat(target); } catch {
+    return { ok: false, error: 'That path could not be reached on this PC.' };
+  }
+  if (info.isSymbolicLink()) return { ok: false, error: 'Symbolic links are never opened from chat.', refused: true };
+  // By name, before file versus folder: a program bundle is a directory too
+  // (Evil.app, a .workflow), and opening it launches it.
+  if (oddFileName(target) || isLaunchable(target) || isSecretPath(target)) {
+    return { ok: false, error: 'Programs and secrets are not opened from chat links. Open it from the folder yourself.', refused: true };
+  }
+  if (info.isFile()) {
+    if (kind === 'folder') return { ok: false, error: 'That link points at a file, not a folder.', refused: true };
+    if (wouldRun(target)) {
+      return { ok: false, error: 'Programs and secrets are not opened from chat links. Open it from the folder yourself.', refused: true };
+    }
+  } else if (!info.isDirectory()) {
+    return { ok: false, error: 'That path is neither a folder nor a regular file.', refused: true };
+  }
   const problem = await shell.openPath(target);
   return problem ? { ok: false, error: problem } : { ok: true, where: 'local' };
 }
@@ -210,7 +235,7 @@ export async function openWorkspacePath(rel: string, kind: LinkKind, serverUrl: 
   const root = workspaceRoot();
   if (root) {
     const target = parts.length ? path.join(root, ...parts) : root;
-    if (insideRoot(root, target) && existsSync(target)) return openLocal(target);
+    if (insideRoot(root, target) && existsSync(target)) return openLocal(target, kind);
   }
 
   if (kind === 'folder') {
@@ -222,8 +247,8 @@ export async function openWorkspacePath(rel: string, kind: LinkKind, serverUrl: 
     };
   }
   if (!serverUrl || parts.length === 0) return { ok: false, error: 'Not connected to a ship.' };
-  if (isLaunchable(parts[parts.length - 1])) {
-    return { ok: false, error: 'Executable files are not opened from a fetched copy. Sync the workspace to this computer to use it.' };
+  if (isLaunchable(parts[parts.length - 1]) || oddFileName(parts[parts.length - 1])) {
+    return { ok: false, error: 'Executable files are not opened from a fetched copy. Sync the workspace to this computer to use it.', refused: true };
   }
 
   // Not on this machine: open the copy fetched earlier, or fetch one now.

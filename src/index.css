@@ -6463,6 +6463,24 @@ button {
   border-color: var(--r-line-gold);
 }
 
+/* "Open on PC": the desktop shell only. A labeled chip so it reads as the way
+ * to open the file in its real app, not one more icon. */
+.chat-link-card-action-pc {
+  width: auto;
+  gap: 4px;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--r-gold);
+  border-color: var(--r-line-gold);
+  background: color-mix(in srgb, var(--r-gold) 8%, transparent);
+}
+
+.chat-link-card-action-pc svg {
+  flex: 0 0 auto;
+}
+
 /* Inline workspace mentions inside markdown text. The Markdown primitive
  * rewrites `ASSISTANT-HUB/...` strings into anchors with a proxy protocol;
  * style them as gold underlines so they read as links and reveal on click.

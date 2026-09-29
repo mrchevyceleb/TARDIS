@@ -3,7 +3,7 @@
 
 export type WorkspaceLinkKind = 'doc' | 'folder';
 
-export type NativeOpenResult = { ok: boolean; where?: 'local' | 'fetched'; error?: string };
+export type NativeOpenResult = { ok: boolean; where?: 'local' | 'fetched'; error?: string; refused?: boolean };
 
 export interface TardisShellBridge {
   native: true;

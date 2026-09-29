@@ -172,6 +172,81 @@ export function openMachineLink(absPath: string): void {
   showToast('Machine paths open in the TARDIS desktop app on that PC.');
 }
 
+// Types that belong in a real app on the PC rather than in TARDIS's own viewer
+// or editor: web pages (their scripts only run there), documents, images,
+// media, Office files, and spreadsheets. Macro-capable Office formats (legacy
+// .doc/.xls/.ppt, .xlsm, .xlsb, .rtf) are left out on purpose.
+const NATIVE_APP_EXTS = new Set([
+  '.html', '.htm', '.pdf',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp', '.tif', '.tiff', '.heic', '.avif',
+  '.mp4', '.mov', '.webm', '.mkv', '.avi', '.mp3', '.wav', '.m4a', '.ogg', '.flac',
+  '.docx', '.dotx', '.xlsx', '.pptx', '.ppsx',
+  '.odt', '.ods', '.odp', '.csv',
+]);
+
+// Text and data files that are safe to hand to the PC's default editor. They
+// get the "Open on PC" button but keep opening in TARDIS's editor on a click.
+// Together with NATIVE_APP_EXTS this is an ALLOWLIST: the desktop shell opens a
+// synced local file with whatever Windows associates with it, so anything not
+// named here (scripts, shortcuts, installers, odd extensions) is never offered
+// or routed, whatever a denylist would have said.
+const PC_TEXT_EXTS = new Set([
+  '.md', '.markdown', '.txt', '.log', '.json', '.jsonl', '.yaml', '.yml', '.toml', '.xml',
+  '.ini', '.cfg', '.conf', '.tsv', '.sql', '.rst', '.tex',
+  '.ts', '.tsx', '.jsx', '.css', '.scss',
+]);
+
+// Mirrors LAUNCHABLE in desktop/src/approvals.ts. A folder link whose name ends
+// in one of these is refused; the allowlist above already keeps them out of docs.
+const LAUNCHABLE_EXTS = new Set([
+  '.exe', '.msi', '.msix', '.appx', '.bat', '.cmd', '.com', '.scr', '.pif', '.cpl', '.hta',
+  '.ps1', '.psm1', '.psd1', '.vbs', '.vbe', '.wsf', '.wsh', '.js', '.jse', '.mjs', '.cjs',
+  '.jar', '.lnk', '.url', '.reg', '.inf', '.sct', '.msc', '.gadget', '.chm',
+  '.sh', '.bash', '.zsh', '.fish', '.command', '.tool', '.app', '.dmg', '.pkg', '.mpkg',
+  '.run', '.bin', '.out', '.apk', '.deb', '.rpm', '.appimage', '.flatpakref', '.snap',
+  '.desktop', '.service', '.scpt', '.applescript', '.workflow', '.action',
+  '.py', '.pyw', '.rb', '.pl', '.php', '.lua', '.tcl', '.ahk', '.jsp',
+  '.scf', '.application', '.ws', '.xll', '.wll', '.slk', '.diagcab', '.appref-ms', '.settingcontent-ms',
+  '.website', '.search-ms', '.library-ms', '.theme', '.themepack', '.cab', '.iso', '.vhd', '.vhdx',
+  '.msp', '.mst', '.msu', '.jnlp', '.psc1', '.rdp', '.xbap', '.ps1xml', '.pssc', '.cdxml',
+]);
+
+// Also only ever a click-through on a plain, well-formed leaf name: no trailing
+// dot or space (Windows drops them), no stream separator, no control chars.
+const ODD_LEAF = /[.\s]$|:|[\u0000-\u001f]/;
+
+function extensionOf(relPath: string): string {
+  const leaf = relPath.split('/').pop() ?? '';
+  if (ODD_LEAF.test(leaf)) return '';
+  const dot = leaf.lastIndexOf('.');
+  return dot > 0 ? leaf.slice(dot).toLowerCase() : '';
+}
+
+/** True when the desktop shell can open this workspace link with the PC's own
+ *  apps. Folders: only when the name does not look like a file (the shell
+ *  cannot be trusted to tell, so a "folder" link at report.pdf is refused).
+ *  Files: only known-safe types. False everywhere outside the desktop shell. */
+export function canOpenOnThisPc(relPath: string, kind: 'doc' | 'folder'): boolean {
+  if (!nativeShell()?.openWorkspacePath) return false;
+  const leaf = relPath.split('/').pop() ?? '';
+  if (ODD_LEAF.test(leaf) && leaf !== '') return false;
+  const ext = extensionOf(relPath);
+  if (kind === 'folder') return !NATIVE_APP_EXTS.has(ext) && !PC_TEXT_EXTS.has(ext) && !LAUNCHABLE_EXTS.has(ext);
+  return NATIVE_APP_EXTS.has(ext) || PC_TEXT_EXTS.has(ext);
+}
+
+/** True when a plain click on this doc link should open it on the PC: the
+ *  desktop shell is here and the file is the kind of thing that belongs in a
+ *  real app. */
+export function opensOnThisPcByClick(relPath: string, kind: 'doc' | 'folder'): boolean {
+  return kind === 'doc' && canOpenOnThisPc(relPath, kind) && NATIVE_APP_EXTS.has(extensionOf(relPath));
+}
+
+/** What to call the PC's folder browser in a tooltip. */
+export function fileManagerName(): string {
+  return nativeShell()?.platform === 'win32' ? 'Explorer' : 'your file manager';
+}
+
 export function openWorkspaceLink(relPath: string, kind: 'doc' | 'folder'): void {
   const shell = nativeShell();
   if (shell?.openWorkspacePath) {
@@ -182,6 +257,8 @@ export function openWorkspaceLink(relPath: string, kind: 'doc' | 'folder'): void
       .then((result) => {
         if (result.ok) return;
         if (result.error) showToast(result.error);
+        // A policy refusal is final: no other way of opening it is tried.
+        if (result.refused) return;
         openWorkspaceLinkInBrowser(relPath, kind, false);
       })
       .catch((error: unknown) => {
