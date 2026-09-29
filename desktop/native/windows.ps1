@@ -582,7 +582,12 @@ public static class UiaWindow {
 function Assert-SetFocusUnlocked {
   $flag = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'tardis-desktop-updater\uia-focus-unlock' } else { '' }
   try {
-    if ($flag -and (Test-Path -LiteralPath $flag) -and (((Get-Date) - (Get-Item -LiteralPath $flag).LastWriteTime).TotalMinutes -lt 30)) { return }
+    if ($flag -and (Test-Path -LiteralPath $flag -PathType Leaf)) {
+      # UTC age, and a future-dated file (clock rollback, a stray touch) is
+      # not an unlock: it must be 0-30 minutes old (1 minute of slack).
+      $age = ([DateTime]::UtcNow - (Get-Item -LiteralPath $flag -ErrorAction Stop).LastWriteTimeUtc).TotalMinutes
+      if ($age -ge -1 -and $age -lt 30) { return }
+    }
   } catch { }
   throw 'needs foreground: background keyboard focus (uia_focus, and uia_value with post:true which focuses first) is disabled on this machine until the SetFocus restore path is proven; it raised a window over the person''s work and could not restore it. Use computer_uia_value WITHOUT post into an empty field (it lands without taking focus) and computer_uia_invoke on Send, or have the person click into the field. No input was sent.'
 }
