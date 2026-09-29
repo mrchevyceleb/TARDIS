@@ -258,7 +258,7 @@ public static class DesktopInput {
   public static bool RestoreForeground(long prev, long raisedTarget) {
     // Detail carries every attempt's attach results, SetForegroundWindow
     // return and settled foreground handle; Outcome is one of restored /
-    // personMoved / holdingKey / noForeground / noPrev / osDenied /
+    // personMoved / noForeground / noPrev / osDenied /
     // appReAsserted / exception. A restore that fails on a real machine
     // (the 18:13 live round was unattributable) is diagnosable from the op
     // result alone instead of live guessing.
@@ -281,21 +281,16 @@ public static class DesktopInput {
         if (now != IntPtr.Zero && now.ToInt64() != raisedTarget && !SameProcess(now.ToInt64(), raisedTarget)) { LastRestoreOutcome = "personMoved"; return true; }
         if (now == IntPtr.Zero) { LastRestoreOutcome = "noForeground"; return false; }
         if (AnyPhysicalKeyDown()) {
-          // A held key WITH input in the last 5s is a plausible live chord:
-          // attaching queues mid-chord could drop its key-up, so that still
-          // aborts. A held key with NO input for 5s+ is a stale state, not a
-          // chord: a game that exits while a movement key is down leaves its
-          // bit set until someone presses that key again (verified live at
-          // 20:13: both restores aborted on exactly that while the desktop
-          // was idle, leaving the raised window stuck over the person's
-          // work). Proceed, and name the stale key in the evidence.
-          var idleForChord = LastInputMs();
-          // Unknown recency (-1) fails CLOSED: with no evidence the key is
-          // stale, a possibly-live held chord wins over the restore (the
-          // op-level guard fails open, but this gate overrides a held key,
-          // which is a different stake).
-          if (idleForChord < 5000) { LastRestoreOutcome = "holdingKey"; LastRestoreDetail += " keysDown=" + KeysDownReport(); return false; }
-          LastRestoreDetail += " staleKeysDown=" + KeysDownReport();
+          // A key held while the restore runs no longer aborts it. It used to
+          // (attaching queues mid-chord could drop a key-up), but that fear has
+          // never once been seen and the abort itself failed the person twice:
+          // a game that exited with a movement key's bit still set (20:13), and
+          // a person simply playing (holding D, 09:09 Sep 29) who was left with
+          // the raised window sitting over their game. The person has waived
+          // the flash; a raised window that stays is the one thing that hurts,
+          // and the attach lasts a couple of milliseconds. Name the held keys
+          // (hex virtual-key codes) in the evidence instead.
+          LastRestoreDetail += " keysHeld=" + KeysDownReport();
         }
         uint nowPid; var nowThread = GetWindowThreadProcessId(now, out nowPid);
         uint prevPid; var prevThread = GetWindowThreadProcessId(prevH, out prevPid);
