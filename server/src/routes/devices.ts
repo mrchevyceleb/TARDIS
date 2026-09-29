@@ -4,8 +4,13 @@ import {
   DEVICE_DEFAULT_TIMEOUT_MS,
   DEVICE_MAX_TIMEOUT_MS,
   callDevice,
+  clearConsoleStop,
+  forgetComputerGrant,
   listDevices,
   findDevice,
+  noteConsoleStop,
+  rememberComputerGrant,
+  wasInterruptedSince,
   type DeviceOp,
 } from '../devices/bridge.ts';
 import { asyncHandler } from './helpers.ts';
@@ -53,8 +58,13 @@ for (const op of ['stop', 'preview', 'resume'] as const) {
     if (op === 'resume' && !trustedWebSocketOrigin(req)) { res.status(403).json({ error: 'Resume is only available from the trusted console.' }); return; }
     const id = String(req.params.id);
     if (findDevice(id)?.id !== id) { res.status(404).json({ error: 'Computer offline.' }); return; }
+    // Noted first, so the pause the desktop reports next can say it came from here.
+    if (op === 'stop') noteConsoleStop(id);
     const reply = await callDevice(id, `computer.${op}`, {}, 10_000);
-    if (op === 'stop' && reply.ok) steps.forget(id);
+    if (op === 'stop') {
+      if (reply.ok) { steps.forget(id); forgetComputerGrant(id); }
+      else clearConsoleStop(id); // it never reached the computer: a later pause is not this press
+    }
     res.setHeader('Cache-Control', 'no-store');
     res.status(reply.ok ? 200 : 409).json(reply.ok ? reply.result : { error: reply.error });
   }));
@@ -91,8 +101,19 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
   try {
     let result;
     if (op === 'start') {
+      const startedAt = Date.now();
       result = await call('start', { ...context!, purpose: body.purpose });
       if (typeof result.session !== 'string') throw new Error('Computer returned an invalid grant.');
+      // Recorded before anything else, so a grant that cannot be ended right
+      // away can still be ended by a later interrupt.
+      rememberComputerGrant(device, context!.owner, result.session);
+      // The turn was interrupted while this start was landing: end the grant
+      // now (with its own session, so nothing pauses) instead of leaving it.
+      if (wasInterruptedSince(context!.owner, startedAt)) {
+        const ended = await callDevice(device, 'computer.end', { session: result.session }, 3000);
+        if (ended.ok) forgetComputerGrant(device, result.session);
+        throw new Error('Interrupted before control started.');
+      }
       steps.retainDevices(new Set(listDevices().map(d => d.id)));
       steps.beginGrant(device, result.session);
       result = { ...result, device, deviceName: info.name };
@@ -128,7 +149,7 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
       });
     } else {
       result = await call(op === 'stop' ? 'end' : op, body);
-      if (op === 'stop') steps.forget(device);
+      if (op === 'stop') { steps.forget(device); forgetComputerGrant(device); }
     }
     const keyboardResult = op === 'type' || op === 'key' || op === 'uia_value' || op === 'uia_invoke' || op === 'uia_key'
       || (op === 'act' && (body.operation === 'type' || body.operation === 'key'));

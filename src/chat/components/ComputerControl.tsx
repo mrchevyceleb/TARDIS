@@ -4,6 +4,16 @@ import { fetchComputers, previewComputer, resumeComputer, selectComputer, stopCo
 import { nativeShell } from '../../native/shell';
 import './computer-control.css';
 
+/** "9:05am ET", or "Sep 28, 11:05pm ET" when it was not today (Eastern, always labeled). */
+function easternTime(ms: number): string {
+  const opts = { timeZone: 'America/New_York' } as const;
+  const clock = new Date(ms).toLocaleTimeString('en-US', { ...opts, hour: 'numeric', minute: '2-digit' }).replace(/\s?(AM|PM)$/i, (_m, p: string) => p.toLowerCase());
+  const day = (t: number) => new Date(t).toLocaleDateString('en-US', opts);
+  return day(ms) === day(Date.now())
+    ? `${clock} ET`
+    : `${new Date(ms).toLocaleDateString('en-US', { ...opts, month: 'short', day: 'numeric' })}, ${clock} ET`;
+}
+
 function errorText(error: unknown): string {
   const text = error instanceof Error ? error.message : 'Computer unavailable.';
   try { return JSON.parse(text).error ?? text; } catch { return text; }
@@ -92,7 +102,7 @@ export function ComputerControl({ chatId }: { chatId: string }) {
           {devices.map(d => <option key={d.id} value={d.id} disabled={!d.computer?.supported}>{d.id === localId ? `This computer · ${d.name}` : d.name}{!d.computer?.supported ? ' · unavailable' : ''}</option>)}
         </select>
       </label>
-      <p>{paused ? 'You stopped autonomous control. Resume when you want agents to use this computer again.' : control ? `${control.label} is controlling this desktop until ${new Date(control.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` : device?.computer?.reason || (automatic ? 'Agents can operate this desktop for assigned work without approval popups.' : device?.computer?.supported ? 'This computer is configured to ask for native approval.' : device ? 'This client does not support desktop control. Update the desktop app.' : 'The selected/default computer is offline. No other machine will be used automatically.')}</p>
+      <p>{paused ? `${device?.computer?.pausedAt ? `Paused at ${easternTime(device.computer.pausedAt)}. ` : 'Paused. '}${device?.computer?.pausedReason ?? 'The pause time and source are unavailable.'} Resume when you want agents to use this computer again.` : control ? `${control.label} is controlling this desktop until ${new Date(control.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` : device?.computer?.reason || (automatic ? 'Agents can operate this desktop for assigned work without approval popups.' : device?.computer?.supported ? 'This computer is configured to ask for native approval.' : device ? 'This client does not support desktop control. Update the desktop app.' : 'The selected/default computer is offline. No other machine will be used automatically.')}</p>
       {paused && <button type="button" disabled={pending} onClick={() => void controlAction(true)}>Resume control</button>}
       {automatic && !paused && !control && <button type="button" className="computer-stop" disabled={pending} onClick={() => void controlAction(false)}><Square size={12} aria-hidden="true" /> Pause control</button>}
       {control && <div className="computer-control-actions">
