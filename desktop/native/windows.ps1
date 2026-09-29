@@ -1008,8 +1008,8 @@ function Save-OwnInputStamp {
 # OURS; anything newer is the person's and refuses). Fails open when the idle
 # query itself is unavailable.
 function Assert-PersonIdleForBackgroundInput([switch]$Strict) {
+  $idleMs = [DesktopInput]::LastInputMs()
   if ($Strict) {
-    $idleMs = [DesktopInput]::LastInputMs()
     $agentAgeMs = Get-AgentInputAgeMs $script:p
     $ours = ($agentAgeMs -ge 0) -and (($idleMs + 1500) -ge $agentAgeMs)
     if ($idleMs -ge 0 -and $idleMs -lt 60000 -and -not $ours) {
@@ -1017,10 +1017,13 @@ function Assert-PersonIdleForBackgroundInput([switch]$Strict) {
       throw "needs foreground: the person used this desktop ${idleSecs}s ago (within the 60s activity guard). Background keyboard focus (uia_focus) raises the target app's window and its restore is not proven, so it refuses while the person is active. Wait until the person has been idle for a minute, then retry."
     }
   }
-  # Record which keys are already down as stale bits (a no-op unless the idle
-  # clock proves 5s+ without input), so the restore's chord gate does not
-  # mistake them for a live chord once the app's own raise resets the clock.
-  [DesktopInput]::MarkStaleKeys()
+  # Record which keys are already down as stale bits so the restore's chord
+  # gate does not mistake them for a live chord once the app's own raise resets
+  # the clock. Only on a desktop that is proven idle for a minute (or a strict
+  # pass): with the person possibly active, a key that looks held is left alone
+  # and the restore's own chord gate protects them (it declines to switch
+  # windows mid-chord rather than guessing the key is stuck).
+  if ($Strict -or $idleMs -ge 60000) { [DesktopInput]::MarkStaleKeys() }
 }
 
 function Assert-TargetWindow([object]$request, [bool]$afterInput) {
