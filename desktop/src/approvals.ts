@@ -53,10 +53,26 @@ export const LAUNCHABLE = new Set([
   '.run', '.bin', '.out', '.apk', '.deb', '.rpm', '.appimage', '.flatpakref', '.snap',
   '.desktop', '.service', '.scpt', '.applescript', '.workflow', '.action',
   '.py', '.pyw', '.rb', '.pl', '.php', '.lua', '.tcl', '.ahk', '.jsp',
+  // Windows shell types that run or configure rather than show.
+  '.scf', '.application', '.ws', '.xll', '.wll', '.slk', '.diagcab', '.appref-ms', '.settingcontent-ms',
+  '.website', '.search-ms', '.library-ms', '.theme', '.themepack', '.cab', '.iso', '.vhd', '.vhdx',
+  '.msp', '.mst', '.msu', '.jnlp', '.psc1', '.rdp', '.xbap', '.ps1xml', '.pssc', '.cdxml',
 ]);
 
+/** Windows drops trailing dots and spaces from a file name and treats `:` as an
+ *  alternate data stream, so `payload.exe.` IS payload.exe. A name like that is
+ *  never a plain document, whatever its visible extension says. */
+export function oddFileName(target: string): boolean {
+  const leaf = path.basename(target);
+  return /[. ]$/.test(leaf) || leaf.includes(':') || /[\u0000-\u001f]/.test(leaf);
+}
+
 export function isLaunchable(target: string): boolean {
-  return LAUNCHABLE.has(path.extname(target).toLowerCase());
+  // Windows takes everything after the last dot as the extension, so a file
+  // named just ".exe" is an .exe even though path.extname('.exe') is empty.
+  const leaf = path.basename(target).toLowerCase();
+  const dot = leaf.lastIndexOf('.');
+  return dot >= 0 && LAUNCHABLE.has(leaf.slice(dot));
 }
 
 /** A path this machine will not read, write, or run for anyone. */

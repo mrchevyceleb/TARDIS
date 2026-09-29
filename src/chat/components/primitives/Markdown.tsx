@@ -10,6 +10,7 @@ import {
   openMachineLink,
   parseDeskHref,
   openWorkspaceLink,
+  opensOnThisPcByClick,
   parseProxyHref,
   parseWorkspaceMentionText,
 } from '../../utils/proxyLinks';
@@ -84,6 +85,10 @@ function useWorkspaceTargetOpener(target: WorkspaceTarget | null): () => void {
     // with a quiet toast when it does not exist there.
     if (kind === 'machine') { openMachineLink(path); return; }
 
+    // In the desktop shell, files that belong in a real app (web pages, PDFs,
+    // images, media, Office files, spreadsheets) open on this PC.
+    if (kind === 'doc' && opensOnThisPcByClick(path, 'doc')) { openWorkspaceLink(path, 'doc'); return; }
+
     // Inside the Studio shell, keep it in-app: folders reveal in the file tree,
     // renderable docs (html/pdf/images/media) open in the overlay, and text,
     // code, markdown, config, and data files open in the editor.
@@ -118,7 +123,8 @@ function MarkdownCode(props: any) {
           onClick={onClick}
           className="sw-md-proxy-link sw-md-proxy-code-link"
           data-proxy-kind={inlineTarget.kind}
-          title={inlineTarget.kind === 'folder' ? 'Reveal in TARDIS' : 'Open in TARDIS'}
+          title={inlineTarget.kind === 'folder' ? 'Reveal in TARDIS'
+            : opensOnThisPcByClick(inlineTarget.path, inlineTarget.kind) ? 'Open on this PC' : 'Open in TARDIS'}
         >
           <code style={INLINE_CODE_STYLE}>{inlineTarget.display}</code>
         </a>
@@ -169,7 +175,8 @@ function MarkdownLink({ href, children }: { href?: string; children?: ReactNode 
         onClick={onClick}
         className="sw-md-proxy-link"
         data-proxy-kind={proxyTarget.kind}
-        title={proxyTarget.kind === 'machine' ? 'Open folder / reveal file on this PC' : undefined}
+        title={proxyTarget.kind === 'machine' ? 'Open folder / reveal file on this PC'
+          : opensOnThisPcByClick(proxyTarget.path, proxyTarget.kind) ? 'Open on this PC' : undefined}
       >
         {children}
       </a>
