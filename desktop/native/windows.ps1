@@ -931,35 +931,60 @@ function Read-AgentInputStamp {
     $v = [long]0
     if (-not [long]::TryParse($raw, [ref]$v)) { return [long]0 }
     # A future-dated stamp (clock rollback, a stray write) is not ours.
-    if ($v -le 0 -or $v -gt ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 5000)) { return [long]0 }
+    if ($v -le 0 -or $v -gt ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 1500)) { return [long]0 }
     return $v
   } catch { return [long]0 }
 }
 
 # Age in ms of the newest input this agent is known to have caused: the later
-# of the adapter's agentInputAt and the persisted stamp; -1 when neither exists.
+# of the adapter's agentInputAt and the persisted stamp, each validated on its
+# own (a future-dated value is dropped, not allowed to shadow a good one); -1
+# when neither exists.
 function Get-AgentInputAgeMs([object]$Request) {
+  $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   $at = [long]0
-  if ($Request -and $Request.agentInputAt) { try { $at = [long]$Request.agentInputAt } catch { $at = [long]0 } }
+  if ($Request -and $Request.agentInputAt) {
+    try { $at = [long]$Request.agentInputAt } catch { $at = [long]0 }
+    if ($at -le 0 -or $at -gt ($now + 1500)) { $at = [long]0 }
+  }
   $stamp = Read-AgentInputStamp
   if ($stamp -gt $at) { $at = $stamp }
   if ($at -le 0) { return [long]-1 }
-  return ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $at)
+  return ($now - $at)
 }
 
-# Called once at the end of every op (success and failure). Only an op that
-# raised the person's foreground and ran the restore stamps, and never one
-# where the person moved windows during it (their input must stay theirs).
+# Called at the end of every op (success and failure). Only an op that raised
+# the person's foreground and ran the restore stamps, and never one where the
+# person moved windows during or after it (their input must stay theirs). The
+# stamp is the newest input event seen at the end of the op, but capped at 2.5s
+# after the restore checkpoint (OpOwnInputAt: the last event right after the
+# restore, i.e. the app's own raise): the settle sleep and verification capture
+# can add a late re-raise event inside that window, while anything later is
+# more likely the person's and stays theirs. No checkpoint, no stamp.
+# Idempotent: a second call (a failure after the success-path call) computes
+# the same capped value.
 function Save-OwnInputStamp {
   if (-not $script:OpStolenAtInput) { return }
   if ($script:OpPersonTookOver) { return }
   if ([string]$script:OpRestoreOutcome -eq 'personMoved') { return }
+  if ($script:OpOwnInputAt -le 0) { return }
+  # The foreground ended on a window that is neither the person's original
+  # nor the target's app: the person switched away (input of theirs).
+  if ($script:OpForegroundBefore -ne 0 -and $hwnd) {
+    $fg = [DesktopInput]::Foreground()
+    if ($fg -ne $script:OpForegroundBefore -and -not (Test-ForegroundRaisedTarget $script:OpForegroundBefore ([long]$hwnd))) { return }
+  }
   $path = Get-AgentInputStampPath
   if (-not $path) { return }
+  $idle = [DesktopInput]::LastInputMs()
+  if ($idle -lt 0) { return }
+  $latest = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $idle
+  $at = [Math]::Min($latest, ($script:OpOwnInputAt + 2500))
+  if ($at -lt $script:OpOwnInputAt) { $at = $script:OpOwnInputAt }
   try {
     $dir = Split-Path -Parent $path
     if (-not (Test-Path -LiteralPath $dir -PathType Container)) { [void](New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop) }
-    [System.IO.File]::WriteAllText($path, [string][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+    [System.IO.File]::WriteAllText($path, [string]$at)
   } catch { }
 }
 
