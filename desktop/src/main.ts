@@ -166,6 +166,38 @@ async function showOffline(reason: string): Promise<void> {
   await win.loadFile(path.join(PAGES, 'offline.html'), { query: { reason } });
 }
 
+const MIN_WINDOW = { width: 360, height: 520 };
+// Windows only: how long after the window is shown its own resize/move events
+// are treated as startup noise rather than the person reshaping it.
+const STARTUP_SETTLE_MS = 1500;
+// However far the read-back is off, never ask for a size more than this far
+// from the remembered one.
+const MAX_CORRECTION = 32;
+
+/**
+ * On Windows a DPI-scaled window can come back a few px bigger than the size it
+ * was created with, and saving that read-back made the window creep on every
+ * relaunch. Nudge it back to the remembered size, feeding the measured error
+ * into the next attempt so the fix does not depend on where the extra comes from.
+ */
+function settleBounds(window: BrowserWindow, target: WindowBounds): void {
+  if (process.platform !== 'win32' || window.isDestroyed()) return;
+  if (window.isMaximized() || window.isMinimized() || window.isFullScreen()) return;
+  const within = (value: number, want: number, floor: number) =>
+    Math.min(want + MAX_CORRECTION, Math.max(floor, want - MAX_CORRECTION, value));
+  let width = target.width;
+  let height = target.height;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const actual = window.getNormalBounds();
+    const overW = actual.width - target.width;
+    const overH = actual.height - target.height;
+    if (Math.abs(overW) <= 1 && Math.abs(overH) <= 1) return;
+    width = within(width - overW, target.width, MIN_WINDOW.width);
+    height = within(height - overH, target.height, MIN_WINDOW.height);
+    window.setBounds({ x: target.x ?? actual.x, y: target.y ?? actual.y, width, height });
+  }
+}
+
 function createWindow(settings: Settings): BrowserWindow {
   const theme = settings.theme ?? 'dark';
   const bounds = visibleBounds(settings.bounds);
@@ -174,8 +206,8 @@ function createWindow(settings: Settings): BrowserWindow {
     height: bounds?.height ?? 820,
     x: bounds?.x,
     y: bounds?.y,
-    minWidth: 360,
-    minHeight: 520,
+    minWidth: MIN_WINDOW.width,
+    minHeight: MIN_WINDOW.height,
     title: 'TARDIS',
     backgroundColor: THEME_BG[theme],
     show: false,
@@ -190,18 +222,42 @@ function createWindow(settings: Settings): BrowserWindow {
       additionalArguments: [`--tardis-version=${app.getVersion()}`],
     },
   });
+  if (bounds) settleBounds(window, bounds);
   if (settings.maximized) window.maximize();
-  window.once('ready-to-show', () => window.show());
 
+  // With no saved size the first read-back is what gets remembered. On Windows,
+  // where the window can come back bigger than asked, only what the person does
+  // after the window has settled is worth saving, so the same saved size is
+  // restored on every launch.
+  let changed = !bounds;
+  let settled = process.platform !== 'win32';
   const remember = () => {
-    if (window.isDestroyed()) return;
+    if (window.isDestroyed() || !changed) return;
     saveSettings({ bounds: window.getNormalBounds(), maximized: window.isMaximized() });
   };
   const rememberSoon = debounce(remember, 400);
-  window.on('resize', rememberSoon);
-  window.on('move', rememberSoon);
-  window.on('maximize', rememberSoon);
-  window.on('unmaximize', rememberSoon);
+  const reshaped = () => {
+    changed = true;
+    rememberSoon();
+  };
+  const reshapedAfterStartup = () => {
+    if (settled) reshaped();
+  };
+  window.on('resize', reshapedAfterStartup);
+  window.on('move', reshapedAfterStartup);
+  window.on('maximize', reshapedAfterStartup);
+  window.on('unmaximize', reshapedAfterStartup);
+  window.once('ready-to-show', () => {
+    if (bounds) settleBounds(window, bounds);
+    // Finished by hand (Windows and macOS). Listening only from here on, the
+    // startup correction above is never mistaken for the person.
+    window.on('resized', reshaped);
+    window.on('moved', reshaped);
+    window.show();
+    if (settled) return;
+    const timer = setTimeout(() => { settled = true; }, STARTUP_SETTLE_MS);
+    window.once('closed', () => clearTimeout(timer));
+  });
   window.on('close', remember);
   window.on('closed', () => {
     if (win === window) win = null;
