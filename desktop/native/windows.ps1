@@ -173,8 +173,38 @@ public static class DesktopInput {
    *  navigation/edit keys, digits, letters, Win keys, numpad, F-keys, OEM
    *  punctuation). The high bit is the physically-down state; toggle-key
    *  lock states live in the low bit and are ignored. */
+  // Keys already reported down at the late idle recheck (person proven idle
+  // 60s, so they are stale bits, not a held chord): the restore's chord gate
+  // ignores exactly these, and still aborts on any key that goes down later.
+  static System.Collections.Generic.HashSet<int> StaleKeySet = new System.Collections.Generic.HashSet<int>();
+  static System.Collections.Generic.List<int> DownKeys() {
+    var keys = new System.Collections.Generic.List<int>();
+    int[][] ranges = new int[][] {
+      new int[]{0x01,0x06}, new int[]{0x08,0x12}, new int[]{0x14,0x28},
+      new int[]{0x30,0x39}, new int[]{0x41,0x5A}, new int[]{0x5B,0x5C},
+      new int[]{0x60,0x87}, new int[]{0xBA,0xC2}, new int[]{0xDB,0xE2}
+    };
+    foreach (int[] r in ranges)
+      for (int vk = r[0]; vk <= r[1]; vk++)
+        if ((GetAsyncKeyState(vk) & 0x8000) != 0) keys.Add(vk);
+    return keys;
+  }
+  /** Called when the person is proven idle (the op-level guard passed): any
+   *  key down with no input event for 5s+ is a stale state. Marks nothing when
+   *  the idle clock is unknown or recent (fails closed to the old gate). */
+  public static void MarkStaleKeys() {
+    StaleKeySet.Clear();
+    var idle = LastInputMs();
+    if (idle < 5000) return;
+    foreach (int vk in DownKeys()) StaleKeySet.Add(vk);
+  }
+  static string StaleKeysReport() {
+    var sb = new System.Text.StringBuilder();
+    foreach (int vk in StaleKeySet) { if (sb.Length > 0) sb.Append(','); sb.Append(vk.ToString("X2")); }
+    return sb.ToString();
+  }
   static bool AnyPhysicalKeyDown() {
-    Func<int, bool> down = vk => (GetAsyncKeyState(vk) & 0x8000) != 0;
+    Func<int, bool> down = vk => !StaleKeySet.Contains(vk) && (GetAsyncKeyState(vk) & 0x8000) != 0;
     for (int vk = 0x01; vk <= 0x06; vk++) if (down(vk)) return true;   // mouse buttons
     for (int vk = 0x08; vk <= 0x12; vk++) if (down(vk)) return true;   // backspace/tab/enter/caps/shift/ctrl/alt
     for (int vk = 0x14; vk <= 0x28; vk++) if (down(vk)) return true;  // caps/esc/space..pgdn + arrows
@@ -233,6 +263,7 @@ public static class DesktopInput {
     // (the 18:13 live round was unattributable) is diagnosable from the op
     // result alone instead of live guessing.
     LastRestoreDetail = ""; LastRestoreOutcome = "";
+    if (StaleKeySet.Count > 0) LastRestoreDetail = " ignoringStaleKeys=" + StaleKeysReport();
     try {
       var prevH = new IntPtr(prev);
       if (prevH == IntPtr.Zero) { LastRestoreOutcome = "noPrev"; return false; }
@@ -339,6 +370,11 @@ $script:OpForegroundBefore = 0
 $script:OpStolenAtInput = $false
 $script:OpRestoredAtInput = $false
 $script:OpPersonTookOver = $false
+# Epoch ms of the last input event as of the first restore call's return: the
+# raise's own input (Electron activates its window with an injected key) and
+# the restore's are all at-or-before it, so only input NEWER than it can be
+# the person's. 0 until a restore ran in this op.
+$script:OpOwnInputAt = 0
 # Background ops never inject user input (UIA and posted messages do not
 # register with GetLastInputInfo), so any input event younger than this
 # process is the PERSON's: a foreground change then is their switch, even onto
@@ -636,20 +672,34 @@ function Assert-BackgroundSetFocus([object]$element, [long]$hwnd) {
 # before the settle sleep and the verification capture, putting the person's
 # foreground window back so the steal lasts milliseconds, not the whole op
 # tail. Flags carry into Add-ForegroundEvidence and the error path.
+# Did the PERSON input since this op's own raise/restore? Live proof (22:01 ET,
+# idle desktop, nobody present): raising the TARDIS Electron window generates
+# its own input event, and the old rule (any input newer than the op start is
+# the person's) read that as the person switching windows, so the restore
+# never ran. Once a restore has run, only input newer than that checkpoint
+# (plus 500ms of settle slack) counts as the person's. Before any checkpoint
+# (a raise detected late) the conservative op-start rule stands, and an
+# unreadable idle clock is assumed to be the person.
+function Test-PersonInputSince {
+  $idle = [DesktopInput]::LastInputMs()
+  if ($idle -lt 0) { return $true }
+  $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  if ($script:OpOwnInputAt -gt 0) { return (($now - $idle) -gt ($script:OpOwnInputAt + 500)) }
+  return ($idle -lt (($now - $script:StartedAt) + 1500))
+}
+
 function Restore-IfStolen([long]$Before, [long]$Target) {
   if (-not (Test-ForegroundRaisedTarget $Before $Target)) { return }
-  # Person input during this op (any input event newer than the op's start,
-  # plus clock-skew slack — background ops never inject user input, so every
-  # such event is the person's): the foreground change is their switch, and
-  # this is the only path onto a same-process sibling window that is NOT our
-  # raise. Their choice stands; report it as a change, never a steal.
-  $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $script:StartedAt
-  if ([DesktopInput]::LastInputMs() -lt ($elapsed + 1500)) {
-    $script:OpPersonTookOver = $true
-    return
-  }
+  # No person check here: this runs immediately after the irreversible call,
+  # and the late idle recheck just before that call proved the person idle for
+  # 60s. Any input event in the milliseconds since is the app's own raise
+  # (Electron activates its window with an injected key), and treating it as
+  # the person's switch is what made the restore never run. RestoreForeground's
+  # own aborts still cover a real switch (personMoved) and a held chord.
   $script:OpStolenAtInput = $true
   $ok = [DesktopInput]::RestoreForeground($Before, $Target)
+  $ownIdle = [DesktopInput]::LastInputMs()
+  if ($ownIdle -ge 0) { $script:OpOwnInputAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $ownIdle }
   $priorDetail = [string][DesktopInput]::LastRestoreDetail
   $reAsserted = $false
   # A personMoved verdict means the person's own switch stands: no further
@@ -665,8 +715,7 @@ function Restore-IfStolen([long]$Before, [long]$Target) {
     # (their input is newer than this op): never override their deliberate
     # switch with another pass; their choice stands.
     if (([DesktopInput]::Foreground() -ne $Before) -and (Test-ForegroundRaisedTarget $Before $Target)) {
-      $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $script:StartedAt
-      if ([DesktopInput]::LastInputMs() -lt ($elapsed + 1500)) {
+      if (Test-PersonInputSince) {
         $script:OpPersonTookOver = $true
       } else {
         $reAsserted = $true
@@ -761,8 +810,7 @@ function Add-ForegroundEvidence([hashtable]$Result, [long]$Before, [long]$Target
       # The person may have clicked into the raised window during the settle
       # (their input is newer than this op): never override their deliberate
       # switch with another restore pass.
-      $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $script:StartedAt
-      $personSwitch = ([DesktopInput]::LastInputMs() -lt ($elapsed + 1500))
+      $personSwitch = (Test-PersonInputSince)
       if (-not $personSwitch -and [DesktopInput]::RestoreForeground($Before, $Target)) {
         Start-Sleep -Milliseconds 120
         $Result.foregroundAfter = [DesktopInput]::Foreground()
@@ -808,8 +856,7 @@ function Add-ForegroundEvidence([hashtable]$Result, [long]$Before, [long]$Target
       $Result.foregroundStolen = $true
       # Same person rule as every retry: their input newer than this op
       # means their deliberate switch stands; never override it.
-      $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $script:StartedAt
-      $personSwitch = ([DesktopInput]::LastInputMs() -lt ($elapsed + 1500))
+      $personSwitch = (Test-PersonInputSince)
       if (-not $personSwitch -and [DesktopInput]::RestoreForeground($Before, $Target)) {
         Start-Sleep -Milliseconds 120
         $Result.foregroundAfter = [DesktopInput]::Foreground()
@@ -865,15 +912,29 @@ function Test-ForegroundRaisedTarget([long]$Before, [long]$Target) {
 # app, every background input op refuses while the person had input within
 # the last 60s, exactly like the foreground tools. Read-only ops (uia
 # snapshot, window_capture) stay open: verified live never to raise.
-# Background ops never inject input, so unlike the act path there is no
-# TARDIS-own-input case to discriminate here. Fails open when the idle
-# query itself is unavailable.
+# Background ops themselves never inject input, but the SAME agent's own
+# foreground op just before one (computer_focus, a key, a click) does, and
+# GetLastInputInfo counts it: the guard would refuse the agent for its own
+# input (a live probe refused itself 10s after its own computer_focus). The
+# adapter passes agentInputAt (epoch ms when its own last injecting op ended,
+# stamped only by act/release): a last-input event at-or-before that moment is
+# OURS, exactly as in the foreground guard; anything newer is the person's and
+# still refuses. Fails open when the idle query itself is unavailable.
 function Assert-PersonIdleForBackgroundInput {
   $idleMs = [DesktopInput]::LastInputMs()
-  if ($idleMs -ge 0 -and $idleMs -lt 60000) {
+  $agentAgeMs = -1
+  if ($script:p -and $script:p.agentInputAt) {
+    try { $agentAgeMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [long]$script:p.agentInputAt } catch { $agentAgeMs = -1 }
+  }
+  $ours = ($agentAgeMs -ge 0) -and (($idleMs + 1500) -ge $agentAgeMs)
+  if ($idleMs -ge 0 -and $idleMs -lt 60000 -and -not $ours) {
     $idleSecs = [int][math]::Floor($idleMs / 1000)
     throw "needs foreground: the person used this desktop ${idleSecs}s ago (within the 60s activity guard). Background input can still raise the target app's window over their work (the restore is not yet proven to hold on a live app), so it refuses by design until the restore is verified. Read-only background ops (computer_uia, computer_window_capture) still work. Wait until the person has been idle for a minute, then retry (with a fresh operationId where the tool takes one)."
   }
+  # Passed: record which keys are already down as stale bits (a no-op unless
+  # the idle clock proves 5s+ without input), so the restore's chord gate does
+  # not mistake them for a live chord once the app's own raise resets the clock.
+  [DesktopInput]::MarkStaleKeys()
 }
 
 function Assert-TargetWindow([object]$request, [bool]$afterInput) {
