@@ -2,7 +2,7 @@
 // model or server dependency: the machine owns its grant and serialises input.
 import { createHash, randomUUID } from 'node:crypto';
 import { hostname, userInfo } from 'node:os';
-import { createAdapter } from './platform.mjs';
+import { createAdapter, foregroundEvidenceText } from './platform.mjs';
 
 // The host companion and Electron can both be open on one desktop. Give the
 // relay a shared physical-desktop identity without exposing the local username.
@@ -365,7 +365,7 @@ export class ComputerController {
         try {
           await this.windowFrame(info, window, raw);
         } catch (error) {
-          throw new Error(`The window action ran, but its verification capture failed: ${error instanceof Error ? error.message : String(error)} Do NOT replay the action; run computer_window_capture and inspect the window.`);
+          throw new Error(`The window action ran, but its verification capture failed: ${error instanceof Error ? error.message : String(error)} Do NOT replay the action; run computer_window_capture and inspect the window. ${foregroundEvidenceText(raw)}`.trim());
         }
         if (keyboardEntry) keyboardEntry.outcome = { executed: true, windowId: window.id, windowTitle: window.title, capturedAt: this.frame.capturedAt };
         check(); this.requireGrant(params.session);
