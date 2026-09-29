@@ -987,37 +987,22 @@ function Save-OwnInputStamp {
 # app's window over the person's work (Chromium activates on background UIA
 # actions, verified live on the Claude app); the adapter restores the person's
 # foreground immediately and reports the evidence (foregroundStolen /
-# foregroundRestored). They used to refuse while the person had input within
-# the last 60s. The owner (Matt, 04:47 ET Sep 29) waived that guard for these
-# ops: something on the box (Unreal) logs input about every 50s, so the guard
-# could never clear and blocked every overnight note. They now run whenever
-# asked; the restore stays, and its own aborts still protect a person who is
-# actively typing (a held chord or a window switch of theirs is never
-# overridden). Read-only ops (uia snapshot, window_capture) never raised.
-# uia_focus (and the posted-characters path, which focuses first) stays
-# refused by Assert-SetFocusUnlocked, and when an operator unlocks it for a
-# test the STRICT 60s person-idle guard still applies to it: SetFocus raises
-# TARDIS itself and the restore for that path is not proven.
-# Strict mode: the same agentInputAt / persisted-stamp attribution as the
-# foreground guard (a last-input event at-or-before the newer of the two is
-# OURS; anything newer is the person's and refuses). Fails open when the idle
-# query itself is unavailable.
+# foregroundRestored). No op waits for the person to be idle any more: the
+# background ops were waived at 04:47 ET Sep 29 (something on the box logs
+# input about every 50s, so the guard could never clear), and the foreground
+# ops and uia_focus at 09:06 ET ("no idle checks"). What still protects the
+# person is the restore (it leaves alone a person who switched windows
+# themselves and otherwise puts their window back, even while a key is held) and
+# the before-and-after OS-focus check on typing. uia_focus (and the
+# posted-characters path, which focuses first) stays refused by
+# Assert-SetFocusUnlocked until its restore is proven on a live app.
 function Assert-PersonIdleForBackgroundInput([switch]$Strict) {
+  # No refusal any more (the owner waived every idle check on Sep 29). Kept as
+  # the single place the stale-key bookkeeping happens, and as the hook a future
+  # policy would use.
   $idleMs = [DesktopInput]::LastInputMs()
-  if ($Strict) {
-    $agentAgeMs = Get-AgentInputAgeMs $script:p
-    $ours = ($agentAgeMs -ge 0) -and (($idleMs + 1500) -ge $agentAgeMs)
-    if ($idleMs -ge 0 -and $idleMs -lt 60000 -and -not $ours) {
-      $idleSecs = [int][math]::Floor($idleMs / 1000)
-      throw "needs foreground: the person used this desktop ${idleSecs}s ago (within the 60s activity guard). Background keyboard focus (uia_focus) raises the target app's window and its restore is not proven, so it refuses while the person is active. Wait until the person has been idle for a minute, then retry."
-    }
-  }
-  # Record which keys are already down as stale bits so the restore's chord
-  # gate does not mistake them for a live chord once the app's own raise resets
-  # the clock. Only on a desktop that is proven idle for a minute (or a strict
-  # pass): with the person possibly active, a key that looks held is left alone
-  # and the restore's own chord gate protects them (it declines to switch
-  # windows mid-chord rather than guessing the key is stuck).
+  # Record which keys are already down as stale bits when the desktop has been
+  # quiet for a minute, so evidence can tell a stuck key from a held one.
   if ($Strict -or $idleMs -ge 60000) { [DesktopInput]::MarkStaleKeys() }
 }
 
@@ -1342,27 +1327,13 @@ try {
     }
     'act' {
       # The foreground tools (focus/type/key/act) raise the target window and
-      # move the real cursor BY DESIGN. While the person is actively using
-      # the desktop (input within the last 60s — the screensaver idle query),
-      # that steals their foreground out from under them, which is the exact
-      # complaint that started background control. Refuse while they work;
-      # the background tools (uia_value into an empty field + uia_invoke) are
-      # the path while the person is present. Allowed again once they are
-      # idle; the guard fails open if the idle query itself is unavailable.
-      $idleMs = [DesktopInput]::LastInputMs()
-      # GetLastInputInfo counts TARDIS's own SendInput too, so a foreground
-      # sequence (type -> Enter, multiple clicks) would refuse ITSELF
-      # mid-sequence. The adapter passes agentInputAt (epoch ms when its own
-      # last injecting op ended): a last-input event at-or-before that moment
-      # is OURS, not the person's, and the guard treats the desktop as
-      # person-idle. The 1500ms slack absorbs epoch-vs-tick clock skew.
-      $agentAgeMs = Get-AgentInputAgeMs $p
-      $ours = ($agentAgeMs -ge 0) -and (($idleMs + 1500) -ge $agentAgeMs)
-      if ($idleMs -ge 0 -and $idleMs -lt 60000 -and -not $ours) {
-        $idleSecs = [int][math]::Floor($idleMs / 1000)
-        throw "needs foreground: the person used this desktop ${idleSecs}s ago (within the 60s activity guard). The foreground tools (including a window-scoped computer_capture, which raises its window) refuse by design while the person is present; use the background path instead: computer_window_capture to see one window, computer_uia_value into an EMPTY field, computer_uia_invoke on the Send button, then a capture to verify. Or wait until they have been idle for a minute."
-      }
-      # Everything past the guard is input territory (window focus, cursor,
+      # move the real cursor BY DESIGN. They used to refuse while the person had
+      # input in the last 60s. The owner (Matt, Sep 29 09:06 ET: "no idle
+      # checks", "use the Claude desktop app at will") waived that wait, so they
+      # run whenever asked. What still protects the input is the before-and-after
+      # OS-focus check on typing and keys (Assert-TargetWindow) and the
+      # foreground restore on the background paths.
+      # Everything from here is input territory (window focus, cursor,
       # keys): mark input attempted BEFORE the first irreversible call, so a
       # post-input failure reports attempted=true and never reads as a
       # pre-input refusal that permits replay.
