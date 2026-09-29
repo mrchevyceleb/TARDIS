@@ -573,11 +573,26 @@ public static class UiaWindow {
   $script:UiaError = $_.Exception.Message
 }
 
+# The UIA SetFocus path is UNPROVEN on a live machine: the 20:30 probe on
+# Trenzalore raised the TARDIS window with it and the restore could not put the
+# person's window back. Until it is proven, uia_focus and the posted-characters
+# path (which focuses first) refuse before touching anything. Only an operator
+# unlocks it for a test, by touching this sentinel file (honoured for 30
+# minutes, so a forgotten unlock cannot linger): agents never should.
+function Assert-SetFocusUnlocked {
+  $flag = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'tardis-desktop-updater\uia-focus-unlock' } else { '' }
+  try {
+    if ($flag -and (Test-Path -LiteralPath $flag) -and (((Get-Date) - (Get-Item -LiteralPath $flag).LastWriteTime).TotalMinutes -lt 30)) { return }
+  } catch { }
+  throw 'needs foreground: background keyboard focus (uia_focus, and uia_value with post:true which focuses first) is disabled on this machine until the SetFocus restore path is proven; it raised a window over the person''s work and could not restore it. Use computer_uia_value WITHOUT post into an empty field (it lands without taking focus) and computer_uia_invoke on Send, or have the person click into the field. No input was sent.'
+}
+
 # Background keyboard focus via UIA only. SetFocus can, on some providers,
 # activate the element's window and steal the person's real foreground: that
 # is exactly what background control must never do, so verify the foreground
 # window is unchanged and refuse when it is not.
 function Assert-BackgroundSetFocus([object]$element, [long]$hwnd) {
+  Assert-SetFocusUnlocked
   $before = [DesktopInput]::Foreground()
   if ($before -eq $hwnd) {
     throw 'needs foreground: the person is actively using this window (it is the foreground window), so background focus would redirect their live typing. Wait for them to leave the window, or use real input with their knowledge.'
@@ -993,7 +1008,7 @@ try {
           $why = if ($post) { 'the element did not take background keyboard focus (UIA SetFocus refused or did not stick)'
           } elseif ($valuePattern) { 'the element is read-only and did not take background keyboard focus'
           } else { 'the element exposes no ValuePattern and did not take background keyboard focus' }
-          throw "needs foreground: $why, so background text cannot land on it. Try computer_uia_focus on the element first, focus the window and use computer_type, or have the person click into the field."
+          throw "needs foreground: $why, so background text cannot land on it. Background keyboard focus is unavailable here (computer_uia_focus is disabled until the SetFocus restore is proven), so have the person click into the field."
         }
         # The empty-field contract is enforced before either path above, so
         # there is nothing to clear here: posted characters land at the caret
@@ -1024,6 +1039,7 @@ try {
       if (!$script:UiaReady) { throw "UI Automation is unavailable on this machine: $script:UiaError" }
       if (!$p.window -or !$p.element) { throw 'uia_focus requires a window id and an element ref from computer_uia.' }
       $hwnd = [long]$p.window
+      Assert-SetFocusUnlocked
       Assert-PersonIdleForBackgroundInput
       $resolved = [UiaWindow]::Resolve($hwnd, [string]$p.element, [string]$p.name)
       $el = $resolved.Element
@@ -1203,6 +1219,21 @@ try {
   if ($script:OpForegroundBefore -ne 0 -and $hwnd) {
     Add-ForegroundEvidence $err $script:OpForegroundBefore ([long]$hwnd)
   }
+  # The evidence also rides the error MESSAGE: the agent-facing error shows
+  # only the message text, so a failed restore must diagnose itself from it
+  # (outcome + per-attempt detail) without a second run. Restore attempts that
+  # ran but never reached an evidence branch are included as restoreAttempt.
+  $ev = @()
+  foreach ($k in 'foregroundBefore','foregroundAfter','foregroundStolen','foregroundRestored','foregroundChanged','foregroundRestoreOutcome','foregroundRestoreDetail') {
+    if ($err.ContainsKey($k)) { $ev += ('{0}={1}' -f $k, $err[$k]) }
+  }
+  try {
+    $attempt = [string][DesktopInput]::LastRestoreOutcome
+    if ($attempt -and -not $err.ContainsKey('foregroundRestoreOutcome')) {
+      $ev += ('restoreAttempt={0} ({1})' -f $attempt, [string][DesktopInput]::LastRestoreDetail)
+    }
+  } catch { }
+  if ($ev.Count -gt 0) { $err.error = ('{0} [foreground evidence: {1}]' -f $err.error, ($ev -join ', ')) }
   $err | ConvertTo-Json -Compress
   exit 1
 }

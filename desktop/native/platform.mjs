@@ -5,6 +5,16 @@ import { tmpdir } from 'node:os';
 import { join, dirname, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const FOREGROUND_EVIDENCE_KEYS = ['foregroundBefore', 'foregroundAfter', 'foregroundStolen', 'foregroundRestored', 'foregroundChanged', 'foregroundRestoreOutcome', 'foregroundRestoreDetail'];
+// The agent-facing error shows only the message text, so restore evidence must
+// be readable from it. The native script already appends the same bracket, so
+// this only fills in for older scripts and the controller's own wrapped errors.
+export function foregroundEvidenceText(source) {
+  if (!source || typeof source !== 'object') return '';
+  const parts = FOREGROUND_EVIDENCE_KEYS.filter(key => source[key] !== undefined).map(key => `${key}=${source[key]}`);
+  return parts.length ? `[foreground evidence: ${parts.join(', ')}]` : '';
+}
+
 function run(file, args, signal, input, timeoutMs = 20_000) {
   return new Promise((resolve, reject) => {
     const child = execFile(file, args, { signal, timeout: timeoutMs, maxBuffer: 40 * 1024 * 1024, windowsHide: true, encoding: 'utf8' }, (err, stdout) => {
@@ -27,9 +37,10 @@ function run(file, args, signal, input, timeoutMs = 20_000) {
           // failure (the verification capture, a restore refusal) is exactly
           // when foregroundStolen/foregroundRestored matter most, and the
           // agent-facing error message must carry the warning too.
-          for (const key of ['foregroundBefore', 'foregroundAfter', 'foregroundStolen', 'foregroundRestored', 'foregroundChanged', 'foregroundRestoreOutcome', 'foregroundRestoreDetail']) {
+          for (const key of FOREGROUND_EVIDENCE_KEYS) {
             if (out[key] !== undefined) (extra ??= {})[key] = out[key];
           }
+          if (extra && !message.includes('[foreground evidence:')) message = `${message} ${foregroundEvidenceText(extra)}`;
           if (typeof out.warning === 'string') {
             (extra ??= {}).warning = out.warning;
             message = `${message} ${out.warning}`;
