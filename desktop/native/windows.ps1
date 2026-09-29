@@ -1245,7 +1245,7 @@ try {
       if (-not $invokePattern -and -not $expandPattern) {
         $ct = 'unknown'
         try { $ct = ([string]$el.Current.ControlType.ProgrammaticName) -replace '^ControlType\.', '' } catch { $ct = 'unknown' }
-        throw "needs foreground: the element at that ref ($ct) exposes neither InvokePattern nor ExpandCollapsePattern, so it cannot be activated in the background. Only real input can activate it; focus the window and use computer_act."
+        throw "needs foreground: the element at that ref ($ct) exposes neither InvokePattern nor ExpandCollapsePattern, the only patterns this op supports, so it cannot be activated in the background. Use another route for it (real input via computer_act, when the person is idle)."
       }
       $expandBefore = ''
       if (-not $invokePattern) {
@@ -1255,20 +1255,27 @@ try {
       if (Test-ForegroundRaisedTarget $fg $hwnd) {
         throw 'needs foreground: preparing this action raised a window (the OS foreground changed). No click was sent. Inspect the current desktop and report which step did this.'
       }
-      Assert-PersonIdleForBackgroundInput
-      $script:InputAttempted = $true
       $activated = 'invoke'
-      if ($invokePattern) {
-        $invokePattern.Invoke()
-      } elseif ($expandBefore -eq 'Expanded') {
-        $activated = 'already-expanded'
-      } else {
-        $expandPattern.Expand()
-        $activated = 'expand'
+      if (-not $invokePattern -and $expandBefore -eq 'Expanded') { $activated = 'already-expanded' }
+      # Nothing is sent for an already-expanded element, so it is neither an
+      # input attempt nor a reason to run the foreground restore.
+      if ($activated -ne 'already-expanded') {
+        Assert-PersonIdleForBackgroundInput
+        $script:InputAttempted = $true
+        # Invoke/Expand raise Chromium windows too (verified live on the Send
+        # button): restore the person's foreground immediately, even when the
+        # call itself throws after the app already raised its window.
+        try {
+          if ($invokePattern) {
+            $invokePattern.Invoke()
+          } else {
+            $expandPattern.Expand()
+            $activated = 'expand'
+          }
+        } finally {
+          Restore-IfStolen $fg $hwnd
+        }
       }
-      # Invoke/Expand raise Chromium windows too (verified live on the Send
-      # button): restore the person's foreground immediately.
-      Restore-IfStolen $fg $hwnd
       Start-Sleep -Milliseconds 300
       $bytes = [DesktopInput]::PrintWindowBytes($hwnd)
       $b = [DesktopInput]::Bounds($hwnd)
