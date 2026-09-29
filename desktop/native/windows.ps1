@@ -186,6 +186,28 @@ public static class DesktopInput {
     for (int vk = 0xDB; vk <= 0xE2; vk++) if (down(vk)) return true; // OEM brackets/backslash/quote/102
     return false;
   }
+  /** Which keys are physically down right now (hex VK codes, same scan
+   *  ranges as AnyPhysicalKeyDown), so a holdingKey or staleKeysDown
+   *  outcome names the key: the 20:13 live round aborted with an empty
+   *  detail and the stuck key was unidentifiable from the op result alone. */
+  static string KeysDownReport() {
+    var sb = new System.Text.StringBuilder();
+    int[][] ranges = new int[][] {
+      new int[]{0x01,0x06}, new int[]{0x08,0x12}, new int[]{0x14,0x28},
+      new int[]{0x30,0x39}, new int[]{0x41,0x5A}, new int[]{0x5B,0x5C},
+      new int[]{0x60,0x87}, new int[]{0xBA,0xC2}, new int[]{0xDB,0xE2}
+    };
+    foreach (int[] r in ranges) {
+      for (int vk = r[0]; vk <= r[1]; vk++) {
+        if ((GetAsyncKeyState(vk) & 0x8000) != 0) {
+          if (sb.Length > 0) sb.Append(',');
+          sb.Append(vk.ToString("X2"));
+          if (sb.Length >= 48) return sb.ToString();
+        }
+      }
+    }
+    return sb.ToString();
+  }
   /** Milliseconds since the last input event anywhere on this desktop
    *  (keyboard or mouse, any process — the screensaver idle API). -1 when
    *  unavailable, in which case the activity guard fails open. */
@@ -227,7 +249,19 @@ public static class DesktopInput {
         // leave their choice alone (restoring would steal from THEM).
         if (now != IntPtr.Zero && now.ToInt64() != raisedTarget && !SameProcess(now.ToInt64(), raisedTarget)) { LastRestoreOutcome = "personMoved"; return true; }
         if (now == IntPtr.Zero) { LastRestoreOutcome = "noForeground"; return false; }
-        if (AnyPhysicalKeyDown()) { LastRestoreOutcome = "holdingKey"; return false; } // never break a live chord mid-restore
+        if (AnyPhysicalKeyDown()) {
+          // A held key WITH input in the last 5s is a plausible live chord:
+          // attaching queues mid-chord could drop its key-up, so that still
+          // aborts. A held key with NO input for 5s+ is a stale state, not a
+          // chord: a game that exits while a movement key is down leaves its
+          // bit set until someone presses that key again (verified live at
+          // 20:13: both restores aborted on exactly that while the desktop
+          // was idle, leaving the raised window stuck over the person's
+          // work). Proceed, and name the stale key in the evidence.
+          var idleForChord = LastInputMs();
+          if (idleForChord >= 0 && idleForChord < 5000) { LastRestoreOutcome = "holdingKey"; LastRestoreDetail += " keysDown=" + KeysDownReport(); return false; }
+          LastRestoreDetail += " staleKeysDown=" + KeysDownReport();
+        }
         uint nowPid; var nowThread = GetWindowThreadProcessId(now, out nowPid);
         uint prevPid; var prevThread = GetWindowThreadProcessId(prevH, out prevPid);
         var ourThread = GetCurrentThreadId();
