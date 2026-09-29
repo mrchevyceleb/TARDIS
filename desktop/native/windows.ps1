@@ -259,7 +259,11 @@ public static class DesktopInput {
           // was idle, leaving the raised window stuck over the person's
           // work). Proceed, and name the stale key in the evidence.
           var idleForChord = LastInputMs();
-          if (idleForChord >= 0 && idleForChord < 5000) { LastRestoreOutcome = "holdingKey"; LastRestoreDetail += " keysDown=" + KeysDownReport(); return false; }
+          // Unknown recency (-1) fails CLOSED: with no evidence the key is
+          // stale, a possibly-live held chord wins over the restore (the
+          // op-level guard fails open, but this gate overrides a held key,
+          // which is a different stake).
+          if (idleForChord < 5000) { LastRestoreOutcome = "holdingKey"; LastRestoreDetail += " keysDown=" + KeysDownReport(); return false; }
           LastRestoreDetail += " staleKeysDown=" + KeysDownReport();
         }
         uint nowPid; var nowThread = GetWindowThreadProcessId(now, out nowPid);
