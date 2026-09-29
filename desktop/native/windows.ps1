@@ -904,6 +904,90 @@ function Test-ForegroundRaisedTarget([long]$Before, [long]$Target) {
   return [DesktopInput]::SameProcess($after, $Target)
 }
 
+# A background op that raises the target window and restores the person's
+# foreground leaves a REAL input event behind (the app's own raise injects an
+# activation key; live proof 22:59 ET: idle 78s -> 0s across one
+# uia_invoke + restore with nobody at the desk). GetLastInputInfo cannot tell
+# that from a person, so the NEXT op of a multi-op send (sidebar, value, Send)
+# refused itself. The adapter's agentInputAt only covers the foreground ops
+# (act/release) and only exists in app builds that carry it, so a background
+# op that stole and restored also persists its own end time here, in the same
+# per-user folder as the unlock sentinel: the next op's guard reads it exactly
+# like agentInputAt (a last-input event at-or-before the stamp is OURS; any
+# newer event is the person's and still refuses). Never stamped when the
+# person moved windows during the op. A stale or unreadable stamp is harmless:
+# it can only discount input at or before its own instant.
+function Get-AgentInputStampPath {
+  if ($env:LOCALAPPDATA) { return (Join-Path $env:LOCALAPPDATA 'tardis-desktop-updater\agent-input-at') }
+  return ''
+}
+
+function Read-AgentInputStamp {
+  $path = Get-AgentInputStampPath
+  if (-not $path) { return [long]0 }
+  try {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return [long]0 }
+    $raw = ([string](Get-Content -LiteralPath $path -Raw -ErrorAction Stop)).Trim()
+    $v = [long]0
+    if (-not [long]::TryParse($raw, [ref]$v)) { return [long]0 }
+    # A future-dated stamp (clock rollback, a stray write) is not ours.
+    if ($v -le 0 -or $v -gt ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 1500)) { return [long]0 }
+    return $v
+  } catch { return [long]0 }
+}
+
+# Age in ms of the newest input this agent is known to have caused: the later
+# of the adapter's agentInputAt and the persisted stamp, each validated on its
+# own (a future-dated value is dropped, not allowed to shadow a good one); -1
+# when neither exists.
+function Get-AgentInputAgeMs([object]$Request) {
+  $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  $at = [long]0
+  if ($Request -and $Request.agentInputAt) {
+    try { $at = [long]$Request.agentInputAt } catch { $at = [long]0 }
+    if ($at -le 0 -or $at -gt ($now + 1500)) { $at = [long]0 }
+  }
+  $stamp = Read-AgentInputStamp
+  if ($stamp -gt $at) { $at = $stamp }
+  if ($at -le 0) { return [long]-1 }
+  return ($now - $at)
+}
+
+# Called at the end of every op (success and failure). Only an op that raised
+# the person's foreground and ran the restore stamps, and never one where the
+# person moved windows during or after it (their input must stay theirs). The
+# stamp is the newest input event seen at the end of the op, but capped at 2.5s
+# after the restore checkpoint (OpOwnInputAt: the last event right after the
+# restore, i.e. the app's own raise): the settle sleep and verification capture
+# can add a late re-raise event inside that window, while anything later is
+# more likely the person's and stays theirs. No checkpoint, no stamp.
+# Idempotent: a second call (a failure after the success-path call) computes
+# the same capped value.
+function Save-OwnInputStamp {
+  if (-not $script:OpStolenAtInput) { return }
+  if ($script:OpPersonTookOver) { return }
+  if ([string]$script:OpRestoreOutcome -eq 'personMoved') { return }
+  if ($script:OpOwnInputAt -le 0) { return }
+  # The foreground ended on a window that is neither the person's original
+  # nor the target's app: the person switched away (input of theirs).
+  if ($script:OpForegroundBefore -ne 0 -and $hwnd) {
+    $fg = [DesktopInput]::Foreground()
+    if ($fg -ne $script:OpForegroundBefore -and -not (Test-ForegroundRaisedTarget $script:OpForegroundBefore ([long]$hwnd))) { return }
+  }
+  $path = Get-AgentInputStampPath
+  if (-not $path) { return }
+  $idle = [DesktopInput]::LastInputMs()
+  if ($idle -lt 0) { return }
+  $latest = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $idle
+  $at = [Math]::Min($latest, ($script:OpOwnInputAt + 2500))
+  if ($at -lt $script:OpOwnInputAt) { $at = $script:OpOwnInputAt }
+  try {
+    $dir = Split-Path -Parent $path
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { [void](New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop) }
+    [System.IO.File]::WriteAllText($path, [string]$at)
+  } catch { }
+}
+
 # Background INPUT ops (uia_value, uia_focus, uia_invoke, uia_key) can raise
 # the target app's window over the person's work (Chromium activates on
 # background UIA actions, verified live on the Claude app), and while the
@@ -912,20 +996,20 @@ function Test-ForegroundRaisedTarget([long]$Before, [long]$Target) {
 # app, every background input op refuses while the person had input within
 # the last 60s, exactly like the foreground tools. Read-only ops (uia
 # snapshot, window_capture) stay open: verified live never to raise.
-# Background ops themselves never inject input, but the SAME agent's own
-# foreground op just before one (computer_focus, a key, a click) does, and
-# GetLastInputInfo counts it: the guard would refuse the agent for its own
+# Background ops themselves send no input, but the SAME agent's own foreground
+# op just before one (computer_focus, a key, a click) does, and so does the
+# app's own raise when a background op steals and restores the foreground;
+# GetLastInputInfo counts both: the guard would refuse the agent for its own
 # input (a live probe refused itself 10s after its own computer_focus). The
 # adapter passes agentInputAt (epoch ms when its own last injecting op ended,
-# stamped only by act/release): a last-input event at-or-before that moment is
-# OURS, exactly as in the foreground guard; anything newer is the person's and
-# still refuses. Fails open when the idle query itself is unavailable.
+# stamped only by act/release) and a stolen-and-restored background op leaves
+# its own persisted stamp (above): a last-input event at-or-before the newer of
+# the two is OURS, exactly as in the foreground guard; anything newer is the
+# person's and still refuses. Fails open when the idle query itself is
+# unavailable.
 function Assert-PersonIdleForBackgroundInput {
   $idleMs = [DesktopInput]::LastInputMs()
-  $agentAgeMs = -1
-  if ($script:p -and $script:p.agentInputAt) {
-    try { $agentAgeMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [long]$script:p.agentInputAt } catch { $agentAgeMs = -1 }
-  }
+  $agentAgeMs = Get-AgentInputAgeMs $script:p
   $ours = ($agentAgeMs -ge 0) -and (($idleMs + 1500) -ge $agentAgeMs)
   if ($idleMs -ge 0 -and $idleMs -lt 60000 -and -not $ours) {
     $idleSecs = [int][math]::Floor($idleMs / 1000)
@@ -1217,10 +1301,7 @@ try {
       # last injecting op ended): a last-input event at-or-before that moment
       # is OURS, not the person's, and the guard treats the desktop as
       # person-idle. The 1500ms slack absorbs epoch-vs-tick clock skew.
-      $agentAgeMs = -1
-      if ($p.agentInputAt) {
-        try { $agentAgeMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [long]$p.agentInputAt } catch { $agentAgeMs = -1 }
-      }
+      $agentAgeMs = Get-AgentInputAgeMs $p
       $ours = ($agentAgeMs -ge 0) -and (($idleMs + 1500) -ge $agentAgeMs)
       if ($idleMs -ge 0 -and $idleMs -lt 60000 -and -not $ours) {
         $idleSecs = [int][math]::Floor($idleMs / 1000)
@@ -1276,6 +1357,7 @@ try {
     }
     default { throw 'Unknown operation.' }
   }
+  Save-OwnInputStamp
   $result | ConvertTo-Json -Depth 8 -Compress
 } catch {
   $err = @{ error=$_.Exception.Message; inputAttempted=([bool]$script:InputAttempted) }
@@ -1285,6 +1367,7 @@ try {
   if ($script:OpForegroundBefore -ne 0 -and $hwnd) {
     Add-ForegroundEvidence $err $script:OpForegroundBefore ([long]$hwnd)
   }
+  Save-OwnInputStamp
   # The evidence also rides the error MESSAGE: the agent-facing error shows
   # only the message text, so a failed restore must diagnose itself from it
   # (outcome + per-attempt detail) without a second run. Restore attempts that
