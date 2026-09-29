@@ -641,7 +641,7 @@ function Assert-BackgroundSetFocus([object]$element, [long]$hwnd) {
   # Reaching this element can take seconds of walking; the person may have
   # resumed typing during it, so the idle guard re-checks right before the
   # irreversible SetFocus (the top-of-op check is fail-fast, not final).
-  Assert-PersonIdleForBackgroundInput
+  Assert-PersonIdleForBackgroundInput -Strict
   try { $element.SetFocus() } catch {
     throw "needs foreground: the element refused background keyboard focus ($($_.Exception.Message)). Real input is required to focus it."
   }
@@ -988,36 +988,38 @@ function Save-OwnInputStamp {
   } catch { }
 }
 
-# Background INPUT ops (uia_value, uia_focus, uia_invoke, uia_key) can raise
-# the target app's window over the person's work (Chromium activates on
-# background UIA actions, verified live on the Claude app), and while the
-# person is actively using the desktop even a millisecond flash can swallow
-# a keystroke mid-typing. Until the restore is proven to hold on a live
-# app, every background input op refuses while the person had input within
-# the last 60s, exactly like the foreground tools. Read-only ops (uia
-# snapshot, window_capture) stay open: verified live never to raise.
-# Background ops themselves send no input, but the SAME agent's own foreground
-# op just before one (computer_focus, a key, a click) does, and so does the
-# app's own raise when a background op steals and restores the foreground;
-# GetLastInputInfo counts both: the guard would refuse the agent for its own
-# input (a live probe refused itself 10s after its own computer_focus). The
-# adapter passes agentInputAt (epoch ms when its own last injecting op ended,
-# stamped only by act/release) and a stolen-and-restored background op leaves
-# its own persisted stamp (above): a last-input event at-or-before the newer of
-# the two is OURS, exactly as in the foreground guard; anything newer is the
-# person's and still refuses. Fails open when the idle query itself is
-# unavailable.
-function Assert-PersonIdleForBackgroundInput {
-  $idleMs = [DesktopInput]::LastInputMs()
-  $agentAgeMs = Get-AgentInputAgeMs $script:p
-  $ours = ($agentAgeMs -ge 0) -and (($idleMs + 1500) -ge $agentAgeMs)
-  if ($idleMs -ge 0 -and $idleMs -lt 60000 -and -not $ours) {
-    $idleSecs = [int][math]::Floor($idleMs / 1000)
-    throw "needs foreground: the person used this desktop ${idleSecs}s ago (within the 60s activity guard). Background input can still raise the target app's window over their work (the restore is not yet proven to hold on a live app), so it refuses by design until the restore is verified. Read-only background ops (computer_uia, computer_window_capture) still work. Wait until the person has been idle for a minute, then retry (with a fresh operationId where the tool takes one)."
+# Background INPUT ops (uia_value, uia_invoke, uia_key) can raise the target
+# app's window over the person's work (Chromium activates on background UIA
+# actions, verified live on the Claude app); the adapter restores the person's
+# foreground immediately and reports the evidence (foregroundStolen /
+# foregroundRestored). They used to refuse while the person had input within
+# the last 60s. The owner (Matt, 04:47 ET Sep 29) waived that guard for these
+# ops: something on the box (Unreal) logs input about every 50s, so the guard
+# could never clear and blocked every overnight note. They now run whenever
+# asked; the restore stays, and its own aborts still protect a person who is
+# actively typing (a held chord or a window switch of theirs is never
+# overridden). Read-only ops (uia snapshot, window_capture) never raised.
+# uia_focus (and the posted-characters path, which focuses first) stays
+# refused by Assert-SetFocusUnlocked, and when an operator unlocks it for a
+# test the STRICT 60s person-idle guard still applies to it: SetFocus raises
+# TARDIS itself and the restore for that path is not proven.
+# Strict mode: the same agentInputAt / persisted-stamp attribution as the
+# foreground guard (a last-input event at-or-before the newer of the two is
+# OURS; anything newer is the person's and refuses). Fails open when the idle
+# query itself is unavailable.
+function Assert-PersonIdleForBackgroundInput([switch]$Strict) {
+  if ($Strict) {
+    $idleMs = [DesktopInput]::LastInputMs()
+    $agentAgeMs = Get-AgentInputAgeMs $script:p
+    $ours = ($agentAgeMs -ge 0) -and (($idleMs + 1500) -ge $agentAgeMs)
+    if ($idleMs -ge 0 -and $idleMs -lt 60000 -and -not $ours) {
+      $idleSecs = [int][math]::Floor($idleMs / 1000)
+      throw "needs foreground: the person used this desktop ${idleSecs}s ago (within the 60s activity guard). Background keyboard focus (uia_focus) raises the target app's window and its restore is not proven, so it refuses while the person is active. Wait until the person has been idle for a minute, then retry."
+    }
   }
-  # Passed: record which keys are already down as stale bits (a no-op unless
-  # the idle clock proves 5s+ without input), so the restore's chord gate does
-  # not mistake them for a live chord once the app's own raise resets the clock.
+  # Record which keys are already down as stale bits (a no-op unless the idle
+  # clock proves 5s+ without input), so the restore's chord gate does not
+  # mistake them for a live chord once the app's own raise resets the clock.
   [DesktopInput]::MarkStaleKeys()
 }
 
@@ -1190,7 +1192,7 @@ try {
       if (!$p.window -or !$p.element) { throw 'uia_focus requires a window id and an element ref from computer_uia.' }
       $hwnd = [long]$p.window
       Assert-SetFocusUnlocked
-      Assert-PersonIdleForBackgroundInput
+      Assert-PersonIdleForBackgroundInput -Strict
       $resolved = [UiaWindow]::Resolve($hwnd, [string]$p.element, [string]$p.name)
       $el = $resolved.Element
       if ([string]::IsNullOrWhiteSpace([string]$p.name) -and -not [string]::IsNullOrWhiteSpace($resolved.Name)) {
