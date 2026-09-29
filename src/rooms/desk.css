@@ -198,6 +198,19 @@
 }
 button.desk-todo-text:hover { color: var(--r-gold); }
 span.desk-todo-text { cursor: default; }
+/* Rows with details open in place. The whole body is the click target. */
+.desk-todo.has-detail .desk-todo-body { cursor: pointer; }
+.desk-todo.has-detail .desk-todo-meta > :not(a):not(button) { cursor: default; }
+.desk-todo-text { display: inline-flex; align-items: baseline; gap: 4px; }
+.desk-todo-chev { flex: none; align-self: center; color: var(--r-ink-mute); transition: transform 0.18s ease, color 0.15s ease; }
+.desk-todo.is-open .desk-todo-chev { transform: rotate(90deg); color: var(--r-gold); }
+.desk-todo.is-open { border-color: var(--r-line-gold); }
+.desk-todo-detail.is-open {
+  display: block; -webkit-line-clamp: unset; overflow: visible; cursor: text; word-break: break-word;
+}
+.desk-detail-link { color: var(--r-gold); text-decoration: underline; text-underline-offset: 2px; word-break: break-all; }
+.desk-detail-link:hover { color: var(--r-ink); }
+.desk-todo-edit { margin-top: 8px; }
 .desk-todo-detail {
   margin: 4px 0 0; color: var(--r-ink-soft); font-size: 13px; line-height: 1.45; white-space: pre-wrap;
   display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;

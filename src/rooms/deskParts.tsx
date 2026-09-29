@@ -1,7 +1,7 @@
 // Small shared pieces for the Desk room (Needs you + Board + card drawer).
 
 import { useQuery } from '@tanstack/react-query';
-import { createContext, useContext } from 'react';
+import { createContext, useContext, type ReactNode } from 'react';
 import { MessageCircle } from 'lucide-react';
 import { apiJson } from '../data/api';
 import type { DeskActor, DeskPriority } from '../data/desk';
@@ -18,6 +18,35 @@ export function useDeskAgents(): Agent[] {
     retry: 1,
   });
   return query.data?.agents ?? [];
+}
+
+const URL_RUN = /https?:\/\/[^\s<>]+/g;
+
+/** Plain text with http(s) URLs turned into links that open in a new tab.
+ *  Nothing but text and anchors is produced (no HTML), and trailing sentence
+ *  punctuation (and an unmatched closing bracket) stays outside the link. */
+export function linkifyText(text: string): ReactNode[] {
+  const out: ReactNode[] = [];
+  let last = 0;
+  for (const match of text.matchAll(URL_RUN)) {
+    let url = match[0];
+    for (;;) {
+      const tail = url[url.length - 1];
+      const unmatched = tail === ')' ? (url.match(/\)/g)?.length ?? 0) > (url.match(/\(/g)?.length ?? 0)
+        : tail === ']' ? (url.match(/\]/g)?.length ?? 0) > (url.match(/\[/g)?.length ?? 0)
+        : false;
+      if (unmatched || /[.,;:!?'"}]/.test(tail ?? '')) url = url.slice(0, -1); else break;
+    }
+    if (!/^https?:\/\/[^/.]/.test(url)) continue;
+    const at = match.index ?? 0;
+    if (at > last) out.push(text.slice(last, at));
+    out.push(
+      <a key={`${at}-${url}`} className="desk-detail-link" href={url} target="_blank" rel="noreferrer noopener">{url}</a>,
+    );
+    last = at + url.length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
 }
 
 export const PRIORITY_LABEL: Record<DeskPriority, string> = { high: 'High', normal: 'Normal', low: 'Low' };
