@@ -26,7 +26,7 @@ import type { Server as HttpServer } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { JsonStore } from '../lib/jsonStore.ts';
-import { loadComputerTargets } from './context.ts';
+import { loadComputerTargets, revokeComputerContext } from './context.ts';
 import { forgetRobot, recordRobotEvent, robotStatus, safeRobotName, setRobotStatus, type RobotStatus } from './robots.ts';
 import type { ControlStatus } from '../../../desktop/native/computer.mjs';
 
@@ -44,9 +44,13 @@ export type DeviceInfo = {
   connectedAt: string;
   kind: DeviceKind;
   capabilities?: string[];
-  computer?: ControlStatus;
+  computer?: ComputerState;
   desktopId?: string;
 };
+
+/** What the desktop reports, plus when and why the server first saw it paused
+ *  (the desktop only says paused or not). */
+export type ComputerState = ControlStatus & { pausedAt?: number; pausedReason?: string };
 
 export type RobotInfo = DeviceInfo & { kind: 'robot'; robot?: RobotStatus };
 
@@ -207,9 +211,76 @@ export function callDevice(
   });
 }
 
+// The live grant per computer, remembered when a start succeeds. The desktop
+// only lets a grant's own session end it without pausing, so an interrupt needs
+// it. A stale entry is harmless: ending with a dead session just fails.
+const grants = new Map<string, { owner: string; session: string }>();
+
+export function rememberComputerGrant(deviceId: string, owner: string, session: string): void {
+  grants.set(deviceId, { owner, session });
+}
+
+/** Forget the remembered grant. With a session, only if it is still that one,
+ *  so a late cleanup never drops a newer grant. */
+export function forgetComputerGrant(deviceId: string, session?: string): void {
+  if (session === undefined || grants.get(deviceId)?.session === session) grants.delete(deviceId);
+}
+
+// When each owner's turn was last interrupted, so a start that lands after the
+// interrupt can be ended at once instead of leaving a 40-minute grant behind.
+const interruptedAt = new Map<string, number>();
+const INTERRUPT_MEMORY_MS = 10 * 60_000;
+
+export function wasInterruptedSince(owner: string, since: number): boolean {
+  return (interruptedAt.get(owner) ?? 0) >= since;
+}
+
+// Console Stop presses, so a pause the desktop reports right after one can say
+// it came from the console rather than the PC. Consumed by the first pause that
+// follows, cleared when the press did not reach the computer, and dropped when
+// it disconnects.
+const consoleStops = new Map<string, number>();
+const CONSOLE_STOP_WINDOW_MS = 15_000;
+
+export function noteConsoleStop(deviceId: string): void {
+  consoleStops.set(deviceId, Date.now());
+}
+
+export function clearConsoleStop(deviceId: string): void {
+  consoleStops.delete(deviceId);
+}
+
+function takePauseReason(deviceId: string): string {
+  const at = consoleStops.get(deviceId);
+  consoleStops.delete(deviceId);
+  return at !== undefined && Date.now() - at < CONSOLE_STOP_WINDOW_MS
+    ? 'Stop control was pressed in the TARDIS console.'
+    : 'Stop was pressed on the PC (the control indicator, its keyboard shortcut, or by closing it).';
+}
+
+/** An agent's turn was interrupted: end the grant it holds and cancel its input.
+ *  This is NOT the person pressing Stop, so it must never pause the computer.
+ *  The desktop treats its `stop` op as the person's Stop (and pauses in
+ *  automatic mode), so an interrupt never sends it. A start still in flight is
+ *  cancelled (the desktop closes its approval prompt, or drops a grant it had
+ *  just made, without pausing), and a grant already held is ended with its own
+ *  session. With no session on record the grant lapses on its own rather than
+ *  risk a pause nobody asked for. */
 export async function stopComputersForOwner(owner: string): Promise<void> {
-  await Promise.all([...devices.values()].filter(d => d.info.computer?.control?.owner === owner || [...d.pending.values()].some(p => p.computerOwner === owner))
-    .map(d => callDevice(d.info.id, 'computer.stop', {}, 3000)));
+  // First, and synchronously: from here the interrupted turn's context no
+  // longer opens a grant, whatever tool call it still has in flight.
+  revokeComputerContext(owner);
+  const now = Date.now();
+  for (const [name, at] of interruptedAt) if (now - at > INTERRUPT_MEMORY_MS) interruptedAt.delete(name);
+  interruptedAt.set(owner, now);
+  await Promise.all([...devices.values()].map(async (d) => {
+    for (const pending of [...d.pending.values()]) if (pending.computerOwner === owner) pending.cancel('Interrupted.');
+    const grant = grants.get(d.info.id);
+    if (grant?.owner !== owner) return;
+    const ended = await callDevice(d.info.id, 'computer.end', { session: grant.session }, 3000);
+    // Forget it only once the computer confirmed; a failed end can be retried.
+    if (ended.ok) forgetComputerGrant(d.info.id, grant.session);
+  }));
 }
 
 function settleAll(device: Device, error: string): void {
@@ -340,7 +411,14 @@ export function registerDeviceBridge(server: HttpServer): void {
         }
 
         if (msg.type === 'computer-state' && registered?.info.computer) {
-          registered.info.computer = computerStatus(msg.computer);
+          const before = registered.info.computer;
+          const next: ComputerState = computerStatus(msg.computer);
+          if (next.paused) {
+            // The first sighting stamps when and why; later updates keep it.
+            next.pausedAt = before.paused && before.pausedAt ? before.pausedAt : Date.now();
+            next.pausedReason = before.paused && before.pausedReason ? before.pausedReason : takePauseReason(registered.info.id);
+          }
+          registered.info.computer = next;
           return;
         }
         if (msg.type === 'robot-state' && registered?.info.kind === 'robot') {
@@ -374,6 +452,8 @@ export function registerDeviceBridge(server: HttpServer): void {
         settleAll(registered, `${registered.info.name} disconnected.`);
         if (devices.get(registered.info.id)?.socket === ws) {
           devices.delete(registered.info.id);
+          grants.delete(registered.info.id);
+          consoleStops.delete(registered.info.id);
           if (registered.info.kind === 'robot') forgetRobot(registered.info.id);
           console.log(`[tardis] unlinked ${registered.info.kind} ${registered.info.name}`);
         }

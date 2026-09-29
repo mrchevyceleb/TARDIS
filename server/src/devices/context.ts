@@ -39,6 +39,12 @@ export function readComputerContext(token: unknown): { owner: string; label: str
   if (!Number.isFinite(data.expires) || data.expires < Date.now() || typeof data.owner !== 'string' || !data.owner || typeof data.label !== 'string' || data.label.length > 100 || contexts.get(data.owner)?.nonce !== data.nonce) throw new Error('Expired or superseded computer context. Use the newest context from the current turn.');
   return { owner: data.owner, label: data.label, human: data.human === true };
 }
+/** The owner's turn was interrupted: its signed context stops working at once,
+ *  so a tool call still in flight from that turn cannot open a new grant. The
+ *  next turn mints a fresh one in computerGuidance. */
+export function revokeComputerContext(owner: string): void {
+  contexts.delete(owner);
+}
 export function computerGuidance(chatId: string, label: string, human = true): string {
   const now = Date.now();
   for (const [owner, context] of contexts) if (context.expires <= now) contexts.delete(owner);

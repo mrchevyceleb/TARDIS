@@ -47,7 +47,7 @@ export async function contentRequest<T>(path: string, method = 'GET', body?: unk
 
 export type LinkedComputer = {
   id: string; name: string; platform: string;
-  computer?: { supported: boolean; reason?: string; approvalMode?: 'ask' | 'automatic'; paused?: boolean; control: { owner: string; label: string; purpose: string; expiresAt: number } | null };
+  computer?: { supported: boolean; reason?: string; approvalMode?: 'ask' | 'automatic'; paused?: boolean; pausedAt?: number; pausedReason?: string; control: { owner: string; label: string; purpose: string; expiresAt: number } | null };
 };
 export type DefaultComputer = { id: string; name: string; online: boolean };
 export type ComputerPreview = { image: string; width: number; height: number; capturedAt: number; displayId: string };
