@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { release as osRelease, tmpdir } from 'node:os';
 import { join, dirname, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -204,6 +204,12 @@ class LinuxAdapter {
   }
 }
 
+// Native helpers are executed, so they live beside the unpacked scripts, not
+// inside the asar archive.
+function nativeDir() {
+  return dirname(fileURLToPath(import.meta.url)).replace(/([\\/])app\.asar([\\/])/, '$1app.asar.unpacked$2');
+}
+
 class WindowsAdapter {
   capability = { supported: true };
   // GetLastInputInfo counts this process's own SendInput, so a foreground
@@ -214,7 +220,7 @@ class WindowsAdapter {
   // person's.
   lastAgentInputAt = 0;
   async call(op, args = {}, signal, timeoutMs) {
-    const script = join(dirname(fileURLToPath(import.meta.url)), 'windows.ps1').replace(/([\\/])app\.asar([\\/])/, '$1app.asar.unpacked$2');
+    const script = join(nativeDir(), 'windows.ps1');
     const request = { op, ...args, ...(this.lastAgentInputAt ? { agentInputAt: this.lastAgentInputAt } : {}) };
     const out = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script], signal, JSON.stringify(request), timeoutMs);
     const result = JSON.parse(out.replace(/^\uFEFF/, '').trim());
@@ -288,8 +294,55 @@ class WindowsAdapter {
     return { ...rest, png: Buffer.from(png, 'base64') };
   }
 }
+// macOS: a small Swift helper (macos.swift, built into native/macos-helper)
+// does the window list, capture and input. It runs as a child of the app, so
+// macOS attributes Screen Recording and Accessibility to TARDIS itself, and it
+// refuses with a plain "needs Screen Recording / Accessibility" message until
+// someone at the Mac has allowed both. Coordinates are global display points.
+class MacAdapter {
+  constructor() {
+    this.helper = join(nativeDir(), 'macos-helper');
+    // os.release() is the Darwin version: 23 is macOS 14.
+    const reason = Number.parseInt(osRelease(), 10) < 23 ? 'Computer control needs macOS 14 or later.'
+      : !existsSync(this.helper) ? 'This TARDIS build has no macOS control helper. Install a build that includes native/macos-helper.'
+      : undefined;
+    this.capability = { supported: !reason, reason };
+  }
+  async call(op, args = {}, signal, timeoutMs = 30_000) {
+    let out;
+    try {
+      out = await run(this.helper, [], signal, JSON.stringify({ ...args, op }), timeoutMs);
+    } catch (error) {
+      // The helper's own message is already complete; drop the path prefix.
+      if (error instanceof Error) error.message = error.message.replace(`${this.helper}: `, '');
+      throw error;
+    }
+    const result = JSON.parse(out.trim());
+    if (result.error) throw new Error(result.error);
+    return result;
+  }
+  inspect(signal) { return this.call('inspect', {}, signal); }
+  async capture(signal) {
+    const result = await this.call('capture', {}, signal);
+    return { png: Buffer.from(result.png, 'base64'), bounds: result.bounds };
+  }
+  // Straight from the compositor: the window need not be in front, so this
+  // never raises anything or moves the cursor.
+  async windowCapture(window, signal) {
+    const result = await this.call('window_capture', { window }, signal);
+    return { ...result, png: Buffer.from(result.png, 'base64') };
+  }
+  act(action, signal) { return this.call('act', action, signal); }
+  release() { return this.call('release', {}, undefined, 10_000); }
+  /** What the person at this Mac has allowed so far; changes nothing. */
+  permissionStatus(signal) { return this.call('status', {}, signal, 10_000); }
+  /** Raises the two system prompts on purpose. Only for the Ship menu item or
+   *  the setup launch flag, never for an agent request. */
+  requestPermissions(signal) { return this.call('request_permissions', {}, signal, 20_000); }
+}
 export function createAdapter() {
   if (process.platform === 'linux') return new LinuxAdapter();
   if (process.platform === 'win32') return new WindowsAdapter();
-  return { capability: { supported: false, reason: 'Native input is currently available on Windows and GNOME X11. macOS requires a Screen Recording/Accessibility adapter.' }, release: async () => {} };
+  if (process.platform === 'darwin') return new MacAdapter();
+  return { capability: { supported: false, reason: 'Native input is currently available on Windows, macOS and GNOME X11.' }, release: async () => {} };
 }

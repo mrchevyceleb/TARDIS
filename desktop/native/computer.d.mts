@@ -1,6 +1,8 @@
 export const COMPUTER_GRANT_MINUTES: number;
 export const COMPUTER_GRANT_MS: number;
 export type ControlStatus = { supported: boolean; reason?: string; approvalMode?: 'ask' | 'automatic'; paused?: boolean; control: { owner: string; label: string; purpose: string; expiresAt: number } | null };
+/** What the person at a Mac has allowed for TARDIS so far. */
+export type PermissionStatus = { screenRecording: boolean; accessibility: boolean; locked: boolean; displayAsleep: boolean; displays: number };
 export type ControlRequest = { owner: string; label: string; purpose: string; minutes: number };
 export function trustedComputerUrl(raw: string): boolean;
 export function desktopIdentity(): string;
@@ -22,6 +24,8 @@ export class ComputerController {
     uiaInvoke?(window: string, element: string, name: string | undefined, signal: AbortSignal): Promise<{ png: Buffer; bounds: { x: number; y: number; width: number; height: number } }>;
     uiaKey?(window: string, keys: string[], signal: AbortSignal): Promise<{ png: Buffer; bounds: { x: number; y: number; width: number; height: number }; postedTo?: number }>;
   } });
+  /** The platform adapter. macOS adds the two setup methods. */
+  readonly adapter: { requestPermissions?(): Promise<PermissionStatus>; permissionStatus?(): Promise<PermissionStatus> };
   status(): ControlStatus;
   stop(pause?: boolean): void;
   handle(op: string, params?: Record<string, unknown>): Promise<any>;

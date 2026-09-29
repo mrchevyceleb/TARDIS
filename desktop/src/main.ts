@@ -23,7 +23,7 @@ import { normalizeServerUrl, probeServer, sameOrigin } from './server.js';
 import { canAutoUpdate, checkForUpdatesInteractive, onUpdateReady, pendingUpdateVersion, restartToUpdate, startUpdater } from './updater.js';
 import { chooseWorkspaceRoot, clearFetchedCopies, handleNativeScheme, openMachinePath, openWorkspacePath, workspaceRoot } from './workspace.js';
 import { deviceId, refreshDeviceBridge, startDeviceBridge, stopDeviceBridge } from './bridge.js';
-import { computer, setComputerAutomatic } from './computer.js';
+import { computer, setComputerAutomatic, setupMacComputerControl } from './computer.js';
 import { bridgeEnabled, forgetApprovals, setBridgeEnabled } from './approvals.js';
 
 const pkg = require('../package.json') as { repository?: { url?: string } };
@@ -450,6 +450,7 @@ function rebuildMenu(): void {
     stopComputer: () => computer.stop(true),
     resumeComputer: () => { void computer.handle('resume'); },
     setComputerAutomatic: on => setComputerAutomatic(on, serverUrl ?? ''),
+    setupComputerControl: () => void setupMacComputerControl(win),
     changeServer: () => void showConnect(),
     reloadServer: () => loadServer(),
     chooseWorkspace: () => void chooseWorkspace(),
@@ -511,6 +512,9 @@ async function main(): Promise<void> {
   // The link is what lets agents use this machine; it is refused entirely
   // while the Ship menu switch is off.
   if (bridgeEnabled()) startDeviceBridge(serverUrl);
+  // Lets the two macOS prompts be raised before the person reaches the Mac:
+  // launch with --setup-computer-control. It only asks; it grants nothing.
+  if (process.argv.includes('--setup-computer-control')) void setupMacComputerControl(null, false);
 }
 
 installNavigationPolicy();

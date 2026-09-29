@@ -1,6 +1,6 @@
-import { BrowserWindow, globalShortcut, ipcMain, nativeImage, powerMonitor, screen } from 'electron';
+import { BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, powerMonitor, powerSaveBlocker, screen, shell, type MessageBoxOptions } from 'electron';
 import path from 'node:path';
-import { ComputerController, trustedComputerUrl, type ControlStatus } from '../native/computer.mjs';
+import { ComputerController, trustedComputerUrl, type ControlStatus, type PermissionStatus } from '../native/computer.mjs';
 import { getSettings, saveSettings } from './settings.js';
 import { approveComputer, bridgeEnabled } from './approvals.js';
 
@@ -9,6 +9,15 @@ const listeners = new Set<(state: ControlStatus) => void>();
 let indicator: BrowserWindow | null = null;
 let serverOrigin = '';
 let initialised = false;
+// A sleeping display gives black captures, so on a Mac the display is held
+// awake for exactly as long as an agent holds a grant. Nothing about the
+// machine's power settings changes, and the hold ends with the grant.
+let displayHold: number | null = null;
+function holdDisplayAwake(on: boolean): void {
+  if (process.platform !== 'darwin') return;
+  if (on && displayHold === null) displayHold = powerSaveBlocker.start('prevent-display-sleep');
+  else if (!on && displayHold !== null) { powerSaveBlocker.stop(displayHold); displayHold = null; }
+}
 export const computer = new ComputerController({
   automatic: () => Boolean(serverOrigin && getSettings().computerTrustedOrigin === serverOrigin),
   encode: async (png, region) => {
@@ -23,6 +32,7 @@ export const computer = new ComputerController({
   },
   approve: (request, signal) => approveComputer(request, serverOrigin, signal),
   changed: state => {
+    holdDisplayAwake(Boolean(state.control));
     if (state.control) {
       indicator?.destroy();
       const win = new BrowserWindow({ width: 430, height: 110, resizable: false, minimizable: false,
@@ -79,4 +89,41 @@ export function setComputerAutomatic(on: boolean, selectedServer = serverOrigin)
 export async function handleComputer(op: string, params: Record<string, unknown>): Promise<unknown> {
   if (!bridgeEnabled()) throw new Error('Agents are disabled on this computer.');
   return computer.handle(op, params);
+}
+
+const MAC_PRIVACY_PANES = {
+  screenRecording: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+  accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+};
+const messageBox = (parent: BrowserWindow | null, options: MessageBoxOptions) =>
+  parent && !parent.isDestroyed() ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options);
+/** macOS only. Raises the two system prompts for Screen Recording and
+ *  Accessibility, on purpose: the person at the Mac starts this from the Ship
+ *  menu (or the setup launch flag) and then switches TARDIS on in System
+ *  Settings. macOS asks for the login password or Touch ID for each switch, and
+ *  nothing here can or should get around that. */
+export async function setupMacComputerControl(parent: BrowserWindow | null, showResult = true): Promise<PermissionStatus | null> {
+  if (process.platform !== 'darwin' || !computer.adapter.requestPermissions) return null;
+  const capability = computer.status();
+  if (!capability.supported) {
+    if (showResult) await messageBox(parent, { type: 'error', message: 'Computer control is not available in this build.', detail: capability.reason ?? 'Unsupported.' });
+    return null;
+  }
+  let status: PermissionStatus;
+  try { status = await computer.adapter.requestPermissions(); }
+  catch (error) {
+    console.error('[computer] macOS setup failed:', error);
+    if (showResult) await messageBox(parent, { type: 'error', message: 'Computer control setup could not start.', detail: error instanceof Error ? error.message : String(error) });
+    return null;
+  }
+  if (!showResult) return status;
+  const line = (name: string, on: boolean) => `${name}: ${on ? 'allowed' : 'not allowed yet'}`;
+  const done = status.screenRecording && status.accessibility;
+  if (!done) void shell.openExternal(status.screenRecording ? MAC_PRIVACY_PANES.accessibility : MAC_PRIVACY_PANES.screenRecording);
+  await messageBox(parent, {
+    type: 'info',
+    message: done ? 'Computer control is ready on this Mac.' : 'Allow TARDIS to control this Mac',
+    detail: `${line('Screen Recording', status.screenRecording)}\n${line('Accessibility', status.accessibility)}\n\n${done ? 'Agents can now see and use this Mac.' : 'In System Settings > Privacy & Security, switch TARDIS on for each one that is not allowed yet (macOS asks for the login password each time). If macOS offers Quit & Reopen, accept it. Then choose Set Up Computer Control again to check.'}`,
+  });
+  return status;
 }
