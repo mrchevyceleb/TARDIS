@@ -49,17 +49,36 @@ function trimHistoricalToolResult(item: Record<string, any>): Record<string, any
 function trimHistoricalToolOutput(event: Record<string, any>): Record<string, any> {
   const inner = event.event;
   if (!inner || typeof inner !== 'object' || inner.type !== 'user') return event;
+  // The CLI also stamps every tool result with a top-level `tool_use_result`:
+  // the same output again as a raw structured object (a screenshot's whole
+  // base64 image, a file's full text). Nothing in the transcript reads it, so
+  // it never ships in history. Trimming only message.content used to leave
+  // each screenshot at ~670KB, and five of them inside one minute blew the
+  // replay byte budget: the clamp then cut everything before them and a device
+  // returning after hours (sinceSeq far behind) was told to drop its saved
+  // history and rebuild from a seven-minute window. Only dropped where the
+  // event also carries the mirrored tool_result, so a producer that ships the
+  // raw object alone keeps its only copy.
   const content = inner.message?.content;
-  if (!Array.isArray(content)) return event;
-  let changed = false;
-  const trimmed = content.map((item: any) => {
-    if (item?.type !== 'tool_result') return item;
-    const next = trimHistoricalToolResult(item);
-    if (next !== item) changed = true;
-    return next;
-  });
+  const mirrored = Array.isArray(content) && content.some((item: any) => item?.type === 'tool_result');
+  const hasRawResult = mirrored && 'tool_use_result' in inner;
+  const { tool_use_result: _rawResult, ...stripped } = inner;
+  const rest = hasRawResult ? stripped : inner;
+  let changed = hasRawResult;
+  let trimmedContent = content;
+  if (Array.isArray(content)) {
+    trimmedContent = content.map((item: any) => {
+      if (item?.type !== 'tool_result') return item;
+      const next = trimHistoricalToolResult(item);
+      if (next !== item) changed = true;
+      return next;
+    });
+  }
   if (!changed) return event;
-  return { ...event, event: { ...inner, message: { ...inner.message, content: trimmed } } };
+  const next = Array.isArray(content)
+    ? { ...rest, message: { ...rest.message, content: trimmedContent } }
+    : rest;
+  return { ...event, event: next };
 }
 
 // A tool call's arguments stream in as hundreds of one-or-two-character
