@@ -335,7 +335,7 @@
 .bt-head-agent:hover { background: var(--r-line); }
 .bt-head-agent .bt-disc { width: 26px; height: 26px; font-size: 11px; }
 .bt-head-name { font-size: 14px; font-weight: 600; color: var(--r-ink); }
-.bt-head-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+.bt-head-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; min-width: 0; }
 
 /* feed */
 .bt-conv-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
@@ -972,10 +972,10 @@
   .bt-feed { padding: 12px max(14px, env(safe-area-inset-right, 0px)) 4px max(14px, env(safe-area-inset-left, 0px)); overscroll-behavior-y: contain; }
   .bt-dock { padding: 4px max(12px, env(safe-area-inset-right, 0px)) max(8px, env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px)); }
   .bt-dock-inner .composer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-bottom: 4px; }
-  .bt-dock-inner .computer-control, .bt-dock-inner .robot-control { flex: 1 1 140px; min-width: 0; margin: 0; }
-  .bt-dock-inner .computer-control > summary, .bt-dock-inner .robot-control > summary { min-height: 44px; padding: 6px 0; box-sizing: border-box; }
+  .bt-dock-inner .robot-control { flex: 1 1 140px; min-width: 0; margin: 0; }
+  .bt-dock-inner .robot-control > summary { min-height: 44px; padding: 6px 0; box-sizing: border-box; }
   .bt-dock-inner details[open] { flex-basis: 100%; order: 1; }
-  .bt-dock-inner .computer-control-body, .bt-dock-inner .robot-control-body { max-height: min(260px, 35dvh); overflow-y: auto; }
+  .bt-dock-inner .robot-control-body { max-height: min(260px, 35dvh); overflow-y: auto; }
   .bt-dock-inner .composer-dictation-slot { margin: 0 0 0 auto; }
   .bt-dock-inner .composer-dictation-slot:has(.dictation-panel), .bt-dock-inner .composer-dictation-slot:has(.dictation-notice) { flex-basis: 100%; }
   .bt-dock-inner .dictation-button { min-height: 44px; }

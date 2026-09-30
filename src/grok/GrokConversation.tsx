@@ -14,6 +14,7 @@ import type { ShellViewProps } from '../chat/components/reimagine/useChatShell';
 import { ChatThread } from '../chat/components/reimagine/blocks';
 import { DRAFT_APPEND_EVENT, type DraftAppendDetail } from '../native/shell';
 import { Composer, AttachButton } from '../chat/components/reimagine/Composer';
+import { ComputerControl } from '../chat/components/ComputerControl';
 import { CounselPopover, ModelChip } from '../chat/components/reimagine/CounselPicker';
 import { Plus } from '../chat/components/reimagine/icons';
 import { BotMark } from './GrokLogo';
@@ -25,7 +26,8 @@ import { useMediaQuery } from '../chat/hooks/useMediaQuery';
 /** Docked beside a room (the Desk chat): its own compact header, and
  *  reference chips that ride along with the next message. */
 export type ConversationDock = {
-  header: ReactNode;
+  /** Gets the Computer chip so the dock header can seat it (it never sits above the composer). */
+  header: (slots: { computer: ReactNode }) => ReactNode;
   chips?: ReactNode;
   chipCount: number;
   onBackspaceEmpty?: () => void;
@@ -142,6 +144,8 @@ export function GrokConversation(props: BotConversationProps) {
   );
 
   const dock = props.dock;
+  // Docked beside a room the header is narrow, so the chip is always compact there.
+  const computerChip = s.chatId ? <ComputerControl key={s.chatId} chatId={s.chatId} compact={isMobile || Boolean(dock)} /> : null;
   const composer = (
     <Composer
       chatId={s.chatId}
@@ -177,12 +181,13 @@ export function GrokConversation(props: BotConversationProps) {
 
   return (
     <div className={`rc rc-desktop bt-conv-wrap bt-fade${dock ? ' is-docked' : ''}`}>
-      {dock ? dock.header : <div className="bt-head">
+      {dock ? dock.header({ computer: computerChip }) : <div className="bt-head">
         <div className="bt-head-agent" title={agent ? `${agent.name} — ${agent.role}` : agentName}>
           <span className="bt-disc" data-chat-color={chatColorOf(agent)} style={agent ? { color: DISC_INK, background: agentColor(agent.name) } : undefined}>{agent && agentAvatarUrl(agent) ? <img className="bt-disc-img" src={agentAvatarUrl(agent) ?? undefined} alt={agent.name} /> : agentMark(agent, agentName.slice(0, 1))}</span>
           <span className="bt-head-name">{agentName}</span>
         </div>
         <div className="bt-head-actions">
+          {computerChip}
           {micDisc}
           <button className="bt-iconbtn" onClick={props.onOpenAgentEditor} title={agent ? `Edit ${agent.name}` : 'Companion settings'} aria-label={agent ? `Edit ${agent.name}` : 'Companion settings'}>
             <SquarePen size={15} />

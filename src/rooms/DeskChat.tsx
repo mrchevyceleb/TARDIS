@@ -4,7 +4,7 @@
 // (`[desk:card-…]`) rides along with the message so the agent can look it up.
 // Same thread, same transport as the Chat view: nothing forks.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown, Maximize2, MessageCircle, PanelRightClose, X } from 'lucide-react';
 import { GrokChat } from '../grok/GrokChat';
 import type { ChatMeta } from '../grok/BotPanel';
@@ -130,7 +130,7 @@ export function DeskChatDock(props: DockProps) {
   }
 
   const avatar = agentAvatarUrl(agent);
-  const header = (
+  const header = ({ computer }: { computer: ReactNode }) => (
     <div className="desk-chat-head">
       <span className="bt-disc" style={{ color: DISC_INK, background: agentColor(agent.name) }}>
         {avatar ? <img className="bt-disc-img" src={avatar} alt="" /> : agentMark(agent, agent.name.slice(0, 1))}
@@ -139,6 +139,7 @@ export function DeskChatDock(props: DockProps) {
         <strong>{agent.name}</strong>
         <span>Same thread as Chat</span>
       </div>
+      {computer}
       <button type="button" className="bt-iconbtn" onClick={props.onOpenInChat} title="Open in Chat" aria-label={`Open ${agent.name} in Chat`}>
         <Maximize2 size={15} />
       </button>
