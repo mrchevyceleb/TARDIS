@@ -150,7 +150,7 @@ export function DesktopAlertsButton() {
           ? 'Desktop alerts are on. New high-priority items will ping this computer.'
           : 'Desktop alerts stay off. You can allow them in this site\'s browser settings.');
       })
-      .catch(() => { /* the browser refused to ask */ });
+      .catch(() => { showToast('This browser would not ask about alerts. Allow them in this site\'s browser settings.'); });
   };
   return (
     <button type="button" className="desk-mini-btn ny-alerts-btn" onClick={ask} title="Get a desktop alert when a high-priority item needs you">

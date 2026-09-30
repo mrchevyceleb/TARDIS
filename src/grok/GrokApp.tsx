@@ -40,7 +40,7 @@ import { OPEN_PANE_EVENT } from './messagePins';
 import { Council } from '../rooms/Council';
 import { Desk } from '../rooms/Desk';
 import { DeskChatDock, DeskChatOpenContext, useDeskChat } from '../rooms/DeskChat';
-import { DESK_FOCUS_EVENT, FIRST_OPEN_REF, OPEN_AGENT_EVENT, focusDeskRef, hasDeskDeepLink, parseDeskDeepLink, takeDeskDeepLink, useDeskSummary } from '../data/desk';
+import { DESK_FOCUS_EVENT, FIRST_OPEN_REF, OPEN_AGENT_EVENT, focusDeskRef, hasDeskDeepLink, useDeskDeepLinks, useDeskSummary } from '../data/desk';
 import { NeedsYouBadge, useNeedsYouAlerts } from '../components/NeedsYouBadge';
 import { ContentHome as Content } from '../rooms/ContentHome';
 import { useDeploymentFlags } from '../data/deploymentFlags';
@@ -355,34 +355,9 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   }, [flags.deskRoom, view, openRoom]);
 
   // `/?desk=<todoId>` or `?desk=open` (a phone push) opens the Desk on that
-  // item, on load and whenever an open app is handed the URL again (history
-  // navigation, or a web app launch that reuses this window). The param is
-  // stripped once handled.
-  useEffect(() => {
-    const bootHref = window.location.href;
-    const handle = () => {
-      const ref = takeDeskDeepLink();
-      if (ref) focusDeskRef(ref);
-    };
-    handle();
-    window.addEventListener('popstate', handle);
-    // An installed web app that is relaunched into this window gets the URL
-    // here instead of a page load. The first call repeats the boot URL,
-    // which was handled above.
-    type LaunchQueue = { setConsumer: (consumer: (params: { targetURL?: string }) => void) => void };
-    const launchQueue = (window as Window & { launchQueue?: LaunchQueue }).launchQueue;
-    let first = true;
-    launchQueue?.setConsumer((params) => {
-      const boot = first && params.targetURL === bootHref;
-      first = false;
-      if (boot || !params.targetURL) return;
-      try {
-        const ref = parseDeskDeepLink(new URL(params.targetURL, window.location.href));
-        if (ref) focusDeskRef(ref);
-      } catch { /* not a URL we know */ }
-    });
-    return () => window.removeEventListener('popstate', handle);
-  }, []);
+  // item, on load and whenever an open app is handed the URL again. The param
+  // is stripped once handled.
+  useDeskDeepLinks(focusDeskRef);
 
   const openStudio = useCallback(() => { window.location.assign('/studio'); }, []);
   const onMeta = useCallback((m: ChatMeta) => setMeta(m), []);

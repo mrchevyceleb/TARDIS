@@ -341,8 +341,11 @@ span.desk-todo-text { cursor: default; }
   .desk-answer-choice, .desk-answer.is-compact .desk-answer-choice { min-height: 44px; padding: 0 18px; font-size: 14px; }
   .desk-answer-write, .desk-answer.is-compact .desk-answer-write { flex-basis: 100%; padding: 3px 3px 3px 14px; }
   .desk-answer-write input, .desk-answer.is-compact .desk-answer-write input { min-height: 38px; font-size: 16px; }
-  .desk-answer-send, .desk-answer.is-compact .desk-answer-send { min-height: 38px; min-width: 44px; justify-content: center; }
-  .desk-answered-ok { width: 36px; height: 36px; }
+  .desk-answer-send, .desk-answer.is-compact .desk-answer-send { position: relative; min-height: 38px; min-width: 44px; justify-content: center; }
+  .desk-answered-ok { position: relative; width: 32px; height: 32px; }
+  /* Invisible reach so each stays a 44px target without growing the chip. */
+  .desk-answer-send::after { content: ''; position: absolute; inset: -3px; }
+  .desk-answered-ok::after { content: ''; position: absolute; inset: -6px; }
 }
 
 /* ---------- Board ---------- */

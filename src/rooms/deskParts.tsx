@@ -130,10 +130,10 @@ export function answerChoices(todo: Pick<DeskTodo, 'choices'>): string[] {
   return list.length ? list : ['Yes', 'No'];
 }
 
-/** A question from an agent (or anything that offers choices) takes an answer.
- *  The owner's own reminders keep just their checkbox. */
+/** Every open Needs-you item takes an answer (the server decides who hears it;
+ *  the owner's own items may have nobody to tell). */
 export function canAnswer(todo: DeskTodo): boolean {
-  return todo.status === 'open' && (todo.from.kind === 'agent' || Boolean(todo.choices?.length));
+  return todo.status === 'open';
 }
 
 /** Who hears the answer: the agent who asked, else the card's agent owner, else
@@ -162,7 +162,7 @@ function withEntry<V>(prev: IdMap<V>, id: string, value: V | undefined): IdMap<V
  *  until the server confirms, then leaves like a check-off. A failed save rolls
  *  back and keeps the typed words; a save the agent was not told about stays on
  *  screen until it is dismissed. */
-export function useTodoAnswers() {
+export function useTodoAnswers(todos: DeskTodo[] | undefined) {
   const write = useDeskWrite();
   const [pending, setPending] = useState<IdMap<PendingAnswer>>(() => new Map());
   const [drafts, setDrafts] = useState<IdMap<string>>(() => new Map());
@@ -173,6 +173,21 @@ export function useTodoAnswers() {
     const live = timers.current;
     return () => { for (const t of live.values()) window.clearTimeout(t); };
   }, []);
+  // The server keeps retrying a delivery that failed. Once the poll says the
+  // agent was told (or the item is gone), the warning row stops claiming
+  // otherwise and leaves for Done.
+  useEffect(() => {
+    if (!todos) return;
+    setPending((prev) => {
+      let next = prev;
+      for (const [id, entry] of prev) {
+        if (entry.phase !== 'undelivered') continue;
+        const todo = todos.find((t) => t.id === id);
+        if (!todo || todo.answer?.delivery === 'sent') next = withEntry(next, id, undefined);
+      }
+      return next;
+    });
+  }, [todos]);
 
   const setDraft = useCallback((id: string, text: string) => setDrafts((prev) => withEntry(prev, id, text || undefined)), []);
   const dismiss = useCallback((id: string) => setPending((prev) => withEntry(prev, id, undefined)), []);

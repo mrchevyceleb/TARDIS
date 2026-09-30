@@ -25,7 +25,7 @@ import { normalizeWorkspacePath } from '../chat/utils/proxyLinks';
 import { useWorkspaceTree } from '../hooks/useRoomData';
 import { Evenstar, StarField } from '../theme/Ornaments';
 import { ROOM_NAMES } from '../data/roomNames';
-import { deskDeepLinkUrl, FIRST_OPEN_REF, useDeskSummary, type DeskRef } from '../data/desk';
+import { deskDeepLinkUrl, FIRST_OPEN_REF, useDeskDeepLinks, useDeskSummary, type DeskRef } from '../data/desk';
 import { useDeploymentFlags } from '../data/deploymentFlags';
 import { NeedsYouBadge, useNeedsYouAlerts } from '../components/NeedsYouBadge';
 import { applyTheme, readTheme } from '../theme/applyTheme';
@@ -113,6 +113,8 @@ export function Studio() {
     window.location.assign(deskDeepLinkUrl(ref));
   }, []);
   useNeedsYouAlerts(flags.deskRoom ? deskSummary.data : undefined, openDesk);
+  // A push link handed to an app that is open on Studio goes to the Desk too.
+  useDeskDeepLinks(openDesk);
   const [reveal, setReveal] = useState<{ path: string; n: number } | null>(null);
   const revealSeq = useRef(0);
   // Inline rename for chat tabs (right-click or double-click a chat tab).

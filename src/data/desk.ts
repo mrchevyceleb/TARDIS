@@ -1,7 +1,7 @@
 // Client for /api/desk: the owner's "Needs you" list and the agent work board.
 
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { apiJson } from './api';
 
 export const DESK_COLUMNS = ['pipeline', 'up_next', 'in_progress', 'waiting', 'done'] as const;
@@ -178,6 +178,36 @@ export function takeDeskDeepLink(): DeskRef | null {
   return ref;
 }
 
+/** Handles Desk deep links for a shell: on load, on history navigation, and
+ *  when an installed web app is relaunched into this window with a new URL
+ *  (the first launch call repeats the boot URL, handled on load). */
+export function useDeskDeepLinks(open: (ref: DeskRef) => void): void {
+  const openRef = useRef(open);
+  useEffect(() => { openRef.current = open; }, [open]);
+  useEffect(() => {
+    const bootHref = window.location.href;
+    const handle = () => {
+      const ref = takeDeskDeepLink();
+      if (ref) openRef.current(ref);
+    };
+    handle();
+    window.addEventListener('popstate', handle);
+    type LaunchQueue = { setConsumer: (consumer: (params: { targetURL?: string }) => void) => void };
+    const launchQueue = (window as Window & { launchQueue?: LaunchQueue }).launchQueue;
+    let first = true;
+    launchQueue?.setConsumer((params) => {
+      const boot = first && params.targetURL === bootHref;
+      first = false;
+      if (boot || !params.targetURL) return;
+      try {
+        const ref = parseDeskDeepLink(new URL(params.targetURL, window.location.href));
+        if (ref) openRef.current(ref);
+      } catch { /* not a URL we know */ }
+    });
+    return () => window.removeEventListener('popstate', handle);
+  }, []);
+}
+
 export function hasDeskDeepLink(): boolean {
   try { return new URLSearchParams(window.location.search).has('desk'); } catch { return false; }
 }
@@ -248,24 +278,53 @@ function shiftSummary(summary: DeskSummary, before: DeskSnapshot, after: DeskSna
   };
 }
 
+/** Undo one optimistic edit inside whatever the cache holds now: only the
+ *  todos and cards that edit touched go back, so an overlapping write from
+ *  another row (or a newer poll) survives the rollback. */
+function revertEdit(current: DeskSnapshot, before: DeskSnapshot, after: DeskSnapshot): DeskSnapshot {
+  const revert = <V extends { id: string }>(now: V[], was: V[], became: V[]): V[] => {
+    const wasById = new Map(was.map((x) => [x.id, x]));
+    const becameIds = new Set(became.map((x) => x.id));
+    const touched = new Set<string>();
+    for (const x of became) if (wasById.get(x.id) !== x) touched.add(x.id);
+    for (const x of was) if (!becameIds.has(x.id)) touched.add(x.id);
+    if (!touched.size) return now;
+    const nowIds = new Set(now.map((x) => x.id));
+    const out = now.flatMap((x) => (!touched.has(x.id) ? [x] : wasById.has(x.id) ? [wasById.get(x.id)!] : []));
+    for (const x of was) if (touched.has(x.id) && !nowIds.has(x.id)) out.push(x);
+    return out;
+  };
+  return { ...current, todos: revert(current.todos, before.todos, after.todos), cards: revert(current.cards, before.cards, after.cards) };
+}
+
 /** Run a desk write with an optimistic local edit, then resync from the server.
- *  A failed write rolls back to the snapshot taken before the edit. */
+ *  A failed write takes back just that edit (and its badge count). */
 export function useDeskWrite() {
   const queryClient = useQueryClient();
   return useCallback(async <T,>(request: () => Promise<T>, optimistic?: (desk: DeskSnapshot) => DeskSnapshot): Promise<T> => {
     await Promise.all([queryClient.cancelQueries({ queryKey: DESK_KEY }), queryClient.cancelQueries({ queryKey: SUMMARY_KEY })]);
     const previous = queryClient.getQueryData<DeskSnapshot>(DESK_KEY);
     const previousSummary = queryClient.getQueryData<DeskSummary>(SUMMARY_KEY);
+    // What the cache actually stored (structural sharing may copy), so the
+    // rollback can tell whether anything newer has landed since.
+    let applied: { after: DeskSnapshot; shifted?: DeskSummary } | null = null;
     if (previous && optimistic) {
-      const next = optimistic(previous);
-      queryClient.setQueryData(DESK_KEY, next);
-      if (previousSummary) queryClient.setQueryData(SUMMARY_KEY, shiftSummary(previousSummary, previous, next));
+      const after = queryClient.setQueryData<DeskSnapshot>(DESK_KEY, optimistic(previous));
+      const shifted = previousSummary && after ? queryClient.setQueryData<DeskSummary>(SUMMARY_KEY, shiftSummary(previousSummary, previous, after)) : undefined;
+      if (after) applied = { after, shifted };
     }
     try {
       return await request();
     } catch (error) {
-      if (previous) queryClient.setQueryData(DESK_KEY, previous);
-      if (previous && optimistic && previousSummary) queryClient.setQueryData(SUMMARY_KEY, previousSummary);
+      if (applied && previous) {
+        const now = queryClient.getQueryData<DeskSnapshot>(DESK_KEY);
+        queryClient.setQueryData(DESK_KEY, !now || now === applied.after ? previous : revertEdit(now, previous, applied.after));
+        // The count goes back only if nothing newer replaced it; otherwise the
+        // refetch below settles it.
+        if (previousSummary && applied.shifted && queryClient.getQueryData(SUMMARY_KEY) === applied.shifted) {
+          queryClient.setQueryData(SUMMARY_KEY, previousSummary);
+        }
+      }
       throw error;
     } finally {
       void queryClient.invalidateQueries({ queryKey: DESK_KEY });

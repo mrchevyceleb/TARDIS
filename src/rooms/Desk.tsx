@@ -198,7 +198,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
   answerable: boolean;
 }) {
   const write = useDeskWrite();
-  const answers = useTodoAnswers();
+  const answers = useTodoAnswers(desk.todos);
   const doneRef = useRef<HTMLDetailsElement>(null);
   const [lit, setLit] = useState<string | null>(null);
   const [draft, setDraft] = useState<TodoDraft>(emptyTodo);

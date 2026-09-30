@@ -47,7 +47,7 @@ export function myCards(desk: DeskSnapshot): DeskCard[] {
 export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpenDesk: () => void }) {
   const desk = useDesk();
   const write = useDeskWrite();
-  const answers = useTodoAnswers();
+  const answers = useTodoAnswers(desk.data?.todos);
   const agents = useDeskAgents();
   // Reads the shell's summary poll: answers only once the server takes them.
   const answerable = useDeskSummary(false).data?.answerable === true;
