@@ -19,6 +19,7 @@ type SessionLike = {
   send: (text: string, images?: unknown, opts?: Record<string, unknown>) => Promise<void>;
   isBusy?: () => boolean;
   canAcceptNativeHumanSteer?: () => boolean;
+  requestBoundaryInterrupt?: () => boolean;
   activeSelection?: () => { model?: string; effort?: string };
   spawnModel?: string;
   spawnEffort?: string;
@@ -262,10 +263,15 @@ export function waitForDeliveryBoundary(
   timeoutMs: number,
   signal?: AbortSignal,
   acceptSteer: () => boolean = () => true,
+  interruptAtBoundary = false,
 ): Promise<DeliveryBoundary> {
   if (signal?.aborted) return Promise.resolve('aborted');
   if (session.isBusy?.() !== true) return Promise.resolve('idle');
   if (acceptSteer() && session.canAcceptNativeHumanSteer?.() === true) return Promise.resolve('steerable');
+  // A teammate or the Desk is waiting on this busy session: end its turn at the
+  // next tool boundary so the handoff arrives as a real turn, not as text
+  // inside a tool result. Scheduled/automation senders wait for the natural end.
+  if (interruptAtBoundary) session.requestBoundaryInterrupt?.();
   const sinceSeq = session.latestSeq();
   return new Promise((resolve) => {
     let settled = false;
@@ -344,6 +350,7 @@ async function getRecipientSessionForDelivery(
   deadline: number,
   signal?: AbortSignal,
   deferIfBusy = false,
+  interruptAtBoundary = false,
 ): Promise<{ session: SessionLike; waited: boolean; nativeSteer: boolean; model?: string; effort?: string }> {
   const runner = await getRunner();
   let waited = false;
@@ -417,6 +424,7 @@ async function getRecipientSessionForDelivery(
       Math.max(1, deadline - Date.now()),
       signal,
       steerAdmissible,
+      interruptAtBoundary,
     );
     if (outcome === 'aborted') throw new Error('sender stopped before delivery');
     if (outcome === 'timeout') break;
@@ -570,7 +578,7 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
     let model: string | undefined;
     let effort: string | undefined;
     try {
-      const admission = await getRecipientSessionForDelivery(to, deadline, signal, deferIfBusy);
+      const admission = await getRecipientSessionForDelivery(to, deadline, signal, deferIfBusy, from.role !== 'automation');
       session = admission.session;
       nativeSteer = admission.nativeSteer;
       model = admission.model;
