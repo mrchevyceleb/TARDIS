@@ -672,7 +672,7 @@ export class PiSession {
       ? ['<rivendell-continuation>', `Warm continuation of the existing conversation. Host time: ${new Date().toString()}.`, 'Do not repeat session-start rituals.', '</rivendell-continuation>', ...(guidance ? ['', guidance] : []), ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []), '', promptText].join('\n')
       : promptText;
     const humanTurn = continuing ? continuing.origin.human : !opts.peerFrom && opts.peerFromRole !== 'automation';
-    const computerContext = computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn);
+    const computerContext = computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn);
     const message = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuation}`;
     const piImages = outImages?.map((img) => ({ type: 'image', data: img.base64, mimeType: img.mediaType }));
 
