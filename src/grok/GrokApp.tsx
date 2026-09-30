@@ -40,7 +40,8 @@ import { OPEN_PANE_EVENT } from './messagePins';
 import { Council } from '../rooms/Council';
 import { Desk } from '../rooms/Desk';
 import { DeskChatDock, DeskChatOpenContext, useDeskChat } from '../rooms/DeskChat';
-import { DESK_FOCUS_EVENT, OPEN_AGENT_EVENT, useDeskSummary } from '../data/desk';
+import { DESK_FOCUS_EVENT, FIRST_OPEN_REF, OPEN_AGENT_EVENT, focusDeskRef, hasDeskDeepLink, useDeskDeepLinks, useDeskSummary } from '../data/desk';
+import { NeedsYouBadge, useNeedsYouAlerts } from '../components/NeedsYouBadge';
 import { ContentHome as Content } from '../rooms/ContentHome';
 import { useDeploymentFlags } from '../data/deploymentFlags';
 import { Integrations } from '../rooms/Integrations';
@@ -108,6 +109,8 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   const { agents, reload: reloadAgents } = useAgents();
 
   const [view, setView] = useState<View>(() => {
+    // A push link (?desk=...) lands straight on the Desk, no flash of chat.
+    if (hasDeskDeepLink()) return { kind: 'room', key: 'desk' };
     if (initialRoom && ROOMS[initialRoom]) return { kind: 'room', key: initialRoom };
     return readView();
   });
@@ -332,6 +335,10 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
 
   const deskSummary = useDeskSummary(flags.deskRoom);
   const needsYou = deskSummary.data?.openTodos ?? 0;
+  // The Needs-you badge, the (N) title, and desktop alerts all ride this poll.
+  // A click on the badge or an alert opens the Desk on the item.
+  const openNeedsYou = useCallback(() => focusDeskRef(FIRST_OPEN_REF), []);
+  useNeedsYouAlerts(flags.deskRoom ? deskSummary.data : undefined, focusDeskRef);
 
   // The Desk chat is the Chief of Staff's own thread, docked beside the Desk.
   const deskChat = useDeskChat(isMobile);
@@ -346,6 +353,11 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
     window.addEventListener(DESK_FOCUS_EVENT, onFocus);
     return () => window.removeEventListener(DESK_FOCUS_EVENT, onFocus);
   }, [flags.deskRoom, view, openRoom]);
+
+  // `/?desk=<todoId>` or `?desk=open` (a phone push) opens the Desk on that
+  // item, on load and whenever an open app is handed the URL again. The param
+  // is stripped once handled.
+  useDeskDeepLinks(focusDeskRef);
 
   const openStudio = useCallback(() => { window.location.assign('/studio'); }, []);
   const onMeta = useCallback((m: ChatMeta) => setMeta(m), []);
@@ -426,20 +438,21 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
                 if (view.kind === 'chat') return;
                 if (lastChat.current) { setView(lastChat.current); setDrawerOpen(false); }
                 else goHome();
-              }}><MessageSquare size={16} aria-hidden="true" />{WORKSPACE_NAV.chat}</button>
+              }}><MessageSquare size={16} aria-hidden="true" /><span className="bt-ws-label">{WORKSPACE_NAV.chat}</span></button>
               {flags.deskRoom && <button
                 type="button"
                 aria-pressed={activeRoom === 'desk'}
                 aria-label={needsYou ? `${ROOM_NAMES.desk.name}, ${needsYou} need${needsYou === 1 ? 's' : ''} you` : ROOM_NAMES.desk.name}
                 onClick={() => { if (activeRoom !== 'desk') openRoom('desk'); }}
               >
-                <ClipboardList size={16} aria-hidden="true" />{ROOM_NAMES.desk.name}
-                {needsYou ? <span className={`bt-ws-badge${(deskSummary.data?.highTodos ?? 0) > 0 ? ' is-hot' : ''}`} aria-hidden="true">{needsYou > 99 ? '99+' : needsYou}</span> : null}
+                <ClipboardList size={16} aria-hidden="true" /><span className="bt-ws-label">{ROOM_NAMES.desk.name}</span>
               </button>}
               {flags.contentRoom && <button type="button" aria-pressed={activeRoom === 'content'} onClick={() => {
                 if (activeRoom !== 'content') openRoom('content');
-              }}><Pencil size={16} aria-hidden="true" />{ROOM_NAMES.content.name}</button>}
+              }}><Pencil size={16} aria-hidden="true" /><span className="bt-ws-label">{ROOM_NAMES.content.name}</span></button>}
             </nav>
+            {/* Always on screen, far from the composer and the phone's thumb zone. */}
+            {flags.deskRoom ? <NeedsYouBadge summary={deskSummary.data} onOpen={openNeedsYou} /> : null}
           </header>
           {(isMobile || railCollapsed) ? (
             <button

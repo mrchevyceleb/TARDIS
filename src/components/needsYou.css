@@ -1,0 +1,86 @@
+/* ============================================================
+   Needs-you badge: the "Needs you: N" chip on every screen.
+   Lives in the top bar of each shell, never near a composer.
+   ============================================================ */
+
+.ny-badge {
+  flex: none; align-self: center;
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  min-height: 40px; padding: 0 7px 0 12px; border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--r-gold) 38%, var(--r-line));
+  background: color-mix(in srgb, var(--r-gold) 9%, var(--r-bg-raised));
+  color: var(--r-ink); font-size: 13.5px; font-weight: 600; line-height: 1; white-space: nowrap;
+  cursor: pointer;
+  transition: transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.16s ease, border-color 0.15s ease, background 0.15s ease;
+  animation: ny-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.ny-badge:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--r-gold) 70%, var(--r-line));
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3), 0 0 0 3px color-mix(in srgb, var(--r-gold) 14%, transparent);
+}
+.ny-badge:active { transform: scale(0.95); box-shadow: none; }
+.ny-badge:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; }
+
+.ny-badge-icon { flex: none; color: var(--r-gold); transform-origin: 50% 15%; transition: transform 0.2s ease; }
+.ny-badge:hover .ny-badge-icon { animation: ny-ring 0.6s ease; }
+
+.ny-badge-count {
+  min-width: 22px; height: 22px; padding: 0 7px; border-radius: 999px;
+  display: inline-grid; place-items: center;
+  font-size: 11.5px; font-weight: 700; font-variant-numeric: tabular-nums;
+  background: var(--r-gold); color: var(--r-on-accent);
+  animation: ny-pop 0.36s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Anything high priority: rose, and a slow breathing ring. */
+.ny-badge.is-hot {
+  border-color: color-mix(in srgb, var(--r-rose) 60%, var(--r-line));
+  background: color-mix(in srgb, var(--r-rose) 15%, var(--r-bg-raised));
+  animation: ny-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), ny-glow 2.6s ease-in-out 0.3s infinite;
+}
+.ny-badge.is-hot:hover {
+  border-color: var(--r-rose);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3), 0 0 0 3px color-mix(in srgb, var(--r-rose) 22%, transparent);
+  animation: none;
+}
+.ny-badge.is-hot .ny-badge-icon { color: var(--r-rose); }
+.ny-badge.is-hot .ny-badge-count { background: var(--r-rose); color: #fff; }
+
+/* Grok shell: the right end of the workspace bar (a size container, see
+   grok.css). When the bar is narrow (phones, a desktop window with both side
+   panes open) it shrinks to the icon and the count; the full label stays in
+   its accessible name. */
+@container bt-workspacebar (max-width: 479px) {
+  .ny-badge { gap: 5px; min-width: 44px; padding: 0 6px 0 9px; }
+  .ny-badge-label { display: none; }
+}
+@media (pointer: coarse) {
+  .ny-badge { min-height: 44px; }
+}
+
+/* Classic Studio: beside the top bar actions. */
+.studio-topbar > .ny-badge { min-height: 30px; margin: 0 2px 0 6px; padding: 0 5px 0 10px; font-size: 12.5px; }
+.studio-topbar > .ny-badge .ny-badge-count { min-width: 20px; height: 20px; }
+@media (max-width: 760px) {
+  /* Row one of the phone bar, just before the actions on the right. */
+  .studio-topbar > .ny-badge { order: 2; min-height: 40px; margin-left: auto; }
+  .studio-topbar > .ny-badge + .studio-topbar-actions { margin-left: 0; }
+  .studio-topbar > .ny-badge .ny-badge-label { display: none; }
+}
+
+/* Desk room header: ask this browser for alerts. */
+.ny-alerts-btn svg { transform-origin: 50% 15%; }
+.ny-alerts-btn:hover svg { animation: ny-ring 0.6s ease; }
+
+@keyframes ny-in { from { opacity: 0; transform: scale(0.85); } to { opacity: 1; transform: none; } }
+@keyframes ny-pop { 0% { transform: scale(0.6); } 60% { transform: scale(1.2); } 100% { transform: scale(1); } }
+@keyframes ny-ring { 0%, 100% { transform: rotate(0); } 20% { transform: rotate(14deg); } 45% { transform: rotate(-11deg); } 70% { transform: rotate(6deg); } }
+@keyframes ny-glow {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--r-rose) 0%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--r-rose) 22%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ny-badge, .ny-badge.is-hot, .ny-badge-count, .ny-badge:hover .ny-badge-icon, .ny-alerts-btn:hover svg { animation: none; }
+  .ny-badge:hover { transform: none; }
+}
