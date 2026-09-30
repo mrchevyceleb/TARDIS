@@ -1526,6 +1526,13 @@ export function useChat(opts: {
           // jump straight to 'streaming' so the UI shows tending instead of
           // looking idle while events stream in via replay.
           reconnectAttemptRef.current = 0;
+          // The 'working' keepalive re-arms the elapsed timer on every busy
+          // tick, but this initial 'ready' never did, so a busy reconnect
+          // left ActiveTurnIndicator frozen at "live" for up to
+          // TURN_KEEPALIVE_MS (15s) - worse across back-to-back reconnects,
+          // which is exactly what made a live turn look dead. No-op if a
+          // start time already survived the reconnect (turnStartRef > 0).
+          if (msg.busy === true) markTurnStarted();
           // Every composer and threshold send waits in the same stable-ID FIFO
           // until this ready boundary, then remains there until durable echo.
           const queued = outboundQueue.get(conversationKey(cli, repo.path, chatId));
