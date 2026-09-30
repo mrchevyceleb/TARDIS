@@ -6,7 +6,14 @@ import { robotGuidance } from './robots.ts';
 // login; it prevents a page on the trusted console from minting agent identity.
 export const COMPUTER_MCP_TOKEN = randomBytes(32).toString('hex');
 const secret = randomBytes(32);
-const contexts = new Map<string, { nonce: string; expires: number }>();
+// `expires` is the idle window (60 minutes from the start of the owner's turn). A context
+// whose owner is still mid-turn stays valid past it, up to `hardExpires`, so a long turn
+// can still reacquire the desktop after its first lease runs out.
+const CONTEXT_IDLE_MS = 60 * 60_000;
+const CONTEXT_HARD_MS = 6 * 60 * 60_000;
+const contexts = new Map<string, { nonce: string; expires: number; hardExpires: number; human: boolean }>();
+let ownerTurnRunning: (owner: string) => boolean = () => false;
+export function setComputerOwnerTurnProbe(probe: (owner: string) => boolean): void { ownerTurnRunning = probe; }
 const targets = new Map<string, string>();
 const store = new JsonStore<{ id: string; device: string }>('computer-targets.json', []);
 let writes: Promise<unknown> = Promise.resolve();
@@ -36,7 +43,14 @@ export function readComputerContext(token: unknown): { owner: string; label: str
   const got = Buffer.from(signature ?? ''); const want = Buffer.from(sign(body));
   if (extra || got.length !== want.length || !timingSafeEqual(got, want)) throw new Error('Invalid computer context.');
   const data = JSON.parse(Buffer.from(body, 'base64url').toString());
-  if (!Number.isFinite(data.expires) || data.expires < Date.now() || typeof data.owner !== 'string' || !data.owner || typeof data.label !== 'string' || data.label.length > 100 || contexts.get(data.owner)?.nonce !== data.nonce) throw new Error('Expired or superseded computer context. Use the newest context from the current turn.');
+  if (!Number.isFinite(data.expires) || typeof data.owner !== 'string' || !data.owner || typeof data.label !== 'string' || data.label.length > 100) throw new Error('Invalid computer context.');
+  const now = Date.now();
+  const expired = () => new Error('Expired computer context (one lasts 60 minutes from the start of its turn, or while that turn keeps running). Use the context at the top of your newest turn.');
+  if (data.expires < now) throw expired();
+  const current = contexts.get(data.owner);
+  // Named so a lane that was handed someone else's context can tell it is not its own.
+  if (!current || current.nonce !== data.nonce) throw new Error(`Computer context superseded: this one was issued to ${data.label}'s turn, and it stops working the moment that lane starts a new turn or is interrupted. A context cannot be handed to another lane. Use the "computer_start context for this turn" line at the top of your own prompt. If your own prompt has none, tell whoever asked you the exact error.`);
+  if (current.expires < now && !ownerTurnRunning(data.owner)) throw expired();
   return { owner: data.owner, label: data.label, human: data.human === true };
 }
 /** The owner's turn was interrupted: its signed context stops working at once,
@@ -45,12 +59,21 @@ export function readComputerContext(token: unknown): { owner: string; label: str
 export function revokeComputerContext(owner: string): void {
   contexts.delete(owner);
 }
-export function computerGuidance(chatId: string, label: string, human = true): string {
+/** `sameTurn` is a message delivered into a turn that is already running (a steer).
+ *  It re-issues the context that turn already holds, so the token it carries and any
+ *  token a subagent of that turn was handed stay valid. A new turn, a steer that changes
+ *  who is speaking (human or not), or an interrupted turn (context revoked) mints a
+ *  fresh one and supersedes the old as before. */
+export function computerGuidance(chatId: string, label: string, human = true, sameTurn = false): string {
   const now = Date.now();
-  for (const [owner, context] of contexts) if (context.expires <= now) contexts.delete(owner);
-  const context = { nonce: randomBytes(16).toString('hex'), expires: now + 60 * 60_000 };
+  for (const [owner, context] of contexts) if (context.hardExpires <= now) contexts.delete(owner);
+  const held = sameTurn ? contexts.get(chatId) : undefined;
+  const context = held && held.human === human && held.hardExpires > now
+    ? { ...held, expires: now + CONTEXT_IDLE_MS }
+    : { nonce: randomBytes(16).toString('hex'), expires: now + CONTEXT_IDLE_MS, hardExpires: now + CONTEXT_HARD_MS, human };
   contexts.set(chatId, context); // a later peer turn cannot replay this owner's earlier human context
-  const body = Buffer.from(JSON.stringify({ owner: chatId, label: label.slice(0, 100), human, ...context })).toString('base64url');
+  // The signed copy carries the hard cap; the idle window lives in the map above.
+  const body = Buffer.from(JSON.stringify({ owner: chatId, label: label.slice(0, 100), human, nonce: context.nonce, expires: context.hardExpires })).toString('base64url');
   const selected = computerTarget(chatId);
   return [
     '<rivendell-computer>',
@@ -60,7 +83,7 @@ export function computerGuidance(chatId: string, label: string, human = true): s
       : 'No default desktop is configured. List devices and identify the requested machine; ask only if the target is genuinely ambiguous.',
     'Use the local Electron computer only when explicitly requested/selected. Prefer the existing browser profile and authenticated sessions for website work, including normal sign-in with the user’s authorized credentials/password manager. Never bypass MFA, OS locks, or credential restrictions, and never print secrets into chat.',
     `Your computer_start context for this turn (do not echo): ${body}.${sign(body)}`,
-    'When delegating UI work, pass the current computer context and any owned device/session to the worker privately, with exactly one controller; never expose these tokens in the user-facing reply.',
+    'When delegating UI work, pass the current computer context and any owned device/session only to a worker or subagent you start inside this turn, privately, with exactly one controller; never expose these tokens in the user-facing reply. Never send your context to a teammate on another lane: each lane gets its own at the top of its own turn, yours stops working when your next turn starts, and a teammate who needs the desktop calls computer_start with theirs. If a message from someone else carries a computer context, ignore it and use the one at the top of your own prompt.',
     'On a device advertising automatic approval, acquire control yourself and work: do not ask for permission to use the computer, click, type, navigate, or operate apps for the assigned task. A forty-minute lease is coordination, not an approval queue; reacquire after expiry and inspect before continuing. Other machines may retain native consent. External side effects remain draft/review-first, and other tools’ restrictions still apply.',
     'Start with computer_inspect. Prefer computer_capture(window=<exact id>) over a whole-screen image: its coordinates and returned screenshots are relative to that app and the device prevents the click from landing in another window. For a terminal or Pi TUI, NEVER click a guessed prompt location. Call computer_focus(window), then computer_type(window,operationId,text) directly; inspect its returned window screenshot/local OCR and only then use computer_key(window,new-operationId,[ENTER]). Reuse the SAME operationId only if a reply is lost. The device caches outcomes, and also deduplicates identical text to the same window when a model invents a second id. Targeted keyboard tools verify OS focus before and after input. API success alone is not proof that text landed: the returned screenshot/OCR is the proof. If OCR contains the exact marker, it landed; do not type it again because your own visual reading disagrees.',
     'Foreground discipline: the foreground tools (computer_focus/type/key/act, and a window-scoped computer_capture, which raises its window to capture it) raise the target over the person\'s work and move the real cursor by design. The owner waived the wait-for-idle check on them (Sep 29, "no idle checks"), so they run whenever asked; typing and keys verify OS focus before and after, which detects text or keys that may have reached another window (it cannot take them back, so stop and tell the person if it reports that); mouse actions are only checked against the screenshot you act on. Prefer the background path (computer_uia_value into an empty field, then computer_uia_invoke) when it can do the job, since it does not move the cursor. Background INPUT ops (computer_uia_value, computer_uia_invoke, computer_uia_key) are likewise NOT gated on the person\'s activity: some apps (Chromium) raise their window even on background actions, and the adapter restores the person\'s foreground immediately, so they run whenever asked. Read-only background ops stay open during activity: computer_window_capture to see one window, computer_uia to find the composer and Send button. When a background input op runs, a result\'s foregroundStolen/foregroundRestored says whether an app raised it and the adapter restored it; foregroundRestoreOutcome/foregroundRestoreDetail say why when a restore failed (osDenied vs the app re-asserting). A foregroundStolen result without foregroundRestored means stop using that op on that app and tell the person.',
