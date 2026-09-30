@@ -41,10 +41,22 @@ const jobsKey = (agentId: string) => ['jobs', 'agent', agentId] as const;
 const SUMMARY_KEY = ['jobs', 'summary'] as const;
 
 type JobsResponse = { jobs: JobView[] };
+/** The chat list plus how far the server clock is ahead of this device's, read
+ *  from the response's Date header. Ended-job ages compare server timestamps,
+ *  so a device with a wrong clock must not hide or keep them. */
+type ChatJobsData = JobsResponse & { skewMs: number };
 
 /** Polling shared by both hooks. TanStack pauses interval refetches while the
  *  tab is hidden, and `refetchOnWindowFocus: 'always'` catches up on return. */
 const POLL = { refetchIntervalInBackground: false, refetchOnWindowFocus: 'always', staleTime: 1_000, retry: false } as const;
+
+async function fetchChatJobs(agentId: string, signal: AbortSignal): Promise<ChatJobsData> {
+  const response = await fetch(`/api/jobs?agentId=${enc(agentId)}`, { signal, cache: 'no-store' });
+  if (!response.ok) throw new Error(await readError(response));
+  const serverAt = Date.parse(response.headers.get('date') ?? '');
+  const body = await response.json() as JobsResponse;
+  return { jobs: body.jobs, skewMs: Number.isFinite(serverAt) ? serverAt - Date.now() : 0 };
+}
 
 async function readError(response: Response): Promise<string> {
   const text = await response.text().catch(() => '');
@@ -61,12 +73,13 @@ export function useJobs(agentId: string | undefined) {
   const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: jobsKey(agentId ?? ''),
-    queryFn: ({ signal }) => apiJson<JobsResponse>(`/api/jobs?agentId=${enc(agentId ?? '')}`, { signal, cache: 'no-store' }),
+    queryFn: ({ signal }) => fetchChatJobs(agentId ?? '', signal),
     enabled: Boolean(agentId),
     refetchInterval: CHAT_POLL_MS,
     ...POLL,
   });
   const jobs = query.data?.jobs;
+  const skewMs = query.data?.skewMs ?? 0;
   const fetchedAt = query.dataUpdatedAt;
 
   // Ended jobs age out of the list without a new poll: a slow tick re-derives
@@ -86,9 +99,9 @@ export function useJobs(agentId: string | undefined) {
   );
   const recent = useMemo(
     () => (jobs ?? [])
-      .filter((job) => job.state !== 'running' && job.endedAt !== null && now - job.endedAt < RECENT_JOB_MS)
+      .filter((job) => job.state !== 'running' && job.endedAt !== null && now + skewMs - job.endedAt < RECENT_JOB_MS)
       .sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0)),
-    [jobs, now],
+    [jobs, now, skewMs],
   );
 
   const [stopping, setStopping] = useState<ReadonlySet<string>>(() => new Set());
@@ -101,17 +114,22 @@ export function useJobs(agentId: string | undefined) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ by: 'user' }),
       });
-      // 409 means it already ended on its own: the refetch below shows how.
-      if (!response.ok && response.status !== 409) return { ok: false, error: await readError(response) };
       if (response.ok) {
         const { job } = await response.json() as { job?: JobView };
         if (job) {
-          queryClient.setQueryData<JobsResponse>(jobsKey(agentId), (old) => (
-            old ? { jobs: old.jobs.map((item) => (item.id === job.id ? job : item)) } : old
+          queryClient.setQueryData<ChatJobsData>(jobsKey(agentId), (old) => (
+            old ? { ...old, jobs: old.jobs.map((item) => (item.id === job.id ? job : item)) } : old
           ));
         }
+        return { ok: true };
       }
-      return { ok: true };
+      // 409 means it already ended on its own. Wait for the fresh list so the
+      // row settles into how it ended instead of offering Stop again.
+      if (response.status === 409) {
+        await queryClient.refetchQueries({ queryKey: jobsKey(agentId) }).catch(() => undefined);
+        return { ok: true };
+      }
+      return { ok: false, error: await readError(response) };
     } catch (error) {
       return { ok: false, error: (error as Error).message || 'could not reach the server' };
     } finally {

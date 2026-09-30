@@ -892,12 +892,16 @@ export type ChatThreadProps = {
   agentName?: string;
   /** One-tap resend of a bubble that read "Not delivered". */
   onRetry?: (clientMsgId: string) => void;
+  /** The model's own background shells/subagents still running after the turn
+   *  ended. The jobs pill by the composer lists them, so the feed only stops
+   *  saying "Turn complete" while they run. */
+  backgroundWork?: string[];
 };
 
 // Renders the full feed: day marks on day changes, user bubbles, per-turn
 // assistant groups (tool cards + streaming prose), and the live-turn pill
 // while a turn is live but no content has landed yet.
-export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, suppressTyping = false, workingSince, agentName, onRetry }: ChatThreadProps) {
+export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, suppressTyping = false, workingSince, backgroundWork = [], agentName, onRetry }: ChatThreadProps) {
   const streaming = status === 'streaming';
   // The indicator lives until something VISIBLE lands in the CURRENT turn.
   // Looking across the whole transcript made any historical terminal-error or
@@ -1171,6 +1175,9 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         activityKey={activityKey}
       />,
     );
+  } else if (!latestQueued && status === 'ready' && backgroundWork.length > 0) {
+    // Nothing to add: the jobs pill by the composer shows what is still
+    // running, and "Turn complete" here would read as "nothing is happening".
   } else if (!latestQueued && status === 'ready' && hasAssistantAfterLastUser && !hasCurrentTerminalFailure) {
     // Absence of animation must mean something explicit. This permanent,
     // low-emphasis terminal marker distinguishes "finished" from "stalled".

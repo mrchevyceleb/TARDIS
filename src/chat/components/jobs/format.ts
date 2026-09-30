@@ -99,11 +99,7 @@ export function parseJobResult(text: string, from?: string): JobResult {
   let output = '';
   const at = lines.findIndex((line) => line.trim() === 'Last output:');
   if (at >= 0) {
-    const tail: string[] = [];
-    for (const line of lines.slice(at + 1)) {
-      if (/^Full log:/.test(line) || /^Background job (?:result|wake) from /.test(line)) break;
-      tail.push(line);
-    }
+    const tail = lines.slice(at + 1);
     while (tail.length && !tail[tail.length - 1].trim()) tail.pop();
     output = tail.join('\n');
   }

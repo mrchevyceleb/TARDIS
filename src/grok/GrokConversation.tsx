@@ -258,6 +258,7 @@ export function GrokConversation(props: BotConversationProps) {
               collapseSteps
               suppressTyping={s.automationBusy}
               workingSince={s.workingSince}
+              backgroundWork={s.backgroundWork}
               onReact={s.react}
               onRetry={s.retry}
               agentName={agentName}

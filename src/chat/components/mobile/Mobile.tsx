@@ -113,6 +113,7 @@ export function Mobile({ s, picker, repo, agent }: ShellViewProps) {
             mobile
             suppressTyping={s.automationBusy}
             workingSince={s.workingSince}
+            backgroundWork={s.backgroundWork}
             onReact={s.react}
             onRetry={s.retry}
             agentName={agent}

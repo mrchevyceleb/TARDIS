@@ -120,7 +120,7 @@ export function ChatJobsBar({ agentId, backgroundWork, mobile = false }: ChatJob
                     <JobRing tone="run" small />
                     <span className="jb-row-text">
                       <span className="jb-name">{task}</span>
-                      <span className="jb-line jb-line-plain">Claude background task</span>
+                      <span className="jb-line jb-line-plain">Background task</span>
                     </span>
                   </div>
                 </div>
@@ -149,6 +149,8 @@ function JobRow({ job, now, fetchedAt, stopping, onStop }: {
   const tone = jobTone(job.state);
   const log = useJobLog(job.id, expanded, isRunning);
   // The poll's elapsed plus local time since it landed: skew-free and 1s smooth.
+  // A failed Stop's message belongs to that attempt: drop it once the job's state moves on.
+  useEffect(() => { setError(''); }, [job.state]);
   const elapsed = isRunning ? job.elapsedMs + Math.max(0, now - fetchedAt) : job.elapsedMs;
 
   const stop = async () => {
