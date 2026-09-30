@@ -36,6 +36,8 @@
   border-right: 1px solid var(--r-line);
   flex-shrink: 0;
 }
+.studio-back { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding: 4px 10px; margin-right: 6px; border: 1px solid var(--r-line); border-radius: 999px; color: var(--r-ink); font-size: 12px; text-decoration: none; cursor: pointer; transition: transform 120ms ease, border-color 120ms ease, background 120ms ease; }
+.studio-back:hover { transform: translateX(-2px); border-color: var(--r-gold); background: color-mix(in srgb, var(--r-gold) 10%, transparent); }
 .studio-brand strong {
   font-family: var(--r-sign);
   font-size: 12px;

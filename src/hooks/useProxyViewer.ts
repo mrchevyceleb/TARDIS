@@ -1,8 +1,9 @@
 import { createContext, useContext } from 'react';
 
 export type ProxyViewerRequest =
-  | { source: 'doc'; path: string; title?: string }
+  | { source: 'doc'; path: string; title?: string; /** Set when opened from a folder list: the header then offers a way back to it. */ fromFolder?: string }
   | { source: 'artifact'; id: string; title?: string }
+  | { source: 'folder'; path: string; title?: string }
   | {
       source: 'inline';
       title: string;

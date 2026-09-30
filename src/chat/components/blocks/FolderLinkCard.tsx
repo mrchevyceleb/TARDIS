@@ -1,22 +1,30 @@
 import { FolderOpen, FolderOutput, FolderTree } from 'lucide-react';
+import { useContext } from 'react';
+import { ProxyViewerContext } from '../../../hooks/useProxyViewer';
 import { useStudioFiles } from '../../../shell/studio/studioFiles';
-import { buildLinkUrls, canOpenOnThisPc, fileManagerName, normalizeWorkspacePath, openWorkspaceLink } from '../../utils/proxyLinks';
+import { canOpenOnThisPc, fileManagerName, inStudioShell, normalizeWorkspacePath, openWorkspaceLink } from '../../utils/proxyLinks';
 
-// Click reveals the folder in TARDIS's own file tree. The side button does
-// the same explicitly. In the desktop shell a second button opens the folder in
-// the PC's own file manager. Outside the Studio shell it falls back to opening
-// the folder in Windows Explorer via the rivendell:// handler.
+// In the desktop shell a plain click opens the folder in the PC's own file
+// manager (same as the Explorer button); when it is not synced to this PC, or
+// anywhere else, it opens a closable file list. Inside the classic Studio
+// shell it reveals the folder in Studio's own tree. It never navigates the app
+// away.
 export function FolderLinkCard({ path, title }: { path: string; title?: string }) {
   const studio = useStudioFiles();
+  const viewer = useContext(ProxyViewerContext);
   const normalizedPath = normalizeWorkspacePath(path);
   const safePath = normalizedPath ?? path;
   const display = title || (safePath === '' ? 'ASSISTANT-HUB' : safePath.split('/').pop() || safePath);
-  const { windowsPath } = buildLinkUrls(safePath, 'folder');
   const onThisPc = normalizedPath !== null && canOpenOnThisPc(normalizedPath, 'folder');
+  const inStudio = Boolean(studio) && inStudioShell();
 
+  const showList = () => { if (normalizedPath !== null) viewer?.open({ source: 'folder', path: normalizedPath }); };
   const openPrimary = () => {
     if (normalizedPath === null) return;
+    if (studio && inStudio) { studio.revealFolder(normalizedPath); return; }
+    if (onThisPc) { openWorkspaceLink(normalizedPath, 'folder', showList); return; }
     if (studio) { studio.revealFolder(normalizedPath); return; }
+    if (viewer) { showList(); return; }
     openWorkspaceLink(normalizedPath, 'folder');
   };
 
@@ -26,7 +34,7 @@ export function FolderLinkCard({ path, title }: { path: string; title?: string }
         type="button"
         className="chat-link-card"
         onClick={openPrimary}
-        title={studio ? `Reveal ${display} in the file tree` : `Open ${display} in File Explorer (${windowsPath})`}
+        title={inStudio ? `Reveal ${display} in the file tree` : onThisPc ? `Open ${display} in ${fileManagerName()}` : `Show the files in ${display}`}
       >
         <FolderOpen size={16} />
         <span className="chat-link-card-text">
@@ -41,7 +49,7 @@ export function FolderLinkCard({ path, title }: { path: string; title?: string }
             className="chat-link-card-action chat-link-card-action-pc"
             onClick={(e) => {
               e.stopPropagation();
-              if (normalizedPath !== null) openWorkspaceLink(normalizedPath, 'folder');
+              if (normalizedPath !== null) openWorkspaceLink(normalizedPath, 'folder', showList);
             }}
             title={`Open in ${fileManagerName()}`}
             aria-label={`Open ${display} in ${fileManagerName()}`}
@@ -57,9 +65,10 @@ export function FolderLinkCard({ path, title }: { path: string; title?: string }
             e.stopPropagation();
             if (normalizedPath === null) return;
             if (studio) studio.revealFolder(normalizedPath);
+            else if (viewer) showList();
             else openWorkspaceLink(normalizedPath, 'folder');
           }}
-          title={studio ? 'Reveal in file tree' : `Open ${display} in File Explorer (${windowsPath})`}
+          title="Show the files in this folder"
         >
           <FolderTree size={13} />
         </button>
