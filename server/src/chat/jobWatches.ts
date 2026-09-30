@@ -385,6 +385,13 @@ function checkWatch(watch: JobWatch, now: number): string | null {
   return null;
 }
 
+/** What the thread shows for a job wake: the outcome and last output, without
+ *  the model-only boilerplate or the host log path. The model still gets the
+ *  full text. The chat UI turns this into a job result card. */
+export function visibleWakeText(text: string): string {
+  return text.split('\n').filter((line) => !/^(?:Full log: |Background job (?:result|wake) from )/.test(line)).join('\n');
+}
+
 /** One resolution → one wake, then the watch is removed. On delivery failure
  *  (agent busy past the 30-minute admission wait, engine down) the outcome
  *  is persisted and retried every RETRY_MS; UNDELIVERABLE_GRACE past the
@@ -424,7 +431,7 @@ async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
     const result = await sendToAgentHome(agent, text, {
       peerFrom: `⏱ ${watch.note}`,
       peerFromRole: 'automation',
-      peerText: `job: ${watch.note}`,
+      peerText: visibleWakeText(text),
     });
     if (result.delivered) {
       await serialize(() => store.delete(watch.id));

@@ -25,7 +25,7 @@ import { isAbsolute, join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 import { JsonStore } from '../lib/jsonStore.ts';
 import { listAgents } from './agents.ts';
-import { canLaunchInScope, pidMatches, pidStart } from './jobWatches.ts';
+import { canLaunchInScope, pidMatches, pidStart, visibleWakeText } from './jobWatches.ts';
 import { sendToAgentHome } from './teamBus.ts';
 
 export type JobState = 'running' | 'finished' | 'failed' | 'stopped' | 'timed-out' | 'lost';
@@ -480,7 +480,7 @@ async function deliver(job: Job): Promise<void> {
     const result = await sendToAgentHome(agent, job.wakeText!, {
       peerFrom: `⏱ ${job.name}`,
       peerFromRole: 'automation',
-      peerText: `job: ${job.name}`,
+      peerText: visibleWakeText(job.wakeText!),
     });
     if (result.delivered) {
       await serialize(() => store.update(job.id, { wakeText: undefined }));
