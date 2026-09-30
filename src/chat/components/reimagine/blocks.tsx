@@ -513,7 +513,7 @@ function BackgroundNote({ block }: { block: Extract<ChatBlock, { kind: 'backgrou
 }
 
 // ── user bubble ───────────────────────────────────────────────────────────
-function UserBubble({ block }: { block: Extract<ChatBlock, { kind: 'user' }> }) {
+function UserBubble({ block, agentName, onRetry }: { block: Extract<ChatBlock, { kind: 'user' }>; agentName?: string; onRetry?: (clientMsgId: string) => void }) {
   const images = block.images ?? [];
   const missing = Math.max(0, (block.imageCount ?? images.length) - images.length);
   // data: URLs can't be top-level navigated to in Chrome — clone via blob.
@@ -554,7 +554,12 @@ function UserBubble({ block }: { block: Extract<ChatBlock, { kind: 'user' }> }) 
       <div className="bubble"><DeskRefText text={block.text} /></div>
       {block.deliveryState ? (
         <span className={`delivery-state ${block.deliveryState}`} role={block.deliveryState === 'failed' ? 'alert' : 'status'}>
-          {block.deliveryState === 'queued' ? 'Queued · will run next' : 'Not delivered'}
+          {block.deliveryState === 'queued'
+            ? `Queued · ${agentName ? `${agentName} is` : 'the agent is'} mid-step, it will land at the next safe moment`
+            : 'Not delivered'}
+          {block.deliveryState === 'failed' && onRetry && block.clientMsgId && !block.imageCount && !images.length ? (
+            <button type="button" className="delivery-retry" onClick={() => onRetry(block.clientMsgId!)}>Retry</button>
+          ) : null}
         </span>
       ) : (
         <span className="when">{timeLabel(block.ts)}</span>
@@ -860,12 +865,16 @@ export type ChatThreadProps = {
   workingSince?: number;
   /** Background shells/subagents still running after the turn ended. */
   backgroundWork?: string[];
+  /** Agent name for the queued-message wording. */
+  agentName?: string;
+  /** One-tap resend of a bubble that read "Not delivered". */
+  onRetry?: (clientMsgId: string) => void;
 };
 
 // Renders the full feed: day marks on day changes, user bubbles, per-turn
 // assistant groups (tool cards + streaming prose), and the live-turn pill
 // while a turn is live but no content has landed yet.
-export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, suppressTyping = false, workingSince, backgroundWork = [] }: ChatThreadProps) {
+export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, suppressTyping = false, workingSince, backgroundWork = [], agentName, onRetry }: ChatThreadProps) {
   const streaming = status === 'streaming';
   // The indicator lives until something VISIBLE lands in the CURRENT turn.
   // Looking across the whole transcript made any historical terminal-error or
@@ -1062,7 +1071,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       lastDay = g.day;
     }
     if (g.type === 'user') {
-      nodes.push(<UserBubble key={g.block.id} block={g.block} />);
+      nodes.push(<UserBubble key={g.block.id} block={g.block} agentName={agentName} onRetry={onRetry} />);
     } else if (g.type === 'compact') {
       nodes.push(<CompactDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'restart') {

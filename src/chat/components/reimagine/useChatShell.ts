@@ -97,7 +97,7 @@ export function useChatShell({ chat, picker }: ShellProps) {
     busy,
     workingSince: chat.turnStartedAt,
     backgroundWork: chat.backgroundWork,
-    send, steer, react: chat.react, stop,
+    send, steer, retry: chat.retry, react: chat.react, stop,
     fresh: chat.freshStart,
     pickChronicle,
     blocks: chat.blocks as ChatBlock[],

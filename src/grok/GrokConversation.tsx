@@ -253,6 +253,8 @@ export function GrokConversation(props: BotConversationProps) {
               workingSince={s.workingSince}
               backgroundWork={s.backgroundWork}
               onReact={s.react}
+              onRetry={s.retry}
+              agentName={agentName}
               pin={agent ? {
                 pinnedBlockIds: messagePins.pins.map((p) => p.blockId),
                 onToggle: messagePins.toggle,

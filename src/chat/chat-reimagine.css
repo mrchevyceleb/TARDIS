@@ -260,6 +260,9 @@
 .rc .delivery-state { font-family: var(--font-mono); font-size: 10px; opacity: 1; }
 .rc .delivery-state.queued { color: var(--amber); animation: rc-breathe 1.8s ease-in-out infinite; }
 .rc .delivery-state.failed { color: var(--r-rose); }
+.rc .delivery-retry { margin-left: 8px; font: inherit; color: var(--amber); background: transparent; border: 1px solid currentColor; border-radius: 999px; padding: 1px 9px; cursor: pointer; transition: transform 0.12s ease, background 0.12s ease; }
+.rc .delivery-retry:hover { background: color-mix(in oklch, var(--amber) 14%, transparent); transform: translateY(-1px); }
+.rc .delivery-retry:active { transform: translateY(0) scale(0.96); }
 
 /* ── tool card (collapsible working card) — §3.5 ───────────────── */
 .rc .tool { position: relative; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface-soft); max-width: 560px; }
