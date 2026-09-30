@@ -717,7 +717,7 @@ function ToolsCard({ blocks, turnLive = false }: { blocks: ToolBlock[]; turnLive
 }
 
 function hasVisibleProse(b: Extract<ChatBlock, { kind: 'text' }>): boolean {
-  return b.text.trim().length > 0;
+  return !b.pending && b.text.trim().length > 0;
 }
 
 /** Protocol no-ops that must not steal the Grok answer slot. Broader
@@ -729,7 +729,7 @@ function isProtocolNoopText(text: string): boolean {
 
 function isAnswerProse(b: Extract<ChatBlock, { kind: 'text' }>): boolean {
   const t = b.text.trim();
-  return t.length > 0 && !isProtocolNoopText(t);
+  return !b.pending && t.length > 0 && !isProtocolNoopText(t);
 }
 
 function visibleAssistantBlocks(blocks: AssistantBlock[], _collapseSteps: boolean): AssistantBlock[] {
@@ -888,6 +888,7 @@ function ElrondGroup({
             const open = showTextCaret(b, streaming);
             const display = isProtocolNoopText(b.text) ? '' : b.text;
             if (!open && !display) return null;
+            if (b.thought) return <div key={b.id} className="bt-thought"><StreamText text={display} open={false} /></div>;
             return <StreamText key={b.id} text={display} open={open} />;
           }
           case 'doc-link':
@@ -1028,6 +1029,9 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   const peerGroupsById = new Map<string, PeerGroup>();
   let lastDay = '';
   for (const b of blocks) {
+    // Hidden: the reply-case marker, and a thinking summary still waiting to
+    // learn whether its message had text of its own.
+    if (b.kind === 'replyask' || (b.kind === 'text' && b.pending)) continue;
     const day = dayLabel(b.ts);
     if (b.kind === 'compact') {
       groups.push({ type: 'compact', block: b, day: lastDay || day });

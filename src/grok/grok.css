@@ -1253,6 +1253,9 @@
 .bt-peer-response .m-elrond .acts { margin-bottom: 0; }
 .bt-peer-public-response { width: 100%; min-width: 0; }
 .bt-peer-public-response .m-elrond { margin-top: 0; }
+/* an agent's reply that came as a thinking summary: same place as a message, dimmed */
+.bt-thought { opacity: 0.66; }
+.bt-thought .prose { font-style: italic; }
 /* folded run of silent teammate handoffs: one dim line, cards inside on demand */
 .bt-peer-fold { margin: 6px 0; width: min(560px, 86%); max-width: 100%; animation: bt-msg-in 0.25s ease both; }
 .bt-peer-fold-toggle {

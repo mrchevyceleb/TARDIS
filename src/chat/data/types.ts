@@ -148,6 +148,19 @@ export type ChatBlock =
       /** Durable event-log seq for this block. Used to pin emoji reactions. */
       seq?: number;
       reactions?: Array<{ emoji: string; from: string }>;
+      /** A Claude thinking summary shown as a dimmed reply line. Only for the
+       * reply case: the first output after a person's message (or a reply-first
+       * nudge) that put its words in thinking and went straight to tools. */
+      thought?: boolean;
+      /** A thought held back until its message shows it had no text of its own. */
+      pending?: boolean;
+    }
+  | {
+      /** Hidden boundary: the agent was nudged to reply in visible text. */
+      kind: 'replyask';
+      id: string;
+      ts: number;
+      seq?: number;
     }
   | {
       kind: 'tool';

@@ -129,6 +129,28 @@ function eventTime(ev: any): { ts: number; tsApprox?: true } {
   return typeof ev?.seq === 'number' ? { ts: Date.now(), tsApprox: true } : { ts: Date.now() };
 }
 
+/** The reply case: nothing from the agent yet since a person's message or a
+ *  reply-first nudge. A teammate, routine or job message ends the case, and so
+ *  does any output, so only the first reply of a message can qualify. */
+function awaitingFirstReply(blocks: ChatBlock[]): boolean {
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const b = blocks[i];
+    if (b.kind === 'replyask') return true;
+    if (b.kind === 'peer' || b.kind === 'text' || b.kind === 'tool') return false;
+  }
+  return false;
+}
+
+/** A thought is held back (`pending`) until its message shows it had no text of
+ *  its own: a tool call starts (show it) or a text block starts (drop it). */
+function settleThoughts(blocks: ChatBlock[], turnId: string | undefined, show: boolean): ChatBlock[] {
+  const held = (b: ChatBlock) => b.kind === 'text' && b.pending === true && (!turnId || b.turnId === turnId);
+  if (!blocks.some(held)) return blocks;
+  return show
+    ? blocks.map((b) => (held(b) && b.kind === 'text' ? { ...b, pending: false } : b))
+    : blocks.filter((b) => !held(b));
+}
+
 export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlock[] {
   if (!ev || typeof ev !== 'object') return blocks;
   // A subagent's own frames (parent_tool_use_id) are its private work, not
@@ -141,6 +163,23 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       ? { ...ev.event, seq: ev.seq ?? ev.event.seq, at: ev.at ?? ev.event.at }
       : ev.event;
     return reduce(blocks, inner, turnIdRef);
+  }
+
+  // The message (or turn) ended with nothing but a held thought: it was the
+  // whole reply, so show it.
+  if (ev.type === 'message_start' || ev.type === 'result' || ev.type === '_interrupted' || ev.type === '_turn_boundary' || ev.type === '_terminal_error') {
+    blocks = settleThoughts(blocks, undefined, true);
+  }
+
+  // A person's message or a reply-first nudge opens the reply case. The marker
+  // sits where the event happened, not where an optimistic bubble was drawn.
+  if ((ev.type === '_user_echo' && typeof ev.text === 'string' && !ev._replyMarked) || ev.type === '_reply_nudge') {
+    const after = ev.type === '_user_echo' ? reduce(blocks, { ...ev, _replyMarked: true }, turnIdRef) : blocks;
+    return reduce(after, { type: '_reply_ask', seq: ev.seq, ts: ev.ts ?? ev.at }, turnIdRef);
+  }
+  if (ev.type === '_reply_ask') {
+    if (typeof ev.seq === 'number' && blocks.some((b) => b.kind === 'replyask' && b.seq === ev.seq)) return blocks;
+    return [...blocks, { kind: 'replyask', id: id(), ts: typeof ev.ts === 'number' ? ev.ts : Date.now(), seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
   }
 
   if (ev.type === 'system' && (ev.subtype === 'commands_changed' || ev.subtype === 'hook_response' || ev.subtype === 'hook_started' || ev.subtype === 'hook_progress')) {
@@ -437,7 +476,8 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         presentation: cb.phase === 'commentary' ? 'update' : cb.phase === 'final_answer' ? 'answer' : undefined,
         seq: typeof ev.seq === 'number' ? ev.seq : undefined,
       };
-      return [...blocks, block];
+      // The message has its own text, so a held thinking summary is not the reply.
+      return [...settleThoughts(blocks, turnId, false), block];
     }
     if (cb?.type === 'tool_use') {
       const block: ChatBlock = {
@@ -446,7 +486,8 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         running: true, ...eventTime(ev),
         turnId, peerId: turnIdRef.peerId, cbIndex: idx, open: true,
       };
-      return [...blocks, block];
+      // A tool call with no text before it: the held thought is the reply.
+      return [...settleThoughts(blocks, turnId, true), block];
     }
     return blocks;
   }
@@ -518,15 +559,28 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         seq: typeof ev.seq === 'number' ? ev.seq : b.seq,
       };
     });
+    // Reply case: a Claude lane answered inside a thinking summary and went
+    // straight to tools, so the person sees only the tool card. Hold the summary
+    // until its message proves it had no text; every other thought stays hidden.
+    const thought = String(ev.message?.model ?? '').startsWith('claude')
+      ? (ev.message.content as Array<any>).find((c) => c?.type === 'thinking' && typeof c.thinking === 'string' && c.thinking.trim())
+      : undefined;
+    if (thought && awaitingFirstReply(annotated)) {
+      annotated.push({
+        kind: 'text', id: id(), text: thought.thinking.trim(), ...eventTime(ev),
+        turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation: 'update',
+        thought: true, pending: true, seq: typeof ev.seq === 'number' ? ev.seq : undefined,
+      });
+    }
     const fullText = (ev.message.content as Array<any>)
       .filter((c) => c?.type === 'text' && typeof c.text === 'string')
       .map((c) => c.text)
       .join('');
     if (fullText) {
       if (isSyntheticApiErrorEvent(ev)) return blocks;
-      const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '');
+      const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '' && !b.thought);
       if (!hasText) {
-        return [...annotated, { kind: 'text', id: id(), text: fullText, ...eventTime(ev), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation, seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
+        return [...settleThoughts(annotated, turnId, false), { kind: 'text', id: id(), text: fullText, ...eventTime(ev), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation, seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
       }
     }
     return annotated;
