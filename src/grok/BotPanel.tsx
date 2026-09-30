@@ -11,6 +11,8 @@ import { useCronJobs } from '../hooks/useRoomData';
 import { useProxyViewer } from '../hooks/useProxyViewer';
 import { scrollToPinnedMessage, useAgentMessagePins } from './messagePins';
 import { statusLabel } from '../theme/voice';
+import { DeskPaneSwitch, useDeskPaneMode } from './DeskPaneSwitch';
+import { MyDeskPane } from './MyDeskPane';
 
 type ArtifactMeta = { id: string; title?: string; kind?: string; createdAt?: number };
 
@@ -157,8 +159,24 @@ export type ChatMeta = {
   compacting?: boolean;
 };
 
-export function BotPanel({ meta, onOpenForge, onClose, className = '', agent }: { meta: ChatMeta | null; onOpenForge: () => void; onClose?: () => void; className?: string; agent?: import('./agents').Agent | null }) {
+export function BotPanel({ meta, onOpenForge, onOpenDesk, onClose, className = '', agent, open = true }: {
+  meta: ChatMeta | null;
+  onOpenForge: () => void;
+  /** Opens the full Desk room. Passed only when the Desk room is on for this
+   *  deployment; without it the pane shows the agent's desk alone, as before. */
+  onOpenDesk?: () => void;
+  onClose?: () => void;
+  className?: string;
+  agent?: import('./agents').Agent | null;
+  /** The pane is showing. My desk only polls the Desk while it is. */
+  open?: boolean;
+}) {
   const viewer = useProxyViewer();
+  const [savedMode, setDeskMode] = useDeskPaneMode();
+  const deskEnabled = Boolean(onOpenDesk);
+  const deskMode = deskEnabled ? savedMode : 'agent';
+  const showAgent = deskMode !== 'mine';
+  const showMine = deskMode !== 'agent';
   const { data: cronJobs } = useCronJobs();
   const messagePins = useAgentMessagePins(agent?.id);
   /** Outcome of a manual Run, per routine, shown briefly under the row. */
@@ -226,236 +244,252 @@ export function BotPanel({ meta, onOpenForge, onClose, className = '', agent }: 
   const frac = meta?.fraction;
 
   return (
-    <aside className={`bt-pane ${className}`.trim()}>
-      <section className="bt-pane-sec">
-        <div className="bt-pane-title-row">
-          <div className="bt-pane-title">{meta?.agentLabel ?? 'Agent'}&apos;s desk</div>
+    <aside className={`bt-pane${deskMode === 'both' ? ' is-both' : ''} ${className}`.trim()}>
+      {deskEnabled ? (
+        <div className="bt-pane-top">
+          <DeskPaneSwitch mode={deskMode} onChange={setDeskMode} agentLabel={meta?.agentLabel ?? agent?.name ?? 'Agent'} />
           {onClose ? (
             <button className="bt-iconbtn bt-pane-close" onClick={onClose} aria-label="Close panel" title="Close panel">
               <X size={16} />
             </button>
           ) : null}
         </div>
-        <div className="bt-screen">
-          {latest ? (
-            <>
-              {isHtml ? (
-                <button
-                  className="bt-screen-preview"
-                  onClick={() => viewer.open({ source: 'artifact', id: latest.id, title: latest.title })}
-                  title="Open artifact"
-                >
-                  <iframe title="artifact preview" sandbox="" src={`/api/artifacts/${encodeURIComponent(latest.id)}/content`} />
-                </button>
-              ) : isImage ? (
-                <button
-                  className="bt-screen-preview"
-                  onClick={() => viewer.open({ source: 'artifact', id: latest.id, title: latest.title })}
-                  title="Open artifact"
-                >
-                  <img src={`/api/artifacts/${encodeURIComponent(latest.id)}/content`} alt={latest.title ?? 'artifact'} />
-                </button>
-              ) : (
-                <button
-                  className="bt-screen-preview"
-                  onClick={() => viewer.open({ source: 'artifact', id: latest.id, title: latest.title })}
-                  title="Open artifact"
-                >
-                  <span className="bt-screen-idle">▤</span>
-                </button>
-              )}
-              <div className="bt-screen-meta">{latest.title ?? 'Latest artifact'}</div>
-            </>
-          ) : (
-            <>
-              <div className="bt-screen-idle">·</div>
-              <div className="bt-screen-meta">Nothing on the desk yet — ask {meta?.agentLabel ?? 'the agent'} to build something.</div>
-            </>
-          )}
-        </div>
-      </section>
-
-      <section className="bt-pane-sec">
-        <div className="bt-pane-title">
-          Automations{agent ? ` · ${agent.name}` : ''}
-          <button
-            className="bt-iconbtn"
-            onClick={openNewRoutine}
-            title={agent ? `New automation for ${agent.name}` : 'New automation'}
-            aria-label="New automation"
-          >
-            <Plus size={16} />
-          </button>
-        </div>
-        {routineForm ? (
-          <div className="bt-rt-form">
-            <input className="bt-rt-input" placeholder="Name (Morning brief)" value={rtName} onChange={(e) => setRtName(e.target.value)} maxLength={80} />
-            <select className="bt-rt-input" value={rtSchedule} onChange={(e) => setRtSchedule(e.target.value)}>
-              {scheduleOptions(rtSchedule).map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
-            <textarea
-              className="bt-rt-input"
-              placeholder={agent ? `What ${agent.name} should do each run…` : 'What the agent should do each run…'}
-              value={rtPrompt}
-              onChange={(e) => setRtPrompt(e.target.value)}
-              rows={4}
-            />
-            <div className="bt-rt-actions">
-              <button type="button" className="bt-rt-btn" onClick={closeRoutineForm}>Cancel</button>
-              <button
-                className="bt-rt-btn primary"
-                disabled={rtBusy || !rtPrompt.trim() || (!rtEditingId && !agent)}
-                onClick={async () => {
-                  setRtBusy(true);
-                  try {
-                    if (rtEditingId) {
-                      await apiJson(`/api/routines/${encodeURIComponent(rtEditingId)}`, {
-                        method: 'PATCH',
-                        body: JSON.stringify({ name: rtName || 'Routine', schedule: rtSchedule, prompt: rtPrompt }),
-                      });
-                    } else {
-                      await apiJson('/api/routines', {
-                        method: 'POST',
-                        body: JSON.stringify({ name: rtName || 'Routine', agentId: agent?.id, schedule: rtSchedule, prompt: rtPrompt }),
-                      });
-                    }
-                    closeRoutineForm();
-                    reloadRoutines();
-                  } finally { setRtBusy(false); }
-                }}
-              >
-                {rtEditingId ? 'Save' : agent ? `Add for ${agent.name}` : 'Pick an agent first'}
-              </button>
-            </div>
-          </div>
-        ) : null}
-        {routines.filter((r) => !agent || r.agentId === agent.id).map((r) => (
-          <div key={r.id} className={`bt-routine ${r.paused ? 'off' : 'on'}${rtEditingId === r.id ? ' editing' : ''}`}>
-            {r.paused ? <PauseCircle size={16} /> : <CheckCircle2 size={16} />}
-            <span style={{ flex: 1, minWidth: 0 }}>
-              <span className="bt-routine-name">{r.name}</span>
-              <span className="bt-routine-sched" style={{ display: 'block' }}>{humanizeRoutine(r.schedule)}</span>
-              {!agent ? <span className="bt-routine-sched" style={{ display: 'block' }}>→ {r.agentName}</span> : null}
-              {r.paused ? <span className="bt-routine-paused" style={{ display: 'block' }}>Paused</span> : null}
-              {runStatus[r.id] ? <span className="bt-routine-sched" style={{ display: 'block', color: runStatus[r.id].startsWith('Sent') ? 'var(--r-mint, #7ee0a9)' : runStatus[r.id].startsWith('Not run') || runStatus[r.id].startsWith('Failed') ? 'var(--r-rose)' : undefined }}>{runStatus[r.id]}</span> : null}
-            </span>
-            <span className="bt-rt-rowbtns">
-              <button className="bt-iconbtn" title="Edit" aria-label={`Edit ${r.name}`}
-                onClick={() => openEditRoutine(r)}>
-                <Pencil size={13} />
-              </button>
-              <button className="bt-iconbtn" title="Run now" aria-label="Run now"
-                onClick={() => {
-                  setRunStatus((m) => ({ ...m, [r.id]: 'Running…' }));
-                  void apiJson<{ ran: boolean; reason?: string; gated?: string; agent?: string }>(`/api/routines/${encodeURIComponent(r.id)}/run`, { method: 'POST' })
-                    .then((out) => {
-                      const text = out.gated ? `Checked, nothing new (${out.gated})` : out.ran ? `Sent to ${out.agent ?? 'the agent'}` : `Not run: ${out.reason ?? 'unknown'}`;
-                      setRunStatus((m) => ({ ...m, [r.id]: text }));
-                      reloadRoutines();
-                    })
-                    .catch((err: Error) => setRunStatus((m) => ({ ...m, [r.id]: `Failed: ${err.message}` })));
-                  window.setTimeout(() => setRunStatus((m) => { const { [r.id]: _gone, ...rest } = m; return rest; }), 12_000);
-                }}>
-                <Play size={13} />
-              </button>
-              <button className="bt-iconbtn" title={r.paused ? 'Resume' : 'Pause'} aria-label={r.paused ? 'Resume' : 'Pause'}
-                onClick={() => { void apiJson(`/api/routines/${encodeURIComponent(r.id)}`, { method: 'PATCH', body: JSON.stringify({ paused: !r.paused }) }).then(reloadRoutines); }}>
-                {r.paused ? <Play size={13} /> : <Pause size={13} />}
-              </button>
-              <button className="bt-iconbtn" title="Delete" aria-label="Delete routine"
-                onClick={() => { if (window.confirm(`Delete routine "${r.name}"?`)) { void apiJson(`/api/routines/${encodeURIComponent(r.id)}`, { method: 'DELETE' }).then(reloadRoutines); } }}>
-                <Trash2 size={13} />
-              </button>
-            </span>
-          </div>
-        ))}
-        {!routines.length && !routineForm ? (
-          <div className="bt-pane-empty">{agent ? `No automations for ${agent.name} yet — + to schedule one.` : 'No automations yet.'}</div>
-        ) : null}
-      </section>
-
-      {agent ? (
-        <section className="bt-pane-sec">
-          <div className="bt-pane-title">Pinned from {agent.name}</div>
-          {messagePins.loadError && !visiblePins.length ? (
-            <div className="bt-pane-empty">Pins hid for a second — I’ll try again in a moment.</div>
-          ) : visiblePins.length ? visiblePins.map((p) => (
-            <div key={p.id} className="bt-msgpin">
-              {p.blockId.startsWith('note-') ? (
-                // An agent's own note (team_pin): there is no bubble to jump to.
-                <div className="bt-msgpin-body" title="Pinned by the agent">
-                  <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty note'}</span>
-                </div>
-              ) : (
-              <button
-                type="button"
-                className="bt-msgpin-body"
-                title="Jump to this message"
-                onClick={() => scrollToPinnedMessage(p.blockId)}
-              >
-                <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty bubble'}</span>
-              </button>
-              )}
-              <button
-                type="button"
-                className="bt-iconbtn bt-msgpin-unpin"
-                title="Unpin"
-                aria-label="Unpin"
-                onClick={() => { void messagePins.unpin(p.id); }}
-              >
-                <X size={13} />
-              </button>
-            </div>
-          )) : (
-            <div className="bt-msgpin-empty">
-              <Pin size={16} className="bt-msgpin-idle" />
-              <span>Nothing pocketed yet. Hover a bubble, tap pin, and I’ll hold it here.</span>
-            </div>
-          )}
-        </section>
       ) : null}
+      <div className="bt-pane-cols">
+        {/* Stays mounted while hidden, so a half-written routine survives a flip to My desk. */}
+        <div className="bt-pane-col bt-pane-agent" hidden={!showAgent}>
+          <section className="bt-pane-sec">
+            <div className="bt-pane-title-row">
+              <div className="bt-pane-title">{meta?.agentLabel ?? 'Agent'}&apos;s desk</div>
+              {onClose && !deskEnabled ? (
+                <button className="bt-iconbtn bt-pane-close" onClick={onClose} aria-label="Close panel" title="Close panel">
+                  <X size={16} />
+                </button>
+              ) : null}
+            </div>
+            <div className="bt-screen">
+              {latest ? (
+                <>
+                  {isHtml ? (
+                    <button
+                      className="bt-screen-preview"
+                      onClick={() => viewer.open({ source: 'artifact', id: latest.id, title: latest.title })}
+                      title="Open artifact"
+                    >
+                      <iframe title="artifact preview" sandbox="" src={`/api/artifacts/${encodeURIComponent(latest.id)}/content`} />
+                    </button>
+                  ) : isImage ? (
+                    <button
+                      className="bt-screen-preview"
+                      onClick={() => viewer.open({ source: 'artifact', id: latest.id, title: latest.title })}
+                      title="Open artifact"
+                    >
+                      <img src={`/api/artifacts/${encodeURIComponent(latest.id)}/content`} alt={latest.title ?? 'artifact'} />
+                    </button>
+                  ) : (
+                    <button
+                      className="bt-screen-preview"
+                      onClick={() => viewer.open({ source: 'artifact', id: latest.id, title: latest.title })}
+                      title="Open artifact"
+                    >
+                      <span className="bt-screen-idle">▤</span>
+                    </button>
+                  )}
+                  <div className="bt-screen-meta">{latest.title ?? 'Latest artifact'}</div>
+                </>
+              ) : (
+                <>
+                  <div className="bt-screen-idle">·</div>
+                  <div className="bt-screen-meta">Nothing on the desk yet — ask {meta?.agentLabel ?? 'the agent'} to build something.</div>
+                </>
+              )}
+            </div>
+          </section>
 
-      <section className="bt-pane-sec">
-        <div className="bt-pane-title">
-          System cron
-          <button className="bt-iconbtn" onClick={onOpenForge} title="Manage in Forge" aria-label="Manage in Forge">
-            <Plus size={16} />
-          </button>
-        </div>
-        {jobs.length ? jobs.map((j) => (
-          <button key={j.id} className={`bt-routine ${j.status === 'active' ? 'on' : 'off'}`} onClick={onOpenForge} title="Open in Forge">
-            {j.status === 'active' ? <CheckCircle2 size={16} /> : <PauseCircle size={16} />}
-            <span>
-              <span className="bt-routine-name">{j.name}</span>
-              <span className="bt-routine-sched" style={{ display: 'block' }}>{humanizeCron(j.schedule)}</span>
-              {j.status !== 'active' ? <span className="bt-routine-paused" style={{ display: 'block' }}>Paused</span> : null}
-            </span>
-          </button>
-        )) : (
-          <div className="bt-pane-empty">No routines yet. Forge can schedule one.</div>
-        )}
-      </section>
-
-      {meta ? (
-        <section className="bt-pane-sec">
-          <div className="bt-pane-title">Session</div>
-          <div className="bt-session">
-            <div className="bt-session-row"><span>Agent</span><b>{meta.agentLabel}</b></div>
-            {meta.model ? <div className="bt-session-row"><span>Model</span><b>{meta.model}</b></div> : null}
-            <div className="bt-session-row"><span>State</span><b>{meta.compacting ? 'Regenerating…' : statusLabel(meta.status)}</b></div>
-            {typeof frac === 'number' ? (
-              <>
-                <div className={`bt-meter${frac > 0.8 ? ' hot' : ''}`}>
-                  <i style={{ width: `${Math.min(100, Math.round(frac * 100))}%` }} />
+          <section className="bt-pane-sec">
+            <div className="bt-pane-title">
+              Automations{agent ? ` · ${agent.name}` : ''}
+              <button
+                className="bt-iconbtn"
+                onClick={openNewRoutine}
+                title={agent ? `New automation for ${agent.name}` : 'New automation'}
+                aria-label="New automation"
+              >
+                <Plus size={16} />
+              </button>
+            </div>
+            {routineForm ? (
+              <div className="bt-rt-form">
+                <input className="bt-rt-input" placeholder="Name (Morning brief)" value={rtName} onChange={(e) => setRtName(e.target.value)} maxLength={80} />
+                <select className="bt-rt-input" value={rtSchedule} onChange={(e) => setRtSchedule(e.target.value)}>
+                  {scheduleOptions(rtSchedule).map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+                <textarea
+                  className="bt-rt-input"
+                  placeholder={agent ? `What ${agent.name} should do each run…` : 'What the agent should do each run…'}
+                  value={rtPrompt}
+                  onChange={(e) => setRtPrompt(e.target.value)}
+                  rows={4}
+                />
+                <div className="bt-rt-actions">
+                  <button type="button" className="bt-rt-btn" onClick={closeRoutineForm}>Cancel</button>
+                  <button
+                    className="bt-rt-btn primary"
+                    disabled={rtBusy || !rtPrompt.trim() || (!rtEditingId && !agent)}
+                    onClick={async () => {
+                      setRtBusy(true);
+                      try {
+                        if (rtEditingId) {
+                          await apiJson(`/api/routines/${encodeURIComponent(rtEditingId)}`, {
+                            method: 'PATCH',
+                            body: JSON.stringify({ name: rtName || 'Routine', schedule: rtSchedule, prompt: rtPrompt }),
+                          });
+                        } else {
+                          await apiJson('/api/routines', {
+                            method: 'POST',
+                            body: JSON.stringify({ name: rtName || 'Routine', agentId: agent?.id, schedule: rtSchedule, prompt: rtPrompt }),
+                          });
+                        }
+                        closeRoutineForm();
+                        reloadRoutines();
+                      } finally { setRtBusy(false); }
+                    }}
+                  >
+                    {rtEditingId ? 'Save' : agent ? `Add for ${agent.name}` : 'Pick an agent first'}
+                  </button>
                 </div>
-                <div className="bt-session-cap">Context {Math.round(frac * 100)}%{meta.compacting ? ' — regenerating to keep the thread alive' : ''}</div>
-              </>
+              </div>
             ) : null}
-          </div>
-        </section>
-      ) : null}
+            {routines.filter((r) => !agent || r.agentId === agent.id).map((r) => (
+              <div key={r.id} className={`bt-routine ${r.paused ? 'off' : 'on'}${rtEditingId === r.id ? ' editing' : ''}`}>
+                {r.paused ? <PauseCircle size={16} /> : <CheckCircle2 size={16} />}
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span className="bt-routine-name">{r.name}</span>
+                  <span className="bt-routine-sched" style={{ display: 'block' }}>{humanizeRoutine(r.schedule)}</span>
+                  {!agent ? <span className="bt-routine-sched" style={{ display: 'block' }}>→ {r.agentName}</span> : null}
+                  {r.paused ? <span className="bt-routine-paused" style={{ display: 'block' }}>Paused</span> : null}
+                  {runStatus[r.id] ? <span className="bt-routine-sched" style={{ display: 'block', color: runStatus[r.id].startsWith('Sent') ? 'var(--r-mint, #7ee0a9)' : runStatus[r.id].startsWith('Not run') || runStatus[r.id].startsWith('Failed') ? 'var(--r-rose)' : undefined }}>{runStatus[r.id]}</span> : null}
+                </span>
+                <span className="bt-rt-rowbtns">
+                  <button className="bt-iconbtn" title="Edit" aria-label={`Edit ${r.name}`}
+                    onClick={() => openEditRoutine(r)}>
+                    <Pencil size={13} />
+                  </button>
+                  <button className="bt-iconbtn" title="Run now" aria-label="Run now"
+                    onClick={() => {
+                      setRunStatus((m) => ({ ...m, [r.id]: 'Running…' }));
+                      void apiJson<{ ran: boolean; reason?: string; gated?: string; agent?: string }>(`/api/routines/${encodeURIComponent(r.id)}/run`, { method: 'POST' })
+                        .then((out) => {
+                          const text = out.gated ? `Checked, nothing new (${out.gated})` : out.ran ? `Sent to ${out.agent ?? 'the agent'}` : `Not run: ${out.reason ?? 'unknown'}`;
+                          setRunStatus((m) => ({ ...m, [r.id]: text }));
+                          reloadRoutines();
+                        })
+                        .catch((err: Error) => setRunStatus((m) => ({ ...m, [r.id]: `Failed: ${err.message}` })));
+                      window.setTimeout(() => setRunStatus((m) => { const { [r.id]: _gone, ...rest } = m; return rest; }), 12_000);
+                    }}>
+                    <Play size={13} />
+                  </button>
+                  <button className="bt-iconbtn" title={r.paused ? 'Resume' : 'Pause'} aria-label={r.paused ? 'Resume' : 'Pause'}
+                    onClick={() => { void apiJson(`/api/routines/${encodeURIComponent(r.id)}`, { method: 'PATCH', body: JSON.stringify({ paused: !r.paused }) }).then(reloadRoutines); }}>
+                    {r.paused ? <Play size={13} /> : <Pause size={13} />}
+                  </button>
+                  <button className="bt-iconbtn" title="Delete" aria-label="Delete routine"
+                    onClick={() => { if (window.confirm(`Delete routine "${r.name}"?`)) { void apiJson(`/api/routines/${encodeURIComponent(r.id)}`, { method: 'DELETE' }).then(reloadRoutines); } }}>
+                    <Trash2 size={13} />
+                  </button>
+                </span>
+              </div>
+            ))}
+            {!routines.length && !routineForm ? (
+              <div className="bt-pane-empty">{agent ? `No automations for ${agent.name} yet — + to schedule one.` : 'No automations yet.'}</div>
+            ) : null}
+          </section>
+
+          {agent ? (
+            <section className="bt-pane-sec">
+              <div className="bt-pane-title">Pinned from {agent.name}</div>
+              {messagePins.loadError && !visiblePins.length ? (
+                <div className="bt-pane-empty">Pins hid for a second — I’ll try again in a moment.</div>
+              ) : visiblePins.length ? visiblePins.map((p) => (
+                <div key={p.id} className="bt-msgpin">
+                  {p.blockId.startsWith('note-') ? (
+                    // An agent's own note (team_pin): there is no bubble to jump to.
+                    <div className="bt-msgpin-body" title="Pinned by the agent">
+                      <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty note'}</span>
+                    </div>
+                  ) : (
+                  <button
+                    type="button"
+                    className="bt-msgpin-body"
+                    title="Jump to this message"
+                    onClick={() => scrollToPinnedMessage(p.blockId)}
+                  >
+                    <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty bubble'}</span>
+                  </button>
+                  )}
+                  <button
+                    type="button"
+                    className="bt-iconbtn bt-msgpin-unpin"
+                    title="Unpin"
+                    aria-label="Unpin"
+                    onClick={() => { void messagePins.unpin(p.id); }}
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              )) : (
+                <div className="bt-msgpin-empty">
+                  <Pin size={16} className="bt-msgpin-idle" />
+                  <span>Nothing pocketed yet. Hover a bubble, tap pin, and I’ll hold it here.</span>
+                </div>
+              )}
+            </section>
+          ) : null}
+
+          <section className="bt-pane-sec">
+            <div className="bt-pane-title">
+              System cron
+              <button className="bt-iconbtn" onClick={onOpenForge} title="Manage in Forge" aria-label="Manage in Forge">
+                <Plus size={16} />
+              </button>
+            </div>
+            {jobs.length ? jobs.map((j) => (
+              <button key={j.id} className={`bt-routine ${j.status === 'active' ? 'on' : 'off'}`} onClick={onOpenForge} title="Open in Forge">
+                {j.status === 'active' ? <CheckCircle2 size={16} /> : <PauseCircle size={16} />}
+                <span>
+                  <span className="bt-routine-name">{j.name}</span>
+                  <span className="bt-routine-sched" style={{ display: 'block' }}>{humanizeCron(j.schedule)}</span>
+                  {j.status !== 'active' ? <span className="bt-routine-paused" style={{ display: 'block' }}>Paused</span> : null}
+                </span>
+              </button>
+            )) : (
+              <div className="bt-pane-empty">No routines yet. Forge can schedule one.</div>
+            )}
+          </section>
+
+          {meta ? (
+            <section className="bt-pane-sec">
+              <div className="bt-pane-title">Session</div>
+              <div className="bt-session">
+                <div className="bt-session-row"><span>Agent</span><b>{meta.agentLabel}</b></div>
+                {meta.model ? <div className="bt-session-row"><span>Model</span><b>{meta.model}</b></div> : null}
+                <div className="bt-session-row"><span>State</span><b>{meta.compacting ? 'Regenerating…' : statusLabel(meta.status)}</b></div>
+                {typeof frac === 'number' ? (
+                  <>
+                    <div className={`bt-meter${frac > 0.8 ? ' hot' : ''}`}>
+                      <i style={{ width: `${Math.min(100, Math.round(frac * 100))}%` }} />
+                    </div>
+                    <div className="bt-session-cap">Context {Math.round(frac * 100)}%{meta.compacting ? ' — regenerating to keep the thread alive' : ''}</div>
+                  </>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
+        </div>
+        {onOpenDesk && showMine && open ? <MyDeskPane limits={deskMode === 'both' ? { todos: 6, cards: 5 } : { todos: 20, cards: 14 }} onOpenDesk={onOpenDesk} /> : null}
+      </div>
     </aside>
   );
 }
