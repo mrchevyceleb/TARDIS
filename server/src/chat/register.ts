@@ -1737,8 +1737,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // clientMsgId that clears the client's queued state.
           logChatTurn(wsId, 'steer', steerCli, steerRepo, chatId, msg.text);
           ++turnGeneration;
+          // A person's message is never dropped for a boundary race: if the lane
+          // started another turn (a job wake, a handoff) between our boundary
+          // and the write, wait for the next boundary and send again.
           const nativeWindowClosed = (error: unknown) =>
-            /native steering window closed|must reach a safe boundary/i.test((error as Error).message || '');
+            /native steering window closed|must reach a safe boundary|waiting for the automation turn|still answering|steer channel closed/i.test((error as Error).message || '');
+          let boundaryRetries = 0;
           try {
             for (;;) {
               if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
@@ -1755,11 +1759,14 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 });
                 break;
               } catch (error) {
-                if (!nativeActiveSteer || !nativeWindowClosed(error)) throw error;
-                // The tool window closed between admission and stdin. Do not
-                // drop the first steer. Wait for the next window or turn end.
+                if (!nativeWindowClosed(error) || ++boundaryRetries > 1000) throw error;
+                // The tool window closed (or another turn started) between
+                // admission and stdin. Do not drop the message. Wait for the
+                // next window or turn end, then send again.
                 nativeActiveSteer = false;
+                let waited = false;
                 while (session && sessionHasActiveBoundary(session)) {
+                  waited = true;
                   const boundary = await waitForSteerOrTurnEnd(
                     session,
                     steerAborter.signal,
@@ -1785,6 +1792,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
                   safeSend({ type: 'turnEnd' });
                   return;
                 }
+                // Not busy yet the send still refused: give the lane a beat
+                // instead of spinning.
+                if (!waited) await new Promise((resolve) => setTimeout(resolve, 250));
               }
             }
           } catch (error) {

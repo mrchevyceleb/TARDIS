@@ -2326,7 +2326,8 @@ export function useChat(opts: {
       setBlocks((prev) => prev.map((block) => (
         block.kind === 'user'
         && (block.deliveryState === 'queued' || Boolean(block.clientMsgId && canceledIds.has(block.clientMsgId)))
-          ? { ...block, deliveryState: 'failed' as const }
+          // Stop holds these on the server for the next send: retrying would send them twice.
+          ? { ...block, deliveryState: 'failed' as const, noRetry: true }
           : block
       )));
     }
@@ -2388,6 +2389,17 @@ export function useChat(opts: {
     setStatus('streaming');
   };
 
+  /** One-tap retry for a bubble that reads "Not delivered": drop the failed
+   *  copy and send the same words again (queued if the agent is mid-step).
+   *  Messages with pictures are not retried here; their pixels are not kept. */
+  const retry = (clientMsgId: string) => {
+    const failed = blocks.find((block) => block.kind === 'user' && block.clientMsgId === clientMsgId && block.deliveryState === 'failed');
+    if (!failed || failed.kind !== 'user' || failed.noRetry || failed.imageCount || failed.images?.length) return;
+    setBlocks((prev) => prev.filter((block) => !(block.kind === 'user' && block.clientMsgId === clientMsgId)));
+    if (pendingSendRef.current || statusRef.current === 'streaming') steer(failed.text);
+    else send(failed.text);
+  };
+
   const react = (targetSeq: number, emoji: string) => {
     if (!repo || !isReactionEmoji(emoji) || !Number.isFinite(targetSeq) || targetSeq <= 0) return;
     const target = blocks.find((block) => block.kind === 'text' && block.seq === targetSeq);
@@ -2419,7 +2431,7 @@ export function useChat(opts: {
 
   return {
     chatId,
-    blocks: visibleBlocks, status, error, send, steer, react, freshStart, stop, reconnect, usage, serverBrain, automationBusy,
+    blocks: visibleBlocks, status, error, send, steer, retry, react, freshStart, stop, reconnect, usage, serverBrain, automationBusy,
     hydrating,
     turnStartedAt,
     backgroundWork,

@@ -19,7 +19,7 @@ import {
 } from '../reimagine/RoomViews';
 import { ROOM_NAMES } from '../../../data/roomNames';
 
-export function Conversation({ s, picker, repo }: ShellViewProps) {
+export function Conversation({ s, picker, repo, agent }: ShellViewProps) {
   const [counselOpen, setCounselOpen] = useState(false);
 
   return (
@@ -53,6 +53,8 @@ export function Conversation({ s, picker, repo }: ShellViewProps) {
                 workingSince={s.workingSince}
                 backgroundWork={s.backgroundWork}
                 onReact={s.react}
+                onRetry={s.retry}
+                agentName={agent}
               />
               {s.error ? (
                 <div className="chip" style={{ color: 'var(--amber)', borderColor: 'color-mix(in oklch, var(--amber) 40%, transparent)', background: 'color-mix(in oklch, var(--amber) 10%, transparent)' }}>
