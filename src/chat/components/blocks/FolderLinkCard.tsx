@@ -2,7 +2,7 @@ import { FolderOpen, FolderOutput, FolderTree } from 'lucide-react';
 import { useContext } from 'react';
 import { ProxyViewerContext } from '../../../hooks/useProxyViewer';
 import { useStudioFiles } from '../../../shell/studio/studioFiles';
-import { buildLinkUrls, canOpenOnThisPc, fileManagerName, normalizeWorkspacePath, openWorkspaceLink } from '../../utils/proxyLinks';
+import { canOpenOnThisPc, fileManagerName, inStudioShell, normalizeWorkspacePath, openWorkspaceLink } from '../../utils/proxyLinks';
 
 // In the desktop shell a plain click opens the folder in the PC's own file
 // manager (same as the Explorer button); when it is not synced to this PC, or
@@ -15,12 +15,12 @@ export function FolderLinkCard({ path, title }: { path: string; title?: string }
   const normalizedPath = normalizeWorkspacePath(path);
   const safePath = normalizedPath ?? path;
   const display = title || (safePath === '' ? 'ASSISTANT-HUB' : safePath.split('/').pop() || safePath);
-  const { windowsPath } = buildLinkUrls(safePath, 'folder');
   const onThisPc = normalizedPath !== null && canOpenOnThisPc(normalizedPath, 'folder');
 
   const showList = () => { if (normalizedPath !== null) viewer?.open({ source: 'folder', path: normalizedPath }); };
   const openPrimary = () => {
     if (normalizedPath === null) return;
+    if (studio && inStudioShell()) { studio.revealFolder(normalizedPath); return; }
     if (onThisPc) { openWorkspaceLink(normalizedPath, 'folder', showList); return; }
     if (studio) { studio.revealFolder(normalizedPath); return; }
     if (viewer) { showList(); return; }

@@ -1,5 +1,5 @@
 import { ArrowUp, Copy, ExternalLink, File as FileIcon, FileText, Folder, X } from 'lucide-react';
-import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Markdown } from '../chat/components/primitives/Markdown';
 import { apiJson } from '../data/api';
 import type { FileTreeNode, WorkspaceChildrenResponse, WorkspaceFileResponse } from '../data/types';
@@ -183,7 +183,10 @@ function ProxyViewerOverlay({
 /** A simple, closable file list for a workspace folder. Never leaves the app. */
 function FolderListing({ loaded }: { loaded: LoadedFolder }) {
   const viewer = useContext(ProxyViewerContext);
+  const listRef = useRef<HTMLDivElement>(null);
   const here = loaded.listing.path ?? loaded.request.path;
+  // Descending or going Up replaces the button that had focus: keep keyboard focus in the list.
+  useEffect(() => { listRef.current?.focus(); }, [here]);
   const parent = here.includes('/') ? here.slice(0, here.lastIndexOf('/')) : '';
   const rows: FileTreeNode[] = [...(loaded.listing.children ?? [])].sort((a, b) => (
     (a.type === b.type ? 0 : a.type === 'directory' ? -1 : 1) || a.name.localeCompare(b.name)
@@ -192,7 +195,7 @@ function FolderListing({ loaded }: { loaded: LoadedFolder }) {
     ? { source: 'folder', path: node.path }
     : { source: 'doc', path: node.path, title: node.name });
   return (
-    <div className="proxy-folder">
+    <div className="proxy-folder" ref={listRef} tabIndex={-1} role="group" aria-label={`Files in ${here || 'workspace'}`}>
       {here ? (
         <button type="button" className="proxy-folder-row proxy-folder-up" onClick={() => viewer?.open({ source: 'folder', path: parent })}>
           <ArrowUp size={15} />

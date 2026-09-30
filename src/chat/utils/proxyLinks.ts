@@ -247,6 +247,12 @@ export function fileManagerName(): string {
   return nativeShell()?.platform === 'win32' ? 'Explorer' : 'your file manager';
 }
 
+/** True inside the classic Studio IDE (/studio), which reveals folders in its
+ *  own file tree. The agent app never does. */
+export function inStudioShell(): boolean {
+  return typeof window !== 'undefined' && /^\/studio(\/|$)/.test(window.location.pathname);
+}
+
 export function openWorkspaceLink(relPath: string, kind: 'doc' | 'folder', onFolderFallback?: () => void): void {
   const shell = nativeShell();
   if (shell?.openWorkspacePath) {

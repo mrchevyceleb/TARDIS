@@ -7,6 +7,7 @@ import {
   annotateMachinePaths,
   annotateWorkspaceMentions,
   canOpenOnThisPc,
+  inStudioShell,
   openExternalHttpLink,
   openMachineLink,
   parseDeskHref,
@@ -92,7 +93,7 @@ function useWorkspaceTargetOpener(target: WorkspaceTarget | null): () => void {
 
     // A folder opens in the PC's file manager in the desktop shell, and in a
     // closable in-app list when it is not synced there.
-    if (kind === 'folder' && canOpenOnThisPc(path, 'folder')) {
+    if (kind === 'folder' && !(studio && inStudioShell()) && canOpenOnThisPc(path, 'folder')) {
       openWorkspaceLink(path, 'folder', () => viewer?.open({ source: 'folder', path }));
       return;
     }
