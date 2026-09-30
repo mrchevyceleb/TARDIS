@@ -550,7 +550,12 @@ function describeCard(c) {
 
 async function callTool(name, args, signal) {
   // The runner turns this call into a visible message in the thread; the tool itself only acknowledges.
-  if (name === 'reply_now' && REPLY_NOW_ENABLED) return 'Posted to the thread.';
+  if (name === 'reply_now' && REPLY_NOW_ENABLED) {
+    const text = typeof args.text === 'string' ? args.text.trim() : '';
+    if (!text) throw new Error('reply_now needs one or two sentences of text.');
+    if (text.length > 2000) throw new Error('reply_now is for one or two sentences; keep it short and call it again.');
+    return 'Posted to the thread.';
+  }
   if (name === 'content_ideas') {
     const query = `?brand=${encodeURIComponent(args.brand)}`;
     const [ideas, scanner] = await Promise.all([api(`/api/content/ideas${query}`, undefined, signal), api(`/api/content/scanner${query}`, undefined, signal)]);

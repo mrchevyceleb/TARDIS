@@ -1535,6 +1535,38 @@ class ClaudeSession {
     return this.replyWatch ??= new ReplyWatch(() => agentForChatId(this.chatId)?.id ?? this.chatId, this.cli);
   }
 
+  /** Tool-call ids already turned into a message, so a replayed event never posts twice. */
+  private readonly replyNowPosted = new Set<string>();
+  /** reply_now calls waiting to be posted right after the event that carried them. */
+  private replyNowQueue: Array<{ id: string; text: string; model?: string }> = [];
+
+  /** Note a reply_now call. A routine or job wake never speaks into the thread. */
+  private queueReplyNow(toolId: string, text: string, model?: string): void {
+    if (this.automationTurn || this.replyNowPosted.has(toolId)) return;
+    this.replyNowPosted.add(toolId);
+    this.replyNowQueue.push({ id: toolId, text, model });
+  }
+
+  /** Post queued reply_now calls as assistant text messages. Called straight after
+   *  the carrying event is emitted, so the thread reads call, then message, with
+   *  nothing in between. */
+  private flushReplyNow(): void {
+    if (!this.replyNowQueue.length) return;
+    const queued = this.replyNowQueue;
+    this.replyNowQueue = [];
+    if (this.disposed) return;
+    for (const { id, text, model } of queued) {
+      this.emit({
+        type: 'event',
+        event: {
+          type: 'assistant',
+          _replyNow: true,
+          message: { id: `reply_now_${id}`, role: 'assistant', model, content: [{ type: 'text', text }], stop_reason: 'tool_use' },
+        },
+      });
+    }
+  }
+
   /** The person's message has gone too long with no visible text: at this tool
    *  boundary (every tool call in flight has returned, so nothing is cancelled)
    *  end the turn and open a new one with a harness note asking the agent to say
@@ -1543,27 +1575,6 @@ class ClaudeSession {
    *  a background subagent runs (the interrupt would kill it). The nudge never
    *  touches lastBoundaryInterruptAt, so it cannot hold back a teammate's
    *  handoff, and it is spent once per person's message. */
-  /** Tool-call ids already turned into a message, so a replayed event never posts twice. */
-  private readonly replyNowPosted = new Set<string>();
-
-  /** Turn a reply_now call into an assistant text message in the thread. Emitted
-   *  after the tool_use event itself, so the thread reads call, then message. */
-  private postReplyNow(toolId: string, text: string, model?: string): void {
-    if (this.replyNowPosted.has(toolId)) return;
-    this.replyNowPosted.add(toolId);
-    setImmediate(() => {
-      if (this.disposed) return;
-      this.emit({
-        type: 'event',
-        event: {
-          type: 'assistant',
-          _replyNow: true,
-          message: { id: `reply_now_${toolId}`, role: 'assistant', model, content: [{ type: 'text', text }], stop_reason: 'tool_use' },
-        },
-      });
-    });
-  }
-
   private nudgeForReply(): void {
     try {
       const watch = this.watchReply();
@@ -1970,7 +1981,7 @@ class ClaudeSession {
               // A reply_now call is the agent speaking: it counts as visible text
               // for the reply watch, and becomes a real message in the thread.
               this.watchReply().noteText();
-              this.postReplyNow(block.id, posted, ev.message?.model);
+              this.queueReplyNow(block.id, posted, ev.message?.model);
             } else {
               this.watchReply().noteTool(block.id);
             }
@@ -2132,6 +2143,7 @@ class ClaudeSession {
     } else {
       this.emit({ type: 'event', event: ev });
     }
+    this.flushReplyNow();
     if ((ev?.type === 'assistant' && !syntheticApiError) || ev?.type === 'result') {
       this.streamTextBlocks.clear();
     }
