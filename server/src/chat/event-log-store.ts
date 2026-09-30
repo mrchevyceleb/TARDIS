@@ -431,9 +431,11 @@ export function loadEventLogSinceSync(
     // Whole lines only: a record still being appended has no newline yet, and
     // the live session's own buffer already carries it.
     let end = 0;
-    for (let probe = Math.min(size, 1024 * 1024); ; probe = Math.min(size, probe * 2)) {
-      const lastNewline = readRange(fd, size - probe, size).lastIndexOf(0x0a);
+    let searched = 0; // tail bytes already checked for a newline; each is read once
+    for (let probe = Math.min(size, 64 * 1024); ; probe = Math.min(size, probe * 2)) {
+      const lastNewline = readRange(fd, size - probe, size - searched).lastIndexOf(0x0a);
       if (lastNewline >= 0) { end = size - probe + lastNewline + 1; break; }
+      searched = probe;
       if (probe >= size || probe >= maxBytes) break;
     }
     if (end === 0) return { events: [], reachedSince: false };
