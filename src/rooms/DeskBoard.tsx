@@ -380,6 +380,13 @@ function ColumnFreshness({ column, title, cards, picked, onPick }: {
     // Quietest first, so the owner who needs a look leads the row.
     return [...byOwner.values()].filter((r) => Number.isFinite(r.latest)).sort((a, b) => a.latest - b.latest);
   }, [cards]);
+  // Ages and the warm/stale tones move with the clock, not only with data, so an
+  // idle open Desk does not stay visually fresh past the thresholds.
+  const [, setMinute] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setMinute((n) => n + 1), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
   if (column === 'done' || !rows.length) return null;
   const warms = column === 'in_progress' || column === 'waiting';
   const shown = rows.slice(0, FRESH_MAX_CHIPS);
