@@ -686,7 +686,10 @@ function cancelPendingSteers(key: string): PendingSteer[] {
 
 // Rebuild once from durable events to recover provider message boundaries and
 // update/answer metadata missing from older flattened browser snapshots.
-const CHAT_CACHE_VERSION = 'v9';
+// v10: a device that was away longer than the server's replay window was caught
+// up from the tail only, so its snapshot has a silent hole (and its cursor sits
+// at head, so nothing will ever fill it). Drop those copies once.
+const CHAT_CACHE_VERSION = 'v10';
 
 function blocksStorageKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
   // Browser snapshots are disposable; transcript history remains on the server.
@@ -765,6 +768,23 @@ function blocksForStorage(blocks: ChatBlock[]): ChatBlock[] {
     });
 }
 
+// Snapshots from older cache versions are never read again. Without a sweep each
+// bump leaves a full extra copy of every conversation in localStorage, and a
+// quota failure then keeps the device cold-attaching on every load.
+let obsoleteSnapshotsSwept = false;
+function sweepObsoleteSnapshots(): void {
+  if (obsoleteSnapshotsSwept) return;
+  obsoleteSnapshotsSwept = true;
+  try {
+    const prefix = 'rivendell:chat-blocks:';
+    const current = `${prefix}${CHAT_CACHE_VERSION}:`;
+    for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(prefix) && !key.startsWith(current)) localStorage.removeItem(key);
+    }
+  } catch { /* best effort: a leftover old copy is only wasted space */ }
+}
+
 function writeStoredState(
   cli: CompanionId,
   repoPath: string,
@@ -785,6 +805,7 @@ function writeStoredState(
     // One atomic localStorage value: another tab can never observe filtered
     // blocks paired with a cursor from a different replay state.
     localStorage.setItem(key, JSON.stringify(snapshot));
+    sweepObsoleteSnapshots();
   } catch (err) {
     // A transient write failure (quota, serialization) must NEVER destroy the
     // existing cache. Keep whatever was last stored; a missing snapshot asks
