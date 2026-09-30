@@ -119,7 +119,7 @@ function dueSlot(clock: { day: string; minute: number }): string | null {
 /** Newest of the card's own update, its column move, and its latest comment. */
 function lastActivityMs(card: DeskCard): number {
   let latest = -Infinity;
-  for (const iso of [card.updatedAt, card.columnSince, ...card.comments.map((c) => c.at)]) {
+  for (const iso of [card.updatedAt, card.columnSince, card.createdAt, ...card.comments.map((c) => c.at)]) {
     const ts = Date.parse(iso);
     if (Number.isFinite(ts) && ts > latest) latest = ts;
   }
@@ -141,11 +141,12 @@ function findingFor(agent: HygieneAgent, desk: DeskData, minutes: number, nowMs:
   const stale: StaleLine[] = [
     ...inProgress
       .map((card) => ({ card, kind: 'in_progress' as const, lastMs: lastActivityMs(card) }))
-      .filter((line) => nowMs - line.lastMs > IN_PROGRESS_STALE_MS)
+      .filter((line) => Number.isFinite(line.lastMs) && nowMs - line.lastMs >= IN_PROGRESS_STALE_MS)
       .sort((a, b) => a.lastMs - b.lastMs),
     ...own
       .filter((c) => c.column === 'waiting' && !backed.has(c.id))
       .map((card) => ({ card, kind: 'waiting' as const, lastMs: lastActivityMs(card) }))
+      .filter((line) => Number.isFinite(line.lastMs))
       .sort((a, b) => a.lastMs - b.lastMs),
   ];
   const noCardMinutes = minutes >= NO_CARD_MINUTES && inProgress.length === 0 ? minutes : null;
@@ -176,7 +177,7 @@ function composeMessage(finding: Finding, ownerName: string, nowMs: number): str
     blocks.push([STALE_HEAD, ...lines].join('\n'));
   }
   if (finding.noCardMinutes !== null) {
-    blocks.push(`You have had live turns for ${finding.noCardMinutes} minutes today and own no In progress card. Create or reuse one (board_cards first) so the Desk shows what you are on.`);
+    blocks.push(`You have had live turns for ${finding.noCardMinutes} minutes today and own no In progress card. If any of that was task work, create or reuse a card (board_cards first) so the Desk shows what you are on. If it was only conversation, no card is needed.`);
   }
   return blocks.join('\n\n');
 }
@@ -322,7 +323,12 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
     dirty = true;
   }
 
-  const agents = await deps.listAgents();
+  // Never the owner (should one ever appear in the roster), and never an agent
+  // the operator listed in RIVENDELL_DESK_HYGIENE_SKIP (comma-separated ids,
+  // for lanes that only run routines or conversation).
+  const skip = new Set((process.env.RIVENDELL_DESK_HYGIENE_SKIP ?? '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean));
+  const owner = DESK_OWNER_NAME.trim().toLowerCase();
+  const agents = (await deps.listAgents()).filter((a) => a.id !== 'owner' && a.name.trim().toLowerCase() !== owner && !skip.has(a.id.toLowerCase()));
   const known = new Set(agents.map((a) => a.id));
   for (const id of await deps.liveAgentIds(agents)) {
     if (!known.has(id)) continue;
