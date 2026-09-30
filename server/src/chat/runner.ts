@@ -38,7 +38,7 @@ import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, syntheticApiErrorRea
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { PiSession, usePiHarness } from './pi-runner.ts';
-import { isPersonMessage, REPLY_NUDGE_NOTE, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
+import { isPersonMessage, REPLY_NUDGE_NOTE, REPLY_NUDGE_NOTE_TOOL, replyNowText, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
 
@@ -419,6 +419,12 @@ const PEER_BOUNDARY_INTERRUPT_GAP_MS = 60_000;
 
 /** Prepended to the turn that follows a boundary interrupt. */
 const PAUSED_FOR_MESSAGE_NOTE = '<rivendell-steer>Your previous turn was paused right after a tool call finished, so the message below reaches you as a normal message. Answer it first. Then, unless it changes the plan, carry on with what you were doing; the transcript above shows where you stopped.</rivendell-steer>';
+/** The same note for a lane that has the reply_now tool: Claude answers a person's
+ *  message in a thinking summary and goes straight to tools unless the reply has a tool to ride. */
+const PAUSED_FOR_MESSAGE_NOTE_TOOL = PAUSED_FOR_MESSAGE_NOTE.replace(
+  'Answer it first.',
+  'Answer it first: if you will use tools before you finish, call reply_now with your answer as your first action.',
+);
 class ClaudeSession {
   readonly key: string;
   /** Durable-history key. Equals `key` for ordinary lanes; for an agent home
@@ -949,7 +955,7 @@ class ClaudeSession {
     const providerCut = startsNewTurn && !continuing && !replyNudge ? providerCutGuidance(fallbackHistory) : '';
     // The turn before this one was ended at a tool boundary to make room for
     // this message. Say so, so the model answers first and then carries on.
-    const pausedNote = startsNewTurn && !continuing && !replyNudge && !automationRequest && this.pausedForMessage ? PAUSED_FOR_MESSAGE_NOTE : '';
+    const pausedNote = startsNewTurn && !continuing && !replyNudge && !automationRequest && this.pausedForMessage ? (agentForChatId(this.chatId) ? PAUSED_FOR_MESSAGE_NOTE_TOOL : PAUSED_FOR_MESSAGE_NOTE) : '';
     if (sendAborted()) {
       abandonUnsentTurn();
       return;
@@ -1537,6 +1543,27 @@ class ClaudeSession {
    *  a background subagent runs (the interrupt would kill it). The nudge never
    *  touches lastBoundaryInterruptAt, so it cannot hold back a teammate's
    *  handoff, and it is spent once per person's message. */
+  /** Tool-call ids already turned into a message, so a replayed event never posts twice. */
+  private readonly replyNowPosted = new Set<string>();
+
+  /** Turn a reply_now call into an assistant text message in the thread. Emitted
+   *  after the tool_use event itself, so the thread reads call, then message. */
+  private postReplyNow(toolId: string, text: string, model?: string): void {
+    if (this.replyNowPosted.has(toolId)) return;
+    this.replyNowPosted.add(toolId);
+    setImmediate(() => {
+      if (this.disposed) return;
+      this.emit({
+        type: 'event',
+        event: {
+          type: 'assistant',
+          _replyNow: true,
+          message: { id: `reply_now_${toolId}`, role: 'assistant', model, content: [{ type: 'text', text }], stop_reason: 'tool_use' },
+        },
+      });
+    });
+  }
+
   private nudgeForReply(): void {
     try {
       const watch = this.watchReply();
@@ -1568,7 +1595,7 @@ class ClaudeSession {
     // A message that reached the lane meanwhile (queued, or already in a turn)
     // takes it instead, and is answered from its own turn.
     if (this.turnStartedAt !== null || this.disposed || humanQueued(this.logKey)) return;
-    await this.send(REPLY_NUDGE_NOTE, undefined, { replyNudge: nudge });
+    await this.send(agentForChatId(this.chatId) ? REPLY_NUDGE_NOTE_TOOL : REPLY_NUDGE_NOTE, undefined, { replyNudge: nudge });
   }
 
   sessionId(): string | null {
@@ -1938,7 +1965,15 @@ class ClaudeSession {
         for (const block of ev.message.content) {
           if (block?.type === 'tool_use' && typeof block.id === 'string') {
             this.activeToolIds.add(block.id);
-            this.watchReply().noteTool(block.id);
+            const posted = replyNowText(block);
+            if (posted) {
+              // A reply_now call is the agent speaking: it counts as visible text
+              // for the reply watch, and becomes a real message in the thread.
+              this.watchReply().noteText();
+              this.postReplyNow(block.id, posted, ev.message?.model);
+            } else {
+              this.watchReply().noteTool(block.id);
+            }
           } else if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
             this.watchReply().noteText();
           }
