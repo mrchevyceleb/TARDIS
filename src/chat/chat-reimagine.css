@@ -222,6 +222,8 @@
   animation: rc-sheen 2.4s linear infinite;
 }
 .rc .active-turn-star { width: 14px; height: 14px; flex: none; }
+.rc .active-turn-label.active-turn-step { max-width: 42ch; }
+.bot-app .rc .active-turn-label.active-turn-step, .rc-mobile .active-turn-label.active-turn-step { max-width: 28ch; }
 .rc .active-turn-label { min-width: 15ch; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 600; }
 .bot-app .rc .active-turn-label, .rc-mobile .active-turn-label { max-width: 18ch; }
 .rc .active-turn-dots { display: inline-flex; align-items: center; gap: 3px; }

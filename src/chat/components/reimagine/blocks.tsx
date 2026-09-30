@@ -43,7 +43,17 @@ export function DayMark({ label }: { label: string }) {
   );
 }
 
-function ActiveTurnIndicator({ since, phrases }: { since?: number; phrases: string[] }) {
+function stepClock(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/** What the agent is doing right now, in plain words: the running tool, or
+ *  thinking, or what it is waiting on. `activityKey` changes whenever output
+ *  lands, which restarts the quiet-for timer; a running tool times itself. */
+function ActiveTurnIndicator({ since, phrases, activity, toolSince, waiting, activityKey }: { since?: number; phrases: string[]; activity?: string; toolSince?: number; waiting?: string; activityKey?: string }) {
+  const changedAtRef = useRef({ key: activityKey, at: Date.now() });
+  if (changedAtRef.current.key !== activityKey) changedAtRef.current = { key: activityKey, at: Date.now() };
   const startedAtRef = useRef(since && since > 0 ? since : 0);
   if (since && since > 0 && (startedAtRef.current === 0 || since < startedAtRef.current)) {
     startedAtRef.current = since;
@@ -56,14 +66,18 @@ function ActiveTurnIndicator({ since, phrases }: { since?: number; phrases: stri
   }, []);
   const elapsed = hasKnownStart ? Math.max(0, now - startedAtRef.current) : 0;
   const seconds = Math.floor(elapsed / 1000);
-  const label = phrases[Math.floor(elapsed / 2800) % phrases.length] ?? 'Working';
+  const stepMs = toolSince ? Math.max(0, now - toolSince) : Math.max(0, now - changedAtRef.current.at);
+  const stepText = activity
+    ? `${waiting ? `Waiting on ${waiting}` : activity} · ${toolSince ? '' : 'quiet '}${stepClock(stepMs)}`
+    : null;
+  const label = stepText ?? phrases[Math.floor(elapsed / 2800) % phrases.length] ?? 'Working';
   const clock = hasKnownStart
     ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
     : 'live';
   return (
     <div className="active-turn" role="status" aria-label="Agent is still working">
       <span className="vortex active-turn-star" aria-hidden="true" />
-      <span key={label} className="active-turn-label bt-fade" aria-hidden="true">{label}</span>
+      <span key={stepText ? 'step' : label} className={`active-turn-label bt-fade${stepText ? ' active-turn-step' : ''}`} title={stepText ? 'What the agent is doing right now' : undefined} aria-hidden="true">{label}</span>
       <span className="active-turn-dots" aria-hidden="true"><i /><i /><i /></span>
       <span className="active-turn-time" aria-hidden="true">{clock}</span>
     </div>
@@ -592,7 +606,7 @@ function RunningMeta({ since }: { since: number }) {
 //    into ONE expandable card instead of N stacked pods eating the feed.
 //    Collapsed: "8 tool calls · done" plus a one-line name summary. Expanded:
 //    the individual ToolCards, each still expandable itself.
-function ToolsCard({ blocks }: { blocks: ToolBlock[] }) {
+function ToolsCard({ blocks, turnLive = false }: { blocks: ToolBlock[]; turnLive?: boolean }) {
   const [open, setOpen] = useState(false);
   const running = blocks.some((b) => b.running);
   const counts = new Map<string, number>();
@@ -601,7 +615,8 @@ function ToolsCard({ blocks }: { blocks: ToolBlock[] }) {
   const sameName = counts.size === 1 ? blocks[0].tool : null;
   const title = sameName ?? `${blocks.length} tool calls`;
   const oldestRunning = blocks.find((b) => b.running);
-  const doneMeta = `${blocks.length} call${blocks.length === 1 ? '' : 's'} · done`;
+  // While the turn is still going, "done" reads as the whole turn: it only means this batch of calls.
+  const doneMeta = `${blocks.length} call${blocks.length === 1 ? '' : 's'} · ${turnLive ? 'batch done' : 'done'}`;
   return (
     <div className={`tool tools-run${running ? ' running' : ' done'}${open ? ' open' : ''}`}>
       <button type="button" className="tool-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
@@ -727,6 +742,7 @@ function RoutineResultBubble({
 function ElrondGroup({
   blocks,
   streaming,
+  turnLive = false,
   mobile,
   collapseSteps = false,
   pin,
@@ -734,6 +750,8 @@ function ElrondGroup({
 }: {
   blocks: AssistantBlock[];
   streaming: boolean;
+  /** This is the latest assistant group and the turn is still running. */
+  turnLive?: boolean;
   mobile: boolean;
   collapseSteps?: boolean;
   pin?: ThreadPin;
@@ -786,7 +804,7 @@ function ElrondGroup({
           case 'tool': {
             if (toolRunSkip.has(b.id)) return null;
             const run = toolRuns.get(b.id);
-            if (run) return <ToolsCard key={b.id} blocks={run} />;
+            if (run) return <ToolsCard key={b.id} blocks={run} turnLive={turnLive} />;
             return <ToolCard key={b.id} block={b} />;
           }
           case 'text': {
@@ -1016,6 +1034,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     coalescedGroups.push(g);
   }
 
+  const lastElrondGroup = [...coalescedGroups].reverse().find((g) => g.type === 'elrond');
   const nodes: ReactNode[] = [];
   let pendingAutomation = false;
   let hideThinking = false;
@@ -1103,15 +1122,36 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         />,
       );
     } else {
-      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} />);
+      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} turnLive={streaming && g === lastElrondGroup} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} />);
     }
   }
 
-  if (streaming && !hasCurrentTerminalFailure && !hideThinking && !pendingAutomation && !suppressTyping) {
+  // A silent routine stays silent, but the moment the current turn has work a
+  // person can see (tool cards, prose), it needs its proof-of-life row too: a
+  // turn that a person's message joined must never look dead.
+  const currentTurnVisible = currentBlocks.some((b) => b.kind === 'tool' || (b.kind === 'text' && b.text.trim().length > 0));
+  const runningTool = [...currentBlocks].reverse().find((b): b is ToolBlock => b.kind === 'tool' && b.running);
+  const lastCurrent = currentBlocks[currentBlocks.length - 1];
+  const openText = currentBlocks.some((b) => b.kind === 'text' && b.open && b.text.trim().length > 0);
+  const liveActivity = runningTool
+    ? `Running ${runningTool.tool.replace(/^mcp__[^_]+(?:_[^_]+)*__/, '')}`
+    : openText ? 'Writing' : currentBlocks.length > 0 ? 'Thinking' : undefined;
+  const activityKey = `${currentBlocks.length}|${lastCurrent?.id ?? ''}|${lastCurrent && 'text' in lastCurrent ? lastCurrent.text.length : ''}|${runningTool?.id ?? ''}`;
+  if (streaming && !hasCurrentTerminalFailure && (currentTurnVisible || (!hideThinking && !pendingAutomation && !suppressTyping))) {
     // Never make the user infer liveness from a Stop button. Keep one animated
     // proof-of-life row visible for the ENTIRE turn, even after user-facing
-    // prose or completed tool cards have appeared.
-    nodes.push(<ActiveTurnIndicator key="active-turn" since={workingSince} phrases={phrases} />);
+    // prose or completed tool cards have appeared, saying what it is doing now.
+    nodes.push(
+      <ActiveTurnIndicator
+        key="active-turn"
+        since={workingSince}
+        phrases={phrases}
+        activity={liveActivity}
+        toolSince={runningTool?.ts}
+        waiting={backgroundWork.length > 0 ? (backgroundWork.length === 1 ? backgroundWork[0] : `${backgroundWork.length} background tasks`) : undefined}
+        activityKey={activityKey}
+      />,
+    );
   } else if (!latestQueued && status === 'ready' && backgroundWork.length > 0) {
     // The turn ended but a background helper or command is still running.
     // "Turn complete" here read as "nothing is happening".
