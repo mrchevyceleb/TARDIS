@@ -35,8 +35,9 @@ import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
-import { cancelProviderContinue, emptyTurnOrigin, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
+import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { PiSession, usePiHarness } from './pi-runner.ts';
+import { isPersonMessage, REPLY_NUDGE_NOTE, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
 
@@ -500,6 +501,12 @@ class ClaudeSession {
    *  the reset cannot decrement waiters that registered after it. */
   private boundaryGeneration = 0;
   private lastBoundaryInterruptAt = 0;
+  /** Has the person's message got visible text yet; see replyNudge.ts. Lazy,
+   *  like stopWatch. */
+  private replyWatch?: ReplyWatch;
+  /** The in-flight interrupt is a reply nudge's. Anything else that joins it
+   *  (a Stop, a waiting message) cancels the nudge's follow-up turn. */
+  private nudgeInterrupt?: { cancelled: boolean };
   /** The last turn was ended that way. The next turn tells the model so it
    *  answers first and then picks its work back up. */
   private pausedForMessage = false;
@@ -848,7 +855,7 @@ class ClaudeSession {
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
-  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts } = {}): Promise<void> {
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
     // Every caller (human, teammate, routine) shares this admission barrier.
     // A read-only MCP control warmup can never reject or absorb a real message.
@@ -862,6 +869,10 @@ class ClaudeSession {
     // holds the lane, that turn carries the cut guidance instead.
     const continuing = opts.providerContinue;
     if (continuing && !startsNewTurn) return;
+    // The reply nudge, like the continue, only ever opens a turn: a message that
+    // took the lane first carries its own watch.
+    const replyNudge = opts.replyNudge;
+    if (replyNudge && !startsNewTurn) return;
     // Concurrent stdin is never implicit. Register/teamBus must opt into the
     // native path after observing a tool window, and we revalidate that window
     // here in the same event-loop slice as the eventual stdin.write. This shuts
@@ -894,6 +905,9 @@ class ClaudeSession {
         ? { peers: [...continuing.origin.peers], human: continuing.origin.human, automation: continuing.origin.automation }
         : emptyTurnOrigin();
       this.turnIsContinuation = Boolean(continuing);
+      // The nudge is still the person's turn, and their one nudge is spent.
+      if (replyNudge) this.turnOrigin.human = true;
+      this.watchReply().reset();
       this.zaiTurnProviderFailed = false;
       this.activeToolIds.clear();
       this.clearBoundaryRequest();
@@ -917,19 +931,19 @@ class ClaudeSession {
     };
     const historyThroughSeq = this.latestSeq();
     const fallbackHistory = this.eventLog.slice();
-    const wantSeed = this.seedWindowOnNextTurn;
+    const wantSeed = this.seedWindowOnNextTurn && !replyNudge;
     const seed = wantSeed
       ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
       : '';
     // Background work a kill ended since the last message: tell the agent once,
     // on the next turn, so it stops waiting for a notification that can't come.
-    const backgroundEnded = startsNewTurn ? backgroundEndedGuidance(fallbackHistory) : '';
+    const backgroundEnded = startsNewTurn && !replyNudge ? backgroundEndedGuidance(fallbackHistory) : '';
     // A message that reaches a thread whose last turn a provider switch cut
     // off (before, or instead of, the automatic continue) finishes that work.
-    const providerCut = startsNewTurn && !continuing ? providerCutGuidance(fallbackHistory) : '';
+    const providerCut = startsNewTurn && !continuing && !replyNudge ? providerCutGuidance(fallbackHistory) : '';
     // The turn before this one was ended at a tool boundary to make room for
     // this message. Say so, so the model answers first and then carries on.
-    const pausedNote = startsNewTurn && !continuing && !automationRequest && this.pausedForMessage ? PAUSED_FOR_MESSAGE_NOTE : '';
+    const pausedNote = startsNewTurn && !continuing && !replyNudge && !automationRequest && this.pausedForMessage ? PAUSED_FOR_MESSAGE_NOTE : '';
     if (sendAborted()) {
       abandonUnsentTurn();
       return;
@@ -1013,9 +1027,13 @@ class ClaudeSession {
           ts: Date.now(),
         },
       });
+    } else if (replyNudge) {
+      this.emit({ type: 'turnStart' });
+      this.emit(replyNudgeEvent(replyNudge));
     } else if (opts.peerFrom) {
       const origin = this.turnOrigin ??= emptyTurnOrigin();
       noteTurnPeer(origin, opts.peerFrom, opts.peerFromRole, opts.peerText ?? text);
+      if (isPersonMessage(opts)) this.watchReply().arm();
       if (startsNewTurn && opts.peerFromRole === 'automation') origin.automation = true;
       if (startsNewTurn) this.emit({ type: 'turnStart' });
       this.emit({
@@ -1052,6 +1070,7 @@ class ClaudeSession {
       noteUserTurn(this.logKey); // forever-thread compaction cadence (monotonic)
       noteAgentLane(this.chatId, this.cli); // historical lane diagnostics
       (this.turnOrigin ??= emptyTurnOrigin()).human = true;
+      this.watchReply().arm();
     }
     if (visionNote) {
       console.log(`[chat zai] vision adapter: ${visionNote}`);
@@ -1182,7 +1201,10 @@ class ClaudeSession {
    * and then accepts the next user message in the same process. Fall back to a
    * process kill only if the control channel itself fails or never settles. */
   interrupt(reason = 'interrupt'): Promise<boolean> {
-    if (this.interruptInFlight) return this.interruptInFlight;
+    if (this.interruptInFlight) {
+      if (this.nudgeInterrupt && reason !== 'reply-nudge') this.nudgeInterrupt.cancelled = true;
+      return this.interruptInFlight;
+    }
     if (this.turnStartedAt === null) return Promise.resolve(this.isAlive());
 
     // An image may still be in attachment persistence or the text-only vision
@@ -1495,6 +1517,52 @@ class ClaudeSession {
     this.boundaryWaiters = 0;
     this.boundaryHumanWaiters = 0;
     this.boundaryGeneration += 1;
+  }
+
+  private watchReply(): ReplyWatch {
+    return this.replyWatch ??= new ReplyWatch(() => agentForChatId(this.chatId)?.id ?? this.chatId, this.cli);
+  }
+
+  /** The person's message has gone too long with no visible text: at this tool
+   *  boundary (every tool call in flight has returned, so nothing is cancelled)
+   *  end the turn and open a new one with a harness note asking the agent to say
+   *  where it is. Skipped, and tried again at the next boundary, while a message
+   *  is waiting for the lane (it takes the next turn and starts its own watch) or
+   *  a background subagent runs (the interrupt would kill it). The nudge never
+   *  touches lastBoundaryInterruptAt, so it cannot hold back a teammate's
+   *  handoff, and it is spent once per person's message. */
+  private nudgeForReply(): void {
+    try {
+      const watch = this.watchReply();
+      const blocked = () => this.boundaryWaiters > 0 || Boolean(this.interruptInFlight) || this.hasInterruptHazard() || this.activeToolIds.size > 0;
+      if (!watch.due() || blocked()) return;
+      const turn = this.turnStartedAt;
+      // After this event has been emitted, so the tool_result reaches the
+      // transcript ahead of the interrupt marker.
+      setImmediate(() => {
+        try {
+          if (this.turnStartedAt === null || this.turnStartedAt !== turn || this.disposed || blocked() || !watch.waiting()) return;
+          const nudge = watch.claim();
+          if (!nudge) return;
+          const pending = this.nudgeInterrupt = { cancelled: false };
+          void this.interrupt('reply-nudge')
+            .then((kept) => kept && !pending.cancelled ? this.deliverReplyNudge(nudge) : undefined)
+            .catch((err) => console.warn(`[reply-nudge] ${this.cli} delivery failed:`, (err as Error).message))
+            .finally(() => { if (this.nudgeInterrupt === pending) this.nudgeInterrupt = undefined; });
+        } catch (err) {
+          console.warn(`[reply-nudge] ${this.cli} check failed:`, (err as Error).message);
+        }
+      });
+    } catch (err) {
+      console.warn(`[reply-nudge] ${this.cli} check failed:`, (err as Error).message);
+    }
+  }
+
+  private async deliverReplyNudge(nudge: ReplyNudge): Promise<void> {
+    // A message that reached the lane meanwhile (queued, or already in a turn)
+    // takes it instead, and is answered from its own turn.
+    if (this.turnStartedAt !== null || this.disposed || humanQueued(this.logKey)) return;
+    await this.send(REPLY_NUDGE_NOTE, undefined, { replyNudge: nudge });
   }
 
   sessionId(): string | null {
@@ -1827,6 +1895,7 @@ class ClaudeSession {
       this.automationTurn = false;
       this.turnOrigin = emptyTurnOrigin();
       this.turnIsContinuation = false;
+      this.watchReply().reset();
       this.zaiTurnProviderFailed = false;
       this.activeToolIds.clear();
       this.clearBoundaryRequest();
@@ -1854,11 +1923,18 @@ class ClaudeSession {
         const block = ev.event.content_block;
         if (block?.type === 'tool_use' && typeof block.id === 'string') {
           this.activeToolIds.add(block.id);
+          this.watchReply().noteTool(block.id);
         }
+      } else if (ev?.type === 'stream_event' && ev.event?.type === 'content_block_delta') {
+        // Visible text only: a thinking delta never reaches the person.
+        if (ev.event.delta?.type === 'text_delta' && ev.event.delta.text?.trim()) this.watchReply().noteText();
       } else if (ev?.type === 'assistant' && Array.isArray(ev.message?.content)) {
         for (const block of ev.message.content) {
           if (block?.type === 'tool_use' && typeof block.id === 'string') {
             this.activeToolIds.add(block.id);
+            this.watchReply().noteTool(block.id);
+          } else if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+            this.watchReply().noteText();
           }
         }
       } else if (ev?.type === 'user' && Array.isArray(ev.message?.content)) {
@@ -1867,6 +1943,7 @@ class ClaudeSession {
             this.activeToolIds.delete(block.tool_use_id);
           }
         }
+        if (this.activeToolIds.size === 0) this.nudgeForReply();
         if (this.boundaryInterruptWanted && this.activeToolIds.size === 0) {
           const now = Date.now();
           // Claude's interrupt stops background subagents, and a person who

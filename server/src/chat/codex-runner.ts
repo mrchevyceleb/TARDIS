@@ -27,6 +27,7 @@ import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { THREAD_VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
+import { isPersonMessage, REPLY_NUDGE_NOTE, replyNudgeEvent, ReplyWatch } from './replyNudge.ts';
 
 const CODEX_BIN = resolveCodexBin();
 console.log(`[chat codex] binary: ${CODEX_BIN}`);
@@ -265,6 +266,8 @@ export class CodexSession {
   /** True after app-server announces turn/started and until turn/completed. */
   private nativeSteerReady = false;
   private nativeSteerWaiters = new Map<string, NativeSteerWaiter>();
+  /** Has the person's message got visible text yet; see replyNudge.ts. */
+  private readonly replyWatch: ReplyWatch;
   /** Set by shutdown() before the SIGTERM so the in-flight send()'s exit
    *  handler knows not to emit a stray result/turnEnd — the steer/stop
    *  caller is driving the next state itself. */
@@ -288,6 +291,7 @@ export class CodexSession {
     this.cli = opts.cli ?? 'codex';
     this.key = keyOf(this.cli, cwd, chatId);
     this.logKey = logKeyFor(this.cli, cwd, chatId);
+    this.replyWatch = new ReplyWatch(() => agentForChatId(chatId)?.id ?? chatId, this.cli);
     this.threadId = threadId;
     this.recoverContextOnNextTurn = opts.recoverContextOnNextTurn === true;
 
@@ -543,6 +547,7 @@ export class CodexSession {
             ts: Date.now(),
           },
         });
+        if (isPersonMessage(opts)) this.replyWatch.arm();
         if (opts.peerDeliveryId) {
           this.emit({
             type: 'event',
@@ -563,6 +568,7 @@ export class CodexSession {
         });
         noteUserTurn(this.logKey);
         noteAgentLane(this.chatId, this.cli);
+        this.replyWatch.arm();
       }
       return;
     }
@@ -574,6 +580,7 @@ export class CodexSession {
     this.turnEffort = codexEffort;
     this.busy = true;
     this.cancellationEmitted = false;
+    if (!opts.suppressEcho) this.replyWatch.reset();
     const recoverContextThisTurn = this.recoverContextOnNextTurn;
     const historyThroughSeq = this.latestSeq();
     const fallbackHistory = this.eventLog.slice();
@@ -596,6 +603,7 @@ export class CodexSession {
           ts: Date.now(),
         },
       });
+      if (isPersonMessage(opts)) this.replyWatch.arm();
     } else if (!opts.suppressEcho) {
       let attachments: Array<{ id: string; mediaType: string }>;
       try {
@@ -624,6 +632,7 @@ export class CodexSession {
       }
       noteUserTurn(this.logKey); // compaction cadence (monotonic)
       noteAgentLane(this.chatId, this.cli); // historical lane diagnostics
+      this.replyWatch.arm();
     }
 
     try {
@@ -826,6 +835,7 @@ export class CodexSession {
           this.nativeSteerReady = false;
         }
         this.handleCodexEvent(ev, turnState);
+        this.watchReply(ev);
       } catch {
         // Non-JSON line — ignore.
       }
@@ -1071,6 +1081,36 @@ export class CodexSession {
   /** Forward an event already in claude stream-json shape. */
   private emitClaudeEvent(event: any): void {
     this.emit({ type: 'event', event });
+  }
+
+  /** The person's message needs visible text (an agent_message), and a turn
+   *  that has run tools without one gets the harness note as a native turn/steer,
+   *  which cancels nothing. Checked as each tool item completes. */
+  private watchReply(ev: any): void {
+    try {
+      const item = ev?.item;
+      if (typeof item?.type !== 'string') return;
+      if (item.type === 'agent_message') {
+        if (ev.type === 'item.completed' && typeof item.text === 'string' && item.text.trim()) this.replyWatch.noteText();
+        return;
+      }
+      if (item.type === 'reasoning' || item.type === 'error') return;
+      if (ev.type === 'item.started') {
+        this.replyWatch.noteTool(String(item.id));
+        return;
+      }
+      if (ev.type !== 'item.completed' || !this.canAcceptNativeHumanSteer()) return;
+      const nudge = this.replyWatch.claim();
+      if (!nudge) return;
+      this.sendNativeSteer(REPLY_NUDGE_NOTE, randomUUID())
+        .then(() => this.emit(replyNudgeEvent(nudge)))
+        .catch((err) => {
+          this.replyWatch.release(nudge);
+          console.warn('[reply-nudge] codex steer failed:', (err as Error).message);
+        });
+    } catch (err) {
+      console.warn('[reply-nudge] codex check failed:', (err as Error).message);
+    }
   }
 
   private handleCodexEvent(
