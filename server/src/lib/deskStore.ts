@@ -17,6 +17,20 @@ export type DeskPriority = (typeof DESK_PRIORITIES)[number];
 
 export type DeskActor = { kind: 'owner' | 'agent'; id: string; name: string };
 
+/** The owner's one-tap (or typed) answer to a Needs-you item. */
+export type DeskAnswer = {
+  choice?: string;
+  text?: string;
+  at: string;
+  /** sent: the owning agent was told. failed: not yet (retried for a while,
+   *  and a crash between saving and telling lands here too). none: the
+   *  owner's own item, nobody to tell. */
+  delivery: 'sent' | 'failed' | 'none';
+  /** Set while the owning agent is being told. One left behind by a crash
+   *  means the outcome is unknown, so it is never sent again (at most once). */
+  sendingAt?: string;
+};
+
 export type DeskTodo = {
   id: string;
   title: string;
@@ -32,6 +46,9 @@ export type DeskTodo = {
   status: 'open' | 'done';
   completedAt?: string;
   cardId?: string;
+  /** Pick-one options for a one-tap answer (the Desk offers Yes / No when absent). */
+  choices?: string[];
+  answer?: DeskAnswer;
 };
 
 export type DeskComment = { id: string; author: DeskActor; text: string; at: string };
@@ -67,6 +84,9 @@ export const DESK_LIMITS = {
   commentsPerCard: 400,
   todos: 2000,
   cards: 2000,
+  choices: 4,
+  choice: 40,
+  answerText: 1000,
 } as const;
 
 /** Thrown for bad input or a missing record; routes map `status` to HTTP. */
@@ -162,6 +182,38 @@ function normalizeActor(value: unknown): DeskActor | null {
   return { kind: raw.kind === 'owner' ? 'owner' : 'agent', id: oneLine(raw.id, 80) || name.toLowerCase(), name };
 }
 
+/** Case-insensitive dedupe that keeps the first spelling seen. */
+function pushUnique(list: string[], item: string): void {
+  const key = item.toLowerCase();
+  if (!list.some((c) => c.toLowerCase() === key)) list.push(item);
+}
+
+/** On-disk repair: keep what fits, never throw. */
+function cleanChoices(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+    const choice = oneLine(item, DESK_LIMITS.choice);
+    if (choice) pushUnique(out, choice);
+  }
+  return out.slice(0, DESK_LIMITS.choices);
+}
+
+function normalizeAnswer(value: unknown, fallback: string): DeskAnswer | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const choice = oneLine(raw.choice, DESK_LIMITS.choice);
+  const text = clip(raw.text, DESK_LIMITS.answerText);
+  if (!choice && !text) return null;
+  // Unknown delivery reads as failed so the answer is retried, not lost.
+  const delivery = raw.delivery === 'sent' || raw.delivery === 'none' ? raw.delivery : 'failed';
+  const answer: DeskAnswer = { at: isoOr(raw.at, fallback), delivery };
+  if (choice) answer.choice = choice;
+  if (text) answer.text = text;
+  if (typeof raw.sendingAt === 'string' && Number.isFinite(Date.parse(raw.sendingAt))) answer.sendingAt = raw.sendingAt;
+  return answer;
+}
+
 function normalizeTodo(value: unknown, now: string): DeskTodo | null {
   if (!value || typeof value !== 'object') return null;
   const raw = value as Record<string, unknown>;
@@ -187,6 +239,10 @@ function normalizeTodo(value: unknown, now: string): DeskTodo | null {
   if (todo.status === 'done') todo.completedAt = isoOr(raw.completedAt, todo.updatedAt);
   const cardId = oneLine(raw.cardId, 80);
   if (cardId) todo.cardId = cardId;
+  const choices = cleanChoices(raw.choices);
+  if (choices.length) todo.choices = choices;
+  const answer = normalizeAnswer(raw.answer, todo.updatedAt);
+  if (answer) todo.answer = answer;
   return todo;
 }
 
@@ -314,10 +370,10 @@ const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
 
 /** Atomic replace. Windows can briefly refuse to replace a file another
  *  process has open; retry the rename rather than ever writing in place. */
-async function replaceFile(tmp: string): Promise<void> {
+async function replaceFile(tmp: string, target = DESK_FILE): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      await rename(tmp, DESK_FILE);
+      await rename(tmp, target);
       return;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code ?? '';
@@ -354,18 +410,44 @@ async function save(data: DeskData): Promise<void> {
   cache = { data, mtimeMs: info.mtimeMs, size: info.size, repaired: false };
 }
 
+/** The same temp-file, fsync and rename write, for Desk side files
+ *  (the notifier's state) that must never be left half written. */
+export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  const handle = await open(tmp, 'wx', 0o600);
+  let handleOpen = true;
+  try {
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handleOpen = false;
+    await replaceFile(tmp, path);
+  } catch (error) {
+    if (handleOpen) await handle.close().catch(() => {});
+    await rm(tmp, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
 function withLock<T>(fn: () => Promise<T>): Promise<T> {
   const run = chain.then(fn, fn);
   chain = run.catch(() => {});
   return run;
 }
 
+/** Returned from a `mutate` callback that changed nothing: skip the write. */
+class Unchanged<T> {
+  constructor(readonly value: T) {}
+}
+
 /** Read-modify-write under the lock. `fn` edits a private copy; the file is
  *  only written (and rev bumped) when `fn` returns without throwing. */
-function mutate<T>(fn: (data: DeskData, now: string) => T): Promise<T> {
+function mutate<T>(fn: (data: DeskData, now: string) => T | Unchanged<T>): Promise<T> {
   return withLock(async () => {
     const data = structuredClone(await load());
     const result = fn(data, new Date().toISOString());
+    if (result instanceof Unchanged) return result.value;
     data.rev += 1;
     await save(data);
     return result;
@@ -437,6 +519,25 @@ function requireLinks(value: unknown): string[] {
   return out;
 }
 
+/** Agent input: strict, so a too-long option comes back as an error the
+ *  agent can fix instead of a clipped button. Empty clears. */
+function requireChoices(value: unknown): string[] {
+  if (value === null || value === undefined || value === '') return [];
+  if (!Array.isArray(value)) throw new DeskError(400, 'choices must be a list of short strings');
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') throw new DeskError(400, 'choices must be a list of short strings');
+    const choice = item.replace(/\s+/g, ' ').trim();
+    if (!choice) continue;
+    if (choice.length > DESK_LIMITS.choice) {
+      throw new DeskError(400, `each choice must be ${DESK_LIMITS.choice} characters or fewer ("${choice.slice(0, 20)}..." is ${choice.length})`);
+    }
+    pushUnique(out, choice);
+  }
+  if (out.length > DESK_LIMITS.choices) throw new DeskError(400, `at most ${DESK_LIMITS.choices} choices`);
+  return out;
+}
+
 function requireCardRef(data: DeskData, value: unknown): string {
   const cardId = oneLine(value, 80);
   if (cardId && !data.cards.some((c) => c.id === cardId)) throw new DeskError(400, `No board card with id ${cardId}.`);
@@ -489,7 +590,7 @@ function placeCard(data: DeskData, card: DeskCard, index: number | undefined): v
 // ---- todos --------------------------------------------------------------------
 
 export type TodoInput = {
-  title?: unknown; detail?: unknown; due?: unknown; priority?: unknown; link?: unknown; cardId?: unknown; status?: unknown;
+  title?: unknown; detail?: unknown; due?: unknown; priority?: unknown; link?: unknown; cardId?: unknown; status?: unknown; choices?: unknown;
 };
 
 export function createTodo(input: TodoInput, from: DeskActor): Promise<DeskTodo> {
@@ -511,6 +612,8 @@ export function createTodo(input: TodoInput, from: DeskActor): Promise<DeskTodo>
     if (link) todo.link = link;
     const cardId = requireCardRef(data, input.cardId);
     if (cardId) todo.cardId = cardId;
+    const choices = requireChoices(input.choices);
+    if (choices.length) todo.choices = choices;
     pruneTodos(data);
     data.todos.unshift(todo);
     return todo;
@@ -538,6 +641,10 @@ export function updateTodo(id: string, input: TodoInput): Promise<DeskTodo> {
       const cardId = requireCardRef(data, input.cardId);
       if (cardId) todo.cardId = cardId; else delete todo.cardId;
     }
+    if (input.choices !== undefined) {
+      const choices = requireChoices(input.choices);
+      if (choices.length) todo.choices = choices; else delete todo.choices;
+    }
     if (input.status !== undefined) {
       if (input.status !== 'open' && input.status !== 'done') throw new DeskError(400, 'status must be open or done');
       applyTodoStatus(todo, input.status, now);
@@ -551,7 +658,78 @@ function applyTodoStatus(todo: DeskTodo, status: 'open' | 'done', now: string): 
   if (status === todo.status) return;
   todo.status = status;
   if (status === 'done') todo.completedAt = now;
-  else delete todo.completedAt;
+  else {
+    delete todo.completedAt;
+    // Reopened means "ask me again": a stale answer would block the next one.
+    delete todo.answer;
+  }
+}
+
+export type AnswerInput = { choice?: unknown; text?: unknown };
+
+/** Save the owner's answer and close the item in one locked write, so a
+ *  double tap lands once (the second call gets `duplicate`). Delivery starts
+ *  as failed whenever an agent should hear it; the caller flips it to sent. */
+export type AnswerResult = { todo: DeskTodo; card?: DeskCard; duplicate: boolean };
+
+export function answerTodo(id: string, input: AnswerInput): Promise<AnswerResult> {
+  return mutate<AnswerResult>((data, now) => {
+    const todo = findTodo(data, id);
+    const card = todo.cardId ? data.cards.find((c) => c.id === todo.cardId) : undefined;
+    if (todo.answer) return new Unchanged({ todo, card, duplicate: true });
+    // Resolved some other way (the agent completed it) while this screen was stale.
+    if (todo.status !== 'open') throw new DeskError(409, 'This item was already resolved, so there is nothing to answer.');
+    for (const key of ['choice', 'text'] as const) {
+      const value = input[key];
+      if (value !== undefined && value !== null && typeof value !== 'string') throw new DeskError(400, `${key} must be a string`);
+    }
+    const wanted = typeof input.choice === 'string' ? input.choice.replace(/\s+/g, ' ').trim() : '';
+    const text = typeof input.text === 'string' ? input.text.replace(/\r\n?/g, '\n').trim() : '';
+    if (!wanted && !text) throw new DeskError(400, 'choice or text is required');
+    if (text.length > DESK_LIMITS.answerText) throw new DeskError(400, `text must be ${DESK_LIMITS.answerText} characters or fewer`);
+    let choice = '';
+    if (wanted) {
+      const options = todo.choices?.length ? todo.choices : ['Yes', 'No'];
+      choice = options.find((o) => o.toLowerCase() === wanted.toLowerCase()) ?? '';
+      if (!choice) throw new DeskError(400, `choice must be one of ${options.map((o) => JSON.stringify(o)).join(', ')}`);
+    }
+    const tellSomeone = todo.from.kind === 'agent' || card?.owner.kind === 'agent';
+    const answer: DeskAnswer = { at: now, delivery: tellSomeone ? 'failed' : 'none' };
+    if (choice) answer.choice = choice;
+    if (text) answer.text = text;
+    todo.answer = answer;
+    applyTodoStatus(todo, 'done', now);
+    todo.updatedAt = now;
+    return { todo, card, duplicate: false };
+  });
+}
+
+/** Claim an answer for delivery. Only a failed answer can be claimed, and the
+ *  claim is on disk before anyone is told, so two callers at once cannot both
+ *  send. A claim older than `staleMs` with no outcome means the server stopped
+ *  mid-send; it can be taken over, because telling the agent twice is harmless
+ *  and never telling them is not. */
+export function claimAnswerDelivery(id: string, staleMs = 5 * 60_000): Promise<DeskTodo | null> {
+  return mutate<DeskTodo | null>((data, now) => {
+    const todo = data.todos.find((t) => t.id === id);
+    if (todo?.answer?.delivery !== 'failed') return new Unchanged(null);
+    const claimedAt = todo.answer.sendingAt ? Date.parse(todo.answer.sendingAt) : NaN;
+    if (Number.isFinite(claimedAt) && Date.parse(now) - claimedAt < staleMs) return new Unchanged(null);
+    todo.answer.sendingAt = now;
+    return todo;
+  });
+}
+
+/** Settle a claimed delivery: sent, or failed (released for a retry). */
+export function setAnswerDelivery(id: string, delivery: 'sent' | 'failed'): Promise<DeskTodo | null> {
+  return mutate<DeskTodo | null>((data) => {
+    const todo = data.todos.find((t) => t.id === id);
+    if (!todo?.answer || todo.answer.delivery === 'none') return new Unchanged(todo ?? null);
+    if (todo.answer.delivery === delivery && !todo.answer.sendingAt) return new Unchanged(todo);
+    todo.answer.delivery = delivery;
+    delete todo.answer.sendingAt;
+    return todo;
+  });
 }
 
 export function setTodoStatus(id: string, status: 'open' | 'done'): Promise<DeskTodo> {

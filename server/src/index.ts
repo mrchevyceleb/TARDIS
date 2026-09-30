@@ -19,7 +19,8 @@ import { jobsRouter } from './routes/jobs.ts';
 import { routinesRouter } from './routes/routines.ts';
 import { messagePinsRouter } from './routes/messagePins.ts';
 import { railLayoutRouter } from './routes/railLayout.ts';
-import { deskRouter } from './routes/desk.ts';
+import { deliverDeskAnswer, deskRouter } from './routes/desk.ts';
+import { startDeskNotifier } from './lib/deskNotify.ts';
 import { registerVoiceCalls } from './voice/grokCall.ts';
 import { registerDeviceBridge } from './devices/bridge.ts';
 import { voicePreviewRouter } from './voice/preview.ts';
@@ -174,6 +175,8 @@ registerDeviceBridge(server);
 startRoutineScheduler(); // agent-scoped routine scheduler (30s tick)
 startJobWatchScheduler(); // background job watches (10s tick): pid/file/command → agent wake
 startJobScheduler(); // job_start jobs (5s tick): exit records → agent job-result
+// Needs-you phone alerts and digests, plus answer delivery retries (60s tick).
+if (DESK_ROOM_ENABLED) startDeskNotifier({ retryAnswer: (id) => deliverDeskAnswer(id) });
 registerScribeSocket(server);
 startWorkerQueue();
 startWorkspaceWatcher();
