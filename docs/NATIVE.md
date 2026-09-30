@@ -82,7 +82,7 @@ The desktop app owns the local side of the workspace, so agent links open real f
 
 **Full desktop control** is also available on Windows and GNOME X11: agents
 can see monitors and operate native apps with mouse and keyboard through the
-same outbound link. The Computer section above the composer selects the target.
+same outbound link. The Computer chip in the chat header selects the target.
 The machine owner can enable **Ship → Automatic Computer Control for This
 Server** to let agents work without approval popups, pinned to that server.
 Otherwise a native warning grants five minutes of access. The floating Stop

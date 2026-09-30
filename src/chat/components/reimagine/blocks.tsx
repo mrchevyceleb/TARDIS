@@ -14,6 +14,8 @@ import { DocLinkCard } from '../blocks/DocLinkCard';
 import { FolderLinkCard } from '../blocks/FolderLinkCard';
 import { ChevronDown, StarSigil } from './icons';
 import { isAutomationPeer, isNoopToken, shouldHideAutomationTurn } from '../../utils/routineNoise';
+import { JobResultCard } from '../jobs/JobResultCard';
+import { isJobResultPeer } from '../jobs/format';
 import { BRAND, REGEN_QUOTES, THINKING_PHRASES, TIMEY_WIMEY } from '../../../theme/voice';
 
 export function timeLabel(ts: number): string {
@@ -69,14 +71,16 @@ function ActiveTurnIndicator({ since, phrases, activity, toolSince, writing = fa
   const quietMs = Math.max(0, now - changedAtRef.current.at);
   // Each state says only what is true of it: a running tool times itself, prose
   // being written has no timer, and "quiet" is time since anything last landed.
-  // Background work is named only once the agent has gone quiet.
+  // What it is waiting on (a background job) is named only once the agent has gone quiet.
   let stepText: string | null = null;
   let spoken = '';
   if (activity) {
     if (toolSince) { stepText = `${activity} · ${stepClock(now - toolSince)}`; spoken = activity; }
     else if (writing) { stepText = activity; spoken = activity; }
     else {
-      stepText = `${activity} · quiet ${stepClock(quietMs)}${waiting && quietMs >= 8000 ? ` · waiting on ${waiting}` : ''}`;
+      // The wait comes before the quiet clock: on a phone the label ellipsizes at the end, and what
+      // it is waiting on matters more than how long it has been quiet.
+      stepText = waiting && quietMs >= 8000 ? `${activity} · waiting on ${waiting} · quiet ${stepClock(quietMs)}` : `${activity} · quiet ${stepClock(quietMs)}`;
       spoken = waiting && quietMs >= 8000 ? `${activity}, waiting on ${waiting}` : activity;
     }
   }
@@ -90,17 +94,6 @@ function ActiveTurnIndicator({ since, phrases, activity, toolSince, writing = fa
       <span key={stepText ? 'step' : label} className={`active-turn-label bt-fade${stepText ? ' active-turn-step' : ''}`} title={stepText ?? undefined} aria-hidden="true">{label}</span>
       <span className="active-turn-dots" aria-hidden="true"><i /><i /><i /></span>
       <span className="active-turn-time" aria-hidden="true">{clock}</span>
-    </div>
-  );
-}
-
-function BackgroundWorkIndicator({ tasks }: { tasks: string[] }) {
-  const label = tasks.length === 1 ? tasks[0] : `${tasks.length} background tasks`;
-  return (
-    <div className="active-turn" role="status" aria-label="Still working in the background">
-      <span className="vortex active-turn-star" aria-hidden="true" />
-      <span className="active-turn-label">Working in the background: {label}</span>
-      <span className="active-turn-dots" aria-hidden="true"><i /><i /><i /></span>
     </div>
   );
 }
@@ -335,7 +328,7 @@ function peerPreview(text: string): string {
   return `${oneLine.slice(0, PEER_PREVIEW_CHARS).trimEnd()}…`;
 }
 
-function PeerBubble({
+function PeerMessageBubble({
   block,
   responseBlocks,
   responseActive,
@@ -449,6 +442,13 @@ function PeerBubble({
     ) : null}
     </>
   );
+}
+
+/** A background job's result arrives as an automation peer message. It gets a
+ *  compact status card, never a person's message bubble. */
+function PeerBubble(props: React.ComponentProps<typeof PeerMessageBubble>) {
+  if (isJobResultPeer(props.block.fromRole, props.block.text)) return <JobResultCard block={props.block} />;
+  return <PeerMessageBubble {...props} />;
 }
 
 // Regeneration: same agent, new face. Rolling compaction and a mid-turn
@@ -891,18 +891,25 @@ export type ChatThreadProps = {
   suppressTyping?: boolean;
   /** Wall-clock start of the active turn, used for visible proof-of-life time. */
   workingSince?: number;
-  /** Background shells/subagents still running after the turn ended. */
-  backgroundWork?: string[];
   /** Agent name for the queued-message wording. */
   agentName?: string;
   /** One-tap resend of a bubble that read "Not delivered". */
   onRetry?: (clientMsgId: string) => void;
+  /** The model's own background shells/subagents still running after the turn
+   *  ended. The jobs pill in the chat header lists them, so the feed only stops
+   *  saying "Turn complete" while they run. */
+  backgroundWork?: string[];
+  /** Everything running behind the chat, by name (background jobs, then the
+   *  model's own background work): the live line says it is waiting on these
+   *  once the agent goes quiet. The header pill counts the same list, so the
+   *  two never disagree. */
+  waitingOn?: string[];
 };
 
 // Renders the full feed: day marks on day changes, user bubbles, per-turn
 // assistant groups (tool cards + streaming prose), and the live-turn pill
 // while a turn is live but no content has landed yet.
-export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, suppressTyping = false, workingSince, backgroundWork = [], agentName, onRetry }: ChatThreadProps) {
+export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, suppressTyping = false, workingSince, backgroundWork = [], waitingOn = [], agentName, onRetry }: ChatThreadProps) {
   const streaming = status === 'streaming';
   // The indicator lives until something VISIBLE lands in the CURRENT turn.
   // Looking across the whole transcript made any historical terminal-error or
@@ -1058,12 +1065,15 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   let pendingAutomation = false;
   let hideThinking = false;
   for (const g of coalescedGroups) {
+    // A job result is an automation wake (the agent's reply to it follows the
+    // same quiet-hiding rules) but the result itself shows, as a status card.
+    const jobResult = g.type === 'peer' && isJobResultPeer(g.block.fromRole, g.block.text);
     if (g.type === 'peer' && isAutomationPeer(g.block.from, g.block.fromRole, g.block.text)) {
       pendingAutomation = true;
       hideThinking = true;
-      continue;
+      if (!jobResult) continue;
     }
-    if (g.type === 'user' || g.type === 'compact' || g.type === 'restart' || g.type === 'terminal-error' || g.type === 'switch' || g.type === 'background' || g.type === 'peer') {
+    if (!jobResult && (g.type === 'user' || g.type === 'compact' || g.type === 'restart' || g.type === 'terminal-error' || g.type === 'switch' || g.type === 'background' || g.type === 'peer')) {
       pendingAutomation = false;
       hideThinking = false;
     }
@@ -1160,6 +1170,9 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     // Never make the user infer liveness from a Stop button. Keep one animated
     // proof-of-life row visible for the ENTIRE turn, even after user-facing
     // prose or completed tool cards have appeared, saying what it is doing now.
+    // Once quiet it says what it is waiting on: a lone job by name, several as
+    // a count. That is the very list the header pill counts (N jobs running),
+    // so the line and the pill never disagree.
     nodes.push(
       <ActiveTurnIndicator
         key="active-turn"
@@ -1168,14 +1181,13 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         activity={liveActivity}
         toolSince={runningTool?.ts}
         writing={openText}
-        waiting={backgroundWork.length > 0 ? (backgroundWork.length === 1 ? backgroundWork[0] : `${backgroundWork.length} background tasks`) : undefined}
+        waiting={waitingOn.length > 0 ? (waitingOn.length === 1 ? waitingOn[0] : `${waitingOn.length} jobs`) : undefined}
         activityKey={activityKey}
       />,
     );
   } else if (!latestQueued && status === 'ready' && backgroundWork.length > 0) {
-    // The turn ended but a background helper or command is still running.
-    // "Turn complete" here read as "nothing is happening".
-    nodes.push(<BackgroundWorkIndicator key="background-work" tasks={backgroundWork} />);
+    // Nothing to add: the jobs pill in the header shows what is still
+    // running, and "Turn complete" here would read as "nothing is happening".
   } else if (!latestQueued && status === 'ready' && hasAssistantAfterLastUser && !hasCurrentTerminalFailure) {
     // Absence of animation must mean something explicit. This permanent,
     // low-emphasis terminal marker distinguishes "finished" from "stalled".

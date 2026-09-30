@@ -49,6 +49,8 @@ import { OTHER_GROUP_ID, OTHER_GROUP_NAME } from './railGroups';
 import { useRailGroups } from './useRailGroups';
 import { agentMark, DISC_INK, agentColor, agentAvatarUrl, sameChatId, CHAT_COLORS, chatColorOf, type Agent, type AgentFlagPatch, type ChatColor } from './agents';
 import { useLive } from '../chat/hooks/useLive';
+import { useJobsSummary } from '../chat/hooks/useJobs';
+import { RailJobsBadge } from '../chat/components/jobs/RailJobsBadge';
 import type { HistoryItem } from './history';
 import { NativeOpenHelper } from '../components/NativeOpenHelper';
 import { ROOM_NAMES } from '../data/roomNames';
@@ -480,6 +482,10 @@ export function BotRail(props: BotRailProps) {
     }
     return set;
   }, [live, props.agents, props.hubRepo]);
+  // Running background jobs per agent (one request for the whole rail). A job
+  // is not a turn: an agent on jobs is busy but free to talk, so it gets its
+  // own outlined badge and never the working lamp.
+  const jobsByAgent = useJobsSummary();
 
   // Named, collapsible groups (layout + sync live in useRailGroups). Group
   // mode replaces the flat list unless a search is running.
@@ -618,11 +624,14 @@ export function BotRail(props: BotRailProps) {
         rows: listed,
         pinned: g.agents.length - listed.length,
         working: listed.filter((r) => busyAgents.has(r.a.id)).length,
+        // Every listed row wearing a jobs badge. Independent of "working": an
+        // agent mid-turn can be on jobs too, and the header must not hide that.
+        jobs: listed.filter((r) => jobsByAgent.has(r.a.id)).length,
         unread: listed.reduce((sum, r) => sum + (r.a.muted ? 0 : r.a.unread ?? 0), 0),
       };
       // "Other" only earns a header when someone is actually listed in it.
     }).filter((sec) => !sec.g.isOther || sec.rows.length > 0);
-  }, [groupsOn, rows, railGroups.groups, busyAgents]);
+  }, [groupsOn, rows, railGroups.groups, busyAgents, jobsByAgent]);
   const realGroupCount = railGroups.groups.filter((g) => !g.isOther).length;
 
   const overGroup = (next: GroupDrop | null) => setGroupDrop((prev) => (
@@ -663,6 +672,7 @@ export function BotRail(props: BotRailProps) {
     if (r.kind === 'agent') {
       const a = r.a;
       const isActive = props.activeChat && sameChatId(props.activeChat.chatId, a.home);
+      const onJobs = jobsByAgent.get(a.id);
       // Group mode marks the landing line from `groupDrop`; the flat list from `dropBefore`.
       const landing = slot && dragId && dragId !== a.id && groupDrop && !groupDrop.head && groupDrop.group === slot.group ? groupDrop : null;
       const dropAbove = slot ? landing?.before === a.id : dropBefore === a.id && dragId && dragId !== a.id;
@@ -709,6 +719,7 @@ export function BotRail(props: BotRailProps) {
               <span className="bt-conv-title">
                 {a.name} <span className="bt-role-chip">{a.role}</span>
               </span>
+              {onJobs ? <RailJobsBadge running={onJobs.running} latest={onJobs.latest} latestLine={onJobs.latestLine} /> : null}
               {a.muted ? <span className="bt-conv-mute" title="Notifications muted"><BellOff size={13} /></span> : a.unread ? <span className="bt-unread" title={`${a.unread} waiting`}>{a.unread > 9 ? '9+' : a.unread}</span> : null}
               {r.item ? <span className="bt-conv-day" title={`${new Date(r.item.updatedAt).toLocaleString()} · ${TIMEY_WIMEY}`}>{dayStamp(r.item.updatedAt)}</span> : null}
               <span
@@ -794,6 +805,7 @@ export function BotRail(props: BotRailProps) {
             {pins.map((a, index) => {
               const isActive = props.activeChat && sameChatId(props.activeChat.chatId, a.home);
               const url = agentAvatarUrl(a);
+              const onJobs = jobsByAgent.get(a.id);
               const dropHere = pinDrag && pinDrag !== a.id;
               const dropLeft = dropHere && pinDropBefore === a.id;
               const dropRight = dropHere && pinDropBefore === PINS_END && index === pins.length - 1;
@@ -830,6 +842,7 @@ export function BotRail(props: BotRailProps) {
                   </span>
                   <span className="bt-pin-name">{a.name}</span>
                   <span className="bt-pin-role">{a.role}</span>
+                  {onJobs ? <RailJobsBadge running={onJobs.running} latest={onJobs.latest} latestLine={onJobs.latestLine} /> : null}
                   {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
                 </button>
               );
@@ -847,6 +860,7 @@ export function BotRail(props: BotRailProps) {
                 count={sec.rows.length}
                 pinned={sec.pinned}
                 working={sec.working}
+                jobs={sec.jobs}
                 unread={sec.unread}
                 collapsed={sec.g.collapsed}
                 first={i === 0}

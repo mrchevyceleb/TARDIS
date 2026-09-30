@@ -389,7 +389,12 @@ function checkWatch(watch: JobWatch, now: number): string | null {
  *  the model-only boilerplate or the host log path. The model still gets the
  *  full text. The chat UI turns this into a job result card. */
 export function visibleWakeText(text: string): string {
-  return text.split('\n').filter((line) => !/^(?:Full log: |Background job (?:result|wake) from )/.test(line)).join('\n');
+  // Only the generated trailer goes: the boilerplate line, then the log path
+  // above it. Job output that happens to start the same way stays.
+  const lines = text.split('\n');
+  if (/^Background job (?:result|wake) from /.test(lines[lines.length - 1] ?? '')) lines.pop();
+  if (/^Full log: /.test(lines[lines.length - 1] ?? '')) lines.pop();
+  return lines.join('\n');
 }
 
 /** One resolution → one wake, then the watch is removed. On delivery failure
