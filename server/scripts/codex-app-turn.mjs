@@ -159,6 +159,7 @@ function handleNotification(message) {
   }
   if (method === 'thread/tokenUsage/updated') {
     lastUsage = normalizeUsage(params.tokenUsage) ?? lastUsage;
+    if (lastUsage) writeEvent({ type: 'rivendell.context_usage', usage: lastUsage });
     return;
   }
   if (method === 'error') {

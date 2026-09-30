@@ -15,7 +15,8 @@ import { getSessionId, setSessionId, setSessionSelection } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession, activeCodexSessions, publishCodexExternalEvent } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions, publishBananaExternalEvent } from './banana-runner.ts';
 import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
-import { maybeAutoCompact, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
+import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
+import { CONTEXT_TOKEN_BUDGET, contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { shouldSkipEngineResume } from './threadWindow.ts';
 import { isAgentThread, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
@@ -436,6 +437,8 @@ class ClaudeSession {
   readonly cwd: string;
   readonly chatId: string;
   private child: ChildProcessByStdio<Writable, Readable, Readable>;
+  private contextMaintenance: Promise<void> | null = null;
+  private contextRotated = false;
   private stdoutBuf = '';
   private stderrBuf = '';
   private listeners = new Set<(e: SeqEvent) => void>();
@@ -698,6 +701,7 @@ class ClaudeSession {
       : cli === 'zai' ? zaiEnv(this.spawnModel, zaiCredential!)
       : forcedAccount ? accountEnvForAccount(forcedAccount, cwd) : accountEnv(cwd);
     if (cli !== 'xai' && cli !== 'zai') assertClaudeSubscription(spawnEnv, cwd);
+    if (cli === 'claude' || cli === 'assistant') spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CONTEXT_TOKEN_BUDGET);
     this.child = spawn('claude', args, {
       cwd,
       env: spawnEnv,
@@ -869,6 +873,12 @@ class ClaudeSession {
    *  peer_message instead of _user_echo and don't tick compaction. */
   async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
+    if (this.contextMaintenance) await this.contextMaintenance;
+    if (opts.signal?.aborted) return;
+    if (this.contextRotated) {
+      const next = await getOrCreateSession({ cli: this.cli, repoPath: this.cwd, chatId: this.chatId, model: this.spawnModel, effort: this.spawnEffort });
+      return next.send(text, images, opts);
+    }
     // Every caller (human, teammate, routine) shares this admission barrier.
     // A read-only MCP control warmup can never reject or absorb a real message.
     if (this.warmupPromise) await this.warmupPromise.catch(() => {});
@@ -1342,7 +1352,7 @@ class ClaudeSession {
 
   /** True while this session is actively processing a turn (between user send and result event). */
   isBusy(): boolean {
-    return this.turnStartedAt !== null;
+    return this.turnStartedAt !== null || Boolean(this.contextMaintenance);
   }
 
   /** Plain descriptions of the background work still running in this process. */
@@ -1841,6 +1851,28 @@ class ClaudeSession {
   }
 
   /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
+  private async rotateContextAtBoundary(): Promise<void> {
+    if (!contextRotationDue(this.logKey) || this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) return;
+    const refreshed = await refreshCompactForRotation({
+      key: this.logKey, cli: this.cli, chatId: this.chatId, events: this.eventLog,
+      isBusy: () => this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork(),
+      emit: (ev) => this.emit(ev as SessionEvent), rotate: () => false,
+    });
+    if (!refreshed || this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) return;
+    await setSessionId(this.cli, this.cwd, '', this.chatId);
+    if (this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) {
+      if (!this.disposed && this.currentSessionId) await setSessionId(this.cli, this.cwd, this.currentSessionId, this.chatId);
+      return;
+    }
+    bankRotation(this.logKey);
+    recordContextRotation(this.logKey);
+    this.contextRotated = true;
+    this.shutdown('context-budget');
+  }
+
+  awaitContextMaintenance(): Promise<void> { return this.contextMaintenance ?? Promise.resolve(); }
+
+  /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
   private async maybeCompact(): Promise<void> {
     try {
       await maybeAutoCompact({
@@ -2079,6 +2111,11 @@ class ClaudeSession {
     }
 
     this.trackStreamText(ev);
+    if (this.cli === 'claude' || this.cli === 'assistant') {
+      const usage = ev?.type === 'assistant' ? ev.message?.usage
+        : ev?.type === 'stream_event' && ev.event?.type === 'message_start' ? ev.event.message?.usage : undefined;
+      recordContextUsage(this.logKey, 'claude', usage);
+    }
     const syntheticApiError = isSyntheticApiErrorEvent(ev);
     if (syntheticApiError) {
       this.syntheticApiErrorSeen = true;
@@ -2216,6 +2253,23 @@ class ClaudeSession {
       this.preparingTurnAborter = null;
       this.turnPromptSubmitted = false;
       this.userInterruptPending = false;
+      const seeded = this.pendingSeedAck;
+      const resultFailed = ev.is_error === true || typeof ev.api_error_status === 'number';
+      const failed = seeded && resultFailed;
+      if (seeded) this.pendingSeedAck = false;
+      if (failed) this.seedWindowOnNextTurn = true;
+      if (!resultFailed) this.persistAppliedSelection();
+      const rotationDue = !resultFailed && (this.cli === 'claude' || this.cli === 'assistant') && contextRotationDue(this.logKey);
+      const housekeeping = async () => {
+        if (seeded && !failed) await clearRotation(this.logKey);
+        if (rotationDue) await this.rotateContextAtBoundary();
+        else await this.maybeCompact();
+      };
+      if (rotationDue) {
+        this.contextMaintenance = Promise.resolve().then(housekeeping).catch((err) => {
+          console.warn(`[context-rotation] ${this.logKey}: deferred after maintenance failure`, (err as Error).message);
+        }).finally(() => { this.contextMaintenance = null; });
+      }
       this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
       // Only now, with the turn boundary already delivered, retire a child
       // whose provider moved. shutdown() flips `disposed`, after which emit()
@@ -2226,16 +2280,7 @@ class ClaudeSession {
       if (authFailPending) this.failAuth();
       else if (zaiStale && !this.hasBackgroundWork()) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
       if (zaiCut) this.afterZaiCut(zaiCut, zaiCutNoticeSeq);
-      const seeded = this.pendingSeedAck;
-      const resultFailed = ev.is_error === true || typeof ev.api_error_status === 'number';
-      const failed = seeded && resultFailed;
-      if (seeded) this.pendingSeedAck = false;
-      if (failed) this.seedWindowOnNextTurn = true;
-      if (!resultFailed) this.persistAppliedSelection();
-      void (async () => {
-        if (seeded && !failed) await clearRotation(this.logKey);
-        await this.maybeCompact();
-      })();
+      if (!rotationDue) void housekeeping();
     }
   }
 }
@@ -2405,6 +2450,7 @@ export async function getOrCreateSession(opts: {
   while (true) {
     const existing = sessions.get(key);
     if (!existing) break;
+    if (existing instanceof ClaudeSession) await existing.awaitContextMaintenance();
     if (!existing.isAlive()) {
       // A child retired a moment ago (provider switch, auth failure) may still
       // be exiting. Let it go before a replacement resumes the same native

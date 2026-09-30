@@ -8,6 +8,8 @@ test('isolates the steerable Codex app-server from the competing native agent bu
     [
       'app-server', '--listen', 'stdio://',
       '--disable', 'multi_agent',
+      '-c', 'model_auto_compact_token_limit=200000',
+      '-c', 'model_auto_compact_token_limit_scope="total"',
       '-c', 'mcp_servers.rivendell-team.command="node"',
     ],
   );

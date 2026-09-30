@@ -414,6 +414,8 @@ export type AutoCompactArgs = {
   /** Return `false` when the engine will seed on the *next* send (banana/codex).
    *  Owed rotation stays banked until that send is acknowledged. */
   rotate: (primer: string) => Promise<boolean | void> | boolean | void;
+  /** Budget rotation must include partial overflow, not wait for 50 more. */
+  refreshOverflow?: boolean;
 };
 
 type MemorySearchResponse = {
@@ -599,7 +601,7 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
 
   migrateLegacyPrimer(key);
 
-  if (recIsOwed(loadState()[key]) && !args.isBusy()) {
+  if (!args.refreshOverflow && recIsOwed(loadState()[key]) && !args.isBusy()) {
     try {
       if (epochOf(key) !== epoch) return false;
       await flushEventLog(key);
@@ -641,7 +643,7 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
   const blob = loadCompactBlob(key);
   const lastSeq = blob?.lastCompactedSeq ?? 0;
   let overflowNew = overflow.filter((t) => t.seq > lastSeq);
-  if (!shouldCompactOverflow(overflowNew)) return false;
+  if (!overflowNew.length || (!args.refreshOverflow && !shouldCompactOverflow(overflowNew))) return false;
 
   inFlight.add(key);
   try {
@@ -659,7 +661,7 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
       // without compaction, or downtime) is folded here in one pass, so the
       // user sees one compaction instead of one on every other turn until it
       // catches up. Only whole batches: a partial tail waits for its 50.
-      if (batch > 0 && !shouldCompactOverflow(overflowNew)) break;
+      if (batch > 0 && !args.refreshOverflow && !shouldCompactOverflow(overflowNew)) break;
       const overflowBatch = takeOverflowBatch(overflowNew.slice(0, COMPACT_BATCH_TURNS));
       if (overflowBatch.length === 0) break;
       console.warn(
@@ -768,4 +770,15 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
   } finally {
     inFlight.delete(key);
   }
+}
+
+/** Fail closed if compaction failed, is already running, or still has backlog. */
+export async function refreshCompactForRotation(args: AutoCompactArgs): Promise<boolean> {
+  await maybeAutoCompact({ ...args, refreshOverflow: true, rotate: () => false });
+  if (args.isBusy()) return false;
+  await flushEventLog(args.key);
+  if (args.isBusy() || inFlight.has(args.key)) return false;
+  const durable = loadEventLogForCompactionSync(args.key);
+  const { overflow } = splitWindow(extractVisibleTurns(durable.length ? durable : args.events));
+  return overflow.every((turn) => turn.seq <= compactedThroughSeq(args.key));
 }

@@ -13,7 +13,8 @@ import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './crashTombstone.ts';
-import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeq, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
+import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeq, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
+import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
@@ -228,6 +229,7 @@ export class CodexSession {
   private threadId: string | null = null;
   /** Next turn seeds persona + rolling compact + last 50 on a fresh thread. */
   private seedWindowOnNextTurn = false;
+  private contextMaintenance: Promise<void> | null = null;
 
   private consumeWindowSeed(): boolean {
     return this.seedWindowOnNextTurn;
@@ -237,6 +239,22 @@ export class CodexSession {
     if (!this.seedWindowOnNextTurn) return Promise.resolve();
     this.seedWindowOnNextTurn = false;
     return clearRotation(this.logKey);
+  }
+
+  /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
+  private async rotateContextAtBoundary(): Promise<void> {
+    if (!contextRotationDue(this.logKey) || this.busy || this.dead) return;
+    const refreshed = await refreshCompactForRotation({
+      key: this.logKey, cli: this.cli, chatId: this.chatId, events: this.eventLog,
+      isBusy: () => this.busy || this.dead, emit: (ev) => this.emit(ev as any), rotate: () => false,
+    });
+    if (!refreshed || this.busy || this.dead) return;
+    await setSessionId(this.cli, this.cwd, '', this.chatId);
+    if (this.dead) return;
+    this.threadId = null;
+    this.seedWindowOnNextTurn = true;
+    bankRotation(this.logKey);
+    recordContextRotation(this.logKey);
   }
 
   /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
@@ -386,7 +404,7 @@ export class CodexSession {
   }
 
   isBusy(): boolean {
-    return this.busy;
+    return this.busy || Boolean(this.contextMaintenance);
   }
 
   activeSelection(): { model?: string; effort?: string } {
@@ -506,6 +524,7 @@ export class CodexSession {
   }
 
   async send(text: string, images?: ChatImage[], opts: CodexSendOptions = {}): Promise<void> {
+    if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
     if (this.busy) {
       const nativeSteerAllowed = opts.peerFrom
@@ -1016,10 +1035,16 @@ export class CodexSession {
         await this.persistThreadId(this.threadId);
       }
       this.busy = false;
+      const rotationDue = contextRotationDue(this.logKey) && code === 0;
+      if (rotationDue) {
+        this.contextMaintenance = this.rotateContextAtBoundary().catch((err) => {
+          console.warn(`[context-rotation] ${this.logKey}: deferred after maintenance failure`, (err as Error).message);
+        }).finally(() => { this.contextMaintenance = null; });
+      }
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
       // Forever-thread housekeeping: compact after successful turns only —
       // error/interrupt paths retry on the next clean turn end.
-      void this.maybeCompact();
+      if (!rotationDue) void this.maybeCompact();
     });
 
     child.on('error', (err) => {
@@ -1119,6 +1144,10 @@ export class CodexSession {
     ev: any,
     state: CodexTurnState,
   ): void {
+    if (ev?.type === 'rivendell.context_usage') {
+      recordContextUsage(this.logKey, 'codex', ev.usage);
+      return;
+    }
     if (!ev || typeof ev !== 'object') return;
 
     // Capture the thread id for resume on later turns.
