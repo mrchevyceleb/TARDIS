@@ -52,6 +52,13 @@ function log(entry) {
   } catch { /* logging never blocks a call */ }
 }
 
+/** Synchronous write to the hook's stdout: process.exit right after an async
+ *  pipe write can truncate the JSON and make a deny silently not apply. */
+function emit(payload) {
+  const text = `${JSON.stringify(payload)}\n`;
+  try { writeFileSync(1, text); } catch { process.stdout.write(text); }
+}
+
 function fmt(seconds) {
   const s = Math.round(seconds);
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
@@ -75,10 +82,18 @@ const RULES = [
   { label: 'a review CLI (run it as a job and read its output file when the result arrives)', re: /\bcodex\s+(?:exec|review)\b|\bclaude\s+(?:[^\n;&|]*\s)?-p\b/ },
 ];
 
-function classify(command) {
-  const s = strip(command);
+function classify(command, depth = 0) {
   // A trailing `&` (not `&&`) backgrounds the last statement: it returns at once.
-  if (/(?:^|[^&])&\s*(?:disown\s*)?$/.test(s.trim())) return null;
+  if (depth === 0 && /(?:^|[^&])&\s*(?:disown\s*)?$/.test(strip(command).trim())) return null;
+  // A shell wrapper hides its payload inside quotes: bash -lc '...', sh -c "...", eval '...'.
+  if (depth < 2) {
+    for (const m of command.matchAll(/\b(?:ba|z|k|da)?sh\s+(?:-[a-zA-Z]*c[a-zA-Z]*)\s+(['"])([\s\S]*?)\1|\beval\s+(['"])([\s\S]*?)\3/g)) {
+      const inner = classify(m[2] ?? m[4] ?? '', depth + 1);
+      if (inner) return inner;
+    }
+  }
+  // Quoted strings and heredoc bodies are data; a comment is not a command.
+  const s = strip(command).replace(/(^|\s)#[^\n]*/g, '$1');
   for (const m of s.matchAll(/(?:^|[;&|(){}\s])sleep\s+(\d+(?:\.\d+)?)([smhd]?)(?![\w.])/g)) {
     const seconds = Number(m[1]) * ({ s: 1, m: 60, h: 3600, d: 86400 }[m[2] || 's']);
     if (seconds >= SLEEP_LIMIT_S) return `a ${m[1]}${m[2] || 's'} sleep`;
@@ -94,7 +109,7 @@ if (mode === 'pre') {
   if (bypass) log({ kind: 'bypass', rule: classify(rawCommand.replace(/#\s*foreground-ok\s*$/, '')) ?? 'not-matched' });
   if (hit) {
     log({ kind: 'block', rule: hit });
-    process.stdout.write(`${JSON.stringify({
+    emit({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
@@ -103,7 +118,7 @@ if (mode === 'pre') {
           'Start it with the job_start tool instead (a short name plus the same command, cwd if needed), then keep working or end your turn. ' +
           'A job result arrives in your thread when it ends. If it really is a quick one-off, run it again with "# foreground-ok" at the end of the command.',
       },
-    })}\n`);
+    });
     process.exit(0);
   }
   // Time it for the 60s nudge. Sweep start files that never got a result.
@@ -129,14 +144,14 @@ if (callId) {
     const seconds = (Date.now() - started) / 1000;
     if (Number.isFinite(seconds) && seconds >= NUDGE_S) {
       log({ kind: 'slow', seconds: Math.round(seconds) });
-      process.stdout.write(`${JSON.stringify({
+      emit({
         hookSpecificOutput: {
-          hookEventName: 'PostToolUse',
+          hookEventName: input.hook_event_name === 'PostToolUseFailure' ? 'PostToolUseFailure' : 'PostToolUse',
           additionalContext:
             `That command held you for ${fmt(seconds)}. While you are inside one foreground call nobody can reach you. ` +
             'Anything that takes more than about 30 seconds should be started with job_start so you stay free to answer people.',
         },
-      })}\n`);
+      });
     }
   } catch { /* no start record: nothing to nudge */ }
 }
