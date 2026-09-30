@@ -34,10 +34,11 @@ const TOMBSTONE_MAX_AGE_MS = 15 * 60_000;
  *  scrolled out, the lane has run a lot since and is resumed). */
 const TAIL_BYTES = 4 * 1024 * 1024;
 /** The kill itself writes a few rows (result, turn end, interrupted, background
- *  notes) within a couple of seconds of the tombstone. A row later than this is
- *  the lane being used again, whatever engine wrote it (not every engine writes
- *  a turn-start row). Rows stamped at or after this process's boot are the new
- *  process's by definition and count at any distance. */
+ *  notes) within a couple of seconds of the tombstone. Whatever engine wrote a
+ *  later row, the lane is being used again (not every engine writes a turn-start
+ *  row). With this process's boot time known, the boundary is the boot itself: a
+ *  row stamped at or after it is the new process's. This window is only the
+ *  fallback for callers that have no boot time. */
 const SETTLE_MS = 10_000;
 /** Sent-set entries are forgotten after this. */
 const SENT_KEEP_MS = 24 * 60 * 60_000;
@@ -91,6 +92,7 @@ export type CutReadOptions = { bootMs?: number; tailBytes?: number };
  *  after it was written by the new process. */
 export function unansweredRestartCutAt(file: string, opts: CutReadOptions = {}): number | null {
   const tailBytes = opts.tailBytes ?? TAIL_BYTES;
+  const hasBoot = typeof opts.bootMs === 'number';
   const bootMs = opts.bootMs ?? Number.POSITIVE_INFINITY;
   let fd: number;
   try {
@@ -127,7 +129,7 @@ export function unansweredRestartCutAt(file: string, opts: CutReadOptions = {}):
         continue;
       }
       if (marked && row.ev?.event?._serviceRestart === true && typeof row.at === 'number') cutAt = row.at;
-      else if (cutAt !== null && typeof row.at === 'number' && (row.at >= bootMs || row.at > cutAt + SETTLE_MS)) cutAt = null;
+      else if (cutAt !== null && typeof row.at === 'number' && (hasBoot ? row.at >= bootMs : row.at > cutAt + SETTLE_MS)) cutAt = null;
     }
     return cutAt;
   } catch {
@@ -232,9 +234,20 @@ export async function runRestartWake(overrides: Partial<WakeDeps> = {}): Promise
   const cut: { agent: WakeAgent; at: number }[] = [];
   for (const agent of await deps.listAgents()) {
     if (agent.id === 'owner' || !agent.home) continue;
-    const at = await deps.cutAt(agent);
+    let at: number | null;
+    try {
+      at = await deps.cutAt(agent);
+    } catch (error) {
+      // One unreadable log must not keep the other lanes asleep.
+      report.failed.push(agent.id);
+      deps.log(`[restart-wake] ${agent.id}: could not read its log: ${(error as Error).message}`);
+      continue;
+    }
     if (at === null) continue;
-    if (deps.bootMs - at > TOMBSTONE_MAX_AGE_MS || at > deps.now()) {
+    // Only the previous process's tombstones count: one stamped at or after this
+    // boot was written by this process's own shutdown, not by the restart that
+    // cut the lane.
+    if (deps.bootMs - at > TOMBSTONE_MAX_AGE_MS || at >= deps.bootMs) {
       deps.log(`[restart-wake] ${agent.id}: restart marker from ${etClock(at)} ET is not from this restart, not waking`);
       continue;
     }
@@ -248,45 +261,51 @@ export async function runRestartWake(overrides: Partial<WakeDeps> = {}): Promise
 
   for (const [index, { agent, at }] of cut.entries()) {
     if (index > 0) await deps.sleep(WAKE_SPACING_MS);
-    const sentKey = `${agent.id}@${at}`;
-    if (deps.sent.has(sentKey)) {
-      report.skipped.push(agent.id);
-      deps.log(`[restart-wake] ${agent.id}: already woken for the ${etClock(at)} ET restart, not waking again`);
-      continue;
-    }
-    const text = wakeText(at);
-    if (deps.dryRun) {
-      report.woken.push(agent.id);
-      deps.log(`[restart-wake] dry run, would wake ${agent.id}: ${text}`);
-      continue;
-    }
-    let result: WakeDelivery = { delivered: false, reason: 'not tried' };
-    let resumed = false;
-    for (let attempt = 1; attempt <= MAX_TRIES; attempt += 1) {
-      if (attempt > 1) await deps.sleep(RETRY_SPACING_MS);
-      // Looked at again before every attempt: the lane may have picked up work
-      // (or had a delivery queued for it) while this pass paced, or while a retry waited.
-      if ((await deps.laneStatus(agent)) !== 'idle' || (await deps.cutAt(agent)) !== at) {
-        resumed = true;
-        break;
+    try {
+      const sentKey = `${agent.id}@${at}`;
+      if (deps.sent.has(sentKey)) {
+        report.skipped.push(agent.id);
+        deps.log(`[restart-wake] ${agent.id}: already woken for the ${etClock(at)} ET restart, not waking again`);
+        continue;
       }
-      try {
-        result = await deps.deliver({ to: agent.id, text });
-      } catch (error) {
-        result = { delivered: false, reason: (error as Error).message };
+      const text = wakeText(at);
+      if (deps.dryRun) {
+        report.woken.push(agent.id);
+        deps.log(`[restart-wake] dry run, would wake ${agent.id}: ${text}`);
+        continue;
       }
-      if (result.delivered) break;
-    }
-    if (resumed) {
-      report.skipped.push(agent.id);
-      deps.log(`[restart-wake] ${agent.id}: running again on its own, not waking`);
-    } else if (result.delivered) {
-      deps.sent.add(sentKey);
-      report.woken.push(agent.id);
-      deps.log(`[restart-wake] woke ${agent.id}`);
-    } else {
+      let result: WakeDelivery = { delivered: false, reason: 'not tried' };
+      let resumed = false;
+      for (let attempt = 1; attempt <= MAX_TRIES; attempt += 1) {
+        if (attempt > 1) await deps.sleep(RETRY_SPACING_MS);
+        // Looked at again before every attempt: the lane may have picked up work
+        // (or had a delivery queued for it) while this pass paced, or while a retry waited.
+        if ((await deps.laneStatus(agent)) !== 'idle' || (await deps.cutAt(agent)) !== at) {
+          resumed = true;
+          break;
+        }
+        try {
+          result = await deps.deliver({ to: agent.id, text });
+        } catch (error) {
+          result = { delivered: false, reason: (error as Error).message };
+        }
+        if (result.delivered) break;
+      }
+      if (resumed) {
+        report.skipped.push(agent.id);
+        deps.log(`[restart-wake] ${agent.id}: running again on its own, not waking`);
+      } else if (result.delivered) {
+        deps.sent.add(sentKey);
+        report.woken.push(agent.id);
+        deps.log(`[restart-wake] woke ${agent.id}`);
+      } else {
+        report.failed.push(agent.id);
+        deps.log(`[restart-wake] could not wake ${agent.id}: ${result.reason ?? 'unknown reason'}`);
+      }
+    } catch (error) {
+      // A failing roster, state or log read costs this lane its wake, not the rest of them.
       report.failed.push(agent.id);
-      deps.log(`[restart-wake] could not wake ${agent.id}: ${result.reason ?? 'unknown reason'}`);
+      deps.log(`[restart-wake] ${agent.id}: wake failed: ${(error as Error).message}`);
     }
   }
   return report;
