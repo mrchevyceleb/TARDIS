@@ -521,7 +521,9 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
             className={`bt-pane-mount${paneOpen ? ' open' : ''}`}
             agent={agent ?? null}
             meta={meta}
+            open={paneOpen}
             onOpenForge={() => openRoom('forge')}
+            onOpenDesk={flags.deskRoom ? () => openRoom('desk') : undefined}
             onClose={() => setPaneOpen(false)}
           />
         ) : null}
