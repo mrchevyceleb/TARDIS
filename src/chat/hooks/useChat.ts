@@ -481,7 +481,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       // The message has its own text, so a held thinking summary is not the reply.
       return [...settleThoughts(blocks, turnId, false), block];
     }
-    if (cb?.type === 'tool_use' && typeof cb.name === 'string' && cb.name.endsWith('reply_now')) {
+    if (cb?.type === 'tool_use' && typeof cb.name === 'string' && /^(mcp__.+__)?reply_now$/.test(cb.name)) {
       // The agent is speaking: the server posts the text as a message, so the call
       // itself gets no tool card.
       return settleThoughts(blocks, turnId, false);
@@ -559,9 +559,9 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const text = (ev.message.content as Array<any>)
       .filter((c) => c?.type === 'text' && typeof c.text === 'string')
       .map((c) => c.text)
-      .join('')
-      .trim();
-    if (!text) return blocks;
+      .join('');
+    // Keep the agent's exact text (leading indentation and trailing newlines can matter in Markdown).
+    if (!text.trim()) return blocks;
     if (typeof ev.seq === 'number' && blocks.some((b) => b.kind === 'text' && b.seq === ev.seq)) return blocks;
     if (!turnIdRef.current) turnIdRef.current = `t${nextId++}`;
     const turnId = turnIdRef.current;
