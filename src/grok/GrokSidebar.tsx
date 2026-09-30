@@ -624,8 +624,9 @@ export function BotRail(props: BotRailProps) {
         rows: listed,
         pinned: g.agents.length - listed.length,
         working: listed.filter((r) => busyAgents.has(r.a.id)).length,
-        // On jobs but not mid-turn, so it never doubles the working count.
-        jobs: listed.filter((r) => jobsByAgent.has(r.a.id) && !busyAgents.has(r.a.id)).length,
+        // Every listed row wearing a jobs badge. Independent of "working": an
+        // agent mid-turn can be on jobs too, and the header must not hide that.
+        jobs: listed.filter((r) => jobsByAgent.has(r.a.id)).length,
         unread: listed.reduce((sum, r) => sum + (r.a.muted ? 0 : r.a.unread ?? 0), 0),
       };
       // "Other" only earns a header when someone is actually listed in it.
@@ -804,6 +805,7 @@ export function BotRail(props: BotRailProps) {
             {pins.map((a, index) => {
               const isActive = props.activeChat && sameChatId(props.activeChat.chatId, a.home);
               const url = agentAvatarUrl(a);
+              const onJobs = jobsByAgent.get(a.id);
               const dropHere = pinDrag && pinDrag !== a.id;
               const dropLeft = dropHere && pinDropBefore === a.id;
               const dropRight = dropHere && pinDropBefore === PINS_END && index === pins.length - 1;
@@ -840,6 +842,7 @@ export function BotRail(props: BotRailProps) {
                   </span>
                   <span className="bt-pin-name">{a.name}</span>
                   <span className="bt-pin-role">{a.role}</span>
+                  {onJobs ? <RailJobsBadge running={onJobs.running} latest={onJobs.latest} latestLine={onJobs.latestLine} /> : null}
                   {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
                 </button>
               );

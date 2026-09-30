@@ -200,7 +200,7 @@ export type RailGroupSectionProps = {
   pinned: number;
   /** Listed companions mid-turn right now. */
   working: number;
-  /** Listed companions running background jobs but not mid-turn: busy, and free to talk. */
+  /** Listed companions running background jobs. Counted on their own, so one can also be mid-turn. */
   jobs: number;
   /** Unread replies across listed companions (muted ones already count zero). */
   unread: number;
@@ -243,7 +243,7 @@ export function RailGroupSection(props: RailGroupSectionProps) {
   const summary = [
     `${name}, ${count} ${count === 1 ? 'companion' : 'companions'}`,
     working ? `${working} working` : '',
-    jobs ? `${jobs} busy on jobs, free to talk` : '',
+    jobs ? `${jobs} on background jobs` : '',
     unread ? `${unread} unread` : '',
   ].filter(Boolean).join(', ');
 
