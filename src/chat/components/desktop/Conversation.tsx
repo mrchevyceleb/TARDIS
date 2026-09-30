@@ -11,6 +11,8 @@ import type { ShellViewProps } from '../reimagine/useChatShell';
 import { ChatThread } from '../reimagine/blocks';
 import { Composer } from '../reimagine/Composer';
 import { ComputerControl } from '../ComputerControl';
+import { ChatJobsBar } from '../jobs/ChatJobsBar';
+import { agentIdFromChatId } from '../../hooks/useJobs';
 import {
   CounselPopover,
   ModelChip,
@@ -53,7 +55,6 @@ export function Conversation({ s, picker, repo, agent }: ShellViewProps) {
                 bottomRef={s.sticky.bottomRef}
                 suppressTyping={s.automationBusy}
                 workingSince={s.workingSince}
-                backgroundWork={s.backgroundWork}
                 onReact={s.react}
                 onRetry={s.retry}
                 agentName={agent}
@@ -77,6 +78,7 @@ export function Conversation({ s, picker, repo, agent }: ShellViewProps) {
 
           <div className="dock">
             <div className="dock-inner">
+              <ChatJobsBar agentId={agentIdFromChatId(s.chatId)} backgroundWork={s.backgroundWork} />
               <CounselPopover picker={picker} open={counselOpen} onClose={() => setCounselOpen(false)} />
               <Composer
                 chatId={s.chatId}

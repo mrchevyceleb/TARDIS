@@ -14,6 +14,8 @@ import type { ShellViewProps } from '../reimagine/useChatShell';
 import { ChatThread } from '../reimagine/blocks';
 import { Composer, AttachButton } from '../reimagine/Composer';
 import { ComputerControl } from '../ComputerControl';
+import { ChatJobsBar } from '../jobs/ChatJobsBar';
+import { agentIdFromChatId } from '../../hooks/useJobs';
 import { CounselSheet, ModelChip } from '../reimagine/CounselPicker';
 import {
   ChronicleRows,
@@ -111,7 +113,6 @@ export function Mobile({ s, picker, repo, agent }: ShellViewProps) {
             mobile
             suppressTyping={s.automationBusy}
             workingSince={s.workingSince}
-            backgroundWork={s.backgroundWork}
             onReact={s.react}
             onRetry={s.retry}
             agentName={agent}
@@ -135,6 +136,7 @@ export function Mobile({ s, picker, repo, agent }: ShellViewProps) {
 
         {/* composer dock */}
         <div className="dock">
+            <ChatJobsBar agentId={agentIdFromChatId(s.chatId)} backgroundWork={s.backgroundWork} mobile />
             <Composer
               chatId={s.chatId}
               mobile

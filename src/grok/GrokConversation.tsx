@@ -17,6 +17,8 @@ import { Composer, AttachButton } from '../chat/components/reimagine/Composer';
 import { ComputerControl } from '../chat/components/ComputerControl';
 import { CounselPopover, ModelChip } from '../chat/components/reimagine/CounselPicker';
 import { Plus } from '../chat/components/reimagine/icons';
+import { ChatJobsBar } from '../chat/components/jobs/ChatJobsBar';
+import { agentIdFromChatId } from '../chat/hooks/useJobs';
 import { BotMark } from './GrokLogo';
 import { agentMark, DISC_INK, agentColor, agentAvatarUrl, chatColorOf, type Agent } from './agents';
 import { useAgentMessagePins } from './messagePins';
@@ -256,7 +258,6 @@ export function GrokConversation(props: BotConversationProps) {
               collapseSteps
               suppressTyping={s.automationBusy}
               workingSince={s.workingSince}
-              backgroundWork={s.backgroundWork}
               onReact={s.react}
               onRetry={s.retry}
               agentName={agentName}
@@ -285,6 +286,7 @@ export function GrokConversation(props: BotConversationProps) {
 
       <div className="bt-dock">
         <div className="bt-dock-inner">
+          <ChatJobsBar agentId={agent?.id ?? agentIdFromChatId(s.chatId)} backgroundWork={s.backgroundWork} mobile={isMobile} />
           <CounselPopover picker={picker} open={counselOpen} onClose={() => setCounselOpen(false)} />
           {composer}
         </div>

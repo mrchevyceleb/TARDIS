@@ -1,0 +1,183 @@
+/* Background jobs UI: the chat pill + list, the in-thread result card and the
+   rail badge. Cool teal for "running" so it never reads as the amber
+   agent-is-busy pulse; green/red/amber only for how a job ended. Uses the global
+   --r-* tokens only (the rail badge lives outside .rc). */
+
+.jb-bar,
+.jr-card,
+.jb-badge {
+  --jb-run: color-mix(in oklch, var(--r-vortex-2) 34%, var(--r-tardis-hi));
+  --jb-spring: cubic-bezier(0.22, 1.4, 0.3, 1);
+}
+.jt-run { --jb: var(--jb-run); }
+.jt-ok { --jb: var(--r-emerald); }
+.jt-bad { --jb: var(--r-rose); }
+.jt-warn { --jb: var(--r-amber); }
+.jt-note { --jb: var(--r-ink-mute); }
+
+@keyframes jb-spin { to { transform: rotate(360deg); } }
+@keyframes jb-in { from { opacity: 0; transform: translateY(6px) scale(0.97); } to { opacity: 1; transform: none; } }
+@keyframes jb-bump { 0% { transform: translateY(3px) scale(0.92); opacity: 0.4; } 60% { transform: translateY(-1px) scale(1.04); } 100% { transform: none; opacity: 1; } }
+@keyframes jb-ripple {
+  0% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--jb) 34%, transparent); }
+  70%, 100% { box-shadow: 0 0 0 7px color-mix(in oklch, var(--jb) 0%, transparent); }
+}
+
+/* ---- the ring ---------------------------------------------------------------------- */
+.jb-ring { width: 14px; height: 14px; flex: none; color: var(--jb); }
+.jb-ring.is-small { width: 13px; height: 13px; }
+.jb-ring.is-run, .jb-ring.is-stopping { animation: jb-spin 1.1s linear infinite; }
+.jb-ring.is-stopping { animation-duration: 0.5s; color: var(--r-amber); }
+.jb-bar .jb-pill:hover .jb-ring { animation-duration: 0.55s; }
+
+/* ---- the pill ------------------------------------------------------------------------ */
+.jb-bar { position: relative; display: flex; align-items: center; padding: 0 0 7px; min-width: 0; animation: jb-in 0.28s var(--jb-spring) both; }
+.jb-bar .jb-pill {
+  display: inline-flex; align-items: center; gap: 8px; min-height: 32px; max-width: 100%;
+  padding: 5px 10px 5px 10px; border-radius: 999px;
+  border: 1px solid color-mix(in oklch, var(--jb) 46%, var(--r-line));
+  background: color-mix(in oklch, var(--jb) 11%, var(--r-bg-card));
+  color: var(--r-ink-soft); font: 600 12px/1 var(--r-body); letter-spacing: 0.01em;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+  transition: transform 0.2s var(--jb-spring), box-shadow 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+}
+.jb-bar .jb-pill.jt-run { animation: jb-ripple 2.6s ease-out infinite; }
+.jb-bar .jb-pill:hover { transform: translateY(-1px); background: color-mix(in oklch, var(--jb) 17%, var(--r-bg-card)); animation: none; box-shadow: 0 6px 18px color-mix(in oklch, var(--jb) 24%, transparent); }
+.jb-bar .jb-pill:active { transform: translateY(0) scale(0.95); box-shadow: none; }
+.jb-bar .jb-pill:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: 2px; }
+.jb-bar .jb-pill.is-open { background: color-mix(in oklch, var(--jb) 20%, var(--r-bg-card)); animation: none; }
+.jb-count { display: inline-block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; animation: jb-bump 0.36s var(--jb-spring) both; }
+.jb-chev { width: 13px; height: 13px; flex: none; color: var(--r-ink-faint); transition: transform 0.25s var(--jb-spring); }
+.jb-bar .jb-pill.is-open .jb-chev { transform: rotate(180deg); }
+
+/* ---- the list ------------------------------------------------------------------------ */
+.jb-pop {
+  position: absolute; left: 0; bottom: calc(100% + 4px); z-index: 40;
+  width: min(480px, 100%); max-height: min(58dvh, 440px); overflow-y: auto; overscroll-behavior: contain;
+  border: 1px solid var(--r-line-strong); border-radius: 14px;
+  background: var(--r-bg-raised); color: var(--r-ink);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.46), 0 0 0 1px color-mix(in oklch, var(--jb-run) 10%, transparent);
+  transform-origin: 14% 100%; animation: jb-in 0.24s var(--jb-spring) both;
+  scrollbar-width: thin; scrollbar-color: var(--r-line-strong) transparent;
+}
+.jb-pop-h {
+  position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 8px 7px 14px; background: inherit; border-bottom: 1px solid var(--r-line);
+  font: 600 10px/1.2 var(--r-mono); letter-spacing: 0.09em; text-transform: uppercase; color: var(--r-ink-faint);
+}
+.jb-bar .jb-x { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: var(--r-ink-mute); font-size: 20px; line-height: 1; transition: background 0.15s, transform 0.15s var(--jb-spring); }
+.jb-bar .jb-x:hover { background: var(--r-bg-hover); color: var(--r-ink); }
+.jb-bar .jb-x:active { transform: scale(0.88); }
+.jb-list { list-style: none; margin: 0; padding: 4px 0 6px; }
+
+.jb-row { border-top: 1px solid var(--r-line); }
+.jb-row:first-child { border-top: 0; }
+.jb-row-main { display: flex; align-items: center; gap: 6px; padding-right: 10px; }
+.jb-bar .jb-row-toggle, .jb-bar .jb-row-static {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 9px 4px 9px 14px; text-align: left;
+  border-radius: 10px; transition: background 0.15s ease;
+}
+.jb-bar .jb-row-toggle:hover { background: var(--r-bg-hover); }
+.jb-bar .jb-row-toggle:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: -2px; }
+.jb-dot { width: 8px; height: 8px; flex: none; margin: 0 2.5px; border-radius: 50%; background: var(--jb); box-shadow: 0 0 0 3px color-mix(in oklch, var(--jb) 16%, transparent); }
+.jb-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.jb-name { font: 600 13px/1.25 var(--r-body); color: var(--r-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jb-line { font: 400 11px/1.3 var(--r-mono); color: var(--r-ink-mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jb-line-plain { font-family: var(--r-body); font-size: 11px; color: var(--r-ink-faint); }
+.jb-clock { flex: none; font: 500 11.5px/1 var(--r-mono); font-variant-numeric: tabular-nums; color: var(--r-ink-soft); }
+
+.jb-bar .jb-stop {
+  flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 74px; min-height: 34px; padding: 6px 11px;
+  border-radius: 9px; border: 1px solid color-mix(in oklch, var(--r-rose) 50%, var(--r-line));
+  background: color-mix(in oklch, var(--r-rose) 9%, transparent); color: var(--r-rose);
+  font: 600 11.5px/1 var(--r-body);
+  transition: transform 0.16s var(--jb-spring), background 0.15s ease, box-shadow 0.15s ease;
+}
+.jb-bar .jb-stop i { width: 8px; height: 8px; border-radius: 2px; background: currentColor; transition: transform 0.2s var(--jb-spring); }
+.jb-bar .jb-stop:hover { background: color-mix(in oklch, var(--r-rose) 16%, transparent); transform: translateY(-1px); }
+.jb-bar .jb-stop:hover i { transform: rotate(90deg) scale(1.1); }
+.jb-bar .jb-stop:active { transform: translateY(1px) scale(0.92); box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.3); }
+.jb-bar .jb-stop:focus-visible { outline: 2px solid var(--r-rose); outline-offset: 2px; }
+.jb-bar .jb-stop:disabled { cursor: progress; color: var(--r-amber); border-color: color-mix(in oklch, var(--r-amber) 50%, var(--r-line)); background: color-mix(in oklch, var(--r-amber) 9%, transparent); transform: none; }
+
+.jb-row.is-ended .jb-name, .jb-row.is-ended .jb-line, .jb-row.is-ended .jb-clock { opacity: 0.62; }
+.jb-row.is-ended .jb-row-toggle:hover .jb-name, .jb-row.is-ended .jb-row-toggle:hover .jb-line, .jb-row.is-ended .jb-row-toggle:hover .jb-clock { opacity: 0.9; }
+.jb-outcome {
+  flex: none; padding: 3px 8px; border-radius: 999px; border: 1px solid color-mix(in oklch, var(--jb) 40%, var(--r-line));
+  background: color-mix(in oklch, var(--jb) 10%, transparent); color: var(--jb);
+  font: 600 10.5px/1.3 var(--r-mono); white-space: nowrap;
+}
+.jb-err { margin: -2px 14px 8px 36px; color: var(--r-rose); font: 500 11.5px/1.35 var(--r-body); }
+.jb-log {
+  margin: 0 12px 10px 14px; padding: 9px 11px; max-height: 190px; overflow: auto;
+  border: 1px solid var(--r-line); border-radius: 9px; background: var(--r-bg-deep);
+  color: var(--r-ink-soft); font: 400 11px/1.5 var(--r-mono); white-space: pre-wrap; word-break: break-word;
+  scrollbar-width: thin; scrollbar-color: var(--r-line-strong) transparent;
+}
+.jb-log:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: 1px; }
+
+/* ---- the result card in the thread --------------------------------------------------- */
+.jr-card {
+  align-self: flex-start; width: min(560px, 100%); min-width: 0; margin: 6px 0;
+  border: 1px solid color-mix(in oklch, var(--jb) 30%, var(--r-line)); border-left: 3px solid var(--jb);
+  border-radius: 4px 12px 12px 4px; background: color-mix(in oklch, var(--jb) 6%, var(--r-bg-card));
+  color: var(--r-ink); overflow: hidden; animation: jb-in 0.3s var(--jb-spring) both;
+}
+.jr-card .jr-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 38px; padding: 8px 12px 8px 11px; text-align: left; transition: background 0.15s ease; }
+.jr-card button.jr-head { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.jr-card button.jr-head:hover { background: color-mix(in oklch, var(--jb) 9%, transparent); }
+.jr-card button.jr-head:active { background: color-mix(in oklch, var(--jb) 14%, transparent); }
+.jr-card button.jr-head:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: -2px; }
+.jr-kicker { flex: none; font: 600 9.5px/1 var(--r-mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--r-ink-faint); }
+.jr-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 13px/1.3 var(--r-body); color: var(--r-ink); }
+.jr-chip {
+  flex: none; padding: 2px 8px; border-radius: 999px; border: 1px solid color-mix(in oklch, var(--jb) 42%, var(--r-line));
+  background: color-mix(in oklch, var(--jb) 12%, transparent); color: var(--jb);
+  font: 600 10.5px/1.35 var(--r-mono); white-space: nowrap;
+}
+.jr-dur { flex: none; font: 500 11px/1 var(--r-mono); font-variant-numeric: tabular-nums; color: var(--r-ink-mute); white-space: nowrap; }
+.jr-peek { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 400 11px/1.3 var(--r-mono); color: var(--r-ink-faint); }
+.jr-fill { flex: 1; }
+.jr-when { flex: none; font: 400 10px/1 var(--r-mono); color: var(--r-ink-faint); }
+.jr-chev { width: 14px; height: 14px; flex: none; color: var(--r-ink-faint); transition: transform 0.25s var(--jb-spring); }
+.jr-card.is-open .jr-chev { transform: rotate(180deg); }
+.jr-log {
+  margin: 0; padding: 10px 14px 12px 14px; max-height: min(44vh, 320px); overflow: auto;
+  border-top: 1px solid color-mix(in oklch, var(--jb) 20%, var(--r-line)); background: var(--r-bg-deep);
+  color: var(--r-ink-soft); font: 400 11.5px/1.55 var(--r-mono); white-space: pre-wrap; word-break: break-word;
+  scrollbar-width: thin; scrollbar-color: var(--r-line-strong) transparent; animation: jb-in 0.2s ease both;
+}
+.jr-log:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: -2px; }
+
+/* ---- the rail badge ------------------------------------------------------------------ */
+.jb-badge {
+  --jb: var(--jb-run);
+  display: inline-flex; align-items: center; gap: 4px; flex: none; padding: 1px 6px 1px 4px; border-radius: 5px;
+  border: 1px solid color-mix(in oklch, var(--jb) 48%, transparent);
+  background: color-mix(in oklch, var(--jb) 10%, transparent); color: var(--jb);
+  font: 600 10px/1.5 var(--r-mono); letter-spacing: 0.02em; white-space: nowrap;
+  transition: transform 0.18s var(--jb-spring), background 0.15s ease;
+}
+.jb-badge:hover { transform: translateY(-1px); background: color-mix(in oklch, var(--jb) 18%, transparent); }
+.jb-badge-ring { width: 10px; height: 10px; flex: none; animation: jb-spin 1.1s linear infinite; }
+
+/* Studio phone shell: the centred "latest" pill must clear the jobs row. */
+.rc-mobile:has(.jb-bar) .jump { bottom: 142px; }
+
+@media (max-width: 600px) {
+  .jb-pop { width: 100%; max-height: min(62dvh, 460px); }
+  .jb-bar .jb-stop { min-height: 40px; min-width: 78px; }
+  .jb-bar .jb-row-toggle, .jb-bar .jb-row-static { padding-left: 12px; }
+  .jr-card { width: 100%; }
+  .jr-peek, .jr-when { display: none; }
+  .jr-fill { display: block; }
+  .jr-head { min-height: 44px; flex-wrap: nowrap; gap: 7px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jb-bar, .jb-pop, .jr-card, .jr-log, .jb-count { animation: none; }
+  .jb-bar .jb-pill.jt-run { animation: none; }
+  .jb-ring.is-run, .jb-ring.is-stopping, .jb-badge-ring { animation: none; }
+  .jb-bar .jb-pill, .jb-bar .jb-stop, .jb-bar .jb-stop i, .jb-bar .jb-x, .jb-badge, .jb-chev, .jr-chev { transition: none; }
+  .jb-bar .jb-pill:hover, .jb-bar .jb-stop:hover, .jb-badge:hover { transform: none; }
+}
