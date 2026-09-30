@@ -10,6 +10,7 @@ import { useState } from 'react';
 import type { ShellViewProps } from '../reimagine/useChatShell';
 import { ChatThread } from '../reimagine/blocks';
 import { Composer } from '../reimagine/Composer';
+import { ComputerControl } from '../ComputerControl';
 import {
   CounselPopover,
   ModelChip,
@@ -38,6 +39,7 @@ export function Conversation({ s, picker, repo, agent }: ShellViewProps) {
             <div className="presence">
               <span className="pulse" style={{ width: 7, height: 7 }} /> TARDIS online
             </div>
+            {s.chatId ? <ComputerControl key={s.chatId} chatId={s.chatId} /> : null}
           </header>
 
           <RibbonTicker events={s.chronicle} />

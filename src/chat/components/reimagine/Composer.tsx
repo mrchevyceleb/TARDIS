@@ -9,7 +9,6 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CommandEntry } from '../../data/types';
 import { ArrowUp, Plus, SquarePen, StopSquare } from './icons';
 import { isEggPhrase } from '../../../theme/eggs';
-import { ComputerControl } from '../ComputerControl';
 import { RobotControl } from '../RobotControl';
 import { ChatDictation } from '../../dictation/ChatDictation';
 
@@ -316,7 +315,6 @@ export function Composer(props: ComposerProps) {
           ))}
         </div>
       ) : null}
-      {props.chatId && <ComputerControl key={props.chatId} chatId={props.chatId} />}
       {props.chatId && <RobotControl />}
       {props.attachMenu}
       <div className={`composer${images.length > 0 || refCount > 0 ? ' has-attach' : ''}${dictating ? ' dictating' : ''}`}>

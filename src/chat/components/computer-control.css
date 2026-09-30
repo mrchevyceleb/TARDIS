@@ -1,1 +1,95 @@
-.computer-control{margin:8px 0;color:var(--r-ink-soft);font-size:12px;max-width:100%}.computer-control>summary{display:flex;align-items:center;gap:7px;cursor:pointer;padding:6px 2px;list-style:none}.computer-control>summary::-webkit-details-marker{display:none}.computer-control>summary span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.computer-control>summary strong{margin-left:auto;font-size:10px;color:var(--r-rose)}.computer-control-body{padding:12px;border:1px solid var(--border-strong);border-radius:10px;background:var(--r-bg-card)}.computer-control label{display:grid;gap:6px}.computer-control select{width:100%;max-width:100%;min-height:36px;border:1px solid var(--border-strong);border-radius:6px;padding:6px;background:var(--r-bg);color:var(--r-ink)}.computer-control p{margin:9px 0;line-height:1.5}.computer-control-actions{display:flex;flex-wrap:wrap;gap:8px}.computer-control button{display:inline-flex;align-items:center;gap:5px;min-height:34px;padding:6px 10px;border:1px solid var(--border-strong);border-radius:7px;background:transparent;color:inherit;cursor:pointer}.computer-control button.computer-stop{color:var(--r-rose);border-color:currentColor}.computer-control button:disabled{opacity:.5;cursor:wait}.computer-control :focus-visible{outline:2px solid var(--r-gold);outline-offset:3px}.computer-control .computer-control-error{color:var(--r-rose)}.computer-control figure{margin:10px 0 0}.computer-control img{width:100%;height:auto;border-radius:6px}.computer-control figcaption{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:11px;margin-top:5px}
+/* The Computer chip: a small pill in the chat header (never above the composer).
+   Click opens the picker popover, which floats through a portal to <body>, so
+   it uses the --r-* tokens directly instead of the .rc-scoped aliases.
+   The [type] attribute lifts the base rule above the `.rc button` reset
+   (border, padding, background: none), which would otherwise flatten the pill. */
+
+.computer-chip[type='button'] {
+  --chip-dot: var(--r-ink-faint);
+  display: inline-flex; align-items: center; gap: 6px;
+  /* Shrinks (the name ellipsizes) before it can push the header's other buttons off-screen. */
+  flex: 0 1 auto; min-width: 116px; height: 30px; max-width: 230px; margin-right: 6px; padding: 0 11px 0 9px;
+  border: 1px solid var(--r-line); border-radius: 999px;
+  background: transparent; color: var(--r-ink-mute);
+  font-size: 12px; line-height: 1; white-space: nowrap; cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.computer-chip:hover, .computer-chip.is-open { background: var(--r-line); color: var(--r-ink); transform: translateY(-1px); }
+.computer-chip:active { transform: scale(0.94); }
+.computer-chip:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; }
+.computer-chip > svg { flex: none; transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.computer-chip:hover > svg { transform: rotate(-8deg) scale(1.12); }
+.computer-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.computer-chip-state { font-size: 10px; font-weight: 600; letter-spacing: 0.02em; color: var(--chip-dot); }
+
+/* The state dot: what the computer is doing right now. */
+.computer-chip-dot { --size: 7px; flex: none; width: var(--size); height: var(--size); border-radius: 50%; background: var(--chip-dot); }
+:is(.computer-chip, .computer-pop-head)[data-state='automatic'] { --chip-dot: var(--r-emerald); }
+:is(.computer-chip, .computer-pop-head)[data-state='paused'] { --chip-dot: var(--r-amber); }
+:is(.computer-chip, .computer-pop-head)[data-state='in-use'] { --chip-dot: var(--r-rose); }
+[data-state='in-use'] > .computer-chip-dot { animation: computer-chip-pulse 1.6s ease-in-out infinite; }
+/* Quiet states are a hollow ring, so they never read as "on". */
+:is(.computer-chip, .computer-pop-head):is([data-state='none'], [data-state='offline'], [data-state='loading'], [data-state='error'], [data-state='ask'], [data-state='unsupported']) > .computer-chip-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--chip-dot); }
+.computer-chip:is([data-state='offline'], [data-state='none'], [data-state='error']) .computer-chip-name { opacity: 0.7; }
+@keyframes computer-chip-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--r-rose) 55%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--r-rose) 0%, transparent); }
+}
+/* The compact dot is a corner badge with a 2px background ring; the pulse keeps that ring. */
+.computer-chip.is-compact[data-state='in-use'] > .computer-chip-dot { animation-name: computer-chip-pulse-badge; }
+@keyframes computer-chip-pulse-badge {
+  0%, 100% { box-shadow: 0 0 0 2px var(--r-bg), 0 0 0 2px color-mix(in srgb, var(--r-rose) 55%, transparent); }
+  50% { box-shadow: 0 0 0 2px var(--r-bg), 0 0 0 6px color-mix(in srgb, var(--r-rose) 0%, transparent); }
+}
+
+/* Compact: icon plus the dot as a corner badge; the name lives in the tooltip and aria-label. */
+.computer-chip.is-compact { position: relative; flex: none; min-width: 0; width: 32px; height: 32px; padding: 0; justify-content: center; margin-right: 2px; border-color: transparent; }
+.computer-chip.is-compact .computer-chip-dot { position: absolute; right: 4px; bottom: 4px; --size: 8px; box-shadow: 0 0 0 2px var(--r-bg); }
+.computer-chip.is-compact:is([data-state='none'], [data-state='offline'], [data-state='loading'], [data-state='error'], [data-state='ask'], [data-state='unsupported']) > .computer-chip-dot { background: var(--r-bg); box-shadow: inset 0 0 0 1.5px var(--chip-dot), 0 0 0 1px var(--r-bg); }
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
+  .computer-chip.is-compact { width: 44px; height: 44px; margin-right: 0; }
+  .computer-chip.is-compact .computer-chip-dot { right: 9px; bottom: 9px; }
+}
+
+/* The popover: the same picker the old strip opened. */
+.computer-pop {
+  position: fixed; z-index: 90; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain;
+  padding: 12px; border: 1px solid var(--r-line-strong); border-radius: 12px;
+  background: var(--r-bg-card); color: var(--r-ink-soft); font: 12px/1.4 var(--r-body, inherit);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.38);
+  transform-origin: top right;
+  animation: computer-pop-in 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.computer-pop:focus { outline: none; }
+@keyframes computer-pop-in { from { opacity: 0; transform: translateY(-6px) scale(0.96); } to { opacity: 1; transform: none; } }
+.computer-pop-head { display: flex; align-items: center; gap: 7px; margin-bottom: 10px; color: var(--r-ink); font-weight: 600; }
+.computer-pop-head span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.computer-pop-head .computer-chip-dot { margin-left: auto; }
+.computer-pop-head strong { font-size: 10px; letter-spacing: 0.02em; color: var(--chip-dot); }
+.computer-pop label { display: grid; gap: 6px; }
+.computer-pop select { width: 100%; max-width: 100%; min-height: 36px; border: 1px solid var(--r-line-strong); border-radius: 6px; padding: 6px; background: var(--r-bg); color: var(--r-ink); font: inherit; }
+.computer-pop p { margin: 9px 0; line-height: 1.5; }
+.computer-control-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.computer-pop button {
+  display: inline-flex; align-items: center; gap: 5px; min-height: 34px; padding: 6px 10px;
+  border: 1px solid var(--r-line-strong); border-radius: 7px; background: transparent; color: inherit; font: inherit; cursor: pointer;
+  transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.15s ease;
+}
+.computer-pop button:hover:not(:disabled) { background: var(--r-line); transform: translateY(-1px); }
+.computer-pop button:active:not(:disabled) { transform: scale(0.95); }
+.computer-pop button.computer-stop { color: var(--r-rose); border-color: currentColor; }
+.computer-pop button:disabled { opacity: 0.5; cursor: wait; }
+.computer-pop :focus-visible { outline: 2px solid var(--r-gold); outline-offset: 3px; }
+.computer-pop .computer-control-error { color: var(--r-rose); }
+.computer-pop figure { margin: 10px 0 0; }
+.computer-pop img { width: 100%; height: auto; border-radius: 6px; }
+.computer-pop figcaption { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11px; margin-top: 5px; }
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
+  .computer-pop select { min-height: 44px; font-size: 16px; }
+  .computer-pop button { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .computer-chip, .computer-chip > svg, .computer-pop button { transition: none; }
+  [data-state='in-use'] > .computer-chip-dot, .computer-chip.is-compact[data-state='in-use'] > .computer-chip-dot, .computer-pop { animation: none; }
+  .computer-chip:hover, .computer-chip:hover > svg { transform: none; }
+}

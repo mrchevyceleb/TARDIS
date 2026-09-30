@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ShellViewProps } from '../reimagine/useChatShell';
 import { ChatThread } from '../reimagine/blocks';
 import { Composer, AttachButton } from '../reimagine/Composer';
+import { ComputerControl } from '../ComputerControl';
 import { CounselSheet, ModelChip } from '../reimagine/CounselPicker';
 import {
   ChronicleRows,
@@ -92,6 +93,7 @@ export function Mobile({ s, picker, repo, agent }: ShellViewProps) {
               <span className="pulse" style={{ width: 6, height: 6 }} /> TARDIS online · {repo?.branch ?? 'master'}
             </div>
           </div>
+          {s.chatId ? <ComputerControl key={s.chatId} chatId={s.chatId} compact /> : null}
           <button type="button" className="iconbtn" aria-label="Open the Chronicle" onClick={() => setSheet('chronicle')}>
             <Book />
           </button>
