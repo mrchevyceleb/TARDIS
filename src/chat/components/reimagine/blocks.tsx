@@ -3,7 +3,7 @@
 // ChatBlock stream from useChat into the "ship speaks on the page" anatomy
 // defined in the approved prototypes (§3.3 – §3.8).
 
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { ChatBlock } from '../../data/types';
 import { REACTION_EMOJIS } from '../../data/reactions';
@@ -328,6 +328,24 @@ function peerPreview(text: string): string {
   return `${oneLine.slice(0, PEER_PREVIEW_CHARS).trimEnd()}…`;
 }
 
+/** What a person can actually see under a teammate message. A settled NO_UPDATE
+ *  or empty reply, and tool cards, are not a reply. */
+function publicPeerResponse(responseBlocks: AssistantBlock[], streaming: boolean): AssistantBlock[] {
+  return responseBlocks.filter((item) => (
+    item.kind !== 'tool'
+    && !(item.kind === 'text' && !showTextCaret(item, streaming) && (!item.text.trim() || isProtocolNoopText(item.text)))
+  ));
+}
+
+/** The peer boundary, not individual content-block open flags, owns progress.
+ *  Providers can briefly close one block before opening the next; the exchange
+ *  must not flicker to "done" while its turn is still running. */
+function peerResponseBusy(responseBlocks: AssistantBlock[], responseActive: boolean): boolean {
+  return responseActive || responseBlocks.some(
+    (item) => (item.kind === 'text' && item.open) || (item.kind === 'tool' && item.running),
+  );
+}
+
 function PeerMessageBubble({
   block,
   responseBlocks,
@@ -357,17 +375,9 @@ function PeerMessageBubble({
   const hasResponse = responseBlocks.length > 0;
   // A settled NO_UPDATE / empty reply renders nothing, so it must not leave an
   // empty timestamped bubble under the peer card.
-  const publicResponseBlocks = responseBlocks.filter((item) => (
-    item.kind !== 'tool'
-    && !(item.kind === 'text' && !showTextCaret(item, streaming) && (!item.text.trim() || isProtocolNoopText(item.text)))
-  ));
+  const publicResponseBlocks = publicPeerResponse(responseBlocks, streaming);
   const responseToolCount = responseBlocks.filter((item) => item.kind === 'tool').length;
-  // The peer boundary, not individual content-block open flags, owns progress.
-  // Providers can briefly close one block before opening the next; the exchange
-  // must not flicker to "done" while its turn is still running.
-  const responseBusy = responseActive || responseBlocks.some(
-    (item) => (item.kind === 'text' && item.open) || (item.kind === 'tool' && item.running),
-  );
+  const responseBusy = peerResponseBusy(responseBlocks, responseActive);
   const role = routineResult
     ? 'routine update'
     : block.fromRole
@@ -449,6 +459,58 @@ function PeerMessageBubble({
 function PeerBubble(props: React.ComponentProps<typeof PeerMessageBubble>) {
   if (isJobResultPeer(props.block.fromRole, props.block.text)) return <JobResultCard block={props.block} />;
   return <PeerMessageBubble {...props} />;
+}
+
+// ── folded teammate updates ──────────────────────────────────────────────
+// Runs of settled, silent teammate handoffs (the agent answered with nothing
+// for the person: NO_UPDATE, or tool work only) collapse into one dim line so a
+// busy lane's thread is not a wall of handoff cards. Expanding shows each card
+// exactly as it renders on its own. Anything still working, anything with a real
+// reply, routine results and job results are never folded.
+const FOLD_MIN_RUN = 2;
+
+type FoldItem = { fold: true; key: string; from: string; ts: number; tsApprox?: boolean; node: ReactNode };
+
+function isFoldItem(node: unknown): node is FoldItem {
+  return typeof node === 'object' && node !== null && (node as { fold?: unknown }).fold === true;
+}
+
+function foldNames(items: FoldItem[]): string {
+  const names: string[] = [];
+  for (const item of items) {
+    const name = (item.from || 'Teammate').trim();
+    if (!names.includes(name)) names.push(name);
+  }
+  return names.length > 3 ? `${names.slice(0, 3).join(', ')} +${names.length - 3}` : names.join(', ');
+}
+
+function FoldedHandoffs({ items }: { items: FoldItem[] }) {
+  const [open, setOpen] = useState(false);
+  const bodyId = `peer-fold-${items[0].key}`;
+  const latest = items[items.length - 1];
+  const when = !latest.tsApprox ? timeLabel(latest.ts) : '';
+  return (
+    <div className={`bt-peer-fold${open ? ' open' : ''}`}>
+      <button
+        type="button"
+        className="bt-peer-fold-toggle"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        aria-controls={bodyId}
+      >
+        <span className="bt-peer-fold-count">{items.length} teammate updates</span>
+        <span className="bt-peer-fold-names">{foldNames(items)}</span>
+        {when ? <span className="bt-peer-fold-when">{when}</span> : null}
+        <span className="bt-peer-fold-action">{open ? 'hide' : 'show'}</span>
+        <ChevronDown className="bt-peer-fold-chev" />
+      </button>
+      {open ? (
+        <div className="bt-peer-fold-body" id={bodyId}>
+          {items.map((item) => <Fragment key={item.key}>{item.node}</Fragment>)}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 // Regeneration: same agent, new face. Rolling compaction and a mid-turn
@@ -1061,7 +1123,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   }
 
   const lastElrondGroup = [...coalescedGroups].reverse().find((g) => g.type === 'elrond');
-  const nodes: ReactNode[] = [];
+  const nodes: Array<ReactNode | FoldItem> = [];
   let pendingAutomation = false;
   let hideThinking = false;
   for (const g of coalescedGroups) {
@@ -1137,7 +1199,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         />,
       );
     } else if (g.type === 'peer') {
-      nodes.push(
+      const bubble = (
         <PeerBubble
           key={g.block.id}
           block={g.block}
@@ -1148,8 +1210,19 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
           collapseSteps={collapseSteps}
           pin={pin}
           onReact={onReact}
-        />,
+        />
       );
+      // Settled and silent: it was answered (so it is not waiting on anyone),
+      // nothing is still running, and the agent said nothing to the person.
+      // (Routine deliverables never get here: they render in the branch above.)
+      const foldable = !jobResult
+        && g.block.fromRole !== 'automation-result'
+        && g.responseBlocks.length > 0
+        && !peerResponseBusy(g.responseBlocks, activePeerId === g.block.id)
+        && publicPeerResponse(g.responseBlocks, streaming).length === 0;
+      nodes.push(foldable
+        ? { fold: true, key: g.block.id, from: g.block.from, ts: g.block.ts, tsApprox: g.block.tsApprox, node: bubble }
+        : bubble);
     } else {
       nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} turnLive={streaming && g === lastElrondGroup} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} />);
     }
@@ -1196,9 +1269,28 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     nodes.push(<ConnectionStateIndicator key="connection-state" reconnecting={status !== 'error'} />);
   }
 
+  // Consecutive silent handoffs (nothing else between them, not even a day
+  // mark) become one line; a lone one stays the card it always was.
+  const rendered: ReactNode[] = [];
+  let foldRun: FoldItem[] = [];
+  const flushFoldRun = () => {
+    if (foldRun.length >= FOLD_MIN_RUN) rendered.push(<FoldedHandoffs key={`fold-${foldRun[0].key}`} items={foldRun} />);
+    else for (const item of foldRun) rendered.push(item.node);
+    foldRun = [];
+  };
+  for (const node of nodes) {
+    if (isFoldItem(node)) {
+      foldRun.push(node);
+    } else {
+      flushFoldRun();
+      rendered.push(node);
+    }
+  }
+  flushFoldRun();
+
   return (
     <div ref={contentRef} style={{ display: 'flex', flexDirection: 'column', gap: mobile ? 18 : 22 }}>
-      {nodes}
+      {rendered}
       <div ref={bottomRef} />
     </div>
   );
