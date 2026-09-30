@@ -13,9 +13,8 @@ import { useEffect, useRef, useState } from 'react';
 import type { ShellViewProps } from '../reimagine/useChatShell';
 import { ChatThread } from '../reimagine/blocks';
 import { Composer, AttachButton } from '../reimagine/Composer';
-import { ComputerControl } from '../ComputerControl';
-import { ChatJobsBar } from '../jobs/ChatJobsBar';
-import { agentIdFromChatId } from '../../hooks/useJobs';
+import { ChatHeaderChips } from '../ChatHeaderChips';
+import { agentIdFromChatId, useWaitingOn } from '../../hooks/useJobs';
 import { CounselSheet, ModelChip } from '../reimagine/CounselPicker';
 import {
   ChronicleRows,
@@ -32,6 +31,7 @@ export function Mobile({ s, picker, repo, agent }: ShellViewProps) {
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<number | null>(null);
   const openFileInput = useRef<() => void>(() => {});
+  const waitingOn = useWaitingOn(agentIdFromChatId(s.chatId), s.backgroundWork);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -89,13 +89,13 @@ export function Mobile({ s, picker, repo, agent }: ShellViewProps) {
           >
             <StarSigil style={{ width: 17, height: 17 }} />
           </button>
-          <div>
+          <div className="head-title">
             <h1>{ROOM_NAMES.hall.name}</h1>
             <div className="presence">
-              <span className="pulse" style={{ width: 6, height: 6 }} /> TARDIS online · {repo?.branch ?? 'master'}
+              <span className="pulse" style={{ width: 6, height: 6 }} /> <span className="presence-text">TARDIS online · {repo?.branch ?? 'master'}</span>
             </div>
           </div>
-          {s.chatId ? <ComputerControl key={s.chatId} chatId={s.chatId} compact /> : null}
+          <ChatHeaderChips chatId={s.chatId} backgroundWork={s.backgroundWork} compact />
           <button type="button" className="iconbtn" aria-label="Open the Chronicle" onClick={() => setSheet('chronicle')}>
             <Book />
           </button>
@@ -114,6 +114,7 @@ export function Mobile({ s, picker, repo, agent }: ShellViewProps) {
             suppressTyping={s.automationBusy}
             workingSince={s.workingSince}
             backgroundWork={s.backgroundWork}
+            waitingOn={waitingOn}
             onReact={s.react}
             onRetry={s.retry}
             agentName={agent}
@@ -137,7 +138,6 @@ export function Mobile({ s, picker, repo, agent }: ShellViewProps) {
 
         {/* composer dock */}
         <div className="dock">
-            <ChatJobsBar agentId={agentIdFromChatId(s.chatId)} backgroundWork={s.backgroundWork} mobile />
             <Composer
               chatId={s.chatId}
               mobile

@@ -328,13 +328,15 @@
 }
 .bt-head-agent {
   display: flex; align-items: center; gap: 10px;
+  /* A long name gives way before the header chips do: it ellipsizes, never pushes them. */
+  flex: 0 100 auto; min-width: 96px;
   padding: 6px 10px 6px 6px;
   border-radius: 999px;
   transition: background 0.15s ease;
 }
 .bt-head-agent:hover { background: var(--r-line); }
 .bt-head-agent .bt-disc { width: 26px; height: 26px; font-size: 11px; }
-.bt-head-name { font-size: 14px; font-weight: 600; color: var(--r-ink); }
+.bt-head-name { min-width: 0; font-size: 14px; font-weight: 600; color: var(--r-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bt-head-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; min-width: 0; }
 
 /* feed */
@@ -965,10 +967,12 @@
   .bot-app .rc .m-elrond, .bot-app .rc .m-user { max-width: 94%; }
   .bt-plugins-pop { left: 8px; right: 8px; width: auto; }
   .bt-head { padding: 4px max(12px, env(safe-area-inset-right, 0px)) 4px max(12px, env(safe-area-inset-left, 0px)); gap: 4px; }
-  .bt-head-agent { min-width: 0; padding-left: 0; gap: 7px; }
-  .bt-head-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bt-head-agent { min-width: 0; padding-left: 0; padding-right: 4px; gap: 7px; }
   .bt-head-actions { flex: none; }
+  .bot-app .rc .bt-head-actions .bt-mic { margin-right: 0; }
   .bt-iconbtn { width: 44px; height: 44px; }
+  /* On the narrowest phones the header is out of room: "Edit <agent>" is in Settings, one tap away. */
+  @media (max-width: 420px) { .bt-head-actions .bt-head-edit { display: none; } }
   .bt-feed { padding: 12px max(14px, env(safe-area-inset-right, 0px)) 4px max(14px, env(safe-area-inset-left, 0px)); overscroll-behavior-y: contain; }
   .bt-dock { padding: 4px max(12px, env(safe-area-inset-right, 0px)) max(8px, env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px)); }
   .bt-dock-inner .composer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-bottom: 4px; }

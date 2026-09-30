@@ -575,7 +575,7 @@ span.desk-todo-text { cursor: default; }
 .desk-chat-head .bt-disc:hover { transform: rotate(-8deg) scale(1.08); }
 .desk-chat-name { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
 .desk-chat-name strong { font-size: 14px; font-weight: 600; color: var(--r-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.desk-chat-name span { font-size: 11px; color: var(--r-ink-faint); }
+.desk-chat-name span { font-size: 11px; color: var(--r-ink-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Reference chips in the composer tray (wrap instead of scrolling). */
 .bot-app .rc .composer .attach-tray.has-refs { flex-wrap: wrap; overflow: visible; gap: 6px; padding: 2px 2px 0; }

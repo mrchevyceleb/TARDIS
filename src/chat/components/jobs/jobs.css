@@ -3,7 +3,8 @@
    agent-is-busy pulse; green/red/amber only for how a job ended. Uses the global
    --r-* tokens only (the rail badge lives outside .rc). */
 
-.jb-bar,
+.jb-pill,
+.jb-pop,
 .jr-card,
 .jb-badge {
   --jb-run: color-mix(in oklch, var(--r-vortex-2) 34%, var(--r-tardis-hi));
@@ -16,6 +17,7 @@
 .jt-note { --jb: var(--r-ink-mute); }
 
 @keyframes jb-spin { to { transform: rotate(360deg); } }
+@keyframes jb-drop { from { opacity: 0; transform: translateY(-6px) scale(0.97); } to { opacity: 1; transform: none; } }
 @keyframes jb-in { from { opacity: 0; transform: translateY(6px) scale(0.97); } to { opacity: 1; transform: none; } }
 @keyframes jb-bump { 0% { transform: translateY(3px) scale(0.92); opacity: 0.4; } 60% { transform: translateY(-1px) scale(1.04); } 100% { transform: none; opacity: 1; } }
 @keyframes jb-ripple {
@@ -28,57 +30,77 @@
 .jb-ring.is-small { width: 13px; height: 13px; }
 .jb-ring.is-run, .jb-ring.is-stopping { animation: jb-spin 1.1s linear infinite; }
 .jb-ring.is-stopping { animation-duration: 0.5s; color: var(--r-amber); }
-.jb-bar .jb-pill:hover .jb-ring { animation-duration: 0.55s; }
 
-/* ---- the pill ------------------------------------------------------------------------ */
-.jb-bar { position: relative; display: flex; align-items: center; padding: 0 0 7px; min-width: 0; animation: jb-in 0.28s var(--jb-spring) both; }
-.jb-bar .jb-pill {
-  display: inline-flex; align-items: center; gap: 8px; min-height: 32px; max-width: 100%;
-  padding: 5px 10px 5px 10px; border-radius: 999px;
-  border: 1px solid color-mix(in oklch, var(--jb) 46%, var(--r-line));
-  background: color-mix(in oklch, var(--jb) 11%, var(--r-bg-card));
-  color: var(--r-ink-soft); font: 600 12px/1 var(--r-body); letter-spacing: 0.01em;
-  cursor: pointer; -webkit-tap-highlight-color: transparent;
+/* ---- the pill (chat header) ---------------------------------------------------------
+   Sits in the header beside the Computer chip. The [type] attribute lifts the
+   rule above the `.rc button` reset (border, padding, background: none). The
+   button is the tap target (44px on a phone); the face inside is the pill you see. */
+.jb-pill[type='button'] {
+  display: inline-flex; align-items: center; justify-content: center; flex: none; height: 30px;
+  margin: 0 6px 0 0; padding: 0; border: 0; border-radius: 999px; background: none;
+  font: 600 12px/1 var(--r-body); letter-spacing: 0.01em; cursor: pointer; -webkit-tap-highlight-color: transparent;
+  animation: jb-in 0.28s var(--jb-spring) both;
+}
+.jb-pill .jb-face {
+  display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; height: 100%; box-sizing: border-box; padding: 0 9px 0 9px; overflow: hidden;
+  border-radius: 999px; border: 1px solid color-mix(in oklch, var(--jb) 46%, var(--r-line));
+  background: color-mix(in oklch, var(--jb) 11%, var(--r-bg-card)); color: var(--r-ink-soft);
   transition: transform 0.2s var(--jb-spring), box-shadow 0.2s ease, background 0.2s ease, border-color 0.2s ease;
 }
-.jb-bar .jb-pill.jt-run { animation: jb-ripple 2.6s ease-out infinite; }
-.jb-bar .jb-pill:hover { transform: translateY(-1px); background: color-mix(in oklch, var(--jb) 17%, var(--r-bg-card)); animation: none; box-shadow: 0 6px 18px color-mix(in oklch, var(--jb) 24%, transparent); }
-.jb-bar .jb-pill:active { transform: translateY(0) scale(0.95); box-shadow: none; }
-.jb-bar .jb-pill:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: 2px; }
-.jb-bar .jb-pill.is-open { background: color-mix(in oklch, var(--jb) 20%, var(--r-bg-card)); animation: none; }
-.jb-count { display: inline-block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; animation: jb-bump 0.36s var(--jb-spring) both; }
+.jb-pill.jt-run .jb-face { animation: jb-ripple 2.6s ease-out infinite; }
+.jb-pill:hover .jb-face { transform: translateY(-1px); background: color-mix(in oklch, var(--jb) 17%, var(--r-bg-card)); animation: none; box-shadow: 0 6px 18px color-mix(in oklch, var(--jb) 24%, transparent); }
+.jb-pill:hover .jb-ring { animation-duration: 0.55s; }
+.jb-pill:active .jb-face { transform: translateY(0) scale(0.95); box-shadow: none; }
+.jb-pill:focus-visible { outline: none; }
+.jb-pill:focus-visible .jb-face { outline: 2px solid var(--r-tardis-lit); outline-offset: 2px; }
+.jb-pill.is-open .jb-face { background: color-mix(in oklch, var(--jb) 20%, var(--r-bg-card)); animation: none; }
+.jb-count { display: inline-block; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; animation: jb-bump 0.36s var(--jb-spring) both; }
 .jb-chev { width: 13px; height: 13px; flex: none; color: var(--r-ink-faint); transition: transform 0.25s var(--jb-spring); }
-.jb-bar .jb-pill.is-open .jb-chev { transform: rotate(180deg); }
+.jb-pill.is-open .jb-chev { transform: rotate(180deg); }
+/* Compact: the ring and the count. The label lives in the tooltip and the accessible name. */
+.jb-pill.is-compact { min-width: 32px; margin-right: 2px; }
+.jb-pill.is-compact .jb-face { gap: 5px; padding: 0 9px 0 8px; min-width: 32px; justify-content: center; font-variant-numeric: tabular-nums; }
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
+  .jb-pill[type='button'].is-compact { min-width: 44px; height: 44px; margin-right: 0; }
+  .jb-pill.is-compact .jb-face { height: 32px; }
+  .jb-pop .jb-x { width: 44px; height: 44px; }
+  .jb-pop-h { padding: 0 4px 0 14px; }
+}
 
-/* ---- the list ------------------------------------------------------------------------ */
+/* ---- the list (a dropdown from the header pill) ----------------------------------------
+   Floats through a portal, positioned by the header chips' shared popover
+   (top, left, width and max-height come from its inline style), so it needs
+   its own resets and variables: it lives outside `.rc`. */
 .jb-pop {
-  position: absolute; left: 0; bottom: calc(100% + 4px); z-index: 40;
-  width: min(480px, 100%); max-height: min(58dvh, 440px); overflow-y: auto; overscroll-behavior: contain;
+  position: fixed; z-index: 90; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain;
   border: 1px solid var(--r-line-strong); border-radius: 14px;
-  background: var(--r-bg-raised); color: var(--r-ink);
+  background: var(--r-bg-raised); color: var(--r-ink); font: 12px/1.4 var(--r-body, inherit);
   box-shadow: 0 18px 46px rgba(0, 0, 0, 0.46), 0 0 0 1px color-mix(in oklch, var(--jb-run) 10%, transparent);
-  transform-origin: 14% 100%; animation: jb-in 0.24s var(--jb-spring) both;
+  transform-origin: top right; animation: jb-drop 0.24s var(--jb-spring) both;
   scrollbar-width: thin; scrollbar-color: var(--r-line-strong) transparent;
 }
+.jb-pop:focus { outline: none; }
+.jb-pop button { padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .jb-pop-h {
   position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between;
   padding: 9px 8px 7px 14px; background: inherit; border-bottom: 1px solid var(--r-line);
   font: 600 10px/1.2 var(--r-mono); letter-spacing: 0.09em; text-transform: uppercase; color: var(--r-ink-faint);
 }
-.jb-bar .jb-x { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: var(--r-ink-mute); font-size: 20px; line-height: 1; transition: background 0.15s, transform 0.15s var(--jb-spring); }
-.jb-bar .jb-x:hover { background: var(--r-bg-hover); color: var(--r-ink); }
-.jb-bar .jb-x:active { transform: scale(0.88); }
+.jb-pop .jb-x { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: var(--r-ink-mute); font-size: 20px; line-height: 1; transition: background 0.15s, transform 0.15s var(--jb-spring); }
+.jb-pop .jb-x:hover { background: var(--r-bg-hover); color: var(--r-ink); }
+.jb-pop .jb-x:active { transform: scale(0.88); }
+.jb-pop :focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: 2px; }
 .jb-list { list-style: none; margin: 0; padding: 4px 0 6px; }
 
 .jb-row { border-top: 1px solid var(--r-line); }
 .jb-row:first-child { border-top: 0; }
 .jb-row-main { display: flex; align-items: center; gap: 6px; padding-right: 10px; }
-.jb-bar .jb-row-toggle, .jb-bar .jb-row-static {
+.jb-pop .jb-row-toggle, .jb-pop .jb-row-static {
   flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 9px 4px 9px 14px; text-align: left;
   border-radius: 10px; transition: background 0.15s ease;
 }
-.jb-bar .jb-row-toggle:hover { background: var(--r-bg-hover); }
-.jb-bar .jb-row-toggle:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: -2px; }
+.jb-pop .jb-row-toggle:hover { background: var(--r-bg-hover); }
+.jb-pop .jb-row-toggle:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: -2px; }
 .jb-dot { width: 8px; height: 8px; flex: none; margin: 0 2.5px; border-radius: 50%; background: var(--jb); box-shadow: 0 0 0 3px color-mix(in oklch, var(--jb) 16%, transparent); }
 .jb-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .jb-name { font: 600 13px/1.25 var(--r-body); color: var(--r-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -86,19 +108,19 @@
 .jb-line-plain { font-family: var(--r-body); font-size: 11px; color: var(--r-ink-faint); }
 .jb-clock { flex: none; font: 500 11.5px/1 var(--r-mono); font-variant-numeric: tabular-nums; color: var(--r-ink-soft); }
 
-.jb-bar .jb-stop {
+.jb-pop .jb-stop {
   flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 74px; min-height: 34px; padding: 6px 11px;
   border-radius: 9px; border: 1px solid color-mix(in oklch, var(--r-rose) 50%, var(--r-line));
   background: color-mix(in oklch, var(--r-rose) 9%, transparent); color: var(--r-rose);
   font: 600 11.5px/1 var(--r-body);
   transition: transform 0.16s var(--jb-spring), background 0.15s ease, box-shadow 0.15s ease;
 }
-.jb-bar .jb-stop i { width: 8px; height: 8px; border-radius: 2px; background: currentColor; transition: transform 0.2s var(--jb-spring); }
-.jb-bar .jb-stop:hover { background: color-mix(in oklch, var(--r-rose) 16%, transparent); transform: translateY(-1px); }
-.jb-bar .jb-stop:hover i { transform: rotate(90deg) scale(1.1); }
-.jb-bar .jb-stop:active { transform: translateY(1px) scale(0.92); box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.3); }
-.jb-bar .jb-stop:focus-visible { outline: 2px solid var(--r-rose); outline-offset: 2px; }
-.jb-bar .jb-stop:disabled { cursor: progress; color: var(--r-amber); border-color: color-mix(in oklch, var(--r-amber) 50%, var(--r-line)); background: color-mix(in oklch, var(--r-amber) 9%, transparent); transform: none; }
+.jb-pop .jb-stop i { width: 8px; height: 8px; border-radius: 2px; background: currentColor; transition: transform 0.2s var(--jb-spring); }
+.jb-pop .jb-stop:hover { background: color-mix(in oklch, var(--r-rose) 16%, transparent); transform: translateY(-1px); }
+.jb-pop .jb-stop:hover i { transform: rotate(90deg) scale(1.1); }
+.jb-pop .jb-stop:active { transform: translateY(1px) scale(0.92); box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.3); }
+.jb-pop .jb-stop:focus-visible { outline: 2px solid var(--r-rose); outline-offset: 2px; }
+.jb-pop .jb-stop:disabled { cursor: progress; color: var(--r-amber); border-color: color-mix(in oklch, var(--r-amber) 50%, var(--r-line)); background: color-mix(in oklch, var(--r-amber) 9%, transparent); transform: none; }
 
 .jb-row.is-ended .jb-name, .jb-row.is-ended .jb-line, .jb-row.is-ended .jb-clock { opacity: 0.62; }
 .jb-row.is-ended .jb-row-toggle:hover .jb-name, .jb-row.is-ended .jb-row-toggle:hover .jb-line, .jb-row.is-ended .jb-row-toggle:hover .jb-clock { opacity: 0.9; }
@@ -161,13 +183,9 @@
 .jb-badge:hover { transform: translateY(-1px); background: color-mix(in oklch, var(--jb) 18%, transparent); }
 .jb-badge-ring { width: 10px; height: 10px; flex: none; animation: jb-spin 1.1s linear infinite; }
 
-/* Studio phone shell: the centred "latest" pill must clear the jobs row. */
-.rc-mobile:has(.jb-bar) .jump { bottom: 142px; }
-
 @media (max-width: 600px) {
-  .jb-pop { width: 100%; max-height: min(62dvh, 460px); }
-  .jb-bar .jb-stop { min-height: 40px; min-width: 78px; }
-  .jb-bar .jb-row-toggle, .jb-bar .jb-row-static { padding-left: 12px; }
+  .jb-pop .jb-stop { min-height: 40px; min-width: 78px; }
+  .jb-pop .jb-row-toggle, .jb-pop .jb-row-static { padding-left: 12px; }
   .jr-card { width: 100%; }
   .jr-peek, .jr-when { display: none; }
   .jr-fill { display: block; }
@@ -175,9 +193,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .jb-bar, .jb-pop, .jr-card, .jr-log, .jb-count { animation: none; }
-  .jb-bar .jb-pill.jt-run { animation: none; }
+  .jb-pill[type='button'], .jb-pop, .jr-card, .jr-log, .jb-count { animation: none; }
+  .jb-pill.jt-run .jb-face { animation: none; }
   .jb-ring.is-run, .jb-ring.is-stopping, .jb-badge-ring { animation: none; }
-  .jb-bar .jb-pill, .jb-bar .jb-stop, .jb-bar .jb-stop i, .jb-bar .jb-x, .jb-badge, .jb-chev, .jr-chev { transition: none; }
-  .jb-bar .jb-pill:hover, .jb-bar .jb-stop:hover, .jb-badge:hover { transform: none; }
+  .jb-pill .jb-face, .jb-pop .jb-stop, .jb-pop .jb-stop i, .jb-pop .jb-x, .jb-badge, .jb-chev, .jr-chev { transition: none; }
+  .jb-pill:hover .jb-face, .jb-pop .jb-stop:hover, .jb-badge:hover { transform: none; }
 }

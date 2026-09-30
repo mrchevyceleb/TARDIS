@@ -51,9 +51,9 @@ function stepClock(ms: number): string {
 }
 
 /** What the agent is doing right now, in plain words: the running tool, or
- *  thinking, or writing. `activityKey` changes whenever output
+ *  thinking, or what it is waiting on. `activityKey` changes whenever output
  *  lands, which restarts the quiet-for timer; a running tool times itself. */
-function ActiveTurnIndicator({ since, phrases, activity, toolSince, writing = false, activityKey }: { since?: number; phrases: string[]; activity?: string; toolSince?: number; writing?: boolean; activityKey?: string }) {
+function ActiveTurnIndicator({ since, phrases, activity, toolSince, writing = false, waiting, activityKey }: { since?: number; phrases: string[]; activity?: string; toolSince?: number; writing?: boolean; waiting?: string; activityKey?: string }) {
   const changedAtRef = useRef({ key: activityKey, at: Date.now() });
   if (changedAtRef.current.key !== activityKey) changedAtRef.current = { key: activityKey, at: Date.now() };
   const startedAtRef = useRef(since && since > 0 ? since : 0);
@@ -71,14 +71,17 @@ function ActiveTurnIndicator({ since, phrases, activity, toolSince, writing = fa
   const quietMs = Math.max(0, now - changedAtRef.current.at);
   // Each state says only what is true of it: a running tool times itself, prose
   // being written has no timer, and "quiet" is time since anything last landed.
+  // What it is waiting on (a background job) is named only once the agent has gone quiet.
   let stepText: string | null = null;
   let spoken = '';
   if (activity) {
     if (toolSince) { stepText = `${activity} · ${stepClock(now - toolSince)}`; spoken = activity; }
     else if (writing) { stepText = activity; spoken = activity; }
     else {
-      stepText = `${activity} · quiet ${stepClock(quietMs)}`;
-      spoken = activity;
+      // The wait comes before the quiet clock: on a phone the label ellipsizes at the end, and what
+      // it is waiting on matters more than how long it has been quiet.
+      stepText = waiting && quietMs >= 8000 ? `${activity} · waiting on ${waiting} · quiet ${stepClock(quietMs)}` : `${activity} · quiet ${stepClock(quietMs)}`;
+      spoken = waiting && quietMs >= 8000 ? `${activity}, waiting on ${waiting}` : activity;
     }
   }
   const label = stepText ?? phrases[Math.floor(elapsed / 2800) % phrases.length] ?? 'Working';
@@ -893,15 +896,20 @@ export type ChatThreadProps = {
   /** One-tap resend of a bubble that read "Not delivered". */
   onRetry?: (clientMsgId: string) => void;
   /** The model's own background shells/subagents still running after the turn
-   *  ended. The jobs pill by the composer lists them, so the feed only stops
+   *  ended. The jobs pill in the chat header lists them, so the feed only stops
    *  saying "Turn complete" while they run. */
   backgroundWork?: string[];
+  /** Everything running behind the chat, by name (background jobs, then the
+   *  model's own background work): the live line says it is waiting on these
+   *  once the agent goes quiet. The header pill counts the same list, so the
+   *  two never disagree. */
+  waitingOn?: string[];
 };
 
 // Renders the full feed: day marks on day changes, user bubbles, per-turn
 // assistant groups (tool cards + streaming prose), and the live-turn pill
 // while a turn is live but no content has landed yet.
-export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, suppressTyping = false, workingSince, backgroundWork = [], agentName, onRetry }: ChatThreadProps) {
+export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, suppressTyping = false, workingSince, backgroundWork = [], waitingOn = [], agentName, onRetry }: ChatThreadProps) {
   const streaming = status === 'streaming';
   // The indicator lives until something VISIBLE lands in the CURRENT turn.
   // Looking across the whole transcript made any historical terminal-error or
@@ -1162,8 +1170,9 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     // Never make the user infer liveness from a Stop button. Keep one animated
     // proof-of-life row visible for the ENTIRE turn, even after user-facing
     // prose or completed tool cards have appeared, saying what it is doing now.
-    // Background work is the jobs pill's to report (N jobs running), so this
-    // line never names it: one status each, never two that could disagree.
+    // Once quiet it says what it is waiting on: a lone job by name, several as
+    // a count. That is the very list the header pill counts (N jobs running),
+    // so the line and the pill never disagree.
     nodes.push(
       <ActiveTurnIndicator
         key="active-turn"
@@ -1172,11 +1181,12 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         activity={liveActivity}
         toolSince={runningTool?.ts}
         writing={openText}
+        waiting={waitingOn.length > 0 ? (waitingOn.length === 1 ? waitingOn[0] : `${waitingOn.length} jobs`) : undefined}
         activityKey={activityKey}
       />,
     );
   } else if (!latestQueued && status === 'ready' && backgroundWork.length > 0) {
-    // Nothing to add: the jobs pill by the composer shows what is still
+    // Nothing to add: the jobs pill in the header shows what is still
     // running, and "Turn complete" here would read as "nothing is happening".
   } else if (!latestQueued && status === 'ready' && hasAssistantAfterLastUser && !hasCurrentTerminalFailure) {
     // Absence of animation must mean something explicit. This permanent,

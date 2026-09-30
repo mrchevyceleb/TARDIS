@@ -69,15 +69,21 @@ async function readError(response: Response): Promise<string> {
 
 export type StopResult = { ok: true } | { ok: false; error: string };
 
-export function useJobs(agentId: string | undefined) {
-  const queryClient = useQueryClient();
-  const query = useQuery({
+/** The chat's job list query. Everything that reads it (the header pill, the live
+ *  line's "waiting on") shares one request, so their counts can never disagree. */
+function chatJobsQuery(agentId: string | undefined) {
+  return {
     queryKey: jobsKey(agentId ?? ''),
-    queryFn: ({ signal }) => fetchChatJobs(agentId ?? '', signal),
+    queryFn: ({ signal }: { signal: AbortSignal }) => fetchChatJobs(agentId ?? '', signal),
     enabled: Boolean(agentId),
     refetchInterval: CHAT_POLL_MS,
     ...POLL,
-  });
+  };
+}
+
+export function useJobs(agentId: string | undefined) {
+  const queryClient = useQueryClient();
+  const query = useQuery(chatJobsQuery(agentId));
   const jobs = query.data?.jobs;
   const skewMs = query.data?.skewMs ?? 0;
   const fetchedAt = query.dataUpdatedAt;
@@ -147,6 +153,27 @@ export function useJobs(agentId: string | undefined) {
   }, [agentId, queryClient]);
 
   return { jobs: jobs ?? [], running, recent, fetchedAt, stopping, stopJob };
+}
+
+const NO_NAMES: string[] = [];
+const runningJobNames = (data: ChatJobsData): string[] => data.jobs
+  .filter((job) => job.state === 'running')
+  .sort((a, b) => b.startedAt - a.startedAt)
+  .map((job) => job.name);
+
+/**
+ * Everything running behind the chat, by name: the agent's running jobs (newest
+ * first), then the model's own background work. The header pill counts exactly
+ * these, so the live line's "waiting on ..." never disagrees with it. Reads the
+ * pill's shared request and re-renders its caller only when the names change
+ * (the 10s tick that ages out ended jobs lives in `useJobs`, not here).
+ */
+export function useWaitingOn(agentId: string | undefined, backgroundWork: readonly string[] | undefined): string[] {
+  const { data: jobNames = NO_NAMES } = useQuery({ ...chatJobsQuery(agentId), select: runningJobNames });
+  return useMemo(
+    () => (backgroundWork?.length ? [...jobNames, ...backgroundWork] : jobNames),
+    [jobNames, backgroundWork],
+  );
 }
 
 /** Tail of one job's output. Polls only while the row is open and the job runs. */

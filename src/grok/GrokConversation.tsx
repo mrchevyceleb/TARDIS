@@ -14,11 +14,10 @@ import type { ShellViewProps } from '../chat/components/reimagine/useChatShell';
 import { ChatThread } from '../chat/components/reimagine/blocks';
 import { DRAFT_APPEND_EVENT, type DraftAppendDetail } from '../native/shell';
 import { Composer, AttachButton } from '../chat/components/reimagine/Composer';
-import { ComputerControl } from '../chat/components/ComputerControl';
+import { ChatHeaderChips, useNarrowHeader } from '../chat/components/ChatHeaderChips';
+import { agentIdFromChatId, useWaitingOn } from '../chat/hooks/useJobs';
 import { CounselPopover, ModelChip } from '../chat/components/reimagine/CounselPicker';
 import { Plus } from '../chat/components/reimagine/icons';
-import { ChatJobsBar } from '../chat/components/jobs/ChatJobsBar';
-import { agentIdFromChatId } from '../chat/hooks/useJobs';
 import { BotMark } from './GrokLogo';
 import { agentMark, DISC_INK, agentColor, agentAvatarUrl, chatColorOf, type Agent } from './agents';
 import { useAgentMessagePins } from './messagePins';
@@ -28,8 +27,8 @@ import { useMediaQuery } from '../chat/hooks/useMediaQuery';
 /** Docked beside a room (the Desk chat): its own compact header, and
  *  reference chips that ride along with the next message. */
 export type ConversationDock = {
-  /** Gets the Computer chip so the dock header can seat it (it never sits above the composer). */
-  header: (slots: { computer: ReactNode }) => ReactNode;
+  /** Gets the header chips (background jobs, Computer) so the dock header can seat them (they never sit above the composer). */
+  header: (slots: { chips: ReactNode }) => ReactNode;
   chips?: ReactNode;
   chipCount: number;
   onBackspaceEmpty?: () => void;
@@ -146,8 +145,10 @@ export function GrokConversation(props: BotConversationProps) {
   );
 
   const dock = props.dock;
-  // Docked beside a room the header is narrow, so the chip is always compact there.
-  const computerChip = s.chatId ? <ComputerControl key={s.chatId} chatId={s.chatId} compact={isMobile || Boolean(dock)} /> : null;
+  // Docked beside a room, on a phone, or squeezed by the sidebar the header is narrow: the chips go compact.
+  const { ref: headRef, narrow: headNarrow } = useNarrowHeader();
+  const waitingOn = useWaitingOn(agent?.id ?? agentIdFromChatId(s.chatId), s.backgroundWork);
+  const chips = <ChatHeaderChips chatId={s.chatId} agentId={agent?.id} backgroundWork={s.backgroundWork} compact={isMobile || Boolean(dock) || headNarrow} />;
   const composer = (
     <Composer
       chatId={s.chatId}
@@ -183,15 +184,15 @@ export function GrokConversation(props: BotConversationProps) {
 
   return (
     <div className={`rc rc-desktop bt-conv-wrap bt-fade${dock ? ' is-docked' : ''}`}>
-      {dock ? dock.header({ computer: computerChip }) : <div className="bt-head">
+      {dock ? dock.header({ chips }) : <div className="bt-head" ref={headRef}>
         <div className="bt-head-agent" title={agent ? `${agent.name} — ${agent.role}` : agentName}>
           <span className="bt-disc" data-chat-color={chatColorOf(agent)} style={agent ? { color: DISC_INK, background: agentColor(agent.name) } : undefined}>{agent && agentAvatarUrl(agent) ? <img className="bt-disc-img" src={agentAvatarUrl(agent) ?? undefined} alt={agent.name} /> : agentMark(agent, agentName.slice(0, 1))}</span>
           <span className="bt-head-name">{agentName}</span>
         </div>
         <div className="bt-head-actions">
-          {computerChip}
+          {chips}
           {micDisc}
-          <button className="bt-iconbtn" onClick={props.onOpenAgentEditor} title={agent ? `Edit ${agent.name}` : 'Companion settings'} aria-label={agent ? `Edit ${agent.name}` : 'Companion settings'}>
+          <button className={`bt-iconbtn${agent ? ' bt-head-edit' : ''}`} onClick={props.onOpenAgentEditor} title={agent ? `Edit ${agent.name}` : 'Companion settings'} aria-label={agent ? `Edit ${agent.name}` : 'Companion settings'}>
             <SquarePen size={15} />
           </button>
           <div style={{ position: 'relative' }} ref={settingsRef}>
@@ -259,6 +260,7 @@ export function GrokConversation(props: BotConversationProps) {
               suppressTyping={s.automationBusy}
               workingSince={s.workingSince}
               backgroundWork={s.backgroundWork}
+              waitingOn={waitingOn}
               onReact={s.react}
               onRetry={s.retry}
               agentName={agentName}
@@ -287,7 +289,6 @@ export function GrokConversation(props: BotConversationProps) {
 
       <div className="bt-dock">
         <div className="bt-dock-inner">
-          <ChatJobsBar agentId={agent?.id ?? agentIdFromChatId(s.chatId)} backgroundWork={s.backgroundWork} mobile={isMobile} />
           <CounselPopover picker={picker} open={counselOpen} onClose={() => setCounselOpen(false)} />
           {composer}
         </div>

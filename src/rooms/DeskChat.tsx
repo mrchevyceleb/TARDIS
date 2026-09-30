@@ -130,7 +130,7 @@ export function DeskChatDock(props: DockProps) {
   }
 
   const avatar = agentAvatarUrl(agent);
-  const header = ({ computer }: { computer: ReactNode }) => (
+  const header = ({ chips }: { chips: ReactNode }) => (
     <div className="desk-chat-head">
       <span className="bt-disc" style={{ color: DISC_INK, background: agentColor(agent.name) }}>
         {avatar ? <img className="bt-disc-img" src={avatar} alt="" /> : agentMark(agent, agent.name.slice(0, 1))}
@@ -139,7 +139,7 @@ export function DeskChatDock(props: DockProps) {
         <strong>{agent.name}</strong>
         <span>Same thread as Chat</span>
       </div>
-      {computer}
+      {chips}
       <button type="button" className="bt-iconbtn" onClick={props.onOpenInChat} title="Open in Chat" aria-label={`Open ${agent.name} in Chat`}>
         <Maximize2 size={15} />
       </button>

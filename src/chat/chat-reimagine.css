@@ -469,7 +469,10 @@
 .rc-desktop .top { display: flex; align-items: center; gap: 14px; padding: 14px 26px 12px; border-bottom: 1px solid var(--border); flex: none; }
 .rc-desktop .hall-title { margin: 0; font-family: var(--font-display); font-size: 19px; font-weight: 600; color: var(--fg); letter-spacing: 0.01em; }
 .rc-desktop .crumb { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
-.rc-desktop .top .presence { margin-left: auto; }
+.rc-desktop .top .presence { margin-left: auto; flex: none; white-space: nowrap; }
+/* The repo crumb gives way before the header chips do. */
+.rc-desktop .top .hall-title { flex: none; white-space: nowrap; }
+.rc-desktop .top .crumb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .rc-desktop .feed { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 26px 26px 30px; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .rc-desktop .feed-inner { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
@@ -496,6 +499,11 @@
 .rc-mobile .head .sigil:active { transform: scale(.88) rotate(-10deg); }
 .rc-mobile .head .sigil svg { width: 17px; height: 17px; }
 .rc-mobile .head h1 { font-size: 19px; line-height: 1.15; }
+/* The title block gives way (ellipsis) before the header chips and buttons do. */
+.rc-mobile .head-title { flex: 1 1 auto; min-width: 0; }
+.rc-mobile .head-title h1, .rc-mobile .head-title .presence-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-mobile .head-title .presence { min-width: 0; }
+.rc-mobile .head-title .presence .pulse { flex: none; }
 .rc-mobile .head .pulse { width: 6px; height: 6px; }
 .rc-mobile .iconbtn { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--border); color: var(--muted); transition: all .18s var(--spring); flex: none; }
 .rc-mobile .iconbtn:active { transform: scale(.88); background: var(--surface-hover); color: var(--fg); }

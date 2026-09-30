@@ -10,9 +10,8 @@ import { useState } from 'react';
 import type { ShellViewProps } from '../reimagine/useChatShell';
 import { ChatThread } from '../reimagine/blocks';
 import { Composer } from '../reimagine/Composer';
-import { ComputerControl } from '../ComputerControl';
-import { ChatJobsBar } from '../jobs/ChatJobsBar';
-import { agentIdFromChatId } from '../../hooks/useJobs';
+import { ChatHeaderChips, useNarrowHeader } from '../ChatHeaderChips';
+import { agentIdFromChatId, useWaitingOn } from '../../hooks/useJobs';
 import {
   CounselPopover,
   ModelChip,
@@ -24,6 +23,8 @@ import { ROOM_NAMES } from '../../../data/roomNames';
 
 export function Conversation({ s, picker, repo, agent }: ShellViewProps) {
   const [counselOpen, setCounselOpen] = useState(false);
+  const { ref: headRef, narrow } = useNarrowHeader();
+  const waitingOn = useWaitingOn(agentIdFromChatId(s.chatId), s.backgroundWork);
 
   return (
     <div className="rc rc-desktop">
@@ -33,7 +34,7 @@ export function Conversation({ s, picker, repo, agent }: ShellViewProps) {
       <div className="shell">
         {/* ── main column ── */}
         <div className="main">
-          <header className="top">
+          <header className="top" ref={headRef}>
             <h2 className="hall-title">{ROOM_NAMES.hall.name}</h2>
             <span className="crumb">
               {repo?.name ?? 'ASSISTANT-HUB'} · {repo?.branch ?? 'master'}
@@ -41,7 +42,7 @@ export function Conversation({ s, picker, repo, agent }: ShellViewProps) {
             <div className="presence">
               <span className="pulse" style={{ width: 7, height: 7 }} /> TARDIS online
             </div>
-            {s.chatId ? <ComputerControl key={s.chatId} chatId={s.chatId} /> : null}
+            <ChatHeaderChips chatId={s.chatId} backgroundWork={s.backgroundWork} compact={narrow} />
           </header>
 
           <RibbonTicker events={s.chronicle} />
@@ -56,6 +57,7 @@ export function Conversation({ s, picker, repo, agent }: ShellViewProps) {
                 suppressTyping={s.automationBusy}
                 workingSince={s.workingSince}
                 backgroundWork={s.backgroundWork}
+                waitingOn={waitingOn}
                 onReact={s.react}
                 onRetry={s.retry}
                 agentName={agent}
@@ -79,7 +81,6 @@ export function Conversation({ s, picker, repo, agent }: ShellViewProps) {
 
           <div className="dock">
             <div className="dock-inner">
-              <ChatJobsBar agentId={agentIdFromChatId(s.chatId)} backgroundWork={s.backgroundWork} />
               <CounselPopover picker={picker} open={counselOpen} onClose={() => setCounselOpen(false)} />
               <Composer
                 chatId={s.chatId}

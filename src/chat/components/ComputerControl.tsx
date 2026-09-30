@@ -1,8 +1,9 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Monitor, Square } from 'lucide-react';
 import { fetchComputers, previewComputer, resumeComputer, selectComputer, stopComputer, type ComputerPreview, type DefaultComputer, type LinkedComputer } from '../../data/api';
 import { nativeShell } from '../../native/shell';
+import { useAnchoredPopover } from './useAnchoredPopover';
 import './computer-control.css';
 
 /** "9:05am ET", or "Sep 28, 11:05pm ET" when it was not today (Eastern, always labeled). */
@@ -36,14 +37,8 @@ const STATE_HINT: Record<ChipState, string> = {
  * name in the tooltip and accessible name.
  */
 export function ComputerControl({ chatId, compact = false }: { chatId: string; compact?: boolean }) {
-  const [open, setOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
-  const [portalRoot, setPortalRoot] = useState<HTMLElement | null>(null);
-  const [anchor, setAnchor] = useState<DOMRect | null>(null);
-  const chipRef = useRef<HTMLButtonElement | null>(null);
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  const panelId = useId();
   const [devices, setDevices] = useState<LinkedComputer[]>([]);
   const [defaultDevice, setDefault] = useState<DefaultComputer | null>(null);
   const [selected, setSelected] = useState('');
@@ -128,59 +123,9 @@ export function ComputerControl({ chatId, compact = false }: { chatId: string; c
     : state === 'none' ? 'No default computer is configured. Pick one above and agents in this chat will use it.'
     : device?.computer?.reason || (automatic ? 'Agents can operate this desktop for assigned work without approval popups.' : device?.computer?.supported ? 'This computer is configured to ask for native approval.' : device ? 'This client does not support desktop control. Update the desktop app.' : 'The selected/default computer is offline. No other machine will be used automatically.');
 
-  const close = (restoreFocus: boolean) => {
-    setOpen(false);
-    if (restoreFocus) window.requestAnimationFrame(() => chipRef.current?.focus({ preventScroll: true }));
-  };
-
-  // The popover floats through a portal so no header overflow can clip it. It
-  // follows the chip and never leaves the visible viewport. On a phone the Desk
-  // chat is an aria-modal sheet: the popover portals INTO it, because assistive
-  // tech treats everything outside a modal as unavailable.
-  useLayoutEffect(() => {
-    if (!open) { setAnchor(null); return; }
-    setPortalRoot((chipRef.current?.closest('[aria-modal="true"]') as HTMLElement | null) ?? document.body);
-    const measure = () => { const el = chipRef.current; if (el) setAnchor(el.getBoundingClientRect()); };
-    measure();
-    const vv = window.visualViewport;
-    window.addEventListener('resize', measure);
-    window.addEventListener('scroll', measure, true);
-    vv?.addEventListener('resize', measure);
-    vv?.addEventListener('scroll', measure);
-    return () => {
-      window.removeEventListener('resize', measure);
-      window.removeEventListener('scroll', measure, true);
-      vv?.removeEventListener('resize', measure);
-      vv?.removeEventListener('scroll', measure);
-    };
-  }, [open, state, name]);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (event: PointerEvent) => {
-      const at = event.target as Node;
-      if (panelRef.current?.contains(at) || chipRef.current?.contains(at)) return;
-      setOpen(false);
-    };
-    // Capture phase: Escape closes only this popover, never the sheet or dock behind it.
-    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape' && !event.ctrlKey && !event.metaKey && !event.isComposing) { event.stopPropagation(); close(true); } };
-    document.addEventListener('pointerdown', onDown);
-    document.addEventListener('keydown', onKey, true);
-    return () => { document.removeEventListener('pointerdown', onDown); document.removeEventListener('keydown', onKey, true); };
-  }, [open]);
-  useEffect(() => { if (open && anchor && !panelRef.current?.contains(document.activeElement)) panelRef.current?.focus({ preventScroll: true }); }, [open, Boolean(anchor)]);
-
-  // Size against what is actually visible (a phone keyboard or browser bar shrinks it).
-  const vv = window.visualViewport;
-  const viewLeft = vv?.offsetLeft ?? 0;
-  const viewWidth = vv?.width ?? window.innerWidth;
-  const viewBottom = vv ? vv.offsetTop + vv.height : window.innerHeight;
-  const width = Math.min(340, viewWidth - 24);
-  const panelStyle: CSSProperties | undefined = anchor ? {
-    top: anchor.bottom + 8,
-    width,
-    left: Math.min(Math.max(anchor.right - width, viewLeft + 12), viewLeft + viewWidth - 12 - width),
-    maxHeight: Math.max(120, viewBottom - anchor.bottom - 20),
-  } : undefined;
+  // The popover (portal, Esc, outside click, Tab containment, visual-viewport sizing) is the
+  // header chips' shared pattern. It re-anchors whenever the chip's label or state changes.
+  const { open, toggle, triggerRef: chipRef, panelRef, panelId, ready, panelStyle, onPanelKeyDown, onPanelBlur, portalRoot } = useAnchoredPopover({ measureKey: `${state}|${name}` });
 
   return <>
     <button
@@ -193,14 +138,14 @@ export function ComputerControl({ chatId, compact = false }: { chatId: string; c
       aria-controls={open ? panelId : undefined}
       aria-label={accessibleName}
       title={accessibleName}
-      onClick={() => (open ? close(false) : setOpen(true))}
+      onClick={toggle}
     >
       <Monitor size={compact ? 16 : 14} aria-hidden="true" />
       {!compact && <span className="computer-chip-name">{name}</span>}
       <i className="computer-chip-dot" aria-hidden="true" />
       {!compact && stateLabel && <strong className="computer-chip-state">{stateLabel}</strong>}
     </button>
-    {open && anchor && portalRoot && createPortal(
+    {ready && portalRoot && createPortal(
       <div
         ref={panelRef}
         id={panelId}
@@ -209,16 +154,8 @@ export function ComputerControl({ chatId, compact = false }: { chatId: string; c
         aria-label="Computer"
         tabIndex={-1}
         style={panelStyle}
-        onKeyDown={event => {
-          // Tabbing off either end of the popover closes it and hands focus back to the chip,
-          // so keyboard order continues from the header instead of jumping to wherever the portal sits.
-          if (event.key !== 'Tab') return;
-          const panel = panelRef.current;
-          const items = panel ? Array.from(panel.querySelectorAll<HTMLElement>('select, button, input, textarea, a[href], [tabindex]:not([tabindex="-1"])')).filter(el => !(el as HTMLButtonElement).disabled) : [];
-          const at = document.activeElement;
-          if (event.shiftKey ? (at === panel || at === items[0]) : (items.length === 0 || at === items[items.length - 1])) { event.preventDefault(); close(true); }
-        }}
-        onBlur={event => { const to = event.relatedTarget as Node | null; if (to && !panelRef.current?.contains(to) && !chipRef.current?.contains(to)) setOpen(false); }}
+        onKeyDown={onPanelKeyDown}
+        onBlur={onPanelBlur}
       >
         <div className="computer-pop-head" data-state={state}>
           <Monitor size={14} aria-hidden="true" />

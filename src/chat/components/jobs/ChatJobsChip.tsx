@@ -1,23 +1,27 @@
-// The chat's background-work pill. It sits with the composer (not in the feed),
-// so it is visible whether the agent is streaming or idle, and it never
-// touches the composer itself: you can always type. One picture of everything
+// The chat's background-work chip. It lives in the chat header next to the
+// Computer chip (never above the composer, where a stray click or thumb lands
+// while someone is typing), so it is visible whether the agent is streaming or
+// idle. Click drops the list down from the header. One picture of everything
 // running behind the chat: named jobs the agent started with job_start (timer,
 // last output line, Stop) plus the model's own background shells and subagents
 // (label only). Ended jobs from the last few minutes stay in the list, dimmed.
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronDown } from '../reimagine/icons';
+import { useAnchoredPopover } from '../useAnchoredPopover';
 import { useJobLog, useJobs, type JobView, type StopResult } from '../../hooks/useJobs';
 import { fmtClock, jobOutcome, jobTone } from './format';
 import { JobRing } from './parts';
 import './jobs.css';
 
-export type ChatJobsBarProps = {
+export type ChatJobsChipProps = {
   /** The chat's agent. Without one only the model's own background work shows. */
   agentId?: string;
   /** Background shells and subagents the model itself is running (useChat). */
   backgroundWork?: string[];
-  mobile?: boolean;
+  /** A narrow header: the pill is the ring and the count only (the label is in the tooltip and accessible name). */
+  compact?: boolean;
 };
 
 /** Ticks while `active`, so a running job's clock moves between polls. */
@@ -34,79 +38,76 @@ function useNow(active: boolean): number {
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-export function ChatJobsBar({ agentId, backgroundWork, mobile = false }: ChatJobsBarProps) {
+export function ChatJobsChip({ agentId, backgroundWork, compact = false }: ChatJobsChipProps) {
   const { running, recent, fetchedAt, stopping, stopJob } = useJobs(agentId);
   const tasks = backgroundWork ?? [];
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const pillRef = useRef<HTMLButtonElement>(null);
-  const popId = useId();
 
   const runningCount = running.length + tasks.length;
   const empty = runningCount === 0 && recent.length === 0;
-  const now = useNow(open && !empty);
-
-  useEffect(() => { if (empty) setOpen(false); }, [empty]);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const onDown = (event: PointerEvent) => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      setOpen(false);
-      pillRef.current?.focus();
-    };
-    document.addEventListener('pointerdown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('pointerdown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
-
-  if (empty) return null;
-
   const bad = recent.filter((job) => jobTone(job.state) === 'bad');
   const failed = bad.length;
   let tone: 'run' | 'ok' | 'bad' | 'warn';
   let label: string;
+  let count: number;
   if (runningCount > 0) {
     tone = 'run';
     label = `${plural(runningCount, 'job')} running`;
+    count = runningCount;
   } else if (failed > 0) {
     tone = 'bad';
     label = `${plural(failed, 'job')} ${bad.every((job) => job.state === 'lost') ? 'lost' : 'failed'}`;
+    count = failed;
   } else if (recent.length === 1) {
     tone = jobTone(recent[0].state) === 'ok' ? 'ok' : 'warn';
     label = `1 job ${jobOutcome(recent[0])}`;
+    count = 1;
   } else {
     tone = recent.some((job) => jobTone(job.state) === 'warn') ? 'warn' : 'ok';
     label = `${recent.length} jobs ended`;
+    count = recent.length;
   }
 
+  const { open, setOpen, toggle, close, triggerRef, panelRef, panelId, portalRoot, ready, panelStyle, onPanelKeyDown, onPanelBlur } = useAnchoredPopover({ measureKey: `${compact}|${label}`, width: 440, maxHeight: 440 });
+  const now = useNow(open && !empty);
+  useEffect(() => { if (empty) setOpen(false); }, [empty, setOpen]);
+
+  if (empty) return null;
+
   return (
-    <div className={`jb-bar${mobile ? ' is-mobile' : ''}`} ref={rootRef}>
+    <>
       <button
-        ref={pillRef}
+        ref={triggerRef}
         type="button"
-        className={`jb-pill jt-${tone}${open ? ' is-open' : ''}`}
+        className={`jb-pill jt-${tone}${compact ? ' is-compact' : ''}${open ? ' is-open' : ''}`}
+        aria-haspopup="dialog"
         aria-expanded={open}
-        aria-controls={open ? popId : undefined}
+        aria-controls={open ? panelId : undefined}
         aria-label={`${label}. ${open ? 'Hide' : 'Show'} the list`}
-        onClick={() => setOpen((value) => !value)}
+        title={label}
+        onClick={toggle}
       >
-        <JobRing tone={tone} />
-        <span className="jb-count" key={label}>{label}</span>
-        <ChevronDown className="jb-chev" aria-hidden="true" />
+        <span className="jb-face">
+          <JobRing tone={tone} />
+          <span className="jb-count" key={compact ? count : label}>{compact ? count : label}</span>
+          {compact ? null : <ChevronDown className="jb-chev" aria-hidden="true" />}
+        </span>
       </button>
 
-      {open ? (
-        <div className="jb-pop" id={popId} role="region" aria-label="Background jobs">
+      {ready && portalRoot ? createPortal(
+        <div
+          ref={panelRef}
+          id={panelId}
+          className="jb-pop"
+          role="dialog"
+          aria-label="Background jobs"
+          tabIndex={-1}
+          style={panelStyle}
+          onKeyDown={onPanelKeyDown}
+          onBlur={onPanelBlur}
+        >
           <div className="jb-pop-h">
             <span>Background jobs</span>
-            <button type="button" className="jb-x" aria-label="Close the list" onClick={() => { setOpen(false); pillRef.current?.focus(); }}>
+            <button type="button" className="jb-x" aria-label="Close the list" onClick={() => close(true)}>
               <span aria-hidden="true">&times;</span>
             </button>
           </div>
@@ -131,9 +132,10 @@ export function ChatJobsBar({ agentId, backgroundWork, mobile = false }: ChatJob
               <JobRow key={job.id} job={job} now={now} fetchedAt={fetchedAt} stopping={false} onStop={stopJob} />
             ))}
           </ul>
-        </div>
+        </div>,
+        portalRoot,
       ) : null}
-    </div>
+    </>
   );
 }
 
