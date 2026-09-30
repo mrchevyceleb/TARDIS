@@ -1448,12 +1448,13 @@ class ClaudeSession {
   /** Ask for the current turn to end at the next tool boundary so a waiting
    *  message can start a fresh turn. Never cancels a tool: the interrupt fires
    *  only once every tool call in flight has returned. If the turn finishes on
-   *  its own first, nothing is interrupted. Scheduled (automation) turns are
-   *  left to finish. Returns a release function, or null when there is no turn
-   *  to end. */
+   *  its own first, nothing is interrupted. A scheduled or wake-started
+   *  (automation) turn ends for a person's message too, at a tool boundary, but
+   *  is left to finish for a teammate's handoff. Returns a release function, or
+   *  null when there is no turn to end. */
   requestBoundaryInterrupt(opts: { human?: boolean } = {}): (() => void) | null {
-    if (this.turnStartedAt === null || this.automationTurn || this.disposed || this.child.exitCode !== null) return null;
     const human = opts.human === true;
+    if (this.turnStartedAt === null || (this.automationTurn && !human) || this.disposed || this.child.exitCode !== null) return null;
     this.boundaryInterruptWanted = true;
     this.boundaryWaiters += 1;
     if (human) this.boundaryHumanWaiters += 1;
