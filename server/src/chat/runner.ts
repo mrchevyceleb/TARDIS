@@ -532,6 +532,11 @@ class ClaudeSession {
    *  name it. Lazy, like stopWatch: prototype-built test sessions skip field
    *  initializers. */
   private backgroundTasks?: Map<string, string>;
+  /** Ids of background tasks a warm interrupt would stop: anything but a plain
+   *  background command (probed on the CLI: run_in_background Bash and Monitor
+   *  survive an interrupt and still report; a background subagent is killed).
+   *  Lazy, like backgroundTasks. */
+  private interruptHazards?: Set<string>;
   /** Open while an explicit Stop settles: the background work alive when Stop
    *  was pressed, and which of it Claude reported stopped. */
   private stopWatch?: { before: Map<string, string>; stopped: Set<string>; timer: NodeJS.Timeout | null } | null;
@@ -1315,6 +1320,11 @@ class ClaudeSession {
     return (this.backgroundTasks?.size ?? 0) > 0;
   }
 
+  /** Would ending the turn with a warm interrupt stop background work? */
+  private hasInterruptHazard(): boolean {
+    return (this.interruptHazards?.size ?? 0) > 0;
+  }
+
   /** Should a model/effort recycle keep waiting for background work? Yes for
    *  up to BACKGROUND_MODEL_HOLD_MINUTES from the first hold, saying so once
    *  per wanted selection. After that the change wins: a watcher can run for
@@ -1347,7 +1357,7 @@ class ClaudeSession {
       mdl: this.spawnModel,
     });
     // Keep the list on a failed write so shutdown's own note still names it.
-    if (written) this.backgroundTasks?.clear();
+    if (written) { this.backgroundTasks?.clear(); this.interruptHazards?.clear(); }
     return written;
   }
 
@@ -1356,6 +1366,7 @@ class ClaudeSession {
   private endBackgroundWork(cause: BackgroundWorkCause, extra: string[] = []): void {
     const tasks = [...new Set([...extra, ...this.backgroundWork()])];
     this.backgroundTasks?.clear();
+    this.interruptHazards?.clear();
     this.postBackgroundWork('ended', cause, tasks);
   }
 
@@ -1371,16 +1382,22 @@ class ClaudeSession {
     if (ev?.type !== 'system') return;
     if (ev.subtype === 'background_tasks_changed' && Array.isArray(ev.tasks)) {
       const next = new Map<string, string>();
+      const hazards = new Set<string>();
       for (const task of ev.tasks) {
-        if (typeof task?.task_id === 'string') next.set(task.task_id, backgroundTaskLabel(task));
+        if (typeof task?.task_id !== 'string') continue;
+        next.set(task.task_id, backgroundTaskLabel(task));
+        if (task.task_type !== 'local_bash') hazards.add(task.task_id);
       }
       this.backgroundTasks = next;
+      this.interruptHazards = hazards;
     } else if (typeof ev.task_id !== 'string') {
       return;
     } else if (ev.subtype === 'task_started' && ev.is_backgrounded === true) {
       (this.backgroundTasks ??= new Map()).set(ev.task_id, backgroundTaskLabel(ev));
+      if (ev.task_type !== 'local_bash') (this.interruptHazards ??= new Set()).add(ev.task_id);
     } else if (ev.subtype === 'task_notification') {
       this.backgroundTasks?.delete(ev.task_id);
+      this.interruptHazards?.delete(ev.task_id);
       if (ev.status === 'stopped') this.stopWatch?.stopped.add(ev.task_id);
     }
     if (!this.hasBackgroundWork()) this.keptForBackground = undefined;
@@ -1852,12 +1869,14 @@ class ClaudeSession {
         }
         if (this.boundaryInterruptWanted && this.activeToolIds.size === 0) {
           const now = Date.now();
-          // Claude's interrupt also stops background subagents, and a person who
-          // never asked for that should not lose a running monitor to a chat
-          // message. With background work running the turn is left to finish
-          // (it usually ends soon, waiting on that work) and the message
-          // starts the next turn as before.
-          if (this.hasBackgroundWork()) {
+          // Claude's interrupt stops background subagents, and a person who
+          // never asked for that should not lose one to a chat message. With
+          // one running the turn is left to finish (it usually ends soon,
+          // waiting on that work) and the message starts the next turn as
+          // before. Background commands and monitors are unaffected by the
+          // interrupt (they keep running and still report), so they do not
+          // hold a message back.
+          if (this.hasInterruptHazard()) {
             this.boundaryInterruptWanted = false;
           } else if (this.boundaryHumanWaiters > 0 || now - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS) {
             // A teammate inside the hold-off window stays armed for the next

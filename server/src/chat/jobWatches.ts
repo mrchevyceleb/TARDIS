@@ -6,9 +6,11 @@
 // as a normal turn, the same delivery path a routine uses — works for every
 // engine (claude, codex, zai, xai, banana). Watches persist in
 // ~/.rivendell/job-watches.json and re-arm after a TARDIS restart. A command
-// spawned by an earlier server process degrades honestly to its persisted
-// pid (exit code unknown) — unless its exit was already recorded, in which
-// case the recorded outcome survives the restart and delivers as-is.
+// runs in its own systemd scope (see launchWatchCommand), so a restart of the
+// service does not kill it. A command spawned by an earlier server process
+// degrades honestly to its persisted pid (exit code unknown) — unless its
+// exit was already recorded, in which case the recorded outcome survives the
+// restart and delivers as-is.
 //
 // No new privilege is granted: pid/file watching is read-only, and `command`
 // runs with the same shell power the agent's own session already has on
@@ -133,7 +135,48 @@ function pidMatches(pid: number, start: number | null | undefined): boolean {
 }
 
 function exitText(code: number | null, signal: NodeJS.Signals | null): string {
-  return `finished: exit ${code ?? 'unknown'}${signal ? ` (signal ${signal})` : ''}`;
+  // Killed by a signal: the watching command died, which says nothing about the
+  // job it was watching. Never call that "finished".
+  if (code === null) {
+    return `was NOT reported finished: the command watching it was stopped${signal ? ` (signal ${signal})` : ''}, so its state is unknown and it may still be running. Check it, and re-arm the watch if you still need the wake.`;
+  }
+  return `finished: exit ${code}`;
+}
+
+let scopeProbe: Promise<boolean> | null = null;
+/** Whether a command can be started in its own transient systemd scope. Probed
+ *  once, off the event loop: a scope needs the user manager's bus, which not
+ *  every host has. (--expand-environment=no keeps the shell program from being
+ *  rewritten by systemd; an older systemd that lacks it fails the probe and
+ *  falls back to the plain spawn.) */
+function canLaunchInScope(): Promise<boolean> {
+  scopeProbe ??= new Promise<boolean>((resolve) => {
+    try {
+      const probe = spawn('systemd-run', ['--user', '--scope', '--quiet', '--collect', '--expand-environment=no', 'true'], { stdio: 'ignore' });
+      const timer = setTimeout(() => { try { probe.kill('SIGKILL'); } catch { /* gone */ } resolve(false); }, 5000);
+      timer.unref?.();
+      probe.once('error', () => { clearTimeout(timer); resolve(false); });
+      probe.once('exit', (code) => { clearTimeout(timer); resolve(code === 0); });
+    } catch {
+      resolve(false);
+    }
+  });
+  return scopeProbe;
+}
+
+/** Start a watch command detached. Under systemd it goes into its own scope
+ *  (systemd-run execs the shell in place, so the pid is the shell's), which
+ *  keeps it outside rivendell.service's cgroup: a service restart used to kill
+ *  every watcher (KillMode=control-group) and wake the agent with a SIGTERM
+ *  for a job that was still running. */
+function launchWatchCommand(command: string, scoped: boolean): ChildProcess {
+  if (!scoped) return spawn(command, { shell: true, detached: true, stdio: 'ignore' });
+  const startedAt = Date.now();
+  const child = spawn('systemd-run', ['--user', '--scope', '--quiet', '--collect', '--expand-environment=no', '--unit', `tardis-watch-${randomUUID().slice(0, 8)}`, '/bin/sh', '-c', command], { detached: true, stdio: 'ignore' });
+  // A scope that fails to register exits 1 within moments. Probe again on the
+  // next launch instead of trusting the earlier answer forever.
+  child.once('exit', (code) => { if (code === 1 && Date.now() - startedAt < 2000) scopeProbe = null; });
+  return child;
 }
 
 export type CreateJobWatchInput = {
@@ -192,7 +235,8 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
   // command: the server runs it detached right now.
   if (typeof input.command !== 'string' || !input.command.trim()) throw new Error('command must be a shell command');
   const command = input.command.trim();
-  const child = spawn(command, { shell: true, detached: true, stdio: 'ignore' });
+  const scoped = await canLaunchInScope();
+  const child = launchWatchCommand(command, scoped);
   // Listen IMMEDIATELY, before anything else: a spawn failure (EAGAIN/EMFILE,
   // no pid) emits an async 'error' that would crash the process with no
   // listener, and a fast command can exit while the record is still being

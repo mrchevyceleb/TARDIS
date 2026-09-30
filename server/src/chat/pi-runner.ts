@@ -559,7 +559,8 @@ export class PiSession {
     if (!startsNewTurn) {
       if (opts.peerFrom && !opts.allowNativePeerSteer) return;
       if (!opts.peerFrom && !opts.allowNativeHumanSteer) throw new Error('the current turn must reach a safe boundary before guidance is delivered');
-      if (this.automationTurn && !opts.peerFrom) throw new Error('human message is waiting for the automation turn to finish');
+      // A person's message steers into a wake- or routine-started turn like any
+      // other: rejecting it here left the bubble failed with no resend.
     }
     const automationRequest = continuing ? continuing.origin.automation : opts.peerFromRole === 'automation';
     if (startsNewTurn) {
