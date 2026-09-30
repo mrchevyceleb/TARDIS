@@ -68,7 +68,8 @@ export function ChatJobsBar({ agentId, backgroundWork, mobile = false }: ChatJob
 
   if (empty) return null;
 
-  const failed = recent.filter((job) => jobTone(job.state) === 'bad').length;
+  const bad = recent.filter((job) => jobTone(job.state) === 'bad');
+  const failed = bad.length;
   let tone: 'run' | 'ok' | 'bad' | 'warn';
   let label: string;
   if (runningCount > 0) {
@@ -76,7 +77,7 @@ export function ChatJobsBar({ agentId, backgroundWork, mobile = false }: ChatJob
     label = `${plural(runningCount, 'job')} running`;
   } else if (failed > 0) {
     tone = 'bad';
-    label = `${plural(failed, 'job')} failed`;
+    label = `${plural(failed, 'job')} ${bad.every((job) => job.state === 'lost') ? 'lost' : 'failed'}`;
   } else if (recent.length === 1) {
     tone = jobTone(recent[0].state) === 'ok' ? 'ok' : 'warn';
     label = `1 job ${jobOutcome(recent[0])}`;

@@ -109,10 +109,13 @@ export function useJobs(agentId: string | undefined) {
     if (!agentId) return { ok: false, error: 'no agent' };
     setStopping((prev) => new Set(prev).add(id));
     try {
+      // The server confirms the process is gone before it answers, which can take
+      // a few seconds. A stalled connection must not leave the row on "stopping".
       const response = await fetch(`/api/jobs/${enc(id)}/stop`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ by: 'user' }),
+        signal: AbortSignal.timeout(30_000),
       });
       if (response.ok) {
         const { job } = await response.json() as { job?: JobView };
@@ -131,7 +134,8 @@ export function useJobs(agentId: string | undefined) {
       }
       return { ok: false, error: await readError(response) };
     } catch (error) {
-      return { ok: false, error: (error as Error).message || 'could not reach the server' };
+      const timedOut = (error as Error).name === 'TimeoutError';
+      return { ok: false, error: timedOut ? 'the server did not answer in time, check the list' : (error as Error).message || 'could not reach the server' };
     } finally {
       setStopping((prev) => {
         const next = new Set(prev);
