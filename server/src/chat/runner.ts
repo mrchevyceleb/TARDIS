@@ -2,7 +2,7 @@ import { assertClaudeSubscription } from './subscription-auth.ts';
 import { assertSubscriptionLane, subscriptionEnvironment } from './subscription-policy.ts';
 import { execFileSync, spawn, type ChildProcessByStdio } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
@@ -35,7 +35,9 @@ import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { chatAttachmentPath, saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
-import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
+import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
+import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
+import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { PiSession, usePiHarness } from './pi-runner.ts';
@@ -488,6 +490,7 @@ class ClaudeSession {
    *  accompanying `result` often carries no status, so this is the only
    *  surviving evidence of the real cause. */
   private syntheticApiErrorReason: string | null = null;
+  private providerAccount = '';
   /** Text-block seqs for the current Claude stream. A later synthetic marker
    * lets us surgically remove only its protocol prose from durable storage. */
   private streamTextBlocks = new Map<number, { text: string; seqs: number[] }>();
@@ -702,6 +705,8 @@ class ClaudeSession {
       : forcedAccount ? accountEnvForAccount(forcedAccount, cwd) : accountEnv(cwd);
     if (cli !== 'xai' && cli !== 'zai') assertClaudeSubscription(spawnEnv, cwd);
     if (cli === 'claude' || cli === 'assistant') spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CONTEXT_TOKEN_BUDGET);
+    const profileDir = spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
+    this.providerAccount = existsSync(profileDir) ? realpathSync(profileDir) : profileDir;
     this.child = spawn('claude', args, {
       cwd,
       env: spawnEnv,
@@ -1934,6 +1939,7 @@ class ClaudeSession {
       console.log(`[chat ${this.cli}] ignored unrecognized_model warning: ${line.slice(0, 180)}`);
       return;
     }
+    noteProviderGateFailure(providerLabel(this.cli), () => agentForChatId(this.chatId)?.name ?? 'a lane', line);
     this.emit({ type: 'error', message: line });
   }
 
@@ -2124,8 +2130,12 @@ class ClaudeSession {
     }
     const expectedUserInterrupt = ev?.type === 'result' && this.userInterruptPending;
     const providerTerminal = ev?.type === 'result' && !expectedUserInterrupt
-      ? terminalProviderError(this.cli, ev)
+      ? terminalProviderError(this.cli, ev, this.syntheticApiErrorReason)
       : null;
+    if (ev?.type === 'result' && (ev.is_error || providerTerminal) && !expectedUserInterrupt) {
+      const detail = [ev.api_error_status === 426 ? 'HTTP 426' : '', this.syntheticApiErrorReason, ev.result, ...(Array.isArray(ev.errors) ? ev.errors.map((e: any) => typeof e === 'string' ? e : e?.message) : [])].filter((s) => typeof s === 'string').join('\n');
+      noteProviderGateFailure(providerLabel(this.cli), () => agentForChatId(this.chatId)?.name ?? this.chatId, detail);
+    }
     const terminal = providerTerminal
       ?? (ev?.type === 'result' && !expectedUserInterrupt
         ? terminalExecutionError(
@@ -2135,6 +2145,9 @@ class ClaudeSession {
             [...this.streamTextBlocks.values()].map((block) => block.text).join('\n'),
           )
         : null);
+    if (terminal?.usageLimit) {
+      noteProviderUsageLimit(this.providerAccount, agentForChatId(this.chatId)?.name ?? 'a lane', terminal);
+    }
     // Z.ai meters the coding plan in fixed windows, so an exhausted window is
     // never a balance problem and topping up credits cannot clear it. Attribute
     // the failure to the provider THIS child is actually talking to: a 1308
