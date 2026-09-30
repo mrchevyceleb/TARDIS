@@ -21,6 +21,19 @@ export const REPLY_NUDGE_EVENT = '_reply_nudge';
 
 export const REPLY_NUDGE_NOTE = '<rivendell-steer>System note, not a new message from the person: they have seen nothing from you since their message, and they cannot see your thinking. Write your reply as visible text, not in thinking: say what you understood and what you are doing, then continue.</rivendell-steer>';
 
+/** The Claude-lane nudge. Claude answers the plain note inside a thinking summary
+ *  about 4 times in 5 (measured), so its nudge routes the reply through a tool
+ *  the runner turns into a visible message. Codex and Pi keep the plain note. */
+export const REPLY_NUDGE_NOTE_TOOL = '<rivendell-steer>System note, not a new message from the person: they have seen nothing from you since their message, and they cannot see your thinking. Call reply_now with one or two sentences for them (what you understood and what you are doing), then continue.</rivendell-steer>';
+
+/** The text of a reply_now tool call (bare name or mcp__<server>__reply_now), or ''
+ *  for any other block. The agent's exact text is kept; blank text counts as none. */
+export function replyNowText(block: { type?: string; name?: string; input?: { text?: unknown } } | null | undefined): string {
+  if (block?.type !== 'tool_use' || typeof block.name !== 'string' || !/^(mcp__.+__)?reply_now$/.test(block.name)) return '';
+  const text = block.input?.text;
+  return typeof text === 'string' && text.trim() ? text : '';
+}
+
 export type ReplyNudgeReason = 'tools' | 'time';
 export type ReplyNudge = { reason: ReplyNudgeReason; tools: number; elapsedMs: number };
 
