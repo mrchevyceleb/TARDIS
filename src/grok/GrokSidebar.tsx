@@ -11,7 +11,7 @@
 // [+] creates a companion (name/role/engine/scope). Every row = a companion and
 // its ONE persistent forever-thread. Scratch threads surface via search only.
 
-import { useCallback, useMemo, useRef, useState, useEffect, type CSSProperties, type KeyboardEvent as ReactKeyEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useMemo, useRef, useState, useEffect, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Activity,
@@ -25,6 +25,7 @@ import {
   CalendarDays,
   ClipboardList,
   Coins,
+  FolderInput,
   Gauge,
   Hammer,
   Heart,
@@ -43,6 +44,9 @@ import {
   X,
 } from 'lucide-react';
 import { BotMark } from './GrokLogo';
+import { MoveToGroupMenu, RailGroupSection, RailNewGroup } from './RailGroups';
+import { OTHER_GROUP_ID, OTHER_GROUP_NAME } from './railGroups';
+import { useRailGroups } from './useRailGroups';
 import { agentMark, DISC_INK, agentColor, agentAvatarUrl, sameChatId, CHAT_COLORS, chatColorOf, type Agent, type AgentFlagPatch, type ChatColor } from './agents';
 import { useLive } from '../chat/hooks/useLive';
 import type { HistoryItem } from './history';
@@ -148,6 +152,7 @@ function AgentContextMenu({
   onPin,
   onColor,
   onEdit,
+  onMoveToGroup,
   onClose,
   swallowPressRelease,
 }: {
@@ -157,6 +162,8 @@ function AgentContextMenu({
   onPin: (a: Agent) => void;
   onColor: (a: Agent, color: ChatColor | null) => void;
   onEdit: (a: Agent) => void;
+  /** Opens the group picker at the menu's spot. Absent while no groups exist. */
+  onMoveToGroup?: (a: Agent) => void;
   onClose: () => void;
   /** True when this click is the finger lifting from the long-press that
    *  opened the menu (it can land on an item under the finger). */
@@ -254,6 +261,12 @@ function AgentContextMenu({
         <Pencil size={16} />
         Edit
       </button>
+      {onMoveToGroup ? (
+        <button type="button" role="menuitem" className="bt-plug-row" onClick={() => { onMoveToGroup(agent); onClose(); }}>
+          <FolderInput size={16} />
+          Move to group
+        </button>
+      ) : null}
       <div className="bt-ctx-sep" role="separator" />
       <div className="bt-ctx-colors" role="group" aria-label="Color label">
         <span className="bt-ctx-colors-h" aria-hidden="true">Color</span>
@@ -304,6 +317,14 @@ function dayStamp(ts: number): string {
 
 /** Drop target meaning "after the last pinned bubble". */
 const PINS_END = '__pins_end__';
+
+type AgentRow = { kind: 'agent'; a: Agent; item?: HistoryItem; ts: number };
+type Row = AgentRow | { kind: 'adhoc'; item: HistoryItem; ts: number };
+/** Where a dragged row would land in group mode. `head` = dropped on a group's
+ *  header or empty slot (append); otherwise before `before` (null = at the end). */
+type GroupDrop = { group: string; before: string | null; head?: boolean };
+/** A row's place in its group: which group, and who sits right below it. */
+type RowSlot = { group: string; next: string | null };
 
 // Desktop rail width, dragged from its right edge and kept per browser.
 const RAIL_WIDTH_KEY = 'rivendell:rail-width';
@@ -447,6 +468,25 @@ export function BotRail(props: BotRailProps) {
     }
     return set;
   }, [live, props.agents, props.hubRepo]);
+  // Same match, but only lanes mid-turn: the "working" count on a folded group
+  // and the ring on a row's presence lamp.
+  const busyAgents = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of live) {
+      if (!s.busy) continue;
+      const a = props.agents.find((aa) => sameChatId(s.chatId, aa.home)
+        && (!props.hubRepo || s.cwd === props.hubRepo));
+      if (a) set.add(a.id);
+    }
+    return set;
+  }, [live, props.agents, props.hubRepo]);
+
+  // Named, collapsible groups (layout + sync live in useRailGroups). Group
+  // mode replaces the flat list unless a search is running.
+  const railGroups = useRailGroups(props.agents);
+  const [groupDrop, setGroupDrop] = useState<GroupDrop | null>(null);
+  const [moveMenu, setMoveMenu] = useState<AgentMenuState | null>(null);
+  const closeMoveMenu = useCallback(() => setMoveMenu(null), []);
 
   const railRef = useRef<HTMLElement | null>(null);
   const [railWidth, setRailWidth] = useState(storedRailWidth);
@@ -522,9 +562,6 @@ export function BotRail(props: BotRailProps) {
   // ONE list: agents in their FIXED manual order. Scratch threads join only in search.
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    type Row =
-      | { kind: 'agent'; a: Agent; item?: HistoryItem; ts: number }
-      | { kind: 'adhoc'; item: HistoryItem; ts: number };
     // FIXED manual order (drag-and-drop persisted). Only search results are
     // recency-sorted; the agents themselves never move on their own. Pinned
     // agents live in the bubble strip, so the list holds the rest.
@@ -548,18 +585,168 @@ export function BotRail(props: BotRailProps) {
   }, [props.agents, props.items, homeById, query, props.hubRepo]);
 
   const agentIds = props.agents.map((a) => a.id);
-  const commitReorder = () => {
-    if (!dragId || dropBefore === null) { setDragId(null); setDropBefore(null); return; }
-    const from = agentIds.indexOf(dragId);
-    let to = dropBefore === '__end__' ? agentIds.length : agentIds.indexOf(dropBefore);
-    if (from < 0 || to < 0 || from === to) { setDragId(null); setDropBefore(null); return; }
+  /** Put `id` before `before` ('__end__' = last) in the global manual order. */
+  const reorderBefore = (id: string, before: string) => {
+    const from = agentIds.indexOf(id);
+    let to = before === '__end__' ? agentIds.length : agentIds.indexOf(before);
+    if (from < 0 || to < 0 || from === to) return;
     const next = [...agentIds];
     next.splice(from, 1);
     if (from < to) to -= 1; // removal shifted the target up one slot
-    next.splice(to, 0, dragId);
+    next.splice(to, 0, id);
+    props.onReorder(next);
+  };
+  const commitReorder = () => {
+    const id = dragId;
+    const before = dropBefore;
     setDragId(null);
     setDropBefore(null);
-    props.onReorder(next);
+    if (id && before !== null) reorderBefore(id, before);
+  };
+
+  // Group mode: sections of rows. Pinned agents stay in the strip, so each
+  // section lists only its unpinned members (`rows` already leaves pins out).
+  const groupsOn = railGroups.grouped && props.agents.length > 0 && !query.trim();
+  const sections = useMemo(() => {
+    if (!groupsOn) return [];
+    const byId = new Map<string, AgentRow>();
+    for (const r of rows) if (r.kind === 'agent') byId.set(r.a.id, r);
+    return railGroups.groups.map((g) => {
+      const listed = g.agents.map((a) => byId.get(a.id)).filter((r): r is AgentRow => Boolean(r));
+      return {
+        g,
+        rows: listed,
+        pinned: g.agents.length - listed.length,
+        working: listed.filter((r) => busyAgents.has(r.a.id)).length,
+        unread: listed.reduce((sum, r) => sum + (r.a.muted ? 0 : r.a.unread ?? 0), 0),
+      };
+      // "Other" only earns a header when someone is actually listed in it.
+    }).filter((sec) => !sec.g.isOther || sec.rows.length > 0);
+  }, [groupsOn, rows, railGroups.groups, busyAgents]);
+  const realGroupCount = railGroups.groups.filter((g) => !g.isOther).length;
+
+  const overGroup = (next: GroupDrop | null) => setGroupDrop((prev) => (
+    prev?.group === next?.group && prev?.before === next?.before && prev?.head === next?.head ? prev : next
+  ));
+  // The landing spot is passed in by the drop itself, not read from state: a
+  // fast drop can arrive before the last dragover has re-rendered.
+  const commitGroupDrop = (to: GroupDrop) => {
+    const id = dragId;
+    setDragId(null);
+    setGroupDrop(null);
+    if (!id) return;
+    // "Other" keeps the shared manual order, so reordering inside it is the
+    // ordinary reorder; everything else is a layout edit.
+    if (to.group === OTHER_GROUP_ID && railGroups.groupIdOf(id) === OTHER_GROUP_ID) reorderBefore(id, to.before ?? '__end__');
+    else railGroups.move(id, to.group, to.before);
+  };
+  const moveChoices = useMemo(() => [
+    ...railGroups.groups.filter((g) => !g.isOther).map((g) => ({ id: g.id, name: g.name })),
+    { id: OTHER_GROUP_ID, name: OTHER_GROUP_NAME },
+  ], [railGroups.groups]);
+  const moveAgentTarget = moveMenu ? props.agents.find((a) => a.id === moveMenu.id) : undefined;
+
+  /** Where a drag over this row would land: upper half = before it, lower half
+   *  = before the row below (null = end of the group). Landing where the row
+   *  already sits is no target at all. */
+  const rowDropTarget = (e: DragEvent, a: Agent, slot: RowSlot): GroupDrop | null => {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const before = e.clientY < rect.top + rect.height / 2 ? a.id : slot.next;
+    return before === dragId ? null : { group: slot.group, before };
+  };
+
+  // One agent row. `slot` is set in group mode (its group and the row below it).
+  const renderRow = (r: Row, slot?: RowSlot) => {
+    if (r.kind === 'agent') {
+      const a = r.a;
+      const isActive = props.activeChat && sameChatId(props.activeChat.chatId, a.home);
+      // Group mode marks the landing line from `groupDrop`; the flat list from `dropBefore`.
+      const landing = slot && dragId && dragId !== a.id && groupDrop && !groupDrop.head && groupDrop.group === slot.group ? groupDrop : null;
+      const dropAbove = slot ? landing?.before === a.id : dropBefore === a.id && dragId && dragId !== a.id;
+      const dropBelow = Boolean(landing && landing.before === null && slot?.next === null);
+      return (
+        <button
+          key={`agent:${a.id}`}
+          className={`bt-conv${isActive ? ' on' : ''}${a.muted ? ' muted' : ''}${dragId === a.id ? ' dragging' : ''}${dropAbove ? ' drop-above' : ''}${dropBelow ? ' drop-below' : ''}`}
+          data-chat-color={chatColorOf(a)}
+          onClick={(e) => { if (!swallowPressClick(e)) props.onOpenAgent(a); }}
+          onContextMenu={(e) => openAgentMenu(e, a)}
+          {...pressProps(a)}
+          aria-haspopup="menu"
+          aria-expanded={agentMenu?.id === a.id}
+          title={`${a.name} · ${a.role}${colorLabel(a)}${a.muted ? ' · muted' : ''} (right-click or long-press to mute, pin, color, or edit)`}
+          draggable
+          onDragStart={(e) => {
+            if (pressOpened.current) { e.preventDefault(); return; }
+            cancelPress();
+            setDragId(a.id); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', a.id);
+          }}
+          onDragOver={(e) => {
+            if (!dragId || dragId === a.id) return;
+            e.preventDefault();
+            if (slot) { overGroup(rowDropTarget(e, a, slot)); return; }
+            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+            setDropBefore(e.clientY < rect.top + rect.height / 2 ? a.id : null);
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            if (!slot) { commitReorder(); return; }
+            const to = rowDropTarget(e, a, slot);
+            if (to) commitGroupDrop(to);
+            else { setDragId(null); setGroupDrop(null); }
+          }}
+          onDragEnd={() => { setDragId(null); setDropBefore(null); setGroupDrop(null); }}
+        >
+          <span className="bt-disc bt-has-presence" style={{ color: DISC_INK, background: agentColor(a.name) }}>
+            {agentAvatarUrl(a) ? <img className="bt-disc-img" src={agentAvatarUrl(a) ?? undefined} alt={a.name} /> : agentMark(a)}
+            {liveAgents.has(a.id) ? <span className={`bt-presence${busyAgents.has(a.id) ? ' is-busy' : ''}`} aria-label={busyAgents.has(a.id) ? 'working now' : 'online now'} /> : null}
+          </span>
+          <span className="bt-conv-main">
+            <span className="bt-conv-top">
+              <span className="bt-conv-title">
+                {a.name} <span className="bt-role-chip">{a.role}</span>
+              </span>
+              {a.muted ? <span className="bt-conv-mute" title="Notifications muted"><BellOff size={13} /></span> : a.unread ? <span className="bt-unread" title={`${a.unread} waiting`}>{a.unread > 9 ? '9+' : a.unread}</span> : null}
+              {r.item ? <span className="bt-conv-day" title={`${new Date(r.item.updatedAt).toLocaleString()} · ${TIMEY_WIMEY}`}>{dayStamp(r.item.updatedAt)}</span> : null}
+              <span
+                className="bt-row-edit"
+                role="button"
+                tabIndex={-1}
+                aria-label={`Edit ${a.name}`}
+                title={`Edit ${a.name}`}
+                onClick={(e) => { e.stopPropagation(); props.onEditAgent(a); }}
+              >
+                <Pencil size={12} />
+              </span>
+            </span>
+            <span className="bt-conv-sub">{r.item?.preview ?? 'No work yet — give them something real.'}</span>
+            {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
+          </span>
+        </button>
+      );
+    }
+    const it = r.item!;
+    const isActive = props.activeChat
+      && sameChatId(it.chatId, props.activeChat.chatId)
+      && (!props.activeChat.cli || it.cli === props.activeChat.cli)
+      && (!props.activeChat.repo || it.repo === props.activeChat.repo);
+    return (
+      <button
+        key={`${it.cli}:${it.repo}:${it.chatId}`}
+        className={`bt-conv${isActive ? ' on' : ''}`}
+        onClick={() => props.onOpenChat(it)}
+        title={it.title}
+      >
+        <span className="bt-disc">{it.cli.slice(0, 1).toUpperCase()}</span>
+        <span className="bt-conv-main">
+          <span className="bt-conv-top">
+            <span className="bt-conv-title">{it.title}</span>
+            <span className="bt-conv-day" title={`${new Date(it.updatedAt).toLocaleString()} · ${TIMEY_WIMEY}`}>{dayStamp(it.updatedAt)}</span>
+          </span>
+          <span className="bt-conv-sub">{it.preview ?? it.cli}</span>
+        </span>
+      </button>
+    );
   };
 
   return (
@@ -646,99 +833,48 @@ export function BotRail(props: BotRailProps) {
             })}
           </div>
         ) : null}
-        {rows.map((r) => {
-          if (r.kind === 'agent') {
-            const a = r.a;
-            const isActive = props.activeChat && sameChatId(props.activeChat.chatId, a.home);
-            return (
-              <button
-                key={`agent:${a.id}`}
-                className={`bt-conv${isActive ? ' on' : ''}${a.muted ? ' muted' : ''}${dragId === a.id ? ' dragging' : ''}${dropBefore === a.id && dragId && dragId !== a.id ? ' drop-above' : ''}`}
-                data-chat-color={chatColorOf(a)}
-                onClick={(e) => { if (!swallowPressClick(e)) props.onOpenAgent(a); }}
-                onContextMenu={(e) => openAgentMenu(e, a)}
-                {...pressProps(a)}
-                aria-haspopup="menu"
-                aria-expanded={agentMenu?.id === a.id}
-                title={`${a.name} · ${a.role}${colorLabel(a)}${a.muted ? ' · muted' : ''} (right-click or long-press to mute, pin, color, or edit)`}
-                draggable
-                onDragStart={(e) => {
-                  if (pressOpened.current) { e.preventDefault(); return; }
-                  cancelPress();
-                  setDragId(a.id); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', a.id);
-                }}
-                onDragOver={(e) => {
-                  if (!dragId || dragId === a.id) return;
-                  e.preventDefault();
-                  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                  setDropBefore(e.clientY < rect.top + rect.height / 2 ? a.id : null);
-                }}
-                onDrop={(e) => { e.preventDefault(); commitReorder(); }}
-                onDragEnd={() => { setDragId(null); setDropBefore(null); }}
+        {groupsOn ? (
+          <div className="bt-groups">
+            {sections.map((sec, i) => (
+              <RailGroupSection
+                key={sec.g.id}
+                id={sec.g.id}
+                name={sec.g.name}
+                isOther={sec.g.isOther}
+                count={sec.rows.length}
+                pinned={sec.pinned}
+                working={sec.working}
+                unread={sec.unread}
+                collapsed={sec.g.collapsed}
+                first={i === 0}
+                last={i === realGroupCount - 1}
+                dragging={dragId !== null}
+                dropping={Boolean(groupDrop?.head && groupDrop.group === sec.g.id)}
+                onToggle={() => railGroups.toggle(sec.g.id)}
+                onRename={(name) => railGroups.rename(sec.g.id, name)}
+                onDelete={() => railGroups.remove(sec.g.id)}
+                onShift={(by) => railGroups.shift(sec.g.id, by)}
+                onDropOver={() => overGroup({ group: sec.g.id, before: null, head: true })}
+                onDropHere={() => commitGroupDrop({ group: sec.g.id, before: null, head: true })}
               >
-                <span className="bt-disc bt-has-presence" style={{ color: DISC_INK, background: agentColor(a.name) }}>
-                  {agentAvatarUrl(a) ? <img className="bt-disc-img" src={agentAvatarUrl(a) ?? undefined} alt={a.name} /> : agentMark(a)}
-                  {liveAgents.has(a.id) ? <span className="bt-presence" aria-label="online now" /> : null}
-                </span>
-                <span className="bt-conv-main">
-                  <span className="bt-conv-top">
-                    <span className="bt-conv-title">
-                      {a.name} <span className="bt-role-chip">{a.role}</span>
-                    </span>
-                    {a.muted ? <span className="bt-conv-mute" title="Notifications muted"><BellOff size={13} /></span> : a.unread ? <span className="bt-unread" title={`${a.unread} waiting`}>{a.unread > 9 ? '9+' : a.unread}</span> : null}
-                    {r.item ? <span className="bt-conv-day" title={`${new Date(r.item.updatedAt).toLocaleString()} · ${TIMEY_WIMEY}`}>{dayStamp(r.item.updatedAt)}</span> : null}
-                    <span
-                      className="bt-row-edit"
-                      role="button"
-                      tabIndex={-1}
-                      aria-label={`Edit ${a.name}`}
-                      title={`Edit ${a.name}`}
-                      onClick={(e) => { e.stopPropagation(); props.onEditAgent(a); }}
-                    >
-                      <Pencil size={12} />
-                    </span>
-                  </span>
-                  <span className="bt-conv-sub">{r.item?.preview ?? 'No work yet — give them something real.'}</span>
-                  {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
-                </span>
-              </button>
-            );
-          }
-          const it = r.item!;
-          const isActive = props.activeChat
-            && sameChatId(it.chatId, props.activeChat.chatId)
-            && (!props.activeChat.cli || it.cli === props.activeChat.cli)
-            && (!props.activeChat.repo || it.repo === props.activeChat.repo);
-          return (
-            <button
-              key={`${it.cli}:${it.repo}:${it.chatId}`}
-              className={`bt-conv${isActive ? ' on' : ''}`}
-              onClick={() => props.onOpenChat(it)}
-              title={it.title}
-            >
-              <span className="bt-disc">{it.cli.slice(0, 1).toUpperCase()}</span>
-              <span className="bt-conv-main">
-                <span className="bt-conv-top">
-                  <span className="bt-conv-title">{it.title}</span>
-                  <span className="bt-conv-day" title={`${new Date(it.updatedAt).toLocaleString()} · ${TIMEY_WIMEY}`}>{dayStamp(it.updatedAt)}</span>
-                </span>
-                <span className="bt-conv-sub">{it.preview ?? it.cli}</span>
-              </span>
-            </button>
-          );
-        })}
-        {!rows.length ? (
+                {sec.rows.map((r, at) => renderRow(r, { group: sec.g.id, next: sec.rows[at + 1]?.a.id ?? null }))}
+              </RailGroupSection>
+            ))}
+          </div>
+        ) : rows.map((r) => renderRow(r))}
+        {!rows.length && !groupsOn ? (
           <div className="bt-pane-empty">
             {query ? 'No matches.' : pins.length ? 'Everyone is pinned up top — drag them back anytime.' : 'No companions yet — add one with +.'}
           </div>
         ) : null}
-        {dragId && props.agents.length ? (
+        {dragId && props.agents.length && !groupsOn ? (
           <div
             className={`bt-dropzone${dropBefore === '__end__' ? ' on' : ''}`}
             onDragOver={(e) => { e.preventDefault(); setDropBefore('__end__'); }}
             onDrop={(e) => { e.preventDefault(); commitReorder(); }}
           />
         ) : null}
+        {props.agents.length && !query.trim() ? <RailNewGroup onCreate={railGroups.create} /> : null}
       </div>
 
       <div className="bt-rail-foot" style={{ position: 'relative' }} ref={pluginsRef}>
@@ -787,8 +923,21 @@ export function BotRail(props: BotRailProps) {
           onPin={(a) => props.onPatchAgent(a, { pinned: !a.pinned })}
           onColor={(a, color) => props.onPatchAgent(a, { color })}
           onEdit={props.onEditAgent}
+          onMoveToGroup={railGroups.grouped ? (a) => setMoveMenu({ ...agentMenu, id: a.id }) : undefined}
           onClose={closeAgentMenu}
           swallowPressRelease={swallowPressClick}
+        />
+      ) : null}
+      {moveMenu && moveAgentTarget ? (
+        <MoveToGroupMenu
+          x={moveMenu.x}
+          y={moveMenu.y}
+          restore={moveMenu.restore}
+          agentName={moveAgentTarget.name}
+          choices={moveChoices}
+          currentId={railGroups.groupIdOf(moveAgentTarget.id)}
+          onPick={(groupId) => railGroups.move(moveAgentTarget.id, groupId, null)}
+          onClose={closeMoveMenu}
         />
       ) : null}
       <div
