@@ -75,7 +75,7 @@ type Device = {
 };
 
 const devices = new Map<string, Device>();
-const startingDesktops = new Map<string, string>();
+const startingDesktops = new Map<string, { id: string; owner?: string }>();
 const HEARTBEAT_MS = 30_000;
 export const DEVICE_DEFAULT_TIMEOUT_MS = 60_000;
 export const DEVICE_MAX_TIMEOUT_MS = 600_000;
@@ -165,16 +165,16 @@ export function callDevice(
   const id = randomUUID();
   if (starting) {
     if (startingDesktops.has(desktop) || [...devices.values()].some(d => (d.info.desktopId || d.info.id) === desktop && d.info.computer?.control && d.info.computer.control.expiresAt > Date.now())) {
-      return Promise.resolve({ ok: false, error: 'This physical desktop is already in use or awaiting approval. Wait; do not use its other client to bypass the owner.' });
+      return Promise.resolve({ ok: false, error: `This physical desktop is already in use or awaiting approval.${desktopHolderNote(desktop)} Wait; do not use its other client to bypass the owner.` });
     }
-    startingDesktops.set(desktop, id);
+    startingDesktops.set(desktop, { id, ...(typeof params.owner === 'string' ? { owner: params.owner } : {}) });
   }
   const ceiling = op.startsWith('computer.') ? (starting ? 60_000 : 30_000) : DEVICE_MAX_TIMEOUT_MS;
   const budget = Math.min(Math.max(1_000, timeoutMs), ceiling);
   const deadlineAt = Date.now() + budget;
   return new Promise<DeviceReply>((done) => {
     let finished = false;
-    const release = () => { if (startingDesktops.get(desktop) === id) startingDesktops.delete(desktop); };
+    const release = () => { if (startingDesktops.get(desktop)?.id === id) startingDesktops.delete(desktop); };
     const finish = (reply: DeviceReply, cancelled = false) => {
       if (finished) return;
       finished = true;
@@ -295,6 +295,29 @@ function computerStatus(value: unknown): ControlStatus {
     approvalMode: v.approvalMode === 'automatic' ? 'automatic' : 'ask', paused: v.paused === true,
     control: c && typeof c.owner === 'string' && typeof c.label === 'string' && Number.isFinite(c.expiresAt)
       ? { owner: c.owner.slice(0, 200), label: c.label.slice(0, 100), purpose: String(c.purpose ?? '').slice(0, 500), expiresAt: c.expiresAt } : null };
+}
+
+/** A lane or desktop name quoted into another agent's tool error: one plain line. */
+function holderName(value: string): string {
+  return value.replace(/^bot-/, '').replace(/\s+/g, ' ').replace(/[^\p{L}\p{N} ._@-]/gu, '').trim().slice(0, 40).trim();
+}
+
+/** Who has a physical desktop right now, for the refusal a second starter gets.
+ *  A live lease names its holder and the minutes left; a start still waiting on
+ *  approval names the lane that asked (kept with the reservation, so it survives a
+ *  cancelled start). What the holder is doing (its purpose) is deliberately left
+ *  out: it is another agent's free text. Empty when nothing is known. */
+function desktopHolderNote(desktop: string): string {
+  const now = Date.now();
+  for (const d of devices.values()) {
+    if ((d.info.desktopId || d.info.id) !== desktop) continue;
+    const c = d.info.computer?.control;
+    const who = c ? holderName(c.label) : '';
+    if (!c || c.expiresAt <= now || !who) continue;
+    return ` Held by ${who}; the lease ends in about ${Math.max(1, Math.ceil((c.expiresAt - now) / 60_000))} min.`;
+  }
+  const who = holderName(startingDesktops.get(desktop)?.owner ?? '');
+  return who ? ` ${who} is starting a session on it now, waiting for approval.` : '';
 }
 
 export function registerDeviceBridge(server: HttpServer): void {
