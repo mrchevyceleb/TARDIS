@@ -4635,6 +4635,10 @@ button {
   color: var(--r-ink);
 }
 
+.sw-md-ext-link { color: var(--accent, var(--r-elf-glow, #6aa3ff)); text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 55%, transparent); text-underline-offset: 2px; cursor: pointer; transition: text-decoration-color 120ms ease, filter 120ms ease; }
+.sw-md-ext-link::after { content: '\2197'; display: inline-block; margin-left: 0.15em; font-size: 0.78em; opacity: 0.7; text-decoration: none; }
+.sw-md-ext-link:hover { text-decoration-color: currentColor; filter: brightness(1.18); }
+.sw-md-ext-link:hover::after { opacity: 1; }
 .markdown-content a {
   color: var(--r-elf-blue);
   text-decoration: none;
@@ -6171,6 +6175,12 @@ button {
 /* Proxy viewer — universal in-app document/artifact preview. Opens over the
  * current room as a centred drawer so it works the same on desktop and mobile.
  */
+.proxy-folder { display: flex; flex-direction: column; gap: 2px; padding: 6px 4px; }
+.proxy-folder-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--r-ink); font: inherit; font-size: 13px; text-align: left; cursor: pointer; transition: background 120ms ease, transform 120ms ease; }
+.proxy-folder-row:hover { background: color-mix(in srgb, var(--r-gold) 10%, transparent); transform: translateX(2px); }
+.proxy-folder-row svg { flex: 0 0 auto; color: var(--r-gold); }
+.proxy-folder-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proxy-folder-size { flex: 0 0 auto; color: var(--r-faint, #8a8f9c); font-family: var(--r-mono); font-size: 11px; }
 .proxy-viewer-overlay {
   position: fixed;
   inset: 0;

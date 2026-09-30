@@ -3,6 +3,7 @@ import { createContext, useContext } from 'react';
 export type ProxyViewerRequest =
   | { source: 'doc'; path: string; title?: string }
   | { source: 'artifact'; id: string; title?: string }
+  | { source: 'folder'; path: string; title?: string }
   | {
       source: 'inline';
       title: string;

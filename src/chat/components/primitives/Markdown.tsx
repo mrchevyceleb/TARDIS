@@ -6,6 +6,7 @@ import {
   annotateDeskRefs,
   annotateMachinePaths,
   annotateWorkspaceMentions,
+  canOpenOnThisPc,
   openExternalHttpLink,
   openMachineLink,
   parseDeskHref,
@@ -88,6 +89,13 @@ function useWorkspaceTargetOpener(target: WorkspaceTarget | null): () => void {
     // In the desktop shell, files that belong in a real app (web pages, PDFs,
     // images, media, Office files, spreadsheets) open on this PC.
     if (kind === 'doc' && opensOnThisPcByClick(path, 'doc')) { openWorkspaceLink(path, 'doc'); return; }
+
+    // A folder opens in the PC's file manager in the desktop shell, and in a
+    // closable in-app list when it is not synced there.
+    if (kind === 'folder' && canOpenOnThisPc(path, 'folder')) {
+      openWorkspaceLink(path, 'folder', () => viewer?.open({ source: 'folder', path }));
+      return;
+    }
 
     // Inside the Studio shell, keep it in-app: folders reveal in the file tree,
     // renderable docs (html/pdf/images/media) open in the overlay, and text,
@@ -197,12 +205,7 @@ function MarkdownLink({ href, children }: { href?: string; children?: ReactNode 
       target="_blank"
       rel="noopener noreferrer"
       onClick={onExternalClick}
-      style={{
-        color: 'var(--r-elf-glow)',
-        textDecoration: 'underline',
-        textUnderlineOffset: 2,
-        textDecorationColor: 'rgba(106, 163, 255, 0.5)',
-      }}
+      className="sw-md-ext-link"
     >
       {children}
     </a>

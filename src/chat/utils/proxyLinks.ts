@@ -247,7 +247,7 @@ export function fileManagerName(): string {
   return nativeShell()?.platform === 'win32' ? 'Explorer' : 'your file manager';
 }
 
-export function openWorkspaceLink(relPath: string, kind: 'doc' | 'folder'): void {
+export function openWorkspaceLink(relPath: string, kind: 'doc' | 'folder', onFolderFallback?: () => void): void {
   const shell = nativeShell();
   if (shell?.openWorkspacePath) {
     // The shell already tried the machine's own apps; say why that failed and
@@ -259,18 +259,18 @@ export function openWorkspaceLink(relPath: string, kind: 'doc' | 'folder'): void
         if (result.error) showToast(result.error);
         // A policy refusal is final: no other way of opening it is tried.
         if (result.refused) return;
-        openWorkspaceLinkInBrowser(relPath, kind, false);
+        openWorkspaceLinkInBrowser(relPath, kind, false, onFolderFallback);
       })
       .catch((error: unknown) => {
         showToast(error instanceof Error ? error.message : 'Could not open that path.');
-        openWorkspaceLinkInBrowser(relPath, kind, false);
+        openWorkspaceLinkInBrowser(relPath, kind, false, onFolderFallback);
       });
     return;
   }
-  openWorkspaceLinkInBrowser(relPath, kind, true);
+  openWorkspaceLinkInBrowser(relPath, kind, true, onFolderFallback);
 }
 
-function openWorkspaceLinkInBrowser(relPath: string, kind: 'doc' | 'folder', allowNativeScheme: boolean): void {
+function openWorkspaceLinkInBrowser(relPath: string, kind: 'doc' | 'folder', allowNativeScheme: boolean, onFolderFallback?: () => void): void {
   const { browserUrl, nativeUrl } = buildLinkUrls(relPath, kind);
   if (allowNativeScheme && isWindowsPlatform()) {
     fireNativeScheme(nativeUrl);
@@ -280,9 +280,11 @@ function openWorkspaceLinkInBrowser(relPath: string, kind: 'doc' | 'folder', all
     window.open(browserUrl, '_blank', 'noopener,noreferrer');
     return;
   }
-  const url = `/library?path=${encodeURIComponent(relPath || '')}`;
-  window.history.pushState({}, '', url);
-  window.dispatchEvent(new PopStateEvent('popstate'));
+  // A folder that cannot open on this PC used to push the app into the legacy
+  // /library route, a screen with no way back. Never navigate the app away:
+  // show a closable file list instead.
+  if (onFolderFallback) onFolderFallback();
+  else showToast('That folder cannot be opened from here.');
 }
 
 // Workspace and OneDrive paths commonly contain spaces ("Client Dashboards/

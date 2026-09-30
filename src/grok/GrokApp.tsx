@@ -364,7 +364,9 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
 
   const fileActions = useMemo<StudioFileActions>(() => ({
     openFile: (path, name) => viewer.open({ source: 'doc', path, title: name }),
-    revealFolder: () => window.location.assign('/studio'),
+    // A folder link opens a closable file list here. It used to navigate the
+    // whole app to the classic Studio IDE, which has no way back.
+    revealFolder: (path) => viewer.open({ source: 'folder', path }),
   }), [viewer]);
 
   const activeChat = view.kind === 'chat' ? view : undefined;

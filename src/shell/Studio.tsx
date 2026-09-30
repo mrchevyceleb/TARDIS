@@ -1,5 +1,6 @@
 import {
   Aperture,
+  ArrowLeft,
   FileText,
   Hammer,
   LayoutGrid,
@@ -366,6 +367,10 @@ export function Studio() {
             <Evenstar size={22} color="var(--r-tardis-lit)" glow />
             <strong>TARDIS</strong>
           </div>
+          <a className="studio-back" href="/" title="Back to TARDIS" aria-label="Back to TARDIS">
+            <ArrowLeft size={14} />
+            <span>Back</span>
+          </a>
 
           <button
             className="studio-tree-toggle"

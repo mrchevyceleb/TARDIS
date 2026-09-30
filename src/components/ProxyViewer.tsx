@@ -1,8 +1,8 @@
-import { Copy, ExternalLink, FileText, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { ArrowUp, Copy, ExternalLink, File as FileIcon, FileText, Folder, X } from 'lucide-react';
+import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Markdown } from '../chat/components/primitives/Markdown';
 import { apiJson } from '../data/api';
-import type { WorkspaceFileResponse } from '../data/types';
+import type { FileTreeNode, WorkspaceChildrenResponse, WorkspaceFileResponse } from '../data/types';
 import { ProxyViewerContext, type ProxyViewerRequest } from '../hooks/useProxyViewer';
 import { Button, Chip } from './Primitives';
 
@@ -32,7 +32,13 @@ type LoadedInline = {
   request: { title: string; kind: 'html' | 'markdown' | 'text'; content: string };
 };
 
-type Loaded = LoadedDoc | LoadedArtifact | LoadedInline;
+type LoadedFolder = {
+  source: 'folder';
+  request: { path: string; title?: string };
+  listing: WorkspaceChildrenResponse;
+};
+
+type Loaded = LoadedDoc | LoadedArtifact | LoadedInline | LoadedFolder;
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico']);
 const VIDEO_EXTS = new Set(['mp4', 'mov', 'webm']);
@@ -67,6 +73,10 @@ export function ProxyViewerProvider({ children }: { children: ReactNode }) {
           const file = await apiJson<WorkspaceFileResponse>(`/api/docs/file?path=${encodeURIComponent(request.path)}`);
           if (cancelled) return;
           setLoaded({ source: 'doc', request, file });
+        } else if (request.source === 'folder') {
+          const listing = await apiJson<WorkspaceChildrenResponse>(`/api/docs/children?path=${encodeURIComponent(request.path)}`);
+          if (cancelled) return;
+          setLoaded({ source: 'folder', request, listing });
         } else if (request.source === 'artifact') {
           const record = await apiJson<ArtifactRecord>(`/api/artifacts/${encodeURIComponent(request.id)}`);
           const contentRes = await fetch(`/api/artifacts/${encodeURIComponent(request.id)}/content`);
@@ -135,7 +145,7 @@ function ProxyViewerOverlay({
     if (request.title) return request.title;
     if (loaded?.source === 'doc') return loaded.file.name;
     if (loaded?.source === 'artifact') return loaded.record.title;
-    if (request.source === 'doc') return request.path.split('/').pop() ?? request.path;
+    if (request.source === 'doc' || request.source === 'folder') return request.path.split('/').pop() || 'Workspace';
     return 'Loading';
   }, [request, loaded]);
 
@@ -170,7 +180,39 @@ function ProxyViewerOverlay({
   );
 }
 
+/** A simple, closable file list for a workspace folder. Never leaves the app. */
+function FolderListing({ loaded }: { loaded: LoadedFolder }) {
+  const viewer = useContext(ProxyViewerContext);
+  const here = loaded.listing.path ?? loaded.request.path;
+  const parent = here.includes('/') ? here.slice(0, here.lastIndexOf('/')) : '';
+  const rows: FileTreeNode[] = [...(loaded.listing.children ?? [])].sort((a, b) => (
+    (a.type === b.type ? 0 : a.type === 'directory' ? -1 : 1) || a.name.localeCompare(b.name)
+  ));
+  const openNode = (node: FileTreeNode) => viewer?.open(node.type === 'directory'
+    ? { source: 'folder', path: node.path }
+    : { source: 'doc', path: node.path, title: node.name });
+  return (
+    <div className="proxy-folder">
+      {here ? (
+        <button type="button" className="proxy-folder-row proxy-folder-up" onClick={() => viewer?.open({ source: 'folder', path: parent })}>
+          <ArrowUp size={15} />
+          <span>Up</span>
+        </button>
+      ) : null}
+      {rows.length === 0 ? <p className="proxy-viewer-status">This folder is empty.</p> : null}
+      {rows.map((node) => (
+        <button key={node.path} type="button" className="proxy-folder-row" onClick={() => openNode(node)}>
+          {node.type === 'directory' ? <Folder size={15} /> : <FileIcon size={15} />}
+          <span className="proxy-folder-name">{node.name}</span>
+          {node.type === 'file' && typeof node.size === 'number' ? <span className="proxy-folder-size">{formatBytes(node.size)}</span> : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function ProxyViewerContent({ loaded }: { loaded: Loaded }) {
+  if (loaded.source === 'folder') return <FolderListing loaded={loaded} />;
   if (loaded.source === 'inline') {
     if (loaded.request.kind === 'html') {
       return (
@@ -305,6 +347,7 @@ function OpenRawButton({ loaded }: { loaded: LoadedArtifact }) {
 }
 
 function labelFor(loaded: Loaded): string {
+  if (loaded.source === 'folder') return 'folder';
   if (loaded.source === 'doc') return loaded.file.language || 'document';
   if (loaded.source === 'artifact') return loaded.record.kind;
   return loaded.request.kind;
@@ -312,9 +355,10 @@ function labelFor(loaded: Loaded): string {
 
 function subtitleFor(request: ProxyViewerRequest, loaded: Loaded | null): string {
   if (loaded?.source === 'doc') return loaded.file.path;
+  if (loaded?.source === 'folder') return `/${loaded.listing.path ?? loaded.request.path}`;
   if (loaded?.source === 'artifact') return `${formatBytes(loaded.record.byteSize)} · ${new Date(loaded.record.createdAt).toLocaleString()}`;
   if (loaded?.source === 'inline') return `${loaded.request.kind} preview`;
-  if (request.source === 'doc') return request.path;
+  if (request.source === 'doc' || request.source === 'folder') return request.path;
   if (request.source === 'inline') return `${request.kind} preview`;
   return 'artifact';
 }
