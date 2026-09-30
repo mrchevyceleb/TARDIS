@@ -410,6 +410,8 @@ export type SeqEvent = { seq: number; ev: SessionEvent; at?: number };
 
 type ZaiCutDecision = { outcome: ZaiTurnOutcome; cut: ProviderCut; origin: TurnOrigin };
 
+/** Prepended to the turn that follows a boundary interrupt. */
+const PAUSED_FOR_MESSAGE_NOTE = '<rivendell-steer>Your previous turn was paused right after a tool call finished, so the message below reaches you as a normal message. Answer it first. Then, unless it changes the plan, carry on with what you were doing; the transcript above shows where you stopped.</rivendell-steer>';
 class ClaudeSession {
   readonly key: string;
   /** Durable-history key. Equals `key` for ordinary lanes; for an agent home
@@ -481,6 +483,15 @@ class ClaudeSession {
    * window. Writing while the provider is already generating its next message
    * is accepted by stdin but can be silently ignored by that in-flight request. */
   private activeToolIds = new Set<string>();
+  /** A person or teammate is waiting to talk to this busy session. The turn is
+   *  ended by a warm interrupt the moment every tool call in flight has returned,
+   *  so the message can start a fresh turn instead of riding inside a tool result. */
+  private boundaryInterruptWanted = false;
+  /** Live waiters that asked for the interrupt; it is dropped when the last one gives up. */
+  private boundaryWaiters = 0;
+  /** The last turn was ended that way. The next turn tells the model so it
+   *  answers first and then picks its work back up. */
+  private pausedForMessage = false;
   /** Explicit Stop uses Claude Code's control protocol, not SIGTERM. This flag
    * prevents its expected canceled result from rendering as a provider failure. */
   private userInterruptPending = false;
@@ -712,6 +723,7 @@ class ClaudeSession {
       this.turnStartedAt = null;
       this.automationTurn = false;
       this.activeToolIds.clear();
+      this.clearBoundaryRequest();
       this.preparingTurnAborter = null;
       this.turnPromptSubmitted = false;
       if (this.disposed) this.notifyClosed(code, signal);
@@ -868,6 +880,7 @@ class ClaudeSession {
       this.turnIsContinuation = Boolean(continuing);
       this.zaiTurnProviderFailed = false;
       this.activeToolIds.clear();
+      this.clearBoundaryRequest();
       this.terminalNoticeEmitted = false;
       this.syntheticApiErrorSeen = false;
       this.syntheticApiErrorReason = null;
@@ -883,6 +896,7 @@ class ClaudeSession {
       this.turnStartedAt = null;
       this.automationTurn = false;
       this.activeToolIds.clear();
+      this.clearBoundaryRequest();
       if (!this.disposed) this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
     };
     const historyThroughSeq = this.latestSeq();
@@ -897,6 +911,9 @@ class ClaudeSession {
     // A message that reaches a thread whose last turn a provider switch cut
     // off (before, or instead of, the automatic continue) finishes that work.
     const providerCut = startsNewTurn && !continuing ? providerCutGuidance(fallbackHistory) : '';
+    // The turn before this one was ended at a tool boundary to make room for
+    // this message. Say so, so the model answers first and then carries on.
+    const pausedNote = startsNewTurn && !continuing && !automationRequest && this.pausedForMessage ? PAUSED_FOR_MESSAGE_NOTE : '';
     if (sendAborted()) {
       abandonUnsentTurn();
       return;
@@ -1059,7 +1076,7 @@ class ClaudeSession {
       : commandText;
     const humanTurn = continuing ? continuing.origin.human : !opts.peerFrom && opts.peerFromRole !== 'automation';
     const computerContext = computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn);
-    const stdinText = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuationText}`;
+    const stdinText = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}`;
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];
@@ -1092,6 +1109,7 @@ class ClaudeSession {
       if (startsNewTurn) {
         this.preparingTurnAborter = null;
         this.turnPromptSubmitted = true;
+        if (pausedNote) this.pausedForMessage = false;
       }
       await new Promise<void>((resolve, reject) => {
         this.child.stdin.write(payload + '\n', (error) => {
@@ -1163,6 +1181,7 @@ class ClaudeSession {
       this.turnStartedAt = null;
       this.automationTurn = false;
       this.activeToolIds.clear();
+      this.clearBoundaryRequest();
       this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
       return Promise.resolve(this.isAlive());
     }
@@ -1219,6 +1238,7 @@ class ClaudeSession {
         this.turnStartedAt = null;
         this.automationTurn = false;
         this.activeToolIds.clear();
+        this.clearBoundaryRequest();
         this.preparingTurnAborter = null;
         this.turnPromptSubmitted = false;
         this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
@@ -1404,7 +1424,41 @@ class ClaudeSession {
    * the model can finish without ever seeing it, so callers must queue a
    * separate turn instead. */
   canAcceptNativeHumanSteer(): boolean {
-    return this.turnStartedAt !== null && !this.automationTurn && this.activeToolIds.size > 0;
+    // Off on purpose. Claude Code's only way to take a message mid-turn is to
+    // queue it and show the model a system-reminder ("The user sent a new
+    // message while you were working") attached to the next tool result. Some
+    // models, rightly, do not treat text inside a tool result as the person's
+    // voice, so they flag it and never answer (eight of Matt's messages to Max in
+    // 13 minutes). A message that arrives mid-turn goes through
+    // requestBoundaryInterrupt instead and starts a real user turn.
+    return false;
+  }
+
+  /** Ask for the current turn to end at the next tool boundary so a waiting
+   *  message can start a fresh turn. Never cancels a tool: the interrupt fires
+   *  only once every tool call in flight has returned. If the turn finishes on
+   *  its own first, nothing is interrupted. Scheduled (automation) turns are
+   *  left to finish. Returns a release function, or null when there is no turn
+   *  to end. */
+  requestBoundaryInterrupt(): (() => void) | null {
+    if (this.turnStartedAt === null || this.automationTurn || this.disposed || this.child.exitCode !== null) return null;
+    this.boundaryInterruptWanted = true;
+    this.boundaryWaiters += 1;
+    let released = false;
+    // The caller releases when its message no longer needs the turn ended
+    // (delivered, superseded, stopped, timed out). The last release withdraws
+    // the request so a session is never interrupted for nobody.
+    return () => {
+      if (released) return;
+      released = true;
+      this.boundaryWaiters = Math.max(0, this.boundaryWaiters - 1);
+      if (this.boundaryWaiters === 0) this.boundaryInterruptWanted = false;
+    };
+  }
+
+  private clearBoundaryRequest(): void {
+    this.boundaryInterruptWanted = false;
+    this.boundaryWaiters = 0;
   }
 
   sessionId(): string | null {
@@ -1739,6 +1793,7 @@ class ClaudeSession {
       this.turnIsContinuation = false;
       this.zaiTurnProviderFailed = false;
       this.activeToolIds.clear();
+      this.clearBoundaryRequest();
       this.terminalNoticeEmitted = false;
       this.syntheticApiErrorSeen = false;
       this.syntheticApiErrorReason = null;
@@ -1774,6 +1829,29 @@ class ClaudeSession {
         for (const block of ev.message.content) {
           if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
             this.activeToolIds.delete(block.tool_use_id);
+          }
+        }
+        if (this.boundaryInterruptWanted && this.activeToolIds.size === 0) {
+          this.boundaryInterruptWanted = false;
+          const turn = this.turnStartedAt;
+          // Claude's interrupt also stops background subagents, and a person who
+          // never asked for that should not lose a running monitor to a chat
+          // message. With background work running the turn is left to finish
+          // (it usually ends soon, waiting on that work) and the message
+          // starts the next turn as before.
+          if (!this.hasBackgroundWork()) {
+            // After this event has been emitted, so the tool_result reaches the
+            // transcript ahead of the interrupt marker.
+            setImmediate(() => {
+              if (this.turnStartedAt === null || this.turnStartedAt !== turn || this.disposed) return;
+              if (this.boundaryWaiters === 0) return;
+              // Another tool started before this ran: the request still stands.
+              if (this.activeToolIds.size > 0) { this.boundaryInterruptWanted = true; return; }
+              this.pausedForMessage = true;
+              void this.interrupt('message-boundary').then((kept) => {
+                if (!kept) this.pausedForMessage = false;
+              });
+            });
           }
         }
       }
@@ -1939,6 +2017,7 @@ class ClaudeSession {
           this.turnStartedAt = null;
           this.automationTurn = false;
           this.activeToolIds.clear();
+          this.clearBoundaryRequest();
           this.preparingTurnAborter = null;
           this.turnPromptSubmitted = false;
           this.userInterruptPending = false;
@@ -1959,6 +2038,7 @@ class ClaudeSession {
       this.turnStartedAt = null;
       this.automationTurn = false;
       this.activeToolIds.clear();
+      this.clearBoundaryRequest();
       this.preparingTurnAborter = null;
       this.turnPromptSubmitted = false;
       this.userInterruptPending = false;

@@ -15,7 +15,7 @@ function harness() {
   return { session, events };
 }
 
-test('native monitor query becomes busy, admits tool-window steering, and ends normally', () => {
+test('native monitor query becomes busy, tracks the tool window, and ends normally', () => {
   const { session, events } = harness();
   session.handleEvent({ type: 'system', subtype: 'task_started', task_id: 'monitor' });
   session.handleEvent({ type: 'system', subtype: 'task_notification', task_id: 'monitor' });
@@ -23,10 +23,11 @@ test('native monitor query becomes busy, admits tool-window steering, and ends n
   session.handleEvent({ type: 'system', subtype: 'status', status: 'requesting' });
   assert.equal(session.isBusy(), true);
   assert.equal(session.turnPromptSubmitted, true);
-  assert.equal(session.canAcceptNativeHumanSteer(), false);
+  assert.equal(session.activeToolIds.size, 0);
   session.handleEvent({ type: 'stream_event', event: { type: 'message_start' } });
   session.handleEvent({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-1' }] } });
-  assert.equal(session.canAcceptNativeHumanSteer(), true);
+  assert.equal(session.activeToolIds.size, 1);
+  assert.equal(session.canAcceptNativeHumanSteer(), false); // never native: see canAcceptNativeHumanSteer
   assert.equal(events.filter(e => e.type === 'turnStart').length, 1);
   session.handleEvent({ type: 'result', subtype: 'success' });
   assert.equal(session.isBusy(), false);
@@ -36,21 +37,22 @@ test('native monitor query becomes busy, admits tool-window steering, and ends n
   assert.equal(events.filter(e => e.type === 'turnStart').length, 2);
 });
 
-test('stream tool_use opens the native steer window without a completed assistant message', () => {
+test('stream tool_use opens the tool window without a completed assistant message', () => {
   const { session } = harness();
   session.handleEvent({ type: 'stream_event', event: { type: 'message_start' } });
   assert.equal(session.isBusy(), true);
-  assert.equal(session.canAcceptNativeHumanSteer(), false);
+  assert.equal(session.activeToolIds.size, 0);
   session.handleEvent({
     type: 'stream_event',
     event: { type: 'content_block_start', content_block: { type: 'tool_use', id: 'tool-stream-1' } },
   });
-  assert.equal(session.canAcceptNativeHumanSteer(), true);
+  assert.equal(session.activeToolIds.size, 1);
+  assert.equal(session.canAcceptNativeHumanSteer(), false); // never native: see canAcceptNativeHumanSteer
   session.handleEvent({
     type: 'user',
     message: { content: [{ type: 'tool_result', tool_use_id: 'tool-stream-1' }] },
   });
-  assert.equal(session.canAcceptNativeHumanSteer(), false);
+  assert.equal(session.activeToolIds.size, 0);
 });
 
 test('content starts native turns on older CLIs without resetting an admitted human turn', () => {
