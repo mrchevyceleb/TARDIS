@@ -113,7 +113,7 @@ function pidAlive(pid: number): boolean {
 /** /proc/<pid>/stat starttime (field 22, clock ticks since boot — pid 1
  *  legitimately reads 0). null when /proc cannot answer (non-Linux), which
  *  falls back to existence-only checking. */
-function pidStart(pid: number): number | null {
+export function pidStart(pid: number): number | null {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
     // comm can contain spaces and parens; everything after the last ')' is
@@ -128,7 +128,7 @@ function pidStart(pid: number): number | null {
 }
 
 /** Alive AND still the same process we armed (start guard when known). */
-function pidMatches(pid: number, start: number | null | undefined): boolean {
+export function pidMatches(pid: number, start: number | null | undefined): boolean {
   if (!pidAlive(pid)) return false;
   if (start == null) return true;
   return pidStart(pid) === start;
@@ -149,7 +149,7 @@ let scopeProbe: Promise<boolean> | null = null;
  *  every host has. (--expand-environment=no keeps the shell program from being
  *  rewritten by systemd; an older systemd that lacks it fails the probe and
  *  falls back to the plain spawn.) */
-function canLaunchInScope(): Promise<boolean> {
+export function canLaunchInScope(): Promise<boolean> {
   scopeProbe ??= new Promise<boolean>((resolve) => {
     try {
       const probe = spawn('systemd-run', ['--user', '--scope', '--quiet', '--collect', '--expand-environment=no', 'true'], { stdio: 'ignore' });

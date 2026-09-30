@@ -15,6 +15,7 @@ import { brainForAgent, cliForAgentEngine, ensureAgents, listAgents } from './ch
 import { resumeQueuedTeamDeliveries } from './chat/teamBus.ts';
 import { agentsRouter } from './routes/agents.ts';
 import { teamRouter } from './routes/team.ts';
+import { jobsRouter } from './routes/jobs.ts';
 import { routinesRouter } from './routes/routines.ts';
 import { messagePinsRouter } from './routes/messagePins.ts';
 import { deskRouter } from './routes/desk.ts';
@@ -24,6 +25,7 @@ import { voicePreviewRouter } from './voice/preview.ts';
 import { chatAttachmentsRouter } from './routes/chatAttachments.ts';
 import { startRoutineScheduler } from './chat/routines.ts';
 import { startJobWatchScheduler } from './chat/jobWatches.ts';
+import { startJobScheduler } from './chat/jobs.ts';
 import { ensureXaiProxy, shutdownXaiProxy } from './chat/xai-proxy.ts';
 import { registerScribeSocket } from './worker/scribe.ts';
 import { startWorkerQueue, stopWorkerQueue } from './worker/queue.ts';
@@ -125,6 +127,7 @@ app.use('/api/devices', devicesRouter);
 app.use('/api/robots', robotsRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/team', teamRouter);
+app.use('/api/jobs', jobsRouter);
 app.use('/api/routines', routinesRouter);
 app.use('/api/message-pins', messagePinsRouter);
 app.use('/api/desk', deskRouter);
@@ -167,6 +170,7 @@ registerVoiceCalls(server);
 registerDeviceBridge(server);
 startRoutineScheduler(); // agent-scoped routine scheduler (30s tick)
 startJobWatchScheduler(); // background job watches (10s tick): pid/file/command → agent wake
+startJobScheduler(); // job_start jobs (5s tick): exit records → agent job-result
 registerScribeSocket(server);
 startWorkerQueue();
 startWorkspaceWatcher();

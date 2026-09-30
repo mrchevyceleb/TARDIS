@@ -13,6 +13,7 @@
  *   team_message — durable async handoff; waits only when explicitly requested
  *   team_recent  — recent visible messages from a teammate's thread
  *   watch_job    — wake yourself when a long background job (pid/file/command) resolves
+ *   job_*        — start, list, stop and read the log of a named background job (any engine)
  *   routine_*    — list, create, update, run, delete TARDIS routines
  *   desk_todo_*  — the owner's "Needs you" list on the Desk
  *   board_*      — the Desk board of agent work (cards, moves, comments)
@@ -169,6 +170,39 @@ const TOOLS = [
       required: ['note'],
       additionalProperties: false,
     },
+  },
+  {
+    name: 'job_start',
+    description:
+      'Run long work as a background job so your turn stays free. Anything that will take more than about 30 seconds (builds, full test runs, renders, installs, sleeps and waits, deploy and CI watchers, long scripts) goes here, never in a foreground call. ' +
+      'The command runs detached in its own scope with output captured to a log, survives TARDIS restarts, shows in the chat UI as a running job with a Stop button, and when it ends TARDIS delivers a job result (exit code plus the last output lines) into your own thread as a new turn. ' +
+      'It is never reported as finished unless the command exited on its own. After starting one, keep working on something else or end your turn: anyone can message you at any time and you answer at once.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Short label shown in the UI and the result, e.g. "operly build"' },
+        command: { type: 'string', description: 'Shell command (bash). Runs with your own shell power on this host.' },
+        cwd: { type: 'string', description: 'Absolute working directory (default: home)' },
+        timeoutMin: { type: 'integer', minimum: 1, maximum: 1440, description: 'Stop the job and report a timeout after this many minutes (default 120)' },
+      },
+      required: ['name', 'command'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'job_list',
+    description: 'List your background jobs (running plus recently ended) with state, elapsed time and the last output line. Pass all:true for every agent\'s.',
+    inputSchema: { type: 'object', properties: { all: { type: 'boolean', description: 'Every agent\'s jobs, not just yours' } }, additionalProperties: false },
+  },
+  {
+    name: 'job_stop',
+    description: 'Stop one of your running background jobs by id. You are not woken for a stop you asked for.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'Job id from job_start or job_list (the first 8 characters are enough)' } }, required: ['id'], additionalProperties: false },
+  },
+  {
+    name: 'job_log',
+    description: 'Read the tail of a background job\'s captured output.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, lines: { type: 'integer', minimum: 1, maximum: 400, description: 'How many trailing lines (default 60)' } }, required: ['id'], additionalProperties: false },
   },
   {
     name: 'routine_list',
@@ -726,6 +760,41 @@ async function callTool(name, args, signal) {
     return [
       `Watching for ${agent.name}: ${subject}, ${timeout}.`,
       `A wake lands in your own thread as a new turn when it finishes or times out. This is the ONLY notification you get — after arming it, never block your turn on a foreground wait. Work on something else or end the turn.`,
+    ].join('\n');
+  }
+  if (name === 'job_start' || name === 'job_list' || name === 'job_stop' || name === 'job_log') {
+    const self = process.env.RIVENDELL_AGENT_NAME;
+    const fmtJob = (j) => `${j.id.slice(0, 8)}  ${j.state.toUpperCase().padEnd(9)} ${j.name} · ${Math.round(j.elapsedMs / 1000)}s${j.exitCode !== null ? ` · exit ${j.exitCode}` : ''}${j.lastLine ? ` · ${j.lastLine}` : ''}`;
+    // Ids can be shortened to their first 8 characters.
+    const fullId = async (short) => {
+      const { jobs } = await api('/api/jobs', undefined, signal);
+      const hit = jobs.filter((j) => j.id === short || j.id.startsWith(short));
+      if (hit.length !== 1) throw new Error(hit.length ? `Job id "${short}" is ambiguous.` : `No recent job with id "${short}". Run job_list.`);
+      return hit[0].id;
+    };
+    if (name === 'job_list') {
+      if (!args.all && !self) throw new Error('Pass all:true, or call this from a named teammate.');
+      const me = args.all ? null : await resolveAgent(self, signal);
+      const { jobs } = await api(`/api/jobs${me ? `?agentId=${encodeURIComponent(me.id)}` : ''}`, undefined, signal);
+      if (!jobs.length) return args.all ? 'No jobs.' : 'You have no running or recent jobs.';
+      return jobs.map((j) => (args.all ? `${j.agentName}: ` : '') + fmtJob(j)).join('\n');
+    }
+    if (name === 'job_log') {
+      const id = await fullId(String(args.id));
+      const { tail } = await api(`/api/jobs/${id}/log?lines=${Number(args.lines) || 60}`, undefined, signal);
+      return tail || '(no output yet)';
+    }
+    if (name === 'job_stop') {
+      const id = await fullId(String(args.id));
+      const { job } = await api(`/api/jobs/${id}/stop`, { method: 'POST', body: JSON.stringify({ by: 'agent' }) }, signal);
+      return `Stopped job "${job.name}". It did NOT finish.`;
+    }
+    if (!self) throw new Error('Start jobs from a named teammate so the result can find your thread.');
+    const agent = await resolveAgent(self, signal);
+    const { job } = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ agentId: agent.id, name: args.name, command: args.command, cwd: args.cwd, timeoutMin: args.timeoutMin }) }, signal);
+    return [
+      `Started job "${job.name}" (id ${job.id.slice(0, 8)}), detached in its own scope. It survives TARDIS restarts and shows in the chat UI with a Stop button.`,
+      `When it ends, a job result (exit code plus the last output) lands in your own thread as a new turn, up to ${job.timeoutMin}m from now. Until then keep working on something else or end your turn: people can message you at any time and you answer at once. Do not wait on it in the foreground. job_list shows state, job_log reads output.`,
     ].join('\n');
   }
   if (name.startsWith('routine_')) {

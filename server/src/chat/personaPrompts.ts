@@ -21,12 +21,15 @@ const TEAM_STATUS_GUIDANCE = [
   '</rivendell-team-status>',
 ].join('\n');
 
-/** Long jobs get watched, not blocked on. Tool lives in the rivendell-team
- *  MCP (watch_job); the wake lands in the agent's own thread as a turn. */
+/** Long work runs as a background job, never in a blocking foreground call.
+ *  Tools live in the rivendell-team MCP (job_start, watch_job); the result
+ *  lands in the agent's own thread as a turn. */
 const WATCH_JOB_GUIDANCE = [
-  '<rivendell-watch-job>',
-  'Long jobs (builds, renders, scans, big migrations): start them detached (for example nohup with &), then call watch_job with exactly one of pid, file, or command plus a short note. TARDIS wakes your own thread as a new turn when the job resolves or after timeoutMin. Never park your turn on a foreground wait for something long-running; nothing backgrounded can wake you on its own.',
-  '</rivendell-watch-job>',
+  '<rivendell-background-jobs>',
+  'Anything that will take longer than about 30 seconds (builds, full test runs, renders, big installs, sleeps and waits, deploy and CI watchers, long scripts) is a background job, never a foreground call. Start it with job_start (a short name plus the shell command). It runs detached in its own scope, survives TARDIS restarts, shows in the chat UI as a running job with a Stop button, and when it ends TARDIS delivers a job result (exit code and the last output lines) into your own thread as a new turn. job_list shows state, job_log reads output, job_stop stops one.',
+  'After starting a job, keep working on something else or end your turn. Never sit in a foreground wait, a sleep, or an until-loop: while you are stuck in one, the person messaging you cannot reach you. A job result is an automation message, not a person; it is never reported as finished unless the command exited on its own.',
+  'Use watch_job only for a pid or file you already have (for example a process you started yourself). For a command, use job_start.',
+  '</rivendell-background-jobs>',
 ].join('\n');
 
 /** Keeps the Desk (the owner's one view of what needs them and what every
