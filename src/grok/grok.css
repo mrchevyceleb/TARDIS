@@ -1253,14 +1253,40 @@
 .bt-peer-response .m-elrond .acts { margin-bottom: 0; }
 .bt-peer-public-response { width: 100%; min-width: 0; }
 .bt-peer-public-response .m-elrond { margin-top: 0; }
+/* folded run of silent teammate handoffs: one dim line, cards inside on demand */
+.bt-peer-fold { margin: 6px 0; width: min(560px, 86%); max-width: 100%; animation: bt-msg-in 0.25s ease both; }
+.bt-peer-fold-toggle {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 12px; text-align: left;
+  border: 1px dashed var(--r-line-strong); border-radius: 12px;
+  background: transparent; color: var(--r-ink-faint);
+  transition: background 0.15s ease;
+}
+.bt-peer-fold-toggle:hover { background: var(--r-bg-hover); }
+.bt-peer-fold-toggle:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: -2px; }
+.bt-peer-fold-count { flex: none; font-size: 12px; font-weight: 600; color: var(--r-ink-mute); }
+.bt-peer-fold-names { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.bt-peer-fold-when { flex: none; font-family: var(--r-mono); font-size: 10px; opacity: .8; }
+.bt-peer-fold-action { margin-left: auto; flex: none; font-family: var(--r-mono); font-size: 10px; }
+.bt-peer-fold-chev { width: 14px; height: 14px; flex: none; transition: transform 0.22s ease; }
+.bt-peer-fold.open .bt-peer-fold-chev { transform: rotate(180deg); }
+/* flex so the cards keep the thread's own rhythm: 10px + their 6px margins = the feed's 22px (18px on phone) */
+.bt-peer-fold-body { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.bt-peer-fold-body .bt-peer { width: 100%; }
 @media (max-width: 600px) {
   .bt-peer { width: 92%; }
   .bt-peer-action { display: none; }
   .bt-peer-status { margin-left: auto; }
   .bt-peer-body { padding-left: 14px; }
+  .bt-peer-fold { width: 92%; }
+  .bt-peer-fold-toggle { min-height: 40px; }
+  .bt-peer-fold-body { gap: 6px; }
+  .bt-peer-fold-action { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .bt-peer-status.working i { animation: none; }
+  .bt-peer-fold { animation: none; }
+  .bt-peer-fold-toggle, .bt-peer-fold-chev { transition: none; }
 }
 
 /* agent avatar disc images */
