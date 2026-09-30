@@ -118,7 +118,7 @@ export function setQueuedHumanProbe(probe: ((logKey: string) => boolean) | null)
   queuedHumanProbe = probe;
 }
 
-function humanQueued(logKey: string): boolean {
+export function humanQueued(logKey: string): boolean {
   try { return queuedHumanProbe?.(logKey) === true; } catch { return false; }
 }
 

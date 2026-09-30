@@ -44,6 +44,7 @@ import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiModeFor, zaiTurnOutcome, type ZaiMode } from './zaiQuota.ts';
 import { emptyTurnOrigin, noteTurnPeer, notifyHandoffSenders, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { laneMcpServers, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
+import { isPersonMessage, REPLY_NUDGE_NOTE, replyNudgeEvent, ReplyWatch } from './replyNudge.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
 const PI_SESSION_DIR = join(STATE_DIR, 'pi-sessions');
@@ -142,6 +143,8 @@ export class PiSession {
   private turnOrigin: TurnOrigin = emptyTurnOrigin();
   /** The current turn is the automatic continue of a provider-cut turn. */
   private turnIsContinuation = false;
+  /** Has the person's message got visible text yet; see replyNudge.ts. */
+  private replyWatch!: ReplyWatch;
 
   constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model: string, effort: string, seedFirst = false, switchedFrom: string | null = null) {
     assertSubscriptionLane(cli);
@@ -158,6 +161,7 @@ export class PiSession {
     this.provider = piProviderFor(cli, model);
     this.zaiMode = this.provider.mode === 'xai' ? 'plan' : this.provider.mode;
     this.ready = new Promise<boolean>((res) => { this.resolveReady = res; });
+    this.replyWatch = new ReplyWatch(() => agentForChatId(chatId)?.id ?? chatId, cli);
 
     try {
       const restored = loadEventLogSync(this.logKey);
@@ -313,6 +317,7 @@ export class PiSession {
             stream({ type: 'content_block_start', index: d.contentIndex, content_block: { type: 'text', text: '' } });
             return;
           case 'text_delta':
+            if (String(d.delta ?? '').trim()) this.replyWatch.noteText();
             stream({ type: 'content_block_delta', index: d.contentIndex, delta: { type: 'text_delta', text: d.delta } });
             return;
           case 'text_end':
@@ -333,6 +338,7 @@ export class PiSession {
             const call = d.toolCall ?? {};
             const id = String(call.id ?? '');
             this.activeToolIds.add(id);
+            this.replyWatch.noteTool(id);
             stream({ type: 'content_block_start', index: d.contentIndex, content_block: { type: 'tool_use', id, name: String(call.name ?? ''), input: {} } });
             stream({ type: 'content_block_delta', index: d.contentIndex, delta: { type: 'input_json_delta', partial_json: JSON.stringify(call.arguments ?? {}) } });
             stream({ type: 'content_block_stop', index: d.contentIndex });
@@ -350,6 +356,7 @@ export class PiSession {
           if (b.type === 'thinking') return { type: 'thinking', thinking: String(b.thinking ?? '') };
           if (b.type === 'toolCall' || b.type === 'tool_use') {
             this.activeToolIds.add(String(b.id));
+            this.replyWatch.noteTool(String(b.id));
             return { type: 'tool_use', id: String(b.id), name: String(b.name ?? ''), input: b.arguments ?? b.input ?? {} };
           }
           return null;
@@ -367,7 +374,7 @@ export class PiSession {
         const usage = { input_tokens: u.input ?? 0, output_tokens: u.output ?? 0, cache_read_input_tokens: u.cacheRead ?? 0, cache_creation_input_tokens: 0 };
         const msgId = this.currentMsgId ?? randomUUID();
         const textOut = content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('');
-        if (textOut.trim()) this.lastAssistantText = textOut;
+        if (textOut.trim()) { this.lastAssistantText = textOut; this.replyWatch.noteText(); }
         if (content.length) {
           this.emit({ type: 'event', event: { type: 'assistant', parent_tool_use_id: null, session_id: this.piSessionId, uuid: randomUUID(), timestamp: new Date().toISOString(), message: { id: msgId, type: 'message', role: 'assistant', model: m.model ?? this.provider.model, content, stop_reason: stopReason, stop_sequence: null, usage } } });
         }
@@ -382,6 +389,7 @@ export class PiSession {
         const parts = Array.isArray(result.content) ? result.content : [];
         const text = parts.filter((c: any) => c?.type === 'text').map((c: any) => String(c.text ?? '')).join('\n');
         this.emit({ type: 'event', event: { type: 'user', parent_tool_use_id: null, session_id: this.piSessionId, uuid: randomUUID(), timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: String(ev.toolCallId), content: text || (typeof result === 'string' ? result : JSON.stringify(result).slice(0, 4000)), is_error: ev.isError === true }] } } });
+        if (this.activeToolIds.size === 0) this.nudgeForReply();
         return;
       }
       case 'agent_end': {
@@ -390,6 +398,30 @@ export class PiSession {
       }
       default:
         return;
+    }
+  }
+
+  /** The person's message has gone too long with no visible text. Pi's steer is
+   *  delivered at the next tool boundary, so the harness note just rides one,
+   *  sent here with no tool in flight. Pi drops the not-yet-started tools of a
+   *  batch when a steer lands mid-batch, as with any person's steer on this lane. */
+  private nudgeForReply(): void {
+    try {
+      if (this.turnStartedAt === null || this.disposed) return;
+      const nudge = this.replyWatch.claim();
+      if (!nudge) return;
+      void this.rpc({ type: 'steer', message: REPLY_NUDGE_NOTE }).then((r) => {
+        if (r.success) this.emit(replyNudgeEvent(nudge));
+        else {
+          this.replyWatch.release(nudge);
+          console.warn(`[reply-nudge] ${this.cli}/pi steer rejected: ${r.error ?? 'unknown'}`);
+        }
+      }).catch((err) => {
+        this.replyWatch.release(nudge);
+        console.warn(`[reply-nudge] ${this.cli}/pi steer failed:`, (err as Error).message);
+      });
+    } catch (err) {
+      console.warn(`[reply-nudge] ${this.cli}/pi check failed:`, (err as Error).message);
     }
   }
 
@@ -573,6 +605,7 @@ export class PiSession {
         ? { peers: [...continuing.origin.peers], human: continuing.origin.human, automation: continuing.origin.automation }
         : emptyTurnOrigin();
       this.turnIsContinuation = Boolean(continuing);
+      this.replyWatch.reset();
     }
     const abandon = () => {
       if (!startsNewTurn || this.turnStartedAt === null) return;
@@ -608,6 +641,7 @@ export class PiSession {
       this.emit({ type: 'event', event: { type: PROVIDER_CONTINUE_EVENT, id: continuing.id, from: continuing.cut.from, to: continuing.cut.to, ...(continuing.origin.automation ? { automation: true } : {}), ts: Date.now() } });
     } else if (opts.peerFrom) {
       noteTurnPeer(this.turnOrigin, opts.peerFrom, opts.peerFromRole, opts.peerText ?? text);
+      if (isPersonMessage(opts)) this.replyWatch.arm();
       if (startsNewTurn && automationRequest) this.turnOrigin.automation = true;
       if (startsNewTurn) this.emit({ type: 'turnStart' });
       this.emit({ type: 'event', event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}), ts: Date.now() } });
@@ -618,6 +652,7 @@ export class PiSession {
       noteUserTurn(this.logKey);
       noteAgentLane(this.chatId, this.cli);
       this.turnOrigin.human = true;
+      this.replyWatch.arm();
     }
 
     const guidance = conversationGuidanceForTurn({

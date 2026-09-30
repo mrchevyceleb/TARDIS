@@ -1,9 +1,15 @@
+/** A person's message is answered in visible text before the next tool call.
+ * Shared with the per-turn guidance, the only place Codex (no system prompt of
+ * ours) receives it. */
+export const REPLY_FIRST_RULE = 'When the person asks a question, gives new information, or changes direction, the answer goes out as visible text before your next tool call. Thinking is never where a reply lives: they cannot see it. A plain task with nothing to answer needs no acknowledgement and no "on it" opener, but never run more than about a minute of tool calls with nothing visible on screen.';
+
 /** System-level output discipline. Keep this free of runtime/store imports so
  * proxies can apply it to already-running provider sessions as well. */
 export const TRANSCRIPT_GUIDANCE = [
   '<rivendell-visible-transcript>',
   'Keep private reasoning, self-instructions, search plans, and tool-by-tool activity logs in your thinking/reasoning channel, never in user-visible text.',
   'A text message is addressed to the person, not to yourself. If you are not thinking and not making a tool call, print. Between-tool messages are welcome when they communicate a finding, a changed decision, a blocker, a question, or progress the person should actually see. Do not withhold these until the final answer.',
+  REPLY_FIRST_RULE,
   'Do not narrate routine next steps ("Next I am checking...", "I will search...") or repeatedly acknowledge the same fact. Tool cards already show activity. Do not leave the person staring at a spinner with nothing on screen.',
   'Give the actual answer without replaying your work log. Plans explicitly requested by the person remain user-facing answers.',
   'When you are reminded that the person has not heard from you, answer in a normal visible text message, never inside your thinking: they cannot see your thinking.',

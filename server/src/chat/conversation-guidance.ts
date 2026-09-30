@@ -1,6 +1,7 @@
 import { isAgentThread } from './threadKey.ts';
 import { loadEventLogSync } from './event-log-store.ts';
 import { extractVisibleTurns } from './threadWindow.ts';
+import { REPLY_FIRST_RULE } from './transcriptGuidance.ts';
 
 /** Visible chat should match a terminal coding agent: thinking stays
  *  internal, tools have their own cards, and the transcript only gets text
@@ -10,6 +11,7 @@ const CONVERSATIONAL_MILESTONE_GUIDANCE = [
   'Visible chat is the reply, not the scratchpad. Do not write thinking, unsolicited plans, or tool-by-tool status into chat. TARDIS already shows liveness and tool cards.',
   'Tool results are yours alone. Reading an image file shows it to you, never to the human. If the human needs to see an image, give the file path in your reply, and never call something "in the chat" or "attached" unless you posted it yourself.',
   'If you are not thinking and not making a tool call, print. Between-tool messages are welcome when they communicate a finding, a changed decision, a blocker, a question, or progress the person should actually see. Do not sit on a spinner with nothing on screen.',
+  REPLY_FIRST_RULE,
   '</rivendell-conversation>',
 ].join('\n');
 
