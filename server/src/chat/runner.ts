@@ -34,7 +34,8 @@ import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { chatAttachmentPath, saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
-import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
+import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
+import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { PiSession, usePiHarness } from './pi-runner.ts';
@@ -1902,6 +1903,7 @@ class ClaudeSession {
       console.log(`[chat ${this.cli}] ignored unrecognized_model warning: ${line.slice(0, 180)}`);
       return;
     }
+    noteProviderGateFailure(providerLabel(this.cli), () => agentForChatId(this.chatId)?.name ?? 'a lane', line);
     this.emit({ type: 'error', message: line });
   }
 
@@ -2089,6 +2091,10 @@ class ClaudeSession {
     const providerTerminal = ev?.type === 'result' && !expectedUserInterrupt
       ? terminalProviderError(this.cli, ev)
       : null;
+    if (ev?.type === 'result' && (ev.is_error || providerTerminal) && !expectedUserInterrupt) {
+      const detail = [ev.api_error_status === 426 ? 'HTTP 426' : '', this.syntheticApiErrorReason, ev.result, ...(Array.isArray(ev.errors) ? ev.errors.map((e: any) => typeof e === 'string' ? e : e?.message) : [])].filter((s) => typeof s === 'string').join('\n');
+      noteProviderGateFailure(providerLabel(this.cli), () => agentForChatId(this.chatId)?.name ?? this.chatId, detail);
+    }
     const terminal = providerTerminal
       ?? (ev?.type === 'result' && !expectedUserInterrupt
         ? terminalExecutionError(

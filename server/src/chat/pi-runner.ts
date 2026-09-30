@@ -36,6 +36,8 @@ import { maybeAutoCompact, noteUserTurn, peekEnginePrimerThroughSeq } from './co
 import { isAgentThread, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
+import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
+import { providerLabel } from './providerErrors.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { isRobotVoiceChatId, isVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STYLE_ADDENDUM, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
@@ -458,6 +460,7 @@ export class PiSession {
         const outcome = zaiTurnOutcome(this.spawnModel, { ...turnCut, providerFailed, continuation: this.turnIsContinuation });
         if (outcome) cut = { outcome, cut: turnCut, origin: { peers: [...this.turnOrigin.peers], human: this.turnOrigin.human, automation: this.turnOrigin.automation }, noticeSeq: 0 };
       }
+      if (failed.code !== 'aborted') noteProviderGateFailure(providerLabel(this.cli), () => agentForChatId(this.chatId)?.name ?? this.chatId, detail);
       if (!this.terminalNoticeEmitted) {
         this.terminalNoticeEmitted = true;
         const label = this.cli === 'xai' ? 'Grok' : 'GLM';

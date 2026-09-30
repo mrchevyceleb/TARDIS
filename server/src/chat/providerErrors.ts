@@ -58,7 +58,7 @@ export function isSyntheticApiErrorEvent(raw: unknown): boolean {
   return model === '<synthetic>' && isSyntheticApiErrorText(rawAssistantText(inner));
 }
 
-function providerLabel(cli: string): string {
+export function providerLabel(cli: string): string {
   if (cli === 'zai') return 'Z.ai';
   if (cli === 'xai') return 'xAI';
   if (cli === 'assistant' || cli === 'claude') return 'Claude';
@@ -111,6 +111,12 @@ export function terminalProviderError(cli: string, raw: unknown): TerminalProvid
       message: `${provider} is rate-limited right now. Switch brains or try again shortly.`,
       code,
       retryable: true,
+    };
+  }
+  if (status === 426) {
+    return {
+      message: `${provider} says this client is out of date (HTTP 426). Update its client version before trying again.`,
+      code,
     };
   }
   if (status === 401) {

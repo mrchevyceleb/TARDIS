@@ -29,6 +29,7 @@ import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { THREAD_VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, replyNudgeEvent, ReplyWatch } from './replyNudge.ts';
+import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 
 const CODEX_BIN = resolveCodexBin();
 console.log(`[chat codex] binary: ${CODEX_BIN}`);
@@ -801,6 +802,9 @@ export class CodexSession {
       if (!line) return;
       try {
         const ev = JSON.parse(line);
+        if (ev?.type === 'turn.failed' || ev?.type === 'error') {
+          noteProviderGateFailure('Codex', () => agentForChatId(this.chatId)?.name ?? this.chatId, String(ev.error?.message ?? ev.message ?? ''));
+        }
         if (ev?.type === 'rivendell.steer.accepted' && typeof ev.request_id === 'string') {
           this.settleNativeSteer(ev.request_id);
           return;
@@ -868,6 +872,7 @@ export class CodexSession {
       for (const raw of chunk.split('\n')) {
         const text = raw.trim();
         if (!text) continue;
+        noteProviderGateFailure('Codex', () => agentForChatId(this.chatId)?.name ?? this.chatId, text);
         if (isIgnorableCodexStderr(text)) continue;
         if (rememberTransientProjectConfigError(text)) continue;
         stderrChunks.push(text);
