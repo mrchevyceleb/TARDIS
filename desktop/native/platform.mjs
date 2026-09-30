@@ -140,13 +140,29 @@ class LinuxAdapter {
     } finally { await rm(dir, { recursive: true, force: true }); }
   }
   async activeWindow(signal) {
-    return canonicalWindowId(await run('xdotool', ['getactivewindow'], signal));
+    // A fresh session, or an app that opened without focus, has no active
+    // managed window: xdotool then fails instead of answering. That is "none",
+    // not a broken desktop.
+    try { return canonicalWindowId(await run('xdotool', ['getactivewindow'], signal)); }
+    catch (error) {
+      // Only that specific answer is "none"; an abort, a timeout or a lost X
+      // server is still an error.
+      if (signal?.aborted || !/_NET_ACTIVE_WINDOW/.test(String(error?.message ?? error))) throw error;
+      return '';
+    }
   }
   async focusWindow(window, signal) {
     const target = canonicalWindowId(window);
     if (!target) throw new Error('Invalid window id. Inspect windows again.');
     await run('xdotool', ['windowactivate', '--sync', target], signal);
-    const active = await this.activeWindow(signal);
+    // The window manager can publish the new active window a beat after
+    // --sync returns; give it a moment before calling focus failed.
+    let active = await this.activeWindow(signal);
+    for (let attempt = 0; attempt < 5 && active !== target; attempt++) {
+      if (signal?.aborted) throw new Error('Window focus was cancelled.');
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      active = await this.activeWindow(signal);
+    }
     if (active !== target) throw new Error(`Window focus verification failed: expected ${target}, active window is ${active || 'none'}. No keyboard input was sent.`);
     return target;
   }
