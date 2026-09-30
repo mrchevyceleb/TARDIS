@@ -4,7 +4,34 @@ export type TerminalProviderError = {
   message: string;
   code?: string;
   retryable?: boolean;
+  usageLimit?: boolean;
+  resetTime?: string;
+  limitKind?: 'session' | 'weekly' | 'model' | 'usage';
 };
+
+const NATIVE_LIMIT = /^\s*(?:You(?:['’]ve| have) hit your (?:(?:session|weekly|usage|Sonnet|Opus|5[- ]hour) )?limit\b|Claude AI usage limit reached\b|5[- ]hour limit reached\b)/i;
+
+/** Preserve only a clock and a valid timezone, never the provider's payload. */
+function safeResetTime(text: string): string | undefined {
+  const match = /\bresets?\s+(?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([12]\d|3[01]|[1-9]),\s*)?(1[0-2]|[1-9])(?::([0-5]\d))?\s*(am|pm)\s*\((UTC|[A-Za-z_]+(?:\/[A-Za-z_+-]+)+)\)/i.exec(text);
+  if (!match) return undefined;
+  let zone: string;
+  try { zone = new Intl.DateTimeFormat('en-US', { timeZone: match[6] }).resolvedOptions().timeZone; } catch { return undefined; }
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const month = match[1] ? months.find((m) => m.toLowerCase() === match[1].toLowerCase()) : undefined;
+  if (month && Number(match[2]) > new Date(Date.UTC(2028, months.indexOf(month) + 1, 0)).getUTCDate()) return undefined;
+  return `${month ? `${month} ${Number(match[2])}, ` : ''}${match[3]}:${match[4] ?? '00'} ${match[5].toUpperCase()} (${zone})`;
+}
+
+function usageLimitError(cli: string, text: string, trustedReason = false): TerminalProviderError | null {
+  if (!['claude', 'assistant'].includes(cli) || !(trustedReason ? /^usage limit(?: \((session|weekly|model|usage)\))?(?:;|$)/i.test(text) : NATIVE_LIMIT.test(text))) return null;
+  const resetTime = safeResetTime(text);
+  const limitKind = /weekly/i.test(text) ? 'weekly' : /Sonnet|Opus|\(model\)/i.test(text) ? 'model' : /session|5[- ]hour/i.test(text) ? 'session' : 'usage';
+  return {
+    message: `Claude's usage window is full. ${resetTime ? `It resets at ${resetTime}.` : 'Try again after the limit resets.'}`,
+    code: '429', retryable: true, usageLimit: true, limitKind, ...(resetTime ? { resetTime } : {}),
+  };
+}
 
 function unwrapEvent(raw: unknown): Record<string, any> | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -30,7 +57,7 @@ export function isSyntheticApiErrorText(text: string): boolean {
   // leading "API Error: 429 …". Missing the third left its text unscrubbed —
   // raw protocol prose could reach durable history — while the turn was still
   // reported as a dead local runner.
-  return /^\s*API Error:\s*(?:Request rejected|\d{3}\b|.*\(\d{3}\))/i.test(text);
+  return /^\s*API Error:\s*(?:Request rejected|\d{3}\b|.*\(\d{3}\))/i.test(text) || NATIVE_LIMIT.test(text);
 }
 
 /** The reason out of a synthetic API-error message, and nothing else.
@@ -43,6 +70,10 @@ export function isSyntheticApiErrorText(text: string): boolean {
  *  payload, which can carry request metadata. */
 export function syntheticApiErrorReason(text: string): string | null {
   if (!isSyntheticApiErrorText(text)) return null;
+  const limit = usageLimitError('claude', text);
+  if (limit) {
+    return `usage limit (${limit.limitKind})${limit.resetTime ? `; resets ${limit.resetTime}` : ''}`;
+  }
   if (/Request rejected/i.test(text)) return 'the request was rejected upstream';
   const status = /\((\d{3})\)/.exec(text) ?? /API Error:\s*(\d{3})\b/i.exec(text);
   return status ? `HTTP ${status[1]}` : null;
@@ -80,7 +111,7 @@ function resultDetail(inner: Record<string, any>): string {
 
 /** Convert a terminal provider result into short, actionable copy. Raw request
  * ids and provider payloads stay out of the durable user transcript. */
-export function terminalProviderError(cli: string, raw: unknown): TerminalProviderError | null {
+export function terminalProviderError(cli: string, raw: unknown, syntheticReason?: string | null): TerminalProviderError | null {
   const inner = unwrapEvent(raw);
   if (!inner || inner.type !== 'result') return null;
   const status = typeof inner.api_error_status === 'number' ? inner.api_error_status : undefined;
@@ -89,10 +120,12 @@ export function terminalProviderError(cli: string, raw: unknown): TerminalProvid
   if (status === undefined) return null;
 
   const provider = providerLabel(cli);
-  const detail = resultDetail(inner);
+  const detail = `${resultDetail(inner)}\n${syntheticReason ?? ''}`;
   const code = status === undefined ? undefined : String(status);
 
   if (status === 429) {
+    const usageLimit = usageLimitError(cli, syntheticReason ?? '', true) ?? usageLimitError(cli, resultDetail(inner));
+    if (usageLimit) return usageLimit;
     if (cli === 'xai' && /\bmodel\s+is\s+currently\s+at\s+capacity\b/i.test(detail)) {
       return {
         message: `${provider} is temporarily at capacity. Try again in a few minutes or switch brains.`,
@@ -160,7 +193,6 @@ export function terminalExecutionError(
   // signal. Without it they all collapse into "dead local runner".
   const signal = `${subtype}\n${detail}\n${lastTurnText ?? ''}`;
   const code = /^[a-z0-9_-]{1,64}$/i.test(subtype) ? subtype : 'execution_error';
-
   if (/cancel|interrupt|aborted/i.test(signal)) {
     return { message: 'This turn was cancelled before it finished.', code };
   }
@@ -178,6 +210,8 @@ export function terminalExecutionError(
       retryable: true,
     };
   }
+  const usageLimit = usageLimitError(cli, syntheticReason ?? '', true) ?? usageLimitError(cli, detail);
+  if (usageLimit) return usageLimit;
   // Two warm-process failures that read as crashes but are not: the CLI's
   // OAuth refresh lock colliding with a sibling process, and a model tool
   // call that fails to parse even after the CLI's own retry nudge. Both are
