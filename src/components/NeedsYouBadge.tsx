@@ -54,19 +54,26 @@ const SEEN_CAP = 200;
 const DAY_MS = 86_400_000;
 const COALESCED_TAG = 'rivendell-needs-you';
 
+/** What this session has already handled. It backs the stored list, so a
+ *  storage that throws (private mode) or is full cannot make every poll re-alert. */
+let sessionSeen: string[] | null = null;
+
 function readSeen(): string[] | null {
+  let stored: string[] | null = null;
   try {
     const raw = localStorage.getItem(SEEN_KEY);
-    if (raw === null) return null;
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : null;
+    const parsed: unknown = raw === null ? null : JSON.parse(raw);
+    if (Array.isArray(parsed)) stored = [...new Set(parsed.filter((id): id is string => typeof id === 'string'))].slice(-SEEN_CAP);
   } catch {
-    return null;
+    /* unreadable: the session copy decides */
   }
+  if (stored === null) return sessionSeen;
+  return sessionSeen === null ? stored : [...new Set([...stored, ...sessionSeen])].slice(-SEEN_CAP);
 }
 
 function writeSeen(ids: string[]): void {
-  try { localStorage.setItem(SEEN_KEY, JSON.stringify(ids)); } catch { /* private mode: alerts may repeat */ }
+  sessionSeen = ids;
+  try { localStorage.setItem(SEEN_KEY, JSON.stringify(ids)); } catch { /* the session copy still stops repeats */ }
 }
 
 /** Which high items to alert on now, and the seen list to keep. First run seeds
