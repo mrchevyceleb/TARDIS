@@ -144,7 +144,12 @@ class LinuxAdapter {
     // managed window: xdotool then fails instead of answering. That is "none",
     // not a broken desktop.
     try { return canonicalWindowId(await run('xdotool', ['getactivewindow'], signal)); }
-    catch { return ''; }
+    catch (error) {
+      // Only that specific answer is "none"; an abort, a timeout or a lost X
+      // server is still an error.
+      if (signal?.aborted || !/_NET_ACTIVE_WINDOW|getactivewindow/i.test(String(error?.message ?? error))) throw error;
+      return '';
+    }
   }
   async focusWindow(window, signal) {
     const target = canonicalWindowId(window);
@@ -154,6 +159,7 @@ class LinuxAdapter {
     // --sync returns; give it a moment before calling focus failed.
     let active = await this.activeWindow(signal);
     for (let attempt = 0; attempt < 5 && active !== target; attempt++) {
+      if (signal?.aborted) throw new Error('Window focus was cancelled.');
       await new Promise((resolve) => setTimeout(resolve, 150));
       active = await this.activeWindow(signal);
     }
