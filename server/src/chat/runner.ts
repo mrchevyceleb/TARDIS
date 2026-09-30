@@ -1542,7 +1542,7 @@ class ClaudeSession {
 
   /** Note a reply_now call. A routine or job wake never speaks into the thread. */
   private queueReplyNow(toolId: string, text: string, model?: string): void {
-    if (this.automationTurn || this.replyNowPosted.has(toolId)) return;
+    if (this.automationTurn || this.replyNowPosted?.has(toolId)) return;
     this.replyNowPosted.add(toolId);
     this.replyNowQueue.push({ id: toolId, text, model });
   }
@@ -1551,7 +1551,7 @@ class ClaudeSession {
    *  the carrying event is emitted, so the thread reads call, then message, with
    *  nothing in between. */
   private flushReplyNow(): void {
-    if (!this.replyNowQueue.length) return;
+    if (!this.replyNowQueue?.length) return;
     const queued = this.replyNowQueue;
     this.replyNowQueue = [];
     if (this.disposed) return;
