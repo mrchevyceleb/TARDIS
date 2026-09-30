@@ -275,7 +275,9 @@ const TOOLS = [
     description:
       `Put an item on ${OWNER}'s "Needs you" list on the Desk. Use it ONLY for something that needs ${OWNER} personally: a decision, a login or 2FA code, an approval, a payment, or an account or physical action only they can take. ` +
       'Not for your own work (that is a board card) and not for FYI updates. Write the title as the action they must take, put context in detail, and pass cardId when it unblocks a board card (then move that card to waiting). ' +
-      'Check desk_todos first so you do not add a duplicate. Returns the id; call desk_todo_complete once it is resolved.',
+      `For a pick-one question pass choices (up to 4 short options; without them ${OWNER} gets Yes / No) so ${OWNER} can answer with one tap. ` +
+      `The answer arrives in your thread as a message from ${OWNER} and the item is already closed. ` +
+      'Check desk_todos first so you do not add a duplicate. Returns the id; call desk_todo_complete if it gets resolved some other way.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -285,6 +287,13 @@ const TOOLS = [
         priority: { type: 'string', enum: DESK_PRIORITIES, description: 'high only when work is blocked or a deadline is close (default normal)' },
         link: { type: 'string', description: 'Optional http(s) URL, or thread:<agentId> to point at a teammate thread' },
         cardId: { type: 'string', description: 'The board card this unblocks (from board_cards)' },
+        choices: {
+          type: 'array',
+          items: { type: 'string', maxLength: 40 },
+          minItems: 1,
+          maxItems: 4,
+          description: `Pick-one options ${OWNER} can answer with one tap, 1 to 4, each 40 characters max (e.g. ["Ship it", "Hold for Monday"]). Leave out for a plain Yes / No.`,
+        },
         from: FROM_PROP,
       },
       required: ['title'],
@@ -305,7 +314,7 @@ const TOOLS = [
   },
   {
     name: 'desk_todo_update',
-    description: 'Change a Needs-you item by id: sharpen the title or detail, change due, priority, link or cardId. Pass an empty string to clear due, link, detail or cardId.',
+    description: 'Change a Needs-you item by id: sharpen the title or detail, change due, priority, link, cardId or choices. Pass an empty string to clear due, link, detail or cardId, and an empty list to clear choices.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -316,6 +325,7 @@ const TOOLS = [
         priority: { type: 'string', enum: DESK_PRIORITIES },
         link: { type: 'string' },
         cardId: { type: 'string' },
+        choices: { type: 'array', items: { type: 'string', maxLength: 40 }, maxItems: 4, description: 'Pick-one options (1 to 4, each 40 characters max); an empty list goes back to Yes / No' },
         status: { type: 'string', enum: ['open', 'done'] },
       },
       required: ['id'],
@@ -506,7 +516,12 @@ function describeTodo(t) {
     t.link ? t.link : null,
     `added ${ago(t.createdAt)}`,
   ].filter(Boolean);
-  return `- [${t.id}] (${t.priority}) ${t.title} · ${bits.join(' · ')}${t.detail ? `\n  ${clipLine(t.detail, 200)}` : ''}`;
+  const extra = [
+    t.detail ? clipLine(t.detail, 200) : null,
+    !t.answer && t.choices?.length ? `choices: ${t.choices.join(' / ')}` : null,
+    t.answer ? `answered: ${[t.answer.choice ? `"${t.answer.choice}"` : null, t.answer.text ? clipLine(t.answer.text, 300) : null].filter(Boolean).join(' ')}` : null,
+  ].filter(Boolean);
+  return `- [${t.id}] (${t.priority}) ${t.title} · ${bits.join(' · ')}${extra.map((line) => `\n  ${line}`).join('')}`;
 }
 
 function describeCard(c) {
@@ -585,9 +600,9 @@ async function callTool(name, args, signal) {
     const comment = (id, text) => post(`/api/desk/cards/${encodeURIComponent(id)}/comments`, { text, agent: self });
     if (name === 'desk_todo_add') {
       const { todo } = await post('/api/desk/todos', {
-        title: args.title, detail: args.detail, due: args.due, priority: args.priority, link: args.link, cardId: args.cardId, agent: self,
+        title: args.title, detail: args.detail, due: args.due, priority: args.priority, link: args.link, cardId: args.cardId, choices: args.choices, agent: self,
       });
-      return `Added to ${OWNER}'s Needs-you list:\n${describeTodo(todo)}\nComplete it with desk_todo_complete once it is resolved.`;
+      return `Added to ${OWNER}'s Needs-you list:\n${describeTodo(todo)}\nIf ${OWNER} answers on the Desk, the answer arrives as a message from ${OWNER} and the item closes itself. Otherwise complete it with desk_todo_complete once it is resolved.`;
     }
     if (name === 'desk_todos') {
       if (typeof args.id === 'string' && args.id.trim()) {
@@ -604,7 +619,7 @@ async function callTool(name, args, signal) {
     }
     if (name === 'desk_todo_update') {
       const patch = {};
-      for (const key of ['title', 'detail', 'due', 'priority', 'link', 'cardId', 'status']) if (args[key] !== undefined) patch[key] = args[key];
+      for (const key of ['title', 'detail', 'due', 'priority', 'link', 'cardId', 'choices', 'status']) if (args[key] !== undefined) patch[key] = args[key];
       if (!Object.keys(patch).length) throw new Error('Nothing to change.');
       const { todo } = await api(`/api/desk/todos/${encodeURIComponent(args.id)}`, { method: 'PATCH', body: JSON.stringify(patch) }, signal);
       return `Updated:\n${describeTodo(todo)}`;

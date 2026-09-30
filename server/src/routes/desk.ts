@@ -4,13 +4,16 @@
 // means the owner is acting from the UI.
 
 import { Router, type NextFunction, type Request, type Response } from 'express';
-import { listAgents } from '../chat/agents.ts';
+import { listAgents, type Agent } from '../chat/agents.ts';
 import { deliverTeamMessage } from '../chat/teamBus.ts';
 import { DESK_OWNER_NAME } from '../config.ts';
+import { isQuietHours, notifyTodoTouched } from '../lib/deskNotify.ts';
 import {
   DESK_COLUMNS,
   DeskError,
+  answerTodo,
   archiveCard,
+  claimAnswerDelivery,
   commentCard,
   createCard,
   createTodo,
@@ -19,12 +22,14 @@ import {
   moveCard,
   parseColumn,
   readDesk,
+  setAnswerDelivery,
   setTodoStatus,
   updateCard,
   updateTodo,
   type DeskActor,
   type DeskCard,
   type DeskComment,
+  type DeskTodo,
 } from '../lib/deskStore.ts';
 
 export const deskRouter = Router();
@@ -114,15 +119,24 @@ deskRouter.get('/', route(async (req, res) => {
   res.json({ rev: data.rev, owner: ownerActor(), columns: COLUMN_META, todos: data.todos, cards });
 }));
 
-/** Cheap poll for the workspace badge. */
+/** Cheap poll for the workspace badge and desktop alerts. */
 deskRouter.get('/summary', route(async (_req, res) => {
   const data = await readDesk();
   const open = data.todos.filter((t) => t.status === 'open');
+  const high = open.filter((t) => t.priority === 'high');
   res.json({
     rev: data.rev,
     openTodos: open.length,
-    highTodos: open.filter((t) => t.priority === 'high').length,
+    highTodos: high.length,
     waitingCards: data.cards.filter((c) => !c.archived && c.column === 'waiting').length,
+    // A client only offers answer buttons when this is present, so one that
+    // ships before this server restarts degrades cleanly.
+    answerable: true,
+    high: [...high]
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, 5)
+      .map((t) => ({ id: t.id, title: t.title, createdAt: t.createdAt, from: t.from.name })),
+    quiet: isQuietHours(),
   });
 }));
 
@@ -138,12 +152,18 @@ deskRouter.get('/todos', route(async (req, res) => {
 deskRouter.post('/todos', route(async (req, res) => {
   const input = body(req);
   const todo = await createTodo(input, resolveAuthor(input.agent));
+  notifyTodoTouched();
   res.status(201).json({ todo });
 }));
 
 deskRouter.patch('/todos/:id', route(async (req, res) => {
-  res.json({ todo: await updateTodo(param(req, 'id'), body(req)) });
+  const input = body(req);
+  const todo = await updateTodo(param(req, 'id'), input);
+  if (input.priority !== undefined) notifyTodoTouched();
+  res.json({ todo });
 }));
+
+deskRouter.post('/todos/:id/answer', answerTodoHandler());
 
 deskRouter.post('/todos/:id/complete', route(async (req, res) => {
   res.json({ todo: await setTodoStatus(param(req, 'id'), 'done') });
@@ -234,6 +254,98 @@ export async function notifyCardOwner(card: DeskCard, comment: DeskComment): Pro
     console.warn(`[desk] could not tell ${recipient.name} about a comment on ${card.id}: ${(error as Error).message}`);
     return { delivered: false, to: recipient.name, reason: 'delivery failed' };
   }
+}
+
+// ---- answers ----------------------------------------------------------------------
+
+export type TeamMessenger = typeof deliverTeamMessage;
+
+/** Who hears an answer: the agent that asked, else the agent that owns the
+ *  linked card, else the Chief of Staff (the asker has left the roster).
+ *  Never an arbitrary teammate: with no Chief of Staff it stays undelivered.
+ *  undefined when the item was the owner's own and no agent is involved. */
+function answerRecipient(todo: DeskTodo, card: DeskCard | undefined): Agent | undefined {
+  const cardAgent = card?.owner.kind === 'agent' ? card.owner : undefined;
+  if (todo.from.kind !== 'agent' && !cardAgent) return undefined;
+  const agents = listAgents();
+  const match = (actor: DeskActor | undefined) =>
+    actor?.kind === 'agent' ? agents.find((a) => a.id === actor.id) ?? findAgent(actor.name) : undefined;
+  return match(todo.from) ?? match(cardAgent) ?? agents.find((a) => a.id === 'chief-of-staff');
+}
+
+function answerMessage(todo: DeskTodo, recipient: Agent, card: DeskCard | undefined): string {
+  const answer = todo.answer!;
+  const askedByRecipient = todo.from.kind === 'agent'
+    && (todo.from.id === recipient.id || todo.from.name.trim().toLowerCase() === recipient.name.trim().toLowerCase());
+  const whose = askedByRecipient ? 'your' : todo.from.kind === 'agent' ? `${todo.from.name}'s` : 'a';
+  const lines = [`${DESK_OWNER_NAME} answered ${whose} Needs-you item [desk:${todo.id}] "${todo.title}".`, ''];
+  if (answer.choice) lines.push(`Answer: ${answer.choice}`);
+  if (answer.text) lines.push(answer.choice ? `${DESK_OWNER_NAME} added: ${answer.text}` : `Answer: ${answer.text}`);
+  lines.push(
+    '',
+    'The item is already marked answered on the Desk, so there is nothing to complete.',
+    `Answer id ${todo.id} (${answer.at}). This message can arrive twice if the server restarted while it was being delivered; if you already acted on it, ignore the repeat.`,
+    card
+      ? `If this changes the plan, update card [desk:${card.id}] with board_card_comment or board_card_move.`
+      : 'If this changes the plan, update the board card for this work.',
+  );
+  return lines.join('\n');
+}
+
+/** Tell the owning agent about a saved answer, at most once: the claim is on
+ *  disk before the team bus is called, so a double call, a retry racing the
+ *  route, or a crash mid-send never repeats the message. Shared by the
+ *  answer route and the notifier's retry loop. */
+export async function deliverDeskAnswer(todoId: string, deliver: TeamMessenger = deliverTeamMessage): Promise<CommentNotice & { todo?: DeskTodo }> {
+  const todo = await claimAnswerDelivery(todoId);
+  if (!todo?.answer) {
+    const current = (await readDesk()).todos.find((t) => t.id === todoId);
+    if (!current?.answer) return { delivered: false, reason: 'no answer to deliver' };
+    if (current.answer.delivery === 'sent') return { delivered: true, todo: current };
+    if (current.answer.delivery === 'none') return { delivered: false, todo: current, reason: 'nobody to tell' };
+    return { delivered: false, todo: current, reason: 'already being delivered' };
+  }
+  const card = todo.cardId ? (await readDesk()).cards.find((c) => c.id === todo.cardId) : undefined;
+  const recipient = answerRecipient(todo, card);
+  let notice: CommentNotice;
+  if (!recipient) {
+    notice = { delivered: false, reason: 'no teammate to tell' };
+  } else {
+    try {
+      const result = await deliver({ from: DESK_OWNER_NAME, to: recipient.id, text: answerMessage(todo, recipient, card), wait: false, source: 'desk' });
+      notice = { delivered: result.delivered, to: result.to ?? recipient.name, ...(result.delivered ? {} : { reason: result.reason }) };
+    } catch (error) {
+      console.warn(`[desk] could not tell ${recipient.name} about the answer to ${todo.id}: ${(error as Error).message}`);
+      notice = { delivered: false, to: recipient.name, reason: 'delivery failed' };
+    }
+  }
+  try {
+    return { ...notice, todo: (await setAnswerDelivery(todo.id, notice.delivered ? 'sent' : 'failed', todo.answer.sendingAt)) ?? todo };
+  } catch (error) {
+    // The claim stays on disk and goes stale, so the notifier delivers this
+    // answer again later; the Desk keeps showing it as not delivered.
+    console.warn(`[desk] could not record the answer delivery for ${todo.id}: ${(error as Error).message}`);
+    return { ...notice, todo };
+  }
+}
+
+/** POST /todos/:id/answer. A factory so a scratch run can pass a stub
+ *  messenger instead of waking a real agent. */
+export function answerTodoHandler(deliver: TeamMessenger = deliverTeamMessage) {
+  return route(async (req, res) => {
+    const { todo, duplicate } = await answerTodo(param(req, 'id'), body(req));
+    // Double tap: the first call already saved and delivered.
+    if (duplicate) {
+      res.json({ todo, duplicate: true });
+      return;
+    }
+    if (todo.answer?.delivery !== 'failed') {
+      res.status(201).json({ todo, notified: { delivered: false, reason: 'nobody to tell' } });
+      return;
+    }
+    const { todo: after, ...notified } = await deliverDeskAnswer(todo.id, deliver);
+    res.status(201).json({ todo: after ?? todo, notified });
+  });
 }
 
 deskRouter.post('/cards/:id/comments', route(async (req, res) => {

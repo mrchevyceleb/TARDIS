@@ -62,6 +62,8 @@ export const DESK_ROOM_ENABLED = !['off', '0', 'false', 'no'].includes(
 export const DESK_OWNER_NAME = (process.env.RIVENDELL_OWNER_NAME ?? '').trim().slice(0, 40) || 'Matt';
 /** desk.json lives in STATE_DIR unless pointed elsewhere (temp runs, tests). */
 export const DESK_FILE = process.env.RIVENDELL_DESK_FILE?.trim() || join(STATE_DIR, 'desk.json');
+/** What the Needs-you notifier already pushed, so a restart never repeats one. */
+export const DESK_NOTIFY_FILE = process.env.RIVENDELL_DESK_NOTIFY_FILE?.trim() || join(STATE_DIR, 'desk-notify.json');
 export const STATIC_DIR = process.env.RIVENDELL_STATIC_DIR || resolve(APP_ROOT, 'dist');
 export const ELROND_WORKSPACE_PATH =
   process.env.ELROND_WORKSPACE_PATH ||
