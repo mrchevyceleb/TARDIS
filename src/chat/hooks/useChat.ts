@@ -2326,7 +2326,8 @@ export function useChat(opts: {
       setBlocks((prev) => prev.map((block) => (
         block.kind === 'user'
         && (block.deliveryState === 'queued' || Boolean(block.clientMsgId && canceledIds.has(block.clientMsgId)))
-          ? { ...block, deliveryState: 'failed' as const }
+          // Stop holds these on the server for the next send: retrying would send them twice.
+          ? { ...block, deliveryState: 'failed' as const, noRetry: true }
           : block
       )));
     }
@@ -2393,7 +2394,7 @@ export function useChat(opts: {
    *  Messages with pictures are not retried here; their pixels are not kept. */
   const retry = (clientMsgId: string) => {
     const failed = blocks.find((block) => block.kind === 'user' && block.clientMsgId === clientMsgId && block.deliveryState === 'failed');
-    if (!failed || failed.kind !== 'user' || failed.imageCount || failed.images?.length) return;
+    if (!failed || failed.kind !== 'user' || failed.noRetry || failed.imageCount || failed.images?.length) return;
     setBlocks((prev) => prev.filter((block) => !(block.kind === 'user' && block.clientMsgId === clientMsgId)));
     if (pendingSendRef.current || statusRef.current === 'streaming') steer(failed.text);
     else send(failed.text);

@@ -23,7 +23,7 @@ import { ROOM_NAMES } from '../../../data/roomNames';
 
 type Sheet = 'none' | 'chronicle' | 'counsel';
 
-export function Mobile({ s, picker, repo }: ShellViewProps) {
+export function Mobile({ s, picker, repo, agent }: ShellViewProps) {
   const [sheet, setSheet] = useState<Sheet>('none');
   const [attachOpen, setAttachOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -112,6 +112,7 @@ export function Mobile({ s, picker, repo }: ShellViewProps) {
             backgroundWork={s.backgroundWork}
             onReact={s.react}
             onRetry={s.retry}
+            agentName={agent}
           />
           {s.error ? (
             <div className="chip" style={{ color: 'var(--amber)', borderColor: 'color-mix(in oklch, var(--amber) 40%, transparent)', background: 'color-mix(in oklch, var(--amber) 10%, transparent)' }}>
