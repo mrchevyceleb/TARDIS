@@ -2117,7 +2117,7 @@ class ClaudeSession {
     }
 
     this.trackStreamText(ev);
-    if (this.cli === 'claude' || this.cli === 'assistant') {
+    if (!sidechain && (this.cli === 'claude' || this.cli === 'assistant')) {
       const usage = ev?.type === 'assistant' ? ev.message?.usage
         : ev?.type === 'stream_event' && ev.event?.type === 'message_start' ? ev.event.message?.usage : undefined;
       recordContextUsage(this.logKey, 'claude', usage);
