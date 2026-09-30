@@ -1,0 +1,208 @@
+/* ============================================================
+   Rail groups: collapsible named sections in the agent list.
+   Loaded by RailGroups.tsx so grok.css stays untouched.
+   ============================================================ */
+
+.bt-groups { padding: 4px 0 10px; }
+.bt-group { margin-top: 2px; }
+
+/* header: chevron, name, count, and (folded shut) the working/unread chips */
+.bt-group-head {
+  display: flex; align-items: center; gap: 2px;
+  border-radius: 12px;
+  transition: background 0.16s ease, box-shadow 0.16s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.bt-group-toggle {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 8px 9px 6px;
+  border-radius: 12px;
+  color: var(--r-ink-mute);
+  font-size: 12px; font-weight: 600;
+  letter-spacing: 0.09em; text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.bt-group-toggle:hover { background: var(--r-line); color: var(--r-ink); transform: translateY(-1px); }
+.bt-group-toggle:active { transform: scale(0.985); }
+.bt-group-toggle.is-editing { cursor: text; }
+.bt-group-toggle.is-editing:hover { transform: none; background: transparent; }
+.bt-group-chev {
+  flex: none;
+  transition: transform 0.24s cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+.bt-group-toggle[aria-expanded='true'] .bt-group-chev,
+.bt-group-toggle.is-editing .bt-group-chev { transform: rotate(90deg); }
+.bt-group-name {
+  min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.bt-group-count {
+  flex: none;
+  min-width: 20px; height: 18px; padding: 0 6px;
+  border-radius: 999px;
+  background: var(--r-line);
+  color: var(--r-ink-mute);
+  font-size: 11px; font-weight: 600; letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  display: grid; place-items: center;
+}
+.bt-group-toggle:hover .bt-group-count { background: var(--r-line-strong); }
+/* the folded-shut summary keeps the rest of the row's clutter out of the way */
+.bt-group-working {
+  flex: none;
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 18px; padding: 0 8px 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--r-elf-blue) 16%, transparent);
+  color: var(--r-elf-blue);
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.02em; text-transform: none;
+  font-variant-numeric: tabular-nums;
+}
+.bt-group-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--r-elf-blue);
+  box-shadow: 0 0 6px color-mix(in oklch, var(--r-elf-blue) 70%, transparent);
+  animation: bt-group-work 1.3s ease-in-out infinite;
+}
+.bt-group-chips { margin-left: auto; flex: none; display: flex; align-items: center; gap: 6px; letter-spacing: 0; }
+.bt-pop { animation: bt-group-pop 0.38s cubic-bezier(0.34, 1.56, 0.64, 1); }
+@keyframes bt-group-pop {
+  0% { transform: scale(0.6); }
+  55% { transform: scale(1.24); }
+  100% { transform: scale(1); }
+}
+@keyframes bt-group-work {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: 0.7; }
+}
+
+.bt-group-more {
+  flex: none;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  color: var(--r-ink-faint);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+.bt-group-head:hover .bt-group-more,
+.bt-group-head:focus-within .bt-group-more,
+.bt-group-more[aria-expanded='true'] { opacity: 1; }
+.bt-group-more:hover { background: var(--r-line); color: var(--r-ink); }
+
+.bt-group-input {
+  flex: 1; min-width: 0;
+  padding: 3px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--r-line-gold);
+  background: var(--r-bg-card);
+  color: var(--r-ink);
+  font: inherit; font-size: 13px; font-weight: 500;
+  letter-spacing: 0; text-transform: none;
+  outline: none;
+}
+.bt-group-input:focus { border-color: var(--r-gold); box-shadow: 0 0 0 2px color-mix(in srgb, var(--r-gold) 25%, transparent); }
+
+/* drop target while an agent row is dragged over the header or empty slot */
+.bt-group.is-drop .bt-group-head {
+  background: color-mix(in srgb, var(--r-gold) 13%, transparent);
+  box-shadow: 0 0 0 2px var(--r-gold);
+  transform: scale(1.012);
+}
+
+/* the rows fold with a smooth height change (0fr <-> 1fr) */
+.bt-group-body {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.26s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
+}
+.bt-group.is-collapsed .bt-group-body {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  transition: grid-template-rows 0.26s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.16s ease, visibility 0s linear 0.26s;
+}
+.bt-group-body-inner { min-height: 0; overflow: hidden; }
+.bt-group:not(.is-collapsed) .bt-group-body-inner { padding-top: 3px; padding-bottom: 3px; }
+
+.bt-group-empty {
+  margin: 2px 4px 6px;
+  padding: 12px;
+  border: 1px dashed var(--r-line-strong);
+  border-radius: 12px;
+  color: var(--r-ink-faint);
+  font-size: 12.5px; line-height: 1.4;
+  transition: border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+.bt-group-empty.on {
+  border-color: var(--r-gold);
+  background: color-mix(in srgb, var(--r-gold) 10%, transparent);
+  color: var(--r-ink);
+}
+
+/* a row dropped at the end of its group */
+.bt-conv.drop-below { box-shadow: 0 2px 0 0 var(--r-gold); }
+
+/* "New group" */
+.bt-group-new {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; margin-top: 10px; padding: 9px 12px;
+  border: 1px dashed var(--r-line-strong);
+  border-radius: 12px;
+  color: var(--r-ink-mute);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.14s ease, color 0.14s ease, background 0.14s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.bt-group-new svg { flex: none; transition: transform 0.24s cubic-bezier(0.34, 1.56, 0.64, 1); }
+button.bt-group-new:hover { border-color: var(--r-gold); color: var(--r-ink); background: var(--r-line); transform: translateY(-1px); }
+button.bt-group-new:hover svg { transform: rotate(90deg); }
+button.bt-group-new:active { transform: scale(0.985); }
+.bt-group-new.is-editing { cursor: text; border-style: solid; border-color: var(--r-line-gold); }
+
+/* group menu: destructive row */
+.bt-plug-row.is-danger, .bt-plug-row.is-danger svg { color: var(--r-rose); }
+.bt-plug-row.is-armed { background: color-mix(in srgb, var(--r-rose) 14%, transparent); font-weight: 600; }
+.bt-agent-ctx .bt-plug-row:disabled { opacity: 0.4; cursor: default; }
+.bt-agent-ctx .bt-plug-row:disabled:hover { background: transparent; }
+.bt-ctx-spacer { width: 16px; height: 16px; flex: none; }
+.bt-ctx-heading {
+  padding: 6px 12px 4px;
+  font-family: var(--r-sign);
+  font-size: 9.5px;
+  color: var(--r-ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+
+/* Rows: a busy lane sends a ring out from its presence lamp. */
+.bt-presence.is-busy::after {
+  content: '';
+  position: absolute; inset: -2px;
+  border-radius: 50%;
+  border: 2px solid var(--r-elf-blue);
+  animation: bt-group-ring 1.5s ease-out infinite;
+}
+@keyframes bt-group-ring {
+  from { transform: scale(0.8); opacity: 0.85; }
+  to { transform: scale(2); opacity: 0; }
+}
+
+@media (pointer: coarse) {
+  .bt-group-toggle { min-height: 44px; }
+  .bt-group-more { opacity: 1; width: 36px; height: 36px; }
+  .bt-group-new { min-height: 44px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bt-group-head, .bt-group-toggle, .bt-group-chev, .bt-group-body, .bt-group.is-collapsed .bt-group-body,
+  .bt-group-new, .bt-group-new svg, .bt-group-empty { transition: none; }
+  .bt-group-toggle:hover, .bt-group-toggle:active, .bt-group.is-drop .bt-group-head,
+  button.bt-group-new:hover, button.bt-group-new:active, button.bt-group-new:hover svg { transform: none; }
+  .bt-group.is-collapsed .bt-group-body { transition: visibility 0s; }
+  .bt-pop, .bt-group-dot, .bt-presence.is-busy::after { animation: none; }
+}
