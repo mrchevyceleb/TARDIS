@@ -12,6 +12,8 @@ import { stopComputersForOwner } from '../devices/bridge.ts';
 import { codexCatalogPayload, startCodexCatalog } from './codex-models.ts';
 import {
   clampReplayWindow,
+  REPLAY_CATCHUP_MAX_BYTES,
+  replayLeavesHole,
   collapseHistoricalToolArgs,
   historicalDelivery,
   subscriptionReplayCursor,
@@ -37,7 +39,7 @@ import {
   type AnySession,
   type CliKind,
 } from './runner.ts';
-import { durableUserEchoClientMsgId, flushEventLog, loadEventLogSync, recentUserEchoClientMsgIds, repairEventLogSequenceSync } from './event-log-store.ts';
+import { durableUserEchoClientMsgId, flushEventLog, loadEventLogCatchUpSync, loadEventLogSync, recentUserEchoClientMsgIds, repairEventLogSequenceSync } from './event-log-store.ts';
 import { isReactionEmoji, recordReaction } from './reactions.ts';
 import {
   activeCodexSessions,
@@ -907,7 +909,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
       const staleSessionThrough = repairedSessionThrough.get(session) ?? 0;
       unsubscribe = session.subscribe(listener, subscriptionReplayCursor(replaySince, staleSessionThrough));
       if (replaying) {
-        const durableReplay: DispatchSeqEvent[] = events
+        const catchUp = loadEventLogCatchUpSync(session.logKey, events, replaySince, REPLAY_CATCHUP_MAX_BYTES);
+        const durableReplay: DispatchSeqEvent[] = [...catchUp.extra, ...events]
           .filter((event) => event.seq > replaySince)
           .map((event) => ({ seq: event.seq, ev: event.ev as any, at: event.at }));
         const seenSeq = new Set<number>();
@@ -934,7 +937,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         // behind than the replay window would keep its old blocks, skip the
         // clamped middle, and show a silent hole. Tell it to drop the stale
         // copy and rebuild from the window instead.
-        if (replaySince > 0 && history.length < full.length) {
+        if (replayLeavesHole(replaySince, catchUp.reachedSince, full.length, history.length)) {
           safeSend({ type: 'replayGap' });
         }
         for (const se of history) dispatch(se);
@@ -966,14 +969,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
       const replaySince = resetReplay ? 0 : sinceSeq;
       if (resetReplay) safeSend({ type: 'replayReset', latestSeq: latest, resetAt });
       if (replaySince >= 0) {
-        const pending: DispatchSeqEvent[] = events
+        const catchUp = loadEventLogCatchUpSync(logKey, events, replaySince, REPLAY_CATCHUP_MAX_BYTES);
+        const pending: DispatchSeqEvent[] = [...catchUp.extra, ...events]
           .filter((event) => event.seq > replaySince)
+          .sort((a, b) => a.seq - b.seq)
+          .filter((event, index, all) => index === 0 || event.seq !== all[index - 1].seq)
           .map((event) => ({ seq: event.seq, ev: event.ev as any, at: event.at }));
         const full = collapseHistoricalToolArgs(filterReplayEvents(pending), latest)
           .map((se) => historicalDelivery(se))
           .filter((se): se is DispatchSeqEvent => se !== null);
         const history = clampReplayWindow(full, latest);
-        if (replaySince > 0 && history.length < full.length) {
+        if (replayLeavesHole(replaySince, catchUp.reachedSince, full.length, history.length)) {
           safeSend({ type: 'replayGap' });
         }
         for (const se of history) dispatch(se);

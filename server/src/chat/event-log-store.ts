@@ -371,6 +371,123 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
   return { events: trimmed, nextSeq: observeNextSeq(key, Math.max(nextSeq, tail.highWater + 1)) };
 }
 
+/** The events a resuming device is owed that the loader's window no longer
+ *  holds. loadEventLogSync keeps the newest few thousand events, which a busy
+ *  lane fills in hours; a device away longer resumes below that floor. Reading
+ *  only the window would hand it the tail, let its cursor jump to latest, and
+ *  leave everything between missing with no signal (a routine every five
+ *  minutes hid a night of real reports this way). `reachedSince` false means
+ *  even the log file no longer reaches the cursor. */
+export function loadEventLogCatchUpSync(
+  key: string,
+  windowEvents: PersistedEvent[],
+  replaySince: number,
+  maxBytes: number,
+): { extra: PersistedEvent[]; reachedSince: boolean } {
+  if (replaySince < 0 || windowEvents.length === 0) return { extra: [], reachedSince: true };
+  if (replaySince === 0) {
+    // A device with nothing saved is owed as much recent history as one attach
+    // may carry, not just what the count-capped window happens to hold: on a
+    // chatty lane 2000 events is a few hours, mostly quiet routine turns, and
+    // the byte budget (which is what is meant to bind) sat mostly unspent.
+    if (windowEvents.length < MAX_EVENTS_PER_LOG) return { extra: [], reachedSince: true };
+    return { extra: loadEventLogSinceSync(key, 0, Math.min(maxBytes, COLD_ATTACH_SCAN_BYTES)).events, reachedSince: true };
+  }
+  if (windowEvents[0].seq <= replaySince + 1) return { extra: [], reachedSince: true };
+  const { events, reachedSince } = loadEventLogSinceSync(key, replaySince, maxBytes);
+  return { extra: events, reachedSince };
+}
+
+// Raw log bytes a cold attach may scan for recent history. Replay collapses and
+// clamps what it finds, so this is several times what is actually sent.
+const COLD_ATTACH_SCAN_BYTES = 8 * 1024 * 1024;
+
+// First chunk of the backwards walk in loadEventLogSinceSync. Doubles from here.
+const SINCE_SCAN_START_BYTES = 2 * 1024 * 1024;
+
+/** Every event after `sinceSeq`, read from the tail of the hot log file.
+ *
+ *  loadEventLogSync keeps only the newest MAX_EVENTS_PER_LOG events, and a busy
+ *  lane fills that window in a few hours. A device that was away longer resumes
+ *  at a cursor the window no longer reaches, so catching it up from the window
+ *  silently skips everything between. This walks backwards from the end of the
+ *  file in doubling chunks (each byte read once) until it has seen a line at or
+ *  below `sinceSeq + 1`, the start of the file, or spent `maxBytes`. It is the
+ *  rare path, so nothing is cached.
+ *
+ *  `reachedSince` is judged on the raw first seq of what was read, plumbing
+ *  lines included: those are dropped from `events`, so the first surviving
+ *  event can sit above `sinceSeq + 1` without anything being missing. */
+export function loadEventLogSinceSync(
+  key: string,
+  sinceSeq: number,
+  maxBytes: number,
+): { events: PersistedEvent[]; reachedSince: boolean } {
+  const path = logPath(key);
+  let fd = -1;
+  try {
+    fd = openSync(path, 'r');
+    const size = fstatSync(fd).size;
+    // Whole lines only: a record still being appended has no newline yet, and
+    // the live session's own buffer already carries it.
+    let end = 0;
+    let searched = 0; // tail bytes already checked for a newline; each is read once
+    for (let probe = Math.min(size, 64 * 1024); ; probe = Math.min(size, probe * 2)) {
+      const lastNewline = readRange(fd, size - probe, size - searched).lastIndexOf(0x0a);
+      if (lastNewline >= 0) { end = size - probe + lastNewline + 1; break; }
+      searched = probe;
+      if (probe >= size || probe >= maxBytes) break;
+    }
+    if (end === 0) return { events: [], reachedSince: false };
+
+    // `carry` is the head of the earliest chunk read so far: the end of a line
+    // that begins further back. Keeping it (instead of re-reading it) means every
+    // byte is read once even when a single record is bigger than a chunk.
+    let carry: Buffer = Buffer.alloc(0);
+    let carryStart = end;
+    let window = Math.max(1, Math.min(SINCE_SCAN_START_BYTES, maxBytes));
+    let spent = 0;
+    let rawFirstSeq: number | null = null;
+    let collected: PersistedEvent[] = [];
+    for (;;) {
+      const start = Math.max(0, carryStart - window);
+      const fresh = readRange(fd, start, carryStart);
+      spent += fresh.length;
+      const buf = Buffer.concat([fresh, carry]);
+      // A chunk that starts mid-file starts inside a line; that line is
+      // finished by the next (earlier) chunk.
+      let skip = 0;
+      if (start > 0) {
+        const nl = buf.indexOf(0x0a);
+        skip = nl < 0 ? buf.length : nl + 1;
+      }
+      const text = buf.toString('utf8', skip);
+      const state = { events: [] as PersistedEvent[], eventChars: [] as number[], highWater: 0 };
+      parseLogLines(text, state);
+      collected = state.events.concat(collected);
+      const firstLine = text.slice(0, Math.max(0, text.indexOf('\n')));
+      try {
+        const seq = JSON.parse(firstLine)?.seq;
+        if (typeof seq === 'number') rawFirstSeq = seq;
+      } catch { /* malformed first line: keep the previous answer */ }
+      carry = buf.subarray(0, skip);
+      carryStart = start;
+      if (start === 0 && rawFirstSeq === null) rawFirstSeq = collected[0]?.seq ?? null;
+      const reached = rawFirstSeq !== null && rawFirstSeq <= sinceSeq + 1;
+      if (reached || start === 0 || spent >= maxBytes) {
+        return { events: collected.filter((event) => event.seq > sinceSeq), reachedSince: reached };
+      }
+      window = Math.max(1, Math.min(window * 2, maxBytes - spent));
+    }
+  } catch {
+    return { events: [], reachedSince: false };
+  } finally {
+    if (fd >= 0) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+  }
+}
+
 /** Newest-first, de-duplicated clientMsgIds of durable user echoes, i.e. the
  * delivery receipts a reconnecting client reconciles its pending sends
  * against. Reads only what was appended since the last call. */
