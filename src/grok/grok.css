@@ -282,17 +282,22 @@
 
 .bt-workspacebar {
   box-sizing: border-box; min-height: calc(65px + env(safe-area-inset-top, 0px));
-  flex: none; display: flex; align-items: center;
+  flex: none; display: flex; align-items: center; gap: 10px;
   padding: calc(8px + env(safe-area-inset-top, 0px)) 16px 8px;
   border-bottom: 1px solid var(--r-line);
+  /* A size container so the Needs-you badge can compact itself when the bar
+     is narrow, whatever makes it narrow (a phone, or both side panes open). */
+  container: bt-workspacebar / inline-size;
 }
+/* The Needs-you badge (components/needsYou.css) sits at the far end. */
+.bt-workspacebar > .ny-badge { margin-left: auto; }
 .bt-workspace-switch {
-  display: inline-flex; gap: 4px; padding: 3px;
+  display: inline-flex; gap: 4px; padding: 3px; min-width: 0;
   border: 1px solid var(--r-line); border-radius: 14px;
   background: var(--r-bg-raised);
 }
 .bt-workspace-switch button {
-  display: flex; align-items: center; justify-content: center; gap: 8px;
+  display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0;
   min-height: 40px; padding: 0 18px; border-radius: 10px;
   font-size: 14px; font-weight: 600; color: var(--r-ink-mute);
 }
@@ -303,17 +308,19 @@
 }
 .bt-workspace-switch button:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; }
 .bt-workspace-switch button:active { transform: scale(0.97); }
-/* Desk: open "Needs you" count; rose and breathing when any is high priority. */
-.bt-ws-badge {
-  min-width: 19px; height: 19px; padding: 0 6px; margin-left: -2px; border-radius: 999px;
-  display: inline-grid; place-items: center;
-  font-size: 11px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums;
-  background: var(--r-gold); color: var(--r-on-accent);
-}
-.bt-ws-badge.is-hot { background: var(--r-rose); color: #fff; animation: bt-breathe 2.4s ease-in-out infinite; }
-@media (prefers-reduced-motion: reduce) { .bt-ws-badge.is-hot { animation: none; } }
+.bt-ws-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
+  .bt-workspacebar { gap: 6px; }
   .bt-workspace-switch button { padding: 0 14px; }
+}
+/* Phones share the bar with the Needs-you badge (sizes are the bar's inner
+   width): the tabs keep their words and drop their icons, so no label clips. */
+@container bt-workspacebar (max-width: 400px) {
+  .bt-workspace-switch button { padding: 0 12px; }
+  .bt-workspace-switch button > svg { display: none; }
+}
+@container bt-workspacebar (max-width: 300px) {
+  .bt-workspace-switch button { padding: 0 10px; }
 }
 .bot-app.rail-collapsed .bt-workspacebar { padding-left: calc(62px + env(safe-area-inset-left, 0px)); }
 @media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {

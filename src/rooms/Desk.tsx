@@ -5,10 +5,12 @@
 import { Check, ChevronDown, ChevronRight, ClipboardList, ExternalLink, Inbox, LayoutGrid, MessageSquare, Pencil, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, MouseEvent } from 'react';
+import { DesktopAlertsButton } from '../components/NeedsYouBadge';
 import { Button, Chip } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
 import { ROOM_NAMES } from '../data/roomNames';
 import {
+  DESK_FIRST_OPEN,
   DESK_FOCUS_EVENT,
   ageLabel,
   agoText,
@@ -20,6 +22,7 @@ import {
   peekDeskFocus,
   sortOpenTodos,
   useDesk,
+  useDeskSummary,
   useDeskWrite,
   type DeskCard,
   type DeskPriority,
@@ -30,7 +33,22 @@ import {
 } from '../data/desk';
 import { showToast } from '../native/shell';
 import type { Agent } from '../grok/agents';
-import { ActorChip, DiscussButton, PRIORITY_LABEL, errorText, linkLabel, linkifyText, priorityClass, useDeskAgents } from './deskParts';
+import {
+  ActorChip,
+  AnswerBar,
+  AnsweredNote,
+  DiscussButton,
+  PRIORITY_LABEL,
+  answerRecipient,
+  canAnswer,
+  errorText,
+  linkLabel,
+  linkifyText,
+  priorityClass,
+  useDeskAgents,
+  useTodoAnswers,
+  type TodoAnswers,
+} from './deskParts';
 import { DeskBoard } from './DeskBoard';
 import { DeskCardDrawer } from './DeskCardDrawer';
 import './desk.css';
@@ -41,6 +59,8 @@ const TAB_KEY = 'rivendell:desk-tab';
 export function Desk() {
   const desk = useDesk();
   const agents = useDeskAgents();
+  // The shell's summary poll says whether this server takes answers yet.
+  const answerable = useDeskSummary(false).data?.answerable === true;
   const [tab, setTab] = useState<Tab>(() => (localStorage.getItem(TAB_KEY) === 'board' ? 'board' : 'needs'));
   const [openCardId, setOpenCardId] = useState<string | null>(null);
   const [flash, setFlash] = useState<{ id: string; at: number } | null>(null);
@@ -69,28 +89,38 @@ export function Desk() {
   useEffect(() => {
     if (!focusReq || !data) return;
     const { ref, at } = focusReq;
-    const found = ref.kind === 'card' ? data.cards.some((c) => c.id === ref.id) : data.todos.some((t) => t.id === ref.id);
-    if (!found && dataUpdatedAt < at && errorUpdatedAt < at) {
+    // "The top of Needs you" (the badge, a digest alert) is resolved only
+    // against data fetched after the request, so it never lights an item that
+    // was answered in the meantime.
+    const first = ref.id === DESK_FIRST_OPEN;
+    const stale = dataUpdatedAt < at && errorUpdatedAt < at;
+    if (first && stale) {
+      if (!isFetching) void refetch();
+      return;
+    }
+    const todoId = first ? sortOpenTodos(data.todos.filter((t) => t.status === 'open'))[0]?.id : ref.id;
+    const found = ref.kind === 'card' && !first ? data.cards.some((c) => c.id === ref.id) : Boolean(todoId) && data.todos.some((t) => t.id === todoId);
+    if (!found && stale) {
       if (!isFetching) void refetch();
       return;
     }
     clearDeskFocus(ref);
     setFocusReq(null);
-    if (!found) {
+    if (!found && !first) {
       showToast(ref.kind === 'card' ? 'That card is no longer on the Desk.' : 'That item is no longer on the Desk.');
       return;
     }
     // Moving off a card with unsaved edits asks first, like closing it does.
-    const leaving = openCardId && !(ref.kind === 'card' && ref.id === openCardId);
+    const leaving = openCardId && !(ref.kind === 'card' && !first && ref.id === openCardId);
     if (leaving && drawerDirty.current && !window.confirm('Discard your unsaved changes to this card?')) return;
     if (leaving) drawerDirty.current = false;
-    if (ref.kind === 'card') {
+    if (ref.kind === 'card' && !first) {
       setOpenCardId(ref.id);
       return;
     }
     setOpenCardId(null);
     setTab('needs');
-    setFlash({ id: ref.id, at: Date.now() });
+    if (todoId && found) setFlash({ id: todoId, at: Date.now() });
   }, [focusReq, data, dataUpdatedAt, errorUpdatedAt, isFetching, refetch, openCardId]);
   const openTodos = useMemo(() => sortOpenTodos((data?.todos ?? []).filter((t) => t.status === 'open')), [data]);
   const liveCards = useMemo(() => (data?.cards ?? []).filter((c) => !c.archived), [data]);
@@ -110,7 +140,7 @@ export function Desk() {
 
   return (
     <div className="desk-room">
-      <RoomHeader eyebrow={ROOM_NAMES.desk.eyebrow} title="Desk" subtitle={subtitle} />
+      <RoomHeader eyebrow={ROOM_NAMES.desk.eyebrow} title="Desk" subtitle={subtitle} actions={<DesktopAlertsButton />} />
       <div className="desk-tabs" role="tablist" aria-label="Desk view">
         <button type="button" role="tab" aria-selected={tab === 'needs'} onClick={() => setTab('needs')}>
           <Inbox size={15} aria-hidden="true" /> Needs you
@@ -137,7 +167,7 @@ export function Desk() {
 
       {data ? (
         tab === 'needs'
-          ? <NeedsYou desk={data} agents={agents} onOpenCard={setOpenCardId} flash={flash} />
+          ? <NeedsYou desk={data} agents={agents} onOpenCard={setOpenCardId} flash={flash} answerable={answerable} />
           : <DeskBoard desk={data} agents={agents} onOpenCard={setOpenCardId} />
       ) : null}
 
@@ -160,13 +190,15 @@ export function Desk() {
 type TodoDraft = { title: string; detail: string; due: string; priority: DeskPriority; link: string };
 const emptyTodo: TodoDraft = { title: '', detail: '', due: '', priority: 'normal', link: '' };
 
-function NeedsYou({ desk, agents, onOpenCard, flash }: {
+function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
   desk: DeskSnapshot;
   agents: Agent[];
   onOpenCard: (id: string) => void;
   flash: { id: string; at: number } | null;
+  answerable: boolean;
 }) {
   const write = useDeskWrite();
+  const answers = useTodoAnswers();
   const doneRef = useRef<HTMLDetailsElement>(null);
   const [lit, setLit] = useState<string | null>(null);
   const [draft, setDraft] = useState<TodoDraft>(emptyTodo);
@@ -193,12 +225,15 @@ function NeedsYou({ desk, agents, onOpenCard, flash }: {
   }, [desk.todos]);
   const [justDone, setJustDone] = useState<string | null>(null);
   const cardsById = useMemo(() => new Map(desk.cards.map((c) => [c.id, c])), [desk.cards]);
-  const open = useMemo(() => sortOpenTodos(desk.todos.filter((t) => t.status === 'open')), [desk.todos]);
+  // A row being answered stays where it was (showing the answer) until the
+  // server confirms, then leaves for Done like a check-off.
+  const answering = answers.pending;
+  const open = useMemo(() => sortOpenTodos(desk.todos.filter((t) => t.status === 'open' || answering.has(t.id))), [desk.todos, answering]);
   const done = useMemo(
     () => desk.todos
-      .filter((t) => t.status === 'done')
+      .filter((t) => t.status === 'done' && !answering.has(t.id))
       .sort((a, b) => (b.completedAt ?? b.updatedAt).localeCompare(a.completedAt ?? a.updatedAt)),
-    [desk.todos],
+    [desk.todos, answering],
   );
 
   const add = async (event: FormEvent) => {
@@ -305,7 +340,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash }: {
     return extra ? [...shown, extra] : shown;
   }, [done, flash]);
 
-  const rowProps = { agents, cardsById, onOpenCard, onStatus: setStatus, onDelete: remove, openIds, onToggleOpen: toggleOpen };
+  const rowProps = { agents, cardsById, onOpenCard, onStatus: setStatus, onDelete: remove, openIds, onToggleOpen: toggleOpen, answers, answerable };
 
   return (
     <section className="desk-needs" aria-label="Needs you">
@@ -333,7 +368,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash }: {
           {open.map((todo) => (
             editingId === todo.id
               ? <TodoEditor key={todo.id} todo={todo} onCancel={() => setEditingId(null)} onSave={(next) => save(todo, next)} />
-              : <TodoRow key={todo.id} todo={todo} {...rowProps} popping={justDone === todo.id} lit={lit === todo.id} onEdit={() => setEditingId(todo.id)} />
+              : <TodoRow key={todo.id} todo={todo} {...rowProps} popping={justDone === todo.id} lit={lit === todo.id} onEdit={answering.has(todo.id) ? undefined : () => setEditingId(todo.id)} />
           ))}
         </ul>
       ) : (
@@ -417,7 +452,7 @@ function TodoEditor({ todo, onCancel, onSave }: { todo: DeskTodo; onCancel: () =
 }
 
 function TodoRow({
-  todo, agents, cardsById, onOpenCard, onStatus, onDelete, onEdit, popping, lit, openIds, onToggleOpen,
+  todo, agents, cardsById, onOpenCard, onStatus, onDelete, onEdit, popping, lit, openIds, onToggleOpen, answers, answerable,
 }: {
   todo: DeskTodo;
   agents: Agent[];
@@ -430,14 +465,31 @@ function TodoRow({
   lit?: boolean;
   openIds: Set<string>;
   onToggleOpen: (id: string) => void;
+  answers: TodoAnswers;
+  answerable: boolean;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const timer = useRef(0);
   useEffect(() => () => window.clearTimeout(timer.current), []);
-  const isDone = todo.status === 'done';
-  const due = isDone ? null : dueLabel(todo.due);
+  // Just answered here: shown as answered in place until it leaves the list.
+  const pending = answers.pending.get(todo.id);
+  const isDone = todo.status === 'done' && !pending;
+  const due = isDone || pending ? null : dueLabel(todo.due);
   const card = todo.cardId ? cardsById.get(todo.cardId) : undefined;
   const threadId = todo.link?.startsWith('thread:') ? todo.link.slice('thread:'.length) : null;
+  const recipient = () => answerRecipient(todo, card, agents);
+  const answerSlot = pending ? (
+    <AnsweredNote
+      answer={pending}
+      phase={pending.phase}
+      to={pending.to ?? recipient()}
+      onDismiss={pending.phase === 'undelivered' ? () => answers.dismiss(todo.id) : undefined}
+    />
+  ) : todo.answer ? (
+    <AnsweredNote answer={todo.answer} phase={todo.answer.delivery === 'failed' ? 'failed' : undefined} to={recipient()} />
+  ) : answerable && canAnswer(todo) ? (
+    <AnswerBar todo={todo} answers={answers} />
+  ) : null;
 
   // A row with details opens in place to read them in full. Clicking the title,
   // the details, or empty space toggles it; the checkbox, chips, links, and
@@ -472,13 +524,14 @@ function TodoRow({
   };
 
   return (
-    <li data-todo-id={todo.id} className={`desk-todo ${priorityClass(todo.priority)}${isDone ? ' is-done' : ''}${popping ? ' is-popping' : ''}${lit ? ' is-lit' : ''}${hasDetail ? ' has-detail' : ''}${open ? ' is-open' : ''}`}>
+    <li data-todo-id={todo.id} className={`desk-todo ${priorityClass(todo.priority)}${isDone ? ' is-done' : ''}${pending ? ` is-answered is-${pending.phase}` : ''}${popping ? ' is-popping' : ''}${lit ? ' is-lit' : ''}${hasDetail ? ' has-detail' : ''}${open ? ' is-open' : ''}`}>
       <button
         type="button"
         className="desk-check"
         onClick={() => onStatus(todo, isDone ? 'open' : 'done')}
-        aria-label={isDone ? `Reopen ${todo.title}` : `Mark ${todo.title} done`}
-        title={isDone ? 'Reopen' : 'Done'}
+        disabled={Boolean(pending)}
+        aria-label={pending ? `${todo.title} is answered` : isDone ? `Reopen ${todo.title}` : `Mark ${todo.title} done`}
+        title={pending ? 'Answered' : isDone ? 'Reopen' : 'Done'}
       >
         <Check size={14} aria-hidden="true" />
       </button>
@@ -534,7 +587,7 @@ function TodoRow({
             </a>
           ) : null}
           <span className="desk-age" title={new Date(isDone ? todo.completedAt ?? todo.updatedAt : todo.createdAt).toLocaleString()}>
-            {isDone ? `done ${agoText(todo.completedAt ?? todo.updatedAt)}` : ageLabel(todo.createdAt)}
+            {isDone ? `${todo.answer ? 'answered' : 'done'} ${agoText(todo.completedAt ?? todo.updatedAt)}` : ageLabel(todo.createdAt)}
           </span>
         </div>
       </div>
@@ -554,6 +607,9 @@ function TodoRow({
           {confirmDelete ? <span>Delete?</span> : null}
         </button>
       </div>
+      {/* Its own grid row under the body and the actions, so the choices get
+          the full width on a phone. */}
+      {answerSlot ? <div className="desk-todo-answer">{answerSlot}</div> : null}
     </li>
   );
 }

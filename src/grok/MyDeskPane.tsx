@@ -15,6 +15,7 @@ import {
   focusDeskRef,
   sortOpenTodos,
   useDesk,
+  useDeskSummary,
   useDeskWrite,
   type DeskCard,
   type DeskColumn,
@@ -22,7 +23,7 @@ import {
   type DeskTodo,
 } from '../data/desk';
 import { showToast } from '../native/shell';
-import { ActorChip, errorText, priorityClass } from '../rooms/deskParts';
+import { ActorChip, AnswerBar, AnsweredNote, answerRecipient, canAnswer, errorText, priorityClass, useDeskAgents, useTodoAnswers } from '../rooms/deskParts';
 import '../rooms/desk.css';
 import './myDesk.css';
 
@@ -46,6 +47,10 @@ export function myCards(desk: DeskSnapshot): DeskCard[] {
 export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpenDesk: () => void }) {
   const desk = useDesk();
   const write = useDeskWrite();
+  const answers = useTodoAnswers();
+  const agents = useDeskAgents();
+  // Reads the shell's summary poll: answers only once the server takes them.
+  const answerable = useDeskSummary(false).data?.answerable === true;
   const data = desk.data;
   const [leaving, setLeaving] = useState<Set<string>>(() => new Set());
   const [announce, setAnnounce] = useState('');
@@ -54,8 +59,15 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
   /** Where keyboard focus goes once a checked row has left the list. */
   const refocus = useRef<{ id: string; index: number } | null>(null);
 
-  const todos = useMemo(() => sortOpenTodos((data?.todos ?? []).filter((t) => t.status === 'open')), [data]);
+  // A row being answered keeps its place (showing the answer) until it leaves.
+  const answering = answers.pending;
+  const todos = useMemo(
+    () => sortOpenTodos((data?.todos ?? []).filter((t) => t.status === 'open' || answering.has(t.id))),
+    [data, answering],
+  );
+  const cardsById = useMemo(() => new Map((data?.cards ?? []).map((c) => [c.id, c])), [data]);
   const cards = useMemo(() => (data ? myCards(data) : []), [data]);
+  const openCount = todos.filter((t) => t.status === 'open' && !answering.has(t.id)).length;
   const shownTodos = todos.slice(0, limits.todos);
   const shownCards = cards.slice(0, limits.cards);
   const hidden = todos.length - shownTodos.length + (cards.length - shownCards.length);
@@ -127,38 +139,51 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
           <>
             <div className="md-sub">
               Needs you
-              {todos.length ? <span className="desk-count">{todos.length}</span> : null}
+              {openCount ? <span className="desk-count">{openCount}</span> : null}
             </div>
             {shownTodos.length ? (
               <ul className="md-list" ref={listRef}>
                 {shownTodos.map((todo, index) => {
                   const due = dueLabel(todo.due);
                   const going = leaving.has(todo.id);
+                  const pending = answers.pending.get(todo.id);
                   return (
-                    <li key={todo.id} className={`md-todo ${priorityClass(todo.priority)}${going ? ' is-leaving' : ''}`}>
+                    <li key={todo.id} className={`md-todo ${priorityClass(todo.priority)}${going ? ' is-leaving' : ''}${pending ? ` is-answered is-${pending.phase}` : ''}`}>
                       <button
                         type="button"
                         className="md-check"
                         onClick={() => complete(todo, index)}
-                        disabled={going}
-                        aria-label={`Mark ${todo.title} done`}
-                        title="Done"
+                        disabled={going || Boolean(pending)}
+                        aria-label={pending ? `${todo.title} is answered` : `Mark ${todo.title} done`}
+                        title={pending ? 'Answered' : 'Done'}
                       >
                         <Check size={13} aria-hidden="true" />
                       </button>
-                      <button
-                        type="button"
-                        className="md-row-main"
-                        onClick={() => focusDeskRef({ kind: 'todo', id: todo.id })}
-                        title="Open on the Desk"
-                      >
-                        <span className="md-row-title">{todo.title}</span>
-                        <span className="md-meta">
-                          <ActorChip actor={todo.from} compact />
-                          {due ? <Chip tone={due.tone}>{due.text}</Chip> : null}
-                          <span className="md-age">{ageLabel(todo.createdAt)}</span>
-                        </span>
-                      </button>
+                      <div className="md-todo-main">
+                        <button
+                          type="button"
+                          className="md-row-main"
+                          onClick={() => focusDeskRef({ kind: 'todo', id: todo.id })}
+                          title="Open on the Desk"
+                        >
+                          <span className="md-row-title">{todo.title}</span>
+                          <span className="md-meta">
+                            <ActorChip actor={todo.from} compact />
+                            {due ? <Chip tone={due.tone}>{due.text}</Chip> : null}
+                            <span className="md-age">{ageLabel(todo.createdAt)}</span>
+                          </span>
+                        </button>
+                        {pending ? (
+                          <AnsweredNote
+                            answer={pending}
+                            phase={pending.phase}
+                            to={pending.to ?? answerRecipient(todo, todo.cardId ? cardsById.get(todo.cardId) : undefined, agents)}
+                            onDismiss={pending.phase === 'undelivered' ? () => answers.dismiss(todo.id) : undefined}
+                          />
+                        ) : answerable && canAnswer(todo) && !going ? (
+                          <AnswerBar todo={todo} answers={answers} compact />
+                        ) : null}
+                      </div>
                     </li>
                   );
                 })}

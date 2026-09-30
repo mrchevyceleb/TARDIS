@@ -25,6 +25,9 @@ import { normalizeWorkspacePath } from '../chat/utils/proxyLinks';
 import { useWorkspaceTree } from '../hooks/useRoomData';
 import { Evenstar, StarField } from '../theme/Ornaments';
 import { ROOM_NAMES } from '../data/roomNames';
+import { deskDeepLinkUrl, FIRST_OPEN_REF, useDeskSummary, type DeskRef } from '../data/desk';
+import { useDeploymentFlags } from '../data/deploymentFlags';
+import { NeedsYouBadge, useNeedsYouAlerts } from '../components/NeedsYouBadge';
 import { applyTheme, readTheme } from '../theme/applyTheme';
 import { FileTree } from './studio/FileTree';
 import { FileTab } from './studio/FileTab';
@@ -98,6 +101,18 @@ export function Studio() {
     return v >= 0.7 && v <= 2 ? v : 1;
   });
   const [dirtyById, setDirtyById] = useState<Record<string, boolean>>({});
+
+  // Needs you: the Desk lives in the main shell, so the badge and its alerts
+  // open it there (a full page load, like Back, so unsaved edits ask first).
+  const flags = useDeploymentFlags();
+  const deskSummary = useDeskSummary(flags.deskRoom);
+  const dirtyRef = useRef(dirtyById);
+  useEffect(() => { dirtyRef.current = dirtyById; }, [dirtyById]);
+  const openDesk = useCallback((ref: DeskRef) => {
+    if (Object.values(dirtyRef.current).some(Boolean) && !window.confirm('You have unsaved changes in Studio. Leave anyway?')) return;
+    window.location.assign(deskDeepLinkUrl(ref));
+  }, []);
+  useNeedsYouAlerts(flags.deskRoom ? deskSummary.data : undefined, openDesk);
   const [reveal, setReveal] = useState<{ path: string; n: number } | null>(null);
   const revealSeq = useRef(0);
   // Inline rename for chat tabs (right-click or double-click a chat tab).
@@ -440,6 +455,8 @@ export function Studio() {
               );
             })}
           </nav>
+
+          {flags.deskRoom ? <NeedsYouBadge summary={deskSummary.data} onOpen={() => openDesk(FIRST_OPEN_REF)} /> : null}
 
           {isMobile ? (
             /* Mobile: keep the primary "new chat" in reach, fold the rest into ⋯ */
