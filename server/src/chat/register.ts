@@ -736,13 +736,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
       });
     };
 
+    // Held while an idle send waits out a rotation's maintenance and the
+    // replacement spawn. A rotation's own `closed` event clears `busy`, and the
+    // client's 90s silence watchdog must still hear the keepalive meanwhile.
+    let holdKeepalive = 0;
     const keepalive = setInterval(() => {
       if (ws.readyState !== ws.OPEN) return;
       const queuedClientMsgIds = pendingSteerIds(cliKind, repoPath, chatId);
       const signature = queuedClientMsgIds.join('\u0000');
       const queueChanged = signature !== lastQueuedSignature;
-      if (!busy && !queueChanged) return;
-      safeSend({ type: 'working', busy, activeCli: cliKind, queuedClientMsgIds, deliveredClientMsgIds });
+      if (!busy && holdKeepalive === 0 && !queueChanged) return;
+      safeSend({ type: 'working', busy: busy || holdKeepalive > 0, activeCli: cliKind, queuedClientMsgIds, deliveredClientMsgIds });
       lastQueuedSignature = signature;
     }, TURN_KEEPALIVE_MS);
     keepalive.unref();
@@ -2025,14 +2029,22 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // recycleOnMismatch remains explicit, so stale device defaults cannot
           // cause replacement themselves.
           if (!initiallyBusy && isClaudeFamilyCli(sendCli) && repoPath) {
-            const reconciled = await getOrCreateSession({
-              cli: sendCli,
-              repoPath,
-              chatId,
-              model: authoritativeAgent ? sendBrain.model : msg.model,
-              effort: authoritativeAgent ? sendBrain.effort : msg.effort,
-              recycleOnMismatch: selectionChangeRequested,
-            });
+            // This can wait out a boundary rotation's compaction; keep the
+            // keepalive going so the client's silence watchdog does not fire.
+            holdKeepalive++;
+            let reconciled: Awaited<ReturnType<typeof getOrCreateSession>>;
+            try {
+              reconciled = await getOrCreateSession({
+                cli: sendCli,
+                repoPath,
+                chatId,
+                model: authoritativeAgent ? sendBrain.model : msg.model,
+                effort: authoritativeAgent ? sendBrain.effort : msg.effort,
+                recycleOnMismatch: selectionChangeRequested,
+              });
+            } finally {
+              holdKeepalive--;
+            }
             if (reconciled !== session) session = await bindSession(Promise.resolve(reconciled));
             if (sendCanceled()) return;
             if (selectionChangeRequested) {
