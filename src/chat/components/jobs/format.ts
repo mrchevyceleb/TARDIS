@@ -100,6 +100,9 @@ export function parseJobResult(text: string, from?: string): JobResult {
   const at = lines.findIndex((line) => line.trim() === 'Last output:');
   if (at >= 0) {
     const tail = lines.slice(at + 1);
+    // Only the trailer the server appends (log path, then the model-only line) goes.
+    if (/^Background job (?:result|wake) from /.test(tail[tail.length - 1] ?? '')) tail.pop();
+    if (/^Full log: /.test(tail[tail.length - 1] ?? '')) tail.pop();
     while (tail.length && !tail[tail.length - 1].trim()) tail.pop();
     output = tail.join('\n');
   }
