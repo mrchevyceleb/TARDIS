@@ -112,7 +112,7 @@ function waitForSteerOrTurnEnd(
   // The message is waiting on a busy Claude-family session: have its turn end
   // at the next tool boundary so the message starts a real turn (see
   // ClaudeSession.canAcceptNativeHumanSteer). Codex takes turn/steer natively.
-  (session as { requestBoundaryInterrupt?: () => boolean }).requestBoundaryInterrupt?.();
+  const releaseBoundary = (session as { requestBoundaryInterrupt?: () => (() => void) | null }).requestBoundaryInterrupt?.() ?? null;
   return new Promise((resolve) => {
     let settled = false;
     let unsubscribe: () => void = () => {};
@@ -120,6 +120,7 @@ function waitForSteerOrTurnEnd(
     const done = (result: SteerBoundary) => {
       if (settled) return;
       settled = true;
+      releaseBoundary?.();
       clearTimeout(timer);
       signal.removeEventListener('abort', onAbort);
       unsubscribe();

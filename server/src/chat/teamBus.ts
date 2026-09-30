@@ -19,7 +19,7 @@ type SessionLike = {
   send: (text: string, images?: unknown, opts?: Record<string, unknown>) => Promise<void>;
   isBusy?: () => boolean;
   canAcceptNativeHumanSteer?: () => boolean;
-  requestBoundaryInterrupt?: () => boolean;
+  requestBoundaryInterrupt?: () => (() => void) | null;
   activeSelection?: () => { model?: string; effort?: string };
   spawnModel?: string;
   spawnEffort?: string;
@@ -271,7 +271,7 @@ export function waitForDeliveryBoundary(
   // A teammate or the Desk is waiting on this busy session: end its turn at the
   // next tool boundary so the handoff arrives as a real turn, not as text
   // inside a tool result. Scheduled/automation senders wait for the natural end.
-  if (interruptAtBoundary) session.requestBoundaryInterrupt?.();
+  const releaseBoundary = interruptAtBoundary ? session.requestBoundaryInterrupt?.() ?? null : null;
   const sinceSeq = session.latestSeq();
   return new Promise((resolve) => {
     let settled = false;
@@ -280,6 +280,7 @@ export function waitForDeliveryBoundary(
     const done = (outcome: DeliveryBoundary) => {
       if (settled) return;
       settled = true;
+      releaseBoundary?.();
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
       unsubscribe();
