@@ -319,10 +319,10 @@ export async function deliverDeskAnswer(todoId: string, deliver: TeamMessenger =
     }
   }
   try {
-    return { ...notice, todo: (await setAnswerDelivery(todo.id, notice.delivered ? 'sent' : 'failed')) ?? todo };
+    return { ...notice, todo: (await setAnswerDelivery(todo.id, notice.delivered ? 'sent' : 'failed', todo.answer.sendingAt)) ?? todo };
   } catch (error) {
-    // The claim stays on disk, so this answer is never sent twice; the Desk
-    // keeps showing it as not delivered.
+    // The claim stays on disk and goes stale, so the notifier delivers this
+    // answer again later; the Desk keeps showing it as not delivered.
     console.warn(`[desk] could not record the answer delivery for ${todo.id}: ${(error as Error).message}`);
     return { ...notice, todo };
   }

@@ -720,11 +720,15 @@ export function claimAnswerDelivery(id: string, staleMs = 5 * 60_000): Promise<D
   });
 }
 
-/** Settle a claimed delivery: sent, or failed (released for a retry). */
-export function setAnswerDelivery(id: string, delivery: 'sent' | 'failed'): Promise<DeskTodo | null> {
+/** Settle a claimed delivery: sent, or failed (released for a retry). `claim`
+ *  is the `sendingAt` the caller was handed; settling only counts while that
+ *  claim is still the one on disk, so a delivery that hung past a takeover, or
+ *  outlived a reopen and a fresh answer, cannot overwrite what replaced it. */
+export function setAnswerDelivery(id: string, delivery: 'sent' | 'failed', claim?: string): Promise<DeskTodo | null> {
   return mutate<DeskTodo | null>((data) => {
     const todo = data.todos.find((t) => t.id === id);
     if (!todo?.answer || todo.answer.delivery === 'none') return new Unchanged(todo ?? null);
+    if (claim !== undefined && todo.answer.sendingAt !== claim) return new Unchanged(todo);
     if (todo.answer.delivery === delivery && !todo.answer.sendingAt) return new Unchanged(todo);
     todo.answer.delivery = delivery;
     delete todo.answer.sendingAt;
