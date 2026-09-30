@@ -6178,6 +6178,9 @@ button {
 .proxy-folder { display: flex; flex-direction: column; gap: 2px; padding: 6px 4px; }
 .proxy-folder-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--r-ink); font: inherit; font-size: 13px; text-align: left; cursor: pointer; transition: background 120ms ease, transform 120ms ease; }
 .proxy-folder-row:hover { background: color-mix(in srgb, var(--r-gold) 10%, transparent); transform: translateX(2px); }
+.proxy-viewer-back { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid var(--r-line); border-radius: 999px; background: transparent; color: var(--r-ink); font: inherit; font-size: 12px; cursor: pointer; transition: border-color 120ms ease, background 120ms ease; }
+@media (max-width: 600px) { .proxy-viewer-back span { display: none; } .proxy-viewer-back { padding: 8px; } }
+.proxy-viewer-back:hover { border-color: var(--r-gold); background: color-mix(in srgb, var(--r-gold) 10%, transparent); }
 .proxy-folder-row svg { flex: 0 0 auto; color: var(--r-gold); }
 .proxy-folder-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proxy-folder-size { flex: 0 0 auto; color: var(--r-faint, #8a8f9c); font-family: var(--r-mono); font-size: 11px; }

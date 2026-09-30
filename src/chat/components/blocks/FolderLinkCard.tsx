@@ -16,11 +16,12 @@ export function FolderLinkCard({ path, title }: { path: string; title?: string }
   const safePath = normalizedPath ?? path;
   const display = title || (safePath === '' ? 'ASSISTANT-HUB' : safePath.split('/').pop() || safePath);
   const onThisPc = normalizedPath !== null && canOpenOnThisPc(normalizedPath, 'folder');
+  const inStudio = Boolean(studio) && inStudioShell();
 
   const showList = () => { if (normalizedPath !== null) viewer?.open({ source: 'folder', path: normalizedPath }); };
   const openPrimary = () => {
     if (normalizedPath === null) return;
-    if (studio && inStudioShell()) { studio.revealFolder(normalizedPath); return; }
+    if (studio && inStudio) { studio.revealFolder(normalizedPath); return; }
     if (onThisPc) { openWorkspaceLink(normalizedPath, 'folder', showList); return; }
     if (studio) { studio.revealFolder(normalizedPath); return; }
     if (viewer) { showList(); return; }
@@ -33,7 +34,7 @@ export function FolderLinkCard({ path, title }: { path: string; title?: string }
         type="button"
         className="chat-link-card"
         onClick={openPrimary}
-        title={onThisPc ? `Open ${display} in ${fileManagerName()}` : `Show the files in ${display}`}
+        title={inStudio ? `Reveal ${display} in the file tree` : onThisPc ? `Open ${display} in ${fileManagerName()}` : `Show the files in ${display}`}
       >
         <FolderOpen size={16} />
         <span className="chat-link-card-text">

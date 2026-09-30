@@ -1,4 +1,4 @@
-import { ArrowUp, Copy, ExternalLink, File as FileIcon, FileText, Folder, X } from 'lucide-react';
+import { ArrowLeft, ArrowUp, Copy, ExternalLink, File as FileIcon, FileText, Folder, X } from 'lucide-react';
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Markdown } from '../chat/components/primitives/Markdown';
 import { apiJson } from '../data/api';
@@ -149,6 +149,9 @@ function ProxyViewerOverlay({
     return 'Loading';
   }, [request, loaded]);
 
+  const viewer = useContext(ProxyViewerContext);
+  const backToFolder = request.source === 'doc' && request.fromFolder !== undefined ? request.fromFolder : null;
+
   return (
     <div className="proxy-viewer-overlay" role="dialog" aria-modal="true" aria-label={title} onClick={onClose}>
       <div className="proxy-viewer" onClick={(event) => event.stopPropagation()}>
@@ -162,6 +165,12 @@ function ProxyViewerOverlay({
             </div>
           </div>
           <div className="proxy-viewer-actions">
+            {backToFolder !== null ? (
+              <button className="proxy-viewer-back" type="button" onClick={() => viewer?.open({ source: 'folder', path: backToFolder })} aria-label="Back to folder" title="Back to the folder list">
+                <ArrowLeft size={14} />
+                <span>Folder</span>
+              </button>
+            ) : null}
             {loaded ? <CopyPathButton loaded={loaded} /> : null}
             {loaded?.source === 'artifact' ? <OpenRawButton loaded={loaded} /> : null}
             <button className="rail-icon-button" type="button" onClick={onClose} aria-label="Close viewer" title="Close">
@@ -193,7 +202,7 @@ function FolderListing({ loaded }: { loaded: LoadedFolder }) {
   ));
   const openNode = (node: FileTreeNode) => viewer?.open(node.type === 'directory'
     ? { source: 'folder', path: node.path }
-    : { source: 'doc', path: node.path, title: node.name });
+    : { source: 'doc', path: node.path, title: node.name, fromFolder: here });
   return (
     <div className="proxy-folder" ref={listRef} tabIndex={-1} role="group" aria-label={`Files in ${here || 'workspace'}`}>
       {here ? (
