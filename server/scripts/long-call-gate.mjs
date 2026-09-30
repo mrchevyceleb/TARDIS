@@ -37,7 +37,7 @@
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 
 const allow = () => process.exit(0);
@@ -56,7 +56,8 @@ const exit2 = flags.includes('--exit2');
 const STATE = process.env.RIVENDELL_STATE_DIR || join(homedir(), '.rivendell');
 const NUDGE_S = Number(process.env.RIVENDELL_LONG_CALL_NUDGE_S) || 60;
 const SLEEP_LIMIT_S = 30;
-const START_DIR = join(tmpdir(), 'tardis-longcall');
+// Call start times live in the private state dir (a shared /tmp path would let another local user pre-create or symlink the records).
+const START_DIR = join(STATE, 'long-call-starts');
 const LOG_FILE = join(STATE, 'long-calls.jsonl');
 const LOG_MAX_BYTES = 5 * 1024 * 1024;
 const MAX_COMMAND_CHARS = 20_000;
@@ -106,7 +107,8 @@ const RULES = [
   { label: 'a build', re: /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:build(?::[\w:-]+)?|ci)\b|\b(?:npx\s+)?tauri\s+build\b|\bcargo\s+(?:build|install)\b|\bdocker\s+(?:compose\s+)?build\b|\bxcodebuild\b|\bswift\s+build\b|\bgradlew?\s+(?:assemble|build)\b/ },
   { label: 'a full install', re: /\b(?:npm|pnpm|yarn|bun)\s+(?:install|i|add)\s*(?:$|[;&|)]|--)/ },
   { label: 'a render', re: /\bhyperframes\s+render\b|\bremotion\s+render\b|\bblender\s+(?:-b|--background)\b/ },
-  { label: 'a full test run', re: /\bplaywright\s+test\b|\bnpm\s+run\s+test:(?:all|full|e2e|ci)\b/ },
+  // Full suites only: a bare `npm test` / `cargo test` / `pytest` (no file, filter or script argument) is the whole suite.
+  { label: 'a full test run', re: /\bplaywright\s+test\b|\bnpm\s+run\s+test:(?:all|full|e2e|ci)\b|\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\s*(?:$|[;&|)])|\bcargo\s+test\s*(?:$|[;&|)])|\bpytest\s*(?:$|[;&|)])/ },
   { label: 'a review CLI (run it as a job and read its output file when the result arrives)', re: /\bcodex\s+(?:exec|review)\b|\bclaude\s+(?:[^\n;&|]*\s)?-p\b/ },
 ];
 
@@ -181,7 +183,7 @@ async function main() {
     // Time it for the 60s nudge. Sweep start files that never got a result.
     if (callId) {
       try {
-        mkdirSync(START_DIR, { recursive: true });
+        mkdirSync(START_DIR, { recursive: true, mode: 0o700 });
         const now = Date.now();
         for (const f of readdirSync(START_DIR)) {
           try { if (now - statSync(join(START_DIR, f)).mtimeMs > 6 * 3600_000) rmSync(join(START_DIR, f), { force: true }); } catch { /* raced */ }

@@ -69,11 +69,13 @@ function piExtensions(): string[] {
   const ext = join(PI_AGENT_DIR, 'extensions');
   // pi-grok registers the `xai-oauth` provider (SuperGrok); without it every
   // Grok spawn dies with "Unknown provider".
-  // long-call-gate.ts is installed by the gate's install script; until it is present the
-  // existsSync filter below leaves it out.
-  const wanted = ['auto-provider-models.ts', 'pi-grok/index.ts', 'bash-timeout-guard.ts', 'bash-self-kill-guard.ts', 'long-call-gate.ts'];
+  const wanted = ['auto-provider-models.ts', 'pi-grok/index.ts', 'bash-timeout-guard.ts', 'bash-self-kill-guard.ts'];
   const configured = process.env.RIVENDELL_PI_EXTENSIONS?.split(',').map((s) => s.trim()).filter(Boolean);
-  const files = (configured ?? wanted).map((f) => (f.startsWith('/') ? f : join(ext, f))).filter(existsSync);
+  // The long-call gate is a TARDIS feature (the spawn is marked in longCallGate.ts), so it is always offered,
+  // even when RIVENDELL_PI_EXTENSIONS picks the rest. It is installed by the gate's install script; until it
+  // is present the existsSync filter leaves it out.
+  const names = [...new Set([...(configured ?? wanted), 'long-call-gate.ts'])];
+  const files = names.map((f) => (f.startsWith('/') ? f : join(ext, f))).filter(existsSync);
   return [...files, TEAM_EXTENSION];
 }
 
