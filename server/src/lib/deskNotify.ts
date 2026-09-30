@@ -31,7 +31,10 @@ const ANSWER_RETRY_MS = 60_000;
 /** After half an hour of failures, keep trying but less often. */
 const ANSWER_SLOW_AFTER_MS = 30 * 60_000;
 const ANSWER_SLOW_RETRY_MS = 10 * 60_000;
-const ANSWER_GIVE_UP_MS = 24 * 60 * 60_000;
+/** Past a day of failures the answer is still not dropped: hourly until it lands
+ *  (or the item is reopened or deleted, which clears the answer). */
+const ANSWER_DAY_MS = 24 * 60 * 60_000;
+const ANSWER_HOURLY_RETRY_MS = 60 * 60_000;
 /** A delivery claim this old with no outcome means the server stopped mid-send
  *  (or the send hung): reclaim it. A repeated message to an agent is harmless;
  *  a lost answer is not. */
@@ -189,7 +192,7 @@ export function senderFromEnv(env: NodeJS.ProcessEnv = process.env, opts: { endp
 /** One alert's progress. Finished once sent, seeded on first run, skipped, or
  *  given up on. `sendingAt` is the claim written just before the network call. */
 type Send = { tries: number; lastTryAt?: string; sendingAt?: string; sentAt?: string; seededAt?: string; failedAt?: string; skipped?: 'empty' };
-type ItemState = { push?: Send; renudge?: Send };
+type ItemState = { push?: Send; renudge?: Send; doneSeen?: boolean };
 type NotifyState = { version: 1; createdAt: string; items: Record<string, ItemState>; digests: Record<string, Send> };
 
 function finished(send: Send | undefined): boolean {
@@ -319,6 +322,9 @@ type Job = {
 
 export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
   const now = opts.now ?? (() => new Date());
+  // Items created after this process started are new work, not backlog, even
+  // when the very first tick (and its one-time seeding) runs a moment later.
+  const bootMs = now().getTime();
   const read = opts.readDesk ?? readDesk;
   const log = opts.log ?? ((line: string) => console.log(line));
   const stateFile = opts.stateFile ?? DESK_NOTIFY_FILE;
@@ -345,6 +351,7 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
     let seeded = 0;
     for (const todo of data.todos) {
       if (todo.status !== 'open') continue;
+      if (Date.parse(todo.createdAt) >= bootMs) continue;
       fresh.items[todo.id] = { push: { tries: 0, seededAt: stamp }, renudge: { tries: 0, seededAt: stamp } };
       seeded += 1;
     }
@@ -389,16 +396,13 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
       // stale limit means the server stopped mid-send: fall through and retry.
       if (answer.sendingAt && nowMs - Date.parse(answer.sendingAt) <= ANSWER_CLAIM_STALE_MS) continue;
       const answeredAt = Date.parse(answer.at);
-      if (nowMs - answeredAt > ANSWER_GIVE_UP_MS) {
-        if (!answerNoted.has(todo.id)) {
-          answerNoted.add(todo.id);
-          answerTriedAt.delete(todo.id);
-          log(`[desk-notify] gave up telling anyone about the answer to ${todo.id} "${todo.title}" after 24 hours`);
-        }
-        continue;
+      const age = nowMs - answeredAt;
+      if (age > ANSWER_DAY_MS && !answerNoted.has(todo.id)) {
+        answerNoted.add(todo.id);
+        log(`[desk-notify] the answer to ${todo.id} "${todo.title}" is still undelivered after 24 hours; trying hourly until it lands`);
       }
       // The answer route itself tried at answer time, so space from that too.
-      const spacing = nowMs - answeredAt > ANSWER_SLOW_AFTER_MS ? ANSWER_SLOW_RETRY_MS : ANSWER_RETRY_MS;
+      const spacing = age > ANSWER_DAY_MS ? ANSWER_HOURLY_RETRY_MS : age > ANSWER_SLOW_AFTER_MS ? ANSWER_SLOW_RETRY_MS : ANSWER_RETRY_MS;
       if (nowMs - Math.max(answeredAt, answerTriedAt.get(todo.id) ?? 0) < spacing) continue;
       answerTriedAt.set(todo.id, nowMs);
       try {
@@ -420,6 +424,22 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
     const st = await ensureState(data, at);
     const clock = easternClock(at);
     let dirty = prune(st, data, clock, nowMs);
+    // A pushed item that was completed and then reopened is asking for the owner
+    // again: forget that it was pushed so it alerts like a new one.
+    for (const todo of data.todos) {
+      const item = st.items[todo.id];
+      if (!item) continue;
+      if (todo.status === 'done' && !item.doneSeen) {
+        item.doneSeen = true;
+        dirty = true;
+      } else if (todo.status === 'open' && item.doneSeen) {
+        delete item.push;
+        delete item.renudge;
+        delete item.doneSeen;
+        dirty = true;
+        log(`[desk-notify] ${todo.id} "${todo.title}" was reopened: alerting again if it is high priority`);
+      }
+    }
     const open = data.todos.filter((t) => t.status === 'open');
     const dayHours = inPushHours(clock);
     const weekday = !isWeekend(clock);

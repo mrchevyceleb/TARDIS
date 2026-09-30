@@ -284,6 +284,7 @@ function answerMessage(todo: DeskTodo, recipient: Agent, card: DeskCard | undefi
   lines.push(
     '',
     'The item is already marked answered on the Desk, so there is nothing to complete.',
+    `Answer id ${todo.id} (${answer.at}). This message can arrive twice if the server restarted while it was being delivered; if you already acted on it, ignore the repeat.`,
     card
       ? `If this changes the plan, update card [desk:${card.id}] with board_card_comment or board_card_move.`
       : 'If this changes the plan, update the board card for this work.',
