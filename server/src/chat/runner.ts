@@ -410,6 +410,11 @@ export type SeqEvent = { seq: number; ev: SessionEvent; at?: number };
 
 type ZaiCutDecision = { outcome: ZaiTurnOutcome; cut: ProviderCut; origin: TurnOrigin };
 
+/** A teammate's handoff may pause a working turn at most this often, so a burst
+ *  of handoffs cannot starve the agent of any uninterrupted work. A person's
+ *  message is never held off. */
+const PEER_BOUNDARY_INTERRUPT_GAP_MS = 60_000;
+
 /** Prepended to the turn that follows a boundary interrupt. */
 const PAUSED_FOR_MESSAGE_NOTE = '<rivendell-steer>Your previous turn was paused right after a tool call finished, so the message below reaches you as a normal message. Answer it first. Then, unless it changes the plan, carry on with what you were doing; the transcript above shows where you stopped.</rivendell-steer>';
 class ClaudeSession {
@@ -489,6 +494,12 @@ class ClaudeSession {
   private boundaryInterruptWanted = false;
   /** Live waiters that asked for the interrupt; it is dropped when the last one gives up. */
   private boundaryWaiters = 0;
+  /** How many of those waiters are a person (Matt, the Desk) rather than a teammate. */
+  private boundaryHumanWaiters = 0;
+  /** Bumped whenever the waiter counts are reset, so a release handed out before
+   *  the reset cannot decrement waiters that registered after it. */
+  private boundaryGeneration = 0;
+  private lastBoundaryInterruptAt = 0;
   /** The last turn was ended that way. The next turn tells the model so it
    *  answers first and then picks its work back up. */
   private pausedForMessage = false;
@@ -1440,10 +1451,13 @@ class ClaudeSession {
    *  its own first, nothing is interrupted. Scheduled (automation) turns are
    *  left to finish. Returns a release function, or null when there is no turn
    *  to end. */
-  requestBoundaryInterrupt(): (() => void) | null {
+  requestBoundaryInterrupt(opts: { human?: boolean } = {}): (() => void) | null {
     if (this.turnStartedAt === null || this.automationTurn || this.disposed || this.child.exitCode !== null) return null;
+    const human = opts.human === true;
     this.boundaryInterruptWanted = true;
     this.boundaryWaiters += 1;
+    if (human) this.boundaryHumanWaiters += 1;
+    const generation = this.boundaryGeneration;
     let released = false;
     // The caller releases when its message no longer needs the turn ended
     // (delivered, superseded, stopped, timed out). The last release withdraws
@@ -1451,7 +1465,9 @@ class ClaudeSession {
     return () => {
       if (released) return;
       released = true;
+      if (generation !== this.boundaryGeneration) return;
       this.boundaryWaiters = Math.max(0, this.boundaryWaiters - 1);
+      if (human) this.boundaryHumanWaiters = Math.max(0, this.boundaryHumanWaiters - 1);
       if (this.boundaryWaiters === 0) this.boundaryInterruptWanted = false;
     };
   }
@@ -1459,6 +1475,8 @@ class ClaudeSession {
   private clearBoundaryRequest(): void {
     this.boundaryInterruptWanted = false;
     this.boundaryWaiters = 0;
+    this.boundaryHumanWaiters = 0;
+    this.boundaryGeneration += 1;
   }
 
   sessionId(): string | null {
@@ -1832,14 +1850,19 @@ class ClaudeSession {
           }
         }
         if (this.boundaryInterruptWanted && this.activeToolIds.size === 0) {
-          this.boundaryInterruptWanted = false;
-          const turn = this.turnStartedAt;
+          const now = Date.now();
           // Claude's interrupt also stops background subagents, and a person who
           // never asked for that should not lose a running monitor to a chat
           // message. With background work running the turn is left to finish
           // (it usually ends soon, waiting on that work) and the message
           // starts the next turn as before.
-          if (!this.hasBackgroundWork()) {
+          if (this.hasBackgroundWork()) {
+            this.boundaryInterruptWanted = false;
+          } else if (this.boundaryHumanWaiters > 0 || now - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS) {
+            // A teammate inside the hold-off window stays armed for the next
+            // tool boundary instead.
+            this.boundaryInterruptWanted = false;
+            const turn = this.turnStartedAt;
             // After this event has been emitted, so the tool_result reaches the
             // transcript ahead of the interrupt marker.
             setImmediate(() => {
@@ -1847,6 +1870,7 @@ class ClaudeSession {
               if (this.boundaryWaiters === 0) return;
               // Another tool started before this ran: the request still stands.
               if (this.activeToolIds.size > 0) { this.boundaryInterruptWanted = true; return; }
+              this.lastBoundaryInterruptAt = Date.now();
               this.pausedForMessage = true;
               void this.interrupt('message-boundary').then((kept) => {
                 if (!kept) this.pausedForMessage = false;
