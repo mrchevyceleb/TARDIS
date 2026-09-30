@@ -81,6 +81,25 @@ function trimHistoricalToolOutput(event: Record<string, any>): Record<string, an
   return { ...event, event: next };
 }
 
+// Claude Code opens every turn with a system/init record that lists its whole
+// toolbox: tools, slash commands, skills, MCP servers, plugins, agents. That is
+// ~12KB a turn, and a lane with a routine every five minutes stacks one in front
+// of each quiet turn, so init records alone were nearly half of a replay window
+// that the client reads a single field of (`model`, for the context meter).
+const HISTORICAL_INIT_HEAVY_KEYS = ['tools', 'slash_commands', 'skills', 'mcp_servers', 'plugins'];
+
+/** Drop the toolbox listing from a replayed system/init record. Live frames
+ *  never pass through here. Returns the original reference when there is
+ *  nothing to drop. */
+function trimHistoricalSystemInit(event: Record<string, any>): Record<string, any> {
+  const inner = event.event;
+  if (!inner || typeof inner !== 'object' || inner.type !== 'system' || inner.subtype !== 'init') return event;
+  if (!HISTORICAL_INIT_HEAVY_KEYS.some((key) => key in inner)) return event;
+  const slim = { ...inner };
+  for (const key of HISTORICAL_INIT_HEAVY_KEYS) delete slim[key];
+  return { ...event, event: slim };
+}
+
 // A tool call's arguments stream in as hundreds of one-or-two-character
 // `input_json_delta` frames so the live card can type them out. On a
 // forever-thread that is the single largest cost of attaching: tens of
@@ -200,6 +219,24 @@ function rewriteArgsFrame<T extends { seq: number; ev: unknown }>(frame: T, part
 // so raising the count cap past that buys nothing.
 export const REPLAY_MAX_EVENTS = 4000;
 export const REPLAY_MAX_BYTES = 1_500_000;
+// How far back into the log file a resuming device may be caught up from. The
+// in-memory window holds 2000 events, which a busy lane fills in hours; this is
+// raw file bytes, so it is generous next to the 1.5MB actually sent (most of a
+// long gap is streamed tool arguments and screenshots that replay collapses).
+export const REPLAY_CATCHUP_MAX_BYTES = 16 * 1024 * 1024;
+
+/** Whether a device resuming at `replaySince` is about to skip events. Either the
+ *  log could not be read back to its cursor at all, or the byte/event clamp cut
+ *  the middle out of what was read. Both leave a silent hole in a device that
+ *  keeps its saved copy, so it must be told to drop it and rebuild. */
+export function replayLeavesHole(
+  replaySince: number,
+  reachedSince: boolean,
+  fullLength: number,
+  historyLength: number,
+): boolean {
+  return replaySince > 0 && (!reachedSince || historyLength < fullLength);
+}
 
 /** Keep the newest slice of a replay. Frames must be ascending by seq.
  *  Anything above `historyThrough` is live rather than history and is always
@@ -231,7 +268,7 @@ export function historicalDelivery<T extends { seq: number; ev: unknown }>(frame
   // routine reply ("NO_UPDATE") hid a real report from an earlier turn.
   if (event.type === 'turnEnd') return { ...frame, ev: { type: 'event', event: { type: '_turn_boundary' } } };
   if (event.type === 'event') {
-    const slim = trimHistoricalToolOutput(event);
+    const slim = trimHistoricalSystemInit(trimHistoricalToolOutput(event));
     return slim === event ? frame : { ...frame, ev: slim };
   }
   if (event.type !== 'error') return frame;
