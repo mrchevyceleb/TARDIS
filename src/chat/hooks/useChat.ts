@@ -481,6 +481,11 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       // The message has its own text, so a held thinking summary is not the reply.
       return [...settleThoughts(blocks, turnId, false), block];
     }
+    if (cb?.type === 'tool_use' && typeof cb.name === 'string' && /^(mcp__.+__)?reply_now$/.test(cb.name)) {
+      // The agent is speaking: the server posts the text as a message, so the call
+      // itself gets no tool card.
+      return settleThoughts(blocks, turnId, false);
+    }
     if (cb?.type === 'tool_use') {
       const block: ChatBlock = {
         kind: 'tool', id: id(),
@@ -548,6 +553,25 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // this final assistant event. Without this fallback xAI replies render as a
   // blank bubble. Guard on "no text yet for this turn" so delta-backed
   // backends never double-render.
+  // A reply_now call, posted by the server as a message: always its own text block,
+  // whatever else this provider message already said.
+  if (ev.type === 'assistant' && ev._replyNow && Array.isArray(ev.message?.content)) {
+    const text = (ev.message.content as Array<any>)
+      .filter((c) => c?.type === 'text' && typeof c.text === 'string')
+      .map((c) => c.text)
+      .join('');
+    // Keep the agent's exact text (leading indentation and trailing newlines can matter in Markdown).
+    if (!text.trim()) return blocks;
+    if (typeof ev.seq === 'number' && blocks.some((b) => b.kind === 'text' && b.seq === ev.seq)) return blocks;
+    if (!turnIdRef.current) turnIdRef.current = `t${nextId++}`;
+    const turnId = turnIdRef.current;
+    return [...settleThoughts(blocks, turnId, false), {
+      kind: 'text', id: id(), text, ...eventTime(ev),
+      turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation: 'update',
+      seq: typeof ev.seq === 'number' ? ev.seq : undefined,
+    }];
+  }
+
   if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
     if (!turnIdRef.current) turnIdRef.current = `t${nextId++}`;
     const turnId = turnIdRef.current;
