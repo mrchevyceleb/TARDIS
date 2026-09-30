@@ -51,7 +51,7 @@ function stepClock(ms: number): string {
 /** What the agent is doing right now, in plain words: the running tool, or
  *  thinking, or what it is waiting on. `activityKey` changes whenever output
  *  lands, which restarts the quiet-for timer; a running tool times itself. */
-function ActiveTurnIndicator({ since, phrases, activity, toolSince, waiting, activityKey }: { since?: number; phrases: string[]; activity?: string; toolSince?: number; waiting?: string; activityKey?: string }) {
+function ActiveTurnIndicator({ since, phrases, activity, toolSince, writing = false, waiting, activityKey }: { since?: number; phrases: string[]; activity?: string; toolSince?: number; writing?: boolean; waiting?: string; activityKey?: string }) {
   const changedAtRef = useRef({ key: activityKey, at: Date.now() });
   if (changedAtRef.current.key !== activityKey) changedAtRef.current = { key: activityKey, at: Date.now() };
   const startedAtRef = useRef(since && since > 0 ? since : 0);
@@ -66,18 +66,28 @@ function ActiveTurnIndicator({ since, phrases, activity, toolSince, waiting, act
   }, []);
   const elapsed = hasKnownStart ? Math.max(0, now - startedAtRef.current) : 0;
   const seconds = Math.floor(elapsed / 1000);
-  const stepMs = toolSince ? Math.max(0, now - toolSince) : Math.max(0, now - changedAtRef.current.at);
-  const stepText = activity
-    ? `${waiting ? `Waiting on ${waiting}` : activity} · ${toolSince ? '' : 'quiet '}${stepClock(stepMs)}`
-    : null;
+  const quietMs = Math.max(0, now - changedAtRef.current.at);
+  // Each state says only what is true of it: a running tool times itself, prose
+  // being written has no timer, and "quiet" is time since anything last landed.
+  // Background work is named only once the agent has gone quiet.
+  let stepText: string | null = null;
+  let spoken = '';
+  if (activity) {
+    if (toolSince) { stepText = `${activity} · ${stepClock(now - toolSince)}`; spoken = activity; }
+    else if (writing) { stepText = activity; spoken = activity; }
+    else {
+      stepText = `${activity} · quiet ${stepClock(quietMs)}${waiting && quietMs >= 8000 ? ` · waiting on ${waiting}` : ''}`;
+      spoken = waiting && quietMs >= 8000 ? `${activity}, waiting on ${waiting}` : activity;
+    }
+  }
   const label = stepText ?? phrases[Math.floor(elapsed / 2800) % phrases.length] ?? 'Working';
   const clock = hasKnownStart
     ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
     : 'live';
   return (
-    <div className="active-turn" role="status" aria-label="Agent is still working">
+    <div className="active-turn" role="status" aria-label={spoken ? `Agent is still working: ${spoken}` : 'Agent is still working'}>
       <span className="vortex active-turn-star" aria-hidden="true" />
-      <span key={stepText ? 'step' : label} className={`active-turn-label bt-fade${stepText ? ' active-turn-step' : ''}`} title={stepText ? 'What the agent is doing right now' : undefined} aria-hidden="true">{label}</span>
+      <span key={stepText ? 'step' : label} className={`active-turn-label bt-fade${stepText ? ' active-turn-step' : ''}`} title={stepText ?? undefined} aria-hidden="true">{label}</span>
       <span className="active-turn-dots" aria-hidden="true"><i /><i /><i /></span>
       <span className="active-turn-time" aria-hidden="true">{clock}</span>
     </div>
@@ -1129,7 +1139,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   // A silent routine stays silent, but the moment the current turn has work a
   // person can see (tool cards, prose), it needs its proof-of-life row too: a
   // turn that a person's message joined must never look dead.
-  const currentTurnVisible = currentBlocks.some((b) => b.kind === 'tool' || (b.kind === 'text' && b.text.trim().length > 0));
+  const currentTurnVisible = currentBlocks.some((b) => b.kind === 'tool' || (b.kind === 'text' && isAnswerProse(b)));
   const runningTool = [...currentBlocks].reverse().find((b): b is ToolBlock => b.kind === 'tool' && b.running);
   const lastCurrent = currentBlocks[currentBlocks.length - 1];
   const openText = currentBlocks.some((b) => b.kind === 'text' && b.open && b.text.trim().length > 0);
@@ -1148,6 +1158,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         phrases={phrases}
         activity={liveActivity}
         toolSince={runningTool?.ts}
+        writing={openText}
         waiting={backgroundWork.length > 0 ? (backgroundWork.length === 1 ? backgroundWork[0] : `${backgroundWork.length} background tasks`) : undefined}
         activityKey={activityKey}
       />,
