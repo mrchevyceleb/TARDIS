@@ -136,7 +136,9 @@ function awaitingFirstReply(blocks: ChatBlock[]): boolean {
   for (let i = blocks.length - 1; i >= 0; i -= 1) {
     const b = blocks[i];
     if (b.kind === 'replyask') return true;
-    if (b.kind === 'peer' || b.kind === 'text' || b.kind === 'tool') return false;
+    // Anything the person can see, or any turn boundary, closes the case.
+    if (b.kind === 'peer' || b.kind === 'text' || b.kind === 'tool' || b.kind === 'doc-link' || b.kind === 'folder-link' || b.kind === 'artifact'
+      || b.kind === 'terminal-error' || b.kind === 'restart' || b.kind === 'switch' || b.kind === 'background' || b.kind === 'compact') return false;
   }
   return false;
 }
@@ -765,7 +767,7 @@ function parseStoredSnapshot(raw: string | null): StoredChatSnapshot | null {
     if (typeof parsed.seq !== 'number' || !Number.isFinite(parsed.seq) || parsed.seq < 0) return null;
     // A persisted snapshot is settled: normalize stale streaming flags from
     // interrupted legacy turns so they cannot suppress the typing indicator.
-    const blocks = parsed.blocks.map((block) => {
+    const blocks = parsed.blocks.filter((block) => block.kind !== 'replyask' && !(block.kind === 'text' && block.pending)).map((block) => {
       if (block.kind === 'text' && block.open) return { ...block, open: false };
       if (block.kind === 'tool' && (block.open || block.running)) return { ...block, open: false, running: false };
       return block;
@@ -800,6 +802,9 @@ function blocksForStorage(blocks: ChatBlock[]): ChatBlock[] {
   // filterAutomationNoise as ordinary text.
   return filterAutomationNoise(blocks)
     .filter((block) => !(block.kind === 'text' && isLegacyCompactionSummaryText(block.text)))
+    // Reply-case markers and held thoughts are live-stream state: a restored
+    // copy must never carry one (it would burn a slot or stay hidden forever).
+    .filter((block) => block.kind !== 'replyask' && !(block.kind === 'text' && block.pending))
     .slice(-200)
     .map((block) => {
       // A snapshot is never live: strip streaming flags so a reload can't

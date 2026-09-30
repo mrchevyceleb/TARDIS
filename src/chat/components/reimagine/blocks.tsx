@@ -1009,7 +1009,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     }
   }
   const hasAssistantAfterLastUser = lastUserIndex >= 0 && blocks.slice(lastUserIndex + 1).some((block) => (
-    (block.kind === 'text' && block.text.trim().length > 0)
+    (block.kind === 'text' && hasVisibleProse(block))
     || block.kind === 'tool'
     || block.kind === 'terminal-error'
   ));
