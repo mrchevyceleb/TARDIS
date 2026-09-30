@@ -43,6 +43,7 @@ import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiModeFor, zaiTurnOutcome, type ZaiMode } from './zaiQuota.ts';
 import { emptyTurnOrigin, noteTurnPeer, notifyHandoffSenders, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
+import { longCallGateEnv } from './longCallGate.ts';
 import { laneMcpServers, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, replyNudgeEvent, ReplyWatch } from './replyNudge.ts';
 
@@ -70,7 +71,11 @@ function piExtensions(): string[] {
   // Grok spawn dies with "Unknown provider".
   const wanted = ['auto-provider-models.ts', 'pi-grok/index.ts', 'bash-timeout-guard.ts', 'bash-self-kill-guard.ts'];
   const configured = process.env.RIVENDELL_PI_EXTENSIONS?.split(',').map((s) => s.trim()).filter(Boolean);
-  const files = (configured ?? wanted).map((f) => (f.startsWith('/') ? f : join(ext, f))).filter(existsSync);
+  // The long-call gate is a TARDIS feature (the spawn is marked in longCallGate.ts), so it is always offered,
+  // even when RIVENDELL_PI_EXTENSIONS picks the rest. It is installed by the gate's install script; until it
+  // is present the existsSync filter leaves it out.
+  const names = [...new Set([...(configured ?? wanted), 'long-call-gate.ts'])];
+  const files = names.map((f) => (f.startsWith('/') ? f : join(ext, f))).filter(existsSync);
   return [...files, TEAM_EXTENSION];
 }
 
@@ -184,6 +189,8 @@ export class PiSession {
     // proxy a Pi lane had no email, Slack or calendar tools at all.
     env.RIVENDELL_PI_MCP = JSON.stringify(laneMcpServers(agentForChatId(chatId)?.name));
     env.SAMWISE_ACCOUNT = cli;
+    // Marks this as a TARDIS agent turn for the long-call gate extension (see longCallGate.ts).
+    Object.assign(env, longCallGateEnv(chatId));
 
     const args = [
       '--mode', 'rpc',

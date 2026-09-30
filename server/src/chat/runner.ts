@@ -19,6 +19,7 @@ import { maybeAutoCompact, noteUserTurn, peekEnginePrimerThroughSeq, clearThread
 import { shouldSkipEngineResume } from './threadWindow.ts';
 import { isAgentThread, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
+import { longCallGateSettings } from './longCallGate.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { crashTombstoneEvent, crashTombstoneText, restartMarkerEvent } from './crashTombstone.ts';
@@ -670,6 +671,11 @@ class ClaudeSession {
       const sys = [voiceAddendum, personaScope, isAgentThread(chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n');
       if (sys) args.push('--append-system-prompt', sys);
     }
+
+    // Long foreground shell calls are blocked/nudged toward job_start so an
+    // agent stays reachable (see longCallGate.ts). Before --mcp-config, which is variadic.
+    const gateSettings = longCallGateSettings(chatId);
+    if (gateSettings) args.push('--settings', gateSettings);
 
     // Same toolbox on every Claude-family engine: optional external MCPs plus
     // rivendell-team. --strict-mcp-config so a model switch cannot

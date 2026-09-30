@@ -26,6 +26,13 @@ export const TEAM_MCP_SCRIPT = resolveServerScript(
   'team-mcp.mjs',
 );
 
+/** PreToolUse/PostToolUse hook that blocks obviously long foreground shell calls
+ *  (steering agents to job_start) and nudges after 60s. */
+export const LONG_CALL_GATE_SCRIPT = resolveServerScript(
+  process.env.RIVENDELL_LONG_CALL_GATE_SCRIPT,
+  'long-call-gate.mjs',
+);
+
 /** Tools for the user's own computers, reached through the desktop app. */
 export const DEVICE_MCP_SCRIPT = resolveServerScript(
   process.env.RIVENDELL_DEVICE_MCP,

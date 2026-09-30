@@ -17,6 +17,7 @@ import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRota
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
+import { longCallGateEnv } from './longCallGate.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
@@ -741,7 +742,8 @@ export class CodexSession {
     const turnStartedAtMs = Date.now();
     const child = spawn(process.execPath, [CODEX_APP_TURN_SCRIPT], {
       cwd: this.cwd,
-      env: forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd),
+      // The marker tells the installed long-call gate hook this is a TARDIS agent turn.
+      env: { ...(forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd)), ...longCallGateEnv(this.chatId) },
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
