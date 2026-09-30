@@ -104,3 +104,18 @@ to the claude binary (Anthropic-compatible endpoints, xAI transform proxy).
 SuperGrok subscription via the pi-grok extension, `xai` for the API key).
 Pi spawns load no discovered extensions; `server/pi/tardis-team-mcp.ts`
 mounts the lane's MCP servers from `RIVENDELL_PI_MCP`.
+
+### Long-call gate
+
+A teammate inside one long foreground shell call cannot be reached, so
+`server/scripts/long-call-gate.mjs` (a PreToolUse/PostToolUse hook) blocks
+obviously long commands (sleeps, polling loops, builds, renders, CI watchers)
+with an error that says how to run them with `job_start`, and nudges after 60s.
+Offenders are logged to `~/.rivendell/long-calls.jsonl`. Claude spawns carry it
+in per-spawn `--settings`. Codex and Pi read a global hook
+(`<codex home>/hooks.json`) and extension (`~/.pi/agent/extensions/long-call-gate.ts`,
+from `server/pi/long-call-gate.ts`) that stay inert unless TARDIS marks an
+agent-thread spawn with `RIVENDELL_LONG_CALL_GATE_AGENT` and
+`RIVENDELL_LONG_CALL_GATE_SCRIPT` (`longCallGate.ts`). It fails open on any error.
+A `# foreground-ok` comment bypasses it; `RIVENDELL_LONG_CALL_GATE=off` disables
+it for every engine.
