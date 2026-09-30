@@ -1,0 +1,62 @@
+/* Desk column freshness: one chip per owner under each column header, aged by
+   that owner's latest card activity in the column. Neutral when fresh; In
+   progress and Waiting warm to amber past 2h and amber-red past 6h. */
+
+.desk-fresh {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 5px;
+  padding: 8px 10px 2px;
+}
+
+.desk-fresh-chip {
+  --fresh-ink: var(--r-ink-soft);
+  --fresh-edge: var(--r-line);
+  --fresh-wash: rgba(217, 168, 90, 0.045);
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%;
+  min-height: 24px; padding: 2px 8px 2px 2px;
+  border: 1px solid var(--fresh-edge); border-radius: 999px;
+  background: var(--fresh-wash); color: var(--fresh-ink);
+  font: inherit; font-size: 11px; line-height: 1.2; cursor: pointer;
+  transition: transform 0.14s cubic-bezier(0.2, 1.6, 0.4, 1), border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+.desk-fresh-chip .desk-actor { padding: 0; border: 0; background: none; pointer-events: none; }
+.desk-fresh-chip:hover { transform: translateY(-1px) scale(1.04); border-color: color-mix(in srgb, var(--fresh-ink) 45%, var(--r-line)); }
+.desk-fresh-chip:hover .desk-actor-disc { transform: rotate(-12deg) scale(1.1); }
+.desk-fresh-chip:active { transform: scale(0.95); }
+.desk-fresh-chip:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; }
+.desk-fresh-chip[aria-pressed='true'] {
+  border-color: var(--column-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--column-accent) 40%, transparent);
+}
+
+.desk-fresh-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 9ch; }
+.desk-fresh-age { font-family: var(--r-mono); font-size: 10.5px; white-space: nowrap; opacity: 0.85; }
+.desk-fresh-more { color: var(--r-ink-faint); font-family: var(--r-mono); font-size: 11px; padding: 0 2px; }
+
+.desk-fresh-chip.is-warm {
+  --fresh-ink: color-mix(in srgb, var(--r-amber) 72%, var(--r-ink-soft));
+  --fresh-edge: color-mix(in srgb, var(--r-amber) 30%, var(--r-line));
+  --fresh-wash: color-mix(in srgb, var(--r-amber) 7%, transparent);
+}
+.desk-fresh-chip.is-stale {
+  --fresh-ink: color-mix(in srgb, var(--r-amber) 55%, var(--r-rose));
+  --fresh-edge: color-mix(in srgb, var(--r-rose) 45%, var(--r-line));
+  --fresh-wash: color-mix(in srgb, var(--r-rose) 11%, transparent);
+}
+.desk-fresh-chip.is-stale .desk-fresh-age { opacity: 1; font-weight: 700; animation: desk-fresh-pulse 2.6s ease-in-out infinite; }
+
+@keyframes desk-fresh-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* touch: real tap targets */
+@media (pointer: coarse) {
+  .desk-fresh { gap: 6px; padding: 10px 12px 2px; }
+  .desk-fresh-chip { min-height: 34px; padding: 3px 11px 3px 4px; font-size: 12px; }
+  .desk-fresh-name { max-width: 12ch; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desk-fresh-chip, .desk-fresh-chip:hover, .desk-fresh-chip:active { transition: none; transform: none; }
+  .desk-fresh-chip.is-stale .desk-fresh-age { animation: none; }
+}

@@ -31,6 +31,7 @@ import { ensureXaiProxy, shutdownXaiProxy } from './chat/xai-proxy.ts';
 import { registerScribeSocket } from './worker/scribe.ts';
 import { startWorkerQueue, stopWorkerQueue } from './worker/queue.ts';
 import { startWorkspaceWatcher, stopWorkspaceWatcher } from './lib/workspaceWatcher.ts';
+import { startDeskHygieneScheduler } from './lib/deskHygiene.ts';
 import { tasksRouter } from './routes/tasks.ts';
 import { calendarRouter } from './routes/calendar.ts';
 import { emailRouter } from './routes/email.ts';
@@ -176,6 +177,7 @@ startJobScheduler(); // job_start jobs (5s tick): exit records → agent job-res
 registerScribeSocket(server);
 startWorkerQueue();
 startWorkspaceWatcher();
+startDeskHygieneScheduler(); // Desk card hygiene (60s tick): stale-card nudges at 8/10/12/2/4 ET
 
 if (existsSync(STATIC_DIR)) {
   // index.html must always revalidate — a heuratively-cached shell pins the

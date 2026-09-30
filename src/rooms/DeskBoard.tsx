@@ -10,10 +10,12 @@ import {
   DESK_COLUMNS,
   PRIORITY_RANK,
   ageLabel,
+  agoText,
   deskApi,
   discussOnDesk,
   hoursSince,
   useDeskWrite,
+  type DeskActor,
   type DeskCard,
   type DeskColumn,
   type DeskPriority,
@@ -22,6 +24,7 @@ import {
 import { showToast } from '../native/shell';
 import type { Agent } from '../grok/agents';
 import { ActorChip, DiscussButton, PRIORITY_LABEL, errorText, priorityClass } from './deskParts';
+import './deskHygiene.css';
 
 type Props = { desk: DeskSnapshot; agents: Agent[]; onOpenCard: (id: string) => void };
 type Layout = 'board' | 'list';
@@ -142,6 +145,10 @@ export function DeskBoard({ desk, agents, onOpenCard }: Props) {
   }, [visible]);
   const filtered = filters.owner !== 'all' || filters.project !== 'all';
   const archivedCount = desk.cards.filter((c) => c.archived).length;
+  const pickOwner = (key: string) => setFilters((f) => ({ ...f, owner: f.owner === key ? 'all' : key }));
+  const freshness = (column: DeskColumn) => (
+    <ColumnFreshness column={column} title={columnTitle(desk, column)} cards={byColumn.get(column) ?? []} picked={filters.owner} onPick={pickOwner} />
+  );
 
   const onDrop = (column: DeskColumn, beforeId: string | null, event: DragEvent) => {
     event.preventDefault();
@@ -263,6 +270,7 @@ export function DeskBoard({ desk, agents, onOpenCard }: Props) {
               </div>
               <button type="button" className="desk-icon-btn" onClick={() => setCreating(mobileColumn)} aria-label={`Add a card to ${columnTitle(desk, mobileColumn)}`}><Plus size={15} /></button>
             </header>
+            {freshness(mobileColumn)}
             <div className="kanban-stack desk-stack">{renderColumnCards(mobileColumn)}</div>
           </section>
         </div>
@@ -294,6 +302,7 @@ export function DeskBoard({ desk, agents, onOpenCard }: Props) {
                     <button type="button" className="desk-icon-btn" onClick={() => setCreating(col)} aria-label={`Add a card to ${columnTitle(desk, col)}`} title="Add a card here"><Plus size={14} /></button>
                   </div>
                 </header>
+                {freshness(col)}
                 <div className="kanban-stack desk-stack">{renderColumnCards(col)}</div>
               </section>
             );
@@ -329,6 +338,85 @@ export function cardAge(card: DeskCard): { text: string; short: string; stale: b
     stale,
     title: stale ? `No update for ${ageLabel(card.updatedAt)}` : `Updated ${new Date(card.updatedAt).toLocaleString()}`,
   };
+}
+
+// ---- column freshness ------------------------------------------------------------------
+// One chip per owner with open cards in a column: how long since they last
+// touched any of them. The same rule the server's stale-card nudge uses
+// (newest of the card update, its column move and its latest comment).
+
+/** In progress and Waiting chips warm up after this long, and go red after the second. */
+const FRESH_WARN_HOURS = 2;
+const FRESH_STALE_HOURS = 6;
+const FRESH_MAX_CHIPS = 8;
+const ET_TIME = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+
+function cardActivity(card: DeskCard): number {
+  let latest = -Infinity;
+  for (const iso of [card.updatedAt, card.columnSince, ...card.comments.map((c) => c.at)]) {
+    const ts = Date.parse(iso);
+    if (Number.isFinite(ts) && ts > latest) latest = ts;
+  }
+  return latest;
+}
+
+function ColumnFreshness({ column, title, cards, picked, onPick }: {
+  column: DeskColumn;
+  title: string;
+  cards: DeskCard[];
+  picked: string;
+  onPick: (ownerKey: string) => void;
+}) {
+  const rows = useMemo(() => {
+    const byOwner = new Map<string, { key: string; actor: DeskActor; latest: number }>();
+    for (const card of cards) {
+      if (card.archived) continue;
+      const key = ownerKey(card);
+      const at = cardActivity(card);
+      const row = byOwner.get(key);
+      if (!row) byOwner.set(key, { key, actor: card.owner, latest: at });
+      else if (at > row.latest) row.latest = at;
+    }
+    // Quietest first, so the owner who needs a look leads the row.
+    return [...byOwner.values()].filter((r) => Number.isFinite(r.latest)).sort((a, b) => a.latest - b.latest);
+  }, [cards]);
+  // Ages and the warm/stale tones move with the clock, not only with data, so an
+  // idle open Desk does not stay visually fresh past the thresholds.
+  const [, setMinute] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setMinute((n) => n + 1), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+  if (column === 'done' || !rows.length) return null;
+  const warms = column === 'in_progress' || column === 'waiting';
+  const shown = rows.slice(0, FRESH_MAX_CHIPS);
+  return (
+    <div className="desk-fresh" role="group" aria-label={`Latest card activity by owner in ${title}`}>
+      {shown.map((row) => {
+        const iso = new Date(row.latest).toISOString();
+        const hours = hoursSince(iso);
+        const tone = !warms || hours < FRESH_WARN_HOURS ? 'fresh' : hours <= FRESH_STALE_HOURS ? 'warm' : 'stale';
+        const when = `${ET_TIME.format(row.latest)} ET`;
+        const label = `${row.actor.name}, last card activity in ${title} ${agoText(iso)} (${when})`;
+        return (
+          <button
+            key={row.key}
+            type="button"
+            className={`desk-fresh-chip is-${tone}`}
+            aria-pressed={picked === row.key}
+            aria-label={`${label}. ${picked === row.key ? 'Show everyone' : `Show only ${row.actor.name}'s cards`}`}
+            title={`${label}\n${picked === row.key ? 'Click to show everyone' : `Click to show only ${row.actor.name}'s cards`}`}
+            onClick={() => onPick(row.key)}
+          >
+            <ActorChip actor={row.actor} compact />
+            <span className="desk-fresh-name">{row.actor.name}</span>
+            <span className="desk-fresh-age">{ageLabel(iso)}</span>
+          </button>
+        );
+      })}
+      {rows.length > shown.length ? <span className="desk-fresh-more">+{rows.length - shown.length}</span> : null}
+    </div>
+  );
 }
 
 function BoardCard({
