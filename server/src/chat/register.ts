@@ -2025,14 +2025,22 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // recycleOnMismatch remains explicit, so stale device defaults cannot
           // cause replacement themselves.
           if (!initiallyBusy && isClaudeFamilyCli(sendCli) && repoPath) {
-            const reconciled = await getOrCreateSession({
-              cli: sendCli,
-              repoPath,
-              chatId,
-              model: authoritativeAgent ? sendBrain.model : msg.model,
-              effort: authoritativeAgent ? sendBrain.effort : msg.effort,
-              recycleOnMismatch: selectionChangeRequested,
-            });
+            // This can wait out a boundary rotation's compaction; keep the
+            // keepalive going so the client's silence watchdog does not fire.
+            busy = true;
+            let reconciled: Awaited<ReturnType<typeof getOrCreateSession>>;
+            try {
+              reconciled = await getOrCreateSession({
+                cli: sendCli,
+                repoPath,
+                chatId,
+                model: authoritativeAgent ? sendBrain.model : msg.model,
+                effort: authoritativeAgent ? sendBrain.effort : msg.effort,
+                recycleOnMismatch: selectionChangeRequested,
+              });
+            } finally {
+              busy = false;
+            }
             if (reconciled !== session) session = await bindSession(Promise.resolve(reconciled));
             if (sendCanceled()) return;
             if (selectionChangeRequested) {

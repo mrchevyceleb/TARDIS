@@ -1,5 +1,12 @@
 /** Usage from one model call, never a turn's accumulated billing totals. */
 export const CONTEXT_TOKEN_BUDGET = 200_000;
+/** Claude Code compacts natively at (window - 20k summary reserve - 13k buffer),
+ *  so a 200k window would fire its lossy compact near 167k and starve our
+ *  boundary rotation. Pad the window so the native compact only backstops a
+ *  single long turn that runs past the budget. */
+export const CLAUDE_NATIVE_COMPACT_WINDOW = CONTEXT_TOKEN_BUDGET + 40_000;
+/** How long a boundary rotation may hold the lane waiting on the compaction. */
+export const ROTATION_COMPACT_DEADLINE_MS = 45_000;
 const contexts = new Map<string, number>();
 const rotations = new Map<string, number>();
 

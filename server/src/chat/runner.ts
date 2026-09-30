@@ -16,7 +16,7 @@ import { CodexSession, getOrCreateCodexSession, activeCodexSessions, publishCode
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions, publishBananaExternalEvent } from './banana-runner.ts';
 import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
 import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
-import { CONTEXT_TOKEN_BUDGET, contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
+import { CLAUDE_NATIVE_COMPACT_WINDOW, contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { shouldSkipEngineResume } from './threadWindow.ts';
 import { isAgentThread, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
@@ -704,7 +704,7 @@ class ClaudeSession {
       : cli === 'zai' ? zaiEnv(this.spawnModel, zaiCredential!)
       : forcedAccount ? accountEnvForAccount(forcedAccount, cwd) : accountEnv(cwd);
     if (cli !== 'xai' && cli !== 'zai') assertClaudeSubscription(spawnEnv, cwd);
-    if (cli === 'claude' || cli === 'assistant') spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CONTEXT_TOKEN_BUDGET);
+    if (cli === 'claude' || cli === 'assistant') spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
     const profileDir = spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
     this.providerAccount = existsSync(profileDir) ? realpathSync(profileDir) : profileDir;
     this.child = spawn('claude', args, {
@@ -1357,7 +1357,7 @@ class ClaudeSession {
 
   /** True while this session is actively processing a turn (between user send and result event). */
   isBusy(): boolean {
-    return this.turnStartedAt !== null || Boolean(this.contextMaintenance);
+    return this.turnStartedAt !== null;
   }
 
   /** Plain descriptions of the background work still running in this process. */
@@ -1856,23 +1856,26 @@ class ClaudeSession {
   }
 
   /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
-  private async rotateContextAtBoundary(): Promise<void> {
-    if (!contextRotationDue(this.logKey) || this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) return;
+  /** Returns false when it never reached the compaction refresh (the normal
+   *  rolling compact still has to run); true once the refresh was attempted. */
+  private async rotateContextAtBoundary(): Promise<boolean> {
+    if (!contextRotationDue(this.logKey) || this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) return false;
     const refreshed = await refreshCompactForRotation({
       key: this.logKey, cli: this.cli, chatId: this.chatId, events: this.eventLog,
       isBusy: () => this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork(),
       emit: (ev) => this.emit(ev as SessionEvent), rotate: () => false,
     });
-    if (!refreshed || this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) return;
+    if (!refreshed || this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) return true;
     await setSessionId(this.cli, this.cwd, '', this.chatId);
     if (this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) {
       if (!this.disposed && this.currentSessionId) await setSessionId(this.cli, this.cwd, this.currentSessionId, this.chatId);
-      return;
+      return true;
     }
     bankRotation(this.logKey);
     recordContextRotation(this.logKey);
     this.contextRotated = true;
     this.shutdown('context-budget');
+    return true;
   }
 
   awaitContextMaintenance(): Promise<void> { return this.contextMaintenance ?? Promise.resolve(); }
@@ -2275,8 +2278,7 @@ class ClaudeSession {
       const rotationDue = !resultFailed && (this.cli === 'claude' || this.cli === 'assistant') && contextRotationDue(this.logKey);
       const housekeeping = async () => {
         if (seeded && !failed) await clearRotation(this.logKey);
-        if (rotationDue) await this.rotateContextAtBoundary();
-        else await this.maybeCompact();
+        if (!rotationDue || !(await this.rotateContextAtBoundary())) await this.maybeCompact();
       };
       if (rotationDue) {
         this.contextMaintenance = Promise.resolve().then(housekeeping).catch((err) => {

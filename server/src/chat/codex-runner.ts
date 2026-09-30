@@ -405,7 +405,7 @@ export class CodexSession {
   }
 
   isBusy(): boolean {
-    return this.busy || Boolean(this.contextMaintenance);
+    return this.busy;
   }
 
   activeSelection(): { model?: string; effort?: string } {

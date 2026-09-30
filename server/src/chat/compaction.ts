@@ -23,6 +23,7 @@ import { callMcp } from '../lib/mcp.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
 import { redactSecrets } from './secretRedaction.ts';
 import { flushEventLog, loadEventLogForCompactionSync } from './event-log-store.ts';
+import { ROTATION_COMPACT_DEADLINE_MS } from './contextBudget.ts';
 import {
   COMPACT_BATCH_TURNS,
   WINDOW_TURNS,
@@ -719,13 +720,13 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
       bankRotation(key);
     }
 
-    let savedToRag = false;
-    try {
-      await saveCompactToMemory(key, epoch, cli, chatId, compactText);
-      savedToRag = true;
-    } catch (err) {
+    // The seed only needs the local compact file. A boundary rotation holds the
+    // lane while it runs, so its RAG mirror goes out in the background.
+    const saveToRag = saveCompactToMemory(key, epoch, cli, chatId, compactText).then(() => true, (err) => {
       console.warn(`[compaction] ${key}: savemem hook failed (compact still applies locally):`, (err as Error).message);
-    }
+      return false;
+    });
+    const savedToRag = args.refreshOverflow ? false : await saveToRag;
     if (epochOf(key) !== epoch) return false;
 
     args.emit({
@@ -774,7 +775,22 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
 
 /** Fail closed if compaction failed, is already running, or still has backlog. */
 export async function refreshCompactForRotation(args: AutoCompactArgs): Promise<boolean> {
-  await maybeAutoCompact({ ...args, refreshOverflow: true, rotate: () => false });
+  // The lane waits on this, so cap it: past the deadline the rotation is
+  // deferred to the next turn end and the compaction finishes on its own.
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<'late'>((resolve) => { timer = setTimeout(() => resolve('late'), ROTATION_COMPACT_DEADLINE_MS); });
+  try {
+    const outcome = await Promise.race([
+      maybeAutoCompact({ ...args, refreshOverflow: true, rotate: () => false }).then(() => 'done' as const),
+      deadline,
+    ]);
+    if (outcome === 'late') {
+      console.warn(`[context-rotation] ${args.key}: compaction still running after ${ROTATION_COMPACT_DEADLINE_MS / 1000}s, rotation deferred`);
+      return false;
+    }
+  } finally {
+    clearTimeout(timer);
+  }
   if (args.isBusy()) return false;
   await flushEventLog(args.key);
   if (args.isBusy() || inFlight.has(args.key)) return false;
