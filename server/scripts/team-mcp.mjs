@@ -275,6 +275,7 @@ const TOOLS = [
     description:
       `Put an item on ${OWNER}'s "Needs you" list on the Desk. Use it ONLY for something that needs ${OWNER} personally: a decision, a login or 2FA code, an approval, a payment, or an account or physical action only they can take. ` +
       'Not for your own work (that is a board card) and not for FYI updates. Write the title as the action they must take, put context in detail, and pass cardId when it unblocks a board card (then move that card to waiting). ' +
+      `Titles show on ${OWNER}'s phone lock screen, so no amounts, account numbers or phone numbers in the title (put them in detail). ` +
       `For a pick-one question pass choices (up to 4 short options; without them ${OWNER} gets Yes / No) so ${OWNER} can answer with one tap. ` +
       `The answer arrives in your thread as a message from ${OWNER} and the item is already closed. ` +
       'Check desk_todos first so you do not add a duplicate. Returns the id; call desk_todo_complete if it gets resolved some other way.',

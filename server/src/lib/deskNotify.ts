@@ -111,11 +111,13 @@ function deskLink(baseUrl: string, target: string): Pick<PushPayload, 'url' | 'u
   return baseUrl ? { url: `${baseUrl}/?desk=${encodeURIComponent(target)}`, url_title: 'Open in TARDIS' } : {};
 }
 
+/** The body never carries the item's detail: it lands on a lock screen through
+ *  a third-party push service, and detail is where amounts and numbers live.
+ *  The title is the only content; the detail waits behind the tap. */
 export function itemPayload(todo: DeskTodo, kind: 'push' | 'renudge', baseUrl: string): PushPayload {
-  const lead = todo.from.kind === 'agent' ? `${todo.from.name} needs you: ` : '';
   return {
     title: clipText(kind === 'renudge' ? `Still waiting: ${todo.title}` : todo.title, 250),
-    message: `${lead}${todo.detail ? clipText(todo.detail, 300) : 'Open the Desk.'}`,
+    message: todo.from.kind === 'agent' ? `${todo.from.name} needs you` : 'Open the Desk.',
     priority: 1,
     ...deskLink(baseUrl, todo.id),
   };
@@ -355,9 +357,19 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
       fresh.items[todo.id] = { push: { tries: 0, seededAt: stamp }, renudge: { tries: 0, seededAt: stamp } };
       seeded += 1;
     }
+    // Same for digest slots that have already started today: a first boot at
+    // 13:38 must not send the 13:30 digest late (Matt would get it twice when
+    // something else already covered that slot). Later slots still go out.
+    const clock = easternClock(at);
+    let slotsSeeded = 0;
+    for (const slot of DIGEST_SLOTS_MIN) {
+      if (clock.minutes < slot) continue;
+      fresh.digests[`${clock.day} ${hhmm(slot)}`] = { tries: 0, seededAt: stamp };
+      slotsSeeded += 1;
+    }
     await save(fresh);
     state = fresh;
-    log(`[desk-notify] first run: ${seeded} open item${seeded === 1 ? '' : 's'} marked as already pushed; they ride the digests`);
+    log(`[desk-notify] first run: ${seeded} open item${seeded === 1 ? '' : 's'} marked as already pushed; they ride the digests${slotsSeeded ? `; ${slotsSeeded} earlier digest slot${slotsSeeded === 1 ? '' : 's'} today marked handled` : ''}`);
     return fresh;
   }
 
