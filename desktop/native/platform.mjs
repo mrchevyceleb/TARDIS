@@ -147,7 +147,7 @@ class LinuxAdapter {
     catch (error) {
       // Only that specific answer is "none"; an abort, a timeout or a lost X
       // server is still an error.
-      if (signal?.aborted || !/_NET_ACTIVE_WINDOW|getactivewindow/i.test(String(error?.message ?? error))) throw error;
+      if (signal?.aborted || !/_NET_ACTIVE_WINDOW/.test(String(error?.message ?? error))) throw error;
       return '';
     }
   }
