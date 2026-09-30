@@ -66,7 +66,10 @@
   box-shadow: 0 0 6px color-mix(in oklch, var(--r-elf-blue) 70%, transparent);
   animation: bt-group-work 1.3s ease-in-out infinite;
 }
-.bt-group-chips { margin-left: auto; flex: none; display: flex; align-items: center; gap: 6px; letter-spacing: 0; }
+.bt-group-chips { margin-left: auto; flex: none; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; letter-spacing: 0; }
+/* Name, count and chips share a line while they fit; on a narrow rail the chips
+   drop to a second line instead of squeezing the group name out. */
+.bt-group-toggle:not(.is-editing) { flex-wrap: wrap; row-gap: 4px; }
 .bt-pop { animation: bt-group-pop 0.38s cubic-bezier(0.34, 1.56, 0.64, 1); }
 @keyframes bt-group-pop {
   0% { transform: scale(0.6); }
@@ -206,3 +209,8 @@ button.bt-group-new:active { transform: scale(0.985); }
   .bt-group.is-collapsed .bt-group-body { transition: visibility 0s; }
   .bt-pop, .bt-group-dot, .bt-presence.is-busy::after { animation: none; }
 }
+
+/* folded header: agents on background jobs (outlined, so it never reads as the
+   filled "working" chip) */
+.bt-group-jobs { flex: none; display: inline-flex; }
+.bt-group-chips .jb-badge { text-transform: none; letter-spacing: 0; }

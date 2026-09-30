@@ -16,10 +16,13 @@ export type RailJobsBadgeProps = {
   latest?: string;
   /** Its last output line, for the tooltip. */
   latestLine?: string;
+  /** Visible text when it is not the plain "N jobs" (a folded group header
+   *  counts agents, not jobs). */
+  label?: string;
   className?: string;
 };
 
-export function RailJobsBadge({ running, latest, latestLine, className }: RailJobsBadgeProps) {
+export function RailJobsBadge({ running, latest, latestLine, label, className }: RailJobsBadgeProps) {
   if (!Number.isFinite(running) || running <= 0) return null;
   const count = `${running} ${running === 1 ? 'job' : 'jobs'}`;
   const detail = [latest, latestLine].filter(Boolean).join(': ');
@@ -27,14 +30,14 @@ export function RailJobsBadge({ running, latest, latestLine, className }: RailJo
     <span
       className={`jb-badge${className ? ` ${className}` : ''}`}
       role="status"
-      aria-label={`${count} running${latest ? `, latest ${latest}` : ''}`}
-      title={detail ? `${count} running. ${detail}` : `${count} running`}
+      aria-label={label ? undefined : `${count} running${latest ? `, latest ${latest}` : ''}`}
+      title={label ? undefined : detail ? `${count} running. ${detail}` : `${count} running`}
     >
       <svg className="jb-badge-ring" viewBox="0 0 16 16" fill="none" aria-hidden="true">
         <circle cx="8" cy="8" r="6" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2.2" />
         <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeDasharray="20 18" />
       </svg>
-      {count}
+      {label ?? count}
     </span>
   );
 }
