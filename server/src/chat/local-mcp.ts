@@ -4,13 +4,14 @@ import { COMPUTER_MCP_TOKEN } from '../devices/context.ts';
 /** Reserved built-ins, independent of global/private MCP configs. Banana uses
  * one server across threads: computer identity comes from signed turn context,
  * never a mutable process-wide RIVENDELL_AGENT_NAME. */
-export function localMcpServers(agentName?: string) {
+export function localMcpServers(agentName?: string, opts: { replyNow?: boolean } = {}) {
   // The canonical (trimmed, capped) owner name, so the tools advertise exactly
   // the name the Desk API accepts as the owner.
   const base = { RIVENDELL_TEAM_URL: `http://127.0.0.1:${PORT}`, RIVENDELL_OWNER_NAME: DESK_OWNER_NAME };
   return {
     'rivendell-team': { type: 'stdio', command: 'node', args: [TEAM_MCP_SCRIPT],
-      env: { ...base, ...(agentName ? { RIVENDELL_AGENT_NAME: agentName } : {}) } },
+      // reply_now is advertised only to lanes whose runner posts it as a message (Claude).
+      env: { ...base, ...(agentName ? { RIVENDELL_AGENT_NAME: agentName } : {}), ...(opts.replyNow ? { RIVENDELL_REPLY_NOW: '1' } : {}) } },
     'rivendell-device': { type: 'stdio', command: 'node', args: [DEVICE_MCP_SCRIPT],
       env: { ...base, RIVENDELL_COMPUTER_MCP_TOKEN: COMPUTER_MCP_TOKEN } },
   };

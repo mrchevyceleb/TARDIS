@@ -33,6 +33,8 @@ const OWNER = process.env.RIVENDELL_OWNER_NAME?.trim() || 'Matt';
 const DESK_COLUMNS = ['pipeline', 'up_next', 'in_progress', 'waiting', 'done'];
 const DESK_COLUMN_TITLES = { pipeline: 'Pipeline', up_next: 'Up next', in_progress: 'In progress', waiting: `Waiting on ${OWNER}`, done: 'Done' };
 const DESK_PRIORITIES = ['low', 'normal', 'high'];
+// Only lanes whose runner turns the call into a message (Claude) are told about reply_now.
+const REPLY_NOW_ENABLED = process.env.RIVENDELL_REPLY_NOW === '1';
 const FROM_PROP = { type: 'string', description: 'Your own teammate name. Only needed if TARDIS has not already identified you.' };
 
 const TOOLS = [
@@ -548,7 +550,7 @@ function describeCard(c) {
 
 async function callTool(name, args, signal) {
   // The runner turns this call into a visible message in the thread; the tool itself only acknowledges.
-  if (name === 'reply_now') return 'Posted to the thread.';
+  if (name === 'reply_now' && REPLY_NOW_ENABLED) return 'Posted to the thread.';
   if (name === 'content_ideas') {
     const query = `?brand=${encodeURIComponent(args.brand)}`;
     const [ideas, scanner] = await Promise.all([api(`/api/content/ideas${query}`, undefined, signal), api(`/api/content/scanner${query}`, undefined, signal)]);
@@ -891,7 +893,7 @@ rl.on('line', async (line) => {
     } else if (method === 'ping') {
       send({ jsonrpc: '2.0', id, result: {} });
     } else if (method === 'tools/list') {
-      send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });
+      send({ jsonrpc: '2.0', id, result: { tools: TOOLS.filter((t) => t.name !== 'reply_now' || REPLY_NOW_ENABLED) } });
     } else if (method === 'tools/call') {
       const controller = new AbortController();
       activeCalls.set(id, controller);

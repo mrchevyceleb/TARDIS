@@ -370,7 +370,7 @@ function withTeamMcp(configJson: string, chatId: string): string {
       console.log('[chat] built-in team and computer MCPs enabled');
     }
     const cfg = JSON.parse(configJson) as { mcpServers: Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> };
-    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name), officeMcpServers());
+    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name, { replyNow: true }), officeMcpServers());
     return JSON.stringify(cfg);
   } catch {
     return configJson;
