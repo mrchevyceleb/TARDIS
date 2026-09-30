@@ -140,7 +140,7 @@ type GroupMenuProps = {
   y: number;
   restore: HTMLElement | null;
   name: string;
-  /** Members that would move to "Other" if the group is deleted. */
+  /** Everyone assigned to the group (pinned ones too) who would move to "Other" if it is deleted. */
   memberCount: number;
   canUp: boolean;
   canDown: boolean;
@@ -326,7 +326,7 @@ export function RailGroupSection(props: RailGroupSectionProps) {
           y={menu.y}
           restore={menu.restore}
           name={name}
-          memberCount={count}
+          memberCount={count + props.pinned}
           canUp={!props.first}
           canDown={!props.last}
           onRename={startRename}

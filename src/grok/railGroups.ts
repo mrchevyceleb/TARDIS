@@ -4,7 +4,10 @@
 //
 // The layout stores agent IDs. Display names are only used to seed the starter
 // groups. Agents that no group claims (a new agent, a deleted group's members)
-// fall into a derived trailing "Other" group, so nobody can ever disappear.
+// fall into a derived trailing "Other" group, so nobody can ever disappear. Ids
+// that name no agent on this device are ignored when drawing and never stripped
+// from the stored layout (another device may know an agent this one has not
+// loaded yet).
 
 import type { Agent } from './agents';
 
@@ -13,6 +16,9 @@ export const OTHER_GROUP_NAME = 'Other';
 export const GROUP_NAME_MAX = 32;
 const MAX_GROUPS = 40;
 const MAX_MEMBERS = 200;
+// A stamp from a clock more than a day ahead is junk (it would outrank every
+// later edit and freeze sync), so it counts as "never stamped".
+const MAX_SKEW_MS = 24 * 60 * 60 * 1000;
 
 export type RailGroup = { id: string; name: string; agentIds: string[] };
 
@@ -103,16 +109,19 @@ export function resolveGroups(layout: RailLayout, agents: Agent[]): ResolvedGrou
 // Every edit below returns the SAME object when nothing changed, so callers can
 // skip a save (and a sync push) with a reference check.
 
-export function toggleCollapsed(layout: RailLayout, id: string): RailLayout {
-  const collapsed = { ...layout.collapsed };
-  if (collapsed[id]) delete collapsed[id];
-  else collapsed[id] = true;
-  return { ...layout, collapsed };
+/** Absolute, not a flip: replaying the same edit onto a copy that already has it
+ *  changes nothing (sync may replay an edit after a lost response). */
+export function setCollapsed(layout: RailLayout, id: string, collapsed: boolean): RailLayout {
+  if (Boolean(layout.collapsed[id]) === collapsed) return layout;
+  const next = { ...layout.collapsed };
+  if (collapsed) next[id] = true;
+  else delete next[id];
+  return { ...layout, collapsed: next };
 }
 
 export function createGroup(layout: RailLayout, id: string, rawName: string): RailLayout {
   const name = cleanGroupName(rawName);
-  if (!name || layout.groups.length >= MAX_GROUPS) return layout;
+  if (!name || layout.groups.length >= MAX_GROUPS || layout.groups.some((g) => g.id === id)) return layout;
   return { ...layout, groups: [...layout.groups, { id, name: uniqueName(layout, name), agentIds: [] }] };
 }
 
@@ -132,13 +141,16 @@ export function deleteGroup(layout: RailLayout, id: string): RailLayout {
   return { ...layout, groups: layout.groups.filter((g) => g.id !== id), collapsed };
 }
 
-export function shiftGroup(layout: RailLayout, id: string, by: -1 | 1): RailLayout {
-  const from = layout.groups.findIndex((g) => g.id === id);
-  const to = from + by;
-  if (from < 0 || to < 0 || to >= layout.groups.length) return layout;
-  const groups = [...layout.groups];
-  [groups[from], groups[to]] = [groups[to], groups[from]];
-  return { ...layout, groups };
+/** Put a group right before (side -1) or right after (side 1) another one. Named
+ *  by the neighbour, not by "one step", so replaying it is harmless. */
+export function placeGroup(layout: RailLayout, id: string, anchorId: string, side: -1 | 1): RailLayout {
+  const moved = layout.groups.find((g) => g.id === id);
+  if (!moved || id === anchorId) return layout;
+  const groups = layout.groups.filter((g) => g.id !== id);
+  const anchor = groups.findIndex((g) => g.id === anchorId);
+  if (anchor < 0) return layout;
+  groups.splice(side < 0 ? anchor : anchor + 1, 0, moved);
+  return groups.every((g, i) => g.id === layout.groups[i].id) ? layout : { ...layout, groups };
 }
 
 /** Put an agent into a group before `beforeId` (null = at the end). Moving to
@@ -159,13 +171,6 @@ export function moveAgent(layout: RailLayout, agentId: string, toGroupId: string
     && g.agentIds.every((id, j) => id === layout.groups[i].agentIds[j])
   ));
   return same ? layout : { ...layout, groups };
-}
-
-/** Forget ids that no longer name an agent. Only call with a full agent list. */
-export function pruneLayout(layout: RailLayout, knownIds: string[]): RailLayout {
-  const known = new Set(knownIds);
-  if (layout.groups.every((g) => g.agentIds.every((id) => known.has(id)))) return layout;
-  return { ...layout, groups: layout.groups.map((g) => ({ ...g, agentIds: g.agentIds.filter((id) => known.has(id)) })) };
 }
 
 /** Accepts anything (localStorage, the network) and returns a clean layout, or
@@ -200,7 +205,7 @@ export function normalizeLayout(raw: unknown): RailLayout | null {
       if (value === true && (key === OTHER_GROUP_ID || seenGroups.has(key))) collapsed[key] = true;
     }
   }
-  const updatedAt = typeof src.updatedAt === 'number' && Number.isFinite(src.updatedAt) && src.updatedAt > 0 ? src.updatedAt : 0;
+  const updatedAt = typeof src.updatedAt === 'number' && Number.isSafeInteger(src.updatedAt) && src.updatedAt > 0 && src.updatedAt <= Date.now() + MAX_SKEW_MS ? src.updatedAt : 0;
   return { groups, collapsed, updatedAt };
 }
 

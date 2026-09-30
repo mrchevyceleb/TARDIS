@@ -635,10 +635,13 @@ export function BotRail(props: BotRailProps) {
     setDragId(null);
     setGroupDrop(null);
     if (!id) return;
-    // "Other" keeps the shared manual order, so reordering inside it is the
-    // ordinary reorder; everything else is a layout edit.
-    if (to.group === OTHER_GROUP_ID && railGroups.groupIdOf(id) === OTHER_GROUP_ID) reorderBefore(id, to.before ?? '__end__');
-    else railGroups.move(id, to.group, to.before);
+    // "Other" is ordered by the shared manual order, so a drop there releases the
+    // agent from its group (if it had one) and then takes the landing spot in
+    // that shared order; everything else is a layout edit.
+    if (to.group === OTHER_GROUP_ID) {
+      if (railGroups.groupIdOf(id) !== OTHER_GROUP_ID) railGroups.move(id, OTHER_GROUP_ID, null);
+      reorderBefore(id, to.before ?? '__end__');
+    } else railGroups.move(id, to.group, to.before);
   };
   const moveChoices = useMemo(() => [
     ...railGroups.groups.filter((g) => !g.isOther).map((g) => ({ id: g.id, name: g.name })),

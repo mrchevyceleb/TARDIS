@@ -1,4 +1,4 @@
-// /api/rail-layout — named agent groups in the left rail, synced across devices.
+// /api/rail-layout: named agent groups in the left rail, synced across devices.
 // The client works without this route (it keeps its own copy); this only adds sync.
 
 import { Router } from 'express';
@@ -18,6 +18,8 @@ railLayoutRouter.put('/', asyncHandler(async (req, res) => {
     res.status(400).json({ error: 'layout is required' });
     return;
   }
+  const base = req.body?.baseUpdatedAt;
+  const baseUpdatedAt = typeof base === 'number' && Number.isSafeInteger(base) && base > 0 ? base : 0;
   res.set('Cache-Control', 'no-store');
-  res.json(saveRailLayout(incoming));
+  res.json(saveRailLayout(incoming, baseUpdatedAt));
 }));

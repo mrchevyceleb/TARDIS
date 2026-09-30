@@ -2,8 +2,10 @@
 // same collapsed state) follows Matt from desktop to phone.
 // Store: ~/.rivendell/rail-layout.json
 //
-// The whole layout is one small document. The copy with the newer `updatedAt`
-// wins; ids are agent ids, so a device that lacks an agent just ignores it.
+// The whole layout is one small document. A write only lands when the device
+// that sent it had seen the server's latest copy (`baseUpdatedAt`); otherwise the
+// caller gets the current copy back and re-applies its edits on top. Ids are
+// agent ids, so a device that lacks an agent just ignores it.
 
 import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -21,6 +23,9 @@ const OTHER_GROUP_ID = 'other';
 const MAX_GROUPS = 40;
 const MAX_MEMBERS = 200;
 const NAME_MAX = 32;
+// A stamp from a clock more than a day ahead is junk, not "newer than everything":
+// left alone it would make every later edit look older and freeze sync.
+const MAX_SKEW_MS = 24 * 60 * 60 * 1000;
 
 function cleanName(value: unknown): string {
   if (typeof value !== 'string') return '';
@@ -58,7 +63,7 @@ export function normalizeRailLayout(value: unknown): RailLayout | null {
       if (flag === true && (key === OTHER_GROUP_ID || seenGroups.has(key))) collapsed[key] = true;
     }
   }
-  const updatedAt = typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt) && raw.updatedAt > 0 ? raw.updatedAt : 0;
+  const updatedAt = typeof raw.updatedAt === 'number' && Number.isSafeInteger(raw.updatedAt) && raw.updatedAt > 0 && raw.updatedAt <= Date.now() + MAX_SKEW_MS ? raw.updatedAt : 0;
   return { groups, collapsed, updatedAt };
 }
 
@@ -91,11 +96,14 @@ function save(layout: RailLayout): void {
   }
 }
 
-/** Store the incoming layout only when it is newer than what we hold. Either
- *  way the caller gets the copy that is now authoritative. */
-export function saveRailLayout(incoming: RailLayout): { layout: RailLayout; applied: boolean } {
+/** Store the incoming layout when the sender had seen our latest copy
+ *  (`baseUpdatedAt` >= what we hold). Otherwise keep ours and hand it back so the
+ *  sender can put its edits on top of it. The stored stamp always moves forward,
+ *  so every other device sees the write as newer. `applied` says which happened. */
+export function saveRailLayout(incoming: RailLayout, baseUpdatedAt: number): { layout: RailLayout; applied: boolean } {
   const current = readRailLayout();
-  if (current && current.updatedAt >= incoming.updatedAt) return { layout: current, applied: false };
-  save(incoming);
-  return { layout: incoming, applied: true };
+  if (current && current.updatedAt > baseUpdatedAt) return { layout: current, applied: false };
+  const layout: RailLayout = { ...incoming, updatedAt: Math.max(incoming.updatedAt, (current?.updatedAt ?? 0) + 1) };
+  save(layout);
+  return { layout, applied: true };
 }
