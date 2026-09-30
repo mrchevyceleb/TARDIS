@@ -15,6 +15,8 @@ import {
   eventText,
   eventType,
   isAutomationPeerEvent,
+  isExactNoUpdate,
+  isModelEosToken,
   isQuietRoutineReply,
   isRoutineNoiseEvent,
   isToolResultUserEvent,
@@ -57,6 +59,28 @@ function resultReplyText(raw: unknown): string {
   const inner = eventInner(raw);
   const r = inner?.result;
   return typeof r === 'string' ? r.trim() : '';
+}
+
+/** Exact protocol idle tokens (NO_UPDATE, provider EOS): never prose. */
+function isProtocolNoopText(text: string): boolean {
+  const t = text.trim();
+  return Boolean(t) && (isExactNoUpdate(t) || isModelEosToken(t));
+}
+
+/** An owner's Desk comment or a voice continuation is the person talking to the
+ *  agent, never a teammate handoff: only handoffs may be answered with silence. */
+function isTeammateHandoff(raw: unknown): boolean {
+  const role = eventInner(raw)?.fromRole;
+  const r = typeof role === 'string' ? role.trim().toLowerCase() : '';
+  return r !== 'desk' && r !== 'voice';
+}
+
+/** A failed or cut turn is never "chose silence", whatever text it carries. */
+function isErrorResult(raw: unknown): boolean {
+  const inner = eventInner(raw);
+  if (!inner) return true;
+  const sub = typeof inner.subtype === 'string' ? inner.subtype : '';
+  return inner.is_error === true || sub === 'error_during_execution' || sub === 'error';
 }
 
 /** Session-init / keepalive / failed-boot results are not a waiting reply.
@@ -143,6 +167,16 @@ export function agentUnread(agent: Agent): number {
     let afterAutomation = false;
     let autoTexts: string[] = [];
     let autoAfterRead = false;
+    // A teammate handoff is itself a waiting message, unless its turn ends in a
+    // bare NO_UPDATE: then the agent chose silence and nothing reached the
+    // person. Hold the count until the turn settles.
+    let pendingPeers = 0;
+    let noopSincePeer = false;
+    const settlePeers = () => {
+      unread += pendingPeers;
+      pendingPeers = 0;
+      noopSincePeer = false;
+    };
     const flushAuto = () => {
       if (!afterAutomation) return;
       const last = [...autoTexts].reverse().find((t) => t.trim()) ?? '';
@@ -168,7 +202,7 @@ export function agentUnread(agent: Agent): number {
       // A turn a GLM provider cut, that nothing will finish on its own, is
       // waiting on the user even though no reply text exists.
       if (t === '_terminal_error') {
-        if (pastCursor && eventInner(raw)?.unread === true) unread++;
+        if (pastCursor && eventInner(raw)?.unread === true) { settlePeers(); unread++; }
         continue;
       }
       // The automatic continue of a cut routine turn is still that routine:
@@ -183,7 +217,11 @@ export function agentUnread(agent: Agent): number {
       }
       if (t === '_user_echo' || t === 'user' || t === 'peer_message') {
         flushAuto();
-        if (t === 'peer_message' && pastCursor) unread++;
+        settlePeers();
+        if (t === 'peer_message' && pastCursor) {
+          if (isTeammateHandoff(raw)) pendingPeers++;
+          else unread++;
+        }
         continue;
       }
       if (afterAutomation && t === 'assistant') {
@@ -200,6 +238,15 @@ export function agentUnread(agent: Agent): number {
           flushAuto();
           continue;
         }
+        // The handoff turn ended on a bare no-op token, as text here or as the
+        // assistant text just before an empty result: it never reached the person.
+        const resultText = resultReplyText(raw);
+        if (pendingPeers > 0 && !isErrorResult(raw) && (isProtocolNoopText(resultText) || (!resultText && noopSincePeer))) {
+          pendingPeers = 0;
+          noopSincePeer = false;
+        } else {
+          settlePeers();
+        }
         if (pastCursor && !isNonReplyResult(raw)) unread++;
         continue;
       }
@@ -207,10 +254,16 @@ export function agentUnread(agent: Agent): number {
       // Bootstrap / transport: system init, hooks, working keepalives,
       // compacted dividers, errors, turnEnd — never a waiting reply.
       if (t !== 'assistant') continue;
+      if (pendingPeers > 0) {
+        const texts = eventText(raw).trim();
+        if (texts && isProtocolNoopText(texts)) noopSincePeer = true;
+      }
       if (isRoutineNoiseEvent(raw, afterAutomation)) continue;
       if (!eventText(raw).trim()) continue;
+      settlePeers();
       unread++;
     }
+    settlePeers();
     flushAuto();
     return unread;
   } catch {
