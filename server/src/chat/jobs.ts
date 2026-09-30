@@ -19,7 +19,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
@@ -51,6 +51,10 @@ export type Job = {
   pidStart?: number | null;
   /** systemd scope unit, when the job runs in its own scope. */
   unit?: string;
+  /** Kernel boot id when the job started. A pid (and its /proc starttime) is
+   *  only meaningful within one boot, so a different boot id means nothing of
+   *  ours can still be running and no pid may ever be signalled. */
+  bootId?: string;
   stoppedBy?: JobStopper;
   /** The exact result text still owed to the agent. Cleared once delivered. */
   wakeText?: string;
@@ -67,6 +71,11 @@ const DEFAULT_TIMEOUT_MIN = 120;
 const MAX_RUNNING_PER_AGENT = 12;
 const KEEP_ENDED_MS = 72 * 60 * 60_000;
 const STOP_GRACE_MS = 8_000;
+const KILL_CONFIRM_MS = 3_000;
+/** How long a fresh job may exist without a recorded pid (launch in flight). */
+const LAUNCH_ORPHAN_MS = 30_000;
+/** A launch that dies inside this window without an exit record never started. */
+const LAUNCH_HANDSHAKE_MS = 700;
 const TAIL_LINES = 12;
 const TAIL_CHARS = 1600;
 
@@ -79,6 +88,14 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 
 /** Jobs being resolved or delivered right now. One outcome, one wake. */
 const delivering = new Set<string>();
+/** Jobs a stop is in flight for. The tick must not call one "lost" just
+ *  because its wrapper already died while a stubborn child waits for KILL. */
+const stopping = new Set<string>();
+
+const BOOT_ID = (() => {
+  try { return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); } catch { return ''; }
+})();
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const retryUntil = new Map<string, number>();
 
 const logPath = (id: string) => join(JOBS_DIR, `${id}.log`);
@@ -150,7 +167,8 @@ function outcomeText(job: Job): string {
     case 'finished': return `finished: exit 0 in ${took}`;
     case 'failed': {
       const code = job.exitCode ?? -1;
-      return code > 128 ? `ended with exit ${code} (killed by signal ${code - 128}) after ${took}` : `failed: exit ${code} in ${took}`;
+      // Above 128 a shell often means "killed by a signal", but exit 200 is also valid: say only what is known.
+      return `failed: exit ${code} in ${took}${code > 128 ? ` (exit codes above 128 often mean the process was killed by a signal)` : ''}`;
     }
     case 'stopped': return `was stopped${job.stoppedBy === 'user' ? ' from the UI' : ''} after ${took}. It did NOT finish.`;
     case 'timed-out': return `timed out after ${job.timeoutMin}m and was stopped. It did NOT finish.`;
@@ -190,7 +208,9 @@ export async function createJob(input: CreateJobInput): Promise<Job> {
   if (input.cwd !== undefined) {
     if (typeof input.cwd !== 'string' || !isAbsolute(input.cwd.trim())) throw new Error('cwd must be an absolute path on this host');
     cwd = input.cwd.trim();
-    if (!existsSync(cwd)) throw new Error(`cwd does not exist: ${cwd}`);
+    let isDir = false;
+    try { isDir = statSync(cwd).isDirectory(); } catch { /* missing */ }
+    if (!isDir) throw new Error(`cwd is not an existing directory: ${cwd}`);
   }
   if (input.timeoutMin !== undefined
     && (typeof input.timeoutMin !== 'number' || !Number.isSafeInteger(input.timeoutMin) || input.timeoutMin < MIN_TIMEOUT_MIN || input.timeoutMin > MAX_TIMEOUT_MIN)) {
@@ -198,44 +218,78 @@ export async function createJob(input: CreateJobInput): Promise<Job> {
   }
   const timeoutMin = typeof input.timeoutMin === 'number' ? input.timeoutMin : DEFAULT_TIMEOUT_MIN;
 
-  const running = (await store.list()).filter((j) => j.agentId === input.agentId && j.state === 'running').length;
-  if (running >= MAX_RUNNING_PER_AGENT) throw new Error(`${running} jobs are already running for this agent; stop or wait for one before starting another`);
-
   const id = randomUUID();
   const short = id.slice(0, 8);
+  const scoped = await canLaunchInScope();
+  const unit = scoped ? `tardis-job-${short}` : undefined;
   mkdirSync(JOBS_DIR, { recursive: true, mode: 0o700 });
   writeFileSync(cmdPath(id), `#!/bin/bash\n${command}\n`, { mode: 0o700 });
   writeFileSync(logPath(id), '', { mode: 0o600 });
   // The wrapper records the exit code atomically (tmp + mv) only when the
   // command ends on its own. A killed wrapper writes nothing, which is how a
-  // stop or an outside kill is told apart from a real exit.
+  // stop or an outside kill is told apart from a real exit. A working
+  // directory that cannot be entered fails the job instead of running the
+  // command somewhere else.
+  const recordExit = (code: string) => `printf '%s' ${code} >${shq(`${exitPath(id)}.tmp`)} && mv ${shq(`${exitPath(id)}.tmp`)} ${shq(exitPath(id))}`;
   writeFileSync(runPath(id), [
     '#!/bin/bash',
-    `cd ${shq(cwd)} 2>/dev/null || cd "$HOME"`,
+    `cd ${shq(cwd)} 2>/dev/null || { echo ${shq(`job_start: cannot enter the working directory ${cwd}`)} >>${shq(logPath(id))}; ${recordExit('127')}; exit 127; }`,
     `/bin/bash ${shq(cmdPath(id))} >>${shq(logPath(id))} 2>&1 </dev/null`,
     'code=$?',
-    `printf '%s' "$code" >${shq(`${exitPath(id)}.tmp`)} && mv ${shq(`${exitPath(id)}.tmp`)} ${shq(exitPath(id))}`,
+    recordExit('"$code"'),
     '',
   ].join('\n'), { mode: 0o700 });
 
-  const scoped = await canLaunchInScope();
-  const unit = scoped ? `tardis-job-${short}` : undefined;
+  // Reserve first: the record (and the per-agent limit, counted in the same
+  // serialized step) exists before anything runs, so concurrent starts cannot
+  // exceed the limit and a failed launch never leaves an untracked process.
+  const now = Date.now();
+  let reserved: Job;
+  try {
+    reserved = await serialize(async () => {
+      const running = (await store.list()).filter((j) => j.agentId === input.agentId && j.state === 'running').length;
+      if (running >= MAX_RUNNING_PER_AGENT) throw new Error(`${running} jobs are already running for this agent; stop or wait for one before starting another`);
+      return store.create({
+        id, agentId: input.agentId, name, command, cwd, state: 'running' as const,
+        startedAt: now, timeoutMin, deadline: now + timeoutMin * 60_000,
+        unit, bootId: BOOT_ID || undefined,
+      });
+    });
+  } catch (err) {
+    cleanupFiles(id);
+    throw err;
+  }
+
   const child = scoped
     ? spawn('systemd-run', ['--user', '--scope', '--quiet', '--collect', '--expand-environment=no', '--unit', unit!, '/bin/bash', runPath(id)], { detached: true, stdio: 'ignore' })
     : spawn('/bin/bash', [runPath(id)], { detached: true, stdio: 'ignore' });
-  let spawnError: string | null = null;
-  child.once('error', (err) => { spawnError = err.message; });
   child.unref();
-  if (typeof child.pid !== 'number') {
+  // Launch handshake: a spawn error, or a process that dies at once without an
+  // exit record (systemd-run refusing the scope), never started. Do not claim
+  // success for it.
+  const launchFailure = await new Promise<string | null>((resolve) => {
+    let settled = false;
+    const finish = (value: string | null) => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } };
+    const timer = setTimeout(() => finish(null), LAUNCH_HANDSHAKE_MS);
+    child.once('error', (err) => finish(err.message));
+    child.once('exit', (code) => finish(readExitCode(id) !== null ? null : `it exited with code ${code} before starting`));
+  });
+  if (launchFailure !== null || typeof child.pid !== 'number') {
+    try { await serialize(() => store.delete(id)); } catch { /* the tick will mark it lost */ }
     cleanupFiles(id);
-    throw new Error(`the job could not be started${spawnError ? `: ${spawnError}` : ''}`);
+    throw new Error(`the job could not be started: ${launchFailure ?? 'no process was created'}`);
   }
-  const now = Date.now();
-  const job = await serialize(() => store.create({
-    id, agentId: input.agentId, name, command, cwd, state: 'running' as const,
-    startedAt: now, timeoutMin, deadline: now + timeoutMin * 60_000,
-    pid: child.pid, pidStart: pidStart(child.pid!), unit,
-  }));
+  let job: Job | null = null;
+  try {
+    job = await serialize(() => store.update(id, { pid: child.pid, pidStart: pidStart(child.pid!) }));
+  } catch { /* handled below */ }
+  if (!job) {
+    // Untracked is worse than not started: stop what we launched.
+    await terminateJob({ ...reserved, pid: child.pid, pidStart: pidStart(child.pid) }).catch(() => false);
+    try { await serialize(() => store.delete(id)); } catch { /* best effort */ }
+    cleanupFiles(id);
+    throw new Error('the job could not be recorded, so it was stopped');
+  }
   console.log(`[jobs] started "${name}" (${short}) for ${input.agentId} pid=${child.pid}${unit ? ` scope=${unit}` : ' (no scope)'}`);
   return job;
 }
@@ -258,33 +312,65 @@ function runQuiet(cmd: string, args: string[]): Promise<number | null> {
   });
 }
 
-/** Terminate a job's whole process tree: TERM now, KILL if anything is still
- *  alive after the grace. Never targets a pid <= 1. */
-async function killJobProcesses(job: Job): Promise<void> {
+/** The wrapper shell (the scope's main process) is still the process we
+ *  started, on this same boot. */
+function wrapperAlive(job: Job): boolean {
+  if (job.bootId && job.bootId !== BOOT_ID) return false;
+  return typeof job.pid === 'number' && Number.isSafeInteger(job.pid) && job.pid > 1 && pidMatches(job.pid, job.pidStart);
+}
+
+/** Anything of the job still running: the whole scope when it has one. */
+async function jobAlive(job: Job): Promise<boolean> {
+  if (job.bootId && job.bootId !== BOOT_ID) return false;
   if (job.unit) {
-    await runQuiet('systemctl', ['--user', 'kill', '--kill-whom=all', '--signal=SIGTERM', `${job.unit}.scope`]);
-    const timer = setTimeout(() => {
-      void runQuiet('systemctl', ['--user', 'kill', '--kill-whom=all', '--signal=SIGKILL', `${job.unit}.scope`]);
-    }, STOP_GRACE_MS);
-    timer.unref?.();
-    return;
+    const active = await runQuiet('systemctl', ['--user', 'is-active', '--quiet', `${job.unit}.scope`]);
+    if (active !== null) return active === 0;
   }
-  const pid = job.pid;
-  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 1 || !pidMatches(pid, job.pidStart)) return;
-  try { process.kill(-pid, 'SIGTERM'); } catch { /* gone */ }
-  const timer = setTimeout(() => {
-    if (pidMatches(pid, job.pidStart)) { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } }
-  }, STOP_GRACE_MS);
-  timer.unref?.();
+  return wrapperAlive(job);
+}
+
+async function waitDead(job: Job, ms: number): Promise<boolean> {
+  const end = Date.now() + ms;
+  for (;;) {
+    if (!(await jobAlive(job))) return true;
+    if (Date.now() >= end) return false;
+    await sleep(250);
+  }
+}
+
+/** Terminate a job's whole process tree and confirm it is gone: TERM, then KILL
+ *  after the grace. Never signals a pid <= 1, and never signals by pid across a
+ *  reboot. Resolves false when something is still alive after the KILL. */
+async function terminateJob(job: Job): Promise<boolean> {
+  if (job.bootId && job.bootId !== BOOT_ID) return true;
+  const signal = async (sig: 'SIGTERM' | 'SIGKILL') => {
+    if (job.unit) {
+      await runQuiet('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${sig}`, `${job.unit}.scope`]);
+    } else if (wrapperAlive(job)) {
+      try { process.kill(-job.pid!, sig); } catch { /* gone */ }
+    }
+  };
+  await signal('SIGTERM');
+  if (await waitDead(job, STOP_GRACE_MS)) return true;
+  await signal('SIGKILL');
+  return waitDead(job, KILL_CONFIRM_MS);
 }
 
 /** Stop a running job. Returns the updated record, or null if it is not
- *  running (already ended or unknown). `by` decides whether the agent is
- *  woken: an agent that stopped its own job already knows. */
+ *  running (already ended or unknown). The job is recorded as stopped only
+ *  once it is confirmed gone; otherwise this throws and it stays running.
+ *  `by` decides whether the agent is woken: an agent that stopped its own job
+ *  already knows. */
 export async function stopJob(id: string, by: JobStopper): Promise<Job | null> {
   const job = (await store.list()).find((j) => j.id === id);
-  if (!job || job.state !== 'running') return null;
-  await killJobProcesses(job);
+  if (!job || job.state !== 'running' || stopping.has(id)) return null;
+  stopping.add(id);
+  try {
+    if (!(await terminateJob(job))) throw new Error('the job is still running after SIGKILL; check the host and try again');
+  } catch (err) {
+    stopping.delete(id);
+    throw err;
+  }
   return serialize(async () => {
     const current = (await store.list()).find((j) => j.id === id);
     if (!current || current.state !== 'running') return null;
@@ -292,7 +378,7 @@ export async function stopJob(id: string, by: JobStopper): Promise<Job | null> {
     const patch: Partial<Job> = { state: ended.state, endedAt: ended.endedAt, stoppedBy: by };
     if (by !== 'agent') patch.wakeText = resultText(ended);
     return store.update(id, patch);
-  });
+  }).finally(() => { stopping.delete(id); });
 }
 
 export async function listJobs(): Promise<Job[]> {
@@ -309,7 +395,7 @@ export async function getJob(id: string): Promise<Job | null> {
 function checkRunning(job: Job, now: number): Partial<Job> | null {
   // Liveness first, then the exit file: the wrapper writes the exit file
   // before it exits, so a dead wrapper with no exit file is really gone.
-  const alive = typeof job.pid === 'number' && pidMatches(job.pid, job.pidStart);
+  const alive = wrapperAlive(job);
   const code = readExitCode(job.id);
   if (code !== null) {
     // The tick is 5s coarse; the exit record's mtime is when it really ended.
@@ -317,6 +403,8 @@ function checkRunning(job: Job, now: number): Partial<Job> | null {
     try { endedAt = Math.min(now, statSync(exitPath(job.id)).mtimeMs); } catch { /* keep now */ }
     return { state: code === 0 ? 'finished' : 'failed', exitCode: code, endedAt };
   }
+  // A fresh record with no pid yet is a launch in flight, not a lost job.
+  if (typeof job.pid !== 'number' && now - job.startedAt < LAUNCH_ORPHAN_MS) return null;
   if (!alive) return { state: 'lost', exitCode: null, endedAt: now };
   return null;
 }
@@ -333,7 +421,11 @@ async function tick(): Promise<void> {
   for (const job of jobs) {
     if (delivering.has(job.id)) continue;
     if (job.state === 'running') {
-      const patch = checkRunning(job, now);
+      if (stopping.has(job.id)) continue;
+      let patch = checkRunning(job, now);
+      // Wrapper gone but the scope still has processes: not lost, still running
+      // (the deadline or a Stop will end it).
+      if (patch?.state === 'lost' && job.unit && await jobAlive(job)) patch = null;
       if (patch) {
         const ended = { ...job, ...patch } as Job;
         await serialize(async () => {
@@ -341,7 +433,11 @@ async function tick(): Promise<void> {
           if (current?.state === 'running') await store.update(job.id, { ...patch, wakeText: resultText(ended) });
         });
       } else if (now >= job.deadline) {
-        await stopJob(job.id, 'timeout');
+        try {
+          await stopJob(job.id, 'timeout');
+        } catch (err) {
+          console.warn(`[jobs] "${job.name}": timeout stop failed:`, (err as Error).message);
+        }
       }
       continue;
     }

@@ -68,11 +68,25 @@ jobsRouter.get('/:id/log', asyncHandler(async (req, res) => {
 }));
 
 // by=user (the UI's Stop) wakes the agent with a stopped result; by=agent
-// (the job_stop tool) does not, the caller already knows.
+// (the job_stop tool) does not, the caller already knows, and it may only stop
+// its own jobs (agentId must match the job's owner).
 jobsRouter.post('/:id/stop', asyncHandler(async (req, res) => {
   const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const by = req.body?.by === 'agent' ? 'agent' : 'user';
-  const job = await stopJob(id, by);
+  if (by === 'agent') {
+    const owner = (await getJob(id))?.agentId;
+    if (owner && owner !== req.body?.agentId) {
+      res.status(403).json({ error: 'that job belongs to another agent' });
+      return;
+    }
+  }
+  let job: Job | null;
+  try {
+    job = await stopJob(id, by);
+  } catch (err) {
+    res.status(502).json({ error: (err as Error).message });
+    return;
+  }
   if (!job) {
     res.status(409).json({ error: 'not running (already ended, or unknown)' });
     return;

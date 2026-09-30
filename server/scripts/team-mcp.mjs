@@ -766,8 +766,8 @@ async function callTool(name, args, signal) {
     const self = process.env.RIVENDELL_AGENT_NAME;
     const fmtJob = (j) => `${j.id.slice(0, 8)}  ${j.state.toUpperCase().padEnd(9)} ${j.name} · ${Math.round(j.elapsedMs / 1000)}s${j.exitCode !== null ? ` · exit ${j.exitCode}` : ''}${j.lastLine ? ` · ${j.lastLine}` : ''}`;
     // Ids can be shortened to their first 8 characters.
-    const fullId = async (short) => {
-      const { jobs } = await api('/api/jobs', undefined, signal);
+    const fullId = async (short, ownerId) => {
+      const { jobs } = await api(`/api/jobs${ownerId ? `?agentId=${encodeURIComponent(ownerId)}` : ''}`, undefined, signal);
       const hit = jobs.filter((j) => j.id === short || j.id.startsWith(short));
       if (hit.length !== 1) throw new Error(hit.length ? `Job id "${short}" is ambiguous.` : `No recent job with id "${short}". Run job_list.`);
       return hit[0].id;
@@ -785,8 +785,10 @@ async function callTool(name, args, signal) {
       return tail || '(no output yet)';
     }
     if (name === 'job_stop') {
-      const id = await fullId(String(args.id));
-      const { job } = await api(`/api/jobs/${id}/stop`, { method: 'POST', body: JSON.stringify({ by: 'agent' }) }, signal);
+      if (!self) throw new Error('Stop jobs from a named teammate.');
+      const me = await resolveAgent(self, signal);
+      const id = await fullId(String(args.id), me.id);
+      const { job } = await api(`/api/jobs/${id}/stop`, { method: 'POST', body: JSON.stringify({ by: 'agent', agentId: me.id }) }, signal);
       return `Stopped job "${job.name}". It did NOT finish.`;
     }
     if (!self) throw new Error('Start jobs from a named teammate so the result can find your thread.');
