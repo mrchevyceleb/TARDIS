@@ -19,7 +19,7 @@ const REPLY_NUDGE_MIN_TOOLS = 2;
 /** Stream event recording that a nudge went out. Not rendered. */
 export const REPLY_NUDGE_EVENT = '_reply_nudge';
 
-export const REPLY_NUDGE_NOTE = '<rivendell-steer>System note, not a new message from the person: they have seen nothing from you since their message, and they cannot see your thinking. Say in visible text what you understood and what you are doing, then continue.</rivendell-steer>';
+export const REPLY_NUDGE_NOTE = '<rivendell-steer>System note, not a new message from the person: they have seen nothing from you since their message, and they cannot see your thinking. Write your reply as visible text, not in thinking: say what you understood and what you are doing, then continue.</rivendell-steer>';
 
 export type ReplyNudgeReason = 'tools' | 'time';
 export type ReplyNudge = { reason: ReplyNudgeReason; tools: number; elapsedMs: number };
