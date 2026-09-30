@@ -329,10 +329,10 @@ async function jobAlive(job: Job): Promise<boolean> {
   return wrapperAlive(job);
 }
 
-async function waitDead(job: Job, ms: number): Promise<boolean> {
+async function pollDead(isAlive: () => Promise<boolean> | boolean, ms: number): Promise<boolean> {
   const end = Date.now() + ms;
   for (;;) {
-    if (!(await jobAlive(job))) return true;
+    if (!(await isAlive())) return true;
     if (Date.now() >= end) return false;
     await sleep(250);
   }
@@ -343,17 +343,25 @@ async function waitDead(job: Job, ms: number): Promise<boolean> {
  *  reboot. Resolves false when something is still alive after the KILL. */
 async function terminateJob(job: Job): Promise<boolean> {
   if (job.bootId && job.bootId !== BOOT_ID) return true;
-  const signal = async (sig: 'SIGTERM' | 'SIGKILL') => {
-    if (job.unit) {
-      await runQuiet('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${sig}`, `${job.unit}.scope`]);
-    } else if (wrapperAlive(job)) {
-      try { process.kill(-job.pid!, sig); } catch { /* gone */ }
-    }
+  if (job.unit) {
+    const kill = (sig: 'SIGTERM' | 'SIGKILL') => runQuiet('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${sig}`, `${job.unit}.scope`]);
+    await kill('SIGTERM');
+    if (await pollDead(() => jobAlive(job), STOP_GRACE_MS)) return true;
+    await kill('SIGKILL');
+    return pollDead(() => jobAlive(job), KILL_CONFIRM_MS);
+  }
+  // No scope (systemd unavailable): the wrapper leads its own process group.
+  // Only signal a group whose leader we can still verify; its members can
+  // outlive the wrapper, so confirm the whole group is gone, not just the pid.
+  if (!wrapperAlive(job)) return true;
+  const pgid = job.pid!;
+  const groupAlive = () => {
+    try { process.kill(-pgid, 0); return true; } catch (err) { return (err as NodeJS.ErrnoException).code === 'EPERM'; }
   };
-  await signal('SIGTERM');
-  if (await waitDead(job, STOP_GRACE_MS)) return true;
-  await signal('SIGKILL');
-  return waitDead(job, KILL_CONFIRM_MS);
+  try { process.kill(-pgid, 'SIGTERM'); } catch { /* gone */ }
+  if (await pollDead(groupAlive, STOP_GRACE_MS)) return true;
+  try { process.kill(-pgid, 'SIGKILL'); } catch { /* gone */ }
+  return pollDead(groupAlive, KILL_CONFIRM_MS);
 }
 
 /** Stop a running job. Returns the updated record, or null if it is not
@@ -374,6 +382,12 @@ export async function stopJob(id: string, by: JobStopper): Promise<Job | null> {
   return serialize(async () => {
     const current = (await store.list()).find((j) => j.id === id);
     if (!current || current.state !== 'running') return null;
+    // Natural completion wins the race: a command that exited on its own before
+    // the stop landed is reported as what it did, never as stopped.
+    const natural = checkRunning(current, Date.now());
+    if (natural && natural.state !== 'lost') {
+      return store.update(id, { ...natural, wakeText: resultText({ ...current, ...natural } as Job) });
+    }
     const ended = { ...current, state: (by === 'timeout' ? 'timed-out' : 'stopped') as JobState, endedAt: Date.now(), stoppedBy: by };
     const patch: Partial<Job> = { state: ended.state, endedAt: ended.endedAt, stoppedBy: by };
     if (by !== 'agent') patch.wakeText = resultText(ended);

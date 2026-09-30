@@ -789,7 +789,7 @@ async function callTool(name, args, signal) {
       const me = await resolveAgent(self, signal);
       const id = await fullId(String(args.id), me.id);
       const { job } = await api(`/api/jobs/${id}/stop`, { method: 'POST', body: JSON.stringify({ by: 'agent', agentId: me.id }) }, signal);
-      return `Stopped job "${job.name}". It did NOT finish.`;
+      return job.state === 'stopped' ? `Stopped job "${job.name}". It did NOT finish.` : `Job "${job.name}" had already ended on its own (${job.state}${job.exitCode !== null ? `, exit ${job.exitCode}` : ''}) before the stop landed; its result is on the way.`;
     }
     if (!self) throw new Error('Start jobs from a named teammate so the result can find your thread.');
     const agent = await resolveAgent(self, signal);
