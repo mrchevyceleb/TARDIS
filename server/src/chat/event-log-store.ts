@@ -428,30 +428,38 @@ export function loadEventLogSinceSync(
   try {
     fd = openSync(path, 'r');
     const size = fstatSync(fd).size;
-    // Only whole lines: a record still being appended has no trailing newline.
-    let end = size;
-    const tailProbe = readRange(fd, Math.max(0, size - 1024 * 1024), size);
-    const lastNewline = tailProbe.lastIndexOf(0x0a);
-    if (lastNewline >= 0) end = size - tailProbe.length + lastNewline + 1;
-    else if (size > tailProbe.length) return { events: [], reachedSince: false };
+    // Whole lines only: a record still being appended has no newline yet, and
+    // the live session's own buffer already carries it.
+    let end = 0;
+    for (let probe = Math.min(size, 1024 * 1024); ; probe = Math.min(size, probe * 2)) {
+      const lastNewline = readRange(fd, size - probe, size).lastIndexOf(0x0a);
+      if (lastNewline >= 0) { end = size - probe + lastNewline + 1; break; }
+      if (probe >= size || probe >= maxBytes) break;
+    }
+    if (end === 0) return { events: [], reachedSince: false };
 
-    let lineStart = end; // everything at or after this offset is already parsed
-    let window = SINCE_SCAN_START_BYTES;
+    // `carry` is the head of the earliest chunk read so far: the end of a line
+    // that begins further back. Keeping it (instead of re-reading it) means every
+    // byte is read once even when a single record is bigger than a chunk.
+    let carry: Buffer = Buffer.alloc(0);
+    let carryStart = end;
+    let window = Math.max(1, Math.min(SINCE_SCAN_START_BYTES, maxBytes));
     let spent = 0;
     let rawFirstSeq: number | null = null;
     let collected: PersistedEvent[] = [];
     for (;;) {
-      const start = Math.max(0, lineStart - window);
-      const chunk = readRange(fd, start, lineStart);
-      spent += chunk.length;
-      // A chunk that starts mid-file starts inside a line: that partial line is
-      // finished by the next (earlier) chunk, so drop it here.
+      const start = Math.max(0, carryStart - window);
+      const fresh = readRange(fd, start, carryStart);
+      spent += fresh.length;
+      const buf = Buffer.concat([fresh, carry]);
+      // A chunk that starts mid-file starts inside a line; that line is
+      // finished by the next (earlier) chunk.
       let skip = 0;
       if (start > 0) {
-        const nl = chunk.indexOf(0x0a);
-        skip = nl < 0 ? chunk.length : nl + 1;
+        const nl = buf.indexOf(0x0a);
+        skip = nl < 0 ? buf.length : nl + 1;
       }
-      const text = chunk.toString('utf8', skip);
+      const text = buf.toString('utf8', skip);
       const state = { events: [] as PersistedEvent[], eventChars: [] as number[], highWater: 0 };
       parseLogLines(text, state);
       collected = state.events.concat(collected);
@@ -460,13 +468,14 @@ export function loadEventLogSinceSync(
         const seq = JSON.parse(firstLine)?.seq;
         if (typeof seq === 'number') rawFirstSeq = seq;
       } catch { /* malformed first line: keep the previous answer */ }
-      lineStart = start + skip;
+      carry = buf.subarray(0, skip);
+      carryStart = start;
       if (start === 0 && rawFirstSeq === null) rawFirstSeq = collected[0]?.seq ?? null;
       const reached = rawFirstSeq !== null && rawFirstSeq <= sinceSeq + 1;
       if (reached || start === 0 || spent >= maxBytes) {
         return { events: collected.filter((event) => event.seq > sinceSeq), reachedSince: reached };
       }
-      window = Math.min(window * 2, maxBytes - spent);
+      window = Math.max(1, Math.min(window * 2, maxBytes - spent));
     }
   } catch {
     return { events: [], reachedSince: false };
