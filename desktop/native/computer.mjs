@@ -114,6 +114,12 @@ export class ComputerController {
   requireGrant(session) {
     if (!this.grant || this.grant.id !== session || Date.now() >= this.grant.expiresAt) throw new Error('No active desktop grant. Request control again; never work around a refusal.');
   }
+  /** Anything that can change what is on screen moves the epoch; see the
+   *  identical-text guard in keyboardOperation. Called only where an action was
+   *  actually dispatched (or may have run), so a refused request never counts. */
+  touched() {
+    if (this.grant) this.grant.epoch += 1;
+  }
   keyboardOperation(op, params) {
     if (op !== 'type' && op !== 'key' && op !== 'uia_value' && op !== 'uia_invoke' && op !== 'uia_key') return null;
     const id = params.operationId;
@@ -143,12 +149,16 @@ export class ComputerController {
     if (op === 'type' || op === 'uia_value') {
       // Models sometimes disregard the same-id retry contract when they cannot
       // visually read a terminal. Exact text to the exact same window must not
-      // duplicate merely because they invented a second id.
-      const duplicate = [...this.grant.operations.entries()].find(([, entry]) => entry.fingerprint === fingerprint);
-      if (duplicate) {
+      // duplicate merely because they invented a second id. That only holds
+      // while nothing else has touched the desktop: a key, click, focus or
+      // invoke since then changes the state, so the same words are a new
+      // operation (a prompt stole the first text, the field was cleared).
+      // Captures and inspects do not count, so a blind re-send still replays.
+      const duplicate = [...this.grant.operations.entries()].reverse().find(([, entry]) => entry.fingerprint === fingerprint);
+      if (duplicate && duplicate[1].epoch === this.grant.epoch) {
         if (!duplicate[1].outcome) throw new Error(`Identical text is already being typed under operationId ${duplicate[0]}. Do not send it again.`);
         return { replay: { ...duplicate[1].outcome, operationId: id, matchedOperationId: duplicate[0], replayed: true,
-          message: 'Identical text was already typed once in this window. It was not typed again. Inspect OCR/window state; do not invent another retry id.' } };
+          message: 'Identical text was already typed once in this window and nothing else has been done since. It was not typed again. Capture the window to check. If the field is verifiably empty, change the state first (computer_focus, a click, or a key such as ESC) and then type it under a NEW operationId.' } };
       }
     }
     return { id, fingerprint, payload };
@@ -167,6 +177,7 @@ export class ComputerController {
     // not label overlapping pixels from another app as the target window.
     if (window && current.activeWindow !== window.id) {
       await this.adapter.act({ action: 'focus', window: window.id }, signal);
+      this.touched();
       current = await this.adapter.inspect(signal);
       window = this.findWindow(current, params.window);
       if (current.activeWindow !== window.id) throw new Error('Window could not be verified active. No screenshot was returned.');
@@ -259,7 +270,7 @@ export class ComputerController {
     let keyboardGrant = null;
     if (keyboardSpec) {
       if (this.grant.operations.size >= 256) throw new Error('This desktop grant reached its keyboard-operation limit. Start a new grant; do not replay uncertain input.');
-      keyboardEntry = { fingerprint: keyboardSpec.fingerprint };
+      keyboardEntry = { fingerprint: keyboardSpec.fingerprint, epoch: this.grant.epoch };
       keyboardGrant = this.grant;
       keyboardGrant.operations.set(keyboardSpec.id, keyboardEntry); // reserve synchronously, before any await
     }
@@ -283,7 +294,7 @@ export class ComputerController {
         const allowed = this.automatic() || await this.approve({ owner, label, purpose, minutes: COMPUTER_GRANT_MINUTES }, ac.signal);
         check();
         if (!allowed) throw new Error('The person at this computer declined desktop control. Stop; do not retry by another route.');
-        this.grant = { id: randomUUID(), owner, label, purpose, expiresAt: Date.now() + COMPUTER_GRANT_MS, operations: new Map() };
+        this.grant = { id: randomUUID(), owner, label, purpose, expiresAt: Date.now() + COMPUTER_GRANT_MS, operations: new Map(), epoch: 0 };
         this.timer = setTimeout(() => this.stop(), COMPUTER_GRANT_MS);
         this.timer.unref?.();
         this.changed(this.status());
@@ -320,6 +331,7 @@ export class ComputerController {
         validateElementRef(params.element);
         this.requireGrant(params.session); check();
         const raw = await this.adapter.uiaFocus(window.id, String(params.element), params.name === undefined ? undefined : String(params.name), ac.signal);
+        this.touched();
         const { png: _focusPng, ...focusRest } = raw;
         const result = await this.windowFrame(info, window, raw);
         check(); this.requireGrant(params.session);
@@ -350,6 +362,7 @@ export class ComputerController {
           // evidence must survive the wrap.
           if (error && error.attempted !== false) {
             inputAttempted = true;
+            this.touched();
             const wrapped = new Error(`Window action may already have run; do NOT replay it. Capture the window to verify. ${error instanceof Error ? error.message : String(error)}`);
             for (const key of ['attempted', 'foregroundBefore', 'foregroundAfter', 'foregroundStolen', 'foregroundRestored', 'foregroundChanged', 'foregroundRestoreOutcome', 'foregroundRestoreDetail', 'warning', 'note']) {
               if (error[key] !== undefined) wrapped[key] = error[key];
@@ -361,6 +374,7 @@ export class ComputerController {
         // The window action itself definitely ran; later failures are
         // post-input, and the reserved operationId replays this outcome.
         inputAttempted = true;
+        this.touched();
         if (keyboardEntry) keyboardEntry.outcome = { executed: true, windowId: window.id, windowTitle: window.title };
         try {
           await this.windowFrame(info, window, raw);
@@ -384,6 +398,7 @@ export class ComputerController {
         this.inputActive = inputAttempted;
         await this.adapter.act(action, ac.signal);
         this.inputActive = false;
+        this.touched();
         if (keyboardEntry) keyboardEntry.outcome = { executed: true, windowId: window.id, windowTitle: window.title };
         check();
         const after = await this.adapter.inspect(ac.signal);
@@ -411,6 +426,7 @@ export class ComputerController {
       this.inputActive = true;
       await this.adapter.act(action, ac.signal);
       this.inputActive = false;
+      if (action.action !== 'move') this.touched(); // a hover alone changes nothing worth a retype
       check();
       const after = await this.adapter.inspect(ac.signal);
       const result = await this.captureFrame(after, f.windowId ? { window: f.windowId } : { display: f.displayId }, ac.signal);
@@ -434,6 +450,7 @@ export class ComputerController {
       // Background window input never touches the real mouse or keyboard, so a
       // possibly-run failure must not inject release keystrokes either.
       if (inputAttempted && !backgroundInput) {
+        this.touched();
         this.inputActive = false;
         this.releasePending = this.adapter.release().catch(() => {});
         throw new Error(`Input may already have run; do NOT replay it. Capture to verify. ${error.message}`);
@@ -442,6 +459,9 @@ export class ComputerController {
     } finally {
       clearTimeout(deadline);
       if (this.abort === ac) this.abort = null;
+      // The op's own verification capture may raise its window; that must not
+      // make an immediate blind re-send look like a new operation.
+      if (keyboardEntry && keyboardGrant) keyboardEntry.epoch = keyboardGrant.epoch;
       this.busy = false;
     }
   }
