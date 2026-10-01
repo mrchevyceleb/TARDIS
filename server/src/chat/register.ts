@@ -1396,8 +1396,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const stopScope = heldScopeKey(stopRepo, stopChatId);
           let releaseStopGate: () => void = () => {};
           const stopGate = new Promise<void>((resolve) => { releaseStopGate = resolve; });
+          // A second Stop on the same thread queues behind the first, so the barrier
+          // never drops while an earlier Stop is still replaying.
+          const priorStopGate = stopBarriers.get(stopScope);
           stopBarriers.set(stopScope, stopGate);
           try {
+            if (priorStopGate) await priorStopGate;
             // Capture steers still queued on this lane BEFORE the generation
             // bump aborts their waiters. Stop silences the turn; held steers
             // survive it and ride the next send.
