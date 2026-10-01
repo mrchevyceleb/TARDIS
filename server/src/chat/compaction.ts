@@ -23,7 +23,7 @@ import { callMcp } from '../lib/mcp.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
 import { redactSecrets } from './secretRedaction.ts';
 import { flushEventLog, loadEventLogForCompactionSync } from './event-log-store.ts';
-import { ROTATION_COMPACT_DEADLINE_MS } from './contextBudget.ts';
+import { ROTATION_COMPACT_DEADLINE_MS, ROTATION_VERBATIM_TAIL_CHARS } from './contextBudget.ts';
 import {
   COMPACT_BATCH_TURNS,
   WINDOW_TURNS,
@@ -773,8 +773,24 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
   }
 }
 
-/** Fail closed if compaction failed, is already running, or still has backlog. */
+/** True when every turn the compact has not absorbed fits the seed verbatim. */
+export async function uncompactedTailFitsSeed(args: AutoCompactArgs): Promise<boolean> {
+  if (args.isBusy()) return false;
+  await flushEventLog(args.key);
+  if (args.isBusy()) return false;
+  const durable = loadEventLogForCompactionSync(args.key);
+  const { overflow } = splitWindow(extractVisibleTurns(durable.length ? durable : args.events));
+  const through = compactedThroughSeq(args.key);
+  let chars = 0;
+  for (const turn of overflow) if (turn.seq > through) chars += turn.text.length + 16;
+  return chars <= ROTATION_VERBATIM_TAIL_CHARS;
+}
+
+/** Fail closed if compaction failed or the tail is too big to carry verbatim. */
 export async function refreshCompactForRotation(args: AutoCompactArgs): Promise<boolean> {
+  // A small tail needs no new summary: the seed carries it as written. Waiting
+  // on one let the lane run into the engine's own compaction first.
+  if (await uncompactedTailFitsSeed(args)) return !args.isBusy();
   // The lane waits on this, so cap it: past the deadline the rotation is
   // deferred to the next turn end and the compaction finishes on its own.
   let timer: NodeJS.Timeout | undefined;
