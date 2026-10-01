@@ -759,12 +759,6 @@ function pendingSteersFor(key: string): PendingSteer[] {
   return pendingSteerQueue.get(key) ?? [];
 }
 
-function cancelPendingSteers(key: string): PendingSteer[] {
-  const queued = pendingSteerQueue.get(key) ?? [];
-  pendingSteerQueue.delete(key);
-  return queued;
-}
-
 // Rebuild once from durable events to recover provider message boundaries and
 // update/answer metadata missing from older flattened browser snapshots.
 // v10: a device that was away longer than the server's replay window was caught
@@ -2029,6 +2023,22 @@ export function useChat(opts: {
             pendingSendRef.current = queuedSteerRef.current.size > 0;
             setError(msg.message || 'Queued guidance was not delivered.');
             setStatus(msg.busy || queuedSteerRef.current.size > 0 ? 'streaming' : 'ready');
+            // The last queued steer just settled on an idle lane. The turnEnd
+            // that would have flushed messages waiting in the outbound FIFO was
+            // swallowed while this steer was queued, so flush them now.
+            if (queuedSteerRef.current.size === 0 && msg.busy !== true && repo) {
+              const leftover = outboundQueue.get(conversationKey(cli, repo.path, chatId));
+              if (leftover && leftover.length > 0) {
+                setStatus('streaming');
+                if (serverCliRef.current !== cli) {
+                  socketReadyRef.current = false;
+                  sentOutboundRef.current = null;
+                  window.setTimeout(() => forceReconnectRef.current(), 0);
+                } else {
+                  flushOutboundRef.current();
+                }
+              }
+            }
           }
         }
         else if (msg.type === 'error') {
@@ -2411,26 +2421,28 @@ export function useChat(opts: {
   const stop = () => {
     if (!repo) return;
     const key = conversationKey(cli, repo.path, chatId);
-    const canceled = cancelOutbound(key);
-    const canceledSteers = cancelPendingSteers(key);
-    const canceledIds = new Set([
-      ...canceled.map((item) => item.clientMsgId),
-      ...canceledSteers.map((item) => item.clientMsgId),
-    ]);
+    // Stop ends the running turn, never what the user queued behind it. Queued
+    // steers stay queued: the server holds them and delivers them as the next
+    // turn (their echo or a delivered receipt clears the bubbles). Sends still
+    // waiting in the outbound FIFO flush at turnEnd. Only the send already on
+    // the wire is dropped, because Stop may have killed the turn it started.
+    const onTheWire = sentOutboundRef.current?.clientMsgId;
+    const canceledIds = new Set<string>();
+    if (onTheWire && hasOutbound(key, onTheWire)) {
+      acknowledgeOutbound(key, onTheWire);
+      canceledIds.add(onTheWire);
+    }
     if (initialClientMsgIdRef.current) canceledIds.add(initialClientMsgIdRef.current);
-    if (canceledIds.size > 0 || queuedSteerRef.current.size > 0) {
+    if (canceledIds.size > 0) {
       setBlocks((prev) => prev.map((block) => (
-        block.kind === 'user'
-        && (block.deliveryState === 'queued' || Boolean(block.clientMsgId && canceledIds.has(block.clientMsgId)))
-          // Stop holds these on the server for the next send: retrying would send them twice.
+        block.kind === 'user' && block.clientMsgId && canceledIds.has(block.clientMsgId)
           ? { ...block, deliveryState: 'failed' as const, noRetry: true }
           : block
       )));
     }
     sentOutboundRef.current = null;
     settleInitialMessage(initialClientMsgIdRef.current ?? undefined);
-    queuedSteerRef.current = new Set();
-    pendingSendRef.current = false;
+    pendingSendRef.current = queuedSteerRef.current.size > 0 || Boolean(peekOutbound(key));
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       clearTurnStarted();

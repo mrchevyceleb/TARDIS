@@ -485,10 +485,21 @@ export async function registerChat(app: express.Express, server: Server): Promis
     images?: ClientSteer['images'];
     clientMsgId?: string;
     laneKey: string;
+    model?: string;
+    effort?: string;
+    voice?: boolean;
+    selectionRevision?: number;
+    /** Monotonic enqueue order across every lane, so a replay after Stop keeps
+     *  the order the user typed even when steers sat on different engine lanes. */
+    seq: number;
   };
+  let steerEnqueueSeq = 0;
   const heldSteers = new Map<string, HeldSteer[]>();
   const inFlightSteers = new Map<string, Map<string, HeldSteer>>();
   const heldClientIds = new Set<string>();
+  // Payloads Stop handed back to the steer path as fresh steers. The aborted
+  // original must not reject or untrack the id its replacement now owns.
+  const requeuedSteers = new WeakSet<HeldSteer>();
   const heldScopeKey = (repo: string | null | undefined, chatId: string): string => `${repo ?? ''}\0${chatId}`;
   const holdLaneSteers = (laneKey: string, repo: string, chatId: string): void => {
     const live = inFlightSteers.get(laneKey);
@@ -512,7 +523,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       heldClientIds.delete(steer.clientMsgId);
       deletePendingSteer(steer.laneKey, steer.clientMsgId);
     }
-    return bucket;
+    return bucket.sort((a, b) => a.seq - b.seq);
   };
   const purgeHeldSteers = (repo: string, chatId: string): void => {
     const scope = heldScopeKey(repo, chatId);
@@ -1378,19 +1389,67 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // Capture steers still queued on this lane BEFORE the generation
           // bump aborts their waiters. Stop silences the turn; held steers
           // survive it and ride the next send.
-          const stopLaneKeys = new Set<string>([
-            laneGenKey(stopCli, stopRepo, stopChatId),
-            laneGenKey(stopBrain.cli, stopRepo, stopChatId),
-          ]);
+          const stopLaneClis = new Set<CliKind>([stopCli, stopBrain.cli]);
           for (const live of sessionsForLogKey(laneLogKey(stopBrain.cli, stopRepo, stopChatId))) {
-            stopLaneKeys.add(laneGenKey(live.cli, stopRepo, stopChatId));
+            stopLaneClis.add(live.cli);
           }
-          for (const key of stopLaneKeys) holdLaneSteers(key, stopRepo, stopChatId);
-          bumpLaneGen(stopCli, stopRepo, stopChatId);
-          if (stopBrain.cli !== stopCli) bumpLaneGen(stopBrain.cli, stopRepo, stopChatId);
+          for (const laneCli of stopLaneClis) holdLaneSteers(laneGenKey(laneCli, stopRepo, stopChatId), stopRepo, stopChatId);
+          // Every lane whose steers were captured must abort its originals, or a
+          // captured steer would also be delivered by the handler that still owns it.
+          for (const laneCli of stopLaneClis) bumpLaneGen(laneCli, stopRepo, stopChatId);
           detachCurrentSession();
-          await Promise.all([interruptSession({ cli: stopCli, repoPath: stopRepo, chatId: stopChatId }), stopComputersForOwner(stopChatId)]);
+          let stopFailure: unknown = null;
+          try {
+            await Promise.all([interruptSession({ cli: stopCli, repoPath: stopRepo, chatId: stopChatId }), stopComputersForOwner(stopChatId)]);
+          } catch (error) {
+            stopFailure = error;
+          }
           safeSend({ type: 'turnEnd' });
+          // Stop ends the turn, never what the user already queued. Hand each
+          // held steer back to the steer path, oldest first, so it runs as the
+          // next turn with its images, keeps its clientMsgId (the echo clears
+          // its bubble), and either delivers or is rejected back to the sender
+          // like any other steer. Runs even when the interrupt itself failed.
+          const heldForRequeue = takeHeldSteers(stopRepo, stopChatId);
+          if (heldForRequeue.length > 0) {
+            console.warn(`[chat ws#${wsId}] stop: re-queueing ${heldForRequeue.length} held steer(s) as the next turn`);
+            // emit() runs each steer handler synchronously up to enqueueThreadSteer
+            // (no await before it), so the replay keeps the held order. It also
+            // does not depend on this socket staying open: accepted guidance
+            // survives a close by design and its echo reaches whichever socket binds.
+            // A steer the provider already accepted (its echo is in the durable log)
+            // raced Stop; replaying it would deliver the guidance twice.
+            const alreadyDelivered = new Set(recentDeliveredClientMsgIds(stopCli, stopRepo, stopChatId));
+            let receiptsOwed = false;
+            for (const held of heldForRequeue) {
+              requeuedSteers.add(held);
+              if (held.clientMsgId && alreadyDelivered.has(held.clientMsgId)) {
+                // The provider accepted it between detach and interrupt, so this
+                // socket never saw the echo: hand it the receipt or the bubble
+                // stays "Queued" forever.
+                rememberDeliveredClientMsgId(held.clientMsgId);
+                receiptsOwed = true;
+                continue;
+              }
+              ws.emit('message', JSON.stringify({
+                type: 'steer',
+                cli: stopCli,
+                repo: stopRepo,
+                chatId: stopChatId,
+                text: held.text,
+                images: held.images,
+                clientMsgId: held.clientMsgId,
+                model: held.model,
+                effort: held.effort,
+                voice: held.voice,
+                selectionRevision: held.selectionRevision,
+              }));
+            }
+            if (receiptsOwed) {
+              safeSend({ type: 'working', busy: busy || holdKeepalive > 0, activeCli: cliKind, queuedClientMsgIds: pendingSteerIds(cliKind, repoPath, chatId), deliveredClientMsgIds });
+            }
+          }
+          if (stopFailure) throw stopFailure;
           return;
         }
 
@@ -1451,6 +1510,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
             images: msg.images,
             clientMsgId: msg.clientMsgId,
             laneKey: '',
+            seq: ++steerEnqueueSeq,
+            model: msg.model,
+            effort: msg.effort,
+            voice: msg.voice,
+            selectionRevision: msg.selectionRevision,
           };
           const steerToken = `${msg.clientMsgId ?? 'anon'}\0${Date.now()}\0${Math.random()}`;
           const trackSteerPayload = (key: string | null) => {
@@ -1469,7 +1533,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           };
           const rejectSteer = (message = 'Queued guidance was superseded or canceled before delivery.') => {
             untrackSteerPayload(waitKey);
-            if (msg.clientMsgId && heldClientIds.has(msg.clientMsgId)) {
+            if (requeuedSteers.has(steerPayload) || (msg.clientMsgId && heldClientIds.has(msg.clientMsgId))) {
               // Stop captured this steer for the next turn. Keep the queued
               // bubble intact on every client; do not send a rejection.
               return;
@@ -1581,9 +1645,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // A pending authoritative brain change must still wait for the
           // natural boundary so guidance cannot land on the old model after a
           // central reconfiguration.
-          // Claude-family engines take steered screenshots as saved files (see
-          // runner imagesAsFiles), so only other engines wait for a turn end.
-          const steerImagesAsFiles = Boolean(msg.images && msg.images.length > 0) && isClaudeFamilyCli(steerCli);
+          // Claude-family engines and Codex take steered screenshots as saved
+          // files (see runner/codex-runner imagesAsFiles), so only other engines
+          // wait for a turn end. Without this a Codex image steer held every
+          // later steer on the thread behind it for the whole turn.
+          const steerImagesAsFiles = Boolean(msg.images && msg.images.length > 0)
+            && (isClaudeFamilyCli(steerCli) || steerCli === 'codex');
           const hasSteerImages = Boolean(msg.images && msg.images.length > 0) && !steerImagesAsFiles;
           let nativeActiveSteer = Boolean(
             session
@@ -1861,6 +1928,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
             safeSend({ type: 'turnEnd' });
             return;
           }
+          // A send that saw the abort mid-flight (for instance while saving
+          // images) returns quietly. That is not delivery: let Stop's replay or
+          // the rejection path own the id instead of clearing its pending flag.
+          if (steerAborter.signal.aborted) { rejectSteer(); releaseSteer(); return; }
           deletePendingSteer(waitKey, msg.clientMsgId);
           untrackSteerPayload(waitKey);
           releaseSteer();
