@@ -99,7 +99,10 @@ async function readCookies(profile: string, domains: string[]): Promise<{ cookie
     for (const ext of ['-wal', '-shm']) if (existsSync(dbPath + ext)) { await copyFile(dbPath + ext, copy + ext); await chmod(copy + ext, 0o600); }
     const db = new DatabaseSync(copy, { readOnly: true });
     try {
-      const rows = db.prepare('SELECT * FROM cookies').all() as Record<string, unknown>[];
+      // Chromium stores microsecond times that overflow a JS number, so read integers as BigInt.
+      const stmt = db.prepare('SELECT * FROM cookies');
+      stmt.setReadBigInts(true);
+      const rows = stmt.all() as Record<string, unknown>[];
       const now = Date.now() / 1000;
       const cookies: ImportedCookie[] = [];
       let skipped = 0;
@@ -110,8 +113,9 @@ async function readCookies(profile: string, domains: string[]): Promise<{ cookie
         let value = typeof row.value === 'string' ? row.value : '';
         const encrypted = row.encrypted_value as Uint8Array | undefined;
         if (!value && encrypted?.length) value = (await decryptCookie(encrypted, hostKey)) ?? '';
-        const hasExpiry = Number(row.has_expires) === 1 && Number(row.expires_utc) > 0;
-        const expires = hasExpiry ? Number(row.expires_utc) / 1e6 - CHROMIUM_EPOCH_OFFSET : now + SESSION_COOKIE_SECONDS;
+        const expiresUtc = typeof row.expires_utc === 'bigint' ? row.expires_utc : BigInt(Number(row.expires_utc) || 0);
+        const hasExpiry = Number(row.has_expires) === 1 && expiresUtc > 0n;
+        const expires = hasExpiry ? Number(expiresUtc / 1_000_000n) - CHROMIUM_EPOCH_OFFSET : now + SESSION_COOKIE_SECONDS;
         if (!value || (hasExpiry && expires < now)) { skipped++; continue; }
         const sameSite = ({ 0: 'None', 1: 'Lax', 2: 'Strict' } as Record<number, ImportedCookie['sameSite']>)[Number(row.samesite)];
         cookies.push({

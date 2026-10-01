@@ -4,7 +4,7 @@
 
 import { chromium, type BrowserContext, type Locator, type Page } from 'playwright-core';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { appendFile, chmod, mkdir, readFile, readlink, rm } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readFile, readlink, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 import { importDesktopSession, type ImportSummary } from './sessionImport.ts';
@@ -55,6 +55,9 @@ export function laneSlug(agent: string): string {
   return agent.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'shared';
 }
 const profileDir = (slug: string) => join(HEADLESS_DIR, slug, 'profile');
+// Chromium drops session-only cookies (most logins) when a lane closes, so they are kept in a 0600 file beside the profile.
+const sessionCookieFile = (slug: string) => join(HEADLESS_DIR, slug, 'session-cookies.json');
+const SESSION_COOKIE_SECONDS = 14 * 24 * 3600;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}\n[truncated ${text.length - max} chars]` : text);
 
@@ -114,9 +117,28 @@ async function launchContext(dir: string): Promise<BrowserContext> {
   }
 }
 
+async function stashSessionCookies(lane: Lane): Promise<void> {
+  try {
+    const session = (await lane.ctx.cookies()).filter((c) => c.expires === -1);
+    const file = sessionCookieFile(lane.slug);
+    if (!session.length) { await rm(file, { force: true }); return; }
+    await writeFile(file, JSON.stringify(session), { mode: 0o600 });
+    await chmod(file, 0o600);
+  } catch { /* the lane is closing anyway; a missed stash only costs a re-login */ }
+}
+
+async function restoreSessionCookies(ctx: BrowserContext, slug: string): Promise<void> {
+  try {
+    const cookies = JSON.parse(await readFile(sessionCookieFile(slug), 'utf8')) as Parameters<BrowserContext['addCookies']>[0];
+    const expires = Math.floor(Date.now() / 1000) + SESSION_COOKIE_SECONDS;
+    if (cookies.length) await ctx.addCookies(cookies.map((c) => ({ ...c, expires })));
+  } catch { /* no stash, or unreadable: start without it */ }
+}
+
 async function closeLane(lane: Lane): Promise<void> {
   lane.closing = true;
   if (lanes.get(lane.slug) === lane) lanes.delete(lane.slug);
+  await stashSessionCookies(lane);
   await lane.ctx.close().catch(() => {});
 }
 
@@ -134,6 +156,7 @@ async function launchLane(agent: string, slug: string): Promise<Lane> {
   await ensurePrivateDir(dir);
   await clearStaleLock(dir);
   const ctx = await launchContext(dir);
+  await restoreSessionCookies(ctx, slug);
   ctx.setDefaultTimeout(15_000);
   ctx.setDefaultNavigationTimeout(30_000);
   const lane: Lane = { agent, slug, ctx, tabs: new Map(), ids: new Map(), seq: 0, current: '', lastUsed: Date.now(), busy: 0, closing: false, dialogs: [], logs: [] };
@@ -274,6 +297,7 @@ async function sessionOp(agent: string, a: Args): Promise<HeadlessResult> {
     const lane = lanes.get(laneSlug(agent));
     if (lane) await closeLane(lane);
     await rm(profileDir(laneSlug(agent)), { recursive: true, force: true });
+    await rm(sessionCookieFile(laneSlug(agent)), { force: true });
     await audit({ agent, op: 'reset_profile' });
     return { reset: true, note: 'This lane\'s headless profile is empty again. Every login in it is gone.' };
   }
