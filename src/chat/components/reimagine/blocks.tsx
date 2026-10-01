@@ -471,7 +471,8 @@ function PeerBubble(props: React.ComponentProps<typeof PeerMessageBubble>) {
 // for the person: NO_UPDATE, or tool work only) collapse into one dim line so a
 // busy lane's thread is not a wall of handoff cards. Expanding shows each card
 // exactly as it renders on its own. Anything still working, anything with a real
-// reply, routine results and job results are never folded.
+// reply, routine results, job results and Matt's own Desk or voice messages are
+// never folded.
 const FOLD_MIN_RUN = 2;
 
 type FoldItem = { fold: true; key: string; from: string; ts: number; tsApprox?: boolean; node: ReactNode };
@@ -1306,8 +1307,12 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       // Settled and silent: it was answered (so it is not waiting on anyone),
       // nothing is still running, and the agent said nothing to the person.
       // (Routine deliverables never get here: they render in the branch above.)
+      // Matt's own Desk answers and voice asks are his messages, so they always
+      // show as their own line, whatever the agent replied.
       const foldable = !jobResult
         && g.block.fromRole !== 'automation-result'
+        && g.block.fromRole !== 'desk'
+        && g.block.fromRole !== 'voice'
         && g.responseBlocks.length > 0
         && !peerResponseBusy(g.responseBlocks, activePeerId === g.block.id)
         && publicPeerResponse(g.responseBlocks, streaming).length === 0;
