@@ -7,7 +7,11 @@
 //  - A high item still open 3h after its push gets one "Still waiting" push,
 //    on weekdays inside the same hours. After that it rides the digests.
 //  - Weekday digests at 09:30, 13:30 and 16:30 when anything is open. A slot
-//    is caught up within 20 minutes (a restart) and never repeats.
+//    is caught up within 20 minutes (a restart) and never repeats. Its top
+//    three lines skip items older than 24h (they count in "+N more" only).
+//  - A high item whose linked card sits in Pipeline is parked: it never pushes,
+//    never re-nudges and ranks as normal in digests. It alerts again if the
+//    card leaves Pipeline while the item is still open.
 //  - Normal and low items never push on their own.
 // Every send is at most once: the attempt is on disk before the network call,
 // and one left mid-flight by a crash counts as sent.
@@ -17,7 +21,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { DESK_NOTIFY_FILE } from '../config.ts';
-import { readDesk, writeJsonAtomic, type DeskData, type DeskTodo } from './deskStore.ts';
+import { readDesk, writeJsonAtomic, type DeskCard, type DeskData, type DeskTodo } from './deskStore.ts';
 
 const TICK_MS = 60_000;
 const DAY_START_MIN = 8 * 60;
@@ -43,6 +47,8 @@ export const ANSWER_CLAIM_STALE_MS = 5 * 60_000;
  *  sooner: a desk.json moved aside for repair must not re-arm every push. */
 const FORGET_AFTER_MS = 14 * 24 * 60 * 60_000;
 const DIGEST_KEEP_DAYS = 8;
+/** Items older than this stay out of a digest's top lines (still counted). */
+const DIGEST_LINE_MAX_AGE_MS = 24 * 60 * 60_000;
 export const PUSHOVER_ENDPOINT = 'https://api.pushover.net/1/messages.json';
 
 // ---- Eastern time -----------------------------------------------------------
@@ -123,12 +129,26 @@ export function itemPayload(todo: DeskTodo, kind: 'push' | 'renudge', baseUrl: s
   };
 }
 
-/** Count, then the top three (high first, then oldest), then "+N more". */
-export function digestPayload(open: DeskTodo[], baseUrl: string): PushPayload {
-  const ranked = [...open].sort((a, b) =>
-    Number(b.priority === 'high') - Number(a.priority === 'high') || Date.parse(a.createdAt) - Date.parse(b.createdAt));
-  const lines = [`${ranked.length} open:`, ...ranked.slice(0, 3).map((t) => `- ${clipText(t.title, 120)}`)];
-  if (ranked.length > 3) lines.push(`+${ranked.length - 3} more`);
+/** A high item whose card is parked in Pipeline is not asking for the owner
+ *  right now: no push, no re-nudge, no high rank in a digest. */
+export function isParkedHigh(todo: DeskTodo, cards: DeskCard[]): boolean {
+  if (todo.priority !== 'high' || !todo.cardId) return false;
+  return cards.find((c) => c.id === todo.cardId)?.column === 'pipeline';
+}
+
+/** Count, then the top three (high first, then oldest), then "+N more". Parked
+ *  highs rank as normal, and items older than 24h only count in "+N more". */
+export function digestPayload(open: DeskTodo[], baseUrl: string, cards: DeskCard[] = [], nowMs: number = Date.now()): PushPayload {
+  const rank = (t: DeskTodo) => Number(t.priority === 'high' && !isParkedHigh(t, cards));
+  // A missing or unreadable createdAt is not known to be old: it counts as new.
+  const created = (t: DeskTodo) => {
+    const ms = Date.parse(t.createdAt);
+    return Number.isFinite(ms) ? ms : nowMs;
+  };
+  const ranked = [...open].sort((a, b) => rank(b) - rank(a) || created(a) - created(b));
+  const shown = ranked.filter((t) => nowMs - created(t) <= DIGEST_LINE_MAX_AGE_MS).slice(0, 3);
+  const lines = [`${ranked.length} open:`, ...shown.map((t) => `- ${clipText(t.title, 120)}`)];
+  if (ranked.length > shown.length) lines.push(`+${ranked.length - shown.length} more`);
   return { title: 'Needs you', message: lines.join('\n'), priority: 0, ...deskLink(baseUrl, 'open') };
 }
 
@@ -465,7 +485,9 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
       weekdayOnly: kind === 'renudge',
       build: (fresh) => {
         const current = fresh.todos.find((t) => t.id === todo.id);
-        return current?.status === 'open' && current.priority === 'high' ? itemPayload(current, kind, baseUrl) : null;
+        return current?.status === 'open' && current.priority === 'high' && !isParkedHigh(current, fresh.cards)
+          ? itemPayload(current, kind, baseUrl)
+          : null;
       },
     });
     const digestJob = (key: string, send: Send): Job => ({
@@ -474,13 +496,18 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
       weekdayOnly: true,
       build: (fresh) => {
         const stillOpen = fresh.todos.filter((t) => t.status === 'open');
-        return stillOpen.length ? digestPayload(stillOpen, baseUrl) : null;
+        return stillOpen.length ? digestPayload(stillOpen, baseUrl, fresh.cards, now().getTime()) : null;
       },
       onGone: () => { send.skipped = 'empty'; },
     });
 
     for (const todo of open) {
       if (todo.priority !== 'high') continue;
+      if (isParkedHigh(todo, data.cards)) {
+        hold(`parked:${todo.id}`, `[desk-notify] ${todo.id} "${todo.title}" is parked (its card is in Pipeline): no push or re-nudge until the card moves`);
+        continue;
+      }
+      heldLogged.delete(`parked:${todo.id}`);
       const item = (st.items[todo.id] ??= {});
       const name = `${todo.id} "${todo.title}"`;
       if (!finished(item.push)) {
@@ -538,19 +565,26 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
         log(`[desk-notify] held ${job.what}: outside the allowed hours now (${clockNow.label})`);
         continue;
       }
-      const payload = job.build(await read());
-      if (!payload) {
-        job.onGone?.();
-        dirty = true;
-        log(`[desk-notify] skipped ${job.what}: nothing needs it any more`);
-        continue;
-      }
+      const prior = { tries: job.send.tries, lastTryAt: job.send.lastTryAt };
       job.send.tries += 1;
       job.send.lastTryAt = stamp;
       job.send.sendingAt = stamp;
       // The claim is on disk before the network call: a crash mid-send is
       // counted as sent on restart, never repeated.
       await save(st);
+      // The fresh read comes after the claim write, so nothing slow sits between
+      // the last check (answered, lowered, moved to Pipeline) and the send.
+      const payload = job.build(await read());
+      if (!payload) {
+        job.send.tries = prior.tries;
+        job.send.lastTryAt = prior.lastTryAt;
+        delete job.send.sendingAt;
+        job.onGone?.();
+        dirty = true;
+        await save(st);
+        log(`[desk-notify] skipped ${job.what}: nothing needs it any more`);
+        continue;
+      }
       const result = await opts.send(payload);
       delete job.send.sendingAt;
       if (result.ok) {
