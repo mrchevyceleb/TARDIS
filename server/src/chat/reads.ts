@@ -176,6 +176,8 @@ export function agentUnread(agent: Agent): number {
     // it only starts a turn, and the turn badges when its reply is real text.
     let turnCounted = false;
     const openStream = new Map<number, string>();
+    // Where each open block's text last arrived. A block belongs to that frame, not to the stop frame that closes it.
+    const streamTextAt = new Map<number, number>();
     const flushAuto = () => {
       if (!afterAutomation) return;
       const last = [...autoTexts].reverse().find((t) => t.trim()) ?? '';
@@ -200,16 +202,28 @@ export function agentUnread(agent: Agent): number {
       }
       if (outer && outer.type === 'stream_event') {
         if (outer.parent_tool_use_id || envelopeParent) continue;
-        const streamed = finishedStreamText(outer.event as Parameters<typeof finishedStreamText>[0], openStream);
+        const frame = outer.event as Parameters<typeof finishedStreamText>[0];
+        if (frame?.type === 'message_start') streamTextAt.clear();
+        const frameIndex = typeof frame?.index === 'number' ? frame.index : null;
+        if (frameIndex !== null) {
+          const addsText = frame?.type === 'content_block_start'
+            ? frame.content_block?.type === 'text' && Boolean(frame.content_block.text)
+            : frame?.type === 'content_block_delta' && frame.delta?.type === 'text_delta' && Boolean(frame.delta.text);
+          if (addsText) streamTextAt.set(frameIndex, i);
+        }
+        const streamed = finishedStreamText(frame, openStream);
+        const textIdx = frameIndex !== null ? streamTextAt.get(frameIndex) : undefined;
+        if (frameIndex !== null && frame?.type === 'content_block_stop') streamTextAt.delete(frameIndex);
         if (streamed === null || !streamed.trim()) continue;
+        const blockPastCursor = (textIdx ?? i) > cursorIdx;
         if (afterAutomation) {
-          if (pastCursor) { autoAfterRead = true; autoTexts.push(streamed); }
+          if (blockPastCursor) { autoAfterRead = true; autoTexts.push(streamed); }
           continue;
         }
         // A stream-only reply is still a visible one. Pre-cursor blocks mark the turn counted without badging, so
         // the same reply's later result cannot re-badge something Matt already saw.
         if (isNoopToken(streamed) || isRoutineNoiseEvent({ type: 'assistant', text: streamed }, false)) continue;
-        if (!turnCounted) { if (pastCursor) unread++; turnCounted = true; }
+        if (!turnCounted) { if (blockPastCursor) unread++; turnCounted = true; }
         continue;
       }
       // A background subagent's own frames (parent_tool_use_id) are its private
@@ -234,7 +248,7 @@ export function agentUnread(agent: Agent): number {
       // A turn that ended without a result (cut, failed, replaced by _terminal_error) still closes the turn, or its
       // counted flag would swallow the next reply. Every runner emits `result` before `turnEnd`, so this never
       // double counts.
-      if (t === 'turnEnd') { turnCounted = false; openStream.clear(); continue; }
+      if (t === 'turnEnd') { turnCounted = false; openStream.clear(); streamTextAt.clear(); continue; }
       // The automatic continue of a cut routine turn is still that routine:
       // its quiet NO_UPDATE must not badge.
       if (t === PROVIDER_CONTINUE_EVENT) {
