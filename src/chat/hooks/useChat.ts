@@ -1248,6 +1248,14 @@ export function useChat(opts: {
         droppedUnretained = true;
       }
     }
+    if (repo && deliveredIds.size) {
+      // A steer whose echo already arrived left `queuedSteerRef`, so the loop
+      // above never sees it; the remembered copy still has to go.
+      const steerKey = conversationKey(cli, repo.path, chatId);
+      for (const item of pendingSteersFor(steerKey)) {
+        if (deliveredIds.has(item.clientMsgId)) forgetPendingSteer(steerKey, item.clientMsgId);
+      }
+    }
     pendingSendRef.current = queuedSteerRef.current.size > 0 || Boolean(peekOutbound(conversationKey(cli, repo?.path ?? '', chatId)));
     if (droppedUnretained && queuedSteerRef.current.size === 0) {
       setError('Queued guidance was not retained by the server. Please send it again.');
@@ -1838,6 +1846,10 @@ export function useChat(opts: {
           if (evType === '_user_echo' && typeof ev?.clientMsgId === 'string') {
             const key = conversationKey(cli, repo.path, chatId);
             acknowledgeOutbound(key, ev.clientMsgId);
+            // The durable echo is the proof of delivery. Without this the steer
+            // stays in the in-memory queue for the life of the page, and the
+            // next remount restores it as a queued bubble with its old time.
+            forgetPendingSteer(key, ev.clientMsgId);
             if (sentOutboundRef.current?.clientMsgId === ev.clientMsgId) {
               sentOutboundRef.current = null;
             }
