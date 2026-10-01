@@ -151,6 +151,24 @@ export function isAutomationPeerEvent(raw: unknown): boolean {
   return isRoutinePromptText(eventText(raw));
 }
 
+/** The wake a finished background job or job watch delivers (`\u23f1 <name>`, from automation). It reports to the
+ *  agent, not to the person, so the turn it starts never badges. */
+export function isJobResultPeerEvent(raw: unknown): boolean {
+  if (eventType(raw) !== 'peer_message' || !isAutomationPeerEvent(raw)) return false;
+  const from = eventInner(raw)?.from;
+  return typeof from === 'string' && from.trim().startsWith('\u23f1');
+}
+
+/** A teammate's handoff: a peer message that names an agent role (not an automation, and not the person's own Desk
+ *  or voice message). The turn it starts is answered to that teammate, so its replies are never waiting on the
+ *  person. A missing role is not evidence of a teammate, so it keeps badging as before. */
+export function isTeammatePeerEvent(raw: unknown): boolean {
+  if (eventType(raw) !== 'peer_message' || isAutomationPeerEvent(raw)) return false;
+  const role = eventInner(raw)?.fromRole;
+  const fromRole = typeof role === 'string' ? role.trim().toLowerCase() : '';
+  return fromRole !== '' && fromRole !== 'voice' && fromRole !== 'desk';
+}
+
 /** Grok/Claude persist tool results as `user` events. Those are not a human
  *  message and must not end an automation turn for unread counting. */
 export function isToolResultUserEvent(raw: unknown): boolean {

@@ -16,12 +16,15 @@ import {
   eventType,
   eventTexts,
   isAutomationPeerEvent,
+  isJobResultPeerEvent,
+  isTeammatePeerEvent,
   isNoopToken,
   isQuietRoutineReply,
   isRoutineNoiseEvent,
   isToolResultUserEvent,
 } from './routineNoise.ts';
 import { PROVIDER_CONTINUE_EVENT } from './providerSwitch.ts';
+import { REPLY_NUDGE_EVENT } from './replyNudge.ts';
 
 const READS_FILE = join(STATE_DIR, 'agent-reads.json');
 
@@ -175,6 +178,15 @@ export function agentUnread(agent: Agent): number {
     // A teammate handoff or a Desk/voice message is never a reply to the person:
     // it only starts a turn, and the turn badges when its reply is real text.
     let turnCounted = false;
+    // A turn a teammate's handoff or a job result started is not a conversation with the person: none of its replies
+    // badge, until the person speaks in the thread or an automation turn starts.
+    let silentTurn = false;
+    // Whether the current turn already has a first message. A peer message that lands mid-turn is a steer into a turn
+    // someone else started, so it must not change who the turn belongs to.
+    let turnHasOrigin = false;
+    // Silence ends with its turn. Only a turn that starts with no message of its own (a provider continue or a reply
+    // nudge) carries on the previous one, so it takes that turn's silence; every other new turn starts audible.
+    let carriedSilent = false;
     const openStream = new Map<number, string>();
     // Where each open block's text last arrived. A block belongs to that frame, not to the stop frame that closes it.
     const streamTextAt = new Map<number, number>();
@@ -214,7 +226,8 @@ export function agentUnread(agent: Agent): number {
         const streamed = finishedStreamText(frame, openStream);
         const textIdx = frameIndex !== null ? streamTextAt.get(frameIndex) : undefined;
         if (frameIndex !== null && frame?.type === 'content_block_stop') streamTextAt.delete(frameIndex);
-        if (streamed === null || !streamed.trim()) continue;
+        // Bookkeeping above runs for every turn, so block state never goes stale; only the badge is gated.
+        if (silentTurn || streamed === null || !streamed.trim()) continue;
         const blockPastCursor = (textIdx ?? i) > cursorIdx;
         if (afterAutomation) {
           if (blockPastCursor) { autoAfterRead = true; autoTexts.push(streamed); }
@@ -229,9 +242,23 @@ export function agentUnread(agent: Agent): number {
       // A background subagent's own frames (parent_tool_use_id) are its private
       // work: the chat reducer drops them, so they can never be a visible reply.
       if (eventInner(raw)?.parent_tool_use_id) continue;
-      if (t === 'peer_message' && isAutomationPeerEvent(raw)) {
+      if (t === 'peer_message' && isJobResultPeerEvent(raw)) {
+        if (turnHasOrigin) continue;
         flushAuto();
         turnCounted = false;
+        silentTurn = true;
+        turnHasOrigin = true;
+        carriedSilent = false;
+        continue;
+      }
+      if (t === 'peer_message' && isAutomationPeerEvent(raw)) {
+        // A routine steered into a teammate or job turn does not change who owns it.
+        if (turnHasOrigin && silentTurn) continue;
+        flushAuto();
+        turnCounted = false;
+        silentTurn = false;
+        turnHasOrigin = true;
+        carriedSilent = false;
         afterAutomation = true;
         autoAfterRead = pastCursor;
         continue;
@@ -242,17 +269,33 @@ export function agentUnread(agent: Agent): number {
       // A turn a GLM provider cut, that nothing will finish on its own, is
       // waiting on the user even though no reply text exists.
       if (t === '_terminal_error') {
-        if (eventInner(raw)?.unread === true && !turnCounted) { if (pastCursor) unread++; turnCounted = true; }
+        if (eventInner(raw)?.unread === true && !turnCounted && !silentTurn) { if (pastCursor) unread++; turnCounted = true; }
         continue;
       }
       // A turn that ended without a result (cut, failed, replaced by _terminal_error) still closes the turn, or its
       // counted flag would swallow the next reply. Every runner emits `result` before `turnEnd`, so this never
       // double counts.
-      if (t === 'turnEnd') { turnCounted = false; openStream.clear(); streamTextAt.clear(); continue; }
+      if (t === 'turnEnd') {
+        turnCounted = false;
+        turnHasOrigin = false;
+        carriedSilent = silentTurn;
+        silentTurn = false;
+        openStream.clear();
+        streamTextAt.clear();
+        continue;
+      }
+      if (t === 'turnStart') { turnHasOrigin = false; continue; }
+      if (t === REPLY_NUDGE_EVENT) {
+        silentTurn = silentTurn || carriedSilent;
+        turnHasOrigin = true;
+        continue;
+      }
       // The automatic continue of a cut routine turn is still that routine:
       // its quiet NO_UPDATE must not badge.
       if (t === PROVIDER_CONTINUE_EVENT) {
-        if (eventInner(raw)?.automation === true) {
+        silentTurn = silentTurn || carriedSilent;
+        turnHasOrigin = true;
+        if (eventInner(raw)?.automation === true && !silentTurn) {
           flushAuto();
           afterAutomation = true;
           autoAfterRead = pastCursor;
@@ -263,6 +306,12 @@ export function agentUnread(agent: Agent): number {
       if (t === '_user_echo' || t === 'user' || t === 'peer_message') {
         flushAuto();
         turnCounted = false;
+        // A harness-injected user message (the post-compaction summary) is not the person speaking, so it must not
+        // reopen a silent turn.
+        if (t === 'user' && eventInner(raw)?.isSynthetic === true) continue;
+        if (!(t === 'peer_message' && turnHasOrigin)) silentTurn = isTeammatePeerEvent(raw);
+        turnHasOrigin = true;
+        carriedSilent = false;
         continue;
       }
       if (afterAutomation && t === 'assistant') {
@@ -279,13 +328,14 @@ export function agentUnread(agent: Agent): number {
           flushAuto();
           continue;
         }
-        if (pastCursor && !isNonReplyResult(raw) && !isNoopOnly(raw) && !turnCounted) unread++;
+        if (pastCursor && !silentTurn && !isNonReplyResult(raw) && !isNoopOnly(raw) && !turnCounted) unread++;
         turnCounted = false;
         continue;
       }
       // Bootstrap / transport: system init, hooks, working keepalives,
       // compacted dividers, errors — never a waiting reply.
       if (t !== 'assistant') continue;
+      if (silentTurn) continue;
       if (isRoutineNoiseEvent(raw, afterAutomation)) continue;
       if (!eventText(raw).trim() || isNoopOnly(raw)) continue;
       // Pre-cursor replies still mark the turn counted (without badging), so a result that repeats an answer
