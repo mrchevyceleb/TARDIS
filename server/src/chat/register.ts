@@ -497,6 +497,20 @@ export async function registerChat(app: express.Express, server: Server): Promis
   const heldSteers = new Map<string, HeldSteer[]>();
   const inFlightSteers = new Map<string, Map<string, HeldSteer>>();
   const heldClientIds = new Set<string>();
+  // Threads with a Stop still ending their turn. Steers typed meanwhile wait here.
+  const stopBarriers = new Map<string, Promise<void>>();
+  // An interrupt that never settles must not hold the barrier up forever. Stop gives
+  // up on it after this long (reported as a stop failure), still replays the held
+  // steers and releases the gate, so waiting steers always go in the order typed and
+  // two Stops never overlap. Waiters themselves never time out.
+  const STOP_INTERRUPT_MAX_WAIT_MS = 20_000;
+  const capStopWork = <T>(work: Promise<T>): Promise<T> => new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`stop did not finish within ${STOP_INTERRUPT_MAX_WAIT_MS / 1000}s`)), STOP_INTERRUPT_MAX_WAIT_MS);
+    work.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
   // Payloads Stop handed back to the steer path as fresh steers. The aborted
   // original must not reject or untrack the id its replacement now owns.
   const requeuedSteers = new WeakSet<HeldSteer>();
@@ -678,6 +692,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
     // The lane this socket is currently counted as watching (threadWatch registry).
     let watchedLane: { repo: string; chatId: string } | null = null;
     let turnGeneration = 0;
+    // True only while Stop replays held steers through this socket's own steer path.
+    let replayingStopSteers = false;
     const ownedSteerWaiters = new Set<AbortController>();
     // Last model/effort actually used on this socket (hello/send/steer).
     // Steer must reuse these for Codex/Banana so a drifted Counsel picker
@@ -1386,70 +1402,91 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const activeOwner = activeSessionForLogKey(laneLogKey(stopBrain.cli, stopRepo, stopChatId));
           const stopCli = (activeOwner?.cli ?? msg.cli) as CliKind;
           console.warn(`[chat ws#${wsId}] stop from ${peer} cli=${stopCli} repo=${stopRepo} chatId=${stopChatId}`);
-          // Capture steers still queued on this lane BEFORE the generation
-          // bump aborts their waiters. Stop silences the turn; held steers
-          // survive it and ride the next send.
-          const stopLaneClis = new Set<CliKind>([stopCli, stopBrain.cli]);
-          for (const live of sessionsForLogKey(laneLogKey(stopBrain.cli, stopRepo, stopChatId))) {
-            stopLaneClis.add(live.cli);
-          }
-          for (const laneCli of stopLaneClis) holdLaneSteers(laneGenKey(laneCli, stopRepo, stopChatId), stopRepo, stopChatId);
-          // Every lane whose steers were captured must abort its originals, or a
-          // captured steer would also be delivered by the handler that still owns it.
-          for (const laneCli of stopLaneClis) bumpLaneGen(laneCli, stopRepo, stopChatId);
-          detachCurrentSession();
-          let stopFailure: unknown = null;
+          // A steer typed while Stop is still ending the turn is newer than every
+          // held steer. This gate makes it wait until Stop has replayed them, so the
+          // next turns run in the order the user typed.
+          const stopScope = heldScopeKey(stopRepo, stopChatId);
+          let releaseStopGate: () => void = () => {};
+          const stopGate = new Promise<void>((resolve) => { releaseStopGate = resolve; });
+          // A second Stop on the same thread queues behind the first, so the barrier
+          // never drops while an earlier Stop is still replaying.
+          const priorStopGate = stopBarriers.get(stopScope);
+          stopBarriers.set(stopScope, stopGate);
           try {
-            await Promise.all([interruptSession({ cli: stopCli, repoPath: stopRepo, chatId: stopChatId }), stopComputersForOwner(stopChatId)]);
-          } catch (error) {
-            stopFailure = error;
-          }
-          safeSend({ type: 'turnEnd' });
-          // Stop ends the turn, never what the user already queued. Hand each
-          // held steer back to the steer path, oldest first, so it runs as the
-          // next turn with its images, keeps its clientMsgId (the echo clears
-          // its bubble), and either delivers or is rejected back to the sender
-          // like any other steer. Runs even when the interrupt itself failed.
-          const heldForRequeue = takeHeldSteers(stopRepo, stopChatId);
-          if (heldForRequeue.length > 0) {
-            console.warn(`[chat ws#${wsId}] stop: re-queueing ${heldForRequeue.length} held steer(s) as the next turn`);
-            // emit() runs each steer handler synchronously up to enqueueThreadSteer
-            // (no await before it), so the replay keeps the held order. It also
-            // does not depend on this socket staying open: accepted guidance
-            // survives a close by design and its echo reaches whichever socket binds.
-            // A steer the provider already accepted (its echo is in the durable log)
-            // raced Stop; replaying it would deliver the guidance twice.
-            const alreadyDelivered = new Set(recentDeliveredClientMsgIds(stopCli, stopRepo, stopChatId));
-            let receiptsOwed = false;
-            for (const held of heldForRequeue) {
-              requeuedSteers.add(held);
-              if (held.clientMsgId && alreadyDelivered.has(held.clientMsgId)) {
-                // The provider accepted it between detach and interrupt, so this
-                // socket never saw the echo: hand it the receipt or the bubble
-                // stays "Queued" forever.
-                rememberDeliveredClientMsgId(held.clientMsgId);
-                receiptsOwed = true;
-                continue;
+            if (priorStopGate) await priorStopGate;
+            // Capture steers still queued on this lane BEFORE the generation
+            // bump aborts their waiters. Stop silences the turn; held steers
+            // survive it and ride the next send.
+            const stopLaneClis = new Set<CliKind>([stopCli, stopBrain.cli]);
+            for (const live of sessionsForLogKey(laneLogKey(stopBrain.cli, stopRepo, stopChatId))) {
+              stopLaneClis.add(live.cli);
+            }
+            for (const laneCli of stopLaneClis) holdLaneSteers(laneGenKey(laneCli, stopRepo, stopChatId), stopRepo, stopChatId);
+            // Every lane whose steers were captured must abort its originals, or a
+            // captured steer would also be delivered by the handler that still owns it.
+            for (const laneCli of stopLaneClis) bumpLaneGen(laneCli, stopRepo, stopChatId);
+            detachCurrentSession();
+            let stopFailure: unknown = null;
+            try {
+              await capStopWork(Promise.all([interruptSession({ cli: stopCli, repoPath: stopRepo, chatId: stopChatId }), stopComputersForOwner(stopChatId)]));
+            } catch (error) {
+              stopFailure = error;
+            }
+            safeSend({ type: 'turnEnd' });
+            // Stop ends the turn, never what the user already queued. Hand each
+            // held steer back to the steer path, oldest first, so it runs as the
+            // next turn with its images, keeps its clientMsgId (the echo clears
+            // its bubble), and either delivers or is rejected back to the sender
+            // like any other steer. Runs even when the interrupt itself failed.
+            const heldForRequeue = takeHeldSteers(stopRepo, stopChatId);
+            if (heldForRequeue.length > 0) {
+              console.warn(`[chat ws#${wsId}] stop: re-queueing ${heldForRequeue.length} held steer(s) as the next turn`);
+              // emit() runs each steer handler synchronously up to enqueueThreadSteer
+              // (no await before it), so the replay keeps the held order. It also
+              // does not depend on this socket staying open: accepted guidance
+              // survives a close by design and its echo reaches whichever socket binds.
+              // A steer the provider already accepted (its echo is in the durable log)
+              // raced Stop; replaying it would deliver the guidance twice.
+              const alreadyDelivered = new Set(recentDeliveredClientMsgIds(stopCli, stopRepo, stopChatId));
+              let receiptsOwed = false;
+              replayingStopSteers = true;
+              try {
+                for (const held of heldForRequeue) {
+                  requeuedSteers.add(held);
+                  if (held.clientMsgId && alreadyDelivered.has(held.clientMsgId)) {
+                    // The provider accepted it between detach and interrupt, so this
+                    // socket never saw the echo: hand it the receipt or the bubble
+                    // stays "Queued" forever.
+                    rememberDeliveredClientMsgId(held.clientMsgId);
+                    receiptsOwed = true;
+                    continue;
+                  }
+                  ws.emit('message', JSON.stringify({
+                    type: 'steer',
+                    cli: stopCli,
+                    repo: stopRepo,
+                    chatId: stopChatId,
+                    text: held.text,
+                    images: held.images,
+                    clientMsgId: held.clientMsgId,
+                    model: held.model,
+                    effort: held.effort,
+                    voice: held.voice,
+                    selectionRevision: held.selectionRevision,
+                  }));
+                }
+              } finally {
+                replayingStopSteers = false;
               }
-              ws.emit('message', JSON.stringify({
-                type: 'steer',
-                cli: stopCli,
-                repo: stopRepo,
-                chatId: stopChatId,
-                text: held.text,
-                images: held.images,
-                clientMsgId: held.clientMsgId,
-                model: held.model,
-                effort: held.effort,
-                voice: held.voice,
-                selectionRevision: held.selectionRevision,
-              }));
+              if (receiptsOwed) {
+                safeSend({ type: 'working', busy: busy || holdKeepalive > 0, activeCli: cliKind, queuedClientMsgIds: pendingSteerIds(cliKind, repoPath, chatId), deliveredClientMsgIds });
+              }
             }
-            if (receiptsOwed) {
-              safeSend({ type: 'working', busy: busy || holdKeepalive > 0, activeCli: cliKind, queuedClientMsgIds: pendingSteerIds(cliKind, repoPath, chatId), deliveredClientMsgIds });
-            }
+            if (stopFailure) throw stopFailure;
+          } finally {
+            if (stopBarriers.get(stopScope) === stopGate) stopBarriers.delete(stopScope);
+            releaseStopGate();
           }
-          if (stopFailure) throw stopFailure;
           return;
         }
 
@@ -1484,6 +1521,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
         }
 
         if (msg.type === 'steer') {
+          // Wait out a Stop still ending this thread's turn (its own replay skips this).
+          if (!replayingStopSteers) {
+            const gateScope = heldScopeKey(msg.repo, normalizeChatId(msg.chatId));
+            for (let gate = stopBarriers.get(gateScope); gate; gate = stopBarriers.get(gateScope)) await gate;
+          }
           if (chatQuiesced) {
             safeSend({ type: 'error', code: 'STEER_REJECTED', clientMsgId: msg.clientMsgId, message: 'TARDIS is regenerating — try again in a few seconds.' });
             safeSend({ type: 'turnEnd' });
