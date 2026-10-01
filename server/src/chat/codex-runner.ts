@@ -751,7 +751,8 @@ export class CodexSession {
         '-c', `mcp_servers.rivendell-browser.args=${JSON.stringify([browserMcpEntry])}`,
       );
     }
-    browserMcpArgs.push(...localMcpCodexArgs(agentForChatId(this.chatId)?.name ?? 'Teammate'), ...officeMcpCodexArgs());
+    const laneName = agentForChatId(this.chatId)?.name;
+    browserMcpArgs.push(...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName }), ...officeMcpCodexArgs());
     const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
 
     // Wait for OneDrive to release its sync lock on .codex/config.toml so

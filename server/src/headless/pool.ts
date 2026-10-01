@@ -49,6 +49,8 @@ interface Lane {
   current: string;
   lastUsed: number;
   busy: number;
+  /** Internal seeding pages being opened (session import); they are exempt from the user tab cap. */
+  seeding: number;
   closing: boolean;
   dialogs: string[];
   logs: string[];
@@ -150,15 +152,18 @@ async function stashSessionCookies(lane: Lane): Promise<void> {
 
 async function restoreSessionCookies(ctx: BrowserContext, slug: string): Promise<void> {
   const file = sessionCookieFile(slug);
+  let cookies: Parameters<BrowserContext['addCookies']>[0];
+  try { cookies = JSON.parse(await readFile(file, 'utf8')); } catch { return; } // no stash, or unreadable: start without it
   try {
-    const cookies = JSON.parse(await readFile(file, 'utf8')) as Parameters<BrowserContext['addCookies']>[0];
     // Restored cookies become persistent ones in the profile, so the stash has done its job; leaving it would let an
     // old copy overwrite a newer login after a crash. A cookie the profile already holds is newer than the stash.
-    const held = new Set((await ctx.cookies()).map((c) => `${c.domain}\t${c.path}\t${c.name}`));
+    // Partitioned (CHIPS) cookies share domain, path and name across partitions, so the partition is part of the key.
+    const key = (c: { domain: string; path: string; name: string; partitionKey?: string }) => `${c.domain}\t${c.path}\t${c.name}\t${c.partitionKey ?? ''}`;
+    const held = new Set((await ctx.cookies()).map(key));
     const expires = Math.floor(Date.now() / 1000) + SESSION_COOKIE_SECONDS;
-    const fresh = cookies.filter((c) => !held.has(`${c.domain}\t${c.path}\t${c.name}`));
+    const fresh = cookies.filter((c) => !held.has(key(c as { domain: string; path: string; name: string; partitionKey?: string })));
     if (fresh.length) await ctx.addCookies(fresh.map((c) => ({ ...c, expires })));
-  } catch { /* no stash, or unreadable: start without it */ }
+  } catch { return; } // restoration failed (for example Chromium exited): keep the stash for the next launch
   await rm(file, { force: true });
 }
 
@@ -187,11 +192,11 @@ async function launchLane(agent: string, slug: string): Promise<Lane> {
   await restoreSessionCookies(ctx, slug);
   ctx.setDefaultTimeout(15_000);
   ctx.setDefaultNavigationTimeout(30_000);
-  const lane: Lane = { agent, slug, ctx, tabs: new Map(), ids: new WeakMap(), seq: 0, current: '', lastUsed: Date.now(), busy: 0, closing: false, dialogs: [], logs: [] };
+  const lane: Lane = { agent, slug, ctx, tabs: new Map(), ids: new WeakMap(), seq: 0, current: '', lastUsed: Date.now(), busy: 0, seeding: 0, closing: false, dialogs: [], logs: [] };
   for (const page of ctx.pages()) registerPage(lane, page);
   ctx.on('page', (page) => {
     // A page can open windows without limit; past the cap they are closed on arrival.
-    if (!lane.ids.has(page) && lane.tabs.size >= MAX_TABS) { void page.close().catch(() => {}); return; }
+    if (!lane.ids.has(page) && lane.tabs.size >= MAX_TABS && lane.seeding === 0) { void page.close().catch(() => {}); return; }
     registerPage(lane, page);
   });
   ctx.on('close', () => { lane.closing = true; if (lanes.get(slug) === lane) lanes.delete(slug); });
@@ -310,7 +315,10 @@ function poolStatus(): HeadlessResult {
 }
 
 async function seedLocalStorage(lane: Lane, origin: string, items: [string, string][]): Promise<void> {
-  const page = await lane.ctx.newPage();
+  // Bounded internal page: closed in the finally below, so it may briefly sit above the tab cap.
+  lane.seeding++;
+  let page: Page;
+  try { page = await lane.ctx.newPage(); } finally { lane.seeding--; }
   try {
     await page.route('**/*', (route) => (route.request().url().startsWith(`${origin}/__rivendell_seed`)
       ? route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>seed</title>' })
