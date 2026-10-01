@@ -140,8 +140,13 @@ export function isParkedHigh(todo: DeskTodo, cards: DeskCard[]): boolean {
  *  highs rank as normal, and items older than 24h only count in "+N more". */
 export function digestPayload(open: DeskTodo[], baseUrl: string, cards: DeskCard[] = [], nowMs: number = Date.now()): PushPayload {
   const rank = (t: DeskTodo) => Number(t.priority === 'high' && !isParkedHigh(t, cards));
-  const ranked = [...open].sort((a, b) => rank(b) - rank(a) || Date.parse(a.createdAt) - Date.parse(b.createdAt));
-  const shown = ranked.filter((t) => nowMs - Date.parse(t.createdAt) <= DIGEST_LINE_MAX_AGE_MS).slice(0, 3);
+  // A missing or unreadable createdAt is not known to be old: it counts as new.
+  const created = (t: DeskTodo) => {
+    const ms = Date.parse(t.createdAt);
+    return Number.isFinite(ms) ? ms : nowMs;
+  };
+  const ranked = [...open].sort((a, b) => rank(b) - rank(a) || created(a) - created(b));
+  const shown = ranked.filter((t) => nowMs - created(t) <= DIGEST_LINE_MAX_AGE_MS).slice(0, 3);
   const lines = [`${ranked.length} open:`, ...shown.map((t) => `- ${clipText(t.title, 120)}`)];
   if (ranked.length > shown.length) lines.push(`+${ranked.length - shown.length} more`);
   return { title: 'Needs you', message: lines.join('\n'), priority: 0, ...deskLink(baseUrl, 'open') };
@@ -560,19 +565,26 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
         log(`[desk-notify] held ${job.what}: outside the allowed hours now (${clockNow.label})`);
         continue;
       }
-      const payload = job.build(await read());
-      if (!payload) {
-        job.onGone?.();
-        dirty = true;
-        log(`[desk-notify] skipped ${job.what}: nothing needs it any more`);
-        continue;
-      }
+      const prior = { tries: job.send.tries, lastTryAt: job.send.lastTryAt };
       job.send.tries += 1;
       job.send.lastTryAt = stamp;
       job.send.sendingAt = stamp;
       // The claim is on disk before the network call: a crash mid-send is
       // counted as sent on restart, never repeated.
       await save(st);
+      // The fresh read comes after the claim write, so nothing slow sits between
+      // the last check (answered, lowered, moved to Pipeline) and the send.
+      const payload = job.build(await read());
+      if (!payload) {
+        job.send.tries = prior.tries;
+        job.send.lastTryAt = prior.lastTryAt;
+        delete job.send.sendingAt;
+        job.onGone?.();
+        dirty = true;
+        await save(st);
+        log(`[desk-notify] skipped ${job.what}: nothing needs it any more`);
+        continue;
+      }
       const result = await opts.send(payload);
       delete job.send.sendingAt;
       if (result.ok) {
