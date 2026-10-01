@@ -122,6 +122,9 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
   let voiceSplitPrefix = '';
   let afterAutomation = false;
   const reactionState = new Map<string, { targetSeq: number; from: string; emoji: string }>();
+  /** A retried team delivery re-echoes the same peer_message (one deliveryId)
+   *  into the log; only the first copy is conversation. */
+  const seenPeerDeliveries = new Set<string>();
 
   const takeStreamTail = (): string => {
     const chunks: string[] = [];
@@ -209,6 +212,10 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
     }
 
     if (t === 'peer_message') {
+      if (typeof inner.deliveryId === 'string' && inner.deliveryId) {
+        if (seenPeerDeliveries.has(inner.deliveryId)) continue;
+        seenPeerDeliveries.add(inner.deliveryId);
+      }
       flushAssistant();
       if (isAutomationPeerEvent(se.ev) || (typeof inner.text === 'string' && isRoutinePromptText(inner.text))) {
         afterAutomation = true;
