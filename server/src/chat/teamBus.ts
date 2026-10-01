@@ -79,6 +79,7 @@ function rateOk(pairKey: string): { ok: boolean; reason?: string } {
 // Serialize the handoffs, then wait for the natural turn boundary rather than
 // making every sender poll and retry. Routines keep their separate defer policy.
 const RECIPIENT_IDLE_WAIT_MS = 30 * 60_000;
+const DELIVERY_REFUSAL_BACKOFF_MAX_MS = 30_000;
 const ASYNC_RETRY_MS = 15_000;
 const recipientDeliveryTails = new Map<string, Promise<void>>();
 const synchronousReplyEdges = new Map<string, number>();
@@ -346,6 +347,40 @@ function waitForSessionProgress(
   });
 }
 
+/** A fixed pause after a provider refusal. Unlike waitForSessionProgress it is not
+ *  cut short by streaming output from the run that caused the refusal; only the
+ *  turn ending, the session closing or an abort end it early. */
+function waitForRefusalPause(
+  session: SessionLike,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    let finished = false;
+    let unsubscribe: () => void = () => {};
+    const done = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      unsubscribe();
+      resolve();
+    };
+    const timer = setTimeout(done, Math.max(1, timeoutMs));
+    timer.unref?.();
+    signal?.addEventListener('abort', done, { once: true });
+    try {
+      unsubscribe = session.subscribe((se) => {
+        if (se.ev?.type === 'turnEnd' || se.ev?.type === 'closed') done();
+      }, session.latestSeq(), false);
+      if (finished) unsubscribe();
+    } catch {
+      done();
+    }
+  });
+}
+
 async function getRecipientSessionForDelivery(
   agent: Agent,
   deadline: number,
@@ -557,6 +592,7 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
   const deliveryId = delivery.deliveryId ?? randomUUID();
   const deadline = Date.now() + RECIPIENT_IDLE_WAIT_MS;
   let waited = false;
+  let providerRefusals = 0;
   const replyInstruction = from.role === 'voice'
     ? '(This is the user continuing your own voice conversation. Reply in this thread. Do not team_message Voice. Ending the audio call does not cancel this work. External side effects remain draft/review-first. The call already has a spoken line. Do not write a second, different Hall answer unless the caller needs a result, blocker, or question they cannot hear.)'
     : from.role === 'desk'
@@ -688,12 +724,20 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
       // A failed idle admission may report neither busy nor steerable; without
       // this bounded progress wait it can spin in microtasks and repeatedly
       // spawn/claim the same recipient for the full 30-minute deadline.
-      await waitForSessionProgress(
-        session,
-        session.latestSeq(),
-        Math.min(250, Math.max(1, deadline - Date.now())),
-        signal,
-      );
+      // When the provider refused a prompt we had already echoed, every retry
+      // writes another echo plus an error into the thread's event log, so those
+      // back off (250ms doubling to 30s) instead of retrying four times a second.
+      if (admittedSeq !== null) providerRefusals++;
+      const remaining = Math.max(1, deadline - Date.now());
+      if (providerRefusals > 0) {
+        await waitForRefusalPause(
+          session,
+          Math.min(DELIVERY_REFUSAL_BACKOFF_MAX_MS, 250 * 2 ** Math.min(providerRefusals - 1, 8), remaining),
+          signal,
+        );
+      } else {
+        await waitForSessionProgress(session, session.latestSeq(), Math.min(250, remaining), signal);
+      }
       continue;
     }
 

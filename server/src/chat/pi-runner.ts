@@ -133,6 +133,14 @@ export class PiSession {
   private disposed = false;
   private initSeen = false;
   private turnStartedAt: number | null = null;
+  /** Bumped whenever a turn opens, so a late failure can tell its turn from a newer one. */
+  private turnSeq = 0;
+  /** True once pi has started a run for the open turn. */
+  private turnRunSeen = false;
+  /** The turn's message went to pi as a steer behind a run we did not start
+   *  ('pending' while the command is in flight, 'queued' once pi took it). The
+   *  agent_end still to come ends that older run, not the turn carrying the steer. */
+  private steerFallback: 'off' | 'pending' | 'queued' = 'off';
   private automationTurn = false;
   private activeToolIds = new Set<string>();
   private seedWindowOnNextTurn = false;
@@ -306,6 +314,24 @@ export class PiSession {
         this.turnUsage = { input: 0, output: 0, cacheRead: 0, cost: 0 };
         this.turnFailed = null;
         this.lastAssistantText = '';
+        // Pi can start a run nobody here asked for: the auto-retry after a failed
+        // attempt, or a queued steer picked up after agent_end. With the books
+        // saying idle, that run was invisible (no busy, no steer, no stop) and
+        // the next prompt bounced with "already processing". Adopt it; the
+        // run's own agent_end closes the turn through the normal path.
+        this.steerFallback = 'off';
+        this.turnRunSeen = true;
+        if (this.turnStartedAt === null && !this.disposed) {
+          this.turnStartedAt = Date.now();
+          this.turnSeq++;
+          this.automationTurn = false;
+          this.activeToolIds.clear();
+          this.terminalNoticeEmitted = false;
+          this.turnOrigin = emptyTurnOrigin();
+          this.turnIsContinuation = false;
+          this.replyWatch.reset();
+          this.emit({ type: 'turnStart' });
+        }
         return;
       }
       case 'message_update': {
@@ -402,6 +428,19 @@ export class PiSession {
         return;
       }
       case 'agent_end': {
+        // Ends the run that was already going when our steer queued behind it;
+        // the steer's own run (agent_start) or the settle below closes the turn.
+        if (this.steerFallback !== 'off') return;
+        this.finishTurn();
+        return;
+      }
+      case 'agent_settled': {
+        // Pi's final word: nothing is running, retrying or compacting any more.
+        // agent_end alone is only a run boundary (a retry, a compaction or a
+        // queued steer can follow it), so this is the backstop that keeps our books
+        // from staying busy over an idle pi. A settle from before this turn's run
+        // (or before pi took the fallback steer) says nothing about the turn.
+        if (this.steerFallback === 'pending' || (this.steerFallback === 'off' && !this.turnRunSeen)) return;
         this.finishTurn();
         return;
       }
@@ -479,6 +518,8 @@ export class PiSession {
     this.emit({ type: 'event', event: { type: 'result', subtype: failed ? 'error' : 'success', is_error: Boolean(failed), ...(failed ? {} : { result: this.lastAssistantText }), session_id: this.piSessionId, total_cost_usd: this.turnUsage.cost, usage: { input_tokens: this.turnUsage.input, output_tokens: this.turnUsage.output, cache_read_input_tokens: this.turnUsage.cacheRead } } });
     this.lastAssistantText = '';
     this.turnStartedAt = null;
+    this.turnRunSeen = false;
+    this.steerFallback = 'off';
     this.automationTurn = false;
     this.activeToolIds.clear();
     this.emit({ type: 'turnEnd', sessionId: this.piSessionId });
@@ -607,6 +648,9 @@ export class PiSession {
     const automationRequest = continuing ? continuing.origin.automation : opts.peerFromRole === 'automation';
     if (startsNewTurn) {
       this.turnStartedAt = Date.now();
+      this.turnSeq++;
+      this.turnRunSeen = false;
+      this.steerFallback = 'off';
       this.automationTurn = automationRequest;
       this.activeToolIds.clear();
       this.terminalNoticeEmitted = false;
@@ -617,9 +661,12 @@ export class PiSession {
       this.turnIsContinuation = Boolean(continuing);
       this.replyWatch.reset();
     }
+    const openedSeq = this.turnSeq;
     const abandon = () => {
-      if (!startsNewTurn || this.turnStartedAt === null) return;
-      this.turnStartedAt = null; this.automationTurn = false; this.activeToolIds.clear();
+      // Only the turn this call opened: a run pi started meanwhile was adopted as
+      // a newer turn that is not ours to clear.
+      if (!startsNewTurn || this.turnStartedAt === null || this.turnSeq !== openedSeq) return;
+      this.turnStartedAt = null; this.turnRunSeen = false; this.steerFallback = 'off'; this.automationTurn = false; this.activeToolIds.clear();
       if (!this.disposed) this.emit({ type: 'turnEnd', sessionId: this.piSessionId });
     };
     const historyThroughSeq = this.latestSeq();
@@ -682,7 +729,21 @@ export class PiSession {
     const command = startsNewTurn
       ? { type: 'prompt', message, ...(piImages?.length ? { images: piImages } : {}) }
       : { type: 'steer', message, ...(piImages?.length ? { images: piImages } : {}) };
-    const response = await this.rpc(command);
+    let response = await this.rpc(command);
+    // Our books said idle but pi is mid-run (a retry delay, a post-run compaction,
+    // a run we missed). Failing here made every caller retry on the spot, so one
+    // desynced lane burned its event log on rejections. Keep the turn open and send
+    // the message again as a prompt that queues as a steer: pi queues it if the run
+    // is still going and just starts it if the run ended in the gap, so nothing is
+    // stranded. The status and Stop work again, and the turn closes on pi's own
+    // agent_end / agent_settled.
+    if (!response.success && startsNewTurn && /already processing/i.test(response.error ?? '')) {
+      console.warn(`[chat ${this.cli}/pi] prompt bounced as already processing while idle; adopting the run and steering key=${this.key}`);
+      if (this.turnSeq === openedSeq && this.turnStartedAt !== null) this.steerFallback = 'pending';
+      response = await this.rpc({ type: 'prompt', message, ...(piImages?.length ? { images: piImages } : {}), streamingBehavior: 'steer' });
+      // agent_start may already have run (and reset this) if pi started the prompt itself.
+      if (this.steerFallback === 'pending') this.steerFallback = response.success && this.turnSeq === openedSeq && this.turnStartedAt !== null ? 'queued' : 'off';
+    }
     if (!response.success) {
       if (wantSeed) this.seedWindowOnNextTurn = true;
       abandon();
