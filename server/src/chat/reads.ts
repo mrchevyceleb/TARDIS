@@ -191,9 +191,15 @@ export function agentUnread(agent: Agent): number {
       const pastCursor = i > cursorIdx;
       // Streamed text arrives as `stream_event` deltas, and eventInner() unwraps those to the bare delta, so read
       // the stored frame itself. A subagent's stream is private work, like its other frames.
-      const outer = ((raw as { ev?: unknown } | null)?.ev ?? raw) as Record<string, unknown> | null;
+      // Runners persist their frames inside a transport envelope ({type:'event', event:{type:'stream_event', ...}}),
+      // Claude's own frames arrive bare, so unwrap one level before looking at the type.
+      let outer = ((raw as { ev?: unknown } | null)?.ev ?? raw) as Record<string, unknown> | null;
+      const envelopeParent = outer && outer.type === 'event' ? outer.parent_tool_use_id : undefined;
+      if (outer && outer.type === 'event' && outer.event && typeof outer.event === 'object') {
+        outer = outer.event as Record<string, unknown>;
+      }
       if (outer && outer.type === 'stream_event') {
-        if (outer.parent_tool_use_id) continue;
+        if (outer.parent_tool_use_id || envelopeParent) continue;
         const streamed = finishedStreamText(outer.event as Parameters<typeof finishedStreamText>[0], openStream);
         if (streamed === null || !streamed.trim()) continue;
         if (afterAutomation) {
