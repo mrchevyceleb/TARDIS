@@ -77,6 +77,8 @@ function isAutomationPeer(block: ChatBlock): block is Extract<ChatBlock, { kind:
   // new trigger to suppress on the next filter/storage pass.
   if (role === 'automation-result') return false;
   if (role === 'automation') return true;
+  // Matt's own Desk or voice message is never a routine, even when he quotes a routine prompt or the sender name starts with the gear.
+  if (role === 'desk' || role === 'voice') return false;
   if (block.from.trim().startsWith(GEAR)) return true;
   return isRoutinePromptText(block.text);
 }

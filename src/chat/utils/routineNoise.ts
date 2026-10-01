@@ -59,6 +59,8 @@ export function isAutomationPeer(from?: string, fromRole?: string, text?: string
   const role = (fromRole ?? '').trim().toLowerCase();
   if (role === 'automation-result') return false;
   if (role === 'automation') return true;
+  // Matt's own Desk or voice message is never a routine, even when he quotes a routine prompt or the sender name starts with the gear.
+  if (role === 'desk' || role === 'voice') return false;
   if ((from ?? '').trim().startsWith(GEAR)) return true;
   if (text && isRoutinePromptText(text)) return true;
   return false;
