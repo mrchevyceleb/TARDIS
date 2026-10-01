@@ -476,6 +476,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         kind: 'text', id: id(), text: '', ...eventTime(ev),
         turnId, peerId: turnIdRef.peerId, cbIndex: idx, open: true,
         presentation: cb.phase === 'commentary' ? 'update' : cb.phase === 'final_answer' ? 'answer' : undefined,
+        ...(cb.phase === 'commentary' ? { commentary: true } : {}),
         seq: typeof ev.seq === 'number' ? ev.seq : undefined,
       };
       // The message has its own text, so a held thinking summary is not the reply.
