@@ -78,6 +78,8 @@ function isAutomationPeer(block: ChatBlock): block is Extract<ChatBlock, { kind:
   if (role === 'automation-result') return false;
   if (role === 'automation') return true;
   if (block.from.trim().startsWith(GEAR)) return true;
+  // Matt's own Desk or voice message is never a routine, even when he quotes a routine prompt.
+  if (role === 'desk' || role === 'voice') return false;
   return isRoutinePromptText(block.text);
 }
 
