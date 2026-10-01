@@ -17,6 +17,7 @@ import {
   eventTexts,
   isAutomationPeerEvent,
   isJobResultPeerEvent,
+  isPersonPeerEvent,
   isTeammatePeerEvent,
   isNoopToken,
   isQuietRoutineReply,
@@ -252,8 +253,9 @@ export function agentUnread(agent: Agent): number {
         continue;
       }
       if (t === 'peer_message' && isAutomationPeerEvent(raw)) {
-        // A routine steered into a teammate or job turn does not change who owns it.
-        if (turnHasOrigin && silentTurn) continue;
+        // A routine steered into a turn that already has a first message does not change who owns it, and the turn
+        // keeps its one badge.
+        if (turnHasOrigin) continue;
         flushAuto();
         turnCounted = false;
         silentTurn = false;
@@ -304,12 +306,15 @@ export function agentUnread(agent: Agent): number {
         continue;
       }
       if (t === '_user_echo' || t === 'user' || t === 'peer_message') {
+        // A harness-injected user message (the post-compaction summary) is not the person speaking, so it changes
+        // nothing about the turn: no flush, no recount, no reopened silence.
+        if (t === 'user' && eventInner(raw)?.isSynthetic === true) continue;
+        // A teammate or other non-person peer steered into a turn that already has an origin does not change who
+        // owns it. Only the person's own Desk or voice message reopens a turn mid-flight.
+        if (t === 'peer_message' && turnHasOrigin && !isPersonPeerEvent(raw)) continue;
         flushAuto();
         turnCounted = false;
-        // A harness-injected user message (the post-compaction summary) is not the person speaking, so it must not
-        // reopen a silent turn.
-        if (t === 'user' && eventInner(raw)?.isSynthetic === true) continue;
-        if (!(t === 'peer_message' && turnHasOrigin)) silentTurn = isTeammatePeerEvent(raw);
+        silentTurn = isTeammatePeerEvent(raw);
         turnHasOrigin = true;
         carriedSilent = false;
         continue;

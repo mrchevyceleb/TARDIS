@@ -148,6 +148,8 @@ export function isAutomationPeerEvent(raw: unknown): boolean {
   const from = typeof inner.from === 'string' ? inner.from : '';
   if (fromRole.trim().toLowerCase() === 'automation') return true;
   if (from.trim().startsWith(GEAR)) return true;
+  // An explicit role is evidence of who sent it; the text heuristic is only for a sender with no role.
+  if (fromRole.trim()) return false;
   return isRoutinePromptText(eventText(raw));
 }
 
@@ -163,10 +165,17 @@ export function isJobResultPeerEvent(raw: unknown): boolean {
  *  or voice message). The turn it starts is answered to that teammate, so its replies are never waiting on the
  *  person. A missing role is not evidence of a teammate, so it keeps badging as before. */
 export function isTeammatePeerEvent(raw: unknown): boolean {
-  if (eventType(raw) !== 'peer_message' || isAutomationPeerEvent(raw)) return false;
+  if (eventType(raw) !== 'peer_message' || isAutomationPeerEvent(raw) || isPersonPeerEvent(raw)) return false;
+  const role = eventInner(raw)?.fromRole;
+  return typeof role === 'string' && role.trim() !== '';
+}
+
+/** The person's own Desk answer or voice ask, which TARDIS delivers as a peer message. It is the person speaking. */
+export function isPersonPeerEvent(raw: unknown): boolean {
+  if (eventType(raw) !== 'peer_message') return false;
   const role = eventInner(raw)?.fromRole;
   const fromRole = typeof role === 'string' ? role.trim().toLowerCase() : '';
-  return fromRole !== '' && fromRole !== 'voice' && fromRole !== 'desk';
+  return fromRole === 'desk' || fromRole === 'voice';
 }
 
 /** Grok/Claude persist tool results as `user` events. Those are not a human
