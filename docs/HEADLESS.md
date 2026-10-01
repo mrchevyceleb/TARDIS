@@ -3,7 +3,7 @@
 Web-only work should not queue behind whoever holds the desktop. Every lane
 gets its own headless Chromium on the TARDIS host, running in parallel.
 
-## Routing rule (also in every lane's computer block)
+## Routing rule (injected into every lane's computer block each turn)
 
 Headless first for web pages, previews, dashboards and form checks. Use the
 desktop (`computer_*`) only for native apps, sites that block headless (Google
