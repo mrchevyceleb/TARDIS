@@ -140,6 +140,10 @@ export type ChatBlock =
       /** Provider-tagged tool-bound update vs completed answer. This is a
        * presentation distinction, never a reason to hide user-facing text. */
       presentation?: 'update' | 'answer';
+      /** The provider tagged this message as running commentary (Codex
+       * `phase: 'commentary'`). The feed folds it into a dim note once the turn
+       * has moved on, but never hides it. Unset for Claude and reply_now text. */
+      commentary?: boolean;
       turnId?: string;
       /** Teammate message this response belongs to, when applicable. */
       peerId?: string;

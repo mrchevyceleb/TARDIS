@@ -376,6 +376,9 @@ function PeerMessageBubble({
   // A settled NO_UPDATE / empty reply renders nothing, so it must not leave an
   // empty timestamped bubble under the peer card.
   const publicResponseBlocks = publicPeerResponse(responseBlocks, streaming);
+  // Tool cards are not part of the public reply, but a tool call after a
+  // commentary message is what tells us the turn moved past it.
+  const noteIds = commentaryNoteIds(responseBlocks);
   const responseToolCount = responseBlocks.filter((item) => item.kind === 'tool').length;
   const responseBusy = peerResponseBusy(responseBlocks, responseActive);
   const role = routineResult
@@ -432,6 +435,7 @@ function PeerMessageBubble({
                 collapseSteps={collapseSteps}
                 pin={pin}
                 onReact={onReact}
+                noteIds={noteIds}
               />
             </section>
           ) : null}
@@ -447,6 +451,7 @@ function PeerMessageBubble({
           collapseSteps={collapseSteps}
           pin={pin}
           onReact={onReact}
+          noteIds={noteIds}
         />
       </div>
     ) : null}
@@ -732,6 +737,82 @@ function isAnswerProse(b: Extract<ChatBlock, { kind: 'text' }>): boolean {
   return !b.pending && t.length > 0 && !isProtocolNoopText(t);
 }
 
+/** Codex narrates between tool calls ("Checking the logs next...") as
+ *  commentary-phase messages. A commentary message folds into a dim note once
+ *  its turn has moved past it: a tool call, an answer, a doc or artifact card,
+ *  or a later commentary message came after it. The newest commentary message
+ *  with no answer after it in the feed stays a normal message: an interrupted
+ *  turn can end on narration plus a tool call, and presentation never decides
+ *  visibility (Riley lost-text bug, #77). */
+function commentaryNoteIds(blocks: readonly ChatBlock[]): Set<string> {
+  const ids = new Set<string>();
+  const moved = new Set<string>();
+  let answered = false;
+  let tailKept = false;
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const b = blocks[i];
+    if (b.kind !== 'text' && b.kind !== 'tool' && b.kind !== 'doc-link' && b.kind !== 'folder-link' && b.kind !== 'artifact') continue;
+    const turnId = (b as { turnId?: string }).turnId;
+    if (!turnId) continue;
+    if (b.kind === 'text' && b.commentary) {
+      if (b.thought || !isAnswerProse(b)) continue;
+      if (!answered && !tailKept) tailKept = true;
+      else if (moved.has(turnId)) ids.add(b.id);
+      moved.add(turnId);
+    } else if (b.kind === 'tool') {
+      moved.add(turnId);
+    } else if (b.kind !== 'text' || isAnswerProse(b)) {
+      moved.add(turnId);
+      answered = true;
+    }
+  }
+  return ids;
+}
+
+/** A progress note: dim, two lines. Long ones get a real button to read the
+ *  rest (keyboard and touch friendly); clicking the text works too. */
+function ProgressNote({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const [clipped, setClipped] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = bodyRef.current?.querySelector<HTMLElement>('.prose');
+    if (!el || open) return undefined;
+    const measure = () => setClipped(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text, open]);
+  const expandable = clipped || open;
+  return (
+    <div className={`bt-note${open ? ' open' : ''}`}>
+      <div
+        ref={bodyRef}
+        className="bt-note-body"
+        onClick={(e) => {
+          if (!expandable || (e.target as HTMLElement).closest('a')) return;
+          e.stopPropagation();
+          setOpen((value) => !value);
+        }}
+      >
+        <StreamText text={text} open={false} />
+      </div>
+      {expandable ? (
+        <button
+          type="button"
+          className="bt-note-toggle"
+          aria-expanded={open}
+          onClick={(e) => { e.stopPropagation(); setOpen((value) => !value); }}
+        >
+          {open ? 'less' : 'more'}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function visibleAssistantBlocks(blocks: AssistantBlock[], _collapseSteps: boolean): AssistantBlock[] {
   return blocks;
 }
@@ -824,6 +905,7 @@ function ElrondGroup({
   collapseSteps = false,
   pin,
   onReact,
+  noteIds,
 }: {
   blocks: AssistantBlock[];
   streaming: boolean;
@@ -833,12 +915,15 @@ function ElrondGroup({
   collapseSteps?: boolean;
   pin?: ThreadPin;
   onReact?: (targetSeq: number, emoji: string) => void;
+  /** Commentary messages the turn has moved past; they render as dim notes. */
+  noteIds?: ReadonlySet<string>;
 }) {
   const [acted, setActed] = useState(false);
   const visible = visibleAssistantBlocks(blocks, collapseSteps);
   if (!visible.length) return null;
   const first = visible[0];
-  const textBlocks = visible.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text');
+  // Notes are narration, not the reply: copy, pin and reactions target the rest.
+  const textBlocks = visible.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && !noteIds?.has(b.id));
   const isActivity = collapseSteps && textBlocks.length === 0;
   const copyText = () => {
     const src = textBlocks.filter(isAnswerProse);
@@ -888,6 +973,7 @@ function ElrondGroup({
             const open = showTextCaret(b, streaming);
             const display = isProtocolNoopText(b.text) ? '' : b.text;
             if (!open && !display) return null;
+            if (!open && noteIds?.has(b.id)) return <ProgressNote key={b.id} text={display} />;
             if (b.thought) return <div key={b.id} className="bt-thought"><StreamText text={display} open={false} /></div>;
             return <StreamText key={b.id} text={display} open={open} />;
           }
@@ -1127,6 +1213,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   }
 
   const lastElrondGroup = [...coalescedGroups].reverse().find((g) => g.type === 'elrond');
+  const noteIds = commentaryNoteIds(blocks);
   const nodes: Array<ReactNode | FoldItem> = [];
   let pendingAutomation = false;
   let hideThinking = false;
@@ -1228,7 +1315,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         ? { fold: true, key: g.block.id, from: g.block.from, ts: g.block.ts, tsApprox: g.block.tsApprox, node: bubble }
         : bubble);
     } else {
-      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} turnLive={streaming && g === lastElrondGroup} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} />);
+      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} turnLive={streaming && g === lastElrondGroup} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} noteIds={noteIds} />);
     }
   }
 

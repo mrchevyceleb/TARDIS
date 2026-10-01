@@ -1256,6 +1256,15 @@
 /* an agent's reply that came as a thinking summary: same place as a message, dimmed */
 .bt-thought { opacity: 0.66; }
 .bt-thought .prose { font-style: italic; }
+/* Codex narration the turn has moved past: dim, two lines, a button for the rest */
+.bt-note { opacity: 0.6; transition: opacity 0.15s ease; }
+.bt-note:hover, .bt-note:focus-within, .bt-note.open { opacity: 0.88; }
+.bt-note .prose { font-size: 0.92em; }
+.bt-note:not(.open) .bt-note-body { cursor: default; }
+.bt-note:not(.open) .prose { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.bt-note:not(.open) .prose > * { margin-top: 0; margin-bottom: 0; }
+.bt-note .prose pre, .bt-note .prose table { max-width: 100%; overflow-x: auto; }
+.bt-note-toggle { background: none; border: 0; padding: 2px 0 0; font: inherit; font-size: 0.8em; color: inherit; text-decoration: underline; cursor: pointer; }
 /* folded run of silent teammate handoffs: one dim line, cards inside on demand */
 .bt-peer-fold { margin: 6px 0; width: min(560px, 86%); max-width: 100%; animation: bt-msg-in 0.25s ease both; }
 .bt-peer-fold-toggle {
