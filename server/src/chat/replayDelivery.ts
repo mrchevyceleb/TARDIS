@@ -223,9 +223,12 @@ export const REPLAY_MAX_BYTES = 1_500_000;
 // in-memory window holds 2000 events, which a busy lane fills in hours; this is
 // raw file bytes, so it is generous next to the 1.5MB actually sent (most of a
 // long gap is streamed tool arguments and screenshots that replay collapses).
-// The scan is synchronous (~0.2s at 16MB on Riley's log, ~0.4s at 48MB), so
-// raising this stalls every socket on the loop; do it only with an async scan.
-export const REPLAY_CATCHUP_MAX_BYTES = 16 * 1024 * 1024;
+// The scan is asynchronous and yields every 1MB (about 12ms of parsing), so a
+// deep one costs the other sockets almost nothing (worst stall 27ms); it only
+// costs the resuming device the wait (about 0.5s for Riley's whole 95MB log).
+// 96MB reaches the whole hot log of the busiest lane, about four hours of it
+// while helpers run; older events live in the archive and are not replayed.
+export const REPLAY_CATCHUP_MAX_BYTES = 96 * 1024 * 1024;
 
 /** Whether a device resuming at `replaySince` is about to skip events. Either the
  *  log could not be read back to its cursor at all, or the byte/event clamp cut
@@ -276,11 +279,18 @@ function isUnreadHistory(inner: Record<string, any> | null | undefined): boolean
   return inner.type === 'system' && HISTORICAL_UNREAD_SYSTEM_SUBTYPES.includes(inner.subtype);
 }
 
+/** Whether a durable frame is history nobody reads. The catch-up scan drops
+ *  these as it parses, so a long scan keeps only the events a replay can use. */
+export function isUnreadHistoryFrame(ev: unknown): boolean {
+  const frame = ev as Record<string, any> | null;
+  return frame?.type === 'event' && isUnreadHistory(frame.event);
+}
+
 export function historicalDelivery<T extends { seq: number; ev: unknown }>(frame: T): T | null {
   const event = frame.ev as Record<string, any> | null;
   if (!event || typeof event !== 'object') return frame;
   if (['closed', 'turnStart'].includes(event.type)) return null;
-  if (event.type === 'event' && isUnreadHistory(event.event)) return null;
+  if (isUnreadHistoryFrame(event)) return null;
   // Keep where each historical turn ended, as an inert marker. Dropping it let
   // a device catching up glue separate turns into one bubble, so a later quiet
   // routine reply ("NO_UPDATE") hid a real report from an earlier turn.
