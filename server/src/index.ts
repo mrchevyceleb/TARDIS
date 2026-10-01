@@ -15,6 +15,8 @@ import { brainForAgent, cliForAgentEngine, ensureAgents, listAgents } from './ch
 import { resumeQueuedTeamDeliveries } from './chat/teamBus.ts';
 import { agentsRouter } from './routes/agents.ts';
 import { teamRouter } from './routes/team.ts';
+import { headlessRouter } from './routes/headless.ts';
+import { closeAllHeadlessLanes } from './headless/pool.ts';
 import { jobsRouter } from './routes/jobs.ts';
 import { routinesRouter } from './routes/routines.ts';
 import { messagePinsRouter } from './routes/messagePins.ts';
@@ -136,6 +138,7 @@ app.use('/api/devices', devicesRouter);
 app.use('/api/robots', robotsRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/team', teamRouter);
+app.use('/api/headless', headlessRouter);
 app.use('/api/jobs', jobsRouter);
 app.use('/api/routines', routinesRouter);
 app.use('/api/message-pins', messagePinsRouter);
@@ -309,8 +312,11 @@ const tearDown = (signal: NodeJS.Signals) => {
   stopChat();
   console.warn('[tardis] shutdown: sessions stopped, flushing logs');
   void (async () => {
+    // Close headless Chromium gracefully (not SIGKILL on exit) so fresh logins reach the profile.
+    const headlessClosed = closeAllHeadlessLanes().catch(() => {});
     // Everything is quiesced and sessions are dead — the chains are final.
     try { await flushAllEventChains(); } catch { /* best effort */ }
+    await Promise.race([headlessClosed, new Promise((resolve) => setTimeout(resolve, 1200))]);
     console.warn('[tardis] shutdown: logs flushed, closing http');
     shutdownXaiProxy();
     server.close(() => process.exit(0));

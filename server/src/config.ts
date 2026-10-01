@@ -39,6 +39,12 @@ export const DEVICE_MCP_SCRIPT = resolveServerScript(
   'device-mcp.mjs',
 );
 
+/** Per-lane headless Chromium tools (parallel to the shared desktop). */
+export const HEADLESS_MCP_SCRIPT = resolveServerScript(
+  process.env.RIVENDELL_HEADLESS_MCP,
+  'headless-mcp.mjs',
+);
+
 /** Codex app-server → exec-JSONL adapter. App-server is required for true
  * same-turn `turn/steer`; `codex exec` cannot accept a second prompt. */
 export const CODEX_APP_TURN_SCRIPT = resolveServerScript(

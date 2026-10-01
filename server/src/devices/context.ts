@@ -77,7 +77,7 @@ export function computerGuidance(chatId: string, label: string, human = true, sa
   const selected = computerTarget(chatId);
   return [
     '<rivendell-computer>',
-    'You HAVE full computer-use tools on every engine. For app, browser, administration and agent-management UI work, default to operating the real desktop with rivendell-device computer_* rather than telling the user to do the steps or opening an unrelated headless/cloud browser. Use shell/API tools when they are better for non-UI work.',
+    'You HAVE full computer-use tools on every engine. For native app, administration and agent-management UI work, default to operating the real desktop with rivendell-device computer_* rather than telling the user to do the steps. For web pages, previews, dashboards and form checks, go headless first with the rivendell-headless headless_* tools: every lane has its own parallel Chromium on the host with a persistent profile, so it never waits on whoever holds the desktop (headless_session import copies a site\'s login from the desktop browser). Use the desktop for a web task only when the site blocks headless (Google sign-in, Meta Ads), it needs MFA or a human handoff, or the person wants to watch. Use shell/API tools when they are better for non-UI work.',
     selected ? `The user explicitly selected device ${JSON.stringify(selected)} for this thread.` : configuredDefaultComputer()
       ? `The operator configured default desktop ${JSON.stringify(configuredDefaultComputer())}. Omit device on computer_start to use it. Never silently fall back to the local PC if it is offline.`
       : 'No default desktop is configured. List devices and identify the requested machine; ask only if the target is genuinely ambiguous.',
