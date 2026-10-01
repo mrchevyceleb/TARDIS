@@ -70,6 +70,15 @@ export function isModelEosToken(text: string): boolean {
   return MODEL_EOS_TOKENS.has(text.trim());
 }
 
+/** Strict no-op tokens the model is told to emit, mirroring the client's `isNoopToken`: exact NO_UPDATE / EOS,
+ *  or exact `quiet` / `quiet.`. "Quiet quitting is…" is prose and must still count. Empty is not a token. */
+export function isNoopToken(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (isExactNoUpdate(t) || isModelEosToken(t)) return true;
+  return /^quiet[.!?]*$/.test(normalizeReply(t));
+}
+
 /** Negated failure phrase ("no jobs failed", "nothing failed", "zero
  *  errors"): the negator must sit within 3 words of the failure word —
  *  "No updates because the API failed" is NOT negated. */
