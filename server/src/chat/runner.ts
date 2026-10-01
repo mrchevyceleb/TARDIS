@@ -1280,13 +1280,17 @@ class ClaudeSession {
       this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
       const requestId = `interrupt-${randomUUID()}`;
       try {
-        await new Promise<void>((resolve, reject) => {
+        const written = new Promise<void>((resolve, reject) => {
           this.child.stdin.write(JSON.stringify({
             type: 'control_request',
             request_id: requestId,
             request: { subtype: 'interrupt' },
           }) + '\n', (error) => error ? reject(error) : resolve());
         });
+        // A write that never calls back (blocked pipe, wedged child) must not outlive
+        // the 12s deadline above: once it passes, the process stop below runs.
+        written.catch(() => {});
+        await Promise.race([written, outcome]);
       } catch {
         finish('failed');
       }
