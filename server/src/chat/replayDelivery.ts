@@ -223,6 +223,8 @@ export const REPLAY_MAX_BYTES = 1_500_000;
 // in-memory window holds 2000 events, which a busy lane fills in hours; this is
 // raw file bytes, so it is generous next to the 1.5MB actually sent (most of a
 // long gap is streamed tool arguments and screenshots that replay collapses).
+// The scan is synchronous (~0.2s at 16MB on Riley's log, ~0.4s at 48MB), so
+// raising this stalls every socket on the loop; do it only with an async scan.
 export const REPLAY_CATCHUP_MAX_BYTES = 16 * 1024 * 1024;
 
 /** Whether a device resuming at `replaySince` is about to skip events. Either the
@@ -259,10 +261,26 @@ export function clampReplayWindow<T extends { seq: number; ev: unknown }>(
   return frames;
 }
 
+// Frames the transcript never reads once they are history. A subagent's own
+// frames (parent_tool_use_id) are dropped by the client reducer before they
+// touch a block, and nothing else consumes them; task progress and task
+// updates have no reader at all (the client tracks background work from
+// background_tasks_changed, task_started and task_notification only). On a
+// lane that runs helpers they were two thirds of the replay window, so a device
+// that had been away less than an hour was told to rebuild from a thin slice.
+const HISTORICAL_UNREAD_SYSTEM_SUBTYPES = ['task_progress', 'task_updated'];
+
+function isUnreadHistory(inner: Record<string, any> | null | undefined): boolean {
+  if (!inner || typeof inner !== 'object') return false;
+  if (inner.parent_tool_use_id) return true;
+  return inner.type === 'system' && HISTORICAL_UNREAD_SYSTEM_SUBTYPES.includes(inner.subtype);
+}
+
 export function historicalDelivery<T extends { seq: number; ev: unknown }>(frame: T): T | null {
   const event = frame.ev as Record<string, any> | null;
   if (!event || typeof event !== 'object') return frame;
   if (['closed', 'turnStart'].includes(event.type)) return null;
+  if (event.type === 'event' && isUnreadHistory(event.event)) return null;
   // Keep where each historical turn ended, as an inert marker. Dropping it let
   // a device catching up glue separate turns into one bubble, so a later quiet
   // routine reply ("NO_UPDATE") hid a real report from an earlier turn.
