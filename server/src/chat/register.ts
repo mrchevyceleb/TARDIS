@@ -499,24 +499,18 @@ export async function registerChat(app: express.Express, server: Server): Promis
   const heldClientIds = new Set<string>();
   // Threads with a Stop still ending their turn. Steers typed meanwhile wait here.
   const stopBarriers = new Map<string, Promise<void>>();
-  // A Stop whose interrupt never settles must not freeze the thread: waiters give
-  // up after this long and go on (order may slip, the thread stays usable).
-  const STOP_BARRIER_MAX_WAIT_MS = 20_000;
-  const raceStopGate = async (gate: Promise<void>, ms: number): Promise<void> => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([gate, new Promise<void>((resolve) => { timer = setTimeout(resolve, Math.max(0, ms)); })]);
-    clearTimeout(timer);
-  };
-  const awaitStopBarrier = async (scope: string): Promise<void> => {
-    const deadline = Date.now() + STOP_BARRIER_MAX_WAIT_MS;
-    for (let gate = stopBarriers.get(scope); gate; gate = stopBarriers.get(scope)) {
-      if (Date.now() >= deadline) {
-        console.warn('[chat] stop barrier still up after 20s; letting the steer through');
-        return;
-      }
-      await raceStopGate(gate, deadline - Date.now());
-    }
-  };
+  // An interrupt that never settles must not hold the barrier up forever. Stop gives
+  // up on it after this long (reported as a stop failure), still replays the held
+  // steers and releases the gate, so waiting steers always go in the order typed and
+  // two Stops never overlap. Waiters themselves never time out.
+  const STOP_INTERRUPT_MAX_WAIT_MS = 20_000;
+  const capStopWork = <T>(work: Promise<T>): Promise<T> => new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`stop did not finish within ${STOP_INTERRUPT_MAX_WAIT_MS / 1000}s`)), STOP_INTERRUPT_MAX_WAIT_MS);
+    work.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
   // Payloads Stop handed back to the steer path as fresh steers. The aborted
   // original must not reject or untrack the id its replacement now owns.
   const requeuedSteers = new WeakSet<HeldSteer>();
@@ -1419,7 +1413,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const priorStopGate = stopBarriers.get(stopScope);
           stopBarriers.set(stopScope, stopGate);
           try {
-            if (priorStopGate) await raceStopGate(priorStopGate, STOP_BARRIER_MAX_WAIT_MS);
+            if (priorStopGate) await priorStopGate;
             // Capture steers still queued on this lane BEFORE the generation
             // bump aborts their waiters. Stop silences the turn; held steers
             // survive it and ride the next send.
@@ -1434,7 +1428,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             detachCurrentSession();
             let stopFailure: unknown = null;
             try {
-              await Promise.all([interruptSession({ cli: stopCli, repoPath: stopRepo, chatId: stopChatId }), stopComputersForOwner(stopChatId)]);
+              await capStopWork(Promise.all([interruptSession({ cli: stopCli, repoPath: stopRepo, chatId: stopChatId }), stopComputersForOwner(stopChatId)]));
             } catch (error) {
               stopFailure = error;
             }
@@ -1529,7 +1523,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (msg.type === 'steer') {
           // Wait out a Stop still ending this thread's turn (its own replay skips this).
           if (!replayingStopSteers) {
-            await awaitStopBarrier(heldScopeKey(msg.repo, normalizeChatId(msg.chatId)));
+            const gateScope = heldScopeKey(msg.repo, normalizeChatId(msg.chatId));
+            for (let gate = stopBarriers.get(gateScope); gate; gate = stopBarriers.get(gateScope)) await gate;
           }
           if (chatQuiesced) {
             safeSend({ type: 'error', code: 'STEER_REJECTED', clientMsgId: msg.clientMsgId, message: 'TARDIS is regenerating — try again in a few seconds.' });
