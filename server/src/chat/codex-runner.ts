@@ -26,7 +26,7 @@ import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/acco
 import { resolveCodexBin, resolveCodexSelection } from './codex-models.ts';
 import { buildCodexAppServerArgs, shouldRetryEmptyCodexTurn } from './codex-args.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
-import { saveChatAttachments } from '../routes/chatAttachments.ts';
+import { chatAttachmentPath, saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { THREAD_VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, replyNudgeEvent, ReplyWatch } from './replyNudge.ts';
@@ -158,6 +158,10 @@ type CodexSendOptions = {
   signal?: AbortSignal;
   clientMsgId?: string;
   skipAttachments?: boolean;
+  /** A human steer's images ride the mid-turn channel as saved files named in
+   * the text (the channel itself is text only), so a picture never has to wait
+   * for the turn to end. Same contract as the Claude runner. */
+  imagesAsFiles?: boolean;
   /** Internal one-shot recovery after a truly empty, side-effect-free exit. */
   emptyRetryDepth?: number;
   suppressEcho?: boolean;
@@ -546,12 +550,27 @@ export class CodexSession {
       if (!this.canAcceptNativeHumanSteer()) {
         throw new Error('the active Codex steer channel closed before delivery');
       }
+      let steerText = text;
+      let steerAttachments: Array<{ id: string; mediaType: string }> = [];
       if (images?.length) {
-        throw new Error('Images cannot attach mid-turn. Wait for this turn to finish, then send them again.');
+        if (!opts.imagesAsFiles || opts.peerFrom) {
+          throw new Error('Images cannot attach mid-turn. Wait for this turn to finish, then send them again.');
+        }
+        steerAttachments = opts.skipAttachments ? [] : await saveChatAttachments(images);
+        if (opts.signal?.aborted) return;
+        // The save awaited: the turn may have ended meanwhile. The caller treats
+        // this as a closed window and sends the pictures as a normal new turn.
+        if (!this.canAcceptNativeHumanSteer()) {
+          throw new Error('the active Codex steer channel closed before delivery');
+        }
+        const paths = steerAttachments.map((a) => chatAttachmentPath(a.id));
+        steerText = paths.length
+          ? `${text}\n\n[Matt attached ${paths.length === 1 ? 'a screenshot' : `${paths.length} screenshots`}. Open ${paths.length === 1 ? 'it' : 'them'} with the view_image tool before replying: ${paths.join(', ')}]`
+          : `${text}\n\n[Matt attached ${images.length === 1 ? 'a screenshot' : 'screenshots'} that could not be saved. Ask him to resend if it matters.]`;
       }
 
       await this.sendNativeSteer(
-        text,
+        steerText,
         opts.peerDeliveryId ?? opts.clientMsgId ?? randomUUID(),
       );
       // Echo only after app-server accepted turn/steer. This is the same durable
@@ -581,8 +600,8 @@ export class CodexSession {
           event: {
             type: '_user_echo',
             text,
-            imageCount: 0,
-            attachments: [],
+            imageCount: images?.length ?? 0,
+            attachments: steerAttachments,
             clientMsgId: opts.clientMsgId,
             ts: Date.now(),
           },
