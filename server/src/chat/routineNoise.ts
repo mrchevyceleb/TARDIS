@@ -148,7 +148,34 @@ export function isAutomationPeerEvent(raw: unknown): boolean {
   const from = typeof inner.from === 'string' ? inner.from : '';
   if (fromRole.trim().toLowerCase() === 'automation') return true;
   if (from.trim().startsWith(GEAR)) return true;
+  // An explicit role is evidence of who sent it; the text heuristic is only for a sender with no role.
+  if (fromRole.trim()) return false;
   return isRoutinePromptText(eventText(raw));
+}
+
+/** The wake a finished background job or job watch delivers (`\u23f1 <name>`, from automation). It reports to the
+ *  agent, not to the person, so the turn it starts never badges. */
+export function isJobResultPeerEvent(raw: unknown): boolean {
+  if (eventType(raw) !== 'peer_message' || !isAutomationPeerEvent(raw)) return false;
+  const from = eventInner(raw)?.from;
+  return typeof from === 'string' && from.trim().startsWith('\u23f1');
+}
+
+/** A teammate's handoff: a peer message that names an agent role (not an automation, and not the person's own Desk
+ *  or voice message). The turn it starts is answered to that teammate, so its replies are never waiting on the
+ *  person. A missing role is not evidence of a teammate, so it keeps badging as before. */
+export function isTeammatePeerEvent(raw: unknown): boolean {
+  if (eventType(raw) !== 'peer_message' || isAutomationPeerEvent(raw) || isPersonPeerEvent(raw)) return false;
+  const role = eventInner(raw)?.fromRole;
+  return typeof role === 'string' && role.trim() !== '';
+}
+
+/** The person's own Desk answer or voice ask, which TARDIS delivers as a peer message. It is the person speaking. */
+export function isPersonPeerEvent(raw: unknown): boolean {
+  if (eventType(raw) !== 'peer_message') return false;
+  const role = eventInner(raw)?.fromRole;
+  const fromRole = typeof role === 'string' ? role.trim().toLowerCase() : '';
+  return fromRole === 'desk' || fromRole === 'voice';
 }
 
 /** Grok/Claude persist tool results as `user` events. Those are not a human
