@@ -3,10 +3,17 @@ export const CONTEXT_TOKEN_BUDGET = 200_000;
 /** Claude Code compacts natively at (window - 20k summary reserve - 13k buffer),
  *  so a 200k window would fire its lossy compact near 167k and starve our
  *  boundary rotation. Pad the window so the native compact only backstops a
- *  single long turn that runs past the budget. */
-export const CLAUDE_NATIVE_COMPACT_WINDOW = CONTEXT_TOKEN_BUDGET + 40_000;
-/** How long a boundary rotation may hold the lane waiting on the compaction. */
-export const ROTATION_COMPACT_DEADLINE_MS = 45_000;
+ *  single long turn that runs past the budget. The pad leaves about 27k tokens
+ *  between the budget and the native compact: a 7k gap let the first turn
+ *  after the budget cross the line and compact natively before a rotation ran. */
+export const CLAUDE_NATIVE_COMPACT_WINDOW = CONTEXT_TOKEN_BUDGET + 60_000;
+/** How long a boundary rotation may hold the lane for a backlog too big to carry
+ *  verbatim. The rolling compact takes a model minutes, so past this the lane
+ *  goes on and the rotation lands at a later turn end, once the compact is done. */
+export const ROTATION_COMPACT_DEADLINE_MS = 10_000;
+/** Turns the compact has not absorbed ride in the seed word for word, so a tail
+ *  up to this size rotates at once instead of waiting on a new summary. */
+export const ROTATION_VERBATIM_TAIL_CHARS = 96 * 1024;
 const contexts = new Map<string, number>();
 const rotations = new Map<string, number>();
 
