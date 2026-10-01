@@ -13,6 +13,7 @@ import { codexCatalogPayload, startCodexCatalog } from './codex-models.ts';
 import {
   clampReplayWindow,
   REPLAY_CATCHUP_MAX_BYTES,
+  isUnreadHistoryFrame,
   replayLeavesHole,
   collapseHistoricalToolArgs,
   historicalDelivery,
@@ -39,7 +40,7 @@ import {
   type AnySession,
   type CliKind,
 } from './runner.ts';
-import { durableUserEchoClientMsgId, flushEventLog, loadEventLogCatchUpSync, loadEventLogSync, recentUserEchoClientMsgIds, repairEventLogSequenceSync } from './event-log-store.ts';
+import { durableUserEchoClientMsgId, flushEventLog, loadEventLogCatchUp, loadEventLogSync, recentUserEchoClientMsgIds, repairEventLogSequenceSync } from './event-log-store.ts';
 import { isReactionEmoji, recordReaction } from './reactions.ts';
 import {
   activeCodexSessions,
@@ -649,6 +650,16 @@ export async function registerChat(app: express.Express, server: Server): Promis
 
     let sessionPromise: Promise<AnySession> | null = null;
     let unsubscribe: (() => void) | null = null;
+    // Bumped by every replaying bind, every cold replay and every detach. A
+    // catch-up scan is asynchronous, so a replay that finds the epoch moved (a
+    // newer replay, or Stop / Fresh Start detaching the lane) or the socket gone
+    // must not subscribe or dispatch: that history would land after newer frames,
+    // or on a retired session, and its subscription would leak.
+    let bindEpoch = 0;
+    // Replaying binds currently between their first await and their subscribe.
+    // The socket holds no subscription then, so external thread events must not
+    // be dispatched directly: the bind replays them from the session's tail.
+    let bindScansInFlight = 0;
     let busy = false;
     let cliKind: CliKind | null = null;
     let repoPath: string | null = null;
@@ -752,6 +763,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
     keepalive.unref();
 
     const detachCurrentSession = () => {
+      bindEpoch += 1;
       sessionPromise = null;
       busy = false;
       unsubscribe?.();
@@ -864,9 +876,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
     const stopExternalEvents = subscribeExternalThreadEvents((logKey, se) => {
       // Warm views receive this through their runner. A cold attach has no
       // process subscription, but must still show the call without a reload.
-      if (unsubscribe || !cliKind || !repoPath || laneLogKey(cliKind, repoPath, chatId) !== logKey) return;
+      if (unsubscribe || bindScansInFlight > 0 || !cliKind || !repoPath || laneLogKey(cliKind, repoPath, chatId) !== logKey) return;
       void helloBarrier.then(() => {
-        if (!unsubscribe && cliKind && repoPath && laneLogKey(cliKind, repoPath, chatId) === logKey) dispatch(se);
+        if (!unsubscribe && bindScansInFlight === 0 && cliKind && repoPath && laneLogKey(cliKind, repoPath, chatId) === logKey) dispatch(se);
       });
     });
 
@@ -876,8 +888,29 @@ export async function registerChat(app: express.Express, server: Server): Promis
       resetAt = 0,
       forceReset = false,
     ) => {
+      if (sinceSeq < 0 && !forceReset) return runBind(promise, sinceSeq, resetAt, forceReset);
+      bindScansInFlight += 1;
+      try {
+        return await runBind(promise, sinceSeq, resetAt, forceReset);
+      } finally {
+        bindScansInFlight -= 1;
+      }
+    };
+
+    const runBind = async (
+      promise: Promise<AnySession>,
+      sinceSeq: number,
+      resetAt: number,
+      forceReset: boolean,
+    ) => {
+      // Only replaying binds take part in the epoch. The epoch is reserved before
+      // any await, so call order decides which bind is newest, not whichever
+      // session promise happens to settle last.
+      const replays = sinceSeq >= 0 || forceReset;
+      const epoch = replays ? ++bindEpoch : bindEpoch;
       sessionPromise = promise;
       const session = await promise;
+      if (replays && epoch !== bindEpoch) return session;
       unsubscribe?.();
 
       // The durable thread, not an engine's potentially stale in-memory tail,
@@ -898,6 +931,18 @@ export async function registerChat(app: express.Express, server: Server): Promis
       const latest = Math.max(durableLatest, session.latestSeq());
       const resetReplay = forceReset || (sinceSeq >= 0 && sinceSeq > latest);
       const replaySince = resetReplay ? 0 : sinceSeq;
+      // Read what the window no longer holds BEFORE subscribing: the scan is
+      // asynchronous, and everything from subscribe to the last dispatch below
+      // must stay one synchronous stretch (live events buffer while it runs).
+      // Anything appended during the scan is above `latest` and also reaches
+      // this socket through the session's in-memory tail.
+      const catchUp = replays
+        ? await loadEventLogCatchUp(session.logKey, events, replaySince, REPLAY_CATCHUP_MAX_BYTES, {
+            keep: (ev) => !isUnreadHistoryFrame(ev),
+            aborted: () => epoch !== bindEpoch || ws.readyState !== ws.OPEN,
+          })
+        : { extra: [], reachedSince: true };
+      if (replays && (epoch !== bindEpoch || ws.readyState !== ws.OPEN)) return session;
       if (resetReplay) safeSend({ type: 'replayReset', latestSeq: latest, resetAt });
 
       const liveReplay: DispatchSeqEvent[] = [];
@@ -916,9 +961,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
       // so disk is authoritative through `latest` and only newer live events
       // may join the replay.
       const staleSessionThrough = repairedSessionThrough.get(session) ?? 0;
+      // A send that bound without a replay while the scan ran has subscribed
+      // already; drop it so this socket never holds two.
+      unsubscribe?.();
       unsubscribe = session.subscribe(listener, subscriptionReplayCursor(replaySince, staleSessionThrough));
       if (replaying) {
-        const catchUp = loadEventLogCatchUpSync(session.logKey, events, replaySince, REPLAY_CATCHUP_MAX_BYTES);
         const durableReplay: DispatchSeqEvent[] = [...catchUp.extra, ...events]
           .filter((event) => event.seq > replaySince)
           .map((event) => ({ seq: event.seq, ev: event.ev as any, at: event.at }));
@@ -965,6 +1012,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       resetAt = 0,
       forceReset = false,
     ): Promise<number> => {
+      const epoch = ++bindEpoch;
       const logKey = laneLogKey(cli, repo, id);
       await flushEventLog(logKey);
       const repair = repairEventLogSequenceSync(logKey);
@@ -976,9 +1024,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
       for (const event of events) if (event.seq > latest) latest = event.seq;
       const resetReplay = forceReset || (sinceSeq >= 0 && sinceSeq > latest);
       const replaySince = resetReplay ? 0 : sinceSeq;
+      const catchUp = replaySince >= 0
+        ? await loadEventLogCatchUp(logKey, events, replaySince, REPLAY_CATCHUP_MAX_BYTES, {
+            keep: (ev) => !isUnreadHistoryFrame(ev),
+            aborted: () => epoch !== bindEpoch || ws.readyState !== ws.OPEN,
+          })
+        : { extra: [], reachedSince: true };
+      if (replaySince >= 0 && (epoch !== bindEpoch || ws.readyState !== ws.OPEN)) return latest;
       if (resetReplay) safeSend({ type: 'replayReset', latestSeq: latest, resetAt });
       if (replaySince >= 0) {
-        const catchUp = loadEventLogCatchUpSync(logKey, events, replaySince, REPLAY_CATCHUP_MAX_BYTES);
         const pending: DispatchSeqEvent[] = [...catchUp.extra, ...events]
           .filter((event) => event.seq > replaySince)
           .sort((a, b) => a.seq - b.seq)

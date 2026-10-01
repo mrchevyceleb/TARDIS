@@ -1,4 +1,5 @@
-import { appendFile, mkdir, rm } from 'node:fs/promises';
+import { appendFile, mkdir, open as openFile, rm } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
@@ -201,6 +202,18 @@ function readRange(fd: number, start: number, end: number): Buffer {
   return read === length ? buf : buf.subarray(0, read);
 }
 
+async function readRangeAsync(handle: FileHandle, start: number, end: number): Promise<Buffer> {
+  const length = Math.max(0, end - start);
+  const buf = Buffer.alloc(length);
+  let read = 0;
+  while (read < length) {
+    const { bytesRead } = await handle.read(buf, read, length - read, start + read);
+    if (bytesRead <= 0) break;
+    read += bytesRead;
+  }
+  return read === length ? buf : buf.subarray(0, read);
+}
+
 function fingerprintAt(fd: number, end: number): Buffer {
   return readRange(fd, Math.max(0, end - TAIL_FINGERPRINT_BYTES), end);
 }
@@ -371,6 +384,14 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
   return { events: trimmed, nextSeq: observeNextSeq(key, Math.max(nextSeq, tail.highWater + 1)) };
 }
 
+/** What a catch-up scan may be told about its caller. `keep` drops events the
+ *  replay would discard anyway as each chunk is parsed, so a long scan does not
+ *  hold the whole range in memory; `aborted` stops it when nobody is listening. */
+export type CatchUpScanOptions = {
+  keep?: (ev: SessionEvent) => boolean;
+  aborted?: () => boolean;
+};
+
 /** The events a resuming device is owed that the loader's window no longer
  *  holds. loadEventLogSync keeps the newest few thousand events, which a busy
  *  lane fills in hours; a device away longer resumes below that floor. Reading
@@ -378,12 +399,13 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
  *  leave everything between missing with no signal (a routine every five
  *  minutes hid a night of real reports this way). `reachedSince` false means
  *  even the log file no longer reaches the cursor. */
-export function loadEventLogCatchUpSync(
+export async function loadEventLogCatchUp(
   key: string,
   windowEvents: PersistedEvent[],
   replaySince: number,
   maxBytes: number,
-): { extra: PersistedEvent[]; reachedSince: boolean } {
+  options: CatchUpScanOptions = {},
+): Promise<{ extra: PersistedEvent[]; reachedSince: boolean }> {
   if (replaySince < 0 || windowEvents.length === 0) return { extra: [], reachedSince: true };
   if (replaySince === 0) {
     // A device with nothing saved is owed as much recent history as one attach
@@ -391,10 +413,11 @@ export function loadEventLogCatchUpSync(
     // chatty lane 2000 events is a few hours, mostly quiet routine turns, and
     // the byte budget (which is what is meant to bind) sat mostly unspent.
     if (windowEvents.length < MAX_EVENTS_PER_LOG) return { extra: [], reachedSince: true };
-    return { extra: loadEventLogSinceSync(key, 0, Math.min(maxBytes, COLD_ATTACH_SCAN_BYTES)).events, reachedSince: true };
+    const cold = await loadEventLogSince(key, 0, Math.min(maxBytes, COLD_ATTACH_SCAN_BYTES), options);
+    return { extra: cold.events, reachedSince: true };
   }
   if (windowEvents[0].seq <= replaySince + 1) return { extra: [], reachedSince: true };
-  const { events, reachedSince } = loadEventLogSinceSync(key, replaySince, maxBytes);
+  const { events, reachedSince } = await loadEventLogSince(key, replaySince, maxBytes, options);
   return { extra: events, reachedSince };
 }
 
@@ -402,8 +425,11 @@ export function loadEventLogCatchUpSync(
 // clamps what it finds, so this is several times what is actually sent.
 const COLD_ATTACH_SCAN_BYTES = 8 * 1024 * 1024;
 
-// First chunk of the backwards walk in loadEventLogSinceSync. Doubles from here.
-const SINCE_SCAN_START_BYTES = 2 * 1024 * 1024;
+// Raw bytes parsed per slice of the backwards walk. Parsing costs about 12ms per
+// MB, so a slice is one short stretch of the event loop, then the scan yields.
+const SINCE_SCAN_CHUNK_BYTES = 1024 * 1024;
+
+const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /** Every event after `sinceSeq`, read from the tail of the hot log file.
  *
@@ -411,29 +437,32 @@ const SINCE_SCAN_START_BYTES = 2 * 1024 * 1024;
  *  lane fills that window in a few hours. A device that was away longer resumes
  *  at a cursor the window no longer reaches, so catching it up from the window
  *  silently skips everything between. This walks backwards from the end of the
- *  file in doubling chunks (each byte read once) until it has seen a line at or
- *  below `sinceSeq + 1`, the start of the file, or spent `maxBytes`. It is the
- *  rare path, so nothing is cached.
+ *  file in fixed chunks (each byte read once) until it has seen a line at or
+ *  below `sinceSeq + 1`, the start of the file, or spent `maxBytes`. Reads are
+ *  asynchronous and the scan yields to the event loop after every chunk, so a
+ *  deep scan never stalls the sockets of other devices. It is the rare path, so
+ *  nothing is cached.
  *
  *  `reachedSince` is judged on the raw first seq of what was read, plumbing
  *  lines included: those are dropped from `events`, so the first surviving
- *  event can sit above `sinceSeq + 1` without anything being missing. */
-export function loadEventLogSinceSync(
+ *  event can sit above `sinceSeq + 1` without anything being missing. A scan
+ *  that `aborted` returns what it has with `reachedSince` false. */
+export async function loadEventLogSince(
   key: string,
   sinceSeq: number,
   maxBytes: number,
-): { events: PersistedEvent[]; reachedSince: boolean } {
-  const path = logPath(key);
-  let fd = -1;
+  options: CatchUpScanOptions = {},
+): Promise<{ events: PersistedEvent[]; reachedSince: boolean }> {
+  let handle: FileHandle | null = null;
   try {
-    fd = openSync(path, 'r');
-    const size = fstatSync(fd).size;
+    handle = await openFile(logPath(key), 'r');
+    const size = (await handle.stat()).size;
     // Whole lines only: a record still being appended has no newline yet, and
     // the live session's own buffer already carries it.
     let end = 0;
     let searched = 0; // tail bytes already checked for a newline; each is read once
     for (let probe = Math.min(size, 64 * 1024); ; probe = Math.min(size, probe * 2)) {
-      const lastNewline = readRange(fd, size - probe, size - searched).lastIndexOf(0x0a);
+      const lastNewline = (await readRangeAsync(handle, size - probe, size - searched)).lastIndexOf(0x0a);
       if (lastNewline >= 0) { end = size - probe + lastNewline + 1; break; }
       searched = probe;
       if (probe >= size || probe >= maxBytes) break;
@@ -442,49 +471,62 @@ export function loadEventLogSinceSync(
 
     // `carry` is the head of the earliest chunk read so far: the end of a line
     // that begins further back. Keeping it (instead of re-reading it) means every
-    // byte is read once even when a single record is bigger than a chunk.
-    let carry: Buffer = Buffer.alloc(0);
+    // byte is read once even when a single record is bigger than a chunk. It is
+    // held as pieces and joined only when the line's start turns up, so a record
+    // spanning many chunks is copied once, not once per chunk.
+    let carry: Buffer[] = [];
     let carryStart = end;
-    let window = Math.max(1, Math.min(SINCE_SCAN_START_BYTES, maxBytes));
     let spent = 0;
     let rawFirstSeq: number | null = null;
     let collected: PersistedEvent[] = [];
     for (;;) {
+      const window = Math.max(1, Math.min(SINCE_SCAN_CHUNK_BYTES, maxBytes - spent));
       const start = Math.max(0, carryStart - window);
-      const fresh = readRange(fd, start, carryStart);
+      const fresh = await readRangeAsync(handle, start, carryStart);
       spent += fresh.length;
-      const buf = Buffer.concat([fresh, carry]);
       // A chunk that starts mid-file starts inside a line; that line is
       // finished by the next (earlier) chunk.
       let skip = 0;
       if (start > 0) {
-        const nl = buf.indexOf(0x0a);
-        skip = nl < 0 ? buf.length : nl + 1;
+        const nl = fresh.indexOf(0x0a);
+        if (nl < 0) {
+          // The whole chunk is the middle of one record: park it and read on.
+          carry.unshift(fresh);
+          carryStart = start;
+          if (spent >= maxBytes) {
+            return { events: collected.filter((event) => event.seq > sinceSeq), reachedSince: false };
+          }
+          await yieldToEventLoop();
+          if (options.aborted?.()) return { events: [], reachedSince: false };
+          continue;
+        }
+        skip = nl + 1;
       }
+      const buf = Buffer.concat([fresh, ...carry]);
       const text = buf.toString('utf8', skip);
       const state = { events: [] as PersistedEvent[], eventChars: [] as number[], highWater: 0 };
       parseLogLines(text, state);
-      collected = state.events.concat(collected);
+      const kept = options.keep ? state.events.filter((event) => options.keep!(event.ev)) : state.events;
+      collected = kept.concat(collected);
       const firstLine = text.slice(0, Math.max(0, text.indexOf('\n')));
       try {
         const seq = JSON.parse(firstLine)?.seq;
         if (typeof seq === 'number') rawFirstSeq = seq;
       } catch { /* malformed first line: keep the previous answer */ }
-      carry = buf.subarray(0, skip);
+      carry = skip > 0 ? [fresh.subarray(0, skip)] : [];
       carryStart = start;
       if (start === 0 && rawFirstSeq === null) rawFirstSeq = collected[0]?.seq ?? null;
       const reached = rawFirstSeq !== null && rawFirstSeq <= sinceSeq + 1;
       if (reached || start === 0 || spent >= maxBytes) {
         return { events: collected.filter((event) => event.seq > sinceSeq), reachedSince: reached };
       }
-      window = Math.max(1, Math.min(window * 2, maxBytes - spent));
+      await yieldToEventLoop();
+      if (options.aborted?.()) return { events: [], reachedSince: false };
     }
   } catch {
     return { events: [], reachedSince: false };
   } finally {
-    if (fd >= 0) {
-      try { closeSync(fd); } catch { /* already closed */ }
-    }
+    if (handle) await handle.close().catch(() => { /* already closed */ });
   }
 }
 
