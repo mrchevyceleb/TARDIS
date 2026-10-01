@@ -88,6 +88,14 @@ const TOOLS = [
   },
 ];
 
+// A lane with no stable name (Banana, plain chats) proves who it is with the signed turn context from the top of its prompt.
+if (!AGENT) {
+  for (const tool of TOOLS) {
+    tool.inputSchema.properties.context = { type: 'string', description: 'The "computer_start context for this turn" string from the top of your prompt (do not echo it). It picks your private browser.' };
+    tool.inputSchema.required = [...tool.inputSchema.required, 'context'];
+  }
+}
+
 async function callTool(name, args) {
   if (!name.startsWith('headless_') || !TOOLS.some((t) => t.name === name)) throw new Error(`unknown tool: ${name}`);
   const op = name.slice('headless_'.length);

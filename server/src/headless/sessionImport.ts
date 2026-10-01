@@ -109,7 +109,8 @@ async function readCookies(profile: string, domains: string[]): Promise<{ cookie
       for (const row of rows) {
         const hostKey = String(row.host_key ?? '');
         if (!matches(hostKey.replace(/^\./, ''), domains)) continue;
-        if (row.top_level_site) { skipped++; continue; } // partitioned third-party cookie
+        // Partitioned (CHIPS) cookies belong to one top-level site; unpartitioned they could overwrite another tenant's.
+        if (row.top_frame_site_key || row.top_level_site) { skipped++; continue; }
         let value = typeof row.value === 'string' ? row.value : '';
         const encrypted = row.encrypted_value as Uint8Array | undefined;
         if (!value && encrypted?.length) value = (await decryptCookie(encrypted, hostKey)) ?? '';
@@ -149,18 +150,19 @@ function readLocalStorage(profile: string, origins: string[]): Promise<{ result:
       const ctx = await chromium.launchPersistentContext(tmp, { headless: true, handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false });
       try {
         const page = ctx.pages()[0] ?? await ctx.newPage();
-        const cdp = await ctx.newCDPSession(page);
-        await cdp.send('DOMStorage.enable');
+        // Storage is only readable from a page on the origin, so serve a blank page for it in-process and refuse every other request.
+        await page.route('**/*', (route) => (route.request().isNavigationRequest() && new URL(route.request().url()).pathname === '/'
+          ? route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>read</title>' })
+          : route.abort()));
         const result: StorageResult = [];
         let skipped = 0;
         for (const origin of origins) {
           let raw: [string, string][] = [];
           try {
-            raw = (await cdp.send('DOMStorage.getDOMStorageItems', { storageId: { securityOrigin: origin, isLocalStorage: true } })).entries as [string, string][];
-          } catch {
-            try { raw = (await cdp.send('DOMStorage.getDOMStorageItems', { storageId: { storageKey: `${origin}/`, isLocalStorage: true } })).entries as [string, string][]; } catch { raw = []; }
-          }
-          const items = raw.filter(([, v]) => { const ok = Buffer.byteLength(v) <= MAX_VALUE_BYTES; if (!ok) skipped++; return ok; }).slice(0, MAX_ITEMS_PER_ORIGIN);
+            await page.goto(`${origin}/`, { waitUntil: 'domcontentloaded', timeout: 8000 });
+            raw = await page.evaluate<[string, string][]>(`(() => { const out = []; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); out.push([k, localStorage.getItem(k)]); } return out; })()`);
+          } catch { raw = []; }
+          const items = raw.filter(([, v]) => { const ok = typeof v === 'string' && Buffer.byteLength(v) <= MAX_VALUE_BYTES; if (!ok) skipped++; return ok; }).slice(0, MAX_ITEMS_PER_ORIGIN);
           if (items.length) result.push({ origin, items });
         }
         return { result, skipped };

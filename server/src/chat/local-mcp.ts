@@ -1,6 +1,6 @@
 import { DESK_OWNER_NAME, DEVICE_MCP_SCRIPT, HEADLESS_MCP_SCRIPT, PORT, TEAM_MCP_SCRIPT } from '../config.ts';
 import { COMPUTER_MCP_TOKEN } from '../devices/context.ts';
-import { HEADLESS_MCP_TOKEN } from '../headless/pool.ts';
+import { headlessLaneToken } from '../headless/pool.ts';
 
 /** Reserved built-ins, independent of global/private MCP configs. Banana uses
  * one server across threads: computer identity comes from signed turn context,
@@ -15,9 +15,9 @@ export function localMcpServers(agentName?: string, opts: { replyNow?: boolean }
       env: { ...base, ...(agentName ? { RIVENDELL_AGENT_NAME: agentName } : {}), ...(opts.replyNow ? { RIVENDELL_REPLY_NOW: '1' } : {}) } },
     'rivendell-device': { type: 'stdio', command: 'node', args: [DEVICE_MCP_SCRIPT],
       env: { ...base, RIVENDELL_COMPUTER_MCP_TOKEN: COMPUTER_MCP_TOKEN } },
-    // Per-lane headless Chromium; the lane name picks the profile.
+    // Per-lane headless Chromium; the lane name picks the profile and its token only works for that name.
     'rivendell-headless': { type: 'stdio', command: 'node', args: [HEADLESS_MCP_SCRIPT],
-      env: { ...base, RIVENDELL_HEADLESS_TOKEN: HEADLESS_MCP_TOKEN, ...(agentName ? { RIVENDELL_AGENT_NAME: agentName } : {}) } },
+      env: { ...base, RIVENDELL_HEADLESS_TOKEN: headlessLaneToken(agentName), ...(agentName ? { RIVENDELL_AGENT_NAME: agentName } : {}) } },
   };
 }
 export function localMcpCodexArgs(agentName?: string): string[] {

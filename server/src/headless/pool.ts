@@ -3,17 +3,25 @@
 // closed so web work never waits on whoever holds the desktop.
 
 import { chromium, type BrowserContext, type Locator, type Page } from 'playwright-core';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { appendFile, chmod, mkdir, readFile, readlink, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 import { importDesktopSession, type ImportSummary } from './sessionImport.ts';
 
 export const HEADLESS_DIR = process.env.RIVENDELL_HEADLESS_DIR?.trim() || join(STATE_DIR, 'headless');
-// Only TARDIS-spawned MCPs may drive the pool; a page on the console cannot.
-export const HEADLESS_MCP_TOKEN = randomBytes(32).toString('hex');
-export function validHeadlessToken(value: string | undefined): boolean {
-  const got = Buffer.from(value ?? ''); const want = Buffer.from(HEADLESS_MCP_TOKEN);
+// Only TARDIS-spawned MCPs may drive the pool, and each MCP's token is bound to
+// its own lane: a token minted for Alex cannot open or reset Becca's browser.
+// Lanes with no stable name (Banana, plain chats) hold the context token instead
+// and name themselves with the signed turn context. Like the computer MCP token,
+// this stops a console page or a mistaken call; it is not a sandbox between lanes
+// that run as the same OS user.
+const headlessSecret = randomBytes(32);
+const CONTEXT_IDENTITY = '\0context';
+const tokenFor = (identity: string) => createHmac('sha256', headlessSecret).update(`headless:${identity}`).digest('hex');
+export const headlessLaneToken = (agent?: string) => tokenFor(agent?.trim() ? `lane:${agent.trim()}` : CONTEXT_IDENTITY);
+export function validHeadlessToken(value: string | undefined, agent?: string): boolean {
+  const got = Buffer.from(value ?? ''); const want = Buffer.from(headlessLaneToken(agent));
   return got.length === want.length && timingSafeEqual(got, want);
 }
 
@@ -36,7 +44,7 @@ interface Lane {
   slug: string;
   ctx: BrowserContext;
   tabs: Map<string, Page>;
-  ids: Map<Page, string>;
+  ids: WeakMap<Page, string>;
   seq: number;
   current: string;
   lastUsed: number;
@@ -51,8 +59,21 @@ const launching = new Map<string, Promise<Lane>>();
 let launchChain: Promise<unknown> = Promise.resolve();
 let sweeper: NodeJS.Timeout | null = null;
 
+// The readable part is only a hint: the hash of the exact name keeps "Alex Smith" and "Alex-Smith" apart.
 export function laneSlug(agent: string): string {
-  return agent.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'shared';
+  const hint = agent.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'lane';
+  return `${hint}-${createHash('sha256').update(agent).digest('hex').slice(0, 8)}`;
+}
+
+// One launch/close/reset at a time per profile, so a call arriving mid-close never starts a browser on an occupied
+// profile and a reset never deletes a profile a newer browser already opened.
+const slugLocks = new Map<string, Promise<unknown>>();
+function exclusive<T>(slug: string, fn: () => Promise<T>): Promise<T> {
+  const run = (slugLocks.get(slug) ?? Promise.resolve()).then(fn, fn);
+  const tail = run.catch(() => {});
+  slugLocks.set(slug, tail);
+  void tail.then(() => { if (slugLocks.get(slug) === tail) slugLocks.delete(slug); });
+  return run;
 }
 const profileDir = (slug: string) => join(HEADLESS_DIR, slug, 'profile');
 // Chromium drops session-only cookies (most logins) when a lane closes, so they are kept in a 0600 file beside the profile.
@@ -128,19 +149,26 @@ async function stashSessionCookies(lane: Lane): Promise<void> {
 }
 
 async function restoreSessionCookies(ctx: BrowserContext, slug: string): Promise<void> {
+  const file = sessionCookieFile(slug);
   try {
-    const cookies = JSON.parse(await readFile(sessionCookieFile(slug), 'utf8')) as Parameters<BrowserContext['addCookies']>[0];
+    const cookies = JSON.parse(await readFile(file, 'utf8')) as Parameters<BrowserContext['addCookies']>[0];
+    // Restored cookies become persistent ones in the profile, so the stash has done its job; leaving it would let an
+    // old copy overwrite a newer login after a crash. A cookie the profile already holds is newer than the stash.
+    const held = new Set((await ctx.cookies()).map((c) => `${c.domain}\t${c.path}\t${c.name}`));
     const expires = Math.floor(Date.now() / 1000) + SESSION_COOKIE_SECONDS;
-    if (cookies.length) await ctx.addCookies(cookies.map((c) => ({ ...c, expires })));
+    const fresh = cookies.filter((c) => !held.has(`${c.domain}\t${c.path}\t${c.name}`));
+    if (fresh.length) await ctx.addCookies(fresh.map((c) => ({ ...c, expires })));
   } catch { /* no stash, or unreadable: start without it */ }
+  await rm(file, { force: true });
 }
 
-async function closeLane(lane: Lane): Promise<void> {
+async function closeLaneLocked(lane: Lane): Promise<void> {
   lane.closing = true;
-  if (lanes.get(lane.slug) === lane) lanes.delete(lane.slug);
   await stashSessionCookies(lane);
   await lane.ctx.close().catch(() => {});
+  if (lanes.get(lane.slug) === lane) lanes.delete(lane.slug);
 }
+const closeLane = (lane: Lane) => exclusive(lane.slug, () => closeLaneLocked(lane));
 
 async function launchLane(agent: string, slug: string): Promise<Lane> {
   while (lanes.size >= MAX_LANES) {
@@ -159,9 +187,13 @@ async function launchLane(agent: string, slug: string): Promise<Lane> {
   await restoreSessionCookies(ctx, slug);
   ctx.setDefaultTimeout(15_000);
   ctx.setDefaultNavigationTimeout(30_000);
-  const lane: Lane = { agent, slug, ctx, tabs: new Map(), ids: new Map(), seq: 0, current: '', lastUsed: Date.now(), busy: 0, closing: false, dialogs: [], logs: [] };
+  const lane: Lane = { agent, slug, ctx, tabs: new Map(), ids: new WeakMap(), seq: 0, current: '', lastUsed: Date.now(), busy: 0, closing: false, dialogs: [], logs: [] };
   for (const page of ctx.pages()) registerPage(lane, page);
-  ctx.on('page', (page) => registerPage(lane, page));
+  ctx.on('page', (page) => {
+    // A page can open windows without limit; past the cap they are closed on arrival.
+    if (!lane.ids.has(page) && lane.tabs.size >= MAX_TABS) { void page.close().catch(() => {}); return; }
+    registerPage(lane, page);
+  });
   ctx.on('close', () => { lane.closing = true; if (lanes.get(slug) === lane) lanes.delete(slug); });
   lanes.set(slug, lane);
   sweeper ??= setInterval(() => void sweepIdle(), 60_000).unref();
@@ -174,8 +206,11 @@ async function acquire(agent: string): Promise<Lane> {
   if (live && !live.closing) return live;
   const pending = launching.get(slug);
   if (pending) return pending;
-  // Launches run one at a time so the cap check and the launch cannot interleave.
-  const run = launchChain.then(() => launchLane(agent, slug));
+  // Launches run one at a time so the cap check and the launch cannot interleave; each also waits out any close of its own profile.
+  const run = launchChain.then(() => exclusive(slug, async () => {
+    const live = lanes.get(slug);
+    return live && !live.closing ? live : launchLane(agent, slug);
+  }));
   launchChain = run.catch(() => {});
   launching.set(slug, run);
   try { return await run; } finally { launching.delete(slug); }
@@ -294,10 +329,13 @@ async function sessionOp(agent: string, a: Args): Promise<HeadlessResult> {
     return { released: Boolean(lane) };
   }
   if (action === 'reset_profile') {
-    const lane = lanes.get(laneSlug(agent));
-    if (lane) await closeLane(lane);
-    await rm(profileDir(laneSlug(agent)), { recursive: true, force: true });
-    await rm(sessionCookieFile(laneSlug(agent)), { force: true });
+    const slug = laneSlug(agent);
+    await exclusive(slug, async () => {
+      const lane = lanes.get(slug);
+      if (lane) await closeLaneLocked(lane);
+      await rm(profileDir(slug), { recursive: true, force: true });
+      await rm(sessionCookieFile(slug), { force: true });
+    });
     await audit({ agent, op: 'reset_profile' });
     return { reset: true, note: 'This lane\'s headless profile is empty again. Every login in it is gone.' };
   }
