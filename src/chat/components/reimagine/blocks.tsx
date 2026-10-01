@@ -738,49 +738,77 @@ function isAnswerProse(b: Extract<ChatBlock, { kind: 'text' }>): boolean {
 }
 
 /** Codex narrates between tool calls ("Checking the logs next...") as
- *  commentary-phase messages. Once the turn has moved past one (a tool call or a
- *  non-commentary message came after it) it folds into a dim note. A commentary
- *  message with nothing after it in its turn stays a normal message: it may be
- *  the whole reply, and presentation never decides visibility. */
+ *  commentary-phase messages. A commentary message folds into a dim note once
+ *  its turn has moved past it: a tool call, an answer, a doc or artifact card,
+ *  or a later commentary message came after it. The newest commentary message
+ *  with no answer after it in the feed stays a normal message: an interrupted
+ *  turn can end on narration plus a tool call, and presentation never decides
+ *  visibility (Riley lost-text bug, #77). */
 function commentaryNoteIds(blocks: readonly ChatBlock[]): Set<string> {
   const ids = new Set<string>();
   const moved = new Set<string>();
+  let answered = false;
+  let tailKept = false;
   for (let i = blocks.length - 1; i >= 0; i -= 1) {
     const b = blocks[i];
     if (b.kind !== 'text' && b.kind !== 'tool' && b.kind !== 'doc-link' && b.kind !== 'folder-link' && b.kind !== 'artifact') continue;
     const turnId = (b as { turnId?: string }).turnId;
     if (!turnId) continue;
     if (b.kind === 'text' && b.commentary) {
-      if (moved.has(turnId) && !b.thought && isAnswerProse(b)) ids.add(b.id);
+      if (b.thought || !isAnswerProse(b)) continue;
+      if (!answered && !tailKept) tailKept = true;
+      else if (moved.has(turnId)) ids.add(b.id);
+      moved.add(turnId);
+    } else if (b.kind === 'tool') {
+      moved.add(turnId);
     } else if (b.kind !== 'text' || isAnswerProse(b)) {
       moved.add(turnId);
+      answered = true;
     }
   }
   return ids;
 }
 
-/** A progress note: dim, two lines, click to read the rest. */
+/** A progress note: dim, two lines. Long ones get a real button to read the
+ *  rest (keyboard and touch friendly); clicking the text works too. */
 function ProgressNote({ text }: { text: string }) {
   const [open, setOpen] = useState(false);
+  const [clipped, setClipped] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = bodyRef.current?.querySelector<HTMLElement>('.prose');
+    if (!el || open) return undefined;
+    const measure = () => setClipped(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text, open]);
+  const expandable = clipped || open;
   return (
-    <div
-      className={`bt-note${open ? ' open' : ''}`}
-      role="button"
-      tabIndex={0}
-      aria-expanded={open}
-      title={open ? 'Collapse' : 'Show the full note'}
-      onClick={(e) => {
-        if ((e.target as HTMLElement).closest('a')) return;
-        e.stopPropagation();
-        setOpen((value) => !value);
-      }}
-      onKeyDown={(e) => {
-        if (e.key !== 'Enter' && e.key !== ' ') return;
-        e.preventDefault();
-        setOpen((value) => !value);
-      }}
-    >
-      <StreamText text={text} open={false} />
+    <div className={`bt-note${open ? ' open' : ''}`}>
+      <div
+        ref={bodyRef}
+        className="bt-note-body"
+        onClick={(e) => {
+          if (!expandable || (e.target as HTMLElement).closest('a')) return;
+          e.stopPropagation();
+          setOpen((value) => !value);
+        }}
+      >
+        <StreamText text={text} open={false} />
+      </div>
+      {expandable ? (
+        <button
+          type="button"
+          className="bt-note-toggle"
+          aria-expanded={open}
+          onClick={(e) => { e.stopPropagation(); setOpen((value) => !value); }}
+        >
+          {open ? 'less' : 'more'}
+        </button>
+      ) : null}
     </div>
   );
 }
