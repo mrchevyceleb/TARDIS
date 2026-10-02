@@ -1331,9 +1331,12 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   const runningTool = [...currentBlocks].reverse().find((b): b is ToolBlock => b.kind === 'tool' && b.running);
   const lastCurrent = currentBlocks[currentBlocks.length - 1];
   const openText = currentBlocks.some((b) => b.kind === 'text' && b.open && b.text.trim().length > 0);
-  const liveActivity = runningTool
-    ? `Running ${runningTool.tool.replace(/^mcp__[^_]+(?:_[^_]+)*__/, '')}`
-    : openText ? 'Writing' : currentBlocks.length > 0 ? 'Thinking' : undefined;
+  // The step label ("Running computer_capture · 4s") is the computer-use indicator: it shows only
+  // while a tool that drives a computer or browser is running. Every other turn (email, chat,
+  // team tools) keeps the normal thinking phrases and dots.
+  const runningToolName = runningTool?.tool.replace(/^mcp__[^_]+(?:_[^_]+)*__/, '');
+  const computerToolRunning = runningToolName !== undefined && /^(?:computer|headless|browser|device)(?:_|$)/.test(runningToolName);
+  const liveActivity = computerToolRunning ? `Running ${runningToolName}` : undefined;
   const activityKey = `${currentBlocks.length}|${lastCurrent?.id ?? ''}|${lastCurrent && 'text' in lastCurrent ? lastCurrent.text.length : ''}|${runningTool?.id ?? ''}`;
   if (streaming && !hasCurrentTerminalFailure && (currentTurnVisible || (!hideThinking && !pendingAutomation && !suppressTyping))) {
     // Never make the user infer liveness from a Stop button. Keep one animated
@@ -1348,7 +1351,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         since={workingSince}
         phrases={phrases}
         activity={liveActivity}
-        toolSince={runningTool?.ts}
+        toolSince={computerToolRunning ? runningTool?.ts : undefined}
         writing={openText}
         waiting={waitingOn.length > 0 ? (waitingOn.length === 1 ? waitingOn[0] : `${waitingOn.length} jobs`) : undefined}
         activityKey={activityKey}
