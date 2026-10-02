@@ -50,6 +50,9 @@ function stepClock(ms: number): string {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
+/** Tools that drive a screen or browser. Only these put a step label on the live-turn pill. */
+const COMPUTER_TOOL = /^mcp__(?:rivendell-device__computer_|rivendell-headless__|rivendell-browser__|assistant-mcp__browser$|playwright__|chrome[-_]devtools__)/;
+
 /** What the agent is doing right now, in plain words: the running tool, or
  *  thinking, or what it is waiting on. `activityKey` changes whenever output
  *  lands, which restarts the quiet-for timer; a running tool times itself. */
@@ -1334,9 +1337,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   // The step label ("Running computer_capture · 4s") is the computer-use indicator: it shows only
   // while a tool that drives a computer or browser is running. Every other turn (email, chat,
   // team tools) keeps the normal thinking phrases and dots.
-  const runningToolName = runningTool?.tool.replace(/^mcp__[^_]+(?:_[^_]+)*__/, '');
-  const computerToolRunning = runningToolName !== undefined && /^(?:computer|headless|browser|device)(?:_|$)/.test(runningToolName);
-  const liveActivity = computerToolRunning ? `Running ${runningToolName}` : undefined;
+  const computerTool = [...currentBlocks].reverse().find((b): b is ToolBlock => b.kind === 'tool' && b.running && COMPUTER_TOOL.test(b.tool));
+  const liveActivity = computerTool ? `Running ${computerTool.tool.replace(/^mcp__[^_]+(?:_[^_]+)*__/, '')}` : undefined;
   const activityKey = `${currentBlocks.length}|${lastCurrent?.id ?? ''}|${lastCurrent && 'text' in lastCurrent ? lastCurrent.text.length : ''}|${runningTool?.id ?? ''}`;
   if (streaming && !hasCurrentTerminalFailure && (currentTurnVisible || (!hideThinking && !pendingAutomation && !suppressTyping))) {
     // Never make the user infer liveness from a Stop button. Keep one animated
@@ -1351,7 +1353,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         since={workingSince}
         phrases={phrases}
         activity={liveActivity}
-        toolSince={computerToolRunning ? runningTool?.ts : undefined}
+        toolSince={computerTool?.ts}
         writing={openText}
         waiting={waitingOn.length > 0 ? (waitingOn.length === 1 ? waitingOn[0] : `${waitingOn.length} jobs`) : undefined}
         activityKey={activityKey}
