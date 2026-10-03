@@ -32,7 +32,8 @@ import { computerGuidance } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import { setSessionId } from './sessions.ts';
 import { appendEventLog, appendEventLogSync, flushEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
-import { maybeAutoCompact, noteUserTurn, peekEnginePrimerThroughSeq } from './compaction.ts';
+import { maybeAutoCompact, noteUserTurn, peekEnginePrimerThroughSeq, refreshCompactForRotation, bankRotation, clearRotation } from './compaction.ts';
+import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { isAgentThread, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
@@ -407,6 +408,9 @@ export class PiSession {
         // Pi: stop | toolUse | length | error | aborted  ->  Anthropic vocabulary
         const stopReason = m.stopReason === 'toolUse' ? 'tool_use' : m.stopReason === 'stop' ? 'end_turn' : m.stopReason === 'length' ? 'max_tokens' : null;
         const usage = { input_tokens: u.input ?? 0, output_tokens: u.output ?? 0, cache_read_input_tokens: u.cacheRead ?? 0, cache_creation_input_tokens: 0 };
+        // Same context-size accounting as the Claude lane: the last assistant
+        // message of a turn carries the live window size.
+        recordContextUsage(this.logKey, 'pi', usage);
         const msgId = this.currentMsgId ?? randomUUID();
         const textOut = content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('');
         if (textOut.trim()) { this.lastAssistantText = textOut; this.replyWatch.noteText(); }
@@ -527,8 +531,16 @@ export class PiSession {
     if (stale) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
     // Keep the rolling memory current on Pi lanes too. Without this a GLM or
     // Grok stretch never compacted, so switching the lane back to Claude or
-    // Codex found hundreds of aged-out turns to fold at once.
-    else if (!failed) void this.maybeCompact();
+    // Codex found hundreds of aged-out turns to fold at once. Past the 200k
+    // budget the lane now rotates at this boundary, exactly like Claude.
+    else if (!failed) {
+      const rotationDue = contextRotationDue(this.logKey);
+      const housekeeping = async () => {
+        if (rotationDue && (await this.rotateContextAtBoundary())) return;
+        await this.maybeCompact();
+      };
+      void housekeeping().catch((err) => console.warn(`[context-rotation] ${this.logKey}: deferred after maintenance failure`, (err as Error).message));
+    }
     // Only once the boundary is out and a stale child is retiring: continue the
     // cut turn on the new provider, or tell its teammate it did not run.
     if (cut?.outcome.kind === 'continue') {
@@ -549,9 +561,34 @@ export class PiSession {
     }
   }
 
+  /** Turn-boundary context rotation, same policy as the Claude lane: past the
+   *  200k budget, refresh the durable compact, drop the pi session id and shut
+   *  the warm process down; the next prompt respawns seeded with compact plus
+   *  the last 50 turns (and the full computer rules block).
+   *  Pi lanes hold no background work in-process, so busy just means mid-turn. */
+  private async rotateContextAtBoundary(): Promise<boolean> {
+    if (!contextRotationDue(this.logKey) || this.turnStartedAt !== null || this.disposed) return false;
+    const refreshed = await refreshCompactForRotation({
+      key: this.logKey, cli: this.cli, chatId: this.chatId, events: this.eventLog,
+      isBusy: () => this.turnStartedAt !== null || this.disposed,
+      emit: (ev) => this.emit(ev as SessionEvent), rotate: () => false,
+    });
+    if (!refreshed || this.turnStartedAt !== null || this.disposed) return true;
+    await setSessionId(this.cli, this.cwd, '', this.chatId);
+    if (this.turnStartedAt !== null || this.disposed) {
+      if (!this.disposed) await setSessionId(this.cli, this.cwd, this.piSessionId, this.chatId);
+      return true;
+    }
+    bankRotation(this.logKey);
+    recordContextRotation(this.logKey);
+    this.shutdown('context-budget');
+    return true;
+  }
+
   /** Forever-thread compaction check, see compaction.ts. Pi keeps its own live
-   *  context, so like the Claude lane the saved compact only seeds the next
-   *  genuine process start; the warm session is never rotated for it. */
+   *  context; the saved compact seeds the next genuine process start, and past
+   *  the 200k budget the warm session now rotates at the turn boundary too
+   *  (rotateContextAtBoundary above), so GLM/Grok windows stay bounded. */
   private async maybeCompact(): Promise<void> {
     try {
       await maybeAutoCompact({
@@ -722,7 +759,9 @@ export class PiSession {
       ? ['<rivendell-continuation>', `Warm continuation of the existing conversation. Host time: ${new Date().toString()}.`, 'Do not repeat session-start rituals.', '</rivendell-continuation>', ...(guidance ? ['', guidance] : []), ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []), '', promptText].join('\n')
       : promptText;
     const humanTurn = continuing ? continuing.origin.human : !opts.peerFrom && opts.peerFromRole !== 'automation';
-    const computerContext = computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn);
+    // Full computer rules ride the seed message that starts a fresh pi window; later
+    // messages of the same warm process get the brief form (fresh token + device + policy).
+    const computerContext = computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
     const message = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuation}`;
     const piImages = outImages?.map((img) => ({ type: 'image', data: img.base64, mimeType: img.mediaType }));
 
@@ -750,7 +789,11 @@ export class PiSession {
       this.emit({ type: 'error', message: `pi rejected the prompt: ${response.error ?? 'unknown'}` });
       return;
     }
-    if (wantSeed) this.seedWindowOnNextTurn = false;
+    if (wantSeed) {
+      this.seedWindowOnNextTurn = false;
+      // The seed was delivered, so the rotation debt that asked for it is paid.
+      void clearRotation(this.logKey);
+    }
     if (opts.peerDeliveryId) this.emit({ type: 'event', event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() } });
   }
 
