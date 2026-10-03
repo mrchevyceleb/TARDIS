@@ -215,6 +215,9 @@ app.use((error: Error, _req: express.Request, res: express.Response, _next: expr
 
 let tearingDown = false;
 let agentPrewarm: Promise<void> | null = null;
+/** How many agent lanes the boot prewarm overlaps the ready waits for (see
+ *  the admission comment at the prewarm loop). */
+const PREWARM_CHUNK = 3;
 
 server.listen(PORT, HOST, () => {
   if (ASSISTANT_ADMIN_BASE_URL && ASSISTANT_ADMIN_TOKEN) {
@@ -237,37 +240,62 @@ server.listen(PORT, HOST, () => {
   agentPrewarm = (async () => {
     const agents = listAgents().sort((a, b) =>
       Number(b.id === 'chief-of-staff') - Number(a.id === 'chief-of-staff'));
-    // Sequential admission makes Max genuinely first and lets the memory guard
-    // observe each already-spawned process before deciding on the next one.
-    for (const agent of agents) {
+    // Bounded-parallel admission: spawns stay sequential — Max is still
+    // genuinely first, and each process is running (and allocating) before
+    // the memory guard is consulted for the next spawn, exactly like the old
+    // fully serial loop — but the slow ready waits (30-70s of MCP startup
+    // each) now overlap within chunks instead of adding up. Admission was
+    // fully serial across 11 agents at one boot (10:50:24 to 10:55:14), which
+    // together with the synchronous whole-log parse per spawn held HTTP for
+    // minutes.
+    for (let i = 0; i < agents.length; i += PREWARM_CHUNK) {
       if (tearingDown) break;
-      try {
-        if (typeof agent?.name !== 'string' || typeof agent?.home !== 'string' || !agent.home) {
-          throw new Error('invalid agent record');
-        }
-        const brain = brainForAgent(agent);
-        const cli = cliForAgentEngine(brain.engine) as CliKind;
-        if (!isClaudeFamilyCli(cli)) continue;
-        const chatKey = agent.home;
+      const chunk = agents.slice(i, i + PREWARM_CHUNK);
+      const warms: Array<{ name: string; ready: Promise<void> }> = [];
+      for (const agent of chunk) {
         if (tearingDown) break;
-        const session = await getOrCreateSession({
-          cli,
-          repoPath: ELROND_WORKSPACE_PATH,
-          chatId: chatKey,
-          model: brain.model,
-          effort: brain.effort,
-          recycleOnMismatch: true,
-        });
-        if (tearingDown) {
-          session.shutdown('prewarm-teardown');
-          break;
+        try {
+          if (typeof agent?.name !== 'string' || typeof agent?.home !== 'string' || !agent.home) {
+            throw new Error('invalid agent record');
+          }
+          const brain = brainForAgent(agent);
+          const cli = cliForAgentEngine(brain.engine) as CliKind;
+          if (!isClaudeFamilyCli(cli)) continue;
+          const chatKey = agent.home;
+          if (tearingDown) break;
+          const session = await getOrCreateSession({
+            cli,
+            repoPath: ELROND_WORKSPACE_PATH,
+            chatId: chatKey,
+            model: brain.model,
+            effort: brain.effort,
+            recycleOnMismatch: true,
+          });
+          if (tearingDown) {
+            session.shutdown('prewarm-teardown');
+            break;
+          }
+          if ('prewarm' in session && typeof session.prewarm === 'function') {
+            const ready = session.prewarm();
+            // Attach a rejection handler immediately: the logging handlers
+            // are only attached at the Promise.all below, and a fast reject
+            // while this loop is still awaiting another getOrCreateSession
+            // would otherwise race an unhandledRejection (process-fatal on
+            // modern Node defaults). The Promise.all handlers still run.
+            ready.catch(() => {});
+            warms.push({ name: agent.name, ready });
+          } else if (!tearingDown) {
+            console.log(`[chat prewarm] ${agent.name} is ready`);
+          }
+        } catch (err) {
+          if (!tearingDown) console.warn(`[chat prewarm] ${String(agent?.name || agent?.id || 'agent')} could not prewarm:`, (err as Error).message);
         }
-        if ('prewarm' in session && typeof session.prewarm === 'function') {
-          await session.prewarm();
-        }
-        if (!tearingDown) console.log(`[chat prewarm] ${agent.name} is ready`);
-      } catch (err) {
-        if (!tearingDown) console.warn(`[chat prewarm] ${String(agent?.name || agent?.id || 'agent')} could not prewarm:`, (err as Error).message);
+      }
+      if (warms.length) {
+        await Promise.all(warms.map((w) => w.ready.then(
+          () => { if (!tearingDown) console.log(`[chat prewarm] ${w.name} is ready`); },
+          (err) => { if (!tearingDown) console.warn(`[chat prewarm] ${w.name} could not prewarm:`, (err as Error).message); },
+        )));
       }
     }
   })().finally(() => {

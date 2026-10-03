@@ -2,7 +2,12 @@ import { jobs, newJob, type JobStatus, type RivendellJob } from '../data/mock.ts
 import { JsonStore } from '../lib/jsonStore.ts';
 import { supabase } from '../lib/supabase.ts';
 
-const jobStore = new JsonStore<RivendellJob & { id: string }>('jobs.json', jobs);
+// Own file: the chat job scheduler (server/src/chat/jobs.ts) owns jobs.json
+// with a different record shape (Job: pid, wakeText, bootId…). Two stores on
+// one file with different schemas read each other's records as garbage and a
+// local write clobbers the other owner's data. This store is the worker
+// queue's Supabase fallback only.
+const jobStore = new JsonStore<RivendellJob & { id: string }>('worker-jobs.json', jobs);
 
 export async function listJobs(): Promise<RivendellJob[]> {
   if (!supabase) return (await jobStore.list()).sort(sortNewest);
