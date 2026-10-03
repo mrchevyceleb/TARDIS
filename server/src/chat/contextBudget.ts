@@ -21,10 +21,12 @@ function count(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
-export function recordContextUsage(key: string, engine: 'claude' | 'codex', usage: any): void {
+export function recordContextUsage(key: string, engine: 'claude' | 'codex' | 'pi', usage: any): void {
   if (!usage || typeof usage !== 'object') return;
-  const input = count(usage.input_tokens) + (engine === 'claude'
-    ? count(usage.cache_read_input_tokens) + count(usage.cache_creation_input_tokens) : 0);
+  // Codex reports cache tokens differently; Claude and the Pi harness (GLM/Grok)
+  // report Anthropic-shaped usage where cache reads still occupy the context window.
+  const input = count(usage.input_tokens) + (engine === 'codex'
+    ? 0 : count(usage.cache_read_input_tokens) + count(usage.cache_creation_input_tokens));
   if (!input) return;
   const tokens = input + count(usage.output_tokens);
   contexts.set(key, tokens);

@@ -1,4 +1,10 @@
 import { Router } from 'express';
+import { execFile as execFileCb } from 'node:child_process';
+import { promisify } from 'node:util';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { asyncHandler } from './helpers.ts';
 import { ASSISTANT_ADMIN_TOKEN, ELROND_WORKSPACE_PATH } from '../config.ts';
 import { getOrCreateSession, activeClaudeSessions, type CliKind } from '../chat/runner.ts';
@@ -149,5 +155,72 @@ internalRouter.post(
       return;
     }
     res.json({ ok: true, result: text.trim(), durationMs });
+  }),
+);
+
+// ---- Riley game-watch gate source -------------------------------------------
+
+const execFileAsync = promisify(execFileCb);
+const RILEY_PULSE_BIN = join(homedir(), 'bin', 'riley-pulse');
+const RILEY_WATCH_STATE = join(homedir(), 'ASSISTANT-HUB', 'projects', 'stone-labs-games', 'watch-state.json');
+let rileyDeltaInFlight = false;
+
+/** Deterministic "what changed" read for the gated 5-minute Game studio watch
+ *  (see chat/routineGate.ts). Runs the SAME pulse script the agent's step 1
+ *  ran — its cursor advances exactly once per tick — surfaces due watch-state
+ *  pending items, and flags the :05 hourly-checks window. An empty array means
+ *  quiet. Any failure is a 503 so the gate fails OPEN to the full agent turn.
+ *  Lines carry only chat ids and short labels, never chat content.
+ *    GET /internal/riley-watch-delta
+ *    header: x-internal-token: <MCP_AUTH_TOKEN> */
+internalRouter.get(
+  '/riley-watch-delta',
+  asyncHandler(async (req, res) => {
+    const token = req.header('x-internal-token');
+    if (!ASSISTANT_ADMIN_TOKEN || token !== ASSISTANT_ADMIN_TOKEN) {
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    if (rileyDeltaInFlight) {
+      res.status(503).json({ error: 'a pulse is still running' });
+      return;
+    }
+    rileyDeltaInFlight = true;
+    try {
+      let pulse = '';
+      try {
+        const r = await execFileAsync(RILEY_PULSE_BIN, { timeout: 55_000, maxBuffer: 1 << 20 });
+        pulse = r.stdout ?? '';
+      } catch (err) {
+        res.status(503).json({ error: `riley-pulse failed: ${(err as Error).message.slice(0, 120)}` });
+        return;
+      }
+      const items: Array<{ id: string; kind: string; text: string }> = [];
+      pulse.split('\n').map((l) => l.trim()).filter(Boolean).forEach((line, i) => {
+        items.push({ id: `pulse-${i}-${createHash('sha1').update(line).digest('hex').slice(0, 8)}`, kind: 'pulse', text: line.slice(0, 300) });
+      });
+      // Due watch-state pending items (the agent removes them once done). An
+      // unreadable state file must not read as quiet.
+      try {
+        const state = JSON.parse(readFileSync(RILEY_WATCH_STATE, 'utf8')) as { pending?: Array<{ after?: string; what?: string }> };
+        for (const p of state.pending ?? []) {
+          if (typeof p.after === 'string' && Date.parse(p.after) <= Date.now()) {
+            items.push({ id: `pending-${createHash('sha1').update(String(p.what ?? '')).digest('hex').slice(0, 8)}`, kind: 'pending', text: String(p.what ?? 'due pending item').slice(0, 300) });
+          }
+        }
+      } catch {
+        res.status(503).json({ error: 'watch-state unreadable' });
+        return;
+      }
+      // The :05 hourly-checks window (prompt section B; the 9:05 slot also
+      // posts the morning roll-up). Local minutes; the scheduler is local too.
+      const now = new Date();
+      if (now.getMinutes() >= 5 && now.getMinutes() <= 9) {
+        items.push({ id: `hourly-${now.toISOString().slice(0, 13)}`, kind: 'hourly', text: 'Hourly checks window: run section B now (Steam/PS/Xbox/Nintendo mail, Pengi clips); on the 9:05 ET slot also post the morning roll-up (section C).' });
+      }
+      res.json(items);
+    } finally {
+      rileyDeltaInFlight = false;
+    }
   }),
 );
