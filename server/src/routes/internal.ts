@@ -163,7 +163,7 @@ internalRouter.post(
 const execFileAsync = promisify(execFileCb);
 const RILEY_PULSE_BIN = join(homedir(), 'bin', 'riley-pulse');
 const RILEY_WATCH_STATE = join(homedir(), 'ASSISTANT-HUB', 'projects', 'stone-labs-games', 'watch-state.json');
-let rileyDeltaInFlight = false;
+let rileyDeltaInFlight: Promise<Array<{ id: string; kind: string; text: string }>> | null = null;
 
 /** Deterministic "what changed" read for the gated 5-minute Game studio watch
  *  (see chat/routineGate.ts). Runs the SAME pulse script the agent's step 1
@@ -182,35 +182,35 @@ internalRouter.get(
       return;
     }
     if (rileyDeltaInFlight) {
-      res.status(503).json({ error: 'a pulse is still running' });
+      // Share the in-flight run instead of failing: a 503 here would fail the
+      // gate open and the agent's own pulse could run concurrently with ours.
+      try {
+        res.json(await rileyDeltaInFlight);
+      } catch {
+        res.status(503).json({ error: 'riley-pulse failed' });
+      }
       return;
     }
-    rileyDeltaInFlight = true;
+    // Read watch-state BEFORE the pulse: its read has no side effect, so a 503
+    // here can never come after the pulse cursor advanced. An unreadable state
+    // file must not read as quiet.
+    let pendingItems: Array<{ after?: string; what?: string }>;
     try {
-      let pulse = '';
-      try {
-        const r = await execFileAsync(RILEY_PULSE_BIN, { timeout: 55_000, maxBuffer: 1 << 20 });
-        pulse = r.stdout ?? '';
-      } catch (err) {
-        res.status(503).json({ error: `riley-pulse failed: ${(err as Error).message.slice(0, 120)}` });
-        return;
-      }
+      pendingItems = ((JSON.parse(readFileSync(RILEY_WATCH_STATE, 'utf8')) as { pending?: Array<{ after?: string; what?: string }> }).pending) ?? [];
+    } catch {
+      res.status(503).json({ error: 'watch-state unreadable' });
+      return;
+    }
+    const run = (async () => {
+      const r = await execFileAsync(RILEY_PULSE_BIN, { timeout: 55_000, maxBuffer: 1 << 20 });
       const items: Array<{ id: string; kind: string; text: string }> = [];
-      pulse.split('\n').map((l) => l.trim()).filter(Boolean).forEach((line, i) => {
+      (r.stdout ?? '').split('\n').map((l) => l.trim()).filter(Boolean).forEach((line, i) => {
         items.push({ id: `pulse-${i}-${createHash('sha1').update(line).digest('hex').slice(0, 8)}`, kind: 'pulse', text: line.slice(0, 300) });
       });
-      // Due watch-state pending items (the agent removes them once done). An
-      // unreadable state file must not read as quiet.
-      try {
-        const state = JSON.parse(readFileSync(RILEY_WATCH_STATE, 'utf8')) as { pending?: Array<{ after?: string; what?: string }> };
-        for (const p of state.pending ?? []) {
-          if (typeof p.after === 'string' && Date.parse(p.after) <= Date.now()) {
-            items.push({ id: `pending-${createHash('sha1').update(String(p.what ?? '')).digest('hex').slice(0, 8)}`, kind: 'pending', text: String(p.what ?? 'due pending item').slice(0, 300) });
-          }
+      for (const p of pendingItems) {
+        if (typeof p.after === 'string' && Date.parse(p.after) <= Date.now()) {
+          items.push({ id: `pending-${createHash('sha1').update(String(p.what ?? '')).digest('hex').slice(0, 8)}`, kind: 'pending', text: String(p.what ?? 'due pending item').slice(0, 300) });
         }
-      } catch {
-        res.status(503).json({ error: 'watch-state unreadable' });
-        return;
       }
       // The :05 hourly-checks window (prompt section B; the 9:05 slot also
       // posts the morning roll-up). Local minutes; the scheduler is local too.
@@ -218,9 +218,15 @@ internalRouter.get(
       if (now.getMinutes() >= 5 && now.getMinutes() <= 9) {
         items.push({ id: `hourly-${now.toISOString().slice(0, 13)}`, kind: 'hourly', text: 'Hourly checks window: run section B now (Steam/PS/Xbox/Nintendo mail, Pengi clips); on the 9:05 ET slot also post the morning roll-up (section C).' });
       }
-      res.json(items);
+      return items;
+    })();
+    rileyDeltaInFlight = run;
+    try {
+      res.json(await run);
+    } catch (err) {
+      res.status(503).json({ error: `riley-pulse failed: ${(err as Error).message.slice(0, 120)}` });
     } finally {
-      rileyDeltaInFlight = false;
+      rileyDeltaInFlight = null;
     }
   }),
 );

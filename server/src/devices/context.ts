@@ -96,8 +96,10 @@ export function computerGuidance(chatId: string, label: string, human = true, sa
       tokenLine,
       'The static computer-use rules sent at the start of this window still apply in full.',
       policyLine,
-      robotGuidance(),
       '</rivendell-computer>',
+      // Same position as the full block: after the closing tag, so consumers
+      // that slice on <rivendell-computer> see the same shape either way.
+      robotGuidance(),
     ].filter(Boolean).join('\n');
   }
   return [
