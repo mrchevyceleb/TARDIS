@@ -22,7 +22,7 @@ import { STATE_DIR } from './config.ts';
 import { callMcp } from '../lib/mcp.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
 import { redactSecrets } from './secretRedaction.ts';
-import { flushEventLog, loadEventLogForCompactionSync } from './event-log-store.ts';
+import { flushEventLog, loadEventLogForCompactionSync, MAX_EVENTS_PER_LOG } from './event-log-store.ts';
 import { ROTATION_COMPACT_DEADLINE_MS, ROTATION_VERBATIM_TAIL_CHARS } from './contextBudget.ts';
 import {
   COMPACT_BATCH_TURNS,
@@ -38,6 +38,15 @@ import {
 
 const MIN_ACCEPT_WORDS = 400;
 const COMPACT_MAX_TOKENS = 8000;
+/** Event-pressure fold trigger: fold the aged batch early (below the 50-turn
+ *  gate) once covering every aged turn would archive at least this many hot
+ *  events. Streaming-heavy lanes add thousands of events per visible turn
+ *  (one watch lane sat at 49 aged turns — one short of the gate for days —
+ *  while its hot log grew 31k events past the trim's coverage), so the
+ *  turn-count gate alone lets tool-heavy lanes outrun the disk bound. A lone
+ *  aged turn's own events rarely reach four caps, so this still folds in
+ *  batches rather than once per turn. */
+const EVENT_PRESSURE_SPAN_EVENTS = 4 * MAX_EVENTS_PER_LOG;
 const TRANSCRIPT_HEAD = 24 * 1024;
 const TRANSCRIPT_TAIL = 220 * 1024;
 
@@ -644,7 +653,18 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
   const blob = loadCompactBlob(key);
   const lastSeq = blob?.lastCompactedSeq ?? 0;
   let overflowNew = overflow.filter((t) => t.seq > lastSeq);
-  if (!overflowNew.length || (!args.refreshOverflow && !shouldCompactOverflow(overflowNew))) return false;
+  // Overflow is oldest-first: the newest aged turn's seq minus the compact's
+  // last covered seq is the event span folding every aged turn would archive.
+  const agedEventSpan = overflowNew.length
+    ? overflowNew[overflowNew.length - 1].seq - lastSeq
+    : 0;
+  const overflowPressesDisk = agedEventSpan >= EVENT_PRESSURE_SPAN_EVENTS;
+  if (
+    !overflowNew.length ||
+    (!args.refreshOverflow && !shouldCompactOverflow(overflowNew) && !overflowPressesDisk)
+  ) {
+    return false;
+  }
 
   inFlight.add(key);
   try {

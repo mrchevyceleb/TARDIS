@@ -958,22 +958,30 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
   const lines = cleaned.lines;
   const desiredDrop = Math.max(0, lines.length - MAX_EVENTS_PER_LOG);
 
-  // Only archive records the rolling compact already covers. The old cap-only
-  // trim could evict a tiny unmerged overflow batch before it reached the
-  // batching threshold, so a one-word reply either triggered a full compact or
-  // disappeared from model memory. Retaining a temporarily oversized hot file
-  // is the safe side of that trade; the next post-compact spawn trims it.
-  let safeDrop = 0;
-  for (; safeDrop < desiredDrop; safeDrop += 1) {
+  // Only archive records the rolling compact already covers — checked PER
+  // LINE across the whole over-cap head, not only up to the first uncovered
+  // one. The old break-at-first-uncovered rule let one late-arriving
+  // high-seq line (or one unparseable line) pin every compacted line behind it
+  // forever (one lane: a single bad line held 41k archived-ready events;
+  // another: the cap break held 201k), and those pinned files are what made
+  // startup restores expensive. Uncovered head lines (not compacted yet, no
+  // seq, or unparseable) are retained in place, in order; nothing the rolling
+  // compact does not cover ever leaves the hot file.
+  const head = lines.slice(0, desiredDrop);
+  const dropped: string[] = [];
+  const retainedHead: string[] = [];
+  for (const line of head) {
+    let seq: unknown;
     try {
-      const parsed = JSON.parse(lines[safeDrop]);
-      if (typeof parsed?.seq !== 'number' || parsed.seq > compactedThroughSeq) break;
+      seq = JSON.parse(line)?.seq;
     } catch {
-      break;
+      seq = undefined;
     }
+    if (typeof seq === 'number' && seq <= compactedThroughSeq) dropped.push(line);
+    else retainedHead.push(line);
   }
 
-  if (cleaned.removed === 0 && safeDrop === 0) {
+  if (cleaned.removed === 0 && dropped.length === 0) {
     if (desiredDrop > 0) {
       console.log(
         `[event-log-store] trim deferred for ${key}: ${desiredDrop} event(s) are not compacted yet`,
@@ -981,8 +989,6 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
     }
     return;
   }
-
-  const dropped = lines.slice(0, safeDrop);
   if (dropped.length > 0) {
     try {
       // Archive must land BEFORE the rewrite. Keep the whole critical section
@@ -999,7 +1005,7 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
     }
   }
 
-  const keptLines = lines.slice(safeDrop);
+  const keptLines = [...retainedHead, ...lines.slice(desiredDrop)];
   const kept = keptLines.length ? keptLines.join('\n') + '\n' : '';
   const tmp = `${path}.compact-${process.pid}`;
   try {
@@ -1007,13 +1013,8 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
     renameSync(tmp, path);
     bumpEventLogRevision();
     console.log(
-      `[event-log-store] cleaned ${key}: dropped ${cleaned.removed} plumbing event(s), archived ${dropped.length} compacted event(s)`,
+      `[event-log-store] cleaned ${key}: dropped ${cleaned.removed} plumbing event(s), archived ${dropped.length} compacted event(s), retained ${retainedHead.length} uncovered event(s)`,
     );
-    if (desiredDrop > safeDrop) {
-      console.log(
-        `[event-log-store] trim deferred for ${key}: ${desiredDrop - safeDrop} event(s) are not compacted yet`,
-      );
-    }
   } catch (err) {
     try { unlinkSync(tmp); } catch { /* best-effort stale temp cleanup */ }
     console.warn('[event-log-store] compact failed', key, (err as Error).message);
