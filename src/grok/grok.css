@@ -1651,7 +1651,7 @@ body.bt-rail-resizing { cursor: col-resize; user-select: none; }
   --bt-cc-pink: #ec72b0;
   --bt-cc-check: #16161c;
 }
-.bot-app[data-theme="light"] {
+[data-theme="light"] .bot-app {
   --bt-cc-red: #cf3e3b;
   --bt-cc-orange: #cc661c;
   --bt-cc-amber: #a87a06;

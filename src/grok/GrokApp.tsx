@@ -408,7 +408,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
 
   return (
     <StudioFilesContext.Provider value={fileActions}>
-      <div ref={appRef} className={`bot-app${railCollapsed ? ' rail-collapsed' : ''}${regen ? ' regen' : ''}`} data-theme={theme} data-style={visualStyle}>
+      <div ref={appRef} className={`bot-app${railCollapsed ? ' rail-collapsed' : ''}${regen ? ' regen' : ''}`} data-style={visualStyle}>
         <BotRail
           collapsed={railCollapsed}
           onToggleCollapse={() => setRailCollapsed((c) => !c)}
