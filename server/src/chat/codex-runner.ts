@@ -738,7 +738,7 @@ export class CodexSession {
     // rollout found for thread id …" before the model sees the prompt. Check
     // first: an unresumable thread becomes a fresh one seeded with the compact
     // window, which costs context rather than the answer.
-    if (this.threadId && codexRolloutMissing(codexHomeFor(childEnv), this.threadId)) {
+    if (this.threadId && (await codexRolloutMissing(codexHomeFor(childEnv), this.threadId))) {
       const unresumable = this.threadId;
       // Drops the in-memory id synchronously; a failed write is not worth
       // wedging a busy lane over, and the next turn re-checks the rollout.
