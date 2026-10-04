@@ -50,38 +50,38 @@ const rolloutStore = (): string => {
   return home;
 };
 
-test('a rollout that is present is resumable', () => {
+test('a rollout that is present is resumable', async () => {
   assert.equal(
-    codexRolloutMissing(rolloutStore(), '01a0baac-8c89-74b1-a3aa-f865680e3643'),
+    await codexRolloutMissing(rolloutStore(), '01a0baac-8c89-74b1-a3aa-f865680e3643'),
     false,
   );
 });
 
-test('a pruned rollout in a populated store is proven missing', () => {
+test('a pruned rollout in a populated store is proven missing', async () => {
   assert.equal(
-    codexRolloutMissing(rolloutStore(), '326883bc-1921-4d23-9405-e9877665ec47'),
+    await codexRolloutMissing(rolloutStore(), '326883bc-1921-4d23-9405-e9877665ec47'),
     true,
   );
 });
 
-test('a compressed rollout still counts as resumable', () => {
+test('a compressed rollout still counts as resumable', async () => {
   const home = rolloutStore();
   const day = join(home, 'sessions', '2026', '09', '18');
   mkdirSync(day, { recursive: true });
   writeFileSync(join(day, 'rollout-2026-09-18T09-02-11-0199a0de-1f4c-7a10-9f3d-2b6d5c41e701.jsonl.zst'), '');
-  assert.equal(codexRolloutMissing(home, '0199a0de-1f4c-7a10-9f3d-2b6d5c41e701'), false);
+  assert.equal(await codexRolloutMissing(home, '0199a0de-1f4c-7a10-9f3d-2b6d5c41e701'), false);
 });
 
-test('an unknown or unreadable store never discards a thread id', () => {
+test('an unknown or unreadable store never discards a thread id', async () => {
   const empty = mkdtempSync(join(tmpdir(), 'codex-home-'));
-  assert.equal(codexRolloutMissing(empty, 'any-thread'), false);
-  assert.equal(codexRolloutMissing(join(empty, 'nope'), 'any-thread'), false);
+  assert.equal(await codexRolloutMissing(empty, 'any-thread'), false);
+  assert.equal(await codexRolloutMissing(join(empty, 'nope'), 'any-thread'), false);
   // A store whose layout we don't recognise holds no rollout-*.jsonl files.
   const foreign = mkdtempSync(join(tmpdir(), 'codex-home-'));
   mkdirSync(join(foreign, 'sessions'), { recursive: true });
   writeFileSync(join(foreign, 'sessions', 'threads.sqlite'), '');
-  assert.equal(codexRolloutMissing(foreign, 'any-thread'), false);
-  assert.equal(codexRolloutMissing(rolloutStore(), ''), false);
+  assert.equal(await codexRolloutMissing(foreign, 'any-thread'), false);
+  assert.equal(await codexRolloutMissing(rolloutStore(), ''), false);
 });
 
 test('codex home follows the account env the turn bills', () => {
