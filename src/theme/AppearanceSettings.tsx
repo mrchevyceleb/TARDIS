@@ -52,7 +52,7 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
     const p = PALETTES.find((t) => t.id === id)!;
     return <button type="button" key={p.id} className="appearance-theme" aria-pressed={appearance.palette === p.id} onClick={() => patch({ palette: p.id, style: p.legacyStyle ?? appearance.style })} title={p.blurb}>
       <span className="appearance-theme-swatch" aria-hidden="true">
-        <i style={{ background: p.colors.bg }} /><i style={{ background: p.colors.bgCard }} /><i style={{ background: p.colors.accent }} /><i style={{ background: p.colors.ink }} />
+        <i style={{ background: p.colors.bg }} /><i style={{ background: p.colors.bgCard }} /><i style={{ background: appearance.accent ?? p.colors.accent }} /><i style={{ background: p.colors.ink }} />
       </span>
       <strong>{p.label}</strong>
     </button>;
@@ -61,7 +61,7 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
   return <div ref={ref} id="appearance-settings" className="appearance-settings" role="dialog" aria-labelledby="appearance-title">
     <div className="appearance-head">
       <h2 id="appearance-title">Make it yours</h2>
-      <button type="button" className="appearance-shuffle" onClick={() => onAppearance(shuffleAppearance(appearance))} title="Shuffle theme (Alt+Shift+R)"><Dices size={17} /></button>
+      <button type="button" className="appearance-shuffle" onClick={() => onAppearance(shuffleAppearance(appearance))} title="Shuffle theme (Alt+Shift+R)" aria-label="Shuffle theme"><Dices size={17} /></button>
       <button type="button" onClick={() => onClose()} aria-label="Close appearance settings"><X size={17} /></button>
     </div>
 

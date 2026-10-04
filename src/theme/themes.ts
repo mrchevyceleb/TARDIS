@@ -133,7 +133,7 @@ export const ACCENT_PRESETS = [
 ] as const;
 
 export const FONTS: { id: FontId; label: string; vars?: Record<'--r-body' | '--r-display' | '--r-sign' | '--r-mono', string> }[] = [
-  { id: 'system', label: 'System' },
+  { id: 'system', label: 'Default' },
   {
     id: 'grotesk', label: 'Grotesk',
     vars: {
@@ -213,7 +213,7 @@ export function mix(hex: string, target: string, amount: number): string {
 }
 
 const WHITE = '#ffffff';
-const BLACK = '#0b0b0d';
+const BLACK = '#000000';
 
 /** Nudge `fg` (toward white on dark themes, black on light) until it reads at `min` on `bg`. */
 export function ensure(fg: string, bg: string, min: number, mode: Mode): string {
@@ -227,9 +227,11 @@ export function ensure(fg: string, bg: string, min: number, mode: Mode): string 
   return out;
 }
 
-/** Pick the ink that reads best on a filled accent surface. */
+/** Pick the ink that reads best on a filled accent surface. Pure black vs
+ *  pure white guarantees >= 4.58:1 on ANY fill (the crossover minimum), so
+ *  on-accent text is always AA even for arbitrary custom accents. */
 export function pickOn(accent: string): string {
-  return contrast(accent, '#1a120a') >= contrast(accent, '#ffffff') ? '#1a120a' : '#ffffff';
+  return contrast(accent, BLACK) >= contrast(accent, WHITE) ? BLACK : WHITE;
 }
 
 /* --------------------------- token expansion --------------------------- */
@@ -355,6 +357,15 @@ function readStored(): string | null {
 
 export function readAppearance(): Appearance {
   const a: Appearance = { ...DEFAULT_APPEARANCE };
+  // Deployment defaults apply only before this browser has chosen its own
+  // appearance — same contract as the original two-axis code.
+  if (import.meta.env.VITE_TARDIS_THEME === 'light' || import.meta.env.VITE_TARDIS_STYLE === 'lavender') {
+    if (import.meta.env.VITE_TARDIS_STYLE === 'lavender') a.style = 'lavender';
+    const wantLight = import.meta.env.VITE_TARDIS_THEME === 'light';
+    a.palette = a.style === 'lavender'
+      ? (wantLight ? 'lavender-light' : 'lavender')
+      : (wantLight ? 'console-light' : 'console');
+  }
   try {
     const legacyTheme = localStorage.getItem('rivendell:theme');
     const legacyStyle = localStorage.getItem('rivendell:style');

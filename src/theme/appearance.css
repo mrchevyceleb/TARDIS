@@ -45,9 +45,12 @@
 .appearance-settings button:focus-visible { outline: 3px solid var(--r-tardis-hi); outline-offset: 3px; }
 
 /* Ambient motion off — calm shell, no twinkle/breathe/glow cycles, flat page. */
-[data-motion="calm"] body { background-image: none !important; }
+[data-motion="calm"] body, [data-motion="calm"] .bt-main { background-image: none !important; }
 [data-motion="calm"] .r-twinkle, [data-motion="calm"] .r-breathe, [data-motion="calm"] .r-glow-pulse,
-[data-motion="calm"] .r-float, [data-motion="calm"] .r-star-field, [data-motion="calm"] .r-pulse-dot { animation: none !important; }
+[data-motion="calm"] .r-float, [data-motion="calm"] .r-pulse-dot { animation: none !important; }
+/* animation is not inherited: target the star children, and hide the field outright. */
+[data-motion="calm"] .r-star-field { display: none !important; }
+[data-motion="calm"] .r-star-field .star { animation: none !important; }
 [data-motion="calm"] .tardis-blink { animation: none !important; }
 
 /* Keep the lavender shell airy without changing conversation geometry. */

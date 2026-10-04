@@ -2,7 +2,7 @@
 // and knobs; these helpers stay source-compatible with the original two-axis
 // API so existing surfaces (Studio shell, sidebar toggle) keep working and now
 // also re-apply the stored knobs instead of clobbering them.
-import { applyAppearance, appearanceAxes, findPalette, readAppearance } from './themes';
+import { applyAppearance, appearanceAxes, readAppearance, withMode, withStyle } from './themes';
 
 export type ThemeName = 'dark' | 'light';
 export type VisualStyle = 'console' | 'lavender';
@@ -38,13 +38,8 @@ export { readAppearance, applyAppearance, findPalette, withMode, withStyle } fro
  * (palette, accent, font, size, corners, motion) so no surface resets them.
  */
 export function applyTheme(theme: ThemeName, style: VisualStyle = readVisualStyle()): void {
-  const current = readAppearance();
-  const def = findPalette(current.palette);
-  // Same mode: keep the active (possibly custom) palette, just re-apply knobs.
-  if (def.mode === theme) { applyAppearance(current); return; }
-  // Mode flip: map onto the nearest legacy palette that carries the asked look.
-  const palette = style === 'lavender'
-    ? (theme === 'light' ? 'lavender-light' : 'lavender')
-    : (theme === 'light' ? 'console-light' : 'console');
-  applyAppearance({ ...current, palette, style });
+  let next = readAppearance();
+  if (appearanceAxes(next).mode !== theme) next = withMode(next, theme);
+  if (next.style !== style) next = withStyle(next, style);
+  applyAppearance(next);
 }

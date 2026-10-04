@@ -12,7 +12,7 @@
 // auto-compaction. Rooms open in the center pane from Plugins; the classic
 // Studio IDE stays at /studio.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { ClipboardList, Menu, MessageSquare, Pencil } from 'lucide-react';
 import { apiJson } from '../data/api';
 import { useJarvis } from '../jarvis/JarvisProvider';
@@ -129,12 +129,16 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   const [editTarget, setEditTarget] = useState<Agent | undefined>(undefined);
   const [callAgent, setCallAgent] = useState<Agent | null>(null);
 
-  useEffect(() => { applyAppearance(appearance); }, [appearance]);
+  // Layout effect: the stored palette and knobs must be on <html> before the
+  // first paint, or a reload flashes the default look (font, size, corners, motion).
+  useLayoutEffect(() => { applyAppearance(appearance); }, [appearance]);
   const toggleTheme = () => setAppearance((a) => withMode(a, appearanceAxes(a).mode === 'dark' ? 'light' : 'dark'));
   // Quick theme switching: Alt+Shift+T cycles, Alt+Shift+R shuffles.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (!event.altKey || !event.shiftKey || event.metaKey || event.ctrlKey || event.defaultPrevented) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return;
       const key = event.key.toLowerCase();
       if (key === 't') { event.preventDefault(); setAppearance((a) => cycleAppearance(a)); }
       else if (key === 'r') { event.preventDefault(); setAppearance((a) => shuffleAppearance(a)); }
