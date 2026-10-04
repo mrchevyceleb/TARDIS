@@ -589,10 +589,21 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // Reply case: a Claude lane answered inside a thinking summary and went
     // straight to tools, so the person sees only the tool card. Hold the summary
     // until its message proves it had no text; every other thought stays hidden.
+    // Mid-turn case: a thinking-ONLY message (no text, no tool call) is that
+    // message's whole output, and Claude lanes put the person-facing update
+    // between tool rounds exactly there. Hold it wherever it lands, not just as
+    // the first reply after the person spoke.
     const thought = String(ev.message?.model ?? '').startsWith('claude')
       ? (ev.message.content as Array<any>).find((c) => c?.type === 'thinking' && typeof c.thinking === 'string' && c.thinking.trim())
       : undefined;
-    if (thought && awaitingFirstReply(annotated)) {
+    const thinkingOnly = Boolean(thought) && !(ev.message.content as Array<any>).some(
+      (c) => (c?.type === 'text' && typeof c.text === 'string' && c.text.trim()) || c?.type === 'tool_use',
+    );
+    // A re-delivered assistant event (reconnect replay) must not stack a second
+    // copy of a thought this same event already produced, pending or released.
+    const thoughtAlreadyHeld = typeof ev.seq === 'number'
+      && annotated.some((b) => b.kind === 'text' && b.thought && b.seq === ev.seq);
+    if (thought && !thoughtAlreadyHeld && (awaitingFirstReply(annotated) || thinkingOnly)) {
       annotated.push({
         kind: 'text', id: id(), text: thought.thinking.trim(), ...eventTime(ev),
         turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation: 'update',
@@ -603,7 +614,9 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       .filter((c) => c?.type === 'text' && typeof c.text === 'string')
       .map((c) => c.text)
       .join('');
-    if (fullText) {
+    // Same emptiness rule as thinkingOnly above: whitespace-only text is not a
+    // real reply, so it neither drops a held thought nor paints a blank bubble.
+    if (fullText.trim()) {
       if (isSyntheticApiErrorEvent(ev)) return blocks;
       const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '' && !b.thought);
       if (!hasText) {
