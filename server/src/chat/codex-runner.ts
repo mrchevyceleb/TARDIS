@@ -23,6 +23,7 @@ import { agentForChatId, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
+import { codexHomeFor, codexRolloutMissing, latestThreadIdFromEvents } from './codex-threads.ts';
 import { resolveCodexBin, resolveCodexSelection } from './codex-models.ts';
 import { buildCodexAppServerArgs, shouldRetryEmptyCodexTurn } from './codex-args.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
@@ -486,7 +487,7 @@ export class CodexSession {
     this.dead = true;
     this.nativeSteerReady = false;
     this.rejectNativeSteers(new Error('Codex session stopped'));
-    const latestThreadId = this.threadId ?? latestThreadIdFromEvents(this.eventLog);
+    const latestThreadId = this.threadId ?? latestThreadIdFromEvents(this.eventLog, this.cli);
     if (latestThreadId) {
       await this.persistThreadId(latestThreadId);
     }
@@ -715,12 +716,38 @@ export class CodexSession {
       return;
     }
 
+    // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
+    // login; everything else keeps the per-repo account-map resolution. Resolved
+    // before the seed so the rollout lookup below reads the same CODEX_HOME the
+    // turn will bill.
+    const forcedAccount = accountFromChatId(this.chatId);
+    const childEnv = forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd);
+    // Resuming a rollout codex no longer has fails the whole turn with "no
+    // rollout found for thread id …" before the model sees the prompt. Check
+    // first: an unresumable thread becomes a fresh one seeded with the compact
+    // window, which costs context rather than the answer.
+    if (this.threadId && (await codexRolloutMissing(codexHomeFor(childEnv), this.threadId))) {
+      const unresumable = this.threadId;
+      // Drops the in-memory id synchronously; a failed write is not worth
+      // wedging a busy lane over, and the next turn re-checks the rollout.
+      await this.clearPersistedThreadId().catch(() => undefined);
+      this.seedWindowOnNextTurn = true;
+      console.warn(
+        `[chat codex] no rollout for thread ${unresumable} on ${this.logKey} — starting a fresh thread and seeding the window`,
+      );
+    }
     const hasSeedOverride = typeof opts.seedOverride === 'string';
     const seedWindow = !hasSeedOverride && (this.consumeWindowSeed() || recoverContextThisTurn);
     const seed = hasSeedOverride
       ? opts.seedOverride as string
       : seedWindow
-        ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
+        ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory).catch((e) => {
+            // A peek/compaction failure after the user's message was accepted
+            // must not strand a busy lane with the reply watcher armed: keep
+            // going unseeded, the same degradation the empty-retry path uses.
+            console.warn(`[chat codex] seed peek failed on ${this.logKey}, continuing unseeded: ${(e as Error).message}`);
+            return '';
+          })
         : '';
     if (seed) {
       this.recoverContextOnNextTurn = false;
@@ -776,14 +803,11 @@ export class CodexSession {
       return;
     }
 
-    // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
-    // login; everything else keeps the per-repo account-map resolution.
-    const forcedAccount = accountFromChatId(this.chatId);
     const turnStartedAtMs = Date.now();
     const child = spawn(process.execPath, [CODEX_APP_TURN_SCRIPT], {
       cwd: this.cwd,
       // The marker tells the installed long-call gate hook this is a TARDIS agent turn.
-      env: { ...(forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd)), ...longCallGateEnv(this.chatId) },
+      env: { ...childEnv, ...longCallGateEnv(this.chatId) },
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -1342,28 +1366,6 @@ export class CodexSession {
 function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
   const normalized = chatId || 'main';
   return normalized === 'main' ? `${cli}|${cwd}` : `${cli}|${cwd}|${normalized}`;
-}
-
-function latestThreadIdFromEvents(events: SeqEvent[]): string | null {
-  let threadId: string | null = null;
-  for (const se of events) {
-    const ev = se.ev;
-    if (ev.type === 'turnEnd' && typeof ev.sessionId === 'string') {
-      threadId = ev.sessionId;
-      continue;
-    }
-    if (ev.type !== 'event') continue;
-    const inner = ev.event;
-    if (!inner || typeof inner !== 'object') continue;
-    if (inner.type === 'system' && inner.subtype === 'init' && typeof inner.session_id === 'string') {
-      threadId = inner.session_id;
-      continue;
-    }
-    if (inner.type === 'result' && typeof inner.session_id === 'string') {
-      threadId = inner.session_id;
-    }
-  }
-  return threadId;
 }
 
 /** Manager keyed by cwd + chat id, matching the claude session map. */
