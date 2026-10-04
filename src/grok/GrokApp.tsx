@@ -12,7 +12,7 @@
 // auto-compaction. Rooms open in the center pane from Plugins; the classic
 // Studio IDE stays at /studio.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { ClipboardList, Menu, MessageSquare, Pencil } from 'lucide-react';
 import { apiJson } from '../data/api';
 import { useJarvis } from '../jarvis/JarvisProvider';
@@ -30,7 +30,7 @@ import { BotPanel, type ChatMeta } from './BotPanel';
 import { AgentEditor } from './AgentEditor';
 import { CallOverlay } from '../voice/CallOverlay';
 import { useKonami } from '../theme/eggs';
-import { applyTheme, readTheme, readVisualStyle } from '../theme/applyTheme';
+import { applyAppearance, appearanceAxes, cycleAppearance, readAppearance, shuffleAppearance, withMode, type Appearance } from '../theme/themes';
 import { TAGLINE, WORKSPACE_NAV } from '../theme/voice';
 import { ROOM_NAMES } from '../data/roomNames';
 import { useAgents, reorderAgentIds, patchAgent, sameChatId, type Agent } from './agents';
@@ -123,13 +123,29 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   const [railCollapsed, setRailCollapsed] = useState(() => localStorage.getItem('rivendell:rail-collapsed') === 'true');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [meta, setMeta] = useState<ChatMeta | null>(null);
-  const [theme, setTheme] = useState(readTheme);
-  const [visualStyle, setVisualStyle] = useState(readVisualStyle);
+  const [appearance, setAppearance] = useState<Appearance>(readAppearance);
+  const { mode: theme, style: visualStyle } = appearanceAxes(appearance);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<Agent | undefined>(undefined);
   const [callAgent, setCallAgent] = useState<Agent | null>(null);
 
-  useEffect(() => { applyTheme(theme, visualStyle); }, [theme, visualStyle]);
+  // Layout effect: the stored palette and knobs must be on <html> before the
+  // first paint, or a reload flashes the default look (font, size, corners, motion).
+  useLayoutEffect(() => { applyAppearance(appearance); }, [appearance]);
+  const toggleTheme = () => setAppearance((a) => withMode(a, appearanceAxes(a).mode === 'dark' ? 'light' : 'dark'));
+  // Quick theme switching: Alt+Shift+T cycles, Alt+Shift+R shuffles.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!event.altKey || !event.shiftKey || event.metaKey || event.ctrlKey || event.defaultPrevented) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return;
+      const key = event.key.toLowerCase();
+      if (key === 't') { event.preventDefault(); setAppearance((a) => cycleAppearance(a)); }
+      else if (key === 'r') { event.preventDefault(); setAppearance((a) => shuffleAppearance(a)); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
   useEffect(() => { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); }, [view]);
   useEffect(() => { localStorage.setItem(PANE_KEY, String(desktopPaneOpen)); }, [desktopPaneOpen]);
   // A desktop preference must never reopen a sheet over a phone conversation.
@@ -392,7 +408,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
 
   return (
     <StudioFilesContext.Provider value={fileActions}>
-      <div ref={appRef} className={`bot-app${railCollapsed ? ' rail-collapsed' : ''}${regen ? ' regen' : ''}`} data-theme={theme} data-style={visualStyle}>
+      <div ref={appRef} className={`bot-app${railCollapsed ? ' rail-collapsed' : ''}${regen ? ' regen' : ''}`} data-style={visualStyle}>
         <BotRail
           collapsed={railCollapsed}
           onToggleCollapse={() => setRailCollapsed((c) => !c)}
@@ -421,10 +437,9 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
           activeRoom={activeRoom}
           onOpenRoom={openRoom}
           theme={theme}
-          visualStyle={visualStyle}
-          onStyleChange={setVisualStyle}
-          onThemeChange={setTheme}
-          onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+          appearance={appearance}
+          onAppearance={setAppearance}
+          onToggleTheme={toggleTheme}
           onOpenStudio={openStudio}
           onHome={goHome}
         />
@@ -488,7 +503,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
               onVoice={() => (agent ? setCallAgent(agent) : jarvis.summon())}
               voiceActive={jarvis.wakeActive}
               theme={theme}
-              onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+              onToggleTheme={toggleTheme}
               onOpenStudio={openStudio}
               onMeta={onMeta}
             />
@@ -508,7 +523,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
                     repo={hubRepo}
                     isMobile={isMobile}
                     theme={theme}
-                    onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+                    onToggleTheme={toggleTheme}
                     onOpenStudio={openStudio}
                     onOpenInChat={() => openAgent(deskAgent)}
                     onEditAgent={() => { setEditTarget(deskAgent); setEditorOpen(true); }}

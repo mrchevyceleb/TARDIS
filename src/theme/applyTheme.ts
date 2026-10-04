@@ -1,9 +1,14 @@
-// Visual style and brightness are independent local preferences. Deployment
-// defaults only apply before this browser has chosen its own appearance.
-export const THEME_COLORS = { dark: '#08080a', light: '#f4f1ea' } as const;
-const LAVENDER_COLORS = { dark: '#171321', light: '#faf8ff' } as const;
-export type ThemeName = keyof typeof THEME_COLORS;
+// Visual appearance entry points. The theme library (themes.ts) owns palettes
+// and knobs; these helpers stay source-compatible with the original two-axis
+// API so existing surfaces (Studio shell, sidebar toggle) keep working and now
+// also re-apply the stored knobs instead of clobbering them.
+import { applyAppearance, appearanceAxes, readAppearance, withMode, withStyle } from './themes';
+
+export type ThemeName = 'dark' | 'light';
 export type VisualStyle = 'console' | 'lavender';
+export { type Appearance } from './themes';
+
+export const THEME_COLORS = { dark: '#08080a', light: '#f4f1ea' } as const;
 
 function stored(key: string): string | null {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -21,14 +26,20 @@ export function readVisualStyle(): VisualStyle {
   return import.meta.env.VITE_TARDIS_STYLE === 'lavender' ? 'lavender' : 'console';
 }
 
+/** The current palette mode, honoring the new theme library when it is in use. */
+export function readAppearanceMode(): ThemeName {
+  return appearanceAxes(readAppearance()).mode;
+}
+
+export { readAppearance, applyAppearance, findPalette, withMode, withStyle } from './themes';
+
+/**
+ * Legacy two-axis apply: keeps working, and now folds in the stored knobs
+ * (palette, accent, font, size, corners, motion) so no surface resets them.
+ */
 export function applyTheme(theme: ThemeName, style: VisualStyle = readVisualStyle()): void {
-  document.documentElement.dataset.theme = theme;
-  document.documentElement.dataset.style = style;
-  try {
-    localStorage.setItem('rivendell:theme', theme);
-    localStorage.setItem('rivendell:style', style);
-  } catch { /* The controls still work when browser storage is unavailable. */ }
-  const colors = style === 'lavender' ? LAVENDER_COLORS : THEME_COLORS;
-  document.documentElement.style.setProperty('--boot-bg', colors[theme]);
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', colors[theme]);
+  let next = readAppearance();
+  if (appearanceAxes(next).mode !== theme) next = withMode(next, theme);
+  if (next.style !== style) next = withStyle(next, style);
+  applyAppearance(next);
 }

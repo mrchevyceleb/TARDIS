@@ -375,7 +375,7 @@ export function Studio() {
 
   return (
     <StudioFilesContext.Provider value={fileActions}>
-      <div className="studio" data-theme={theme} style={rootStyle}>
+      <div className="studio" style={rootStyle}>
         <StarField />
 
         {/* ── Top bar ── */}
