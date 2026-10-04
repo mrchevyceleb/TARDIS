@@ -1,4 +1,5 @@
-import { readdirSync, type Dirent } from 'node:fs';
+import type { Dirent } from 'node:fs';
+import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { SeqEvent } from './runner.ts';
@@ -66,15 +67,17 @@ const SCAN_BUDGET = 20_000;
  * layout we don't recognise (no `rollout-*.jsonl` seen at all) must not discard
  * a thread id that may be perfectly live.
  */
-export function codexRolloutMissing(codexHome: string, threadId: string): boolean {
+export async function codexRolloutMissing(codexHome: string, threadId: string): Promise<boolean> {
   if (!threadId) return false;
   let budget = SCAN_BUDGET;
   let sawAnyRollout = false;
   // true = found, false = not in this subtree, null = inconclusive.
-  const walk = (dir: string): boolean | null => {
+  // The walk is async so a huge rollout store can never stall the event loop
+  // (and with it every HTTP/WebSocket turn) mid-lookup.
+  const walk = async (dir: string): Promise<boolean | null> => {
     let entries: Dirent[];
     try {
-      entries = readdirSync(dir, { withFileTypes: true });
+      entries = await readdir(dir, { withFileTypes: true });
     } catch {
       return null;
     }
@@ -84,7 +87,7 @@ export function codexRolloutMissing(codexHome: string, threadId: string): boolea
     for (const entry of entries) {
       if (budget-- <= 0) return null;
       if (entry.isDirectory()) {
-        const found = walk(join(dir, entry.name));
+        const found = await walk(join(dir, entry.name));
         if (found !== false) return found;
         continue;
       }
@@ -96,7 +99,7 @@ export function codexRolloutMissing(codexHome: string, threadId: string): boolea
     }
     return false;
   };
-  const result = walk(join(codexHome, 'sessions'));
+  const result = await walk(join(codexHome, 'sessions'));
   if (result !== false) return false;
   return sawAnyRollout;
 }

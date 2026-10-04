@@ -726,7 +726,7 @@ export class CodexSession {
     // rollout found for thread id …" before the model sees the prompt. Check
     // first: an unresumable thread becomes a fresh one seeded with the compact
     // window, which costs context rather than the answer.
-    if (this.threadId && codexRolloutMissing(codexHomeFor(childEnv), this.threadId)) {
+    if (this.threadId && (await codexRolloutMissing(codexHomeFor(childEnv), this.threadId))) {
       const unresumable = this.threadId;
       // Drops the in-memory id synchronously; a failed write is not worth
       // wedging a busy lane over, and the next turn re-checks the rollout.
@@ -741,7 +741,13 @@ export class CodexSession {
     const seed = hasSeedOverride
       ? opts.seedOverride as string
       : seedWindow
-        ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
+        ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory).catch((e) => {
+            // A peek/compaction failure after the user's message was accepted
+            // must not strand a busy lane with the reply watcher armed: keep
+            // going unseeded, the same degradation the empty-retry path uses.
+            console.warn(`[chat codex] seed peek failed on ${this.logKey}, continuing unseeded: ${(e as Error).message}`);
+            return '';
+          })
         : '';
     if (seed) {
       this.recoverContextOnNextTurn = false;
