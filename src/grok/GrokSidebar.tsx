@@ -56,7 +56,8 @@ import { NativeOpenHelper } from '../components/NativeOpenHelper';
 import { ROOM_NAMES } from '../data/roomNames';
 import { useDeploymentFlags } from '../data/deploymentFlags';
 import { AppearanceSettings } from '../theme/AppearanceSettings';
-import type { ThemeName, VisualStyle } from '../theme/applyTheme';
+import type { ThemeName } from '../theme/applyTheme';
+import type { Appearance } from '../theme/themes';
 import { TIMEY_WIMEY } from '../theme/voice';
 import { readSound, useIdle, useTripleTap, vworp, writeSound } from '../theme/eggs';
 
@@ -103,9 +104,8 @@ export type BotRailProps = {
   activeRoom?: string;
   onOpenRoom: (key: string) => void;
   theme: ThemeName;
-  visualStyle: VisualStyle;
-  onStyleChange: (style: VisualStyle) => void;
-  onThemeChange: (theme: ThemeName) => void;
+  appearance: Appearance;
+  onAppearance: (a: Appearance) => void;
   onToggleTheme: () => void;
   onOpenStudio: () => void;
   onHome: () => void;
@@ -923,10 +923,8 @@ export function BotRail(props: BotRailProps) {
           <span className="bt-disc">Y</span> You
         </button>
         {appearanceOpen ? <AppearanceSettings
-          theme={props.theme}
-          visualStyle={props.visualStyle}
-          onThemeChange={props.onThemeChange}
-          onStyleChange={props.onStyleChange}
+          appearance={props.appearance}
+          onAppearance={props.onAppearance}
           onClose={(restoreFocus = true) => { setAppearanceOpen(false); if (restoreFocus) appearanceTrigger.current?.focus(); }}
           triggerRef={appearanceTrigger}
         /> : null}

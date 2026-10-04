@@ -20,15 +20,17 @@
       // before first paint so neither style nor brightness flashes on reload.
       var t = '%VITE_TARDIS_THEME%' === 'light' ? 'light' : 'dark';
       var v = '%VITE_TARDIS_STYLE%' === 'lavender' ? 'lavender' : 'console';
+      var bootBg = null;
       try {
         var savedTheme = localStorage.getItem('rivendell:theme');
         var savedStyle = localStorage.getItem('rivendell:style');
         if (savedTheme === 'light' || savedTheme === 'dark') t = savedTheme;
         if (savedStyle === 'console' || savedStyle === 'lavender') v = savedStyle;
+        bootBg = localStorage.getItem('rivendell:boot-bg');
       } catch (e) {}
       document.documentElement.dataset.theme = t;
       document.documentElement.dataset.style = v;
-      var bg = v === 'lavender' ? (t === 'light' ? '#faf8ff' : '#171321') : (t === 'light' ? '#f4f1ea' : '#08080a');
+      var bg = bootBg || (v === 'lavender' ? (t === 'light' ? '#faf8ff' : '#171321') : (t === 'light' ? '#f4f1ea' : '#08080a'));
       document.documentElement.style.setProperty('--boot-bg', bg);
       var m = document.querySelector('meta[name=theme-color]');
       if (m) m.setAttribute('content', bg);
