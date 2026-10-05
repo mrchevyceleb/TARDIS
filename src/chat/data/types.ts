@@ -141,8 +141,9 @@ export type ChatBlock =
        * presentation distinction, never a reason to hide user-facing text. */
       presentation?: 'update' | 'answer';
       /** The provider tagged this message as running commentary (Codex
-       * `phase: 'commentary'`). The feed folds it into a dim note once the turn
-       * has moved on, but never hides it. Unset for Claude and reply_now text. */
+       * `phase: 'commentary'`): the model's between-tool message to the
+       * person. It renders as normal reply text, never dimmed or folded.
+       * Unset for Claude and reply_now text. */
       commentary?: boolean;
       turnId?: string;
       /** Teammate message this response belongs to, when applicable. */
@@ -152,11 +153,12 @@ export type ChatBlock =
       /** Durable event-log seq for this block. Used to pin emoji reactions. */
       seq?: number;
       reactions?: Array<{ emoji: string; from: string }>;
-      /** A Claude thinking summary shown as a dimmed reply line. Only for the
-       * reply case: the first output after a person's message (or a reply-first
-       * nudge) that put its words in thinking and went straight to tools. */
+      /** Legacy cached blocks only: a Claude thinking summary once surfaced as
+       * a dimmed reply line. Thinking is private reasoning, never rendered and
+       * never created anymore; kept so stale snapshots typecheck and filter. */
       thought?: boolean;
-      /** A thought held back until its message shows it had no text of its own. */
+      /** Legacy cached blocks only: a thought once held back until its message
+       * showed it had no text of its own. Never created anymore. */
       pending?: boolean;
     }
   | {
