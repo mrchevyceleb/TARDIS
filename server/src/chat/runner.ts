@@ -19,6 +19,7 @@ import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn
 import { CLAUDE_NATIVE_COMPACT_WINDOW, contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { shouldSkipEngineResume } from './threadWindow.ts';
 import { isAgentThread, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
+import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateSettings } from './longCallGate.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
@@ -1124,6 +1125,18 @@ class ClaudeSession {
       // A continue keeps the voice of the turn it finishes.
       hidden: Boolean(continuing && !continuing.origin.human),
     });
+    // Auto-recall: put recorded knowledge (lane memory notes, Desk cards,
+    // assistant-mcp memories) in front of every new human or teammate turn.
+    // Automation traffic (routines, job wakes, reply nudges, continues) never
+    // spends the search; every source fails open under a hard deadline.
+    const recall = startsNewTurn && !continuing && !replyNudge && !automationRequest
+      && recallEligibleTurn(this.chatId, { peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole, voiceMode: opts.voiceMode })
+      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, messageText: opts.peerText ?? text })
+      : '';
+    if (sendAborted()) {
+      abandonUnsentTurn();
+      return;
+    }
     const continuationText = isAgentThread(this.chatId)
       ? [
           '<rivendell-continuation>',
@@ -1131,11 +1144,12 @@ class ClaudeSession {
           'Do not repeat session-start rituals for this turn: do not run `date`, do not call session_start_context, and do not open with empty boilerplate such as “I’m on it” or “checking now.” TARDIS already renders basic liveness.',
           '</rivendell-continuation>',
           ...(conversationGuidance ? ['', conversationGuidance] : []),
+          ...(recall ? ['', recall] : []),
           ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []),
           '',
           commandText,
         ].join('\n')
-      : commandText;
+      : recall ? `${recall}\n\n${commandText}` : commandText;
     const humanTurn = continuing ? continuing.origin.human : !opts.peerFrom && opts.peerFromRole !== 'automation';
     // Full computer rules only on the message that seeds a fresh window; every later
     // message of the same warm process carries the brief form (fresh token + device + policy).

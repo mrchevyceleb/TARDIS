@@ -16,6 +16,7 @@ import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './
 import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeq, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { lastEngineOf, logKeyFor } from './threadKey.ts';
+import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import {
@@ -2981,7 +2982,22 @@ export class BananaSession {
       peerFromRole: opts.peerFromRole,
       hidden: opts.hidden,
     });
-    const effectiveText = `${computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation')}\n\n${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${commandExpandedText}`;
+    // Auto-recall: recorded knowledge in front of every new human or teammate
+    // turn; hidden auto-continues never spend the search.
+    const recall = recallEligibleTurn(this.chatId, {
+      peerFrom: opts.peerFrom,
+      peerFromRole: opts.peerFromRole,
+      hidden: opts.hidden,
+      automation: (opts.autoContinueDepth ?? 0) > 0,
+      voiceMode: opts.voiceMode,
+    })
+      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, messageText: opts.peerText ?? text })
+      : '';
+    if (opts.signal?.aborted || this.dead) {
+      this.busy = false;
+      return;
+    }
+    const effectiveText = `${computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation')}\n\n${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${commandExpandedText}`;
     if (seed) {
       this.turn.recoveryRecapUsed = true;
       this.emit({
