@@ -129,30 +129,6 @@ function eventTime(ev: any): { ts: number; tsApprox?: true } {
   return typeof ev?.seq === 'number' ? { ts: Date.now(), tsApprox: true } : { ts: Date.now() };
 }
 
-/** The reply case: nothing from the agent yet since a person's message or a
- *  reply-first nudge. A teammate, routine or job message ends the case, and so
- *  does any output, so only the first reply of a message can qualify. */
-function awaitingFirstReply(blocks: ChatBlock[]): boolean {
-  for (let i = blocks.length - 1; i >= 0; i -= 1) {
-    const b = blocks[i];
-    if (b.kind === 'replyask') return true;
-    // Anything the person can see, or any turn boundary, closes the case.
-    if (b.kind === 'peer' || b.kind === 'text' || b.kind === 'tool' || b.kind === 'doc-link' || b.kind === 'folder-link' || b.kind === 'artifact'
-      || b.kind === 'terminal-error' || b.kind === 'restart' || b.kind === 'switch' || b.kind === 'background' || b.kind === 'compact') return false;
-  }
-  return false;
-}
-
-/** A thought is held back (`pending`) until its message shows it had no text of
- *  its own: a tool call starts (show it) or a text block starts (drop it). */
-function settleThoughts(blocks: ChatBlock[], turnId: string | undefined, show: boolean): ChatBlock[] {
-  const held = (b: ChatBlock) => b.kind === 'text' && b.pending === true && (!turnId || b.turnId === turnId);
-  if (!blocks.some(held)) return blocks;
-  return show
-    ? blocks.map((b) => (held(b) && b.kind === 'text' ? { ...b, pending: false } : b))
-    : blocks.filter((b) => !held(b));
-}
-
 export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlock[] {
   if (!ev || typeof ev !== 'object') return blocks;
   // A subagent's own frames (parent_tool_use_id) are its private work, not
@@ -165,12 +141,6 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       ? { ...ev.event, seq: ev.seq ?? ev.event.seq, at: ev.at ?? ev.event.at }
       : ev.event;
     return reduce(blocks, inner, turnIdRef);
-  }
-
-  // The message (or turn) ended with nothing but a held thought: it was the
-  // whole reply, so show it.
-  if (ev.type === 'message_start' || ev.type === 'result' || ev.type === '_interrupted' || ev.type === '_turn_boundary' || ev.type === '_terminal_error') {
-    blocks = settleThoughts(blocks, undefined, true);
   }
 
   // A person's message or a reply-first nudge opens the reply case. The marker
@@ -434,12 +404,16 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // misses a reply the stream already showed with different line breaks.
     // That paints the same answer twice. A closing copy is never a new bubble
     // once any visible text already contains it.
+    // Legacy thought blocks never join the dedup: a thought that an older
+    // build surfaced must not suppress the real reply as "already rendered".
+    // Pending streaming blocks stay in: matching the live stream is the
+    // double-paint guard this dedup exists for.
     const finalTurnParts = closed
-      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && (!finalTurnId || b.turnId === finalTurnId))
+      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && !b.thought && (!finalTurnId || b.turnId === finalTurnId))
       .map((b) => b.text);
     const finalAlreadyRendered = finalTurnParts.some((part) => sameReply(part, finalText))
       || ['', '\n', '\n\n'].some((separator) => sameReply(finalTurnParts.join(separator), finalText))
-      || closed.some((b) => b.kind === 'text' && b.text.trim().length > 0 && sameReply(b.text, finalText));
+      || closed.some((b) => b.kind === 'text' && !b.thought && b.text.trim().length > 0 && sameReply(b.text, finalText));
     if (finalText && !finalAlreadyRendered) {
       return [...closed, {
         kind: 'text',
@@ -479,13 +453,12 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         ...(cb.phase === 'commentary' ? { commentary: true } : {}),
         seq: typeof ev.seq === 'number' ? ev.seq : undefined,
       };
-      // The message has its own text, so a held thinking summary is not the reply.
-      return [...settleThoughts(blocks, turnId, false), block];
+      return [...blocks, block];
     }
     if (cb?.type === 'tool_use' && typeof cb.name === 'string' && /^(mcp__.+__)?reply_now$/.test(cb.name)) {
       // The agent is speaking: the server posts the text as a message, so the call
       // itself gets no tool card.
-      return settleThoughts(blocks, turnId, false);
+      return blocks;
     }
     if (cb?.type === 'tool_use') {
       const block: ChatBlock = {
@@ -494,8 +467,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         running: true, ...eventTime(ev),
         turnId, peerId: turnIdRef.peerId, cbIndex: idx, open: true,
       };
-      // A tool call with no text before it: the held thought is the reply.
-      return [...settleThoughts(blocks, turnId, true), block];
+      return [...blocks, block];
     }
     return blocks;
   }
@@ -566,7 +538,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     if (typeof ev.seq === 'number' && blocks.some((b) => b.kind === 'text' && b.seq === ev.seq)) return blocks;
     if (!turnIdRef.current) turnIdRef.current = `t${nextId++}`;
     const turnId = turnIdRef.current;
-    return [...settleThoughts(blocks, turnId, false), {
+    return [...blocks, {
       kind: 'text', id: id(), text, ...eventTime(ev),
       turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation: 'update',
       seq: typeof ev.seq === 'number' ? ev.seq : undefined,
@@ -586,41 +558,19 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         seq: typeof ev.seq === 'number' ? ev.seq : b.seq,
       };
     });
-    // Reply case: a Claude lane answered inside a thinking summary and went
-    // straight to tools, so the person sees only the tool card. Hold the summary
-    // until its message proves it had no text; every other thought stays hidden.
-    // Mid-turn case: a thinking-ONLY message (no text, no tool call) is that
-    // message's whole output, and Claude lanes put the person-facing update
-    // between tool rounds exactly there. Hold it wherever it lands, not just as
-    // the first reply after the person spoke.
-    const thought = String(ev.message?.model ?? '').startsWith('claude')
-      ? (ev.message.content as Array<any>).find((c) => c?.type === 'thinking' && typeof c.thinking === 'string' && c.thinking.trim())
-      : undefined;
-    const thinkingOnly = Boolean(thought) && !(ev.message.content as Array<any>).some(
-      (c) => (c?.type === 'text' && typeof c.text === 'string' && c.text.trim()) || c?.type === 'tool_use',
-    );
-    // A re-delivered assistant event (reconnect replay) must not stack a second
-    // copy of a thought this same event already produced, pending or released.
-    const thoughtAlreadyHeld = typeof ev.seq === 'number'
-      && annotated.some((b) => b.kind === 'text' && b.thought && b.seq === ev.seq);
-    if (thought && !thoughtAlreadyHeld && (awaitingFirstReply(annotated) || thinkingOnly)) {
-      annotated.push({
-        kind: 'text', id: id(), text: thought.thinking.trim(), ...eventTime(ev),
-        turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation: 'update',
-        thought: true, pending: true, seq: typeof ev.seq === 'number' ? ev.seq : undefined,
-      });
-    }
+    // Claude thinking is private reasoning, never reply text: it never becomes
+    // a block. A lane that answers only inside thinking gets the server's
+    // reply-nudge (replyNudge.ts) asking for visible text instead.
     const fullText = (ev.message.content as Array<any>)
       .filter((c) => c?.type === 'text' && typeof c.text === 'string')
       .map((c) => c.text)
       .join('');
-    // Same emptiness rule as thinkingOnly above: whitespace-only text is not a
-    // real reply, so it neither drops a held thought nor paints a blank bubble.
+    // Whitespace-only text is not a real reply, so it paints no blank bubble.
     if (fullText.trim()) {
       if (isSyntheticApiErrorEvent(ev)) return blocks;
       const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '' && !b.thought);
       if (!hasText) {
-        return [...settleThoughts(annotated, turnId, false), { kind: 'text', id: id(), text: fullText, ...eventTime(ev), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation, seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
+        return [...annotated, { kind: 'text', id: id(), text: fullText, ...eventTime(ev), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation, seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
       }
     }
     return annotated;
@@ -799,7 +749,9 @@ function parseStoredSnapshot(raw: string | null): StoredChatSnapshot | null {
     if (typeof parsed.seq !== 'number' || !Number.isFinite(parsed.seq) || parsed.seq < 0) return null;
     // A persisted snapshot is settled: normalize stale streaming flags from
     // interrupted legacy turns so they cannot suppress the typing indicator.
-    const blocks = parsed.blocks.filter((block) => block.kind !== 'replyask' && !(block.kind === 'text' && block.pending)).map((block) => {
+    // Legacy thought blocks (thinking an older build surfaced as dim lines)
+    // are dropped here too: reasoning must never count as reply text anywhere.
+    const blocks = parsed.blocks.filter((block) => block.kind !== 'replyask' && !(block.kind === 'text' && (block.pending || block.thought))).map((block) => {
       if (block.kind === 'text' && block.open) return { ...block, open: false };
       if (block.kind === 'tool' && (block.open || block.running)) return { ...block, open: false, running: false };
       return block;
