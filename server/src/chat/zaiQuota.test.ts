@@ -105,11 +105,21 @@ test('GLM never flaps between two failing providers', () => {
     // A mid-turn api_retry carries its status under a different key.
     assert.equal(isZaiFallbackProviderFailure({ type: 'system', subtype: 'api_retry', error_status: 401 }), true);
 
-    // Fireworks refusing a turn benches it. Without this, the next plan 429
-    // would hand the turn straight back to a provider that just failed.
+    // While the plan window is exhausted, a Fireworks failure must NOT bench
+    // it: benching routes every GLM turn back to a plan that 429s until the
+    // window resets (observed 2026-10-05: a single 503 blip benched Fireworks
+    // for 15 minutes against a plan closed for days, so every GLM turn in the
+    // bench died on the dead plan). A transient Fireworks blip beats a
+    // guaranteed-dead plan, so GLM keeps retrying Fireworks.
     noteZaiFallbackFailure();
-    assert.equal(zaiModeFor(GLM), 'plan');
+    assert.equal(zaiModeFor(GLM), 'fireworks');
+    // A plan-window refusal also drops any bench still active from when the
+    // plan was healthy: carried into the closed window it would route every
+    // GLM turn to a guaranteed 429, so the window closing under an existing
+    // bench keeps GLM on Fireworks too.
+    resetZaiQuotaState();
+    noteZaiFallbackFailure();
     noteZaiPlanQuota(QUOTA_RESULT);
-    assert.equal(zaiModeFor(GLM), 'plan');
+    assert.equal(zaiModeFor(GLM), 'fireworks');
   });
 });
