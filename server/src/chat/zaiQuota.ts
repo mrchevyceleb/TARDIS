@@ -136,6 +136,12 @@ export function isZaiPlanQuotaEvent(ev: unknown): boolean {
  *  window never shortens an already-open one. */
 export function noteZaiPlanQuota(ev: unknown): boolean {
   if (!isZaiPlanQuotaEvent(ev)) return false;
+  // The plan just went dead for this window: drop any Fireworks bench still
+  // active. A bench set while the plan was healthy only guarded against
+  // flapping between two usable providers; carried into a closed window it
+  // routes every GLM turn to a guaranteed 429 until the window resets, so
+  // Fireworks stays the better side until the plan reopens.
+  fallbackBenchedUntilMs = 0;
   const until = Date.now() + windowMsFromDetail(quotaDetail(ev)) + WINDOW_BUFFER_MS;
   if (until > planExhaustedUntilMs) {
     planExhaustedUntilMs = until;
@@ -163,8 +169,19 @@ export function isZaiFallbackProviderFailure(ev: unknown): boolean {
 }
 
 /** Fireworks itself is unusable. Bench it so GLM does not flap between two
- *  failing providers; the plan key is no worse and reopens on its own. */
+ *  failing providers; the plan key is no worse and reopens on its own.
+ *
+ *  Except while the plan window is exhausted: benching then routes every GLM
+ *  turn back to a plan that 429s until the window resets (observed 2026-10-05:
+ *  a single Fireworks 503 benched Fireworks for 15 minutes while the plan was
+ *  closed for days, so every GLM turn inside the bench died on the dead
+ *  plan). A transient Fireworks blip beats a guaranteed-dead plan, so keep
+ *  retrying Fireworks until the plan reopens. */
 export function noteZaiFallbackFailure(): void {
+  if (zaiPlanWindowResetsAt() > 0) {
+    console.warn('[chat zai] Fireworks failed while the plan window is exhausted; keeping Fireworks (retrying it) instead of benching it against a dead plan');
+    return;
+  }
   fallbackBenchedUntilMs = Date.now() + fallbackCooldownMs();
   console.warn('[chat zai] Fireworks fallback benched after a provider-level failure');
 }
