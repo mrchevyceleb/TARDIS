@@ -35,6 +35,7 @@ import { appendEventLog, appendEventLogSync, flushEventLog, isPlumbingEvent, loa
 import { maybeAutoCompact, noteUserTurn, peekEnginePrimerThroughSeq, refreshCompactForRotation, bankRotation, clearRotation } from './compaction.ts';
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { isAgentThread, logKeyFor } from './threadKey.ts';
+import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
@@ -755,9 +756,18 @@ export class PiSession {
       // A continue keeps the voice of the turn it finishes.
       hidden: Boolean(continuing && !continuing.origin.human),
     });
+    // Auto-recall: recorded knowledge (lane memory notes, Desk cards,
+    // assistant-mcp memories) in front of every new human or teammate turn;
+    // automation traffic never spends the search, and every source fails
+    // open under a hard deadline.
+    const recall = startsNewTurn && !continuing && !automationRequest
+      && recallEligibleTurn(this.chatId, { peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole, voiceMode: opts.voiceMode })
+      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, messageText: opts.peerText ?? text })
+      : '';
+    if (opts.signal?.aborted) { abandon(); return; }
     const continuation = isAgentThread(this.chatId)
-      ? ['<rivendell-continuation>', `Warm continuation of the existing conversation. Host time: ${new Date().toString()}.`, 'Do not repeat session-start rituals.', '</rivendell-continuation>', ...(guidance ? ['', guidance] : []), ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []), '', promptText].join('\n')
-      : promptText;
+      ? ['<rivendell-continuation>', `Warm continuation of the existing conversation. Host time: ${new Date().toString()}.`, 'Do not repeat session-start rituals.', '</rivendell-continuation>', ...(guidance ? ['', guidance] : []), ...(recall ? ['', recall] : []), ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []), '', promptText].join('\n')
+      : recall ? `${recall}\n\n${promptText}` : promptText;
     const humanTurn = continuing ? continuing.origin.human : !opts.peerFrom && opts.peerFromRole !== 'automation';
     // Full computer rules ride the seed message that starts a fresh pi window; later
     // messages of the same warm process get the brief form (fresh token + device + policy).

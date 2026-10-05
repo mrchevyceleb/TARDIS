@@ -17,6 +17,7 @@ import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { lastEngineOf, logKeyFor } from './threadKey.ts';
+import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
@@ -739,7 +740,17 @@ export class CodexSession {
       peerFrom: opts.peerFrom,
       peerFromRole: opts.peerFromRole,
     });
-    const prompt = `${computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, !(seedWindow || hasSeedOverride))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
+    // Auto-recall: recorded knowledge in front of every new human or teammate
+    // turn; automation deliveries never spend the search (the reply nudge
+    // rides the steer path and never reaches here).
+    const recall = recallEligibleTurn(this.chatId, { peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole, voiceMode: opts.voiceMode })
+      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, messageText: opts.peerText ?? text })
+      : '';
+    if (opts.signal?.aborted) {
+      this.busy = false;
+      return;
+    }
+    const prompt = `${computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, !(seedWindow || hasSeedOverride))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
     // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
     // -c overrides rather than written into ~/.codex/config.toml so this stays
     // scoped to TARDIS.

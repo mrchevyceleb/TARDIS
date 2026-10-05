@@ -17,7 +17,7 @@
 
 import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { STATE_DIR } from './config.ts';
 import { callMcp } from '../lib/mcp.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
@@ -60,6 +60,10 @@ export type CompactBlob = {
   lastAt: number;
   lastCompactedSeq: number;
   chatId?: string;
+  /** Durable facts already trimmed out of the compact whose memory save is
+   *  not yet confirmed. A failed or interrupted save retries from here on
+   *  the next compaction instead of losing the facts forever. */
+  pendingFacts?: DurableFact[];
 };
 
 type CompactionRecord = {
@@ -396,7 +400,8 @@ Rules for the document you produce:
 - Organize with clear headings (## ...) so it can be indexed: Overview / People & Projects / Decisions / Open Work / Facts & References / Preferences & Style / Current State.
 - Write in third person, past tense, no fluff, no meta commentary. Never invent content that is not in the previous document or the aged-out turns.
 - SECURITY: never retain passwords, passcodes, OTPs, API keys, access/auth tokens, cookies, private keys, or other credential values. Replace every value with [redacted secret]. Keep only the fact that a credential exists and where the user intentionally stored it (for example, a vault service/account name).
-- The last ~50 visible turns stay in the live working window and are NOT your job — only merge what just aged out of that window.`;
+- The last ~50 visible turns stay in the live working window and are NOT your job — only merge what just aged out of that window.
+- DURABLE FACTS: after the document, output one line with exactly the durable-facts marker given in the user message (it has the form <<<DURABLE_FACTS:hex>>>) and then a bare JSON array (no markdown fence) of at most 10 objects like {"title":"short label","content":"one or two self-contained sentences"}. Include only durable facts stated in the previous document or the aged-out turns that the new document above no longer states in full: standing decisions and their reasons, ownership or lane assignments, standing user rules or preferences, and long-lived technical commitments (paths, models, endpoints, prices). Facts the new document already keeps in full do not belong there. Output [] when there are none. Never include credentials.`;
 
 /** Upper bound on batches folded in one catch-up pass (~400 turns). */
 const MAX_CATCHUP_BATCHES = 8;
@@ -434,6 +439,7 @@ type MemorySearchResponse = {
     title?: unknown;
     project?: unknown;
     tags?: unknown;
+    content?: unknown;
   }>;
 };
 
@@ -515,7 +521,20 @@ async function deleteCompactMemoryIds(memoryIds: string[]): Promise<void> {
 
 async function clearCompactMemoryMirror(key: string, chatId: string): Promise<void> {
   await withRagLock(key, async () => {
-    await deleteCompactMemoryIds(await compactMemoryIds(key, chatId));
+    // A fresh start clears the thread's whole RAG mirror: the rolling
+    // compact AND the durable-fact notes alike, so an old fact can never
+    // survive (or be saved by an in-flight drain that finishes first, since
+    // this deletion is serialized behind the same lock) past the user's
+    // reset. Mid-drain saves are stopped by the epoch rechecks in
+    // saveDurableFacts; any that still land are deleted here.
+    const [compactIds, factNotes] = await Promise.all([
+      compactMemoryIds(key, chatId),
+      durableFactNotes(key, chatId),
+    ]);
+    await deleteCompactMemoryIds([
+      ...compactIds,
+      ...[...factNotes.values()].map((note) => note.id),
+    ]);
   });
 }
 
@@ -563,15 +582,212 @@ async function saveCompactToMemory(
   });
 }
 
-async function generateCompact(previous: string, overflow: VisibleTurn[]): Promise<{ compact: string; words: number }> {
+const DURABLE_FACTS_MAX = 10;
+/** Total facts the blob's pending outbox can hold (the per-generation cap is
+ *  DURABLE_FACTS_MAX). Reached only when saves keep failing across many
+ *  compactions. At the cap a new DISTINCT fact is retained inside the compact
+ *  document instead of enqueued (never dropped: the fact is no longer
+ *  recoverable from the events once lastCompactedSeq advances); a re-extracted
+ *  update of an already-pending fact supersedes its queued version in place. */
+const PENDING_FACTS_CAP = 100;
+/** Drain bounds: at most this many pending facts are saved per compaction
+ *  pass, and the drain gives up softly after this long so a slow or partially
+ *  failing RAG cannot stall the triggering lane's turn for minutes. The
+ *  remainder stays in the outbox and retries on the next compaction. */
+const DRAIN_BATCH_MAX = 20;
+const DRAIN_DEADLINE_MS = 15_000;
+
+/** Unpredictable per-generation durable-facts marker. A fixed marker is
+ *  user-reproducible: summarized content ending in the marker plus a valid
+ *  bare JSON array could be split off as facts. A random sentinel cannot be
+ *  predicted by content already in the thread, and the model is handed the
+ *  exact string to emit in the user message. If the model garbles or omits
+ *  it, the section simply stays in the document (retained, never lost). */
+function durableFactsSentinel(): string {
+  return `<<<DURABLE_FACTS:${randomBytes(8).toString('hex')}>>>`;
+}
+
+type DurableFact = { title: string; content: string };
+
+/** Parse a bare JSON array of durable facts from the text after the marker.
+ *  Returns null when the tail is not a valid bare (or fence-wrapped) JSON
+ *  array sitting at the very end: the marker is then literal content, never
+ *  a split point. */
+function parseFactArray(tail: string): DurableFact[] | null {
+  const start = tail.indexOf('[');
+  if (start < 0) return null;
+  const gap = tail.slice(0, start).trim();
+  if (gap !== '' && !/^```(json)?$/i.test(gap)) return null;
+  const end = tail.lastIndexOf(']');
+  if (end <= start) return null;
+  const trailing = tail.slice(end + 1).trim();
+  if (trailing !== '' && trailing !== '```') return null;
+  try {
+    const parsed = JSON.parse(tail.slice(start, end + 1));
+    if (!Array.isArray(parsed)) return null;
+    const facts: DurableFact[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const title = typeof item.title === 'string' ? item.title.trim().slice(0, 120) : '';
+      const content = typeof item.content === 'string' ? item.content.trim().slice(0, 500) : '';
+      if (title && content) facts.push({ title, content });
+    }
+    return facts.slice(0, DURABLE_FACTS_MAX);
+  } catch {
+    return null;
+  }
+}
+
+/** Split the durable-facts terminal section off a generated compact. The
+ *  section must be the LAST thing the model emitted, start with this pass's
+ *  unpredictable sentinel, and parse as a bare JSON array; otherwise the
+ *  sentinel stays literal document text. A sentinel that survived into the
+ *  summary from summarized user content cannot match this pass's fresh
+ *  random value, so it can never truncate an otherwise valid compact. */
+function splitDurableFacts(text: string, marker: string): { compact: string; facts: DurableFact[] } {
+  const markerAt = text.lastIndexOf(marker);
+  if (markerAt < 0) return { compact: text, facts: [] };
+  const facts = parseFactArray(text.slice(markerAt + marker.length));
+  if (!facts) return { compact: text, facts: [] };
+  return { compact: text.slice(0, markerAt).trim(), facts };
+}
+
+/** Collision-resistant identity for one durable fact: a Unicode-normalized
+ *  (NFKC) hash of the COMPLETE title with punctuation preserved. Punctuation
+ *  is meaning ("C++ runtime" vs "C# runtime" must never collide), non-Latin
+ *  titles keep their characters (never normalizing empty into one bucket),
+ *  and identity is never content-derived — a changed decision under the
+ *  same title supersedes in ONE key, so no stale note can survive an update. */
+function factIdentity(noteTitle: string): string {
+  const stripped = noteTitle.replace(/^Durable fact:\s*/i, '');
+  const norm = stripped.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
+  return `t:${createHash('sha256').update(norm).digest('hex').slice(0, 32)}`;
+}
+
+/** The identity a fact is keyed, deduped, and drained by. One construction
+ *  so the save, the dedupe lookup, and the outbox drain can never disagree. */
+function durableFactKey(fact: DurableFact): string {
+  const title = `Durable fact: ${fact.title}`.slice(0, 200);
+  return factIdentity(title);
+}
+
+/** This thread's already-saved durable-fact notes, keyed by normalized title.
+ *  Titles are prefixed like the rolling compact's own rows so the search
+ *  query always matches them. Content rides along so a changed decision
+ *  under the same title can be superseded instead of skipped. */
+async function durableFactNotes(key: string, chatId: string): Promise<Map<string, { id: string; content: string }>> {
+  const identity = compactMemoryIdentity(key, chatId);
+  const found = await callMcp<MemorySearchResponse & { error?: unknown }>('memory', {
+    action: 'search_memory',
+    params: {
+      query: 'Durable fact',
+      project: 'rivendell',
+      category: 'context',
+      tags: [identity.threadTag, 'durable-fact'],
+      limit: 2000,
+    },
+  });
+  if (!found || typeof found !== 'object' || found.error !== undefined || !Array.isArray(found.memories)) {
+    throw new Error('RAG search returned a malformed or failed response');
+  }
+  const notes = new Map<string, { id: string; content: string }>();
+  for (const memory of found.memories) {
+    if (memory?.project !== 'rivendell') continue;
+    if (!Array.isArray(memory.tags) || !memory.tags.includes(identity.threadTag) || !memory.tags.includes('durable-fact')) continue;
+    if (typeof memory.title !== 'string' || !memory.title) continue;
+    if (typeof memory.id !== 'string' || !memory.id) continue;
+    const content = typeof memory.content === 'string' ? memory.content : '';
+    const key = factIdentity(memory.title);
+    if (!notes.has(key)) notes.set(key, { id: memory.id, content });
+  }
+  return notes;
+}
+
+function normalizeFactContent(content: string): string {
+  return content.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/** Save each trimmed durable fact as its own memory note so auto-recall can
+ *  find it later. Dedupes on title AND content: a title whose content changed
+ *  supersedes its old note (delete first, then save) so recall never serves a
+ *  stale decision under a reused label. Bounded per pass (DRAIN_BATCH_MAX
+ *  facts, DRAIN_DEADLINE_MS) so a backlog drains across compactions without
+ *  stalling this lane's turn; the remainder stays pending. Resolves every
+ *  fact it leaves confirmed in RAG; one failed save aborts the rest and the
+ *  caller keeps them all pending for the next compaction. A fresh-start
+ *  mid-drain stops further saves (the queued wipe, serialized behind this
+ *  same lock, removes everything this pass already landed). */
+async function saveDurableFacts(
+  key: string,
+  epoch: number,
+  cli: string,
+  chatId: string,
+  facts: DurableFact[],
+): Promise<{ saved: number; resolvedKeys: string[] }> {
+  let saved = 0;
+  const resolvedKeys: string[] = [];
+  await withRagLock(key, async () => {
+    if (epochOf(key) !== epoch) return;
+    const identity = compactMemoryIdentity(key, chatId);
+    const existing = await durableFactNotes(key, chatId);
+    if (epochOf(key) !== epoch) return;
+    const drain = facts.slice(0, DRAIN_BATCH_MAX);
+    const drainDeadline = Date.now() + DRAIN_DEADLINE_MS;
+    for (const fact of drain) {
+      if (Date.now() > drainDeadline) break; // remainder stays pending
+      const title = `Durable fact: ${fact.title}`.slice(0, 200);
+      const content = redactSecrets(fact.content);
+      const factKey = factIdentity(title);
+      const prior = existing.get(factKey);
+      if (prior && normalizeFactContent(prior.content) === normalizeFactContent(content)) {
+        resolvedKeys.push(factKey);
+        continue;
+      }
+      if (prior) {
+        // Supersede: remove the stale note first so one title can never
+        // carry both the old and the new decision. A failure here throws,
+        // the outbox keeps the fact pending, and the next compaction
+        // restores it — losing a save-first race would instead leave a
+        // permanent duplicate row no later pass can clean.
+        await deleteCompactMemoryIds([prior.id]);
+        if (epochOf(key) !== epoch) return;
+      }
+      const result = await callMcp<MemorySaveResponse>('memory', {
+        action: 'save_memory',
+        params: {
+          title,
+          content,
+          project: 'rivendell',
+          category: 'context',
+          tags: [cli, chatId, identity.threadTag, 'durable-fact'],
+        },
+      });
+      if (typeof result.memory?.id !== 'string' || !result.memory.id) {
+        throw new Error('RAG save returned no memory id');
+      }
+      if (epochOf(key) !== epoch) return; // queued fresh-start wipe removes this row
+      existing.set(factKey, { id: result.memory.id, content });
+      resolvedKeys.push(factKey);
+      saved += 1;
+    }
+  });
+  return { saved, resolvedKeys };
+}
+
+async function generateCompact(previous: string, overflow: VisibleTurn[]): Promise<{ compact: string; words: number; facts: DurableFact[] }> {
   // Redact BEFORE sending the prompt to the compaction provider, then redact
   // the generated document again before it touches local disk or RAG.
   const safePrevious = redactSecrets(previous);
   const safeOverflow = overflow.map((turn) => ({ ...turn, text: redactSecrets(turn.text) }));
   const overflowText = formatTurnsForCompact(safeOverflow);
-  const userContent = safePrevious.trim()
+  let userContent = safePrevious.trim()
     ? `Previous rolling memory document (REPLACE this entirely with an updated version — do not stack primers):\n\n${safePrevious}\n\n---\n\nAged-out turns that just left the last-${WINDOW_TURNS} working window. Merge them in:\n\n${overflowText}`
     : `Turns older than the last-${WINDOW_TURNS} working window. Write the first rolling memory document:\n\n${overflowText}`;
+
+  // Unpredictable per-pass sentinel: hand the model the exact marker line to
+  // emit so summarized user content can never forge the facts split point.
+  const sentinel = durableFactsSentinel();
+  userContent = `${userContent}\n\nEnd the document with the durable-facts section your rules describe: one line containing exactly ${sentinel} followed immediately by the bare JSON array (or ${sentinel} followed by [] when there are no durable facts).`;
 
   await ensureXaiProxy();
   const res = await fetch(`${xaiProxyBaseUrl().replace(/\/$/, '')}/v1/messages`, {
@@ -590,7 +806,11 @@ async function generateCompact(previous: string, overflow: VisibleTurn[]): Promi
   if (!res.ok) throw new Error(`compact generation failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
   const body = (await res.json()) as { content?: Array<{ type?: string; text?: string }> };
   const generated = (body.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text ?? '').join('\n').trim();
-  const compact = redactSecrets(generated);
+  // The durable-facts section rides the same generation call; keep it out of
+  // the document itself so the rolling compact stays a pure summary. The
+  // split only happens for a valid terminal bare-JSON section: a marker that
+  // survived from summarized user content stays literal document text.
+  const { compact, facts } = splitDurableFacts(redactSecrets(generated), sentinel);
   const words = compact ? compact.split(/\s+/).length : 0;
   const prevWords = safePrevious.trim() ? safePrevious.trim().split(/\s+/).length : 0;
   const overflowWordEst = Math.max(1, Math.floor(overflowChars(safeOverflow) / 5));
@@ -598,7 +818,7 @@ async function generateCompact(previous: string, overflow: VisibleTurn[]): Promi
     ? Math.max(80, Math.floor(prevWords * 0.85))
     : Math.max(80, Math.min(MIN_ACCEPT_WORDS, overflowWordEst));
   if (words < minWords) throw new Error(`compact came back thin (${words} words < ${minWords}) — will retry`);
-  return { compact, words };
+  return { compact, words, facts };
 }
 
 export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> {
@@ -673,6 +893,21 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
     let lastCompactedSeq = lastSeq;
     let generatedWords = 0;
     let compactText = previous;
+    // Durable-facts outbox: facts already trimmed out of the document whose
+    // memory save is not yet confirmed. Leftovers from a failed save retry
+    // here; malformed disk entries are dropped on load.
+    const rawPending = blob?.pendingFacts;
+    let pendingFacts: DurableFact[] = [];
+    if (Array.isArray(rawPending)) {
+      // Same count and field-length limits as a freshly parsed fact, so a
+      // malformed or hand-edited blob can never hold the compaction or the
+      // RAG lock with an oversized queue.
+      for (const fact of rawPending.slice(0, PENDING_FACTS_CAP)) {
+        if (fact && typeof fact.title === 'string' && typeof fact.content === 'string' && fact.title.trim() && fact.content.trim()) {
+          pendingFacts.push({ title: fact.title.trim().slice(0, 120), content: fact.content.trim().slice(0, 500) });
+        }
+      }
+    }
     const total = rec?.userTurnsTotal ?? countUserEchoes(events);
 
     for (let batch = 0; batch < MAX_CATCHUP_BATCHES; batch++) {
@@ -695,6 +930,32 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
       }
       count += 1;
       lastCompactedSeq = overflowBatch.reduce((m, t) => Math.max(m, t.seq), lastCompactedSeq);
+      let retainedFacts = '';
+      let retainedCount = 0;
+      for (const fact of generated.facts) {
+        const factKey = durableFactKey(fact);
+        const queuedIdx = pendingFacts.findIndex((queued) => durableFactKey(queued) === factKey);
+        if (queuedIdx >= 0) {
+          // Re-extracted update of an already-pending fact: supersede the
+          // queued version in place instead of growing the queue.
+          pendingFacts[queuedIdx] = fact;
+          continue;
+        }
+        if (pendingFacts.length >= PENDING_FACTS_CAP) {
+          // Never drop: the fact was already trimmed out of the generated
+          // document and lastCompactedSeq advances past its source turns, so
+          // it is unrecoverable from the events. Retain it in the document
+          // itself until the outbox drains below the cap.
+          retainedCount += 1;
+          retainedFacts += `\n- ${fact.title}: ${fact.content}`;
+          continue;
+        }
+        pendingFacts.push(fact);
+      }
+      if (retainedCount > 0) {
+        console.warn(`[compaction] ${key}: durable-fact outbox at cap (${PENDING_FACTS_CAP}); ${retainedCount} new fact(s) retained in the document`);
+        generated.compact = `${generated.compact}\n\nDurable facts kept in the document because the durable-fact outbox is at cap:${retainedFacts}`;
+      }
       previous = generated.compact;
       compactText = generated.compact;
       generatedWords = generated.words;
@@ -705,6 +966,7 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
         lastAt: Date.now(),
         lastCompactedSeq,
         chatId,
+        pendingFacts,
       }, epoch);
       if (!wrote || epochOf(key) !== epoch) {
         console.warn(`[compaction] ${key}: discarded compact blob — thread was fresh-started`);
@@ -738,6 +1000,50 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
     });
     if (epochOf(key) === epoch && !loadState()[key]?.rotationOwed) {
       bankRotation(key);
+    }
+
+    // Durable facts trimmed by this rewrite become standalone memory notes so
+    // auto-recall can surface them later. They ride the blob as a pending
+    // outbox until the save is confirmed, so a failed or interrupted save
+    // retries next compaction instead of losing facts the document no longer
+    // states. The normal path awaits the save and then drains the confirmed
+    // ones while this run still holds inFlight (it owns the blob). The
+    // deadline-capped refresh path saves in the background without touching
+    // the blob; the next normal compaction's dedupe pass drains them.
+    if (pendingFacts.length && epochOf(key) === epoch && !args.refreshOverflow) {
+      try {
+        const { saved, resolvedKeys } = await saveDurableFacts(key, epoch, cli, chatId, pendingFacts);
+        if (saved > 0) console.warn(`[compaction] ${key}: saved ${saved} durable-fact note(s) for auto-recall`);
+        const resolved = new Set(resolvedKeys);
+        const unresolved = pendingFacts.filter((fact) => !resolved.has(durableFactKey(fact)));
+        const wrote = writeCompactBlob(key, {
+          compact: compactText,
+          words: generatedWords,
+          count,
+          lastAt: Date.now(),
+          lastCompactedSeq,
+          chatId,
+          pendingFacts: unresolved,
+        }, epoch);
+        if (!wrote || epochOf(key) !== epoch) {
+          console.warn(`[compaction] ${key}: discarded durable-fact drain — thread was fresh-started`);
+          return false;
+        }
+        if (unresolved.length) {
+          console.warn(`[compaction] ${key}: ${unresolved.length} durable-fact note(s) still pending save (retried next compaction)`);
+        }
+        pendingFacts = unresolved;
+      } catch (err) {
+        console.warn(
+          `[compaction] ${key}: durable-fact save failed (facts stay pending in the blob for retry):`,
+          (err as Error).message,
+        );
+      }
+    } else if (pendingFacts.length && epochOf(key) === epoch) {
+      void saveDurableFacts(key, epoch, cli, chatId, pendingFacts).then(
+        ({ saved }) => { if (saved > 0) console.warn(`[compaction] ${key}: saved ${saved} durable-fact note(s) for auto-recall`); },
+        (err) => { console.warn(`[compaction] ${key}: durable-fact save failed (facts stay pending for retry):`, (err as Error).message); },
+      );
     }
 
     // The seed only needs the local compact file. A boundary rotation holds the

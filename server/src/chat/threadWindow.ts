@@ -446,13 +446,13 @@ export function lastContextTokenEstimate(events: Seqish[], sessionId?: string | 
   return null;
 }
 
-function claudeConfigDir(cli: string): string {
+export function claudeConfigDir(cli: string): string {
   if (cli === 'xai') return join(homedir(), '.claude-xai');
   if (cli === 'zai') return join(homedir(), '.claude-zai');
   return join(homedir(), '.claude');
 }
 
-function encodeClaudeProject(cwd: string): string {
+export function encodeClaudeProject(cwd: string): string {
   return cwd.replace(/[\\/]/g, '-');
 }
 
