@@ -6184,33 +6184,75 @@ button {
 .proxy-folder-row svg { flex: 0 0 auto; color: var(--r-gold); }
 .proxy-folder-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proxy-folder-size { flex: 0 0 auto; color: var(--r-faint, #8a8f9c); font-family: var(--r-mono); font-size: 11px; }
+/* The viewer docks beside the chat instead of covering it: a right-hand panel,
+ * full height, non-modal (no backdrop, no click-outside close; X or Escape).
+ * While it is open, body.proxy-viewer-open shifts the chat column left so
+ * nothing hides underneath — the doc stays open for reference while the
+ * conversation keeps going. The Studio IDE shell keeps its own layout; the
+ * dock simply covers its right edge until closed. */
 .proxy-viewer-overlay {
   position: fixed;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--proxy-viewer-w, clamp(340px, 46vw, 720px));
   z-index: 60;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
   background: color-mix(in srgb, var(--r-bg-deep) 78%, transparent);
   backdrop-filter: blur(4px);
-  animation: proxyFade 160ms ease;
+  animation: proxySlide 160ms ease;
 }
 
-@keyframes proxyFade {
-  from { opacity: 0; }
-  to { opacity: 1; }
+body.proxy-viewer-open {
+  --proxy-viewer-w: clamp(340px, 46vw, 720px);
+}
+
+/* The Grok shell makes room for the dock. bt-main carries the workspace
+ * header, the chat feed, the composer and every room view, so one shift
+ * moves everything the user is reading left of the panel; nothing the
+ * user is typing into can end up under it. Above 1180 the right Session
+ * pane column is dead space fully covered by the dock, so it hides while
+ * the viewer is open and returns when it closes (below 1180 it is already
+ * an overlay sheet and is untouched). Phones keep the full-width viewer
+ * and no shift, same as before. */
+@media (min-width: 721px) {
+  body.proxy-viewer-open .bt-main {
+    margin-right: var(--proxy-viewer-w);
+  }
+}
+/* The 350px rail, the 46vw dock and the conversation column's own ~279px
+ * of insets never fit side by side: with the rail open the docked
+ * composer gets ~148px at 1440 and ~62px at 1280, and at 761px the chat
+ * column itself would get ~61px. So while the viewer is docked the rail
+ * slides out at every width the same way the user's own rail-collapsed
+ * state does, and the chat keeps at least its natural rail-open width;
+ * the rail returns the moment the viewer closes. */
+@media (min-width: 721px) {
+  body.proxy-viewer-open .bot-app .bt-rail {
+    margin-left: calc(-1 * var(--bt-rail-w, 350px) - 1px); /* width + border */
+    pointer-events: none;
+  }
+}
+@media (min-width: 1181px) {
+  body.proxy-viewer-open .bt-pane {
+    display: none;
+  }
+}
+
+@keyframes proxySlide {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
 }
 
 .proxy-viewer {
-  width: min(960px, 100%);
-  max-height: calc(100vh - 48px);
+  width: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
   background: linear-gradient(180deg, var(--r-bg-card), var(--r-bg-soft));
   border: 1px solid var(--r-line-gold);
-  border-radius: 14px;
-  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
+  border-radius: 14px 0 0 14px;
+  box-shadow: -24px 0 60px rgba(0, 0, 0, 0.45);
   overflow: hidden;
 }
 
@@ -6369,11 +6411,9 @@ button {
 
 @media (max-width: 720px) {
   .proxy-viewer-overlay {
-    padding: 0;
+    width: 100%;
   }
   .proxy-viewer {
-    width: 100%;
-    max-height: 100vh;
     border-radius: 0;
   }
   .proxy-viewer-frame {
