@@ -187,6 +187,24 @@ export function terminalProviderError(cli: string, raw: unknown, syntheticReason
   };
 }
 
+/** The provider refused the prompt as too long for the model's context. Output
+ *  cap errors ("exceeded the 32000 output token maximum") are not this. */
+export function isContextLengthRejection(detail: string): boolean {
+  return /prompt is too long|context[ _-]?(?:length|window)[ _-](?:exceeded|limit)|maximum context length|input (?:is )?too long|too many input tokens/i.test(detail);
+}
+
+/** A turn that died because Claude Code could not compact its history. The
+ *  provider's own reason is the only actionable part, so keep it (trimmed,
+ *  first line only) instead of a bare status. */
+export function compactFailureError(cli: string, detail: string): TerminalProviderError {
+  const reason = detail.split('\n')[0].replace(/^\s*API Error:\s*/i, '').replace(/\s*To configure this behavior.*$/i, '').trim().replace(/\.$/, '').slice(0, 240);
+  return {
+    message: `${providerLabel(cli)} could not shrink this chat's history${reason ? ` (${reason})` : ''}. The next message starts fresh from the saved summary; send it again.`,
+    code: 'compact_failed',
+    retryable: true,
+  };
+}
+
 /** Normalize non-provider terminal outcomes without persisting their raw
  * result payload. These are runner states, not evidence that the API provider
  * failed, so keep the copy accurate and category-based. */
