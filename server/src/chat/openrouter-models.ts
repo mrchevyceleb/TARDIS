@@ -1,4 +1,4 @@
-// OpenRouter model catalog — the list behind the `openrouter` engine lane
+// OpenRouter model catalog: the list behind the `openrouter` engine lane
 // (runner.ts), the /api/openrouter/models picker payload, and agent-brain
 // validation. Same shape as fireworks-models.ts: a hand fallback list plus the
 // live public catalog (GET https://openrouter.ai/api/v1/models, no key), with a
@@ -23,7 +23,7 @@ import { engineDefault } from '../lib/engineConfig.ts';
 import { ALL_EFFORTS, nearestEffort } from './fireworks-models.ts';
 
 export type OpenRouterModelInfo = {
-  /** OpenRouter model id — also the `--model` value the claude binary sends. */
+  /** OpenRouter model id, also the `--model` value the claude binary sends. */
   id: string;
   label: string;
   /** Tiers the model really honors, lowest first. */
