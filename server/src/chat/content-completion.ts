@@ -148,6 +148,7 @@ export async function completeSubscription(request: CompletionRequest, signal: A
   // branch here would quietly send its prompt to OpenAI under the Codex
   // subscription. Refuse instead of answering as the wrong provider.
   if (engine === 'zai') throw new Error('GLM cannot serve content completions yet. Choose Claude, Codex, or Grok.');
+  if (engine === 'fireworks') throw new Error('Fireworks models cannot serve content completions yet. Choose Claude, Codex, or Grok.');
   const brain = defaultAgentBrain(engine);
   const model = selectedModel ?? brain.model!;
   if (engine === 'xai') {

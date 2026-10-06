@@ -570,6 +570,7 @@ const ENGINE_LABEL: Record<string, string> = {
   banana: 'OpenRouter',
   'banana-local': 'Local',
   'banana-fireworks': 'Fireworks',
+  fireworks: 'Fireworks',
 };
 
 function engineLabel(id: string): string {

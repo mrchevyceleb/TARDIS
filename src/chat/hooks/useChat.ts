@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatBlock, ChatImagePreview, CompanionId, Repo } from '../data/types';
 import { isReactionEmoji } from '../data/reactions';
 import { contextWindowForCodexModel } from '../codexModels';
+import { contextWindowForFireworksModel } from '../fireworksModels';
 import { automationTurnInFlight, filterAutomationNoise } from '../utils/automationNoise';
 import { isAutomationPeer } from '../utils/routineNoise';
 import { onPresenceChange, userPresent } from '../utils/userPresence';
@@ -53,6 +54,8 @@ const GROK_WINDOW_TOKENS = 500_000; // Grok 4.x context window
 // Sonnet 4.6) is 1M; GLM 5.3/5.2 is 1M; xAI/Grok is 500K; banana/OpenRouter defaults to 200K.
 function defaultWindowForCli(cli: CompanionId, model?: string): number {
   if (isCodexCli(cli)) return contextWindowForCodexModel(model);
+  // Fireworks context windows vary per model (128K to 1M); the catalog entry carries the real one.
+  if (cli === 'fireworks') return contextWindowForFireworksModel(model);
   if (cli === 'banana' || cli === 'banana-local' || cli === 'banana-fireworks') return BANANA_WINDOW_TOKENS;
   // xAI always runs Grok (500K). Pin before system/init arrives so the meter
   // never flashes the 200K non-claude default.

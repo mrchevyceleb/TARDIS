@@ -11,6 +11,7 @@ import { readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, readdirSy
 import { join } from 'node:path';
 import { SESSIONS_FILE, STATE_DIR } from './config.ts';
 import { codexCapability } from './codex-models.ts';
+import { FIREWORKS_LANE_EFFORT, FIREWORKS_LANE_MODEL, resolveFireworksModel } from './fireworks-models.ts';
 import { deleteRoutinesForAgent } from './routines.ts';
 import { deleteJobWatchesForAgent } from './jobWatches.ts';
 import { deleteMessagePinsForAgent } from '../lib/messagePinStore.ts';
@@ -78,6 +79,7 @@ export function cliForAgentEngine(engine: string): string {
   if (engine.startsWith('codex')) return 'codex';
   if (engine === 'zai') return 'zai';
   if (engine === 'xai') return 'xai';
+  if (engine === 'fireworks') return 'fireworks';
   return 'xai';
 }
 
@@ -86,6 +88,7 @@ export function defaultAgentBrain(engine: string): Omit<AgentBrain, 'revision' |
     case 'claude': return { engine: 'claude', model: 'claude-opus-5-5', effort: 'xhigh' };
     case 'codex': return { engine: 'codex', model: 'gpt-5.6-sol', effort: 'low' };
     case 'zai': return { engine: 'zai', model: 'glm-5.3[1m]', effort: 'high' };
+    case 'fireworks': return { engine: 'fireworks', model: FIREWORKS_LANE_MODEL, effort: FIREWORKS_LANE_EFFORT };
     case 'xai':
     default: return { engine: 'xai', model: 'grok-4.7', effort: 'xhigh' };
   }
@@ -110,6 +113,11 @@ function normalizeBrainModel(engine: string, value: unknown, fallback?: string):
   let model = cleanBrainValue(value);
   if (!model) return fallback;
   if (engine === 'zai') model = ZAI_MODEL_ALIASES[model] ?? model;
+  // The fireworks resolver already applies aliases (glm-5p2 -> glm-5p3) and
+  // honors the caller's fallback, so return it directly. Reducing it to a
+  // validity boolean would drop the alias: a stored glm-5p2 pin would fall to
+  // the lane default instead of migrating to glm-5p3.
+  if (engine === 'fireworks') return resolveFireworksModel(model, fallback);
   const valid = engine === 'claude' ? CLAUDE_BRAIN_MODELS.has(model)
     : engine === 'codex' ? codexCapability(model) !== undefined
     : engine === 'xai' ? model === 'grok-4.7' || model === 'grok-4.6' || model === 'grok-4.5'
@@ -131,6 +139,7 @@ function normalizeBrainEffort(engine: string, model: string | undefined, value: 
   const allowed = engine === 'codex' && model ? new Set(codexCapability(model)?.efforts)
     : engine === 'xai' ? XAI_BRAIN_EFFORTS
     : engine === 'zai' ? new Set(['high', 'max'])
+    : engine === 'fireworks' ? new Set(['low', 'medium', 'high'])
     : engine.startsWith('banana') ? BANANA_BRAIN_EFFORTS
     : STANDARD_BRAIN_EFFORTS;
   const canonicalFallback = engine === 'codex' && model

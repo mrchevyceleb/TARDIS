@@ -16,6 +16,7 @@ import {
 } from '../../hooks/useCompanionPicker';
 import { CLAUDE_MODELS, CLAUDE_EFFORTS } from '../CodexEnginePicker';
 import { CODEX_MODELS, codexEffortsForModel, useCodexModels } from '../../codexModels';
+import { FIREWORKS_MODELS, fireworksEffortsForModel, useFireworksModels } from '../../fireworksModels';
 import { StarSigil } from './icons';
 
 type LaneMeta = { ring: string; short: string; word: string };
@@ -25,6 +26,7 @@ const LANE_META: Record<string, LaneMeta> = {
   codex: { ring: 'X', short: 'Codex subscription', word: 'effort' },
   xai: { ring: 'G', short: 'Grok coding subscription', word: 'thinking' },
   zai: { ring: 'Z', short: 'Z.ai coding plan', word: 'effort' },
+  fireworks: { ring: 'F', short: 'Fireworks API models', word: 'thinking' },
 };
 
 function labelFor(id: string, list: Array<{ id: string; label: string }>): string {
@@ -41,6 +43,7 @@ export function counselChipInfo(picker: CompanionPicker) {
   else if (picker.isCodex) name = labelFor(picker.codexModel, CODEX_MODELS);
   else if (picker.isXai) name = labelFor(picker.xaiModel, XAI_MODELS);
   else if (picker.isZai) name = labelFor(picker.zaiModel, ZAI_MODELS);
+  else if (picker.isFireworks) name = labelFor(picker.fireworksModel, FIREWORKS_MODELS);
   const lane = WORKSPACE_COMPANIONS.find((c) => c.id === picker.companion);
   const blurb = companionAuthBlurb(picker.cli, picker.account);
   return { ring: meta.ring, name, effort, word: meta.word, short: meta.short, blurb, laneLabel: lane?.label ?? name };
@@ -132,6 +135,7 @@ function LaneList({ picker }: { picker: CompanionPicker }) {
 // The active lane's model + effort controls, expanded in place.
 function LaneControls({ picker }: { picker: CompanionPicker }) {
   useCodexModels();
+  useFireworksModels();
   return (
     <div className="lane-ctl">
       {picker.isClaude && (
@@ -204,6 +208,30 @@ function LaneControls({ picker }: { picker: CompanionPicker }) {
           ))}
           <span className="ctl-lab">effort</span>
           <EffortPills options={ZAI_EFFORTS} current={picker.zaiEffort} onPick={picker.setZaiEffort} />
+        </>
+      )}
+      {picker.isFireworks && (
+        <>
+          <span className="ctl-lab">model</span>
+          {/* A select instead of pills: the live catalog carries a dozen+ models. */}
+          <select
+            aria-label="Fireworks model"
+            className="fw-model-select"
+            value={picker.fireworksModel}
+            onChange={(e) => picker.setFireworksModel(e.target.value)}
+          >
+            {FIREWORKS_MODELS.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}{m.thinkingOnly ? ' · always thinking' : ''}
+              </option>
+            ))}
+          </select>
+          <span className="ctl-lab">thinking</span>
+          <EffortPills
+            options={fireworksEffortsForModel(picker.fireworksModel)}
+            current={picker.fireworksEffort}
+            onPick={picker.setFireworksEffort}
+          />
         </>
       )}
       <span className="lane-note">{counselChipInfo(picker).blurb}</span>
