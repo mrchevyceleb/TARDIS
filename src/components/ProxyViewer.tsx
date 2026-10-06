@@ -1,9 +1,10 @@
-import { ArrowLeft, ArrowUp, Copy, ExternalLink, File as FileIcon, FileText, Folder, X } from 'lucide-react';
+import { ArrowLeft, ArrowUp, Copy, Download, ExternalLink, File as FileIcon, FileText, Folder, X } from 'lucide-react';
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Markdown } from '../chat/components/primitives/Markdown';
 import { apiJson } from '../data/api';
 import type { FileTreeNode, WorkspaceChildrenResponse, WorkspaceFileResponse } from '../data/types';
 import { ProxyViewerContext, type ProxyViewerRequest } from '../hooks/useProxyViewer';
+import { buildLinkUrls } from '../chat/utils/proxyLinks';
 import { Button, Chip } from './Primitives';
 
 type ArtifactRecord = {
@@ -109,6 +110,14 @@ export function ProxyViewerProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [request, close]);
 
+  // Docked, non-modal: while the viewer is open, body.proxy-viewer-open lets
+  // the chat column shift left to make room (index.css) instead of hiding
+  // under the panel, so the doc stays open for reference while chatting.
+  useEffect(() => {
+    document.body.classList.toggle('proxy-viewer-open', request !== null);
+    return () => document.body.classList.remove('proxy-viewer-open');
+  }, [request]);
+
   const value = useMemo(() => ({ open, close }), [open, close]);
 
   return (
@@ -152,9 +161,38 @@ function ProxyViewerOverlay({
   const viewer = useContext(ProxyViewerContext);
   const backToFolder = request.source === 'doc' && request.fromFolder !== undefined ? request.fromFolder : null;
 
+  // The docked panel is a non-modal sidebar beside the chat. The phone
+  // sheet (720px and below) still covers the whole app, so it keeps the
+  // modal dialog semantics the old overlay had: assistive tech is told it
+  // is a dialog, focus moves into it on open and returns to whatever was
+  // focused before it opened on close.
+  const [isSheet, setIsSheet] = useState(() => window.matchMedia('(max-width: 720px)').matches);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+  const restoreRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 720px)');
+    const onChange = (event: MediaQueryListEvent) => setIsSheet(event.matches);
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+  useEffect(() => {
+    if (!isSheet) return;
+    restoreRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeRef.current?.focus();
+    return () => {
+      const restore = restoreRef.current;
+      const active = document.activeElement;
+      const insideViewer = overlayRef.current?.contains(active) ?? false;
+      if (restore && document.contains(restore) && (active === document.body || insideViewer)) {
+        restore.focus();
+      }
+    };
+  }, [isSheet]);
+
   return (
-    <div className="proxy-viewer-overlay" role="dialog" aria-modal="true" aria-label={title} onClick={onClose}>
-      <div className="proxy-viewer" onClick={(event) => event.stopPropagation()}>
+    <div ref={overlayRef} className="proxy-viewer-overlay" role={isSheet ? 'dialog' : 'complementary'} aria-modal={isSheet ? 'true' : undefined} aria-label={title}>
+      <div className="proxy-viewer">
         <header className="proxy-viewer-head">
           <div className="proxy-viewer-title">
             <FileText size={18} />
@@ -172,8 +210,9 @@ function ProxyViewerOverlay({
               </button>
             ) : null}
             {loaded ? <CopyPathButton loaded={loaded} /> : null}
+            {loaded?.source === 'doc' ? <DownloadDocButton loaded={loaded} /> : null}
             {loaded?.source === 'artifact' ? <OpenRawButton loaded={loaded} /> : null}
-            <button className="rail-icon-button" type="button" onClick={onClose} aria-label="Close viewer" title="Close">
+            <button ref={closeRef} className="rail-icon-button" type="button" onClick={onClose} aria-label="Close viewer" title="Close">
               <X size={17} />
             </button>
           </div>
@@ -341,6 +380,30 @@ function CopyPathButton({ loaded }: { loaded: Loaded }) {
     <Button tone="ghost" onClick={() => navigator.clipboard?.writeText(loaded.file.path)} title="Copy workspace-relative path">
       <Copy size={14} />
       Copy path
+    </Button>
+  );
+}
+
+/** Same-origin anchor download of the raw file (works on Windows and iPad
+ *  Safari alike): the file lands in the device's downloads, ready to open in
+ *  its own app. */
+function DownloadDocButton({ loaded }: { loaded: LoadedDoc }) {
+  const { browserUrl } = buildLinkUrls(loaded.request.path, 'doc');
+  return (
+    <Button
+      tone="ghost"
+      title="Download this file to your device"
+      onClick={() => {
+        const a = document.createElement('a');
+        a.href = browserUrl;
+        a.download = loaded.file.name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }}
+    >
+      <Download size={14} />
+      Download
     </Button>
   );
 }
