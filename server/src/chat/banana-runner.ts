@@ -650,12 +650,15 @@ const OPENROUTER_DEFAULT_MODEL = 'openrouter/anthropic/claude-sonnet-5';
 // Fireworks AI exposes an OpenAI-compatible API. We register a custom
 // `fireworks` provider (baseURL + apiKey + auto-discovered models) so the
 // Fireworks engine routes `fireworks/<account-model-id>` picks directly. Auth
-// uses FIREWORKS_API_KEY from the assistant Doppler project.
+// uses the same key resolution as the fireworks engine spawn (runner.ts
+// fireworksEnv) and the Z.ai GLM fallback (zaiQuota.ts): the host wrapper may
+// stash the metered key under RIVENDELL_ZAI_FALLBACK_API_KEY before
+// FIREWORKS_API_KEY, so both names serve every Fireworks call.
 const FIREWORKS_BASE_URL =
   process.env.RIVENDELL_FIREWORKS_BASE_URL?.trim() || 'https://api.fireworks.ai/inference/v1';
 
 function resolveFireworksKey(): string {
-  return process.env.FIREWORKS_API_KEY?.trim() || '';
+  return process.env.RIVENDELL_ZAI_FALLBACK_API_KEY?.trim() || process.env.FIREWORKS_API_KEY?.trim() || '';
 }
 
 /** Default Fireworks model when the `banana-fireworks` engine is sent an empty
@@ -673,7 +676,9 @@ const FIREWORKS_CONTROL_BASE_URL =
   process.env.RIVENDELL_FIREWORKS_CONTROL_BASE_URL?.trim() || 'https://api.fireworks.ai/v1';
 // Serverless models that aren't chat completions (image/embedding/reranker) —
 // flagged supports_chat=false so the config/picker mappers drop them.
-const FIREWORKS_NON_CHAT_RE = /embedding|reranker|rerank|flux|whisper|sdxl|stable-diffusion|image-?gen/i;
+// Exported for the live `fireworks` engine lane (fireworks-models.ts), which
+// shares this one source of truth for the serverless chat catalog.
+export const FIREWORKS_NON_CHAT_RE = /embedding|reranker|rerank|flux|whisper|sdxl|stable-diffusion|image-?gen/i;
 
 const MODEL_CATALOG_TTL_MS = 60 * 1000;
 const MODEL_CATALOG_TIMEOUT_MS = 10_000;
@@ -777,7 +782,7 @@ function fetchOpenRouterCatalog(): Promise<unknown[]> {
 // ({ id, supports_chat, supports_image_input, supports_tools, context_length })
 // so the downstream config/picker mappers stay unchanged. Short TTL cache +
 // keep-prior-on-failure, matching fetchModelCatalog.
-function fetchFireworksCatalog(): Promise<unknown[]> {
+export function fetchFireworksCatalog(): Promise<unknown[]> {
   const apiKey = resolveFireworksKey();
   const cache = fireworksCatalog;
   const fresh = cache.rows !== null && Date.now() - cache.at < MODEL_CATALOG_TTL_MS;

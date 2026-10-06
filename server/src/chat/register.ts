@@ -10,6 +10,7 @@ import { clearThreadSessionIds, ensureStateDir } from './sessions.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { stopComputersForOwner } from '../devices/bridge.ts';
 import { codexCatalogPayload, startCodexCatalog } from './codex-models.ts';
+import { fireworksCatalogPayload, startFireworksCatalog } from './fireworks-models.ts';
 import {
   clampReplayWindow,
   REPLAY_CATCHUP_MAX_BYTES,
@@ -296,10 +297,19 @@ export async function registerChat(app: express.Express, server: Server): Promis
   // The Codex model picker follows the CLI's own catalog. Give the first read a
   // moment (it is local and quick) so early turns are checked against it.
   await startCodexCatalog();
+  // The Fireworks picker follows the live control-plane catalog. The hand list
+  // is complete for today's models, so boot never waits on the network: warm in
+  // the background and let the endpoint/lazy spawns use the hand list first.
+  void startFireworksCatalog();
 
   app.get('/api/codex/models', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.json(codexCatalogPayload());
+  });
+
+  app.get('/api/fireworks/models', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(fireworksCatalogPayload());
   });
 
   app.get('/api/repos', async (_req, res) => {
@@ -337,7 +347,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
       cli !== 'banana-local' &&
       cli !== 'banana-fireworks' &&
       cli !== 'zai' &&
-      cli !== 'xai'
+      cli !== 'xai' &&
+      cli !== 'fireworks'
     ) {
       res.status(400).json({ error: 'invalid cli' });
       return;

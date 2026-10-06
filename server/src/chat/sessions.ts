@@ -5,7 +5,7 @@ import { SESSIONS_FILE, STATE_DIR } from './config.ts';
 // One mapping per native lane → session id plus last proven model/effort.
 // Persists across server restarts so chats resume or prewarm with the same brain.
 
-type Cli = 'claude' | 'codex' | 'assistant' | 'banana' | 'codex-personal' | 'banana-local' | 'banana-fireworks' | 'zai' | 'xai';
+type Cli = 'claude' | 'codex' | 'assistant' | 'banana' | 'codex-personal' | 'banana-local' | 'banana-fireworks' | 'zai' | 'xai' | 'fireworks';
 type Key = string; // `${cli}|${repoPath}` or `${cli}|${repoPath}|${chatId}`
 
 type StoredSession = {

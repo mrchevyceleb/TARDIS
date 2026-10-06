@@ -10,7 +10,8 @@ export type CompanionId =
   | 'banana-local'
   | 'banana-fireworks'
   | 'zai'
-  | 'xai';
+  | 'xai'
+  | 'fireworks';
 
 // A live session reported by /api/live — used to mark "running now" entries
 // in the chronicle ribbon.

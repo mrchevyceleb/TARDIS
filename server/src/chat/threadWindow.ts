@@ -449,6 +449,7 @@ export function lastContextTokenEstimate(events: Seqish[], sessionId?: string | 
 export function claudeConfigDir(cli: string): string {
   if (cli === 'xai') return join(homedir(), '.claude-xai');
   if (cli === 'zai') return join(homedir(), '.claude-zai');
+  if (cli === 'fireworks') return join(homedir(), '.claude-fireworks');
   return join(homedir(), '.claude');
 }
 

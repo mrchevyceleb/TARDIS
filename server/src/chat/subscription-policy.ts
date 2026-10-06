@@ -1,9 +1,12 @@
-/** Retired lane IDs remain readable in durable logs, but cannot run new work. */
-export const SUBSCRIPTION_ENGINES = new Set(['claude', 'codex', 'xai', 'zai']);
+/** Retired lane IDs remain readable in durable logs, but cannot run new work.
+ *  `fireworks` is the API-key provider lane (any serverless Fireworks model
+ *  via FIREWORKS_API_KEY), not a subscription, but it shares this gate so the
+ *  WS lane assert and agent CRUD accept it everywhere engines are checked. */
+export const SUBSCRIPTION_ENGINES = new Set(['claude', 'codex', 'xai', 'zai', 'fireworks']);
 
 export class SubscriptionEngineError extends Error {
   constructor() {
-    super('Choose a subscription engine: Claude Code, Codex, Grok, or GLM.');
+    super('Choose a subscription engine: Claude Code, Codex, Grok, GLM, or Fireworks.');
     this.name = 'SubscriptionEngineError';
   }
 }

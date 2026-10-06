@@ -40,6 +40,7 @@ import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
 import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
+import { fireworksCapability, fireworksContextWindow, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
 import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { PiSession, usePiHarness } from './pi-runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, REPLY_NUDGE_NOTE_TOOL, replyNowText, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
@@ -103,7 +104,8 @@ export type CliKind =
   | 'banana-local'
   | 'banana-fireworks'
   | 'zai'
-  | 'xai';
+  | 'xai'
+  | 'fireworks';
 
 export type StreamEvent = unknown;
 
@@ -278,13 +280,45 @@ function xaiEnv(): NodeJS.ProcessEnv {
   return env;
 }
 /** Persistent `claude` binary lanes (Anthropic, Z.ai, xAI). Not Codex/Banana. */
-export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' {
-  return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai';
+export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' | 'fireworks' {
+  return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai' || cli === 'fireworks';
+}
+
+// Fireworks provider lane — any serverless chat model from the Fireworks
+// catalog (fireworks-models.ts), served over Fireworks' Anthropic-compatible
+// endpoint. Same trick as Z.ai/xAI: run the stock `claude` binary with
+// ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN redirected to the Fireworks key
+// and a dedicated, OAuth-free CLAUDE_CONFIG_DIR. The Z.ai GLM fallback
+// (zaiQuota.ts) already proves this exact shape works against
+// https://api.fireworks.ai/inference. Model ids are the catalog ids verbatim
+// (accounts/fireworks/models/...). Thinking is always on: three catalog models
+// reject thinking:{type:'disabled'} with a 400 (verified 2026-10-06), so the
+// spawn always passes an effort and the lane offers low/medium/high only.
+const FIREWORKS_CONFIG_DIR = join(homedir(), '.claude-fireworks');
+function fireworksEnv(model: string): NodeJS.ProcessEnv {
+  const env = subscriptionEnvironment(process.env);
+  env.CLAUDE_CONFIG_DIR = FIREWORKS_CONFIG_DIR;
+  env.ANTHROPIC_BASE_URL =
+    process.env.RIVENDELL_FIREWORKS_ANTHROPIC_BASE_URL?.trim() || 'https://api.fireworks.ai/inference';
+  // Same key resolution as the Z.ai GLM fallback: the host wrapper may stash
+  // the metered key under the fallback-specific name before exec.
+  env.ANTHROPIC_AUTH_TOKEN =
+    process.env.RIVENDELL_ZAI_FALLBACK_API_KEY?.trim() || process.env.FIREWORKS_API_KEY?.trim() || '';
+  const window = String(fireworksContextWindow(model));
+  env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = window;
+  env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = window;
+  env.CLAUDE_CODE_MAX_RETRIES =
+    process.env.RIVENDELL_FIREWORKS_MAX_RETRIES?.trim()
+    || process.env.CLAUDE_CODE_MAX_RETRIES?.trim()
+    || '1';
+  env.SAMWISE_ACCOUNT = 'fireworks';
+  return env;
 }
 
 const resolveClaudeModel = (cli: CliKind, m?: string): string => {
   if (cli === 'zai') return resolveZaiModel(m, ZAI_MODEL);
   if (cli === 'xai') return resolveXaiModel(m, XAI_MODEL);
+  if (cli === 'fireworks') return resolveFireworksModel(m);
   // Anthropic Claude Code only. A drifted Counsel picker can send grok-* / glm-*
   // here; those ids are valid xAI/Z.ai spawn args and must not become `--model`
   // on an Anthropic Claude process (which then prints unrecognized_model to stderr).
@@ -301,6 +335,7 @@ export function isClaudeUnrecognizedModelWarning(message: string): boolean {
 const resolveClaudeEffort = (cli: CliKind, e?: string): string =>
   cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT)
   : cli === 'xai' ? resolveXaiEffort(e, XAI_EFFORT)
+  : cli === 'fireworks' ? resolveFireworksEffort(e)
   : e && VALID_CLAUDE_EFFORTS.has(e) ? e : CLAUDE_EFFORT;
 
 /** Prime the SuperGrok OAuth token (refreshing now if it's near expiry) and
@@ -694,7 +729,7 @@ class ClaudeSession {
     // rivendell-team. --strict-mcp-config so a model switch cannot
     // silently pick up extra (or stale) servers from ~/.claude*.json. Keep
     // --mcp-config last: it is variadic and swallows any plain arg after it.
-    if (cli === 'assistant' || cli === 'xai' || cli === 'claude' || cli === 'zai') {
+    if (cli === 'assistant' || cli === 'xai' || cli === 'claude' || cli === 'zai' || cli === 'fireworks') {
       args.push('--strict-mcp-config', '--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, chatId));
     }
 
@@ -703,8 +738,9 @@ class ClaudeSession {
     const forcedAccount = accountFromChatId(chatId);
     const spawnEnv = cli === 'xai' ? xaiEnv()
       : cli === 'zai' ? zaiEnv(this.spawnModel, zaiCredential!)
+      : cli === 'fireworks' ? fireworksEnv(this.spawnModel)
       : forcedAccount ? accountEnvForAccount(forcedAccount, cwd) : accountEnv(cwd);
-    if (cli !== 'xai' && cli !== 'zai') assertClaudeSubscription(spawnEnv, cwd);
+    if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks') assertClaudeSubscription(spawnEnv, cwd);
     if (cli === 'claude' || cli === 'assistant') spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
     const profileDir = spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
     this.providerAccount = existsSync(profileDir) ? realpathSync(profileDir) : profileDir;
@@ -997,7 +1033,9 @@ class ClaudeSession {
     // Z.ai GLM models are text-only over the Anthropic-compatible endpoint, so a
     // native image payload is dropped (or errors). Route pasted images through
     // the vision adapter (Fireworks GLM 5.3 Flash by default) and inject a text
-    // description instead. claude/assistant keep full native vision — they never adapt.
+    // description instead. Fireworks is per-model: serverless models without
+    // imageInput reject native blocks the same way, so they adapt too.
+    // claude/assistant keep full native vision — they never adapt.
     let promptText = text;
     let outImages = images;
     let visionNote: string | undefined;
@@ -1012,7 +1050,9 @@ class ClaudeSession {
         : `${text}\n\n[Matt attached ${images.length === 1 ? 'a screenshot' : 'screenshots'} that could not be saved. Ask him to resend if it matters.]`;
       outImages = undefined;
     }
-    if (this.cli === 'zai' && images && images.length) {
+    const textOnlyLane = this.cli === 'zai'
+      || (this.cli === 'fireworks' && !fireworksCapability(this.spawnModel)?.imageInput);
+    if (textOnlyLane && images && images.length) {
       const result = await adaptImagesForTextModel({ text, images, modelSupportsImages: false });
       if (result.adapted) {
         promptText = result.text;
@@ -1101,7 +1141,7 @@ class ClaudeSession {
       this.watchReply().arm();
     }
     if (visionNote) {
-      console.log(`[chat zai] vision adapter: ${visionNote}`);
+      console.log(`[chat ${this.cli}] vision adapter: ${visionNote}`);
       this.emit({
         type: 'event',
         event: { type: '_vision_adapter', images: images!.length, note: visionNote, ts: Date.now() },
@@ -2237,10 +2277,10 @@ class ClaudeSession {
       // carrying error:"authentication_failed" is a plan/permission problem a
       // respawn can't fix, so it must NOT be treated as fatal.
       const fatalAuth = ev.error_status === 401;
-      const tokenBacked = this.cli === 'zai' || this.cli === 'xai';
+      const tokenBacked = this.cli === 'zai' || this.cli === 'xai' || this.cli === 'fireworks';
       if (fatalAuth) {
         const provider = tokenBacked
-          ? (this.cli === 'xai' ? 'xAI' : this.zaiMode === 'fireworks' ? 'Fireworks' : 'Z.ai')
+          ? (this.cli === 'xai' ? 'xAI' : this.cli === 'fireworks' || this.zaiMode === 'fireworks' ? 'Fireworks' : 'Z.ai')
           : 'Claude';
         const authTerminal: TerminalProviderError = {
           message: `${provider} could not authenticate. Check its account or API key, then try again.`,

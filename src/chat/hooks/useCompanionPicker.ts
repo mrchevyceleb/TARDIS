@@ -10,6 +10,14 @@ import {
   useCodexCatalogVersion,
 } from '../codexModels';
 import { CLAUDE_EFFORTS, DEFAULT_CLAUDE_MODEL, normalizeClaudeModel } from '../components/CodexEnginePicker';
+import {
+  isFireworksCatalogLoaded,
+  normalizeFireworksEffort,
+  normalizeFireworksModel,
+  readStoredFireworksEffort,
+  readStoredFireworksModel,
+  useFireworksCatalogVersion,
+} from '../fireworksModels';
 
 // Companion + model/effort selection for an embedded chat (the Workspace room).
 // The subscription engines share one flat list.
@@ -32,6 +40,7 @@ export const WORKSPACE_COMPANIONS: {
   { id: 'codex', cli: 'codex', label: 'Codex' },
   { id: 'xai', cli: 'xai', label: 'Grok' },
   { id: 'zai', cli: 'zai', label: 'GLM' },
+  { id: 'fireworks', cli: 'fireworks', label: 'Fireworks' },
 ];
 
 // Optional named profile for custom/private picker extensions. Public entries
@@ -48,6 +57,7 @@ export function companionAuthBlurb(cli: CompanionId, account: RepoAccount | null
     case 'codex':           return `Codex, signed in as ${who}.`;
     case 'xai':              return 'Grok via your configured coding subscription.';
     case 'zai':              return 'GLM via your Z.ai coding plan.';
+    case 'fireworks':        return 'Any serverless Fireworks model via your Fireworks API key.';
     default:                 return '';
   }
 }
@@ -57,11 +67,14 @@ function readLS(key: string, fallback: string): string {
   try { return localStorage.getItem(key) || fallback; } catch { return fallback; }
 }
 
-/** Legacy stamps remain readable; new selections use subscription engines only. */
-export function normalizeCompanion(engine: string | undefined): 'claude' | 'codex' | 'xai' | 'zai' {
+/** Legacy stamps remain readable; new selections use subscription engines only.
+ *  `fireworks` is the API-key provider lane (any serverless Fireworks model);
+ *  the retired `banana-fireworks` engine maps onto it. */
+export function normalizeCompanion(engine: string | undefined): 'claude' | 'codex' | 'xai' | 'zai' | 'fireworks' {
   if (engine === 'claude' || engine === 'assistant' || engine === 'claude-kim') return 'claude';
   if (engine === 'codex' || engine === 'codex-kim') return 'codex';
   if (engine === 'zai') return 'zai';
+  if (engine === 'fireworks' || engine === 'banana-fireworks') return 'fireworks';
   return 'xai';
 }
 
@@ -206,6 +219,29 @@ export function useCompanionPicker(storageKey: string) {
   const [xaiEffort, setXaiEffortState] = useState(readStoredXaiEffort);
   const [zaiModel, setZaiModelState] = useState(readStoredZaiModel);
   const [zaiEffort, setZaiEffortState] = useState(readStoredZaiEffort);
+  const [fireworksModel, setFireworksModelState] = useState(readStoredFireworksModel);
+  const [fireworksEffort, setFireworksEffortState] = useState(readStoredFireworksEffort);
+  // Mirror the Codex reconciliation: when the live catalog lands, a stored
+  // model it no longer offers gives way to one it does, and a stale effort
+  // falls to the replacement's tiers. Without this, a removed pin renders a
+  // blank selector and keeps being sent to the server.
+  const fireworksCatalogVersion = useFireworksCatalogVersion();
+  useEffect(() => {
+    if (!isFireworksCatalogLoaded()) return;
+    const model = normalizeFireworksModel(fireworksModel);
+    // A replaced model starts on its own default effort; the old effort
+    // belonged to the model that is gone.
+    const effort = model === fireworksModel
+      ? normalizeFireworksEffort(model, fireworksEffort)
+      : normalizeFireworksEffort(model, undefined);
+    if (model === fireworksModel && effort === fireworksEffort) return;
+    setFireworksModelState(model);
+    setFireworksEffortState(effort);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('rivendell:fireworks-model', model);
+      localStorage.setItem('rivendell:fireworks-effort', effort);
+    }
+  }, [fireworksCatalogVersion]);
   // Process-local, intentionally not persisted. A new device starts at zero,
   // while every actual picker click advances only that lane's revision—even if
   // the clicked value matches what that device already displayed.
@@ -270,6 +306,24 @@ export function useCompanionPicker(storageKey: string) {
     setZaiEffortState(effort);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:zai-effort', effort);
   };
+  const setFireworksModel = (v: string) => {
+    markSelectionChanged('fireworks');
+    const model = normalizeFireworksModel(v);
+    setFireworksModelState(model);
+    // A model change re-derives the effort from the new model's tiers.
+    const effort = normalizeFireworksEffort(model, fireworksEffort);
+    setFireworksEffortState(effort);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('rivendell:fireworks-model', model);
+      localStorage.setItem('rivendell:fireworks-effort', effort);
+    }
+  };
+  const setFireworksEffort = (v: string) => {
+    markSelectionChanged('fireworks');
+    const effort = normalizeFireworksEffort(fireworksModel, v);
+    setFireworksEffortState(effort);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:fireworks-effort', effort);
+  };
 
   /** Apply the server-owned brain without marking it as a device-local picker
    * action. Used by agent chats so cross-device updates converge without
@@ -316,6 +370,15 @@ export function useCompanionPicker(storageKey: string) {
         localStorage.setItem('rivendell:zai-model', nextModel);
         localStorage.setItem('rivendell:zai-effort', nextEffort);
       }
+    } else if (lane === 'fireworks') {
+      const nextModel = normalizeFireworksModel(model ?? '');
+      const nextEffort = normalizeFireworksEffort(nextModel, effort ?? '');
+      setFireworksModelState(nextModel);
+      setFireworksEffortState(nextEffort);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rivendell:fireworks-model', nextModel);
+        localStorage.setItem('rivendell:fireworks-effort', nextEffort);
+      }
     }
   }, [storageKey]);
 
@@ -324,17 +387,19 @@ export function useCompanionPicker(storageKey: string) {
   const isCodex = cli === 'codex';
   const isXai = cli === 'xai';
   const isZai = cli === 'zai';
-  const model = isZai ? zaiModel : isXai ? xaiModel : isCodex ? codexModel : claudeModel;
-  const effort = isZai ? zaiEffort : isXai ? xaiEffort : isCodex ? codexEffort : claudeEffort;
+  const isFireworks = cli === 'fireworks';
+  const model = isZai ? zaiModel : isFireworks ? fireworksModel : isXai ? xaiModel : isCodex ? codexModel : claudeModel;
+  const effort = isZai ? zaiEffort : isFireworks ? fireworksEffort : isXai ? xaiEffort : isCodex ? codexEffort : claudeEffort;
 
   return {
     companion, setCompanion, applyAuthoritativeBrain,
     cli, account, model, effort, selectionRevision: selectionRevisions[companion] ?? 0,
     brainPending: false,
-    isClaude, isCodex, isXai, isZai,
+    isClaude, isCodex, isXai, isZai, isFireworks,
     claudeModel, setClaudeModel, claudeEffort, setClaudeEffort,
     codexModel, setCodexModel, codexEffort, setCodexEffort,
     xaiModel, setXaiModel, xaiEffort, setXaiEffort,
     zaiModel, setZaiModel, zaiEffort, setZaiEffort,
+    fireworksModel, setFireworksModel, fireworksEffort, setFireworksEffort,
   };
 }
