@@ -38,7 +38,7 @@ export type FireworksModelInfo = {
 /** Tiers for a catalog model with no published list (a brand-new release). */
 export const FIREWORKS_EFFORTS = ['low', 'medium', 'high'] as const;
 /** Every tier the claude binary's --effort accepts. */
-const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+export const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 const LMHX = ['low', 'medium', 'high', 'max'];
 const LHX = ['low', 'high', 'max'];
@@ -200,10 +200,12 @@ export function resolveFireworksModel(m: string | undefined, fallback = FIREWORK
  *  lane default the same way. Unknown models accept any tier the claude
  *  binary takes. */
 export function resolveFireworksEffort(e: string | undefined, model?: string, fallback = FIREWORKS_LANE_EFFORT): string {
-  return nearestFireworksEffort(fireworksEffortsFor(model), e?.trim(), fallback);
+  return nearestEffort(fireworksEffortsFor(model), e?.trim(), fallback);
 }
 
-function nearestFireworksEffort(allowed: string[], effort: string | undefined, fallback: string): string {
+/** Shared with the openrouter lane: the tier itself when the model has it,
+ *  else the nearest tier below it, else the model's lowest tier. */
+export function nearestEffort(allowed: string[], effort: string | undefined, fallback: string): string {
   if (effort && allowed.includes(effort)) return effort;
   const target = ALL_EFFORTS.indexOf(effort && ALL_EFFORTS.includes(effort) ? effort : fallback);
   const below = allowed.filter((tier) => ALL_EFFORTS.indexOf(tier) <= target);

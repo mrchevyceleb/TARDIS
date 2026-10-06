@@ -93,6 +93,7 @@ export function providerLabel(cli: string): string {
   if (cli === 'zai') return 'Z.ai';
   if (cli === 'xai') return 'xAI';
   if (cli === 'fireworks') return 'Fireworks';
+  if (cli === 'openrouter') return 'OpenRouter';
   if (cli === 'assistant' || cli === 'claude') return 'Claude';
   if (cli === 'codex' || cli === 'codex-personal') return 'Codex';
   return 'The model provider';
@@ -156,6 +157,13 @@ export function terminalProviderError(cli: string, raw: unknown, syntheticReason
   if (status === 401) {
     return {
       message: `${provider} could not authenticate. Check its account or API key, then try again.`,
+      code,
+    };
+  }
+  if (status === 402) {
+    // OpenRouter's out-of-credits answer; retrying cannot help.
+    return {
+      message: `${provider} says the account is out of credits (HTTP 402). Add credits or switch brains.`,
       code,
     };
   }

@@ -46,7 +46,7 @@ const MEMORY_FILE_BYTES = MEMORY_FILE_CHARS * 4;
 const MCP_HITS_TAKE = 3;
 
 /** Only Claude-family CLIs keep a project memory directory. */
-const CLAUDE_MEMORY_CLIS = new Set(['claude', 'assistant', 'zai', 'xai', 'fireworks']);
+const CLAUDE_MEMORY_CLIS = new Set(['claude', 'assistant', 'zai', 'xai', 'fireworks', 'openrouter']);
 
 const STOPWORDS = new Set([
   'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'for', 'with', 'is', 'are', 'was', 'were', 'be',

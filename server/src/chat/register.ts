@@ -11,6 +11,7 @@ import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { stopComputersForOwner } from '../devices/bridge.ts';
 import { codexCatalogPayload, startCodexCatalog } from './codex-models.ts';
 import { fireworksCatalogPayload, startFireworksCatalog } from './fireworks-models.ts';
+import { openRouterCatalogPayload, startOpenRouterCatalog } from './openrouter-models.ts';
 import {
   clampReplayWindow,
   REPLAY_CATCHUP_MAX_BYTES,
@@ -301,6 +302,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
   // is complete for today's models, so boot never waits on the network: warm in
   // the background and let the endpoint/lazy spawns use the hand list first.
   void startFireworksCatalog();
+  // Same for OpenRouter's public model list (no key needed to read it).
+  void startOpenRouterCatalog();
 
   app.get('/api/codex/models', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -310,6 +313,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
   app.get('/api/fireworks/models', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.json(fireworksCatalogPayload());
+  });
+
+  app.get('/api/openrouter/models', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(openRouterCatalogPayload());
   });
 
   app.get('/api/repos', async (_req, res) => {
@@ -348,7 +356,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
       cli !== 'banana-fireworks' &&
       cli !== 'zai' &&
       cli !== 'xai' &&
-      cli !== 'fireworks'
+      cli !== 'fireworks' &&
+      cli !== 'openrouter'
     ) {
       res.status(400).json({ error: 'invalid cli' });
       return;

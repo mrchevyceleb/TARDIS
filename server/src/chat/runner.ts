@@ -41,6 +41,7 @@ import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, synth
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { fireworksCapability, fireworksContextWindow, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
+import { openRouterCapability, openRouterContextWindow, resolveOpenRouterEffort, resolveOpenRouterModel } from './openrouter-models.ts';
 import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { PiSession, usePiHarness } from './pi-runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, REPLY_NUDGE_NOTE_TOOL, replyNowText, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
@@ -105,7 +106,8 @@ export type CliKind =
   | 'banana-fireworks'
   | 'zai'
   | 'xai'
-  | 'fireworks';
+  | 'fireworks'
+  | 'openrouter';
 
 export type StreamEvent = unknown;
 
@@ -280,8 +282,8 @@ function xaiEnv(): NodeJS.ProcessEnv {
   return env;
 }
 /** Persistent `claude` binary lanes (Anthropic, Z.ai, xAI). Not Codex/Banana. */
-export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' | 'fireworks' {
-  return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai' || cli === 'fireworks';
+export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' | 'fireworks' | 'openrouter' {
+  return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai' || cli === 'fireworks' || cli === 'openrouter';
 }
 
 // Fireworks provider lane — any serverless chat model from the Fireworks
@@ -316,10 +318,43 @@ function fireworksEnv(model: string): NodeJS.ProcessEnv {
   return env;
 }
 
+// OpenRouter provider lane: any tool-capable model in OpenRouter's catalog
+// (openrouter-models.ts) over its Anthropic skin, the same stock `claude`
+// binary trick as fireworks with its own OAuth-free CLAUDE_CONFIG_DIR.
+// OpenRouter's Claude Code guide asks for ANTHROPIC_API_KEY set to an explicit
+// empty string so no Anthropic key can win over the OpenRouter token.
+// A host wrapper that unsets the metered keys before exec can stash this one
+// as RIVENDELL_OPENROUTER_API_KEY first (the Fireworks fallback pattern).
+const OPENROUTER_CONFIG_DIR = join(homedir(), '.claude-openrouter');
+function openRouterEnv(model: string): NodeJS.ProcessEnv {
+  const env = subscriptionEnvironment(process.env);
+  env.CLAUDE_CONFIG_DIR = OPENROUTER_CONFIG_DIR;
+  env.ANTHROPIC_BASE_URL =
+    process.env.RIVENDELL_OPENROUTER_ANTHROPIC_BASE_URL?.trim() || 'https://openrouter.ai/api';
+  env.ANTHROPIC_AUTH_TOKEN =
+    process.env.RIVENDELL_OPENROUTER_API_KEY?.trim() || process.env.OPENROUTER_API_KEY?.trim() || '';
+  env.ANTHROPIC_API_KEY = '';
+  // Every model role (subagents, background haiku calls) stays on the picked
+  // OpenRouter model; an inherited Anthropic default id would route elsewhere.
+  for (const role of ['ANTHROPIC_DEFAULT_FABLE_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL']) {
+    env[role] = model;
+  }
+  const window = String(openRouterContextWindow(model));
+  env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = window;
+  env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = window;
+  env.CLAUDE_CODE_MAX_RETRIES =
+    process.env.RIVENDELL_OPENROUTER_MAX_RETRIES?.trim()
+    || process.env.CLAUDE_CODE_MAX_RETRIES?.trim()
+    || '1';
+  env.SAMWISE_ACCOUNT = 'openrouter';
+  return env;
+}
+
 const resolveClaudeModel = (cli: CliKind, m?: string): string => {
   if (cli === 'zai') return resolveZaiModel(m, ZAI_MODEL);
   if (cli === 'xai') return resolveXaiModel(m, XAI_MODEL);
   if (cli === 'fireworks') return resolveFireworksModel(m);
+  if (cli === 'openrouter') return resolveOpenRouterModel(m);
   // Anthropic Claude Code only. A drifted Counsel picker can send grok-* / glm-*
   // here; those ids are valid xAI/Z.ai spawn args and must not become `--model`
   // on an Anthropic Claude process (which then prints unrecognized_model to stderr).
@@ -337,6 +372,7 @@ const resolveClaudeEffort = (cli: CliKind, e?: string, model?: string): string =
   cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT)
   : cli === 'xai' ? resolveXaiEffort(e, XAI_EFFORT)
   : cli === 'fireworks' ? resolveFireworksEffort(e, model)
+  : cli === 'openrouter' ? resolveOpenRouterEffort(e, model)
   : e && VALID_CLAUDE_EFFORTS.has(e) ? e : CLAUDE_EFFORT;
 
 /** Prime the SuperGrok OAuth token (refreshing now if it's near expiry) and
@@ -730,7 +766,7 @@ class ClaudeSession {
     // rivendell-team. --strict-mcp-config so a model switch cannot
     // silently pick up extra (or stale) servers from ~/.claude*.json. Keep
     // --mcp-config last: it is variadic and swallows any plain arg after it.
-    if (cli === 'assistant' || cli === 'xai' || cli === 'claude' || cli === 'zai' || cli === 'fireworks') {
+    if (cli === 'assistant' || cli === 'xai' || cli === 'claude' || cli === 'zai' || cli === 'fireworks' || cli === 'openrouter') {
       args.push('--strict-mcp-config', '--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, chatId));
     }
 
@@ -740,8 +776,9 @@ class ClaudeSession {
     const spawnEnv = cli === 'xai' ? xaiEnv()
       : cli === 'zai' ? zaiEnv(this.spawnModel, zaiCredential!)
       : cli === 'fireworks' ? fireworksEnv(this.spawnModel)
+      : cli === 'openrouter' ? openRouterEnv(this.spawnModel)
       : forcedAccount ? accountEnvForAccount(forcedAccount, cwd) : accountEnv(cwd);
-    if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks') assertClaudeSubscription(spawnEnv, cwd);
+    if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks' && cli !== 'openrouter') assertClaudeSubscription(spawnEnv, cwd);
     if (cli === 'claude' || cli === 'assistant') spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
     const profileDir = spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
     this.providerAccount = existsSync(profileDir) ? realpathSync(profileDir) : profileDir;
@@ -1052,7 +1089,8 @@ class ClaudeSession {
       outImages = undefined;
     }
     const textOnlyLane = this.cli === 'zai'
-      || (this.cli === 'fireworks' && !fireworksCapability(this.spawnModel)?.imageInput);
+      || (this.cli === 'fireworks' && !fireworksCapability(this.spawnModel)?.imageInput)
+      || (this.cli === 'openrouter' && !openRouterCapability(this.spawnModel)?.imageInput);
     if (textOnlyLane && images && images.length) {
       const result = await adaptImagesForTextModel({ text, images, modelSupportsImages: false });
       if (result.adapted) {
@@ -2278,10 +2316,10 @@ class ClaudeSession {
       // carrying error:"authentication_failed" is a plan/permission problem a
       // respawn can't fix, so it must NOT be treated as fatal.
       const fatalAuth = ev.error_status === 401;
-      const tokenBacked = this.cli === 'zai' || this.cli === 'xai' || this.cli === 'fireworks';
+      const tokenBacked = this.cli === 'zai' || this.cli === 'xai' || this.cli === 'fireworks' || this.cli === 'openrouter';
       if (fatalAuth) {
         const provider = tokenBacked
-          ? (this.cli === 'xai' ? 'xAI' : this.cli === 'fireworks' || this.zaiMode === 'fireworks' ? 'Fireworks' : 'Z.ai')
+          ? (this.cli === 'xai' ? 'xAI' : this.cli === 'openrouter' ? 'OpenRouter' : this.cli === 'fireworks' || this.zaiMode === 'fireworks' ? 'Fireworks' : 'Z.ai')
           : 'Claude';
         const authTerminal: TerminalProviderError = {
           message: `${provider} could not authenticate. Check its account or API key, then try again.`,

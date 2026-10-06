@@ -17,6 +17,7 @@ import {
 import { CLAUDE_MODELS, CLAUDE_EFFORTS } from '../CodexEnginePicker';
 import { CODEX_MODELS, codexEffortsForModel, useCodexModels } from '../../codexModels';
 import { FIREWORKS_MODELS, fireworksEffortsForModel, useFireworksModels } from '../../fireworksModels';
+import { OPENROUTER_MODELS, openRouterEffortsForModel, useOpenRouterModels, type OpenRouterModelSpec } from '../../openrouterModels';
 import { StarSigil } from './icons';
 
 type LaneMeta = { ring: string; short: string; word: string };
@@ -27,6 +28,7 @@ const LANE_META: Record<string, LaneMeta> = {
   xai: { ring: 'G', short: 'Grok coding subscription', word: 'thinking' },
   zai: { ring: 'Z', short: 'Z.ai coding plan', word: 'effort' },
   fireworks: { ring: 'F', short: 'Fireworks API models', word: 'thinking' },
+  openrouter: { ring: 'O', short: 'OpenRouter API models', word: 'thinking' },
 };
 
 function labelFor(id: string, list: Array<{ id: string; label: string }>): string {
@@ -44,6 +46,7 @@ export function counselChipInfo(picker: CompanionPicker) {
   else if (picker.isXai) name = labelFor(picker.xaiModel, XAI_MODELS);
   else if (picker.isZai) name = labelFor(picker.zaiModel, ZAI_MODELS);
   else if (picker.isFireworks) name = labelFor(picker.fireworksModel, FIREWORKS_MODELS);
+  else if (picker.isOpenRouter) name = labelFor(picker.openRouterModel, OPENROUTER_MODELS);
   const lane = WORKSPACE_COMPANIONS.find((c) => c.id === picker.companion);
   const blurb = companionAuthBlurb(picker.cli, picker.account);
   return { ring: meta.ring, name, effort, word: meta.word, short: meta.short, blurb, laneLabel: lane?.label ?? name };
@@ -132,10 +135,25 @@ function LaneList({ picker }: { picker: CompanionPicker }) {
   );
 }
 
+// Most OpenRouter labels read "Vendor: Model"; group on that vendor (or the id's
+// vendor segment when a label has no prefix), keeping the server's order
+// (vendor, then newest first). Options drop only a verified prefix.
+function openRouterVendorGroups(models: OpenRouterModelSpec[]): Array<[string, Array<{ id: string; name: string }>]> {
+  const groups = new Map<string, Array<{ id: string; name: string }>>();
+  for (const m of models) {
+    const cut = m.label.indexOf(': ');
+    const vendor = cut > 0 ? m.label.slice(0, cut) : m.id.replace(/^~/, '').split('/')[0]!;
+    const name = cut > 0 ? m.label.slice(cut + 2) : m.label;
+    groups.set(vendor, [...(groups.get(vendor) ?? []), { id: m.id, name }]);
+  }
+  return [...groups];
+}
+
 // The active lane's model + effort controls, expanded in place.
 function LaneControls({ picker }: { picker: CompanionPicker }) {
   useCodexModels();
   useFireworksModels();
+  useOpenRouterModels();
   return (
     <div className="lane-ctl">
       {picker.isClaude && (
@@ -231,6 +249,32 @@ function LaneControls({ picker }: { picker: CompanionPicker }) {
             options={fireworksEffortsForModel(picker.fireworksModel)}
             current={picker.fireworksEffort}
             onPick={picker.setFireworksEffort}
+          />
+        </>
+      )}
+      {picker.isOpenRouter && (
+        <>
+          <span className="ctl-lab">model</span>
+          {/* Hundreds of models: one select, grouped by vendor. */}
+          <select
+            aria-label="OpenRouter model"
+            className="fw-model-select"
+            value={picker.openRouterModel}
+            onChange={(e) => picker.setOpenRouterModel(e.target.value)}
+          >
+            {openRouterVendorGroups(OPENROUTER_MODELS).map(([vendor, models]) => (
+              <optgroup key={vendor} label={vendor}>
+                {models.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name}</option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          <span className="ctl-lab">thinking</span>
+          <EffortPills
+            options={openRouterEffortsForModel(picker.openRouterModel)}
+            current={picker.openRouterEffort}
+            onPick={picker.setOpenRouterEffort}
           />
         </>
       )}

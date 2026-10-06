@@ -18,6 +18,14 @@ import {
   readStoredFireworksModel,
   useFireworksCatalogVersion,
 } from '../fireworksModels';
+import {
+  isOpenRouterCatalogLoaded,
+  normalizeOpenRouterEffort,
+  normalizeOpenRouterModel,
+  readStoredOpenRouterEffort,
+  readStoredOpenRouterModel,
+  useOpenRouterCatalogVersion,
+} from '../openrouterModels';
 
 // Companion + model/effort selection for an embedded chat (the Workspace room).
 // The subscription engines share one flat list.
@@ -41,6 +49,7 @@ export const WORKSPACE_COMPANIONS: {
   { id: 'xai', cli: 'xai', label: 'Grok' },
   { id: 'zai', cli: 'zai', label: 'GLM' },
   { id: 'fireworks', cli: 'fireworks', label: 'Fireworks' },
+  { id: 'openrouter', cli: 'openrouter', label: 'OpenRouter' },
 ];
 
 // Optional named profile for custom/private picker extensions. Public entries
@@ -58,6 +67,7 @@ export function companionAuthBlurb(cli: CompanionId, account: RepoAccount | null
     case 'xai':              return 'Grok via your configured coding subscription.';
     case 'zai':              return 'GLM via your Z.ai coding plan.';
     case 'fireworks':        return 'Any serverless Fireworks model via your Fireworks API key.';
+    case 'openrouter':       return 'Any tool-capable OpenRouter model via your OpenRouter API key.';
     default:                 return '';
   }
 }
@@ -69,12 +79,14 @@ function readLS(key: string, fallback: string): string {
 
 /** Legacy stamps remain readable; new selections use subscription engines only.
  *  `fireworks` is the API-key provider lane (any serverless Fireworks model);
- *  the retired `banana-fireworks` engine maps onto it. */
-export function normalizeCompanion(engine: string | undefined): 'claude' | 'codex' | 'xai' | 'zai' | 'fireworks' {
+ *  the retired `banana-fireworks` engine maps onto it. `openrouter` is the
+ *  same kind of lane for any tool-capable OpenRouter model. */
+export function normalizeCompanion(engine: string | undefined): 'claude' | 'codex' | 'xai' | 'zai' | 'fireworks' | 'openrouter' {
   if (engine === 'claude' || engine === 'assistant' || engine === 'claude-kim') return 'claude';
   if (engine === 'codex' || engine === 'codex-kim') return 'codex';
   if (engine === 'zai') return 'zai';
   if (engine === 'fireworks' || engine === 'banana-fireworks') return 'fireworks';
+  if (engine === 'openrouter') return 'openrouter';
   return 'xai';
 }
 
@@ -242,6 +254,24 @@ export function useCompanionPicker(storageKey: string) {
       localStorage.setItem('rivendell:fireworks-effort', effort);
     }
   }, [fireworksCatalogVersion]);
+  const [openRouterModel, setOpenRouterModelState] = useState(readStoredOpenRouterModel);
+  const [openRouterEffort, setOpenRouterEffortState] = useState(readStoredOpenRouterEffort);
+  // Same reconciliation as Fireworks when OpenRouter's live catalog lands.
+  const openRouterCatalogVersion = useOpenRouterCatalogVersion();
+  useEffect(() => {
+    if (!isOpenRouterCatalogLoaded()) return;
+    const model = normalizeOpenRouterModel(openRouterModel);
+    const effort = model === openRouterModel
+      ? normalizeOpenRouterEffort(model, openRouterEffort)
+      : normalizeOpenRouterEffort(model, undefined);
+    if (model === openRouterModel && effort === openRouterEffort) return;
+    setOpenRouterModelState(model);
+    setOpenRouterEffortState(effort);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('rivendell:openrouter-model', model);
+      localStorage.setItem('rivendell:openrouter-effort', effort);
+    }
+  }, [openRouterCatalogVersion]);
   // Process-local, intentionally not persisted. A new device starts at zero,
   // while every actual picker click advances only that lane's revision—even if
   // the clicked value matches what that device already displayed.
@@ -324,6 +354,23 @@ export function useCompanionPicker(storageKey: string) {
     setFireworksEffortState(effort);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:fireworks-effort', effort);
   };
+  const setOpenRouterModel = (v: string) => {
+    markSelectionChanged('openrouter');
+    const model = normalizeOpenRouterModel(v);
+    setOpenRouterModelState(model);
+    const effort = normalizeOpenRouterEffort(model, openRouterEffort);
+    setOpenRouterEffortState(effort);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('rivendell:openrouter-model', model);
+      localStorage.setItem('rivendell:openrouter-effort', effort);
+    }
+  };
+  const setOpenRouterEffort = (v: string) => {
+    markSelectionChanged('openrouter');
+    const effort = normalizeOpenRouterEffort(openRouterModel, v);
+    setOpenRouterEffortState(effort);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:openrouter-effort', effort);
+  };
 
   /** Apply the server-owned brain without marking it as a device-local picker
    * action. Used by agent chats so cross-device updates converge without
@@ -379,6 +426,15 @@ export function useCompanionPicker(storageKey: string) {
         localStorage.setItem('rivendell:fireworks-model', nextModel);
         localStorage.setItem('rivendell:fireworks-effort', nextEffort);
       }
+    } else if (lane === 'openrouter') {
+      const nextModel = normalizeOpenRouterModel(model ?? '');
+      const nextEffort = normalizeOpenRouterEffort(nextModel, effort ?? '');
+      setOpenRouterModelState(nextModel);
+      setOpenRouterEffortState(nextEffort);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rivendell:openrouter-model', nextModel);
+        localStorage.setItem('rivendell:openrouter-effort', nextEffort);
+      }
     }
   }, [storageKey]);
 
@@ -388,18 +444,20 @@ export function useCompanionPicker(storageKey: string) {
   const isXai = cli === 'xai';
   const isZai = cli === 'zai';
   const isFireworks = cli === 'fireworks';
-  const model = isZai ? zaiModel : isFireworks ? fireworksModel : isXai ? xaiModel : isCodex ? codexModel : claudeModel;
-  const effort = isZai ? zaiEffort : isFireworks ? fireworksEffort : isXai ? xaiEffort : isCodex ? codexEffort : claudeEffort;
+  const isOpenRouter = cli === 'openrouter';
+  const model = isZai ? zaiModel : isFireworks ? fireworksModel : isOpenRouter ? openRouterModel : isXai ? xaiModel : isCodex ? codexModel : claudeModel;
+  const effort = isZai ? zaiEffort : isFireworks ? fireworksEffort : isOpenRouter ? openRouterEffort : isXai ? xaiEffort : isCodex ? codexEffort : claudeEffort;
 
   return {
     companion, setCompanion, applyAuthoritativeBrain,
     cli, account, model, effort, selectionRevision: selectionRevisions[companion] ?? 0,
     brainPending: false,
-    isClaude, isCodex, isXai, isZai, isFireworks,
+    isClaude, isCodex, isXai, isZai, isFireworks, isOpenRouter,
     claudeModel, setClaudeModel, claudeEffort, setClaudeEffort,
     codexModel, setCodexModel, codexEffort, setCodexEffort,
     xaiModel, setXaiModel, xaiEffort, setXaiEffort,
     zaiModel, setZaiModel, zaiEffort, setZaiEffort,
     fireworksModel, setFireworksModel, fireworksEffort, setFireworksEffort,
+    openRouterModel, setOpenRouterModel, openRouterEffort, setOpenRouterEffort,
   };
 }
