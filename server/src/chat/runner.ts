@@ -37,7 +37,8 @@ import { chatAttachmentPath, saveChatAttachments } from '../routes/chatAttachmen
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
-import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
+import { applyProviderLimits } from './providerEnv.ts';
+import { compactFailureError, isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { fireworksCapability, fireworksContextWindow, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
@@ -214,15 +215,7 @@ function zaiEnv(model: string, credential: ReturnType<typeof zaiCredentials>): N
   // base URL, token, and `--model` id all have to describe the same provider.
   env.ANTHROPIC_BASE_URL = credential.baseUrl;
   env.ANTHROPIC_AUTH_TOKEN = credential.token;
-  const window = zaiCompactWindowForModel(model);
-  // Same two knobs as xAI: MAX_CONTEXT tells Claude Code the real window for a
-  // non-claude-* id; AUTO_COMPACT_WINDOW is the compact threshold.
-  env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = window;
-  env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = window;
-  env.CLAUDE_CODE_MAX_RETRIES =
-    process.env.RIVENDELL_ZAI_MAX_RETRIES?.trim()
-    || process.env.CLAUDE_CODE_MAX_RETRIES?.trim()
-    || '1';
+  applyProviderLimits(env, { contextWindow: zaiCompactWindowForModel(model), retriesVar: 'RIVENDELL_ZAI_MAX_RETRIES' });
   env.SAMWISE_ACCOUNT = 'zai';
   return env;
 }
@@ -268,16 +261,7 @@ function xaiEnv(): NodeJS.ProcessEnv {
   env.CLAUDE_CONFIG_DIR = XAI_CONFIG_DIR;
   env.ANTHROPIC_BASE_URL = xaiProxyBaseUrl();
   env.ANTHROPIC_AUTH_TOKEN = xaiProxySecret();
-  // Both knobs required: MAX_CONTEXT tells Claude Code Grok is 500K (not the
-  // 200K non-claude default); AUTO_COMPACT_WINDOW is the compact threshold.
-  env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = XAI_COMPACT_WINDOW;
-  env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = XAI_COMPACT_WINDOW;
-  // Capacity/quota windows do not improve during Claude Code's long default
-  // retry storm. Fail promptly so the user can switch brains or retry later.
-  env.CLAUDE_CODE_MAX_RETRIES =
-    process.env.RIVENDELL_XAI_MAX_RETRIES?.trim()
-    || process.env.CLAUDE_CODE_MAX_RETRIES?.trim()
-    || '1';
+  applyProviderLimits(env, { contextWindow: XAI_COMPACT_WINDOW, retriesVar: 'RIVENDELL_XAI_MAX_RETRIES' });
   env.SAMWISE_ACCOUNT = 'xai';
   return env;
 }
@@ -307,13 +291,7 @@ function fireworksEnv(model: string): NodeJS.ProcessEnv {
   // the metered key under the fallback-specific name before exec.
   env.ANTHROPIC_AUTH_TOKEN =
     process.env.RIVENDELL_ZAI_FALLBACK_API_KEY?.trim() || process.env.FIREWORKS_API_KEY?.trim() || '';
-  const window = String(fireworksContextWindow(model));
-  env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = window;
-  env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = window;
-  env.CLAUDE_CODE_MAX_RETRIES =
-    process.env.RIVENDELL_FIREWORKS_MAX_RETRIES?.trim()
-    || process.env.CLAUDE_CODE_MAX_RETRIES?.trim()
-    || '1';
+  applyProviderLimits(env, { contextWindow: fireworksContextWindow(model), retriesVar: 'RIVENDELL_FIREWORKS_MAX_RETRIES' });
   env.SAMWISE_ACCOUNT = 'fireworks';
   return env;
 }
@@ -563,6 +541,9 @@ class ClaudeSession {
    *  accompanying `result` often carries no status, so this is the only
    *  surviving evidence of the real cause. */
   private syntheticApiErrorReason: string | null = null;
+  /** Claude Code's own compaction failed this turn: its reason, verbatim. The
+   *  native session is still over the limit, so it must not be resumed. */
+  private compactFailure: string | null = null;
   private providerAccount = '';
   /** Text-block seqs for the current Claude stream. A later synthetic marker
    * lets us surgically remove only its protocol prose from durable storage. */
@@ -1016,6 +997,7 @@ class ClaudeSession {
       this.terminalNoticeEmitted = false;
       this.syntheticApiErrorSeen = false;
       this.syntheticApiErrorReason = null;
+      this.compactFailure = null;
       this.streamTextBlocks.clear();
       this.preparingTurnAborter = preparationAborter;
       this.turnPromptSubmitted = false;
@@ -1977,6 +1959,21 @@ class ClaudeSession {
     return true;
   }
 
+  /** Every later turn on a session whose compaction failed hits the same
+   *  limit again. Drop it at the turn boundary so the next send spawns fresh
+   *  from compact+50, the same way a context rotation does. */
+  private async reseedAfterCompactFailure(): Promise<void> {
+    const busy = () => this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork();
+    if (busy()) return;
+    await setSessionId(this.cli, this.cwd, '', this.chatId);
+    if (busy()) {
+      if (!this.disposed && this.currentSessionId) await setSessionId(this.cli, this.cwd, this.currentSessionId, this.chatId);
+      return;
+    }
+    bankRotation(this.logKey);
+    this.shutdown('compact-failed');
+  }
+
   awaitContextMaintenance(): Promise<void> { return this.contextMaintenance ?? Promise.resolve(); }
 
   /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
@@ -2086,6 +2083,7 @@ class ClaudeSession {
       this.terminalNoticeEmitted = false;
       this.syntheticApiErrorSeen = false;
       this.syntheticApiErrorReason = null;
+      this.compactFailure = null;
       this.streamTextBlocks.clear();
       this.preparingTurnAborter = null;
       this.turnPromptSubmitted = true;
@@ -2230,6 +2228,9 @@ class ClaudeSession {
       this.syntheticApiErrorReason ??= this.captureSyntheticReason(ev);
       this.scrubSyntheticStreamText();
     }
+    if (ev?.type === 'system' && ev.subtype === 'status' && ev.compact_result === 'failed') {
+      this.compactFailure = typeof ev.compact_error === 'string' ? ev.compact_error : '';
+    }
     const expectedUserInterrupt = ev?.type === 'result' && this.userInterruptPending;
     const providerTerminal = ev?.type === 'result' && !expectedUserInterrupt
       ? terminalProviderError(this.cli, ev, this.syntheticApiErrorReason)
@@ -2238,7 +2239,10 @@ class ClaudeSession {
       const detail = [ev.api_error_status === 426 ? 'HTTP 426' : '', this.syntheticApiErrorReason, ev.result, ...(Array.isArray(ev.errors) ? ev.errors.map((e: any) => typeof e === 'string' ? e : e?.message) : [])].filter((s) => typeof s === 'string').join('\n');
       noteProviderGateFailure(providerLabel(this.cli), () => agentForChatId(this.chatId)?.name ?? this.chatId, detail);
     }
-    const terminal = providerTerminal
+    const compactFailed = ev?.type === 'result' && !expectedUserInterrupt && this.compactFailure !== null
+      && (ev.is_error === true || providerTerminal !== null);
+    const terminal = (compactFailed ? compactFailureError(this.cli, this.compactFailure ?? '') : null)
+      ?? providerTerminal
       ?? (ev?.type === 'result' && !expectedUserInterrupt
         ? terminalExecutionError(
             this.cli,
@@ -2394,6 +2398,7 @@ class ClaudeSession {
       if (authFailPending) this.failAuth();
       else if (zaiStale && !this.hasBackgroundWork()) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
       if (zaiCut) this.afterZaiCut(zaiCut, zaiCutNoticeSeq);
+      else if (compactFailed && !authFailPending && !zaiStale) void this.reseedAfterCompactFailure();
       if (!rotationDue) void housekeeping();
     }
   }
