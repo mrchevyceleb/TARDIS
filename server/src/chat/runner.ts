@@ -271,6 +271,9 @@ function xaiEnv(model: string): NodeJS.ProcessEnv {
 /** How far below Claude Code's native compact threshold a compact must start
  *  to count as the provider refusing the context. */
 const REACTIVE_COMPACT_GAP = 40_000;
+/** A provider lane rotates at least this far below Claude Code's own compact,
+ *  and a seed needs twice that much room to grow or rotating cannot help. */
+const ROTATE_BEFORE_NATIVE = 10_000;
 /** Persistent `claude` binary lanes (Anthropic, Z.ai, xAI). Not Codex/Banana. */
 export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' | 'fireworks' | 'openrouter' {
   return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai' || cli === 'fireworks' || cli === 'openrouter';
@@ -559,6 +562,9 @@ class ClaudeSession {
   /** This process reported usage of its own; until then the lane's recorded
    *  context may belong to a previous model and must not teach a budget. */
   private usageSeen = false;
+  /** Claude Code compacted the seeded start before any usage came back: the
+   *  seed alone filled the window. */
+  private seedOverflowed = false;
   /** The context a seeded process started with. */
   private startTokens = 0;
   private providerAccount = '';
@@ -1966,7 +1972,21 @@ class ClaudeSession {
     // A seed already past a (learned) budget gets half a budget to grow
     // before the next rotation, or every turn would rotate.
     const budget = providerContextBudget(this.spawnModel, this.providerWindow);
-    return Math.max(budget, this.startTokens + Math.floor(budget / 2));
+    // A seed with no room before the native compact would reload just as big
+    // after every rotation; leave that lane to the native compact instead.
+    if (this.seedFillsWindow()) return Infinity;
+    const nativeThreshold = this.nativeCompactWindow - NATIVE_COMPACT_MARGIN;
+    return Math.min(Math.max(budget, this.startTokens + Math.floor(budget / 2)), nativeThreshold - ROTATE_BEFORE_NATIVE);
+  }
+
+  /** The seeded start already sits within reach of Claude Code's own compact
+   *  (a small-window model with a large compact), so a rotation would only
+   *  reload the same oversized seed and loop. */
+  private seedFillsWindow(): boolean {
+    if (!this.providerWindow) return false;
+    if (this.seedOverflowed) return true;
+    if (!this.nativeCompactWindow || this.startTokens <= 0) return false;
+    return this.startTokens + 2 * ROTATE_BEFORE_NATIVE >= this.nativeCompactWindow - NATIVE_COMPACT_MARGIN;
   }
 
   private rotationWanted(): boolean {
@@ -2273,7 +2293,10 @@ class ClaudeSession {
     // reactive compact. Below the native threshold that is the only sign of
     // it: learn a lower budget for this model and rotate at the boundary.
     if (!sidechain && this.providerWindow && ev?.type === 'system' && ev.subtype === 'status' && ev.status === 'compacting') {
-      this.rotateAfterNativeCompact = true;
+      // The native compact already shrank an oversized seed; rotating would
+      // reload the same seed and compact again.
+      if (this.pendingSeedAck && !this.usageSeen) this.seedOverflowed = true;
+      if (!this.seedFillsWindow()) this.rotateAfterNativeCompact = true;
       const accepted = this.usageSeen ? contextTokens(this.logKey) : 0;
       // A gap this wide below the native threshold is more than one turn adds,
       // so a plain backstop compact after a big tool result does not count.
