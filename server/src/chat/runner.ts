@@ -291,9 +291,10 @@ export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'clau
 // and a dedicated, OAuth-free CLAUDE_CONFIG_DIR. The Z.ai GLM fallback
 // (zaiQuota.ts) already proves this exact shape works against
 // https://api.fireworks.ai/inference. Model ids are the catalog ids verbatim
-// (accounts/fireworks/models/...). Thinking is always on: three catalog models
+// (accounts/fireworks/models/... or .../routers/...). Thinking is always on: three catalog models
 // reject thinking:{type:'disabled'} with a 400 (verified 2026-10-06), so the
-// spawn always passes an effort and the lane offers low/medium/high only.
+// spawn always passes an effort. The binary forwards it as output_config.effort;
+// each model's own tiers (fireworks-models.ts) bound what the lane offers.
 const FIREWORKS_CONFIG_DIR = join(homedir(), '.claude-fireworks');
 function fireworksEnv(model: string): NodeJS.ProcessEnv {
   const env = subscriptionEnvironment(process.env);
@@ -332,10 +333,10 @@ export function isClaudeUnrecognizedModelWarning(message: string): boolean {
   return message.includes('[claude-code:unrecognized_model]');
 }
 
-const resolveClaudeEffort = (cli: CliKind, e?: string): string =>
+const resolveClaudeEffort = (cli: CliKind, e?: string, model?: string): string =>
   cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT)
   : cli === 'xai' ? resolveXaiEffort(e, XAI_EFFORT)
-  : cli === 'fireworks' ? resolveFireworksEffort(e)
+  : cli === 'fireworks' ? resolveFireworksEffort(e, model)
   : e && VALID_CLAUDE_EFFORTS.has(e) ? e : CLAUDE_EFFORT;
 
 /** Prime the SuperGrok OAuth token (refreshing now if it's near expiry) and
@@ -615,7 +616,7 @@ class ClaudeSession {
     this.pendingResumeId = resumeId;
     this.startedResumeId = resumeId;
     this.spawnModel = resolveClaudeModel(cli, model);
-    this.spawnEffort = resolveClaudeEffort(cli, effort);
+    this.spawnEffort = resolveClaudeEffort(cli, effort, this.spawnModel);
     // Persona/FACE stay in --append-system-prompt. The forever-window
     // (compact + last 50) is prepended to the first user message so raw
     // turns are not promoted to system-level instructions.
@@ -2520,7 +2521,7 @@ export async function getOrCreateSession(opts: {
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
   const wantModel = resolveClaudeModel(opts.cli, opts.model);
-  const wantEffort = resolveClaudeEffort(opts.cli, opts.effort);
+  const wantEffort = resolveClaudeEffort(opts.cli, opts.effort, wantModel);
 
   while (true) {
     const existing = sessions.get(key);

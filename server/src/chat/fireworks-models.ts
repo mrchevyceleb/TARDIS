@@ -13,6 +13,13 @@
 // thinking. `accounts/fireworks/models/glm-5p2` still appears in the
 // control-plane catalog but 404s on the inference endpoint (verified twice),
 // so it is excluded here and a stored brain pin migrates to GLM 5.3.
+//
+// Effort tiers are per model. The claude binary forwards `--effort` verbatim as
+// `output_config.effort` (captured 2026-10-06), and Fireworks returns 200 for
+// every tier on every model, so the endpoint cannot tell us which tiers are
+// real. The lists below are each model's published tiers (models.dev
+// reasoning_options for the fireworks-ai provider, 2026-10-06). Models with
+// only an on/off thinking toggle get a single tier.
 import { engineDefault } from '../lib/engineConfig.ts';
 import { FIREWORKS_NON_CHAT_RE, fetchFireworksCatalog } from './banana-runner.ts';
 
@@ -20,7 +27,7 @@ export type FireworksModelInfo = {
   /** Full Fireworks id — also the `--model` value the claude binary sends. */
   id: string;
   label: string;
-  /** Verified reasoning tiers. Every chat model accepts thinking; three cannot disable it. */
+  /** The model's published reasoning tiers. Every chat model accepts thinking; three cannot disable it. */
   efforts: string[];
   contextWindow: number;
   imageInput?: boolean;
@@ -28,27 +35,42 @@ export type FireworksModelInfo = {
   thinkingOnly?: true;
 };
 
-/** Verified against the live endpoint: low/medium/high budgets are accepted
- *  by every serverless chat model. Higher tiers (xhigh/max) are unverified, so
- *  they are not offered. */
+/** Tiers for a catalog model with no published list (a brand-new release). */
 export const FIREWORKS_EFFORTS = ['low', 'medium', 'high'] as const;
+/** Every tier the claude binary's --effort accepts. */
+const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+const LMHX = ['low', 'medium', 'high', 'max'];
+const LHX = ['low', 'high', 'max'];
+const LMH = ['low', 'medium', 'high'];
+/** On/off thinking toggle only: the effort value is ignored, so offer one tier. */
+const TOGGLE = ['high'];
 
 const HAND_MODELS: FireworksModelInfo[] = [
-  { id: 'accounts/fireworks/models/deepseek-v4p1-flash', label: 'DeepSeek V4.1 Flash', efforts: [...FIREWORKS_EFFORTS], contextWindow: 1_048_576, imageInput: true },
-  { id: 'accounts/fireworks/models/ember-1', label: 'Ember 1', efforts: [...FIREWORKS_EFFORTS], contextWindow: 1_048_576, imageInput: true },
-  { id: 'accounts/fireworks/models/glm-5p3', label: 'GLM 5.3', efforts: [...FIREWORKS_EFFORTS], contextWindow: 1_048_576, thinkingOnly: true },
-  { id: 'accounts/fireworks/models/glm-5p3-flash', label: 'GLM 5.3 Flash', efforts: [...FIREWORKS_EFFORTS], contextWindow: 1_048_576, imageInput: true, thinkingOnly: true },
-  { id: 'accounts/fireworks/models/gpt-oss-120b', label: 'GPT-OSS 120B', efforts: [...FIREWORKS_EFFORTS], contextWindow: 131_072, thinkingOnly: true },
-  { id: 'accounts/fireworks/models/inkling', label: 'Inkling', efforts: [...FIREWORKS_EFFORTS], contextWindow: 1_048_576, imageInput: true },
-  { id: 'accounts/fireworks/models/kimi-k3', label: 'Kimi K3', efforts: [...FIREWORKS_EFFORTS], contextWindow: 1_048_576, imageInput: true },
-  { id: 'accounts/fireworks/models/minimax-m3', label: 'MiniMax M3', efforts: [...FIREWORKS_EFFORTS], contextWindow: 512_000 },
-  { id: 'accounts/fireworks/models/nemotron-3-ultra-nvfp4', label: 'Nemotron 3 Ultra', efforts: [...FIREWORKS_EFFORTS], contextWindow: 262_144 },
-  { id: 'accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b', label: 'Nemotron Lightning 3.5', efforts: [...FIREWORKS_EFFORTS], contextWindow: 262_144 },
-  { id: 'accounts/fireworks/models/qwen3p8-2p4t-a95b', label: 'Qwen 3.8 2.4T', efforts: [...FIREWORKS_EFFORTS], contextWindow: 262_144 },
+  { id: 'accounts/fireworks/models/deepseek-v4p1-flash', label: 'DeepSeek V4.1 Flash', efforts: LHX, contextWindow: 1_048_576, imageInput: true },
+  { id: 'accounts/fireworks/models/ember-1', label: 'Ember 1', efforts: LMHX, contextWindow: 1_048_576, imageInput: true },
+  { id: 'accounts/fireworks/models/glm-5p3', label: 'GLM 5.3', efforts: LHX, contextWindow: 1_048_576, thinkingOnly: true },
+  { id: 'accounts/fireworks/models/glm-5p3-flash', label: 'GLM 5.3 Flash', efforts: LHX, contextWindow: 1_048_576, imageInput: true, thinkingOnly: true },
+  { id: 'accounts/fireworks/models/gpt-oss-120b', label: 'GPT-OSS 120B', efforts: LMH, contextWindow: 131_072, thinkingOnly: true },
+  { id: 'accounts/fireworks/models/inkling', label: 'Inkling', efforts: TOGGLE, contextWindow: 1_048_576, imageInput: true },
+  { id: 'accounts/fireworks/models/kimi-k3', label: 'Kimi K3', efforts: LMHX, contextWindow: 1_048_576, imageInput: true },
+  { id: 'accounts/fireworks/models/minimax-m3', label: 'MiniMax M3', efforts: LMH, contextWindow: 512_000 },
+  { id: 'accounts/fireworks/models/nemotron-3-ultra-nvfp4', label: 'Nemotron 3 Ultra', efforts: TOGGLE, contextWindow: 262_144 },
+  { id: 'accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b', label: 'Nemotron Lightning 3.5', efforts: TOGGLE, contextWindow: 262_144 },
+  { id: 'accounts/fireworks/models/qwen3p8-2p4t-a95b', label: 'Qwen 3.8 2.4T', efforts: ['low', 'medium', 'xhigh'], contextWindow: 262_144 },
   // Control plane reports no context_length for this one; pinned to its sibling's.
-  { id: 'accounts/fireworks/models/qwen3p8-max', label: 'Qwen 3.8 Max', efforts: [...FIREWORKS_EFFORTS], contextWindow: 262_144, imageInput: true },
+  { id: 'accounts/fireworks/models/qwen3p8-max', label: 'Qwen 3.8 Max', efforts: TOGGLE, contextWindow: 262_144, imageInput: true },
 ];
-const HAND_BY_ID = new Map(HAND_MODELS.map((model) => [model.id, model]));
+/** Fireworks "fast" routers. The control-plane model list never includes
+ *  routers and the router list is 403 for an inference key, so they are always
+ *  appended by hand. Both answered on the inference endpoint 2026-10-06. The
+ *  "*-latest" routers are left out: they only alias models already listed. */
+const ROUTER_MODELS: FireworksModelInfo[] = [
+  { id: 'accounts/fireworks/routers/kimi-k3-fast', label: 'Kimi K3 Fast', efforts: LMHX, contextWindow: 1_048_576, imageInput: true },
+  { id: 'accounts/fireworks/routers/glm-5p3-fast', label: 'GLM 5.3 Fast', efforts: LHX, contextWindow: 1_048_576, thinkingOnly: true },
+];
+const HAND_LIST = [...HAND_MODELS, ...ROUTER_MODELS];
+const HAND_BY_ID = new Map(HAND_LIST.map((model) => [model.id, model]));
 
 /** Catalog rows the inference endpoint refuses today. Verified 2026-10-06:
  *  glm-5p2 404s ("Model not found, inaccessible, and/or not deployed") on the
@@ -61,7 +83,9 @@ const MODEL_ALIASES: Record<string, string> = {
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const REFRESH_MS = 4 * 60 * 60 * 1000;
-const FIREWORKS_MODEL_ID = /^accounts\/fireworks\/models\/[a-z0-9][a-z0-9._-]{0,96}$/;
+const BOOT_RETRY_MS = 60 * 1000;
+const BOOT_RETRIES = 15;
+const FIREWORKS_MODEL_ID = /^accounts\/fireworks\/(models|routers)\/[a-z0-9][a-z0-9._-]{0,96}$/;
 
 /** Operator-configurable lane default (~/samwise/.accounts/engines.json). */
 export const { model: FIREWORKS_LANE_MODEL, effort: FIREWORKS_LANE_EFFORT } = engineDefault(
@@ -89,7 +113,7 @@ function rowToInfo(row: unknown): FireworksModelInfo | null {
   return {
     id,
     label: hand?.label ?? (id.split('/').pop() || id),
-    efforts: [...FIREWORKS_EFFORTS],
+    efforts: [...(hand?.efforts ?? FIREWORKS_EFFORTS)],
     contextWindow: context,
     ...(rec.supports_image_input === true || hand?.imageInput ? { imageInput: true } : {}),
     ...(hand?.thinkingOnly ? { thinkingOnly: true } : {}),
@@ -104,25 +128,38 @@ async function refreshCatalog(): Promise<FireworksModelInfo[]> {
     const rows = await fetchFireworksCatalog();
     const next = rows.map(rowToInfo).filter((info): info is FireworksModelInfo => info !== null);
     // Keep the prior list on an empty/failed answer (fail-open, like codex).
-    if (next.length > 0) catalog = next;
+    if (next.length > 0) {
+      // Routers are appended by hand; skip any the control plane starts listing.
+      const ids = new Set(next.map((info) => info.id));
+      catalog = [...next, ...ROUTER_MODELS.filter((info) => !ids.has(info.id))];
+    }
   } catch (error) {
     console.warn(`[fireworks] catalog refresh failed: ${(error as Error).message}`);
   }
-  return catalog ?? HAND_MODELS;
+  return catalog ?? HAND_LIST;
 }
 
-/** Warm the catalog at boot and refresh it every few hours. Never throws. */
+/** Warm the catalog at boot and refresh it every few hours. A failed boot
+ *  fetch (Fireworks' control plane can time out) retries every minute for a
+ *  while instead of leaving the hand list in force until the 4-hour refresh.
+ *  Never throws. */
 export async function startFireworksCatalog(): Promise<void> {
   await refreshCatalog();
   if (refreshTimer) return;
   refreshTimer = setInterval(() => { void refreshCatalog(); }, REFRESH_MS);
   refreshTimer.unref();
+  let retries = 0;
+  const retry = (): void => {
+    if (catalog !== null || retries++ >= BOOT_RETRIES) return;
+    setTimeout(() => { void refreshCatalog().then(retry); }, BOOT_RETRY_MS).unref();
+  };
+  retry();
 }
 
 /** The live list for spawn-time validation. Falls back to the hand list until
  *  the first refresh lands. */
 export function fireworksModelList(): FireworksModelInfo[] {
-  return catalog ?? HAND_MODELS;
+  return catalog ?? HAND_LIST;
 }
 
 /** Sync capability lookup used by the runner, agent-brain normalization, and
@@ -156,8 +193,25 @@ export function resolveFireworksModel(m: string | undefined, fallback = FIREWORK
   return fallback;
 }
 
-/** Effort tiers for the fireworks lane. Verified low/medium/high only. */
-export function resolveFireworksEffort(e: string | undefined, fallback = FIREWORKS_LANE_EFFORT): string {
-  const effort = e?.trim();
-  return effort && (FIREWORKS_EFFORTS as readonly string[]).includes(effort) ? effort : fallback;
+/** Effort for the fireworks lane, checked against the model's own tiers. A
+ *  tier the model doesn't publish steps down to the nearest tier it has (never
+ *  up, so a saved `high` on a low/medium/xhigh model lands on `medium`), and
+ *  to its lowest tier when nothing sits below. A missing effort aims at the
+ *  lane default the same way. Unknown models accept any tier the claude
+ *  binary takes. */
+export function resolveFireworksEffort(e: string | undefined, model?: string, fallback = FIREWORKS_LANE_EFFORT): string {
+  return nearestFireworksEffort(fireworksEffortsFor(model), e?.trim(), fallback);
+}
+
+function nearestFireworksEffort(allowed: string[], effort: string | undefined, fallback: string): string {
+  if (effort && allowed.includes(effort)) return effort;
+  const target = ALL_EFFORTS.indexOf(effort && ALL_EFFORTS.includes(effort) ? effort : fallback);
+  const below = allowed.filter((tier) => ALL_EFFORTS.indexOf(tier) <= target);
+  return below[below.length - 1] ?? allowed[0] ?? fallback;
+}
+
+/** Published tiers for the model the lane will actually run (aliases and
+ *  unknown ids resolve first), or every tier for one the catalog doesn't know. */
+export function fireworksEffortsFor(model: string | undefined): string[] {
+  return fireworksCapability(resolveFireworksModel(model))?.efforts ?? ALL_EFFORTS;
 }
