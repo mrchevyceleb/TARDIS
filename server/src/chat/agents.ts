@@ -11,7 +11,7 @@ import { readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, readdirSy
 import { join } from 'node:path';
 import { SESSIONS_FILE, STATE_DIR } from './config.ts';
 import { codexCapability } from './codex-models.ts';
-import { FIREWORKS_LANE_EFFORT, FIREWORKS_LANE_MODEL, fireworksEffortsFor, resolveFireworksModel } from './fireworks-models.ts';
+import { FIREWORKS_LANE_EFFORT, FIREWORKS_LANE_MODEL, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
 import { deleteRoutinesForAgent } from './routines.ts';
 import { deleteJobWatchesForAgent } from './jobWatches.ts';
 import { deleteMessagePinsForAgent } from '../lib/messagePinStore.ts';
@@ -135,11 +135,12 @@ const XAI_BRAIN_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh'])
 
 function normalizeBrainEffort(engine: string, model: string | undefined, value: unknown, fallback?: string): string | undefined {
   let effort = cleanBrainValue(value);
+  // Fireworks steps to the model's nearest tier, the same pick the runner spawns with.
+  if (engine === 'fireworks') return resolveFireworksEffort(effort, model, fallback);
   if (engine === 'xai' && effort === 'max') effort = 'xhigh';
   const allowed = engine === 'codex' && model ? new Set(codexCapability(model)?.efforts)
     : engine === 'xai' ? XAI_BRAIN_EFFORTS
     : engine === 'zai' ? new Set(['high', 'max'])
-    : engine === 'fireworks' ? new Set(fireworksEffortsFor(model))
     : engine.startsWith('banana') ? BANANA_BRAIN_EFFORTS
     : STANDARD_BRAIN_EFFORTS;
   const canonicalFallback = engine === 'codex' && model

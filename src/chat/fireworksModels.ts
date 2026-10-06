@@ -122,7 +122,9 @@ async function fetchFireworksCatalog(): Promise<void> {
   } catch {
     // Offline or an older server: the fallback list stays in force.
   }
-  if (!catalogLoaded && quickRetries++ < 12) setTimeout(() => void fetchFireworksCatalog(), 5_000);
+  // Quick polls first, then every 30s for as long as the server keeps retrying
+  // its own boot fetch (15 minutes), so the picker never sits on the hand list.
+  if (!catalogLoaded && quickRetries++ < 44) setTimeout(() => void fetchFireworksCatalog(), quickRetries <= 12 ? 5_000 : 30_000);
 }
 if (typeof window !== 'undefined') {
   void fetchFireworksCatalog();
