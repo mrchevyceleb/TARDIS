@@ -23,6 +23,7 @@ export type FireworksModelSpec = {
 export const DEFAULT_FIREWORKS_MODEL = 'accounts/fireworks/models/glm-5p3';
 export const DEFAULT_FIREWORKS_EFFORT = 'high';
 export const FIREWORKS_EFFORTS = ['low', 'medium', 'high'];
+const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const LMHX = ['low', 'medium', 'high', 'max'];
 const LHX = ['low', 'high', 'max'];
 const LMH = ['low', 'medium', 'high'];
@@ -154,8 +155,11 @@ export function contextWindowForFireworksModel(model: string | undefined): numbe
 export function normalizeFireworksEffort(model: string, effort: string | null | undefined): string {
   const spec = fireworksModelSpec(normalizeFireworksModel(model));
   if (spec.efforts.includes(effort as string)) return effort as string;
-  // Same rule as the server: the lane default when the model has it, else its top tier.
-  return spec.efforts.includes(DEFAULT_FIREWORKS_EFFORT) ? DEFAULT_FIREWORKS_EFFORT : spec.efforts[spec.efforts.length - 1] ?? DEFAULT_FIREWORKS_EFFORT;
+  // Same rule as the server: step down to the nearest tier the model has
+  // (never up), aiming at the lane default when the effort is missing.
+  const target = ALL_EFFORTS.indexOf(effort && ALL_EFFORTS.includes(effort) ? effort : DEFAULT_FIREWORKS_EFFORT);
+  const below = spec.efforts.filter((tier) => ALL_EFFORTS.indexOf(tier) <= target);
+  return below[below.length - 1] ?? spec.efforts[0] ?? DEFAULT_FIREWORKS_EFFORT;
 }
 
 export function readStoredFireworksModel(): string {

@@ -69,8 +69,8 @@ const ROUTER_MODELS: FireworksModelInfo[] = [
   { id: 'accounts/fireworks/routers/kimi-k3-fast', label: 'Kimi K3 Fast', efforts: LMHX, contextWindow: 1_048_576, imageInput: true },
   { id: 'accounts/fireworks/routers/glm-5p3-fast', label: 'GLM 5.3 Fast', efforts: LHX, contextWindow: 1_048_576, thinkingOnly: true },
 ];
-const HAND_BY_ID = new Map(HAND_MODELS.map((model) => [model.id, model]));
 const HAND_LIST = [...HAND_MODELS, ...ROUTER_MODELS];
+const HAND_BY_ID = new Map(HAND_LIST.map((model) => [model.id, model]));
 
 /** Catalog rows the inference endpoint refuses today. Verified 2026-10-06:
  *  glm-5p2 404s ("Model not found, inaccessible, and/or not deployed") on the
@@ -128,7 +128,11 @@ async function refreshCatalog(): Promise<FireworksModelInfo[]> {
     const rows = await fetchFireworksCatalog();
     const next = rows.map(rowToInfo).filter((info): info is FireworksModelInfo => info !== null);
     // Keep the prior list on an empty/failed answer (fail-open, like codex).
-    if (next.length > 0) catalog = [...next, ...ROUTER_MODELS];
+    if (next.length > 0) {
+      // Routers are appended by hand; skip any the control plane starts listing.
+      const ids = new Set(next.map((info) => info.id));
+      catalog = [...next, ...ROUTER_MODELS.filter((info) => !ids.has(info.id))];
+    }
   } catch (error) {
     console.warn(`[fireworks] catalog refresh failed: ${(error as Error).message}`);
   }
@@ -190,17 +194,24 @@ export function resolveFireworksModel(m: string | undefined, fallback = FIREWORK
 }
 
 /** Effort for the fireworks lane, checked against the model's own tiers. A
- *  tier the model doesn't publish falls to the lane default when the model has
- *  it, otherwise to the model's top tier. Unknown models accept any tier the
- *  claude binary takes. */
+ *  tier the model doesn't publish steps down to the nearest tier it has (never
+ *  up, so a saved `high` on a low/medium/xhigh model lands on `medium`), and
+ *  to its lowest tier when nothing sits below. A missing effort aims at the
+ *  lane default the same way. Unknown models accept any tier the claude
+ *  binary takes. */
 export function resolveFireworksEffort(e: string | undefined, model?: string, fallback = FIREWORKS_LANE_EFFORT): string {
-  const allowed = (model && fireworksCapability(model)?.efforts) || ALL_EFFORTS;
-  const effort = e?.trim();
-  if (effort && allowed.includes(effort)) return effort;
-  return allowed.includes(fallback) ? fallback : allowed[allowed.length - 1] ?? fallback;
+  return nearestFireworksEffort(fireworksEffortsFor(model), e?.trim(), fallback);
 }
 
-/** Published tiers for a model, or every tier for one the catalog doesn't know. */
+function nearestFireworksEffort(allowed: string[], effort: string | undefined, fallback: string): string {
+  if (effort && allowed.includes(effort)) return effort;
+  const target = ALL_EFFORTS.indexOf(effort && ALL_EFFORTS.includes(effort) ? effort : fallback);
+  const below = allowed.filter((tier) => ALL_EFFORTS.indexOf(tier) <= target);
+  return below[below.length - 1] ?? allowed[0] ?? fallback;
+}
+
+/** Published tiers for the model the lane will actually run (aliases and
+ *  unknown ids resolve first), or every tier for one the catalog doesn't know. */
 export function fireworksEffortsFor(model: string | undefined): string[] {
-  return (model && fireworksCapability(model)?.efforts) || ALL_EFFORTS;
+  return fireworksCapability(resolveFireworksModel(model))?.efforts ?? ALL_EFFORTS;
 }
