@@ -4,8 +4,9 @@ import { useSyncExternalStore } from 'react';
 // server's live control-plane read). Mirrors codexModels.ts: a hand-verified
 // fallback list until the catalog lands, an in-place swap so every importer
 // sees the update, and a stored pick survives until the catalog can judge it.
-// Thinking tiers are the three verified against the live Anthropic-compatible
-// endpoint (low/medium/high); three models are thinking-only (they reject
+// Thinking tiers are per model: each model's published tiers (models.dev
+// reasoning_options, 2026-10-06), since Fireworks accepts any tier without
+// saying which are real. Three models are thinking-only (they reject
 // thinking:{type:'disabled'} with a 400) and are flagged so the UI can say so.
 
 export type FireworksModelSpec = {
@@ -22,8 +23,13 @@ export type FireworksModelSpec = {
 export const DEFAULT_FIREWORKS_MODEL = 'accounts/fireworks/models/glm-5p3';
 export const DEFAULT_FIREWORKS_EFFORT = 'high';
 export const FIREWORKS_EFFORTS = ['low', 'medium', 'high'];
+const LMHX = ['low', 'medium', 'high', 'max'];
+const LHX = ['low', 'high', 'max'];
+const LMH = ['low', 'medium', 'high'];
+// On/off thinking toggle only: the tier is ignored, so offer one.
+const TOGGLE = ['high'];
 
-const FIREWORKS_MODEL_ID = /^accounts\/fireworks\/models\/[a-z0-9][a-z0-9._-]{0,96}$/;
+const FIREWORKS_MODEL_ID = /^accounts\/fireworks\/(models|routers)\/[a-z0-9][a-z0-9._-]{0,96}$/;
 // glm-5p2 is still in the control-plane catalog but the inference endpoint
 // 404s it (verified 2026-10-06), so a stored pin migrates to GLM 5.3.
 const FIREWORKS_MODEL_ALIASES: Record<string, string> = {
@@ -33,18 +39,21 @@ const FIREWORKS_MODEL_ALIASES: Record<string, string> = {
 // Fallback only: the server's catalog answer replaces it. Verified against the
 // live endpoint 2026-10-06 (context windows from the control plane).
 const FALLBACK_FIREWORKS_MODELS: FireworksModelSpec[] = [
-  { id: 'accounts/fireworks/models/deepseek-v4p1-flash', label: 'DeepSeek V4.1 Flash', efforts: FIREWORKS_EFFORTS, contextWindow: 1_048_576, imageInput: true },
-  { id: 'accounts/fireworks/models/ember-1', label: 'Ember 1', efforts: FIREWORKS_EFFORTS, contextWindow: 1_048_576, imageInput: true },
-  { id: 'accounts/fireworks/models/glm-5p3', label: 'GLM 5.3', efforts: FIREWORKS_EFFORTS, contextWindow: 1_048_576, thinkingOnly: true },
-  { id: 'accounts/fireworks/models/glm-5p3-flash', label: 'GLM 5.3 Flash', efforts: FIREWORKS_EFFORTS, contextWindow: 1_048_576, imageInput: true, thinkingOnly: true },
-  { id: 'accounts/fireworks/models/gpt-oss-120b', label: 'GPT-OSS 120B', efforts: FIREWORKS_EFFORTS, contextWindow: 131_072, thinkingOnly: true },
-  { id: 'accounts/fireworks/models/inkling', label: 'Inkling', efforts: FIREWORKS_EFFORTS, contextWindow: 1_048_576, imageInput: true },
-  { id: 'accounts/fireworks/models/kimi-k3', label: 'Kimi K3', efforts: FIREWORKS_EFFORTS, contextWindow: 1_048_576, imageInput: true },
-  { id: 'accounts/fireworks/models/minimax-m3', label: 'MiniMax M3', efforts: FIREWORKS_EFFORTS, contextWindow: 512_000 },
-  { id: 'accounts/fireworks/models/nemotron-3-ultra-nvfp4', label: 'Nemotron 3 Ultra', efforts: FIREWORKS_EFFORTS, contextWindow: 262_144 },
-  { id: 'accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b', label: 'Nemotron Lightning 3.5', efforts: FIREWORKS_EFFORTS, contextWindow: 262_144 },
-  { id: 'accounts/fireworks/models/qwen3p8-2p4t-a95b', label: 'Qwen 3.8 2.4T', efforts: FIREWORKS_EFFORTS, contextWindow: 262_144 },
-  { id: 'accounts/fireworks/models/qwen3p8-max', label: 'Qwen 3.8 Max', efforts: FIREWORKS_EFFORTS, contextWindow: 262_144, imageInput: true },
+  { id: 'accounts/fireworks/models/deepseek-v4p1-flash', label: 'DeepSeek V4.1 Flash', efforts: LHX, contextWindow: 1_048_576, imageInput: true },
+  { id: 'accounts/fireworks/models/ember-1', label: 'Ember 1', efforts: LMHX, contextWindow: 1_048_576, imageInput: true },
+  { id: 'accounts/fireworks/models/glm-5p3', label: 'GLM 5.3', efforts: LHX, contextWindow: 1_048_576, thinkingOnly: true },
+  { id: 'accounts/fireworks/models/glm-5p3-flash', label: 'GLM 5.3 Flash', efforts: LHX, contextWindow: 1_048_576, imageInput: true, thinkingOnly: true },
+  { id: 'accounts/fireworks/models/gpt-oss-120b', label: 'GPT-OSS 120B', efforts: LMH, contextWindow: 131_072, thinkingOnly: true },
+  { id: 'accounts/fireworks/models/inkling', label: 'Inkling', efforts: TOGGLE, contextWindow: 1_048_576, imageInput: true },
+  { id: 'accounts/fireworks/models/kimi-k3', label: 'Kimi K3', efforts: LMHX, contextWindow: 1_048_576, imageInput: true },
+  { id: 'accounts/fireworks/models/minimax-m3', label: 'MiniMax M3', efforts: LMH, contextWindow: 512_000 },
+  { id: 'accounts/fireworks/models/nemotron-3-ultra-nvfp4', label: 'Nemotron 3 Ultra', efforts: TOGGLE, contextWindow: 262_144 },
+  { id: 'accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b', label: 'Nemotron Lightning 3.5', efforts: TOGGLE, contextWindow: 262_144 },
+  { id: 'accounts/fireworks/models/qwen3p8-2p4t-a95b', label: 'Qwen 3.8 2.4T', efforts: ['low', 'medium', 'xhigh'], contextWindow: 262_144 },
+  { id: 'accounts/fireworks/models/qwen3p8-max', label: 'Qwen 3.8 Max', efforts: TOGGLE, contextWindow: 262_144, imageInput: true },
+  // Fireworks "fast" routers (the server always appends these; see fireworks-models.ts).
+  { id: 'accounts/fireworks/routers/kimi-k3-fast', label: 'Kimi K3 Fast', efforts: LMHX, contextWindow: 1_048_576, imageInput: true },
+  { id: 'accounts/fireworks/routers/glm-5p3-fast', label: 'GLM 5.3 Fast', efforts: LHX, contextWindow: 1_048_576, thinkingOnly: true },
 ];
 
 /** The live list. Identity never changes; the catalog is swapped in place. */
@@ -144,7 +153,9 @@ export function contextWindowForFireworksModel(model: string | undefined): numbe
 
 export function normalizeFireworksEffort(model: string, effort: string | null | undefined): string {
   const spec = fireworksModelSpec(normalizeFireworksModel(model));
-  return spec.efforts.includes(effort as string) ? effort as string : spec.efforts[spec.efforts.length - 1] ?? DEFAULT_FIREWORKS_EFFORT;
+  if (spec.efforts.includes(effort as string)) return effort as string;
+  // Same rule as the server: the lane default when the model has it, else its top tier.
+  return spec.efforts.includes(DEFAULT_FIREWORKS_EFFORT) ? DEFAULT_FIREWORKS_EFFORT : spec.efforts[spec.efforts.length - 1] ?? DEFAULT_FIREWORKS_EFFORT;
 }
 
 export function readStoredFireworksModel(): string {
