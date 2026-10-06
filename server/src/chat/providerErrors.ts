@@ -160,6 +160,13 @@ export function terminalProviderError(cli: string, raw: unknown, syntheticReason
       code,
     };
   }
+  if (status === 402) {
+    // OpenRouter's out-of-credits answer; retrying cannot help.
+    return {
+      message: `${provider} says the account is out of credits (HTTP 402). Add credits or switch brains.`,
+      code,
+    };
+  }
   if (status === 403) {
     return {
       message: `${provider} refused this request because the account or plan does not allow it.`,

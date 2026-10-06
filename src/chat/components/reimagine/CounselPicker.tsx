@@ -135,13 +135,16 @@ function LaneList({ picker }: { picker: CompanionPicker }) {
   );
 }
 
-// OpenRouter labels read "Vendor: Model"; group on the vendor, keeping the
-// server's order (vendor, then newest first).
-function openRouterVendorGroups(models: OpenRouterModelSpec[]): Array<[string, OpenRouterModelSpec[]]> {
-  const groups = new Map<string, OpenRouterModelSpec[]>();
+// Most OpenRouter labels read "Vendor: Model"; group on that vendor (or the id's
+// vendor segment when a label has no prefix), keeping the server's order
+// (vendor, then newest first). Options drop only a verified prefix.
+function openRouterVendorGroups(models: OpenRouterModelSpec[]): Array<[string, Array<{ id: string; name: string }>]> {
+  const groups = new Map<string, Array<{ id: string; name: string }>>();
   for (const m of models) {
-    const vendor = m.label.includes(': ') ? m.label.slice(0, m.label.indexOf(': ')) : 'Other';
-    groups.set(vendor, [...(groups.get(vendor) ?? []), m]);
+    const cut = m.label.indexOf(': ');
+    const vendor = cut > 0 ? m.label.slice(0, cut) : m.id.replace(/^~/, '').split('/')[0]!;
+    const name = cut > 0 ? m.label.slice(cut + 2) : m.label;
+    groups.set(vendor, [...(groups.get(vendor) ?? []), { id: m.id, name }]);
   }
   return [...groups];
 }
@@ -262,7 +265,7 @@ function LaneControls({ picker }: { picker: CompanionPicker }) {
             {openRouterVendorGroups(OPENROUTER_MODELS).map(([vendor, models]) => (
               <optgroup key={vendor} label={vendor}>
                 {models.map((m) => (
-                  <option key={m.id} value={m.id}>{m.label.slice(vendor.length + 2) || m.label}</option>
+                  <option key={m.id} value={m.id}>{m.name}</option>
                 ))}
               </optgroup>
             ))}

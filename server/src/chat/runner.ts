@@ -334,6 +334,11 @@ function openRouterEnv(model: string): NodeJS.ProcessEnv {
   env.ANTHROPIC_AUTH_TOKEN =
     process.env.RIVENDELL_OPENROUTER_API_KEY?.trim() || process.env.OPENROUTER_API_KEY?.trim() || '';
   env.ANTHROPIC_API_KEY = '';
+  // Every model role (subagents, background haiku calls) stays on the picked
+  // OpenRouter model; an inherited Anthropic default id would route elsewhere.
+  for (const role of ['ANTHROPIC_DEFAULT_FABLE_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL']) {
+    env[role] = model;
+  }
   const window = String(openRouterContextWindow(model));
   env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = window;
   env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = window;
