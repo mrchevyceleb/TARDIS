@@ -6,7 +6,37 @@ export const CONTEXT_TOKEN_BUDGET = 200_000;
  *  single long turn that runs past the budget. The pad leaves about 27k tokens
  *  between the budget and the native compact: a 7k gap let the first turn
  *  after the budget cross the line and compact natively before a rotation ran. */
-export const CLAUDE_NATIVE_COMPACT_WINDOW = CONTEXT_TOKEN_BUDGET + 60_000;
+export const NATIVE_COMPACT_PAD = 60_000;
+export const CLAUDE_NATIVE_COMPACT_WINDOW = CONTEXT_TOKEN_BUDGET + NATIVE_COMPACT_PAD;
+/** Claude Code's own compact fires this far below the window it is given
+ *  (20k summary reserve + 13k buffer). */
+export const NATIVE_COMPACT_MARGIN = 33_000;
+/** Budgets learned this process from a provider refusing a context below its
+ *  catalog window, keyed by model id. Never persisted: a restart retries the
+ *  catalog number, and the first refusal teaches it again. */
+const learnedBudgets = new Map<string, number>();
+
+/** Rotation budget for a non-Anthropic `claude` lane: the 200k budget, or the
+ *  model's window less the native-compact pad when that is smaller (half the
+ *  window at least, so a tiny window still gets a usable thread). */
+export function providerContextBudget(model: string, window: number): number {
+  const base = Math.min(CONTEXT_TOKEN_BUDGET, Math.max(Math.floor(window / 2), window - NATIVE_COMPACT_PAD));
+  return Math.min(base, learnedBudgets.get(model) ?? Infinity);
+}
+/** The native compact only backstops the lane's own rotation budget. */
+export function providerNativeCompactWindow(model: string, window: number): number {
+  return Math.min(window, providerContextBudget(model, window) + NATIVE_COMPACT_PAD);
+}
+/** A provider refused (or Claude Code compacted reactively at) `tokens`; rotate
+ *  this model 15% below that for the rest of the process. Returns the budget. */
+export function learnContextLimit(model: string, tokens: number, window: number): number {
+  const learned = Math.floor(tokens * 0.85);
+  if (learned > 0 && learned < (learnedBudgets.get(model) ?? Infinity)) {
+    learnedBudgets.set(model, learned);
+    console.log(`[context-rotation] model=${model} refused near ${tokens} tokens; budget now ${providerContextBudget(model, window)}`);
+  }
+  return providerContextBudget(model, window);
+}
 /** How long a boundary rotation may hold the lane for a backlog too big to carry
  *  verbatim. The rolling compact takes a model minutes, so past this the lane
  *  goes on and the rotation lands at a later turn end, once the compact is done. */
@@ -38,7 +68,7 @@ export function recordContextUsage(key: string, engine: 'claude' | 'codex' | 'pi
 }
 
 export function contextTokens(key: string): number { return contexts.get(key) ?? 0; }
-export function contextRotationDue(key: string): boolean { return contextTokens(key) > CONTEXT_TOKEN_BUDGET; }
+export function contextRotationDue(key: string, budget = CONTEXT_TOKEN_BUDGET): boolean { return contextTokens(key) > budget; }
 export function recordContextRotation(key: string): void {
   rotations.set(key, contextTokens(key));
   contexts.delete(key);

@@ -1,3 +1,5 @@
+import { providerNativeCompactWindow } from './contextBudget.ts';
+
 /** Limits every non-Anthropic `claude` binary lane (Z.ai, xAI, Fireworks,
  *  OpenRouter) passes to Claude Code.
  *
@@ -18,11 +20,12 @@ export const PROVIDER_MAX_OUTPUT_TOKENS = 64_000;
  *  (OpenRouter publishes one per model); the cap never exceeds it. */
 export function applyProviderLimits(
   env: NodeJS.ProcessEnv,
-  opts: { contextWindow: number | string; maxOutputTokens?: number; retriesVar: string },
+  opts: { model: string; contextWindow: number; maxOutputTokens?: number; retriesVar: string },
 ): NodeJS.ProcessEnv {
-  const window = String(opts.contextWindow);
-  env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = window;
-  env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = window;
+  env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(opts.contextWindow);
+  // TARDIS rotates the lane at its own budget; the native compact only
+  // backstops a single turn that runs past it.
+  env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(providerNativeCompactWindow(opts.model, opts.contextWindow));
   const override = Number(process.env.RIVENDELL_PROVIDER_MAX_OUTPUT_TOKENS?.trim());
   const cap = Number.isInteger(override) && override > 0 ? override : PROVIDER_MAX_OUTPUT_TOKENS;
   const ceiling = opts.maxOutputTokens;

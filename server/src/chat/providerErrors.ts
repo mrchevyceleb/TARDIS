@@ -187,6 +187,12 @@ export function terminalProviderError(cli: string, raw: unknown, syntheticReason
   };
 }
 
+/** The provider refused the prompt as too long for the model's context. Output
+ *  cap errors ("exceeded the 32000 output token maximum") are not this. */
+export function isContextLengthRejection(detail: string): boolean {
+  return /prompt is too long|context[ _-]?(?:length|window)[ _-](?:exceeded|limit)|maximum context length|input (?:is )?too long|too many input tokens/i.test(detail);
+}
+
 /** A turn that died because Claude Code could not compact its history. The
  *  provider's own reason is the only actionable part, so keep it (trimmed,
  *  first line only) instead of a bare status. */

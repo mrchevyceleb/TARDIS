@@ -16,7 +16,7 @@ import { CodexSession, getOrCreateCodexSession, activeCodexSessions, publishCode
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions, publishBananaExternalEvent } from './banana-runner.ts';
 import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
 import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
-import { CLAUDE_NATIVE_COMPACT_WINDOW, contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
+import { CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKEN_BUDGET, NATIVE_COMPACT_MARGIN, contextRotationDue, contextTokens, learnContextLimit, providerContextBudget, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { shouldSkipEngineResume } from './threadWindow.ts';
 import { isAgentThread, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
@@ -38,7 +38,7 @@ import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
 import { applyProviderLimits } from './providerEnv.ts';
-import { compactFailureError, isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
+import { compactFailureError, isContextLengthRejection, isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { fireworksCapability, fireworksContextWindow, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
@@ -215,7 +215,10 @@ function zaiEnv(model: string, credential: ReturnType<typeof zaiCredentials>): N
   // base URL, token, and `--model` id all have to describe the same provider.
   env.ANTHROPIC_BASE_URL = credential.baseUrl;
   env.ANTHROPIC_AUTH_TOKEN = credential.token;
-  applyProviderLimits(env, { contextWindow: zaiCompactWindowForModel(model), retriesVar: 'RIVENDELL_ZAI_MAX_RETRIES' });
+  // On the Fireworks fallback the wire model's own window is the real limit.
+  const contextWindow = credential.mode === 'fireworks'
+    ? fireworksContextWindow(credential.wireModel) : Number(zaiCompactWindowForModel(model));
+  applyProviderLimits(env, { model, contextWindow, retriesVar: 'RIVENDELL_ZAI_MAX_RETRIES' });
   env.SAMWISE_ACCOUNT = 'zai';
   return env;
 }
@@ -236,7 +239,7 @@ function zaiEnv(model: string, credential: ReturnType<typeof zaiCredentials>): N
 const XAI_GROK47_MODEL = 'grok-4.7'; // 500K context, May 2026 cutoff (docs.x.ai/developers/models)
 const XAI_GROK46_MODEL = 'grok-4.6';
 const XAI_GROK45_MODEL = 'grok-4.5'; // legacy pin still accepted
-const XAI_COMPACT_WINDOW = '500000';
+const XAI_CONTEXT_WINDOW = 500_000;
 const XAI_CONFIG_DIR = join(homedir(), '.claude-xai');
 const VALID_XAI_MODELS = new Set([XAI_GROK47_MODEL, XAI_GROK46_MODEL, XAI_GROK45_MODEL]);
 // Grok 4.6 / 4.7 expose exactly these reasoning tiers (verified 2026-09-21
@@ -256,12 +259,12 @@ function resolveXaiEffort(e?: string, fallback = 'xhigh'): string {
 }
 const XAI_MODEL = resolveXaiModel(process.env.RIVENDELL_XAI_MODEL);
 const XAI_EFFORT = resolveXaiEffort(process.env.RIVENDELL_XAI_EFFORT);
-function xaiEnv(): NodeJS.ProcessEnv {
+function xaiEnv(model: string): NodeJS.ProcessEnv {
   const env = subscriptionEnvironment(process.env);
   env.CLAUDE_CONFIG_DIR = XAI_CONFIG_DIR;
   env.ANTHROPIC_BASE_URL = xaiProxyBaseUrl();
   env.ANTHROPIC_AUTH_TOKEN = xaiProxySecret();
-  applyProviderLimits(env, { contextWindow: XAI_COMPACT_WINDOW, retriesVar: 'RIVENDELL_XAI_MAX_RETRIES' });
+  applyProviderLimits(env, { model, contextWindow: XAI_CONTEXT_WINDOW, retriesVar: 'RIVENDELL_XAI_MAX_RETRIES' });
   env.SAMWISE_ACCOUNT = 'xai';
   return env;
 }
@@ -291,7 +294,7 @@ function fireworksEnv(model: string): NodeJS.ProcessEnv {
   // the metered key under the fallback-specific name before exec.
   env.ANTHROPIC_AUTH_TOKEN =
     process.env.RIVENDELL_ZAI_FALLBACK_API_KEY?.trim() || process.env.FIREWORKS_API_KEY?.trim() || '';
-  applyProviderLimits(env, { contextWindow: fireworksContextWindow(model), retriesVar: 'RIVENDELL_FIREWORKS_MAX_RETRIES' });
+  applyProviderLimits(env, { model, contextWindow: fireworksContextWindow(model), retriesVar: 'RIVENDELL_FIREWORKS_MAX_RETRIES' });
   env.SAMWISE_ACCOUNT = 'fireworks';
   return env;
 }
@@ -318,6 +321,7 @@ function openRouterEnv(model: string): NodeJS.ProcessEnv {
     env[role] = model;
   }
   applyProviderLimits(env, {
+    model,
     contextWindow: openRouterContextWindow(model),
     maxOutputTokens: openRouterMaxOutput(model),
     retriesVar: 'RIVENDELL_OPENROUTER_MAX_RETRIES',
@@ -542,6 +546,13 @@ class ClaudeSession {
   /** Claude Code's own compaction failed this turn: its reason, verbatim. The
    *  native session is still over the limit, so it must not be resumed. */
   private compactFailure: string | null = null;
+  /** A provider lane's real context window (0 on Anthropic lanes) and the
+   *  native compact window it was spawned with. */
+  private providerWindow = 0;
+  private nativeCompactWindow = 0;
+  /** Claude Code compacted a provider lane natively. Its summary is lossy, so
+   *  the next turn boundary rotates onto the rolling compact instead. */
+  private rotateAfterNativeCompact = false;
   private providerAccount = '';
   /** Text-block seqs for the current Claude stream. A later synthetic marker
    * lets us surgically remove only its protocol prose from durable storage. */
@@ -752,13 +763,16 @@ class ClaudeSession {
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
     // login; everything else keeps the per-repo account-map resolution.
     const forcedAccount = accountFromChatId(chatId);
-    const spawnEnv = cli === 'xai' ? xaiEnv()
+    const spawnEnv = cli === 'xai' ? xaiEnv(this.spawnModel)
       : cli === 'zai' ? zaiEnv(this.spawnModel, zaiCredential!)
       : cli === 'fireworks' ? fireworksEnv(this.spawnModel)
       : cli === 'openrouter' ? openRouterEnv(this.spawnModel)
       : forcedAccount ? accountEnvForAccount(forcedAccount, cwd) : accountEnv(cwd);
     if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks' && cli !== 'openrouter') assertClaudeSubscription(spawnEnv, cwd);
     if (cli === 'claude' || cli === 'assistant') spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
+    // Provider lanes rotate at a budget sized to the model's own window.
+    this.providerWindow = cli === 'claude' || cli === 'assistant' ? 0 : Number(spawnEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS) || 0;
+    this.nativeCompactWindow = Number(spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW) || 0;
     const profileDir = spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
     this.providerAccount = existsSync(profileDir) ? realpathSync(profileDir) : profileDir;
     this.child = spawn('claude', args, {
@@ -1937,8 +1951,18 @@ class ClaudeSession {
   /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
   /** Returns false when it never reached the compaction refresh (the normal
    *  rolling compact still has to run); true once the refresh was attempted. */
+  /** Anthropic lanes keep the flat 200k budget; a provider lane rotates below
+   *  its own model's window, and lower once the provider has refused a size. */
+  private contextBudget(): number {
+    return this.providerWindow ? providerContextBudget(this.spawnModel, this.providerWindow) : CONTEXT_TOKEN_BUDGET;
+  }
+
+  private rotationWanted(): boolean {
+    return this.rotateAfterNativeCompact || contextRotationDue(this.logKey, this.contextBudget());
+  }
+
   private async rotateContextAtBoundary(): Promise<boolean> {
-    if (!contextRotationDue(this.logKey) || this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) return false;
+    if (!this.rotationWanted() || this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) return false;
     const refreshed = await refreshCompactForRotation({
       key: this.logKey, cli: this.cli, chatId: this.chatId, events: this.eventLog,
       isBusy: () => this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork(),
@@ -1952,6 +1976,7 @@ class ClaudeSession {
     }
     bankRotation(this.logKey);
     recordContextRotation(this.logKey);
+    this.rotateAfterNativeCompact = false;
     this.contextRotated = true;
     this.shutdown('context-budget');
     return true;
@@ -2216,10 +2241,24 @@ class ClaudeSession {
     }
 
     this.trackStreamText(ev);
-    if (!sidechain && (this.cli === 'claude' || this.cli === 'assistant')) {
+    if (!sidechain && isClaudeFamilyCli(this.cli)) {
+      // Fireworks and OpenRouter send zeros in message_start and the real
+      // counts in message_delta (verified 2026-10-06); zero usage is ignored.
       const usage = ev?.type === 'assistant' ? ev.message?.usage
-        : ev?.type === 'stream_event' && ev.event?.type === 'message_start' ? ev.event.message?.usage : undefined;
+        : ev?.type === 'stream_event' && ev.event?.type === 'message_start' ? ev.event.message?.usage
+        : ev?.type === 'stream_event' && ev.event?.type === 'message_delta' ? ev.event.usage : undefined;
       recordContextUsage(this.logKey, 'claude', usage);
+    }
+    // A provider can refuse a context below its catalog window (Fireworks
+    // refused Qwen 3.8 Max near 140K of 262K), and Claude Code answers with a
+    // reactive compact. Below the native threshold that is the only sign of
+    // it: learn a lower budget for this model and rotate at the boundary.
+    if (!sidechain && this.providerWindow && ev?.type === 'system' && ev.subtype === 'status' && ev.status === 'compacting') {
+      this.rotateAfterNativeCompact = true;
+      const accepted = contextTokens(this.logKey);
+      if (accepted > 0 && accepted < this.nativeCompactWindow - NATIVE_COMPACT_MARGIN) {
+        learnContextLimit(this.spawnModel, accepted, this.providerWindow);
+      }
     }
     const syntheticApiError = isSyntheticApiErrorEvent(ev);
     if (syntheticApiError) {
@@ -2236,9 +2275,17 @@ class ClaudeSession {
     const providerTerminal = ev?.type === 'result' && !expectedUserInterrupt
       ? terminalProviderError(this.cli, ev, this.syntheticApiErrorReason)
       : null;
+    let lengthRejected = false;
     if (ev?.type === 'result' && (ev.is_error || providerTerminal) && !expectedUserInterrupt) {
       const detail = [ev.api_error_status === 426 ? 'HTTP 426' : '', this.syntheticApiErrorReason, ev.result, ...(Array.isArray(ev.errors) ? ev.errors.map((e: any) => typeof e === 'string' ? e : e?.message) : [])].filter((s) => typeof s === 'string').join('\n');
       noteProviderGateFailure(providerLabel(this.cli), () => agentForChatId(this.chatId)?.name ?? this.chatId, detail);
+      // Refused for length with no compact to fall back on: same lesson, and
+      // the oversized session must not be resumed.
+      if (this.providerWindow && this.compactFailure === null && isContextLengthRejection(detail)) {
+        lengthRejected = true;
+        const accepted = contextTokens(this.logKey);
+        if (accepted > 0) learnContextLimit(this.spawnModel, accepted, this.providerWindow);
+      }
     }
     const compactFailed = ev?.type === 'result' && !expectedUserInterrupt && this.compactFailure !== null
       && (ev.is_error === true || providerTerminal !== null);
@@ -2379,7 +2426,7 @@ class ClaudeSession {
       if (seeded) this.pendingSeedAck = false;
       if (failed) this.seedWindowOnNextTurn = true;
       if (!resultFailed) this.persistAppliedSelection();
-      const rotationDue = !resultFailed && (this.cli === 'claude' || this.cli === 'assistant') && contextRotationDue(this.logKey);
+      const rotationDue = !resultFailed && isClaudeFamilyCli(this.cli) && this.rotationWanted();
       const housekeeping = async () => {
         if (seeded && !failed) await clearRotation(this.logKey);
         if (!rotationDue || !(await this.rotateContextAtBoundary())) await this.maybeCompact();
@@ -2399,7 +2446,7 @@ class ClaudeSession {
       if (authFailPending) this.failAuth();
       else if (zaiStale && !this.hasBackgroundWork()) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
       if (zaiCut) this.afterZaiCut(zaiCut, zaiCutNoticeSeq);
-      else if (compactFailed && !authFailPending && !zaiStale) this.reseedAfterCompactFailure();
+      else if ((compactFailed || lengthRejected) && !authFailPending && !zaiStale) this.reseedAfterCompactFailure();
       if (!rotationDue) void housekeeping();
     }
   }
