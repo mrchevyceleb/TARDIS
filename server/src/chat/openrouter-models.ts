@@ -29,6 +29,8 @@ export type OpenRouterModelInfo = {
   /** Tiers the model really honors, lowest first. */
   efforts: string[];
   contextWindow: number;
+  /** The provider's output ceiling; a quarter of tool models sit under 64K. */
+  maxOutput?: number;
   imageInput?: boolean;
 };
 
@@ -93,12 +95,14 @@ function rowToInfo(row: unknown): OpenRouterModelInfo | null {
     ? ALL_EFFORTS.filter((tier) => published.includes(tier))
     : reasoning ? BUDGET : NO_REASONING;
   const context = Number(rec.context_length);
+  const maxOutput = Number(recordOf(rec.top_provider).max_completion_tokens);
   return {
     id,
     label: (typeof rec.name === 'string' && rec.name.trim() ? rec.name.trim() : id).slice(0, 80),
     // A model publishing only minimal/none still takes thinking fields; one tier.
     efforts: efforts.length ? [...efforts] : NO_REASONING,
     contextWindow: Number.isFinite(context) && context > 0 ? context : DEFAULT_CONTEXT_WINDOW,
+    ...(Number.isFinite(maxOutput) && maxOutput > 0 ? { maxOutput } : {}),
     ...(stringsOf(arch.input_modalities).includes('image') ? { imageInput: true } : {}),
   };
 }
@@ -157,6 +161,10 @@ export function openRouterCapability(model: string): OpenRouterModelInfo | undef
 /** True context window for the spawn env (MAX_CONTEXT + AUTO_COMPACT). */
 export function openRouterContextWindow(model: string): number {
   return openRouterCapability(model)?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+}
+
+export function openRouterMaxOutput(model: string): number | undefined {
+  return openRouterCapability(model)?.maxOutput;
 }
 
 export function openRouterCatalogPayload(): { models: OpenRouterModelInfo[]; source: 'catalog' | 'hand' } {

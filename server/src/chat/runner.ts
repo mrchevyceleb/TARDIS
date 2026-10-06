@@ -42,7 +42,7 @@ import { compactFailureError, isSyntheticApiErrorEvent, isSyntheticApiErrorText,
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { fireworksCapability, fireworksContextWindow, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
-import { openRouterCapability, openRouterContextWindow, resolveOpenRouterEffort, resolveOpenRouterModel } from './openrouter-models.ts';
+import { openRouterCapability, openRouterContextWindow, openRouterMaxOutput, resolveOpenRouterEffort, resolveOpenRouterModel } from './openrouter-models.ts';
 import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { PiSession, usePiHarness } from './pi-runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, REPLY_NUDGE_NOTE_TOOL, replyNowText, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
@@ -317,13 +317,11 @@ function openRouterEnv(model: string): NodeJS.ProcessEnv {
   for (const role of ['ANTHROPIC_DEFAULT_FABLE_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL']) {
     env[role] = model;
   }
-  const window = String(openRouterContextWindow(model));
-  env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = window;
-  env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = window;
-  env.CLAUDE_CODE_MAX_RETRIES =
-    process.env.RIVENDELL_OPENROUTER_MAX_RETRIES?.trim()
-    || process.env.CLAUDE_CODE_MAX_RETRIES?.trim()
-    || '1';
+  applyProviderLimits(env, {
+    contextWindow: openRouterContextWindow(model),
+    maxOutputTokens: openRouterMaxOutput(model),
+    retriesVar: 'RIVENDELL_OPENROUTER_MAX_RETRIES',
+  });
   env.SAMWISE_ACCOUNT = 'openrouter';
   return env;
 }
@@ -1962,15 +1960,16 @@ class ClaudeSession {
   /** Every later turn on a session whose compaction failed hits the same
    *  limit again. Drop it at the turn boundary so the next send spawns fresh
    *  from compact+50, the same way a context rotation does. */
-  private async reseedAfterCompactFailure(): Promise<void> {
-    const busy = () => this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork();
-    if (busy()) return;
-    await setSessionId(this.cli, this.cwd, '', this.chatId);
-    if (busy()) {
-      if (!this.disposed && this.currentSessionId) await setSessionId(this.cli, this.cwd, this.currentSessionId, this.chatId);
-      return;
-    }
+  /** All in one tick, so no turn can be admitted onto this child in between;
+   *  the banked rotation alone already forces a seed if the id write fails. */
+  private reseedAfterCompactFailure(): void {
+    if (this.turnStartedAt !== null || this.disposed) return;
     bankRotation(this.logKey);
+    // Background work keeps this child; its next failed turn retires it.
+    if (this.hasBackgroundWork()) return;
+    setSessionId(this.cli, this.cwd, '', this.chatId).catch((err) => {
+      console.warn(`[chat ${this.cli}] could not clear the session after a failed compaction:`, (err as Error).message);
+    });
     this.shutdown('compact-failed');
   }
 
@@ -2230,6 +2229,8 @@ class ClaudeSession {
     }
     if (ev?.type === 'system' && ev.subtype === 'status' && ev.compact_result === 'failed') {
       this.compactFailure = typeof ev.compact_error === 'string' ? ev.compact_error : '';
+    } else if (ev?.type === 'system' && ev.subtype === 'status' && ev.compact_result === 'success') {
+      this.compactFailure = null;
     }
     const expectedUserInterrupt = ev?.type === 'result' && this.userInterruptPending;
     const providerTerminal = ev?.type === 'result' && !expectedUserInterrupt
@@ -2398,7 +2399,7 @@ class ClaudeSession {
       if (authFailPending) this.failAuth();
       else if (zaiStale && !this.hasBackgroundWork()) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
       if (zaiCut) this.afterZaiCut(zaiCut, zaiCutNoticeSeq);
-      else if (compactFailed && !authFailPending && !zaiStale) void this.reseedAfterCompactFailure();
+      else if (compactFailed && !authFailPending && !zaiStale) this.reseedAfterCompactFailure();
       if (!rotationDue) void housekeeping();
     }
   }

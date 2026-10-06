@@ -14,15 +14,19 @@
  *  the cap does not move the compact threshold. */
 export const PROVIDER_MAX_OUTPUT_TOKENS = 64_000;
 
+/** `maxOutputTokens` is the model's own ceiling when the lane knows it
+ *  (OpenRouter publishes one per model); the cap never exceeds it. */
 export function applyProviderLimits(
   env: NodeJS.ProcessEnv,
-  opts: { contextWindow: number | string; retriesVar: string },
+  opts: { contextWindow: number | string; maxOutputTokens?: number; retriesVar: string },
 ): NodeJS.ProcessEnv {
   const window = String(opts.contextWindow);
   env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = window;
   env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = window;
-  env.CLAUDE_CODE_MAX_OUTPUT_TOKENS =
-    process.env.RIVENDELL_PROVIDER_MAX_OUTPUT_TOKENS?.trim() || String(PROVIDER_MAX_OUTPUT_TOKENS);
+  const override = Number(process.env.RIVENDELL_PROVIDER_MAX_OUTPUT_TOKENS?.trim());
+  const cap = Number.isInteger(override) && override > 0 ? override : PROVIDER_MAX_OUTPUT_TOKENS;
+  const ceiling = opts.maxOutputTokens;
+  env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(ceiling && Number.isInteger(ceiling) && ceiling > 0 ? Math.min(cap, ceiling) : cap);
   // Capacity/quota windows do not improve during Claude Code's long default
   // retry storm. Fail promptly so the user can switch brains or retry later.
   env.CLAUDE_CODE_MAX_RETRIES =
