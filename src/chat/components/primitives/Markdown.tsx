@@ -1,6 +1,6 @@
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { memo, useCallback, useContext, type MouseEvent, type ReactNode } from 'react';
+import { memo, useCallback, useContext, useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import {
   DESK_HREF_PREFIX,
   annotateDeskRefs,
@@ -112,54 +112,138 @@ function useWorkspaceTargetOpener(target: WorkspaceTarget | null): () => void {
   }, [kind, path, studio, viewer]);
 }
 
-function MarkdownCode(props: any) {
-  const { inline, children, className } = props;
-  const isInline = inline ?? !className;
-  const inlineTarget = isInline ? parseWorkspaceMentionText(textFromReactNode(children)) : null;
-  const openTarget = useWorkspaceTargetOpener(inlineTarget);
-
-  if (isInline) {
-    if (inlineTarget) {
-      const href = `rivendell-${inlineTarget.kind}:${encodeURIComponent(inlineTarget.path)}`;
-      const onClick = (event: MouseEvent<HTMLAnchorElement>) => {
-        event.preventDefault();
-        openTarget();
-      };
-
-      return (
-        <a
-          href={href}
-          onClick={onClick}
-          className="sw-md-proxy-link sw-md-proxy-code-link"
-          data-proxy-kind={inlineTarget.kind}
-          title={inlineTarget.kind === 'folder' ? 'Reveal in TARDIS'
-            : opensOnThisPcByClick(inlineTarget.path, inlineTarget.kind) ? 'Open on this PC' : 'Open in TARDIS'}
-        >
-          <code style={INLINE_CODE_STYLE}>{inlineTarget.display}</code>
-        </a>
-      );
+// Fenced code block: wraps long lines inside the bubble (a clipped edge with
+// no readable scrollbar was unreadable and uncopyable on desktop) and carries
+// its own one-click Copy for the raw block text. The chrome lives on this
+// wrapper (not the <pre>) so the copy button gets a header row that can never
+// cover code text. Module scope like every component in MD_COMPONENTS — an
+// inline-defined type would remount the subtree and kill in-flight text
+// selection on every Hall re-render.
+function MarkdownCodeBlock({ raw, children }: { raw: string; children: ReactNode }) {
+  const [copied, setCopied] = useState(false);
+  // Rapid repeat-copying: clear the previous fade timer so an older one can
+  // never wipe the fresh "copied ✓" early. Cleared on unmount too.
+  const fadeTimer = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const onCopy = useCallback(async (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    try {
+      // Guard the optional chain: `await navigator.clipboard?.writeText()`
+      // resolves to undefined (NOT a rejection) where the Clipboard API is
+      // absent (non-secure context), which would flash a false "copied ✓".
+      if (!navigator.clipboard?.writeText) return;
+      await navigator.clipboard.writeText(raw);
+      if (fadeTimer.current !== null) window.clearTimeout(fadeTimer.current);
+      setCopied(true);
+      fadeTimer.current = window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      /* clipboard denied: keep the normal state */
     }
-
-    return <code style={INLINE_CODE_STYLE}>{children}</code>;
-  }
+  }, [raw]);
+  useEffect(() => () => {
+    if (fadeTimer.current !== null) window.clearTimeout(fadeTimer.current);
+  }, []);
 
   return (
-    <pre style={{
+    <div className="sw-md-code" style={{
       background: 'var(--r-bg-deep)',
       border: '1px solid var(--r-line)',
       borderLeft: '2px solid var(--r-gold-soft)',
       borderRadius: 6,
-      padding: '10px 12px',
       margin: '10px 0',
-      overflowX: 'auto',
       maxWidth: '100%',
-      fontFamily: 'var(--r-mono)',
-      fontSize: 12.5,
-      lineHeight: 1.55,
-      color: 'var(--r-ink)',
-      whiteSpace: 'pre',
-    }}><code>{children}</code></pre>
+    }}>
+      <div className="sw-md-code-head" style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 8,
+        padding: '3px 6px 3px 12px',
+        borderBottom: '1px solid var(--r-line)',
+      }}>
+        <span className="sw-md-code-tag" style={{
+          fontFamily: 'var(--r-mono)',
+          fontSize: 10,
+          letterSpacing: '0.09em',
+          textTransform: 'uppercase',
+          color: 'var(--r-ink-faint)',
+        }}>code</span>
+        <button
+          type="button"
+          className={`sw-md-code-copy${copied ? ' copied' : ''}`}
+          onClick={onCopy}
+          style={{
+            fontFamily: 'var(--r-mono)',
+            fontSize: 10.5,
+            color: copied ? 'var(--r-gold)' : 'var(--r-ink-soft)',
+            background: 'transparent',
+            border: `1px solid ${copied ? 'var(--r-gold-soft)' : 'var(--r-line)'}`,
+            borderRadius: 999,
+            padding: '2px 9px',
+            cursor: 'pointer',
+            transition: 'all .15s ease',
+          }}
+        >
+          {copied ? 'copied ✓' : 'copy'}
+        </button>
+      </div>
+      <pre style={{
+        margin: 0,
+        padding: '10px 12px',
+        maxWidth: '100%',
+        fontFamily: 'var(--r-mono)',
+        fontSize: 12.5,
+        lineHeight: 1.55,
+        color: 'var(--r-ink)',
+        whiteSpace: 'pre-wrap',
+        overflowWrap: 'anywhere',
+      }}><code>{children}</code></pre>
+    </div>
   );
+}
+
+/** Concatenate the text values of a hast node tree (the raw source of a
+ *  fenced block, straight from the `pre` override's node). */
+function hastText(node: any): string {
+  if (!node) return '';
+  if (node.type === 'text') return typeof node.value === 'string' ? node.value : '';
+  if (!Array.isArray(node.children)) return '';
+  return node.children.map(hastText).join('');
+}
+
+// Inline code span only. Fenced and indented blocks never mount this
+// component: the `pre` override renders MarkdownCodeBlock directly from the
+// hast node and discards the inner code element, so block/inline
+// classification can never flip a mounted instance between hook shapes
+// (review P1: a transitioning code node crashed with "Rendered fewer hooks
+// than expected"). Hooks below run on every path unconditionally.
+function MarkdownCode(props: any) {
+  const { children } = props;
+  const raw = textFromReactNode(children);
+  const inlineTarget = parseWorkspaceMentionText(raw);
+  const openTarget = useWorkspaceTargetOpener(inlineTarget);
+
+  if (inlineTarget) {
+    const href = `rivendell-${inlineTarget.kind}:${encodeURIComponent(inlineTarget.path)}`;
+    const onClick = (event: MouseEvent<HTMLAnchorElement>) => {
+      event.preventDefault();
+      openTarget();
+    };
+
+    return (
+      <a
+        href={href}
+        onClick={onClick}
+        className="sw-md-proxy-link sw-md-proxy-code-link"
+        data-proxy-kind={inlineTarget.kind}
+        title={inlineTarget.kind === 'folder' ? 'Reveal in TARDIS'
+          : opensOnThisPcByClick(inlineTarget.path, inlineTarget.kind) ? 'Open on this PC' : 'Open in TARDIS'}
+      >
+        <code style={INLINE_CODE_STYLE}>{inlineTarget.display}</code>
+      </a>
+    );
+  }
+
+  return <code style={INLINE_CODE_STYLE}>{children}</code>;
 }
 
 function MarkdownAnchor({ href, children }: { href?: string; children?: ReactNode }) {
@@ -268,6 +352,17 @@ const MD_COMPONENTS: Components = {
     }}>{children}</h5>
   ),
   code: MarkdownCode,
+  // Fenced (and indented) code always renders pre > code in the hast tree,
+  // so EVERY block — language-tagged, bare, or empty — is owned here, not
+  // guessed from the code child's className or text. Render the styled
+  // block straight from the hast node's raw text and discard the inner code
+  // element (MarkdownCode stays inline-only, so a code node can never flip
+  // between block and inline shapes across renders — the hook-order crash
+  // the review flagged, plus the empty-bare-fence misclassification).
+  pre: ({ node }: any) => {
+    const raw = hastText(node);
+    return <MarkdownCodeBlock raw={raw}>{raw}</MarkdownCodeBlock>;
+  },
   a: MarkdownAnchor,
   blockquote: ({ children }) => (
     <blockquote style={{

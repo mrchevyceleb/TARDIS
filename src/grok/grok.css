@@ -579,13 +579,39 @@
   overflow-wrap: anywhere !important;
 }
 .bot-app .rc .sw-md pre {
+  background: none !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  margin: 0 !important;
+  padding: 12px 16px !important;
+  max-width: 100% !important;
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
+}
+.bot-app .rc .sw-md pre code { background: none !important; border: 0 !important; padding: 0 !important; }
+/* fenced code block chrome: the wrapper carries the sand frame, the head
+   carries the per-block copy pill, and the pre wraps long lines in place. */
+.bot-app .rc .sw-md-code {
   background: var(--r-bg-soft) !important;
   border: 1px solid var(--r-line-strong) !important;
   border-left: 1px solid var(--r-line-strong) !important;
   border-radius: 12px !important;
-  padding: 13px 16px !important;
+  max-width: 100% !important;
 }
-.bot-app .rc .sw-md pre code { background: none !important; border: 0 !important; padding: 0 !important; word-break: normal !important; overflow-wrap: normal !important; }
+.bot-app .rc .sw-md-code-head { border-bottom: 1px solid var(--r-line-strong) !important; }
+.bot-app .rc .sw-md-code-copy {
+  font-family: var(--r-mono) !important;
+  font-size: 10.5px !important;
+  color: var(--r-ink-soft) !important;
+  background: transparent !important;
+  border: 1px solid var(--r-line-strong) !important;
+  border-radius: 999px !important;
+  padding: 2px 9px !important;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.bot-app .rc .sw-md-code-copy:hover { color: var(--r-ink) !important; background: var(--r-bg-card) !important; }
+.bot-app .rc .sw-md-code-copy.copied { color: var(--r-gold) !important; border-color: var(--r-gold-soft) !important; }
 .bot-app .rc .sw-md :is(ul, ol) { padding-left: 18px !important; margin: 4px 0 10px !important; }
 .bot-app .rc .sw-md h3, .bot-app .rc .sw-md h4, .bot-app .rc .sw-md h5 {
   font-family: var(--r-body) !important;
