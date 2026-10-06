@@ -1,12 +1,14 @@
 /** Retired lane IDs remain readable in durable logs, but cannot run new work.
  *  `fireworks` is the API-key provider lane (any serverless Fireworks model
  *  via FIREWORKS_API_KEY), not a subscription, but it shares this gate so the
- *  WS lane assert and agent CRUD accept it everywhere engines are checked. */
-export const SUBSCRIPTION_ENGINES = new Set(['claude', 'codex', 'xai', 'zai', 'fireworks']);
+ *  WS lane assert and agent CRUD accept it everywhere engines are checked.
+ *  `openrouter` is the same kind of API-key lane (any tool-capable OpenRouter
+ *  model). */
+export const SUBSCRIPTION_ENGINES = new Set(['claude', 'codex', 'xai', 'zai', 'fireworks', 'openrouter']);
 
 export class SubscriptionEngineError extends Error {
   constructor() {
-    super('Choose a subscription engine: Claude Code, Codex, Grok, GLM, or Fireworks.');
+    super('Choose a subscription engine: Claude Code, Codex, Grok, GLM, Fireworks, or OpenRouter.');
     this.name = 'SubscriptionEngineError';
   }
 }
@@ -27,7 +29,7 @@ export function subscriptionEnvironment(source: NodeJS.ProcessEnv): NodeJS.Proce
   const env = { ...source };
   for (const key of Object.keys(env)) {
     if (/^TARDIS_OFFICE_ADMIN_TOKEN$/i.test(key)) delete env[key];
-    if (/^(ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)|OPENAI_(API_KEY|BASE_URL)|CODEX_API_KEY|OPENROUTER_|FIREWORKS_|GROK_PERSONAL_API_KEY|XAI_API_KEY|Z_AI_API_KEY|RIVENDELL_ZAI_FALLBACK_API_KEY|TYPESAFE_|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))/i.test(key)) delete env[key];
+    if (/^(ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)|OPENAI_(API_KEY|BASE_URL)|CODEX_API_KEY|OPENROUTER_|FIREWORKS_|GROK_PERSONAL_API_KEY|XAI_API_KEY|Z_AI_API_KEY|RIVENDELL_ZAI_FALLBACK_API_KEY|RIVENDELL_OPENROUTER_API_KEY|TYPESAFE_|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))/i.test(key)) delete env[key];
   }
   return env;
 }

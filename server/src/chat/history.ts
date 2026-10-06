@@ -25,7 +25,7 @@ export type ChatHistoryItem = {
 // continuous log lives under (see threadKey.ts). It shares the prefix grammar
 // (`<kind>|<cwd>|<chatId>`), so listing it here is all the mapping this index
 // needs: one stat + one head/tail read per conversation, exactly as before.
-const CLI_KINDS = ['claude', 'codex', 'assistant', 'banana', 'banana-local', 'banana-fireworks', 'zai', 'xai', 'fireworks', 'thread'];
+const CLI_KINDS = ['claude', 'codex', 'assistant', 'banana', 'banana-local', 'banana-fireworks', 'zai', 'xai', 'fireworks', 'openrouter', 'thread'];
 // Automation/spam logs that would drown the sidebar (bridge probes, browser
 // sessions, account bootstraps). Real conversations (studio-*, grok-*, main)
 // never start with these prefixes.

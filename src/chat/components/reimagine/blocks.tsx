@@ -571,6 +571,7 @@ const ENGINE_LABEL: Record<string, string> = {
   'banana-local': 'Local',
   'banana-fireworks': 'Fireworks',
   fireworks: 'Fireworks',
+  openrouter: 'OpenRouter',
 };
 
 function engineLabel(id: string): string {

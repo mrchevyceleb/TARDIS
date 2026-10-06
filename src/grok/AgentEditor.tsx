@@ -17,6 +17,7 @@ import {
 import { CLAUDE_EFFORTS, CLAUDE_MODELS, normalizeClaudeModel } from '../chat/components/CodexEnginePicker';
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL, codexEffortsForModel, codexModelSpec, useCodexModels } from '../chat/codexModels';
 import { DEFAULT_FIREWORKS_EFFORT, DEFAULT_FIREWORKS_MODEL, FIREWORKS_MODELS, fireworksEffortsForModel, useFireworksModels } from '../chat/fireworksModels';
+import { DEFAULT_OPENROUTER_EFFORT, DEFAULT_OPENROUTER_MODEL, OPENROUTER_MODELS, openRouterEffortsForModel, useOpenRouterModels } from '../chat/openrouterModels';
 import { AgentUpdateConflictError, createAgent, updateAgentReq, deleteAgentReq, uploadAgentAvatar, removeAgentAvatar, agentAvatarUrl, DISC_INK, agentColor, type Agent } from './agents';
 import { GROK_VOICES } from '../voice/useGrokCall';
 
@@ -30,6 +31,7 @@ function defaultBrainSelection(engine: string): { model: string; effort: string 
   if (engine === 'xai') return { model: DEFAULT_XAI_MODEL, effort: DEFAULT_XAI_EFFORT };
   if (engine === 'zai') return { model: DEFAULT_ZAI_MODEL, effort: DEFAULT_ZAI_EFFORT };
   if (engine === 'fireworks') return { model: DEFAULT_FIREWORKS_MODEL, effort: DEFAULT_FIREWORKS_EFFORT };
+  if (engine === 'openrouter') return { model: DEFAULT_OPENROUTER_MODEL, effort: DEFAULT_OPENROUTER_EFFORT };
   return { model: '', effort: 'medium' };
 }
 
@@ -39,6 +41,7 @@ function effortOptions(engine: string, model: string): string[] {
   if (engine === 'xai') return XAI_EFFORTS;
   if (engine === 'zai') return ZAI_EFFORTS;
   if (engine === 'fireworks') return fireworksEffortsForModel(model);
+  if (engine === 'openrouter') return openRouterEffortsForModel(model);
   return XAI_EFFORTS;
 }
 
@@ -48,6 +51,7 @@ function staticModelOptions(engine: string): BrainModelOption[] {
   if (engine === 'xai') return XAI_MODELS;
   if (engine === 'zai') return ZAI_MODELS;
   if (engine === 'fireworks') return FIREWORKS_MODELS;
+  if (engine === 'openrouter') return OPENROUTER_MODELS;
   return [];
 }
 
@@ -72,6 +76,7 @@ export type AgentEditorProps = {
 export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentEditorProps) {
   useCodexModels();
   useFireworksModels();
+  useOpenRouterModels();
   const [name, setName] = useState('');
   const [role, setRole] = useState('');
   const [engine, setEngine] = useState('xai');
@@ -412,7 +417,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
           </label>
 
           <label className="bt-agent-field">
-            <span>{engine === 'xai' || engine === 'fireworks' ? 'Thinking' : engine === 'zai' ? 'Effort' : 'Reasoning effort'}</span>
+            <span>{engine === 'xai' || engine === 'fireworks' || engine === 'openrouter' ? 'Thinking' : engine === 'zai' ? 'Effort' : 'Reasoning effort'}</span>
             <select value={effort} onChange={(e) => setEffort(e.target.value)}>
               {availableEfforts.map((option) => (
                 <option key={option} value={option}>{option[0].toUpperCase() + option.slice(1)}</option>

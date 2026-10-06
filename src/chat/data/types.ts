@@ -11,7 +11,8 @@ export type CompanionId =
   | 'banana-fireworks'
   | 'zai'
   | 'xai'
-  | 'fireworks';
+  | 'fireworks'
+  | 'openrouter';
 
 // A live session reported by /api/live — used to mark "running now" entries
 // in the chronicle ribbon.
