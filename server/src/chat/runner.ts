@@ -268,6 +268,9 @@ function xaiEnv(model: string): NodeJS.ProcessEnv {
   env.SAMWISE_ACCOUNT = 'xai';
   return env;
 }
+/** How far below Claude Code's native compact threshold a compact must start
+ *  to count as the provider refusing the context. */
+const REACTIVE_COMPACT_GAP = 40_000;
 /** Persistent `claude` binary lanes (Anthropic, Z.ai, xAI). Not Codex/Banana. */
 export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' | 'fireworks' | 'openrouter' {
   return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai' || cli === 'fireworks' || cli === 'openrouter';
@@ -553,6 +556,11 @@ class ClaudeSession {
   /** Claude Code compacted a provider lane natively. Its summary is lossy, so
    *  the next turn boundary rotates onto the rolling compact instead. */
   private rotateAfterNativeCompact = false;
+  /** This process reported usage of its own; until then the lane's recorded
+   *  context may belong to a previous model and must not teach a budget. */
+  private usageSeen = false;
+  /** The context a seeded process started with. */
+  private startTokens = 0;
   private providerAccount = '';
   /** Text-block seqs for the current Claude stream. A later synthetic marker
    * lets us surgically remove only its protocol prose from durable storage. */
@@ -1954,7 +1962,11 @@ class ClaudeSession {
   /** Anthropic lanes keep the flat 200k budget; a provider lane rotates below
    *  its own model's window, and lower once the provider has refused a size. */
   private contextBudget(): number {
-    return this.providerWindow ? providerContextBudget(this.spawnModel, this.providerWindow) : CONTEXT_TOKEN_BUDGET;
+    if (!this.providerWindow) return CONTEXT_TOKEN_BUDGET;
+    // A seed already past a (learned) budget gets half a budget to grow
+    // before the next rotation, or every turn would rotate.
+    const budget = providerContextBudget(this.spawnModel, this.providerWindow);
+    return Math.max(budget, this.startTokens + Math.floor(budget / 2));
   }
 
   private rotationWanted(): boolean {
@@ -1995,6 +2007,8 @@ class ClaudeSession {
     setSessionId(this.cli, this.cwd, '', this.chatId).catch((err) => {
       console.warn(`[chat ${this.cli}] could not clear the session after a failed compaction:`, (err as Error).message);
     });
+    // A send waiting on the reseed barrier follows to the fresh process.
+    this.contextRotated = true;
     this.shutdown('compact-failed');
   }
 
@@ -2248,6 +2262,11 @@ class ClaudeSession {
         : ev?.type === 'stream_event' && ev.event?.type === 'message_start' ? ev.event.message?.usage
         : ev?.type === 'stream_event' && ev.event?.type === 'message_delta' ? ev.event.usage : undefined;
       recordContextUsage(this.logKey, 'claude', usage);
+      if (!this.usageSeen && usage && (Number(usage.input_tokens) > 0 || Number(usage.cache_read_input_tokens) > 0)) {
+        this.usageSeen = true;
+        // Only a seeded start: a resumed session past budget should rotate.
+        if (this.pendingSeedAck) this.startTokens = contextTokens(this.logKey);
+      }
     }
     // A provider can refuse a context below its catalog window (Fireworks
     // refused Qwen 3.8 Max near 140K of 262K), and Claude Code answers with a
@@ -2255,8 +2274,10 @@ class ClaudeSession {
     // it: learn a lower budget for this model and rotate at the boundary.
     if (!sidechain && this.providerWindow && ev?.type === 'system' && ev.subtype === 'status' && ev.status === 'compacting') {
       this.rotateAfterNativeCompact = true;
-      const accepted = contextTokens(this.logKey);
-      if (accepted > 0 && accepted < this.nativeCompactWindow - NATIVE_COMPACT_MARGIN) {
+      const accepted = this.usageSeen ? contextTokens(this.logKey) : 0;
+      // A gap this wide below the native threshold is more than one turn adds,
+      // so a plain backstop compact after a big tool result does not count.
+      if (accepted > 0 && accepted < this.nativeCompactWindow - NATIVE_COMPACT_MARGIN - REACTIVE_COMPACT_GAP) {
         learnContextLimit(this.spawnModel, accepted, this.providerWindow);
       }
     }
@@ -2266,9 +2287,9 @@ class ClaudeSession {
       this.syntheticApiErrorReason ??= this.captureSyntheticReason(ev);
       this.scrubSyntheticStreamText();
     }
-    if (ev?.type === 'system' && ev.subtype === 'status' && ev.compact_result === 'failed') {
+    if (!sidechain && ev?.type === 'system' && ev.subtype === 'status' && ev.compact_result === 'failed') {
       this.compactFailure = typeof ev.compact_error === 'string' ? ev.compact_error : '';
-    } else if (ev?.type === 'system' && ev.subtype === 'status' && ev.compact_result === 'success') {
+    } else if (!sidechain && ev?.type === 'system' && ev.subtype === 'status' && ev.compact_result === 'success') {
       this.compactFailure = null;
     }
     const expectedUserInterrupt = ev?.type === 'result' && this.userInterruptPending;
@@ -2283,7 +2304,7 @@ class ClaudeSession {
       // the oversized session must not be resumed.
       if (this.providerWindow && this.compactFailure === null && isContextLengthRejection(detail)) {
         lengthRejected = true;
-        const accepted = contextTokens(this.logKey);
+        const accepted = this.usageSeen ? contextTokens(this.logKey) : 0;
         if (accepted > 0) learnContextLimit(this.spawnModel, accepted, this.providerWindow);
       }
     }
@@ -2426,11 +2447,21 @@ class ClaudeSession {
       if (seeded) this.pendingSeedAck = false;
       if (failed) this.seedWindowOnNextTurn = true;
       if (!resultFailed) this.persistAppliedSelection();
-      const rotationDue = !resultFailed && isClaudeFamilyCli(this.cli) && this.rotationWanted();
+      // A dead native session reseeds instead. A native compact rotates even
+      // when the turn then failed, so no later turn runs on its lossy summary.
+      const reseed = (compactFailed || lengthRejected) && !authFailPending && !zaiStale && !zaiCut;
+      const rotationDue = !reseed && isClaudeFamilyCli(this.cli)
+        && (this.rotateAfterNativeCompact || (!resultFailed && this.rotationWanted()));
       const housekeeping = async () => {
         if (seeded && !failed) await clearRotation(this.logKey);
         if (!rotationDue || !(await this.rotateContextAtBoundary())) await this.maybeCompact();
       };
+      // Installed before turnEnd, so a send admitted by a turnEnd subscriber
+      // waits for the reseed instead of landing on the oversized session.
+      if (reseed) {
+        this.contextMaintenance = Promise.resolve().then(() => this.reseedAfterCompactFailure())
+          .finally(() => { this.contextMaintenance = null; });
+      }
       if (rotationDue) {
         this.contextMaintenance = Promise.resolve().then(housekeeping).catch((err) => {
           console.warn(`[context-rotation] ${this.logKey}: deferred after maintenance failure`, (err as Error).message);
@@ -2446,8 +2477,7 @@ class ClaudeSession {
       if (authFailPending) this.failAuth();
       else if (zaiStale && !this.hasBackgroundWork()) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
       if (zaiCut) this.afterZaiCut(zaiCut, zaiCutNoticeSeq);
-      else if ((compactFailed || lengthRejected) && !authFailPending && !zaiStale) this.reseedAfterCompactFailure();
-      if (!rotationDue) void housekeeping();
+      if (!rotationDue && !reseed) void housekeeping();
     }
   }
 }

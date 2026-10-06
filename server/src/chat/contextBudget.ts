@@ -17,10 +17,12 @@ export const NATIVE_COMPACT_MARGIN = 33_000;
 const learnedBudgets = new Map<string, number>();
 
 /** Rotation budget for a non-Anthropic `claude` lane: the 200k budget, or the
- *  model's window less the native-compact pad when that is smaller (half the
- *  window at least, so a tiny window still gets a usable thread). */
+ *  model's window less the native-compact pad when that is smaller. A small
+ *  window shrinks the pad but keeps the budget a quarter of the window below
+ *  the native threshold, so rotation still comes first. */
 export function providerContextBudget(model: string, window: number): number {
-  const base = Math.min(CONTEXT_TOKEN_BUDGET, Math.max(Math.floor(window / 2), window - NATIVE_COMPACT_PAD));
+  const pad = Math.min(NATIVE_COMPACT_PAD, NATIVE_COMPACT_MARGIN + Math.floor(window / 4));
+  const base = Math.min(CONTEXT_TOKEN_BUDGET, Math.max(Math.floor(window / 4), window - pad));
   return Math.min(base, learnedBudgets.get(model) ?? Infinity);
 }
 /** The native compact only backstops the lane's own rotation budget. */
