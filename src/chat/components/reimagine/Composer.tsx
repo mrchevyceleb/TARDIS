@@ -317,8 +317,9 @@ export function Composer(props: ComposerProps) {
   // Stop is shown exactly when a tap really stops: an empty-draft Stop still
   // interrupts while an upload streams, but with draft content the tap is
   // gated (the path line is not in the draft yet), so the button must not
-  // promise Stop then. The upload chip carries that state instead.
-  const stopLive = props.busy && !canSteer && !(uploading && hasContent);
+  // promise Stop then. The upload chip carries that state instead. A busy
+  // composer with no onStop handler renders Send, never a no-op Stop.
+  const stopLive = props.busy && Boolean(props.onStop) && !canSteer && !(uploading && hasContent);
 
   const sendBtn = (extraClass = '') => (
     <button

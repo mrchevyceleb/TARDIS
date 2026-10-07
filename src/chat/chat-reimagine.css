@@ -601,7 +601,7 @@
    behind the name while XHR reports progress, phone shows the keep-open note. */
 .rc .up-chip, .rc-mobile .up-chip { position: relative; flex: none; display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 20px 3px 8px; border: 1px solid var(--border-strong); border-radius: 6px; overflow: hidden; }
 .rc .up-bar, .rc-mobile .up-bar { position: absolute; inset: 0; width: 0%; background: color-mix(in oklch, var(--shadow) 45%, transparent); pointer-events: none; }
-.rc .up-txt, .rc-mobile .up-txt { position: relative; font-size: 11px; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.rc .up-chip .attach-x, .rc-mobile .up-chip .attach-x { position: static; width: 14px; height: 14px; font-size: 10px; line-height: 12px; }
+.rc .up-txt, .rc-mobile .up-txt { position: relative; flex: 1; min-width: 0; font-size: 11px; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rc .up-chip .attach-x, .rc-mobile .up-chip .attach-x { position: static; flex: none; width: 14px; height: 14px; font-size: 10px; line-height: 12px; }
 .rc .up-err, .rc-mobile .up-err { border-color: color-mix(in oklch, #d05050 60%, var(--border-strong)); }
 .rc .up-err .up-bar, .rc-mobile .up-err .up-bar { display: none; }

@@ -277,8 +277,8 @@ filesRouter.post('/upload-stream', requireTrustedOrigin, (req, res) => {
     return;
   }
   const expected = Number(req.headers['content-length'] ?? 0);
-  if (!Number.isFinite(expected) || expected <= 0 || expected > UPLOAD_STREAM_MAX_BYTES) {
-    res.status(400).json({ error: 'Content-Length must be between 1 byte and 16 GB' });
+  if (!Number.isFinite(expected) || expected < 0 || expected > UPLOAD_STREAM_MAX_BYTES) {
+    res.status(400).json({ error: 'Content-Length must be between 0 bytes and 16 GB' });
     return;
   }
   const name = safeFileName(String(req.query.name ?? '').trim().split(/[\\/]/).pop() ?? '') || 'file';
@@ -307,9 +307,20 @@ filesRouter.post('/upload-stream', requireTrustedOrigin, (req, res) => {
   const fail = (status: number, message: string) => {
     if (settled) return;
     settled = true;
-    if (!res.headersSent) res.status(status).json({ error: message });
+    if (!res.headersSent) {
+      // The error response must leave the door before the socket dies:
+      // destroying right after json() can eat the response before it
+      // flushes (through the tailscale proxy this surfaces as a generic
+      // network failure instead of the 4xx). 'close' fires once the
+      // response is handed off, or right away if the client already
+      // vanished, so the socket never lingers either way.
+      res.setHeader('Connection', 'close');
+      res.status(status).json({ error: message });
+      res.on('close', () => req.destroy());
+    } else {
+      req.destroy();
+    }
     cleanupTemp();
-    req.destroy();
   };
   req.on('data', (chunk: Buffer) => {
     received += chunk.length;
@@ -346,10 +357,12 @@ filesRouter.post('/upload-stream', requireTrustedOrigin, (req, res) => {
         console.log(`[files] stream upload saved ${dest} (${received} bytes)`);
         if (!res.destroyed) res.status(201).json({ path: dest, name: basename(dest), bytes: received });
         // The claim already made the file visible; the temp unlink is
-        // best-effort and logged, never a client failure.
-        void rm(temp, { force: true }).catch((err) =>
-          console.warn('[files] upload temp unlink failed:', (err as Error)?.message ?? err),
-        );
+        // best-effort, logged on failure, never a client error. It waits for
+        // the stream's close (finish precedes close) so it can never race
+        // the descriptor, same rule as the failure cleanup.
+        void outClosed
+          .then(() => rm(temp, { force: true }))
+          .catch((err) => console.warn('[files] upload temp unlink failed:', (err as Error)?.message ?? err));
       },
       () => fail(500, 'could not save the upload'),
     );
