@@ -30,9 +30,13 @@ export function applyProviderLimits(
   const cap = Number.isInteger(override) && override > 0 ? override : PROVIDER_MAX_OUTPUT_TOKENS;
   const ceiling = opts.maxOutputTokens;
   env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(ceiling && Number.isInteger(ceiling) && ceiling > 0 ? Math.min(cap, ceiling) : cap);
-  // Capacity/quota windows do not improve during Claude Code's long default
-  // retry storm. Fail promptly so the user can switch brains or retry later.
+  // Transient server errors (503/529/overloaded) clear on their own, so let
+  // the CLI's own retry loop ride them out: 3 attempts with its internal
+  // backoff (~2s, ~5s, ~12s) before a lane shows a terminal error (a real
+  // Fireworks 503 once killed Becca's turn on attempt 1/1). Non-retryable
+  // classes are untouched: the CLI never retries 4xx, so 400s still fail
+  // immediately, and a per-engine retriesVar still pins a lane tighter.
   env.CLAUDE_CODE_MAX_RETRIES =
-    process.env[opts.retriesVar]?.trim() || process.env.CLAUDE_CODE_MAX_RETRIES?.trim() || '1';
+    process.env[opts.retriesVar]?.trim() || process.env.CLAUDE_CODE_MAX_RETRIES?.trim() || '3';
   return env;
 }

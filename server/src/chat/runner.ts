@@ -219,6 +219,12 @@ function zaiEnv(model: string, credential: ReturnType<typeof zaiCredentials>): N
   const contextWindow = credential.mode === 'fireworks'
     ? fireworksContextWindow(credential.wireModel) : Number(zaiCompactWindowForModel(model));
   applyProviderLimits(env, { model, contextWindow, retriesVar: 'RIVENDELL_ZAI_MAX_RETRIES' });
+  // No-vision marker for the PreToolUse Read guard (scripts/vision-read-guard.sh,
+  // card-faf580): every Z.ai lane is text-only over this endpoint (mirroring
+  // the session's textOnlyLane exactly), even on a vision-capable Fireworks
+  // fallback wire model, so a native image block can never enter the session
+  // and 400 the turn or the CLI's own compaction.
+  env.RIVENDELL_NO_VISION = '1';
   env.SAMWISE_ACCOUNT = 'zai';
   return env;
 }
@@ -301,6 +307,11 @@ function fireworksEnv(model: string): NodeJS.ProcessEnv {
   env.ANTHROPIC_AUTH_TOKEN =
     process.env.RIVENDELL_ZAI_FALLBACK_API_KEY?.trim() || process.env.FIREWORKS_API_KEY?.trim() || '';
   applyProviderLimits(env, { model, contextWindow: fireworksContextWindow(model), retriesVar: 'RIVENDELL_FIREWORKS_MAX_RETRIES' });
+  // No-vision marker for the PreToolUse Read guard (scripts/vision-read-guard.sh,
+  // card-faf580): serverless models without imageInput reject native image
+  // blocks with a 400 (Adam's lane, glm-5p3-fast), killing the turn and the
+  // CLI's own compaction. Mirrors the session's textOnlyLane.
+  if (!fireworksCapability(model)?.imageInput) env.RIVENDELL_NO_VISION = '1';
   env.SAMWISE_ACCOUNT = 'fireworks';
   return env;
 }
@@ -332,6 +343,10 @@ function openRouterEnv(model: string): NodeJS.ProcessEnv {
     maxOutputTokens: openRouterMaxOutput(model),
     retriesVar: 'RIVENDELL_OPENROUTER_MAX_RETRIES',
   });
+  // No-vision marker for the PreToolUse Read guard (scripts/vision-read-guard.sh,
+  // card-faf580): text-only OpenRouter models reject native image blocks the
+  // same way. Mirrors the session's textOnlyLane.
+  if (!openRouterCapability(model)?.imageInput) env.RIVENDELL_NO_VISION = '1';
   env.SAMWISE_ACCOUNT = 'openrouter';
   return env;
 }
@@ -1118,6 +1133,14 @@ class ClaudeSession {
         promptText = result.text;
         outImages = undefined;
         visionNote = result.note;
+      } else {
+        // The adapter is configured off (RIVENDELL_VISION_MODE=off): a
+        // text-only lane still must never receive a native image block (a
+        // 400 kills the turn AND Claude Code's own compaction), so drop the
+        // images with a plain note instead of forwarding them (review 1).
+        promptText = `${text}\n\n[The user pasted ${images.length === 1 ? 'an image that is' : `${images.length} images that are`} not shown: this lane's chat model cannot see images and the vision adapter is disabled. Ask a vision-capable teammate or Max to describe ${images.length === 1 ? 'it' : 'them'} if it matters.]`;
+        outImages = undefined;
+        visionNote = 'vision adapter off: images dropped for a text-only lane';
       }
       // shutdown()/interrupt during the (up to 90s) adapter await sets disposed
       // but may leave exitCode null momentarily — don't write to a dying stdin.
