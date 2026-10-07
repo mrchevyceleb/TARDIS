@@ -1678,7 +1678,8 @@ class ClaudeSession {
    *  flight (no boundary is coming, and ending the turn loses only partial
    *  generation). If the turn finishes on
    *  its own first, nothing is interrupted. A scheduled or wake-started
-   *  (automation) turn ends for a person's message too, at a tool boundary, but
+   *  (automation) turn ends for a person's message too — immediately while
+   *  nothing is in flight, or at a tool boundary — but
    *  is left to finish for a teammate's handoff. Returns a release function, or
    *  null when there is no turn to end. */
   requestBoundaryInterrupt(opts: { human?: boolean } = {}): (() => void) | null {
@@ -1707,6 +1708,10 @@ class ClaudeSession {
         try {
           if (this.turnStartedAt === null || this.turnStartedAt !== turn || this.disposed) return;
           if (this.boundaryWaiters === 0) return;
+          // Immediate fire is human-only: if the human released before this ran
+          // and only peer waiters remain, re-arm for the normal tool-boundary
+          // path (the peer gap applies there) instead of interrupting now.
+          if (this.boundaryHumanWaiters === 0) { this.boundaryInterruptWanted = true; return; }
           if (this.activeToolIds.size > 0) { this.boundaryInterruptWanted = true; return; }
           if (this.hasInterruptHazard()) return;
           this.lastBoundaryInterruptAt = Date.now();
