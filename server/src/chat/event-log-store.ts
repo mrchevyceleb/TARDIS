@@ -541,11 +541,12 @@ export async function loadEventLogSince(
 // the full file: parsing a whole 190 MB hot log blocks the loop ~3.2 s
 // (measured Oct 7 2026), which is what made chat switches queue for 25 s and
 // /api/health answer in 0.2-1.7 s. The tail is read asynchronously and parsed
-// in slices that yield to the loop. Whenever the tail covered the entire
-// retained window, the parsed-cache entry is exactly what a full read would
-// have stored (same events, same high-water, same end-of-file cursor), so
-// later loads stay warm; otherwise the result is served without caching and
-// the next load still takes the proven full path.
+// in slices that yield to the loop. The parsed cache is installed only from
+// a tail that PROVES the whole entry: enough retained events for the full
+// replay window (otherwise the call falls back to the sync full loader),
+// receipts coverage for the whole receipts window, and a high-water verified
+// monotonic through the live repair cursor. An unproven tail is served
+// without caching and the next sync load still takes the proven full path.
 const TAIL_LOAD_MAX_BYTES = 16 * 1024 * 1024;
 const TAIL_PARSE_LINES_PER_SLICE = 4000;
 
@@ -576,6 +577,14 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
   let handle: FileHandle | null = null;
   try {
     handle = await openFile(path, 'r');
+    // Identity from the handle we actually read, never the pre-open stat: a
+    // rename, append, or truncate between the two must never key the cache
+    // or a cursor off bytes we did not open.
+    const live = await handle.stat();
+    size = live.size;
+    mtimeMs = live.mtimeMs;
+    ino = live.ino;
+    if (size <= TAIL_LOAD_MAX_BYTES) return loadEventLogSync(key);
     const from = size - TAIL_LOAD_MAX_BYTES;
     const chunk = await readRangeAsync(handle, from, size);
     const completeEnd = chunk.lastIndexOf(0x0a) + 1;
@@ -586,6 +595,7 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
     const fragment = chunk.toString('utf8', completeEnd);
     // The read starts mid-line: drop the leading partial line.
     if (from > 0) text = text.slice(text.indexOf('\n') + 1);
+    const carriedReceipts = echoReceipts.get(path)?.length ?? 0;
     const state = {
       events: [] as PersistedEvent[],
       eventChars: [] as number[],
@@ -597,6 +607,19 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
       parseLogLines(lines.slice(i, i + TAIL_PARSE_LINES_PER_SLICE).join('\n'), state);
       if (i + TAIL_PARSE_LINES_PER_SLICE < lines.length) await yieldToEventLoop();
     }
+    // A tail holding fewer retained events than the replay window would
+    // serve a SHORTER window than loadEventLogSync (huge events can eat all
+    // 16 MiB). Fall back to the proven full loader before touching any
+    // shared state — it reparses, rebuilds receipts, and caches exactly as
+    // before this path existed. Rare: a normal lane holds well over 2000
+    // events in its last 16 MiB.
+    if (state.events.length < MAX_EVENTS_PER_LOG) return loadEventLogSync(key);
+    // Receipts this parse found in the tail itself. The tail is the file's
+    // suffix, so at least RECEIPTS_PER_LOG of them proves the file's newest
+    // RECEIPTS_PER_LOG receipts are all inside the window — exactly the ones
+    // a full read would keep. Receipts carried from earlier parses never
+    // count toward that proof.
+    const tailReceipts = state.echoIds.length - carriedReceipts;
     if (state.echoIds.length > RECEIPTS_PER_LOG) state.echoIds.splice(0, state.echoIds.length - RECEIPTS_PER_LOG);
     echoReceipts.set(path, state.echoIds);
     if (state.events.length > MAX_EVENTS_PER_LOG) {
@@ -606,12 +629,25 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
     }
     const nextSeq = state.highWater + 1;
     const consumed = from + completeEnd;
-    // The high-water comes from the tail, which equals the file's max seq on a
-    // monotonic file. Every hello bind repairs/normalizes the sequence before
-    // any load, so a non-monotonic file is repaired before this can cache a
-    // short high-water; a tail that did not cover the whole retained window
-    // is simply never cached (below), so the next load takes the full path.
-    if (state.events.length >= MAX_EVENTS_PER_LOG) {
+    // The tail's high-water equals the file's max seq only on a file known
+    // monotonic. repairEventLogSequenceSync verifies exactly that, per file,
+    // and every append this process makes allocates above the verified point
+    // (the shared allocator only ever raises), so a live repair cursor whose
+    // inode, size, and fingerprint bytes all still match proves the tail saw
+    // the file's true maximum. Without that proof nothing is cached and the
+    // allocator map is never seeded from the tail: on a legacy non-monotonic
+    // file (never repaired since boot) a short high-water would otherwise let
+    // new events collide with older, higher sequences.
+    const repairCursor = repairCursors.get(path);
+    let verified = false;
+    if (repairCursor && repairCursor.ino === ino && size >= repairCursor.consumed && repairCursor.consumed >= TAIL_FINGERPRINT_BYTES) {
+      const fpStart = repairCursor.consumed - TAIL_FINGERPRINT_BYTES;
+      const fpBytes = fpStart >= from
+        ? chunk.subarray(fpStart - from, repairCursor.consumed - from)
+        : await readRangeAsync(handle, fpStart, repairCursor.consumed);
+      verified = fpBytes.equals(repairCursor.fingerprint);
+    }
+    if (verified && state.events.length >= MAX_EVENTS_PER_LOG && tailReceipts >= RECEIPTS_PER_LOG) {
       let retainedBytes = 0;
       for (const chars of state.eventChars) retainedBytes += chars;
       const fingerprint = await readRangeAsync(handle, Math.max(0, consumed - TAIL_FINGERPRINT_BYTES), consumed);
@@ -636,7 +672,13 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
     if (fragment) parseLogLines(fragment, tail);
     const events = state.events.concat(tail.events);
     const trimmed = events.length > MAX_EVENTS_PER_LOG ? events.slice(events.length - MAX_EVENTS_PER_LOG) : events;
-    return { events: trimmed, nextSeq: observeNextSeq(key, Math.max(nextSeq, tail.highWater + 1)) };
+    // Only a verified high-water may seed the allocator; an unproven tail's
+    // value is served for display but never observed into nextSeqByLogKey.
+    const computed = Math.max(nextSeq, tail.highWater + 1);
+    return {
+      events: trimmed,
+      nextSeq: verified ? observeNextSeq(key, computed) : Math.max(computed, nextSeqByLogKey.get(key) ?? 1),
+    };
   } catch {
     return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
   } finally {

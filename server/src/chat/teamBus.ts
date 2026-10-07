@@ -156,19 +156,15 @@ function queueStoreOperation<T>(operation: () => Promise<T>): Promise<T> {
   return result;
 }
 
-/** One FIFO per recipient lane: the person's voice continuations and Desk
- *  answers never queue behind background handoffs once the background lane is
- *  on. */
-function queueKeyOf(record: { toId: string; fromRole?: string }): string {
-  if (!backgroundLaneEnabled() || (record.fromRole !== 'voice' && record.fromRole !== 'desk')) return record.toId;
-  // Engines without a background lane run both kinds on one session: one FIFO.
-  const agent = listAgents().find((a) => a.id === record.toId);
-  const cli = agent ? cliForAgentEngine(brainForAgent(agent).engine) : '';
-  return BACKGROUND_LANE_CLIS.has(cli) ? `${record.toId}|main` : record.toId;
+/** One FIFO per recipient: a single delivery worker per agent serializes
+ *  every admission to it, so a person-sourced record can never race the
+ *  teammate worker onto the same session (two parallel FIFOs once admitted
+ *  both at once — refusals, duplicate echoes). Person-sourced records still
+ *  never wait behind teammate chatter: the drain sorts them first inside the
+ *  one FIFO. */
+function queueKeyOf(record: { toId: string }): string {
+  return record.toId;
 }
-
-/** Mirrors runner.isClaudeFamilyCli; the runner is loaded lazily here. */
-const BACKGROUND_LANE_CLIS = new Set(['claude', 'assistant', 'zai', 'xai', 'fireworks', 'openrouter']);
 
 function replyEdge(fromId: string, toId: string): string {
   return `${fromId}->${toId}`;
@@ -908,6 +904,43 @@ function batchDeliveryBlock(record: QueuedTeamDelivery): string {
   return `${header}\n${record.text}`;
 }
 
+// Bounds for one admitted batch turn. Unbounded, a 34-message backlog (each
+// record can carry 8,000 characters) would hand the recipient a prompt
+// hundreds of KB long — past admission and provider context limits — and
+// retry forever without draining. Overflow stays queued; the next admission
+// takes it, so a big backlog clears in a few turns instead of one or 34.
+const MAX_BATCH_DELIVERIES = 8;
+const MAX_BATCH_TEXT_CHARS = 24_000;
+
+/** Sender class for batch compatibility: the reply instruction an admitted
+ *  turn carries is built from the lead's role, so only same-class records
+ *  can share it (Desk answers answer on the card, voice continuations
+ *  continue the call, automation stays automation, teammates reply inline). */
+function batchRoleClass(record: { fromRole?: string }): 'desk' | 'voice' | 'automation' | 'teammate' {
+  if (record.fromRole === 'desk') return 'desk';
+  if (record.fromRole === 'voice') return 'voice';
+  if (record.fromRole === 'automation') return 'automation';
+  return 'teammate';
+}
+
+/** Whether a queued record can ride the lead's admitted turn without losing
+ *  its own routing. The lead's collaboration chain is the only one the turn
+ *  can activate (one active chain slot per lane), so a record carrying an
+ *  explicit chain joins only an identical one; plain handoffs join freely and
+ *  lose only synthesized route metadata, which every sender can read from the
+ *  thread anyway. */
+function batchJoinable(lead: QueuedTeamDelivery, record: QueuedTeamDelivery): boolean {
+  if (batchRoleClass(lead) !== batchRoleClass(record)) return false;
+  const explicit = (r: QueuedTeamDelivery) => Boolean(r.chainId || r.chainEdges?.length || r.chainRoute?.length);
+  if (!explicit(lead) && !explicit(record)) return true;
+  if (explicit(lead) !== explicit(record)) return false;
+  const leadChain = chainForQueuedDelivery(lead);
+  const recordChain = chainForQueuedDelivery(record);
+  return leadChain.id === recordChain.id
+    && leadChain.edges.join('\u0000') === recordChain.edges.join('\u0000')
+    && leadChain.route.join('\u0000') === recordChain.route.join('\u0000');
+}
+
 /** Ack a joined batch: the lead record's durable receipt proves the whole
  *  joined prompt was accepted (one send, one peer echo), so persist a
  *  per-record receipt for every other message before deleting them — a
@@ -961,19 +994,33 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         await retryDelay();
         continue;
       }
-      // One admission for the whole still-queued batch. A boundary per message
-      // is what backed deliveries up for an hour on busy lanes (34 queued for
-      // one Kimi K3 recipient, one message per 10-25 s step), so every
-      // still-queued message for this recipient rides the same admitted turn:
-      // person messages first (Matt's Desk answers never sit behind teammate
-      // chatter), oldest first within each group, so the joined delivery reads
-      // newest-last.
-      const siblings = (await queueStoreOperation(() => queuedDeliveryStore.list()))
+      // One admission for the whole still-queued batch, bounded and
+      // routing-compatible. A boundary per message is what backed deliveries
+      // up for an hour on busy lanes (34 queued for one Kimi K3 recipient,
+      // one message per 10-25 s step), so every still-queued message for this
+      // recipient rides the same admitted turn: person messages first
+      // (Matt's Desk answers never sit behind teammate chatter), oldest first
+      // within each group. Only records that keep their own routing join
+      // (same sender class, and no explicit chain unless it matches the
+      // lead's), and the join is capped by count and characters so an
+      // admitted turn never grows past admission limits. Whatever does not
+      // fit stays queued and the next admission takes it.
+      const candidates = (await queueStoreOperation(() => queuedDeliveryStore.list()))
         .filter((item) => queueKeyOf(item) === queueKey)
         .sort((a, b) => (Number(personSourced(b)) - Number(personSourced(a)))
           || String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
-      if (siblings.length === 0) break;
-      const lead = siblings[0];
+      if (candidates.length === 0) break;
+      const lead = candidates[0];
+      const siblings = [lead];
+      let batchChars = lead.text.length;
+      for (const candidate of candidates.slice(1)) {
+        if (siblings.length >= MAX_BATCH_DELIVERIES) break;
+        if (!batchJoinable(lead, candidate)) continue;
+        const block = batchDeliveryBlock(candidate);
+        if (batchChars + block.length > MAX_BATCH_TEXT_CHARS) continue;
+        siblings.push(candidate);
+        batchChars += block.length;
+      }
       const from = findAgent(lead.fromId) ?? {
         id: lead.fromId,
         name: lead.fromName,
@@ -1097,7 +1144,7 @@ export async function deliverTeamMessage(input: {
   const rl = rateOk(replyEdge(from.id, to.id));
   if (!rl.ok) return { delivered: false, reason: rl.reason };
 
-  const fifoKey = queueKeyOf({ toId: to.id, fromRole: from.role });
+  const fifoKey = queueKeyOf({ toId: to.id });
   const queuedBehindAnotherTurn = recipientDeliveryTails.has(fifoKey);
   let record: QueuedTeamDelivery;
   try {
