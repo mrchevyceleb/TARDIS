@@ -122,6 +122,20 @@ type ParsedEntry = {
   nextSeq: number;
   bytes: number;
   cursor: AppendCursor;
+  /** True when `highWater` is the whole file's maximum seq. A tail read
+   *  without a verified repair cursor still yields the true newest replay
+   *  window (it is the file's suffix), but its high-water is only the tail's
+   *  own maximum, so the allocator paths must not trust `nextSeq`. Display
+   *  readers may serve such an entry; loadEventLogSync re-reads in full. */
+  seqProven: boolean;
+  /** True when the parse that built this entry also rebuilt `echoReceipts`
+   *  from the WHOLE file. A tail parse only ever sees the last
+   *  TAIL_LOAD_MAX_BYTES, so it leaves receipts older than that window
+   *  unrebuilt. durableUserEchoClientMsgId / recentUserEchoClientMsgIds call
+   *  loadEventLogSync purely to refresh receipts, so serving them a
+   *  tail-built entry would answer "not retained" for messages that are in
+   *  fact durable. loadEventLogSync therefore requires this too. */
+  receiptsProven: boolean;
 };
 const parsedCache = new Map<string, ParsedEntry>();
 const PARSED_CACHE_MAX = 128;
@@ -228,7 +242,7 @@ type LogRead = { text: string; fragment: string; cursor: AppendCursor; size: num
  * (fragment). The fragment is never consumed, so it is re-read once complete.
  * With a cursor, returns only what was appended after it, or null when the
  * file was rewritten or truncated underneath the cursor. */
-function readLog(path: string, cursor?: AppendCursor): LogRead | null {
+function readLog(path: string, cursor?: AppendCursor, maxAppend?: number): LogRead | null {
   let fd = -1;
   try {
     fd = openSync(path, 'r');
@@ -236,6 +250,9 @@ function readLog(path: string, cursor?: AppendCursor): LogRead | null {
     let from = 0;
     if (cursor) {
       if (st.ino !== cursor.ino || st.size < cursor.consumed) return null;
+      // Refuse BEFORE paying for the read: this is what makes an incremental
+      // read a bounded operation a request path may perform synchronously.
+      if (maxAppend !== undefined && st.size - cursor.consumed > maxAppend) return null;
       if (!fingerprintAt(fd, cursor.consumed).equals(cursor.fingerprint)) return null;
       from = cursor.consumed;
     }
@@ -316,6 +333,24 @@ function parseLogLines(
 }
 
 export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextSeq: number } {
+  return loadEventLogProven(key, false)!;
+}
+
+/** The proven loader: parses every line (or folds the appended bytes onto an
+ *  already-proven base), so its high-water is the file's true maximum and its
+ *  receipts cover the whole file.
+ *
+ *  `incrementalOnly` is the BOUNDED contract the async tail loader needs. It
+ *  caps the appended range at TAIL_LOAD_MAX_BYTES and returns null rather than
+ *  ever falling back to a full synchronous read, so the tail path can simply
+ *  try it and carry on when it declines. Checking the cache and the file
+ *  separately beforehand could not give that guarantee: this function re-stats
+ *  the file, and anything observed before an await can be evicted, rewritten,
+ *  or grown by the time it runs. */
+function loadEventLogProven(
+  key: string,
+  incrementalOnly: boolean,
+): { events: PersistedEvent[]; nextSeq: number } | null {
   const path = logPath(key);
   let mtimeMs: number;
   let size: number;
@@ -324,9 +359,19 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
     mtimeMs = st.mtimeMs;
     size = st.size;
   } catch {
+    if (incrementalOnly) return null;
     return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
   }
-  const cached = parsedCache.get(path);
+  // This is the allocator AND receipts-rebuild path, so only an entry proven
+  // on both counts may answer it. A tail-built entry carries the right events
+  // but an unproven high-water (serving it would seed nextSeq below an on-disk
+  // seq and let new appends collide) and receipts covering only the tail
+  // window (durableUserEchoClientMsgId would answer "not retained" for a
+  // message that is in fact durable). Such an entry falls through to the full
+  // read below, which re-reads every line, proves the maximum, and rebuilds
+  // the whole receipts list.
+  const entry = parsedCache.get(path);
+  const cached = entry?.seqProven && entry.receiptsProven ? entry : undefined;
   if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
     // Re-insert so eviction order is least-recently-USED, not first-inserted.
     parsedCache.delete(path);
@@ -336,9 +381,15 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
 
   // Grown since the cached read: parse only the appended bytes. Anything else
   // (never read, evicted, rewritten, truncated) is a full read.
-  const appended = cached ? readLog(path, cached.cursor) : null;
+  const appended = cached ? readLog(path, cached.cursor, incrementalOnly ? TAIL_LOAD_MAX_BYTES : undefined) : null;
+  // The one place the full read is reachable, and the one place the bounded
+  // caller gets to decline it.
+  if (incrementalOnly && !appended) return null;
   const read = appended ?? readLog(path);
-  if (!read) return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
+  if (!read) {
+    if (incrementalOnly) return null;
+    return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
+  }
   const incremental = Boolean(appended && cached);
   const state = incremental && cached
     ? { events: cached.events, eventChars: cached.eventChars, highWater: cached.highWater, echoIds: echoReceipts.get(path) ?? [] }
@@ -359,7 +410,10 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
   const nextSeq = state.highWater + 1;
   let retainedBytes = 0;
   for (const chars of state.eventChars) retainedBytes += chars;
-  if (cached) parsedCacheBytes -= cached.bytes;
+  // Discount whatever is actually in the map, proven or not: an unproven
+  // entry is being replaced here too, and skipping it would double-count its
+  // bytes against the budget forever.
+  if (entry) parsedCacheBytes -= entry.bytes;
   parsedCache.delete(path);
   parsedCache.set(path, {
     mtimeMs: read.mtimeMs,
@@ -374,6 +428,11 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
     nextSeq,
     bytes: retainedBytes,
     cursor: read.cursor,
+    // Every line of the file was parsed (full read) or folded onto a proven
+    // base (incremental), so this high-water is the file's true maximum and
+    // the receipts list this parse just rebuilt covers the whole file.
+    seqProven: true,
+    receiptsProven: true,
   });
   parsedCacheBytes += retainedBytes;
   // A single log bigger than the whole budget evicts itself here: callers still
@@ -568,7 +627,29 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
     // Re-insert so eviction order is least-recently-USED, same as the sync path.
     parsedCache.delete(path);
     parsedCache.set(path, cached);
-    return { events: cached.events.slice(), nextSeq: observeNextSeq(key, cached.nextSeq) };
+    return {
+      events: cached.events.slice(),
+      // Only a proven high-water may raise the shared allocator; an unproven
+      // entry's nextSeq is served for display and never observed.
+      nextSeq: cached.seqProven
+        ? observeNextSeq(key, cached.nextSeq)
+        : Math.max(cached.nextSeq, nextSeqByLogKey.get(key) ?? 1),
+    };
+  }
+  // A fully proven entry can serve this read from the proven loader's BOUNDED
+  // incremental path: it parses only the appended bytes (capped at the same
+  // 16 MiB the tail would have cost), keeps the entry proven, and avoids
+  // replacing it with an unproven one — which would force every later receipt
+  // and allocator call (durableUserEchoClientMsgId on each hello) into a full
+  // synchronous re-read of a 70-190 MB log.
+  //
+  // It returns null instead of ever full-reading, so declining is free and
+  // there is nothing to pre-validate. That matters: there is NO await between
+  // this check and the call, so no eviction, append, or rewrite can slip in
+  // between and turn a bounded read into an unbounded one.
+  if (cached?.seqProven && cached.receiptsProven) {
+    const incremental = loadEventLogProven(key, true);
+    if (incremental) return incremental;
   }
   // Small files are already bounded: keep the proven path (and its cache
   // maintenance) instead of a second one.
@@ -595,12 +676,17 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
     const fragment = chunk.toString('utf8', completeEnd);
     // The read starts mid-line: drop the leading partial line.
     if (from > 0) text = text.slice(text.indexOf('\n') + 1);
-    const carriedReceipts = echoReceipts.get(path)?.length ?? 0;
+    // Collect this tail's receipts into a FRESH array rather than pushing onto
+    // the carried one. The tail re-reads the same file suffix on every call,
+    // so appending in place refilled the window with duplicates of the same
+    // few ids and evicted genuine older receipts, which made
+    // isUserEchoRetained answer false for messages that were in fact durable.
+    const carried = echoReceipts.get(path) ?? [];
     const state = {
       events: [] as PersistedEvent[],
       eventChars: [] as number[],
       highWater: 0,
-      echoIds: echoReceipts.get(path) ?? ([] as string[]),
+      echoIds: [] as string[],
     };
     const lines = text.split('\n');
     for (let i = 0; i < lines.length; i += TAIL_PARSE_LINES_PER_SLICE) {
@@ -614,14 +700,25 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
     // before this path existed. Rare: a normal lane holds well over 2000
     // events in its last 16 MiB.
     if (state.events.length < MAX_EVENTS_PER_LOG) return loadEventLogSync(key);
-    // Receipts this parse found in the tail itself. The tail is the file's
-    // suffix, so at least RECEIPTS_PER_LOG of them proves the file's newest
-    // RECEIPTS_PER_LOG receipts are all inside the window — exactly the ones
-    // a full read would keep. Receipts carried from earlier parses never
-    // count toward that proof.
-    const tailReceipts = state.echoIds.length - carriedReceipts;
-    if (state.echoIds.length > RECEIPTS_PER_LOG) state.echoIds.splice(0, state.echoIds.length - RECEIPTS_PER_LOG);
-    echoReceipts.set(path, state.echoIds);
+    // Merge carried + tail receipts newest-last, de-duplicated, then keep the
+    // newest RECEIPTS_PER_LOG. The tail is the file's suffix, so its receipts
+    // are the newest ones on disk; carried ids from earlier (possibly full)
+    // reads cover anything older that is still worth answering for.
+    const mergedReceipts = carried.concat(state.echoIds);
+    const keptReceipts: string[] = [];
+    const seenReceipts = new Set<string>();
+    for (let i = mergedReceipts.length - 1; i >= 0 && keptReceipts.length < RECEIPTS_PER_LOG; i -= 1) {
+      const id = mergedReceipts[i];
+      if (seenReceipts.has(id)) continue;
+      seenReceipts.add(id);
+      keptReceipts.push(id);
+    }
+    keptReceipts.reverse();
+    // NOT published here. Publishing receipts before the awaits below opened a
+    // window where a concurrent receipt lookup could hit a fully proven cache
+    // entry (so it skipped rebuilding) and then read this tail-only list,
+    // reporting a durable message as not retained. The write now happens in
+    // the same synchronous block as the cache install.
     if (state.events.length > MAX_EVENTS_PER_LOG) {
       const drop = state.events.length - MAX_EVENTS_PER_LOG;
       state.events.splice(0, drop);
@@ -647,11 +744,60 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
         : await readRangeAsync(handle, fpStart, repairCursor.consumed);
       verified = fpBytes.equals(repairCursor.fingerprint);
     }
-    if (verified && state.events.length >= MAX_EVENTS_PER_LOG && tailReceipts >= RECEIPTS_PER_LOG) {
+    // Cache the window this parse just paid for. The events are the file's
+    // newest MAX_EVENTS_PER_LOG (guaranteed by the length check above, since
+    // the tail is the file's suffix), which is exactly what display readers
+    // want, so caching them is sound whether or not the high-water is proven.
+    // `seqProven` carries that distinction instead of refusing to cache:
+    // the previous gate also demanded RECEIPTS_PER_LOG (1024) receipts inside
+    // the tail, but receipts are sparse (a 16 MiB tail of a busy lane holds
+    // ~0-25), so it never passed. Nothing was ever cached, and every sidebar
+    // poll re-read 16 MiB and re-parsed ~37k records, which pinned the event
+    // loop and drove the process into a GC spiral (Oct 7 2026).
+    install: {
       let retainedBytes = 0;
       for (const chars of state.eventChars) retainedBytes += chars;
       const fingerprint = await readRangeAsync(handle, Math.max(0, consumed - TAIL_FINGERPRINT_BYTES), consumed);
-      if (cached) parsedCacheBytes -= cached.bytes;
+      // Discount whatever is in the map RIGHT NOW, not the snapshot taken
+      // before this function's awaits. Two cold tail loads of the same path
+      // can interleave across those yields; subtracting the stale snapshot
+      // (usually undefined) would leave the other load's bytes counted
+      // forever, and a phantom parsedCacheBytes total above
+      // PARSED_CACHE_MAX_BYTES makes evictParsedCache drop every entry on
+      // sight — which is exactly the uncached re-parse spiral this fix exists
+      // to end.
+      const current = parsedCache.get(path);
+      // A fully proven entry for this same file won the race (a full read
+      // finished during the awaits above). Replacing it with this tail-only
+      // entry would downgrade both proofs, so the next receipt or allocator
+      // call would pay a full synchronous re-read — and clobbering
+      // echoReceipts under it would make that entry's skipped rebuild answer
+      // from a tail-only list. Leave both alone; the events parsed above are
+      // still correct for this caller's display.
+      // Keep a proven entry only when it is one this call did not already
+      // prove useless.
+      //
+      // `current !== cached` is the load-bearing part: a proven entry that
+      // appeared during the awaits above is fresher than what this tail
+      // started from, and downgrading it would force later receipt and
+      // allocator calls into a full synchronous re-read. But `cached` itself
+      // is the entry the bounded delegation at the top ALREADY declined — it
+      // declines on a >16 MiB delta, a fingerprint mismatch, or a same-inode
+      // TRUNCATION — so preserving that one would mean re-reading 16 MiB on
+      // every request and never being able to install the result: the exact
+      // starvation loop this loader exists to end, and worse for a truncated
+      // file, whose stale cursor sits past EOF so the proven path full-reads
+      // every time too. `consumed <= size` rejects such a cursor outright.
+      // A different inode means the file was replaced and that entry is dead.
+      if (
+        current && current !== cached
+        && current.seqProven && current.receiptsProven
+        && current.cursor.ino === ino && current.cursor.consumed <= size
+      ) break install;
+      // Receipts and the entry that vouches for them are published together,
+      // with no await between, so no reader can see one without the other.
+      echoReceipts.set(path, keptReceipts);
+      if (current) parsedCacheBytes -= current.bytes;
       parsedCache.delete(path);
       parsedCache.set(path, {
         mtimeMs,
@@ -664,6 +810,11 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
         nextSeq,
         bytes: retainedBytes,
         cursor: { ino, consumed, fingerprint },
+        seqProven: verified,
+        // This parse only ever saw the last TAIL_LOAD_MAX_BYTES, so receipts
+        // older than that window were not rebuilt. Receipt callers go through
+        // loadEventLogSync, which refuses this entry and re-reads in full.
+        receiptsProven: false,
       });
       parsedCacheBytes += retainedBytes;
       evictParsedCache();
