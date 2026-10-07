@@ -44,13 +44,13 @@ jobsRouter.get('/', asyncHandler(async (req, res) => {
 }));
 
 jobsRouter.post('/', asyncHandler(async (req, res) => {
-  const { agentId, name, command, cwd, timeoutMin } = req.body ?? {};
+  const { agentId, name, command, cwd, timeoutMin, lane } = req.body ?? {};
   if (typeof agentId !== 'string' || !agentId.trim()) {
     res.status(400).json({ error: 'agentId is required' });
     return;
   }
   try {
-    const job = await createJob({ agentId, name, command, cwd, timeoutMin });
+    const job = await createJob({ agentId, name, command, cwd, timeoutMin, lane });
     res.status(201).json({ job: view(job, new Map(listAgents().map((a) => [a.id, a.name]))) });
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });

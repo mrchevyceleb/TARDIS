@@ -56,7 +56,7 @@ export type WindowSplit = {
   overflow: VisibleTurn[];
 };
 
-export type Seqish = { seq?: number; ev?: any };
+export type Seqish = { seq?: number; ev?: any; lane?: string };
 
 function clipTurn(text: string): string {
   const t = text.trim();
@@ -111,6 +111,16 @@ function flushPending(
 /** Visible user+assistant turns for the model window. Skips tool results,
  *  MCP dumps, hidden routine prompts, and quiet NO_UPDATE replies. */
 export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
+  // An agent's background lane streams into the same log as its home lane, so
+  // their frames interleave. Read each lane's stream on its own, then merge.
+  if (!events.some((event) => event.lane === 'bg')) return extractLaneTurns(events);
+  return [
+    ...extractLaneTurns(events.filter((event) => event.lane !== 'bg')),
+    ...extractLaneTurns(events.filter((event) => event.lane === 'bg')),
+  ].sort((a, b) => a.seq - b.seq);
+}
+
+function extractLaneTurns(events: Seqish[]): VisibleTurn[] {
   const turns: VisibleTurn[] = [];
   const openText = new Map<number, string>();
   let pendingAssistant = '';

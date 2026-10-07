@@ -60,6 +60,7 @@ import { watchThread, unwatchThread, setWatchVisible } from './threadWatch.ts';
 import { agentForChatId, brainForAgent, cliForAgentEngine } from './agents.ts';
 import { loadThreadResetEpochs, persistThreadResetEpoch } from './threadResetStore.ts';
 import { setQueuedHumanProbe } from './providerSwitch.ts';
+import { bareChatId, isBackgroundChatId } from './threadKey.ts';
 
 type ClientSelection = {
   model?: string;
@@ -209,7 +210,8 @@ function normalizeChatId(value: unknown): string {
   // clients onto the same public/default-profile thread instead of forking it.
   const withoutLegacyAccount = trimmed.replace(/__acct__[a-z0-9-]+$/i, '');
   const safe = withoutLegacyAccount.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
-  return safe || DEFAULT_CHAT_ID;
+  // A viewer always attaches to the home lane; the background lane is server-owned.
+  return (isBackgroundChatId(safe) ? bareChatId(safe) : safe) || DEFAULT_CHAT_ID;
 }
 
 function selectionRevisionOf(value: unknown): number {
@@ -255,7 +257,7 @@ function activeSelectionOf(session: AnySession | null | undefined): { model?: st
   return selected ?? {};
 }
 
-type DispatchSeqEvent = { seq: number; ev: any; at?: number };
+type DispatchSeqEvent = { seq: number; ev: any; at?: number; lane?: 'bg' };
 
 function isBananaTaggedError(se: DispatchSeqEvent): boolean {
   if (se.ev?.type !== 'error') return false;
@@ -464,9 +466,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
       if (admission.state === 'accepted') sendAdmissions.delete(entryKey);
     }
   };
+  // The person's own lane only: a busy background lane never owns the thread,
+  // so it can never reject, delay or capture a human send.
   const sessionsForLogKey = (logKey: string) => (
     [...activeClaudeSessions(), ...activeCodexSessions(), ...activeBananaSessions()]
-      .filter((session) => laneLogKey(session.cli, session.cwd, session.chatId) === logKey)
+      .filter((session) => !isBackgroundChatId(session.chatId)
+        && laneLogKey(session.cli, session.cwd, session.chatId) === logKey)
   );
   const activeSessionForLogKey = (logKey: string) => (
     sessionsForLogKey(logKey).find((session) => session.busy) ?? null
@@ -827,6 +832,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
     const dispatch = (se: DispatchSeqEvent) => {
       const sev = se.ev;
       if (se.seq > lastDeliveredSeq) lastDeliveredSeq = se.seq;
+      // The agent's background lane shares this thread's transcript, never its
+      // busy state: only its transcript frames reach the viewer, tagged so the
+      // client keeps a separate reply cursor for them.
+      if (se.lane === 'bg') {
+        if (sev.type === 'event') safeSend({ type: 'stream', event: sev.event, seq: se.seq, at: se.at, lane: 'bg' });
+        return;
+      }
       if (sev.type === 'event') {
         const admittedClientMsgId = userEchoClientMsgId(sev.event);
         if (admittedClientMsgId && cliKind && repoPath) {
@@ -1015,7 +1027,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       if (replaying) {
         const durableReplay: DispatchSeqEvent[] = [...catchUp.extra, ...events]
           .filter((event) => event.seq > replaySince)
-          .map((event) => ({ seq: event.seq, ev: event.ev as any, at: event.at }));
+          .map((event) => ({ seq: event.seq, ev: event.ev as any, at: event.at, ...(event.lane ? { lane: event.lane } : {}) }));
         const seenSeq = new Set<number>();
         const merged = [...durableReplay, ...liveReplay]
           .sort((a, b) => a.seq - b.seq)
@@ -1084,7 +1096,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           .filter((event) => event.seq > replaySince)
           .sort((a, b) => a.seq - b.seq)
           .filter((event, index, all) => index === 0 || event.seq !== all[index - 1].seq)
-          .map((event) => ({ seq: event.seq, ev: event.ev as any, at: event.at }));
+          .map((event) => ({ seq: event.seq, ev: event.ev as any, at: event.at, ...(event.lane ? { lane: event.lane } : {}) }));
         const full = collapseHistoricalToolArgs(filterReplayEvents(pending), latest)
           .map((se) => historicalDelivery(se))
           .filter((se): se is DispatchSeqEvent => se !== null);

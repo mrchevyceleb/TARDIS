@@ -35,6 +35,9 @@ const DESK_COLUMN_TITLES = { pipeline: 'Pipeline', up_next: 'Up next', in_progre
 const DESK_PRIORITIES = ['low', 'normal', 'high'];
 // Only lanes whose runner turns the call into a message (Claude) are told about reply_now.
 const REPLY_NOW_ENABLED = process.env.RIVENDELL_REPLY_NOW === '1';
+// Which of the agent's two lanes this tool server belongs to. Jobs and watches
+// report back to the lane that started them; handoffs keep chains per lane.
+const LANE = process.env.RIVENDELL_AGENT_LANE === 'bg' ? 'bg' : 'main';
 const FROM_PROP = { type: 'string', description: 'Your own teammate name. Only needed if TARDIS has not already identified you.' };
 
 const TOOLS = [
@@ -475,7 +478,7 @@ async function api(path, init, signal) {
 
 function formatAgentStatus(agent) {
   const activity = agent.status === 'working'
-    ? `WORKING NOW${agent.activeCli ? ` via ${agent.activeCli}` : ''}`
+    ? `WORKING NOW${agent.background ? ' (background)' : ''}${agent.activeCli ? ` via ${agent.activeCli}` : ''}`
     : agent.status === 'queued'
       ? `QUEUED · no live turn · ${agent.queuedMessages} handoff${agent.queuedMessages === 1 ? '' : 's'}`
       : 'IDLE';
@@ -748,6 +751,7 @@ async function callTool(name, args, signal) {
         to: args.to,
         text: args.text,
         hop: args.hop,
+        lane: LANE,
         // Version the async-default behavior at the MCP boundary. The raw HTTP
         // API keeps its historical synchronous default for non-MCP callers.
         wait: args.wait === true,
@@ -777,7 +781,7 @@ async function callTool(name, args, signal) {
     const picked = ['pid', 'file', 'command'].filter((key) => args[key] !== undefined && args[key] !== null && String(args[key]).trim() !== '');
     if (picked.length !== 1) throw new Error('Pass exactly one of pid, file, or command.');
     const agent = await resolveAgent(self, signal);
-    const body = { agentId: agent.id, note: args.note, timeoutMin: args.timeoutMin, [picked[0]]: args[picked[0]] };
+    const body = { agentId: agent.id, lane: LANE, note: args.note, timeoutMin: args.timeoutMin, [picked[0]]: args[picked[0]] };
     let watch;
     try {
       ({ watch } = await api('/api/team/watch', { method: 'POST', body: JSON.stringify(body) }, signal));
@@ -825,7 +829,7 @@ async function callTool(name, args, signal) {
     }
     if (!self) throw new Error('Start jobs from a named teammate so the result can find your thread.');
     const agent = await resolveAgent(self, signal);
-    const { job } = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ agentId: agent.id, name: args.name, command: args.command, cwd: args.cwd, timeoutMin: args.timeoutMin }) }, signal);
+    const { job } = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ agentId: agent.id, lane: LANE, name: args.name, command: args.command, cwd: args.cwd, timeoutMin: args.timeoutMin }) }, signal);
     return [
       `Started job "${job.name}" (id ${job.id.slice(0, 8)}), detached in its own scope. It survives TARDIS restarts and shows in the chat UI with a Stop button.`,
       `When it ends, a job result (exit code plus the last output) lands in your own thread as a new turn, up to ${job.timeoutMin}m from now. Until then keep working on something else or end your turn: people can message you at any time and you answer at once. Do not wait on it in the foreground. job_list shows state, job_log reads output.`,

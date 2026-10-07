@@ -12,7 +12,7 @@ teamRouter.get('/', asyncHandler(async (_req, res) => {
 }));
 
 teamRouter.post('/message', asyncHandler(async (req, res) => {
-  const { from, to, text, hop, wait, source } = req.body ?? {};
+  const { from, to, text, hop, wait, source, lane } = req.body ?? {};
   if (typeof to !== 'string' || typeof text !== 'string' || typeof from !== 'string') {
     res.status(400).json({ error: 'from, to and text are required' });
     return;
@@ -28,6 +28,7 @@ teamRouter.post('/message', asyncHandler(async (req, res) => {
   let result;
   try {
     result = await deliverTeamMessage({ from, to, text, hop, wait, source,
+      fromLane: lane === 'bg' ? 'bg' : 'main',
       // A voice recovery outbox item must survive the HTTP caller leaving too.
       signal: source === 'voice' ? undefined : aborter.signal,
     });
@@ -53,13 +54,13 @@ teamRouter.get('/watch', asyncHandler(async (_req, res) => {
 }));
 
 teamRouter.post('/watch', asyncHandler(async (req, res) => {
-  const { agentId, note, pid, file, command, timeoutMin } = req.body ?? {};
+  const { agentId, note, pid, file, command, timeoutMin, lane } = req.body ?? {};
   if (typeof agentId !== 'string' || !agentId.trim()) {
     res.status(400).json({ error: 'agentId is required' });
     return;
   }
   try {
-    const watch = await createJobWatch({ agentId, note, pid, file, command, timeoutMin });
+    const watch = await createJobWatch({ agentId, lane, note, pid, file, command, timeoutMin });
     res.status(201).json({ watch });
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });

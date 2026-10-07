@@ -19,6 +19,7 @@ import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { DESK_OWNER_NAME, DESK_ROOM_ENABLED, STATE_DIR } from '../config.ts';
 import { readDesk, type DeskCard, type DeskData } from './deskStore.ts';
+import { bareChatId } from '../chat/threadKey.ts';
 
 const TICK_MS = 60_000;
 const FIRST_TICK_MS = 15_000;
@@ -262,7 +263,7 @@ async function liveAgentIdsFromRunners(agents: HygieneAgent[]): Promise<Set<stri
   const out = new Set<string>();
   for (const session of runner.activeChatSessions()) {
     if (!session.busy) continue;
-    const id = byHome.get(session.chatId.replace(/__acct__[a-z0-9-]+$/i, ''));
+    const id = byHome.get(bareChatId(session.chatId));
     if (!id || out.has(id)) continue;
     // Claude-family and Pi lanes know a routine or job wake started the turn.
     // Codex and Grok lanes do not, so their busy time all counts.

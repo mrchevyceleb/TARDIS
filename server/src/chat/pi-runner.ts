@@ -31,10 +31,10 @@ import { assertSubscriptionLane, subscriptionEnvironment } from './subscription-
 import { computerGuidance } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import { setSessionId } from './sessions.ts';
-import { appendEventLog, appendEventLogSync, flushEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
+import { appendEventLog, appendEventLogSync, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogSync, reserveEventLogSeq } from './event-log-store.ts';
 import { maybeAutoCompact, noteUserTurn, peekEnginePrimerThroughSeq, refreshCompactForRotation, bankRotation, clearRotation } from './compaction.ts';
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
-import { isAgentThread, logKeyFor } from './threadKey.ts';
+import { isAgentThread, isBackgroundChatId, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
@@ -43,12 +43,12 @@ import { providerLabel } from './providerErrors.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { isRobotVoiceChatId, isVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STYLE_ADDENDUM, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
-import { conversationGuidanceForTurn } from './conversation-guidance.ts';
+import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiModeFor, zaiTurnOutcome, type ZaiMode } from './zaiQuota.ts';
 import { emptyTurnOrigin, noteTurnPeer, notifyHandoffSenders, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { longCallGateEnv } from './longCallGate.ts';
-import { laneMcpServers, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
+import { laneMcpServers, laneTagFor, shareBackgroundLaneEvent, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, replyNudgeEvent, ReplyWatch } from './replyNudge.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
@@ -162,6 +162,12 @@ export class PiSession {
   private turnIsContinuation = false;
   /** Has the person's message got visible text yet; see replyNudge.ts. */
   private replyWatch!: ReplyWatch;
+  /** Last shared-log seq this process was told about by the lane recap. */
+  private laneSyncSeq?: number;
+  /** Each lane runs its own native context; the transcript is shared. */
+  private get contextKey(): string {
+    return isBackgroundChatId(this.chatId) ? `${this.logKey}|bg` : this.logKey;
+  }
 
   constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model: string, effort: string, seedFirst = false, switchedFrom: string | null = null) {
     assertSubscriptionLane(cli);
@@ -199,7 +205,7 @@ export class PiSession {
     env.PI_CODING_AGENT_DIR = PI_AGENT_DIR;
     // The full lane set, not just the built-ins: without the assistant-mcp
     // proxy a Pi lane had no email, Slack or calendar tools at all.
-    env.RIVENDELL_PI_MCP = JSON.stringify(laneMcpServers(agentForChatId(chatId)?.name));
+    env.RIVENDELL_PI_MCP = JSON.stringify(laneMcpServers(agentForChatId(chatId)?.name, isBackgroundChatId(chatId)));
     env.SAMWISE_ACCOUNT = cli;
     // Marks this as a TARDIS agent turn for the long-call gate extension (see longCallGate.ts).
     Object.assign(env, longCallGateEnv(chatId));
@@ -411,7 +417,7 @@ export class PiSession {
         const usage = { input_tokens: u.input ?? 0, output_tokens: u.output ?? 0, cache_read_input_tokens: u.cacheRead ?? 0, cache_creation_input_tokens: 0 };
         // Same context-size accounting as the Claude lane: the last assistant
         // message of a turn carries the live window size.
-        recordContextUsage(this.logKey, 'pi', usage);
+        recordContextUsage(this.contextKey, 'pi', usage);
         const msgId = this.currentMsgId ?? randomUUID();
         const textOut = content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('');
         if (textOut.trim()) { this.lastAssistantText = textOut; this.replyWatch.noteText(); }
@@ -535,7 +541,7 @@ export class PiSession {
     // Codex found hundreds of aged-out turns to fold at once. Past the 200k
     // budget the lane now rotates at this boundary, exactly like Claude.
     else if (!failed) {
-      const rotationDue = contextRotationDue(this.logKey);
+      const rotationDue = contextRotationDue(this.contextKey);
       const housekeeping = async () => {
         if (rotationDue && (await this.rotateContextAtBoundary())) return;
         await this.maybeCompact();
@@ -568,7 +574,7 @@ export class PiSession {
    *  the last 50 turns (and the full computer rules block).
    *  Pi lanes hold no background work in-process, so busy just means mid-turn. */
   private async rotateContextAtBoundary(): Promise<boolean> {
-    if (!contextRotationDue(this.logKey) || this.turnStartedAt !== null || this.disposed) return false;
+    if (!contextRotationDue(this.contextKey) || this.turnStartedAt !== null || this.disposed) return false;
     const refreshed = await refreshCompactForRotation({
       key: this.logKey, cli: this.cli, chatId: this.chatId, events: this.eventLog,
       isBusy: () => this.turnStartedAt !== null || this.disposed,
@@ -581,7 +587,7 @@ export class PiSession {
       return true;
     }
     bankRotation(this.logKey);
-    recordContextRotation(this.logKey);
+    recordContextRotation(this.contextKey);
     this.shutdown('context-budget');
     return true;
   }
@@ -631,8 +637,14 @@ export class PiSession {
     if (sinceSeq >= 0) for (const se of this.eventLog) if (se.seq > sinceSeq) fn(se);
     return () => { this.listeners.delete(fn); };
   }
-  reserveSeq(): number { return this.nextSeq++; }
-  latestSeq(): number { return this.nextSeq - 1; }
+  /** Shared per-log allocator: an agent's home and background lanes write one
+   *  log, so two sessions must never hand out the same seq. */
+  reserveSeq(): number {
+    const seq = reserveEventLogSeq(this.logKey, this.nextSeq);
+    this.nextSeq = seq + 1;
+    return seq;
+  }
+  latestSeq(): number { return latestEventLogSeq(this.logKey, this.nextSeq - 1); }
   async prewarm(): Promise<void> { await this.ready; }
   isPrewarming(): boolean { return !this.initSeen && !this.disposed; }
   listenerCount(): number { return this.listeners.size; }
@@ -712,7 +724,9 @@ export class PiSession {
     const seed = wantSeed ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, this.eventLog.slice()) : '';
     // A message that reaches a thread whose last turn a provider switch cut
     // off (before, or instead of, the automatic continue) finishes that work.
-    const providerCut = startsNewTurn && !continuing ? providerCutGuidance(this.eventLog) : '';
+    const providerCut = startsNewTurn && !continuing
+      ? providerCutGuidance(this.eventLog.filter((se) => !se.lane === !isBackgroundChatId(this.chatId)))
+      : '';
     if (opts.signal?.aborted) { abandon(); return; }
 
     let attachments: Array<{ id: string; mediaType: string }> = [];
@@ -756,6 +770,9 @@ export class PiSession {
       // A continue keeps the voice of the turn it finishes.
       hidden: Boolean(continuing && !continuing.origin.human),
     });
+    const laneContext = startsNewTurn
+      ? laneContextForTurn({ chatId: this.chatId, logKey: this.logKey, sinceSeq: this.laneSyncSeq ?? null, throughSeq: historyThroughSeq, seeded: Boolean(seed) })
+      : '';
     // Auto-recall: recorded knowledge (lane memory notes, Desk cards,
     // assistant-mcp memories) in front of every new human or teammate turn;
     // automation traffic never spends the search, and every source fails
@@ -766,7 +783,7 @@ export class PiSession {
       : '';
     if (opts.signal?.aborted) { abandon(); return; }
     const continuation = isAgentThread(this.chatId)
-      ? ['<rivendell-continuation>', `Warm continuation of the existing conversation. Host time: ${new Date().toString()}.`, 'Do not repeat session-start rituals.', '</rivendell-continuation>', ...(guidance ? ['', guidance] : []), ...(recall ? ['', recall] : []), ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []), '', promptText].join('\n')
+      ? ['<rivendell-continuation>', `Warm continuation of the existing conversation. Host time: ${new Date().toString()}.`, 'Do not repeat session-start rituals.', '</rivendell-continuation>', ...(guidance ? ['', guidance] : []), ...(laneContext ? ['', laneContext] : []), ...(recall ? ['', recall] : []), ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []), '', promptText].join('\n')
       : recall ? `${recall}\n\n${promptText}` : promptText;
     const humanTurn = continuing ? continuing.origin.human : !opts.peerFrom && opts.peerFromRole !== 'automation';
     // Full computer rules ride the seed message that starts a fresh pi window; later
@@ -799,6 +816,8 @@ export class PiSession {
       this.emit({ type: 'error', message: `pi rejected the prompt: ${response.error ?? 'unknown'}` });
       return;
     }
+    // The recap reached the model; the next turn recaps only what came after.
+    if (startsNewTurn) this.laneSyncSeq = historyThroughSeq;
     if (wantSeed) {
       this.seedWindowOnNextTurn = false;
       // The seed was delivered, so the rotation debt that asked for it is paid.
@@ -833,7 +852,7 @@ export class PiSession {
     msg = redactComputerImages(msg);
     if (this.disposed || isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
-    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now() };
+    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now(), ...laneTagFor(this.chatId) };
     const persisted = { ...se, eng: this.cli, mdl: this.spawnModel };
     const durableUserEcho = msg.type === 'event' && (msg as any).event?.type === '_user_echo';
     if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) throw new Error('could not durably accept the user message');
@@ -841,5 +860,6 @@ export class PiSession {
     if (this.eventLog.length > EVENT_BUFFER_SIZE) this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
     if (!durableUserEcho) appendEventLog(this.logKey, persisted);
     for (const fn of this.listeners) fn(se);
+    shareBackgroundLaneEvent(this, se);
   }
 }

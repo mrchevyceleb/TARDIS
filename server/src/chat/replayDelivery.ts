@@ -155,6 +155,7 @@ export function collapseHistoricalToolArgs<T extends { seq: number; ev: unknown 
   historyThrough: number,
 ): T[] {
   let runIndex: number | null = null;
+  let runLane: unknown;
   let runFrames: T[] = [];
   const out: T[] = [];
   let changed = false;
@@ -190,8 +191,11 @@ export function collapseHistoricalToolArgs<T extends { seq: number; ev: unknown 
       out.push(frame);
       continue;
     }
-    if (runIndex !== null && index !== runIndex) flush();
+    // Home and background lanes interleave in one log; never merge across them.
+    const lane = (frame as { lane?: unknown }).lane;
+    if (runIndex !== null && (index !== runIndex || lane !== runLane)) flush();
     runIndex = index;
+    runLane = lane;
     runFrames.push(frame);
   }
   flush();
