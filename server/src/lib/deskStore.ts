@@ -166,6 +166,22 @@ function clip(value: unknown, max: number): string {
   return typeof value === 'string' ? value.replace(/\r\n?/g, '\n').trim().slice(0, max) : '';
 }
 
+/** Write-path clip: silently truncating on save loses data (Kip's Oct 7 backlog loss), so over-limit text is rejected with a 400 instead. */
+function requireClip(value: unknown, max: number, field: string): string {
+  if (typeof value === 'string' && value.replace(/\r\n?/g, '\n').trim().length > max) {
+    throw new DeskError(400, `${field} must be ${max} characters or fewer`);
+  }
+  return clip(value, max);
+}
+
+/** Write-path one-line fields: same rejection rule with one-line normalisation. */
+function requireOneLine(value: unknown, max: number, field: string): string {
+  if (typeof value === 'string' && value.replace(/\s+/g, ' ').trim().length > max) {
+    throw new DeskError(400, `${field} must be ${max} characters or fewer`);
+  }
+  return oneLine(value, max);
+}
+
 function oneLine(value: unknown, max: number): string {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '';
 }
@@ -478,7 +494,7 @@ function findCard(data: DeskData, id: string): DeskCard {
 }
 
 function requireTitle(value: unknown): string {
-  const title = oneLine(value, DESK_LIMITS.title);
+  const title = requireOneLine(value, DESK_LIMITS.title, 'title');
   if (!title) throw new DeskError(400, 'title is required');
   return title;
 }
@@ -604,7 +620,7 @@ export function createTodo(input: TodoInput, from: DeskActor): Promise<DeskTodo>
       priority: input.priority === undefined || input.priority === '' ? 'normal' : requirePriority(input.priority),
       status: 'open',
     };
-    const detail = clip(input.detail, DESK_LIMITS.detail);
+    const detail = requireClip(input.detail, DESK_LIMITS.detail, 'detail');
     if (detail) todo.detail = detail;
     const due = requireDue(input.due);
     if (due) todo.due = due;
@@ -625,7 +641,7 @@ export function updateTodo(id: string, input: TodoInput): Promise<DeskTodo> {
     const todo = findTodo(data, id);
     if (input.title !== undefined) todo.title = requireTitle(input.title);
     if (input.detail !== undefined) {
-      const detail = clip(input.detail, DESK_LIMITS.detail);
+      const detail = requireClip(input.detail, DESK_LIMITS.detail, 'detail');
       if (detail) todo.detail = detail; else delete todo.detail;
     }
     if (input.due !== undefined) {
@@ -782,9 +798,9 @@ export function createCard(input: CardInput, owner: DeskActor, by: DeskActor, op
       columnSince: now,
       createdBy: by,
     };
-    const description = clip(input.description, DESK_LIMITS.description);
+    const description = requireClip(input.description, DESK_LIMITS.description, 'description');
     if (description) card.description = description;
-    const project = oneLine(input.project, DESK_LIMITS.project);
+    const project = requireOneLine(input.project, DESK_LIMITS.project, 'project');
     if (project) card.project = project;
     pruneCards(data);
     placeCard(data, card, typeof input.index === 'number' ? input.index : undefined);
@@ -797,11 +813,11 @@ export function updateCard(id: string, input: CardInput, owner?: DeskActor): Pro
     const card = findCard(data, id);
     if (input.title !== undefined) card.title = requireTitle(input.title);
     if (input.description !== undefined) {
-      const description = clip(input.description, DESK_LIMITS.description);
+      const description = requireClip(input.description, DESK_LIMITS.description, 'description');
       if (description) card.description = description; else delete card.description;
     }
     if (input.project !== undefined) {
-      const project = oneLine(input.project, DESK_LIMITS.project);
+      const project = requireOneLine(input.project, DESK_LIMITS.project, 'project');
       if (project) card.project = project; else delete card.project;
     }
     if (input.priority !== undefined) card.priority = requirePriority(input.priority);
@@ -840,7 +856,7 @@ export function moveCard(id: string, column: unknown, index?: unknown): Promise<
 export function commentCard(id: string, text: unknown, author: DeskActor): Promise<{ card: DeskCard; comment: DeskComment }> {
   return mutate((data, now) => {
     const card = findCard(data, id);
-    const body = clip(text, DESK_LIMITS.comment);
+    const body = requireClip(text, DESK_LIMITS.comment, 'text');
     if (!body) throw new DeskError(400, 'text is required');
     if (card.comments.length >= DESK_LIMITS.commentsPerCard) {
       throw new DeskError(409, 'This card has too many comments; start a fresh card for the next phase.');
