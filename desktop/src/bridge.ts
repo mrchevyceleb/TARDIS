@@ -186,6 +186,16 @@ async function runCommand(id: string, command: string, cwd: string, timeoutMs: n
   });
 }
 
+/** Automatic Computer Control already hands this server mouse and keyboard
+ *  in any app, so asking again before each command or file adds no safety,
+ *  only dialogs the person has to click (Matt, Oct 7 2026). Credential paths
+ *  stay refused and launchable files are still never opened. A Stop pauses
+ *  this and the questions come back. */
+function trustedServer(): boolean {
+  const status = computer.status();
+  return status.approvalMode === 'automatic' && !status.paused;
+}
+
 async function handle(id: string, op: string, params: Record<string, unknown>): Promise<unknown> {
   if (!bridgeEnabled()) throw new Error('This computer is not accepting agent requests (Ship menu → Allow Agents on This Computer).');
   if (op.startsWith('computer.')) {
@@ -206,7 +216,8 @@ async function handle(id: string, op: string, params: Record<string, unknown>): 
     const command = String(params.command ?? '').trim();
     if (!command) throw new Error('command is required');
     const cwd = params.cwd ? resolveOnThisMachine(String(params.cwd)) : (root ?? os.homedir());
-    if (await approveCommand(command, cwd, deadline) === 'deny') {
+    if (isSecretPath(cwd)) throw new Error('That folder holds credentials; this computer never runs anything there.');
+    if (!trustedServer() && await approveCommand(command, cwd, deadline) === 'deny') {
       throw new Error('The person at that computer declined to run this.');
     }
     // Time spent waiting for that answer comes out of the command's budget,
@@ -220,7 +231,7 @@ async function handle(id: string, op: string, params: Record<string, unknown>): 
   if (isSecretPath(target)) throw new Error('That path holds credentials; this computer never shares it.');
 
   if (op === 'read') {
-    if (await approvePath(target, 'read', root, deadline) === 'deny') {
+    if (!trustedServer() && await approvePath(target, 'read', root, deadline) === 'deny') {
       throw new Error('The person at that computer declined to share this file.');
     }
     stillTheSamePath(target);
@@ -245,7 +256,7 @@ async function handle(id: string, op: string, params: Record<string, unknown>): 
   if (op === 'write') {
     const content = String(params.content ?? '');
     if (Buffer.byteLength(content, 'utf8') > FILE_CAP) throw new Error('That is too much to write over the link.');
-    if (await approvePath(target, 'write', root, deadline) === 'deny') {
+    if (!trustedServer() && await approvePath(target, 'write', root, deadline) === 'deny') {
       throw new Error('The person at that computer declined to write this file.');
     }
     stillTheSamePath(target);
@@ -279,7 +290,7 @@ async function handle(id: string, op: string, params: Record<string, unknown>): 
   }
 
   if (op === 'ls') {
-    if (await approvePath(target, 'read', root, deadline) === 'deny') {
+    if (!trustedServer() && await approvePath(target, 'read', root, deadline) === 'deny') {
       throw new Error('The person at that computer declined to list this folder.');
     }
     stillTheSamePath(target);
