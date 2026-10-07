@@ -3,7 +3,10 @@
 // the slash-command popover (↑/↓ wrap, Enter/Tab pick, Esc close), the
 // ready → stop send-button state machine, auto-grow to the mobile/desktop cap,
 // Enter-sends / Shift+Enter-newlines, the egg-phrase spark bursts, and
-// image attachment (paste, drag/drop, file picker) threaded through send/steer.
+// attachment (paste, drag/drop, file picker) threaded through send/steer:
+// images under the vision cap go as base64 exactly as before; any other file
+// (and any oversized image) streams to the server with a progress bar and
+// lands in the draft as a path line the receiving agent can open.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CommandEntry } from '../../data/types';
@@ -11,9 +14,16 @@ import { ArrowUp, Plus, SquarePen, StopSquare } from './icons';
 import { isEggPhrase } from '../../../theme/eggs';
 import { RobotControl } from '../RobotControl';
 import { ChatDictation } from '../../dictation/ChatDictation';
+import { BIG_UPLOAD_MAX_BYTES, humanFileSize, uploadBigFile } from '../../../data/api';
 
 export type SendImage = { mediaType: string; base64: string; previewDataUrl?: string };
 type PendingImage = { id: string; mediaType: string; base64: string; previewUrl: string };
+type PendingUpload = { id: string; name: string; size: number; progress: number; error?: string };
+
+/** Images up to this size go as base64 vision attachments, exactly as before
+ *  (mirrors the server's per-image cap). Anything bigger, and any non-image,
+ *  streams to the server's upload store instead. */
+const IMAGE_DIRECT_MAX = 12 * 1024 * 1024;
 
 export type ComposerProps = {
   chatId?: string;
@@ -32,7 +42,8 @@ export type ComposerProps = {
   hint?: React.ReactNode;
   attachButton?: React.ReactNode;
   attachMenu?: React.ReactNode;
-  /** Accept image attachments (paste / drop / picker). Defaults to true. */
+  /** Accept attachments (images as vision, any other file as an upload).
+   *  Defaults to true. */
   acceptImages?: boolean;
   /** Parent (mobile) can trigger the file picker by calling this ref. */
   openFileInputRef?: React.MutableRefObject<() => void>;
@@ -85,6 +96,8 @@ export function Composer(props: ComposerProps) {
   const [popSel, setPopSel] = useState(0);
   const [popDismissed, setPopDismissed] = useState(false);
   const [images, setImages] = useState<PendingImage[]>([]);
+  const [uploads, setUploads] = useState<PendingUpload[]>([]);
+  const uploadAborts = useRef(new Map<string, () => void>());
   const [phIdx, setPhIdx] = useState(0);
   const [dictating,setDictating]=useState(false);
   const latest=useRef(props);latest.current=props;
@@ -128,13 +141,26 @@ export function Composer(props: ComposerProps) {
     },
     [images],
   );
+  // Unmount mid-upload aborts it (the path line never landed, so the draft
+  // must not pretend the file is attached).
+  useEffect(
+    () => () => {
+      for (const abort of uploadAborts.current.values()) abort();
+      uploadAborts.current.clear();
+    },
+    [],
+  );
 
   const ingest = async (files: FileList | File[]) => {
     if (!acceptImages) return;
     const next: PendingImage[] = [];
     for (const f of Array.from(files)) {
-      const img = await fileToImage(f);
-      if (img) next.push(img);
+      if (f.type.startsWith('image/') && f.size <= IMAGE_DIRECT_MAX) {
+        const img = await fileToImage(f);
+        if (img) next.push(img);
+        continue;
+      }
+      void uploadFile(f);
     }
     if (next.length) setImages((prev) => [...prev, ...next]);
   };
@@ -144,6 +170,37 @@ export function Composer(props: ComposerProps) {
       if (t) URL.revokeObjectURL(t.previewUrl);
       return prev.filter((i) => i.id !== id);
     });
+  const uploadFile = (f: File) => {
+    const id = `up${Math.random().toString(36).slice(2, 8)}`;
+    setUploads((prev) => [...prev, { id, name: f.name, size: f.size, progress: 0 }]);
+    if (f.size > BIG_UPLOAD_MAX_BYTES) {
+      setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, error: 'over the 16 GB cap' } : u)));
+      return;
+    }
+    uploadBigFile(f, {
+      onProgress: (fraction) => setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, progress: fraction } : u))),
+      register: (abort) => uploadAborts.current.set(id, abort),
+    }).then(
+      (saved) => {
+        uploadAborts.current.delete(id);
+        setUploads((prev) => prev.filter((u) => u.id !== id));
+        // The path line IS the attachment: whichever agent gets the message
+        // can open the file at that path.
+        const line = `${saved.name} (${humanFileSize(saved.bytes)}): ${saved.path}`;
+        const cur = taRef.current?.value ?? props.value;
+        props.onChange(cur ? `${cur.trimEnd()}\n${line}` : line);
+      },
+      (error) => {
+        uploadAborts.current.delete(id);
+        setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, error: (error as Error).message } : u)));
+      },
+    );
+  };
+  const removeUpload = (id: string) => {
+    uploadAborts.current.get(id)?.();
+    uploadAborts.current.delete(id);
+    setUploads((prev) => prev.filter((u) => u.id !== id));
+  };
 
   const grow = () => {
     const el = taRef.current;
@@ -173,6 +230,15 @@ export function Composer(props: ComposerProps) {
     const imgs = payload();
     const refs = (props.refCount ?? 0) > 0;
     const hasLiveContent = Boolean(v || imgs?.length || refs);
+    // A streaming upload is still writing its file; its path line is not in
+    // the draft yet, so sending or steering now would drop it. An explicit
+    // Stop tap on an empty draft still interrupts the running agent (it
+    // sends nothing), so an in-flight upload never locks the person out of
+    // Stop (review 1).
+    if (uploads.some((u) => !u.error)) {
+      if (props.busy && allowStop && !hasLiveContent) props.onStop?.();
+      return;
+    }
     // While the backend still owns a turn, any text OR image is queued guidance.
     // Only an explicit click/tap on an empty red Stop button may cancel.
     // Keyboard Enter with an empty/stale draft is a no-op, never an interrupt.
@@ -234,21 +300,34 @@ export function Composer(props: ComposerProps) {
     }
   };
 
+  // The keep-open note is for phone surfaces: a phone browser suspends
+  // background tabs and kills the upload. The mobile prop covers the mobile
+  // shells; the Grok phone surface renders this composer desktop-shaped, so
+  // fall back to the viewport shape (a snapshot check; the chip re-renders
+  // on every progress tick, so it stays fresh while uploading).
+  const phoneSurface = mobile || (typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches);
   const trimmed = props.value.trim();
   const refCount = props.refCount ?? 0;
   const hasContent = trimmed.length > 0 || images.length > 0 || refCount > 0;
-  const ready = hasContent && !props.busy;
+  const uploading = uploads.some((u) => !u.error);
+  const ready = hasContent && !props.busy && !uploading;
   // Text and image-only drafts both queue safely. An attached image must never
   // leave the button in destructive Stop mode.
-  const canSteer = props.busy && hasContent && Boolean(props.onSteer);
+  const canSteer = props.busy && hasContent && !uploading && Boolean(props.onSteer);
+  // Stop is shown exactly when a tap really stops: an empty-draft Stop still
+  // interrupts while an upload streams, but with draft content the tap is
+  // gated (the path line is not in the draft yet), so the button must not
+  // promise Stop then. The upload chip carries that state instead. A busy
+  // composer with no onStop handler renders Send, never a no-op Stop.
+  const stopLive = props.busy && Boolean(props.onStop) && !canSteer && !(uploading && hasContent);
 
   const sendBtn = (extraClass = '') => (
     <button
       ref={sendRef}
       type="button"
-      className={`send${ready ? ' ready' : ''}${canSteer ? ' steer' : ''}${props.busy && !canSteer ? ' streaming' : ''} ${extraClass}`}
-      aria-label={canSteer ? 'Send after the current response' : props.busy ? 'Stop generating' : 'Send'}
-      title={canSteer ? 'Send after the current response' : props.busy ? 'Stop generating' : 'Send'}
+      className={`send${ready ? ' ready' : ''}${canSteer ? ' steer' : ''}${stopLive ? ' streaming' : ''} ${extraClass}`}
+      aria-label={canSteer ? 'Send after the current response' : stopLive ? 'Stop generating' : uploading ? 'Uploading a file' : 'Send'}
+      title={canSteer ? 'Send after the current response' : stopLive ? 'Stop generating' : uploading ? 'Uploading a file' : 'Send'}
       onPointerDown={(e) => {
         if (e.pointerType !== 'touch') return;
         // iOS/Android blur the textarea first; the keyboard viewport resize can
@@ -301,7 +380,7 @@ export function Composer(props: ComposerProps) {
       {mobile && (props.modelChip || props.busy) ? (
         <div className="dock-meta">
           {props.modelChip}
-          {props.busy ? <span className="steer-cue">Reply will send next ↪</span> : null}
+          {props.busy && !uploading ? <span className="steer-cue">Reply will send next ↪</span> : null}
         </div>
       ) : null}
       {popOpen ? (
@@ -317,10 +396,23 @@ export function Composer(props: ComposerProps) {
       ) : null}
       {props.chatId && <RobotControl />}
       {props.attachMenu}
-      <div className={`composer${images.length > 0 || refCount > 0 ? ' has-attach' : ''}${dictating ? ' dictating' : ''}`}>
-        {images.length > 0 || refCount > 0 ? (
+      <div className={`composer${images.length > 0 || refCount > 0 || uploads.length > 0 ? ' has-attach' : ''}${dictating ? ' dictating' : ''}`}>
+        {images.length > 0 || refCount > 0 || uploads.length > 0 ? (
           <div className={`attach-tray${refCount > 0 ? ' has-refs' : ''}`}>
             {refCount > 0 ? props.refChips : null}
+            {uploads.map((u) => (
+              <div key={u.id} className={`up-chip${u.error ? ' up-err' : ''}`}>
+                <div className="up-bar" style={{ width: `${Math.round((u.error ? 0 : u.progress) * 100)}%` }} />
+                <span className="up-txt">
+                  {u.error
+                    ? `${u.name} · ${u.error}`
+                    : `${u.name} · ${Math.round(u.progress * 100)}%${phoneSurface ? ' · keep this tab open' : ''}`}
+                </span>
+                <button type="button" className="attach-x" aria-label="remove" onClick={() => removeUpload(u.id)}>
+                  ×
+                </button>
+              </div>
+            ))}
             {images.map((img) => (
               <div key={img.id} className="attach-thumb">
                 <img src={img.previewUrl} alt="attached" />
@@ -347,7 +439,7 @@ export function Composer(props: ComposerProps) {
             if (!acceptImages) return;
             const files: File[] = [];
             for (const item of Array.from(e.clipboardData.items)) {
-              if (item.kind === 'file' && item.type.startsWith('image/')) {
+              if (item.kind === 'file') {
                 const f = item.getAsFile();
                 if (f) files.push(f);
               }
@@ -365,7 +457,7 @@ export function Composer(props: ComposerProps) {
           }}
           onDrop={(e) => {
             if (!acceptImages) return;
-            const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/'));
+            const files = Array.from(e.dataTransfer.files);
             if (files.length) {
               e.preventDefault();
               void ingest(files);
@@ -411,7 +503,6 @@ export function Composer(props: ComposerProps) {
         <input
           type="file"
           ref={fileInputRef}
-          accept="image/*"
           multiple
           style={{ display: 'none' }}
           onChange={(e) => {

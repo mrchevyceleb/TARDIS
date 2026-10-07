@@ -161,7 +161,7 @@ export function Mobile({ s, picker, repo, agent }: ShellViewProps) {
                         openFileInput.current();
                       }}
                     >
-                      <Camera /> A photograph
+                      <Camera /> A photo or file
                     </button>
                     <button
                       type="button"

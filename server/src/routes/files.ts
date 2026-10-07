@@ -1,11 +1,13 @@
 import express, { Router, raw } from 'express';
-import { createReadStream } from 'node:fs';
-import { realpath, stat } from 'node:fs/promises';
-import { extname, basename, resolve as resolvePath, sep as pathSep } from 'node:path';
+import { createReadStream, createWriteStream, mkdirSync } from 'node:fs';
+import { link, realpath, rm, stat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { extname, basename, join, resolve as resolvePath, sep as pathSep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { safeFileName, storeWorkspaceFile, workspaceRoot } from '../lib/workspace.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { emitScribe } from '../worker/scribe.ts';
+import { STATE_DIR } from '../config.ts';
 import { mapWorkspaceError } from './docs.ts';
 import { asyncHandler } from './helpers.ts';
 
@@ -248,3 +250,121 @@ filesRouter.post('/upload', requireTrustedOrigin, raw({ type: UPLOAD_TYPE, limit
     res.status(status).json({ error: message });
   }
 }));
+
+// ---- big-file streaming upload (any type, multi-GB) -------------------------------
+
+/** Big uploads land here, OUTSIDE the Syncthing-synced workspace so a 5 GB
+ *  video never syncs to Matt's PC and iPad, and outside the chat-attachment
+ *  store so the 2 GB attachment sweep never touches them. Per-day folders. */
+const UPLOAD_STREAM_DIR = join(STATE_DIR, 'uploads');
+/** Same cap as Riley's :8798 phone upload page. */
+const UPLOAD_STREAM_MAX_BYTES = 16 * 1024 * 1024 * 1024;
+
+// Streams any file type straight to disk (Riley's PUT pattern): the body is
+// piped, never buffered in memory, so a multi-GB phone upload cannot balloon
+// RAM. Same two guards as /upload above: octet-stream only (a non-simple
+// type, so a cross-site POST needs a CORS preflight this server never
+// answers) and a trusted Origin. The response carries the saved absolute
+// path so the client can put it in the message and any agent can open the
+// file. Node's requestTimeout is handled globally in index.ts (see the
+// comment there: on Node 25 it is measured from request start with no reset
+// on body data, so even an actively-flowing multi-GB body longer than the
+// deadline would be cut).
+filesRouter.post('/upload-stream', requireTrustedOrigin, (req, res) => {
+  const type = String(req.headers['content-type'] ?? '').toLowerCase();
+  if (!type.startsWith(UPLOAD_TYPE)) {
+    res.status(415).json({ error: `send the file as ${UPLOAD_TYPE}` });
+    return;
+  }
+  const expected = Number(req.headers['content-length'] ?? 0);
+  if (!Number.isFinite(expected) || expected < 0 || expected > UPLOAD_STREAM_MAX_BYTES) {
+    res.status(400).json({ error: 'Content-Length must be between 0 bytes and 16 GB' });
+    return;
+  }
+  const name = safeFileName(String(req.query.name ?? '').trim().split(/[\\/]/).pop() ?? '') || 'file';
+  const dir = join(UPLOAD_STREAM_DIR, new Date().toISOString().slice(0, 10));
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Unique exclusive temp file: two concurrent uploads of the same name never
+  // share a .part file or race one destination (review 1). The final name is
+  // claimed atomically with link(2), which never overwrites; EEXIST just takes
+  // the next numeric suffix (Riley's -2, -3, ...).
+  const ext = extname(name);
+  const stem = name.slice(0, name.length - ext.length);
+  const temp = join(dir, `.${stem}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}.part`);
+  const out = createWriteStream(temp, { mode: 0o600, flags: 'wx' });
+  let received = 0;
+  let settled = false;
+  // Cleanup waits for the stream to really close before unlinking the temp
+  // file (a rm racing an open descriptor can fail and leave residue), and a
+  // failed cleanup is logged, never swallowed (review 1).
+  const outClosed = new Promise<void>((resolve) => out.on('close', resolve));
+  const cleanupTemp = () => {
+    out.destroy();
+    void outClosed
+      .then(() => rm(temp, { force: true }))
+      .catch((err) => console.warn('[files] upload temp cleanup failed:', (err as Error)?.message ?? err));
+  };
+  const fail = (status: number, message: string) => {
+    if (settled) return;
+    settled = true;
+    if (!res.headersSent) {
+      // The error response must leave the door before the socket dies:
+      // destroying right after json() can eat the response before it
+      // flushes (through the tailscale proxy this surfaces as a generic
+      // network failure instead of the 4xx). 'close' fires once the
+      // response is handed off, or right away if the client already
+      // vanished, so the socket never lingers either way.
+      res.setHeader('Connection', 'close');
+      res.status(status).json({ error: message });
+      res.on('close', () => req.destroy());
+    } else {
+      req.destroy();
+    }
+    cleanupTemp();
+  };
+  req.on('data', (chunk: Buffer) => {
+    received += chunk.length;
+    if (received > UPLOAD_STREAM_MAX_BYTES) fail(413, 'over the 16 GB cap');
+  });
+  req.on('error', () => fail(400, 'the upload stream failed'));
+  req.on('close', () => {
+    if (!settled && !req.complete) fail(400, 'the upload was cut off');
+  });
+  out.on('error', () => fail(500, 'could not write the upload'));
+  req.pipe(out);
+  out.on('finish', () => {
+    if (settled) return;
+    if (received !== expected) {
+      fail(400, 'the upload ended early');
+      return;
+    }
+    // link(2) claims the destination atomically and never overwrites. settled
+    // only flips after the claim succeeds (review 1): a claim error still
+    // answers the request with 500 and cleans up the temp file.
+    (async () => {
+      for (let i = 1; ; i += 1) {
+        const target = join(dir, i === 1 ? name : `${stem}-${i}${ext}`);
+        try {
+          await link(temp, target);
+          return target;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err;
+        }
+      }
+    })().then(
+      (dest) => {
+        settled = true;
+        console.log(`[files] stream upload saved ${dest} (${received} bytes)`);
+        if (!res.destroyed) res.status(201).json({ path: dest, name: basename(dest), bytes: received });
+        // The claim already made the file visible; the temp unlink is
+        // best-effort, logged on failure, never a client error. It waits for
+        // the stream's close (finish precedes close) so it can never race
+        // the descriptor, same rule as the failure cleanup.
+        void outClosed
+          .then(() => rm(temp, { force: true }))
+          .catch((err) => console.warn('[files] upload temp unlink failed:', (err as Error)?.message ?? err));
+      },
+      () => fail(500, 'could not save the upload'),
+    );
+  });
+});
