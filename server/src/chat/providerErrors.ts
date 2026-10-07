@@ -6,10 +6,14 @@ export type TerminalProviderError = {
   retryable?: boolean;
   usageLimit?: boolean;
   resetTime?: string;
-  limitKind?: 'session' | 'weekly' | 'model' | 'usage';
+  limitKind?: 'session' | 'weekly' | 'monthly' | 'model' | 'usage';
+  /** True when the turn died because the history did not fit the model's
+   *  context window: the runner uses this to reseed instead of resuming the
+   *  oversized session (Oct 7 review). */
+  contextLength?: boolean;
 };
 
-const NATIVE_LIMIT = /^\s*(?:You(?:['’]ve| have) hit your (?:(?:session|weekly|usage|Sonnet|Opus|5[- ]hour) )?limit\b|Claude AI usage limit reached\b|5[- ]hour limit reached\b)/i;
+const NATIVE_LIMIT = /^\s*(?:You(?:['’]ve| have) hit your (?:(?:session|weekly|usage|monthly spend|Sonnet|Opus|5[- ]hour) )?limit\b|Claude AI usage limit reached\b|5[- ]hour limit reached\b)/i;
 
 /** Preserve only a clock and a valid timezone, never the provider's payload. */
 function safeResetTime(text: string): string | undefined {
@@ -26,6 +30,15 @@ function safeResetTime(text: string): string | undefined {
 function usageLimitError(cli: string, text: string, trustedReason = false): TerminalProviderError | null {
   if (!['claude', 'assistant'].includes(cli) || !(trustedReason ? /^usage limit(?: \((session|weekly|model|usage)\))?(?:;|$)/i.test(text) : NATIVE_LIMIT.test(text))) return null;
   const resetTime = safeResetTime(text);
+  // The native monthly-spend string names the WEEKLY limit's reset time, not
+  // the monthly cap's (Oct 7 review): never claim the spend cap "resets"
+  // then. The actionable step is raising the cap at settings/usage.
+  if (/monthly spend/i.test(text)) {
+    return {
+      message: `Claude's monthly spend limit is reached. Raise it at claude.ai/settings/usage, or switch brains and try again later.`,
+      code: '429', retryable: true, usageLimit: true, limitKind: 'monthly',
+    };
+  }
   const limitKind = /weekly/i.test(text) ? 'weekly' : /Sonnet|Opus|\(model\)/i.test(text) ? 'model' : /session|5[- ]hour/i.test(text) ? 'session' : 'usage';
   return {
     message: `Claude's usage window is full. ${resetTime ? `It resets at ${resetTime}.` : 'Try again after the limit resets.'}`,
@@ -236,6 +249,13 @@ export function terminalExecutionError(
       retryable: true,
     };
   }
+  // The provider's own native limit text must classify as a usage window
+  // even when it mentions a spend limit (Oct 3: the monthly-spend native
+  // string read as the runner's budget), so this check runs BEFORE the
+  // budget branch. Only NATIVE_LIMIT-shaped text passes; a runner-budget
+  // signal still falls through to the branch below.
+  const usageLimit = usageLimitError(cli, syntheticReason ?? '', true) ?? usageLimitError(cli, detail) ?? usageLimitError(cli, lastTurnText ?? '');
+  if (usageLimit) return usageLimit;
   if (/budget|spend limit|cost limit/i.test(signal)) {
     return {
       message: `${provider}'s runner reached its configured budget for this turn. Try a smaller request.`,
@@ -243,8 +263,19 @@ export function terminalExecutionError(
       retryable: true,
     };
   }
-  const usageLimit = usageLimitError(cli, syntheticReason ?? '', true) ?? usageLimitError(cli, detail);
-  if (usageLimit) return usageLimit;
+  // History too big for the model's context window and compaction could not
+  // save the turn (Oct 3: the native "Prompt is too long" wrapper read as a
+  // dead local runner). Same recovery class as a failed compact: a fresh
+  // message continues from the saved summary. The flag drives the runner's
+  // reseed so an oversized session is never resumed (Oct 7 review).
+  if (isContextLengthRejection(signal)) {
+    return {
+      message: `${provider} could not fit this chat's history into its context window. Start a fresh chat or trim the largest items, then send again.`,
+      code,
+      retryable: true,
+      contextLength: true,
+    };
+  }
   // Two warm-process failures that read as crashes but are not: the CLI's
   // OAuth refresh lock colliding with a sibling process, and a model tool
   // call that fails to parse even after the CLI's own retry nudge. Both are
