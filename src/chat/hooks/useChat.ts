@@ -1586,13 +1586,13 @@ export function useChat(opts: {
         if (typeof msg.seq === 'number') {
           if (msg.seq <= lastSeqRef.current) return;
           lastSeqRef.current = msg.seq;
-          setAppliedSeq((current) => Math.max(current, msg.seq));
+          noteAppliedSeq(msg.seq);
         }
         if (typeof msg.latestSeq === 'number' && msg.latestSeq > lastSeqRef.current) {
           lastSeqRef.current = msg.latestSeq;
           // `latestSeq` is emitted only after hello replay has sent every
           // durable event through that boundary, so it is safe to commit.
-          setAppliedSeq((current) => Math.max(current, msg.latestSeq));
+          noteAppliedSeq(msg.latestSeq);
         }
         if (msg.type === 'working') {
           // First authoritative busy report on this socket: from here a
@@ -2237,6 +2237,7 @@ export function useChat(opts: {
     // Closures are queued rather than raw events so every frame type keeps its
     // exact semantics and relative order, not just `stream`.
     let replayOps: ((prev: ChatBlock[]) => ChatBlock[])[] = [];
+    let replayAppliedSeq = 0;
     // Safety net: `ready` is what normally ends the replay, so a hello that
     // errors or stalls before it would otherwise leave the buffered window
     // unpainted forever — a blank thread, which is worse than the slow paint
@@ -2249,10 +2250,16 @@ export function useChat(opts: {
     };
     const flushReplayOps = (): void => {
       clearReplayTimer();
-      if (!replayOps.length) return;
-      const ops = replayOps;
-      replayOps = [];
-      setBlocks((prev) => ops.reduce((acc, op) => op(acc), prev));
+      const seq = replayAppliedSeq;
+      replayAppliedSeq = 0;
+      if (replayOps.length) {
+        const ops = replayOps;
+        replayOps = [];
+        setBlocks((prev) => ops.reduce((acc, op) => op(acc), prev));
+      }
+      // Committed together with the blocks those frames produced, and still
+      // committed when the window held only control frames.
+      if (seq > 0) setAppliedSeq((current) => Math.max(current, seq));
     };
     // Use for any block update driven by an inbound socket frame.
     const applyBlocks = (fn: (prev: ChatBlock[]) => ChatBlock[]): void => {
@@ -2261,7 +2268,29 @@ export function useChat(opts: {
       if (replayFlushTimer === null) replayFlushTimer = setTimeout(flushReplayOps, REPLAY_FLUSH_FALLBACK_MS);
     };
     // A reset frame mid-replay invalidates everything queued before it.
-    const dropReplayOps = (): void => { clearReplayTimer(); replayOps = []; };
+    const dropReplayOps = (): void => {
+      clearReplayTimer();
+      replayOps = [];
+      replayAppliedSeq = 0;
+    };
+
+    /** The persisted cursor must never run ahead of the blocks it claims to
+     *  cover. The snapshot effect writes `blocks` and `appliedSeq` as one
+     *  envelope, so advancing the cursor while reductions are still buffered
+     *  persists OLD blocks under a NEW seq — and another tab that adopts that
+     *  snapshot then discards those very frames from its own socket (its
+     *  cursor says they were applied), losing them for good. Per-frame
+     *  setBlocks made this window a single render; batching made it seconds
+     *  long, so the cursor is buffered alongside the ops. `lastSeqRef` still
+     *  advances immediately: it is the live socket's duplicate guard, not the
+     *  persisted cursor. */
+    const noteAppliedSeq = (seq: number): void => {
+      if (socketReady) {
+        setAppliedSeq((current) => Math.max(current, seq));
+        return;
+      }
+      replayAppliedSeq = Math.max(replayAppliedSeq, seq);
+    };
 
     // Backgrounded tabs get their WebSocket throttled or silently killed by
     // the browser, and the setTimeout-based reconnect can be deferred for
@@ -2368,6 +2397,13 @@ export function useChat(opts: {
         setError(null);
         setStatus('connecting');
       }
+      // Replay ops buffered on this socket are already represented in the
+      // snapshot: every frame that queued one also advanced lastSeqRef, and
+      // this snapshot was only accepted because its seq is ahead of that (or
+      // because it carries a newer reset, which retires them outright).
+      // Reducing them onto the adopted snapshot at the ready frame would
+      // duplicate blocks, or resurrect pre-reset ones.
+      dropReplayOps();
       setBlocks(restoreBlocksWithUniqueIds(snapshot.blocks));
       lastSeqRef.current = snapshot.seq;
       setAppliedSeq(snapshot.seq);
