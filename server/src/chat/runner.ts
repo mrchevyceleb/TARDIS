@@ -219,6 +219,13 @@ function zaiEnv(model: string, credential: ReturnType<typeof zaiCredentials>): N
   const contextWindow = credential.mode === 'fireworks'
     ? fireworksContextWindow(credential.wireModel) : Number(zaiCompactWindowForModel(model));
   applyProviderLimits(env, { model, contextWindow, retriesVar: 'RIVENDELL_ZAI_MAX_RETRIES' });
+  // No-vision marker for the PreToolUse Read guard (scripts/vision-read-guard.sh,
+  // card-faf580): Z.ai GLM models are text-only over this endpoint, so a native
+  // image block 400s the turn and the CLI's own compaction. On the Fireworks
+  // fallback the wire model decides, mirroring the session's textOnlyLane.
+  if (!(credential.mode === 'fireworks' && fireworksCapability(credential.wireModel)?.imageInput)) {
+    env.RIVENDELL_NO_VISION = '1';
+  }
   env.SAMWISE_ACCOUNT = 'zai';
   return env;
 }
@@ -301,6 +308,11 @@ function fireworksEnv(model: string): NodeJS.ProcessEnv {
   env.ANTHROPIC_AUTH_TOKEN =
     process.env.RIVENDELL_ZAI_FALLBACK_API_KEY?.trim() || process.env.FIREWORKS_API_KEY?.trim() || '';
   applyProviderLimits(env, { model, contextWindow: fireworksContextWindow(model), retriesVar: 'RIVENDELL_FIREWORKS_MAX_RETRIES' });
+  // No-vision marker for the PreToolUse Read guard (scripts/vision-read-guard.sh,
+  // card-faf580): serverless models without imageInput reject native image
+  // blocks with a 400 (Adam's lane, glm-5p3-fast), killing the turn and the
+  // CLI's own compaction. Mirrors the session's textOnlyLane.
+  if (!fireworksCapability(model)?.imageInput) env.RIVENDELL_NO_VISION = '1';
   env.SAMWISE_ACCOUNT = 'fireworks';
   return env;
 }
@@ -332,6 +344,10 @@ function openRouterEnv(model: string): NodeJS.ProcessEnv {
     maxOutputTokens: openRouterMaxOutput(model),
     retriesVar: 'RIVENDELL_OPENROUTER_MAX_RETRIES',
   });
+  // No-vision marker for the PreToolUse Read guard (scripts/vision-read-guard.sh,
+  // card-faf580): text-only OpenRouter models reject native image blocks the
+  // same way. Mirrors the session's textOnlyLane.
+  if (!openRouterCapability(model)?.imageInput) env.RIVENDELL_NO_VISION = '1';
   env.SAMWISE_ACCOUNT = 'openrouter';
   return env;
 }
