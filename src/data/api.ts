@@ -142,6 +142,59 @@ export type WorkspaceUploadResponse = { path: string; size: number; modifiedAt: 
 /** Mirrors the server's upload cap. */
 export const UPLOAD_MAX_BYTES = 200 * 1024 * 1024;
 
+/** Mirrors the streaming route's cap. */
+export const BIG_UPLOAD_MAX_BYTES = 16 * 1024 * 1024 * 1024;
+
+/** Human-readable size for upload lines ("2.1 GB"). */
+export function humanFileSize(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
+export type BigUpload = { path: string; name: string; bytes: number };
+
+/** Stream any file (any type, multi-GB) to the server's
+ *  ~/.rivendell/uploads store. XHR, not fetch, so the caller gets real
+ *  upload progress. The response carries the saved absolute path so it can
+ *  go into the message and any agent can open the file. `register` hands
+ *  back an abort for an in-flight chip's remove button. */
+export function uploadBigFile(
+  file: File,
+  opts: { onProgress?: (fraction: number) => void; register?: (abort: () => void) => void } = {},
+): Promise<BigUpload> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/files/upload-stream?name=${encodeURIComponent(file.name)}`);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && opts.onProgress) opts.onProgress(e.loaded / e.total);
+    };
+    opts.register?.(() => xhr.abort());
+    xhr.onerror = () => reject(new Error('the upload failed (network)'));
+    xhr.onabort = () => reject(new Error('the upload was cancelled'));
+    xhr.onload = () => {
+      if (xhr.status === 201) {
+        try {
+          resolve(JSON.parse(xhr.responseText) as BigUpload);
+          return;
+        } catch {
+          /* fall through to the error path */
+        }
+      }
+      let message = `${xhr.status} ${xhr.statusText}`;
+      try {
+        message = (JSON.parse(xhr.responseText) as { error?: string }).error ?? message;
+      } catch {
+        /* plain text */
+      }
+      reject(new Error(message || 'the upload failed'));
+    };
+    xhr.send(file);
+  });
+}
+
 /** Send a file to the ship's workspace. The server keeps it under `path`,
  *  adding a numeric suffix rather than overwriting. */
 export async function uploadWorkspaceFile(path: string, file: Blob): Promise<WorkspaceUploadResponse> {

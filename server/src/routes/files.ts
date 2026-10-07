@@ -1,11 +1,12 @@
 import express, { Router, raw } from 'express';
-import { createReadStream } from 'node:fs';
-import { realpath, stat } from 'node:fs/promises';
-import { extname, basename, resolve as resolvePath, sep as pathSep } from 'node:path';
+import { createReadStream, createWriteStream, existsSync, mkdirSync } from 'node:fs';
+import { realpath, rename, rm, stat } from 'node:fs/promises';
+import { extname, basename, join, resolve as resolvePath, sep as pathSep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { safeFileName, storeWorkspaceFile, workspaceRoot } from '../lib/workspace.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { emitScribe } from '../worker/scribe.ts';
+import { STATE_DIR } from '../config.ts';
 import { mapWorkspaceError } from './docs.ts';
 import { asyncHandler } from './helpers.ts';
 
@@ -248,3 +249,78 @@ filesRouter.post('/upload', requireTrustedOrigin, raw({ type: UPLOAD_TYPE, limit
     res.status(status).json({ error: message });
   }
 }));
+
+// ---- big-file streaming upload (any type, multi-GB) -------------------------------
+
+/** Big uploads land here, OUTSIDE the Syncthing-synced workspace so a 5 GB
+ *  video never syncs to Matt's PC and iPad, and outside the chat-attachment
+ *  store so the 2 GB attachment sweep never touches them. Per-day folders. */
+const UPLOAD_STREAM_DIR = join(STATE_DIR, 'uploads');
+/** Same cap as Riley's :8798 phone upload page. */
+const UPLOAD_STREAM_MAX_BYTES = 16 * 1024 * 1024 * 1024;
+
+// Streams any file type straight to disk (Riley's PUT pattern): the body is
+// piped, never buffered in memory, so a multi-GB phone upload cannot balloon
+// RAM. Same two guards as /upload above: octet-stream only (a non-simple
+// type, so a cross-site POST needs a CORS preflight this server never
+// answers) and a trusted Origin. index.ts raises Node's requestTimeout so a
+// slow multi-GB body is not cut off at the 300s default. The response carries
+// the saved absolute path so the client can put it in the message and any
+// agent can open the file.
+filesRouter.post('/upload-stream', requireTrustedOrigin, (req, res) => {
+  const type = String(req.headers['content-type'] ?? '').toLowerCase();
+  if (!type.startsWith(UPLOAD_TYPE)) {
+    res.status(415).json({ error: `send the file as ${UPLOAD_TYPE}` });
+    return;
+  }
+  const expected = Number(req.headers['content-length'] ?? 0);
+  if (!Number.isFinite(expected) || expected <= 0 || expected > UPLOAD_STREAM_MAX_BYTES) {
+    res.status(400).json({ error: 'Content-Length must be between 1 byte and 16 GB' });
+    return;
+  }
+  const name = safeFileName(String(req.query.name ?? '').trim().split(/[\\/]/).pop() ?? '') || 'file';
+  const dir = join(UPLOAD_STREAM_DIR, new Date().toISOString().slice(0, 10));
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Never overwrite: the first free numeric suffix wins (Riley's -2, -3, ...).
+  const ext = extname(name);
+  const stem = name.slice(0, name.length - ext.length);
+  let dest = join(dir, name);
+  for (let i = 2; existsSync(dest); i += 1) dest = join(dir, `${stem}-${i}${ext}`);
+  const part = `${dest}.part`;
+  const out = createWriteStream(part, { mode: 0o600 });
+  let received = 0;
+  let settled = false;
+  const fail = (status: number, message: string) => {
+    if (settled) return;
+    settled = true;
+    if (!res.headersSent) res.status(status).json({ error: message });
+    out.destroy();
+    req.destroy();
+    void rm(part, { force: true }).catch(() => {});
+  };
+  req.on('data', (chunk: Buffer) => {
+    received += chunk.length;
+    if (received > UPLOAD_STREAM_MAX_BYTES) fail(413, 'over the 16 GB cap');
+  });
+  req.on('error', () => fail(400, 'the upload stream failed'));
+  req.on('close', () => {
+    if (!settled && !req.complete) fail(400, 'the upload was cut off');
+  });
+  out.on('error', () => fail(500, 'could not write the upload'));
+  req.pipe(out);
+  out.on('finish', () => {
+    if (settled) return;
+    if (received !== expected) {
+      fail(400, 'the upload ended early');
+      return;
+    }
+    settled = true;
+    rename(part, dest).then(
+      () => {
+        console.log(`[files] stream upload saved ${dest} (${received} bytes)`);
+        if (!res.destroyed) res.status(201).json({ path: dest, name: basename(dest), bytes: received });
+      },
+      () => fail(500, 'could not save the upload'),
+    );
+  });
+});

@@ -22,7 +22,7 @@ import { useRepos } from '../chat/hooks/useRepos';
 import { useProxyViewer } from '../hooks/useProxyViewer';
 import { StudioFilesContext, type StudioFileActions } from '../shell/studio/studioFiles';
 import type { CompanionId } from '../chat/data/types';
-import { UPLOAD_MAX_BYTES, uploadWorkspaceFile } from '../data/api';
+import { uploadBigFile, humanFileSize } from '../data/api';
 import { appendToDraft, showToast, TOAST_EVENT } from '../native/shell';
 import { BotRail } from './GrokSidebar';
 import { GrokChat } from './GrokChat';
@@ -228,9 +228,11 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
     return () => window.removeEventListener(TOAST_EVENT, onToast);
   }, [toastEgg]);
 
-  // Drop any file onto the console and it lands in the ship's inbox/, with
-  // its workspace path appended to the draft so the companion can be told.
-  // The composer keeps first claim on image drops (they become attachments).
+  // Drop any file onto the console and it streams to the server's
+  // ~/.rivendell/uploads store (outside the Syncthing hub, so a multi-GB
+  // video never syncs to Matt's devices), with its absolute path appended
+  // to the draft so the companion can open it. The composer keeps first
+  // claim on drops that land on it (they become attachments/uploads).
   useEffect(() => {
     const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files');
     const onDragOver = (e: DragEvent) => {
@@ -245,14 +247,10 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
       if (!files.length) return;
       void (async () => {
         for (const file of files) {
-          if (file.size > UPLOAD_MAX_BYTES) {
-            toastEgg(`${file.name} is over 200 MB; sync it to the workspace instead.`);
-            continue;
-          }
           toastEgg(`Sending ${file.name} to the ship…`);
           try {
-            const saved = await uploadWorkspaceFile(`inbox/${file.name}`, file);
-            const mention = `ASSISTANT-HUB/${saved.path}`;
+            const saved = await uploadBigFile(file);
+            const mention = `${saved.name} (${humanFileSize(saved.bytes)}): ${saved.path}`;
             if (appendToDraft(mention)) {
               toastEgg(`Sent to the ship · ${saved.path}`);
             } else {

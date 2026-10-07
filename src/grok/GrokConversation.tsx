@@ -168,8 +168,8 @@ export function GrokConversation(props: BotConversationProps) {
         <button
           type="button"
           className="grok-attach"
-          aria-label="Attach images"
-          title="Attach images"
+          aria-label="Attach a file"
+          title="Attach a file"
           onClick={() => attachRef.current()}
         >
           <Plus />

@@ -1132,6 +1132,17 @@ class ClaudeSession {
       }
     }
 
+    // Native image path: the model gets the images as blocks, but a long turn
+    // that reactive-compacts can summarize the image content away. The saved
+    // paths ride along as plain text, so the model can still open the files
+    // after a compaction dropped the images (card-d17deb).
+    if (outImages?.length && attachments.length) {
+      const paths = attachments.map((a) => chatAttachmentPath(a.id));
+      promptText = paths.length === 1
+        ? `${promptText}\n\n[Screenshot saved at ${paths[0]}. If it is not visible to you, open it with Read.]`
+        : `${promptText}\n\n[Screenshots saved at ${paths.join(', ')}. If they are not visible to you, open them with Read.]`;
+    }
+
     // Revalidate native steering after every possible await. From this check
     // through stdin.write there is no event-loop yield, so a completed tool
     // cannot silently move us into provider inference between check and write.

@@ -155,6 +155,10 @@ app.use('/internal', internalRouter);
 app.use('/xai-oauth', xaiOauthRouter);
 
 const server = createServer(app);
+// Big-file chat uploads stream their whole body slowly (a multi-GB file from
+// a phone can take well over the 300s default). Node's requestTimeout covers
+// receiving the entire request, so raise it or the socket is cut mid-body.
+server.requestTimeout = 6 * 60 * 60 * 1000;
 app.use('/api/content', contentRouter);
 app.use('/api/dictation', dictationRouter);
 app.use('/api/integrations', integrationsRouter);
