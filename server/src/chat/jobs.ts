@@ -304,12 +304,40 @@ function cleanupFiles(id: string): void {
   }
 }
 
-function runQuiet(cmd: string, args: string[]): Promise<number | null> {
+/** A `systemctl --user` call against a wedged user manager can hang forever.
+ *  Nothing here is worth blocking the reaper on, so every spawn gets a hard
+ *  deadline and an unanswered call resolves null (= "could not determine"),
+ *  which every caller already treats conservatively. */
+const RUN_TIMEOUT_MS = 10_000;
+
+/** runQuiet's answer when a command hit the deadline. Distinct from null on
+ *  purpose: null means systemd could not be reached AT ALL, which is the one
+ *  case where falling back to the wrapper pid is right. A timeout means the
+ *  scope's state is simply unknown, and treating unknown as dead would let the
+ *  reaper declare a job finished while its processes keep running. */
+const RUN_TIMED_OUT = Symbol('run-timed-out');
+
+function withDeadline<T>(
+  child: ReturnType<typeof spawn>,
+  resolve: (value: T) => void,
+  onTimeout: T,
+): () => void {
+  const timer = setTimeout(() => {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+    resolve(onTimeout);
+  }, RUN_TIMEOUT_MS);
+  // Never hold the event loop open just for a reaper probe.
+  timer.unref?.();
+  return () => clearTimeout(timer);
+}
+
+function runQuiet(cmd: string, args: string[]): Promise<number | null | typeof RUN_TIMED_OUT> {
   return new Promise((resolve) => {
     try {
       const p = spawn(cmd, args, { stdio: 'ignore' });
-      p.once('error', () => resolve(null));
-      p.once('exit', (code) => resolve(code));
+      const done = withDeadline<number | null | typeof RUN_TIMED_OUT>(p, resolve, RUN_TIMED_OUT);
+      p.once('error', () => { done(); resolve(null); });
+      p.once('exit', (code) => { done(); resolve(code); });
     } catch {
       resolve(null);
     }
@@ -326,8 +354,9 @@ function runCaptured(cmd: string, args: string[]): Promise<string | null> {
       let out = '';
       p.stdout.setEncoding('utf8');
       p.stdout.on('data', (chunk: string) => { out += chunk; });
-      p.once('error', () => resolve(null));
-      p.once('close', (code) => resolve(code === 0 ? out.trim() : null));
+      const done = withDeadline<string | null>(p, resolve, null);
+      p.once('error', () => { done(); resolve(null); });
+      p.once('close', (code) => { done(); resolve(code === 0 ? out.trim() : null); });
     } catch {
       resolve(null);
     }
@@ -346,6 +375,9 @@ async function jobAlive(job: Job): Promise<boolean> {
   if (job.bootId && job.bootId !== BOOT_ID) return false;
   if (job.unit) {
     const active = await runQuiet('systemctl', ['--user', 'is-active', '--quiet', `${job.unit}.scope`]);
+    // Unanswered is not evidence of death: a wedged user manager must leave the
+    // job alive rather than let the reaper report a running job as gone.
+    if (active === RUN_TIMED_OUT) return true;
     if (active !== null) {
       if (active !== 0) return false;
       // An ABANDONED scope keeps ActiveState=active with nothing left inside
@@ -373,10 +405,44 @@ async function jobAlive(job: Job): Promise<boolean> {
  *  failure: cleanup must not break a job's bookkeeping. */
 async function releaseScope(job: Job): Promise<void> {
   if (!job.unit || (job.bootId && job.bootId !== BOOT_ID)) return;
-  // "[not set]" (accounting off) and "" (already inactive) both mean leave it be.
-  const tasks = await runCaptured('systemctl', ['--user', 'show', `${job.unit}.scope`, '-p', 'TasksCurrent', '--value']);
-  if (tasks !== '0') return;
-  await runQuiet('systemctl', ['--user', 'stop', `${job.unit}.scope`]);
+  await releaseUnit(job.unit);
+}
+
+/** Scopes awaiting release, with the attempts each has left. The wrapper writes
+ *  its exit file BEFORE it exits, so a job terminalizes while descendants can
+ *  still be inside its scope: the first release then correctly declines, and
+ *  without this the job is no longer running and nothing ever retries, so the
+ *  scope leaks exactly as before. Attempts are bounded so a scope that never
+ *  empties cannot be probed for the life of the process. */
+const pendingRelease = new Map<string, number>();
+const RELEASE_ATTEMPTS = 60;
+/** Probes per tick. Every probe can sit out the full RUN_TIMEOUT_MS against a
+ *  wedged user manager, and this drain shares the tick with job completion and
+ *  timeout handling, so an unbounded pass could delay those by attempts ×
+ *  timeout. Retries rotate to the back of the map, so a long queue still drains
+ *  fairly instead of starving behind the first few. */
+const RELEASE_PER_TICK = 4;
+
+async function releaseUnit(unit: string): Promise<void> {
+  const tasks = await runCaptured('systemctl', ['--user', 'show', `${unit}.scope`, '-p', 'TasksCurrent', '--value']);
+  // Already inactive (empty value), or task accounting is off so emptiness can
+  // never be established ("[not set]"). Either way there is nothing to retry.
+  if (tasks === '' || tasks === '[not set]') {
+    pendingRelease.delete(unit);
+    return;
+  }
+  // Empty, so it is ours to release — but only a stop that actually SUCCEEDED
+  // finishes the job. A transiently wedged user manager would otherwise drop
+  // the retry and permanently leak the very scope this exists to clean up.
+  if (tasks === '0' && await runQuiet('systemctl', ['--user', 'stop', `${unit}.scope`]) === 0) {
+    pendingRelease.delete(unit);
+    return;
+  }
+  // Still occupied, or a probe or stop that did not succeed: try again later,
+  // re-inserted at the back so other pending units get their turn first.
+  const left = pendingRelease.get(unit) ?? RELEASE_ATTEMPTS;
+  pendingRelease.delete(unit);
+  if (left > 1) pendingRelease.set(unit, left - 1);
 }
 
 async function pollDead(isAlive: () => Promise<boolean> | boolean, ms: number): Promise<boolean> {
@@ -477,7 +543,23 @@ function checkRunning(job: Job, now: number): Partial<Job> | null {
   return null;
 }
 
+/** One tick at a time. Every tick awaits per-job `systemctl` probes, stops and
+ *  scope releases, so a slow or wedged batch can outlast TICK_MS; without this
+ *  guard the interval would start a second pass over the same jobs and stack up
+ *  overlapping `systemctl` children — the resource loop the reaper fixes. */
+let ticking = false;
+
 async function tick(): Promise<void> {
+  if (ticking) return;
+  ticking = true;
+  try {
+    await runTick();
+  } finally {
+    ticking = false;
+  }
+}
+
+async function runTick(): Promise<void> {
   let jobs: Job[];
   try {
     jobs = await store.list();
@@ -522,6 +604,9 @@ async function tick(): Promise<void> {
       retryUntil.delete(job.id);
     }
   }
+  // Scopes whose job had already ended but which still held processes when we
+  // first tried. Keyed by unit, so a record deleted above is still cleaned up.
+  for (const unit of [...pendingRelease.keys()].slice(0, RELEASE_PER_TICK)) await releaseUnit(unit);
 }
 
 /** Deliver the owed result. On failure (agent busy past the admission wait,
