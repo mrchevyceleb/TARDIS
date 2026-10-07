@@ -166,6 +166,8 @@ function ModelList({
   searchable?: boolean;
 }) {
   const [query, setQuery] = useState('');
+  // Show a tap right away; agent threads only confirm after the server save.
+  const [picked, setPicked] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const q = query.trim().toLowerCase();
   const shown = q
@@ -173,13 +175,42 @@ function ModelList({
       .map(([vendor, models]): ModelGroup => [vendor, models.filter((m) => `${vendor} ${m.name} ${m.id}`.toLowerCase().includes(q))])
       .filter(([, models]) => models.length > 0)
     : groups;
+  const selected = picked ?? current;
+  const rowCount = groups.reduce((n, [, models]) => n + models.length, 0);
 
-  // Open with the current model in view, scrolling only the list itself.
+  // The server answered (or another device changed it): drop the optimistic pick.
+  // A save that never lands (conflict, offline) falls back after a few seconds.
+  useEffect(() => { setPicked(null); }, [current]);
+  useEffect(() => {
+    if (picked === null) return;
+    const t = window.setTimeout(() => setPicked(null), 5000);
+    return () => window.clearTimeout(t);
+  }, [picked]);
+
+  // Keep the current model in view (also once a late catalog fills in),
+  // scrolling only the list itself, never while a search is narrowing it.
   useLayoutEffect(() => {
     const list = listRef.current;
     const row = list?.querySelector<HTMLElement>('.model-row.on');
-    if (list && row) list.scrollTop = row.offsetTop - list.clientHeight / 2 + row.clientHeight / 2;
-  }, []);
+    if (q || !list || !row) return;
+    list.scrollTop = row.offsetTop - list.clientHeight / 2 + row.clientHeight / 2;
+  }, [current, rowCount]);
+
+  // Listbox keys: one Tab stop, arrows/Home/End move between rows.
+  const onListKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+    const rows = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>('.model-row') ?? []);
+    if (!rows.length) return;
+    e.preventDefault();
+    const at = rows.indexOf(document.activeElement as HTMLButtonElement);
+    const next = e.key === 'Home' ? 0
+      : e.key === 'End' ? rows.length - 1
+      : e.key === 'ArrowDown' ? Math.min(rows.length - 1, at + 1)
+      : Math.max(0, at < 0 ? 0 : at - 1);
+    rows[next]!.focus();
+  };
+  const firstId = shown[0]?.[1][0]?.id;
+  const tabbableId = shown.some(([, models]) => models.some((m) => m.id === selected)) ? selected : firstId;
 
   return (
     <div className="model-list-wrap">
@@ -193,7 +224,7 @@ function ModelList({
           onChange={(e) => setQuery(e.target.value)}
         />
       ) : null}
-      <div className="model-list" role="listbox" aria-label={label} ref={listRef}>
+      <div className="model-list" role="listbox" aria-label={label} ref={listRef} onKeyDown={onListKey}>
         {shown.map(([vendor, models]) => (
           <div key={vendor || 'all'} role="group" aria-label={vendor || undefined}>
             {vendor ? <div className="model-group">{vendor}</div> : null}
@@ -202,9 +233,15 @@ function ModelList({
                 key={m.id}
                 type="button"
                 role="option"
-                aria-selected={current === m.id}
-                className={`model-row${current === m.id ? ' on' : ''}`}
-                onClick={() => onPick(m.id)}
+                aria-selected={selected === m.id}
+                tabIndex={m.id === tabbableId ? 0 : -1}
+                title={m.id}
+                className={`model-row${selected === m.id ? ' on' : ''}`}
+                onClick={() => {
+                  if (m.id === selected) return;
+                  setPicked(m.id);
+                  onPick(m.id);
+                }}
               >
                 {m.name}
               </button>
