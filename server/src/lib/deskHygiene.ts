@@ -53,7 +53,7 @@ const STALE_HEAD = 'These Desk cards look stale. Move or update each one now (bo
 
 const PIPELINE_HEAD = 'Pipeline is only for work blocked outside the team or parked by Matt. For each card: restart it (Up next), finish it (Done: shipped is Done, owed proof is not a reason to keep a card open), hand it to whoever has the ball (board_card_update owner), or close it as Done if it\'s a duplicate or dead. Re-parking needs a new reason and what restarts it.';
 
-const IDLE_GUIDANCE = 'You\'re idle with Up next work. Start this now. If you\'re waiting on a job or another lane, start it in parallel. If it\'s truly blocked, move it to Pipeline with what restarts it.';
+const IDLE_GUIDANCE = 'You\'re idle with Up next work. Start this now. If you\'re waiting on a job or another lane, start it in parallel. If a teammate has the ball, hand them the card (board_card_update owner). If it\'s blocked outside the team, or Matt parked it, keep it in Pipeline with what restarts it.';
 
 export type HygieneAgent = { id: string; name: string; home: string };
 export type HygieneDelivery = { delivered: boolean; reason?: string };
@@ -159,9 +159,16 @@ function lastActivityMs(card: DeskCard): number {
   return latest;
 }
 
-function ownedBy(card: DeskCard, agent: HygieneAgent): boolean {
+/** Does this card belong to this agent? Canonical ids match only their own
+ *  agent. The name is consulted solely for legacy cards whose stored id
+ *  resolves to no roster agent (the store derives it from the owner name
+ *  when a card is created by name), so two agents sharing a display name
+ *  never each own the other's id-keyed cards. */
+function ownedBy(card: DeskCard, agent: HygieneAgent, rosterIds: Set<string>): boolean {
   if (card.owner.kind !== 'agent') return false;
-  return card.owner.id === agent.id || card.owner.name.trim().toLowerCase() === agent.name.trim().toLowerCase();
+  const ownerId = card.owner.id.trim();
+  if (ownerId && rosterIds.has(ownerId)) return ownerId === agent.id;
+  return card.owner.name.trim().toLowerCase() === agent.name.trim().toLowerCase();
 }
 
 type StaleLine = { card: DeskCard; kind: 'in_progress' | 'waiting'; lastMs: number };
@@ -171,11 +178,12 @@ type Finding = { stale: StaleLine[]; noCardMinutes: number | null; pipeline: Pip
 function findingFor(
   agent: HygieneAgent,
   desk: DeskData,
+  rosterIds: Set<string>,
   minutes: number,
   nowMs: number,
   opts: { pipelineReview?: boolean } = {},
 ): Finding | null {
-  const own = desk.cards.filter((c) => !c.archived && ownedBy(c, agent));
+  const own = desk.cards.filter((c) => !c.archived && ownedBy(c, agent, rosterIds));
   const backed = new Set(desk.todos.filter((t) => t.status === 'open' && t.cardId).map((t) => t.cardId));
   const inProgress = own.filter((c) => c.column === 'in_progress');
   const stale: StaleLine[] = [
@@ -428,8 +436,24 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
   // for lanes that only run routines or conversation).
   const skip = new Set((process.env.RIVENDELL_DESK_HYGIENE_SKIP ?? '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean));
   const owner = DESK_OWNER_NAME.trim().toLowerCase();
-  const agents = (await deps.listAgents()).filter((a) => a.id !== 'owner' && a.name.trim().toLowerCase() !== owner && !skip.has(a.id.toLowerCase()));
+  const roster = await deps.listAgents();
+  const agents = roster.filter((a) => a.id !== 'owner' && a.name.trim().toLowerCase() !== owner && !skip.has(a.id.toLowerCase()));
   const known = new Set(agents.map((a) => a.id));
+  const rosterIds = new Set(roster.map((a) => a.id));
+  // Roster churn: state for agents no longer on the roster is dropped, so an
+  // agent removed and later recreated starts its quiet clock fresh (that can
+  // only delay a pickup, never burst one) instead of inheriting stale
+  // stamps. An empty roster (a transient hiccup) never wipes state.
+  if (rosterIds.size) {
+    for (const map of [state.minutes, state.lastBusy, state.lastIdleNudge]) {
+      for (const id of Object.keys(map)) {
+        if (!rosterIds.has(id)) {
+          delete map[id];
+          dirty = true;
+        }
+      }
+    }
+  }
   for (const id of await deps.liveAgentIds(agents)) {
     if (!known.has(id)) continue;
     state.minutes[id] = (state.minutes[id] ?? 0) + 1;
@@ -485,7 +509,7 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
     while (pending.agents.length && sends < MAX_SENDS_PER_TICK) {
       const id = pending.agents[0];
       const agent = agents.find((a) => a.id === id);
-      const finding = agent ? findingFor(agent, desk, state.minutes[id] ?? 0, nowMs, { pipelineReview }) : null;
+      const finding = agent ? findingFor(agent, desk, rosterIds, state.minutes[id] ?? 0, nowMs, { pipelineReview }) : null;
       pending.agents.shift();
       dirty = true;
       report.checked.push(id);
@@ -545,7 +569,7 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
         // message (or its clean check); its pickup waits for the next tick.
         if (report.checked.includes(agent.id)) continue;
         // First card in the Up next column is the board's top card.
-        const top = desk.cards.find((c) => !c.archived && c.column === 'up_next' && ownedBy(c, agent));
+        const top = desk.cards.find((c) => !c.archived && c.column === 'up_next' && ownedBy(c, agent, rosterIds));
         if (!top) continue;
         const text = `[desk:${top.id}] "${cleanTitle(top.title)}"\n${IDLE_GUIDANCE}`;
         state.lastIdleNudge[agent.id] = nowMs;
