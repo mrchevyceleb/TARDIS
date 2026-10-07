@@ -1,6 +1,7 @@
 import express, { Router, raw } from 'express';
-import { createReadStream, createWriteStream, existsSync, mkdirSync } from 'node:fs';
-import { realpath, rename, rm, stat } from 'node:fs/promises';
+import { createReadStream, createWriteStream, mkdirSync } from 'node:fs';
+import { link, realpath, rm, stat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { extname, basename, join, resolve as resolvePath, sep as pathSep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { safeFileName, storeWorkspaceFile, workspaceRoot } from '../lib/workspace.ts';
@@ -263,10 +264,12 @@ const UPLOAD_STREAM_MAX_BYTES = 16 * 1024 * 1024 * 1024;
 // piped, never buffered in memory, so a multi-GB phone upload cannot balloon
 // RAM. Same two guards as /upload above: octet-stream only (a non-simple
 // type, so a cross-site POST needs a CORS preflight this server never
-// answers) and a trusted Origin. index.ts raises Node's requestTimeout so a
-// slow multi-GB body is not cut off at the 300s default. The response carries
-// the saved absolute path so the client can put it in the message and any
-// agent can open the file.
+// answers) and a trusted Origin. The response carries the saved absolute
+// path so the client can put it in the message and any agent can open the
+// file. Node's requestTimeout is handled globally in index.ts (see the
+// comment there: on Node 25 it is measured from request start with no reset
+// on body data, so even an actively-flowing multi-GB body longer than the
+// deadline would be cut).
 filesRouter.post('/upload-stream', requireTrustedOrigin, (req, res) => {
   const type = String(req.headers['content-type'] ?? '').toLowerCase();
   if (!type.startsWith(UPLOAD_TYPE)) {
@@ -281,22 +284,32 @@ filesRouter.post('/upload-stream', requireTrustedOrigin, (req, res) => {
   const name = safeFileName(String(req.query.name ?? '').trim().split(/[\\/]/).pop() ?? '') || 'file';
   const dir = join(UPLOAD_STREAM_DIR, new Date().toISOString().slice(0, 10));
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  // Never overwrite: the first free numeric suffix wins (Riley's -2, -3, ...).
+  // Unique exclusive temp file: two concurrent uploads of the same name never
+  // share a .part file or race one destination (review 1). The final name is
+  // claimed atomically with link(2), which never overwrites; EEXIST just takes
+  // the next numeric suffix (Riley's -2, -3, ...).
   const ext = extname(name);
   const stem = name.slice(0, name.length - ext.length);
-  let dest = join(dir, name);
-  for (let i = 2; existsSync(dest); i += 1) dest = join(dir, `${stem}-${i}${ext}`);
-  const part = `${dest}.part`;
-  const out = createWriteStream(part, { mode: 0o600 });
+  const temp = join(dir, `.${stem}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}.part`);
+  const out = createWriteStream(temp, { mode: 0o600, flags: 'wx' });
   let received = 0;
   let settled = false;
+  // Cleanup waits for the stream to really close before unlinking the temp
+  // file (a rm racing an open descriptor can fail and leave residue), and a
+  // failed cleanup is logged, never swallowed (review 1).
+  const outClosed = new Promise<void>((resolve) => out.on('close', resolve));
+  const cleanupTemp = () => {
+    out.destroy();
+    void outClosed
+      .then(() => rm(temp, { force: true }))
+      .catch((err) => console.warn('[files] upload temp cleanup failed:', (err as Error)?.message ?? err));
+  };
   const fail = (status: number, message: string) => {
     if (settled) return;
     settled = true;
     if (!res.headersSent) res.status(status).json({ error: message });
-    out.destroy();
+    cleanupTemp();
     req.destroy();
-    void rm(part, { force: true }).catch(() => {});
   };
   req.on('data', (chunk: Buffer) => {
     received += chunk.length;
@@ -314,11 +327,29 @@ filesRouter.post('/upload-stream', requireTrustedOrigin, (req, res) => {
       fail(400, 'the upload ended early');
       return;
     }
-    settled = true;
-    rename(part, dest).then(
-      () => {
+    // link(2) claims the destination atomically and never overwrites. settled
+    // only flips after the claim succeeds (review 1): a claim error still
+    // answers the request with 500 and cleans up the temp file.
+    (async () => {
+      for (let i = 1; ; i += 1) {
+        const target = join(dir, i === 1 ? name : `${stem}-${i}${ext}`);
+        try {
+          await link(temp, target);
+          return target;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err;
+        }
+      }
+    })().then(
+      (dest) => {
+        settled = true;
         console.log(`[files] stream upload saved ${dest} (${received} bytes)`);
         if (!res.destroyed) res.status(201).json({ path: dest, name: basename(dest), bytes: received });
+        // The claim already made the file visible; the temp unlink is
+        // best-effort and logged, never a client failure.
+        void rm(temp, { force: true }).catch((err) =>
+          console.warn('[files] upload temp unlink failed:', (err as Error)?.message ?? err),
+        );
       },
       () => fail(500, 'could not save the upload'),
     );

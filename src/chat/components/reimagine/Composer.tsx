@@ -222,9 +222,6 @@ export function Composer(props: ComposerProps) {
 
   const submit = (allowStop = false) => {
     if(dictating)return;
-    // A streaming upload is still writing the file; its path line is not in
-    // the draft yet, so sending now would drop it.
-    if (uploads.some((u) => !u.error)) return;
     // Read the DOM value, not only the controlled prop. Android keyboards can
     // fire Enter/pointer-up before React commits the final input event; the old
     // stale empty prop took the Stop branch and killed the warm agent even
@@ -233,6 +230,15 @@ export function Composer(props: ComposerProps) {
     const imgs = payload();
     const refs = (props.refCount ?? 0) > 0;
     const hasLiveContent = Boolean(v || imgs?.length || refs);
+    // A streaming upload is still writing its file; its path line is not in
+    // the draft yet, so sending or steering now would drop it. An explicit
+    // Stop tap on an empty draft still interrupts the running agent (it
+    // sends nothing), so an in-flight upload never locks the person out of
+    // Stop (review 1).
+    if (uploads.some((u) => !u.error)) {
+      if (props.busy && allowStop && !hasLiveContent) props.onStop?.();
+      return;
+    }
     // While the backend still owns a turn, any text OR image is queued guidance.
     // Only an explicit click/tap on an empty red Stop button may cancel.
     // Keyboard Enter with an empty/stale draft is a no-op, never an interrupt.
@@ -308,14 +314,19 @@ export function Composer(props: ComposerProps) {
   // Text and image-only drafts both queue safely. An attached image must never
   // leave the button in destructive Stop mode.
   const canSteer = props.busy && hasContent && !uploading && Boolean(props.onSteer);
+  // Stop is shown exactly when a tap really stops: an empty-draft Stop still
+  // interrupts while an upload streams, but with draft content the tap is
+  // gated (the path line is not in the draft yet), so the button must not
+  // promise Stop then. The upload chip carries that state instead.
+  const stopLive = props.busy && !canSteer && !(uploading && hasContent);
 
   const sendBtn = (extraClass = '') => (
     <button
       ref={sendRef}
       type="button"
-      className={`send${ready ? ' ready' : ''}${canSteer ? ' steer' : ''}${props.busy && !canSteer ? ' streaming' : ''} ${extraClass}`}
-      aria-label={canSteer ? 'Send after the current response' : props.busy ? 'Stop generating' : 'Send'}
-      title={canSteer ? 'Send after the current response' : props.busy ? 'Stop generating' : 'Send'}
+      className={`send${ready ? ' ready' : ''}${canSteer ? ' steer' : ''}${stopLive ? ' streaming' : ''} ${extraClass}`}
+      aria-label={canSteer ? 'Send after the current response' : stopLive ? 'Stop generating' : uploading ? 'Uploading a file' : 'Send'}
+      title={canSteer ? 'Send after the current response' : stopLive ? 'Stop generating' : uploading ? 'Uploading a file' : 'Send'}
       onPointerDown={(e) => {
         if (e.pointerType !== 'touch') return;
         // iOS/Android blur the textarea first; the keyboard viewport resize can
@@ -368,7 +379,7 @@ export function Composer(props: ComposerProps) {
       {mobile && (props.modelChip || props.busy) ? (
         <div className="dock-meta">
           {props.modelChip}
-          {props.busy ? <span className="steer-cue">Reply will send next ↪</span> : null}
+          {props.busy && !uploading ? <span className="steer-cue">Reply will send next ↪</span> : null}
         </div>
       ) : null}
       {popOpen ? (

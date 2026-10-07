@@ -156,8 +156,16 @@ app.use('/xai-oauth', xaiOauthRouter);
 
 const server = createServer(app);
 // Big-file chat uploads stream their whole body slowly (a multi-GB file from
-// a phone can take well over the 300s default). Node's requestTimeout covers
-// receiving the entire request, so raise it or the socket is cut mid-body.
+// a phone can take well over the 300s default). On Node 25 the requestTimeout
+// deadline is measured from request start with no reset on body data, and a
+// 30s connections checker 408s any request past it, so even an
+// actively-flowing multi-GB body longer than the deadline is cut mid-stream.
+// Per-route scoping is not possible: the checker is server-level and
+// req.socket.setTimeout does not participate (pinned empirically and against
+// the Node 25 parser source). The checker expires a request at
+// max(headersTimeout, requestTimeout); headersTimeout keeps its 60s
+// construction clamp, so slow-header connections are still capped at 60s
+// while the request deadline becomes this value.
 server.requestTimeout = 6 * 60 * 60 * 1000;
 app.use('/api/content', contentRouter);
 app.use('/api/dictation', dictationRouter);
