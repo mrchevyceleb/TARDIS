@@ -21,6 +21,12 @@ const HYDRATION_FALLBACK_MS = 2500;
  *  the placeholder longer (a cold lane has taken 5.5s), but never forever:
  *  a socket that neither answers nor closes still ends in the usual view. */
 const HYDRATION_EMPTY_FALLBACK_MS = 8000;
+/** How long the hello replay may buffer block updates before painting them
+ *  anyway. `ready` normally ends the replay well inside this (a full ~2500
+ *  frame window arrives in about 1.5s), so this only covers a hello that
+ *  stalls or dies before `ready` — the buffered window must still reach the
+ *  screen, just unbatched from here on. */
+const REPLAY_FLUSH_FALLBACK_MS = 3000;
 type ChatSendImage = { mediaType: string; base64: string; previewDataUrl?: string };
 
 export type ServerBrainState = {
@@ -1609,6 +1615,9 @@ export function useChat(opts: {
         }
         if (msg.type === 'ready') {
           socketReady = true;
+          // Paint the whole replayed window in one update, before anything
+          // below reads or writes block state.
+          flushReplayOps();
           // `ready` is sent after the replay on both the warm and cold paths,
           // so the visible thread is now server truth, not the cache.
           endHydration();
@@ -1711,6 +1720,7 @@ export function useChat(opts: {
           settleInitialMessage();
           queuedSteerRef.current = new Set();
           pendingSendRef.current = false;
+          dropReplayOps();
           setBlocks([]);
           setUsage(null);
           setError(null);
@@ -1730,6 +1740,7 @@ export function useChat(opts: {
           // copy would leave a silent hole before the replayed slice, so drop
           // it and rebuild from the window. Unlike replayReset, the thread was
           // not reset: pending outbound messages stay queued.
+          dropReplayOps();
           setBlocks([]);
           turnIdRef.current = '';
           turnIdRef.peerId = undefined;
@@ -1803,7 +1814,7 @@ export function useChat(opts: {
         else if (msg.type === 'compacted') {
           // Auto-compaction marker: the model's context rotated (juicy summary
           // banked to RAG). The visible thread lives on — just draw the line.
-          setBlocks((prev) => {
+          applyBlocks((prev) => {
             const id = `compact-${msg.seq}`;
             if (prev.some((b) => b.id === id)) return prev;
             return [...prev, {
@@ -1825,6 +1836,7 @@ export function useChat(opts: {
           queuedSteerRef.current = new Set();
           pendingSendRef.current = false;
           socketReadyRef.current = msg.remote !== true;
+          dropReplayOps();
           setBlocks([]);
           setUsage(null);
           setError(null);
@@ -1860,7 +1872,7 @@ export function useChat(opts: {
           const streamed = msg.event && typeof msg.event === 'object'
             ? { ...msg.event, seq: msg.seq ?? msg.event.seq, at: msg.at ?? msg.event.at, lane: 'bg' }
             : msg.event;
-          setBlocks((prev) => reduce(prev, streamed, turnIdRef));
+          applyBlocks((prev) => reduce(prev, streamed, turnIdRef));
         }
         else if (msg.type === 'stream') {
           // Track compaction so the working banner can say "compacting context"
@@ -1919,7 +1931,7 @@ export function useChat(opts: {
             ? { ...msg.event, seq: msg.seq ?? msg.event.seq, at: msg.at ?? msg.event.at }
             : msg.event;
           trackBackgroundEvent(msg.event);
-          setBlocks((prev) => reduce(prev, streamed, turnIdRef));
+          applyBlocks((prev) => reduce(prev, streamed, turnIdRef));
           // Pick up the model id from claude's system/init event so the
           // context meter knows which window to divide against. Opus 4.7
           // with the `[1m]` suffix is 1M; defaults stay at 200K.
@@ -2214,6 +2226,43 @@ export function useChat(opts: {
     // by that ready (busy flag) and its queued-outbound flush.
     let socketReady = false;
 
+    // Replay batching. The hello replay is one frame per persisted event, so a
+    // full window is ~2500 `stream` messages, each arriving as its own
+    // WebSocket macrotask. Calling setBlocks per frame therefore meant ~2500
+    // React renders over a transcript that grows with every one of them, and a
+    // busy lane took about two minutes to paint while the server had already
+    // delivered everything in ~1.5s. Buffer the block updates while the replay
+    // is still running (socketReady is false until `ready`, which the server
+    // sends after the replay) and apply them as ONE update on `ready`.
+    // Closures are queued rather than raw events so every frame type keeps its
+    // exact semantics and relative order, not just `stream`.
+    let replayOps: ((prev: ChatBlock[]) => ChatBlock[])[] = [];
+    // Safety net: `ready` is what normally ends the replay, so a hello that
+    // errors or stalls before it would otherwise leave the buffered window
+    // unpainted forever — a blank thread, which is worse than the slow paint
+    // this batching replaces. Never hold frames longer than this.
+    let replayFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearReplayTimer = (): void => {
+      if (replayFlushTimer === null) return;
+      clearTimeout(replayFlushTimer);
+      replayFlushTimer = null;
+    };
+    const flushReplayOps = (): void => {
+      clearReplayTimer();
+      if (!replayOps.length) return;
+      const ops = replayOps;
+      replayOps = [];
+      setBlocks((prev) => ops.reduce((acc, op) => op(acc), prev));
+    };
+    // Use for any block update driven by an inbound socket frame.
+    const applyBlocks = (fn: (prev: ChatBlock[]) => ChatBlock[]): void => {
+      if (socketReady) { setBlocks(fn); return; }
+      replayOps.push(fn);
+      if (replayFlushTimer === null) replayFlushTimer = setTimeout(flushReplayOps, REPLAY_FLUSH_FALLBACK_MS);
+    };
+    // A reset frame mid-replay invalidates everything queued before it.
+    const dropReplayOps = (): void => { clearReplayTimer(); replayOps = []; };
+
     // Backgrounded tabs get their WebSocket throttled or silently killed by
     // the browser, and the setTimeout-based reconnect can be deferred for
     // minutes. When the tab comes back we force a reconcile: if the socket
@@ -2369,6 +2418,9 @@ export function useChat(opts: {
       teardownRef.current = true;
       hydrationPending = false;
       if (hydrationFallback !== null) clearTimeout(hydrationFallback);
+      // Drop any replay still buffered for this lane: its frames belong to the
+      // socket going away, and the next bind replays from the server anyway.
+      dropReplayOps();
       socketReadyRef.current = false;
       sentOutboundRef.current = null;
       queuedSteerRef.current = new Set();
