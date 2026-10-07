@@ -7,8 +7,12 @@
 // in its own thread listing its stale cards (In progress with no activity for
 // 6 hours, or Waiting with no open Needs-you item behind it) and, when it has
 // worked 30+ minutes today while owning no In progress card, a nudge to card
-// that work. Silent when nothing qualifies. The human owner is never
-// messaged, and cards they own are never listed.
+// that work. The 10:00 slot also reviews that agent's Pipeline cards with no
+// activity for 3+ days. Outside the slots, an agent whose lane has been quiet
+// for 20+ minutes while it owns Up next work gets one idle pickup message an
+// hour, any hour, pointing at its top Up next card. Silent when nothing
+// qualifies. The human owner is never messaged, and cards they own are never
+// listed.
 //
 // RIVENDELL_DESK_HYGIENE=off disables it; RIVENDELL_DESK_HYGIENE_DRY_RUN=1
 // logs the would-be messages instead of delivering. State lives in
@@ -31,13 +35,25 @@ const SLOT_WINDOW_MIN = 20;
 const PENDING_TTL_MS = 60 * 60_000;
 const IN_PROGRESS_STALE_MS = 6 * 60 * 60_000;
 const NO_CARD_MINUTES = 30;
+/** Pipeline cards with no activity this long are reviewed in the 10:00 slot. */
+const PIPELINE_STALE_MS = 3 * 24 * 60 * 60_000;
+/** The one daily slot that carries the Pipeline review. */
+const PIPELINE_SLOT_HOUR = 10;
+/** A lane this quiet while its agent owns Up next work is idle. */
+const IDLE_QUIET_MS = 20 * 60_000;
+/** At most one idle pickup per agent per hour. */
+const IDLE_RESEND_MS = 60 * 60_000;
 const MAX_LINES = 10;
 /** Deliveries per tick, so one slot never eats the team's shared per-minute
  *  handoff budget (teamBus allows 20 a minute across everyone). */
 const MAX_SENDS_PER_TICK = 4;
 const TITLE_MAX = 80;
 
-const STALE_HEAD = 'These Desk cards look stale. Move or update each one now (board_card_move / board_card_comment), or tell me why not.';
+const STALE_HEAD = 'These Desk cards look stale. Move or update each one now (board_card_move / board_card_comment), or tell me why not.\nParking in Pipeline is not a way to clear this list.';
+
+const PIPELINE_HEAD = 'Pipeline is only for work blocked outside the team or parked by Matt. For each card: restart it (Up next), finish it (Done: shipped is Done, owed proof is not a reason to keep a card open), hand it to whoever has the ball (board_card_update owner), or close it as Done if it\'s a duplicate or dead. Re-parking needs a new reason and what restarts it.';
+
+const IDLE_GUIDANCE = 'You\'re idle with Up next work. Start this now. If you\'re waiting on a job or another lane, start it in parallel. If it\'s truly blocked, move it to Pipeline with what restarts it.';
 
 export type HygieneAgent = { id: string; name: string; home: string };
 export type HygieneDelivery = { delivered: boolean; reason?: string };
@@ -49,6 +65,10 @@ export type HygieneDeps = {
   /** Ids of agents with a live turn right now (routine and job wakes left out
    *  where the lane can tell them apart). */
   liveAgentIds: (agents: HygieneAgent[]) => Set<string> | Promise<Set<string>>;
+  /** Ids of agents with ANY busy turn right now, automation wakes included: a
+   *  lane mid-turn is not idle even when the turn is a routine or job wake.
+   *  Falls back to liveAgentIds when not provided. */
+  occupiedAgentIds?: (agents: HygieneAgent[]) => Set<string> | Promise<Set<string>>;
   deliver: (message: { to: string; text: string }) => Promise<HygieneDelivery>;
   log: (line: string) => void;
   stateFile: string;
@@ -66,6 +86,10 @@ type HygieneState = {
   fired: string[];
   /** Agents still to check for the latest slot (deliveries are paced). */
   pending: { slot: string; at: number; agents: string[] } | null;
+  /** agent id -> epoch ms it was last seen busy (any turn, automation included). */
+  lastBusy: Record<string, number>;
+  /** agent id -> epoch ms of its last idle pickup message. */
+  lastIdleNudge: Record<string, number>;
 };
 
 const OFF_VALUES = new Set(['off', '0', 'false', 'no']);
@@ -106,6 +130,12 @@ function slotKey(day: string, hour: number): string {
   return `${day} ${String(hour).padStart(2, '0')}:00`;
 }
 
+/** Hour of a slot key ("YYYY-MM-DD HH:00"), or -1 when unreadable. */
+function slotHourOf(slot: string): number {
+  const hour = Number(slot.slice(-5, -3));
+  return Number.isInteger(hour) ? hour : -1;
+}
+
 /** The slot whose catch-up window contains this minute, if any. */
 function dueSlot(clock: { day: string; minute: number }): string | null {
   for (const hour of SLOT_HOURS) {
@@ -133,9 +163,16 @@ function ownedBy(card: DeskCard, agent: HygieneAgent): boolean {
 }
 
 type StaleLine = { card: DeskCard; kind: 'in_progress' | 'waiting'; lastMs: number };
-type Finding = { stale: StaleLine[]; noCardMinutes: number | null };
+type PipelineLine = { card: DeskCard; lastMs: number };
+type Finding = { stale: StaleLine[]; noCardMinutes: number | null; pipeline: PipelineLine[] };
 
-function findingFor(agent: HygieneAgent, desk: DeskData, minutes: number, nowMs: number): Finding | null {
+function findingFor(
+  agent: HygieneAgent,
+  desk: DeskData,
+  minutes: number,
+  nowMs: number,
+  opts: { pipelineReview?: boolean } = {},
+): Finding | null {
   const own = desk.cards.filter((c) => !c.archived && ownedBy(c, agent));
   const backed = new Set(desk.todos.filter((t) => t.status === 'open' && t.cardId).map((t) => t.cardId));
   const inProgress = own.filter((c) => c.column === 'in_progress');
@@ -150,13 +187,22 @@ function findingFor(agent: HygieneAgent, desk: DeskData, minutes: number, nowMs:
       .filter((line) => Number.isFinite(line.lastMs))
       .sort((a, b) => a.lastMs - b.lastMs),
   ];
+  const pipeline: PipelineLine[] = opts.pipelineReview
+    ? own
+        .filter((c) => c.column === 'pipeline')
+        .map((card) => ({ card, lastMs: lastActivityMs(card) }))
+        .filter((line) => Number.isFinite(line.lastMs) && nowMs - line.lastMs >= PIPELINE_STALE_MS)
+        .sort((a, b) => a.lastMs - b.lastMs)
+    : [];
   const noCardMinutes = minutes >= NO_CARD_MINUTES && inProgress.length === 0 ? minutes : null;
-  return stale.length || noCardMinutes !== null ? { stale, noCardMinutes } : null;
+  return stale.length || pipeline.length || noCardMinutes !== null ? { stale, noCardMinutes, pipeline } : null;
 }
 
 function ageText(ms: number): string {
   const minutes = Math.max(0, Math.floor(ms / 60_000));
-  return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h`;
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes >= 24 * 60) return `${Math.floor(minutes / 1440)}d`;
+  return `${Math.floor(minutes / 60)}h`;
 }
 
 /** One line, straight quotes and no dashes that read as em dashes. */
@@ -176,6 +222,12 @@ function composeMessage(finding: Finding, ownerName: string, nowMs: number): str
     });
     if (finding.stale.length > MAX_LINES) lines.push(`+${finding.stale.length - MAX_LINES} more`);
     blocks.push([STALE_HEAD, ...lines].join('\n'));
+  }
+  if (finding.pipeline.length) {
+    const lines = finding.pipeline.slice(0, MAX_LINES).map(({ card, lastMs }) =>
+      `[desk:${card.id}] "${cleanTitle(card.title)}" (no activity for ${ageText(nowMs - lastMs)})`);
+    if (finding.pipeline.length > MAX_LINES) lines.push(`+${finding.pipeline.length - MAX_LINES} more`);
+    blocks.push([PIPELINE_HEAD, ...lines].join('\n'));
   }
   if (finding.noCardMinutes !== null) {
     blocks.push(`You have had live turns for ${finding.noCardMinutes} minutes today and own no In progress card. If any of that was task work, create or reuse a card (board_cards first) so the Desk shows what you are on. If it was only conversation, no card is needed.`);
@@ -203,12 +255,23 @@ function parseState(raw: string): HygieneState | null {
   const pending = rawPending && typeof rawPending.slot === 'string' && typeof rawPending.at === 'number' && Array.isArray(rawPending.agents)
     ? { slot: rawPending.slot, at: rawPending.at, agents: rawPending.agents.filter((a): a is string => typeof a === 'string') }
     : null;
+  const epochMap = (value: unknown): Record<string, number> => {
+    const out: Record<string, number> = {};
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const [id, ms] of Object.entries(value as Record<string, unknown>)) {
+        if (typeof ms === 'number' && Number.isFinite(ms) && ms >= 0) out[id] = ms;
+      }
+    }
+    return out;
+  };
   return {
     version: 1,
     day: obj.day,
     minutes,
     fired: obj.fired.filter((s): s is string => typeof s === 'string'),
     pending,
+    lastBusy: epochMap(obj.lastBusy),
+    lastIdleNudge: epochMap(obj.lastIdleNudge),
   };
 }
 
@@ -252,10 +315,25 @@ function seedState(clock: { day: string; minute: number }): HygieneState {
     minutes: {},
     fired: SLOT_HOURS.filter((hour) => hour * 60 <= clock.minute).map((hour) => slotKey(clock.day, hour)),
     pending: null,
+    lastBusy: {},
+    lastIdleNudge: {},
   };
 }
 
 // ---- tick -----------------------------------------------------------------------
+
+/** Any busy turn, automation wakes included: a lane mid-turn is not idle. */
+async function occupiedAgentIdsFromRunners(agents: HygieneAgent[]): Promise<Set<string>> {
+  const runner = await import('../chat/runner.ts');
+  const byHome = new Map(agents.map((a) => [a.home, a.id]));
+  const out = new Set<string>();
+  for (const session of runner.activeChatSessions()) {
+    if (!session.busy) continue;
+    const id = byHome.get(bareChatId(session.chatId));
+    if (id) out.add(id);
+  }
+  return out;
+}
 
 async function liveAgentIdsFromRunners(agents: HygieneAgent[]): Promise<Set<string>> {
   const runner = await import('../chat/runner.ts');
@@ -280,6 +358,7 @@ function defaultDeps(): HygieneDeps {
     readDesk,
     listAgents: async () => (await import('../chat/agents.ts')).listAgents(),
     liveAgentIds: liveAgentIdsFromRunners,
+    occupiedAgentIds: occupiedAgentIdsFromRunners,
     deliver: async ({ to, text }) => {
       const { deliverTeamMessage } = await import('../chat/teamBus.ts');
       // A plain named sender (never source 'desk', which is the human owner):
@@ -336,6 +415,21 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
     state.minutes[id] = (state.minutes[id] ?? 0) + 1;
     dirty = true;
   }
+  const occupied = await (deps.occupiedAgentIds ?? deps.liveAgentIds)(agents);
+  for (const id of occupied) {
+    if (!known.has(id)) continue;
+    state.lastBusy[id] = nowMs;
+    dirty = true;
+  }
+  // A lane first seen now (new roster entry, or a state file from before
+  // this field existed) starts its quiet clock at this tick, so a restart
+  // never bursts pickup messages.
+  for (const agent of agents) {
+    if (state.lastBusy[agent.id] === undefined) {
+      state.lastBusy[agent.id] = nowMs;
+      dirty = true;
+    }
+  }
 
   const slot = dueSlot(clock);
   if (slot && !state.fired.includes(slot)) {
@@ -354,18 +448,19 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
   if (state.pending?.agents.length) {
     const pending = state.pending;
     const desk = await deps.readDesk();
+    const pipelineReview = slotHourOf(pending.slot) === PIPELINE_SLOT_HOUR;
     let sends = 0;
     while (pending.agents.length && sends < MAX_SENDS_PER_TICK) {
       const id = pending.agents[0];
       const agent = agents.find((a) => a.id === id);
-      const finding = agent ? findingFor(agent, desk, state.minutes[id] ?? 0, nowMs) : null;
+      const finding = agent ? findingFor(agent, desk, state.minutes[id] ?? 0, nowMs, { pipelineReview }) : null;
       pending.agents.shift();
       dirty = true;
       report.checked.push(id);
       if (!agent || !finding) continue;
       const text = composeMessage(finding, deps.ownerName, nowMs);
-      const counts = `stale=${finding.stale.filter((s) => s.kind === 'in_progress').length} waiting=${finding.stale.filter((s) => s.kind === 'waiting').length} minutes=${state.minutes[id] ?? 0} nocard=${finding.noCardMinutes !== null ? 'yes' : 'no'}`;
-      const cards = finding.stale.map((s) => s.card.id).join(',') || '-';
+      const counts = `stale=${finding.stale.filter((s) => s.kind === 'in_progress').length} waiting=${finding.stale.filter((s) => s.kind === 'waiting').length} minutes=${state.minutes[id] ?? 0} nocard=${finding.noCardMinutes !== null ? 'yes' : 'no'}${pipelineReview ? ` pipeline=${finding.pipeline.length}` : ''}`;
+      const cards = [...finding.stale, ...finding.pipeline].map((s) => s.card.id).join(',') || '-';
       sends += 1;
       if (deps.dryRun) {
         deps.log(`[desk-hygiene] dry run, would message ${agent.id} (${counts} cards=${cards}):\n${text}`);
@@ -398,6 +493,59 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
     if (!pending.agents.length) {
       state.pending = null;
       dirty = true;
+    }
+  }
+
+  // Idle pickup, any hour: one message an hour to an agent whose lane has
+  // been quiet for 20+ minutes while it owns Up next work. Skipped while a
+  // slot sweep is still delivering, so an agent never gets two Desk messages
+  // in the same minute.
+  if (!state.pending?.agents.length) {
+    const due = agents.filter((a) =>
+      nowMs - (state.lastBusy[a.id] ?? nowMs) >= IDLE_QUIET_MS
+      && nowMs - (state.lastIdleNudge[a.id] ?? 0) >= IDLE_RESEND_MS);
+    if (due.length) {
+      const desk = await deps.readDesk();
+      let sends = 0;
+      for (const agent of due) {
+        if (sends >= MAX_SENDS_PER_TICK) break;
+        // An agent the slot sweep touched this tick already had its one
+        // message (or its clean check); its pickup waits for the next tick.
+        if (report.checked.includes(agent.id)) continue;
+        // First card in the Up next column is the board's top card.
+        const top = desk.cards.find((c) => !c.archived && c.column === 'up_next' && ownedBy(c, agent));
+        if (!top) continue;
+        const text = `[desk:${top.id}] "${cleanTitle(top.title)}"\n${IDLE_GUIDANCE}`;
+        state.lastIdleNudge[agent.id] = nowMs;
+        dirty = true;
+        sends += 1;
+        if (deps.dryRun) {
+          deps.log(`[desk-hygiene] dry run, would idle-message ${agent.id} (up_next=${top.id}):\n${text}`);
+          report.sent.push(agent.id);
+          continue;
+        }
+        // At most once: the nudge time is on disk before the send, so a crash
+        // mid-delivery can drop a nudge but never repeat one.
+        await save(state);
+        dirty = false;
+        let result: HygieneDelivery;
+        try {
+          result = await deps.deliver({ to: agent.id, text });
+        } catch (error) {
+          result = { delivered: false, reason: (error as Error).message };
+        }
+        if (result.delivered) {
+          report.sent.push(agent.id);
+          deps.log(`[desk-hygiene] ${agent.id}: idle up_next=${top.id} sent`);
+        } else if (/rate limit/i.test(result.reason ?? '')) {
+          state.lastIdleNudge[agent.id] = 0;
+          dirty = true;
+          deps.log(`[desk-hygiene] ${agent.id}: idle rate limited, retrying next tick`);
+          break;
+        } else {
+          deps.log(`[desk-hygiene] ${agent.id}: idle up_next=${top.id} not delivered (${result.reason ?? 'unknown reason'})`);
+        }
+      }
     }
   }
 
