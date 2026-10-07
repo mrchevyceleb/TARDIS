@@ -1673,9 +1673,13 @@ class ClaudeSession {
 
   /** Ask for the current turn to end at the next tool boundary so a waiting
    *  message can start a fresh turn. Never cancels a tool: the interrupt fires
-   *  only once every tool call in flight has returned. If the turn finishes on
+   *  only once every tool call in flight has returned — or immediately, for a
+   *  human message that arrives while the model is generating with no tool in
+   *  flight (no boundary is coming, and ending the turn loses only partial
+   *  generation). If the turn finishes on
    *  its own first, nothing is interrupted. A scheduled or wake-started
-   *  (automation) turn ends for a person's message too, at a tool boundary, but
+   *  (automation) turn ends for a person's message too — immediately while
+   *  nothing is in flight, or at a tool boundary — but
    *  is left to finish for a teammate's handoff. Returns a release function, or
    *  null when there is no turn to end. */
   requestBoundaryInterrupt(opts: { human?: boolean } = {}): (() => void) | null {
@@ -1684,6 +1688,40 @@ class ClaudeSession {
     this.boundaryInterruptWanted = true;
     this.boundaryWaiters += 1;
     if (human) this.boundaryHumanWaiters += 1;
+    // While the model is generating with no tool in flight, no tool boundary
+    // is coming: on long-inference models (Kimi steps run 10-25s) a person's
+    // mid-turn message waited out the whole step ("Queued · mid-step",
+    // delivered 20-35s later). With no tool running, ending the turn right
+    // away is safe: partial generation is lost, nothing is cancelled. Human
+    // only — a teammate handoff still waits for a boundary, and anything
+    // with a tool in flight stays on the tool_result path (never cancel a
+    // running tool).
+    if (human && this.activeToolIds.size === 0 && !this.hasInterruptHazard()) {
+      this.boundaryInterruptWanted = false;
+      const turn = this.turnStartedAt;
+      // Like the tool-boundary path: let the caller finish delivering first
+      // (its events emit ahead of the interrupt marker), then re-check — a
+      // tool that started before this runs re-arms the request for the next
+      // boundary instead, and a hazard that appeared leaves the turn to
+      // finish as that path does.
+      setImmediate(() => {
+        try {
+          if (this.turnStartedAt === null || this.turnStartedAt !== turn || this.disposed) return;
+          if (this.boundaryWaiters === 0) return;
+          // Immediate fire is human-only: if the human released before this ran
+          // and only peer waiters remain, re-arm for the normal tool-boundary
+          // path (the peer gap applies there) instead of interrupting now.
+          if (this.boundaryHumanWaiters === 0) { this.boundaryInterruptWanted = true; return; }
+          if (this.activeToolIds.size > 0) { this.boundaryInterruptWanted = true; return; }
+          if (this.hasInterruptHazard()) return;
+          this.lastBoundaryInterruptAt = Date.now();
+          this.pausedForMessage = true;
+          void this.interrupt('message-boundary').then((kept) => {
+            if (!kept) this.pausedForMessage = false;
+          });
+        } catch {}
+      });
+    }
     const generation = this.boundaryGeneration;
     let released = false;
     // The caller releases when its message no longer needs the turn ended
