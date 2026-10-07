@@ -646,9 +646,11 @@ function UserBubble({ block, agentName, onRetry }: { block: Extract<ChatBlock, {
       <div className="bubble"><DeskRefText text={block.text} /></div>
       {block.deliveryState ? (
         <span className={`delivery-state ${block.deliveryState}`} role={block.deliveryState === 'failed' ? 'alert' : 'status'}>
-          {block.deliveryState === 'queued'
-            ? `Queued · ${agentName ? `${agentName} is` : 'the agent is'} mid-step, it will land at the next safe moment`
-            : 'Not delivered'}
+          {block.deliveryState === 'sending'
+            ? 'Sending…'
+            : block.deliveryState === 'queued'
+              ? `Queued · ${agentName ? `${agentName} is` : 'the agent is'} mid-step, it will land at the next safe moment`
+              : 'Not delivered'}
           {block.deliveryState === 'failed' && onRetry && block.clientMsgId && !block.noRetry && !block.imageCount && !images.length ? (
             <button type="button" className="delivery-retry" onClick={() => onRetry(block.clientMsgId!)}>Retry</button>
           ) : null}

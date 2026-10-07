@@ -1388,7 +1388,14 @@ class ClaudeSession {
       if (this.nudgeInterrupt && reason !== 'reply-nudge') this.nudgeInterrupt.cancelled = true;
       return this.interruptInFlight;
     }
-    if (this.turnStartedAt === null) return Promise.resolve(this.isAlive());
+    if (this.turnStartedAt === null) {
+      // Any interrupt that is not the message-boundary pause ends the turn
+      // for good: a leftover pausedForMessage would tell the NEXT turn a
+      // message paused its predecessor and to "carry on with what you were
+      // doing" — the opposite of what a Stop means.
+      if (reason !== 'message-boundary') this.pausedForMessage = false;
+      return Promise.resolve(this.isAlive());
+    }
 
     // An image may still be in attachment persistence or the text-only vision
     // adapter, before the CLI has received any prompt. Cancel that local work
@@ -1403,6 +1410,7 @@ class ClaudeSession {
       this.automationTurn = false;
       this.activeToolIds.clear();
       this.clearBoundaryRequest();
+      if (reason !== 'message-boundary') this.pausedForMessage = false;
       this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
       return Promise.resolve(this.isAlive());
     }
@@ -1430,6 +1438,9 @@ class ClaudeSession {
       });
 
       this.userInterruptPending = true;
+      // Any interrupt that is not the message-boundary pause ends the turn
+      // for good (same rule as the early return above).
+      if (reason !== 'message-boundary') this.pausedForMessage = false;
       // Claude's own interrupt stops background subagents. Remember what was
       // running so the note can name what this Stop ended.
       this.openStopWatch();

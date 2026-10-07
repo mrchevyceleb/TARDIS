@@ -62,7 +62,7 @@ export type ChatImagePreview = {
 // `turnId` + `cbIndex` correlate a block back to claude's content_block_*
 // stream events so the reducer stays pure (no out-of-band Maps).
 export type ChatBlock =
-  | { kind: 'user'; id: string; text: string; ts: number; images?: ChatImagePreview[]; imageCount?: number; clientMsgId?: string; attachmentsLost?: boolean; deliveryState?: 'queued' | 'failed'; noRetry?: boolean }
+  | { kind: 'user'; id: string; text: string; ts: number; images?: ChatImagePreview[]; imageCount?: number; clientMsgId?: string; attachmentsLost?: boolean; deliveryState?: 'queued' | 'failed' | 'sending'; noRetry?: boolean }
   | {
       /** Agent-to-agent delivery (team bus): a teammate's message arriving in
        *  this thread — rendered with the SENDER's identity, not as a user turn. */

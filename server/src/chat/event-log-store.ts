@@ -103,8 +103,10 @@ function archivePath(key: string): string {
 
 // Synchronous load — called once during ClaudeSession / CodexSession
 // construction so the new instance can prime its in-memory buffer and
-// `nextSeq` counter before any new emit. Files top out at MAX_EVENTS_PER_LOG
-// lines (~a few MB), so blocking the construct here is fine.
+// `nextSeq` counter before any new emit. Hot files only stay small once the
+// lane's rolling compact covers them; un-compacted lanes grow to 50-190 MB,
+// so request paths use loadEventLogTail (a bounded tail read) and only the
+// construction/allocator paths still pay this full parse.
 // Parsed-log cache, validated against (mtimeMs, size). The same multi-MB logs
 // are re-read by every session spawn, every ws `hello`, and the /api/agents
 // unread pass; parsing them per call is pure event-loop burn. Callers mutate the
@@ -533,6 +535,157 @@ export async function loadEventLogSince(
   }
 }
 
+// Bounded tail read for request paths. The retained replay window is the
+// newest MAX_EVENTS_PER_LOG events, and those bytes sit at the END of the
+// file, so a cold bind or sidebar unread poll on an evicted lane never needs
+// the full file: parsing a whole 190 MB hot log blocks the loop ~3.2 s
+// (measured Oct 7 2026), which is what made chat switches queue for 25 s and
+// /api/health answer in 0.2-1.7 s. The tail is read asynchronously and parsed
+// in slices that yield to the loop. The parsed cache is installed only from
+// a tail that PROVES the whole entry: enough retained events for the full
+// replay window (otherwise the call falls back to the sync full loader),
+// receipts coverage for the whole receipts window, and a high-water verified
+// monotonic through the live repair cursor. An unproven tail is served
+// without caching and the next sync load still takes the proven full path.
+const TAIL_LOAD_MAX_BYTES = 16 * 1024 * 1024;
+const TAIL_PARSE_LINES_PER_SLICE = 4000;
+
+export async function loadEventLogTail(key: string): Promise<{ events: PersistedEvent[]; nextSeq: number }> {
+  const path = logPath(key);
+  let size: number;
+  let mtimeMs: number;
+  let ino: number;
+  try {
+    const st = statSync(path);
+    size = st.size;
+    mtimeMs = st.mtimeMs;
+    ino = st.ino;
+  } catch {
+    return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
+  }
+  const cached = parsedCache.get(path);
+  if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
+    // Re-insert so eviction order is least-recently-USED, same as the sync path.
+    parsedCache.delete(path);
+    parsedCache.set(path, cached);
+    return { events: cached.events.slice(), nextSeq: observeNextSeq(key, cached.nextSeq) };
+  }
+  // Small files are already bounded: keep the proven path (and its cache
+  // maintenance) instead of a second one.
+  if (size <= TAIL_LOAD_MAX_BYTES) return loadEventLogSync(key);
+
+  let handle: FileHandle | null = null;
+  try {
+    handle = await openFile(path, 'r');
+    // Identity from the handle we actually read, never the pre-open stat: a
+    // rename, append, or truncate between the two must never key the cache
+    // or a cursor off bytes we did not open.
+    const live = await handle.stat();
+    size = live.size;
+    mtimeMs = live.mtimeMs;
+    ino = live.ino;
+    if (size <= TAIL_LOAD_MAX_BYTES) return loadEventLogSync(key);
+    const from = size - TAIL_LOAD_MAX_BYTES;
+    const chunk = await readRangeAsync(handle, from, size);
+    const completeEnd = chunk.lastIndexOf(0x0a) + 1;
+    // A tail with no newline at all is one giant (or malformed) line; the
+    // proven full path is the only honest reader for that shape.
+    if (completeEnd === 0) return loadEventLogSync(key);
+    let text = chunk.toString('utf8', 0, completeEnd);
+    const fragment = chunk.toString('utf8', completeEnd);
+    // The read starts mid-line: drop the leading partial line.
+    if (from > 0) text = text.slice(text.indexOf('\n') + 1);
+    const carriedReceipts = echoReceipts.get(path)?.length ?? 0;
+    const state = {
+      events: [] as PersistedEvent[],
+      eventChars: [] as number[],
+      highWater: 0,
+      echoIds: echoReceipts.get(path) ?? ([] as string[]),
+    };
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length; i += TAIL_PARSE_LINES_PER_SLICE) {
+      parseLogLines(lines.slice(i, i + TAIL_PARSE_LINES_PER_SLICE).join('\n'), state);
+      if (i + TAIL_PARSE_LINES_PER_SLICE < lines.length) await yieldToEventLoop();
+    }
+    // A tail holding fewer retained events than the replay window would
+    // serve a SHORTER window than loadEventLogSync (huge events can eat all
+    // 16 MiB). Fall back to the proven full loader before touching any
+    // shared state — it reparses, rebuilds receipts, and caches exactly as
+    // before this path existed. Rare: a normal lane holds well over 2000
+    // events in its last 16 MiB.
+    if (state.events.length < MAX_EVENTS_PER_LOG) return loadEventLogSync(key);
+    // Receipts this parse found in the tail itself. The tail is the file's
+    // suffix, so at least RECEIPTS_PER_LOG of them proves the file's newest
+    // RECEIPTS_PER_LOG receipts are all inside the window — exactly the ones
+    // a full read would keep. Receipts carried from earlier parses never
+    // count toward that proof.
+    const tailReceipts = state.echoIds.length - carriedReceipts;
+    if (state.echoIds.length > RECEIPTS_PER_LOG) state.echoIds.splice(0, state.echoIds.length - RECEIPTS_PER_LOG);
+    echoReceipts.set(path, state.echoIds);
+    if (state.events.length > MAX_EVENTS_PER_LOG) {
+      const drop = state.events.length - MAX_EVENTS_PER_LOG;
+      state.events.splice(0, drop);
+      state.eventChars.splice(0, drop);
+    }
+    const nextSeq = state.highWater + 1;
+    const consumed = from + completeEnd;
+    // The tail's high-water equals the file's max seq only on a file known
+    // monotonic. repairEventLogSequenceSync verifies exactly that, per file,
+    // and every append this process makes allocates above the verified point
+    // (the shared allocator only ever raises), so a live repair cursor whose
+    // inode, size, and fingerprint bytes all still match proves the tail saw
+    // the file's true maximum. Without that proof nothing is cached and the
+    // allocator map is never seeded from the tail: on a legacy non-monotonic
+    // file (never repaired since boot) a short high-water would otherwise let
+    // new events collide with older, higher sequences.
+    const repairCursor = repairCursors.get(path);
+    let verified = false;
+    if (repairCursor && repairCursor.ino === ino && size >= repairCursor.consumed && repairCursor.consumed >= TAIL_FINGERPRINT_BYTES) {
+      const fpStart = repairCursor.consumed - TAIL_FINGERPRINT_BYTES;
+      const fpBytes = fpStart >= from
+        ? chunk.subarray(fpStart - from, repairCursor.consumed - from)
+        : await readRangeAsync(handle, fpStart, repairCursor.consumed);
+      verified = fpBytes.equals(repairCursor.fingerprint);
+    }
+    if (verified && state.events.length >= MAX_EVENTS_PER_LOG && tailReceipts >= RECEIPTS_PER_LOG) {
+      let retainedBytes = 0;
+      for (const chars of state.eventChars) retainedBytes += chars;
+      const fingerprint = await readRangeAsync(handle, Math.max(0, consumed - TAIL_FINGERPRINT_BYTES), consumed);
+      if (cached) parsedCacheBytes -= cached.bytes;
+      parsedCache.delete(path);
+      parsedCache.set(path, {
+        mtimeMs,
+        // An unterminated trailing line must not serve exact hits: -1 never
+        // matches, so the next call takes the (cheap) incremental read.
+        size: fragment ? -1 : size,
+        events: state.events,
+        eventChars: state.eventChars,
+        highWater: state.highWater,
+        nextSeq,
+        bytes: retainedBytes,
+        cursor: { ino, consumed, fingerprint },
+      });
+      parsedCacheBytes += retainedBytes;
+      evictParsedCache();
+    }
+    const tail = { events: [] as PersistedEvent[], eventChars: [] as number[], highWater: 0 };
+    if (fragment) parseLogLines(fragment, tail);
+    const events = state.events.concat(tail.events);
+    const trimmed = events.length > MAX_EVENTS_PER_LOG ? events.slice(events.length - MAX_EVENTS_PER_LOG) : events;
+    // Only a verified high-water may seed the allocator; an unproven tail's
+    // value is served for display but never observed into nextSeqByLogKey.
+    const computed = Math.max(nextSeq, tail.highWater + 1);
+    return {
+      events: trimmed,
+      nextSeq: verified ? observeNextSeq(key, computed) : Math.max(computed, nextSeqByLogKey.get(key) ?? 1),
+    };
+  } catch {
+    return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
+  } finally {
+    if (handle) await handle.close().catch(() => { /* already closed */ });
+  }
+}
+
 /** Newest-first, de-duplicated clientMsgIds of durable user echoes, i.e. the
  * delivery receipts a reconnecting client reconciles its pending sends
  * against. Reads only what was appended since the last call. */
@@ -951,6 +1104,14 @@ function stripPlumbingLines(lines: string[]): { lines: string[]; removed: number
 function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void {
   const path = logPath(key);
   if (!existsSync(path)) return;
+  // No rolling-compact coverage means nothing can ever be archived (seqs are
+  // >= 1), so this attempt is always "trim deferred" — and a never-compacted
+  // lane is exactly the 50-190 MB hot log. Reading the whole file just to
+  // rediscover the deferral blocks the loop for seconds on every session
+  // spawn, so skip the read entirely: the plumbing strip is the only other
+  // effect, and it is not worth rewriting a giant file no compact boundary
+  // covers yet.
+  if (compactedThroughSeq <= 0) return;
   let raw: string;
   try {
     raw = readFileSync(path, 'utf8');

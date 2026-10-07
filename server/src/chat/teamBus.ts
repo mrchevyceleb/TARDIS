@@ -156,18 +156,15 @@ function queueStoreOperation<T>(operation: () => Promise<T>): Promise<T> {
   return result;
 }
 
-/** One FIFO per recipient lane: the person's voice continuations never queue
- *  behind background handoffs once the background lane is on. */
-function queueKeyOf(record: { toId: string; fromRole?: string }): string {
-  if (!backgroundLaneEnabled() || record.fromRole !== 'voice') return record.toId;
-  // Engines without a background lane run both kinds on one session: one FIFO.
-  const agent = listAgents().find((a) => a.id === record.toId);
-  const cli = agent ? cliForAgentEngine(brainForAgent(agent).engine) : '';
-  return BACKGROUND_LANE_CLIS.has(cli) ? `${record.toId}|main` : record.toId;
+/** One FIFO per recipient: a single delivery worker per agent serializes
+ *  every admission to it, so a person-sourced record can never race the
+ *  teammate worker onto the same session (two parallel FIFOs once admitted
+ *  both at once — refusals, duplicate echoes). Person-sourced records still
+ *  never wait behind teammate chatter: the drain sorts them first inside the
+ *  one FIFO. */
+function queueKeyOf(record: { toId: string }): string {
+  return record.toId;
 }
-
-/** Mirrors runner.isClaudeFamilyCli; the runner is loaded lazily here. */
-const BACKGROUND_LANE_CLIS = new Set(['claude', 'assistant', 'zai', 'xai', 'fireworks', 'openrouter']);
 
 function replyEdge(fromId: string, toId: string): string {
   return `${fromId}->${toId}`;
@@ -424,6 +421,28 @@ function waitForRefusalPause(
   });
 }
 
+/** The lane a person-sourced message (Desk answer, voice continuation) should
+ *  take: the one that can act now. Prefers the person's main lane, falls back
+ *  to the background lane when main is tied up and background is free, and
+ *  otherwise stays on main, where the human message-boundary interrupt makes
+ *  room within a step. Probes only already-running sessions — it never
+ *  spawns one just to look. */
+async function personLanePreference(agent: Agent): Promise<AgentLane> {
+  const runner = await getRunner();
+  for (const lane of ['main', 'bg'] as AgentLane[]) {
+    const { cli, chatKey } = agentLogKey(agent, lane);
+    const active = runner.activeChatSessions().find((session) => session.cli === cli && session.chatId === chatKey);
+    // No session yet means it spawns idle; an idle session can act now.
+    if (!active || active.busy !== true) return lane;
+  }
+  return 'main';
+}
+
+/** Person-sourced queued deliveries (Desk answers, voice continuations). */
+function personSourced(record: { fromRole?: string }): boolean {
+  return record.fromRole === 'desk' || record.fromRole === 'voice';
+}
+
 async function getRecipientSessionForDelivery(
   agent: Agent,
   deadline: number,
@@ -671,7 +690,7 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
       const admission = await getRecipientSessionForDelivery(
         to, deadline, signal, deferIfBusy,
         from.role === 'automation' ? false : from.role === 'desk' || from.role === 'voice' ? 'human' : 'peer',
-        from.role === 'voice' ? 'main' : 'bg',
+        from.role === 'voice' || from.role === 'desk' ? await personLanePreference(to) : 'bg',
       );
       session = admission.session;
       lane = admission.lane;
@@ -874,6 +893,76 @@ async function acknowledgeQueuedDelivery(record: QueuedTeamDelivery, session: Se
   await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
 }
 
+/** The joined-delivery block for each batch record after the lead. Mirrors
+ *  runTeamDelivery's own prompt headers so every message keeps its sender. */
+function batchDeliveryBlock(record: QueuedTeamDelivery): string {
+  const header = record.fromRole === 'desk'
+    ? `[comment from ${record.fromName} on the Desk]`
+    : record.fromRole === 'voice'
+    ? '[continuation of the user\u2019s voice request in your own thread]'
+    : `[message from teammate ${record.fromName}${record.fromRole ? ` (${record.fromRole})` : ''} \u2014 handoff ${record.hop}]`;
+  return `${header}\n${record.text}`;
+}
+
+// Bounds for one admitted batch turn. Unbounded, a 34-message backlog (each
+// record can carry 8,000 characters) would hand the recipient a prompt
+// hundreds of KB long — past admission and provider context limits — and
+// retry forever without draining. Overflow stays queued; the next admission
+// takes it, so a big backlog clears in a few turns instead of one or 34.
+const MAX_BATCH_DELIVERIES = 8;
+const MAX_BATCH_TEXT_CHARS = 24_000;
+
+/** Sender class for batch compatibility: the reply instruction an admitted
+ *  turn carries is built from the lead's role, so only same-class records
+ *  can share it (Desk answers answer on the card, voice continuations
+ *  continue the call, automation stays automation, teammates reply inline). */
+function batchRoleClass(record: { fromRole?: string }): 'desk' | 'voice' | 'automation' | 'teammate' {
+  if (record.fromRole === 'desk') return 'desk';
+  if (record.fromRole === 'voice') return 'voice';
+  if (record.fromRole === 'automation') return 'automation';
+  return 'teammate';
+}
+
+/** Whether a queued record can ride the lead's admitted turn without losing
+ *  its own routing. The lead's collaboration chain is the only one the turn
+ *  can activate (one active chain slot per lane), so a record carrying an
+ *  explicit chain joins only an identical one; plain handoffs join freely and
+ *  lose only synthesized route metadata, which every sender can read from the
+ *  thread anyway. */
+function batchJoinable(lead: QueuedTeamDelivery, record: QueuedTeamDelivery): boolean {
+  if (batchRoleClass(lead) !== batchRoleClass(record)) return false;
+  const explicit = (r: QueuedTeamDelivery) => Boolean(r.chainId || r.chainEdges?.length || r.chainRoute?.length);
+  if (!explicit(lead) && !explicit(record)) return true;
+  if (explicit(lead) !== explicit(record)) return false;
+  const leadChain = chainForQueuedDelivery(lead);
+  const recordChain = chainForQueuedDelivery(record);
+  return leadChain.id === recordChain.id
+    && leadChain.edges.join('\u0000') === recordChain.edges.join('\u0000')
+    && leadChain.route.join('\u0000') === recordChain.route.join('\u0000');
+}
+
+/** Ack a joined batch: the lead record's durable receipt proves the whole
+ *  joined prompt was accepted (one send, one peer echo), so persist a
+ *  per-record receipt for every other message before deleting them — a
+ *  restart mid-ack must never redeliver the tail of a batch. */
+async function acknowledgeQueuedBatch(records: QueuedTeamDelivery[], session: SessionLike): Promise<void> {
+  const [lead, ...rest] = records;
+  await flushEventLog(session.logKey);
+  if (!hasDurableDeliveryReceipt(session.logKey, lead.id)) {
+    throw new Error('accepted delivery receipt did not reach the event log');
+  }
+  for (const record of rest) {
+    if (hasDurableDeliveryReceipt(session.logKey, record.id)) continue;
+    await appendEventLogDurable(session.logKey, {
+      seq: reserveEventLogSeq(session.logKey),
+      ev: { type: 'event', event: { type: 'peer_delivery_accepted', deliveryId: record.id } } as PersistedEvent['ev'],
+    });
+  }
+  for (const record of records) {
+    await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
+  }
+}
+
 function retryDelay(): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ASYNC_RETRY_MS);
@@ -887,7 +976,11 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
   // same recipient tail.
   const batch = (await queueStoreOperation(() => queuedDeliveryStore.list()))
     .filter((item) => queueKeyOf(item) === queueKey)
-    .sort((a, b) => String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
+    // Person-sourced records (Desk answers, voice continuations) jump teammate
+    // chatter; within each group oldest first, so a joined delivery reads
+    // newest-last.
+    .sort((a, b) => (Number(personSourced(b)) - Number(personSourced(a)))
+      || String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
 
   for (const record of batch) {
     while (true) {
@@ -901,28 +994,58 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         await retryDelay();
         continue;
       }
-      const from = findAgent(record.fromId) ?? {
-        id: record.fromId,
-        name: record.fromName,
-        role: record.fromRole ?? '',
+      // One admission for the whole still-queued batch, bounded and
+      // routing-compatible. A boundary per message is what backed deliveries
+      // up for an hour on busy lanes (34 queued for one Kimi K3 recipient,
+      // one message per 10-25 s step), so every still-queued message for this
+      // recipient rides the same admitted turn: person messages first
+      // (Matt's Desk answers never sit behind teammate chatter), oldest first
+      // within each group. Only records that keep their own routing join
+      // (same sender class, and no explicit chain unless it matches the
+      // lead's), and the join is capped by count and characters so an
+      // admitted turn never grows past admission limits. Whatever does not
+      // fit stays queued and the next admission takes it.
+      const candidates = (await queueStoreOperation(() => queuedDeliveryStore.list()))
+        .filter((item) => queueKeyOf(item) === queueKey)
+        .sort((a, b) => (Number(personSourced(b)) - Number(personSourced(a)))
+          || String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
+      if (candidates.length === 0) break;
+      const lead = candidates[0];
+      const siblings = [lead];
+      let batchChars = lead.text.length;
+      for (const candidate of candidates.slice(1)) {
+        if (siblings.length >= MAX_BATCH_DELIVERIES) break;
+        if (!batchJoinable(lead, candidate)) continue;
+        const block = batchDeliveryBlock(candidate);
+        if (batchChars + block.length > MAX_BATCH_TEXT_CHARS) continue;
+        siblings.push(candidate);
+        batchChars += block.length;
+      }
+      const from = findAgent(lead.fromId) ?? {
+        id: lead.fromId,
+        name: lead.fromName,
+        role: lead.fromRole ?? '',
         engine: '',
         home: '',
         createdAt: 0,
       };
+      const joinedText = siblings.length > 1
+        ? [lead.text, '', ...siblings.slice(1).map(batchDeliveryBlock)].join('\n')
+        : lead.text;
       const result = await runTeamDelivery({
         from,
         to,
-        text: record.text,
-        hop: record.hop,
-        chain: chainForQueuedDelivery(record),
+        text: joinedText,
+        hop: lead.hop,
+        chain: chainForQueuedDelivery(lead),
         waitForReply: false,
-        deliveryId: record.id,
-        onAdmitted: (session) => acknowledgeQueuedDelivery(record, session),
+        deliveryId: lead.id,
+        onAdmitted: (session) => acknowledgeQueuedBatch(siblings, session),
       });
       const remains = await queueStoreOperation(async () =>
         (await queuedDeliveryStore.list()).some((item) => item.id === record.id));
       if (!result.delivered || remains) {
-        console.warn(`[team] queued delivery ${record.fromName} -> ${to.name} will retry: ${result.reason ?? 'durable acknowledgement pending'}`);
+        console.warn(`[team] queued delivery ${lead.fromName} -> ${to.name} will retry: ${result.reason ?? 'durable acknowledgement pending'}`);
         await retryDelay();
         continue;
       }
@@ -1021,7 +1144,7 @@ export async function deliverTeamMessage(input: {
   const rl = rateOk(replyEdge(from.id, to.id));
   if (!rl.ok) return { delivered: false, reason: rl.reason };
 
-  const fifoKey = queueKeyOf({ toId: to.id, fromRole: from.role });
+  const fifoKey = queueKeyOf({ toId: to.id });
   const queuedBehindAnotherTurn = recipientDeliveryTails.has(fifoKey);
   let record: QueuedTeamDelivery;
   try {
@@ -1137,7 +1260,7 @@ export async function deliverTeamMessage(input: {
 
 // ---- reply extraction ---------------------------------------------------------
 
-import { flushEventLog, loadEventLogSync } from './event-log-store.ts';
+import { appendEventLogDurable, flushEventLog, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 
 /** Read the recipient's authoritative shared-thread tail for this exact turn. */
 async function readLastReply(logKey: string, minSeq = 0, maxSeq = Number.POSITIVE_INFINITY, lane: AgentLane = 'main'): Promise<string | undefined> {

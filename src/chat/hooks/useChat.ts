@@ -899,6 +899,12 @@ function restoreBlocksWithUniqueIds(blocks: ChatBlock[]): ChatBlock[] {
 
   const seen = new Set<string>();
   return visibleBlocks.map((block) => {
+    // 'sending' is an in-flight, socket-scoped state: after a restore the
+    // outbound FIFO is gone, so the label could never settle. Drop it here;
+    // an unsent bubble then reads like any other pre-echo send.
+    if (block.kind === 'user' && block.deliveryState === 'sending') {
+      block = { ...block, deliveryState: undefined };
+    }
     if (!seen.has(block.id)) {
       seen.add(block.id);
       return block;
@@ -990,6 +996,14 @@ export function useChat(opts: {
    * leak through the prior lane before the connection effect cleans it up. */
   const socketReadyRef = useRef(false);
   const sentOutboundRef = useRef<{ key: string; clientMsgId: string } | null>(null);
+  // False from every socket open until the server's first post-hello busy
+  // report ('ready', or a 'working' keepalive) for this lane. A reconnect
+  // keeps 'streaming' alive so the UI does not die mid-turn, but that kept
+  // status can be stale: the turn may have ended while disconnected, and a
+  // message typed in that gap must not leave as mid-step guidance (Riley,
+  // Oct 7 2026: sent as a steer off stale busy, shown "Queued · mid-step",
+  // while the server ran it as a normal turn).
+  const busyConfirmedRef = useRef(false);
   /** The server may temporarily keep this thread attached to a still-busy
    * previous engine after the picker changes. Stop must target that owner. */
   const serverCliRef = useRef<CompanionId>(cli);
@@ -1533,6 +1547,7 @@ export function useChat(opts: {
       // reconcileNow for the second hello path.
       socketReady = false;
       socketReadyRef.current = false;
+      busyConfirmedRef.current = false;
       sentOutboundRef.current = null;
       lastMessageAtRef.current = Date.now();
 
@@ -1574,6 +1589,9 @@ export function useChat(opts: {
           setAppliedSeq((current) => Math.max(current, msg.latestSeq));
         }
         if (msg.type === 'working') {
+          // First authoritative busy report on this socket: from here a
+          // 'streaming' status is server-confirmed, not reconnect-kept.
+          busyConfirmedRef.current = true;
           // Transport keepalive while the engine is on a tool/think pause.
           // It also carries authoritative queued-steer ownership so a cached
           // bubble cannot remain "will run next" after a lost operation.
@@ -1598,6 +1616,7 @@ export function useChat(opts: {
             cacheResetAtRef.current = Math.max(cacheResetAtRef.current, msg.resetAt);
           }
           socketReadyRef.current = true;
+          busyConfirmedRef.current = true;
           serverCliRef.current = typeof msg.activeCli === 'string'
             ? msg.activeCli as CompanionId
             : cli;
@@ -1740,7 +1759,20 @@ export function useChat(opts: {
           setStatus('streaming');
         }
         else if (msg.type === 'turnEnd') {
-          if (!socketReady) return; // replayed control message from the hello buffer
+          if (!socketReady) {
+            // Replayed turnEnd from the hello buffer: the turn it closed ended
+            // before this reconnect. With nothing queued behind it, a
+            // 'streaming' status kept alive across the reconnect is stale, so
+            // clear the spinner now instead of holding it for the ready frame
+            // (Riley's congested bind held it 18s, Oct 7 2026). Queued steers
+            // or a pending outbound send keep streaming: the server owns
+            // those and ready settles them.
+            if (queuedSteerRef.current.size === 0 && !pendingSendRef.current && statusRef.current === 'streaming') {
+              clearTurnStarted();
+              setStatus('ready');
+            }
+            return; // replayed control message from the hello buffer
+          }
           window.dispatchEvent(new Event('rivendell:history-changed'));
           compactingRef.current = false;
           if (queuedSteerRef.current.size > 0) {
@@ -2367,6 +2399,7 @@ export function useChat(opts: {
   const send = (
     text: string,
     images?: ChatSendImage[],
+    labelSending = false,
   ) => {
     if (!repo) {
       setError('Sam is not on the line. Please wait a moment.');
@@ -2375,7 +2408,7 @@ export function useChat(opts: {
     const clientMsgId = `cm-${Date.now().toString(36)}-${nextId++}`;
     setBlocks((prev) => [
       ...prev,
-      { kind: 'user', id: id(), text, images: imagePreviews(images), imageCount: images?.length, clientMsgId, ts: Date.now() },
+      { kind: 'user', id: id(), text, images: imagePreviews(images), imageCount: images?.length, clientMsgId, ts: Date.now(), ...(labelSending ? { deliveryState: 'sending' as const } : {}) },
     ]);
     // Someone typing into a chat that is still catching up must see their
     // own message land, even if that means showing the saved copy early.
@@ -2469,9 +2502,17 @@ export function useChat(opts: {
     const waiting = (outboundQueue.get(key)?.length ?? 0) > 0
       || !socketReadyRef.current
       || !ws
-      || ws.readyState !== WebSocket.OPEN;
+      || ws.readyState !== WebSocket.OPEN
+      // Stale busy after a reconnect: until the server confirms this lane is
+      // busy, a 'streaming' status is kept state, not truth, so these words
+      // go out as a normal message labeled Sending, never as mid-step
+      // guidance the server would have to run as a fresh turn anyway.
+      || !busyConfirmedRef.current;
     if (waiting) {
-      send(text, images);
+      // Only the stale-busy case reads as a fresh send: label it Sending so
+      // it never shows the mid-step queue wording. Transport waits keep the
+      // plain send look, same as before.
+      send(text, images, !busyConfirmedRef.current);
       return;
     }
     const clientMsgId = `cm-${Date.now().toString(36)}-${nextId++}`;
