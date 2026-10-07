@@ -242,7 +242,7 @@ type LogRead = { text: string; fragment: string; cursor: AppendCursor; size: num
  * (fragment). The fragment is never consumed, so it is re-read once complete.
  * With a cursor, returns only what was appended after it, or null when the
  * file was rewritten or truncated underneath the cursor. */
-function readLog(path: string, cursor?: AppendCursor): LogRead | null {
+function readLog(path: string, cursor?: AppendCursor, maxAppend?: number): LogRead | null {
   let fd = -1;
   try {
     fd = openSync(path, 'r');
@@ -250,6 +250,9 @@ function readLog(path: string, cursor?: AppendCursor): LogRead | null {
     let from = 0;
     if (cursor) {
       if (st.ino !== cursor.ino || st.size < cursor.consumed) return null;
+      // Refuse BEFORE paying for the read: this is what makes an incremental
+      // read a bounded operation a request path may perform synchronously.
+      if (maxAppend !== undefined && st.size - cursor.consumed > maxAppend) return null;
       if (!fingerprintAt(fd, cursor.consumed).equals(cursor.fingerprint)) return null;
       from = cursor.consumed;
     }
@@ -330,6 +333,24 @@ function parseLogLines(
 }
 
 export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextSeq: number } {
+  return loadEventLogProven(key, false)!;
+}
+
+/** The proven loader: parses every line (or folds the appended bytes onto an
+ *  already-proven base), so its high-water is the file's true maximum and its
+ *  receipts cover the whole file.
+ *
+ *  `incrementalOnly` is the BOUNDED contract the async tail loader needs. It
+ *  caps the appended range at TAIL_LOAD_MAX_BYTES and returns null rather than
+ *  ever falling back to a full synchronous read, so the tail path can simply
+ *  try it and carry on when it declines. Checking the cache and the file
+ *  separately beforehand could not give that guarantee: this function re-stats
+ *  the file, and anything observed before an await can be evicted, rewritten,
+ *  or grown by the time it runs. */
+function loadEventLogProven(
+  key: string,
+  incrementalOnly: boolean,
+): { events: PersistedEvent[]; nextSeq: number } | null {
   const path = logPath(key);
   let mtimeMs: number;
   let size: number;
@@ -338,6 +359,7 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
     mtimeMs = st.mtimeMs;
     size = st.size;
   } catch {
+    if (incrementalOnly) return null;
     return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
   }
   // This is the allocator AND receipts-rebuild path, so only an entry proven
@@ -359,9 +381,15 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
 
   // Grown since the cached read: parse only the appended bytes. Anything else
   // (never read, evicted, rewritten, truncated) is a full read.
-  const appended = cached ? readLog(path, cached.cursor) : null;
+  const appended = cached ? readLog(path, cached.cursor, incrementalOnly ? TAIL_LOAD_MAX_BYTES : undefined) : null;
+  // The one place the full read is reachable, and the one place the bounded
+  // caller gets to decline it.
+  if (incrementalOnly && !appended) return null;
   const read = appended ?? readLog(path);
-  if (!read) return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
+  if (!read) {
+    if (incrementalOnly) return null;
+    return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
+  }
   const incremental = Boolean(appended && cached);
   const state = incremental && cached
     ? { events: cached.events, eventChars: cached.eventChars, highWater: cached.highWater, echoIds: echoReceipts.get(path) ?? [] }
@@ -608,18 +636,21 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
         : Math.max(cached.nextSeq, nextSeqByLogKey.get(key) ?? 1),
     };
   }
-  // A fully proven entry for this same file, which has only grown since: the
-  // sync loader's INCREMENTAL read parses just the appended bytes, keeps the
-  // entry proven, and costs far less than re-reading 16 MiB. Taking the tail
-  // here instead would be both slower and destructive — it would replace a
-  // proven entry with an unproven one, and every later receipt/allocator call
-  // (durableUserEchoClientMsgId on each hello) would then be forced into a
-  // FULL synchronous re-read of a 70-190 MB log, blocking the event loop far
-  // worse than the uncached tail this path exists to avoid.
-  if (
-    cached?.seqProven && cached.receiptsProven
-    && cached.cursor.ino === ino && size >= cached.cursor.consumed
-  ) return loadEventLogSync(key);
+  // A fully proven entry can serve this read from the proven loader's BOUNDED
+  // incremental path: it parses only the appended bytes (capped at the same
+  // 16 MiB the tail would have cost), keeps the entry proven, and avoids
+  // replacing it with an unproven one — which would force every later receipt
+  // and allocator call (durableUserEchoClientMsgId on each hello) into a full
+  // synchronous re-read of a 70-190 MB log.
+  //
+  // It returns null instead of ever full-reading, so declining is free and
+  // there is nothing to pre-validate. That matters: there is NO await between
+  // this check and the call, so no eviction, append, or rewrite can slip in
+  // between and turn a bounded read into an unbounded one.
+  if (cached?.seqProven && cached.receiptsProven) {
+    const incremental = loadEventLogProven(key, true);
+    if (incremental) return incremental;
+  }
   // Small files are already bounded: keep the proven path (and its cache
   // maintenance) instead of a second one.
   if (size <= TAIL_LOAD_MAX_BYTES) return loadEventLogSync(key);
@@ -683,7 +714,11 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
       keptReceipts.push(id);
     }
     keptReceipts.reverse();
-    echoReceipts.set(path, keptReceipts);
+    // NOT published here. Publishing receipts before the awaits below opened a
+    // window where a concurrent receipt lookup could hit a fully proven cache
+    // entry (so it skipped rebuilding) and then read this tail-only list,
+    // reporting a durable message as not retained. The write now happens in
+    // the same synchronous block as the cache install.
     if (state.events.length > MAX_EVENTS_PER_LOG) {
       const drop = state.events.length - MAX_EVENTS_PER_LOG;
       state.events.splice(0, drop);
@@ -719,7 +754,7 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
     // ~0-25), so it never passed. Nothing was ever cached, and every sidebar
     // poll re-read 16 MiB and re-parsed ~37k records, which pinned the event
     // loop and drove the process into a GC spiral (Oct 7 2026).
-    {
+    install: {
       let retainedBytes = 0;
       for (const chars of state.eventChars) retainedBytes += chars;
       const fingerprint = await readRangeAsync(handle, Math.max(0, consumed - TAIL_FINGERPRINT_BYTES), consumed);
@@ -732,6 +767,36 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
       // sight — which is exactly the uncached re-parse spiral this fix exists
       // to end.
       const current = parsedCache.get(path);
+      // A fully proven entry for this same file won the race (a full read
+      // finished during the awaits above). Replacing it with this tail-only
+      // entry would downgrade both proofs, so the next receipt or allocator
+      // call would pay a full synchronous re-read — and clobbering
+      // echoReceipts under it would make that entry's skipped rebuild answer
+      // from a tail-only list. Leave both alone; the events parsed above are
+      // still correct for this caller's display.
+      // Keep a proven entry only when it is one this call did not already
+      // prove useless.
+      //
+      // `current !== cached` is the load-bearing part: a proven entry that
+      // appeared during the awaits above is fresher than what this tail
+      // started from, and downgrading it would force later receipt and
+      // allocator calls into a full synchronous re-read. But `cached` itself
+      // is the entry the bounded delegation at the top ALREADY declined — it
+      // declines on a >16 MiB delta, a fingerprint mismatch, or a same-inode
+      // TRUNCATION — so preserving that one would mean re-reading 16 MiB on
+      // every request and never being able to install the result: the exact
+      // starvation loop this loader exists to end, and worse for a truncated
+      // file, whose stale cursor sits past EOF so the proven path full-reads
+      // every time too. `consumed <= size` rejects such a cursor outright.
+      // A different inode means the file was replaced and that entry is dead.
+      if (
+        current && current !== cached
+        && current.seqProven && current.receiptsProven
+        && current.cursor.ino === ino && current.cursor.consumed <= size
+      ) break install;
+      // Receipts and the entry that vouches for them are published together,
+      // with no await between, so no reader can see one without the other.
+      echoReceipts.set(path, keptReceipts);
       if (current) parsedCacheBytes -= current.bytes;
       parsedCache.delete(path);
       parsedCache.set(path, {
