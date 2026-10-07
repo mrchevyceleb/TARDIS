@@ -65,10 +65,12 @@ export type HygieneDeps = {
   /** Ids of agents with a live turn right now (routine and job wakes left out
    *  where the lane can tell them apart). */
   liveAgentIds: (agents: HygieneAgent[]) => Set<string> | Promise<Set<string>>;
-  /** Ids of agents with ANY busy turn right now, automation wakes included: a
-   *  lane mid-turn is not idle even when the turn is a routine or job wake.
-   *  Falls back to liveAgentIds when not provided. */
-  occupiedAgentIds?: (agents: HygieneAgent[]) => Set<string> | Promise<Set<string>>;
+  /** agent id -> epoch ms that lane was last known active: busy sessions
+   *  report nowMs, automation wakes included (a lane mid-turn is not idle),
+   *  and a session that went quiet between ticks still reports its last
+   *  activity, so a short turn is never mistaken for idle time. Optional:
+   *  falls back to liveAgentIds, treated as busy now. */
+  occupiedAgentActivity?: (agents: HygieneAgent[], nowMs: number) => Map<string, number> | Promise<Map<string, number>>;
   deliver: (message: { to: string; text: string }) => Promise<HygieneDelivery>;
   log: (line: string) => void;
   stateFile: string;
@@ -322,15 +324,21 @@ function seedState(clock: { day: string; minute: number }): HygieneState {
 
 // ---- tick -----------------------------------------------------------------------
 
-/** Any busy turn, automation wakes included: a lane mid-turn is not idle. */
-async function occupiedAgentIdsFromRunners(agents: HygieneAgent[]): Promise<Set<string>> {
+/** Last-known activity per lane. Busy sessions count as active now (any
+ *  turn, automation wakes included: a lane mid-turn is not idle), and a
+ *  session that went quiet between two minute ticks still reports its last
+ *  activity, so a short turn never reads as idle time. */
+async function occupiedAgentActivityFromRunners(agents: HygieneAgent[], nowMs: number): Promise<Map<string, number>> {
   const runner = await import('../chat/runner.ts');
   const byHome = new Map(agents.map((a) => [a.home, a.id]));
-  const out = new Set<string>();
+  const out = new Map<string, number>();
   for (const session of runner.activeChatSessions()) {
-    if (!session.busy) continue;
     const id = byHome.get(bareChatId(session.chatId));
-    if (id) out.add(id);
+    if (!id) continue;
+    const ms = session.busy ? nowMs : session.lastActivityAt;
+    if (!Number.isFinite(ms)) continue;
+    const prev = out.get(id);
+    if (prev === undefined || ms > prev) out.set(id, ms);
   }
   return out;
 }
@@ -358,7 +366,7 @@ function defaultDeps(): HygieneDeps {
     readDesk,
     listAgents: async () => (await import('../chat/agents.ts')).listAgents(),
     liveAgentIds: liveAgentIdsFromRunners,
-    occupiedAgentIds: occupiedAgentIdsFromRunners,
+    occupiedAgentActivity: occupiedAgentActivityFromRunners,
     deliver: async ({ to, text }) => {
       const { deliverTeamMessage } = await import('../chat/teamBus.ts');
       // A plain named sender (never source 'desk', which is the human owner):
@@ -379,7 +387,19 @@ export type HygieneTickReport = { skipped?: 'off'; seeded?: boolean; slot?: stri
 export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): Promise<HygieneTickReport> {
   const report: HygieneTickReport = { sent: [], checked: [] };
   if (!hygieneEnabled()) return { ...report, skipped: 'off' };
-  const deps: HygieneDeps = { ...defaultDeps(), ...overrides };
+  const defaults = defaultDeps();
+  const deps: HygieneDeps = {
+    ...defaults,
+    ...overrides,
+    // A caller that stubs liveAgentIds but not occupiedAgentActivity must
+    // not fall through to the real runner scan: its live set stands in for
+    // the lanes. Production (no overrides) keeps the real activity scan.
+    occupiedAgentActivity: overrides.occupiedAgentActivity
+      ?? (overrides.liveAgentIds
+        ? (agents, nowMs) => Promise.resolve(overrides.liveAgentIds!(agents))
+          .then((ids) => new Map(Array.from(ids, (id) => [id, nowMs] as const)))
+        : defaults.occupiedAgentActivity),
+  };
   const nowMs = deps.now();
   const clock = etClock(nowMs);
   const save = (state: HygieneState) => saveState(deps.stateFile, state);
@@ -415,18 +435,30 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
     state.minutes[id] = (state.minutes[id] ?? 0) + 1;
     dirty = true;
   }
-  const occupied = await (deps.occupiedAgentIds ?? deps.liveAgentIds)(agents);
-  for (const id of occupied) {
-    if (!known.has(id)) continue;
-    state.lastBusy[id] = nowMs;
-    dirty = true;
+  const activity = deps.occupiedAgentActivity
+    ? await deps.occupiedAgentActivity(agents, nowMs)
+    : new Map(Array.from(await deps.liveAgentIds(agents), (id) => [id, nowMs] as const));
+  for (const [id, ms] of activity) {
+    if (!known.has(id) || !Number.isFinite(ms)) continue;
+    const last = Math.min(ms, nowMs); // a future stamp can never extend the clock
+    if ((state.lastBusy[id] ?? -1) < last) {
+      state.lastBusy[id] = last;
+      dirty = true;
+    }
   }
   // A lane first seen now (new roster entry, or a state file from before
   // this field existed) starts its quiet clock at this tick, so a restart
-  // never bursts pickup messages.
+  // never bursts pickup messages. Implausible clocks (zero, or in the
+  // future) reset the same way: always the quiet direction.
   for (const agent of agents) {
-    if (state.lastBusy[agent.id] === undefined) {
+    const busy = state.lastBusy[agent.id];
+    if (busy === undefined || busy <= 0 || busy > nowMs) {
       state.lastBusy[agent.id] = nowMs;
+      dirty = true;
+    }
+    const nudged = state.lastIdleNudge[agent.id];
+    if (nudged !== undefined && nudged > nowMs) {
+      state.lastIdleNudge[agent.id] = 0;
       dirty = true;
     }
   }
