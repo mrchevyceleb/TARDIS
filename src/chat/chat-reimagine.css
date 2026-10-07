@@ -403,10 +403,16 @@
 .rc .mini { padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border); font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); transition: all .15s ease; min-height: 30px; display: inline-flex; align-items: center; }
 .rc .mini:hover { border-color: var(--border-strong); color: var(--fg-soft); }
 .rc .mini.on { border-color: color-mix(in oklch, var(--accent) 55%, transparent); color: var(--accent-glow); background: color-mix(in oklch, var(--accent) 10%, transparent); }
-.rc .fw-model-select { padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border); font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); background: transparent; min-height: 30px; max-width: 100%; }
-/* The open list is drawn by the OS: a transparent select leaves it white, so give it theme colors. */
-.rc .fw-model-select optgroup { background: var(--surface-raised); color: var(--gold); }
-.rc .fw-model-select option { background: var(--surface-raised); color: var(--fg); }
+.rc .model-list-wrap { flex-basis: 100%; display: flex; flex-direction: column; gap: 6px; }
+/* 16px keeps iOS from zooming the page when the search box takes focus. */
+.rc .model-search { width: 100%; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: transparent; color: var(--fg); font-family: var(--font-mono); font-size: 16px; min-height: 34px; }
+.rc .model-search:focus { outline: none; border-color: color-mix(in oklch, var(--accent) 55%, transparent); }
+.rc .model-list { max-height: 220px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--border); border-radius: 12px; padding: 4px; position: relative; }
+.rc .model-group { padding: 6px 8px 3px; font-family: var(--r-sign); font-size: 8.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--gold); }
+.rc .model-row { display: block; width: 100%; text-align: left; padding: 7px 10px; min-height: 36px; border-radius: 8px; font-family: var(--font-mono); font-size: 11px; color: var(--muted); transition: background .15s ease, color .15s ease; }
+.rc .model-row:hover { background: var(--surface-hover); color: var(--fg-soft); }
+.rc .model-row.on { color: var(--accent-glow); background: color-mix(in oklch, var(--accent) 10%, transparent); }
+.rc .model-empty { padding: 10px; font-size: 11px; color: var(--faint); }
 .rc .lane-note { flex-basis: 100%; font-family: var(--font-display); font-style: italic; font-size: 12px; color: var(--muted); padding-top: 5px; }
 
 /* ── chronicle ribbon (ticker) — §3 / §4.2 ─────────────────────── */
