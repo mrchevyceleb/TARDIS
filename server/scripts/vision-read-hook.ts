@@ -5,15 +5,42 @@
 // to a plain no-image note. The standing vision proxy config
 // (RIVENDELL_VISION_BASE_URL / _MODEL / _API_KEY) rides the CLI child env:
 // the subscription scrub strips provider keys but not these.
-import { readFileSync } from 'node:fs';
-import { describeImageBase64, describeImageFile } from '../src/chat/vision-adapter.ts';
+import { describeImageBase64, describeImageFile, MAX_IMAGE_B64_CHARS } from '../src/chat/vision-adapter.ts';
+
+// The stdin path is for device captures: images only, and bounded while being
+// read (review 2). An oversized or non-image payload exits before it is ever
+// buffered in full; the decoded-size check inside the adapter stays as
+// defense in depth.
+const STDIN_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp']);
+
+function readStdinBounded(maxChars: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    process.stdin.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > maxChars) {
+        process.stdin.destroy();
+        reject(new Error(`stdin image exceeds the encoded size limit (~${Math.round(maxChars / 1024 / 1024)}MB base64)`));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    process.stdin.on('error', reject);
+    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8').trim()));
+  });
+}
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   try {
     if (argv[0] === '--stdin') {
       const mediaType = argv[1] || 'image/jpeg';
-      const base64 = readFileSync(0, 'utf8').trim();
+      if (!STDIN_MEDIA_TYPES.has(mediaType)) {
+        console.error(`vision-read-hook: unsupported stdin media type: ${mediaType}`);
+        process.exit(1);
+      }
+      const base64 = await readStdinBounded(MAX_IMAGE_B64_CHARS);
       if (!base64) {
         console.error('vision-read-hook: empty stdin');
         process.exit(1);

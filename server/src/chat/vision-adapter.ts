@@ -18,8 +18,14 @@
 //   RIVENDELL_VISION_MODEL      VLM id, or 'auto' to detect  (default: auto)
 //   RIVENDELL_VISION_PROMPT     override the describe prompt
 
-import { readFile, stat } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdtemp, open, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import sharp from 'sharp';
+
+const execFileAsync = promisify(execFile);
 
 export type VisionImage = { mediaType: string; base64: string };
 export type VisionMode = 'auto' | 'force' | 'off';
@@ -88,7 +94,7 @@ const MAX_IMAGES_PER_TURN = 4;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 // base64 inflates ~4/3; reject by raw string length BEFORE decoding so an
 // oversized paste can't be fully decoded into memory just to be rejected.
-const MAX_IMAGE_B64_CHARS = Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 64;
+export const MAX_IMAGE_B64_CHARS = Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 64;
 // Cap the user text echoed into each per-image describe request (it's only
 // context for the description and is sent once per image).
 const MAX_QUOTED_USER_CHARS = 2000;
@@ -323,26 +329,86 @@ async function describeImageInline(image: VisionImage, userText: string): Promis
   return describeImage(image, 1, 1, userText, baseUrl, model);
 }
 
+/** Media type from the file's leading bytes (review 2): extensionless or
+ *  renamed files are no longer assumed jpeg, and PDFs get the dedicated
+ *  render path. Returns null when no known signature is found. */
+function sniffMediaType(head: Buffer): string | null {
+  if (head.length >= 8 && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e
+    && head[3] === 0x47 && head[4] === 0x0d && head[5] === 0x0a && head[6] === 0x1a && head[7] === 0x0a) return 'image/png';
+  if (head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'image/jpeg';
+  if (head.length >= 6) {
+    const gif = head.subarray(0, 6).toString('latin1');
+    if (gif === 'GIF87a' || gif === 'GIF89a') return 'image/gif';
+  }
+  if (head.length >= 12 && head.subarray(0, 4).toString('latin1') === 'RIFF'
+    && head.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
+  if (head.length >= 2 && head[0] === 0x42 && head[1] === 0x4d) return 'image/bmp';
+  // PDF allows junk before the header; scan the first 1KB.
+  if (head.subarray(0, 1024).includes('%PDF-')) return 'application/pdf';
+  return null;
+}
+
+/** Describe a PDF for a no-vision lane (review 2): render up to 3 pages with
+ *  pdftoppm and describe each page through the same single describe pipeline
+ *  (each rendered page is size-checked in describeImageInline). pdftoppm and
+ *  pdfinfo run as child processes that stream the file, so a large PDF never
+ *  lands whole in this process's memory. Throws on any failure (no renderer,
+ *  proxy down) so the caller falls back to the plain no-image note. */
+const PDF_MAX_PAGES = 3;
+async function describePdfFile(file: string): Promise<string> {
+  let totalPages = 0;
+  try {
+    const info = await execFileAsync('pdfinfo', [file], { timeout: 10_000 });
+    const m = /^Pages:\s+(\d+)/m.exec(info.stdout);
+    if (m) totalPages = Number(m[1]);
+  } catch { /* page count is optional; the render is the source of truth */ }
+  const dir = await mkdtemp(join(tmpdir(), 'vision-pdf-'));
+  try {
+    const prefix = join(dir, 'page');
+    await execFileAsync('pdftoppm', ['-png', '-r', '100', '-l', String(PDF_MAX_PAGES), file, prefix], { timeout: 20_000 });
+    const pages = (await readdir(dir)).filter((n) => n.startsWith('page')).sort();
+    if (pages.length === 0) throw new Error('pdftoppm rendered no pages');
+    const parts: string[] = [];
+    for (const [i, name] of pages.entries()) {
+      const data = await readFile(join(dir, name));
+      parts.push(`Page ${i + 1}: ${await describeImageInline(
+        { mediaType: 'image/png', base64: data.toString('base64') },
+        'A tool on a lane whose chat model cannot see images read this PDF; this is one rendered page. Describe its full visual content so the model can work from the description.',
+      )}`);
+    }
+    const shown = totalPages > PDF_MAX_PAGES ? `first ${PDF_MAX_PAGES} of ${totalPages} pages` : `${pages.length} page(s)`;
+    return `This PDF was rendered to images and described visually (${shown}):\n\n${parts.join('\n\n')}`;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 /** Describe one image FILE for a no-vision lane's tool result (card-faf580).
- *  Size is checked with stat BEFORE the file is read or base64-copied, so an
- *  oversized "image" cannot balloon the hook's memory before the fallback
- *  (review 1). Throws on any failure (missing file, oversized image, proxy
- *  down) so the caller — the PreToolUse Read guard — can fall back to a plain
- *  no-image note. */
+ *  The media type comes from the file's leading bytes, never its name (review
+ *  2), and image size is checked with stat BEFORE the file is read or
+ *  base64-copied, so an oversized image cannot balloon the hook's memory
+ *  before the fallback (review 1). Throws on any failure (missing file,
+ *  unrecognized type, oversized image, proxy down) so the caller — the
+ *  PreToolUse Read guard — can fall back to a plain no-image note. */
 export async function describeImageFile(file: string): Promise<string> {
+  const fh = await open(file, 'r');
+  let sniff: string | null = null;
+  try {
+    const head = Buffer.alloc(1024);
+    const { bytesRead } = await fh.read(head, 0, 1024, 0);
+    sniff = sniffMediaType(head.subarray(0, bytesRead));
+  } finally {
+    await fh.close();
+  }
+  if (sniff === 'application/pdf') return describePdfFile(file);
+  if (!sniff) throw new Error('unrecognized image file (no PNG/JPEG/GIF/WebP/BMP/PDF signature)');
   const { size } = await stat(file);
   if (size > MAX_IMAGE_BYTES) {
     throw new Error(`image is too large for the vision adapter (${Math.round(size / 1024 / 1024)}MB); limit is ${Math.round(MAX_IMAGE_BYTES / 1024 / 1024)}MB`);
   }
   const data = await readFile(file);
-  const ext = file.toLowerCase().split('.').pop() ?? '';
-  const mediaType = ext === 'png' ? 'image/png'
-    : ext === 'gif' ? 'image/gif'
-    : ext === 'webp' ? 'image/webp'
-    : ext === 'bmp' ? 'image/bmp'
-    : 'image/jpeg';
   return describeImageInline(
-    { mediaType, base64: data.toString('base64') },
+    { mediaType: sniff, base64: data.toString('base64') },
     'A tool on a lane whose chat model cannot see images read this image file; describe its full visual content so the model can work from the description.',
   );
 }
