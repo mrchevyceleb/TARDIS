@@ -122,6 +122,12 @@ type ParsedEntry = {
   nextSeq: number;
   bytes: number;
   cursor: AppendCursor;
+  /** True when `highWater` is the whole file's maximum seq. A tail read
+   *  without a verified repair cursor still yields the true newest replay
+   *  window (it is the file's suffix), but its high-water is only the tail's
+   *  own maximum, so the allocator paths must not trust `nextSeq`. Display
+   *  readers may serve such an entry; loadEventLogSync re-reads in full. */
+  seqProven: boolean;
 };
 const parsedCache = new Map<string, ParsedEntry>();
 const PARSED_CACHE_MAX = 128;
@@ -326,7 +332,13 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
   } catch {
     return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
   }
-  const cached = parsedCache.get(path);
+  // This is the allocator path, so only a seq-proven entry may answer it. A
+  // tail-built entry carries the right events but an unproven high-water;
+  // serving it here would seed nextSeq below an on-disk seq and let new
+  // appends collide with existing ones. Such an entry falls through to the
+  // full read below, which re-reads every line and proves the maximum.
+  const entry = parsedCache.get(path);
+  const cached = entry?.seqProven ? entry : undefined;
   if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
     // Re-insert so eviction order is least-recently-USED, not first-inserted.
     parsedCache.delete(path);
@@ -359,7 +371,10 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
   const nextSeq = state.highWater + 1;
   let retainedBytes = 0;
   for (const chars of state.eventChars) retainedBytes += chars;
-  if (cached) parsedCacheBytes -= cached.bytes;
+  // Discount whatever is actually in the map, proven or not: an unproven
+  // entry is being replaced here too, and skipping it would double-count its
+  // bytes against the budget forever.
+  if (entry) parsedCacheBytes -= entry.bytes;
   parsedCache.delete(path);
   parsedCache.set(path, {
     mtimeMs: read.mtimeMs,
@@ -374,6 +389,9 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
     nextSeq,
     bytes: retainedBytes,
     cursor: read.cursor,
+    // Every line of the file was parsed (full read) or folded onto a proven
+    // base (incremental), so this high-water is the file's true maximum.
+    seqProven: true,
   });
   parsedCacheBytes += retainedBytes;
   // A single log bigger than the whole budget evicts itself here: callers still
@@ -568,7 +586,14 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
     // Re-insert so eviction order is least-recently-USED, same as the sync path.
     parsedCache.delete(path);
     parsedCache.set(path, cached);
-    return { events: cached.events.slice(), nextSeq: observeNextSeq(key, cached.nextSeq) };
+    return {
+      events: cached.events.slice(),
+      // Only a proven high-water may raise the shared allocator; an unproven
+      // entry's nextSeq is served for display and never observed.
+      nextSeq: cached.seqProven
+        ? observeNextSeq(key, cached.nextSeq)
+        : Math.max(cached.nextSeq, nextSeqByLogKey.get(key) ?? 1),
+    };
   }
   // Small files are already bounded: keep the proven path (and its cache
   // maintenance) instead of a second one.
@@ -595,12 +620,17 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
     const fragment = chunk.toString('utf8', completeEnd);
     // The read starts mid-line: drop the leading partial line.
     if (from > 0) text = text.slice(text.indexOf('\n') + 1);
-    const carriedReceipts = echoReceipts.get(path)?.length ?? 0;
+    // Collect this tail's receipts into a FRESH array rather than pushing onto
+    // the carried one. The tail re-reads the same file suffix on every call,
+    // so appending in place refilled the window with duplicates of the same
+    // few ids and evicted genuine older receipts, which made
+    // isUserEchoRetained answer false for messages that were in fact durable.
+    const carried = echoReceipts.get(path) ?? [];
     const state = {
       events: [] as PersistedEvent[],
       eventChars: [] as number[],
       highWater: 0,
-      echoIds: echoReceipts.get(path) ?? ([] as string[]),
+      echoIds: [] as string[],
     };
     const lines = text.split('\n');
     for (let i = 0; i < lines.length; i += TAIL_PARSE_LINES_PER_SLICE) {
@@ -614,14 +644,21 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
     // before this path existed. Rare: a normal lane holds well over 2000
     // events in its last 16 MiB.
     if (state.events.length < MAX_EVENTS_PER_LOG) return loadEventLogSync(key);
-    // Receipts this parse found in the tail itself. The tail is the file's
-    // suffix, so at least RECEIPTS_PER_LOG of them proves the file's newest
-    // RECEIPTS_PER_LOG receipts are all inside the window — exactly the ones
-    // a full read would keep. Receipts carried from earlier parses never
-    // count toward that proof.
-    const tailReceipts = state.echoIds.length - carriedReceipts;
-    if (state.echoIds.length > RECEIPTS_PER_LOG) state.echoIds.splice(0, state.echoIds.length - RECEIPTS_PER_LOG);
-    echoReceipts.set(path, state.echoIds);
+    // Merge carried + tail receipts newest-last, de-duplicated, then keep the
+    // newest RECEIPTS_PER_LOG. The tail is the file's suffix, so its receipts
+    // are the newest ones on disk; carried ids from earlier (possibly full)
+    // reads cover anything older that is still worth answering for.
+    const mergedReceipts = carried.concat(state.echoIds);
+    const keptReceipts: string[] = [];
+    const seenReceipts = new Set<string>();
+    for (let i = mergedReceipts.length - 1; i >= 0 && keptReceipts.length < RECEIPTS_PER_LOG; i -= 1) {
+      const id = mergedReceipts[i];
+      if (seenReceipts.has(id)) continue;
+      seenReceipts.add(id);
+      keptReceipts.push(id);
+    }
+    keptReceipts.reverse();
+    echoReceipts.set(path, keptReceipts);
     if (state.events.length > MAX_EVENTS_PER_LOG) {
       const drop = state.events.length - MAX_EVENTS_PER_LOG;
       state.events.splice(0, drop);
@@ -647,7 +684,17 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
         : await readRangeAsync(handle, fpStart, repairCursor.consumed);
       verified = fpBytes.equals(repairCursor.fingerprint);
     }
-    if (verified && state.events.length >= MAX_EVENTS_PER_LOG && tailReceipts >= RECEIPTS_PER_LOG) {
+    // Cache the window this parse just paid for. The events are the file's
+    // newest MAX_EVENTS_PER_LOG (guaranteed by the length check above, since
+    // the tail is the file's suffix), which is exactly what display readers
+    // want, so caching them is sound whether or not the high-water is proven.
+    // `seqProven` carries that distinction instead of refusing to cache:
+    // the previous gate also demanded RECEIPTS_PER_LOG (1024) receipts inside
+    // the tail, but receipts are sparse (a 16 MiB tail of a busy lane holds
+    // ~0-25), so it never passed. Nothing was ever cached, and every sidebar
+    // poll re-read 16 MiB and re-parsed ~37k records, which pinned the event
+    // loop and drove the process into a GC spiral (Oct 7 2026).
+    {
       let retainedBytes = 0;
       for (const chars of state.eventChars) retainedBytes += chars;
       const fingerprint = await readRangeAsync(handle, Math.max(0, consumed - TAIL_FINGERPRINT_BYTES), consumed);
@@ -664,6 +711,7 @@ export async function loadEventLogTail(key: string): Promise<{ events: Persisted
         nextSeq,
         bytes: retainedBytes,
         cursor: { ino, consumed, fingerprint },
+        seqProven: verified,
       });
       parsedCacheBytes += retainedBytes;
       evictParsedCache();
