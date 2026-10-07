@@ -294,6 +294,12 @@ export function Composer(props: ComposerProps) {
     }
   };
 
+  // The keep-open note is for phone surfaces: a phone browser suspends
+  // background tabs and kills the upload. The mobile prop covers the mobile
+  // shells; the Grok phone surface renders this composer desktop-shaped, so
+  // fall back to the viewport shape (a snapshot check; the chip re-renders
+  // on every progress tick, so it stays fresh while uploading).
+  const phoneSurface = mobile || (typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches);
   const trimmed = props.value.trim();
   const refCount = props.refCount ?? 0;
   const hasContent = trimmed.length > 0 || images.length > 0 || refCount > 0;
@@ -388,7 +394,7 @@ export function Composer(props: ComposerProps) {
                 <span className="up-txt">
                   {u.error
                     ? `${u.name} · ${u.error}`
-                    : `${u.name} · ${Math.round(u.progress * 100)}%${mobile ? ' · keep this tab open' : ''}`}
+                    : `${u.name} · ${Math.round(u.progress * 100)}%${phoneSurface ? ' · keep this tab open' : ''}`}
                 </span>
                 <button type="button" className="attach-x" aria-label="remove" onClick={() => removeUpload(u.id)}>
                   ×
