@@ -76,6 +76,8 @@ export type ChatBlock =
       ts: number;
       /** Time unknown (history logged before events were time-stamped). */
       tsApprox?: boolean;
+      /** Delivered into the agent's background lane. */
+      lane?: 'bg';
     }
   | {
       /** Auto-compaction marker — the thread's model context rotated with a
@@ -150,6 +152,8 @@ export type ChatBlock =
       turnId?: string;
       /** Teammate message this response belongs to, when applicable. */
       peerId?: string;
+      /** Written by the agent's background lane, which streams alongside the home lane. */
+      lane?: 'bg';
       cbIndex?: number;
       open?: boolean;
       /** Durable event-log seq for this block. Used to pin emoji reactions. */
@@ -184,6 +188,8 @@ export type ChatBlock =
       turnId?: string;
       /** Teammate message this tool activity belongs to, when applicable. */
       peerId?: string;
+      /** Written by the agent's background lane, which streams alongside the home lane. */
+      lane?: 'bg';
       cbIndex?: number;
       open?: boolean;
     }

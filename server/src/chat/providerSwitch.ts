@@ -189,8 +189,14 @@ function waitForTurnEnd(session: ContinuableSession, timeoutMs: number): Promise
 
 /** Queue the one automatic continue for a cut turn. A second cut on the same
  *  thread before it runs (a kept child waking and failing again) folds in. */
+/** One pending continue per lane: an agent's home and background lanes share
+ *  a log but each continues its own cut turn. */
+function laneJobKey(job: { logKey: string; chatId: string }): string {
+  return `${job.logKey}\0${job.chatId}`;
+}
+
 export function scheduleProviderContinue(request: ProviderContinueRequest): void {
-  const existing = jobs.get(request.logKey);
+  const existing = jobs.get(laneJobKey(request));
   // A job still waiting for its old child absorbs the new cut. One already
   // past that point cannot see it, so the new cut gets its own job.
   if (existing && !existing.cancelled && !existing.started) {
@@ -206,12 +212,12 @@ export function scheduleProviderContinue(request: ProviderContinueRequest): void
     ? mergeOrigins(request.origin, { peers: existing.origin.peers, human: false, automation: request.origin.automation })
     : request.origin;
   const job: Job = { ...request, origin, cancelled: false, started: false };
-  jobs.set(request.logKey, job);
+  jobs.set(laneJobKey(request), job);
   runningJobs.add(job);
   console.warn(`[chat ${request.cli}] provider switched mid-turn on ${request.logKey} (${request.cut.from} -> ${request.cut.to}); continuing automatically`);
   void runJob(job).finally(() => {
     runningJobs.delete(job);
-    if (jobs.get(job.logKey) === job) jobs.delete(job.logKey);
+    if (jobs.get(laneJobKey(job)) === job) jobs.delete(laneJobKey(job));
   });
 }
 
@@ -224,7 +230,7 @@ export function markPendingProviderContinuesInterrupted(): number {
   for (const job of [...runningJobs]) {
     job.cancelled = true;
     runningJobs.delete(job);
-    jobs.delete(job.logKey);
+    jobs.delete(laneJobKey(job));
     if (noted.has(job.logKey)) continue;
     noted.add(job.logKey);
     const label = job.cut.to === 'fireworks' ? 'Fireworks' : 'the Z.ai coding plan';
@@ -243,7 +249,7 @@ export function markPendingProviderContinuesInterrupted(): number {
  *  the thread, so the cut is not picked back up by the next message or a
  *  reload that still shows "continuing". Fresh wipes the thread instead. */
 export function cancelProviderContinue(logKey: string, opts: { stopped?: boolean } = {}): void {
-  jobs.delete(logKey);
+  for (const key of [...jobs.keys()]) if (key.startsWith(`${logKey}\0`)) jobs.delete(key);
   let cancelled: Job | null = null;
   for (const job of [...runningJobs]) {
     if (job.logKey !== logKey) continue;

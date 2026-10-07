@@ -9,7 +9,7 @@
 import { randomUUID } from 'node:crypto';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
 import { brainForAgent, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
-import { bareChatId, logKeyFor } from './threadKey.ts';
+import { backgroundChatId, backgroundLaneEnabled, bareChatId, isBackgroundChatId, logKeyFor } from './threadKey.ts';
 import { extractVisibleTurns } from './threadWindow.ts';
 import { JsonStore, type StoredRecord } from '../lib/jsonStore.ts';
 
@@ -27,6 +27,7 @@ type SessionLike = {
   subscribe: (
     fn: (event: {
       seq?: number;
+      lane?: string;
       ev?: { type?: string; event?: { type?: string; deliveryId?: string; continuing?: boolean; unread?: boolean; message?: string } };
     }) => void,
     sinceSeq?: number,
@@ -34,6 +35,7 @@ type SessionLike = {
   ) => () => void;
   key: string;
   logKey: string;
+  chatId?: string;
 };
 
 async function getRunner() {
@@ -41,7 +43,30 @@ async function getRunner() {
   return mod as unknown as {
     getOrCreateSession: (opts: { cli: string; repoPath: string; chatId: string; model?: string; effort?: string; recycleOnMismatch?: boolean }) => Promise<SessionLike>;
     activeChatSessions: () => Array<{ cli: string; cwd: string; chatId: string; busy: boolean }>;
+    isClaudeFamilyCli: (cli: string) => boolean;
   };
+}
+
+/** Which of an agent's two live sessions a delivery runs in. `main` is the
+ *  home lane the person talks to; `bg` is the background lane. */
+export type AgentLane = 'main' | 'bg';
+
+/** Everything that is not the person typing or speaking runs in the
+ *  background lane, unless the kill switch is off. Codex and Banana engines
+ *  keep their single lane: background lanes live on the Claude-family
+ *  registry (claude binary or Pi), which mirrors them into the home view. */
+function resolveLane(cli: string, requested: AgentLane, runner: { isClaudeFamilyCli: (cli: string) => boolean }): AgentLane {
+  if (requested === 'main' || !backgroundLaneEnabled()) return 'main';
+  return runner.isClaudeFamilyCli(cli) ? 'bg' : 'main';
+}
+
+/** An event from the other lane, mirrored into a home session for viewers. */
+function foreignLaneEvent(event: { lane?: string }, lane: AgentLane): boolean {
+  return (event.lane === 'bg') !== (lane === 'bg');
+}
+
+function chainKey(agentId: string, lane: AgentLane): string {
+  return `${agentId}|${lane}`;
 }
 
 /** Backward-compatible export for callers that resolve an engine lane. */
@@ -131,6 +156,12 @@ function queueStoreOperation<T>(operation: () => Promise<T>): Promise<T> {
   return result;
 }
 
+/** One FIFO per recipient lane: the person's voice continuations never queue
+ *  behind background handoffs once the background lane is on. */
+function queueKeyOf(record: { toId: string; fromRole?: string }): string {
+  return backgroundLaneEnabled() && record.fromRole === 'voice' ? `${record.toId}|main` : record.toId;
+}
+
 function replyEdge(fromId: string, toId: string): string {
   return `${fromId}->${toId}`;
 }
@@ -159,12 +190,15 @@ export function extendTeamChain(
   };
 }
 
-function inheritedTeamChain(fromId: string, toId: string): { chain: TeamChain; repeatsEdge: boolean } {
-  let parent = activeInboundChains.get(fromId);
+function inheritedTeamChain(fromId: string, toId: string, fromLane: AgentLane): { chain: TeamChain; repeatsEdge: boolean } {
+  // Keyed per lane: a handoff the background lane is handling never leaks its
+  // collaboration chain into a message sent from the person's own lane.
+  const key = chainKey(fromId, fromLane);
+  let parent = activeInboundChains.get(key);
   // Turn-end normally clears this. The expiry is only crash insurance for a
   // listener that could not observe its terminal event.
   if (parent && Date.now() - parent.at > 2 * 60 * 60_000) {
-    activeInboundChains.delete(fromId);
+    activeInboundChains.delete(key);
     parent = undefined;
   }
   return extendTeamChain(parent, fromId, toId);
@@ -172,17 +206,19 @@ function inheritedTeamChain(fromId: string, toId: string): { chain: TeamChain; r
 
 function activateInboundChain(
   recipientId: string,
+  lane: AgentLane,
   chain: TeamChain,
   deliveryId: string,
   session: SessionLike,
   admittedSeq: number,
 ): void {
+  const key = chainKey(recipientId, lane);
   const active: ActiveInboundChain = { ...chain, deliveryId, at: Date.now() };
-  activeInboundChains.set(recipientId, active);
+  activeInboundChains.set(key, active);
   let unsubscribe: (() => void) | null = null;
   const clear = () => {
-    if (activeInboundChains.get(recipientId)?.deliveryId === deliveryId) {
-      activeInboundChains.delete(recipientId);
+    if (activeInboundChains.get(key)?.deliveryId === deliveryId) {
+      activeInboundChains.delete(key);
     }
     unsubscribe?.();
     unsubscribe = null;
@@ -387,14 +423,17 @@ async function getRecipientSessionForDelivery(
   signal?: AbortSignal,
   deferIfBusy = false,
   interruptAtBoundary: false | 'human' | 'peer' = false,
-): Promise<{ session: SessionLike; waited: boolean; nativeSteer: boolean; model?: string; effort?: string }> {
+  requestedLane: AgentLane = 'main',
+): Promise<{ session: SessionLike; waited: boolean; nativeSteer: boolean; model?: string; effort?: string; lane: AgentLane }> {
   const runner = await getRunner();
   let waited = false;
 
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new Error('sender stopped before delivery');
     const currentAgent = findAgent(agent.id) ?? agent;
-    const { cli, chatKey, model, effort } = agentLogKey(currentAgent);
+    const home = agentLogKey(currentAgent);
+    const lane = resolveLane(home.cli, requestedLane, runner);
+    const { cli, chatKey, model, effort } = agentLogKey(currentAgent, lane);
     let session: SessionLike;
     try {
       const conflictingBusyLane = runner.activeChatSessions().some((active) => (
@@ -425,7 +464,7 @@ async function getRecipientSessionForDelivery(
       continue;
     }
     const recipientBusy = session.isBusy?.() === true;
-    if (!recipientBusy) return { session, waited, nativeSteer: false, model, effort };
+    if (!recipientBusy) return { session, waited, nativeSteer: false, model, effort, lane };
     // Same-turn steer is cheap and keeps babysitter/cron jobs from waiting for
     // a 40-minute Codex turn to finish. Prefer it even when the caller asked
     // to defer-if-busy (routines, MCP fire-and-forget).
@@ -444,7 +483,7 @@ async function getRecipientSessionForDelivery(
         && (!brain.effort || selected.effort === brain.effort);
     };
     if (steerAdmissible() && session.canAcceptNativeHumanSteer?.() === true) {
-      return { session, waited, nativeSteer: true, model, effort };
+      return { session, waited, nativeSteer: true, model, effort, lane };
     }
     // A synchronous MCP tool call must never sit behind somebody else's long
     // turn until Claude Code's ~5 minute tool timeout. The message is already
@@ -478,11 +517,11 @@ async function getRecipientSessionForDelivery(
 
 /** Resolve an agent's live session key. Account routing, when configured, is
  * derived server-side from the workspace rather than baked into public IDs. */
-export function agentLogKey(agent: Agent): { cli: string; chatKey: string; model?: string; effort?: string } {
+export function agentLogKey(agent: Agent, lane: AgentLane = 'main'): { cli: string; chatKey: string; model?: string; effort?: string } {
   const brain = brainForAgent(agent);
   return {
     cli: cliForAgentEngine(brain.engine),
-    chatKey: agent.home,
+    chatKey: lane === 'bg' ? backgroundChatId(agent.home) : agent.home,
     model: brain.model,
     effort: brain.effort,
   };
@@ -492,7 +531,9 @@ export function agentLogKey(agent: Agent): { cli: string; chatKey: string; model
 export async function sendToAgentHome(
   agent: Agent,
   text: string,
-  opts: { peerFrom: string; peerFromRole?: string; peerText?: string },
+  /** `lane` defaults to the background lane; a job or watch started from the
+   *  home lane reports back there. */
+  opts: { peerFrom: string; peerFromRole?: string; peerText?: string; lane?: AgentLane },
 ): Promise<{ delivered: boolean; reason?: string }> {
   let session: SessionLike;
   let model: string | undefined;
@@ -506,6 +547,8 @@ export async function sendToAgentHome(
       Date.now() + RECIPIENT_IDLE_WAIT_MS,
       undefined,
       false,
+      false,
+      opts.lane ?? 'bg',
     );
     session = admission.session;
     model = admission.model;
@@ -614,9 +657,17 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
     let nativeSteer = false;
     let model: string | undefined;
     let effort: string | undefined;
+    let lane: AgentLane;
     try {
-      const admission = await getRecipientSessionForDelivery(to, deadline, signal, deferIfBusy, from.role === 'automation' ? false : from.role === 'desk' || from.role === 'voice' ? 'human' : 'peer');
+      // The person's own voice continues in their lane; every other sender
+      // (teammates, the Desk, TARDIS notices, robots) runs in the background.
+      const admission = await getRecipientSessionForDelivery(
+        to, deadline, signal, deferIfBusy,
+        from.role === 'automation' ? false : from.role === 'desk' || from.role === 'voice' ? 'human' : 'peer',
+        from.role === 'voice' ? 'main' : 'bg',
+      );
       session = admission.session;
+      lane = admission.lane;
       nativeSteer = admission.nativeSteer;
       model = admission.model;
       effort = admission.effort;
@@ -647,7 +698,7 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
     const maybeActivateChain = () => {
       if (chainActivated || !providerAccepted || admittedSeq === null) return;
       chainActivated = true;
-      activateInboundChain(to.id, chain, deliveryId, session, admittedSeq);
+      activateInboundChain(to.id, lane, chain, deliveryId, session, admittedSeq);
     };
     type WaitOutcome =
       | { kind: 'completed'; endSeq: number }
@@ -668,6 +719,7 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
     let unsubscribe: (() => void) | null = null;
     try {
       unsubscribe = session.subscribe((event) => {
+        if (foreignLaneEvent(event, lane)) return;
         const inner = event.ev?.type === 'event' ? event.ev.event : undefined;
         if (inner?.type === 'peer_message' && inner.deliveryId === deliveryId) {
           admittedSeq = event.seq ?? session.latestSeq();
@@ -771,10 +823,10 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
     try {
       const outcome = await turnDoneP;
       if (outcome.kind === 'completed') {
-        result.reply = await readLastReply(session.logKey, admittedSeq, outcome.endSeq).catch(() => undefined);
+        result.reply = await readLastReply(session.logKey, admittedSeq, outcome.endSeq, lane).catch(() => undefined);
         if (!result.reply) {
           await new Promise((resolve) => setTimeout(resolve, 1500));
-          result.reply = await readLastReply(session.logKey, admittedSeq, outcome.endSeq).catch(() => undefined);
+          result.reply = await readLastReply(session.logKey, admittedSeq, outcome.endSeq, lane).catch(() => undefined);
         }
         if (providerCut.seen?.continuing) {
           result.reason = `${to.name}'s model provider switched mid-turn, so any reply here is partial. ${to.name} is continuing automatically and the rest will land in its thread`;
@@ -822,12 +874,12 @@ function retryDelay(): Promise<void> {
   });
 }
 
-async function drainQueuedRecipient(toId: string): Promise<void> {
+async function drainQueuedRecipient(queueKey: string): Promise<void> {
   // Snapshot this worker's batch. Handoffs accepted while it runs are scheduled
   // as the next batch, behind any synchronous delivery already waiting on the
   // same recipient tail.
   const batch = (await queueStoreOperation(() => queuedDeliveryStore.list()))
-    .filter((item) => item.toId === toId)
+    .filter((item) => queueKeyOf(item) === queueKey)
     .sort((a, b) => String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
 
   for (const record of batch) {
@@ -872,24 +924,24 @@ async function drainQueuedRecipient(toId: string): Promise<void> {
   }
 }
 
-function scheduleQueuedRecipient(toId: string, delayMs = 0): void {
-  if (activeQueuedRecipients.has(toId) || queuedRetryTimers.has(toId)) return;
+function scheduleQueuedRecipient(queueKey: string, delayMs = 0): void {
+  if (activeQueuedRecipients.has(queueKey) || queuedRetryTimers.has(queueKey)) return;
   const launch = () => {
-    queuedRetryTimers.delete(toId);
-    if (activeQueuedRecipients.has(toId)) return;
-    activeQueuedRecipients.add(toId);
-    const { job } = enqueueForRecipient(toId, () => drainQueuedRecipient(toId));
+    queuedRetryTimers.delete(queueKey);
+    if (activeQueuedRecipients.has(queueKey)) return;
+    activeQueuedRecipients.add(queueKey);
+    const { job } = enqueueForRecipient(queueKey, () => drainQueuedRecipient(queueKey));
     void job.catch((error) => {
-      console.warn(`[team] durable queue for ${toId} paused after an error: ${(error as Error).message}`);
+      console.warn(`[team] durable queue for ${queueKey} paused after an error: ${(error as Error).message}`);
     }).finally(async () => {
-      activeQueuedRecipients.delete(toId);
+      activeQueuedRecipients.delete(queueKey);
       try {
         const remains = await queueStoreOperation(async () =>
-          (await queuedDeliveryStore.list()).some((item) => item.toId === toId));
-        if (remains) scheduleQueuedRecipient(toId, ASYNC_RETRY_MS);
+          (await queuedDeliveryStore.list()).some((item) => queueKeyOf(item) === queueKey));
+        if (remains) scheduleQueuedRecipient(queueKey, ASYNC_RETRY_MS);
       } catch (error) {
-        console.warn(`[team] could not inspect durable queue for ${toId}: ${(error as Error).message}`);
-        scheduleQueuedRecipient(toId, ASYNC_RETRY_MS);
+        console.warn(`[team] could not inspect durable queue for ${queueKey}: ${(error as Error).message}`);
+        scheduleQueuedRecipient(queueKey, ASYNC_RETRY_MS);
       }
     });
   };
@@ -900,13 +952,13 @@ function scheduleQueuedRecipient(toId: string, delayMs = 0): void {
   }
   const timer = setTimeout(launch, delayMs);
   timer.unref?.();
-  queuedRetryTimers.set(toId, timer);
+  queuedRetryTimers.set(queueKey, timer);
 }
 
 /** Resume accepted fire-and-forget handoffs after a TARDIS restart. */
 export async function resumeQueuedTeamDeliveries(): Promise<number> {
   const records = await queueStoreOperation(() => queuedDeliveryStore.list());
-  new Set(records.map((record) => record.toId)).forEach((toId) => scheduleQueuedRecipient(toId));
+  new Set(records.map(queueKeyOf)).forEach((queueKey) => scheduleQueuedRecipient(queueKey));
   return records.length;
 }
 
@@ -929,6 +981,8 @@ export async function deliverTeamMessage(input: {
   hop?: number;
   wait?: boolean;
   signal?: AbortSignal;
+  /** The sender's own lane (from its team MCP), for chain inheritance. */
+  fromLane?: AgentLane;
 }): Promise<TeamMessageResult> {
   const hop = Math.max(1, Math.floor(input.hop ?? 1));
   const text = (input.text ?? '').trim().slice(0, MAX_TEXT);
@@ -946,7 +1000,7 @@ export async function deliverTeamMessage(input: {
     return { delivered: false, reason: 'that is you — no need to message yourself' };
   }
 
-  const { chain } = inheritedTeamChain(from.id, to.id);
+  const { chain } = inheritedTeamChain(from.id, to.id, input.fromLane === 'bg' ? 'bg' : 'main');
   const requestedWaitForReply = teamMessageWaitRequested(input.wait);
   // Historical route repetition is never a reason to discard a message. Only
   // a CURRENT synchronous wait path can deadlock; that exact case is degraded
@@ -960,7 +1014,8 @@ export async function deliverTeamMessage(input: {
   const rl = rateOk(replyEdge(from.id, to.id));
   if (!rl.ok) return { delivered: false, reason: rl.reason };
 
-  const queuedBehindAnotherTurn = recipientDeliveryTails.has(to.id);
+  const fifoKey = queueKeyOf({ toId: to.id, fromRole: from.role });
+  const queuedBehindAnotherTurn = recipientDeliveryTails.has(fifoKey);
   let record: QueuedTeamDelivery;
   try {
     // Every handoff enters the durable outbox BEFORE it can wait on another
@@ -986,7 +1041,7 @@ export async function deliverTeamMessage(input: {
   }
 
   if (!waitForReply) {
-    scheduleQueuedRecipient(record.toId);
+    scheduleQueuedRecipient(queueKeyOf(record));
     return {
       delivered: true,
       to: to.name,
@@ -1001,7 +1056,7 @@ export async function deliverTeamMessage(input: {
   }
 
   if (queuedBehindAnotherTurn) {
-    scheduleQueuedRecipient(record.toId);
+    scheduleQueuedRecipient(queueKeyOf(record));
     return {
       delivered: true,
       to: to.name,
@@ -1011,7 +1066,7 @@ export async function deliverTeamMessage(input: {
     };
   }
 
-  const job = tryEnqueueForRecipient(to.id, () => runTeamDelivery({
+  const job = tryEnqueueForRecipient(fifoKey, () => runTeamDelivery({
     from,
     to,
     text,
@@ -1024,7 +1079,7 @@ export async function deliverTeamMessage(input: {
     onAdmitted: (session) => acknowledgeQueuedDelivery(record, session),
   }));
   if (!job) {
-    scheduleQueuedRecipient(record.toId);
+    scheduleQueuedRecipient(queueKeyOf(record));
     return {
       delivered: true,
       to: to.name,
@@ -1044,7 +1099,7 @@ export async function deliverTeamMessage(input: {
       if (remains) await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
       return result;
     }
-    if (remains) scheduleQueuedRecipient(record.toId);
+    if (remains) scheduleQueuedRecipient(queueKeyOf(record));
     if (!result.delivered && remains) {
       return {
         delivered: true,
@@ -1060,7 +1115,7 @@ export async function deliverTeamMessage(input: {
       await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
       return { delivered: false, to: to.name, hop, reason: 'sender stopped before delivery' };
     }
-    scheduleQueuedRecipient(record.toId);
+    scheduleQueuedRecipient(queueKeyOf(record));
     return {
       delivered: true,
       to: to.name,
@@ -1078,10 +1133,11 @@ export async function deliverTeamMessage(input: {
 import { flushEventLog, loadEventLogSync } from './event-log-store.ts';
 
 /** Read the recipient's authoritative shared-thread tail for this exact turn. */
-async function readLastReply(logKey: string, minSeq = 0, maxSeq = Number.POSITIVE_INFINITY): Promise<string | undefined> {
+async function readLastReply(logKey: string, minSeq = 0, maxSeq = Number.POSITIVE_INFINITY, lane: AgentLane = 'main'): Promise<string | undefined> {
   try { await flushEventLog(logKey); } catch { /* best-effort */ }
   const { events } = loadEventLogSync(logKey);
-  const bounded = events.filter((event) => event.seq >= minSeq && event.seq <= maxSeq);
+  // The other lane may have spoken in the same seq range; the reply is this lane's.
+  const bounded = events.filter((event) => event.seq >= minSeq && event.seq <= maxSeq && !foreignLaneEvent(event, lane));
   // One shared transcript extractor handles Claude's full assistant messages
   // plus Codex/Banana stream-only content blocks, while excluding tool results.
   const reply = [...extractVisibleTurns(bounded)].reverse().find((turn) => turn.role === 'assistant');
@@ -1101,18 +1157,21 @@ export function teamAvailability(
   agent: Agent,
   sessions: readonly TeamAvailabilitySession[],
   queued: readonly Pick<QueuedTeamDelivery, 'toId'>[],
-): { status: 'working' | 'queued' | 'idle'; busy: boolean; queuedMessages: number; activeCli?: string } {
-  const active = sessions.find((session) => (
+): { status: 'working' | 'queued' | 'idle'; busy: boolean; queuedMessages: number; activeCli?: string; background?: boolean } {
+  const busyLanes = sessions.filter((session) => (
     session.cwd === ELROND_WORKSPACE_PATH
     && bareChatId(session.chatId) === bareChatId(agent.home)
     && session.busy
   ));
+  const active = busyLanes.find((session) => !isBackgroundChatId(session.chatId)) ?? busyLanes[0];
   const queuedMessages = queued.filter((delivery) => delivery.toId === agent.id).length;
   return {
     status: active ? 'working' : queuedMessages > 0 ? 'queued' : 'idle',
     busy: Boolean(active),
     queuedMessages,
     ...(active ? { activeCli: active.cli } : {}),
+    // Only the background lane is working: the person's own lane is free.
+    ...(active && isBackgroundChatId(active.chatId) ? { background: true } : {}),
   };
 }
 

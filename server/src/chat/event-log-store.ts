@@ -33,6 +33,8 @@ export type PersistedEvent = {
   mdl?: string;
   /** Wall-clock ms when the event was emitted (absent on older lines). */
   at?: number;
+  /** Written by an agent's background lane (absent on home-lane events). */
+  lane?: 'bg';
 };
 
 export const EVENT_LOG_DIR = join(STATE_DIR, 'event-logs');
@@ -298,6 +300,7 @@ function parseLogLines(
         const event: PersistedEvent = { seq: parsed.seq, ev: parsed.ev as SessionEvent };
         if (typeof parsed.eng === 'string' && parsed.eng) event.eng = parsed.eng;
         if (typeof parsed.mdl === 'string' && parsed.mdl) event.mdl = parsed.mdl;
+        if (parsed.lane === 'bg') event.lane = 'bg';
         if (typeof parsed.at === 'number' && Number.isFinite(parsed.at)) event.at = parsed.at;
         into.events.push(event);
         // Source-text length, so the cache can charge itself the EXACT
@@ -733,6 +736,7 @@ export function loadEventLogForCompactionSync(key: string): PersistedEvent[] {
       const event: PersistedEvent = { seq: parsed.seq, ev: parsed.ev as SessionEvent };
       if (typeof parsed.eng === 'string' && parsed.eng) event.eng = parsed.eng;
       if (typeof parsed.mdl === 'string' && parsed.mdl) event.mdl = parsed.mdl;
+      if (parsed.lane === 'bg') event.lane = 'bg';
       events.push(event);
     } catch {
       // Interrupted trailing append: ignore only the malformed line.

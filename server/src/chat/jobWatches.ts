@@ -31,6 +31,8 @@ export type JobWatch = {
   createdAt?: string;
   updatedAt?: string;
   agentId: string;
+  /** Lane that armed the watch; the wake returns there. Absent → background. */
+  lane?: 'main' | 'bg';
   /** Short label for the wake message, e.g. "scanner build". */
   note: string;
   kind: JobWatchKind;
@@ -181,6 +183,7 @@ function launchWatchCommand(command: string, scoped: boolean): ChildProcess {
 
 export type CreateJobWatchInput = {
   agentId: string;
+  lane?: unknown;
   note: unknown;
   pid?: unknown;
   file?: unknown;
@@ -213,7 +216,7 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
     const pid = input.pid;
     if (!pidAlive(pid)) throw new Error(`process ${pid} has already exited — there is nothing left to watch`);
     return serialize(() => store.create({
-      agentId: input.agentId, note, kind: 'pid' as const, pid, pidStart: pidStart(pid), timeoutMin, deadline,
+      agentId: input.agentId, lane: input.lane === 'main' ? 'main' as const : 'bg' as const, note, kind: 'pid' as const, pid, pidStart: pidStart(pid), timeoutMin, deadline,
     }));
   }
 
@@ -228,7 +231,7 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
       baselineSize = null; // absent: resolve when it appears
     }
     return serialize(() => store.create({
-      agentId: input.agentId, note, kind: 'file' as const, file, timeoutMin, deadline, baselineSize,
+      agentId: input.agentId, lane: input.lane === 'main' ? 'main' as const : 'bg' as const, note, kind: 'file' as const, file, timeoutMin, deadline, baselineSize,
     }));
   }
 
@@ -256,7 +259,7 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
   const id = randomUUID();
   try {
     const created = await serialize(() => store.create({
-      id, agentId: input.agentId, note, kind: 'command' as const, command, pid, pidStart: start, timeoutMin, deadline, spawned: true,
+      id, agentId: input.agentId, lane: input.lane === 'main' ? 'main' as const : 'bg' as const, note, kind: 'command' as const, command, pid, pidStart: start, timeoutMin, deadline, spawned: true,
     }));
     if (buffered === null) {
       // Not exited yet: swap the buffer listeners for the durable arm. If the
@@ -437,6 +440,7 @@ async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
       peerFrom: `⏱ ${watch.note}`,
       peerFromRole: 'automation',
       peerText: visibleWakeText(text),
+      lane: watch.lane === 'main' ? 'main' : 'bg',
     });
     if (result.delivered) {
       await serialize(() => store.delete(watch.id));

@@ -16,6 +16,7 @@ import { OPENROUTER_LANE_EFFORT, OPENROUTER_LANE_MODEL, resolveOpenRouterEffort,
 import { deleteRoutinesForAgent } from './routines.ts';
 import { deleteJobWatchesForAgent } from './jobWatches.ts';
 import { deleteMessagePinsForAgent } from '../lib/messagePinStore.ts';
+import { bareChatId } from './threadKey.ts';
 
 const AGENTS_DIR = join(STATE_DIR, 'personas');
 const AGENTS_FILE = join(AGENTS_DIR, 'agents.json');
@@ -471,7 +472,7 @@ export function reorderAgents(ids: string[]): Agent[] {
 }
 
 export function agentForChatId(chatId: string): Agent | undefined {
-  const bare = chatId.replace(/__acct__[a-z0-9-]+$/i, '');
+  const bare = bareChatId(chatId);
   return listAgents().find((a) => a.home === bare);
 }
 
@@ -482,7 +483,7 @@ const laneStamps = new Map<string, string>();
  * diagnostics. Throttled write: at most one save/min/agent. */
 const laneLastWrite = new Map<string, number>();
 export function noteAgentLane(chatId: string, cli: string): void {
-  const bare = chatId.replace(/__acct__[a-z0-9-]+$/i, '');
+  const bare = bareChatId(chatId);
   if (laneStamps.get(bare) === cli) return;
   const now = Date.now();
   // Do not stamp an unsaved change as complete. The old code updated

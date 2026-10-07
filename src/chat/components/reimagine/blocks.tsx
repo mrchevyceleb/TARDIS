@@ -1086,6 +1086,9 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       if (
         peerId === undefined
         && last?.type === 'peer'
+        // Never across lanes: the home lane's reply is not the background
+        // teammate exchange that happens to sit just above it.
+        && ((b as { lane?: string }).lane === 'bg') === (last.block.lane === 'bg')
         && !isAutomationPeer(last.block.from, last.block.fromRole, last.block.text)
         && (last.responseTurnId === undefined || last.responseTurnId === (turnId ?? null))
       ) {

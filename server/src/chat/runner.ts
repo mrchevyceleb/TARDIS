@@ -18,7 +18,7 @@ import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flu
 import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
 import { CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKEN_BUDGET, NATIVE_COMPACT_MARGIN, contextRotationDue, contextTokens, learnContextLimit, providerContextBudget, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { shouldSkipEngineResume } from './threadWindow.ts';
-import { isAgentThread, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
+import { backgroundChatId, isAgentThread, isBackgroundChatId, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateSettings } from './longCallGate.ts';
@@ -34,7 +34,7 @@ import { getXaiOauthToken } from '../routes/xai-oauth.ts';
 import { isRobotVoiceChatId, isVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STYLE_ADDENDUM, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { chatAttachmentPath, saveChatAttachments } from '../routes/chatAttachments.ts';
-import { conversationGuidanceForTurn } from './conversation-guidance.ts';
+import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
 import { applyProviderLimits } from './providerEnv.ts';
@@ -415,8 +415,8 @@ const ASSISTANT_MCP_CONFIG = JSON.stringify({ mcpServers: optionalMcpServers });
  *  themselves (the Pi bridge): the operator's optional backends (assistant-mcp
  *  proxy, browser) plus the built-in team and device servers. Same set the
  *  claude binary receives through --mcp-config. */
-export function laneMcpServers(agentName?: string): Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> {
-  return { ...optionalMcpServers, ...localMcpServers(agentName) };
+export function laneMcpServers(agentName?: string, backgroundLane = false): Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> {
+  return { ...optionalMcpServers, ...localMcpServers(agentName, { backgroundLane }) };
 }
 
 
@@ -432,7 +432,7 @@ function withTeamMcp(configJson: string, chatId: string): string {
       console.log('[chat] built-in team and computer MCPs enabled');
     }
     const cfg = JSON.parse(configJson) as { mcpServers: Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> };
-    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name, { replyNow: true }), officeMcpServers());
+    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name, { replyNow: true, backgroundLane: isBackgroundChatId(chatId) }), officeMcpServers());
     return JSON.stringify(cfg);
   } catch {
     return configJson;
@@ -470,7 +470,12 @@ const EVENT_BUFFER_SIZE = 2000;
 
 /** `at` = wall-clock ms when the event was emitted, so replayed history can
  *  show real times (absent on events logged before 2026-09-23). */
-export type SeqEvent = { seq: number; ev: SessionEvent; at?: number };
+export type SeqEvent = { seq: number; ev: SessionEvent; at?: number; lane?: 'bg' };
+
+/** Tag for events written by an agent's background lane (see threadKey.ts). */
+export function laneTagFor(chatId: string): { lane?: 'bg' } {
+  return isBackgroundChatId(chatId) ? { lane: 'bg' } : {};
+}
 
 type ZaiCutDecision = { outcome: ZaiTurnOutcome; cut: ProviderCut; origin: TurnOrigin };
 
@@ -591,6 +596,8 @@ class ClaudeSession {
    *  the reset cannot decrement waiters that registered after it. */
   private boundaryGeneration = 0;
   private lastBoundaryInterruptAt = 0;
+  /** Last shared-log seq this process was told about by the lane recap. */
+  private laneSyncSeq?: number;
   /** Has the person's message got visible text yet; see replyNudge.ts. Lazy,
    *  like stopWatch. */
   private replyWatch?: ReplyWatch;
@@ -1040,7 +1047,9 @@ class ClaudeSession {
       if (!this.disposed) this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
     };
     const historyThroughSeq = this.latestSeq();
-    const fallbackHistory = this.eventLog.slice();
+    // This lane's own frames: a sibling lane's events mirrored in for viewers
+    // must not read as this process's provider cut or background kill.
+    const fallbackHistory = this.eventLog.filter((se) => !se.lane === !isBackgroundChatId(this.chatId));
     const wantSeed = this.seedWindowOnNextTurn && !replyNudge;
     const seed = wantSeed
       ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
@@ -1212,6 +1221,10 @@ class ClaudeSession {
       // A continue keeps the voice of the turn it finishes.
       hidden: Boolean(continuing && !continuing.origin.human),
     });
+    const laneContext = startsNewTurn
+      ? laneContextForTurn({ chatId: this.chatId, logKey: this.logKey, sinceSeq: this.laneSyncSeq ?? null, throughSeq: historyThroughSeq, seeded: Boolean(seed) })
+      : '';
+    if (startsNewTurn) this.laneSyncSeq = historyThroughSeq;
     // Auto-recall: put recorded knowledge (lane memory notes, Desk cards,
     // assistant-mcp memories) in front of every new human or teammate turn.
     // Automation traffic (routines, job wakes, reply nudges, continues) never
@@ -1231,6 +1244,7 @@ class ClaudeSession {
           'Do not repeat session-start rituals for this turn: do not run `date`, do not call session_start_context, and do not open with empty boilerplate such as “I’m on it” or “checking now.” TARDIS already renders basic liveness.',
           '</rivendell-continuation>',
           ...(conversationGuidance ? ['', conversationGuidance] : []),
+          ...(laneContext ? ['', laneContext] : []),
           ...(recall ? ['', recall] : []),
           ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []),
           '',
@@ -1936,7 +1950,7 @@ class ClaudeSession {
     // the retiring process. Do not allocate, persist, or deliver it.
     if (this.disposed || isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
-    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now() };
+    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now(), ...laneTagFor(this.chatId) };
     const persisted = { ...se, eng: this.cli, mdl: this.spawnModel };
     const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
     // A user echo is the admission commit. Persist it synchronously before any
@@ -1952,6 +1966,7 @@ class ClaudeSession {
     // dying child's trailing output and would repollute a freshly-cleared log.
     if (!durableUserEcho && !this.disposed) appendEventLog(this.logKey, persisted);
     for (const fn of this.listeners) fn(se);
+    shareBackgroundLaneEvent(this, se);
   }
 
   /** Already durable; do not persist again or touch native turn state. */
@@ -2513,9 +2528,10 @@ export function markBusyLanesRestarting(signal: string): number {
   for (const s of sessions.values()) {
     if (!s.isBusy()) continue;
     try {
-      const session = s as unknown as { logKey: string; reserveSeq(): number; cli: string; spawnModel: string };
+      const session = s as unknown as { logKey: string; reserveSeq(): number; cli: string; spawnModel: string; chatId: string };
       // SYNC write: a dying process can't be trusted to flush an async queue.
       const written = appendEventLogSync(session.logKey, {
+        ...laneTagFor(session.chatId),
         seq: session.reserveSeq(),
         at: Date.now(),
         ev: restartMarkerEvent(signal) as never,
@@ -3044,7 +3060,9 @@ export function pruneIdleClaudeSessions(ttlMs: number, now = Date.now()): number
   let pruned = 0;
   for (const [key, session] of sessions) {
     if (session.isBusy()) continue;
-    if (session.listenerCount() > 0) continue;
+    // Viewers bind to the home lane; a background lane's only listeners are
+    // internal, so it idles out on time alone.
+    if (session.listenerCount() > 0 && !isBackgroundChatId(session.chatId)) continue;
     const idleMs = now - session.lastActivityAt();
     if (idleMs < ttlMs) continue;
     if (holdsBackgroundWork(session) && idleMs < ttlMs * BACKGROUND_IDLE_TTL_MULTIPLE) continue;
@@ -3094,6 +3112,18 @@ export async function freshStart(opts: {
     sessions.delete(key);
   }
   await setSessionId(opts.cli, cwd, '', chatId); // drop the stored id so we don't --resume
+  // The background lane shares the reset thread: end it and forget its resume id too.
+  if (!isBackgroundChatId(chatId) && isAgentThread(chatId)) {
+    const bgChatId = backgroundChatId(chatId);
+    for (const [bgKey, bg] of [...sessions]) {
+      if (bg.chatId !== bgChatId || bg.cwd !== cwd) continue;
+      if (bg instanceof ClaudeSession) bg.shutdown('freshStart', 'fresh');
+      else bg.shutdown('freshStart');
+      sessions.delete(bgKey);
+      await setSessionId(bg.cli, cwd, '', bgChatId);
+    }
+    await setSessionId(opts.cli, cwd, '', bgChatId);
+  }
   // Wipe the durable log too — otherwise a client whose cache is empty would
   // pull the old thread back via a full (sinceSeq=0) replay after the reset.
   // For an agent home thread that log is the shared, engine-free one, so a
@@ -3141,11 +3171,18 @@ export async function interruptSession(opts: { cli: CliKind; repoPath: string; c
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
-  const s = sessions.get(key);
-  if (s) {
-    const keptWarm = await s.interrupt('interruptSession');
-    if (!keptWarm && sessions.get(key) === s) sessions.delete(key);
+  // Stop on a thread stops both of its lanes.
+  const keys = [key];
+  if (!isBackgroundChatId(chatId) && isAgentThread(chatId)) {
+    const bgChatId = backgroundChatId(chatId);
+    for (const [bgKey, bg] of sessions) if (bg.chatId === bgChatId && bg.cwd === cwd) keys.push(bgKey);
   }
+  await Promise.all(keys.map(async (laneKey) => {
+    const s = sessions.get(laneKey);
+    if (!s) return;
+    const keptWarm = await s.interrupt('interruptSession');
+    if (!keptWarm && sessions.get(laneKey) === s) sessions.delete(laneKey);
+  }));
 }
 
 // Re-export so callers can ignore the manager and use the class type.
@@ -3192,6 +3229,20 @@ export function liveLaneSession(logKey: string): LaneSession | null {
 export function subscribeExternalThreadEvents(fn: (logKey: string, se: SeqEvent) => void): () => void {
   externalThreadListeners.add(fn);
   return () => { externalThreadListeners.delete(fn); };
+}
+
+/** Mirror a background-lane event to the home lane's viewers (warm sockets
+ *  ride the home session; cold ones the external listeners). Only transcript
+ *  frames cross: the background lane's turnStart/turnEnd/closed stay its own,
+ *  so they never flip the home lane's busy state or end its waits. */
+export function shareBackgroundLaneEvent(source: { chatId: string; logKey: string }, se: SeqEvent): void {
+  if (se.lane !== 'bg' || se.ev.type !== 'event') return;
+  for (const session of sessions.values()) {
+    if (session !== source && session.logKey === source.logKey && !isBackgroundChatId(session.chatId)) session.ingestExternalEvent(se);
+  }
+  publishCodexExternalEvent(source.logKey, se);
+  publishBananaExternalEvent(source.logKey, se);
+  for (const fn of externalThreadListeners) fn(source.logKey, se);
 }
 
 /** Fan out a voice event to warm engine views and cold log-only subscribers. */

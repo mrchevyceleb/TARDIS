@@ -13,11 +13,37 @@
 // exactly where they are and nothing has to be migrated to keep working.
 
 const ACCOUNT_SUFFIX = /__acct__[a-z0-9-]+$/i;
+const BACKGROUND_SUFFIX = '__bg';
 const AGENT_HOME = /^bot-[a-z0-9][a-z0-9-]*$/i;
 
-/** chatId without its engine-account pin (`bot-kip__acct__kim` → `bot-kip`). */
+/** chatId without its engine-account pin or background-lane suffix
+ *  (`bot-kip__acct__kim` and `bot-kip__bg` both → `bot-kip`). */
 export function bareChatId(chatId: string): string {
-  return (chatId || 'main').replace(ACCOUNT_SUFFIX, '');
+  const id = (chatId || 'main').replace(ACCOUNT_SUFFIX, '');
+  return id.endsWith(BACKGROUND_SUFFIX) ? id.slice(0, -BACKGROUND_SUFFIX.length) : id;
+}
+
+// Background lane: an agent's second live session. Teammate handoffs,
+// routines, job results and system nudges run there so the human's own lane
+// stays free. Same persona, brain and durable thread log as the home thread;
+// its own engine process and native resume id. Not an account pin.
+
+/** The background-lane chatId for an agent home (`bot-max` → `bot-max__bg`). */
+export function backgroundChatId(home: string): string {
+  return `${bareChatId(home)}${BACKGROUND_SUFFIX}`;
+}
+
+/** True for an agent's background-lane chatId. */
+export function isBackgroundChatId(chatId: string | null | undefined): boolean {
+  const id = (chatId || '').replace(ACCOUNT_SUFFIX, '');
+  return id.endsWith(BACKGROUND_SUFFIX) && AGENT_HOME.test(id.slice(0, -BACKGROUND_SUFFIX.length));
+}
+
+/** Kill switch, read on every call. `RIVENDELL_BACKGROUND_LANE=false` routes
+ *  everything back to the home lane exactly as before. Default on. */
+export function backgroundLaneEnabled(): boolean {
+  const raw = (process.env.RIVENDELL_BACKGROUND_LANE ?? '').trim().toLowerCase();
+  return !['false', '0', 'off', 'no'].includes(raw);
 }
 
 /** The account pinned into a chatId, if any. */

@@ -126,6 +126,7 @@ export async function clearThreadSessionIds(repoPath: string, chatId = 'main', c
       || (normalized !== 'main' && storageKey.includes(`${threadSuffix}__acct__`))
       || Boolean(agentSuffix && (
         storageKey.endsWith(agentSuffix)
+        || storageKey.endsWith(`${agentSuffix}__bg`)
         || storageKey.includes(`${agentSuffix}__acct__`)
       ));
     const providerMatches = agentSuffix !== null || !cli || storageKey.startsWith(`${cli}|`);

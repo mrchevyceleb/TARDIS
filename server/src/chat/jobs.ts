@@ -58,6 +58,8 @@ export type Job = {
   stoppedBy?: JobStopper;
   /** The exact result text still owed to the agent. Cleared once delivered. */
   wakeText?: string;
+  /** Lane that started the job; the result returns there. Absent → background. */
+  lane?: 'main' | 'bg';
 };
 
 const store = new JsonStore<Job>('jobs.json', []);
@@ -189,6 +191,7 @@ function resultText(job: Job): string {
 
 export type CreateJobInput = {
   agentId: string;
+  lane?: unknown;
   name?: unknown;
   command?: unknown;
   cwd?: unknown;
@@ -253,6 +256,7 @@ export async function createJob(input: CreateJobInput): Promise<Job> {
         id, agentId: input.agentId, name, command, cwd, state: 'running' as const,
         startedAt: now, timeoutMin, deadline: now + timeoutMin * 60_000,
         unit, bootId: BOOT_ID || undefined,
+        lane: input.lane === 'main' ? 'main' as const : 'bg' as const,
       });
     });
   } catch (err) {
@@ -481,6 +485,7 @@ async function deliver(job: Job): Promise<void> {
       peerFrom: `⏱ ${job.name}`,
       peerFromRole: 'automation',
       peerText: visibleWakeText(job.wakeText!),
+      lane: job.lane === 'main' ? 'main' : 'bg',
     });
     if (result.delivered) {
       await serialize(() => store.update(job.id, { wakeText: undefined }));

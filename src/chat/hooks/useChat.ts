@@ -124,7 +124,18 @@ function isSyntheticApiErrorEvent(ev: any): boolean {
 // Pure reducer — all per-turn state lives on the blocks themselves
 // (turnId + cbIndex). This keeps it safe under React Strict Mode, which
 // invokes reducers twice for purity-checking.
-type ReducerCursor = { current: string; peerId?: string };
+type ReducerCursor = { current: string; peerId?: string; lane?: 'bg'; bg?: ReducerCursor };
+
+/** Blocks this cursor's lane owns. The agent's background lane streams into
+ *  the same thread as the home lane, so closing one lane's turn must never
+ *  close the other lane's still-streaming blocks. */
+function ownsBlock(cursor: ReducerCursor, block: ChatBlock): boolean {
+  return ((block as { lane?: string }).lane === 'bg') === (cursor.lane === 'bg');
+}
+
+function laneStamp(cursor: ReducerCursor): { lane?: 'bg' } {
+  return cursor.lane === 'bg' ? { lane: 'bg' } : {};
+}
 
 /** When a streamed event happened. Server-stamped `at` wins; a sequenced
  *  event without one is pre-timestamp history, so its time is unknown and the
@@ -136,6 +147,13 @@ function eventTime(ev: any): { ts: number; tsApprox?: true } {
 
 export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlock[] {
   if (!ev || typeof ev !== 'object') return blocks;
+  // Background-lane frames (teammate handoffs, routines, job results) get
+  // their own turn/teammate cursor, so their replies group under their own
+  // teammate card and never borrow the home lane's.
+  if (ev.lane === 'bg' && turnIdRef.lane !== 'bg') {
+    const { lane: _lane, ...frame } = ev;
+    return reduce(blocks, frame, turnIdRef.bg ??= { current: '', lane: 'bg' });
+  }
   // A subagent's own frames (parent_tool_use_id) are its private work, not
   // the main agent speaking. Rendering them put a background helper's notes
   // in the thread as if the agent had said them.
@@ -175,6 +193,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         && isProviderSyntheticErrorText(b.text)
         && (!currentTurnId || b.turnId === currentTurnId)
       ) return [];
+      if (!ownsBlock(turnIdRef, b)) return [b];
       if (b.kind === 'text' && b.open) return [{ ...b, open: false }];
       if (b.kind === 'tool' && (b.open || b.running)) return [{ ...b, open: false, running: false }];
       return [b];
@@ -219,8 +238,8 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   if (ev.type === '_turn_boundary') {
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
-    if (!blocks.some((b) => b.kind === 'text' && b.open)) return blocks;
-    return blocks.map((b) => (b.kind === 'text' && b.open ? { ...b, open: false } : b));
+    if (!blocks.some((b) => b.kind === 'text' && b.open && ownsBlock(turnIdRef, b))) return blocks;
+    return blocks.map((b) => (b.kind === 'text' && b.open && ownsBlock(turnIdRef, b) ? { ...b, open: false } : b));
   }
 
   // Service-restart marker (assistant-shaped so the agent reads it in seeds;
@@ -319,6 +338,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       deliveryId,
       text: ev.text,
       ts: typeof ev.ts === 'number' ? ev.ts : Date.now(),
+      ...laneStamp(turnIdRef),
     }];
   }
 
@@ -374,6 +394,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // typing indicator forever (hasOpen scans the whole history).
     turnIdRef.current = `t${nextId++}`;
     return blocks.map((b) => {
+      if (!ownsBlock(turnIdRef, b)) return b;
       if (b.kind === 'text' && b.open) return { ...b, open: false };
       if (b.kind === 'tool' && (b.open || b.running)) return { ...b, open: false, running: false };
       return b;
@@ -391,7 +412,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       if (b.kind === 'text' && b.turnId === finalTurnId) {
         return { ...b, open: false, seq: b.seq ?? resultSeq };
       }
-      if (b.kind === 'tool' && (b.open || b.running)) return { ...b, open: false, running: false };
+      if (b.kind === 'tool' && (b.open || b.running) && ownsBlock(turnIdRef, b)) return { ...b, open: false, running: false };
       return b;
     });
     // `result.result` is the provider's canonical final answer. A mobile tab
@@ -427,6 +448,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         ...eventTime(ev),
         turnId: finalTurnId,
         peerId: finalPeerId,
+        ...laneStamp(turnIdRef),
         cbIndex: -1,
         open: false,
         seq: typeof ev.seq === 'number' ? ev.seq : undefined,
@@ -453,7 +475,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     if (cb?.type === 'text') {
       const block: ChatBlock = {
         kind: 'text', id: id(), text: '', ...eventTime(ev),
-        turnId, peerId: turnIdRef.peerId, cbIndex: idx, open: true,
+        turnId, peerId: turnIdRef.peerId, ...laneStamp(turnIdRef), cbIndex: idx, open: true,
         presentation: cb.phase === 'commentary' ? 'update' : cb.phase === 'final_answer' ? 'answer' : undefined,
         ...(cb.phase === 'commentary' ? { commentary: true } : {}),
         seq: typeof ev.seq === 'number' ? ev.seq : undefined,
@@ -470,7 +492,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         kind: 'tool', id: id(),
         toolUseId: cb.id, tool: cb.name, args: '',
         running: true, ...eventTime(ev),
-        turnId, peerId: turnIdRef.peerId, cbIndex: idx, open: true,
+        turnId, peerId: turnIdRef.peerId, ...laneStamp(turnIdRef), cbIndex: idx, open: true,
       };
       return [...blocks, block];
     }
@@ -545,7 +567,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const turnId = turnIdRef.current;
     return [...blocks, {
       kind: 'text', id: id(), text, ...eventTime(ev),
-      turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation: 'update',
+      turnId, peerId: turnIdRef.peerId, ...laneStamp(turnIdRef), cbIndex: -1, open: false, presentation: 'update',
       seq: typeof ev.seq === 'number' ? ev.seq : undefined,
     }];
   }
@@ -575,7 +597,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       if (isSyntheticApiErrorEvent(ev)) return blocks;
       const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '' && !b.thought);
       if (!hasText) {
-        return [...annotated, { kind: 'text', id: id(), text: fullText, ...eventTime(ev), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false, presentation, seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
+        return [...annotated, { kind: 'text', id: id(), text: fullText, ...eventTime(ev), turnId, peerId: turnIdRef.peerId, ...laneStamp(turnIdRef), cbIndex: -1, open: false, presentation, seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
       }
     }
     return annotated;
@@ -1463,6 +1485,7 @@ export function useChat(opts: {
     pendingSendRef.current = queuedSteerRef.current.size > 0;
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
+    turnIdRef.bg = undefined;
     clearTurnStarted();
     reconnectAttemptRef.current = 0;
     // The atomic envelope distinguishes a valid, fully-filtered empty thread
@@ -1674,6 +1697,7 @@ export function useChat(opts: {
           setError(null);
           turnIdRef.current = '';
           turnIdRef.peerId = undefined;
+          turnIdRef.bg = undefined;
           clearTurnStarted();
           lastSeqRef.current = 0;
           setAppliedSeq(0);
@@ -1690,6 +1714,7 @@ export function useChat(opts: {
           setBlocks([]);
           turnIdRef.current = '';
           turnIdRef.peerId = undefined;
+          turnIdRef.bg = undefined;
           lastSeqRef.current = 0;
           setAppliedSeq(0);
           writeStoredState(cli, repo.path, chatId, [], 0, cacheResetAtRef.current);
@@ -1774,6 +1799,7 @@ export function useChat(opts: {
           setStatus(msg.remote === true ? 'connecting' : 'ready');
           turnIdRef.current = '';
           turnIdRef.peerId = undefined;
+          turnIdRef.bg = undefined;
           clearTurnStarted();
           lastSeqRef.current = 0;
           setAppliedSeq(0);
@@ -1795,6 +1821,14 @@ export function useChat(opts: {
           setError(null);
           setStatus('closed');
           window.setTimeout(() => forceReconnectRef.current(), 250);
+        }
+        else if (msg.type === 'stream' && msg.lane === 'bg') {
+          // The agent's background lane: same transcript, but never this
+          // composer's busy state, compaction banner or context meter.
+          const streamed = msg.event && typeof msg.event === 'object'
+            ? { ...msg.event, seq: msg.seq ?? msg.event.seq, at: msg.at ?? msg.event.at, lane: 'bg' }
+            : msg.event;
+          setBlocks((prev) => reduce(prev, streamed, turnIdRef));
         }
         else if (msg.type === 'stream') {
           // Track compaction so the working banner can say "compacting context"
