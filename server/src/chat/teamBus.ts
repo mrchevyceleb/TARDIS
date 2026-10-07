@@ -128,6 +128,9 @@ type QueuedTeamDelivery = StoredRecord & {
   toId: string;
   text: string;
   hop: number;
+  /** Explicit priority flag from team_message: this record sorts with
+   *  person-sourced records, ahead of older teammate chatter. */
+  priority?: true;
   chainId?: string;
   chainEdges?: string[];
   chainRoute?: string[];
@@ -441,6 +444,14 @@ async function personLanePreference(agent: Agent): Promise<AgentLane> {
 /** Person-sourced queued deliveries (Desk answers, voice continuations). */
 function personSourced(record: { fromRole?: string }): boolean {
   return record.fromRole === 'desk' || record.fromRole === 'voice';
+}
+
+/** Records that sort to the front of an admitted batch: person-sourced
+ *  (Desk answers, voice continuations) plus explicitly priority-flagged
+ *  teammate messages. Sort order only; lane routing and interrupt class
+ *  key off from.role, never off this. */
+function sortsAhead(record: { fromRole?: string; priority?: boolean }): boolean {
+  return personSourced(record) || record.priority === true;
 }
 
 async function getRecipientSessionForDelivery(
@@ -976,10 +987,10 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
   // same recipient tail.
   const batch = (await queueStoreOperation(() => queuedDeliveryStore.list()))
     .filter((item) => queueKeyOf(item) === queueKey)
-    // Person-sourced records (Desk answers, voice continuations) jump teammate
-    // chatter; within each group oldest first, so a joined delivery reads
-    // newest-last.
-    .sort((a, b) => (Number(personSourced(b)) - Number(personSourced(a)))
+    // Person-sourced records (Desk answers, voice continuations) and
+    // priority-flagged messages jump teammate chatter; within each group
+    // oldest first, so a joined delivery reads newest-last.
+    .sort((a, b) => (Number(sortsAhead(b)) - Number(sortsAhead(a)))
       || String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
 
   for (const record of batch) {
@@ -1007,7 +1018,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       // fit stays queued and the next admission takes it.
       const candidates = (await queueStoreOperation(() => queuedDeliveryStore.list()))
         .filter((item) => queueKeyOf(item) === queueKey)
-        .sort((a, b) => (Number(personSourced(b)) - Number(personSourced(a)))
+        .sort((a, b) => (Number(sortsAhead(b)) - Number(sortsAhead(a)))
           || String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
       if (candidates.length === 0) break;
       const lead = candidates[0];
@@ -1110,6 +1121,9 @@ export async function deliverTeamMessage(input: {
   onQueued?: () => void;
   hop?: number;
   wait?: boolean;
+  /** Priority flag: this record sorts with person-sourced records, ahead of
+   *  older teammate chatter. Sort order only; nothing else changes. */
+  priority?: boolean;
   signal?: AbortSignal;
   /** The sender's own lane (from its team MCP), for chain inheritance. */
   fromLane?: AgentLane;
@@ -1158,6 +1172,7 @@ export async function deliverTeamMessage(input: {
       toId: to.id,
       text,
       hop,
+      priority: input.priority === true ? true : undefined,
       chainId: chain.id,
       chainEdges: chain.edges,
       chainRoute: chain.route,

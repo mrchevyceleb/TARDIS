@@ -118,6 +118,7 @@ const TOOLS = [
         text: { type: 'string', description: 'What to say or ask' },
         hop: { type: 'number', description: 'Optional legacy handoff sequence metadata; there is no fixed depth limit' },
         wait: { type: 'boolean', description: 'Wait for the reply (default false; use true only for a required synchronous answer)' },
+        priority: { type: 'boolean', description: 'Sort this message with Desk answers and voice continuations, ahead of older teammate chatter in the queue. Sort order only; delivery and routing are unchanged.' },
       },
       required: ['from', 'to', 'text'],
       additionalProperties: false,
@@ -755,6 +756,7 @@ async function callTool(name, args, signal) {
         // Version the async-default behavior at the MCP boundary. The raw HTTP
         // API keeps its historical synchronous default for non-MCP callers.
         wait: args.wait === true,
+        priority: args.priority === true,
       }),
     }, signal);
     if (!result.delivered) return `NOT DELIVERED: ${result.reason}`;
