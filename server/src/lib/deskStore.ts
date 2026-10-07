@@ -555,7 +555,7 @@ function requireChoices(value: unknown): string[] {
 }
 
 function requireCardRef(data: DeskData, value: unknown): string {
-  const cardId = oneLine(value, 80);
+  const cardId = requireOneLine(value, 80, 'cardId');
   if (cardId && !data.cards.some((c) => c.id === cardId)) throw new DeskError(400, `No board card with id ${cardId}.`);
   return cardId;
 }
