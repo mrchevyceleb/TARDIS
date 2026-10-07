@@ -4,7 +4,7 @@
 // ("The Counsel"). All state + persistence already live in useCompanionPicker;
 // this is presentation-only, with subscription model and effort controls.
 
-import { useEffect } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CompanionPicker } from '../../hooks/useCompanionPicker';
 import {
   WORKSPACE_COMPANIONS,
@@ -149,6 +149,111 @@ function openRouterVendorGroups(models: OpenRouterModelSpec[]): Array<[string, A
   return [...groups];
 }
 
+// A scrollable list of model rows drawn in the page. Native <select> pickers on
+// phones could lose the pick, and plain buttons behave the same everywhere.
+type ModelGroup = [string, Array<{ id: string; name: string }>];
+function ModelList({
+  label,
+  groups,
+  current,
+  onPick,
+  searchable = false,
+}: {
+  label: string;
+  groups: ModelGroup[];
+  current: string;
+  onPick: (id: string) => void;
+  searchable?: boolean;
+}) {
+  const [query, setQuery] = useState('');
+  // Show a tap right away; agent threads only confirm after the server save.
+  const [picked, setPicked] = useState<string | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const q = query.trim().toLowerCase();
+  const shown = q
+    ? groups
+      .map(([vendor, models]): ModelGroup => [vendor, models.filter((m) => `${vendor} ${m.name} ${m.id}`.toLowerCase().includes(q))])
+      .filter(([, models]) => models.length > 0)
+    : groups;
+  const selected = picked ?? current;
+  const rowCount = groups.reduce((n, [, models]) => n + models.length, 0);
+
+  // The server answered (or another device changed it): drop the optimistic pick.
+  // A save that never lands (conflict, offline) falls back after a few seconds.
+  useEffect(() => { setPicked(null); }, [current]);
+  useEffect(() => {
+    if (picked === null) return;
+    const t = window.setTimeout(() => setPicked(null), 5000);
+    return () => window.clearTimeout(t);
+  }, [picked]);
+
+  // Keep the current model in view (also once a late catalog fills in),
+  // scrolling only the list itself, never while a search is narrowing it.
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    const row = list?.querySelector<HTMLElement>('.model-row.on');
+    if (q || !list || !row) return;
+    list.scrollTop = row.offsetTop - list.clientHeight / 2 + row.clientHeight / 2;
+  }, [current, rowCount]);
+
+  // Listbox keys: one Tab stop, arrows/Home/End move between rows.
+  const onListKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+    const rows = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>('.model-row') ?? []);
+    if (!rows.length) return;
+    e.preventDefault();
+    const at = rows.indexOf(document.activeElement as HTMLButtonElement);
+    const next = e.key === 'Home' ? 0
+      : e.key === 'End' ? rows.length - 1
+      : e.key === 'ArrowDown' ? Math.min(rows.length - 1, at + 1)
+      : Math.max(0, at < 0 ? 0 : at - 1);
+    rows[next]!.focus();
+  };
+  const firstId = shown[0]?.[1][0]?.id;
+  const tabbableId = shown.some(([, models]) => models.some((m) => m.id === selected)) ? selected : firstId;
+
+  return (
+    <div className="model-list-wrap">
+      {searchable ? (
+        <input
+          type="search"
+          className="model-search"
+          placeholder="Search models"
+          aria-label={`Search ${label}s`}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      ) : null}
+      <div className="model-list" role="listbox" aria-label={label} ref={listRef} onKeyDown={onListKey}>
+        {shown.map(([vendor, models]) => (
+          <div key={vendor || 'all'} role="group" aria-label={vendor || undefined}>
+            {vendor ? <div className="model-group">{vendor}</div> : null}
+            {models.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                role="option"
+                aria-selected={selected === m.id}
+                tabIndex={m.id === tabbableId ? 0 : -1}
+                title={m.id}
+                className={`model-row${selected === m.id ? ' on' : ''}`}
+                onClick={() => {
+                  if (m.id === selected) return;
+                  setPicked(m.id);
+                  onPick(m.id);
+                }}
+              >
+                {m.name}
+              </button>
+            ))}
+          </div>
+        ))}
+        {shown.length === 0 ? <div className="model-empty">No models match</div> : null}
+      </div>
+    </div>
+  );
+}
+
 // The active lane's model + effort controls, expanded in place.
 function LaneControls({ picker }: { picker: CompanionPicker }) {
   useCodexModels();
@@ -231,19 +336,13 @@ function LaneControls({ picker }: { picker: CompanionPicker }) {
       {picker.isFireworks && (
         <>
           <span className="ctl-lab">model</span>
-          {/* A select instead of pills: the live catalog carries a dozen+ models. */}
-          <select
-            aria-label="Fireworks model"
-            className="fw-model-select"
-            value={picker.fireworksModel}
-            onChange={(e) => picker.setFireworksModel(e.target.value)}
-          >
-            {FIREWORKS_MODELS.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}{m.thinkingOnly ? ' · always thinking' : ''}
-              </option>
-            ))}
-          </select>
+          {/* An in-page list, not a native select: phone OS pickers dropped the pick. */}
+          <ModelList
+            label="Fireworks model"
+            groups={[['', FIREWORKS_MODELS.map((m) => ({ id: m.id, name: `${m.label}${m.thinkingOnly ? ' · always thinking' : ''}` }))]]}
+            current={picker.fireworksModel}
+            onPick={picker.setFireworksModel}
+          />
           <span className="ctl-lab">thinking</span>
           <EffortPills
             options={fireworksEffortsForModel(picker.fireworksModel)}
@@ -255,21 +354,14 @@ function LaneControls({ picker }: { picker: CompanionPicker }) {
       {picker.isOpenRouter && (
         <>
           <span className="ctl-lab">model</span>
-          {/* Hundreds of models: one select, grouped by vendor. */}
-          <select
-            aria-label="OpenRouter model"
-            className="fw-model-select"
-            value={picker.openRouterModel}
-            onChange={(e) => picker.setOpenRouterModel(e.target.value)}
-          >
-            {openRouterVendorGroups(OPENROUTER_MODELS).map(([vendor, models]) => (
-              <optgroup key={vendor} label={vendor}>
-                {models.map((m) => (
-                  <option key={m.id} value={m.id}>{m.name}</option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
+          {/* Hundreds of models: a searchable in-page list, grouped by vendor. */}
+          <ModelList
+            label="OpenRouter model"
+            groups={openRouterVendorGroups(OPENROUTER_MODELS)}
+            current={picker.openRouterModel}
+            onPick={picker.setOpenRouterModel}
+            searchable
+          />
           <span className="ctl-lab">thinking</span>
           <EffortPills
             options={openRouterEffortsForModel(picker.openRouterModel)}
