@@ -2378,11 +2378,15 @@ class ClaudeSession {
       const detail = [ev.api_error_status === 426 ? 'HTTP 426' : '', this.syntheticApiErrorReason, ev.result, ...(Array.isArray(ev.errors) ? ev.errors.map((e: any) => typeof e === 'string' ? e : e?.message) : [])].filter((s) => typeof s === 'string').join('\n');
       noteProviderGateFailure(providerLabel(this.cli), () => agentForChatId(this.chatId)?.name ?? this.chatId, detail);
       // Refused for length with no compact to fall back on: same lesson, and
-      // the oversized session must not be resumed.
-      if (this.providerWindow && this.compactFailure === null && isContextLengthRejection(detail)) {
+      // the oversized session must not be resumed. The terminal classification
+      // checks the full signal (subtype + detail + streamed text) for
+      // context-length rejection, so the reseed decision uses its flag too;
+      // otherwise a "Prompt is too long" that only reached the streamed text
+      // would keep the oversized session resumable (Oct 7 review).
+      if (this.compactFailure === null && (providerTerminal?.contextLength === true || (this.providerWindow && isContextLengthRejection(detail)))) {
         lengthRejected = true;
         const accepted = this.usageSeen ? contextTokens(this.contextKey) : 0;
-        if (accepted > 0) learnContextLimit(this.spawnModel, accepted, this.providerWindow);
+        if (accepted > 0 && this.providerWindow) learnContextLimit(this.spawnModel, accepted, this.providerWindow);
       }
     }
     const compactFailed = ev?.type === 'result' && !expectedUserInterrupt && this.compactFailure !== null
