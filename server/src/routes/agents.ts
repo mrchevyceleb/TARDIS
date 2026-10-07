@@ -13,14 +13,21 @@ const rawImage = express.raw({ type: 'image/*', limit: '6mb' });
 export const agentsRouter = Router();
 
 agentsRouter.get('/', asyncHandler(async (_req, res) => {
-  res.json({ agents: listAgents().map((a) => ({ ...a, unread: agentUnread(a), muted: Boolean(a.muted) })) });
+  // Unread counts read each agent's log; awaiting per agent keeps a cold big
+  // lane's bounded tail read off the response-blocking path.
+  const agents = await Promise.all(listAgents().map(async (a) => ({
+    ...a,
+    unread: await agentUnread(a),
+    muted: Boolean(a.muted),
+  })));
+  res.json({ agents });
 }));
 
 agentsRouter.post('/:id/read', asyncHandler(async (req, res) => {
   const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const agent = listAgents().find((a) => a.id === id);
   if (!agent) { res.status(404).json({ error: 'agent not found' }); return; }
-  markAgentRead(id, agentLatestSeq(agent));
+  markAgentRead(id, await agentLatestSeq(agent));
   res.json({ ok: true, unread: 0 });
 }));
 

@@ -42,7 +42,7 @@ import {
   type AnySession,
   type CliKind,
 } from './runner.ts';
-import { durableUserEchoClientMsgId, flushEventLog, loadEventLogCatchUp, loadEventLogSync, recentUserEchoClientMsgIds, repairEventLogSequenceSync } from './event-log-store.ts';
+import { durableUserEchoClientMsgId, flushEventLog, loadEventLogCatchUp, loadEventLogTail, recentUserEchoClientMsgIds, repairEventLogSequenceSync } from './event-log-store.ts';
 import { isReactionEmoji, recordReaction } from './reactions.ts';
 import {
   activeCodexSessions,
@@ -985,7 +985,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         );
         console.warn(`[chat ws#${wsId}] repaired non-monotonic event sequence for ${session.logKey}`);
       }
-      const { events } = loadEventLogSync(session.logKey);
+      const { events } = await loadEventLogTail(session.logKey);
       const durableLatest = events.reduce((max, event) => Math.max(max, event.seq), 0);
       const latest = Math.max(durableLatest, session.latestSeq());
       const resetReplay = forceReset || (sinceSeq >= 0 && sinceSeq > latest);
@@ -1078,7 +1078,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       if (repair.repaired) {
         console.warn(`[chat ws#${wsId}] repaired non-monotonic cold event sequence for ${logKey}`);
       }
-      const { events } = loadEventLogSync(logKey);
+      const { events } = await loadEventLogTail(logKey);
       let latest = 0;
       for (const event of events) if (event.seq > latest) latest = event.seq;
       const resetReplay = forceReset || (sinceSeq >= 0 && sinceSeq > latest);
@@ -1213,9 +1213,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
             const sessionBusy = current
               ? (current as { isBusy?: () => boolean }).isBusy?.() === true
               : busy;
+            const coldEvents = current
+              ? null
+              : await loadEventLogTail(laneLogKey(desiredBrain.cli, msg.repo, chatId));
             const latestSeq = current
               ? current.latestSeq()
-              : loadEventLogSync(laneLogKey(desiredBrain.cli, msg.repo, chatId)).events.reduce(
+              : (coldEvents?.events ?? []).reduce(
                   (max, event) => Math.max(max, event.seq),
                   0,
                 );

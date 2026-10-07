@@ -156,10 +156,11 @@ function queueStoreOperation<T>(operation: () => Promise<T>): Promise<T> {
   return result;
 }
 
-/** One FIFO per recipient lane: the person's voice continuations never queue
- *  behind background handoffs once the background lane is on. */
+/** One FIFO per recipient lane: the person's voice continuations and Desk
+ *  answers never queue behind background handoffs once the background lane is
+ *  on. */
 function queueKeyOf(record: { toId: string; fromRole?: string }): string {
-  if (!backgroundLaneEnabled() || record.fromRole !== 'voice') return record.toId;
+  if (!backgroundLaneEnabled() || (record.fromRole !== 'voice' && record.fromRole !== 'desk')) return record.toId;
   // Engines without a background lane run both kinds on one session: one FIFO.
   const agent = listAgents().find((a) => a.id === record.toId);
   const cli = agent ? cliForAgentEngine(brainForAgent(agent).engine) : '';
@@ -424,6 +425,28 @@ function waitForRefusalPause(
   });
 }
 
+/** The lane a person-sourced message (Desk answer, voice continuation) should
+ *  take: the one that can act now. Prefers the person's main lane, falls back
+ *  to the background lane when main is tied up and background is free, and
+ *  otherwise stays on main, where the human message-boundary interrupt makes
+ *  room within a step. Probes only already-running sessions — it never
+ *  spawns one just to look. */
+async function personLanePreference(agent: Agent): Promise<AgentLane> {
+  const runner = await getRunner();
+  for (const lane of ['main', 'bg'] as AgentLane[]) {
+    const { cli, chatKey } = agentLogKey(agent, lane);
+    const active = runner.activeChatSessions().find((session) => session.cli === cli && session.chatId === chatKey);
+    // No session yet means it spawns idle; an idle session can act now.
+    if (!active || active.busy !== true) return lane;
+  }
+  return 'main';
+}
+
+/** Person-sourced queued deliveries (Desk answers, voice continuations). */
+function personSourced(record: { fromRole?: string }): boolean {
+  return record.fromRole === 'desk' || record.fromRole === 'voice';
+}
+
 async function getRecipientSessionForDelivery(
   agent: Agent,
   deadline: number,
@@ -671,7 +694,7 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
       const admission = await getRecipientSessionForDelivery(
         to, deadline, signal, deferIfBusy,
         from.role === 'automation' ? false : from.role === 'desk' || from.role === 'voice' ? 'human' : 'peer',
-        from.role === 'voice' ? 'main' : 'bg',
+        from.role === 'voice' || from.role === 'desk' ? await personLanePreference(to) : 'bg',
       );
       session = admission.session;
       lane = admission.lane;
@@ -874,6 +897,39 @@ async function acknowledgeQueuedDelivery(record: QueuedTeamDelivery, session: Se
   await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
 }
 
+/** The joined-delivery block for each batch record after the lead. Mirrors
+ *  runTeamDelivery's own prompt headers so every message keeps its sender. */
+function batchDeliveryBlock(record: QueuedTeamDelivery): string {
+  const header = record.fromRole === 'desk'
+    ? `[comment from ${record.fromName} on the Desk]`
+    : record.fromRole === 'voice'
+    ? '[continuation of the user\u2019s voice request in your own thread]'
+    : `[message from teammate ${record.fromName}${record.fromRole ? ` (${record.fromRole})` : ''} \u2014 handoff ${record.hop}]`;
+  return `${header}\n${record.text}`;
+}
+
+/** Ack a joined batch: the lead record's durable receipt proves the whole
+ *  joined prompt was accepted (one send, one peer echo), so persist a
+ *  per-record receipt for every other message before deleting them — a
+ *  restart mid-ack must never redeliver the tail of a batch. */
+async function acknowledgeQueuedBatch(records: QueuedTeamDelivery[], session: SessionLike): Promise<void> {
+  const [lead, ...rest] = records;
+  await flushEventLog(session.logKey);
+  if (!hasDurableDeliveryReceipt(session.logKey, lead.id)) {
+    throw new Error('accepted delivery receipt did not reach the event log');
+  }
+  for (const record of rest) {
+    if (hasDurableDeliveryReceipt(session.logKey, record.id)) continue;
+    await appendEventLogDurable(session.logKey, {
+      seq: reserveEventLogSeq(session.logKey),
+      ev: { type: 'event', event: { type: 'peer_delivery_accepted', deliveryId: record.id } } as PersistedEvent['ev'],
+    });
+  }
+  for (const record of records) {
+    await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
+  }
+}
+
 function retryDelay(): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ASYNC_RETRY_MS);
@@ -887,7 +943,11 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
   // same recipient tail.
   const batch = (await queueStoreOperation(() => queuedDeliveryStore.list()))
     .filter((item) => queueKeyOf(item) === queueKey)
-    .sort((a, b) => String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
+    // Person-sourced records (Desk answers, voice continuations) jump teammate
+    // chatter; within each group oldest first, so a joined delivery reads
+    // newest-last.
+    .sort((a, b) => (Number(personSourced(b)) - Number(personSourced(a)))
+      || String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
 
   for (const record of batch) {
     while (true) {
@@ -901,28 +961,44 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         await retryDelay();
         continue;
       }
-      const from = findAgent(record.fromId) ?? {
-        id: record.fromId,
-        name: record.fromName,
-        role: record.fromRole ?? '',
+      // One admission for the whole still-queued batch. A boundary per message
+      // is what backed deliveries up for an hour on busy lanes (34 queued for
+      // one Kimi K3 recipient, one message per 10-25 s step), so every
+      // still-queued message for this recipient rides the same admitted turn:
+      // person messages first (Matt's Desk answers never sit behind teammate
+      // chatter), oldest first within each group, so the joined delivery reads
+      // newest-last.
+      const siblings = (await queueStoreOperation(() => queuedDeliveryStore.list()))
+        .filter((item) => queueKeyOf(item) === queueKey)
+        .sort((a, b) => (Number(personSourced(b)) - Number(personSourced(a)))
+          || String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
+      if (siblings.length === 0) break;
+      const lead = siblings[0];
+      const from = findAgent(lead.fromId) ?? {
+        id: lead.fromId,
+        name: lead.fromName,
+        role: lead.fromRole ?? '',
         engine: '',
         home: '',
         createdAt: 0,
       };
+      const joinedText = siblings.length > 1
+        ? [lead.text, '', ...siblings.slice(1).map(batchDeliveryBlock)].join('\n')
+        : lead.text;
       const result = await runTeamDelivery({
         from,
         to,
-        text: record.text,
-        hop: record.hop,
-        chain: chainForQueuedDelivery(record),
+        text: joinedText,
+        hop: lead.hop,
+        chain: chainForQueuedDelivery(lead),
         waitForReply: false,
-        deliveryId: record.id,
-        onAdmitted: (session) => acknowledgeQueuedDelivery(record, session),
+        deliveryId: lead.id,
+        onAdmitted: (session) => acknowledgeQueuedBatch(siblings, session),
       });
       const remains = await queueStoreOperation(async () =>
         (await queuedDeliveryStore.list()).some((item) => item.id === record.id));
       if (!result.delivered || remains) {
-        console.warn(`[team] queued delivery ${record.fromName} -> ${to.name} will retry: ${result.reason ?? 'durable acknowledgement pending'}`);
+        console.warn(`[team] queued delivery ${lead.fromName} -> ${to.name} will retry: ${result.reason ?? 'durable acknowledgement pending'}`);
         await retryDelay();
         continue;
       }
@@ -1137,7 +1213,7 @@ export async function deliverTeamMessage(input: {
 
 // ---- reply extraction ---------------------------------------------------------
 
-import { flushEventLog, loadEventLogSync } from './event-log-store.ts';
+import { appendEventLogDurable, flushEventLog, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 
 /** Read the recipient's authoritative shared-thread tail for this exact turn. */
 async function readLastReply(logKey: string, minSeq = 0, maxSeq = Number.POSITIVE_INFINITY, lane: AgentLane = 'main'): Promise<string | undefined> {

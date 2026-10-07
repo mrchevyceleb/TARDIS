@@ -5,7 +5,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR, ELROND_WORKSPACE_PATH } from '../config.ts';
-import { loadEventLogSync } from './event-log-store.ts';
+import { loadEventLogTail } from './event-log-store.ts';
 import { agentLogKey } from './teamBus.ts';
 import { logKeyFor } from './threadKey.ts';
 import { isThreadWatched } from './threadWatch.ts';
@@ -111,9 +111,9 @@ function finishedStreamText(stream: { type?: string; index?: unknown; content_bl
 /** Latest persisted seq in an agent's home log (0 when no log yet).
  *  Recency is the last line's seq (append order), not max(seq): a trailing
  *  duplicate/rewound seq is still the newest event. */
-export function agentLatestSeq(agent: Agent): number {
+export async function agentLatestSeq(agent: Agent): Promise<number> {
   try {
-    const { events } = loadEventLogSync(agentHistoryKey(agent));
+    const { events } = await loadEventLogTail(agentHistoryKey(agent));
     return events.length ? events[events.length - 1].seq : 0;
   } catch {
     return 0;
@@ -128,11 +128,11 @@ function agentHistoryKey(agent: Agent): string {
 }
 
 /** Count of assistant-authored events since the last read (0 = read). */
-export function agentUnread(agent: Agent): number {
+export async function agentUnread(agent: Agent): Promise<number> {
   // Muted companions still write and talk to the crew; they just never badge.
   if (agent.muted) return 0;
   try {
-    const { events } = loadEventLogSync(agentHistoryKey(agent));
+    const { events } = await loadEventLogTail(agentHistoryKey(agent));
     if (!events.length) return 0;
     {
       // A thread the user is actively watching (visible tab) can never be "waiting
