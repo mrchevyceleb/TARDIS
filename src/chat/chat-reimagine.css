@@ -404,6 +404,9 @@
 .rc .mini:hover { border-color: var(--border-strong); color: var(--fg-soft); }
 .rc .mini.on { border-color: color-mix(in oklch, var(--accent) 55%, transparent); color: var(--accent-glow); background: color-mix(in oklch, var(--accent) 10%, transparent); }
 .rc .fw-model-select { padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border); font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); background: transparent; min-height: 30px; max-width: 100%; }
+/* The open list is drawn by the OS: a transparent select leaves it white, so give it theme colors. */
+.rc .fw-model-select optgroup { background: var(--surface-raised); color: var(--gold); }
+.rc .fw-model-select option { background: var(--surface-raised); color: var(--fg); }
 .rc .lane-note { flex-basis: 100%; font-family: var(--font-display); font-style: italic; font-size: 12px; color: var(--muted); padding-top: 5px; }
 
 /* ── chronicle ribbon (ticker) — §3 / §4.2 ─────────────────────── */
