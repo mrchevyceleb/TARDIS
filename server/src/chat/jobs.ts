@@ -316,6 +316,24 @@ function runQuiet(cmd: string, args: string[]): Promise<number | null> {
   });
 }
 
+/** Same as runQuiet but hands back trimmed stdout (null if the command could
+ *  not run or exited nonzero). Used for the one systemd property that cannot
+ *  be read from an exit code. */
+function runCaptured(cmd: string, args: string[]): Promise<string | null> {
+  return new Promise((resolve) => {
+    try {
+      const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+      let out = '';
+      p.stdout.setEncoding('utf8');
+      p.stdout.on('data', (chunk: string) => { out += chunk; });
+      p.once('error', () => resolve(null));
+      p.once('close', (code) => resolve(code === 0 ? out.trim() : null));
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
 /** The wrapper shell (the scope's main process) is still the process we
  *  started, on this same boot. */
 function wrapperAlive(job: Job): boolean {
@@ -328,9 +346,37 @@ async function jobAlive(job: Job): Promise<boolean> {
   if (job.bootId && job.bootId !== BOOT_ID) return false;
   if (job.unit) {
     const active = await runQuiet('systemctl', ['--user', 'is-active', '--quiet', `${job.unit}.scope`]);
-    if (active !== null) return active === 0;
+    if (active !== null) {
+      if (active !== 0) return false;
+      // An ABANDONED scope keeps ActiveState=active with nothing left inside
+      // it, so is-active on its own calls a long-finished job alive forever.
+      // That is a live loop, not a cosmetic wrong answer: the timeout stop
+      // signals an empty cgroup, this still answers alive, stopJob throws,
+      // and the 5s tick retries it for the life of the process — about 46
+      // `systemctl` spawns per attempt, per job (4 jobs sat like this for
+      // 4-6 hours on Oct 7 2026). No tasks in the cgroup means no job.
+      // Only an explicit "0" counts as gone: with task accounting off the
+      // property reads "[not set]", and an unknown must stay alive rather
+      // than report a running job as finished.
+      const tasks = await runCaptured('systemctl', ['--user', 'show', `${job.unit}.scope`, '-p', 'TasksCurrent', '--value']);
+      return tasks !== '0';
+    }
   }
   return wrapperAlive(job);
+}
+
+/** Release a scope with nothing left inside it. systemd holds an ABANDONED
+ *  scope at ActiveState=active indefinitely once its processes are gone, so a
+ *  scope nothing ever stops leaks for the life of the login session (94 had
+ *  piled up on this box by Oct 7 2026, 90 of them from jobs that had finished
+ *  normally). Never tears down a scope that still has tasks, and never reports
+ *  failure: cleanup must not break a job's bookkeeping. */
+async function releaseScope(job: Job): Promise<void> {
+  if (!job.unit || (job.bootId && job.bootId !== BOOT_ID)) return;
+  // "[not set]" (accounting off) and "" (already inactive) both mean leave it be.
+  const tasks = await runCaptured('systemctl', ['--user', 'show', `${job.unit}.scope`, '-p', 'TasksCurrent', '--value']);
+  if (tasks !== '0') return;
+  await runQuiet('systemctl', ['--user', 'stop', `${job.unit}.scope`]);
 }
 
 async function pollDead(isAlive: () => Promise<boolean> | boolean, ms: number): Promise<boolean> {
@@ -350,9 +396,13 @@ async function terminateJob(job: Job): Promise<boolean> {
   if (job.unit) {
     const kill = (sig: 'SIGTERM' | 'SIGKILL') => runQuiet('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${sig}`, `${job.unit}.scope`]);
     await kill('SIGTERM');
-    if (await pollDead(() => jobAlive(job), STOP_GRACE_MS)) return true;
-    await kill('SIGKILL');
-    return pollDead(() => jobAlive(job), KILL_CONFIRM_MS);
+    let dead = await pollDead(() => jobAlive(job), STOP_GRACE_MS);
+    if (!dead) {
+      await kill('SIGKILL');
+      dead = await pollDead(() => jobAlive(job), KILL_CONFIRM_MS);
+    }
+    if (dead) await releaseScope(job);
+    return dead;
   }
   // No scope (systemd unavailable): the wrapper leads its own process group.
   // Only signal a group whose leader we can still verify; its members can
@@ -450,6 +500,8 @@ async function tick(): Promise<void> {
           const current = (await store.list()).find((j) => j.id === job.id);
           if (current?.state === 'running') await store.update(job.id, { ...patch, wakeText: resultText(ended) });
         });
+        // The job ended on its own, so no one signalled its scope: release it.
+        await releaseScope(job);
       } else if (now >= job.deadline) {
         try {
           await stopJob(job.id, 'timeout');
