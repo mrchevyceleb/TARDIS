@@ -9,7 +9,7 @@ export type TerminalProviderError = {
   limitKind?: 'session' | 'weekly' | 'model' | 'usage';
 };
 
-const NATIVE_LIMIT = /^\s*(?:You(?:['’]ve| have) hit your (?:(?:session|weekly|usage|Sonnet|Opus|5[- ]hour) )?limit\b|Claude AI usage limit reached\b|5[- ]hour limit reached\b)/i;
+const NATIVE_LIMIT = /^\s*(?:You(?:['’]ve| have) hit your (?:(?:session|weekly|usage|monthly spend|Sonnet|Opus|5[- ]hour) )?limit\b|Claude AI usage limit reached\b|5[- ]hour limit reached\b)/i;
 
 /** Preserve only a clock and a valid timezone, never the provider's payload. */
 function safeResetTime(text: string): string | undefined {
@@ -236,6 +236,13 @@ export function terminalExecutionError(
       retryable: true,
     };
   }
+  // The provider's own native limit text must classify as a usage window
+  // even when it mentions a spend limit (Oct 3: the monthly-spend native
+  // string read as the runner's budget), so this check runs BEFORE the
+  // budget branch. Only NATIVE_LIMIT-shaped text passes; a runner-budget
+  // signal still falls through to the branch below.
+  const usageLimit = usageLimitError(cli, syntheticReason ?? '', true) ?? usageLimitError(cli, detail);
+  if (usageLimit) return usageLimit;
   if (/budget|spend limit|cost limit/i.test(signal)) {
     return {
       message: `${provider}'s runner reached its configured budget for this turn. Try a smaller request.`,
@@ -243,8 +250,17 @@ export function terminalExecutionError(
       retryable: true,
     };
   }
-  const usageLimit = usageLimitError(cli, syntheticReason ?? '', true) ?? usageLimitError(cli, detail);
-  if (usageLimit) return usageLimit;
+  // History too big for the model's context window and compaction could not
+  // save the turn (Oct 3: the native "Prompt is too long" wrapper read as a
+  // dead local runner). Same recovery class as a failed compact: a fresh
+  // message continues from the saved summary.
+  if (isContextLengthRejection(signal)) {
+    return {
+      message: `${provider} could not fit this chat's history into its context window. Start a fresh chat or trim the largest items, then send again.`,
+      code,
+      retryable: true,
+    };
+  }
   // Two warm-process failures that read as crashes but are not: the CLI's
   // OAuth refresh lock colliding with a sibling process, and a model tool
   // call that fails to parse even after the CLI's own retry nudge. Both are
