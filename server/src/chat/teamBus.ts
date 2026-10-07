@@ -159,8 +159,15 @@ function queueStoreOperation<T>(operation: () => Promise<T>): Promise<T> {
 /** One FIFO per recipient lane: the person's voice continuations never queue
  *  behind background handoffs once the background lane is on. */
 function queueKeyOf(record: { toId: string; fromRole?: string }): string {
-  return backgroundLaneEnabled() && record.fromRole === 'voice' ? `${record.toId}|main` : record.toId;
+  if (!backgroundLaneEnabled() || record.fromRole !== 'voice') return record.toId;
+  // Engines without a background lane run both kinds on one session: one FIFO.
+  const agent = listAgents().find((a) => a.id === record.toId);
+  const cli = agent ? cliForAgentEngine(brainForAgent(agent).engine) : '';
+  return BACKGROUND_LANE_CLIS.has(cli) ? `${record.toId}|main` : record.toId;
 }
+
+/** Mirrors runner.isClaudeFamilyCli; the runner is loaded lazily here. */
+const BACKGROUND_LANE_CLIS = new Set(['claude', 'assistant', 'zai', 'xai', 'fireworks', 'openrouter']);
 
 function replyEdge(fromId: string, toId: string): string {
   return `${fromId}->${toId}`;

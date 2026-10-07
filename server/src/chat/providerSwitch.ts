@@ -21,6 +21,7 @@ import type { CliKind, SeqEvent } from './runner.ts';
 import type { ZaiMode } from './zaiQuota.ts';
 import { appendEventLogDurable, appendEventLogSync, flushEventLog, loadEventLogSync, reserveEventLogSeq } from './event-log-store.ts';
 import { agentForChatId, brainForAgent, cliForAgentEngine, listAgents } from './agents.ts';
+import { isBackgroundChatId } from './threadKey.ts';
 
 /** Stream event that opens an automatic continue turn. Not rendered: the
  *  `_terminal_error` notice before it already says what happened. */
@@ -250,15 +251,16 @@ export function markPendingProviderContinuesInterrupted(): number {
  *  reload that still shows "continuing". Fresh wipes the thread instead. */
 export function cancelProviderContinue(logKey: string, opts: { stopped?: boolean } = {}): void {
   for (const key of [...jobs.keys()]) if (key.startsWith(`${logKey}\0`)) jobs.delete(key);
-  let cancelled: Job | null = null;
+  // One per lane: each lane's cut needs its own Stop marker.
+  const cancelled = new Map<string, Job>();
   for (const job of [...runningJobs]) {
     if (job.logKey !== logKey) continue;
     job.cancelled = true;
     runningJobs.delete(job);
-    cancelled = job;
+    cancelled.set(job.chatId, job);
     console.warn(`[chat ${job.cli}] automatic continue on ${logKey} cancelled`);
   }
-  if (cancelled && opts.stopped) void postThreadEvent(cancelled, { type: '_interrupted', ts: Date.now() });
+  if (opts.stopped) for (const job of cancelled.values()) void postThreadEvent(job, { type: '_interrupted', ts: Date.now() });
 }
 
 function mergeOrigins(a: TurnOrigin, b: TurnOrigin): TurnOrigin {
@@ -319,7 +321,9 @@ async function waitForRetirement(job: Job): Promise<boolean> {
  *  owned by a newer cut (which has its own outcome). */
 async function cutState(job: Job): Promise<'pending' | 'settled' | 'superseded' | 'stopped'> {
   try { await flushEventLog(job.logKey); } catch { /* best effort */ }
-  const events = loadEventLogSync(job.logKey).events;
+  // Only this job's lane: the sibling lane's turns never settle or own its cut.
+  const background = isBackgroundChatId(job.chatId);
+  const events = loadEventLogSync(job.logKey).events.filter((event) => (event.lane === 'bg') === background);
   for (let i = events.length - 1; i >= 0 && events[i].seq > job.noticeSeq; i -= 1) {
     const outer = events[i].ev as { type?: string; event?: { type?: string; providerCut?: unknown; unread?: unknown } };
     if (outer?.type === 'event' && outer.event?.type === '_terminal_error' && outer.event.providerCut) {
@@ -371,7 +375,7 @@ async function runJob(job: Job): Promise<void> {
         console.warn(`[chat ${job.cli}] automatic continue on ${job.logKey} not needed: ${state === 'settled' ? 'a later turn picked the cut work up' : 'a newer cut owns the thread'}`);
         return;
       }
-      const live = (session?.isAlive() ? session : null) ?? (runner.liveLaneSession(job.logKey) as unknown as ContinuableSession | null);
+      const live = (session?.isAlive() ? session : null) ?? (runner.liveLaneSession(job.logKey, job.chatId) as unknown as ContinuableSession | null);
       if (humanQueued(job.logKey) || live?.isBusy()) {
         if (Date.now() >= deadline) {
           await stopJob(job, `GLM could not continue on ${label}: the thread stayed busy too long. Send again to continue.`, `GLM could not continue on ${label} while the thread stayed busy`);
@@ -458,7 +462,7 @@ async function postProviderCutNotice(job: Job, message: string): Promise<void> {
     // UI and the team bus would read it as that turn failing. The idle check
     // and the post share one synchronous slice, so no turn can start between.
     for (;;) {
-      const live = runner.liveLaneSession(job.logKey);
+      const live = runner.liveLaneSession(job.logKey, job.chatId);
       if (!live?.isBusy()) {
         if (live?.postNotice(event)) return;
         break;
@@ -469,7 +473,7 @@ async function postProviderCutNotice(job: Job, message: string): Promise<void> {
       }
       await waitForTurnEnd(live as unknown as ContinuableSession, Math.min(60_000, deadline - Date.now()));
     }
-    const persisted = { seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event' as const, event }, eng: job.cli, mdl: job.model };
+    const persisted = { seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event' as const, event }, eng: job.cli, mdl: job.model, ...runner.laneTagFor(job.chatId) };
     const saved = appendEventLogDurable(job.logKey, persisted);
     runner.publishExternalThreadEvent(job.logKey, persisted);
     await saved;
@@ -483,10 +487,10 @@ async function postProviderCutNotice(job: Job, message: string): Promise<void> {
 async function postThreadEvent(job: Job, event: Record<string, unknown>): Promise<void> {
   try {
     const runner = await import('./runner.ts');
-    const live = runner.liveLaneSession(job.logKey);
+    const live = runner.liveLaneSession(job.logKey, job.chatId);
     if (live && !live.isBusy() && live.postNotice(event)) return;
     if (live) return; // a turn is running; it already settles the cut
-    const persisted = { seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event' as const, event }, eng: job.cli, mdl: job.model };
+    const persisted = { seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event' as const, event }, eng: job.cli, mdl: job.model, ...runner.laneTagFor(job.chatId) };
     const saved = appendEventLogDurable(job.logKey, persisted);
     runner.publishExternalThreadEvent(job.logKey, persisted);
     await saved;

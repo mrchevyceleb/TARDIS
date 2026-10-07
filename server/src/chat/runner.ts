@@ -598,6 +598,10 @@ class ClaudeSession {
   private lastBoundaryInterruptAt = 0;
   /** Last shared-log seq this process was told about by the lane recap. */
   private laneSyncSeq?: number;
+  /** Each lane runs its own native context; the transcript is shared. */
+  private get contextKey(): string {
+    return isBackgroundChatId(this.chatId) ? `${this.logKey}|bg` : this.logKey;
+  }
   /** Has the person's message got visible text yet; see replyNudge.ts. Lazy,
    *  like stopWatch. */
   private replyWatch?: ReplyWatch;
@@ -1224,7 +1228,6 @@ class ClaudeSession {
     const laneContext = startsNewTurn
       ? laneContextForTurn({ chatId: this.chatId, logKey: this.logKey, sinceSeq: this.laneSyncSeq ?? null, throughSeq: historyThroughSeq, seeded: Boolean(seed) })
       : '';
-    if (startsNewTurn) this.laneSyncSeq = historyThroughSeq;
     // Auto-recall: put recorded knowledge (lane memory notes, Desk cards,
     // assistant-mcp memories) in front of every new human or teammate turn.
     // Automation traffic (routines, job wakes, reply nudges, continues) never
@@ -1296,6 +1299,8 @@ class ClaudeSession {
           else resolve();
         });
       });
+      // The recap reached the model; the next turn recaps only what came after.
+      if (startsNewTurn) this.laneSyncSeq = historyThroughSeq;
       if (wantSeed) {
         this.seedWindowOnNextTurn = false;
         if (seed) this.pendingSeedAck = true;
@@ -1796,20 +1801,20 @@ class ClaudeSession {
     if (stream.type === 'content_block_start' && stream.content_block?.type === 'text') {
       this.streamTextBlocks.set(stream.index, {
         text: typeof stream.content_block.text === 'string' ? stream.content_block.text : '',
-        seqs: [this.nextSeq],
+        seqs: [this.latestSeq() + 1],
       });
       return;
     }
     if (stream.type === 'content_block_delta' && stream.delta?.type === 'text_delta') {
       const block = this.streamTextBlocks.get(stream.index) ?? { text: '', seqs: [] };
       if (typeof stream.delta.text === 'string') block.text += stream.delta.text;
-      block.seqs.push(this.nextSeq);
+      block.seqs.push(this.latestSeq() + 1);
       this.streamTextBlocks.set(stream.index, block);
       return;
     }
     if (stream.type === 'content_block_stop') {
       const block = this.streamTextBlocks.get(stream.index);
-      if (block) block.seqs.push(this.nextSeq);
+      if (block) block.seqs.push(this.latestSeq() + 1);
     }
   }
 
@@ -2005,7 +2010,7 @@ class ClaudeSession {
   }
 
   private rotationWanted(): boolean {
-    return this.rotateAfterNativeCompact || contextRotationDue(this.logKey, this.contextBudget());
+    return this.rotateAfterNativeCompact || contextRotationDue(this.contextKey, this.contextBudget());
   }
 
   private async rotateContextAtBoundary(): Promise<boolean> {
@@ -2022,7 +2027,7 @@ class ClaudeSession {
       return true;
     }
     bankRotation(this.logKey);
-    recordContextRotation(this.logKey);
+    recordContextRotation(this.contextKey);
     this.rotateAfterNativeCompact = false;
     this.contextRotated = true;
     this.shutdown('context-budget');
@@ -2296,11 +2301,11 @@ class ClaudeSession {
       const usage = ev?.type === 'assistant' ? ev.message?.usage
         : ev?.type === 'stream_event' && ev.event?.type === 'message_start' ? ev.event.message?.usage
         : ev?.type === 'stream_event' && ev.event?.type === 'message_delta' ? ev.event.usage : undefined;
-      recordContextUsage(this.logKey, 'claude', usage);
+      recordContextUsage(this.contextKey, 'claude', usage);
       if (!this.usageSeen && usage && (Number(usage.input_tokens) > 0 || Number(usage.cache_read_input_tokens) > 0)) {
         this.usageSeen = true;
         // Only a seeded start: a resumed session past budget should rotate.
-        if (this.pendingSeedAck) this.startTokens = contextTokens(this.logKey);
+        if (this.pendingSeedAck) this.startTokens = contextTokens(this.contextKey);
       }
     }
     // A provider can refuse a context below its catalog window (Fireworks
@@ -2312,7 +2317,7 @@ class ClaudeSession {
       // reload the same seed and compact again.
       if (this.pendingSeedAck && !this.usageSeen) this.seedOverflowed = true;
       if (!this.seedFillsWindow()) this.rotateAfterNativeCompact = true;
-      const accepted = this.usageSeen ? contextTokens(this.logKey) : 0;
+      const accepted = this.usageSeen ? contextTokens(this.contextKey) : 0;
       // A gap this wide below the native threshold is more than one turn adds,
       // so a plain backstop compact after a big tool result does not count.
       if (accepted > 0 && accepted < this.nativeCompactWindow - NATIVE_COMPACT_MARGIN - REACTIVE_COMPACT_GAP) {
@@ -2342,7 +2347,7 @@ class ClaudeSession {
       // the oversized session must not be resumed.
       if (this.providerWindow && this.compactFailure === null && isContextLengthRejection(detail)) {
         lengthRejected = true;
-        const accepted = this.usageSeen ? contextTokens(this.logKey) : 0;
+        const accepted = this.usageSeen ? contextTokens(this.contextKey) : 0;
         if (accepted > 0) learnContextLimit(this.spawnModel, accepted, this.providerWindow);
       }
     }
@@ -2894,7 +2899,7 @@ async function spawnSessionOnce(
     // Right after a provider cut, only the native session still holds the cut
     // turn's tool calls; reseeding from visible text would make the agent
     // redo finished work. Same context the retired child had a moment ago.
-    const resumeAfterCut = Boolean(resumeId) && preferResumeAfterProviderCut(restored.events);
+    const resumeAfterCut = Boolean(resumeId) && preferResumeAfterProviderCut(restored.events.filter((event) => (event.lane === 'bg') === isBackgroundChatId(chatId)));
     if (switchedFrom) {
       console.warn(
         `[chat ${cli}] model switch on ${logKey}: ${switchedFrom} → ${cli} — seeding compact+50 from the thread log, not resuming`,
@@ -3086,6 +3091,14 @@ export async function freshStart(opts: {
 }): Promise<AnySession> {
   assertSubscriptionLane(opts.cli);
   const chatId = opts.chatId || 'main';
+  // The background lane shares the reset thread on every engine: end it and
+  // forget its resume id before any engine-specific reset runs.
+  for (const [bgKey, bg] of backgroundSiblings(trackedThreadLogKey({ ...opts, chatId }), chatId)) {
+    if (bg instanceof ClaudeSession) bg.shutdown('freshStart', 'fresh');
+    else bg.shutdown('freshStart');
+    sessions.delete(bgKey);
+    await setSessionId(bg.cli, bg.cwd, '', bg.chatId);
+  }
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
     const { freshStartCodex } = await import('./codex-runner.ts');
     return freshStartCodex({ repoPath: opts.repoPath, chatId, cli: opts.cli });
@@ -3112,18 +3125,7 @@ export async function freshStart(opts: {
     sessions.delete(key);
   }
   await setSessionId(opts.cli, cwd, '', chatId); // drop the stored id so we don't --resume
-  // The background lane shares the reset thread: end it and forget its resume id too.
-  if (!isBackgroundChatId(chatId) && isAgentThread(chatId)) {
-    const bgChatId = backgroundChatId(chatId);
-    for (const [bgKey, bg] of [...sessions]) {
-      if (bg.chatId !== bgChatId || bg.cwd !== cwd) continue;
-      if (bg instanceof ClaudeSession) bg.shutdown('freshStart', 'fresh');
-      else bg.shutdown('freshStart');
-      sessions.delete(bgKey);
-      await setSessionId(bg.cli, cwd, '', bgChatId);
-    }
-    await setSessionId(opts.cli, cwd, '', bgChatId);
-  }
+  if (!isBackgroundChatId(chatId) && isAgentThread(chatId)) await setSessionId(opts.cli, cwd, '', backgroundChatId(chatId));
   // Wipe the durable log too — otherwise a client whose cache is empty would
   // pull the old thread back via a full (sinceSeq=0) replay after the reset.
   // For an agent home thread that log is the shared, engine-free one, so a
@@ -3157,32 +3159,37 @@ export function dropSession(cli: CliKind, repoPath: string, chatId = 'main'): vo
  *  saved session_id so the next message resumes the conversation. */
 export async function interruptSession(opts: { cli: CliKind; repoPath: string; chatId?: string }): Promise<void> {
   const chatId = opts.chatId || 'main';
+  const logKey = trackedThreadLogKey({ ...opts, chatId });
   // Stop also means "do not pick the cut turn back up on your own".
-  cancelProviderContinue(trackedThreadLogKey({ ...opts, chatId }), { stopped: true });
+  cancelProviderContinue(logKey, { stopped: true });
+  const stopLane = async ([laneKey, s]: [string, LaneSession]) => {
+    const keptWarm = await s.interrupt('interruptSession');
+    if (!keptWarm && sessions.get(laneKey) === s) sessions.delete(laneKey);
+  };
+  // Stop on a thread stops both of its lanes, whatever engine the home lane runs.
+  const stopBackground = Promise.all(backgroundSiblings(logKey, chatId).map(stopLane));
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
     const { interruptCodex } = await import('./codex-runner.ts');
-    await interruptCodex({ repoPath: opts.repoPath, chatId, cli: opts.cli });
+    await Promise.all([interruptCodex({ repoPath: opts.repoPath, chatId, cli: opts.cli }), stopBackground]);
     return;
   }
   if (opts.cli === 'banana' || opts.cli === 'banana-local' || opts.cli === 'banana-fireworks') {
     const { interruptBanana } = await import('./banana-runner.ts');
     interruptBanana({ repoPath: opts.repoPath, chatId, cli: opts.cli });
+    await stopBackground;
     return;
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
-  // Stop on a thread stops both of its lanes.
-  const keys = [key];
-  if (!isBackgroundChatId(chatId) && isAgentThread(chatId)) {
-    const bgChatId = backgroundChatId(chatId);
-    for (const [bgKey, bg] of sessions) if (bg.chatId === bgChatId && bg.cwd === cwd) keys.push(bgKey);
-  }
-  await Promise.all(keys.map(async (laneKey) => {
-    const s = sessions.get(laneKey);
-    if (!s) return;
-    const keptWarm = await s.interrupt('interruptSession');
-    if (!keptWarm && sessions.get(laneKey) === s) sessions.delete(laneKey);
-  }));
+  const s = sessions.get(key);
+  await Promise.all([s ? stopLane([key, s]) : undefined, stopBackground]);
+}
+
+/** Live background-lane sessions of an agent home thread, on any engine. */
+function backgroundSiblings(logKey: string, chatId: string): Array<[string, LaneSession]> {
+  if (isBackgroundChatId(chatId) || !isAgentThread(chatId)) return [];
+  const bgChatId = backgroundChatId(chatId);
+  return [...sessions].filter(([, s]) => s.chatId === bgChatId && s.logKey === logKey);
 }
 
 // Re-export so callers can ignore the manager and use the class type.
@@ -3218,10 +3225,11 @@ function notifySessionCreated(logKey: string, session: LaneSession): void {
   }
 }
 
-/** The live Claude-family session writing to this durable thread, if any. */
-export function liveLaneSession(logKey: string): LaneSession | null {
+/** The live Claude-family session writing to this durable thread, if any.
+ *  `chatId` pins it to one lane (home or background). */
+export function liveLaneSession(logKey: string, chatId?: string): LaneSession | null {
   for (const session of sessions.values()) {
-    if (session.logKey === logKey && session.isAlive()) return session;
+    if (session.logKey === logKey && (chatId === undefined || session.chatId === chatId) && session.isAlive()) return session;
   }
   return null;
 }

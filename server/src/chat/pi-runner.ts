@@ -164,6 +164,10 @@ export class PiSession {
   private replyWatch!: ReplyWatch;
   /** Last shared-log seq this process was told about by the lane recap. */
   private laneSyncSeq?: number;
+  /** Each lane runs its own native context; the transcript is shared. */
+  private get contextKey(): string {
+    return isBackgroundChatId(this.chatId) ? `${this.logKey}|bg` : this.logKey;
+  }
 
   constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model: string, effort: string, seedFirst = false, switchedFrom: string | null = null) {
     assertSubscriptionLane(cli);
@@ -413,7 +417,7 @@ export class PiSession {
         const usage = { input_tokens: u.input ?? 0, output_tokens: u.output ?? 0, cache_read_input_tokens: u.cacheRead ?? 0, cache_creation_input_tokens: 0 };
         // Same context-size accounting as the Claude lane: the last assistant
         // message of a turn carries the live window size.
-        recordContextUsage(this.logKey, 'pi', usage);
+        recordContextUsage(this.contextKey, 'pi', usage);
         const msgId = this.currentMsgId ?? randomUUID();
         const textOut = content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('');
         if (textOut.trim()) { this.lastAssistantText = textOut; this.replyWatch.noteText(); }
@@ -537,7 +541,7 @@ export class PiSession {
     // Codex found hundreds of aged-out turns to fold at once. Past the 200k
     // budget the lane now rotates at this boundary, exactly like Claude.
     else if (!failed) {
-      const rotationDue = contextRotationDue(this.logKey);
+      const rotationDue = contextRotationDue(this.contextKey);
       const housekeeping = async () => {
         if (rotationDue && (await this.rotateContextAtBoundary())) return;
         await this.maybeCompact();
@@ -570,7 +574,7 @@ export class PiSession {
    *  the last 50 turns (and the full computer rules block).
    *  Pi lanes hold no background work in-process, so busy just means mid-turn. */
   private async rotateContextAtBoundary(): Promise<boolean> {
-    if (!contextRotationDue(this.logKey) || this.turnStartedAt !== null || this.disposed) return false;
+    if (!contextRotationDue(this.contextKey) || this.turnStartedAt !== null || this.disposed) return false;
     const refreshed = await refreshCompactForRotation({
       key: this.logKey, cli: this.cli, chatId: this.chatId, events: this.eventLog,
       isBusy: () => this.turnStartedAt !== null || this.disposed,
@@ -583,7 +587,7 @@ export class PiSession {
       return true;
     }
     bankRotation(this.logKey);
-    recordContextRotation(this.logKey);
+    recordContextRotation(this.contextKey);
     this.shutdown('context-budget');
     return true;
   }
@@ -769,7 +773,6 @@ export class PiSession {
     const laneContext = startsNewTurn
       ? laneContextForTurn({ chatId: this.chatId, logKey: this.logKey, sinceSeq: this.laneSyncSeq ?? null, throughSeq: historyThroughSeq, seeded: Boolean(seed) })
       : '';
-    if (startsNewTurn) this.laneSyncSeq = historyThroughSeq;
     // Auto-recall: recorded knowledge (lane memory notes, Desk cards,
     // assistant-mcp memories) in front of every new human or teammate turn;
     // automation traffic never spends the search, and every source fails
@@ -813,6 +816,8 @@ export class PiSession {
       this.emit({ type: 'error', message: `pi rejected the prompt: ${response.error ?? 'unknown'}` });
       return;
     }
+    // The recap reached the model; the next turn recaps only what came after.
+    if (startsNewTurn) this.laneSyncSeq = historyThroughSeq;
     if (wantSeed) {
       this.seedWindowOnNextTurn = false;
       // The seed was delivered, so the rotation debt that asked for it is paid.
