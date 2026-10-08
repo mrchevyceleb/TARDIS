@@ -79,7 +79,7 @@ function findAgent(ref: string): Agent | undefined {
 
 // ---- guards ----------------------------------------------------------------
 
-const MAX_TEXT = 8000;
+export const MAX_TEXT = 8000;
 const GLOBAL_WINDOW_MS = 60_000;
 const GLOBAL_MAX = 20;
 const PAIR_MAX = 8;
@@ -677,6 +677,8 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
     ? '(This is the user continuing your own voice conversation. Reply in this thread. Do not team_message Voice. Ending the audio call does not cancel this work. External side effects remain draft/review-first. The call already has a spoken line. Do not write a second, different Hall answer unless the caller needs a result, blocker, or question they cannot hear.)'
     : from.role === 'desk'
     ? `(${from.name} is the human owner, not a teammate, and reads the answer on the Desk card. Reply there with board_card_comment. Do not team_message ${from.name}.)`
+    : from.role === 'channel'
+    ? '(This ping is a group-channel post. Reply in that channel with the channel_post tool exactly as the ping\'s rules describe, passing the hop number through unchanged. Do not team_message the channel and never move this into a one-on-one thread.)'
     : waitForReply
     ? `(Reply inline in this turn. Your final answer is returned automatically to ${from.name}; no second team_message call is needed.)`
     : `(Reply inline for the thread. If ${from.name} needs the result, use team_message(to: "${from.name}", text: ..., wait: false); busy teammates are queued automatically.)`;
@@ -911,6 +913,8 @@ function batchDeliveryBlock(record: QueuedTeamDelivery): string {
     ? `[comment from ${record.fromName} on the Desk]`
     : record.fromRole === 'voice'
     ? '[continuation of the user\u2019s voice request in your own thread]'
+    : record.fromRole === 'channel'
+    ? `[group-channel post in ${record.fromName} \u2014 handoff ${record.hop}]`
     : `[message from teammate ${record.fromName}${record.fromRole ? ` (${record.fromRole})` : ''} \u2014 handoff ${record.hop}]`;
   return `${header}\n${record.text}`;
 }
@@ -1122,8 +1126,12 @@ export async function deliverTeamMessage(input: {
   to: string;
   text: string;
   /** voice: the user's own call continuing in the thread. desk: the human
-   *  owner commenting on a Desk card (`from` is their display name). */
-  source?: 'voice' | 'desk';
+   *  owner commenting on a Desk card (`from` is their display name). channel:
+   *  a group-channel post fanned out to a member (the channel identity rides
+   *  in `channel`; the poster's name rides inside the text). */
+  source?: 'voice' | 'desk' | 'channel';
+  /** Group-channel identity for source 'channel' records (id + display name). */
+  channel?: { id: string; name: string };
   /** Internal admission notification; fires only after the outbox is durable. */
   onQueued?: () => void;
   hop?: number;
@@ -1146,6 +1154,10 @@ export async function deliverTeamMessage(input: {
     : input.source === 'desk'
     // Agent ids are slugs, so the colon keeps this from ever resolving to one.
     ? { id: 'desk:owner', name: input.from.trim() || 'Owner', role: 'desk', engine: '', home: '', createdAt: 0 }
+    : input.source === 'channel'
+    // Same colon trick: the pseudo-sender is the channel itself, never an
+    // agent, and the poster's own name rides inside the delivered text.
+    ? { id: `channel:${input.channel?.id ?? 'unknown'}`, name: input.channel?.name?.trim() ? input.channel.name : '#channel', role: 'channel', engine: '', home: '', createdAt: 0 }
     : findAgent(input.from) ?? { id: 'unknown', name: input.from || 'Unknown', role: '', engine: '', home: '', createdAt: 0 };
   if (to.id === from.id && input.from.trim().toLowerCase() === to.name.trim().toLowerCase()) {
     return { delivered: false, reason: 'that is you — no need to message yourself' };

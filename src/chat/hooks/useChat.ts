@@ -323,6 +323,14 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     return blocks;
   }
 
+  // Channel talk is displayed in its channel view only, never in a one-on-one
+  // thread. Display-only here: the delivered record still reaches the agent's
+  // own turn on the server side.
+  if (ev.type === 'peer_message' && ev.fromRole === 'channel') {
+    turnIdRef.peerId = undefined;
+    return blocks;
+  }
+
   // Agent-to-agent delivery: a teammate's message landing in this thread.
   if (ev.type === 'peer_message' && typeof ev.text === 'string') {
     const from = typeof ev.from === 'string' ? ev.from : 'Companion';
