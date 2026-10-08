@@ -5,7 +5,7 @@ import { headlessLaneToken } from '../headless/pool.ts';
 /** Reserved built-ins, independent of global/private MCP configs. Banana uses
  * one server across threads: computer identity comes from signed turn context,
  * never a mutable process-wide RIVENDELL_AGENT_NAME. */
-export function localMcpServers(agentName?: string, opts: { replyNow?: boolean; unnamedLane?: boolean; backgroundLane?: boolean } = {}) {
+export function localMcpServers(agentName?: string, opts: { replyNow?: boolean; unnamedLane?: boolean; backgroundLane?: boolean; owner?: string } = {}) {
   // A chat with no stable name may carry a placeholder agentName for the team MCP (Codex uses 'Teammate'). The
   // headless MCP must never treat that placeholder as an identity, or every such chat would share one browser.
   const headlessAgent = opts.unnamedLane ? undefined : agentName;
@@ -18,13 +18,17 @@ export function localMcpServers(agentName?: string, opts: { replyNow?: boolean; 
       // RIVENDELL_AGENT_LANE lets jobs, watches and handoffs report back to the lane that started them.
       env: { ...base, ...(agentName ? { RIVENDELL_AGENT_NAME: agentName } : {}), ...(opts.replyNow ? { RIVENDELL_REPLY_NOW: '1' } : {}), ...(opts.backgroundLane ? { RIVENDELL_AGENT_LANE: 'bg' } : {}) } },
     'rivendell-device': { type: 'stdio', command: 'node', args: [DEVICE_MCP_SCRIPT],
-      env: { ...base, RIVENDELL_COMPUTER_MCP_TOKEN: COMPUTER_MCP_TOKEN } },
+      // The owner env binds this shim's calls to its lane: computer_start
+      // refuses a context whose owner lane is not the caller. Banana's serve
+      // process shares one server across threads, so it passes no owner and
+      // keeps the signed-context-only identity.
+      env: { ...base, RIVENDELL_COMPUTER_MCP_TOKEN: COMPUTER_MCP_TOKEN, ...(opts.owner ? { RIVENDELL_COMPUTER_OWNER: opts.owner } : {}) } },
     // Per-lane headless Chromium; the lane name picks the profile and its token only works for that name.
     'rivendell-headless': { type: 'stdio', command: 'node', args: [HEADLESS_MCP_SCRIPT],
       env: { ...base, RIVENDELL_HEADLESS_TOKEN: headlessLaneToken(headlessAgent), ...(headlessAgent ? { RIVENDELL_AGENT_NAME: headlessAgent } : {}) } },
   };
 }
-export function localMcpCodexArgs(agentName?: string, opts: { unnamedLane?: boolean } = {}): string[] {
+export function localMcpCodexArgs(agentName?: string, opts: { unnamedLane?: boolean; owner?: string } = {}): string[] {
   return Object.entries(localMcpServers(agentName, opts)).flatMap(([name, server]) => [
     '-c', `mcp_servers.${name}.command=${JSON.stringify(server.command)}`,
     '-c', `mcp_servers.${name}.args=${JSON.stringify(server.args)}`,

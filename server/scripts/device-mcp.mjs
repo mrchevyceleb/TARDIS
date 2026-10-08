@@ -278,7 +278,9 @@ async function api(path, init, signal) {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
     signal,
-    headers: { 'Content-Type': 'application/json', 'x-rivendell-computer-token': process.env.RIVENDELL_COMPUTER_MCP_TOKEN || '', ...(init?.headers ?? {}) },
+    // The owner header (set only for lane-bound shims at spawn) lets the server
+    // refuse a computer_start whose context was pasted from another lane.
+    headers: { 'Content-Type': 'application/json', 'x-rivendell-computer-token': process.env.RIVENDELL_COMPUTER_MCP_TOKEN || '', ...(process.env.RIVENDELL_COMPUTER_OWNER ? { 'x-rivendell-computer-owner': process.env.RIVENDELL_COMPUTER_OWNER } : {}), ...(init?.headers ?? {}) },
   });
   const text = await res.text();
   let body = null;
