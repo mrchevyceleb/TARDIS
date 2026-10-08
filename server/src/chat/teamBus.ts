@@ -1026,6 +1026,13 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       let batchChars = lead.text.length;
       for (const candidate of candidates.slice(1)) {
         if (siblings.length >= MAX_BATCH_DELIVERIES) break;
+        // Siblings must share the lead's sortsAhead tier. A priority-flagged
+        // teammate lead that joined ordinary chatter would strand a queued
+        // Desk answer or voice continuation behind that whole admitted batch,
+        // breaking person-first delivery; same tier plus batchJoinable's
+        // same-class rule keeps every person-sourced and priority record
+        // ahead of ordinary chatter.
+        if (sortsAhead(candidate) !== sortsAhead(lead)) continue;
         if (!batchJoinable(lead, candidate)) continue;
         const block = batchDeliveryBlock(candidate);
         if (batchChars + block.length > MAX_BATCH_TEXT_CHARS) continue;
