@@ -40,12 +40,26 @@ jobs:
           swiftc -O -swift-version 5 -target x86_64-apple-macos14 macos.swift -o macos-helper-x64
           lipo -create macos-helper-arm64 macos-helper-x64 -output macos-helper
           rm macos-helper-arm64 macos-helper-x64
+      - name: Require macOS signing on tagged releases
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          if [ -z "$CSC_LINK" ] || [ -z "$CSC_KEY_PASSWORD" ]; then
+            echo "::error::Tagged mac releases must be signed with the stable identity (CSC_LINK / CSC_KEY_PASSWORD secrets): an unsigned mac build wipes the mac's Screen Recording and Accessibility grants on every update."
+            exit 1
+          fi
       - name: Build installers
         run: npm run dist --prefix desktop
         env:
-          # Unsigned builds by default. Provide CSC_LINK / CSC_KEY_PASSWORD
-          # (and Apple notarization variables) to sign.
+          # macOS builds sign with the stable self-signed identity from the
+          # CSC_LINK / CSC_KEY_PASSWORD repo secrets, so Screen Recording and
+          # Accessibility grants survive every update (ad-hoc cdhash never
+          # did). Windows and Linux builds stay unsigned.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          CSC_LINK: ${{ runner.os == 'macOS' && secrets.CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.CSC_KEY_PASSWORD || '' }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-${{ matrix.os }}
