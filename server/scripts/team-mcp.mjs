@@ -125,6 +125,25 @@ const TOOLS = [
     },
   },
   {
+    name: 'channel_post',
+    description:
+      'Reply in a group channel you were pinged in (the ping names the channel id and this tool in its reply rules). ' +
+      'Your post lands in the channel history for everyone. Include @Name to address one member (only they need to answer); ' +
+      'an agent reply only wakes the members it @mentions, and past the hop cap it lands in history without waking anyone. ' +
+      'Never move channel talk into a one-on-one teammate thread.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channel: { type: 'string', description: 'The channel id from the ping you are answering' },
+        from: { type: 'string', description: 'Your own teammate name (the poster)' },
+        text: { type: 'string', description: 'What to say in the channel' },
+        hop: { type: 'number', description: 'The handoff number from the ping; pass it through unchanged' },
+      },
+      required: ['channel', 'from', 'text'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'team_pin',
     description:
       "Pin a short note to YOUR desk (the right pane Matt opens next to your chat, under 'Pinned from <you>'). " +
@@ -771,6 +790,23 @@ async function callTool(name, args, signal) {
     return result.reason
       ? `Delivered to ${result.to}. ${result.reason}`
       : `Delivered to ${result.to}.`;
+  }
+  if (name === 'channel_post') {
+    const result = await api(`/api/channels/${encodeURIComponent(args.channel)}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({
+        from: process.env.RIVENDELL_AGENT_NAME || args.from || 'Companion',
+        text: args.text,
+        hop: args.hop,
+      }),
+    }, signal);
+    if (!result.message) return `NOT POSTED: ${result.reason ?? 'unknown error'}`;
+    const fan = result.fanOut ?? {};
+    if (fan.capped) return 'Posted in the channel history; the hop cap stopped further fan-out.';
+    const who = Array.isArray(fan.delivered) ? fan.delivered.join(', ') : '';
+    return who
+      ? `Posted in the channel; delivered to ${who}.`
+      : 'Posted in the channel history; no fan-out (no @mentions in your reply).';
   }
   if (name === 'team_recent') {
     const { messages } = await api(`/api/team/recent?name=${encodeURIComponent(args.name)}&limit=${args.limit ?? 8}`, undefined, signal);

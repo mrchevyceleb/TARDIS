@@ -911,6 +911,8 @@ function batchDeliveryBlock(record: QueuedTeamDelivery): string {
     ? `[comment from ${record.fromName} on the Desk]`
     : record.fromRole === 'voice'
     ? '[continuation of the user\u2019s voice request in your own thread]'
+    : record.fromRole === 'channel'
+    ? `[group-channel post in ${record.fromName} \u2014 handoff ${record.hop}]`
     : `[message from teammate ${record.fromName}${record.fromRole ? ` (${record.fromRole})` : ''} \u2014 handoff ${record.hop}]`;
   return `${header}\n${record.text}`;
 }
@@ -1122,8 +1124,12 @@ export async function deliverTeamMessage(input: {
   to: string;
   text: string;
   /** voice: the user's own call continuing in the thread. desk: the human
-   *  owner commenting on a Desk card (`from` is their display name). */
-  source?: 'voice' | 'desk';
+   *  owner commenting on a Desk card (`from` is their display name). channel:
+   *  a group-channel post fanned out to a member (the channel identity rides
+   *  in `channel`; the poster's name rides inside the text). */
+  source?: 'voice' | 'desk' | 'channel';
+  /** Group-channel identity for source 'channel' records (id + display name). */
+  channel?: { id: string; name: string };
   /** Internal admission notification; fires only after the outbox is durable. */
   onQueued?: () => void;
   hop?: number;
@@ -1146,6 +1152,10 @@ export async function deliverTeamMessage(input: {
     : input.source === 'desk'
     // Agent ids are slugs, so the colon keeps this from ever resolving to one.
     ? { id: 'desk:owner', name: input.from.trim() || 'Owner', role: 'desk', engine: '', home: '', createdAt: 0 }
+    : input.source === 'channel'
+    // Same colon trick: the pseudo-sender is the channel itself, never an
+    // agent, and the poster's own name rides inside the delivered text.
+    ? { id: `channel:${input.channel?.id ?? 'unknown'}`, name: input.channel?.name?.trim() ? input.channel.name : '#channel', role: 'channel', engine: '', home: '', createdAt: 0 }
     : findAgent(input.from) ?? { id: 'unknown', name: input.from || 'Unknown', role: '', engine: '', home: '', createdAt: 0 };
   if (to.id === from.id && input.from.trim().toLowerCase() === to.name.trim().toLowerCase()) {
     return { delivered: false, reason: 'that is you — no need to message yourself' };

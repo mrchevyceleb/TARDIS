@@ -8,6 +8,7 @@ import {
   CHANNEL_TEXT_LIMIT,
   channelHistory,
   createChannel,
+  deliverChannelPost,
   deleteChannel,
   deleteChannelMessages,
   findChannel,
@@ -146,5 +147,15 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
     res.status(400).json({ error: `text is limited to ${CHANNEL_TEXT_LIMIT} characters` });
     return;
   }
-  res.status(201).json({ message: await postChannelMessage(channel.id, from.trim(), text) });
+  // The hop rides with agent replies (from the channel_post tool) so the
+  // agent-to-agent cap can count hops across the whole fan-out chain.
+  const hopInput = req.body?.hop;
+  const receivedHop = Number.isFinite(Number(hopInput)) ? Math.max(0, Math.floor(Number(hopInput))) : 0;
+  const message = await postChannelMessage(channel.id, from.trim(), text);
+  // The post is already durable; a fan-out failure never fails the post.
+  const fanOut = await deliverChannelPost(channel, from.trim(), text, receivedHop).catch((error) => {
+    console.warn('[channels] fan-out failed:', (error as Error).message);
+    return { delivered: [] as string[], skipped: channel.members, hop: 0 };
+  });
+  res.status(201).json({ message, fanOut });
 }));
