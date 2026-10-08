@@ -11,7 +11,7 @@ export const CLAUDE_MODELS = [
   { id: 'claude-fable-5', label: 'Fable 5' },
 ];
 // The 5.5 family (Opus, Sonnet, Haiku) shares the same five real effort tiers
-// (low → max); their own default is medium, but TARDIS always passes
+// (low → max); their own CLI defaults differ, but TARDIS always passes
 // --effort explicitly per brain.
 export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
