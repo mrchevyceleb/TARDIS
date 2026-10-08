@@ -46,7 +46,7 @@ func requirePermissions(_ needs: [Need]) throws {
   if needs.contains(.screen) && !CGPreflightScreenCaptureAccess() { missing.append("Screen Recording") }
   if needs.contains(.accessibility) && !AXIsProcessTrusted() { missing.append("Accessibility") }
   if missing.isEmpty { return }
-  throw Failure(message: "TARDIS is not allowed to control this Mac yet: it needs \(missing.joined(separator: " and ")). Nothing was done. Someone at the Mac must choose TARDIS > Ship > Set Up Computer Control on This Mac, then switch TARDIS on under System Settings > Privacy & Security. Do not retry or work around this.")
+  throw Failure(message: "TARDIS is not allowed to control this Mac yet: it needs \(missing.joined(separator: " and ")). Nothing was done. Someone at the Mac must choose TARDIS > Ship > Set Up Computer Control on This Mac, then allow TARDIS under System Settings > Privacy & Security: switch it on if it is off, or, if it already shows as on, remove it with the minus button and re-add it with the plus button from ~/Applications, then quit and reopen TARDIS (a grant can show as on and still be stale after an update). Do not retry or work around this.")
 }
 
 /// Every operation that touches the screen or the input devices starts here.

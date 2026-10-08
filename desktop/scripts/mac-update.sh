@@ -12,7 +12,10 @@
 #             on any mismatch, before anything is staged. A leading "v" on
 #             TARDIS_VERSION (a release tag) is accepted and stripped.
 #   phase2    quit the app, swap (the old bundle is kept as TARDIS.app.old),
-#             strip the quarantine flag, verify, relaunch. Holds a lock
+#             strip the quarantine flag, repair the bundle seal (a bundle that
+#             fails codesign --verify --deep --strict - CI mac builds arrive
+#             linker-signed only - is re-signed ad-hoc) and gate on that
+#             verify, check the version, relaunch. Holds a lock
 #             beside the app for the whole swap, so concurrent or repeated
 #             phase2 calls can never interleave; if the swapped bundle fails
 #             its version check the previous bundle is restored
@@ -86,6 +89,27 @@ launch_app() {
     done
   done
   return 1
+}
+swap_failed() {
+  # A landed bundle that cannot be trusted (a broken seal or the wrong
+  # version): keep it for inspection as TARDIS.app.failed, put the previous
+  # one back automatically, and report honestly. Runs inside phase2 under
+  # its lock, so the exit trap still cleans the lock up.
+  local why="$1" restored=""
+  rm -rf "${APP}.failed"
+  mv "$APP" "${APP}.failed" || true
+  if mv "$old" "$APP"; then
+    restored="$(app_version "$APP" || echo unknown)"
+    xattr -dr com.apple.quarantine "$APP" >/dev/null 2>&1 || true
+    launch_app || true
+    printf 'phase2 failed: %s; the previous bundle was restored automatically (now TARDIS %s). The failed bundle is kept at %s.\n' \
+      "$why" "$restored" "${APP}.failed" | tee "$RESULT"
+  else
+    printf 'ROLLBACK NOW: bash %s rollback\n(%s, and the automatic restore failed; the old bundle may still be at %s)\n' \
+      "$0" "$why" "$old" | tee "$RESULT"
+  fi
+  tcc_note | tee -a "$RESULT"
+  exit 1
 }
 detach_if_needed() {
   # The device bridge dies when the app quits, and the app tree-kills the
@@ -211,6 +235,24 @@ phase2() {
     die 'swap failed; the previous app was restored at its original path'
   fi
   xattr -dr com.apple.quarantine "$APP" >/dev/null 2>&1 || true
+  # Seal gate and repair, right after the swap: CI mac builds arrive
+  # linker-signed only (the Electron binary), which breaks the bundle
+  # seal, and macOS refuses to honor Screen Recording / Accessibility
+  # grants for a bundle that fails codesign --verify --deep --strict (the
+  # toggle shows on and the grant still does nothing - the stale-grant
+  # case the refusal texts cover). Only a bundle that FAILS the verify is
+  # re-signed ad-hoc, so a future CSC_LINK-signed CI build (a stable
+  # identity whose grants survive swaps) is never downgraded; the second
+  # verify is the gate: no broken seal ships or stays.
+  if ! codesign --verify --deep --strict "$APP" >/dev/null 2>&1; then
+    say "phase2: the swapped bundle has a broken seal; re-signing it ad-hoc"
+    if ! codesign --force --deep --sign - "$APP" >/dev/null 2>&1; then
+      swap_failed 're-signing the swapped bundle failed (broken seal)'
+    fi
+  fi
+  if ! codesign --verify --deep --strict "$APP" >/dev/null 2>&1; then
+    swap_failed 'the swapped bundle fails codesign --verify --deep --strict after the re-sign (broken seal)'
+  fi
   # The new bundle is live at the app path: the grants drop is real from
   # here on, whatever the verdict below ends up being.
   tcc_note
@@ -219,20 +261,7 @@ phase2() {
   if [ "$v" != "$staged" ]; then
     # The swapped bundle does not verify: keep it for inspection and put the
     # previous one back, automatically.
-    rm -rf "${APP}.failed"
-    mv "$APP" "${APP}.failed" || true
-    if mv "$old" "$APP"; then
-      xattr -dr com.apple.quarantine "$APP" >/dev/null 2>&1 || true
-      launch_app || true
-      printf 'phase2 failed: the swapped bundle reported %s, expected %s; the previous bundle was restored automatically (now TARDIS %s). The failed bundle is kept at %s.\n' \
-        "${v:-nothing}" "$staged" "$(app_version "$APP" || echo unknown)" "${APP}.failed" | tee "$RESULT"
-      tcc_note | tee -a "$RESULT"
-      exit 1
-    fi
-    printf 'ROLLBACK NOW: bash %s rollback\n(the swap could not be verified and the automatic restore failed; the old bundle may still be at %s)\n' \
-      "$0" "$old" | tee "$RESULT"
-    tcc_note | tee -a "$RESULT"
-    exit 1
+    swap_failed "the swapped bundle reported ${v:-nothing}, expected $staged"
   fi
   if ! launch_app; then
     printf 'phase2 swapped and verified TARDIS %s but it did not relaunch: the bundle is at %s, launch it from Finder or run "bash %s rollback" (the previous bundle is kept at %s)\n' \
