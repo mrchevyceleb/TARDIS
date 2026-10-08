@@ -12,9 +12,10 @@
 #             on any mismatch, before anything is staged. A leading "v" on
 #             TARDIS_VERSION (a release tag) is accepted and stripped.
 #   phase2    quit the app, swap (the old bundle is kept as TARDIS.app.old),
-#             strip the quarantine flag, repair the bundle seal (a bundle that
-#             fails codesign --verify --deep --strict - CI mac builds arrive
-#             linker-signed only - is re-signed ad-hoc) and gate on that
+#             strip the quarantine flag, repair the bundle seal (an unsigned,
+#             no-team build that fails codesign --verify --deep --strict - CI
+#             mac builds arrive linker-signed only - is re-signed ad-hoc; a
+#             team-signed one fails the swap instead) and gate on that
 #             verify, check the version, relaunch. Holds a lock
 #             beside the app for the whole swap, so concurrent or repeated
 #             phase2 calls can never interleave; if the swapped bundle fails
@@ -240,12 +241,20 @@ phase2() {
   # seal, and macOS refuses to honor Screen Recording / Accessibility
   # grants for a bundle that fails codesign --verify --deep --strict (the
   # toggle shows on and the grant still does nothing - the stale-grant
-  # case the refusal texts cover). Only a bundle that FAILS the verify is
-  # re-signed ad-hoc, so a future CSC_LINK-signed CI build (a stable
-  # identity whose grants survive swaps) is never downgraded; the second
-  # verify is the gate: no broken seal ships or stays.
+  # case the refusal texts cover). Repair is gated on the bundle's own
+  # signing metadata: only the known unsigned shape (no TeamIdentifier,
+  # no Developer ID authority - today's CI builds) is re-signed ad-hoc.
+  # A bundle that carries a team identity and still fails the verify
+  # fails the swap, so a future CSC_LINK-signed CI build (a stable
+  # identity whose grants survive swaps) is never downgraded to ad-hoc;
+  # the second verify is the gate: no broken seal ships or stays.
   if ! codesign --verify --deep --strict "$APP" >/dev/null 2>&1; then
-    say "phase2: the swapped bundle has a broken seal; re-signing it ad-hoc"
+    sign_meta="$(codesign -dvv "$APP" 2>&1 || true)"
+    if printf '%s\n' "$sign_meta" | grep -qE '^TeamIdentifier=[A-Z0-9]{10}$' ||
+       printf '%s\n' "$sign_meta" | grep -qE '^Authority=Developer ID'; then
+      swap_failed 'the swapped bundle carries a team identity (TeamIdentifier / Developer ID) but fails codesign --verify --deep --strict (broken seal on a trusted identity; not re-signing it ad-hoc)'
+    fi
+    say "phase2: the swapped bundle has a broken seal; re-signing it ad-hoc (an unsigned, no-team build)"
     if ! codesign --force --deep --sign - "$APP" >/dev/null 2>&1; then
       swap_failed 're-signing the swapped bundle failed (broken seal)'
     fi
