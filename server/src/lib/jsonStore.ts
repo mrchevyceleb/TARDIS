@@ -8,10 +8,20 @@ export type StoredRecord = { id: string; createdAt?: string; updatedAt?: string 
 export class JsonStore<T extends StoredRecord> {
   private readonly path: string;
   private readonly directory: string;
+  /** Serializes every mutation: two concurrent read-modify-write cycles would
+   * otherwise both read the same base list and silently drop one writer. */
+  private tail: Promise<unknown> = Promise.resolve();
 
   constructor(fileName: string, private readonly seed: T[], directory = STATE_DIR) {
     this.directory = directory;
     this.path = join(directory, fileName);
+  }
+
+  /** One mutation under the store's write chain; reads never queue. */
+  private run<R>(op: () => Promise<R>): Promise<R> {
+    const result = this.tail.then(op, op);
+    this.tail = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   async list(): Promise<T[]> {
@@ -19,34 +29,52 @@ export class JsonStore<T extends StoredRecord> {
   }
 
   async create(input: Omit<Partial<T>, 'id'> & { id?: string }): Promise<T> {
-    const now = new Date().toISOString();
-    const item = { id: input.id ?? randomUUID(), createdAt: now, updatedAt: now, ...input } as T;
-    const items = await this.read();
-    await this.write([item, ...items]);
-    return item;
+    return this.run(async () => {
+      const now = new Date().toISOString();
+      const item = { id: input.id ?? randomUUID(), createdAt: now, updatedAt: now, ...input } as T;
+      const items = await this.read();
+      await this.write([item, ...items]);
+      return item;
+    });
   }
 
   async update(id: string, patch: Partial<T>): Promise<T | null> {
-    const items = await this.read();
-    const index = items.findIndex((item) => item.id === id);
-    if (index === -1) return null;
-    const next = { ...items[index], ...patch, id, updatedAt: new Date().toISOString() } as T;
-    items[index] = next;
-    await this.write(items);
-    return next;
+    return this.run(async () => {
+      const items = await this.read();
+      const index = items.findIndex((item) => item.id === id);
+      if (index === -1) return null;
+      const next = { ...items[index], ...patch, id, updatedAt: new Date().toISOString() } as T;
+      items[index] = next;
+      await this.write(items);
+      return next;
+    });
   }
 
   async delete(id: string): Promise<boolean> {
-    const items = await this.read();
-    const next = items.filter((item) => item.id !== id);
-    if (next.length === items.length) return false;
-    await this.write(next);
-    return true;
+    return this.run(async () => {
+      const items = await this.read();
+      const next = items.filter((item) => item.id !== id);
+      if (next.length === items.length) return false;
+      await this.write(next);
+      return true;
+    });
   }
 
   async replace(items: T[]): Promise<T[]> {
-    await this.write(items);
-    return items;
+    return this.run(async () => {
+      await this.write(items);
+      return items;
+    });
+  }
+
+  /** One atomic read-modify-write: the callback sees the current list and its
+   * return value is written under the same chain. */
+  async modify(fn: (items: T[]) => T[]): Promise<T[]> {
+    return this.run(async () => {
+      const next = fn(await this.read());
+      await this.write(next);
+      return next;
+    });
   }
 
   private async read(): Promise<T[]> {

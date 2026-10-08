@@ -79,7 +79,7 @@ function findAgent(ref: string): Agent | undefined {
 
 // ---- guards ----------------------------------------------------------------
 
-const MAX_TEXT = 8000;
+export const MAX_TEXT = 8000;
 const GLOBAL_WINDOW_MS = 60_000;
 const GLOBAL_MAX = 20;
 const PAIR_MAX = 8;
@@ -677,6 +677,8 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
     ? '(This is the user continuing your own voice conversation. Reply in this thread. Do not team_message Voice. Ending the audio call does not cancel this work. External side effects remain draft/review-first. The call already has a spoken line. Do not write a second, different Hall answer unless the caller needs a result, blocker, or question they cannot hear.)'
     : from.role === 'desk'
     ? `(${from.name} is the human owner, not a teammate, and reads the answer on the Desk card. Reply there with board_card_comment. Do not team_message ${from.name}.)`
+    : from.role === 'channel'
+    ? '(This ping is a group-channel post. Reply in that channel with the channel_post tool exactly as the ping\'s rules describe, passing the hop number through unchanged. Do not team_message the channel and never move this into a one-on-one thread.)'
     : waitForReply
     ? `(Reply inline in this turn. Your final answer is returned automatically to ${from.name}; no second team_message call is needed.)`
     : `(Reply inline for the thread. If ${from.name} needs the result, use team_message(to: "${from.name}", text: ..., wait: false); busy teammates are queued automatically.)`;

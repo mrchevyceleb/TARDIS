@@ -112,8 +112,15 @@ channelsRouter.delete('/:id', asyncHandler(async (req, res) => {
     res.status(404).json({ error: 'no such channel' });
     return;
   }
-  await deleteChannelMessages(id);
+  // The channel goes first: a failure here leaves everything untouched,
+  // while a failed history purge after a successful delete only leaves
+  // unreachable rows (never a visible channel with its history erased).
   await deleteChannel(id);
+  try {
+    await deleteChannelMessages(id);
+  } catch (error) {
+    console.warn('[channels] history purge failed for deleted channel:', (error as Error).message);
+  }
   res.json({ deleted: true });
 }));
 

@@ -93,6 +93,7 @@ function readView(): View {
       const parsed = JSON.parse(raw);
       if (parsed?.kind === 'chat' && typeof parsed.chatId === 'string') return parsed;
       if (parsed?.kind === 'room' && typeof parsed.key === 'string' && ROOMS[parsed.key]) return parsed;
+      if (parsed?.kind === 'channel' && typeof parsed.id === 'string') return parsed;
     }
   } catch { /* fall through */ }
   return { kind: 'chat', chatId: '' }; // resolved against the agent list below

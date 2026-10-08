@@ -2,7 +2,7 @@
  * (name field, teammate picks, error line). Modest on purpose: no threads,
  * reactions, permissions or dashboards. */
 
-.ch-rail { margin-top: 10px; padding: 0 4px; }
+.ch-rail { margin-top: 10px; padding: 0 4px; max-height: 240px; overflow-y: auto; flex-shrink: 0; }
 .ch-rail-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px 2px; }
 .ch-rail-title { font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.55; }
 .ch-row {

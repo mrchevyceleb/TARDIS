@@ -327,6 +327,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // thread. Display-only here: the delivered record still reaches the agent's
   // own turn on the server side.
   if (ev.type === 'peer_message' && ev.fromRole === 'channel') {
+    turnIdRef.peerId = undefined;
     return blocks;
   }
 

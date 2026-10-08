@@ -4,7 +4,7 @@
 // fan-out delivery and reply routing layer on top of it later.
 
 import { JsonStore } from '../lib/jsonStore.ts';
-import { deliverTeamMessage, teamRoster } from './teamBus.ts';
+import { MAX_TEXT, deliverTeamMessage, teamRoster } from './teamBus.ts';
 
 export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string };
 export type ChannelMessage = { id: string; channelId: string; from: string; text: string; createdAt?: string; updatedAt?: string };
@@ -42,9 +42,10 @@ export async function deleteChannel(id: string): Promise<boolean> {
   return channels.delete(id);
 }
 
-/** A deleted channel takes its history with it. */
+/** A deleted channel takes its history with it. One atomic read-modify-write
+ * so a post landing mid-purge cannot be erased by a stale list. */
 export async function deleteChannelMessages(channelId: string): Promise<void> {
-  await messages.replace((await messages.list()).filter((message) => message.channelId !== channelId));
+  await messages.modify((items) => items.filter((message) => message.channelId !== channelId));
 }
 
 export async function postChannelMessage(channelId: string, from: string, text: string): Promise<ChannelMessage> {
@@ -65,10 +66,21 @@ export async function channelHistory(channelId: string, limit: number): Promise<
 /** Matt's own post is hop 1; up to 3 agent-to-agent hops may follow it. */
 export const CHANNEL_HOP_CAP = 4;
 
-/** Members whose names appear as @mentions in the text. */
+/** Members whose names appear as @mentions in the text. Longer names match
+ * first, so @Sam Wise never also wakes a member named Sam. */
 export function mentionedMembers(text: string, members: string[]): string[] {
-  return members.filter((member) =>
-    new RegExp(`@${member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`, 'i').test(text));
+  if (!members.length) return [];
+  const sorted = [...members].sort((a, b) => b.length - a.length);
+  const pattern = `@(?:${sorted.map((member) => member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})(?![\\w])`;
+  const re = new RegExp(pattern, 'gi');
+  const seen = new Set<string>();
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    const raw = match[0].slice(1);
+    const member = sorted.find((m) => m.length === raw.length && m.toLowerCase() === raw.toLowerCase());
+    if (member) seen.add(member);
+  }
+  return sorted.filter((member) => seen.has(member));
 }
 
 export type ChannelFanOut = { delivered: string[]; skipped: string[]; hop: number; capped?: boolean };
@@ -81,24 +93,47 @@ export type ChannelFanOut = { delivered: string[]; skipped: string[]; hop: numbe
 export async function deliverChannelPost(channel: Channel, poster: string, text: string, receivedHop: number): Promise<ChannelFanOut> {
   const roster = await teamRoster();
   const isAgent = roster.some((agent) => agent.name === poster);
-  const hop = isAgent ? Math.max(1, receivedHop) + 1 : 1;
+  // Matt's own post is hop 1. An agent reply must carry the hop number from
+  // its ping; a missing or invalid hop fails closed (history only, wakes no
+  // one) so the fan-out cap can never be reset by omitting it.
+  const hop = isAgent
+    ? (Number.isFinite(receivedHop) && receivedHop >= 1
+      ? Math.min(Math.floor(receivedHop), CHANNEL_HOP_CAP) + 1
+      : CHANNEL_HOP_CAP + 1)
+    : 1;
   const mentioned = mentionedMembers(text, channel.members);
   const targets = !isAgent
     ? channel.members
     : hop > CHANNEL_HOP_CAP ? [] : mentioned;
   const earlier = (await channelHistory(channel.id, 9)).slice(0, -1);
   const guidance =
-    `Reply in the channel with the channel_post tool (channel: "${channel.id}", from: "${isAgent ? poster : 'your own name'}"),` 
+    `Reply in the channel with the channel_post tool (channel: "${channel.id}", from: "${isAgent ? poster : 'your own name'}"),`
     + ' including the hop number from this ping. Include @Name to address one member; only they need to answer.'
     + ' Without an @, answer only if the message is for you or you have something real to add;'
     + ' if nothing is needed from you, stay silent (do not reply at all, never send NO_UPDATE).'
     + ' Channel talk stays in the channel; never move it into a one-on-one thread.';
-  const historyBlock = earlier.length
-    ? `\nEarlier in this channel:\n${earlier.map((m) => `${m.from}: ${m.text}`).join('\n')}\n`
-    : '';
-  const bundle =
-    `[#${channel.name} group channel \u2014 handoff ${hop}] ${poster} posted:\n\n${text}\n\n${guidance}`
-    + historyBlock;
+  const header = `[#${channel.name} group channel \u2014 handoff ${hop}] ${poster} posted:\n\n`;
+  // The delivered bundle must fit MAX_TEXT with the reply rules intact, so
+  // the post text is clamped (with a visible note) and the history block is
+  // clamped per message and dropped first when there is no room.
+  const truncationNote = '\n(post text truncated for delivery; the full text is in the channel history)\n';
+  const roomForText = MAX_TEXT - header.length - guidance.length - 2;
+  const textPart = text.length > roomForText
+    ? `${text.slice(0, Math.max(0, roomForText - truncationNote.length))}${truncationNote}`
+    : text;
+  let historyBlock = '';
+  if (earlier.length) {
+    let used = header.length + textPart.length + guidance.length + 2;
+    const kept: string[] = [];
+    for (const m of earlier) {
+      const line = `${m.from}: ${m.text.length > 400 ? `${m.text.slice(0, 400)}\u2026` : m.text}`;
+      if (used + line.length + 2 > MAX_TEXT) break;
+      kept.push(line);
+      used += line.length + 1;
+    }
+    historyBlock = kept.length ? `\nEarlier in this channel:\n${kept.join('\n')}\n` : '';
+  }
+  const bundle = `${header}${textPart}\n\n${guidance}` + historyBlock;
   const delivered: string[] = [];
   const skipped: string[] = [];
   for (const member of targets) {

@@ -81,6 +81,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
 
   const remove = async () => {
     setError(null);
+    if (!window.confirm(`Delete #${channel?.name ?? 'channel'}? Its history is removed with it.`)) return;
     try {
       await actions.remove.mutateAsync(channelId);
       onDeleted();
@@ -89,6 +90,13 @@ export function ChannelView({ channelId, agents, onDeleted }: {
     }
   };
 
+  if (channels.isError) {
+    return (
+      <div className="ch-view">
+        <div className="ch-missing">Could not load channels. <button type="button" className="ch-create-x" onClick={() => void channels.refetch()}>Retry</button></div>
+      </div>
+    );
+  }
   if (!channel && !channels.isLoading) {
     return (
       <div className="ch-view">
@@ -139,6 +147,13 @@ export function ChannelView({ channelId, agents, onDeleted }: {
                 {a.name}
               </button>
             ))}
+            {picked.filter((m) => !agents.some((a) => a.name === m)).map((m) => (
+              <button key={`gone-${m}`} type="button" className="ch-pick on" title="Former teammate — click to remove"
+                onClick={() => setPicked((p) => p.filter((x) => x !== m))} aria-pressed={true}>
+                <Check size={11} />
+                {m} (gone)
+              </button>
+            ))}
           </div>
           <button type="button" className="ch-create-go" onClick={() => void saveMembers()}>Save</button>
           <button type="button" className="ch-create-x" onClick={() => setEditing('none')}><X size={11} /> Cancel</button>
@@ -153,7 +168,8 @@ export function ChannelView({ channelId, agents, onDeleted }: {
             <span className="ch-msg-time">{m.createdAt ? new Date(m.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : ''}</span>
           </div>
         ))}
-        {!list.length ? <div className="ch-empty">No messages yet. Say hello.</div> : null}
+        {messages.isError ? <div className="ch-empty">Could not load messages. <button type="button" className="ch-create-x" onClick={() => void messages.refetch()}>Retry</button></div> : null}
+        {!list.length && !messages.isError ? <div className="ch-empty">No messages yet. Say hello.</div> : null}
       </div>
 
       {error && !menuOpen ? <div className="ch-error" role="alert">{error}</div> : null}
