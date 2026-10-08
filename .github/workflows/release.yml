@@ -72,6 +72,13 @@ jobs:
           security set-keychain-settings "$KEYCHAIN"
           security import "$RUNNER_TEMP/sign.p12" -k "$KEYCHAIN" -P "$CSC_KEY_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$CSC_KEY_PASSWORD" "$KEYCHAIN"
+          # A self-signed identity only counts as a valid codesigning identity
+          # when its certificate is trusted as a root for code signing. The mac
+          # trusted it once; an ephemeral runner must trust it every run, or
+          # find-identity reports 0 valid identities and signing is skipped.
+          # The cert is public (it is the trust anchor); the private key never
+          # leaves the CSC_LINK secret.
+          sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain -p codeSign desktop/build/signing-cert.pem
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
           rm -f "$RUNNER_TEMP/sign.p12"
           security find-identity -v -p codesigning "$KEYCHAIN"
