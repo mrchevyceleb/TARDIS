@@ -20,8 +20,12 @@ export function setComputerOwnerTurnProbe(probe: (owner: string) => boolean): vo
  *  same-named lanes would otherwise share one context), and threadLogKey is
  *  wrong here because bareChatId collapses an agent's background lane into its
  *  home lane — for computer control those are two live sessions that must
- *  never share a context. Engine-free, so a model switch keeps the same owner. */
-export function computerOwnerKey(cwd: string, chatId: string): string { return `${cwd}|${chatId}`; }
+ *  never share a context. Engine-free, so a model switch keeps the same owner.
+ *  JSON-encoded so the pair is injective: raw `|`-joining would let a pipe in
+ *  one component collide with a pipe in the other. Nothing parses the key;
+ *  every consumer (maps, the signed body, shim env, HTTP header) treats it as
+ *  an opaque string. */
+export function computerOwnerKey(cwd: string, chatId: string): string { return JSON.stringify([cwd, chatId]); }
 const targets = new Map<string, string>();
 const store = new JsonStore<{ id: string; device: string }>('computer-targets.json', []);
 let writes: Promise<unknown> = Promise.resolve();

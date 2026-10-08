@@ -125,7 +125,7 @@ test('all runner configurations include identical reserved device tools; turn id
   assert.ok(localMcpCodexArgs('Test').some(arg => arg.includes('mcp_servers.rivendell-device.args=')));
   const prompt = computerGuidance('/wt/owner-key', 'agent:test', 'Test', true);
   const token = prompt.match(/do not echo\): ([\w.-]+)/)![1];
-  assert.deepEqual(readComputerContext(token), { owner: '/wt/owner-key|agent:test', chatId: 'agent:test', label: 'Test', human: true });
+  assert.deepEqual(readComputerContext(token), { owner: JSON.stringify(['/wt/owner-key', 'agent:test']), chatId: 'agent:test', label: 'Test', human: true });
   assert.throws(() => readComputerContext(token + 'tampered'));
   const peer = computerGuidance('/wt/owner-key', 'agent:test', 'Test', false).match(/do not echo\): ([\w.-]+)/)![1];
   assert.throws(() => readComputerContext(token), /superseded/);

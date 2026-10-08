@@ -10,6 +10,7 @@ import { clearThreadSessionIds, ensureStateDir } from './sessions.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { stopComputersForOwner } from '../devices/bridge.ts';
 import { computerOwnerKey } from '../devices/context.ts';
+import { ASSISTANT_HUB_PATH } from './config.ts';
 import { codexCatalogPayload, startCodexCatalog } from './codex-models.ts';
 import { fireworksCatalogPayload, startFireworksCatalog } from './fireworks-models.ts';
 import { openRouterCatalogPayload, startOpenRouterCatalog } from './openrouter-models.ts';
@@ -373,7 +374,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
     const peer = (req.headers['x-forwarded-for'] as string | undefined)
       ?? req.socket?.remoteAddress ?? '?';
     console.warn(`[chat http] interrupt from ${peer} cli=${cli} repo=${body.repo} chatId=${chatId}`);
-    await Promise.all([interruptSession({ cli, repoPath: body.repo, chatId }), stopComputersForOwner(computerOwnerKey(String(body.repo ?? ''), chatId))]);
+    // The same cwd forcing every session-resolution path applies (runner.ts
+    // getOrCreateSession): assistant lanes always run from the hub, so their
+    // computer owner keys must too, or a stop would miss the grant cleanup.
+    const ownerCwd = cli === 'assistant' ? ASSISTANT_HUB_PATH : String(body.repo ?? '');
+    await Promise.all([interruptSession({ cli, repoPath: body.repo, chatId }), stopComputersForOwner(computerOwnerKey(ownerCwd, chatId))]);
     res.json({ ok: true, chatId });
   });
 
@@ -1460,7 +1465,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
             detachCurrentSession();
             let stopFailure: unknown = null;
             try {
-              await capStopWork(Promise.all([interruptSession({ cli: stopCli, repoPath: stopRepo, chatId: stopChatId }), stopComputersForOwner(computerOwnerKey(String(stopRepo ?? ''), stopChatId))]));
+              const stopOwnerCwd = stopCli === 'assistant' ? ASSISTANT_HUB_PATH : String(stopRepo ?? '');
+              await capStopWork(Promise.all([interruptSession({ cli: stopCli, repoPath: stopRepo, chatId: stopChatId }), stopComputersForOwner(computerOwnerKey(stopOwnerCwd, stopChatId))]));
             } catch (error) {
               stopFailure = error;
             }
