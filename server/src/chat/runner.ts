@@ -14,7 +14,7 @@ import { redactComputerImages } from '../devices/transcript.ts';
 import { getSessionId, setSessionId, setSessionSelection } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession, activeCodexSessions, publishCodexExternalEvent } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions, publishBananaExternalEvent } from './banana-runner.ts';
-import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
+import { appendEventLog, appendEventLogDurable, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
 import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
 import { CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKEN_BUDGET, NATIVE_COMPACT_MARGIN, contextRotationDue, contextTokens, learnContextLimit, providerContextBudget, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { shouldSkipEngineResume } from './threadWindow.ts';
@@ -3146,6 +3146,43 @@ type CompactRerunJob = {
   retiring: ClaudeSession;
 };
 const compactRerunJobs = new Set<CompactRerunJob>();
+/** How long the re-run failure notice waits for the lane to go idle before it
+ *  is dropped. providerSwitch's NOTICE_IDLE_WAIT_MS (6h) is the precedent. */
+const COMPACT_RERUN_NOTICE_IDLE_WAIT_MS = 6 * 60 * 60_000;
+
+/** Post the re-run failure notice the way every other out-of-band terminal
+ *  notice lands (providerSwitch.postProviderCutNotice is the precedent):
+ *  through the live lane session once it is idle — it owns the seq allocator
+ *  and its connected viewers — waiting for a running turn to end so the
+ *  notice is never read as that turn failing, and otherwise durably to the
+ *  log plus the external listeners for cold viewers. */
+async function postCompactRerunFailureNotice(job: CompactRerunJob, reason: string): Promise<void> {
+  try {
+    const event = {
+      type: '_terminal_error',
+      message: `TARDIS re-seeded this thread after the failed history shrink but could not re-run the message automatically (${reason}). Send it again.`,
+      code: 'compact_rerun_failed',
+    };
+    const deadline = Date.now() + COMPACT_RERUN_NOTICE_IDLE_WAIT_MS;
+    for (;;) {
+      const live = liveLaneSession(job.logKey, job.chatId);
+      if (!live?.isBusy()) {
+        if (live?.postNotice(event)) return;
+        break;
+      }
+      if (Date.now() >= deadline) {
+        console.warn(`[chat ${job.cli}] compact re-run failure notice on ${job.logKey} dropped: the thread never went idle`);
+        return;
+      }
+      await new Promise((resolve) => { const t = setTimeout(resolve, 250); t.unref?.(); });
+    }
+    const persisted = { ...laneTagFor(job.chatId), seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event' as const, event }, eng: job.cli, mdl: job.model };
+    const saved = appendEventLogDurable(job.logKey, persisted);
+    publishExternalThreadEvent(job.logKey, persisted);
+    await saved;
+  } catch { /* best effort */ }
+}
+
 function scheduleCompactRerun(job: CompactRerunJob): void {
   // One per lane: a second failure while a re-run is still landing waits for
   // that one instead of stacking a second replay of the same prompt.
@@ -3173,16 +3210,11 @@ function scheduleCompactRerun(job: CompactRerunJob): void {
       await session.send(job.text, job.images, { compactRerun: true });
     } catch (err) {
       console.warn(`[chat ${job.cli}] automatic re-run after the failed compact did not land:`, (err as Error).message);
-      try {
-        appendEventLogSync(job.logKey, {
-          ...laneTagFor(job.chatId),
-          seq: reserveEventLogSeq(job.logKey),
-          at: Date.now(),
-          ev: { type: 'event', event: { type: '_terminal_error', message: `TARDIS re-seeded this thread after the failed history shrink but could not re-run the message automatically (${(err as Error).message}). Send it again.`, code: 'compact_rerun_failed' } },
-          eng: job.cli,
-          mdl: job.model,
-        });
-      } catch { /* best effort */ }
+      // The re-run is finished and failed, so free the lane's dedupe key now:
+      // a new compact failure while the notice below waits must still get its
+      // own re-run instead of folding into this dead one.
+      compactRerunJobs.delete(job);
+      await postCompactRerunFailureNotice(job, (err as Error).message);
     } finally {
       compactRerunJobs.delete(job);
     }
