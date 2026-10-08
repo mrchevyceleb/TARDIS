@@ -95,7 +95,7 @@ export function Mobile({ s, picker, repo, agent }: ShellViewProps) {
               <span className="pulse" style={{ width: 6, height: 6 }} /> <span className="presence-text">TARDIS online · {repo?.branch ?? 'master'}</span>
             </div>
           </div>
-          <ChatHeaderChips chatId={s.chatId} backgroundWork={s.backgroundWork} compact />
+          <ChatHeaderChips chatId={s.chatId} repo={repo?.path} backgroundWork={s.backgroundWork} compact />
           <button type="button" className="iconbtn" aria-label="Open the Chronicle" onClick={() => setSheet('chronicle')}>
             <Book />
           </button>

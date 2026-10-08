@@ -14,7 +14,8 @@ import {
   type DeviceOp,
 } from '../devices/bridge.ts';
 import { asyncHandler } from './helpers.ts';
-import { backgroundComputerAllowed, configuredDefaultComputer, computerTarget, readComputerContext, setComputerTarget, validComputerMcpToken } from '../devices/context.ts';
+import { backgroundComputerAllowed, computerSelectionKey, computerTarget, computerTargetFor, configuredDefaultComputer, readComputerContext, setComputerTarget, validComputerMcpToken } from '../devices/context.ts';
+import { bareChatId } from '../chat/threadKey.ts';
 import { ComputerStepJournal } from '../devices/stepJournal.ts';
 import { computerOcr } from '../devices/ocr.ts';
 import { computerVision } from '../chat/vision-adapter.ts';
@@ -37,16 +38,21 @@ function defaultComputer() {
 
 devicesRouter.get('/', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ devices: listDevices(), target: computerTarget(String(req.query.chatId ?? '')), defaultDevice: defaultComputer() });
+  const chatId = String(req.query.chatId ?? '');
+  const repo = typeof req.query.repo === 'string' && req.query.repo ? req.query.repo : undefined;
+  res.json({ devices: listDevices(), target: computerTargetFor(repo, chatId), defaultDevice: defaultComputer() });
 });
 
 devicesRouter.put('/target', asyncHandler(async (req, res) => {
-  const { chatId, device } = req.body ?? {};
+  const { chatId, device, repo } = req.body ?? {};
   if (typeof chatId !== 'string' || !chatId || chatId.length > 200 || typeof device !== 'string' || device.length > 100) {
     res.status(400).json({ error: 'chatId and explicit device id required' }); return;
   }
+  if (repo !== undefined && (typeof repo !== 'string' || repo.length > 500)) {
+    res.status(400).json({ error: 'repo must be a workspace path' }); return;
+  }
   if (device && findDevice(device)?.id !== device) { res.status(400).json({ error: 'Device is offline; no target was changed.' }); return; }
-  await setComputerTarget(chatId, device);
+  await setComputerTarget(computerSelectionKey(repo, chatId), device);
   res.json({ target: device });
 }));
 
@@ -86,10 +92,13 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
       const callerOwner = req.get('x-rivendell-computer-owner');
       if (callerOwner && callerOwner !== context.owner) throw new Error(`This computer context was issued to ${context.label}'s turn, and this lane is not it. A context cannot be borrowed from another lane; use the "computer_start context for this turn" line at the top of your own prompt.`);
       if (!context.human && !backgroundComputerAllowed()) throw new Error('Background computer use is not authorized by operator policy.');
-      // The per-thread device selection stays keyed by the bare chatId (a
-      // client-facing contract), while grants and interrupts key on the
-      // workspace-qualified owner above.
-      const selected = computerTarget(context.chatId);
+      // The per-thread device selection is the human's statement about the
+      // whole thread, so both lanes of an agent share it: it keys on the
+      // workspace plus the bare chatId, while grants and interrupts key on the
+      // workspace-qualified owner above. `selection` comes from the minted
+      // body; a body minted before it falls back to the legacy bare-chatId key
+      // (an old client's entry).
+      const selected = (context.selection && computerTarget(context.selection)) || computerTarget(bareChatId(context.chatId));
       const ref = device || selected || configuredDefaultComputer();
       const resolved = ref ? findDevice(ref) : undefined;
       if (!resolved || (device && resolved.id !== device)) throw new Error('Requested/default computer is unavailable. Use an explicit online id or configure a default; never fall back to another machine.');

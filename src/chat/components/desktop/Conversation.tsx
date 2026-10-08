@@ -42,7 +42,7 @@ export function Conversation({ s, picker, repo, agent }: ShellViewProps) {
             <div className="presence">
               <span className="pulse" style={{ width: 7, height: 7 }} /> TARDIS online
             </div>
-            <ChatHeaderChips chatId={s.chatId} backgroundWork={s.backgroundWork} compact={narrow} />
+            <ChatHeaderChips chatId={s.chatId} repo={repo?.path} backgroundWork={s.backgroundWork} compact={narrow} />
           </header>
 
           <RibbonTicker events={s.chronicle} />

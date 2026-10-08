@@ -51,11 +51,12 @@ export type LinkedComputer = {
 };
 export type DefaultComputer = { id: string; name: string; online: boolean };
 export type ComputerPreview = { image: string; width: number; height: number; capturedAt: number; displayId: string };
-export function fetchComputers(chatId: string, signal?: AbortSignal) {
-  return apiJson<{ devices: LinkedComputer[]; target: string; defaultDevice: DefaultComputer | null }>(`/api/devices?chatId=${encodeURIComponent(chatId)}`, { signal, cache: 'no-store' });
+export function fetchComputers(chatId: string, signal?: AbortSignal, repo?: string) {
+  const query = repo ? `chatId=${encodeURIComponent(chatId)}&repo=${encodeURIComponent(repo)}` : `chatId=${encodeURIComponent(chatId)}`;
+  return apiJson<{ devices: LinkedComputer[]; target: string; defaultDevice: DefaultComputer | null }>(`/api/devices?${query}`, { signal, cache: 'no-store' });
 }
-export function selectComputer(chatId: string, device: string) {
-  return apiJson<{ target: string }>('/api/devices/target', { method: 'PUT', body: JSON.stringify({ chatId, device }) });
+export function selectComputer(chatId: string, device: string, repo?: string) {
+  return apiJson<{ target: string }>('/api/devices/target', { method: 'PUT', body: JSON.stringify({ chatId, device, repo }) });
 }
 export function stopComputer(device: string) {
   return apiJson<{ stopped: boolean }>(`/api/devices/${encodeURIComponent(device)}/computer/stop`, { method: 'POST' });
