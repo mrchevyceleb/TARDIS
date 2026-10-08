@@ -164,11 +164,12 @@ export async function callDevice(
   const starting = op === 'computer.start';
   const id = randomUUID();
   if (starting) {
-    // The device-reported control owner is capped at 200 characters, so a
-    // longer identity could never match its own lease anywhere. Fail closed
-    // here with an honest error instead of a silently degraded takeover.
-    if (typeof params.owner === 'string' && params.owner.length > 200) {
-      return Promise.resolve({ ok: false, error: `Desktop lease owner identity is ${params.owner.length} characters; the limit is 200. Use a shorter workspace path.` });
+    // The device-reported control owner is parsed with a 3000-character cap
+    // (the signed-context token cap; real owners stay far under it), so any
+    // key under the bound matches its own lease end-to-end. Fail closed only
+    // past it, with an honest error, never a silently degraded takeover.
+    if (typeof params.owner === 'string' && params.owner.length > 3000) {
+      return Promise.resolve({ ok: false, error: `Desktop lease owner identity is ${params.owner.length} characters; the limit is 3000. Use a shorter workspace path.` });
     }
     if (startingDesktops.has(desktop)) {
       return Promise.resolve({ ok: false, error: `This physical desktop is already in use or awaiting approval.${desktopHolderNote(desktop)} Wait; do not use its other client to bypass the owner.` });
@@ -340,7 +341,7 @@ function computerStatus(value: unknown): ControlStatus {
   return { supported: v.supported === true, reason: typeof v.reason === 'string' ? v.reason.slice(0, 500) : undefined,
     approvalMode: v.approvalMode === 'automatic' ? 'automatic' : 'ask', paused: v.paused === true,
     control: c && typeof c.owner === 'string' && typeof c.label === 'string' && Number.isFinite(c.expiresAt)
-      ? { owner: c.owner.slice(0, 200), label: c.label.slice(0, 100), purpose: String(c.purpose ?? '').slice(0, 500), expiresAt: c.expiresAt } : null };
+      ? { owner: c.owner.slice(0, 3000), label: c.label.slice(0, 100), purpose: String(c.purpose ?? '').slice(0, 500), expiresAt: c.expiresAt } : null };
 }
 
 /** A lane or desktop name quoted into another agent's tool error: one plain line. */
