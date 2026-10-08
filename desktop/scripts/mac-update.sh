@@ -40,6 +40,18 @@ LOCK="${APP}.swaplock"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'mac-update: %s\n' "$*" >&2; exit 1; }
+# Printed at every swap and appended to the success verdicts: macOS ties the
+# Screen Recording + Accessibility grants to the exact bundle, and desktop
+# mac builds are ad-hoc signed (no TeamIdentifier), so every swap - a pushed
+# update or a rollback - drops those grants for TARDIS on this machine. The
+# swap itself is unaffected (it rides device_exec and workspace writes);
+# computer control here is dead until a human re-allows TARDIS in System
+# Settings > Privacy & Security. No remote fix exists - tccutil only resets,
+# it cannot re-grant. Expect this after every push until mac builds are
+# properly signed in CI (CSC_LINK).
+tcc_note() {
+  printf 'note: the swap dropped the Screen Recording + Accessibility grants for TARDIS on this machine (the build is ad-hoc signed, so macOS ties those grants to the exact bundle and drops them on every swap). Re-allow TARDIS in System Settings > Privacy & Security before relying on computer control here - no remote fix exists, tccutil only resets. Expect this after every push until mac builds are CSC_LINK-signed in CI.\n'
+}
 app_version() {
   /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
     "$1/Contents/Info.plist" 2>/dev/null || true
@@ -188,6 +200,7 @@ phase2() {
     die "the staged bundle reports TARDIS ${v:-unknown}, the state says $staged; run phase1 again"
   fi
   say "phase2: quitting TARDIS to swap in $staged"
+  tcc_note
   if ! wait_for_quit; then die 'TARDIS did not quit; nothing was changed'; fi
   rm -rf "$old"
   mv "$APP" "$old" || die 'could not move the running app aside; nothing was changed'
@@ -220,6 +233,7 @@ phase2() {
     exit 1
   fi
   printf 'phase2 ok: TARDIS.app %s is live; rollback bundle kept at %s\n' "$v" "$old" | tee "$RESULT"
+  tcc_note | tee -a "$RESULT"
 }
 
 rollback() {
@@ -227,6 +241,7 @@ rollback() {
   local v=""
   detach_if_needed rollback
   own_lock
+  tcc_note
   if ! wait_for_quit; then die 'TARDIS did not quit; rollback aborted, nothing was changed'; fi
   rm -rf "${APP}.failed"
   if [ -d "$APP" ]; then
@@ -250,6 +265,7 @@ rollback() {
   fi
   printf 'rollback ok: TARDIS.app restored at %s and is live; the swapped-out bundle is kept at %s\n' \
     "$v" "${APP}.failed" | tee "$RESULT"
+  tcc_note | tee -a "$RESULT"
 }
 
 case "${1:-}" in
