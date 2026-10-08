@@ -164,6 +164,12 @@ export async function callDevice(
   const starting = op === 'computer.start';
   const id = randomUUID();
   if (starting) {
+    // The device-reported control owner is capped at 200 characters, so a
+    // longer identity could never match its own lease anywhere. Fail closed
+    // here with an honest error instead of a silently degraded takeover.
+    if (typeof params.owner === 'string' && params.owner.length > 200) {
+      return Promise.resolve({ ok: false, error: `Desktop lease owner identity is ${params.owner.length} characters; the limit is 200. Use a shorter workspace path.` });
+    }
     if (startingDesktops.has(desktop)) {
       return Promise.resolve({ ok: false, error: `This physical desktop is already in use or awaiting approval.${desktopHolderNote(desktop)} Wait; do not use its other client to bypass the owner.` });
     }
@@ -187,6 +193,13 @@ export async function callDevice(
         return Promise.resolve({ ok: false, error: `This physical desktop is already in use or awaiting approval.${desktopHolderNote(desktop)} Wait; do not use its other client to bypass the owner.` });
       }
       await releaseHeldControl(heldBy.device);
+      // The abort listener registers only inside the promise below, and an
+      // AbortSignal never replays an abort that fired while that await ran,
+      // so a cancelled turn could still take a fresh lease: re-check here.
+      if (signal?.aborted) {
+        if (startingDesktops.get(desktop)?.id === id) startingDesktops.delete(desktop);
+        return { ok: false, error: 'Request cancelled.' };
+      }
     }
   }
   const ceiling = op.startsWith('computer.') ? (starting ? 60_000 : 30_000) : DEVICE_MAX_TIMEOUT_MS;
