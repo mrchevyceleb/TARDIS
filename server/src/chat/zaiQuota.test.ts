@@ -1,6 +1,23 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
-import {
+import { after, test } from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// Isolate from live state before the module loads: zaiQuota captures STATE_DIR
+// at import time, seeds its plan window from <state>/zai-quota.json, persists
+// window changes back to that file, and prefers an inherited
+// RIVENDELL_ZAI_FALLBACK_API_KEY over the FIREWORKS_API_KEY these tests set.
+// A bare run on the dev box or inside a service-env job therefore read the
+// real (exhausted) window and the wrapped fallback key, failing both tests.
+const state = mkdtempSync(join(tmpdir(), 'zai-quota-'));
+process.env.RIVENDELL_STATE_DIR = state;
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith('RIVENDELL_ZAI_')) delete process.env[key];
+}
+// Registered before the import so a failed module init still cleans up.
+after(() => { rmSync(state, { recursive: true, force: true }); });
+const {
   isZaiFallbackProviderFailure,
   isZaiPlanQuotaEvent,
   noteZaiFallbackFailure,
@@ -8,7 +25,7 @@ import {
   resetZaiQuotaState,
   zaiCredentials,
   zaiModeFor,
-} from './zaiQuota.ts';
+} = await import('./zaiQuota.ts');
 
 const GLM = 'glm-5.3[1m]';
 const FLASH = 'glm-5.3-flash[1m]';
