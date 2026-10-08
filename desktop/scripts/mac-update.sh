@@ -40,6 +40,21 @@ LOCK="${APP}.swaplock"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'mac-update: %s\n' "$*" >&2; exit 1; }
+# Printed once a bundle has landed at the app path, and appended to every
+# verdict that follows a landed swap: macOS ties the Screen Recording +
+# Accessibility grants to the exact bundle, and desktop mac builds are ad-hoc
+# signed (no TeamIdentifier), so every swap - a pushed update or a rollback
+# - drops those grants for TARDIS on this machine. The swap itself is
+# unaffected (it rides device_exec and workspace writes); computer control
+# here is dead until a human re-allows TARDIS in System Settings > Privacy &
+# Security. No remote fix exists - tccutil only resets, it cannot re-grant.
+# Expect this after every push until mac builds are properly signed in CI
+# (CSC_LINK). Never printed before the swap lands, so a run that changes
+# nothing (the app will not quit, the move aside fails) never claims a
+# grants drop that did not happen.
+tcc_note() {
+  printf 'note: the swap dropped the Screen Recording + Accessibility grants for TARDIS on this machine (the build is ad-hoc signed, so macOS ties those grants to the exact bundle and drops them on every swap). Re-allow TARDIS in System Settings > Privacy & Security before relying on computer control here - no remote fix exists, tccutil only resets. Expect this after every push until mac builds are CSC_LINK-signed in CI.\n'
+}
 app_version() {
   /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
     "$1/Contents/Info.plist" 2>/dev/null || true
@@ -196,6 +211,9 @@ phase2() {
     die 'swap failed; the previous app was restored at its original path'
   fi
   xattr -dr com.apple.quarantine "$APP" >/dev/null 2>&1 || true
+  # The new bundle is live at the app path: the grants drop is real from
+  # here on, whatever the verdict below ends up being.
+  tcc_note
   v="$(app_version "$APP")"
   rm -f "$STATE"
   if [ "$v" != "$staged" ]; then
@@ -208,18 +226,22 @@ phase2() {
       launch_app || true
       printf 'phase2 failed: the swapped bundle reported %s, expected %s; the previous bundle was restored automatically (now TARDIS %s). The failed bundle is kept at %s.\n' \
         "${v:-nothing}" "$staged" "$(app_version "$APP" || echo unknown)" "${APP}.failed" | tee "$RESULT"
+      tcc_note | tee -a "$RESULT"
       exit 1
     fi
     printf 'ROLLBACK NOW: bash %s rollback\n(the swap could not be verified and the automatic restore failed; the old bundle may still be at %s)\n' \
       "$0" "$old" | tee "$RESULT"
+    tcc_note | tee -a "$RESULT"
     exit 1
   fi
   if ! launch_app; then
     printf 'phase2 swapped and verified TARDIS %s but it did not relaunch: the bundle is at %s, launch it from Finder or run "bash %s rollback" (the previous bundle is kept at %s)\n' \
       "$v" "$APP" "$0" "$old" | tee "$RESULT"
+    tcc_note | tee -a "$RESULT"
     exit 1
   fi
   printf 'phase2 ok: TARDIS.app %s is live; rollback bundle kept at %s\n' "$v" "$old" | tee "$RESULT"
+  tcc_note | tee -a "$RESULT"
 }
 
 rollback() {
@@ -237,19 +259,25 @@ rollback() {
     die 'rollback failed; the previous bundle was restored at its original path'
   fi
   xattr -dr com.apple.quarantine "$APP" >/dev/null 2>&1 || true
+  # The old bundle is live at the app path again: the grants state is not
+  # guaranteed from here on, whatever the verdict below ends up being.
+  tcc_note
   v="$(app_version "$APP")"
   if [ -z "$v" ]; then
     printf 'rollback moved the old bundle back but its version could not be read; inspect %s (the swapped-out bundle is kept at %s)\n' \
       "$APP" "${APP}.failed" | tee "$RESULT"
+    tcc_note | tee -a "$RESULT"
     exit 1
   fi
   if ! launch_app; then
     printf 'rollback restored TARDIS.app %s but it did not relaunch: the bundle is at %s, launch it from Finder\n' \
       "$v" "$APP" | tee "$RESULT"
+    tcc_note | tee -a "$RESULT"
     exit 1
   fi
   printf 'rollback ok: TARDIS.app restored at %s and is live; the swapped-out bundle is kept at %s\n' \
     "$v" "${APP}.failed" | tee "$RESULT"
+  tcc_note | tee -a "$RESULT"
 }
 
 case "${1:-}" in
