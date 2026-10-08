@@ -39,8 +39,10 @@ mac:
       arch: [x64, arm64]
   category: public.app-category.productivity
   icon: build/icon.png
-  # Unsigned by default. Set CSC_LINK/CSC_KEY_PASSWORD in CI to sign.
-  identity: null
+  # identity is deliberately NOT pinned: null would skip signing even with
+  # CSC_LINK set. With no CSC_LINK and CI's CSC_IDENTITY_AUTO_DISCOVERY=false
+  # this builds exactly as unsigned as today; with CSC_LINK set,
+  # electron-builder imports the identity and signs.
   hardenedRuntime: false
 dmg:
   artifactName: ${productName}-${version}-mac-${arch}.${ext}
