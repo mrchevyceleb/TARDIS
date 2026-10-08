@@ -15,6 +15,8 @@ process.env.RIVENDELL_STATE_DIR = state;
 for (const key of Object.keys(process.env)) {
   if (key.startsWith('RIVENDELL_ZAI_')) delete process.env[key];
 }
+// Registered before the import so a failed module init still cleans up.
+after(() => { rmSync(state, { recursive: true, force: true }); });
 const {
   isZaiFallbackProviderFailure,
   isZaiPlanQuotaEvent,
@@ -24,7 +26,6 @@ const {
   zaiCredentials,
   zaiModeFor,
 } = await import('./zaiQuota.ts');
-after(() => { rmSync(state, { recursive: true, force: true }); });
 
 const GLM = 'glm-5.3[1m]';
 const FLASH = 'glm-5.3-flash[1m]';
