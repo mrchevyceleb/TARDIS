@@ -50,16 +50,40 @@ jobs:
             echo "::error::Tagged mac releases must be signed with the stable identity (CSC_LINK / CSC_KEY_PASSWORD secrets): an unsigned mac build wipes the mac's Screen Recording and Accessibility grants on every update."
             exit 1
           fi
+      - name: Install the macOS signing identity
+        if: runner.os == 'macOS'
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          if [ -z "$CSC_LINK" ]; then
+            echo "No CSC_LINK secret: this mac build stays unsigned (ad-hoc), as before."
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/tardis-signing.keychain"
+          printf '%s' "$CSC_LINK" | base64 -d > "$RUNNER_TEMP/sign.p12"
+          # One password for both the keychain and the p12. electron-builder's
+          # own CSC_LINK dance creates its temp keychain with a random password
+          # and then unlocks it with the p12 password, and the mismatched
+          # SecKeychainUnlock fails on this macOS, so the identity is installed
+          # here instead and the build step below only names it.
+          security create-keychain -p "$CSC_KEY_PASSWORD" "$KEYCHAIN"
+          security unlock-keychain -p "$CSC_KEY_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings "$KEYCHAIN"
+          security import "$RUNNER_TEMP/sign.p12" -k "$KEYCHAIN" -P "$CSC_KEY_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$CSC_KEY_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/sign.p12"
+          security find-identity -v -p codesigning "$KEYCHAIN"
       - name: Build installers
         run: npm run dist --prefix desktop
         env:
-          # macOS builds sign with the stable self-signed identity from the
-          # CSC_LINK / CSC_KEY_PASSWORD repo secrets, so Screen Recording and
-          # Accessibility grants survive every update (ad-hoc cdhash never
-          # did). Windows and Linux builds stay unsigned.
+          # macOS builds sign with the stable self-signed identity, installed
+          # into a temp keychain by the step above, so Screen Recording and
+          # Accessibility grants survive every update. Windows and Linux
+          # builds stay unsigned.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-          CSC_LINK: ${{ runner.os == 'macOS' && secrets.CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.CSC_KEY_PASSWORD || '' }}
+          CSC_NAME: ${{ runner.os == 'macOS' && secrets.CSC_LINK != '' && 'SamWise Self-Signed' || '' }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-${{ matrix.os }}
