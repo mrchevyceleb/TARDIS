@@ -92,13 +92,14 @@ function shouldReadResultUsage(cli: CompanionId): boolean {
 }
 
 // Map a model id to its real context window. Current Opus (4.6/4.7/4.8),
-// Sonnet 4.6, and Fable/Mythos 5 are all 1M; Haiku and older models are 200K;
-// GLM 5.3 / 5.2 are 1M on Z.ai's coding API; GLM 5.1 stays 200K.
+// Sonnet 4.6, and Fable/Mythos 5 are all 1M; Haiku 5.5 is 1M while older
+// Haiku stays 200K; GLM 5.3 / 5.2 are 1M on Z.ai's coding API; GLM 5.1
+// stays 200K.
 function windowForClaudeModel(model: string | undefined): number {
   if (!model) return LARGE_WINDOW_TOKENS;
   const m = model.toLowerCase();
   if (m.includes('[1m]') || m.includes('-1m')) return LARGE_WINDOW_TOKENS;
-  if (m.includes('haiku')) return DEFAULT_WINDOW_TOKENS;
+  if (m.includes('haiku')) return m.includes('haiku-5-5') ? LARGE_WINDOW_TOKENS : DEFAULT_WINDOW_TOKENS;
   if (m.includes('glm-5.3') || m.includes('glm-5.2')) return LARGE_WINDOW_TOKENS;
   if (m.includes('glm')) return DEFAULT_WINDOW_TOKENS;
   // Any Grok id (grok-4.5, grok-4-5, future grok-*) is 500K on xAI.
