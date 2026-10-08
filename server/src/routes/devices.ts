@@ -53,6 +53,11 @@ devicesRouter.put('/target', asyncHandler(async (req, res) => {
   }
   if (device && findDevice(device)?.id !== device) { res.status(400).json({ error: 'Device is offline; no target was changed.' }); return; }
   await setComputerTarget(computerSelectionKey(repo, chatId), device);
+  // A repo-aware write is the human's current statement for the thread, so it
+  // also supersedes the legacy bare entry (mirroring a set, clearing on
+  // Default): an old desktop bundle that still keys on the bare chatId then
+  // shows the same choice instead of a resurrected stale one.
+  if (repo) await setComputerTarget(bareChatId(chatId), device);
   res.json({ target: device });
 }));
 
@@ -96,9 +101,14 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
       // whole thread, so both lanes of an agent share it: it keys on the
       // workspace plus the bare chatId, while grants and interrupts key on the
       // workspace-qualified owner above. `selection` comes from the minted
-      // body; a body minted before it falls back to the legacy bare-chatId key
-      // (an old client's entry).
-      const selected = (context.selection && computerTarget(context.selection)) || computerTarget(bareChatId(context.chatId));
+      // body, and a present selection reads ONLY its qualified entry: a miss
+      // means no explicit selection, never a legacy bare entry another
+      // workspace's old client wrote under the shared bare key. Only a body
+      // minted before the field existed (a server older than this change)
+      // falls back to the legacy bare-chatId entry, its only identity.
+      const selected = context.selection
+        ? computerTarget(context.selection)
+        : computerTarget(bareChatId(context.chatId));
       const ref = device || selected || configuredDefaultComputer();
       const resolved = ref ? findDevice(ref) : undefined;
       if (!resolved || (device && resolved.id !== device)) throw new Error('Requested/default computer is unavailable. Use an explicit online id or configure a default; never fall back to another machine.');

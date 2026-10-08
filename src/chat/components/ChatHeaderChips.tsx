@@ -28,7 +28,9 @@ export function ChatHeaderChips({ chatId, repo, agentId, backgroundWork, compact
   return (
     <>
       <ChatJobsChip key={`jobs:${chatId ?? ''}`} agentId={jobsAgent} backgroundWork={backgroundWork} compact={compact} />
-      {chatId ? <ComputerControl key={chatId} chatId={chatId} repo={repo} compact={compact} /> : null}
+      {/* Keyed on chatId + repo: two repos' same-named threads remount the
+          control instead of reusing the other repo's in-flight selection. */}
+      {chatId ? <ComputerControl key={`${chatId}|${repo ?? ''}`} chatId={chatId} repo={repo} compact={compact} /> : null}
     </>
   );
 }

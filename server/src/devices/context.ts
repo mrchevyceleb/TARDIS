@@ -37,9 +37,12 @@ export function computerSelectionKey(repo: string | undefined, chatId: string): 
   return repo ? computerOwnerKey(repo, bare) : bare;
 }
 /** The selection for a thread: the workspace-qualified entry when the client
- *  knows the repo, falling back to the legacy bare-chatId entry. */
+ *  knows the repo. A repo-aware client reads ONLY that entry — a miss means
+ *  no explicit selection (the default), never a legacy bare entry another
+ *  workspace's old client wrote under the shared bare key. Only a legacy
+ *  client (no repo) reads the bare key, which is its whole identity. */
 export function computerTargetFor(repo: string | undefined, chatId: string): string {
-  return computerTarget(computerSelectionKey(repo, chatId)) || computerTarget(bareChatId(chatId));
+  return computerTarget(computerSelectionKey(repo, chatId));
 }
 const targets = new Map<string, string>();
 const store = new JsonStore<{ id: string; device: string }>('computer-targets.json', []);
