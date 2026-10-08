@@ -86,7 +86,10 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
       const callerOwner = req.get('x-rivendell-computer-owner');
       if (callerOwner && callerOwner !== context.owner) throw new Error(`This computer context was issued to ${context.label}'s turn, and this lane is not it. A context cannot be borrowed from another lane; use the "computer_start context for this turn" line at the top of your own prompt.`);
       if (!context.human && !backgroundComputerAllowed()) throw new Error('Background computer use is not authorized by operator policy.');
-      const selected = computerTarget(context.owner);
+      // The per-thread device selection stays keyed by the bare chatId (a
+      // client-facing contract), while grants and interrupts key on the
+      // workspace-qualified owner above.
+      const selected = computerTarget(context.chatId);
       const ref = device || selected || configuredDefaultComputer();
       const resolved = ref ? findDevice(ref) : undefined;
       if (!resolved || (device && resolved.id !== device)) throw new Error('Requested/default computer is unavailable. Use an explicit online id or configure a default; never fall back to another machine.');

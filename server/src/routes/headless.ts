@@ -21,7 +21,7 @@ headlessRouter.post('/:op', asyncHandler(async (req, res) => {
     if (!validHeadlessToken(token)) { res.status(403).json({ error: 'TARDIS headless MCP required.' }); return; }
     try {
       const turn = readComputerContext(context);
-      agent = agentForChatId(turn.owner)?.name ?? `chat-${turn.owner}`;
+      agent = agentForChatId(turn.chatId)?.name ?? `chat-${turn.chatId}`;
     } catch (err) { res.status(403).json({ error: (err as Error).message }); return; }
   }
   try {

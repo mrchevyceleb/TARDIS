@@ -63,7 +63,7 @@ import { markPendingProviderContinuesInterrupted } from './chat/providerSwitch.t
 import { flushAllEventChains } from './chat/event-log-store.ts';
 import { markBusyCodexLanesRestarting, activeCodexSessions } from './chat/codex-runner.ts';
 import { markBusyBananaLanesRestarting, activeBananaSessions } from './chat/banana-runner.ts';
-import { setComputerOwnerTurnProbe } from './devices/context.ts';
+import { computerOwnerKey, setComputerOwnerTurnProbe } from './devices/context.ts';
 
 const app = express();
 app.disable('x-powered-by');
@@ -82,7 +82,7 @@ const CONTENT_ROOM_ENABLED =
 
 // A computer context stays valid past its idle window while its owner's turn is still running.
 setComputerOwnerTurnProbe((owner) =>
-  [...activeClaudeSessions(), ...activeCodexSessions(), ...activeBananaSessions()].some((s) => s.chatId === owner && s.busy));
+  [...activeClaudeSessions(), ...activeCodexSessions(), ...activeBananaSessions()].some((s) => computerOwnerKey(s.cwd, s.chatId) === owner && s.busy));
 
 app.get('/api/health', (_req, res) => {
   const claudeSessions = activeClaudeSessions();

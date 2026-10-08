@@ -14,6 +14,14 @@ const CONTEXT_HARD_MS = 6 * 60 * 60_000;
 const contexts = new Map<string, { nonce: string; expires: number; hardExpires: number; human: boolean }>();
 let ownerTurnRunning: (owner: string) => boolean = () => false;
 export function setComputerOwnerTurnProbe(probe: (owner: string) => boolean): void { ownerTurnRunning = probe; }
+
+/** The computer-control owner identity: workspace + full chatId. A bare chatId
+ *  is not unique across repos (`main` exists in every workspace, so two repos'
+ *  same-named lanes would otherwise share one context), and threadLogKey is
+ *  wrong here because bareChatId collapses an agent's background lane into its
+ *  home lane — for computer control those are two live sessions that must
+ *  never share a context. Engine-free, so a model switch keeps the same owner. */
+export function computerOwnerKey(cwd: string, chatId: string): string { return `${cwd}|${chatId}`; }
 const targets = new Map<string, string>();
 const store = new JsonStore<{ id: string; device: string }>('computer-targets.json', []);
 let writes: Promise<unknown> = Promise.resolve();
@@ -37,7 +45,7 @@ export function validComputerMcpToken(value: string | undefined): boolean {
   const got = Buffer.from(value ?? ''); const want = Buffer.from(COMPUTER_MCP_TOKEN);
   return got.length === want.length && timingSafeEqual(got, want);
 }
-export function readComputerContext(token: unknown): { owner: string; label: string; human: boolean } {
+export function readComputerContext(token: unknown): { owner: string; chatId: string; label: string; human: boolean } {
   if (typeof token !== 'string' || token.length > 3000) throw new Error('Current turn computer context is required.');
   const [body, signature, extra] = token.split('.');
   const got = Buffer.from(signature ?? ''); const want = Buffer.from(sign(body));
@@ -51,7 +59,10 @@ export function readComputerContext(token: unknown): { owner: string; label: str
   // Named so a lane that was handed someone else's context can tell it is not its own.
   if (!current || current.nonce !== data.nonce) throw new Error(`Computer context superseded: this one was issued to ${data.label}'s turn, and it stops working the moment that lane starts a new turn or is interrupted. A context cannot be handed to another lane. Use the "computer_start context for this turn" line at the top of your own prompt. If your own prompt has none, tell whoever asked you the exact error.`);
   if (current.expires < now && !ownerTurnRunning(data.owner)) throw expired();
-  return { owner: data.owner, label: data.label, human: data.human === true };
+  // `chatId` (added with the workspace-qualified owner) lets callers key the
+  // per-thread device selection, which stays keyed by the bare chatId. A body
+  // minted before that field falls back to its owner, which was the bare chatId.
+  return { owner: data.owner, chatId: typeof data.chatId === 'string' && data.chatId ? data.chatId : data.owner, label: data.label, human: data.human === true };
 }
 /** The owner's turn was interrupted: its signed context stops working at once,
  *  so a tool call still in flight from that turn cannot open a new grant. The
@@ -69,16 +80,17 @@ export function revokeComputerContext(owner: string): void {
  *  rules were sent once with the seed that started this window, so only the fresh
  *  token, the device line and the policy line ride along. Callers must pass brief=false
  *  (full rules) on the first message a process sees: each spawn, each context rotation. */
-export function computerGuidance(chatId: string, label: string, human = true, sameTurn = false, brief = false): string {
+export function computerGuidance(cwd: string, chatId: string, label: string, human = true, sameTurn = false, brief = false): string {
   const now = Date.now();
-  for (const [owner, context] of contexts) if (context.hardExpires <= now) contexts.delete(owner);
-  const held = sameTurn ? contexts.get(chatId) : undefined;
+  const owner = computerOwnerKey(cwd, chatId);
+  for (const [ownerKey, context] of contexts) if (context.hardExpires <= now) contexts.delete(ownerKey);
+  const held = sameTurn ? contexts.get(owner) : undefined;
   const context = held && held.human === human && held.hardExpires > now
     ? { ...held, expires: now + CONTEXT_IDLE_MS }
     : { nonce: randomBytes(16).toString('hex'), expires: now + CONTEXT_IDLE_MS, hardExpires: now + CONTEXT_HARD_MS, human };
-  contexts.set(chatId, context); // a later peer turn cannot replay this owner's earlier human context
+  contexts.set(owner, context); // a later peer turn cannot replay this owner's earlier human context
   // The signed copy carries the hard cap; the idle window lives in the map above.
-  const body = Buffer.from(JSON.stringify({ owner: chatId, label: label.slice(0, 100), human, nonce: context.nonce, expires: context.hardExpires })).toString('base64url');
+  const body = Buffer.from(JSON.stringify({ owner, chatId, label: label.slice(0, 100), human, nonce: context.nonce, expires: context.hardExpires })).toString('base64url');
   const selected = computerTarget(chatId);
   const deviceLine = selected
     ? `The user explicitly selected device ${JSON.stringify(selected)} for this thread.`
