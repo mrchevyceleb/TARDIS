@@ -14,7 +14,7 @@ import { redactComputerImages } from '../devices/transcript.ts';
 import { getSessionId, setSessionId, setSessionSelection } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession, activeCodexSessions, publishCodexExternalEvent } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions, publishBananaExternalEvent } from './banana-runner.ts';
-import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
+import { appendEventLog, appendEventLogDurable, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
 import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
 import { CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKEN_BUDGET, NATIVE_COMPACT_MARGIN, contextRotationDue, contextTokens, learnContextLimit, providerContextBudget, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { shouldSkipEngineResume } from './threadWindow.ts';
@@ -634,6 +634,12 @@ class ClaudeSession {
    * aborts that preparation locally instead of interrupting an idle provider. */
   private preparingTurnAborter: AbortController | null = null;
   private turnPromptSubmitted = false;
+  /** Opening prompt of the running turn, held only for the one automatic
+   *  re-run after a failed native compact (see scheduleCompactRerun). Set at
+   *  every turn start and overwritten by the next; a steer never touches it,
+   * and a native query adopted without send() leaves it null so that turn
+   *  still reports for a human. */
+  private compactRerunPrompt: { text: string; images?: Array<{ mediaType: string; base64: string }>; rerun: boolean } | null = null;
   /** Boot/rotation warmup uses Claude's read-only `mcp_status` control request:
    * no model turn, no tool call, and no transcript event. */
   private mcpPrewarmed = false;
@@ -984,7 +990,7 @@ class ClaudeSession {
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
-  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge } = {}): Promise<void> {
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge; compactRerun?: boolean } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
@@ -1050,6 +1056,7 @@ class ClaudeSession {
       this.syntheticApiErrorSeen = false;
       this.syntheticApiErrorReason = null;
       this.compactFailure = null;
+      this.compactRerunPrompt = { text, images, rerun: opts.compactRerun === true };
       this.streamTextBlocks.clear();
       this.preparingTurnAborter = preparationAborter;
       this.turnPromptSubmitted = false;
@@ -2440,7 +2447,15 @@ class ClaudeSession {
     }
     const compactFailed = ev?.type === 'result' && !expectedUserInterrupt && this.compactFailure !== null
       && (ev.is_error === true || providerTerminal !== null);
-    const terminal = (compactFailed ? compactFailureError(this.cli, this.compactFailure ?? '') : null)
+    // One automatic re-run of this turn's opening prompt is planned when the
+    // prompt is captured, this turn is not itself the re-run, and nothing else
+    // owns the failure (a 401 kills the child; a zai provider cut schedules
+    // its own continue). The reseed block below re-checks every one of these
+    // gates before scheduling, so the notice and the action cannot disagree.
+    const compactRerunPlanned = compactFailed && this.compactRerunPrompt !== null && !this.compactRerunPrompt.rerun
+      && ev?.api_error_status !== 401
+      && !(this.cli === 'zai' && zaiModeFor(this.spawnModel) !== this.zaiMode);
+    const terminal = (compactFailed ? compactFailureError(this.cli, this.compactFailure ?? '', compactRerunPlanned) : null)
       ?? providerTerminal
       ?? (ev?.type === 'result' && !expectedUserInterrupt
         ? terminalExecutionError(
@@ -2591,6 +2606,22 @@ class ClaudeSession {
       if (reseed) {
         this.contextMaintenance = Promise.resolve().then(() => this.reseedAfterCompactFailure())
           .finally(() => { this.contextMaintenance = null; });
+        // The compact failure's one automatic re-run (the copy above already
+        // promised it). lengthRejected stays manual: its oversized prompt may
+        // still be oversized after the reseed, so a human decides there.
+        if (compactFailed && compactRerunPlanned) {
+          scheduleCompactRerun({
+            cli: this.cli,
+            cwd: this.cwd,
+            chatId: this.chatId,
+            logKey: this.logKey,
+            model: this.spawnModel,
+            effort: this.spawnEffort,
+            text: this.compactRerunPrompt!.text,
+            images: this.compactRerunPrompt!.images,
+            retiring: this,
+          });
+        }
       }
       if (rotationDue) {
         this.contextMaintenance = Promise.resolve().then(housekeeping).catch((err) => {
@@ -3094,6 +3125,100 @@ async function spawnSession(
   }
   spawnFailures.delete(key);
   return session;
+}
+
+/** One automatic re-run after a failed native compact killed a live turn
+ *  (card-bfdad5). The reseed already dropped the oversized native session and
+ *  banked the rotation, so this waits for the dying child, then replays the
+ *  turn's opening prompt on the fresh session exactly once: nobody has to
+ *  send the message again. A re-run that fails again reports for a human
+ *  instead of looping (the re-send carries the rerun marker, which cancels
+ *  the next plan). */
+type CompactRerunJob = {
+  cli: CliKind;
+  cwd: string;
+  chatId: string;
+  logKey: string;
+  model: string;
+  effort: string;
+  text: string;
+  images?: Array<{ mediaType: string; base64: string }>;
+  retiring: ClaudeSession;
+};
+const compactRerunJobs = new Set<CompactRerunJob>();
+/** How long the re-run failure notice waits for the lane to go idle before it
+ *  is dropped. providerSwitch's NOTICE_IDLE_WAIT_MS (6h) is the precedent. */
+const COMPACT_RERUN_NOTICE_IDLE_WAIT_MS = 6 * 60 * 60_000;
+
+/** Post the re-run failure notice the way every other out-of-band terminal
+ *  notice lands (providerSwitch.postProviderCutNotice is the precedent):
+ *  through the live lane session once it is idle — it owns the seq allocator
+ *  and its connected viewers — waiting for a running turn to end so the
+ *  notice is never read as that turn failing, and otherwise durably to the
+ *  log plus the external listeners for cold viewers. */
+async function postCompactRerunFailureNotice(job: CompactRerunJob, reason: string): Promise<void> {
+  try {
+    const event = {
+      type: '_terminal_error',
+      message: `TARDIS re-seeded this thread after the failed history shrink but could not re-run the message automatically (${reason}). Send it again.`,
+      code: 'compact_rerun_failed',
+    };
+    const deadline = Date.now() + COMPACT_RERUN_NOTICE_IDLE_WAIT_MS;
+    for (;;) {
+      const live = liveLaneSession(job.logKey, job.chatId);
+      if (!live?.isBusy()) {
+        if (live?.postNotice(event)) return;
+        break;
+      }
+      if (Date.now() >= deadline) {
+        console.warn(`[chat ${job.cli}] compact re-run failure notice on ${job.logKey} dropped: the thread never went idle`);
+        return;
+      }
+      await new Promise((resolve) => { const t = setTimeout(resolve, 250); t.unref?.(); });
+    }
+    const persisted = { ...laneTagFor(job.chatId), seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event' as const, event }, eng: job.cli, mdl: job.model };
+    const saved = appendEventLogDurable(job.logKey, persisted);
+    publishExternalThreadEvent(job.logKey, persisted);
+    await saved;
+  } catch { /* best effort */ }
+}
+
+function scheduleCompactRerun(job: CompactRerunJob): void {
+  // One per lane: a second failure while a re-run is still landing waits for
+  // that one instead of stacking a second replay of the same prompt.
+  for (const pending of compactRerunJobs) {
+    if (pending.logKey === job.logKey && pending.chatId === job.chatId) return;
+  }
+  compactRerunJobs.add(job);
+  console.warn(`[chat ${job.cli}] native compact failed on ${job.logKey}; re-seeding and re-running the message automatically`);
+  void (async () => {
+    try {
+      // Wait for the reseeded child to die (its shutdown already SIGKILLs after
+      // its grace), so two processes never hold the same thread.
+      const started = Date.now();
+      while (!job.retiring.processExited() && Date.now() - started < 15_000) {
+        await new Promise((resolve) => { const t = setTimeout(resolve, 250); t.unref?.(); });
+      }
+      if (!job.retiring.processExited()) throw new Error('the old engine had not exited after the reseed');
+      const session = await getOrCreateSession({
+        cli: job.cli,
+        repoPath: job.cwd,
+        chatId: job.chatId,
+        model: job.model,
+        effort: job.effort,
+      });
+      await session.send(job.text, job.images, { compactRerun: true });
+    } catch (err) {
+      console.warn(`[chat ${job.cli}] automatic re-run after the failed compact did not land:`, (err as Error).message);
+      // The re-run is finished and failed, so free the lane's dedupe key now:
+      // a new compact failure while the notice below waits must still get its
+      // own re-run instead of folding into this dead one.
+      compactRerunJobs.delete(job);
+      await postCompactRerunFailureNotice(job, (err as Error).message);
+    } finally {
+      compactRerunJobs.delete(job);
+    }
+  })();
 }
 
 export function shutdownAllSessions(): void {

@@ -13,7 +13,9 @@ import { providerNativeCompactWindow } from './contextBudget.ts';
  *  token maximum" (2026-10-06). 64K was accepted by every Fireworks catalog
  *  model and by xAI; Fireworks clamps rather than rejecting prompt plus cap.
  *  The binary reserves min(cap, 20K) for the summary either way, so raising
- *  the cap does not move the compact threshold. */
+ *  the cap does not move the compact threshold. On 2026-10-08 the summary ran
+ *  past 64K the same way, so the native auto-compact is disabled outright on
+ *  every non-Anthropic lane and the cap now bounds real turns only. */
 export const PROVIDER_MAX_OUTPUT_TOKENS = 64_000;
 
 /** `maxOutputTokens` is the model's own ceiling when the lane knows it
@@ -26,6 +28,16 @@ export function applyProviderLimits(
   // TARDIS rotates the lane at its own budget; the native compact only
   // backstops a single turn that runs past it.
   env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(providerNativeCompactWindow(opts.model, opts.contextWindow));
+  // The native compact makes the lane model rewrite the whole history as one
+  // summary, and a thinking model runs past the output cap doing it (Qwen 3.8
+  // Max at 32K on 2026-10-06, past 64K again on 2026-10-08, killing Becca's
+  // live turn mid task). TARDIS owns history management on these lanes with
+  // its own rolling summary, so the native auto-compact is disabled outright
+  // instead of chasing the cap: a single turn that outgrows the real window
+  // now ends as a context-length rejection, which reseeds and re-runs once
+  // (runner.ts). Manual /compact stays enabled (that would be
+  // DISABLE_COMPACT, a different switch).
+  env.DISABLE_AUTO_COMPACT = '1';
   const override = Number(process.env.RIVENDELL_PROVIDER_MAX_OUTPUT_TOKENS?.trim());
   const cap = Number.isInteger(override) && override > 0 ? override : PROVIDER_MAX_OUTPUT_TOKENS;
   const ceiling = opts.maxOutputTokens;
