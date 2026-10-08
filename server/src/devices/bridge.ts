@@ -26,7 +26,7 @@ import type { Server as HttpServer } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { JsonStore } from '../lib/jsonStore.ts';
-import { loadComputerTargets, revokeComputerContext } from './context.ts';
+import { computerOwnerTurnRunning, loadComputerTargets, revokeComputerContext } from './context.ts';
 import { forgetRobot, recordRobotEvent, robotStatus, safeRobotName, setRobotStatus, type RobotStatus } from './robots.ts';
 import type { ControlStatus } from '../../../desktop/native/computer.mjs';
 
@@ -132,7 +132,7 @@ export class AmbiguousDeviceError extends Error {
 
 /** Ask a linked computer to do something. Never throws: a refusal, a timeout,
  *  and a dropped link all come back as `{ ok: false }`. */
-export function callDevice(
+export async function callDevice(
   idOrName: string,
   op: DeviceOp,
   params: Record<string, unknown>,
@@ -164,10 +164,30 @@ export function callDevice(
   const starting = op === 'computer.start';
   const id = randomUUID();
   if (starting) {
-    if (startingDesktops.has(desktop) || [...devices.values()].some(d => (d.info.desktopId || d.info.id) === desktop && d.info.computer?.control && d.info.computer.control.expiresAt > Date.now())) {
+    if (startingDesktops.has(desktop)) {
       return Promise.resolve({ ok: false, error: `This physical desktop is already in use or awaiting approval.${desktopHolderNote(desktop)} Wait; do not use its other client to bypass the owner.` });
     }
+    // Reserve the desktop before anything async, so two starts can never both
+    // pass this gate while a stale lease is being ended.
     startingDesktops.set(desktop, { id, ...(typeof params.owner === 'string' ? { owner: params.owner } : {}) });
+    // Who holds the desktop right now. A live lease held by another lane is
+    // never taken. The same lane replacing itself is always safe, and a holder
+    // whose turn is gone left the lease behind when it died (a failed compact
+    // once killed a live turn, and its 40-minute grant then refused that same
+    // lane and pushed other work off the machine): let it go and start cleanly.
+    let heldBy: { device: Device; owner: string } | null = null;
+    for (const d of devices.values()) {
+      const c = (d.info.desktopId || d.info.id) === desktop ? d.info.computer?.control : undefined;
+      if (c && c.expiresAt > Date.now()) { heldBy = { device: d, owner: c.owner }; break; }
+    }
+    if (heldBy) {
+      const sameLane = typeof params.owner === 'string' && params.owner === heldBy.owner;
+      if (!sameLane && computerOwnerTurnRunning(heldBy.owner)) {
+        if (startingDesktops.get(desktop)?.id === id) startingDesktops.delete(desktop);
+        return Promise.resolve({ ok: false, error: `This physical desktop is already in use or awaiting approval.${desktopHolderNote(desktop)} Wait; do not use its other client to bypass the owner.` });
+      }
+      await releaseHeldControl(heldBy.device);
+    }
   }
   const ceiling = op.startsWith('computer.') ? (starting ? 60_000 : 30_000) : DEVICE_MAX_TIMEOUT_MS;
   const budget = Math.min(Math.max(1_000, timeoutMs), ceiling);
@@ -224,6 +244,19 @@ export function rememberComputerGrant(deviceId: string, owner: string, session: 
  *  so a late cleanup never drops a newer grant. */
 export function forgetComputerGrant(deviceId: string, session?: string): void {
   if (session === undefined || grants.get(deviceId)?.session === session) grants.delete(deviceId);
+}
+
+/** End a control its holder cannot use anymore: the same lane starting again
+ *  (it replaces itself), or a holder whose turn is gone and died without
+ *  releasing. Only the remembered session can end a grant without pausing, so
+ *  a control with no matching record (the server restarted since it was made)
+ *  is left to the device's own expiry while the fresh start supersedes it. */
+async function releaseHeldControl(device: Device): Promise<void> {
+  const control = device.info.computer?.control;
+  const grant = grants.get(device.info.id);
+  if (!control || !grant || grant.owner !== control.owner) return;
+  const ended = await callDevice(device.info.id, 'computer.end', { session: grant.session }, 3000);
+  if (ended.ok) forgetComputerGrant(device.info.id, grant.session);
 }
 
 // When each owner's turn was last interrupted, so a start that lands after the

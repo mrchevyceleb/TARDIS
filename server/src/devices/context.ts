@@ -15,6 +15,10 @@ const CONTEXT_HARD_MS = 6 * 60 * 60_000;
 const contexts = new Map<string, { nonce: string; expires: number; hardExpires: number; human: boolean }>();
 let ownerTurnRunning: (owner: string) => boolean = () => false;
 export function setComputerOwnerTurnProbe(probe: (owner: string) => boolean): void { ownerTurnRunning = probe; }
+/** Whether the owner's turn is running right now (the probe above). Lease
+ *  takeover uses this: a control whose holder has no running turn was left
+ *  behind when that turn died, so it can be let go. */
+export function computerOwnerTurnRunning(owner: string): boolean { return ownerTurnRunning(owner); }
 
 /** The computer-control owner identity: workspace + full chatId. A bare chatId
  *  is not unique across repos (`main` exists in every workspace, so two repos'
