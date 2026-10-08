@@ -26,6 +26,7 @@ import { uploadBigFile, humanFileSize } from '../data/api';
 import { appendToDraft, showToast, TOAST_EVENT } from '../native/shell';
 import { BotRail } from './GrokSidebar';
 import { GrokChat } from './GrokChat';
+import { ChannelView } from '../chat/components/ChannelView';
 import { BotPanel, type ChatMeta } from './BotPanel';
 import { AgentEditor } from './AgentEditor';
 import { CallOverlay } from '../voice/CallOverlay';
@@ -79,7 +80,8 @@ const ROOMS: Record<string, ComponentType> = {
 
 type View =
   | { kind: 'chat'; chatId: string; cli?: CompanionId; lane?: string; repoPath?: string }
-  | { kind: 'room'; key: string };
+  | { kind: 'room'; key: string }
+  | { kind: 'channel'; id: string };
 
 const VIEW_KEY = 'rivendell:bot-view';
 const PANE_KEY = 'rivendell:bot-pane';
@@ -325,6 +327,11 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
     setDrawerOpen(false);
   }, []);
 
+  const openChannel = useCallback((id: string) => {
+    setView({ kind: 'channel', id });
+    setDrawerOpen(false);
+  }, []);
+
   const goHome = useCallback(() => {
     if (agents.length) setView({ kind: 'chat', chatId: agents[0].home, lane: agents[0].engine });
     setDrawerOpen(false);
@@ -434,6 +441,8 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
           onNewAgent={() => { setEditTarget(undefined); setEditorOpen(true); }}
           activeRoom={activeRoom}
           onOpenRoom={openRoom}
+          activeChannelId={view.kind === 'channel' ? view.id : undefined}
+          onOpenChannel={openChannel}
           theme={theme}
           appearance={appearance}
           onAppearance={setAppearance}
@@ -505,6 +514,12 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
               onOpenStudio={openStudio}
               onMeta={onMeta}
             />
+          ) : view.kind === 'channel' ? (
+            <div className="bt-room r-scroll" key={view.id}>
+              <div className="bt-room-wrap bt-fade">
+                <ChannelView channelId={view.id} agents={agents} onDeleted={goHome} />
+              </div>
+            </div>
           ) : RoomView && activeRoom === 'desk' ? (
             <DeskChatOpenContext.Provider value={deskChat.open && Boolean(deskAgent && hubRepo)}>
               <div className={`desk-split${deskChat.open && deskAgent && hubRepo ? ' chat-open' : ''}${isMobile ? ' is-phone' : ''}`}>

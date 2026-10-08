@@ -1,0 +1,94 @@
+/* Group channels: the rail section, the channel view, and the shared bits
+ * (name field, teammate picks, error line). Modest on purpose: no threads,
+ * reactions, permissions or dashboards. */
+
+.ch-rail { margin-top: 10px; padding: 0 4px; }
+.ch-rail-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px 2px; }
+.ch-rail-title { font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.55; }
+.ch-row {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  padding: 5px 8px; border: 0; border-radius: 8px; background: none;
+  color: inherit; font: inherit; font-size: 13px; cursor: pointer; text-align: left;
+}
+.ch-row:hover { background: color-mix(in srgb, currentColor 7%, transparent); }
+.ch-row.active { background: color-mix(in srgb, currentColor 12%, transparent); font-weight: 600; }
+.ch-row-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-row-count { font-size: 10.5px; opacity: 0.5; }
+.ch-empty { padding: 4px 8px 8px; font-size: 12px; opacity: 0.5; }
+
+.ch-create { padding: 6px 6px 8px; display: flex; flex-direction: column; gap: 7px; }
+.ch-create-name {
+  width: 100%; padding: 6px 9px; border-radius: 8px; font: inherit; font-size: 13px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  background: color-mix(in srgb, currentColor 5%, transparent); color: inherit;
+}
+.ch-create-name:focus { outline: none; border-color: color-mix(in srgb, currentColor 40%, transparent); }
+.ch-create-picks { display: flex; flex-wrap: wrap; gap: 4px; max-height: 132px; overflow-y: auto; }
+.ch-pick {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2.5px 8px;
+  border-radius: 999px; font-size: 11.5px; cursor: pointer; color: inherit;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  background: none;
+}
+.ch-pick.on { border-color: color-mix(in srgb, currentColor 45%, transparent); background: color-mix(in srgb, currentColor 10%, transparent); font-weight: 600; }
+.ch-pick-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: 0.4; }
+.ch-create-actions { display: flex; align-items: center; gap: 8px; }
+.ch-create-go {
+  padding: 4px 10px; border-radius: 8px; font: inherit; font-size: 12px; cursor: pointer;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  background: color-mix(in srgb, currentColor 12%, transparent); color: inherit;
+}
+.ch-create-go:disabled { opacity: 0.5; cursor: default; }
+.ch-create-x { display: inline-flex; align-items: center; gap: 3px; border: 0; background: none; color: inherit; font: inherit; font-size: 12px; opacity: 0.7; cursor: pointer; }
+.ch-create-x:hover { opacity: 1; }
+.ch-error { font-size: 12px; color: #e5484d; padding: 2px 8px; }
+
+.ch-view { display: flex; flex-direction: column; height: 100%; min-height: 0; position: relative; }
+.ch-missing { padding: 24px; font-size: 13.5px; opacity: 0.8; }
+.ch-head {
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  position: sticky; top: 0; z-index: 2; backdrop-filter: blur(6px);
+}
+.ch-head-name { font-weight: 650; font-size: 14.5px; }
+.ch-head-members { font-size: 11.5px; opacity: 0.55; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-menu-scrim { position: fixed; inset: 0; z-index: 40; }
+.ch-menu {
+  position: absolute; top: 42px; right: 12px; z-index: 41; min-width: 168px;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  background: var(--bt-panel, #1e222b); border-radius: 10px; padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.ch-menu-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 9px;
+  border: 0; border-radius: 7px; background: none; color: inherit; font: inherit;
+  font-size: 13px; cursor: pointer; text-align: left;
+}
+.ch-menu-row:hover { background: color-mix(in srgb, currentColor 9%, transparent); }
+.ch-menu-row.danger { color: #e5484d; }
+.ch-edit-bar {
+  display: flex; align-items: center; gap: 8px; padding: 8px 14px; flex-wrap: wrap;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+.ch-edit-members { align-items: flex-start; }
+.ch-list { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.ch-msg { display: flex; align-items: baseline; gap: 8px; font-size: 13.5px; line-height: 1.45; }
+.ch-msg-from { font-weight: 650; flex-shrink: 0; }
+.ch-msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ch-msg-time { font-size: 10.5px; opacity: 0.45; flex-shrink: 0; margin-left: auto; }
+.ch-composer {
+  display: flex; align-items: flex-end; gap: 8px; padding: 10px 14px;
+  border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+.ch-input {
+  flex: 1; resize: none; padding: 8px 10px; border-radius: 10px; font: inherit; font-size: 13.5px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  background: color-mix(in srgb, currentColor 5%, transparent); color: inherit; max-height: 132px;
+}
+.ch-input:focus { outline: none; border-color: color-mix(in srgb, currentColor 40%, transparent); }
+.ch-send {
+  padding: 8px 14px; border-radius: 10px; font: inherit; font-size: 13px; cursor: pointer;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  background: color-mix(in srgb, currentColor 14%, transparent); color: inherit;
+}
+.ch-send:disabled { opacity: 0.45; cursor: default; }

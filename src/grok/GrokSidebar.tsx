@@ -53,6 +53,7 @@ import { useJobsSummary } from '../chat/hooks/useJobs';
 import { RailJobsBadge } from '../chat/components/jobs/RailJobsBadge';
 import type { HistoryItem } from './history';
 import { NativeOpenHelper } from '../components/NativeOpenHelper';
+import { ChannelsRail } from '../chat/components/ChannelsRail';
 import { ROOM_NAMES } from '../data/roomNames';
 import { useDeploymentFlags } from '../data/deploymentFlags';
 import { AppearanceSettings } from '../theme/AppearanceSettings';
@@ -101,6 +102,9 @@ export type BotRailProps = {
   onEditAgent: (a: Agent) => void;
   onPatchAgent: (a: Agent, patch: AgentFlagPatch) => void;
   onNewAgent: () => void;
+  /** Group channels: the active channel id when a channel view is open. */
+  activeChannelId?: string;
+  onOpenChannel: (id: string) => void;
   activeRoom?: string;
   onOpenRoom: (key: string) => void;
   theme: ThemeName;
@@ -893,6 +897,8 @@ export function BotRail(props: BotRailProps) {
         ) : null}
         {props.agents.length && !query.trim() ? <RailNewGroup onCreate={railGroups.create} /> : null}
       </div>
+
+      <ChannelsRail agents={props.agents} activeChannelId={props.activeChannelId} onOpenChannel={props.onOpenChannel} />
 
       <div className="bt-rail-foot" style={{ position: 'relative' }} ref={pluginsRef}>
         {pluginsOpen ? (
