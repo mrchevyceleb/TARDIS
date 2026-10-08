@@ -151,3 +151,20 @@ git push --follow-tags
 The **Release** workflow builds the Windows, macOS, Linux, and Android artifacts and publishes them on the matching GitHub Release. The Android signing key comes from the repository secrets `ANDROID_KEYSTORE_B64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. A tagged release fails without them, on purpose: a runner-generated debug key changes every build, and phones refuse updates signed by a different key. Keep a copy of the keystore somewhere safe, because a lost key means every phone has to uninstall before the next update.
 
 Run the workflow manually from the Actions tab to build artifacts from any branch without publishing a release. Manual builds without the secrets are signed with a debug key.
+
+### Push the mac build to a linked mac
+
+A macOS build cannot update itself in place, so a linked mac stays on the last version someone pushed. After the Release workflow publishes, push the new dmg to it from any lane with the `rivendell-device` tools (the mac must be in Automatic Computer Control; `device_list` shows its workspace path):
+
+1. Resolve the release, then read the mac's current version with `device_exec`:
+   `/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' ~/Applications/TARDIS.app/Contents/Info.plist`.
+   ```bash
+   gh release view --json tagName,assets -q '[.tagName] + ([.assets[] | select(.name|endswith("mac-arm64.dmg")) | (.name,.size,.url)])'
+   ```
+   Stop here if the versions already match.
+2. `device_write` `desktop/scripts/mac-update.sh` from this checkout to `scratch/<date>/mac-update.sh` in the mac's workspace copy (workspace writes are prompt-free).
+3. `device_exec` on the mac:
+   `TARDIS_URL=<url> TARDIS_BYTES=<size> TARDIS_VERSION=<version> bash scratch/<date>/mac-update.sh phase1`.
+   It downloads the dmg, checks the byte size and the bundled version, and stages `TARDIS.app.new` beside the running app, refusing on any mismatch.
+4. `device_exec` on the mac: `bash scratch/<date>/mac-update.sh phase2`. The script self-detaches into its own session and then runs through the quit: graceful quit, swap with `TARDIS.app.old` kept as the rollback, quarantine strip, relaunch, and a version check. The device bridge dies when the app quits and the app tree-kills the exec shell's process group; the detached session is outside it. No Terminal and no computer control are needed — an unsigned swap also loses the old bundle's Screen Recording and Accessibility grants, so computer control is not reliable between pushes. Output lands in `scratch/<date>/run.log`, the verdict in `scratch/<date>/run.result`.
+5. Verify: the mac's bridge reconnects within about a minute, an exec on it is prompt-free, and the Info.plist read from step 1 returns the new version (`device_read` of `scratch/<date>/run.result` shows the swap's verdict). On any mismatch, run `bash scratch/<date>/mac-update.sh rollback` — it self-detaches the same way — to restore `TARDIS.app.old`.
