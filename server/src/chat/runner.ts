@@ -9,7 +9,7 @@ import type { Readable, Writable } from 'node:stream';
 import { ASSISTANT_HUB_PATH } from './config.ts';
 import { localMcpServers } from './local-mcp.ts';
 import { officeMcpServers } from './office-mcp.ts';
-import { computerGuidance } from '../devices/context.ts';
+import { computerGuidance, computerOwnerKey } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import { getSessionId, setSessionId, setSessionSelection } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession, activeCodexSessions, publishCodexExternalEvent } from './codex-runner.ts';
@@ -440,14 +440,14 @@ export function laneMcpServers(agentName?: string, backgroundLane = false, owner
  *  tool can attribute sends) and rivendell-device (the user's own computers,
  *  reachable while their desktop app is open). */
 let localMcpLogged = false;
-function withTeamMcp(configJson: string, chatId: string): string {
+function withTeamMcp(configJson: string, cwd: string, chatId: string): string {
   try {
     if (!localMcpLogged) {
       localMcpLogged = true;
       console.log('[chat] built-in team and computer MCPs enabled');
     }
     const cfg = JSON.parse(configJson) as { mcpServers: Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> };
-    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name, { replyNow: true, backgroundLane: isBackgroundChatId(chatId), owner: chatId }), officeMcpServers());
+    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name, { replyNow: true, backgroundLane: isBackgroundChatId(chatId), owner: computerOwnerKey(cwd, chatId) }), officeMcpServers());
     return JSON.stringify(cfg);
   } catch {
     return configJson;
@@ -797,7 +797,7 @@ class ClaudeSession {
     // silently pick up extra (or stale) servers from ~/.claude*.json. Keep
     // --mcp-config last: it is variadic and swallows any plain arg after it.
     if (cli === 'assistant' || cli === 'xai' || cli === 'claude' || cli === 'zai' || cli === 'fireworks' || cli === 'openrouter') {
-      args.push('--strict-mcp-config', '--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, chatId));
+      args.push('--strict-mcp-config', '--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, this.cwd, chatId));
     }
 
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
@@ -1291,7 +1291,7 @@ class ClaudeSession {
     const humanTurn = continuing ? continuing.origin.human : !opts.peerFrom && opts.peerFromRole !== 'automation';
     // Full computer rules only on the message that seeds a fresh window; every later
     // message of the same warm process carries the brief form (fresh token + device + policy).
-    const computerContext = computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
+    const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
     const stdinText = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}`;
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.

@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 import type { Readable, Writable } from 'node:stream';
 import { STATE_DIR } from '../config.ts';
 import { assertSubscriptionLane, subscriptionEnvironment } from './subscription-policy.ts';
-import { computerGuidance } from '../devices/context.ts';
+import { computerGuidance, computerOwnerKey } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import { setSessionId } from './sessions.ts';
 import { appendEventLog, appendEventLogSync, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogSync, reserveEventLogSeq } from './event-log-store.ts';
@@ -205,7 +205,7 @@ export class PiSession {
     env.PI_CODING_AGENT_DIR = PI_AGENT_DIR;
     // The full lane set, not just the built-ins: without the assistant-mcp
     // proxy a Pi lane had no email, Slack or calendar tools at all.
-    env.RIVENDELL_PI_MCP = JSON.stringify(laneMcpServers(agentForChatId(chatId)?.name, isBackgroundChatId(chatId), chatId));
+    env.RIVENDELL_PI_MCP = JSON.stringify(laneMcpServers(agentForChatId(chatId)?.name, isBackgroundChatId(chatId), computerOwnerKey(cwd, chatId)));
     env.SAMWISE_ACCOUNT = cli;
     // Marks this as a TARDIS agent turn for the long-call gate extension (see longCallGate.ts).
     Object.assign(env, longCallGateEnv(chatId));
@@ -788,7 +788,7 @@ export class PiSession {
     const humanTurn = continuing ? continuing.origin.human : !opts.peerFrom && opts.peerFromRole !== 'automation';
     // Full computer rules ride the seed message that starts a fresh pi window; later
     // messages of the same warm process get the brief form (fresh token + device + policy).
-    const computerContext = computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
+    const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
     const message = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuation}`;
     const piImages = outImages?.map((img) => ({ type: 'image', data: img.base64, mimeType: img.mediaType }));
 

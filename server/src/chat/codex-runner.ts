@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { CODEX_APP_TURN_SCRIPT } from '../config.ts';
 import { localMcpCodexArgs } from './local-mcp.ts';
 import { officeMcpCodexArgs } from './office-mcp.ts';
-import { computerGuidance } from '../devices/context.ts';
+import { computerGuidance, computerOwnerKey } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
@@ -750,7 +750,7 @@ export class CodexSession {
       this.busy = false;
       return;
     }
-    const prompt = `${computerGuidance(this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, !(seedWindow || hasSeedOverride))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
+    const prompt = `${computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, !(seedWindow || hasSeedOverride))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
     // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
     // -c overrides rather than written into ~/.codex/config.toml so this stays
     // scoped to TARDIS.
@@ -763,7 +763,7 @@ export class CodexSession {
       );
     }
     const laneName = agentForChatId(this.chatId)?.name;
-    browserMcpArgs.push(...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: this.chatId }), ...officeMcpCodexArgs());
+    browserMcpArgs.push(...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId) }), ...officeMcpCodexArgs());
     const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
 
     // Wait for OneDrive to release its sync lock on .codex/config.toml so

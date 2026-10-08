@@ -123,11 +123,11 @@ test('all runner configurations include identical reserved device tools; turn id
   assert.deepEqual(localMcpBananaServers()['rivendell-device'].environment, env);
   assert.equal(localMcpServers('Test', { owner: 'chat:9' })['rivendell-device'].env.RIVENDELL_COMPUTER_OWNER, 'chat:9');
   assert.ok(localMcpCodexArgs('Test').some(arg => arg.includes('mcp_servers.rivendell-device.args=')));
-  const prompt = computerGuidance('agent:test', 'Test', true);
+  const prompt = computerGuidance('/wt/owner-key', 'agent:test', 'Test', true);
   const token = prompt.match(/do not echo\): ([\w.-]+)/)![1];
-  assert.deepEqual(readComputerContext(token), { owner: 'agent:test', label: 'Test', human: true });
+  assert.deepEqual(readComputerContext(token), { owner: JSON.stringify(['/wt/owner-key', 'agent:test']), chatId: 'agent:test', label: 'Test', human: true });
   assert.throws(() => readComputerContext(token + 'tampered'));
-  const peer = computerGuidance('agent:test', 'Test', false).match(/do not echo\): ([\w.-]+)/)![1];
+  const peer = computerGuidance('/wt/owner-key', 'agent:test', 'Test', false).match(/do not echo\): ([\w.-]+)/)![1];
   assert.throws(() => readComputerContext(token), /superseded/);
   assert.equal(readComputerContext(peer).human, false);
   assert.equal(trustedComputerUrl('http://example.test'), false);
