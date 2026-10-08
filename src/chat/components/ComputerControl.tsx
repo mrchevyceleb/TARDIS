@@ -36,7 +36,7 @@ const STATE_HINT: Record<ChipState, string> = {
  * popover; `compact` collapses it to an icon plus a state dot, with the device
  * name in the tooltip and accessible name.
  */
-export function ComputerControl({ chatId, compact = false }: { chatId: string; compact?: boolean }) {
+export function ComputerControl({ chatId, repo, compact = false }: { chatId: string; repo?: string; compact?: boolean }) {
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
   const [devices, setDevices] = useState<LinkedComputer[]>([]);
@@ -69,7 +69,7 @@ export function ComputerControl({ chatId, compact = false }: { chatId: string; c
       fetching = true;
       const rev = revision.current;
       try {
-        const data = await fetchComputers(chatId, ac.signal);
+        const data = await fetchComputers(chatId, ac.signal, repo);
         if (!ac.signal.aborted && revision.current === rev) applyState(data);
       } catch (e) { if (!ac.signal.aborted) { setError(errorText(e)); setFailed(true); } }
       finally { fetching = false; }
@@ -77,7 +77,7 @@ export function ComputerControl({ chatId, compact = false }: { chatId: string; c
     void refresh();
     const timer = window.setInterval(() => void refresh(), 5000);
     return () => { ac.abort(); clearInterval(timer); revision.current++; previewRequest.current++; };
-  }, [chatId]);
+  }, [chatId, repo]);
   useEffect(() => { setPreview(null); previewRequest.current++; }, [target, control?.owner, control?.expiresAt]);
 
   const controlAction = async (resume: boolean) => {
@@ -87,7 +87,7 @@ export function ComputerControl({ chatId, compact = false }: { chatId: string; c
     setPending(true); setError(''); setPreview(null);
     try {
       await (resume ? resumeComputer(target) : stopComputer(target));
-      const data = await fetchComputers(chatId);
+      const data = await fetchComputers(chatId, undefined, repo);
       if (revision.current === rev) applyState(data);
     } catch (e) { if (revision.current === rev) setError(errorText(e)); }
     finally { if (revision.current === rev) { revision.current++; setPending(false); } }
@@ -169,7 +169,7 @@ export function ComputerControl({ chatId, compact = false }: { chatId: string; c
           const rev = ++revision.current;
           previewRequest.current++;
           setPending(true); setError('');
-          try { await selectComputer(chatId, next); if (rev === revision.current) { setSelected(next); setPreview(null); } }
+          try { await selectComputer(chatId, next, repo); if (rev === revision.current) { setSelected(next); setPreview(null); } }
           catch (e) { if (rev === revision.current) setError(errorText(e)); }
           finally { if (rev === revision.current) { revision.current++; setPending(false); } }
         }}>

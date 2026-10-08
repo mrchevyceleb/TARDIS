@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { JsonStore } from '../lib/jsonStore.ts';
+import { bareChatId } from '../chat/threadKey.ts';
 import { robotGuidance } from './robots.ts';
 
 // Only TARDIS-spawned MCPs can invoke input APIs. This is not a general app
@@ -26,6 +27,23 @@ export function setComputerOwnerTurnProbe(probe: (owner: string) => boolean): vo
  *  every consumer (maps, the signed body, shim env, HTTP header) treats it as
  *  an opaque string. */
 export function computerOwnerKey(cwd: string, chatId: string): string { return JSON.stringify([cwd, chatId]); }
+/** The per-thread device selection key. The selection is the human's statement
+ *  about the whole thread, so both lanes of an agent share it (unlike contexts
+ *  and grants, which are per-lane): the workspace plus the BARE chatId. A
+ *  missing repo (legacy clients send only the chatId) keeps the legacy bare
+ *  key, so desktops that have not updated yet keep working. */
+export function computerSelectionKey(repo: string | undefined, chatId: string): string {
+  const bare = bareChatId(chatId);
+  return repo ? computerOwnerKey(repo, bare) : bare;
+}
+/** The selection for a thread: the workspace-qualified entry when the client
+ *  knows the repo. A repo-aware client reads ONLY that entry — a miss means
+ *  no explicit selection (the default), never a legacy bare entry another
+ *  workspace's old client wrote under the shared bare key. Only a legacy
+ *  client (no repo) reads the bare key, which is its whole identity. */
+export function computerTargetFor(repo: string | undefined, chatId: string): string {
+  return computerTarget(computerSelectionKey(repo, chatId));
+}
 const targets = new Map<string, string>();
 const store = new JsonStore<{ id: string; device: string }>('computer-targets.json', []);
 let writes: Promise<unknown> = Promise.resolve();
@@ -49,7 +67,7 @@ export function validComputerMcpToken(value: string | undefined): boolean {
   const got = Buffer.from(value ?? ''); const want = Buffer.from(COMPUTER_MCP_TOKEN);
   return got.length === want.length && timingSafeEqual(got, want);
 }
-export function readComputerContext(token: unknown): { owner: string; chatId: string; label: string; human: boolean } {
+export function readComputerContext(token: unknown): { owner: string; chatId: string; selection?: string; label: string; human: boolean } {
   if (typeof token !== 'string' || token.length > 3000) throw new Error('Current turn computer context is required.');
   const [body, signature, extra] = token.split('.');
   const got = Buffer.from(signature ?? ''); const want = Buffer.from(sign(body));
@@ -63,10 +81,11 @@ export function readComputerContext(token: unknown): { owner: string; chatId: st
   // Named so a lane that was handed someone else's context can tell it is not its own.
   if (!current || current.nonce !== data.nonce) throw new Error(`Computer context superseded: this one was issued to ${data.label}'s turn, and it stops working the moment that lane starts a new turn or is interrupted. A context cannot be handed to another lane. Use the "computer_start context for this turn" line at the top of your own prompt. If your own prompt has none, tell whoever asked you the exact error.`);
   if (current.expires < now && !ownerTurnRunning(data.owner)) throw expired();
-  // `chatId` (added with the workspace-qualified owner) lets callers key the
-  // per-thread device selection, which stays keyed by the bare chatId. A body
-  // minted before that field falls back to its owner, which was the bare chatId.
-  return { owner: data.owner, chatId: typeof data.chatId === 'string' && data.chatId ? data.chatId : data.owner, label: data.label, human: data.human === true };
+  // `chatId` and `selection` let callers key the per-thread device selection
+  // (workspace + bare chatId) without parsing the owner. Bodies minted before
+  // those fields fall back: chatId to the owner, which was the bare chatId;
+  // selection to absent, and callers fall back to the bare chatId themselves.
+  return { owner: data.owner, chatId: typeof data.chatId === 'string' && data.chatId ? data.chatId : data.owner, selection: typeof data.selection === 'string' && data.selection ? data.selection : undefined, label: data.label, human: data.human === true };
 }
 /** The owner's turn was interrupted: its signed context stops working at once,
  *  so a tool call still in flight from that turn cannot open a new grant. The
@@ -94,8 +113,8 @@ export function computerGuidance(cwd: string, chatId: string, label: string, hum
     : { nonce: randomBytes(16).toString('hex'), expires: now + CONTEXT_IDLE_MS, hardExpires: now + CONTEXT_HARD_MS, human };
   contexts.set(owner, context); // a later peer turn cannot replay this owner's earlier human context
   // The signed copy carries the hard cap; the idle window lives in the map above.
-  const body = Buffer.from(JSON.stringify({ owner, chatId, label: label.slice(0, 100), human, nonce: context.nonce, expires: context.hardExpires })).toString('base64url');
-  const selected = computerTarget(chatId);
+  const body = Buffer.from(JSON.stringify({ owner, chatId, selection: computerSelectionKey(cwd, chatId), label: label.slice(0, 100), human, nonce: context.nonce, expires: context.hardExpires })).toString('base64url');
+  const selected = computerTargetFor(cwd, chatId);
   const deviceLine = selected
     ? `The user explicitly selected device ${JSON.stringify(selected)} for this thread.`
     : configuredDefaultComputer()

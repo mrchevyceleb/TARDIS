@@ -14,8 +14,10 @@ import { agentIdFromChatId } from '../hooks/useJobs';
  * where it was. The jobs pill hides itself when nothing runs or ran recently.
  * `compact` collapses both to an icon (plus a count or a state dot).
  */
-export function ChatHeaderChips({ chatId, agentId, backgroundWork, compact = false }: {
+export function ChatHeaderChips({ chatId, repo, agentId, backgroundWork, compact = false }: {
   chatId: string | undefined;
+  /** The chat's workspace path, when the shell knows it; keys the per-thread device selection. */
+  repo?: string;
   /** The chat's agent, when the shell knows it; else it is read from the chat id. */
   agentId?: string;
   /** Background shells and subagents the model itself is running (useChat). */
@@ -26,7 +28,9 @@ export function ChatHeaderChips({ chatId, agentId, backgroundWork, compact = fal
   return (
     <>
       <ChatJobsChip key={`jobs:${chatId ?? ''}`} agentId={jobsAgent} backgroundWork={backgroundWork} compact={compact} />
-      {chatId ? <ComputerControl key={chatId} chatId={chatId} compact={compact} /> : null}
+      {/* Keyed on chatId + repo: two repos' same-named threads remount the
+          control instead of reusing the other repo's in-flight selection. */}
+      {chatId ? <ComputerControl key={`${chatId}|${repo ?? ''}`} chatId={chatId} repo={repo} compact={compact} /> : null}
     </>
   );
 }

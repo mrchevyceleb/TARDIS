@@ -148,7 +148,7 @@ export function GrokConversation(props: BotConversationProps) {
   // Docked beside a room, on a phone, or squeezed by the sidebar the header is narrow: the chips go compact.
   const { ref: headRef, narrow: headNarrow } = useNarrowHeader();
   const waitingOn = useWaitingOn(agent?.id ?? agentIdFromChatId(s.chatId), s.backgroundWork);
-  const chips = <ChatHeaderChips chatId={s.chatId} agentId={agent?.id} backgroundWork={s.backgroundWork} compact={isMobile || Boolean(dock) || headNarrow} />;
+  const chips = <ChatHeaderChips chatId={s.chatId} repo={props.repo?.path} agentId={agent?.id} backgroundWork={s.backgroundWork} compact={isMobile || Boolean(dock) || headNarrow} />;
   const composer = (
     <Composer
       chatId={s.chatId}
