@@ -123,7 +123,7 @@ export async function setupMacComputerControl(parent: BrowserWindow | null, show
   await messageBox(parent, {
     type: 'info',
     message: done ? 'Computer control is ready on this Mac.' : 'Allow TARDIS to control this Mac',
-    detail: `${line('Screen Recording', status.screenRecording)}\n${line('Accessibility', status.accessibility)}\n\n${done ? 'Agents can now see and use this Mac.' : 'In System Settings > Privacy & Security, switch TARDIS on for each one that is not allowed yet (macOS asks for the login password each time). If macOS offers Quit & Reopen, accept it. Then choose Set Up Computer Control again to check.'}`,
+    detail: `${line('Screen Recording', status.screenRecording)}\n${line('Accessibility', status.accessibility)}\n\n${done ? 'Agents can now see and use this Mac.' : 'In System Settings > Privacy & Security, switch TARDIS on for each one that is not allowed yet (macOS asks for the login password each time). If TARDIS already shows as on, remove it with the minus button and re-add it with the plus button from ~/Applications, then quit and reopen TARDIS: a grant can show as on and still be stale after an update. If macOS offers Quit & Reopen, accept it. Then choose Set Up Computer Control again to check.'}`,
   });
   return status;
 }
