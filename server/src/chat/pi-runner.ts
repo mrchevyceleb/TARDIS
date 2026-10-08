@@ -205,7 +205,7 @@ export class PiSession {
     env.PI_CODING_AGENT_DIR = PI_AGENT_DIR;
     // The full lane set, not just the built-ins: without the assistant-mcp
     // proxy a Pi lane had no email, Slack or calendar tools at all.
-    env.RIVENDELL_PI_MCP = JSON.stringify(laneMcpServers(agentForChatId(chatId)?.name, isBackgroundChatId(chatId)));
+    env.RIVENDELL_PI_MCP = JSON.stringify(laneMcpServers(agentForChatId(chatId)?.name, isBackgroundChatId(chatId), chatId));
     env.SAMWISE_ACCOUNT = cli;
     // Marks this as a TARDIS agent turn for the long-call gate extension (see longCallGate.ts).
     Object.assign(env, longCallGateEnv(chatId));

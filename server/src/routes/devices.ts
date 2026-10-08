@@ -80,6 +80,11 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
   if (op === 'start') {
     try {
       context = readComputerContext(body.context);
+      // A lane-bound shim names its owner on every call, so a context pasted
+      // from another lane (including a human turn's) cannot be started here.
+      // Shims with no owner env (the shared Banana serve process) are exempt.
+      const callerOwner = req.get('x-rivendell-computer-owner');
+      if (callerOwner && callerOwner !== context.owner) throw new Error(`This computer context was issued to ${context.label}'s turn, and this lane is not it. A context cannot be borrowed from another lane; use the "computer_start context for this turn" line at the top of your own prompt.`);
       if (!context.human && !backgroundComputerAllowed()) throw new Error('Background computer use is not authorized by operator policy.');
       const selected = computerTarget(context.owner);
       const ref = device || selected || configuredDefaultComputer();

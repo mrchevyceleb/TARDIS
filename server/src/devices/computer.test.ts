@@ -121,6 +121,7 @@ test('concurrent and retried targeted keyboard operations execute at most once',
 test('all runner configurations include identical reserved device tools; turn identity is signed', () => {
   const env = localMcpServers('Test')['rivendell-device'].env;
   assert.deepEqual(localMcpBananaServers()['rivendell-device'].environment, env);
+  assert.equal(localMcpServers('Test', { owner: 'chat:9' })['rivendell-device'].env.RIVENDELL_COMPUTER_OWNER, 'chat:9');
   assert.ok(localMcpCodexArgs('Test').some(arg => arg.includes('mcp_servers.rivendell-device.args=')));
   const prompt = computerGuidance('agent:test', 'Test', true);
   const token = prompt.match(/do not echo\): ([\w.-]+)/)![1];

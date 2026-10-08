@@ -430,8 +430,8 @@ const ASSISTANT_MCP_CONFIG = JSON.stringify({ mcpServers: optionalMcpServers });
  *  themselves (the Pi bridge): the operator's optional backends (assistant-mcp
  *  proxy, browser) plus the built-in team and device servers. Same set the
  *  claude binary receives through --mcp-config. */
-export function laneMcpServers(agentName?: string, backgroundLane = false): Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> {
-  return { ...optionalMcpServers, ...localMcpServers(agentName, { backgroundLane }) };
+export function laneMcpServers(agentName?: string, backgroundLane = false, owner?: string): Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> {
+  return { ...optionalMcpServers, ...localMcpServers(agentName, { backgroundLane, owner }) };
 }
 
 
@@ -447,7 +447,7 @@ function withTeamMcp(configJson: string, chatId: string): string {
       console.log('[chat] built-in team and computer MCPs enabled');
     }
     const cfg = JSON.parse(configJson) as { mcpServers: Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> };
-    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name, { replyNow: true, backgroundLane: isBackgroundChatId(chatId) }), officeMcpServers());
+    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name, { replyNow: true, backgroundLane: isBackgroundChatId(chatId), owner: chatId }), officeMcpServers());
     return JSON.stringify(cfg);
   } catch {
     return configJson;
