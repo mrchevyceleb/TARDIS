@@ -30,8 +30,8 @@ const BASE = process.env.RIVENDELL_TEAM_URL || 'http://127.0.0.1:8091';
 const SERVER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'server-local';
 // The human the Desk's "Needs you" list belongs to.
 const OWNER = process.env.RIVENDELL_OWNER_NAME?.trim() || 'Matt';
-const DESK_COLUMNS = ['pipeline', 'up_next', 'in_progress', 'waiting', 'done'];
-const DESK_COLUMN_TITLES = { pipeline: 'Pipeline', up_next: 'Up next', in_progress: 'In progress', waiting: `Waiting on ${OWNER}`, done: 'Done' };
+const DESK_COLUMNS = ['not_started', 'in_progress', 'in_qa', 'on_staging', 'in_production'];
+const DESK_COLUMN_TITLES = { not_started: 'Not started', in_progress: 'In progress', in_qa: 'In QA (Sud)', on_staging: 'Merged to staging', in_production: 'Live in production' };
 const DESK_PRIORITIES = ['low', 'normal', 'high'];
 // Only lanes whose runner turns the call into a message (Claude) are told about reply_now.
 const REPLY_NOW_ENABLED = process.env.RIVENDELL_REPLY_NOW === '1';
@@ -306,7 +306,7 @@ const TOOLS = [
     name: 'desk_todo_add',
     description:
       `Put an item on ${OWNER}'s "Needs you" list on the Desk. Use it ONLY for something that needs ${OWNER} personally: a decision, a login or 2FA code, an approval, a payment, or an account or physical action only they can take. ` +
-      'Not for your own work (that is a board card) and not for FYI updates. Write the title as the action they must take, put context in detail, and pass cardId when it unblocks a board card (then move that card to waiting). ' +
+      'Not for your own work (that is a board card) and not for FYI updates. Write the title as the action they must take, put context in detail, and pass cardId when it unblocks a board card (the card shows its needs-' + OWNER + ' flag while your item is open). ' +
       `Titles show on ${OWNER}'s phone lock screen, so no amounts, account numbers or phone numbers in the title (put them in detail). ` +
       `For a pick-one question pass choices (up to 4 short options; without them ${OWNER} gets Yes / No) so ${OWNER} can answer with one tap. ` +
       `The answer arrives in your thread as a message from ${OWNER} and the item is already closed. ` +
@@ -382,8 +382,8 @@ const TOOLS = [
   {
     name: 'board_cards',
     description:
-      'List cards on the Desk board with ids, grouped by column (Pipeline, Up next, In progress, Waiting on ' + OWNER + ', Done). ' +
-      'Call it BEFORE board_card_create so you reuse an existing card instead of making a duplicate, and when picking work back up. Done cards are hidden unless includeDone is true.',
+      'List cards on the Desk board with ids, grouped by column (Not started, In progress, In QA (Sud), Merged to staging, Live in production). ' +
+      'Call it BEFORE board_card_create so you reuse an existing card instead of making a duplicate, and when picking work back up. Live-in-production cards are hidden unless includeDone is true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -410,7 +410,7 @@ const TOOLS = [
     name: 'board_card_create',
     description:
       'Create a Desk board card for a real piece of work (more than a quick answer) so ' + OWNER + ' can see it. You own it by default and it starts in in_progress. ' +
-      'Use pipeline for something parked or not started that must not be forgotten (say why in the description). Returns the id; keep it moving with board_card_move and board_card_comment.',
+      'Use not_started for something parked or not started that must not be forgotten (say why in the description). Old column ids (pipeline, up_next, waiting, done) still work as aliases this release. Returns the id; keep it moving with board_card_move and board_card_comment.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -431,7 +431,8 @@ const TOOLS = [
   {
     name: 'board_card_move',
     description:
-      'Move a board card to another column: in_progress when you start, waiting when it needs ' + OWNER + ' (also add a desk_todo_add), pipeline when parked (give the reason in note), done when finished and verified. ' +
+      'Move a board card to another column: in_progress when you start, in_qa when it goes to Sud QA, on_staging when merged to staging, in_production when it is live and verified. ' +
+      'A card with an open Needs-you item carries its needs-' + OWNER + ' flag in any column. Old ids (pipeline, up_next, waiting, done) still work as aliases this release. ' +
       'The optional note is added as a comment.',
     inputSchema: {
       type: 'object',
@@ -747,8 +748,7 @@ async function callTool(name, args, signal) {
           extra = ` (note not saved: ${error.message})`;
         }
       }
-      const hint = card.column === 'waiting' ? ` If ${OWNER} has to act, make sure a desk_todo_add points at this card.` : '';
-      return `Moved [${card.id}] ${card.title} to ${DESK_COLUMN_TITLES[card.column]}.${hint}${extra}`;
+      return `Moved [${card.id}] ${card.title} to ${DESK_COLUMN_TITLES[card.column]}.${extra}`;
     }
     if (name === 'board_card_comment') {
       const { card } = await comment(args.id, args.text);

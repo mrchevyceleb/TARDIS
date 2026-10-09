@@ -37,11 +37,11 @@ export const deskRouter = Router();
 const COLUMN_META = DESK_COLUMNS.map((key) => ({
   key,
   title: {
-    pipeline: 'Pipeline',
-    up_next: 'Up next',
+    not_started: 'Not started',
     in_progress: 'In progress',
-    waiting: `Waiting on ${DESK_OWNER_NAME}`,
-    done: 'Done',
+    in_qa: 'In QA (Sud)',
+    on_staging: 'Merged to staging',
+    in_production: 'Live in production',
   }[key],
 }));
 
@@ -128,7 +128,9 @@ deskRouter.get('/summary', route(async (_req, res) => {
     rev: data.rev,
     openTodos: open.length,
     highTodos: high.length,
-    waitingCards: data.cards.filter((c) => !c.archived && c.column === 'waiting').length,
+    // "Waiting on you" successor under the five-stage board: a card with an
+    // open Needs-you item linked to it (the card's needs-Matt flag).
+    waitingCards: data.cards.filter((c) => !c.archived && open.some((t) => t.cardId === c.id)).length,
     // A client only offers answer buttons when this is present, so one that
     // ships before this server restarts degrades cleanly.
     answerable: true,
@@ -189,12 +191,12 @@ deskRouter.get('/cards', route(async (req, res) => {
     column = parseColumn(q.column);
     if (!column) throw new DeskError(400, `column must be one of ${DESK_COLUMNS.join(', ')}`);
   }
-  const includeDone = flag(q.includeDone) || column === 'done';
+  const includeDone = flag(q.includeDone) || column === 'in_production';
   const includeArchived = flag(q.includeArchived);
   const { cards } = await readDesk();
   const out = cards.filter((c: DeskCard) =>
     (includeArchived || !c.archived)
-    && (includeDone || c.column !== 'done')
+    && (includeDone || c.column !== 'in_production')
     && (!column || c.column === column)
     && (!owner || matchesActor(c.owner, owner))
     && (!project || (c.project ?? '').toLowerCase() === project));

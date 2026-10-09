@@ -1,5 +1,12 @@
 // Desk card hygiene: deterministic nudges, no model in the loop.
 //
+// RETIRED IN PART 2026-10-09: the board moved to Matt's five stages and Max's
+// hourly routine replaces the column-keyed nudges. The waiting / pipeline /
+// up_next checks below are kept verbatim for Max's read-back but can never
+// match again (stored columns are normalized to the five new ids on load),
+// so those messages are permanently off. Still live until Max's go: the
+// In-progress stale check and the 30-minutes-no-card nudge. Deletion of the
+// dead paths is a separate commit after his read.
 // Every minute the scheduler notes which agents have a live turn (routine and
 // job wakes excluded where the lane can tell) and adds a minute to that
 // agent's tally for the current Eastern day. At 08:00, 10:00, 12:00, 14:00
@@ -198,14 +205,17 @@ function findingFor(
       .filter((line) => Number.isFinite(line.lastMs) && nowMs - line.lastMs >= IN_PROGRESS_STALE_MS)
       .sort((a, b) => a.lastMs - b.lastMs),
     ...own
-      .filter((c) => c.column === 'waiting' && !backed.has(c.id))
+      // Retired column (five-stage rename): stored columns are normalized, so
+      // this comparison can never be true. Kept for Max's read-back.
+      .filter((c) => (c.column as string) === 'waiting' && !backed.has(c.id))
       .map((card) => ({ card, kind: 'waiting' as const, lastMs: lastActivityMs(card) }))
       .filter((line) => Number.isFinite(line.lastMs))
       .sort((a, b) => a.lastMs - b.lastMs),
   ];
   const pipeline: PipelineLine[] = opts.pipelineReview
     ? own
-        .filter((c) => c.column === 'pipeline')
+        // Retired column (five-stage rename): can never match. Kept for read-back.
+        .filter((c) => (c.column as string) === 'pipeline')
         .map((card) => ({ card, lastMs: lastActivityMs(card) }))
         .filter((line) => Number.isFinite(line.lastMs) && nowMs - line.lastMs >= PIPELINE_STALE_MS)
         .sort((a, b) => a.lastMs - b.lastMs)
@@ -577,8 +587,9 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
         // An agent the slot sweep touched this tick already had its one
         // message (or its clean check); its pickup waits for the next tick.
         if (report.checked.includes(agent.id)) continue;
-        // First card in the Up next column is the board's top card.
-        const top = desk.cards.find((c) => !c.archived && c.column === 'up_next' && ownedBy(c, agent, rosterIds));
+        // Retired column (five-stage rename): can never match, so the idle
+        // pickup finds no top card and stays silent. Kept for Max's read-back.
+        const top = desk.cards.find((c) => !c.archived && (c.column as string) === 'up_next' && ownedBy(c, agent, rosterIds));
         if (!top) continue;
         const text = `[desk:${top.id}] "${cleanTitle(top.title)}"\n${IDLE_GUIDANCE}`;
         state.lastIdleNudge[agent.id] = nowMs;
