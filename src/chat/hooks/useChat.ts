@@ -772,7 +772,7 @@ function pendingSteersFor(key: string): PendingSteer[] {
 // v11: same class, different writer — clients that adopted a ready frame's
 // latestSeq assertion as coverage (deduped hello, no replay) saved head
 // cursors over holed blocks. The writer is fixed below; bump once to purge
-// every copy poisoned before the fix (Trenzalore, Oct 9 2026).
+// every copy poisoned before the fix (a desktop client, Oct 9 2026).
 const CHAT_CACHE_VERSION = 'v11';
 
 function blocksStorageKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
@@ -1606,7 +1606,7 @@ export function useChat(opts: {
         // WITHOUT any replay, so adopting its latestSeq would jump this
         // cursor to head over blocks that never saw the intervening events —
         // every one of them is then discarded by the guard above and the
-        // persisted snapshot saves a hole nothing can ever fill (Trenzalore,
+        // persisted snapshot saves a hole nothing can ever fill (observed
         // Oct 9 2026). The cursor therefore advances ONLY on event seqs this
         // socket actually received; a trailing control-frame tail is simply
         // replayed (and deduped) on the next connect.
