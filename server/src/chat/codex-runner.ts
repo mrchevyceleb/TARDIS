@@ -23,7 +23,7 @@ import { longCallGateEnv } from './longCallGate.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
-import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
+import { accountEnv, accountEnvForAccount, accountFromChatId, accountForAgent } from '../lib/accountResolver.ts';
 import { resolveCodexBin, resolveCodexSelection } from './codex-models.ts';
 import { buildCodexAppServerArgs, shouldRetryEmptyCodexTurn } from './codex-args.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
@@ -788,8 +788,9 @@ export class CodexSession {
     }
 
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
-    // login; everything else keeps the per-repo account-map resolution.
-    const forcedAccount = accountFromChatId(this.chatId);
+    // login; a per-agent pin (RIVENDELL_AGENT_ACCOUNTS) comes next; everything else
+    // keeps the per-repo account-map resolution.
+    const forcedAccount = accountFromChatId(this.chatId) ?? accountForAgent(laneName);
     const turnStartedAtMs = Date.now();
     const child = spawn(process.execPath, [CODEX_APP_TURN_SCRIPT], {
       cwd: this.cwd,
