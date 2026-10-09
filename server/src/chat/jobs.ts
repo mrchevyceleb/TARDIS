@@ -654,6 +654,16 @@ async function runTick(): Promise<void> {
   for (const unit of [...pendingRelease.keys()].slice(0, RELEASE_PER_TICK)) await releaseUnit(unit);
 }
 
+/** Clear wakeText on a delivered bundle in ONE atomic store write. If any
+ *  write could land partially, a later retry would re-deliver the records
+ *  already cleared — exactly the duplicate the bundle exists to prevent. */
+async function clearDelivered(jobs: Job[]): Promise<void> {
+  const ids = new Set(jobs.map((job) => job.id));
+  await store.modify((items) =>
+    items.map((item) => (ids.has(item.id) ? { ...item, wakeText: undefined } : item))
+  );
+}
+
 /** Deliver owed results as one wake. On failure (agent busy past the
  *  admission wait, engine down) the exact text stays on each record and the
  *  bundle retries after RETRY_MS. */
@@ -662,7 +672,7 @@ async function deliverBundle(agentId: string, jobs: Job[]): Promise<void> {
   try {
     const agent = listAgents().find((a) => a.id === agentId);
     if (!agent) {
-      await serialize(() => Promise.all(jobs.map((job) => store.update(job.id, { wakeText: undefined }))));
+      await clearDelivered(jobs);
       return;
     }
     const text = jobs.map((job) => job.wakeText!).join('\n\n');
@@ -673,7 +683,7 @@ async function deliverBundle(agentId: string, jobs: Job[]): Promise<void> {
       lane: jobs[0].lane === 'main' ? 'main' : 'bg',
     });
     if (result.delivered) {
-      await serialize(() => Promise.all(jobs.map((job) => store.update(job.id, { wakeText: undefined }))));
+      await clearDelivered(jobs);
       for (const job of jobs) retryUntil.delete(job.id);
       console.log(`[jobs] ${names} (${jobs[0].state}${jobs.length > 1 ? ` +${jobs.length - 1} more` : ''}) → woke ${agent.name}`);
       return;
