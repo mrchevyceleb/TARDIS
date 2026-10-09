@@ -89,7 +89,13 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 }
 
 /** Jobs being resolved or delivered right now. One outcome, one wake. */
+/** Owed results for one agent deliver as ONE bundled wake, oldest first. */
+const WAKE_BUNDLE_MAX = 5;
+
 const delivering = new Set<string>();
+/** One bundle delivery in flight per agent, so a long admission wait inside
+ *  sendToAgentHome never stacks concurrent sends for one lane. */
+const deliveringAgent = new Set<string>();
 /** Jobs a stop is in flight for. The tick must not call one "lost" just
  *  because its wrapper already died while a stubborn child waits for KILL. */
 const stopping = new Set<string>();
@@ -99,6 +105,24 @@ const BOOT_ID = (() => {
 })();
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const retryUntil = new Map<string, number>();
+
+const etHourFmt = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23',
+});
+function etHour(ms: number): number {
+  return Number(etHourFmt.format(new Date(ms)));
+}
+
+/** Quiet hours hold (Matt, Oct 8 2026): an owed wake for a job STARTED
+ *  outside 22:00-05:00 ET holds through the window and resumes after 05:00.
+ *  A job started inside the window was started on purpose (overnight
+ *  emergency work) and delivers normally. */
+function heldForQuietHours(job: Job, now: number): boolean {
+  const h = etHour(now);
+  if (h >= 5 && h < 22) return false;
+  const started = etHour(job.startedAt);
+  return !(started >= 22 || started < 5);
+}
 
 const logPath = (id: string) => join(JOBS_DIR, `${id}.log`);
 const exitPath = (id: string) => join(JOBS_DIR, `${id}.exit`);
@@ -593,48 +617,82 @@ async function runTick(): Promise<void> {
       }
       continue;
     }
-    if (job.wakeText && (retryUntil.get(job.id) ?? 0) <= now) {
-      delivering.add(job.id);
-      void deliver(job).finally(() => delivering.delete(job.id));
-      continue;
-    }
+    if (job.wakeText) continue; // owed wakes deliver as bundles below
     if (job.endedAt && now - job.endedAt > KEEP_ENDED_MS && !job.wakeText) {
       await serialize(() => store.delete(job.id));
       cleanupFiles(job.id);
       retryUntil.delete(job.id);
     }
   }
+  // Owed results deliver as ONE bundled wake per agent+lane per tick, oldest
+  // first: a busy lane accumulates results all day, and waking it once per
+  // result floods it the moment it goes idle (Oct 8: 139 single-result turns
+  // to one lane between 22:03 and 00:31). Jobs started inside quiet hours
+  // deliver normally; results owed from before the window hold until 05:00 ET.
+  const owed = new Map<string, { agentId: string; lane: string; jobs: Job[] }>();
+  for (const job of jobs) {
+    if (!job.wakeText || job.state === 'running' || delivering.has(job.id)) continue;
+    if ((retryUntil.get(job.id) ?? 0) > now) continue;
+    if (heldForQuietHours(job, now)) continue;
+    const key = `${job.agentId}\u0000${job.lane ?? 'bg'}`;
+    const group = owed.get(key) ?? { agentId: job.agentId, lane: job.lane ?? 'bg', jobs: [] };
+    group.jobs.push(job);
+    owed.set(key, group);
+  }
+  for (const group of owed.values()) {
+    if (deliveringAgent.has(group.agentId)) continue;
+    const bundle = group.jobs.sort((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0)).slice(0, WAKE_BUNDLE_MAX);
+    for (const job of bundle) delivering.add(job.id);
+    deliveringAgent.add(group.agentId);
+    void deliverBundle(group.agentId, bundle).finally(() => {
+      for (const job of bundle) delivering.delete(job.id);
+      deliveringAgent.delete(group.agentId);
+    });
+  }
   // Scopes whose job had already ended but which still held processes when we
   // first tried. Keyed by unit, so a record deleted above is still cleaned up.
   for (const unit of [...pendingRelease.keys()].slice(0, RELEASE_PER_TICK)) await releaseUnit(unit);
 }
 
-/** Deliver the owed result. On failure (agent busy past the admission wait,
- *  engine down) the exact text stays on the record and retries each minute. */
-async function deliver(job: Job): Promise<void> {
+/** Clear wakeText on a delivered bundle in ONE atomic store write. If any
+ *  write could land partially, a later retry would re-deliver the records
+ *  already cleared — exactly the duplicate the bundle exists to prevent. */
+async function clearDelivered(jobs: Job[]): Promise<void> {
+  const ids = new Set(jobs.map((job) => job.id));
+  await store.modify((items) =>
+    items.map((item) => (ids.has(item.id) ? { ...item, wakeText: undefined } : item))
+  );
+}
+
+/** Deliver owed results as one wake. On failure (agent busy past the
+ *  admission wait, engine down) the exact text stays on each record and the
+ *  bundle retries after RETRY_MS. */
+async function deliverBundle(agentId: string, jobs: Job[]): Promise<void> {
+  const names = jobs.map((job) => `"${job.name}"`).join(', ');
   try {
-    const agent = listAgents().find((a) => a.id === job.agentId);
+    const agent = listAgents().find((a) => a.id === agentId);
     if (!agent) {
-      await serialize(() => store.update(job.id, { wakeText: undefined }));
+      await clearDelivered(jobs);
       return;
     }
-    const result = await sendToAgentHome(agent, job.wakeText!, {
-      peerFrom: `⏱ ${job.name}`,
+    const text = jobs.map((job) => job.wakeText!).join('\n\n');
+    const result = await sendToAgentHome(agent, text, {
+      peerFrom: jobs.length === 1 ? `⏱ ${jobs[0].name}` : `⏱ ${jobs.length} finished jobs`,
       peerFromRole: 'automation',
-      peerText: visibleWakeText(job.wakeText!),
-      lane: job.lane === 'main' ? 'main' : 'bg',
+      peerText: visibleWakeText(text),
+      lane: jobs[0].lane === 'main' ? 'main' : 'bg',
     });
     if (result.delivered) {
-      await serialize(() => store.update(job.id, { wakeText: undefined }));
-      retryUntil.delete(job.id);
-      console.log(`[jobs] "${job.name}" (${job.state}) → woke ${agent.name}`);
+      await clearDelivered(jobs);
+      for (const job of jobs) retryUntil.delete(job.id);
+      console.log(`[jobs] ${names} (${jobs[0].state}${jobs.length > 1 ? ` +${jobs.length - 1} more` : ''}) → woke ${agent.name}`);
       return;
     }
-    retryUntil.set(job.id, Date.now() + RETRY_MS);
-    console.warn(`[jobs] "${job.name}": result not delivered (${result.reason}); will retry`);
+    for (const job of jobs) retryUntil.set(job.id, Date.now() + RETRY_MS);
+    console.warn(`[jobs] ${names}: result not delivered (${result.reason}); will retry`);
   } catch (err) {
-    retryUntil.set(job.id, Date.now() + RETRY_MS);
-    console.warn(`[jobs] "${job.name}": delivery failed:`, (err as Error).message);
+    for (const job of jobs) retryUntil.set(job.id, Date.now() + RETRY_MS);
+    console.warn(`[jobs] ${names}: delivery failed:`, (err as Error).message);
   }
 }
 
