@@ -26,7 +26,7 @@ export function DeskRefPill({ target }: { target: DeskRef }) {
   const live = flags.deskRoom;
   const noun = target.kind === 'card' ? 'Card' : 'Needs-you item';
   const title = card?.title ?? todo?.title ?? (gone ? `${noun} removed` : target.id);
-  const done = card ? card.column === 'done' : todo?.status === 'done';
+  const done = card ? card.column === 'in_production' : todo?.status === 'done';
   const where = card
     ? `${data?.columns.find((c) => c.key === card.column)?.title ?? card.column} · ${card.owner.name}`
     : todo ? (todo.status === 'done' ? 'Needs you · done' : 'Needs you') : '';

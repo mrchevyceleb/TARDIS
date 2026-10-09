@@ -146,7 +146,7 @@ export function Desk() {
         </button>
         <button type="button" role="tab" aria-selected={tab === 'board'} onClick={() => setTab('board')}>
           <LayoutGrid size={15} aria-hidden="true" /> Board
-          {liveCards.length ? <span className="desk-count is-quiet">{liveCards.filter((c) => c.column !== 'done').length}</span> : null}
+          {liveCards.length ? <span className="desk-count is-quiet">{liveCards.filter((c) => c.column !== 'in_production').length}</span> : null}
         </button>
       </div>
 
