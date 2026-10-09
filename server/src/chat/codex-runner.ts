@@ -789,13 +789,30 @@ export class CodexSession {
 
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
     // login; a per-agent pin (RIVENDELL_AGENT_ACCOUNTS) comes next; everything else
-    // keeps the per-repo account-map resolution.
-    const forcedAccount = accountFromChatId(this.chatId) ?? accountForAgent(laneName);
+    // keeps the per-repo account-map resolution. A pin that cannot be honored
+    // throws, so resolve inside a guard that unwedges the session instead of
+    // dying with busy still set (mirrors the config-lock failure path above).
+    let codexSpawnEnv: NodeJS.ProcessEnv;
+    try {
+      const forcedAccount = accountFromChatId(this.chatId) ?? accountForAgent(laneName);
+      codexSpawnEnv = forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd);
+    } catch (err) {
+      cleanupImages();
+      this.busy = false;
+      this.emit({
+        type: 'error',
+        code: 'CODEX_ACCOUNT_PIN_UNAVAILABLE',
+        retryable: true,
+        message: `account pin unavailable: ${(err as Error).message}`,
+      });
+      this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
+      return;
+    }
     const turnStartedAtMs = Date.now();
     const child = spawn(process.execPath, [CODEX_APP_TURN_SCRIPT], {
       cwd: this.cwd,
       // The marker tells the installed long-call gate hook this is a TARDIS agent turn.
-      env: { ...(forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd)), ...longCallGateEnv(this.chatId) },
+      env: { ...codexSpawnEnv, ...longCallGateEnv(this.chatId) },
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
