@@ -66,6 +66,7 @@ scripts/                   startup, Tailscale, PWA and native icons, Windows han
 - A new API belongs in `server/src/routes/`, is mounted in `server/src/index.ts`, and is mirrored in `src/data/api.ts`.
 - UI work should remain responsive, tactile, and accessible.
 - The native shells stay thin: no server code, no state beyond the server address and window chrome. Behaviour belongs in the web app.
+- Install dependencies with `npm ci` at the repo root only, never inside `server/`: `server/` has no lockfile of its own, so npm runs a server-scoped install against the root workspace and replaces the root `node_modules` hoist.
 - Linked computers are the one exception: the desktop app executes on its own machine. It always dials out, and the machine's own user approves each command or out-of-workspace file. Credential paths are refused in the shell, not the server.
 
 ## Open-source safety
