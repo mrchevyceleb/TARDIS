@@ -62,7 +62,11 @@ const MAX_LINES = 10;
 const MAX_SENDS_PER_TICK = 4;
 const TITLE_MAX = 80;
 
+// Only Kip and Max create, move or update cards (Matt, Oct 9 2026). Every nudge
+// to anyone else reports movement instead of telling them to touch the board.
+const BOARD_MUTATORS = new Set(['kip', 'chief-of-staff']);
 const STALE_HEAD = 'These Desk cards look stale. Move or update each one now (board_card_move / board_card_comment), or tell me why not.\nParking in Pipeline is not a way to clear this list.';
+const STALE_HEAD_REPORT = 'These Desk cards look stale. Report movement for each one to Kip (Rally) or Max via team_message (what moved, and where it stands), or tell me why not.';
 
 const PIPELINE_HEAD = 'Pipeline is only for work blocked outside the team or parked by Matt. For each card: restart it (Up next), finish it (Done: shipped is Done, owed proof is not a reason to keep a card open), hand it to whoever has the ball (board_card_update owner), or close it as Done if it\'s a duplicate or dead. Re-parking needs a new reason and what restarts it.';
 
@@ -237,7 +241,7 @@ function cleanTitle(title: string): string {
   return flat.length > TITLE_MAX ? `${flat.slice(0, TITLE_MAX - 3).trimEnd()}...` : flat;
 }
 
-function composeMessage(finding: Finding, ownerName: string, nowMs: number): string {
+function composeMessage(finding: Finding, ownerName: string, nowMs: number, recipientId: string): string {
   const blocks: string[] = [];
   if (finding.stale.length) {
     const lines = finding.stale.slice(0, MAX_LINES).map(({ card, kind, lastMs }) => {
@@ -247,7 +251,7 @@ function composeMessage(finding: Finding, ownerName: string, nowMs: number): str
       return `[desk:${card.id}] "${cleanTitle(card.title)}" (${why})`;
     });
     if (finding.stale.length > MAX_LINES) lines.push(`+${finding.stale.length - MAX_LINES} more`);
-    blocks.push([STALE_HEAD, ...lines].join('\n'));
+    blocks.push([BOARD_MUTATORS.has(recipientId) ? STALE_HEAD : STALE_HEAD_REPORT, ...lines].join('\n'));
   }
   if (finding.pipeline.length) {
     const lines = finding.pipeline.slice(0, MAX_LINES).map(({ card, lastMs }) =>
@@ -256,7 +260,9 @@ function composeMessage(finding: Finding, ownerName: string, nowMs: number): str
     blocks.push([PIPELINE_HEAD, ...lines].join('\n'));
   }
   if (finding.noCardMinutes !== null) {
-    blocks.push(`You have had live turns for ${finding.noCardMinutes} minutes today and own no In progress card. If any of that was task work, create or reuse a card (board_cards first) so the Desk shows what you are on. If it was only conversation, no card is needed.`);
+    blocks.push(BOARD_MUTATORS.has(recipientId)
+      ? `You have had live turns for ${finding.noCardMinutes} minutes today and own no In progress card. If any of that was task work, create or reuse a card (board_cards first) so the Desk shows what you are on. If it was only conversation, no card is needed.`
+      : `You have had live turns for ${finding.noCardMinutes} minutes today and own no In progress card. If any of that was task work, report it to Kip (Rally) or Max via team_message so the Desk shows what you are on. If it was only conversation, no card is needed.`);
   }
   return blocks.join('\n\n');
 }
@@ -530,7 +536,7 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
       dirty = true;
       report.checked.push(id);
       if (!agent || !finding) continue;
-      const text = composeMessage(finding, deps.ownerName, nowMs);
+      const text = composeMessage(finding, deps.ownerName, nowMs, agent.id);
       const counts = `stale=${finding.stale.filter((s) => s.kind === 'in_progress').length} waiting=${finding.stale.filter((s) => s.kind === 'waiting').length} minutes=${state.minutes[id] ?? 0} nocard=${finding.noCardMinutes !== null ? 'yes' : 'no'}${pipelineReview ? ` pipeline=${finding.pipeline.length}` : ''}`;
       const cards = [...finding.stale, ...finding.pipeline].map((s) => s.card.id).join(',') || '-';
       sends += 1;
