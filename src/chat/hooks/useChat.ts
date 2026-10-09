@@ -769,7 +769,11 @@ function pendingSteersFor(key: string): PendingSteer[] {
 // v10: a device that was away longer than the server's replay window was caught
 // up from the tail only, so its snapshot has a silent hole (and its cursor sits
 // at head, so nothing will ever fill it). Drop those copies once.
-const CHAT_CACHE_VERSION = 'v10';
+// v11: same class, different writer — clients that adopted a ready frame's
+// latestSeq assertion as coverage (deduped hello, no replay) saved head
+// cursors over holed blocks. The writer is fixed below; bump once to purge
+// every copy poisoned before the fix (Trenzalore, Oct 9 2026).
+const CHAT_CACHE_VERSION = 'v11';
 
 function blocksStorageKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
   // Browser snapshots are disposable; transcript history remains on the server.
@@ -1597,12 +1601,15 @@ export function useChat(opts: {
           lastSeqRef.current = msg.seq;
           noteAppliedSeq(msg.seq);
         }
-        if (typeof msg.latestSeq === 'number' && msg.latestSeq > lastSeqRef.current) {
-          lastSeqRef.current = msg.latestSeq;
-          // `latestSeq` is emitted only after hello replay has sent every
-          // durable event through that boundary, so it is safe to commit.
-          noteAppliedSeq(msg.latestSeq);
-        }
+        // `latestSeq` is a server head ASSERTION, not coverage: a deduped
+        // hello (focus reconcile inside HELLO_DEDUPE_MS) is answered ready
+        // WITHOUT any replay, so adopting its latestSeq would jump this
+        // cursor to head over blocks that never saw the intervening events —
+        // every one of them is then discarded by the guard above and the
+        // persisted snapshot saves a hole nothing can ever fill (Trenzalore,
+        // Oct 9 2026). The cursor therefore advances ONLY on event seqs this
+        // socket actually received; a trailing control-frame tail is simply
+        // replayed (and deduped) on the next connect.
         if (msg.type === 'working') {
           // First authoritative busy report on this socket: from here a
           // 'streaming' status is server-confirmed, not reconnect-kept.
