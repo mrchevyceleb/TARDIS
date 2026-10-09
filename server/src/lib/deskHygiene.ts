@@ -10,7 +10,8 @@
 // that work. The 10:00 slot also reviews that agent's Pipeline cards with no
 // activity for 3+ days. Outside the slots, an agent whose lane has been quiet
 // for 20+ minutes while it owns Up next work gets one idle pickup message an
-// hour, any hour, pointing at its top Up next card. Silent when nothing
+// hour outside quiet hours (22:00-05:00 America/New_York: delayed, not
+// dropped; the first tick after 05:00 delivers). Silent when nothing
 // qualifies. The human owner is never messaged, and cards they own are never
 // listed.
 //
@@ -43,6 +44,11 @@ const PIPELINE_SLOT_HOUR = 10;
 const IDLE_QUIET_MS = 20 * 60_000;
 /** At most one idle pickup per agent per hour. */
 const IDLE_RESEND_MS = 60 * 60_000;
+/** Idle pickup quiet hours, Eastern minute of day: no sends 22:00-05:00 ET
+ *  (Matt, Oct 8 2026). Delayed, not dropped: the nudge state keeps aging, so
+ *  the first tick after 05:00 delivers if the lane is still due. */
+const IDLE_QUIET_FROM_MIN = 22 * 60;
+const IDLE_QUIET_TO_MIN = 5 * 60;
 const MAX_LINES = 10;
 /** Deliveries per tick, so one slot never eats the team's shared per-minute
  *  handoff budget (teamBus allows 20 a minute across everyone). */
@@ -552,11 +558,14 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
     }
   }
 
-  // Idle pickup, any hour: one message an hour to an agent whose lane has
-  // been quiet for 20+ minutes while it owns Up next work. Skipped while a
-  // slot sweep is still delivering, so an agent never gets two Desk messages
-  // in the same minute.
-  if (!state.pending?.agents.length) {
+  // Idle pickup, one an hour outside quiet hours (22:00-05:00 ET): one message
+  // an hour to an agent whose lane has been quiet for 20+ minutes while it
+  // owns Up next work. Skipped while a slot sweep is still delivering, so an
+  // agent never gets two Desk messages in the same minute. During quiet hours
+  // nothing sends; the resend clock keeps running, so the nudge lands on the
+  // first tick after 05:00 ET rather than being lost.
+  const idleQuiet = clock.minute >= IDLE_QUIET_FROM_MIN || clock.minute < IDLE_QUIET_TO_MIN;
+  if (!state.pending?.agents.length && !idleQuiet) {
     const due = agents.filter((a) =>
       nowMs - (state.lastBusy[a.id] ?? nowMs) >= IDLE_QUIET_MS
       && nowMs - (state.lastIdleNudge[a.id] ?? 0) >= IDLE_RESEND_MS);
