@@ -582,11 +582,11 @@ function pruneCards(data: DeskData): void {
   if (data.cards.length < DESK_LIMITS.cards) return;
   const referenced = new Set(data.todos.filter((t) => t.cardId).map((t) => t.cardId));
   const finished = data.cards
-    .filter((c) => c.column === 'done' && !referenced.has(c.id))
+    .filter((c) => c.column === 'in_production' && !referenced.has(c.id))
     .sort((a, b) => Number(Boolean(b.archived)) - Number(Boolean(a.archived)) || a.updatedAt.localeCompare(b.updatedAt));
   const drop = new Set(finished.slice(0, data.cards.length - DESK_LIMITS.cards + 1).map((c) => c.id));
   data.cards = data.cards.filter((c) => !drop.has(c.id));
-  if (data.cards.length >= DESK_LIMITS.cards) throw new DeskError(409, 'The board is full; move finished cards to Done or archive them first.');
+  if (data.cards.length >= DESK_LIMITS.cards) throw new DeskError(409, 'The board is full; move finished cards to Live in production or archive them first.');
 }
 
 /** Case- and spacing-insensitive title key; punctuation still counts, so
@@ -787,7 +787,7 @@ export function createCard(input: CardInput, owner: DeskActor, by: DeskActor, op
   return mutate((data, now) => {
     if (opts.dedupe) {
       const wanted = normalizeTitleKey(requireTitle(input.title));
-      const dupe = wanted ? data.cards.find((c) => !c.archived && c.column !== 'done' && normalizeTitleKey(c.title) === wanted) : undefined;
+      const dupe = wanted ? data.cards.find((c) => !c.archived && c.column !== 'in_production' && normalizeTitleKey(c.title) === wanted) : undefined;
       if (dupe) throw new DeskError(409, `${DUPLICATE_CARD_PREFIX}: [${dupe.id}] ${dupe.title} (owner ${dupe.owner.name}, ${dupe.column}).`);
     }
     const card: DeskCard = {

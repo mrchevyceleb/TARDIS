@@ -129,11 +129,11 @@ export function itemPayload(todo: DeskTodo, kind: 'push' | 'renudge', baseUrl: s
   };
 }
 
-/** A high item whose card is parked in Pipeline is not asking for the owner
+/** A high item whose card is parked in Not started is not asking for the owner
  *  right now: no push, no re-nudge, no high rank in a digest. */
 export function isParkedHigh(todo: DeskTodo, cards: DeskCard[]): boolean {
   if (todo.priority !== 'high' || !todo.cardId) return false;
-  return cards.find((c) => c.id === todo.cardId)?.column === 'pipeline';
+  return cards.find((c) => c.id === todo.cardId)?.column === 'not_started';
 }
 
 /** Count, then the top three (high first, then oldest), then "+N more". Parked

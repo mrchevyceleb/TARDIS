@@ -224,7 +224,7 @@ async function deskCardHits(queryTokens: ReadonlySet<string>): Promise<RecallHit
   const hits: RecallHit[] = [];
   for (const card of desk.cards ?? []) {
     if (!card || card.archived) continue;
-    if (card.column === 'done') {
+    if (card.column === 'in_production') {
       const since = Date.parse(card.columnSince ?? '') || Date.parse(card.updatedAt ?? '') || 0;
       if (since < cutoff) continue;
     }

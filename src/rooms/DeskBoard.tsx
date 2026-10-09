@@ -95,7 +95,7 @@ export function useCardMover() {
   return async (desk: DeskSnapshot, id: string, column: DeskColumn, beforeId: string | null = null) => {
     const peers = desk.cards.filter((c) => c.column === column && !c.archived && c.id !== id);
     const found = beforeId ? peers.findIndex((c) => c.id === beforeId) : -1;
-    const index = found >= 0 ? found : beforeId === null && column !== 'done' ? peers.length : 0;
+    const index = found >= 0 ? found : beforeId === null && column !== 'in_production' ? peers.length : 0;
     try {
       await write(() => deskApi.moveCard(id, column, index), (d) => moveLocal(d, id, column, index));
     } catch (error) {
@@ -185,7 +185,7 @@ export function DeskBoard({ desk, agents, onOpenCard }: Props) {
 
   const renderColumnCards = (column: DeskColumn) => {
     const cards = byColumn.get(column) ?? [];
-    const shown = column === 'done' && !showAllDone ? cards.slice(0, DONE_PREVIEW) : cards;
+    const shown = column === 'in_production' && !showAllDone ? cards.slice(0, DONE_PREVIEW) : cards;
     return (
       <>
         {shown.length ? shown.map((card) => (
@@ -195,7 +195,7 @@ export function DeskBoard({ desk, agents, onOpenCard }: Props) {
         )) : (
           <div className="column-empty desk-col-empty">{emptyCopy(column, filtered)}</div>
         )}
-        {column === 'done' && cards.length > DONE_PREVIEW ? (
+        {column === 'in_production' && cards.length > DONE_PREVIEW ? (
           <button type="button" className="desk-more" onClick={() => setShowAllDone((v) => !v)}>
             {showAllDone ? 'Show fewer' : `Show all ${cards.length}`}
           </button>
