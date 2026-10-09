@@ -30,14 +30,16 @@ import './myDesk.css';
 /** How many rows each list shows before "N more on the Desk". */
 export type MyDeskLimits = { todos: number; cards: number };
 
-const COLUMN_RANK: Record<DeskColumn, number> = { waiting: 0, in_progress: 1, up_next: 2, pipeline: 3, done: 4 };
+const COLUMN_RANK: Record<DeskColumn, number> = { in_progress: 0, not_started: 1, in_qa: 2, on_staging: 3, in_production: 4 };
 /** How long a checked row lingers (struck through) before it leaves the list. */
 const LEAVE_MS = 420;
 
-/** Cards that are the owner's, plus any waiting on the owner's call. */
+/** Cards that are the owner's, plus any with an open Needs-you item (the
+ * five-stage board's needs-Matt flag: waiting is now a card state, not a column). */
 export function myCards(desk: DeskSnapshot): DeskCard[] {
+  const needsMatt = new Set(desk.todos.filter((t) => t.status === 'open' && t.cardId).map((t) => t.cardId as string));
   return desk.cards
-    .filter((c) => !c.archived && c.column !== 'done' && (c.owner.kind === 'owner' || c.column === 'waiting'))
+    .filter((c) => !c.archived && c.column !== 'in_production' && (c.owner.kind === 'owner' || needsMatt.has(c.id)))
     .sort((a, b) =>
       COLUMN_RANK[a.column] - COLUMN_RANK[b.column]
       || PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]

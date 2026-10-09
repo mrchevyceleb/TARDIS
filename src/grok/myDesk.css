@@ -173,9 +173,10 @@
   box-shadow: 0 8px 18px rgba(0, 0, 0, 0.22);
 }
 .md-card:active { transform: scale(0.985); }
-.md-card[data-col='pipeline'] { --md-accent: var(--r-amber); }
-.md-card[data-col='up_next'] { --md-accent: var(--r-silver); }
-.md-card[data-col='waiting'] { --md-accent: var(--r-rose); }
+.md-card[data-col='not_started'] { --md-accent: var(--r-amber); }
+.md-card[data-col='in_qa'] { --md-accent: var(--r-silver); }
+.md-card[data-col='on_staging'] { --md-accent: var(--r-rose); }
+.md-card[data-col='in_production'] { --md-accent: var(--r-emerald); }
 .md-card-dot {
   flex: none; width: 8px; height: 8px; margin-top: 5px; border-radius: 50%;
   background: var(--md-accent); box-shadow: 0 0 8px var(--md-accent);

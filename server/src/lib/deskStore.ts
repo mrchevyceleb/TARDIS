@@ -10,7 +10,10 @@ import { copyFile, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promi
 import { dirname } from 'node:path';
 import { DESK_FILE } from '../config.ts';
 
-export const DESK_COLUMNS = ['pipeline', 'up_next', 'in_progress', 'waiting', 'done'] as const;
+// Matt's five stages (2026-10-09). Old ids (pipeline, up_next, waiting, done)
+// are accepted as aliases for one release via COLUMN_ALIASES; stored cards
+// migrate lazily through parseColumn's read-repair on load.
+export const DESK_COLUMNS = ['not_started', 'in_progress', 'in_qa', 'on_staging', 'in_production'] as const;
 export type DeskColumn = (typeof DESK_COLUMNS)[number];
 export const DESK_PRIORITIES = ['low', 'normal', 'high'] as const;
 export type DeskPriority = (typeof DESK_PRIORITIES)[number];
@@ -99,11 +102,13 @@ export class DeskError extends Error {
 // ---- normalisers (shared by input validation and on-disk repair) -----------
 
 const COLUMN_ALIASES: Record<string, DeskColumn> = {
-  pipeline: 'pipeline', parked: 'pipeline', backlog: 'pipeline', later: 'pipeline',
-  up_next: 'up_next', upnext: 'up_next', next: 'up_next', todo: 'up_next',
+  not_started: 'not_started', notstarted: 'not_started', pipeline: 'not_started', parked: 'not_started', backlog: 'not_started', later: 'not_started',
+  up_next: 'not_started', upnext: 'not_started', next: 'not_started', todo: 'not_started',
   in_progress: 'in_progress', inprogress: 'in_progress', doing: 'in_progress', active: 'in_progress', working: 'in_progress',
-  waiting: 'waiting', waiting_on_matt: 'waiting', waiting_on_owner: 'waiting', blocked: 'waiting', needs_you: 'waiting',
-  done: 'done', complete: 'done', completed: 'done', shipped: 'done',
+  waiting: 'in_progress', waiting_on_matt: 'in_progress', waiting_on_owner: 'in_progress', blocked: 'in_progress', needs_you: 'in_progress',
+  in_qa: 'in_qa', inqa: 'in_qa', qa: 'in_qa', sud: 'in_qa',
+  on_staging: 'on_staging', onstaging: 'on_staging', staging: 'on_staging', merged: 'on_staging', merged_to_staging: 'on_staging',
+  in_production: 'in_production', inproduction: 'in_production', production: 'in_production', live: 'in_production', done: 'in_production', complete: 'in_production', completed: 'in_production', shipped: 'in_production',
 };
 
 export function parseColumn(value: unknown): DeskColumn | null {
@@ -284,7 +289,7 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     id,
     title,
     owner,
-    column: parseColumn(raw.column) ?? 'pipeline',
+    column: parseColumn(raw.column) ?? 'not_started',
     priority: parsePriority(raw.priority) ?? 'normal',
     links: Array.isArray(raw.links)
       ? raw.links.map(parseLink).filter((l): l is string => Boolean(l)).slice(0, DESK_LIMITS.links)
@@ -577,11 +582,11 @@ function pruneCards(data: DeskData): void {
   if (data.cards.length < DESK_LIMITS.cards) return;
   const referenced = new Set(data.todos.filter((t) => t.cardId).map((t) => t.cardId));
   const finished = data.cards
-    .filter((c) => c.column === 'done' && !referenced.has(c.id))
+    .filter((c) => c.column === 'in_production' && !referenced.has(c.id))
     .sort((a, b) => Number(Boolean(b.archived)) - Number(Boolean(a.archived)) || a.updatedAt.localeCompare(b.updatedAt));
   const drop = new Set(finished.slice(0, data.cards.length - DESK_LIMITS.cards + 1).map((c) => c.id));
   data.cards = data.cards.filter((c) => !drop.has(c.id));
-  if (data.cards.length >= DESK_LIMITS.cards) throw new DeskError(409, 'The board is full; move finished cards to Done or archive them first.');
+  if (data.cards.length >= DESK_LIMITS.cards) throw new DeskError(409, 'The board is full; move finished cards to Live in production or archive them first.');
 }
 
 /** Case- and spacing-insensitive title key; punctuation still counts, so
@@ -782,14 +787,14 @@ export function createCard(input: CardInput, owner: DeskActor, by: DeskActor, op
   return mutate((data, now) => {
     if (opts.dedupe) {
       const wanted = normalizeTitleKey(requireTitle(input.title));
-      const dupe = wanted ? data.cards.find((c) => !c.archived && c.column !== 'done' && normalizeTitleKey(c.title) === wanted) : undefined;
+      const dupe = wanted ? data.cards.find((c) => !c.archived && c.column !== 'in_production' && normalizeTitleKey(c.title) === wanted) : undefined;
       if (dupe) throw new DeskError(409, `${DUPLICATE_CARD_PREFIX}: [${dupe.id}] ${dupe.title} (owner ${dupe.owner.name}, ${dupe.column}).`);
     }
     const card: DeskCard = {
       id: newId('card', (id) => data.cards.some((c) => c.id === id)),
       title: requireTitle(input.title),
       owner,
-      column: input.column === undefined || input.column === '' ? 'up_next' : requireColumn(input.column),
+      column: input.column === undefined || input.column === '' ? 'not_started' : requireColumn(input.column),
       priority: input.priority === undefined || input.priority === '' ? 'normal' : requirePriority(input.priority),
       links: requireLinks(input.links),
       comments: [],

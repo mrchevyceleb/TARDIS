@@ -10,11 +10,11 @@
 
 /* column accents (board, list groups, picker, drawer) */
 .desk-room [data-col], .desk-drawer[data-col] { --column-accent: var(--r-gold); --column-wash: rgba(217, 168, 90, 0.12); }
-.desk-room [data-col='pipeline'], .desk-drawer[data-col='pipeline'] { --column-accent: var(--r-amber); --column-wash: rgba(224, 138, 60, 0.13); }
-.desk-room [data-col='up_next'], .desk-drawer[data-col='up_next'] { --column-accent: var(--r-silver); --column-wash: rgba(184, 178, 164, 0.12); }
+.desk-room [data-col='not_started'], .desk-drawer[data-col='not_started'] { --column-accent: var(--r-amber); --column-wash: rgba(224, 138, 60, 0.13); }
 .desk-room [data-col='in_progress'], .desk-drawer[data-col='in_progress'] { --column-accent: var(--r-gold); --column-wash: rgba(217, 168, 90, 0.14); }
-.desk-room [data-col='waiting'], .desk-drawer[data-col='waiting'] { --column-accent: var(--r-rose); --column-wash: rgba(204, 71, 68, 0.12); }
-.desk-room [data-col='done'], .desk-drawer[data-col='done'] { --column-accent: var(--r-emerald); --column-wash: rgba(111, 168, 135, 0.12); }
+.desk-room [data-col='in_qa'], .desk-drawer[data-col='in_qa'] { --column-accent: var(--r-silver); --column-wash: rgba(184, 178, 164, 0.12); }
+.desk-room [data-col='on_staging'], .desk-drawer[data-col='on_staging'] { --column-accent: var(--r-rose); --column-wash: rgba(204, 71, 68, 0.12); }
+.desk-room [data-col='in_production'], .desk-drawer[data-col='in_production'] { --column-accent: var(--r-emerald); --column-wash: rgba(111, 168, 135, 0.12); }
 
 /* ---------- tabs + counters ---------- */
 .desk-tabs {

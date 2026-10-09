@@ -40,11 +40,11 @@ const DONE_PREVIEW = 12;
 const STALE_HOURS = 48;
 
 export const COLUMN_DETAIL: Record<DeskColumn, string> = {
-  pipeline: 'Parked or not started',
-  up_next: 'Queued to start',
+  not_started: 'Parked or not started',
   in_progress: 'Being worked now',
-  waiting: 'Blocked on your call',
-  done: 'Finished',
+  in_qa: 'Waiting on Sud QA',
+  on_staging: 'Merged, staging checks next',
+  in_production: 'Live in production',
 };
 
 function readFilters(): Filters {
@@ -95,7 +95,7 @@ export function useCardMover() {
   return async (desk: DeskSnapshot, id: string, column: DeskColumn, beforeId: string | null = null) => {
     const peers = desk.cards.filter((c) => c.column === column && !c.archived && c.id !== id);
     const found = beforeId ? peers.findIndex((c) => c.id === beforeId) : -1;
-    const index = found >= 0 ? found : beforeId === null && column !== 'done' ? peers.length : 0;
+    const index = found >= 0 ? found : beforeId === null && column !== 'in_production' ? peers.length : 0;
     try {
       await write(() => deskApi.moveCard(id, column, index), (d) => moveLocal(d, id, column, index));
     } catch (error) {
@@ -185,7 +185,7 @@ export function DeskBoard({ desk, agents, onOpenCard }: Props) {
 
   const renderColumnCards = (column: DeskColumn) => {
     const cards = byColumn.get(column) ?? [];
-    const shown = column === 'done' && !showAllDone ? cards.slice(0, DONE_PREVIEW) : cards;
+    const shown = column === 'in_production' && !showAllDone ? cards.slice(0, DONE_PREVIEW) : cards;
     return (
       <>
         {shown.length ? shown.map((card) => (
@@ -195,7 +195,7 @@ export function DeskBoard({ desk, agents, onOpenCard }: Props) {
         )) : (
           <div className="column-empty desk-col-empty">{emptyCopy(column, filtered)}</div>
         )}
-        {column === 'done' && cards.length > DONE_PREVIEW ? (
+        {column === 'in_production' && cards.length > DONE_PREVIEW ? (
           <button type="button" className="desk-more" onClick={() => setShowAllDone((v) => !v)}>
             {showAllDone ? 'Show fewer' : `Show all ${cards.length}`}
           </button>
@@ -236,7 +236,7 @@ export function DeskBoard({ desk, agents, onOpenCard }: Props) {
             <X size={13} aria-hidden="true" /> Clear
           </button>
         ) : null}
-        <Button tone="gold" className="desk-new-btn" onClick={() => setCreating((c) => (c ? null : isMobile ? mobileColumn : 'up_next'))}>
+        <Button tone="gold" className="desk-new-btn" onClick={() => setCreating((c) => (c ? null : isMobile ? mobileColumn : 'not_started'))}>
           <Plus size={15} /> New card
         </Button>
       </div>
@@ -316,21 +316,21 @@ export function DeskBoard({ desk, agents, onOpenCard }: Props) {
 function emptyCopy(column: DeskColumn, filtered: boolean): string {
   if (filtered) return 'Nothing here for this filter.';
   switch (column) {
-    case 'pipeline': return 'Nothing parked. Paused work lands here so it is not forgotten.';
-    case 'up_next': return 'Nothing queued.';
+    case 'not_started': return 'Nothing parked. Paused work lands here so it is not forgotten.';
     case 'in_progress': return 'No one is on a card right now.';
-    case 'waiting': return 'Nothing is waiting on you.';
-    default: return 'Nothing finished yet.';
+    case 'in_qa': return 'Nothing is in QA right now.';
+    case 'on_staging': return 'Nothing merged to staging yet.';
+    default: return 'Nothing live yet.';
   }
 }
 
 export function cardAge(card: DeskCard): { text: string; short: string; stale: boolean; title: string } {
-  if (card.column === 'pipeline') {
+  if (card.column === 'not_started') {
     const short = ageLabel(card.columnSince);
-    return { text: `parked ${short}`, short, stale: hoursSince(card.columnSince) > 24 * 7, title: `In Pipeline since ${new Date(card.columnSince).toLocaleString()}` };
+    return { text: `not started ${short}`, short, stale: hoursSince(card.columnSince) > 24 * 7, title: `In Not started since ${new Date(card.columnSince).toLocaleString()}` };
   }
   const quiet = hoursSince(card.updatedAt);
-  const active = card.column === 'up_next' || card.column === 'in_progress' || card.column === 'waiting';
+  const active = card.column === 'in_progress' || card.column === 'in_qa';
   const stale = active && !card.archived && quiet > STALE_HOURS;
   return {
     text: ageLabel(card.updatedAt),
@@ -387,8 +387,8 @@ function ColumnFreshness({ column, title, cards, picked, onPick }: {
     const id = window.setInterval(() => setMinute((n) => n + 1), 60_000);
     return () => window.clearInterval(id);
   }, []);
-  if (column === 'done' || !rows.length) return null;
-  const warms = column === 'in_progress' || column === 'waiting';
+  if (column === 'in_production' || !rows.length) return null;
+  const warms = column === 'in_progress';
   const shown = rows.slice(0, FRESH_MAX_CHIPS);
   return (
     <div className="desk-fresh" role="group" aria-label={`Latest card activity by owner in ${title}`}>

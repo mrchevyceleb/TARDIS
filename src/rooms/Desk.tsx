@@ -124,17 +124,15 @@ export function Desk() {
   }, [focusReq, data, dataUpdatedAt, errorUpdatedAt, isFetching, refetch, openCardId]);
   const openTodos = useMemo(() => sortOpenTodos((data?.todos ?? []).filter((t) => t.status === 'open')), [data]);
   const liveCards = useMemo(() => (data?.cards ?? []).filter((c) => !c.archived), [data]);
-  const moving = liveCards.filter((c) => c.column === 'in_progress' || c.column === 'up_next').length;
-  const parked = liveCards.filter((c) => c.column === 'pipeline').length;
-  const waiting = liveCards.filter((c) => c.column === 'waiting').length;
+  const moving = liveCards.filter((c) => c.column === 'in_progress').length;
+  const notStarted = liveCards.filter((c) => c.column === 'not_started').length;
   const openCard = openCardId ? data?.cards.find((c) => c.id === openCardId) ?? null : null;
 
   const subtitle = data
     ? [
         openTodos.length ? `${openTodos.length} need${openTodos.length === 1 ? 's' : ''} you` : 'Nothing needs you',
         `${moving} in motion`,
-        waiting ? `${waiting} waiting on you` : null,
-        parked ? `${parked} parked` : null,
+        notStarted ? `${notStarted} not started` : null,
       ].filter(Boolean).join(' · ')
     : 'Loading the desk';
 
@@ -148,7 +146,7 @@ export function Desk() {
         </button>
         <button type="button" role="tab" aria-selected={tab === 'board'} onClick={() => setTab('board')}>
           <LayoutGrid size={15} aria-hidden="true" /> Board
-          {liveCards.length ? <span className="desk-count is-quiet">{liveCards.filter((c) => c.column !== 'done').length}</span> : null}
+          {liveCards.length ? <span className="desk-count is-quiet">{liveCards.filter((c) => c.column !== 'in_production').length}</span> : null}
         </button>
       </div>
 
