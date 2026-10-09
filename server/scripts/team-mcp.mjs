@@ -31,6 +31,10 @@ const SERVER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'server-lo
 // The human the Desk's "Needs you" list belongs to.
 const OWNER = process.env.RIVENDELL_OWNER_NAME?.trim() || 'Matt';
 const DESK_COLUMNS = ['not_started', 'in_progress', 'in_qa', 'on_staging', 'in_production'];
+// Schema-facing list: old ids stay accepted for one release (the server's
+// COLUMN_ALIASES normalizes them), so a schema-validating MCP host must not
+// reject them before the call ever reaches the server.
+const DESK_COLUMN_ENUM = [...DESK_COLUMNS, 'pipeline', 'up_next', 'waiting', 'done'];
 const DESK_COLUMN_TITLES = { not_started: 'Not started', in_progress: 'In progress', in_qa: 'In QA (Sud)', on_staging: 'Merged to staging', in_production: 'Live in production' };
 const DESK_PRIORITIES = ['low', 'normal', 'high'];
 // Only lanes whose runner turns the call into a message (Claude) are told about reply_now.
@@ -388,7 +392,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         owner: { type: 'string', description: 'me, a teammate name, ' + OWNER + ', or all (default all)' },
-        column: { type: 'string', enum: DESK_COLUMNS },
+        column: { type: 'string', enum: DESK_COLUMN_ENUM },
         project: { type: 'string', description: 'Exact project, e.g. Operly' },
         includeDone: { type: 'boolean' },
         from: FROM_PROP,
@@ -416,7 +420,7 @@ const TOOLS = [
       properties: {
         title: { type: 'string', description: 'Short outcome-style title, e.g. "Submit Operly 2.2 to the App Store"' },
         description: { type: 'string', description: 'Goal, scope, and anything a teammate would need to pick it up' },
-        column: { type: 'string', enum: DESK_COLUMNS, description: 'Default in_progress' },
+        column: { type: 'string', enum: DESK_COLUMN_ENUM, description: 'Default in_progress' },
         owner: { type: 'string', description: 'Default you. A teammate name, or ' + OWNER + ' for work only they can do' },
         project: { type: 'string', description: 'Free text, e.g. Operly, Studio, TARDIS, Personal' },
         priority: { type: 'string', enum: DESK_PRIORITIES },
@@ -438,7 +442,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         id: { type: 'string' },
-        column: { type: 'string', enum: DESK_COLUMNS },
+        column: { type: 'string', enum: DESK_COLUMN_ENUM },
         note: { type: 'string', description: 'One line: why it moved' },
         from: FROM_PROP,
       },

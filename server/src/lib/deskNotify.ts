@@ -504,7 +504,7 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
     for (const todo of open) {
       if (todo.priority !== 'high') continue;
       if (isParkedHigh(todo, data.cards)) {
-        hold(`parked:${todo.id}`, `[desk-notify] ${todo.id} "${todo.title}" is parked (its card is in Pipeline): no push or re-nudge until the card moves`);
+        hold(`parked:${todo.id}`, `[desk-notify] ${todo.id} "${todo.title}" is parked (its card is in Not started): no push or re-nudge until the card moves`);
         continue;
       }
       heldLogged.delete(`parked:${todo.id}`);
