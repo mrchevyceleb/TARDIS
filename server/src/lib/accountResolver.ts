@@ -130,6 +130,42 @@ export function accountEnv(cwd: string): NodeJS.ProcessEnv {
   return env;
 }
 
+// Per-agent account pin (Matt, Oct 8 2026): named teammates run on their own
+// subscription (Riley and Tim on Matt's mjohnst Claude sub) instead of the shared
+// default. Format: RIVENDELL_AGENT_ACCOUNTS="riley=mjohnst,tim=mjohnst".
+// Resolved AFTER the explicit `__acct__` chatId pin and BEFORE the default, so a
+// lane-level pin always wins. Fail closed on config errors: a malformed pair
+// ("riley:mjohnst", "riley=") or duplicate agent key throws rather than letting
+// a typo silently route a pinned agent back onto the default/shared profile;
+// a well-formed pin whose account is missing from the map throws inside
+// accountEnvForAccount. With the env unset this is a no-op for every agent.
+export function accountForAgent(agentName: string | null | undefined): string | null {
+  const raw = process.env.RIVENDELL_AGENT_ACCOUNTS;
+  if (!agentName || !raw) return null;
+  const wanted = agentName.trim().toLowerCase();
+  if (!wanted) return null;
+  let match: string | null = null;
+  const seen = new Set<string>();
+  for (const pair of raw.split(',')) {
+    const eq = pair.indexOf('=');
+    const key = eq > 0 ? pair.slice(0, eq).trim().toLowerCase() : '';
+    const value = eq > 0 ? pair.slice(eq + 1).trim() : '';
+    if (!key || !value) {
+      throw new Error(
+        `[accountResolver] malformed RIVENDELL_AGENT_ACCOUNTS pair "${pair.trim()}" (expected name=account, e.g. riley=mjohnst); refusing to resolve agent account pins`,
+      );
+    }
+    if (seen.has(key)) {
+      throw new Error(
+        `[accountResolver] duplicate agent "${key}" in RIVENDELL_AGENT_ACCOUNTS; refusing an ambiguous account pin`,
+      );
+    }
+    seen.add(key);
+    if (key === wanted && match === null) match = value;
+  }
+  return match;
+}
+
 // Legacy/custom account-pinned chat lanes carry the chosen profile inside the
 // chatId as a `__acct__<account>` suffix. Here we pull it back out at spawn time so the
 // CLI launches under that exact account regardless of the repo path. The client

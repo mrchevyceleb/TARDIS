@@ -26,7 +26,7 @@ import { agentForChatId, noteAgentLane } from './agents.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { crashTombstoneEvent, crashTombstoneText, restartMarkerEvent } from './crashTombstone.ts';
 import { BACKGROUND_MODEL_HOLD_MINUTES, backgroundEndedGuidance, backgroundTaskLabel, backgroundWorkEvent, type BackgroundWorkCause } from './backgroundWork.ts';
-import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
+import { accountEnv, accountEnvForAccount, accountFromChatId, accountForAgent } from '../lib/accountResolver.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
@@ -807,8 +807,9 @@ class ClaudeSession {
     }
 
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
-    // login; everything else keeps the per-repo account-map resolution.
-    const forcedAccount = accountFromChatId(chatId);
+    // login; a per-agent pin (RIVENDELL_AGENT_ACCOUNTS) comes next; everything else
+    // keeps the per-repo account-map resolution.
+    const forcedAccount = accountFromChatId(chatId) ?? accountForAgent(agentForChatId(chatId)?.name);
     const spawnEnv = cli === 'xai' ? xaiEnv(this.spawnModel)
       : cli === 'zai' ? zaiEnv(this.spawnModel, zaiCredential!)
       : cli === 'fireworks' ? fireworksEnv(this.spawnModel)
