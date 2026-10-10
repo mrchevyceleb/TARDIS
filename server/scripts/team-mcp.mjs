@@ -30,7 +30,7 @@ const BASE = process.env.RIVENDELL_TEAM_URL || 'http://127.0.0.1:8091';
 const SERVER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'server-local';
 // The human the Desk's "Needs you" list belongs to.
 const OWNER = process.env.RIVENDELL_OWNER_NAME?.trim() || 'Matt';
-const DESK_COLUMNS = ['not_started', 'in_progress', 'in_qa', 'on_staging', 'in_production'];
+const DESK_COLUMNS = ['not_started', 'in_progress', 'on_staging', 'in_qa', 'in_production'];
 // Schema-facing list: old ids stay accepted for one release (the server's
 // COLUMN_ALIASES normalizes them), so a schema-validating MCP host must not
 // reject them before the call ever reaches the server.
@@ -386,7 +386,7 @@ const TOOLS = [
   {
     name: 'board_cards',
     description:
-      'List cards on the Desk board with ids, grouped by column (Not started, In progress, In QA (Sud), Merged to staging, Live in production). ' +
+      'List cards on the Desk board with ids, grouped by column (Not started, In progress, Merged to staging, In QA (Sud), Live in production). ' +
       'Call it BEFORE board_card_create so you reuse an existing card instead of making a duplicate, and when picking work back up. Live-in-production cards are hidden unless includeDone is true.',
     inputSchema: {
       type: 'object',
@@ -435,7 +435,7 @@ const TOOLS = [
   {
     name: 'board_card_move',
     description:
-      'Move a board card to another column: in_progress when you start, in_qa when it goes to Sud QA, on_staging when merged to staging, in_production when it is live and verified. ' +
+      'Move a board card to another column: in_progress when you start, on_staging when merged to staging, in_qa when it goes to Sud QA, in_production when it is live and verified. ' +
       'A card with an open Needs-you item carries its needs-' + OWNER + ' flag in any column. Old ids (pipeline, up_next, waiting, done) still work as aliases this release. ' +
       'The optional note is added as a comment.',
     inputSchema: {
