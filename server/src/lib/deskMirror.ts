@@ -95,8 +95,17 @@ async function pushBody(id: string, body: string): Promise<boolean> {
       body,
       signal: AbortSignal.timeout(8_000),
     }));
-    if (!res.ok) console.warn(`[desk-mirror] ${id} push failed: ${res.status}`);
-    return res.ok;
+    if (!res.ok) {
+      console.warn(`[desk-mirror] ${id} push failed: ${res.status}`);
+      return false;
+    }
+    // A 200 skip (stale delivery / not previously mirrored) is a delivered
+    // verdict, but it must never pass as silent success again (Max, Oct 10).
+    try {
+      const json = (await res.json()) as { skipped?: boolean; reason?: string };
+      if (json?.skipped) console.warn(`[desk-mirror] ${id} skipped: ${json.reason ?? 'unspecified'}`);
+    } catch { /* non-JSON body: nothing to report */ }
+    return true;
   } catch (err) {
     console.warn(`[desk-mirror] ${id} push error:`, (err as Error).message);
     return false;
