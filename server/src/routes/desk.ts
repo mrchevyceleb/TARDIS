@@ -31,6 +31,7 @@ import {
   type DeskComment,
   type DeskTodo,
 } from '../lib/deskStore.ts';
+import { mirrorAll } from '../lib/deskMirror.ts';
 
 export const deskRouter = Router();
 
@@ -209,6 +210,14 @@ deskRouter.get('/cards/:id', route(async (req, res) => {
   const card = cards.find((c) => c.id === id);
   if (!card) throw new DeskError(404, `No board card with id ${id}.`);
   res.json({ card, todos: todos.filter((t) => t.cardId === id) });
+}));
+
+// One-shot full sync of the Dev PR Tracker mirror (deploy receipt; localhost
+// like every other desk route). Pushes every live Rally-lane card once; cards
+// already pushed since boot are skipped.
+deskRouter.post('/mirror-sync', route(async (_req, res) => {
+  const { cards } = await readDesk();
+  res.json(await mirrorAll(cards));
 }));
 
 deskRouter.post('/cards', route(async (req, res) => {
