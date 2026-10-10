@@ -108,6 +108,9 @@ async function pushBody(id: string, body: string): Promise<boolean> {
 const mirrored = new Set<string>();
 // Latest payload per card; one drain chain per card delivers them in order.
 const pending = new Map<string, string>();
+// Per-card generation: only the newest generation's outcome may mark the id
+// mirrored, so an older in-flight success can never mask a newer failure.
+const generations = new Map<string, number>();
 const chains = new Map<string, Promise<void>>();
 
 function enqueue(card: DeskCard): void {
@@ -116,6 +119,7 @@ function enqueue(card: DeskCard): void {
   // create a row for one, so this is what closes a mirror when a card leaves
   // the lane — statelessly, including right after a restart.
   mirrored.delete(card.id);
+  generations.set(card.id, (generations.get(card.id) ?? 0) + 1);
   pending.set(card.id, payloadFor(card, !eligible));
   if (!chains.has(card.id)) chains.set(card.id, drain(card.id));
 }
@@ -125,8 +129,10 @@ function drain(id: string): Promise<void> {
     try {
       while (pending.has(id)) {
         const body = pending.get(id)!;
+        const generation = generations.get(id) ?? 0;
         pending.delete(id);
-        if (await pushBody(id, body)) mirrored.add(id);
+        const ok = await pushBody(id, body);
+        if (ok && (generations.get(id) ?? 0) === generation) mirrored.add(id);
       }
     } finally {
       chains.delete(id);
@@ -179,7 +185,9 @@ export async function mirrorAll(
         // closed by a stale set.
         const cutoff = new Date().toISOString();
         const fresh = await refetch();
-        const freshIds = fresh.filter((c) => mirrorEligible(c)).map((c) => c.id);
+        // Live cards only: an archived card's row must NOT be protected by
+        // the reconcile, so a failed tombstone gets repaired by it.
+        const freshIds = fresh.filter((c) => !c.archived && mirrorEligible(c)).map((c) => c.id);
         const res = await fetch(cfg.url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.secret}` },

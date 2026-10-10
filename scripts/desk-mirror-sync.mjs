@@ -84,12 +84,15 @@ try {
   // during the sweep can never be closed by a stale id set.
   const cutoff = new Date().toISOString();
   const freshRes = await fetch(DESK, { signal: AbortSignal.timeout(8_000) });
-  if (!freshRes.ok) { failed += 1; console.error(`fresh desk read failed: ${freshRes.status}`); }
-  const freshData = await freshRes.json().catch(() => null);
+  if (!freshRes.ok) { failed += 1; console.error(`fresh desk read failed: ${freshRes.status}; skipping reconcile`); }
+  // Live cards only: an archived card's row must NOT be protected by the
+  // reconcile, so a failed tombstone is repaired by it. A non-2xx or malformed
+  // fresh response never reconciles at all.
+  const freshData = freshRes.ok ? await freshRes.json().catch(() => null) : null;
   const freshIds = freshData && Array.isArray(freshData.cards)
-    ? freshData.cards.filter((c) => PROJECTS.has((c.project ?? '').trim().toLowerCase()) || OWNERS.has((c.owner?.name ?? '').trim().toLowerCase())).map((c) => c.id)
+    ? freshData.cards.filter((c) => !c.archived && (PROJECTS.has((c.project ?? '').trim().toLowerCase()) || OWNERS.has((c.owner?.name ?? '').trim().toLowerCase()))).map((c) => c.id)
     : null;
-  if (!freshIds) { failed += 1; console.error('fresh desk read malformed; skipping reconcile'); }
+  if (!freshIds) { failed += 1; console.error('fresh desk read unavailable or malformed; skipping reconcile'); }
   const r = freshIds && await fetch(URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SECRET}` },
