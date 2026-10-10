@@ -217,7 +217,9 @@ deskRouter.get('/cards/:id', route(async (req, res) => {
 // already pushed since boot are skipped.
 deskRouter.post('/mirror-sync', route(async (_req, res) => {
   const { cards } = await readDesk();
-  res.json(await mirrorAll(cards));
+  const result = await mirrorAll(cards);
+  if (result.busy) { res.status(409).json({ error: 'A mirror sync is already running' }); return; }
+  res.json(result);
 }));
 
 deskRouter.post('/cards', route(async (req, res) => {
