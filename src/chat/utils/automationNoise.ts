@@ -83,6 +83,12 @@ function isAutomationPeer(block: ChatBlock): block is Extract<ChatBlock, { kind:
   return isRoutinePromptText(block.text);
 }
 
+/** The lane a block streamed on. `undefined` is the home lane; 'bg' is the
+ *  agent's background lane (routines, teammate handoffs, job results). */
+function blockLane(b: ChatBlock): 'bg' | undefined {
+  return (b as { lane?: 'bg' }).lane === 'bg' ? 'bg' : undefined;
+}
+
 function tailAutomationStart(blocks: ChatBlock[]): number {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const b = blocks[i];
@@ -125,12 +131,22 @@ export function filterAutomationNoise(blocks: ChatBlock[]): ChatBlock[] {
       i += 1;
       continue;
     }
-    // Gather the turn: everything until the next user/peer/switch/compact block.
+    // Gather the turn: same-lane blocks until the next user/peer/switch/
+    // compact boundary. A bg routine and a home-lane turn interleave freely
+    // in one thread (a routine firing mid-answer is normal); opposite-lane
+    // blocks are NEVER part of the automation turn — they pass through to the
+    // render untouched, because absorbing them is how a finished main-lane
+    // answer vanished from the render the moment a routine's trigger card
+    // landed mid-read (Oct 10 2026). Skipping (not stopping) keeps the
+    // routine's own frames folded under its card exactly as before.
+    const triggerLane = blockLane(b);
     let j = i + 1;
     const turn: ChatBlock[] = [];
+    const passthrough: ChatBlock[] = [];
     while (j < blocks.length) {
       const k = blocks[j].kind;
       if (k === 'user' || k === 'peer' || k === 'switch' || k === 'compact' || k === 'restart' || k === 'terminal-error' || k === 'background') break;
+      if (blockLane(blocks[j]) !== triggerLane) { passthrough.push(blocks[j]); j += 1; continue; }
       turn.push(blocks[j]);
       j += 1;
     }
@@ -170,6 +186,9 @@ export function filterAutomationNoise(blocks: ChatBlock[]): ChatBlock[] {
         ...(deliverable.tsApprox ? { tsApprox: true } : {}),
       });
     }
+    // Opposite-lane blocks collected during the gather render in their
+    // original relative order, untouched by the automation filtering.
+    out.push(...passthrough);
     i = j;
   }
   return out;
