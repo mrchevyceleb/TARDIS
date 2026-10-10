@@ -11,10 +11,11 @@ import { dirname } from 'node:path';
 import { DESK_FILE } from '../config.ts';
 import { queueMirror } from './deskMirror.ts';
 
-// Matt's five stages (2026-10-09). Old ids (pipeline, up_next, waiting, done)
+// Matt's five stages (2026-10-09; order staging-first per the locked rally
+// release process, 2026-10-10). Old ids (pipeline, up_next, waiting, done)
 // are accepted as aliases for one release via COLUMN_ALIASES; stored cards
 // migrate lazily through parseColumn's read-repair on load.
-export const DESK_COLUMNS = ['not_started', 'in_progress', 'in_qa', 'on_staging', 'in_production'] as const;
+export const DESK_COLUMNS = ['not_started', 'in_progress', 'on_staging', 'in_qa', 'in_production'] as const;
 export type DeskColumn = (typeof DESK_COLUMNS)[number];
 export const DESK_PRIORITIES = ['low', 'normal', 'high'] as const;
 export type DeskPriority = (typeof DESK_PRIORITIES)[number];
