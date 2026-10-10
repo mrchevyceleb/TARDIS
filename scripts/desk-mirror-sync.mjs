@@ -40,6 +40,9 @@ async function push(payload) {
 const res = await fetch(DESK);
 if (!res.ok) { console.error(`desk read failed: ${res.status}`); process.exit(1); }
 const data = await res.json();
+// A malformed response must abort before any push or reconcile: an
+// unrecognized body reconciled as an empty lane would close every row.
+if (!data || !Array.isArray(data.cards)) { console.error('desk response has no cards array; aborting'); process.exit(1); }
 const eligible = (data.cards ?? []).filter((c) =>
   PROJECTS.has((c.project ?? '').trim().toLowerCase()) ||
   OWNERS.has((c.owner?.name ?? '').trim().toLowerCase()));
@@ -56,6 +59,7 @@ for (const card of live) {
     pr_urls: (card.links ?? []).filter((l) => PR_URL.test(l)),
     project: card.project ?? '',
     archived: false,
+    desk_updated_at: card.updatedAt,
   };
   try {
     if (await push(payload)) ok += 1; else { failed += 1; console.error(`${card.id} -> not ok`); }
@@ -67,7 +71,7 @@ for (const card of live) {
 let closed = 0;
 for (const card of archived) {
   try {
-    if (await push({ desk_card_id: card.id, title: card.title, stage: ALIASES[card.column] ?? card.column, archived: true })) closed += 1; else failed += 1;
+    if (await push({ desk_card_id: card.id, title: card.title, stage: ALIASES[card.column] ?? card.column, archived: true, desk_updated_at: card.updatedAt })) closed += 1; else failed += 1;
   } catch (err) {
     failed += 1;
     console.error(`${card.id} tombstone error:`, err.message);
@@ -75,16 +79,29 @@ for (const card of archived) {
 }
 let reconciled = 0;
 try {
-  const r = await fetch(URL, {
+  // Fresh read after every push settled, with a cutoff timestamp: rows the
+  // receiver updated after this moment are immune, so a card created or moved
+  // during the sweep can never be closed by a stale id set.
+  const cutoff = new Date().toISOString();
+  const freshRes = await fetch(DESK, { signal: AbortSignal.timeout(8_000) });
+  if (!freshRes.ok) { failed += 1; console.error(`fresh desk read failed: ${freshRes.status}`); }
+  const freshData = await freshRes.json().catch(() => null);
+  const freshIds = freshData && Array.isArray(freshData.cards)
+    ? freshData.cards.filter((c) => PROJECTS.has((c.project ?? '').trim().toLowerCase()) || OWNERS.has((c.owner?.name ?? '').trim().toLowerCase())).map((c) => c.id)
+    : null;
+  if (!freshIds) { failed += 1; console.error('fresh desk read malformed; skipping reconcile'); }
+  const r = freshIds && await fetch(URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SECRET}` },
-    body: JSON.stringify({ reconcile_ids: eligible.map((c) => c.id) }),
+    body: JSON.stringify({ reconcile_ids: freshIds, updated_before: cutoff }),
     signal: AbortSignal.timeout(20_000),
   });
-  if (r.ok) {
-    const body = await r.json().catch(() => ({}));
-    reconciled = Number(body?.closed) || 0;
-  } else { failed += 1; console.error(`reconcile -> ${r.status}`); }
+  if (r) {
+    if (r.ok) {
+      const body = await r.json().catch(() => ({}));
+      reconciled = Number(body?.closed) || 0;
+    } else { failed += 1; console.error(`reconcile -> ${r.status}`); }
+  }
 } catch (err) {
   failed += 1;
   console.error('reconcile error:', err.message);

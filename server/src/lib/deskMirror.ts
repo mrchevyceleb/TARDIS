@@ -1,10 +1,24 @@
-// One-way Desk -> Dev PR Tracker mirror (Matt, Oct 9 2026). Every Rally-lane
-// card mutation pushes the card's title, stage and PR links to the tracker's
+// One-way Desk -> Dev PR Tracker mirror (Matt, Oct 9 2026). Every card
+// mutation pushes the card's title, stage and PR links to the tracker's
 // desk-mirror edge function, keyed by Desk card id so a re-push updates
 // instead of duplicating. Fire-and-forget: a failed push never blocks or
 // fails a Desk write. Only title/stage/links/project ever leave the Desk —
 // no owner names, no agent ids, no comments, no internal notes.
 // Dormant until DESK_MIRROR_URL and DESK_MIRROR_SECRET are both set.
+//
+// Delivery contract (review-hardened):
+// - Every delivery — hook or full sync — goes through one per-card queue
+//   (latest payload wins, one in-flight request per card), so a burst of
+//   mutations can never land out of order, and a global slot limiter keeps
+//   the whole process under a handful of concurrent requests.
+// - The payload carries the card's updatedAt (desk_updated_at); the receiver
+//   rejects stale deliveries, so a retry or a racing sync can never regress
+//   a newer state.
+// - An ineligible card (left the Rally lane) pushes one closing tombstone;
+//   the receiver refuses to create a row for a tombstone, so a card that was
+//   never mirrored adds nothing, and a mirrored row closes.
+// - A card is marked mirrored only while its latest payload is delivered;
+//   a newer payload un-marks it, and the next sync retries it.
 import type { DeskCard } from './deskStore.ts';
 
 // Rally lane projects (Max, Oct 9 2026; KG-KimGarst deliberately excluded —
@@ -25,6 +39,9 @@ const STAGE_ALIASES: Record<string, string> = {
 // "PR links", so anything that is not a pull-request URL is left out.
 const PR_URL = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+\/?$/;
 
+// At most this many mirror requests in flight from this process at once.
+const MAX_IN_FLIGHT = 8;
+
 export function mirrorEligible(card: DeskCard): boolean {
   const project = (card.project ?? '').trim().toLowerCase();
   if (project && MIRROR_PROJECTS.has(project)) return true;
@@ -42,6 +59,7 @@ function payloadFor(card: DeskCard, closing: boolean): string {
     // A closing tombstone (archived on the Desk, or the card left the Rally
     // lane) closes the mirror row; the receiver refuses to create-as-closed.
     archived: closing || card.archived === true,
+    desk_updated_at: card.updatedAt,
   });
 }
 
@@ -51,16 +69,32 @@ function configured(): { url: string; secret: string } | null {
   return url && secret ? { url, secret } : null;
 }
 
+let syncing = false;
+
+// Global concurrency limiter: every delivery, from any queue, takes a slot.
+let active = 0;
+const waiters: Array<() => void> = [];
+async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
+  while (active >= MAX_IN_FLIGHT) await new Promise<void>((resolve) => waiters.push(resolve));
+  active += 1;
+  try {
+    return await fn();
+  } finally {
+    active -= 1;
+    waiters.shift()?.();
+  }
+}
+
 async function pushBody(id: string, body: string): Promise<boolean> {
   const cfg = configured();
   if (!cfg) return false;
   try {
-    const res = await fetch(cfg.url, {
+    const res = await withSlot(() => fetch(cfg.url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.secret}` },
       body,
       signal: AbortSignal.timeout(8_000),
-    });
+    }));
     if (!res.ok) console.warn(`[desk-mirror] ${id} push failed: ${res.status}`);
     return res.ok;
   } catch (err) {
@@ -69,16 +103,22 @@ async function pushBody(id: string, body: string): Promise<boolean> {
   }
 }
 
-// Cards this process has seen in the lane: a card that later leaves the lane
-// still gets one closing tombstone (its new state alone is no longer eligible).
-const everEligible = new Set<string>();
-// Cards with a confirmed successful push: later sweeps skip them (no dup).
-// Failed pushes are not marked, so a later sweep retries them.
+// Cards whose LATEST payload was delivered. A newer payload removes the id,
+// so a failed delivery is retried by the next sync instead of skipped.
 const mirrored = new Set<string>();
-// Latest payload per card, pushed one-at-a-time per card, so a burst of
-// mutations collapses to the newest state and can never land out of order.
+// Latest payload per card; one drain chain per card delivers them in order.
 const pending = new Map<string, string>();
 const chains = new Map<string, Promise<void>>();
+
+function enqueue(card: DeskCard): void {
+  const eligible = mirrorEligible(card);
+  // Ineligible cards still get one closing tombstone: the receiver refuses to
+  // create a row for one, so this is what closes a mirror when a card leaves
+  // the lane — statelessly, including right after a restart.
+  mirrored.delete(card.id);
+  pending.set(card.id, payloadFor(card, !eligible));
+  if (!chains.has(card.id)) chains.set(card.id, drain(card.id));
+}
 
 function drain(id: string): Promise<void> {
   return (async () => {
@@ -96,62 +136,54 @@ function drain(id: string): Promise<void> {
 
 /** Fire-and-forget push after a card mutation. Never throws, never blocks. */
 export function queueMirror(card: DeskCard): void {
-  const eligible = mirrorEligible(card);
-  if (!eligible && !everEligible.has(card.id)) return;
-  if (eligible) everEligible.add(card.id);
-  pending.set(card.id, payloadFor(card, !eligible));
-  if (!chains.has(card.id)) chains.set(card.id, drain(card.id));
+  enqueue(card);
 }
 
-async function pushCard(card: DeskCard, closing: boolean): Promise<boolean> {
-  everEligible.add(card.id);
-  const ok = await pushBody(card.id, payloadFor(card, closing));
-  if (ok) mirrored.add(card.id);
-  return ok;
+/** Await every queued delivery for the given ids (the full sync uses this). */
+async function awaitChains(ids: string[]): Promise<void> {
+  for (const id of ids) await chains.get(id);
 }
 
-// Bounded concurrency for the sweep: enough to finish in seconds, few enough
-// never to look like an attack on the edge function.
-const SYNC_CONCURRENCY = 8;
-let syncing = false;
-
-/** One-shot full sync. Live eligible cards push their state; archived
- *  eligible cards push closing tombstones (the receiver refuses to create a
- *  row for a tombstone, so an archived card that never mirrored adds
- *  nothing); then one reconcile call closes any mirror row whose Desk card
- *  is no longer in the Rally lane at all. Single-flight: a second call
- *  while one runs returns { busy: true }. */
-export async function mirrorAll(cards: DeskCard[]): Promise<{ busy?: boolean; pushed?: number; closed?: number; failed?: number; skipped?: number }> {
+/** One-shot full sync: enqueue every eligible card (live state or closing
+ *  tombstone) through the same per-card queues, await them all, then one
+ *  reconcile call from a FRESH desk read so a card created or moved during
+ *  the sweep cannot be closed by a stale id set. Single-flight: a second
+ *  call while one runs returns { busy: true }. */
+export async function mirrorAll(
+  cards: DeskCard[],
+  refetch: () => Promise<DeskCard[]>,
+): Promise<{ busy?: boolean; pushed?: number; closed?: number; failed?: number; reconciled?: number }> {
   if (syncing) return { busy: true };
   syncing = true;
   try {
+    if (!Array.isArray(cards)) return { failed: 0, pushed: 0, closed: 0, reconciled: 0 };
     const eligible = cards.filter((c) => mirrorEligible(c));
-    const live = eligible.filter((c) => !c.archived);
-    const archived = eligible.filter((c) => c.archived);
+    for (const card of eligible) enqueue(card);
+    await awaitChains(eligible.map((c) => c.id));
     let pushed = 0;
     let closed = 0;
     let failed = 0;
-    let skipped = 0;
-    let cursor = 0;
-    async function worker(kind: 'live' | 'archived'): Promise<void> {
-      while (cursor < eligible.length) {
-        const card = eligible[cursor++];
-        const isArchived = card.archived === true;
-        if (isArchived !== (kind === 'archived')) continue;
-        if (!isArchived && mirrored.has(card.id)) { skipped += 1; continue; }
-        if (await pushCard(card, isArchived)) { if (isArchived) closed += 1; else pushed += 1; } else failed += 1;
-      }
+    for (const card of eligible) {
+      if (card.archived === true) {
+        if (mirrored.has(card.id)) closed += 1; else failed += 1;
+      } else if (mirrored.has(card.id)) pushed += 1; else failed += 1;
     }
-    await Promise.all([...Array.from({ length: SYNC_CONCURRENCY }, () => worker('live'))]);
-    await Promise.all([...Array.from({ length: SYNC_CONCURRENCY }, () => worker('archived'))]);
+
     const cfg = configured();
     let reconciled: number | undefined;
     if (cfg) {
       try {
+        // Fresh read AFTER all pushes settled: the reconcile set is the
+        // current eligible lane, and rows updated after this moment are
+        // immune (updated_before cutoff), so mid-sweep changes can never be
+        // closed by a stale set.
+        const cutoff = new Date().toISOString();
+        const fresh = await refetch();
+        const freshIds = fresh.filter((c) => mirrorEligible(c)).map((c) => c.id);
         const res = await fetch(cfg.url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.secret}` },
-          body: JSON.stringify({ reconcile_ids: eligible.map((c) => c.id) }),
+          body: JSON.stringify({ reconcile_ids: freshIds, updated_before: cutoff }),
           signal: AbortSignal.timeout(20_000),
         });
         if (res.ok) {
@@ -166,8 +198,9 @@ export async function mirrorAll(cards: DeskCard[]): Promise<{ busy?: boolean; pu
         failed += 1;
       }
     }
-    return { pushed, closed, failed, skipped, ...(reconciled !== undefined ? { reconciled } : {}) };
+    return { pushed, closed, failed, ...(reconciled !== undefined ? { reconciled } : {}) };
   } finally {
     syncing = false;
   }
 }
+
