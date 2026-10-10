@@ -83,6 +83,12 @@ function isAutomationPeer(block: ChatBlock): block is Extract<ChatBlock, { kind:
   return isRoutinePromptText(block.text);
 }
 
+/** The lane a block streamed on. `undefined` is the home lane; 'bg' is the
+ *  agent's background lane (routines, teammate handoffs, job results). */
+function blockLane(b: ChatBlock): 'bg' | undefined {
+  return (b as { lane?: 'bg' }).lane === 'bg' ? 'bg' : undefined;
+}
+
 function tailAutomationStart(blocks: ChatBlock[]): number {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const b = blocks[i];
@@ -125,12 +131,20 @@ export function filterAutomationNoise(blocks: ChatBlock[]): ChatBlock[] {
       i += 1;
       continue;
     }
-    // Gather the turn: everything until the next user/peer/switch/compact block.
+    // Gather the turn: everything until the next user/peer/switch/compact block
+    // OR a lane boundary. A bg routine and a home-lane turn interleave freely
+    // in one thread (a routine firing mid-answer is normal); blocks from the
+    // other lane are never part of this automation turn — absorbing them is
+    // how a finished main-lane answer vanished from the render the moment a
+    // routine's trigger card landed mid-read (Oct 10 2026).
+    const triggerLane = blockLane(b);
     let j = i + 1;
     const turn: ChatBlock[] = [];
+    let jStop = -1; // first opposite-lane block: boundary, not consumable
     while (j < blocks.length) {
       const k = blocks[j].kind;
       if (k === 'user' || k === 'peer' || k === 'switch' || k === 'compact' || k === 'restart' || k === 'terminal-error' || k === 'background') break;
+      if (blockLane(blocks[j]) !== triggerLane) { jStop = j; break; }
       turn.push(blocks[j]);
       j += 1;
     }
@@ -170,7 +184,10 @@ export function filterAutomationNoise(blocks: ChatBlock[]): ChatBlock[] {
         ...(deliverable.tsApprox ? { tsApprox: true } : {}),
       });
     }
-    i = j;
+    // An opposite-lane block stopped the gather: leave it (and everything
+    // after it) for the outer loop untouched, so interleaved home-lane
+    // content renders exactly as it would without the routine.
+    i = jStop >= 0 ? jStop : j;
   }
   return out;
 }
