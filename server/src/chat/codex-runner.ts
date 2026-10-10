@@ -717,6 +717,7 @@ export class CodexSession {
       return;
     }
 
+    const laneName = agentForChatId(this.chatId)?.name;
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
     // login; everything else keeps the per-repo account-map resolution. Resolved
     // before the seed so the rollout lookup below reads the same CODEX_HOME the
@@ -803,7 +804,6 @@ export class CodexSession {
         '-c', `mcp_servers.rivendell-browser.args=${JSON.stringify([browserMcpEntry])}`,
       );
     }
-    const laneName = agentForChatId(this.chatId)?.name;
     browserMcpArgs.push(...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId) }), ...officeMcpCodexArgs());
     const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
 
