@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef } from 'react';
 import { apiJson } from './api';
 
-export const DESK_COLUMNS = ['not_started', 'in_progress', 'in_qa', 'on_staging', 'in_production'] as const;
+export const DESK_COLUMNS = ['not_started', 'in_progress', 'on_staging', 'in_qa', 'in_production'] as const;
 export type DeskColumn = (typeof DESK_COLUMNS)[number];
 export type DeskPriority = 'low' | 'normal' | 'high';
 export type DeskActor = { kind: 'owner' | 'agent'; id: string; name: string };
