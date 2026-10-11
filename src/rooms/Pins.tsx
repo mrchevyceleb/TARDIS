@@ -328,7 +328,7 @@ export function Pins() {
 
 /** First web URL anywhere in the content, for the detail view's Open button. */
 function contentLinkOf(pin: PinItem): string | null {
-  const match = pin.content.match(/https?:\/\/[^\s<>"']+/);
+  const match = pin.content.match(/https?:\/\/[^\s<>"']+/i);
   const url = match ? match[0].replace(/[.,;:!?…`*)\]]+$/, '') : '';
   return url || null;
 }
