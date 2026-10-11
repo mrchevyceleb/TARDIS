@@ -124,6 +124,13 @@ export type ThreadPin = {
   onToggle: (target: { blockId: string; text: string; ts: number }) => void | Promise<void>;
 };
 
+/** Short stable id suffix so link/selection pins toggle independently. */
+function shortHash(input: string): string {
+  let h = 5381;
+  for (let i = 0; i < input.length; i++) h = ((h << 5) + h + input.charCodeAt(i)) | 0;
+  return Math.abs(h).toString(36).slice(0, 8);
+}
+
 // ── actions row (copy / pin) — §3.8 ───────────────────────────────────────
 export function ActionsRow({
   getText,
@@ -131,12 +138,16 @@ export function ActionsRow({
   onTogglePin,
   onReact,
   mine,
+  onPinLink,
+  onPinSelection,
 }: {
   getText: () => string;
   pinned?: boolean;
   onTogglePin?: () => void | Promise<void>;
   onReact?: (emoji: string) => void;
   mine?: string[];
+  onPinLink?: (url: string) => void | Promise<void>;
+  onPinSelection?: (text: string) => void | Promise<void>;
 }) {
   const [copied, setCopied] = useState(false);
   const [localPinned, setLocalPinned] = useState(false);
@@ -196,6 +207,14 @@ export function ActionsRow({
           ) : null}
         </span>
       ) : null}
+      {onTogglePin ? (
+        <PinExtras
+          getText={getText}
+          onPinLink={onPinLink}
+          onPinSelection={onPinSelection}
+          onOpenPicker={() => setPickerOpen(true)}
+        />
+      ) : null}
       <button
         type="button"
         className={`act${isPinned ? ' copied' : ''}`}
@@ -216,6 +235,148 @@ export function ActionsRow({
       </button>
     </div>
   );
+}
+
+/** Pin just a link or a text selection from this message (quick-access notes).
+ *  Link and selection pins get synthetic blockIds (`<id>::link-<h>` /
+ *  `<id>::sel-<h>`) so they toggle independently of the whole-message pin. */
+function PinExtras({
+  getText,
+  onPinLink,
+  onPinSelection,
+  onOpenPicker,
+}: {
+  getText: () => string;
+  onPinLink?: (url: string) => void | Promise<void>;
+  onPinSelection?: (text: string) => void | Promise<void>;
+  onOpenPicker?: () => void;
+}) {
+  const [linkPickerOpen, setLinkPickerOpen] = useState(false);
+  const [hint, setHint] = useState<'link' | 'sel' | null>(null);
+  const [busy, setBusy] = useState(false);
+  const selRef = useRef('');
+  const rowRef = useRef<HTMLDivElement | null>(null);
+
+  // Track the latest selection made inside THIS message so the click on
+  // "pin selection" still has it even if the click collapses the highlight.
+  useEffect(() => {
+    if (!onPinSelection) return;
+    const onSel = () => {
+      const host = rowRef.current?.closest('[data-pin-block]');
+      const sel = document.getSelection();
+      if (!host || !sel || sel.isCollapsed || !sel.anchorNode || !host.contains(sel.anchorNode)) return;
+      const text = sel.toString().trim();
+      if (text) selRef.current = text.slice(0, 800);
+    };
+    document.addEventListener('selectionchange', onSel);
+    return () => document.removeEventListener('selectionchange', onSel);
+  }, [onPinSelection]);
+
+  const links = extractLinks(getText());
+
+  const flashHint = (which: 'link' | 'sel') => {
+    setHint(which);
+    window.setTimeout(() => setHint((cur) => (cur === which ? null : cur)), 1400);
+  };
+
+  const run = async (fn: () => void | Promise<void>) => {
+    if (busy) return;
+    setBusy(true);
+    try { await fn(); } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="pin-extras" ref={rowRef}>
+      {onPinSelection ? (
+        <button
+          type="button"
+          className={`act${hint === 'sel' ? ' copied' : ''}`}
+          title="Pin the text you selected in this message"
+          onClick={async (e) => {
+            e.stopPropagation();
+            if (!selRef.current) { flashHint('sel'); return; }
+            const text = selRef.current;
+            await run(() => onPinSelection(text));
+            selRef.current = '';
+          }}
+        >
+          {hint === 'sel' ? 'select text ↑' : 'pin selection'}
+        </button>
+      ) : null}
+      {onPinLink && links.length ? (
+        links.length === 1 ? (
+          <button
+            type="button"
+            className={`act${hint === 'link' ? ' copied' : ''}`}
+            title={`Pin ${links[0]}`}
+            onClick={async (e) => {
+              e.stopPropagation();
+              await run(() => onPinLink(links[0]));
+              flashHint('link');
+            }}
+          >
+            {hint === 'link' ? 'pinned ✓' : `pin link · ${hostOf(links[0])}`}
+          </button>
+        ) : (
+          <span className={`react-wrap${linkPickerOpen ? ' open' : ''}`}>
+            <button
+              type="button"
+              className="act"
+              aria-expanded={linkPickerOpen}
+              title="Pin one of the links in this message"
+              onClick={(e) => {
+                e.stopPropagation();
+                setLinkPickerOpen((open) => !open);
+                if (!linkPickerOpen) onOpenPicker?.();
+              }}
+            >
+              pin link ▾
+            </button>
+            {linkPickerOpen ? (
+              <span className="link-picker" role="listbox" aria-label="Pick a link to pin">
+                {links.map((url) => (
+                  <button
+                    key={url}
+                    type="button"
+                    className="link-pick"
+                    title={url}
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      setLinkPickerOpen(false);
+                      await run(() => onPinLink(url));
+                      flashHint('link');
+                    }}
+                  >
+                    {hostOf(url)}
+                  </button>
+                ))}
+              </span>
+            ) : null}
+          </span>
+        )
+      ) : null}
+    </div>
+  );
+}
+
+const URL_RE = /https?:\/\/[^\s<>"'\]）】»]+/g;
+
+function extractLinks(text: string): string[] {
+  const out: string[] = [];
+  for (const match of text.matchAll(URL_RE)) {
+    const url = match[0].replace(/[.,;:!?…()\]]+$/, '');
+    if (url && !out.includes(url)) out.push(url);
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return url.slice(0, 30);
+  }
 }
 
 // ── streaming text — §3.3 (raw tail fades via .tok + caret; full markdown
@@ -937,6 +1098,12 @@ function ElrondGroup({
                   const last = visible[visible.length - 1];
                   return pin.onToggle({ blockId: first.id, text: last?.text ?? copyText(), ts: first.ts });
                 } : undefined}
+                onPinLink={pin ? (url) =>
+                  pin.onToggle({ blockId: `${first.id}::link-${shortHash(url)}`, text: url, ts: first.ts })
+                : undefined}
+                onPinSelection={pin ? (text) =>
+                  pin.onToggle({ blockId: `${first.id}::sel-${shortHash(text)}`, text, ts: first.ts })
+                : undefined}
               />
             ) : null}
           </>

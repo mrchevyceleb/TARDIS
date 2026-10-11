@@ -168,6 +168,23 @@
   font-size: 15px; line-height: 1; cursor: pointer;
 }
 .rc .react-pick:hover, .rc .react-pick.mine { background: var(--surface-hover); }
+
+/* pin link / pin selection (quick-access notes) */
+.rc .pin-extras { display: inline-flex; gap: 6px; }
+.rc .link-picker {
+  position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 6;
+  display: flex; flex-direction: column; gap: 2px; padding: 4px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--surface-raised);
+  box-shadow: 0 8px 24px color-mix(in oklch, var(--bg-deep) 55%, transparent);
+  min-width: 180px; max-width: 280px;
+}
+.rc .link-pick {
+  display: block; width: 100%; padding: 5px 8px; border: 0; border-radius: 7px;
+  background: transparent; font-family: var(--font-mono); font-size: 11px; color: var(--fg-soft);
+  text-align: left; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rc .link-pick:hover { background: var(--surface-hover); color: var(--fg); }
 .rc .react-strip { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .rc .react-chip {
   display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px;
