@@ -10,6 +10,7 @@ import { apiJson } from '../data/api';
 import { useCronJobs } from '../hooks/useRoomData';
 import { useProxyViewer } from '../hooks/useProxyViewer';
 import { scrollToPinnedMessage, useAgentMessagePins } from './messagePins';
+import { parsePinLinkTarget } from '../chat/utils/proxyLinks';
 import { statusLabel } from '../theme/voice';
 import { DeskPaneSwitch, useDeskPaneMode } from './DeskPaneSwitch';
 import { MyDeskPane } from './MyDeskPane';
@@ -414,21 +415,55 @@ export function BotPanel({ meta, onOpenForge, onOpenDesk, onClose, className = '
                 <div className="bt-pane-empty">Pins hid for a second — I’ll try again in a moment.</div>
               ) : visiblePins.length ? visiblePins.map((p) => (
                 <div key={p.id} className="bt-msgpin">
-                  {p.blockId.startsWith('note-') ? (
-                    // An agent's own note (team_pin): there is no bubble to jump to.
-                    <div className="bt-msgpin-body" title="Pinned by the agent">
-                      <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty note'}</span>
-                    </div>
-                  ) : (
-                  <button
-                    type="button"
-                    className="bt-msgpin-body"
-                    title="Jump to this message"
-                    onClick={() => scrollToPinnedMessage(p.blockId)}
-                  >
-                    <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty bubble'}</span>
-                  </button>
-                  )}
+                  {(() => {
+                    // Quick-access notes: a pin that IS a link opens on tap
+                    // (web in a new tab, workspace path in the viewer) — for
+                    // message pins AND agent team_pin notes alike. Everything
+                    // else: message pins jump to their bubble, notes sit still.
+                    const target = parsePinLinkTarget(p.text);
+                    if (target?.kind === 'web') {
+                      return (
+                        <button
+                          type="button"
+                          className="bt-msgpin-body"
+                          title={`Open ${target.url}`}
+                          onClick={() => window.open(target.url, '_blank', 'noopener,noreferrer')}
+                        >
+                          <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty note'} ↗</span>
+                        </button>
+                      );
+                    }
+                    if (target) {
+                      return (
+                        <button
+                          type="button"
+                          className="bt-msgpin-body"
+                          title="Open in the viewer"
+                          onClick={() => viewer.open({ source: target.kind, path: target.path, title: (p.text ?? '').trim() || undefined })}
+                        >
+                          <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty note'} ↗</span>
+                        </button>
+                      );
+                    }
+                    if (p.blockId.startsWith('note-')) {
+                      // An agent's own note (team_pin): there is no bubble to jump to.
+                      return (
+                        <div className="bt-msgpin-body" title="Pinned by the agent">
+                          <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty note'}</span>
+                        </div>
+                      );
+                    }
+                    return (
+                      <button
+                        type="button"
+                        className="bt-msgpin-body"
+                        title="Jump to this message"
+                        onClick={() => scrollToPinnedMessage(p.blockId)}
+                      >
+                        <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty bubble'}</span>
+                      </button>
+                    );
+                  })()}
                   <button
                     type="button"
                     className="bt-iconbtn bt-msgpin-unpin"
