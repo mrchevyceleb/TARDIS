@@ -557,6 +557,26 @@ function toWindowsDisplay(rel: string): string {
   return `${WIN_WORKSPACE_PREFIX}${LOCAL_SEP}${rel.split('/').join(LOCAL_SEP)}`;
 }
 
+/** A quick-access pin target: what tapping a link-shaped pin should open.
+ *  The whole pin text must BE one target (a URL or a workspace path), so
+ *  note pins with a link buried in prose never hijack the tap. */
+export type PinLinkTarget =
+  | { kind: 'web'; url: string }
+  | { kind: 'doc'; path: string }
+  | { kind: 'folder'; path: string };
+
+export function parsePinLinkTarget(text: string | undefined | null): PinLinkTarget | null {
+  const value = (text ?? '').trim();
+  if (!value || /\s/.test(value)) return null;
+  if (/^https?:\/\//i.test(value)) {
+    const url = value.replace(/[.,;:!?…`*)\]]+$/, '');
+    return url ? { kind: 'web', url } : null;
+  }
+  const proxy = parseProxyHref(value);
+  if (proxy && (proxy.kind === 'doc' || proxy.kind === 'folder')) return { kind: proxy.kind, path: proxy.path };
+  return null;
+}
+
 export function parseProxyHref(href: string | undefined): { kind: 'doc' | 'folder' | 'machine'; path: string } | null {
   if (!href) return null;
   if (href.startsWith('rivendell-machine:')) {
