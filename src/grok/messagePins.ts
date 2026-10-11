@@ -22,7 +22,7 @@ function emitChanged(): void {
 export function useAgentMessagePins(agentId: string | undefined): {
   pins: MessagePin[];
   loadError: boolean;
-  toggle: (target: { blockId: string; text: string; ts: number }) => Promise<void>;
+  toggle: (target: { blockId: string; text: string; ts: number }) => Promise<boolean | 'error'>;
   unpin: (id: string) => Promise<void>;
 } {
   const [pins, setPins] = useState<MessagePin[]>([]);
@@ -55,8 +55,8 @@ export function useAgentMessagePins(agentId: string | undefined): {
     };
   }, [agentId]);
 
-  const toggle = useCallback(async (target: { blockId: string; text: string; ts: number }) => {
-    if (!agentId) return;
+  const toggle = useCallback(async (target: { blockId: string; text: string; ts: number }): Promise<boolean | 'error'> => {
+    if (!agentId) return 'error';
     try {
       const r = await apiJson<{ pin: MessagePin | null; pinned: boolean }>('/api/message-pins', {
         method: 'POST',
@@ -64,8 +64,10 @@ export function useAgentMessagePins(agentId: string | undefined): {
       });
       if (r.pinned) window.dispatchEvent(new Event(OPEN_PANE_EVENT));
       emitChanged();
+      return Boolean(r.pinned);
     } catch {
       emitChanged();
+      return 'error';
     }
   }, [agentId]);
 
@@ -82,7 +84,10 @@ export function useAgentMessagePins(agentId: string | undefined): {
 }
 
 export function scrollToPinnedMessage(blockId: string): void {
-  const el = document.getElementById(`msg-pin-${blockId}`);
+  // Link/selection pins use synthetic ids (`<msg>::link-…`/`<msg>::sel-…`);
+  // jumping lands on the source message bubble for those.
+  const base = blockId.includes('::') ? blockId.split('::')[0] : blockId;
+  const el = document.getElementById(`msg-pin-${blockId}`) ?? document.getElementById(`msg-pin-${base}`);
   if (!el) return;
   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   el.classList.remove('pin-flash');
