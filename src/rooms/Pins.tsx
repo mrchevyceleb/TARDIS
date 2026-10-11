@@ -1,4 +1,4 @@
-import { Check, Copy, Pencil, Pin, PinOff, Plus, Search, Trash2, X } from 'lucide-react';
+import { Check, Copy, ExternalLink, Pencil, Pin, PinOff, Plus, Search, Trash2, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { CSSProperties, FormEvent } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
@@ -9,6 +9,8 @@ import type { PinItem } from '../data/types';
 import { usePins } from '../hooks/useRoomData';
 import { timeAgo } from '../utils/format';
 import { ROOM_NAMES } from '../data/roomNames';
+import { useProxyViewer } from '../hooks/useProxyViewer';
+import { parsePinLinkTarget } from '../chat/utils/proxyLinks';
 
 type PinDraft = {
   title: string;
@@ -45,6 +47,7 @@ const categoryTone: Record<string, 'neutral' | 'gold' | 'elf' | 'rose' | 'emeral
 
 export function Pins() {
   const queryClient = useQueryClient();
+  const viewer = useProxyViewer();
   const { data: pins = [] } = usePins();
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('all');
@@ -143,6 +146,15 @@ export function Pins() {
     await navigator.clipboard.writeText(pin.content);
     setCopiedId(pin.id);
     window.setTimeout(() => setCopiedId((value) => (value === pin.id ? null : value)), 1400);
+  };
+
+  /** One tap: a pin whose whole content is a link opens it (web in a new
+   *  tab, workspace path in the viewer); anything else opens the detail view. */
+  const openPin = (pin: PinItem) => {
+    const target = parsePinLinkTarget(pin.content);
+    if (target?.kind === 'web') { window.open(target.url, '_blank', 'noopener,noreferrer'); return; }
+    if (target) { viewer.open({ source: target.kind, path: target.path, title: pin.title }); return; }
+    setViewing(pin);
   };
 
   return (
@@ -246,8 +258,8 @@ export function Pins() {
               <button
                 type="button"
                 className="pin-card-open"
-                onClick={() => setViewing(pin)}
-                title="Open pin"
+                onClick={() => openPin(pin)}
+                title={parsePinLinkTarget(pin.content) ? 'Open link' : 'Open pin'}
               >
                 <header>
                   <h2>{pin.title}</h2>
@@ -291,6 +303,12 @@ export function Pins() {
                 {viewing.pinned ? <span className="pin-status">pinned</span> : null}
               </div>
               <div className="r-modal-foot-end">
+                {contentLinkOf(viewing) ? (
+                  <Button tone="ghost" onClick={() => { const url = contentLinkOf(viewing); if (url) window.open(url, '_blank', 'noopener,noreferrer'); }}>
+                    <ExternalLink size={14} />
+                    Open link
+                  </Button>
+                ) : null}
                 <Button tone="ghost" onClick={() => copyPin(viewing)}>
                   {copiedId === viewing.id ? <Check size={14} /> : <Copy size={14} />}
                   {copiedId === viewing.id ? 'Copied' : 'Copy'}
@@ -306,6 +324,13 @@ export function Pins() {
       ) : null}
     </div>
   );
+}
+
+/** First web URL anywhere in the content, for the detail view's Open button. */
+function contentLinkOf(pin: PinItem): string | null {
+  const match = pin.content.match(/https?:\/\/[^\s<>"']+/);
+  const url = match ? match[0].replace(/[.,;:!?…`*)\]]+$/, '') : '';
+  return url || null;
 }
 
 function normalizeDraft(draft: PinDraft) {

@@ -10,6 +10,7 @@ import { apiJson } from '../data/api';
 import { useCronJobs } from '../hooks/useRoomData';
 import { useProxyViewer } from '../hooks/useProxyViewer';
 import { scrollToPinnedMessage, useAgentMessagePins } from './messagePins';
+import { parsePinLinkTarget } from '../chat/utils/proxyLinks';
 import { statusLabel } from '../theme/voice';
 import { DeskPaneSwitch, useDeskPaneMode } from './DeskPaneSwitch';
 import { MyDeskPane } from './MyDeskPane';
@@ -419,7 +420,36 @@ export function BotPanel({ meta, onOpenForge, onOpenDesk, onClose, className = '
                     <div className="bt-msgpin-body" title="Pinned by the agent">
                       <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty note'}</span>
                     </div>
-                  ) : (
+                  ) : (() => {
+                    // Quick-access notes: a pin that IS a link opens on tap
+                    // (web in a new tab, workspace path in the viewer);
+                    // everything else still jumps to its message.
+                    const target = parsePinLinkTarget(p.text);
+                    if (target?.kind === 'web') {
+                      return (
+                        <button
+                          type="button"
+                          className="bt-msgpin-body"
+                          title={`Open ${target.url}`}
+                          onClick={() => window.open(target.url, '_blank', 'noopener,noreferrer')}
+                        >
+                          <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty bubble'} ↗</span>
+                        </button>
+                      );
+                    }
+                    if (target) {
+                      return (
+                        <button
+                          type="button"
+                          className="bt-msgpin-body"
+                          title="Open in the viewer"
+                          onClick={() => viewer.open({ source: target.kind, path: target.path, title: (p.text ?? '').trim() || undefined })}
+                        >
+                          <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty bubble'} ↗</span>
+                        </button>
+                      );
+                    }
+                    return (
                   <button
                     type="button"
                     className="bt-msgpin-body"
@@ -428,7 +458,8 @@ export function BotPanel({ meta, onOpenForge, onOpenDesk, onClose, className = '
                   >
                     <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty bubble'}</span>
                   </button>
-                  )}
+                    );
+                  })()}
                   <button
                     type="button"
                     className="bt-iconbtn bt-msgpin-unpin"
