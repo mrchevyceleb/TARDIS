@@ -121,7 +121,7 @@ function ConnectionStateIndicator({ reconnecting }: { reconnecting: boolean }) {
 
 export type ThreadPin = {
   pinnedBlockIds: string[];
-  onToggle: (target: { blockId: string; text: string; ts: number }) => void | Promise<void>;
+  onToggle: (target: { blockId: string; text: string; ts: number }) => void | Promise<void | boolean | 'error'>;
 };
 
 /** Short stable id suffix so link/selection pins toggle independently. */
@@ -129,6 +129,25 @@ function shortHash(input: string): string {
   let h = 5381;
   for (let i = 0; i < input.length; i++) h = ((h << 5) + h + input.charCodeAt(i)) | 0;
   return Math.abs(h).toString(36).slice(0, 8);
+}
+
+// One delegated selectionchange listener for every "pin selection" button:
+// the latest in-message selection plus the message it was made in, so a
+// click can never pin text selected in a different message.
+let lastSel: { host: string; text: string } | null = null;
+let selListenerInstalled = false;
+function ensureSelListener(): void {
+  if (selListenerInstalled || typeof document === 'undefined') return;
+  selListenerInstalled = true;
+  document.addEventListener('selectionchange', () => {
+    const sel = document.getSelection();
+    if (!sel || sel.isCollapsed || !sel.anchorNode || !sel.focusNode) return;
+    const anchorEl = sel.anchorNode instanceof Element ? sel.anchorNode : sel.anchorNode.parentElement;
+    const host = anchorEl?.closest('[data-pin-block]');
+    if (!(host instanceof HTMLElement) || !host.contains(sel.focusNode)) return;
+    const text = sel.toString().trim();
+    if (text) lastSel = { host: host.dataset.pinBlock ?? '', text: text.slice(0, 800) };
+  });
 }
 
 // ── actions row (copy / pin) — §3.8 ───────────────────────────────────────
@@ -140,23 +159,29 @@ export function ActionsRow({
   mine,
   onPinLink,
   onPinSelection,
+  mobile,
+  blockId,
 }: {
   getText: () => string;
   pinned?: boolean;
-  onTogglePin?: () => void | Promise<void>;
+  onTogglePin?: () => void | Promise<void | boolean | 'error'>;
   onReact?: (emoji: string) => void;
   mine?: string[];
-  onPinLink?: (url: string) => void | Promise<void>;
-  onPinSelection?: (text: string) => void | Promise<void>;
+  onPinLink?: (url: string) => void | Promise<void | boolean | 'error'>;
+  onPinSelection?: (text: string) => void | Promise<void | boolean | 'error'>;
+  /** Quick-access pin extras are desktop-only for now (phone lands in piece 2). */
+  mobile?: boolean;
+  blockId?: string;
 }) {
   const [copied, setCopied] = useState(false);
   const [localPinned, setLocalPinned] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [extrasOpen, setExtrasOpen] = useState(false);
   const isPinned = onTogglePin ? Boolean(pinned) : localPinned;
   const mineSet = new Set(mine ?? []);
   return (
-    <div className={`acts${pickerOpen ? ' react-open' : ''}`}>
+    <div className={`acts${pickerOpen || extrasOpen ? ' react-open' : ''}`}>
       <button
         type="button"
         className={`act${copied ? ' copied' : ''}`}
@@ -207,12 +232,13 @@ export function ActionsRow({
           ) : null}
         </span>
       ) : null}
-      {onTogglePin ? (
+      {onTogglePin && !mobile ? (
         <PinExtras
+          blockId={blockId}
           getText={getText}
           onPinLink={onPinLink}
           onPinSelection={onPinSelection}
-          onOpenPicker={() => setPickerOpen(true)}
+          onPickerVisibility={setExtrasOpen}
         />
       ) : null}
       <button
@@ -241,81 +267,78 @@ export function ActionsRow({
  *  Link and selection pins get synthetic blockIds (`<id>::link-<h>` /
  *  `<id>::sel-<h>`) so they toggle independently of the whole-message pin. */
 function PinExtras({
+  blockId,
   getText,
   onPinLink,
   onPinSelection,
-  onOpenPicker,
+  onPickerVisibility,
 }: {
+  blockId?: string;
   getText: () => string;
-  onPinLink?: (url: string) => void | Promise<void>;
-  onPinSelection?: (text: string) => void | Promise<void>;
-  onOpenPicker?: () => void;
+  onPinLink?: (url: string) => void | Promise<void | boolean | 'error'>;
+  onPinSelection?: (text: string) => void | Promise<void | boolean | 'error'>;
+  onPickerVisibility?: (open: boolean) => void;
 }) {
   const [linkPickerOpen, setLinkPickerOpen] = useState(false);
-  const [hint, setHint] = useState<'link' | 'sel' | null>(null);
+  const [hint, setHint] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const selRef = useRef('');
-  const rowRef = useRef<HTMLDivElement | null>(null);
 
-  // Track the latest selection made inside THIS message so the click on
-  // "pin selection" still has it even if the click collapses the highlight.
-  useEffect(() => {
-    if (!onPinSelection) return;
-    const onSel = () => {
-      const host = rowRef.current?.closest('[data-pin-block]');
-      const sel = document.getSelection();
-      if (!host || !sel || sel.isCollapsed || !sel.anchorNode || !host.contains(sel.anchorNode)) return;
-      const text = sel.toString().trim();
-      if (text) selRef.current = text.slice(0, 800);
-    };
-    document.addEventListener('selectionchange', onSel);
-    return () => document.removeEventListener('selectionchange', onSel);
-  }, [onPinSelection]);
+  useEffect(() => { ensureSelListener(); }, []);
+
+  const flashHint = (label: string) => {
+    setHint(label);
+    window.setTimeout(() => setHint((cur) => (cur === label ? null : cur)), 1400);
+  };
+
+  // Runs a pin toggle and reports the honest outcome: pinned, unpinned or failed.
+  const fire = async (ok: string, fn: () => void | Promise<void | boolean | 'error'>) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const result = await fn();
+      if (result === 'error') flashHint('failed ✗');
+      else if (result === false) flashHint('unpinned');
+      else flashHint(ok);
+    } catch {
+      flashHint('failed ✗');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const links = extractLinks(getText());
 
-  const flashHint = (which: 'link' | 'sel') => {
-    setHint(which);
-    window.setTimeout(() => setHint((cur) => (cur === which ? null : cur)), 1400);
-  };
-
-  const run = async (fn: () => void | Promise<void>) => {
-    if (busy) return;
-    setBusy(true);
-    try { await fn(); } finally { setBusy(false); }
-  };
-
   return (
-    <div className="pin-extras" ref={rowRef}>
+    <div className="pin-extras">
       {onPinSelection ? (
         <button
           type="button"
-          className={`act${hint === 'sel' ? ' copied' : ''}`}
+          className={`act${hint === 'select text ↑' || hint === 'pinned ✓' ? ' copied' : ''}`}
           title="Pin the text you selected in this message"
           onClick={async (e) => {
             e.stopPropagation();
-            if (!selRef.current) { flashHint('sel'); return; }
-            const text = selRef.current;
-            await run(() => onPinSelection(text));
-            selRef.current = '';
+            const sel = lastSel;
+            if (!sel || !sel.text || sel.host !== blockId) { flashHint('select text ↑'); return; }
+            await fire('pinned ✓', () => onPinSelection(sel.text));
           }}
         >
-          {hint === 'sel' ? 'select text ↑' : 'pin selection'}
+          {hint === 'select text ↑' || hint === 'pinned ✓' || hint === 'unpinned' || hint === 'failed ✗'
+            ? hint
+            : 'pin selection'}
         </button>
       ) : null}
       {onPinLink && links.length ? (
         links.length === 1 ? (
           <button
             type="button"
-            className={`act${hint === 'link' ? ' copied' : ''}`}
+            className={`act${hint === 'pinned ✓' ? ' copied' : ''}`}
             title={`Pin ${links[0]}`}
             onClick={async (e) => {
               e.stopPropagation();
-              await run(() => onPinLink(links[0]));
-              flashHint('link');
+              await fire('pinned ✓', () => onPinLink(links[0]));
             }}
           >
-            {hint === 'link' ? 'pinned ✓' : `pin link · ${hostOf(links[0])}`}
+            {hint === 'pinned ✓' || hint === 'unpinned' || hint === 'failed ✗' ? hint : `pin link · ${labelOf(links[0])}`}
           </button>
         ) : (
           <span className={`react-wrap${linkPickerOpen ? ' open' : ''}`}>
@@ -323,17 +346,21 @@ function PinExtras({
               type="button"
               className="act"
               aria-expanded={linkPickerOpen}
+              aria-haspopup="menu"
               title="Pin one of the links in this message"
               onClick={(e) => {
                 e.stopPropagation();
-                setLinkPickerOpen((open) => !open);
-                if (!linkPickerOpen) onOpenPicker?.();
+                setLinkPickerOpen((open) => {
+                  const next = !open;
+                  onPickerVisibility?.(next);
+                  return next;
+                });
               }}
             >
               pin link ▾
             </button>
             {linkPickerOpen ? (
-              <span className="link-picker" role="listbox" aria-label="Pick a link to pin">
+              <span className="link-picker" aria-label="Pick a link to pin">
                 {links.map((url) => (
                   <button
                     key={url}
@@ -343,11 +370,11 @@ function PinExtras({
                     onClick={async (e) => {
                       e.stopPropagation();
                       setLinkPickerOpen(false);
-                      await run(() => onPinLink(url));
-                      flashHint('link');
+                      onPickerVisibility?.(false);
+                      await fire('pinned ✓', () => onPinLink(url));
                     }}
                   >
-                    {hostOf(url)}
+                    {labelOf(url)}
                   </button>
                 ))}
               </span>
@@ -364,18 +391,29 @@ const URL_RE = /https?:\/\/[^\s<>"'\]）】»]+/g;
 function extractLinks(text: string): string[] {
   const out: string[] = [];
   for (const match of text.matchAll(URL_RE)) {
-    const url = match[0].replace(/[.,;:!?…()\]]+$/, '');
+    // Keep balanced parentheses inside the URL (wiki-style paths) and only
+    // strip a trailing `)` that has no opening partner (markdown residue).
+    let url = match[0];
+    let opens = (url.match(/\(/g) ?? []).length;
+    while (url.endsWith(')') && (url.match(/\)/g) ?? []).length > opens) {
+      url = url.slice(0, -1);
+      opens = (url.match(/\(/g) ?? []).length;
+    }
+    url = url.replace(/[.,;:!?…\]`*]+$/, '');
     if (url && !out.includes(url)) out.push(url);
     if (out.length >= 6) break;
   }
   return out;
 }
 
-function hostOf(url: string): string {
+function labelOf(url: string): string {
   try {
-    return new URL(url).hostname.replace(/^www\./, '');
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./, '');
+    const path = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname : '';
+    return `${host}${path.slice(0, 26)}${path.length > 26 ? '…' : ''}`;
   } catch {
-    return url.slice(0, 30);
+    return url.slice(0, 32);
   }
 }
 
@@ -1091,6 +1129,8 @@ function ElrondGroup({
                 getText={copyText}
                 pinned={isPinned}
                 mine={mine}
+                blockId={first.id}
+                mobile={mobile}
                 onReact={canReact ? (emoji) => onReact!(targetSeq!, emoji) : undefined}
                 onTogglePin={pin ? () => {
                   const src = textBlocks.filter(isAnswerProse);
@@ -1098,10 +1138,10 @@ function ElrondGroup({
                   const last = visible[visible.length - 1];
                   return pin.onToggle({ blockId: first.id, text: last?.text ?? copyText(), ts: first.ts });
                 } : undefined}
-                onPinLink={pin ? (url) =>
+                onPinLink={pin && !mobile ? (url) =>
                   pin.onToggle({ blockId: `${first.id}::link-${shortHash(url)}`, text: url, ts: first.ts })
                 : undefined}
-                onPinSelection={pin ? (text) =>
+                onPinSelection={pin && !mobile ? (text) =>
                   pin.onToggle({ blockId: `${first.id}::sel-${shortHash(text)}`, text, ts: first.ts })
                 : undefined}
               />
