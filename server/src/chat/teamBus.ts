@@ -1073,8 +1073,9 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // self-stamp persists). Reuse the stamped members verbatim instead
         // of rebuilding: if that attempt actually admitted, this pass is only
         // retrying the ack, and a rebuilt batch would fold in records that
-        // queued later and were never seen.
-        siblings = [lead, ...candidates.filter((item) => item.batchLeadId === lead.id)];
+        // queued later and were never seen. The lead is self-stamped, so it
+        // also matches the filter and is excluded to keep it out twice.
+        siblings = [lead, ...candidates.filter((item) => item.id !== lead.id && item.batchLeadId === lead.id)];
       } else {
         siblings = [lead];
         let batchChars = lead.text.length;

@@ -2343,6 +2343,10 @@ class ClaudeSession {
               if (this.boundaryWaiters === 0) return;
               // Another tool started before this ran: the request still stands.
               if (this.activeToolIds.size > 0) { this.boundaryInterruptWanted = true; return; }
+              // A background subagent can also have started between the outer
+              // check and this deferred fire. Same stand-down as that check:
+              // the turn is left to finish and the message starts the next one.
+              if (this.hasInterruptHazard()) { this.boundaryInterruptWanted = false; return; }
               this.lastBoundaryInterruptAt = Date.now();
               this.pausedForMessage = true;
               void this.interrupt('message-boundary').then((kept) => {
