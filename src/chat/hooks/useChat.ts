@@ -824,6 +824,24 @@ function readStoredBlocks(cli: CompanionId, repoPath: string, chatId = 'main'): 
   return readStoredSnapshot(cli, repoPath, chatId)?.blocks ?? [];
 }
 
+/** The person-facing blocks a replay gap must not erase: their messages,
+ *  teammate/automation bubbles, and assistant prose. Structure (tool cards,
+ *  links, artifacts, dividers) is dropped — the replayed window re-supplies
+ *  its newest — but prose at or below the client's cursor never re-arrives
+ *  (both server replay paths filter to seq > sinceSeq), so a full wipe erased
+ *  answers the pane had already shown (Oct 12 2026: reply_now answers on a
+ *  fast lane vanished this way). Kept text blocks are closed: a restored
+ *  copy is never live. */
+function personProseBlocks(blocks: ChatBlock[]): ChatBlock[] {
+  return blocks.flatMap((b): ChatBlock[] => {
+    if (b.kind === 'user' || b.kind === 'peer') return [b];
+    if (b.kind === 'text' && !b.thought && !b.pending && b.text.trim()) {
+      return [{ ...b, open: false }];
+    }
+    return [];
+  });
+}
+
 function blocksForStorage(blocks: ChatBlock[]): ChatBlock[] {
   // Never persist raw automation internals. A quiet routine is suppressed only
   // after its terminal NO_UPDATE/EOS arrives; storing the raw mid-turn list let
@@ -1756,8 +1774,13 @@ export function useChat(opts: {
           // copy would leave a silent hole before the replayed slice, so drop
           // it and rebuild from the window. Unlike replayReset, the thread was
           // not reset: pending outbound messages stay queued.
+          // Person-facing blocks are kept, not wiped: the server's prose
+          // exemption covers the replayed range, but prose at or below this
+          // cursor never re-arrives (both replay paths filter to
+          // seq > sinceSeq), so the wipe itself was erasing answers the pane
+          // had already shown.
           dropReplayOps();
-          setBlocks([]);
+          setBlocks((prev) => personProseBlocks(prev));
           turnIdRef.current = '';
           turnIdRef.peerId = undefined;
           turnIdRef.bg = undefined;
