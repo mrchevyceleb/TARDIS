@@ -20,6 +20,8 @@ export interface MenuActions {
   checkForUpdates(): void;
   openReleases(): void;
   openRepository(): void;
+  /** Half step in or out; 0 resets to 100%. Saved so it survives a restart. */
+  zoom(step: number): void;
 }
 
 export function installMenu(actions: MenuActions): void {
@@ -97,9 +99,9 @@ export function installMenu(actions: MenuActions): void {
     {
       label: 'View',
       submenu: [
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
+        { label: 'Actual Size', accelerator: 'CommandOrControl+0', click: () => actions.zoom(0) },
+        { label: 'Zoom In', accelerator: 'CommandOrControl+=', click: () => actions.zoom(0.5) },
+        { label: 'Zoom Out', accelerator: 'CommandOrControl+-', click: () => actions.zoom(-0.5) },
         { type: 'separator' },
         { role: 'togglefullscreen' },
         { type: 'separator' },
