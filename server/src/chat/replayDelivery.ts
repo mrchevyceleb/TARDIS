@@ -232,6 +232,11 @@ export const REPLAY_MAX_BYTES = 1_500_000;
 // bounds the extra replay cost to about a third again of the byte budget.
 export const REPLAY_PROSE_MAX_FRAMES = 500;
 export const REPLAY_PROSE_MAX_BYTES = 512 * 1024;
+// On the busiest lanes, where between-tool narration counts as prose, 500
+// frames can still be under an hour of messages; older prose then falls out
+// of the window like today. The client's replayGap keep (useChat) covers what
+// the pane had already shown below its cursor, which the server can never
+// re-send there (both replay paths filter to seq > sinceSeq).
 // How far back into the log file a resuming device may be caught up from. The
 // in-memory window holds 2000 events, which a busy lane fills in hours; this is
 // raw file bytes, so it is generous next to the 1.5MB actually sent (most of a
@@ -266,6 +271,9 @@ function isPersonProseFrame(ev: unknown): boolean {
   const frame = ev as Record<string, any> | null;
   const inner = frame?.type === 'event' ? frame.event : null;
   if (!inner || typeof inner !== 'object') return false;
+  // A subagent's own frames are private work even when they carry text: the
+  // client drops them unseen, and keeping them would only waste prose budget.
+  if (inner.parent_tool_use_id) return false;
   if (inner.type === '_user_echo' || inner.type === 'peer_message') return true;
   // A result frame can carry the turn's canonical answer when no assistant
   // frame did; the reducer's result handler renders it standalone too.
@@ -308,10 +316,16 @@ export function clampReplayWindow<T extends { seq: number; ev: unknown }>(
   const slice = frames.slice(cut);
   const prose: T[] = [];
   let proseBytes = 0;
-  for (let i = cut - 1; i >= 0 && prose.length < REPLAY_PROSE_MAX_FRAMES && proseBytes < REPLAY_PROSE_MAX_BYTES; i -= 1) {
+  for (let i = cut - 1; i >= 0 && prose.length < REPLAY_PROSE_MAX_FRAMES; i -= 1) {
     if (!isPersonProseFrame(frames[i].ev)) continue;
+    const size = JSON.stringify(frames[i].ev)?.length ?? 0;
+    // Measure before keeping: one oversized frame must not ride in on a fresh
+    // budget, and a monster frame is skipped entirely so it cannot crowd out
+    // the many small messages behind it.
+    if (size > REPLAY_PROSE_MAX_BYTES) continue;
+    if (proseBytes + size > REPLAY_PROSE_MAX_BYTES) break;
     prose.push(frames[i]);
-    proseBytes += JSON.stringify(frames[i].ev)?.length ?? 0;
+    proseBytes += size;
   }
   // Collected newest→oldest below the cut, so reversed it precedes the slice
   // in ascending seq order with no overlap.
