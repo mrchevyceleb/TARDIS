@@ -108,7 +108,12 @@ function useWorkspaceTargetOpener(target: WorkspaceTarget | null): () => void {
       return;
     }
 
-    openWorkspaceLink(path, kind);
+    // In a plain browser a folder opens the closable in-app list (the ship
+    // serves it, so it is always current); files keep their native scheme /
+    // browser-tab behavior.
+    openWorkspaceLink(path, kind, kind === 'folder' && viewer
+      ? () => viewer.open({ source: 'folder', path })
+      : undefined);
   }, [kind, path, studio, viewer]);
 }
 

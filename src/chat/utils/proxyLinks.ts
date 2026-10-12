@@ -278,19 +278,22 @@ export function openWorkspaceLink(relPath: string, kind: 'doc' | 'folder', onFol
 
 function openWorkspaceLinkInBrowser(relPath: string, kind: 'doc' | 'folder', allowNativeScheme: boolean, onFolderFallback?: () => void): void {
   const { browserUrl, nativeUrl } = buildLinkUrls(relPath, kind);
+  // A folder never gambles on this PC's local copy from a browser: the
+  // OneDrive copy can be stale or missing entirely (a folder the ship just
+  // made), and a `rivendell://` fire that fails is completely silent. The
+  // closable in-app list is always current (the ship serves it), so it comes
+  // first; the native scheme stays the last resort when no list can be shown.
+  if (kind === 'folder') {
+    if (onFolderFallback) { onFolderFallback(); return; }
+    if (allowNativeScheme && isWindowsPlatform()) { fireNativeScheme(nativeUrl); return; }
+    showToast('That folder cannot be opened from here.');
+    return;
+  }
   if (allowNativeScheme && isWindowsPlatform()) {
     fireNativeScheme(nativeUrl);
     return;
   }
-  if (kind === 'doc') {
-    window.open(browserUrl, '_blank', 'noopener,noreferrer');
-    return;
-  }
-  // A folder that cannot open on this PC used to push the app into the legacy
-  // /library route, a screen with no way back. Never navigate the app away:
-  // show a closable file list instead.
-  if (onFolderFallback) onFolderFallback();
-  else showToast('That folder cannot be opened from here.');
+  window.open(browserUrl, '_blank', 'noopener,noreferrer');
 }
 
 // Workspace and OneDrive paths commonly contain spaces ("Client Dashboards/

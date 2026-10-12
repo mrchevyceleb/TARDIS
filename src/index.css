@@ -6182,6 +6182,7 @@ button {
 @media (max-width: 600px) { .proxy-viewer-back span { display: none; } .proxy-viewer-back { padding: 8px; } }
 .proxy-viewer-back:hover { border-color: var(--r-gold); background: color-mix(in srgb, var(--r-gold) 10%, transparent); }
 .proxy-folder-row svg { flex: 0 0 auto; color: var(--r-gold); }
+.proxy-folder-thumb { flex: 0 0 auto; width: 32px; height: 32px; object-fit: cover; border: 1px solid var(--r-line); border-radius: 6px; background: var(--r-bg-deep); }
 .proxy-folder-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proxy-folder-size { flex: 0 0 auto; color: var(--r-faint, #8a8f9c); font-family: var(--r-mono); font-size: 11px; }
 /* The viewer docks beside the chat instead of covering it: a right-hand panel,
