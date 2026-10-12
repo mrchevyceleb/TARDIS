@@ -938,22 +938,19 @@ function batchRoleClass(record: { fromRole?: string }): 'desk' | 'voice' | 'auto
   return 'teammate';
 }
 
-/** Whether a queued record can ride the lead's admitted turn without losing
- *  its own routing. The lead's collaboration chain is the only one the turn
- *  can activate (one active chain slot per lane), so a record carrying an
- *  explicit chain joins only an identical one; plain handoffs join freely and
- *  lose only synthesized route metadata, which every sender can read from the
- *  thread anyway. */
+/** Whether a queued record can ride the lead's admitted turn. Same sender
+ *  class (the admitted turn's reply instruction is built from the lead's
+ *  role); tier and batch caps (count, characters) are applied by the caller.
+ *  Collaboration chains no longer gate the join: the lead's chain is the
+ *  only one the turn activates (one active chain slot per lane), so a
+ *  sibling's chain is not activated — but queued records never carry blocking
+ *  waiters (a wait:true caller gets the busy error instead of a silent
+ *  queue), so a sibling loses only continuity metadata its sender can read
+ *  from the thread. Chain-identity joins left every differently-chained
+ *  handoff a singleton batch — Tim's queue held 11 records, one admitted
+ *  per idle break. */
 function batchJoinable(lead: QueuedTeamDelivery, record: QueuedTeamDelivery): boolean {
-  if (batchRoleClass(lead) !== batchRoleClass(record)) return false;
-  const explicit = (r: QueuedTeamDelivery) => Boolean(r.chainId || r.chainEdges?.length || r.chainRoute?.length);
-  if (!explicit(lead) && !explicit(record)) return true;
-  if (explicit(lead) !== explicit(record)) return false;
-  const leadChain = chainForQueuedDelivery(lead);
-  const recordChain = chainForQueuedDelivery(record);
-  return leadChain.id === recordChain.id
-    && leadChain.edges.join('\u0000') === recordChain.edges.join('\u0000')
-    && leadChain.route.join('\u0000') === recordChain.route.join('\u0000');
+  return batchRoleClass(lead) === batchRoleClass(record);
 }
 
 /** Ack a joined batch: the lead record's durable receipt proves the whole
@@ -1015,11 +1012,10 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       // one message per 10-25 s step), so every still-queued message for this
       // recipient rides the same admitted turn: person messages first
       // (Matt's Desk answers never sit behind teammate chatter), oldest first
-      // within each group. Only records that keep their own routing join
-      // (same sender class, and no explicit chain unless it matches the
-      // lead's), and the join is capped by count and characters so an
-      // admitted turn never grows past admission limits. Whatever does not
-      // fit stays queued and the next admission takes it.
+      // within each group. Same sender class joins (see batchJoinable —
+      // chains no longer gate it), and the join is capped by count and
+      // characters so an admitted turn never grows past admission limits.
+      // Whatever does not fit stays queued and the next admission takes it.
       const candidates = (await queueStoreOperation(() => queuedDeliveryStore.list()))
         .filter((item) => queueKeyOf(item) === queueKey)
         .sort((a, b) => (Number(sortsAhead(b)) - Number(sortsAhead(a)))

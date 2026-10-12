@@ -499,6 +499,13 @@ type ZaiCutDecision = { outcome: ZaiTurnOutcome; cut: ProviderCut; origin: TurnO
  *  message is never held off. */
 const PEER_BOUNDARY_INTERRUPT_GAP_MS = 60_000;
 
+/** How long a scheduled, wake- or job-result-started (automation) turn runs
+ *  before a teammate's handoff may end it at a tool boundary. Tim's
+ *  job-started turns ran 40+ minutes with Riley's handoffs queued the whole
+ *  time because automation turns were never interruptible for peers; the
+ *  grace only protects a just-started turn's chance to report. */
+const PEER_AUTOMATION_TURN_GRACE_MS = 60_000;
+
 /** Prepended to the turn that follows a boundary interrupt. */
 const PAUSED_FOR_MESSAGE_NOTE = '<rivendell-steer>Your previous turn was paused right after a tool call finished, so the message below reaches you as a normal message. Answer it first. Then, unless it changes the plan, carry on with what you were doing; the transcript above shows where you stopped.</rivendell-steer>';
 /** The same note for a lane that has the reply_now tool: Claude answers a person's
@@ -1698,12 +1705,14 @@ class ClaudeSession {
    *  generation). If the turn finishes on
    *  its own first, nothing is interrupted. A scheduled or wake-started
    *  (automation) turn ends for a person's message too — immediately while
-   *  nothing is in flight, or at a tool boundary — but
-   *  is left to finish for a teammate's handoff. Returns a release function, or
-   *  null when there is no turn to end. */
+   *  nothing is in flight, or at a tool boundary — and a teammate's handoff
+   *  may end it as well, at a tool boundary only and never mid-tool, after a
+   *  short grace (PEER_AUTOMATION_TURN_GRACE_MS) so a just-started job-result
+   *  turn still gets to report. Returns a release function, or null when
+   *  there is no turn to end. */
   requestBoundaryInterrupt(opts: { human?: boolean } = {}): (() => void) | null {
     const human = opts.human === true;
-    if (this.turnStartedAt === null || (this.automationTurn && !human) || this.disposed || this.child.exitCode !== null) return null;
+    if (this.turnStartedAt === null || this.disposed || this.child.exitCode !== null) return null;
     this.boundaryInterruptWanted = true;
     this.boundaryWaiters += 1;
     if (human) this.boundaryHumanWaiters += 1;
@@ -2314,7 +2323,15 @@ class ClaudeSession {
           // hold a message back.
           if (this.hasInterruptHazard()) {
             this.boundaryInterruptWanted = false;
-          } else if (this.boundaryHumanWaiters > 0 || now - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS) {
+          } else if (
+            (this.boundaryHumanWaiters > 0 || now - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS)
+            // A teammate's handoff may end an automation (scheduled, wake- or
+            // job-result-started) turn only once it has run the grace, so a
+            // turn that just started still gets to report. A person's message
+            // never waits out the grace. Inside the grace the request stays
+            // armed and the next tool boundary after it fires.
+            && (this.boundaryHumanWaiters > 0 || !this.automationTurn || now - (this.turnStartedAt ?? 0) >= PEER_AUTOMATION_TURN_GRACE_MS)
+          ) {
             // A teammate inside the hold-off window stays armed for the next
             // tool boundary instead.
             this.boundaryInterruptWanted = false;
