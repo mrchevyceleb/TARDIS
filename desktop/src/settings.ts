@@ -18,6 +18,8 @@ export interface Settings {
   theme?: ThemeName;
   bounds?: WindowBounds;
   maximized?: boolean;
+  /** Page zoom (Chromium zoom level, 0 = 100%), restored on every launch. */
+  zoomLevel?: number;
   /** This machine's copy of the workspace (ASSISTANT-HUB). */
   workspaceRoot?: string;
   /** Stable id for this machine on the ship's list of linked computers. */
@@ -87,8 +89,12 @@ function sanitize(raw: unknown): Settings {
     }
   }
   if (typeof input.maximized === 'boolean') out.maximized = input.maximized;
+  if (isFinite(input.zoomLevel)) out.zoomLevel = clamp(input.zoomLevel, ZOOM_MIN, ZOOM_MAX);
   return out;
 }
+
+export const ZOOM_MIN = -3;
+export const ZOOM_MAX = 5;
 
 // Generous, but finite: a corrupt settings file must never produce a window
 // Chromium refuses to create.
