@@ -1,7 +1,7 @@
 {
   "name": "tardis",
   "private": true,
-  "version": "0.3.16",
+  "version": "0.3.17",
   "description": "Bigger on the inside. A local-first, always-on multi-agent office for Claude Code, Codex, and Grok subscriptions.",
   "license": "MIT",
   "repository": {
@@ -61,7 +61,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
     "concurrently": "^9.2.1",
-    "knip": "^5.88.1",
+    "knip": "^6.41.0",
     "tailwindcss": "^4.1.0",
     "typescript": "~6.0.2",
     "vite": "^8.0.10"

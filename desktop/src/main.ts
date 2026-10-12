@@ -17,7 +17,7 @@ import {
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { getSettings, initSettings, saveSettings, type Settings, type ThemeName, type WindowBounds } from './settings.js';
+import { clampZoom, getSettings, initSettings, saveSettings, type Settings, type ThemeName, type WindowBounds } from './settings.js';
 import { installMenu } from './menu.js';
 import { normalizeServerUrl, probeServer, sameOrigin } from './server.js';
 import { canAutoUpdate, checkForUpdatesInteractive, onUpdateReady, pendingUpdateVersion, restartToUpdate, startUpdater } from './updater.js';
@@ -263,6 +263,25 @@ function createWindow(settings: Settings): BrowserWindow {
     if (win === window) win = null;
   });
 
+  // Ctrl (Cmd on a Mac) with + or = zooms in, - zooms out, 0 resets, number
+  // pad included. The View menu roles alone need Shift on Windows
+  // (Ctrl+Shift+=) and Electron forgets the level on restart, so the keys are
+  // handled here and the level is saved and put back on every load.
+  window.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.alt) return;
+    if (!(process.platform === 'darwin' ? input.meta : input.control)) return;
+    const step = input.code === 'Equal' || input.code === 'NumpadAdd' ? 0.5
+      : input.code === 'Minus' || input.code === 'NumpadSubtract' ? -0.5
+        : input.code === 'Digit0' || input.code === 'Numpad0' ? 0
+          : null;
+    if (step === null) return;
+    event.preventDefault();
+    zoom(window, step);
+  });
+  window.webContents.on('did-finish-load', () => {
+    window.webContents.setZoomLevel(getSettings().zoomLevel ?? 0);
+  });
+
   window.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
     if (code === ERR_ABORTED) return;
     if (!isMainFrame) {
@@ -436,6 +455,14 @@ function scheduleScreenshot(target: string): void {
   });
 }
 
+/** Zooms by a half step (0 resets) and saves the level; the keys and the View menu both land here. */
+function zoom(window: BrowserWindow | null, step: number): void {
+  if (!window || window.isDestroyed()) return;
+  const level = clampZoom(step === 0 ? 0 : window.webContents.getZoomLevel() + step);
+  window.webContents.setZoomLevel(level);
+  saveSettings({ zoomLevel: level });
+}
+
 function rebuildMenu(): void {
   installMenu({
     bridgeEnabled: bridgeEnabled(),
@@ -459,6 +486,7 @@ function rebuildMenu(): void {
     checkForUpdates: () => void checkForUpdatesInteractive(win, RELEASES_URL),
     openReleases: () => void shell.openExternal(RELEASES_URL),
     openRepository: () => void shell.openExternal(REPO_URL),
+    zoom: (step: number) => zoom(win, step),
   });
 }
 
