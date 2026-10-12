@@ -2598,9 +2598,12 @@ class ClaudeSession {
       const reseed = (compactFailed || lengthRejected) && !authFailPending && !zaiStale && !zaiCut;
       const rotationDue = !reseed && isClaudeFamilyCli(this.cli)
         && (this.rotateAfterNativeCompact || (!resultFailed && this.rotationWanted()));
-      const housekeeping = async () => {
+      const rotateIfDue = async (): Promise<boolean> => {
         if (seeded && !failed) await clearRotation(this.logKey);
-        if (!rotationDue || !(await this.rotateContextAtBoundary())) await this.maybeCompact();
+        return rotationDue && await this.rotateContextAtBoundary();
+      };
+      const housekeeping = async () => {
+        if (!(await rotateIfDue())) await this.maybeCompact();
       };
       // Installed before turnEnd, so a send admitted by a turnEnd subscriber
       // waits for the reseed instead of landing on the oversized session.
@@ -2625,7 +2628,13 @@ class ClaudeSession {
         }
       }
       if (rotationDue) {
-        this.contextMaintenance = Promise.resolve().then(housekeeping).catch((err) => {
+        // Only the rotation holds sends. When it can't rotate (background
+        // work), the durable compact is a slow model call that keeps the warm
+        // session, so it runs unbarriered: Oct 12 2026 it held Riley's lane
+        // (every hello and send) for four minutes and Matt's messages looked lost.
+        this.contextMaintenance = Promise.resolve().then(rotateIfDue).then((rotated) => {
+          if (!rotated) void this.maybeCompact();
+        }).catch((err) => {
           console.warn(`[context-rotation] ${this.logKey}: deferred after maintenance failure`, (err as Error).message);
         }).finally(() => { this.contextMaintenance = null; });
       }
