@@ -134,6 +134,16 @@ type QueuedTeamDelivery = StoredRecord & {
   chainId?: string;
   chainEdges?: string[];
   chainRoute?: string[];
+  /** Batch stamp, persisted before a batch is sent: the lead carries its
+   *  own id (self-stamp, freezing the membership across retries) and each
+   *  sibling carries the lead's id, so an ack, or its retry after a
+   *  restart, can reconstruct exactly which records rode the admitted
+   *  turn, never records that queued later and were never seen. */
+  batchLeadId?: string;
+  /** Set the moment the record's batch was admitted (the recipient saw it).
+   *  A queue row that survives a partial ack must be dropped by the next
+   *  batch build, never resent. */
+  acked?: true;
 };
 
 function chainForQueuedDelivery(record: QueuedTeamDelivery): TeamChain {
@@ -652,6 +662,9 @@ type TeamDelivery = {
   signal?: AbortSignal;
   /** Stable for persisted async jobs, so restart recovery can dedupe receipts. */
   deliveryId?: string;
+  /** True when a joined batch carries messages from several senders, so the
+   *  closing reply instruction must not name only the lead's sender. */
+  mixedSenders?: boolean;
   onAdmitted?: (session: SessionLike) => Promise<void>;
 };
 
@@ -681,6 +694,8 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
     ? '(This ping is a group-channel post. Reply in that channel with the channel_post tool exactly as the ping\'s rules describe, passing the hop number through unchanged. Do not team_message the channel and never move this into a one-on-one thread.)'
     : waitForReply
     ? `(Reply inline in this turn. Your final answer is returned automatically to ${from.name}; no second team_message call is needed.)`
+    : delivery.mixedSenders
+    ? '(Reply inline for the thread. This turn carries messages from several senders, so the sender of the first block is not the only one waiting. If any sender above needs the result, use team_message(to: "<that sender>", text: ..., wait: false) with that sender\'s own name; busy teammates are queued automatically.)'
     : `(Reply inline for the thread. If ${from.name} needs the result, use team_message(to: "${from.name}", text: ..., wait: false); busy teammates are queued automatically.)`;
   const prompt = [
     from.role === 'voice' ? '[continuation of the user’s voice request in your own thread]'
@@ -930,51 +945,69 @@ const MAX_BATCH_TEXT_CHARS = 24_000;
 /** Sender class for batch compatibility: the reply instruction an admitted
  *  turn carries is built from the lead's role, so only same-class records
  *  can share it (Desk answers answer on the card, voice continuations
- *  continue the call, automation stays automation, teammates reply inline). */
-function batchRoleClass(record: { fromRole?: string }): 'desk' | 'voice' | 'automation' | 'teammate' {
+ *  continue the call, automation stays automation, channel posts keep their
+ *  channel reply rules, teammates reply inline). */
+function batchRoleClass(record: { fromRole?: string }): 'desk' | 'voice' | 'automation' | 'channel' | 'teammate' {
   if (record.fromRole === 'desk') return 'desk';
   if (record.fromRole === 'voice') return 'voice';
   if (record.fromRole === 'automation') return 'automation';
+  if (record.fromRole === 'channel') return 'channel';
   return 'teammate';
 }
 
-/** Whether a queued record can ride the lead's admitted turn without losing
- *  its own routing. The lead's collaboration chain is the only one the turn
- *  can activate (one active chain slot per lane), so a record carrying an
- *  explicit chain joins only an identical one; plain handoffs join freely and
- *  lose only synthesized route metadata, which every sender can read from the
- *  thread anyway. */
+/** Whether a queued record can ride the lead's admitted turn. Same sender
+ *  class (the admitted turn's reply instruction is built from the lead's
+ *  role); channel posts additionally need the same channel, because every
+ *  channel record carries reply rules tied to its own channel and hop;
+ *  tier and batch caps (count, characters) are applied by the caller.
+ *  Collaboration chains no longer gate the join: the lead's chain is the
+ *  only one the turn activates (one active chain slot per lane), so a
+ *  sibling's chain is not activated. Queued records never carry blocking
+ *  waiters (the drain always delivers with waitForReply false; a wait:true
+ *  caller to a busy FIFO gets back a delivered+queued result and its reply
+ *  edge is released), so a sibling loses only continuity metadata its sender
+ *  can read from the thread. Chain-identity joins left every differently
+ *  chained handoff a singleton batch: Tim's queue held 11 records, one
+ *  admitted per idle break. */
 function batchJoinable(lead: QueuedTeamDelivery, record: QueuedTeamDelivery): boolean {
   if (batchRoleClass(lead) !== batchRoleClass(record)) return false;
-  const explicit = (r: QueuedTeamDelivery) => Boolean(r.chainId || r.chainEdges?.length || r.chainRoute?.length);
-  if (!explicit(lead) && !explicit(record)) return true;
-  if (explicit(lead) !== explicit(record)) return false;
-  const leadChain = chainForQueuedDelivery(lead);
-  const recordChain = chainForQueuedDelivery(record);
-  return leadChain.id === recordChain.id
-    && leadChain.edges.join('\u0000') === recordChain.edges.join('\u0000')
-    && leadChain.route.join('\u0000') === recordChain.route.join('\u0000');
+  if (batchRoleClass(lead) === 'channel') return lead.fromId === record.fromId;
+  return true;
 }
 
 /** Ack a joined batch: the lead record's durable receipt proves the whole
  *  joined prompt was accepted (one send, one peer echo), so persist a
- *  per-record receipt for every other message before deleting them — a
- *  restart mid-ack must never redeliver the tail of a batch. */
-async function acknowledgeQueuedBatch(records: QueuedTeamDelivery[], session: SessionLike): Promise<void> {
-  const [lead, ...rest] = records;
+ *  per-record receipt for every stamped member before deleting them; a
+ *  restart mid-ack must never redeliver the tail of a batch. Membership
+ *  comes from the persisted batch stamps, not the caller's in-memory list:
+ *  an ack retried after a restart must cover exactly the records that rode
+ *  the admitted turn, never a batch rebuilt around records that queued
+ *  later and were never seen. Members are marked acked before their
+ *  receipts and rows go (and the lead's row goes last), so every partial
+ *  failure leaves the queue in a state the next pass resolves by dropping
+ *  rows, never by resending a message the recipient already saw. */
+async function acknowledgeQueuedBatch(lead: QueuedTeamDelivery, session: SessionLike): Promise<void> {
   await flushEventLog(session.logKey);
   if (!hasDurableDeliveryReceipt(session.logKey, lead.id)) {
     throw new Error('accepted delivery receipt did not reach the event log');
   }
-  for (const record of rest) {
-    if (hasDurableDeliveryReceipt(session.logKey, record.id)) continue;
+  const members = [lead, ...(await queueStoreOperation(() => queuedDeliveryStore.list()))
+    .filter((item) => item.batchLeadId === lead.id && queueKeyOf(item) === queueKeyOf(lead))];
+  const memberIds = new Set(members.map((member) => member.id));
+  await queueStoreOperation(() => queuedDeliveryStore.modify((items) => items.map((item) =>
+    (memberIds.has(item.id) && item.id !== lead.id && item.acked !== true
+      ? { ...item, acked: true }
+      : item))));
+  for (const member of members) {
+    if (member.id === lead.id) continue;
+    if (hasDurableDeliveryReceipt(session.logKey, member.id)) continue;
     await appendEventLogDurable(session.logKey, {
       seq: reserveEventLogSeq(session.logKey),
-      ev: { type: 'event', event: { type: 'peer_delivery_accepted', deliveryId: record.id } } as PersistedEvent['ev'],
+      ev: { type: 'event', event: { type: 'peer_delivery_accepted', deliveryId: member.id } } as PersistedEvent['ev'],
     });
   }
-  for (const record of records) {
-    await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
+  for (const member of [...members.slice(1), lead]) {
+    await queueStoreOperation(() => queuedDeliveryStore.delete(member.id));
   }
 }
 
@@ -1015,33 +1048,61 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       // one message per 10-25 s step), so every still-queued message for this
       // recipient rides the same admitted turn: person messages first
       // (Matt's Desk answers never sit behind teammate chatter), oldest first
-      // within each group. Only records that keep their own routing join
-      // (same sender class, and no explicit chain unless it matches the
-      // lead's), and the join is capped by count and characters so an
-      // admitted turn never grows past admission limits. Whatever does not
-      // fit stays queued and the next admission takes it.
-      const candidates = (await queueStoreOperation(() => queuedDeliveryStore.list()))
+      // within each group. Same sender class joins (see batchJoinable —
+      // chains no longer gate it), and the join is capped by count and
+      // characters so an admitted turn never grows past admission limits.
+      // Whatever does not fit stays queued and the next admission takes it.
+      let candidates = (await queueStoreOperation(() => queuedDeliveryStore.list()))
         .filter((item) => queueKeyOf(item) === queueKey)
         .sort((a, b) => (Number(sortsAhead(b)) - Number(sortsAhead(a)))
           || String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
+      // Rows marked acked rode a batch the recipient already saw, but their
+      // delete did not survive the ack. Drop them here rather than letting
+      // them ride, or lead, a fresh batch: resending one would duplicate a
+      // delivered message.
+      const seenRows = candidates.filter((item) => item.acked === true);
+      for (const row of seenRows) {
+        await queueStoreOperation(() => queuedDeliveryStore.delete(row.id));
+      }
+      if (seenRows.length > 0) candidates = candidates.filter((item) => item.acked !== true);
       if (candidates.length === 0) break;
       const lead = candidates[0];
-      const siblings = [lead];
-      let batchChars = lead.text.length;
-      for (const candidate of candidates.slice(1)) {
-        if (siblings.length >= MAX_BATCH_DELIVERIES) break;
-        // Siblings must share the lead's sortsAhead tier. A priority-flagged
-        // teammate lead that joined ordinary chatter would strand a queued
-        // Desk answer or voice continuation behind that whole admitted batch,
-        // breaking person-first delivery; same tier plus batchJoinable's
-        // same-class rule keeps every person-sourced and priority record
-        // ahead of ordinary chatter.
-        if (sortsAhead(candidate) !== sortsAhead(lead)) continue;
-        if (!batchJoinable(lead, candidate)) continue;
-        const block = batchDeliveryBlock(candidate);
-        if (batchChars + block.length > MAX_BATCH_TEXT_CHARS) continue;
-        siblings.push(candidate);
-        batchChars += block.length;
+      let siblings: QueuedTeamDelivery[];
+      if (lead.batchLeadId === lead.id) {
+        // Frozen batch from a send attempt that already ran (the lead's
+        // self-stamp persists). Reuse the stamped members verbatim instead
+        // of rebuilding: if that attempt actually admitted, this pass is only
+        // retrying the ack, and a rebuilt batch would fold in records that
+        // queued later and were never seen. The lead is self-stamped, so it
+        // also matches the filter and is excluded to keep it out twice.
+        siblings = [lead, ...candidates.filter((item) => item.id !== lead.id && item.batchLeadId === lead.id)];
+      } else {
+        siblings = [lead];
+        let batchChars = lead.text.length;
+        for (const candidate of candidates.slice(1)) {
+          if (siblings.length >= MAX_BATCH_DELIVERIES) break;
+          // Siblings must share the lead's sortsAhead tier. A priority-flagged
+          // teammate lead that joined ordinary chatter would strand a queued
+          // Desk answer or voice continuation behind that whole admitted batch,
+          // breaking person-first delivery; same tier plus batchJoinable's
+          // same-class rule keeps every person-sourced and priority record
+          // ahead of ordinary chatter.
+          if (sortsAhead(candidate) !== sortsAhead(lead)) continue;
+          if (!batchJoinable(lead, candidate)) continue;
+          const block = batchDeliveryBlock(candidate);
+          if (batchChars + block.length > MAX_BATCH_TEXT_CHARS) continue;
+          siblings.push(candidate);
+          batchChars += block.length;
+        }
+        // Stamp the whole batch in one store write before it is sent: the
+        // lead self-stamps (freezing the membership across retries) and
+        // each sibling carries the lead's id, so an ack, or its retry
+        // after a restart, can always reconstruct exactly which records
+        // rode the admitted turn.
+        await queueStoreOperation(() => queuedDeliveryStore.modify((items) => items.map((item) =>
+          (siblings.some((sibling) => sibling.id === item.id) && item.batchLeadId !== lead.id
+            ? { ...item, batchLeadId: lead.id }
+            : item))));
       }
       const from = findAgent(lead.fromId) ?? {
         id: lead.fromId,
@@ -1062,7 +1123,8 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         chain: chainForQueuedDelivery(lead),
         waitForReply: false,
         deliveryId: lead.id,
-        onAdmitted: (session) => acknowledgeQueuedBatch(siblings, session),
+        mixedSenders: siblings.some((sibling) => sibling.fromId !== lead.fromId),
+        onAdmitted: (session) => acknowledgeQueuedBatch(lead, session),
       });
       const remains = await queueStoreOperation(async () =>
         (await queuedDeliveryStore.list()).some((item) => item.id === record.id));
