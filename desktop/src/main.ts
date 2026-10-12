@@ -17,7 +17,7 @@ import {
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { getSettings, initSettings, saveSettings, ZOOM_MAX, ZOOM_MIN, type Settings, type ThemeName, type WindowBounds } from './settings.js';
+import { clampZoom, getSettings, initSettings, saveSettings, type Settings, type ThemeName, type WindowBounds } from './settings.js';
 import { installMenu } from './menu.js';
 import { normalizeServerUrl, probeServer, sameOrigin } from './server.js';
 import { canAutoUpdate, checkForUpdatesInteractive, onUpdateReady, pendingUpdateVersion, restartToUpdate, startUpdater } from './updater.js';
@@ -276,10 +276,7 @@ function createWindow(settings: Settings): BrowserWindow {
           : null;
     if (step === null) return;
     event.preventDefault();
-    const raw = step === 0 ? 0 : window.webContents.getZoomLevel() + step;
-    const level = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(raw * 2) / 2));
-    window.webContents.setZoomLevel(level);
-    saveSettings({ zoomLevel: level });
+    zoom(window, step);
   });
   window.webContents.on('did-finish-load', () => {
     window.webContents.setZoomLevel(getSettings().zoomLevel ?? 0);
@@ -458,6 +455,14 @@ function scheduleScreenshot(target: string): void {
   });
 }
 
+/** Zooms by a half step (0 resets) and saves the level; the keys and the View menu both land here. */
+function zoom(window: BrowserWindow | null, step: number): void {
+  if (!window || window.isDestroyed()) return;
+  const level = clampZoom(step === 0 ? 0 : window.webContents.getZoomLevel() + step);
+  window.webContents.setZoomLevel(level);
+  saveSettings({ zoomLevel: level });
+}
+
 function rebuildMenu(): void {
   installMenu({
     bridgeEnabled: bridgeEnabled(),
@@ -481,6 +486,7 @@ function rebuildMenu(): void {
     checkForUpdates: () => void checkForUpdatesInteractive(win, RELEASES_URL),
     openReleases: () => void shell.openExternal(RELEASES_URL),
     openRepository: () => void shell.openExternal(REPO_URL),
+    zoom: (step: number) => zoom(win, step),
   });
 }
 

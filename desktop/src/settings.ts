@@ -89,12 +89,17 @@ function sanitize(raw: unknown): Settings {
     }
   }
   if (typeof input.maximized === 'boolean') out.maximized = input.maximized;
-  if (isFinite(input.zoomLevel)) out.zoomLevel = clamp(input.zoomLevel, ZOOM_MIN, ZOOM_MAX);
+  if (isFinite(input.zoomLevel)) out.zoomLevel = clampZoom(input.zoomLevel);
   return out;
 }
 
 export const ZOOM_MIN = -3;
 export const ZOOM_MAX = 5;
+
+/** Zoom moves in half steps, so it rounds to the nearest 0.5 (not a whole number like clamp). */
+export function clampZoom(level: number): number {
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(level * 2) / 2));
+}
 
 // Generous, but finite: a corrupt settings file must never produce a window
 // Chromium refuses to create.
