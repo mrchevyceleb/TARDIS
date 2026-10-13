@@ -56,6 +56,7 @@ const stateDir = path.join(tmp, 'state');
 const bootLog = path.join(tmp, 'boot.log');
 let child = null;
 let pass = false;
+let failedMsg = null;
 let targetSha = '';
 let liveHead = '';
 
@@ -110,9 +111,10 @@ try {
   const log = fs.createWriteStream(bootLog);
   child.stdout.pipe(log);
   child.stderr.pipe(log);
-  child.on('exit', (code) => { if (!pass) fail(`side copy exited early (code ${code}) — see ${bootLog}`); });
+  let earlyExit = null;
+  child.on('exit', (code) => { earlyExit = code; });
 
-  const health = await waitHealthy(PORT, 150_000);
+  const health = await waitHealthy(PORT, 150_000, () => earlyExit);
   if (health.busyTurns !== 0) fail(`busyTurns ${health.busyTurns} on a fresh side copy — lanes are running; see ${bootLog}`);
   const sideCopyLine = fs.readFileSync(bootLog, 'utf8').includes('[side-copy]');
   if (!sideCopyLine) fail('side-copy gate did not engage (no [side-copy] boot line) — see ' + bootLog);
@@ -126,7 +128,7 @@ try {
 
   pass = true;
 } catch (err) {
-  fail(String(err.message || err));
+  if (!failedMsg) fail(String(err.message || err));
 } finally {
   // 6. Report + teardown (always, pass or fail).
   const elapsed = Math.round((Date.now() - T0) / 1000);
@@ -138,7 +140,8 @@ try {
     });
   }
   try { run('git', ['worktree', 'remove', '--force', srcDir], REPO, undefined, true); } catch {}
-  if (!KEEP) { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} }
+  // Logs stay for inspection on any FAIL (the report says where they are).
+  if (pass && !KEEP) { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} }
   console.log(pass
     ? `\nPASS — ${targetSha.slice(0, 10)} boots clean${MESSAGE ? ' and answers a test lane' : ''} in ${elapsed}s.`
       + `\nRollback point if the live restart fails: ${liveHead.slice(0, 10)}.`
@@ -148,7 +151,12 @@ try {
 }
 
 function step(msg) { console.log(`[check] ${msg}`); }
-function fail(msg) { console.error(`[check] FAIL: ${msg}`); throw new Error(msg); }
+function fail(msg) {
+  if (failedMsg) throw new Error(failedMsg); // already reported; just unwind
+  failedMsg = msg;
+  console.error(`[check] FAIL: ${msg}`);
+  throw new Error(msg);
+}
 function mb(dir) {
   let n = 0;
   try { for (const e of fs.readdirSync(dir, { withFileTypes: true })) n += e.isFile() ? fs.statSync(path.join(dir, e.name)).size : 0; } catch {}
@@ -163,9 +171,11 @@ function run(cmd, cmdArgs, cwd, toFile, quiet) {
   }
 }
 
-async function waitHealthy(port, timeoutMs) {
+async function waitHealthy(port, timeoutMs, earlyExit) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    const code = earlyExit();
+    if (code !== null) fail(`side copy exited early (code ${code}) — see ${bootLog}`);
     if (Date.now() > deadline) fail(`health never came up within ${Math.round(timeoutMs / 1000)}s — see ${bootLog}`);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/api/health`);
