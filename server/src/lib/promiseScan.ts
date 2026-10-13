@@ -65,12 +65,14 @@ function instantInZone(year: number, month0: number, day: number, hour: number, 
 /** `now` as a wall-clock in the team's zone: the instant shifted BY the
  *  zone offset (the offset already carries its sign; adding it moves the
  *  wall-clock fields into Eastern). */
-function wallInZone(date: Date): { y: number; m0: number; d: number; weekday: number } {
+function wallInZone(date: Date): { y: number; m0: number; d: number; h: number; min: number; weekday: number } {
   const shifted = new Date(date.getTime() + zoneOffsetMs(date));
   return {
     y: shifted.getUTCFullYear(),
     m0: shifted.getUTCMonth(),
     d: shifted.getUTCDate(),
+    h: shifted.getUTCHours(),
+    min: shifted.getUTCMinutes(),
     weekday: shifted.getUTCDay(),
   };
 }
@@ -152,10 +154,13 @@ function resolveClock(text: string, dayWord: string | undefined, clockText: stri
     at = instantInZone(y, m0, d, hour, minute);
   }
   // A date that does not survive the round trip (Feb 31 normalizes into
-  // March) is not the requested date: refuse instead of placing the promise
-  // on a different day.
+  // March, and a nonexistent spring-forward wall clock normalizes into the
+  // hour after) is not the requested time: refuse instead of silently
+  // storing a different one. Ambiguous fall-back hours are inherently so;
+  // the first occurrence wins and passes this check as itself.
   const resolved = wallInZone(new Date(at));
   if (resolved.y !== y || resolved.m0 !== m0 || resolved.d !== d) return null;
+  if (resolved.h !== hour || resolved.min !== minute) return null;
   return at;
 }
 
