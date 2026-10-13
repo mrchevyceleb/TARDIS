@@ -44,6 +44,11 @@ const REPLY_NOW_ENABLED = process.env.RIVENDELL_REPLY_NOW === '1';
 const LANE = process.env.RIVENDELL_AGENT_LANE === 'bg' ? 'bg' : 'main';
 const FROM_PROP = { type: 'string', description: 'Your own teammate name. Only needed if TARDIS has not already identified you.' };
 
+// Identity for the owner-isolated commitments tool: the stable roster id the
+// runner passes when it names an agent, else the display name. A shared MCP
+// with neither (the banana serve process) never advertises the tool at all.
+const COMMITMENTS_IDENTITY = process.env.RIVENDELL_AGENT_ID || process.env.RIVENDELL_AGENT_NAME || '';
+
 const TOOLS = [
   {
     name: 'reply_now',
@@ -987,7 +992,7 @@ rl.on('line', async (line) => {
     } else if (method === 'ping') {
       send({ jsonrpc: '2.0', id, result: {} });
     } else if (method === 'tools/list') {
-      send({ jsonrpc: '2.0', id, result: { tools: TOOLS.filter((t) => t.name !== 'reply_now' || REPLY_NOW_ENABLED) } });
+      send({ jsonrpc: '2.0', id, result: { tools: TOOLS.filter((t) => (t.name !== 'reply_now' || REPLY_NOW_ENABLED) && (t.name !== 'commitments' || COMMITMENTS_IDENTITY)) } });
     } else if (method === 'tools/call') {
       const controller = new AbortController();
       activeCalls.set(id, controller);
