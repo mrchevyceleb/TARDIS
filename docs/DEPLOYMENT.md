@@ -93,6 +93,8 @@ curl http://127.0.0.1:8091/api/health   # wait for busyTurns: 0
 systemctl --user restart rivendell
 ```
 
+Since Oct 13 2026, `scripts/start.sh` also self-heals the client bundle on every boot: when the client sources are newer than `dist/` (a checkout that moved but never rebuilt), it builds into `dist.new`, swaps by rename, and keeps the previous bundle under `dist.old.*` (a failed build keeps the old bundle and boots anyway). A restart alone can therefore never keep serving a stale client. The explicit `npm run build` above stays for a logged, attended build.
+
 ## Private remote access with Tailscale
 
 Install and authenticate Tailscale on the server, then run:
