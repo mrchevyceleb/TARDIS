@@ -59,6 +59,9 @@ const synth = (prefix: string) => `${prefix}_${nextSyntheticId++}`;
 type ChatImage = { mediaType: string; base64: string };
 type BananaSessionOptions = {
   recoverContextOnNextTurn?: boolean;
+  /** Seed the primer on the first send. freshStart passes true so a reset
+   *  thread still receives its agent's code-carried open commitments. */
+  seedFirst?: boolean;
   cli?: CliKind;
   durableHistory?: PersistedEvent[];
 };
@@ -2471,6 +2474,7 @@ export class BananaSession {
     this.logKey = logKeyFor(this.cli, cwd, chatId);
     this.threadId = threadId;
     this.recoverContextOnNextTurn = opts.recoverContextOnNextTurn === true;
+    this.seedWindowOnNextTurn = opts.seedFirst === true;
 
     // Mirror the claude/codex path: rehydrate eventLog from disk so a server
     // restart between turns doesn't strand a reconnecting client.
@@ -4155,7 +4159,9 @@ export async function freshStartBanana(opts: {
   // failure leaves the old thread coherent and Fresh can be retried safely.
   await clearThreadMemory(logKey, chatId);
   await clearEventLog(logKey);
-  const session = new BananaSession(cwd, chatId, null, { cli, durableHistory: [] });
+  // seedFirst: a reset thread still seeds the primer on its first send, so
+  // the agent's code-carried open commitments survive a Fresh.
+  const session = new BananaSession(cwd, chatId, null, { cli, durableHistory: [], seedFirst: true });
   bananaSessions.set(key, session);
   return session;
 }

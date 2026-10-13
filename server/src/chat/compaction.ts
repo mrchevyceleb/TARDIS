@@ -344,7 +344,10 @@ export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev:
   // list the rolling compact can never rewrite, drop, or fold away. Every
   // engine seeds through here, so one stitch covers all four runners.
   const block = commitmentsSeedBlock(key);
-  return block ? `${block}\n\n---\n\n${primer}` : primer;
+  // After a Fresh the primer body is empty (compact and log were wiped) while
+  // the commitments block lives on: the seed is then exactly the block, with
+  // no dangling separator.
+  return block && primer ? `${block}\n\n---\n\n${primer}` : (block || primer);
 }
 
 /** The seed block for this thread's agent commitments, or ''. Fail-open: a

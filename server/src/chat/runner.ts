@@ -3386,7 +3386,11 @@ export async function freshStart(opts: {
   await clearThreadMemory(logKey, chatId);
   await clearEventLog(logKey);
   if (opts.cli === 'xai') await ensureXaiProxy();
-  const fresh = await spawnSession(opts.cli, cwd, chatId, null, key, 0, opts.model, opts.effort);
+  // seedFirst=true: the fresh session still seeds the primer on its first
+  // turn, so the agent's code-carried open commitments survive a Fresh (the
+  // compact and log the primer normally carries were just wiped, so the seed
+  // is exactly the commitments block).
+  const fresh = await spawnSession(opts.cli, cwd, chatId, null, key, 0, opts.model, opts.effort, true);
   if (fresh instanceof ClaudeSession) {
     fresh.noteBackgroundWorkEndedBefore('stop', stoppedBeforeFresh);
     fresh.noteBackgroundWorkEndedBefore('fresh', endedByFresh);

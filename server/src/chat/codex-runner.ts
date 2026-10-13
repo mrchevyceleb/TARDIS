@@ -171,6 +171,10 @@ type CodexSendOptions = {
 };
 type CodexSessionOptions = {
   recoverContextOnNextTurn?: boolean;
+  /** Seed the primer on the first send. freshStart passes true so a reset
+   *  thread still receives its agent's code-carried open commitments
+   *  (claude-family parity: spawnSession seeds whenever there is no resume id). */
+  seedFirst?: boolean;
   cli?: CliKind;
   durableHistory?: PersistedEvent[];
 };
@@ -319,6 +323,7 @@ export class CodexSession {
     this.replyWatch = new ReplyWatch(() => agentForChatId(chatId)?.id ?? chatId, this.cli);
     this.threadId = threadId;
     this.recoverContextOnNextTurn = opts.recoverContextOnNextTurn === true;
+    this.seedWindowOnNextTurn = opts.seedFirst === true;
 
     // Mirror the claude path: rehydrate eventLog from disk so a server
     // restart between turns doesn't strand a reconnecting client whose
@@ -1533,7 +1538,10 @@ export async function freshStartCodex(opts: {
   // failure leaves the old thread coherent and Fresh can be retried safely.
   await clearThreadMemory(logKey, chatId);
   await clearEventLog(logKey);
-  const session = new CodexSession(cwd, chatId, null, { cli, durableHistory: [] });
+  // seedFirst: a reset thread still seeds the primer on its first send, so
+  // the agent's code-carried open commitments survive a Fresh (claude-family
+  // parity: freshStart passes seedFirst to spawnSession below).
+  const session = new CodexSession(cwd, chatId, null, { cli, durableHistory: [], seedFirst: true });
   codexSessions.set(key, session);
   return session;
 }
