@@ -35,6 +35,9 @@ import {
   splitWindow,
   type VisibleTurn,
 } from './threadWindow.ts';
+import { bareChatId, isThreadLogKey } from './threadKey.ts';
+import { agentForChatId } from './agents.ts';
+import { listCommitments } from '../lib/commitmentStore.ts';
 
 const MIN_ACCEPT_WORDS = 400;
 const COMPACT_MAX_TOKENS = 8000;
@@ -84,29 +87,51 @@ type CompactionRecord = {
 };
 type CompactionState = Record<string, CompactionRecord>;
 
-let stateQueue: Promise<void> = Promise.resolve();
+let stateQueue: Promise<boolean> = Promise.resolve(true);
 
 function defaultRec(): CompactionRecord {
   return { userTurnsTotal: 0, lastCompactUserTurns: 0, count: 0, lastAt: 0, lastWords: 0 };
 }
 
-function loadState(): CompactionState {
+/** Tolerant by default (readers treat any problem as empty state). Strict
+ *  mode (mutations) refuses to run on state it cannot trust: only a
+ *  never-written file (ENOENT) reads as legitimately empty. */
+function loadState(strict = false): CompactionState {
+  let raw: string;
   try {
-    return JSON.parse(readFileSync(STATE_FILE, 'utf8')) as CompactionState;
-  } catch {
-    return {};
+    raw = readFileSync(STATE_FILE, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    if (!strict) return {};
+    throw new Error(`compaction state unreadable, refusing state mutations: ${(err as Error).message}`);
+  }
+  try {
+    return JSON.parse(raw) as CompactionState;
+  } catch (err) {
+    if (!strict) return {};
+    throw new Error(`compaction state corrupt, refusing state mutations: ${(err as Error).message}`);
   }
 }
 
-function mutateState(fn: (state: CompactionState) => void): Promise<void> {
+/** Serial state writes. Resolves false when the write failed (it is warned
+ *  inside, never rejected), so a caller that must know can retry; callers
+ *  that merely await keep their silent best-effort behavior. The read is
+ *  strict and the write atomic (tmp + rename, same shape as the roster and
+ *  commitments saves): a truncated state file can never be silently read as
+ *  empty and rewritten, wiping every lane's banked rotations. */
+function mutateState(fn: (state: CompactionState) => void): Promise<boolean> {
   stateQueue = stateQueue.then(() => {
     try {
-      const state = loadState();
+      const state = loadState(true);
       fn(state);
       mkdirSync(STATE_DIR, { recursive: true });
-      writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+      const tmp = `${STATE_FILE}.tmp`;
+      writeFileSync(tmp, JSON.stringify(state, null, 2));
+      renameSync(tmp, STATE_FILE);
+      return true;
     } catch (err) {
       console.warn('[compaction] state mutation failed:', (err as Error).message);
+      return false;
     }
   });
   return stateQueue;
@@ -224,10 +249,21 @@ export function adoptCompaction(fromKeys: string[], toKey: string): { blob: bool
 }
 
 /** Wipe rolling memory + cadence when the user fresh-starts a thread.
- * Remote deletion is staged first; callers clear the visible event log only
- * after this succeeds, so an MCP outage cannot leave a half-cleared thread. */
+ * The compaction state clears FIRST and fails closed: a corrupt or
+ * unwritable state file must throw before any compact copy is deleted, or
+ * the thread's only summary of its archived turns is destroyed while the
+ * Fresh aborts and the lane loses its older context. Every later failure
+ * point leaves the summary copies on disk, so a retried Fresh always
+ * starts from intact content. Callers clear the visible event log only
+ * after all of this succeeds. */
 export async function clearThreadMemory(key: string, chatId: string): Promise<void> {
   bumpCompactEpoch(key);
+  const stateCleared = await mutateState((state) => {
+    delete state[key];
+  });
+  if (!stateCleared) {
+    throw new Error('thread was not cleared because its compaction state could not be cleared');
+  }
   // Queue behind an in-flight replacement. The epoch bump makes that writer
   // discard its result; the lock then guarantees this deletion is last.
   try {
@@ -244,9 +280,6 @@ export async function clearThreadMemory(key: string, chatId: string): Promise<vo
       throw new Error(`thread was not cleared because its local compact could not be deleted: ${(err as Error).message}`);
     }
   }
-  await mutateState((state) => {
-    delete state[key];
-  });
 }
 
 export function countUserEchoes(events: Array<{ ev: any }>): number {
@@ -295,7 +328,10 @@ export function isRotationOwed(key: string): boolean {
   return recIsOwed(loadState()[key]);
 }
 
-export function clearRotation(key: string): Promise<void> {
+/** Consume a banked rotation. Resolves false when the state write failed:
+ *  the marker then stays set, so the next spawn re-seeds once (never blind),
+ *  and a caller that must know can retry the clear with bounded backoff. */
+export function clearRotation(key: string): Promise<boolean> {
   return mutateState((state) => {
     if (state[key]) {
       state[key].rotationOwed = false;
@@ -332,11 +368,39 @@ export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev:
   migrateLegacyPrimer(key);
   const evs = events ?? loadEventLogForCompactionSync(key);
   const blob = loadCompactBlob(key);
-  return assembleForeverTurn({
+  const primer = assembleForeverTurn({
     events: evs,
     compact: blob?.compact ?? '',
     lastCompactedSeq: blob?.lastCompactedSeq,
   }).primer;
+  // The agent's open commitments lead every seed: a short code-carried
+  // list the rolling compact can never rewrite, drop, or fold away. Every
+  // engine seeds through here, so one stitch covers all four runners.
+  const block = commitmentsSeedBlock(key);
+  // After a Fresh the primer body is empty (compact and log were wiped) while
+  // the commitments block lives on: the seed is then exactly the block, with
+  // no dangling separator.
+  return block && primer ? `${block}\n\n---\n\n${primer}` : (block || primer);
+}
+
+/** The seed block for this thread's agent commitments, or ''. A
+ *  roster-bound thread always seeds the block (an empty list seeds a one-line
+ *  "none") so the header's roster agent id reaches every lane — banana's
+ *  shared MCP has no identity env, and its display name may not even be
+ *  unique. Fail-open: a store hiccup must never block a session seed. */
+function commitmentsSeedBlock(key: string): string {
+  try {
+    if (!isThreadLogKey(key)) return '';
+    const agent = agentForChatId(bareChatId(key.slice(key.lastIndexOf('|') + 1)));
+    if (!agent) return '';
+    const lines = listCommitments(agent.id).map((c) => `- [${c.id}] ${c.text}${c.due ? ` (due ${c.due})` : ''}`);
+    return [
+      `Your open commitments — your own always-there list, carried by code so no memory rewrite can drop it. You are roster agent id ${agent.id}: pass it as from for the commitments tool's add and clear. Clear each one with the commitments tool (action clear, id in brackets) the moment it is done:`,
+      ...(lines.length ? lines : ['None right now. Add one the moment you owe a reply or promise a time.']),
+    ].join('\n');
+  } catch {
+    return '';
+  }
 }
 
 /** Build a seed from the COMPLETE durable hot log as it existed before the

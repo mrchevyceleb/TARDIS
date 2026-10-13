@@ -189,7 +189,7 @@ const TOOLS = [
         text: { type: 'string', description: 'One line, plain text, e.g. "Reply owed to Paula on the 3am tags" or "Restart TARDIS 4:00pm ET, prove with a round-trip"' },
         due: { type: 'string', description: 'Optional short time, e.g. "4:00pm ET today"' },
         id: { type: 'string', description: 'The commitment id to clear (from your list)' },
-        from: { type: 'string', description: 'Your own teammate name. Only needed on engines whose tool server carries no identity (banana); TARDIS has already identified you everywhere else.' },
+        from: { type: 'string', description: 'Your own teammate identity: your roster id for add/clear (run list first, it shows your id), or your exact name for list. Only needed on engines whose tool server carries no identity (banana); TARDIS has already identified you everywhere else.' },
       },
       required: ['action'],
       additionalProperties: false,
@@ -833,11 +833,12 @@ async function callTool(name, args, signal) {
       : 'Posted in the channel history; no fan-out (no @mentions in your reply).';
   }
   if (name === 'commitments') {
-    // The stable roster id when the runner passed it, else the display name.
-    // Banana's shared MCP has neither, so its lanes self-identify per call
-    // with `from`, exactly like the desk/board tools. No local roster lookup:
-    // every action goes through the routes, which resolve ids first and
-    // refuse ambiguous or unknown names.
+    // The stable roster id when the runner passed it, else the per-call
+    // `from` identity (banana's shared MCP has no env identity; its lanes
+    // self-identify exactly like the desk/board tools). No local roster
+    // lookup: every action goes through the routes, which resolve ids first,
+    // refuse ambiguous or unknown names, and accept ID-ONLY needles for
+    // add/clear (a display name is not owner-proof).
     const agent = process.env.RIVENDELL_AGENT_ID || process.env.RIVENDELL_AGENT_NAME
       || (typeof args.from === 'string' ? args.from.trim() : '');
     if (!agent) throw new Error('Only a named teammate keeps a commitments list.');
@@ -854,9 +855,12 @@ async function callTool(name, args, signal) {
       if (result?.error) throw new Error(result.error);
       return `Cleared ${args.id}.`;
     }
-    const { commitments } = await api(`/api/commitments?agent=${encodeURIComponent(agent)}`, undefined, signal);
-    if (!commitments?.length) return 'Your commitments list is empty. Add one the moment you owe a reply or promise a time.';
-    return commitments.map((c) => `- [${c.id}] ${c.text}${c.due ? ` — due ${c.due}` : ''}`).join('\n');
+    const { agentId, commitments } = await api(`/api/commitments?agent=${encodeURIComponent(agent)}`, undefined, signal);
+    if (!commitments?.length) return `Your commitments list is empty. Add one the moment you owe a reply or promise a time. Your roster agent id is ${agentId}: pass it as from for add and clear.`;
+    return [
+      `Your open commitments (roster agent id ${agentId}; pass it as from for add/clear):`,
+      ...commitments.map((c) => `- [${c.id}] ${c.text}${c.due ? ` — due ${c.due}` : ''}`),
+    ].join('\n');
   }
   if (name === 'team_recent') {
     const { messages } = await api(`/api/team/recent?name=${encodeURIComponent(args.name)}&limit=${args.limit ?? 8}`, undefined, signal);

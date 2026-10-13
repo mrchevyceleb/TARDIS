@@ -4,7 +4,7 @@
 // by the rolling compact, and the session seed stitches the list in.
 // Store: ~/.rivendell/agent-commitments.json
 
-import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 
@@ -74,14 +74,12 @@ function save(commitments: Commitment[]): void {
   mkdirSync(STATE_DIR, { recursive: true });
   const tmp = `${FILE}.tmp`;
   writeFileSync(tmp, `${JSON.stringify({ commitments }, null, 2)}\n`);
-  try {
-    renameSync(tmp, FILE);
-  } catch {
-    // Windows cannot replace via rename; overwrite in place so a failed
-    // write cannot leave the store deleted. Linux rename already replaced.
-    writeFileSync(FILE, readFileSync(tmp));
-    try { unlinkSync(tmp); } catch { /* leftover tmp is harmless */ }
-  }
+  // Atomic replace only. Never fall back to overwriting the live shared
+  // store in place: a partial in-place write could corrupt every live
+  // agent's commitments. A failed rename leaves the previous store fully
+  // intact and throws to the caller (the server never runs on Windows, so
+  // the old in-place fallback was dead code carrying exactly that risk).
+  renameSync(tmp, FILE);
 }
 
 /** Oldest first, so the seed reads like a queue. */
@@ -142,20 +140,4 @@ export function deleteCommitmentsForAgent(agentId: string): void {
   const all = readAll();
   const next = all.filter((c) => c.agentId !== owner);
   if (next.length !== all.length) save(next);
-}
-
-/** Put a snapshot of an agent's entries back (deleteAgent's undo when the
- *  roster save fails and the agent therefore stays alive). Fail-open and
- *  logged, never thrown: a restore failure must not mask the roster error
- *  it is unwinding. */
-export function restoreCommitments(agentId: string, snapshot: Commitment[]): void {
-  const owner = agentId.trim();
-  if (!owner) return;
-  try {
-    const others = readAll().filter((c) => c.agentId !== owner);
-    const restored = snapshot.filter((c) => c && c.agentId === owner && c.id && c.text);
-    save([...others, ...restored]);
-  } catch (err) {
-    console.warn(`[commitments] restore for ${owner} failed:`, (err as Error).message);
-  }
 }

@@ -409,10 +409,7 @@ const optionalMcpServers: Record<string, {
   args: string[];
   env?: Record<string, string>;
 }> = {};
-// A side-copy boot (pre-restart check) mounts no optional proxies: the
-// probe engine must never reach assistant-mcp (Railway) or the browser MCP.
-const OPTIONAL_MCP_DISABLED = process.env.RIVENDELL_SIDE_COPY === '1';
-if (!OPTIONAL_MCP_DISABLED && ASSISTANT_MCP_SERVER_URL && existsSync(ASSISTANT_MCP_PROXY)) {
+if (ASSISTANT_MCP_SERVER_URL && existsSync(ASSISTANT_MCP_PROXY)) {
   optionalMcpServers['assistant-mcp'] = {
     type: 'stdio',
     command: 'node',
@@ -420,7 +417,7 @@ if (!OPTIONAL_MCP_DISABLED && ASSISTANT_MCP_SERVER_URL && existsSync(ASSISTANT_M
     env: { MCP_SERVER_URL: ASSISTANT_MCP_SERVER_URL },
   };
 }
-if (!OPTIONAL_MCP_DISABLED && BROWSER_MCP_ENTRY && existsSync(BROWSER_MCP_ENTRY)) {
+if (BROWSER_MCP_ENTRY && existsSync(BROWSER_MCP_ENTRY)) {
   optionalMcpServers['rivendell-browser'] = {
     type: 'stdio',
     command: 'node',
@@ -444,11 +441,6 @@ export function laneMcpServers(agentName?: string, backgroundLane = false, owner
  *  reachable while their desktop app is open). */
 let localMcpLogged = false;
 function withTeamMcp(configJson: string, cwd: string, chatId: string): string {
-  // A side-copy boot (pre-restart check) mounts no built-in MCPs either: the
-  // probe lane must not reach rivendell-team, rivendell-device or the office
-  // tools. With the optional proxies already gated, --strict-mcp-config then
-  // leaves the probe with zero MCP servers.
-  if (OPTIONAL_MCP_DISABLED) return configJson;
   try {
     if (!localMcpLogged) {
       localMcpLogged = true;
@@ -781,13 +773,7 @@ class ClaudeSession {
       // Block the tool so the model asks inline in plain text, which the user can
       // actually reply to in the composer. (Same fix as samwise-2.)
       '--disallowedTools', disallowedTools,
-      // A side-copy probe never gets the permission bypass: --tools ''
-      // disables every built-in tool outright, and auto-denied permission
-      // prompts are the second layer (it only needs to reply, never to act).
-      // A normal lane keeps the full toolbox and the bypass.
-      ...(OPTIONAL_MCP_DISABLED
-        ? ['--tools', '', '--permission-prompts', 'none']
-        : ['--dangerously-skip-permissions']),
+      '--dangerously-skip-permissions',
       '--model', zaiCredential?.wireModel ?? this.spawnModel,
       // The claude binary's --effort has no `minimal`; only the Pi harness does.
       '--effort', this.spawnEffort === 'minimal' ? 'low' : this.spawnEffort,
@@ -3400,7 +3386,11 @@ export async function freshStart(opts: {
   await clearThreadMemory(logKey, chatId);
   await clearEventLog(logKey);
   if (opts.cli === 'xai') await ensureXaiProxy();
-  const fresh = await spawnSession(opts.cli, cwd, chatId, null, key, 0, opts.model, opts.effort);
+  // seedFirst=true: the fresh session still seeds the primer on its first
+  // turn, so the agent's code-carried open commitments survive a Fresh (the
+  // compact and log the primer normally carries were just wiped, so the seed
+  // is exactly the commitments block).
+  const fresh = await spawnSession(opts.cli, cwd, chatId, null, key, 0, opts.model, opts.effort, true);
   if (fresh instanceof ClaudeSession) {
     fresh.noteBackgroundWorkEndedBefore('stop', stoppedBeforeFresh);
     fresh.noteBackgroundWorkEndedBefore('fresh', endedByFresh);
