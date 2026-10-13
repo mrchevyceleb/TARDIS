@@ -1025,13 +1025,7 @@ export function repairEventLogSequenceSync(key: string): { repaired: boolean; la
  * turns that just aged out of the last-50 window must remain available until
  * Grok has merged them into the rolling compact. compactEventLog below refuses
  * to archive past that compacted seq, so the hot file is the complete source. */
-export function loadEventLogForCompactionSync(key: string): PersistedEvent[] {
-  let raw: string;
-  try {
-    raw = readFileSync(logPath(key), 'utf8');
-  } catch {
-    return [];
-  }
+function parseEventLogLines(raw: string): PersistedEvent[] {
   const events: PersistedEvent[] = [];
   for (const line of raw.split('\n')) {
     if (!line) continue;
@@ -1048,6 +1042,25 @@ export function loadEventLogForCompactionSync(key: string): PersistedEvent[] {
     }
   }
   return events;
+}
+
+export function loadEventLogForCompactionSync(key: string): PersistedEvent[] {
+  try {
+    return parseEventLogLines(readFileSync(logPath(key), 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+/** The archived prefix of a thread's durable log: events the rolling
+ *  compact already covers, moved out of the hot file by cleanup. The hot
+ *  file plus this is the complete durable log. */
+export function loadEventLogArchiveSync(key: string): PersistedEvent[] {
+  try {
+    return parseEventLogLines(readFileSync(archivePath(key), 'utf8'));
+  } catch {
+    return [];
+  }
 }
 
 // Append-only writer keyed by sanitized session key. A per-key promise chain
