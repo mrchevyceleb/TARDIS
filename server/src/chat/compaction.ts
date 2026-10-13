@@ -15,14 +15,14 @@
 //
 // The durable event log the user sees is NEVER wiped.
 
-import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { STATE_DIR } from './config.ts';
 import { callMcp } from '../lib/mcp.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
 import { redactSecrets } from './secretRedaction.ts';
-import { flushEventLog, loadEventLogForCompactionSync, MAX_EVENTS_PER_LOG } from './event-log-store.ts';
+import { flushEventLog, loadEventLogArchiveSync, loadEventLogForCompactionSync, MAX_EVENTS_PER_LOG } from './event-log-store.ts';
 import { ROTATION_COMPACT_DEADLINE_MS, ROTATION_VERBATIM_TAIL_CHARS } from './contextBudget.ts';
 import {
   COMPACT_BATCH_TURNS,
@@ -480,9 +480,20 @@ export async function rebuildTruncatedCompact(
   inFlight.add(key);
   try {
     await flushEventLog(key);
-    const durable = loadEventLogForCompactionSync(key);
-    const visible = extractVisibleTurns(durable);
+    // The complete durable log: the archived prefix (events this compact
+    // already covers, which cleanup moved out of the hot file) plus the hot
+    // file, deduped by seq and ordered. Reading only the hot file would
+    // leave the oldest material — exactly what a truncated compact lost —
+    // unread, and a rebuild could then report success from a suffix.
+    const durable = [...loadEventLogArchiveSync(key), ...loadEventLogForCompactionSync(key)];
+    const bySeq = new Map<number, (typeof durable)[number]>();
+    for (const event of durable) bySeq.set(event.seq, event);
+    const ordered = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+    const visible = extractVisibleTurns(ordered);
     const covered = visible.filter((t) => t.seq <= blob.lastCompactedSeq).sort((a, b) => a.seq - b.seq);
+    if (blob.lastCompactedSeq > 0 && covered.length === 0) {
+      throw new Error(`no covered events found in the archive or hot log (lastCompactedSeq ${blob.lastCompactedSeq}) — coverage cannot be proven; refusing to rebuild`);
+    }
     const pendingFacts: DurableFact[] = [];
     if (Array.isArray(blob.pendingFacts)) {
       for (const fact of blob.pendingFacts.slice(0, PENDING_FACTS_CAP)) {
@@ -500,9 +511,26 @@ export async function rebuildTruncatedCompact(
       if (!batch.length) break;
       onProgress?.(`${key}: rebuild batch ${batches + 1} (${batch.length} covered turns)`);
       const generated = await generateCompact(previous, batch);
+      // Cross-process CAS: this repair can run beside the live server, whose
+      // inFlight and epoch guards cannot see this process. A blob that
+      // changed on disk since this run's last read means a live compaction
+      // or fresh start won the race — abort with the last good document
+      // still on disk, and re-run later.
+      const disk = loadCompactBlob(key);
+      if (!disk || disk.compact !== previous || disk.lastCompactedSeq !== blob.lastCompactedSeq) {
+        throw new Error('the compact changed under the rebuild (a live compaction or fresh start won the race); aborting with the last good document on disk');
+      }
       let compactText = generated.compact;
       let retainedFacts = '';
       for (const fact of generated.facts) {
+        const factKey = durableFactKey(fact);
+        const queuedIdx = pendingFacts.findIndex((queued) => durableFactKey(queued) === factKey);
+        if (queuedIdx >= 0) {
+          // A re-extracted update supersedes the queued version in place, so
+          // the drain can never resolve an older version over a newer one.
+          pendingFacts[queuedIdx] = fact;
+          continue;
+        }
         if (pendingFacts.length >= PENDING_FACTS_CAP) retainedFacts += `\n- ${fact.title}: ${fact.content}`;
         else pendingFacts.push(fact);
       }
@@ -516,10 +544,46 @@ export async function rebuildTruncatedCompact(
       const wrote = writeCompactBlob(key, { ...blob, compact: compactText, words, pendingFacts }, epoch);
       if (!wrote || epochOf(key) !== epoch) throw new Error('thread was fresh-started during the rebuild');
     }
+    // The overwriteable RAG mirror must not keep serving the truncated
+    // document after a reported repair. Best effort: a failed save leaves
+    // the mirror stale until the next real compaction replaces it.
+    if (previous !== blob.compact && blob.chatId) {
+      try {
+        await saveCompactToMemory(key, epoch, 'rebuild', blob.chatId, previous);
+      } catch (err) {
+        console.warn(`[compaction] ${key}: RAG mirror not refreshed after the rebuild (the next real compaction replaces it): ${(err as Error).message}`);
+      }
+    }
     return { batches, fed, covered: covered.length, words, hitBound: fed < covered.length };
   } finally {
     inFlight.delete(key);
   }
+}
+
+/** Maintenance discovery: every compact blob on disk, each with the thread
+ *  key the compaction state still names for it (null when only the file
+ *  remains — a blob whose state write failed), plus the blob read raw from
+ *  the file. The one-time rebuild driver unions this with the state keys so
+ *  an orphaned truncated compact cannot be silently skipped. */
+export function listCompactBlobFiles(): { file: string; key: string | null; blob: CompactBlob | null }[] {
+  let names: string[] = [];
+  try {
+    names = readdirSync(COMPACTS_DIR).filter((n) => n.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  const keyByFile = new Map<string, string>();
+  for (const key of Object.keys(loadState())) keyByFile.set(compactFileId(key), key);
+  return names.map((name) => {
+    const file = name.slice(0, -5);
+    let blob: CompactBlob | null = null;
+    try {
+      blob = JSON.parse(readFileSync(compactPath(file), 'utf8')) as CompactBlob;
+    } catch {
+      // Unreadable file: reported with a null blob, never rebuilt.
+    }
+    return { file, key: keyByFile.get(file) ?? null, blob };
+  });
 }
 
 function formatTurnsForCompact(turns: VisibleTurn[]): string {
