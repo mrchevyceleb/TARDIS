@@ -12,6 +12,7 @@ import { brainForAgent, cliForAgentEngine, listAgents, type Agent } from './agen
 import { backgroundChatId, backgroundLaneEnabled, bareChatId, isBackgroundChatId, logKeyFor } from './threadKey.ts';
 import { extractVisibleTurns } from './threadWindow.ts';
 import { JsonStore, type StoredRecord } from '../lib/jsonStore.ts';
+import { scanOutgoingPromise } from '../lib/promiseScan.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
 // both sides touch shared graph modules — keeping this lazy is cheap insurance).
@@ -1264,6 +1265,30 @@ export async function deliverTeamMessage(input: {
 
   try { input.onQueued?.(); } catch (error) {
     console.warn('[team] admission observer failed:', (error as Error).message);
+  }
+
+  // A time the sender promises in this message becomes a commitment
+  // automatically when nothing matches it, so a promise can never silently
+  // vanish (card-baadaf gap 1). Fire-and-forget: a scan hiccup must never
+  // delay or fail the delivery itself. Only a roster agent's own words
+  // count: pseudo-senders (desk, voice, channel, unknown) are skipped, so a
+  // flag or nudge can never be re-processed as a promise.
+  if (!input.source) {
+    const sender = findAgent(input.from);
+    if (sender) {
+      void Promise.resolve().then(() => {
+        const scan = scanOutgoingPromise(sender.id, text);
+        if (scan.addError && scan.promise) {
+          void deliverTeamMessage({
+            from: 'TARDIS',
+            to: sender.id,
+            text: `You promised "${scan.promise.clause.replace(/\s+/g, ' ').slice(0, 120)}" (due ${scan.promise.due}) with no matching commitment, and the auto-add failed: ${scan.addError}. Add it with the commitments tool now.`,
+            wait: false,
+            priority: true,
+          }).catch(() => undefined);
+        }
+      }).catch(() => undefined);
+    }
   }
 
   if (!waitForReply) {

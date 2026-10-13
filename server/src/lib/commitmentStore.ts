@@ -13,6 +13,8 @@ export type Commitment = {
   agentId: string;
   text: string;
   due?: string;
+  /** Set once the past-due sweep has raised this entry (owner + Chief). */
+  flaggedAt?: number;
   createdAt: number;
 };
 
@@ -43,11 +45,13 @@ function normalizeCommitment(value: unknown): Commitment | null {
   const text = typeof raw.text === 'string' ? raw.text.replace(LINE_BREAKS, ' ').trim() : '';
   if (!id || !agentId || !text) return null;
   const due = typeof raw.due === 'string' ? raw.due.replace(LINE_BREAKS, ' ').trim().slice(0, DUE_CAP) : '';
+  const flaggedAt = asFiniteNumber(raw.flaggedAt, 0);
   return {
     id,
     agentId,
     text: text.slice(0, TEXT_CAP),
     ...(due ? { due } : {}),
+    ...(flaggedAt > 0 ? { flaggedAt } : {}),
     createdAt: asFiniteNumber(raw.createdAt, 0),
   };
 }
@@ -118,6 +122,24 @@ export function addCommitment(agentId: string, text: string, due?: string):
   all.push(commitment);
   save(all);
   return { commitment };
+}
+
+/** The past-due sweep marks an entry raised so it goes out once, not on
+ *  every tick. A no-op never rewrites the file. */
+export function markCommitmentFlagged(id: string): boolean {
+  const target = id.trim();
+  if (!target) return false;
+  const all = readAll();
+  let changed = false;
+  const next = all.map((c) => {
+    if (c.id === target && !c.flaggedAt) {
+      changed = true;
+      return { ...c, flaggedAt: Date.now() };
+    }
+    return c;
+  });
+  if (changed) save(next);
+  return changed;
 }
 
 /** Only the owner can clear its own entry; returns false when nothing matched. */
