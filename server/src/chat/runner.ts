@@ -781,12 +781,12 @@ class ClaudeSession {
       // Block the tool so the model asks inline in plain text, which the user can
       // actually reply to in the composer. (Same fix as samwise-2.)
       '--disallowedTools', disallowedTools,
-      // A side-copy probe never gets the permission bypass: auto-denied
-      // prompts are its enforcement boundary (it only needs to reply, never
-      // to act), so Bash/Write/Edit/web/MCP calls are all denied while a
-      // normal lane keeps the bypass.
+      // A side-copy probe never gets the permission bypass: --tools ''
+      // disables every built-in tool outright, and auto-denied permission
+      // prompts are the second layer (it only needs to reply, never to act).
+      // A normal lane keeps the full toolbox and the bypass.
       ...(OPTIONAL_MCP_DISABLED
-        ? ['--permission-prompts', 'none']
+        ? ['--tools', '', '--permission-prompts', 'none']
         : ['--dangerously-skip-permissions']),
       '--model', zaiCredential?.wireModel ?? this.spawnModel,
       // The claude binary's --effort has no `minimal`; only the Pi harness does.

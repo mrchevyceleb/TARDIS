@@ -81,7 +81,13 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     // signal cancelled the run.
     interrupted = true;
     console.error(`[check] ${sig} received — tearing down`);
-    void teardown().finally(() => process.exit(1));
+    void teardown().finally(() => {
+      // The main finally may never run (it can still be awaiting health or a
+      // reply), so the retained-log path is printed HERE or it could be
+      // undiscoverable.
+      console.error(`\nFAIL — interrupted by ${sig}; logs kept in ${tmp}`);
+      process.exit(1);
+    });
   });
 }
 
