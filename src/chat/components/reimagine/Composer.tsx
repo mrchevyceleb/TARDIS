@@ -156,19 +156,33 @@ export function Composer(props: ComposerProps) {
   // one-on-one threads pay zero selection-state overhead.
   const [caret, setCaret] = useState(0);
   const [images, setImages] = useState<PendingImage[]>([]);
+  const [imageIngesting,setImageIngesting]=useState(0);
+  const imageIngestingRef=useRef(0);
   const [uploads, setUploads] = useState<PendingUpload[]>([]);
   const [queueArmed, setQueueArmed] = useState(false);
   const uploadAborts = useRef(new Map<string, () => void>());
   const [phIdx, setPhIdx] = useState(0);
   const [dictating,setDictating]=useState(false);
+  const [dictationOutcomeVersion,setDictationOutcomeVersion]=useState(0);
+  const pendingDictation=useRef<{chatId:string;completed:boolean}|null>(null);
   const latest=useRef(props);latest.current=props;
-  const insertDictation=(text:string)=>{
+  const queueDictation=(text:string)=>{
+    const dictated=text.trim();
+    if(!dictated)return;
     const current=taRef.current?.value??latest.current.value;
-    const next=current?`${current.trimEnd()}\n\n${text}`:text;
+    const next=current.trim()?`${current.trimEnd()}\n\n${dictated}`:dictated;
     if ( latest.current.mentionMembers?.length ) setCaret(next.length);
     latest.current.onChange(next);
     taRef.current?.focus();
+    pendingDictation.current={chatId:latest.current.chatId??'',completed:false};
   };
+  const completeDictation=()=>{
+    if(pendingDictation.current){
+      pendingDictation.current.completed=true;
+      setDictationOutcomeVersion(v=>v+1);
+    }
+  };
+  const discardDictation=()=>{pendingDictation.current=null;};
 
   // grok.com rotates the empty-composer placeholder every few seconds.
   const phrases = props.placeholders;
@@ -239,27 +253,50 @@ export function Composer(props: ComposerProps) {
 
   const ingest = async (files: FileList | File[]) => {
     if (!acceptImages) return;
+    const selected = Array.from(files);
+    const gated = selected.filter(f => INLINE_IMAGE_TYPES.has(f.type) && f.size <= IMAGE_DIRECT_MAX);
     const next: PendingImage[] = [];
     let inlineCount = imagesRef.current.length;
     let inlineBytes = imagesRef.current.reduce((sum, img) => sum + Math.floor((img.base64.length * 3) / 4), 0);
-    for (const f of Array.from(files)) {
-      if (
-        INLINE_IMAGE_TYPES.has(f.type)
-        && f.size <= IMAGE_DIRECT_MAX
-        && inlineCount < IMAGE_DIRECT_MAX_COUNT
-        && inlineBytes + f.size <= IMAGE_DIRECT_MAX_TURN_BYTES
-      ) {
-        const img = await fileToImage(f);
-        if (img) {
-          next.push(img);
-          inlineCount += 1;
-          inlineBytes += f.size;
+    if (gated.length) {
+      imageIngestingRef.current += gated.length;
+      setImageIngesting(imageIngestingRef.current);
+    }
+    try {
+      for (const f of selected) {
+        if (
+          INLINE_IMAGE_TYPES.has(f.type)
+          && f.size <= IMAGE_DIRECT_MAX
+          && inlineCount < IMAGE_DIRECT_MAX_COUNT
+          && inlineBytes + f.size <= IMAGE_DIRECT_MAX_TURN_BYTES
+        ) {
+          try {
+            const img = await fileToImage(f);
+            if (img) {
+              next.push(img);
+              inlineCount += 1;
+              inlineBytes += f.size;
+            }
+          } catch (error) {
+            setUploads((prev) => [...prev, {
+              id:`imgerr${Math.random().toString(36).slice(2,8)}`,
+              name:f.name,
+              size:f.size,
+              progress:0,
+              error:error instanceof Error?error.message:'Image could not be read',
+            }]);
+          }
           continue;
         }
+        void uploadFile(f);
       }
-      void uploadFile(f);
+      if(next.length)setImages(prev=>[...prev,...next]);
+    } finally {
+      if (gated.length) {
+        imageIngestingRef.current = Math.max(0, imageIngestingRef.current - gated.length);
+        setImageIngesting(imageIngestingRef.current);
+      }
     }
-    if (next.length) setImages((prev) => [...prev, ...next]);
   };
   const removeImage = (id: string) =>
     setImages((prev) => {
@@ -329,6 +366,13 @@ export function Composer(props: ComposerProps) {
     const imgs = payload();
     const refs = (props.refCount ?? 0) > 0;
     const hasLiveContent = Boolean(v || imgs?.length || refs);
+    // A direct image is not part of the payload until fileToImage completes.
+    // Block both manual and automatic submission while that conversion is in
+    // flight so the image cannot arrive as a surprise second message.
+    if(imageIngesting>0||imageIngestingRef.current>0){
+      if(props.busy&&allowStop&&!hasLiveContent)props.onStop?.();
+      return;
+    }
     // A streaming upload is still writing its file; its path line is not in
     // the draft yet, so sending or steering now would drop it. An explicit
     // Stop tap on an empty draft still interrupts the running agent (it
@@ -348,6 +392,7 @@ export function Composer(props: ComposerProps) {
     }
     if (props.busy) {
       if (hasLiveContent && props.onSteer) {
+        pendingDictation.current=null;
         if (queueArmed && props.onSendQueued && (canSteer || props.queueAvailable === true)) {
           props.onSendQueued(v, imgs);
           props.onChange('');
@@ -364,6 +409,7 @@ export function Composer(props: ComposerProps) {
       return;
     }
     if (!v && !imgs?.length && !refs) return;
+    pendingDictation.current=null;
     // A queued send on a channel (never busy-blocked there): the chip arms
     // the next-turn choice even when the composer itself is not busy.
     const sendQueued = queueArmed && props.onSendQueued && (canSteer || props.queueAvailable === true);
@@ -391,6 +437,26 @@ export function Composer(props: ComposerProps) {
       clearImages();
     }
   };
+
+  // Dictation finishes before ChatDictation reports itself inactive and before
+  // the controlled draft has committed. Wait for both, and also for any file
+  // upload to finish, then reuse the canonical Send/Steer path exactly once.
+  useEffect(()=>{
+    const pending=pendingDictation.current;
+    if(!pending||!pending.completed||dictating||pending.chatId!==(props.chatId??''))return;
+    // A failed attachment is not permission to send an incomplete request.
+    // Keep the dictated text in the draft and require an explicit Send after
+    // the person removes or replaces the failed upload.
+    if(uploads.some(u=>Boolean(u.error))){
+      pendingDictation.current=null;
+      return;
+    }
+    if(imageIngesting>0||imageIngestingRef.current>0)return;
+    if(uploads.some(u=>!u.error))return;
+    pendingDictation.current=null;
+    submit(false);
+  },[dictating,dictationOutcomeVersion,imageIngesting,props.value,props.chatId,uploads]);
+  useEffect(()=>()=>{pendingDictation.current=null;},[props.chatId]);
 
   const pick = (i: number) => {
     const c = matches[i];
@@ -758,7 +824,7 @@ export function Composer(props: ComposerProps) {
                 </span>
               )
             )}
-            {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating} />}
+            {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={queueDictation} onActive={setDictating} onComplete={completeDictation} onDiscard={discardDictation} />}
             <div className="send-slot">
               {queueChip}
               {trailingBtn()}
@@ -766,7 +832,7 @@ export function Composer(props: ComposerProps) {
           </div>
         ) : (
           <>
-            {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating} />}
+            {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={queueDictation} onActive={setDictating} onComplete={completeDictation} onDiscard={discardDictation} />}
             <div className="send-slot">
               {queueChip}
               {trailingBtn()}
