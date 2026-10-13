@@ -35,6 +35,20 @@ const EVICT_MIN_IDLE_MS = 60_000;
 const MAX_TABS = 8;
 const OP_DEADLINE_MS = 45_000;
 const SNAPSHOT_MAX = 40_000;
+
+/** Mask typed values of password-shaped fields in an accessibility snapshot.
+ *  The value sits on a nested /value line under a node whose accessible name
+ *  is "Password" and friends, a shape none of the generic secret rules can
+ *  see (the name's colon comes first and the value is on its own line), so a
+ *  typed password once reached chat and the log through this snapshot
+ *  (Oct 13, Wren's throwaway signup). Field labels matching a secret name
+ *  get their value line masked; every other field keeps its value. */
+function maskSnapshotSecrets(snapshot: string): string {
+  return snapshot.replace(
+    /(^[ \t]*[-*]?[ \t]*(?:[a-z]+[ \t]+)*(?:textbox|input|edittext|searchbox)\b[^\n]*\b(?:password|passcode|passphrase|pass phrase|pin|secret|api[ _-]?key|access[ _-]?key|token)\b[^\n]*)(\n[ \t]*[-*]?[ \t]*\/(?:value|placeholder)[ \t]*:[ \t]*)[^\n]*/gim,
+    (_all, header: string, valuePrefix: string) => `${header}${valuePrefix}[redacted secret]`,
+  );
+}
 const TEXT_MAX = 30_000;
 const LOG_LINES = 40;
 const SHOT_MAX_BYTES = 1_500_000;
@@ -388,7 +402,7 @@ export async function runHeadlessOp(op: string, agent: string, a: Args): Promise
         }
         case 'snapshot': {
           const snapshot = await page.ariaSnapshot({ mode: 'ai', timeout: 10_000 });
-          return { ...(await stateOf(lane, id, page)), snapshot: clip(snapshot, SNAPSHOT_MAX) };
+          return { ...(await stateOf(lane, id, page)), snapshot: clip(maskSnapshotSecrets(snapshot), SNAPSHOT_MAX) };
         }
         case 'click': {
           await locatorFor(page, a).click({ timeout: 10_000, clickCount: a.double === true ? 2 : 1, button: a.button === 'right' ? 'right' : 'left' });

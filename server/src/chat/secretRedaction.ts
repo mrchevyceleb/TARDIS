@@ -3,6 +3,11 @@
  * service/account names while replacing credential values. */
 
 const REDACTED = '[redacted secret]';
+/** A secret-word name followed by a dimension word is a config field, not a
+ *  credential: INPUT_TOKEN_COUNT, MAX_TOKEN_LIMIT, RATE_LIMIT_SECRET_PATH.
+ *  Matched against the prefix tail so these lines are never masked (the
+ *  unquoted rule would otherwise erase the whole remainder of the line). */
+const NON_SECRET_NAME = /(?:COUNT|LIMIT|SIZE|WIDTH|HEIGHT|LENGTH|URL|URI|ORIGIN|HOST|PORT|NAME|TITLE|PATH|DIR|PREFIX|SUFFIX|TTL|TIMEOUT|ID|IDS|VERSION|TYPE|MODE|FORMAT|LABEL|TAG|FLAG|DEBUG|RETRIES?|NUM|CAP|BUDGET|WINDOW|EXPIRY|EXPIRES|AT|ON|IN|OF)[A-Z0-9_]*\s*[:=]\s*$/;
 const REDACTED_SENTINEL = 'RIVENDELL_REDACTED_SECRET_VALUE';
 
 function preserveFence(value: string): string {
@@ -27,7 +32,10 @@ function redactOpaqueToken(token: string, offset: number, source: string): strin
  * at first use: every lane inherits this environment, so a printed value that
  * matches one is a leaked credential even with no recognizable shape (a
  * 24-char Vercel key). Exact-value masking is the only reliable catch for
- * short shapeless tokens. */
+ * short shapeless tokens. The process environment is boot-frozen (nothing
+ * mutates it at runtime; a rotated secret arrives with the next process, and
+ * every process rescans on its first redaction), so a once-collected list
+ * cannot go stale inside a run. */
 let knownSecretValues: string[] | null = null;
 let knownSecretMatcher: RegExp | null = null;
 
@@ -70,8 +78,8 @@ export function redactSecrets(text: string): string {
     )
     .replace(/\b(Bearer|Basic)(\s+)[A-Za-z0-9._~+/=-]{8,}/gi, (_all, scheme: string, gap: string) => `${scheme}${gap}${REDACTED}`)
     .replace(
-      /(\b(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)*\s*=\s*)(`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\r\n]+)/gi,
-      (_all, prefix: string, value: string) => `${prefix}${preserveFence(value)}`,
+      /(\b(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)*\s*=\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/gi,
+      (_all, prefix: string, value: string) => (NON_SECRET_NAME.test(prefix) ? _all : `${prefix}${preserveFence(value)}`),
     )
     // A value under a secret-shaped UPPERCASE name in JSON/YAML/JS object
     // form: quotes and a colon instead of "=". The env rule above needs "=",
@@ -84,8 +92,8 @@ export function redactSecrets(text: string): string {
     // ("PASSWORD: correct horse battery staple") and token-shape matching
     // would leak most of it.
     .replace(
-      /(\b(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)*["']?\s*:\s*)(`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\r\n]+)/g,
-      (_all, prefix: string, value: string) => `${prefix}${preserveFence(value)}`,
+      /(\b(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)*["']?\s*:\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/g,
+      (_all, prefix: string, value: string) => (NON_SECRET_NAME.test(prefix) ? _all : `${prefix}${preserveFence(value)}`),
     )
     .replace(
       /(\b(?:password|passcode|passwd|pwd|api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|bearer token|client[_ -]?secret|refresh[_ -]?token|private[_ -]?key|credential|cookie|session token|otp|one[- ]time (?:password|code)|verification code|recovery code)\b[^:\r\n=]{0,80}(?::|=)\s*)(`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;]+)/gi,
@@ -141,7 +149,9 @@ export function redactEventSecrets<T>(value: T): T {
     if (proto !== Object.prototype && proto !== null) return value;
     const out = Object.create(null) as Record<string, unknown>;
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      if (k === '__proto__') continue;
+      // A JSON-echoed own "__proto__" key stays: on this null-prototype
+      // receiver the assignment creates an ordinary own property (no
+      // inherited setter exists to hijack), and dropping it would lose data.
       out[k] = redactEventSecrets(v);
     }
     return out as unknown as T;
