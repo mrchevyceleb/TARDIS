@@ -157,7 +157,15 @@ try {
   try { roster = JSON.parse(fs.readFileSync(agentsFile, 'utf8')); } catch { /* fresh copy */ }
   if (!Array.isArray(roster.agents)) roster.agents = [];
   roster.agents = roster.agents.filter((a) => a?.id !== 'restart-check-a' && a?.id !== 'restart-check-b');
-  for (const [id, name] of [['restart-check-a', 'Restart Check A'], ['restart-check-b', 'Restart Check B']]) {
+  // Random per-run suffix in the NAME: /api/team/message routes by display
+  // name, so a copied-roster agent that happens to share a probe's name
+  // could win resolution and run a real (non-probe, possibly non-Claude)
+  // agent instead. A per-run suffix makes that collision impossible; the id
+  // filter above keeps a re-used state dir from double-seeding.
+  const probeSuffix = Math.random().toString(16).slice(2, 6);
+  const PROBE_A = `Pre-Restart Probe A ${probeSuffix}`;
+  const PROBE_B = `Pre-Restart Probe B ${probeSuffix}`;
+  for (const [id, name] of [['restart-check-a', PROBE_A], ['restart-check-b', PROBE_B]]) {
     roster.agents.push({ id, name, role: 'pre-restart check probe (side copy only)', engine: 'claude', home: `bot-${id}`, createdAt: Date.now() });
   }
   fs.mkdirSync(personasDir, { recursive: true });
@@ -220,7 +228,7 @@ try {
 
     // 7c. One team_message between the two probe lanes, entirely inside the
     //     side copy: no real agent, no outside system, exact reply required.
-    const team = await teamRoundTrip(PORT);
+    const team = await teamRoundTrip(PORT, PROBE_A, PROBE_B);
     step(`team round trip ok (reply: ${JSON.stringify(String(team.reply).slice(0, 40))})`);
   }
 
@@ -389,22 +397,43 @@ async function replayCheck(port, repo, chatId, sinceSeq, clientMsgId, echoSeq, r
     ws.onerror = () => { clearTimeout(timer); reject(new Error('replay websocket error')); };
   });
   ws.send(JSON.stringify({ type: 'hello', cli: 'claude', repo, chatId, sinceSeq, visible: false }));
-  // The replay is served after the hello barrier settles; 4s covers the
-  // seeded history plus the probe turn on a cold lane.
-  await sleep(4000);
+  // The WS protocol has no replay-complete barrier, so close on quiet: hold
+  // the socket until no frame has arrived for 2s (a slow but valid replay
+  // simply holds longer instead of false-failing a fixed window, and a
+  // straggler duplicate still lands inside the window), with a hard cap so
+  // a chatty or broken lane cannot hang the check.
+  await new Promise((resolve) => {
+    const started = Date.now();
+    let lastArrival = 0;
+    let seen = 0;
+    const pump = () => {
+      if (frames.length > seen) { seen = frames.length; lastArrival = Date.now(); }
+      if ((seen > 0 && Date.now() - lastArrival >= 2000) || Date.now() - started >= 20000) {
+        resolve(undefined);
+        return;
+      }
+      setTimeout(pump, 100);
+    };
+    setTimeout(pump, 100);
+  });
   try { ws.close(); } catch {}
   const echoes = frames.filter((m) => m.type === 'stream' && m.event?.type === '_user_echo' && m.event?.clientMsgId === clientMsgId);
   if (echoes.length !== 1) fail(`replay sent the probe message ${echoes.length} times (expected exactly 1)`);
   if (echoes[0].seq !== echoSeq) fail(`replay re-allocated the echo seq (${echoes[0].seq} vs the original ${echoSeq})`);
-  const results = frames.filter((m) => m.type === 'stream' && m.event?.type === 'result' && m.seq === resultSeq);
+  // Count result frames by kind, not by seq: the lane above the watermark
+  // holds exactly one turn, so ANY second result frame is a duplicate —
+  // including one re-allocated to a different sequence, which a seq-only
+  // filter would let slip past.
+  const results = frames.filter((m) => m.type === 'stream' && m.event?.type === 'result');
   if (results.length !== 1) fail(`replay sent the turn result ${results.length} times (expected exactly 1)`);
+  if (results[0].seq !== resultSeq) fail(`replay re-allocated the result seq (${results[0].seq} vs the original ${resultSeq})`);
   return { echoSeq: echoes[0].seq, resultSeq };
 }
 
 /** Team leg: one team_message between the two seeded probe lanes, entirely
  *  inside the side copy. The recipient's engine runs in the probe sandbox;
  *  the wait path returns its exact reply, which must be TEAMOK. */
-async function teamRoundTrip(port) {
+async function teamRoundTrip(port, fromName, toName) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 150_000);
   let res;
@@ -414,8 +443,8 @@ async function teamRoundTrip(port) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        from: 'Restart Check A',
-        to: 'Restart Check B',
+        from: fromName,
+        to: toName,
         text: 'This is the TARDIS pre-restart check. Reply with exactly the word TEAMOK and nothing else.',
         wait: true,
       }),
