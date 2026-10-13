@@ -6,26 +6,30 @@
  *
  * What it does, in order:
  *   1. Resolves the target commit (default: origin/main after a fetch).
- *   2. Checks that commit out into a throwaway worktree and builds it.
+ *   2. Checks that commit out into a throwaway worktree and typechecks it.
  *   3. Boots it as an isolated side copy on a spare port against a COPY of
  *      the TARDIS state dir — never the live files, never the live port.
  *      The side copy runs lanes-and-engines only (RIVENDELL_SIDE_COPY=1):
  *      no routine prompts, job watches, Desk nudges, phone alerts, computer
- *      control, cron pausing, durable team delivery or agent prewarm, so it
- *      can never message anyone or touch another system.
+ *      control, model-catalog pollers, optional MCP proxies, xAI OAuth
+ *      priming, cron pausing, durable team delivery or agent prewarm, so a
+ *      check boot can never message anyone or touch another system.
  *   4. Waits for /api/health and requires busyTurns 0.
- *   5. With --message: opens the chat websocket, sends one real message
- *      through a throwaway test lane, and passes only if the message renders
- *      in the event stream with FRESH seqs (the Oct 7 duplicate-drop bug
+ *   5. With --message: opens the chat websocket against a SYNTHETIC probe
+ *      workspace (never a live repo) whose durable log is seeded with a high
+ *      sequence watermark, sends one real message, and passes only if it
+ *      renders with a FRESH seq ABOVE the watermark (the Oct 7 duplicate-drop
  *      class) and a real reply comes back.
  *   6. Prints PASS or FAIL with the target commit and the live HEAD (the
- *      rollback point), then tears the whole side copy down.
+ *      rollback point), then tears the side copy down — including on SIGINT
+ *      and SIGTERM.
  *
  * Usage:
  *   node scripts/pre-restart-check.mjs [commit-ish] [--port 8199] [--message] [--keep]
  *
  * Run it from the LIVE repository checkout (it uses this repo's git and
- * node_modules; the target commit's tree is built in the throwaway worktree).
+ * node_modules; the target commit's tree is checked out in a throwaway
+ * worktree).
  */
 
 import { spawn, execFileSync } from 'node:child_process';
@@ -53,12 +57,24 @@ const T0 = Date.now();
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tardis-prerestart-'));
 const srcDir = path.join(tmp, 'src');
 const stateDir = path.join(tmp, 'state');
+const probeWs = path.join(tmp, 'probe-ws');
 const bootLog = path.join(tmp, 'boot.log');
 let child = null;
+let tornDown = false;
 let pass = false;
 let failedMsg = null;
 let targetSha = '';
 let liveHead = '';
+
+// Signals tear the side copy down too: `finally` alone never runs on a
+// default SIGINT/SIGTERM death, and a leaked child/worktree is exactly the
+// kind of mess this check exists to prevent.
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    console.error(`[check] ${sig} received — tearing down`);
+    void teardown().finally(() => process.exit(1));
+  });
+}
 
 const big = ['event-logs', 'uploads', 'headless', 'attachments', 'backups', 'sessions',
   'artifacts', 'jobs', 'scratch', 'scratch-shots', 'autosam-qa-local', 'sift', 'dev-plan',
@@ -71,16 +87,15 @@ try {
   liveHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim();
   step(`target ${targetSha.slice(0, 10)} (live HEAD ${liveHead.slice(0, 10)} is the rollback point)`);
 
-  // 2. Throwaway worktree + build of the exact commit.
+  // 2. Throwaway worktree + typecheck of the exact commit. The live boot runs
+  //    the TS directly through tsx (scripts/start.sh -> npm start), and the
+  //    side copy boots the exact same way below.
   run('git', ['worktree', 'add', '--detach', srcDir, targetSha], REPO);
   const liveLock = fs.readFileSync(path.join(REPO, 'package-lock.json'), 'utf8');
   const tgtLock = fs.readFileSync(path.join(srcDir, 'package-lock.json'), 'utf8');
   if (liveLock !== tgtLock) fail('Lockfile differs from the live tree; run the build with a real install first.');
   fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(srcDir, 'node_modules'));
   fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(srcDir, 'server', 'node_modules'));
-  // The server compiles as a typecheck gate; the live boot runs the TS
-  // directly through tsx (scripts/start.sh -> npm start), and the side copy
-  // boots the exact same way.
   step('typechecking the server...');
   run('npm', ['run', 'build', '--workspace', 'server'], srcDir, path.join(tmp, 'build.log'));
   step('typecheck green');
@@ -88,7 +103,7 @@ try {
   // 3. Copy state (selective: the copy must be fast; everything the check
   //    exercises — desk, roster, personas, compaction state, lane config —
   //    is small; the excluded bulk is logs and media no gated-off subsystem
-  //    ever reads).
+  //    ever reads). The probe lane's own log is seeded below.
   fs.cpSync(LIVE_STATE, stateDir, {
     recursive: true,
     filter: (s) => {
@@ -101,7 +116,32 @@ try {
   });
   step(`state copied to ${stateDir} (${mb(stateDir)} MB)`);
 
-  // 4. Boot the side copy: lanes and engines only.
+  // 4. A synthetic probe workspace: the probe engine's cwd is never a live
+  //    repo, so no unproven code or unexpected agent behavior can touch real
+  //    workspace files or follow real workspace instructions.
+  fs.mkdirSync(probeWs, { recursive: true });
+  fs.writeFileSync(path.join(probeWs, 'AGENTS.md'),
+    'Sandbox workspace for the TARDIS pre-restart check. Answer the user directly and briefly. Do not use tools. Do not touch anything outside this directory.\n');
+
+  // 5. Seed the probe lane's durable log with a high sequence watermark, so
+  //    the message test exercises allocation ABOVE an existing high-water
+  //    mark — the Oct 7 duplicate-drop class — instead of an empty log.
+  const CHAT = 'restart-check';
+  const WATERMARK = 5000;
+  const laneKey = `claude|${probeWs}|${CHAT}`;
+  const logFile = path.join(stateDir, 'event-logs', `${laneKey.replace(/[^a-zA-Z0-9._-]/g, '_')}.jsonl`);
+  const seededLines = [];
+  for (let seq = WATERMARK - 4; seq <= WATERMARK; seq++) {
+    seededLines.push(JSON.stringify({
+      seq,
+      at: Date.now() - 60_000,
+      ev: { type: 'event', event: { type: '_user_echo', text: `seed-${seq}`, clientMsgId: `seed-${seq}` } },
+    }));
+  }
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  fs.writeFileSync(logFile, `${seededLines.join('\n')}\n`);
+
+  // 6. Boot the side copy: lanes and engines only.
   const env = {
     ...process.env,
     PORT: String(PORT),
@@ -123,18 +163,29 @@ try {
   if (!sideCopyLine) fail('side-copy gate did not engage (no [side-copy] boot line) — see ' + bootLog);
   step(`healthy on :${PORT} (busyTurns 0, side-copy gate engaged)`);
 
-  // 5. One real message through a throwaway test lane.
+  // 7. One real message through the seeded probe lane.
   if (MESSAGE) {
-    const reply = await messageRoundTrip(PORT);
-    step(`test lane round trip ok (reply: ${reply.text.slice(0, 60)}, seq ${reply.echoSeq} -> ${reply.replySeq})`);
+    const reply = await messageRoundTrip(PORT, probeWs, CHAT, WATERMARK);
+    step(`probe lane round trip ok (reply: ${reply.text.slice(0, 60)}, watermark ${WATERMARK} -> echo ${reply.echoSeq} -> result ${reply.resultSeq})`);
   }
 
   pass = true;
 } catch (err) {
   if (!failedMsg) fail(String(err.message || err));
 } finally {
-  // 6. Report + teardown (always, pass or fail).
+  await teardown();
   const elapsed = Math.round((Date.now() - T0) / 1000);
+  console.log(pass
+    ? `\nPASS — ${targetSha.slice(0, 10)} boots clean${MESSAGE ? ' and answers the probe lane above a 5000-seq watermark' : ''} in ${elapsed}s.`
+      + `\nRollback point if the live restart fails: ${liveHead.slice(0, 10)}.`
+      + (KEEP ? `\nKept for inspection: ${tmp}` : '')
+    : `\nFAIL — see the output above (logs kept in ${tmp}).`);
+  process.exit(pass ? 0 : 1);
+}
+
+async function teardown() {
+  if (tornDown) return;
+  tornDown = true;
   if (child) {
     child.kill('SIGTERM');
     await new Promise((resolve) => {
@@ -142,15 +193,9 @@ try {
       child.on('exit', () => { clearTimeout(t); resolve(); });
     });
   }
-  try { run('git', ['worktree', 'remove', '--force', srcDir], REPO, undefined, true); } catch {}
+  try { execFileSync('git', ['worktree', 'remove', '--force', srcDir], { cwd: REPO, stdio: 'ignore' }); } catch {}
   // Logs stay for inspection on any FAIL (the report says where they are).
   if (pass && !KEEP) { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} }
-  console.log(pass
-    ? `\nPASS — ${targetSha.slice(0, 10)} boots clean${MESSAGE ? ' and answers a test lane' : ''} in ${elapsed}s.`
-      + `\nRollback point if the live restart fails: ${liveHead.slice(0, 10)}.`
-      + (KEEP ? `\nKept for inspection: ${tmp}` : '')
-    : `\nFAIL — see the output above (logs kept in ${tmp}).`);
-  process.exit(pass ? 0 : 1);
 }
 
 function step(msg) { console.log(`[check] ${msg}`); }
@@ -188,9 +233,10 @@ async function waitHealthy(port, timeoutMs, earlyExit) {
   }
 }
 
-/** One real message through a throwaway probe lane: it must render with a
- *  FRESH seq (the Oct 7 duplicate-drop class) and get a real reply. */
-async function messageRoundTrip(port) {
+/** One real message through the seeded probe lane: it must render with a
+ *  FRESH seq ABOVE the watermark (the Oct 7 duplicate-drop class) and get a
+ *  real reply. Frames arrive as {type:'stream', event:{...}, seq, at}. */
+async function messageRoundTrip(port, repo, chatId, watermark) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/api/ws`);
   const frames = [];
   const waiters = [];
@@ -212,28 +258,27 @@ async function messageRoundTrip(port) {
     ws.onerror = () => { clearTimeout(timer); reject(new Error('websocket error')); };
   });
 
-  const CHAT = 'restart-check';
-  const REPO_HUB = '/home/mrchevyceleb/ASSISTANT-HUB';
   const clientMsgId = `restart-check-${Date.now().toString(36)}`;
-  ws.send(JSON.stringify({ type: 'hello', cli: 'claude', repo: REPO_HUB, chatId: CHAT, sinceSeq: -1, visible: false }));
+  ws.send(JSON.stringify({ type: 'hello', cli: 'claude', repo, chatId, sinceSeq: watermark, visible: false }));
   // The hello barrier settles before the send is admitted; a short settle
   // wait avoids the handshake-pending bounce on a cold lane.
   await sleep(2500);
-  ws.send(JSON.stringify({ type: 'send', chatId: CHAT, text: 'This is the pre-restart check. Reply with exactly the word CHECKED and nothing else.', clientMsgId }));
+  ws.send(JSON.stringify({ type: 'send', chatId, text: 'This is the pre-restart check. Reply with exactly the word CHECKED and nothing else.', clientMsgId }));
 
-  // Frames arrive as {type:'stream', event:{...}, seq, at} (register.ts dispatch).
   const echo = await next((m) => m.type === 'stream' && m.event?.type === '_user_echo' && m.event?.clientMsgId === clientMsgId, 60_000, 'the message rendering in the event stream');
   const echoSeq = typeof echo.seq === 'number' ? echo.seq : 0;
   if (!echoSeq) fail('the echo carried no seq — cannot prove fresh seqs');
+  if (echoSeq <= watermark) fail(`the echo rendered at seq ${echoSeq}, at or below the ${watermark} watermark — the Oct 7 duplicate-drop class`);
+  const echoIdx = frames.indexOf(echo);
 
   const reply = await next((m) => m.type === 'stream' && m.event?.type === 'result', 180_000, 'a completed turn (result)');
-  if (reply.event?.is_error) fail('the test-lane turn failed: ' + JSON.stringify(reply.event).slice(0, 200));
-  const text = collectAssistantText(frames);
+  if (reply.event?.is_error !== false) fail('the probe-lane turn did not complete cleanly: ' + JSON.stringify(reply.event).slice(0, 200));
+  const resultSeq = typeof reply.seq === 'number' ? reply.seq : 0;
+  if (!resultSeq || resultSeq <= echoSeq) fail(`the result seq (${resultSeq}) is not fresh above the echo (${echoSeq})`);
+  const text = collectAssistantText(frames.slice(echoIdx));
   if (!/CHECKED/i.test(text)) fail(`the reply did not contain CHECKED (got: ${JSON.stringify(text.slice(0, 120))})`);
-  const replySeq = Math.max(...frames.filter((m) => typeof m.seq === 'number').map((m) => m.seq), echoSeq);
-  if (replySeq <= echoSeq) fail(`no fresh seqs after the echo (echo ${echoSeq}, max ${replySeq}) — the Oct 7 duplicate-drop class`);
   try { ws.close(); } catch {}
-  return { text, echoSeq, replySeq };
+  return { text, echoSeq, resultSeq };
 }
 
 function collectAssistantText(frames) {

@@ -409,7 +409,10 @@ const optionalMcpServers: Record<string, {
   args: string[];
   env?: Record<string, string>;
 }> = {};
-if (ASSISTANT_MCP_SERVER_URL && existsSync(ASSISTANT_MCP_PROXY)) {
+// A side-copy boot (pre-restart check) mounts no optional proxies: the
+// probe engine must never reach assistant-mcp (Railway) or the browser MCP.
+const OPTIONAL_MCP_DISABLED = process.env.RIVENDELL_SIDE_COPY === '1';
+if (!OPTIONAL_MCP_DISABLED && ASSISTANT_MCP_SERVER_URL && existsSync(ASSISTANT_MCP_PROXY)) {
   optionalMcpServers['assistant-mcp'] = {
     type: 'stdio',
     command: 'node',
@@ -417,7 +420,7 @@ if (ASSISTANT_MCP_SERVER_URL && existsSync(ASSISTANT_MCP_PROXY)) {
     env: { MCP_SERVER_URL: ASSISTANT_MCP_SERVER_URL },
   };
 }
-if (BROWSER_MCP_ENTRY && existsSync(BROWSER_MCP_ENTRY)) {
+if (!OPTIONAL_MCP_DISABLED && BROWSER_MCP_ENTRY && existsSync(BROWSER_MCP_ENTRY)) {
   optionalMcpServers['rivendell-browser'] = {
     type: 'stdio',
     command: 'node',
