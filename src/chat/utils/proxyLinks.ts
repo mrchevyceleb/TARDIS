@@ -468,6 +468,14 @@ export type WorkspaceMentionSpan = {
 // whole, so the Desk tokenizer must too.
 const PROXY_MD_LINK_RUN = /\[([^\]]+)\]\((rivendell-(?:doc|folder):(?:[^()]|\([^()]*\))*)\)/g;
 
+// A proxy-markdown link the strict run above cannot match at all (nested
+// parentheses in the href, or no closing paren before the line ends). Not a
+// link source: only the region it shields, so the raw mention pass cannot
+// turn a workspace-looking label inside a malformed candidate into a
+// partial link. Bounded by the first ')' or the newline, so a raw mention
+// after the broken region on the same line still linkifies.
+const PROXY_MD_LINK_SHAPE = /\[[^\]\n]*\]\(rivendell-(?:doc|folder):[^)\n]*/g;
+
 /** The same workspace-mention matches annotatePlainWorkspaceMentions turns
  *  into markdown links, as spans over the original text (for plain-text
  *  surfaces like the Desk's Needs-you detail, which renders React nodes,
@@ -476,24 +484,37 @@ const PROXY_MD_LINK_RUN = /\[([^\]]+)\]\((rivendell-(?:doc|folder):(?:[^()]|\([^
  *  way they match in chat, and trailing punctuation and prose stay outside
  *  the span. An explicit `[label](rivendell-doc:…)` link is kept whole
  *  (label, href and closing paren inside the span) instead of re-annotated,
- *  and raw mentions inside one are skipped. */
+ *  and raw mentions inside one are skipped — including inside a candidate
+ *  whose href is malformed or not a workspace path: those fail safe as
+ *  plain text rather than re-linkifying their label. */
 export function scanWorkspaceMentionSpans(text: string): WorkspaceMentionSpan[] {
   const spans: WorkspaceMentionSpan[] = [];
+  // Regions the raw mention pass must leave alone whether or not they became
+  // links: every proxy-link-shaped candidate in the text.
+  const reserved: Array<{ at: number; end: number }> = [];
   for (const match of text.matchAll(PROXY_MD_LINK_RUN)) {
+    const at = match.index ?? 0;
+    reserved.push({ at, end: at + match[0].length });
     // Parsed from the captured href, not through parseWorkspaceMentionText:
     // its anchored md-link form stops at the first ')' and would reject the
     // parenthesized hrefs this run now matches.
     const target = parseProxyHref(match[2]);
     if (!target || target.kind === 'machine') continue;
-    const at = match.index ?? 0;
     spans.push({ at, end: at + match[0].length, kind: target.kind, path: target.path, display: match[1] || toWindowsDisplay(target.path) });
+  }
+  // Candidates the strict run above cannot match at all keep their region
+  // reserved too: a rejected link fails safe as plain text, its label is
+  // not raw material for the mention pass.
+  for (const match of text.matchAll(PROXY_MD_LINK_SHAPE)) {
+    const at = match.index ?? 0;
+    reserved.push({ at, end: at + match[0].length });
   }
   if (mentionsWorkspace(text)) {
     for (const match of text.matchAll(MENTION_PATTERN)) {
       const raw = match[0];
       const at = match.index ?? 0;
       const rawEnd = at + raw.length;
-      if (spans.some((span) => at < span.end && span.at < rawEnd)) continue;
+      if (reserved.some((region) => at < region.end && region.at < rawEnd)) continue;
       const trailingMatch = raw.match(TRAILING_PUNCT);
       const trailing = trailingMatch ? trailingMatch[0] : '';
       const cleanMatch = trailing ? raw.slice(0, raw.length - trailing.length) : raw;
