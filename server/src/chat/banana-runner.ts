@@ -2407,10 +2407,17 @@ export class BananaSession {
     return this.seedWindowOnNextTurn;
   }
 
-  private ackWindowSeed(): Promise<void> {
-    if (!this.seedWindowOnNextTurn) return Promise.resolve();
+  private ackWindowSeed(): void {
+    if (!this.seedWindowOnNextTurn) return;
     this.seedWindowOnNextTurn = false;
-    return clearRotation(this.logKey);
+    // Consumed here, never returned: markPromptAccepted is sync, so a floating
+    // clearRotation promise would be an unhandled rejection in this shared
+    // serve process. A failed ack re-arms the window seed so the next turn
+    // re-seeds instead of running blind on a rotation marker never cleared.
+    clearRotation(this.logKey).then(() => {}, (err) => {
+      console.warn(`[banana-runner] seed ack failed for ${this.logKey}; window seed re-armed`, (err as Error)?.message);
+      this.seedWindowOnNextTurn = true;
+    });
   }
 
   /** Forever-thread compaction check — see server/src/chat/compaction.ts. */

@@ -350,19 +350,20 @@ export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev:
   return block && primer ? `${block}\n\n---\n\n${primer}` : (block || primer);
 }
 
-/** The seed block for this thread's agent commitments, or ''. Fail-open: a
- *  store hiccup must never block a session seed. */
+/** The seed block for this thread's agent commitments, or ''. A
+ *  roster-bound thread always seeds the block (an empty list seeds a one-line
+ *  "none") so the header's roster agent id reaches every lane — banana's
+ *  shared MCP has no identity env, and its display name may not even be
+ *  unique. Fail-open: a store hiccup must never block a session seed. */
 function commitmentsSeedBlock(key: string): string {
   try {
     if (!isThreadLogKey(key)) return '';
     const agent = agentForChatId(bareChatId(key.slice(key.lastIndexOf('|') + 1)));
     if (!agent) return '';
-    const list = listCommitments(agent.id);
-    if (list.length === 0) return '';
-    const lines = list.map((c) => `- [${c.id}] ${c.text}${c.due ? ` (due ${c.due})` : ''}`);
+    const lines = listCommitments(agent.id).map((c) => `- [${c.id}] ${c.text}${c.due ? ` (due ${c.due})` : ''}`);
     return [
-      'Your open commitments — your own always-there list, carried by code so no memory rewrite can drop it. Clear each one with the commitments tool (action clear, id in brackets) the moment it is done:',
-      ...lines,
+      `Your open commitments — your own always-there list, carried by code so no memory rewrite can drop it. You are roster agent id ${agent.id}: pass it as from for the commitments tool's add and clear. Clear each one with the commitments tool (action clear, id in brackets) the moment it is done:`,
+      ...(lines.length ? lines : ['None right now. Add one the moment you owe a reply or promise a time.']),
     ].join('\n');
   } catch {
     return '';

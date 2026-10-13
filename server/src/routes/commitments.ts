@@ -55,7 +55,10 @@ function agentIdForMutation(agent: unknown): { id: string } | { error: string; s
 commitmentsRouter.get('/', asyncHandler(async (req, res) => {
   const r = agentIdOrError(req.query.agent);
   if ('error' in r) { res.status(r.status).json({ error: r.error }); return; }
-  res.json({ commitments: listCommitments(r.id) });
+  // agentId rides every list response: a lane that listed by name (banana's
+  // shared MCP has no identity env) learns the stable id its id-only
+  // add/clear calls need, so the first add never dead-ends on a display name.
+  res.json({ agentId: r.id, commitments: listCommitments(r.id) });
 }));
 
 commitmentsRouter.post('/add', asyncHandler(async (req, res) => {

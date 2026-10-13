@@ -855,9 +855,12 @@ async function callTool(name, args, signal) {
       if (result?.error) throw new Error(result.error);
       return `Cleared ${args.id}.`;
     }
-    const { commitments } = await api(`/api/commitments?agent=${encodeURIComponent(agent)}`, undefined, signal);
-    if (!commitments?.length) return 'Your commitments list is empty. Add one the moment you owe a reply or promise a time.';
-    return commitments.map((c) => `- [${c.id}] ${c.text}${c.due ? ` — due ${c.due}` : ''}`).join('\n');
+    const { agentId, commitments } = await api(`/api/commitments?agent=${encodeURIComponent(agent)}`, undefined, signal);
+    if (!commitments?.length) return `Your commitments list is empty. Add one the moment you owe a reply or promise a time. Your roster agent id is ${agentId}: pass it as from for add and clear.`;
+    return [
+      `Your open commitments (roster agent id ${agentId}; pass it as from for add/clear):`,
+      ...commitments.map((c) => `- [${c.id}] ${c.text}${c.due ? ` — due ${c.due}` : ''}`),
+    ].join('\n');
   }
   if (name === 'team_recent') {
     const { messages } = await api(`/api/team/recent?name=${encodeURIComponent(args.name)}&limit=${args.limit ?? 8}`, undefined, signal);
