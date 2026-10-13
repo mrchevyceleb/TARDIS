@@ -27,6 +27,10 @@ export type RailLayout = {
   groups: RailGroup[];
   /** Group ids (or OTHER_GROUP_ID) that are folded shut. Absent means open. */
   collapsed: Record<string, true>;
+  /** The rail sequence: group ids and loose agent ids interleaved, so a loose
+   *  agent can sit between groups or below the last one. Absent means loose
+   *  agents sit above the groups. An agent that joins a group loses its seat. */
+  order?: string[];
   /** Millisecond stamp of the last edit. The newer copy wins across devices. */
   updatedAt: number;
 };
@@ -122,7 +126,9 @@ export function setCollapsed(layout: RailLayout, id: string, collapsed: boolean)
 export function createGroup(layout: RailLayout, id: string, rawName: string): RailLayout {
   const name = cleanGroupName(rawName);
   if (!name || layout.groups.length >= MAX_GROUPS || layout.groups.some((g) => g.id === id)) return layout;
-  return { ...layout, groups: [...layout.groups, { id, name: uniqueName(layout, name), agentIds: [] }] };
+  const groups = [...layout.groups, { id, name: uniqueName(layout, name), agentIds: [] }];
+  // A new group takes the last seat in the rail sequence when one exists.
+  return { ...layout, groups, order: layout.order ? [...layout.order, id] : undefined };
 }
 
 export function renameGroup(layout: RailLayout, id: string, rawName: string): RailLayout {
@@ -138,7 +144,11 @@ export function deleteGroup(layout: RailLayout, id: string): RailLayout {
   if (!layout.groups.some((g) => g.id === id)) return layout;
   const collapsed = { ...layout.collapsed };
   delete collapsed[id];
-  return { ...layout, groups: layout.groups.filter((g) => g.id !== id), collapsed };
+  const groups = layout.groups.filter((g) => g.id !== id);
+  // The group's seat in the rail sequence goes with it; its members come back
+  // loose above the groups.
+  const order = layout.order?.filter((entry) => entry !== id);
+  return { ...layout, groups, collapsed, order: order?.length ? order : undefined };
 }
 
 /** Put a group right before (side -1) or right after (side 1) another one. Named
@@ -150,7 +160,17 @@ export function placeGroup(layout: RailLayout, id: string, anchorId: string, sid
   const anchor = groups.findIndex((g) => g.id === anchorId);
   if (anchor < 0) return layout;
   groups.splice(side < 0 ? anchor : anchor + 1, 0, moved);
-  return groups.every((g, i) => g.id === layout.groups[i].id) ? layout : { ...layout, groups };
+  const out = groups.every((g, i) => g.id === layout.groups[i].id) ? layout : { ...layout, groups };
+  // Mirror the move in the rail sequence when both groups hold seats, so a
+  // shift still moves a sequenced group on screen.
+  if (out.order?.includes(id) && out.order.includes(anchorId)) {
+    const order = [...out.order];
+    order.splice(order.indexOf(id), 1);
+    const at = order.indexOf(anchorId);
+    order.splice(side < 0 ? at : at + 1, 0, id);
+    return { ...out, order };
+  }
+  return out;
 }
 
 /** Put an agent into a group before `beforeId` (null = at the end). Moving to
@@ -170,14 +190,21 @@ export function moveAgent(layout: RailLayout, agentId: string, toGroupId: string
     g.agentIds.length === layout.groups[i].agentIds.length
     && g.agentIds.every((id, j) => id === layout.groups[i].agentIds[j])
   ));
-  return same ? layout : { ...layout, groups };
+  // Joining a group (or being released to the loose block above the groups)
+  // costs the agent its seat in the rail sequence.
+  const order = layout.order?.filter((entry) => entry !== agentId);
+  const savedOrder = layout.order;
+  const orderSame = savedOrder === undefined
+    || (order?.length === savedOrder.length && order.every((entry, i) => entry === savedOrder[i]));
+  if (same && orderSame) return layout;
+  return { ...layout, groups, order: order?.length ? order : undefined };
 }
 
 /** Accepts anything (localStorage, the network) and returns a clean layout, or
  *  null when it is not one. Duplicate groups and duplicate members are dropped. */
 export function normalizeLayout(raw: unknown): RailLayout | null {
   if (!raw || typeof raw !== 'object') return null;
-  const src = raw as { groups?: unknown; collapsed?: unknown; updatedAt?: unknown };
+  const src = raw as { groups?: unknown; collapsed?: unknown; order?: unknown; updatedAt?: unknown };
   if (!Array.isArray(src.groups)) return null;
   const seenGroups = new Set<string>();
   const seenAgents = new Set<string>();
@@ -205,8 +232,25 @@ export function normalizeLayout(raw: unknown): RailLayout | null {
       if (value === true && (key === OTHER_GROUP_ID || seenGroups.has(key))) collapsed[key] = true;
     }
   }
+  // The rail sequence: group ids and loose agent ids (at most 240). Ids that
+  // belong to a group's members are dropped (they are not loose), as are
+  // duplicates and the fallback id; an empty sequence counts as none.
+  let order: string[] | undefined;
+  if (Array.isArray(src.order)) {
+    const memberIds = new Set<string>();
+    for (const g of groups) for (const id of g.agentIds) memberIds.add(id);
+    const seen = new Set<string>();
+    const seq: string[] = [];
+    for (const item of src.order.slice(0, 240)) {
+      const id = typeof item === 'string' ? item.trim() : '';
+      if (!id || id === OTHER_GROUP_ID || seen.has(id) || memberIds.has(id)) continue;
+      seen.add(id);
+      seq.push(id);
+    }
+    if (seq.length) order = seq;
+  }
   const updatedAt = typeof src.updatedAt === 'number' && Number.isSafeInteger(src.updatedAt) && src.updatedAt > 0 && src.updatedAt <= Date.now() + MAX_SKEW_MS ? src.updatedAt : 0;
-  return { groups, collapsed, updatedAt };
+  return order ? { groups, collapsed, order, updatedAt } : { groups, collapsed, updatedAt };
 }
 
 export function newGroupId(): string {

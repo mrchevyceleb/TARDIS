@@ -105,6 +105,14 @@ export type RailGroupsApi = {
   shift: (groupId: string, by: -1 | 1) => void;
   /** Move an agent to a group, before `beforeId` (null = the end). */
   move: (agentId: string, groupId: string, beforeId: string | null) => void;
+  /** The rail sequence when one has been saved: group ids and seated loose
+   *  agent ids, interleaved. Empty until someone seats a loose agent. */
+  ordered: string[];
+  /** Seat a loose agent in the rail sequence: `after` is a group id or a
+   *  seated agent id (null = above the sequence, right below the loose block
+   *  that was never seated; '__end__' = below the last item). An agent that
+   *  is in a group is pulled out of it first. */
+  placeLoose: (agentId: string, after: string | null | '__end__') => void;
   groupIdOf: (agentId: string) => string;
 };
 
@@ -157,6 +165,19 @@ export function useRailGroups(agents: Agent[]): RailGroupsApi {
     lastRemoteStamp = Math.max(lastRemoteStamp, copy.updatedAt);
     let merged = copy;
     for (const change of pending.current) merged = change(merged);
+    // A copy without `order` (a server or install that predates the field) has
+    // no opinion on the rail sequence: keep ours instead of losing it. The
+    // carry is nothing that copy can hold, so it neither re-stamps nor
+    // counts as work left to save.
+    if (merged.order === undefined && savedRef.current?.order !== undefined) {
+      const carried = { ...merged, order: savedRef.current.order };
+      if (merged === copy) {
+        pending.current = [];
+        adopt(carried, persist);
+        return false;
+      }
+      merged = carried;
+    }
     if (merged === copy) {
       pending.current = [];
       adopt(copy, persist);
@@ -306,5 +327,53 @@ export function useRailGroups(agents: Agent[]): RailGroupsApi {
   }, [edit]);
   const move = useCallback((agentId: string, id: string, before: string | null) => edit((l) => moveAgent(l, agentId, id, before)), [edit]);
 
-  return { groups, grouped: groups.some((g) => !g.isOther), toggle, create, rename, remove, shift, move, groupIdOf };
+  const placeLoose = useCallback((agentId: string, after: string | null | '__end__') => {
+    // The roster as it is on screen, fixed at edit time so a replay onto a
+    // newer server copy seats the agent in the same place.
+    const roster = agentsRef.current.map((a) => a.id);
+    edit((base) => {
+      // Pull the agent out of any group first: only loose agents hold seats.
+      let groups = base.groups;
+      if (groups.some((g) => g.agentIds.includes(agentId))) {
+        groups = groups
+          .map((g) => (g.agentIds.includes(agentId) ? { ...g, agentIds: g.agentIds.filter((id) => id !== agentId) } : g))
+          .filter((g) => g.agentIds.length > 0);
+      }
+      const memberIds = new Set<string>();
+      for (const g of groups) for (const id of g.agentIds) memberIds.add(id);
+      const groupIds = new Set(groups.map((g) => g.id));
+      const savedOrder = base.order ?? [];
+      const seated = new Set(savedOrder);
+      // Effective sequence, exactly as the rail renders it: never-seated loose
+      // agents first, then the saved sequence, then groups with no seat yet.
+      const seq: string[] = [];
+      for (const id of roster) if (!memberIds.has(id) && !seated.has(id)) seq.push(id);
+      for (const id of savedOrder) if (groupIds.has(id) || (!memberIds.has(id) && roster.includes(id))) seq.push(id);
+      for (const g of groups) if (!savedOrder.includes(g.id)) seq.push(g.id);
+      const without = seq.filter((id) => id !== agentId);
+      let at: number;
+      if (after === null) {
+        at = seq.filter((id) => !seated.has(id) && !groupIds.has(id) && id !== agentId).length;
+      } else if (after === '__end__') {
+        at = without.length;
+      } else {
+        const i = without.indexOf(after);
+        if (i < 0) return base;
+        at = i + 1;
+      }
+      without.splice(at, 0, agentId);
+      // Write back only seats that already existed (or a group's), plus the
+      // one just taken: agents that were never seated stay in the block above.
+      const nextOrder = without.filter((id) => id === agentId || groupIds.has(id) || seated.has(id));
+      const orderSame = groups === base.groups
+        && savedOrder.length === nextOrder.length
+        && savedOrder.every((id, i) => id === nextOrder[i]);
+      if (orderSame) return base;
+      return { ...base, groups, order: nextOrder };
+    });
+  }, [edit]);
+
+  const ordered = layout.order ?? [];
+
+  return { groups, grouped: groups.some((g) => !g.isOther), toggle, create, rename, remove, shift, move, ordered, placeLoose, groupIdOf };
 }

@@ -11,7 +11,7 @@
 // [+] creates a companion (name/role/engine/scope). Every row = a companion and
 // its ONE persistent forever-thread. Scratch threads surface via search only.
 
-import { useCallback, useMemo, useRef, useState, useEffect, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { Fragment, useCallback, useMemo, useRef, useState, useEffect, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Activity,
@@ -328,9 +328,10 @@ type AgentRow = { kind: 'agent'; a: Agent; item?: HistoryItem; ts: number };
 type Row = AgentRow | { kind: 'adhoc'; item: HistoryItem; ts: number };
 /** Where a dragged row would land in group mode. `head` = dropped on a group's
  *  header or empty slot (append); otherwise before `before` (null = at the end). */
-type GroupDrop = { group: string; before: string | null; head?: boolean };
-/** A row's place in its group: which group, and who sits right below it. */
-type RowSlot = { group: string; next: string | null };
+type GroupDrop = { group: string; before: string | null; head?: boolean; seqRow?: string };
+/** A row's place in its group: which group, and who sits right below it.
+ *  `seqRow` marks a loose row that holds a seat in the rail sequence. */
+type RowSlot = { group: string; next: string | null; seqRow?: string };
 
 // Desktop rail width, dragged from its right edge and kept per browser.
 const RAIL_WIDTH_KEY = 'rivendell:rail-width';
@@ -495,6 +496,7 @@ export function BotRail(props: BotRailProps) {
   // mode replaces the flat list unless a search is running.
   const railGroups = useRailGroups(props.agents);
   const [groupDrop, setGroupDrop] = useState<GroupDrop | null>(null);
+  const [seqZone, setSeqZone] = useState<string | null>(null);
   const [moveMenu, setMoveMenu] = useState<AgentMenuState | null>(null);
   const closeMoveMenu = useCallback(() => setMoveMenu(null), []);
 
@@ -649,7 +651,27 @@ export function BotRail(props: BotRailProps) {
     if (!other) return [];
     return other.agents.map((a) => agentRowsById.get(a.id)).filter((r): r is AgentRow => Boolean(r));
   }, [groupsOn, railGroups.groups, agentRowsById]);
-  const realGroupCount = railGroups.groups.filter((g) => !g.isOther).length;
+  // The rail walk: never-seated loose agents stay in the block above the
+  // groups; the saved sequence then interleaves group sections with seated
+  // loose rows, and groups without a seat yet follow in saved group order.
+  const seatedIds = new Set(railGroups.ordered);
+  const implicitRows = looseRows.filter((r) => !seatedIds.has(r.a.id));
+  const looseById = new Map(looseRows.map((r) => [r.a.id, r]));
+  const sectionsById = new Map(sections.map((s) => [s.g.id, s]));
+  type WalkItem = { kind: 'group'; sec: (typeof sections)[number] } | { kind: 'loose'; row: (typeof looseRows)[number] };
+  const railWalk: WalkItem[] = [];
+  for (const id of railGroups.ordered) {
+    const sec = sectionsById.get(id);
+    if (sec) { railWalk.push({ kind: 'group', sec }); sectionsById.delete(id); continue; }
+    const row = looseById.get(id);
+    if (row) railWalk.push({ kind: 'loose', row });
+  }
+  for (const sec of sectionsById.values()) railWalk.push({ kind: 'group', sec });
+  const walkGroupIds = railWalk
+    .filter((item): item is Extract<WalkItem, { kind: 'group' }> => item.kind === 'group')
+    .map((item) => item.sec.g.id);
+  const firstGroupId = walkGroupIds[0];
+  const lastGroupId = walkGroupIds[walkGroupIds.length - 1];
 
   const overGroup = (next: GroupDrop | null) => setGroupDrop((prev) => (
     prev?.group === next?.group && prev?.before === next?.before && prev?.head === next?.head ? prev : next
@@ -660,14 +682,39 @@ export function BotRail(props: BotRailProps) {
     const id = dragId;
     setDragId(null);
     setGroupDrop(null);
+    setSeqZone(null);
     if (!id) return;
-    // "Other" is ordered by the shared manual order, so a drop there releases the
-    // agent from its group (if it had one) and then takes the landing spot in
-    // that shared order; everything else is a layout edit.
+    // A seated loose row: the drop seats the drag in the rail sequence, in
+    // the saved seat above the row (upper half) or below it (lower half).
+    if (to.seqRow) {
+      const seq = railGroups.ordered;
+      if (to.before === to.seqRow) {
+        const i = seq.indexOf(to.seqRow);
+        railGroups.placeLoose(id, i > 0 ? seq[i - 1] : null);
+      } else {
+        railGroups.placeLoose(id, to.seqRow);
+      }
+      return;
+    }
+    // The loose block above the groups is ordered by the shared manual order,
+    // so a drop there releases the agent from its group (if it had one) and
+    // then takes the landing spot in that shared order.
     if (to.group === OTHER_GROUP_ID) {
-      if (railGroups.groupIdOf(id) !== OTHER_GROUP_ID) railGroups.move(id, OTHER_GROUP_ID, null);
+      // Releasing to the loose block also unseats a sequenced agent:
+      // moveAgent releases a group member and drops a seated agent's seat,
+      // and is a no-op for an agent that was already loose and unseated.
+      railGroups.move(id, OTHER_GROUP_ID, null);
       reorderBefore(id, to.before ?? '__end__');
     } else railGroups.move(id, to.group, to.before);
+  };
+  // A boundary drop (between rail items, or below the last one) seats the
+  // dragged agent loose right there: `after` is the item above the boundary.
+  const commitSeqZone = (after: string | null) => {
+    const id = dragId;
+    setDragId(null);
+    setGroupDrop(null);
+    setSeqZone(null);
+    if (id) railGroups.placeLoose(id, after);
   };
   const moveChoices = useMemo(() => [
     ...railGroups.groups.filter((g) => !g.isOther).map((g) => ({ id: g.id, name: g.name })),
@@ -681,7 +728,8 @@ export function BotRail(props: BotRailProps) {
   const rowDropTarget = (e: DragEvent, a: Agent, slot: RowSlot): GroupDrop | null => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const before = e.clientY < rect.top + rect.height / 2 ? a.id : slot.next;
-    return before === dragId ? null : { group: slot.group, before };
+    if (before === dragId) return null;
+    return slot.seqRow ? { group: slot.group, before, seqRow: slot.seqRow } : { group: slot.group, before };
   };
 
   // One agent row. `slot` is set in group mode (its group and the row below it).
@@ -725,7 +773,7 @@ export function BotRail(props: BotRailProps) {
             if (to) commitGroupDrop(to);
             else { setDragId(null); setGroupDrop(null); }
           }}
-          onDragEnd={() => { setDragId(null); setDropBefore(null); setGroupDrop(null); }}
+          onDragEnd={() => { setDragId(null); setDropBefore(null); setGroupDrop(null); setSeqZone(null); }}
         >
           <span className="bt-disc bt-has-presence" style={{ color: DISC_INK, background: agentColor(a.name) }}>
             {agentAvatarUrl(a) ? <img className="bt-disc-img" src={agentAvatarUrl(a) ?? undefined} alt={a.name} /> : agentMark(a)}
@@ -866,48 +914,78 @@ export function BotRail(props: BotRailProps) {
             })}
           </div>
         ) : null}
-        {groupsOn && (looseRows.length > 0 ? (
+        {groupsOn && implicitRows.length > 0 ? (
           <div className="bt-loose" role="group" aria-label="Loose companions (no group)">
-            {looseRows.map((r, at) => renderRow(r, { group: OTHER_GROUP_ID, next: looseRows[at + 1]?.a.id ?? null }))}
+            {implicitRows.map((r, at) => renderRow(r, { group: OTHER_GROUP_ID, next: implicitRows[at + 1]?.a.id ?? null }))}
           </div>
-        ) : dragId ? (
-          // Every agent grouped: no loose row to drop on, so the loose area
-          // itself shows as an ungroup drop zone while a drag is live.
+        ) : null}
+        {groupsOn && dragId ? (
+          // The boundary above the sequence: below the never-seated loose
+          // block, or the top of the rail when every loose agent is seated.
           <div
-            className={`bt-dropzone${groupDrop?.head && groupDrop.group === OTHER_GROUP_ID ? ' on' : ''}`}
-            aria-label="Drop here to take the agent out of its group"
-            onDragOver={(e) => { e.preventDefault(); overGroup({ group: OTHER_GROUP_ID, before: null, head: true }); }}
-            onDrop={(e) => { e.preventDefault(); commitGroupDrop({ group: OTHER_GROUP_ID, before: null }); }}
+            className={`bt-dropzone${seqZone === '__top__' ? ' on' : ''}`}
+            aria-label="Drop here to seat the companion loose, above the groups"
+            onDragOver={(e) => { e.preventDefault(); setSeqZone('__top__'); }}
+            onDrop={(e) => { e.preventDefault(); commitSeqZone(null); }}
           />
-        ) : null)}
+        ) : null}
         {groupsOn ? (
           <div className="bt-groups">
-            {sections.map((sec, i) => (
-              <RailGroupSection
-                key={sec.g.id}
-                id={sec.g.id}
-                name={sec.g.name}
-                isOther={sec.g.isOther}
-                count={sec.rows.length}
-                pinned={sec.pinned}
-                working={sec.working}
-                jobs={sec.jobs}
-                unread={sec.unread}
-                collapsed={sec.g.collapsed}
-                first={i === 0}
-                last={i === realGroupCount - 1}
-                dragging={dragId !== null}
-                dropping={Boolean(groupDrop?.head && groupDrop.group === sec.g.id)}
-                onToggle={() => railGroups.toggle(sec.g.id)}
-                onRename={(name) => railGroups.rename(sec.g.id, name)}
-                onDelete={() => railGroups.remove(sec.g.id)}
-                onShift={(by) => railGroups.shift(sec.g.id, by)}
-                onDropOver={() => overGroup({ group: sec.g.id, before: null, head: true })}
-                onDropHere={() => commitGroupDrop({ group: sec.g.id, before: null, head: true })}
-              >
-                {sec.rows.map((r, at) => renderRow(r, { group: sec.g.id, next: sec.rows[at + 1]?.a.id ?? null }))}
-              </RailGroupSection>
-            ))}
+            {railWalk.map((item) => {
+              if (item.kind === 'group') {
+                const sec = item.sec;
+                return (
+                  <Fragment key={`g:${sec.g.id}`}>
+                    <RailGroupSection
+                      id={sec.g.id}
+                      name={sec.g.name}
+                      isOther={sec.g.isOther}
+                      count={sec.rows.length}
+                      pinned={sec.pinned}
+                      working={sec.working}
+                      jobs={sec.jobs}
+                      unread={sec.unread}
+                      collapsed={sec.g.collapsed}
+                      first={sec.g.id === firstGroupId}
+                      last={sec.g.id === lastGroupId}
+                      dragging={dragId !== null}
+                      dropping={Boolean(groupDrop?.head && groupDrop.group === sec.g.id)}
+                      onToggle={() => railGroups.toggle(sec.g.id)}
+                      onRename={(name) => railGroups.rename(sec.g.id, name)}
+                      onDelete={() => railGroups.remove(sec.g.id)}
+                      onShift={(by) => railGroups.shift(sec.g.id, by)}
+                      onDropOver={() => overGroup({ group: sec.g.id, before: null, head: true })}
+                      onDropHere={() => commitGroupDrop({ group: sec.g.id, before: null, head: true })}
+                    >
+                      {sec.rows.map((r, at) => renderRow(r, { group: sec.g.id, next: sec.rows[at + 1]?.a.id ?? null }))}
+                    </RailGroupSection>
+                    {dragId ? (
+                      <div
+                        className={`bt-dropzone${seqZone === sec.g.id ? ' on' : ''}`}
+                        aria-label="Drop here to seat the companion loose, below this group"
+                        onDragOver={(e) => { e.preventDefault(); setSeqZone(sec.g.id); }}
+                        onDrop={(e) => { e.preventDefault(); commitSeqZone(sec.g.id); }}
+                      />
+                    ) : null}
+                  </Fragment>
+                );
+              }
+              return (
+                <Fragment key={`a:${item.row.a.id}`}>
+                  <div className="bt-loose" role="group" aria-label="Loose companion (no group)">
+                    {renderRow(item.row, { group: OTHER_GROUP_ID, next: null, seqRow: item.row.a.id })}
+                  </div>
+                  {dragId ? (
+                    <div
+                      className={`bt-dropzone${seqZone === item.row.a.id ? ' on' : ''}`}
+                      aria-label="Drop here to seat the companion loose, below this companion"
+                      onDragOver={(e) => { e.preventDefault(); setSeqZone(item.row.a.id); }}
+                      onDrop={(e) => { e.preventDefault(); commitSeqZone(item.row.a.id); }}
+                    />
+                  ) : null}
+                </Fragment>
+              );
+            })}
           </div>
         ) : rows.map((r) => renderRow(r))}
         {!rows.length && !groupsOn ? (
