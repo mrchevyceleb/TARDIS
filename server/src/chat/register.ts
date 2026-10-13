@@ -299,15 +299,20 @@ export function quiesceChat(): void {
 
 export async function registerChat(app: express.Express, server: Server): Promise<() => void> {
   await ensureStateDir();
-  // The Codex model picker follows the CLI's own catalog. Give the first read a
-  // moment (it is local and quick) so early turns are checked against it.
-  await startCodexCatalog();
-  // The Fireworks picker follows the live control-plane catalog. The hand list
-  // is complete for today's models, so boot never waits on the network: warm in
-  // the background and let the endpoint/lazy spawns use the hand list first.
-  void startFireworksCatalog();
-  // Same for OpenRouter's public model list (no key needed to read it).
-  void startOpenRouterCatalog();
+  // A side-copy boot (pre-restart check) skips the model-catalog pollers:
+  // they are outbound requests a check boot never needs, and lanes use the
+  // hand lists for lazy spawns anyway.
+  if (process.env.RIVENDELL_SIDE_COPY !== '1') {
+    // The Codex model picker follows the CLI's own catalog. Give the first read a
+    // moment (it is local and quick) so early turns are checked against it.
+    await startCodexCatalog();
+    // The Fireworks picker follows the live control-plane catalog. The hand list
+    // is complete for today's models, so boot never waits on the network: warm in
+    // the background and let the endpoint/lazy spawns use the hand list first.
+    void startFireworksCatalog();
+    // Same for OpenRouter's public model list (no key needed to read it).
+    void startOpenRouterCatalog();
+  }
 
   app.get('/api/codex/models', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
