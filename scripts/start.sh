@@ -38,21 +38,23 @@ client_stale() {
   # Every input that can change the built client, not only the sources:
   # dependency and build-config updates (lockfiles, package.json, tsconfig,
   # the vite config family) change the bundle without touching src.
-  for p in index.html public package.json package-lock.json pnpm-lock.yaml yarn.lock tsconfig.json tsconfig.node.json vite.config.ts vite.config.mts vite.config.js vite.config.mjs vite.config.cjs vite.config.cts; do
+  for p in index.html public package.json package-lock.json pnpm-lock.yaml yarn.lock tsconfig.json tsconfig.node.json .env .env.local .env.production .env.production.local vite.config.ts vite.config.mts vite.config.js vite.config.mjs vite.config.cjs vite.config.cts; do
     [[ -e "$p" ]] && inputs+=("$p")
   done
   [[ -n $(find "${inputs[@]}" -newer dist/index.html -print -quit 2>/dev/null) ]]
 }
-if [[ -x node_modules/.bin/vite ]] && client_stale; then
+if [[ -x node_modules/.bin/vite ]]; then
   # One build at a time (non-blocking: a concurrent boot keeps the existing
   # bundle rather than waiting), a unique build dir per process, a bounded
   # build, and a swap that restores the previous bundle if it half-fails.
+  # Staleness is re-checked under the lock: a boot that waited out another
+  # boot's rebuild must not rebuild the same fresh bundle again.
   exec 9>"$HOME/.rivendell/client-build.lock"
-  if flock -n 9; then
+  if flock -n 9 && client_stale; then
     echo "[start] client bundle stale: rebuilding dist/ before boot" >&2
     build="dist.new.$$"
     rm -rf "$build"
-    if timeout 120 node_modules/.bin/vite build --outDir "$build" --emptyOutDir >"$HOME/.rivendell/client-build.log" 2>&1 && [[ -f "$build/index.html" ]]; then
+    if timeout --kill-after=10s 120 node_modules/.bin/vite build --outDir "$build" --emptyOutDir >"$HOME/.rivendell/client-build.log" 2>&1 && [[ -f "$build/index.html" ]]; then
       old="dist.old.$(date +%Y%m%d%H%M%S)"
       if [[ ! -e dist ]] || mv dist "$old" 2>/dev/null; then
         if mv "$build" dist; then
