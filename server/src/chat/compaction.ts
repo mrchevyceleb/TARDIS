@@ -441,6 +441,87 @@ export async function takeRotation(key: string): Promise<string | null> {
   return primer || null;
 }
 
+/** A compact whose tail was cut off. Before the output-cap retry (c7de444),
+ *  a generation that hit the token cap was accepted as the document, so its
+ *  tail was lost. The one-time rebuild maintenance keys off this: an unclosed
+ *  code fence, or a last line with no terminal punctuation that is not a
+ *  heading. */
+export function isTruncatedCompact(compact: string): boolean {
+  const text = compact.trim();
+  if (!text) return false;
+  if (((text.match(/```/g) ?? []).length) % 2 === 1) return true;
+  const lines = text.split('\n').filter((line) => line.trim());
+  const last = lines[lines.length - 1]?.trim() ?? '';
+  if (!last || last.startsWith('#')) return false;
+  return !/[.!?:;)\]}"”…\]]$/.test(last);
+}
+
+/** Hard bound on re-fed batches per rebuild run, so a huge lane reports
+ *  instead of running all evening. */
+const REBUILD_MAX_BATCHES = 60;
+
+/** Rebuild a truncated rolling compact from the durable log. The head stands;
+ *  the tail was lost. Every covered turn (seq <= the blob's lastCompactedSeq)
+ *  is re-fed batch by batch through the same generation path, with the head as
+ *  the baseline document, so the replacement is rebuilt from source instead
+ *  of from the truncated head alone. Coverage, cadence, and the state record
+ *  never move: this is repair, not compaction. Facts trimmed by a generation
+ *  ride the blob's pending outbox (drained by the next real compaction), with
+ *  over-cap facts retained in the document exactly like the live path. */
+export async function rebuildTruncatedCompact(
+  key: string,
+  onProgress?: (msg: string) => void,
+): Promise<{ batches: number; fed: number; covered: number; words: number; hitBound: boolean }> {
+  const blob = loadCompactBlob(key);
+  if (!blob) throw new Error('no rolling compact for this thread');
+  if (!isTruncatedCompact(blob.compact)) throw new Error('compact tail looks complete; refusing to rebuild');
+  if (inFlight.has(key)) throw new Error('a live compaction is in flight for this thread; retry after it');
+  const epoch = epochOf(key);
+  inFlight.add(key);
+  try {
+    await flushEventLog(key);
+    const durable = loadEventLogForCompactionSync(key);
+    const visible = extractVisibleTurns(durable);
+    const covered = visible.filter((t) => t.seq <= blob.lastCompactedSeq).sort((a, b) => a.seq - b.seq);
+    const pendingFacts: DurableFact[] = [];
+    if (Array.isArray(blob.pendingFacts)) {
+      for (const fact of blob.pendingFacts.slice(0, PENDING_FACTS_CAP)) {
+        if (fact && typeof fact.title === 'string' && typeof fact.content === 'string' && fact.title.trim() && fact.content.trim()) {
+          pendingFacts.push({ title: fact.title.trim().slice(0, 120), content: fact.content.trim().slice(0, 500) });
+        }
+      }
+    }
+    let previous = blob.compact;
+    let fed = 0;
+    let batches = 0;
+    let words = blob.words;
+    while (fed < covered.length && batches < REBUILD_MAX_BATCHES) {
+      const batch = takeOverflowBatch(covered.slice(fed));
+      if (!batch.length) break;
+      onProgress?.(`${key}: rebuild batch ${batches + 1} (${batch.length} covered turns)`);
+      const generated = await generateCompact(previous, batch);
+      let compactText = generated.compact;
+      let retainedFacts = '';
+      for (const fact of generated.facts) {
+        if (pendingFacts.length >= PENDING_FACTS_CAP) retainedFacts += `\n- ${fact.title}: ${fact.content}`;
+        else pendingFacts.push(fact);
+      }
+      if (retainedFacts) {
+        compactText = `${compactText}\n\nDurable facts kept in the document because the durable-fact outbox is at cap:${retainedFacts}`;
+      }
+      previous = compactText;
+      words = compactText.trim().split(/\s+/).filter(Boolean).length;
+      fed += batch.length;
+      batches += 1;
+      const wrote = writeCompactBlob(key, { ...blob, compact: compactText, words, pendingFacts }, epoch);
+      if (!wrote || epochOf(key) !== epoch) throw new Error('thread was fresh-started during the rebuild');
+    }
+    return { batches, fed, covered: covered.length, words, hitBound: fed < covered.length };
+  } finally {
+    inFlight.delete(key);
+  }
+}
+
 function formatTurnsForCompact(turns: VisibleTurn[]): string {
   return formatAgedTurns(turns);
 }
