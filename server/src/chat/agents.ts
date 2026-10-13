@@ -272,7 +272,16 @@ export function ensureAgents(): void {
     mkdirSync(AGENTS_DIR, { recursive: true });
     let agents = listAgents();
     if (agents.length === 0) {
-      const id = 'chief-of-staff';
+      // Allocate against the retired-id ledger exactly like createAgent: a
+      // deleted Chief of Staff must never be reborn with its retired id, or
+      // an orphaned pre-restart process holding that id would be owner-proof
+      // for the replacement (the crossover the ledger exists to stop). A
+      // corrupt ledger throws here and seeding refuses (fail-closed).
+      const retired = new Set(readDeletedAgentIds());
+      const base = 'chief-of-staff';
+      let id = base;
+      let n = 2;
+      while (agents.some((a) => a.id === id) || retired.has(id)) id = `${base}-${n++}`;
       const scopePath = join(AGENTS_DIR, `${id}.md`);
       try { statSync(scopePath); } catch { writeFileSync(scopePath, DEFAULT_SCOPE); }
       agents = [{

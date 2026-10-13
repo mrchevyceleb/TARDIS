@@ -87,7 +87,7 @@ type CompactionRecord = {
 };
 type CompactionState = Record<string, CompactionRecord>;
 
-let stateQueue: Promise<void> = Promise.resolve();
+let stateQueue: Promise<boolean> = Promise.resolve(true);
 
 function defaultRec(): CompactionRecord {
   return { userTurnsTotal: 0, lastCompactUserTurns: 0, count: 0, lastAt: 0, lastWords: 0 };
@@ -101,15 +101,20 @@ function loadState(): CompactionState {
   }
 }
 
-function mutateState(fn: (state: CompactionState) => void): Promise<void> {
+/** Serial state writes. Resolves false when the write failed (it is warned
+ *  inside, never rejected), so a caller that must know can retry; callers
+ *  that merely await keep their silent best-effort behavior. */
+function mutateState(fn: (state: CompactionState) => void): Promise<boolean> {
   stateQueue = stateQueue.then(() => {
     try {
       const state = loadState();
       fn(state);
       mkdirSync(STATE_DIR, { recursive: true });
       writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+      return true;
     } catch (err) {
       console.warn('[compaction] state mutation failed:', (err as Error).message);
+      return false;
     }
   });
   return stateQueue;
@@ -298,7 +303,10 @@ export function isRotationOwed(key: string): boolean {
   return recIsOwed(loadState()[key]);
 }
 
-export function clearRotation(key: string): Promise<void> {
+/** Consume a banked rotation. Resolves false when the state write failed:
+ *  the marker then stays set, so the next spawn re-seeds once (never blind),
+ *  and a caller that must know can retry the clear with bounded backoff. */
+export function clearRotation(key: string): Promise<boolean> {
   return mutateState((state) => {
     if (state[key]) {
       state[key].rotationOwed = false;

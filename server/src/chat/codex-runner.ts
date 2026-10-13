@@ -245,9 +245,11 @@ export class CodexSession {
     return this.seedWindowOnNextTurn;
   }
 
-  private ackWindowSeed(): Promise<void> {
-    if (!this.seedWindowOnNextTurn) return Promise.resolve();
+  private ackWindowSeed(): Promise<boolean> {
+    if (!this.seedWindowOnNextTurn) return Promise.resolve(true);
     this.seedWindowOnNextTurn = false;
+    // Resolves false when the state write failed: the marker then stays set,
+    // so the next spawn re-seeds once (never blind).
     return clearRotation(this.logKey);
   }
 

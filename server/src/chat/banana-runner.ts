@@ -2410,14 +2410,18 @@ export class BananaSession {
   private ackWindowSeed(): void {
     if (!this.seedWindowOnNextTurn) return;
     this.seedWindowOnNextTurn = false;
-    // Consumed here, never returned: markPromptAccepted is sync, so a floating
-    // clearRotation promise would be an unhandled rejection in this shared
-    // serve process. A failed ack re-arms the window seed so the next turn
-    // re-seeds instead of running blind on a rotation marker never cleared.
-    clearRotation(this.logKey).then(() => {}, (err) => {
-      console.warn(`[banana-runner] seed ack failed for ${this.logKey}; window seed re-armed`, (err as Error)?.message);
-      this.seedWindowOnNextTurn = true;
-    });
+    // The seed this turn was already delivered, so it stays consumed. A
+    // failed state write (clearRotation resolves false - mutateState never
+    // rejects) retries the CLEAR with bounded backoff; re-arming the seed
+    // instead would inject the full primer into every warm turn while the
+    // write keeps failing. A still-uncleared marker re-seeds the next spawn
+    // once, so nothing ever runs blind.
+    const retryClear = (attempt: number) => {
+      clearRotation(this.logKey).then((cleared) => {
+        if (!cleared && attempt < 3) setTimeout(() => retryClear(attempt + 1), 200 * 2 ** attempt);
+      });
+    };
+    retryClear(0);
   }
 
   /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
