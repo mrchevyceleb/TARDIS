@@ -5,7 +5,7 @@ import { headlessLaneToken } from '../headless/pool.ts';
 /** Reserved built-ins, independent of global/private MCP configs. Banana uses
  * one server across threads: computer identity comes from signed turn context,
  * never a mutable process-wide RIVENDELL_AGENT_NAME. */
-export function localMcpServers(agentName?: string, opts: { replyNow?: boolean; unnamedLane?: boolean; backgroundLane?: boolean; owner?: string } = {}) {
+export function localMcpServers(agentName?: string, opts: { replyNow?: boolean; unnamedLane?: boolean; backgroundLane?: boolean; owner?: string; agentId?: string } = {}) {
   // A chat with no stable name may carry a placeholder agentName for the team MCP (Codex uses 'Teammate'). The
   // headless MCP must never treat that placeholder as an identity, or every such chat would share one browser.
   const headlessAgent = opts.unnamedLane ? undefined : agentName;
@@ -16,7 +16,9 @@ export function localMcpServers(agentName?: string, opts: { replyNow?: boolean; 
     'rivendell-team': { type: 'stdio', command: 'node', args: [TEAM_MCP_SCRIPT],
       // reply_now is advertised only to lanes whose runner posts it as a message (Claude).
       // RIVENDELL_AGENT_LANE lets jobs, watches and handoffs report back to the lane that started them.
-      env: { ...base, ...(agentName ? { RIVENDELL_AGENT_NAME: agentName } : {}), ...(opts.replyNow ? { RIVENDELL_REPLY_NOW: '1' } : {}), ...(opts.backgroundLane ? { RIVENDELL_AGENT_LANE: 'bg' } : {}) } },
+      // RIVENDELL_AGENT_ID is the stable roster id, so owner-isolated tools
+      // (commitments) never resolve identity through a mutable display name.
+      env: { ...base, ...(agentName ? { RIVENDELL_AGENT_NAME: agentName } : {}), ...(opts.agentId ? { RIVENDELL_AGENT_ID: opts.agentId } : {}), ...(opts.replyNow ? { RIVENDELL_REPLY_NOW: '1' } : {}), ...(opts.backgroundLane ? { RIVENDELL_AGENT_LANE: 'bg' } : {}) } },
     'rivendell-device': { type: 'stdio', command: 'node', args: [DEVICE_MCP_SCRIPT],
       // The owner env binds this shim's calls to its lane: computer_start
       // refuses a context whose owner lane is not the caller. Banana's serve
@@ -28,7 +30,7 @@ export function localMcpServers(agentName?: string, opts: { replyNow?: boolean; 
       env: { ...base, RIVENDELL_HEADLESS_TOKEN: headlessLaneToken(headlessAgent), ...(headlessAgent ? { RIVENDELL_AGENT_NAME: headlessAgent } : {}) } },
   };
 }
-export function localMcpCodexArgs(agentName?: string, opts: { unnamedLane?: boolean; owner?: string } = {}): string[] {
+export function localMcpCodexArgs(agentName?: string, opts: { unnamedLane?: boolean; owner?: string; agentId?: string } = {}): string[] {
   return Object.entries(localMcpServers(agentName, opts)).flatMap(([name, server]) => [
     '-c', `mcp_servers.${name}.command=${JSON.stringify(server.command)}`,
     '-c', `mcp_servers.${name}.args=${JSON.stringify(server.args)}`,
