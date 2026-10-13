@@ -129,26 +129,23 @@ function foldToken(token: string): string {
   return t;
 }
 
-/** How many distinct message tokens the candidate text contains. Matching
- *  is token-level with folding, not raw substring containment: a longer
- *  inflected query form (minis) meets its shorter candidate root (mini), and
- *  a shared prefix of four or more characters (min/mini, bridge/bridges)
- *  counts as a match in both directions. Pure containment missed exactly
- *  the longer-form direction. */
+/** How many distinct message roots the candidate text contains. Matching is
+ *  root-level with folding, not raw substring containment and not prefix
+ *  equivalence (auth is not author): the query folds and dedupes into roots,
+ *  the candidate folds the same way, and a root counts once — one candidate
+ *  token can satisfy at most one query root, so a query carrying both an
+ *  inflected form and its root (mini and minis) still scores one concept,
+ *  never two. */
 function matchCount(queryTokens: ReadonlySet<string>, candidate: string): number {
-  const foldedQuery = [...queryTokens].map(foldToken);
+  const queryRoots = new Set<string>();
+  for (const token of queryTokens) queryRoots.add(foldToken(token));
   const candidateTokens = new Set<string>();
   for (const word of candidate.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}'\u2019-]*/gu) ?? []) {
     candidateTokens.add(foldToken(word.replace(/^-+|-+$/g, '')));
   }
   let matches = 0;
-  for (const q of foldedQuery) {
-    for (const c of candidateTokens) {
-      if (q === c || (q.length >= 4 && c.length >= 4 && (c.startsWith(q) || q.startsWith(c)))) {
-        matches += 1;
-        break;
-      }
-    }
+  for (const root of queryRoots) {
+    if (candidateTokens.has(root)) matches += 1;
   }
   return matches;
 }
@@ -183,7 +180,17 @@ async function memoryFileHits(cli: string, cwd: string, queryTokens: ReadonlySet
   const files = await orderedMemoryFiles(dir);
   if (files.length === 0) return [];
   const hits: RecallHit[] = [];
+  const scanDeadline = Date.now() + LOCAL_BUDGET_MS - 50;
+  const yieldNow = () => new Promise<void>((resolve) => setImmediate(resolve));
+  let scanned = 0;
   for (const file of files.slice(0, MEMORY_FILES_CAP)) {
+    // Cooperative deadline and event-loop yields, same as the transcript
+    // scan: a long memory-file chain must never block the turn, and the
+    // outer deadline timer can only fire if this loop yields.
+    if ((scanned++ & 7) === 0) {
+      if (Date.now() > scanDeadline) break;
+      await yieldNow();
+    }
     const path = join(dir, file);
     let content: string;
     let mtime = 0;
@@ -448,7 +455,7 @@ export async function recallBlockForTurn(args: {
     // not chit-chat: it searches with the one-token bar instead of the default
     // two-token bar that silently dropped it.
     const lone = queryTokens.size === 1 ? [...queryTokens][0] : undefined;
-    const bar = lone !== undefined && lone.length >= 4 && !/^\d+$/.test(lone) ? 1 : MIN_MATCH_TOKENS;
+    const bar = lone !== undefined && lone.length >= 4 && !/^\p{N}+$/u.test(lone) ? 1 : MIN_MATCH_TOKENS;
     const work = (async () => {
       const [memoryHits, deskHits, mcpHits, notesHits] = await Promise.all([
         withDeadline(memoryFileHits(args.cli, args.cwd, queryTokens, bar), LOCAL_BUDGET_MS, [] as RecallHit[]),
