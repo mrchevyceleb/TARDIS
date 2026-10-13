@@ -72,8 +72,8 @@ try {
 
   // 2. Throwaway worktree + build of the exact commit.
   run('git', ['worktree', 'add', '--detach', srcDir, targetSha], REPO);
-  const liveLock = fs.readFileSync(path.join(REPO, 'server', 'package-lock.json'), 'utf8');
-  const tgtLock = fs.readFileSync(path.join(srcDir, 'server', 'package-lock.json'), 'utf8');
+  const liveLock = fs.readFileSync(path.join(REPO, 'package-lock.json'), 'utf8');
+  const tgtLock = fs.readFileSync(path.join(srcDir, 'package-lock.json'), 'utf8');
   if (liveLock !== tgtLock) fail('Lockfile differs from the live tree; run the build with a real install first.');
   fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(srcDir, 'node_modules'));
   fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(srcDir, 'server', 'node_modules'));
