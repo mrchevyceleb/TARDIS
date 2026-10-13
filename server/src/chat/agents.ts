@@ -16,10 +16,14 @@ import { OPENROUTER_LANE_EFFORT, OPENROUTER_LANE_MODEL, resolveOpenRouterEffort,
 import { deleteRoutinesForAgent } from './routines.ts';
 import { deleteJobWatchesForAgent } from './jobWatches.ts';
 import { deleteMessagePinsForAgent } from '../lib/messagePinStore.ts';
-import { deleteCommitmentsForAgent } from '../lib/commitmentStore.ts';
+import { deleteCommitmentsForAgent, listCommitments, restoreCommitments } from '../lib/commitmentStore.ts';
 import { bareChatId } from './threadKey.ts';
 
 const AGENTS_DIR = join(STATE_DIR, 'personas');
+/** Ids of deleted agents, never handed out again: a deleted agent's
+ *  still-live engine process holds the old id, and a same-id recreate would
+ *  let that stale process act as the new agent. */
+const DELETED_IDS_FILE = join(STATE_DIR, 'deleted-agent-ids.json');
 const AGENTS_FILE = join(AGENTS_DIR, 'agents.json');
 const AVATARS_DIR = join(AGENTS_DIR, 'avatars');
 
@@ -283,14 +287,42 @@ export function ensureAgents(): void {
 
 export type AgentInput = { name: string; role?: string; engine?: string; model?: string; effort?: string; voice?: string; pinned?: boolean; muted?: boolean; color?: AgentColor | null; scope?: string };
 
+function readDeletedAgentIds(): string[] {
+  try {
+    const data = JSON.parse(readFileSync(DELETED_IDS_FILE, 'utf8')) as unknown;
+    const ids = Array.isArray(data)
+      ? data
+      : data && typeof data === 'object' && Array.isArray((data as { ids?: unknown }).ids)
+        ? (data as { ids: unknown[] }).ids
+        : [];
+    return ids.filter((v): v is string => typeof v === 'string' && v.trim() !== '').map((v) => v.trim());
+  } catch {
+    return [];
+  }
+}
+
+function recordDeletedAgentId(id: string): void {
+  try {
+    const ids = new Set(readDeletedAgentIds());
+    ids.add(id);
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(DELETED_IDS_FILE, `${JSON.stringify({ ids: [...ids] }, null, 2)}\n`);
+  } catch (err) {
+    // Fail-open and logged: a lost tombstone only reopens id reuse, it never
+    // blocks a deletion that already succeeded.
+    console.warn('[agents] retired-id write failed:', (err as Error).message);
+  }
+}
+
 export function createAgent(input: AgentInput): Agent {
   if (input.engine !== undefined) assertSubscriptionEngine(input.engine);
   mkdirSync(AGENTS_DIR, { recursive: true });
   const agents = listAgents();
+  const retired = new Set(readDeletedAgentIds());
   const base = slugify(input.name);
   let id = base;
   let n = 2;
-  while (agents.some((a) => a.id === id) || id === 'chief-of-staff' && false) id = `${base}-${n++}`;
+  while (agents.some((a) => a.id === id) || retired.has(id)) id = `${base}-${n++}`;
   const engine = input.engine && VALID_ENGINES.has(input.engine) ? input.engine : 'claude';
   const defaults = defaultAgentBrain(engine);
   const now = Date.now();
@@ -399,11 +431,23 @@ export function deleteAgent(id: string): boolean {
   const agents = listAgents();
   const next = agents.filter((a) => a.id !== id);
   if (next.length === agents.length) return false;
+  // Snapshot first: if the roster save fails below, the agent stays alive
+  // and must not have permanently lost its commitments with it.
+  const commitmentsSnapshot = listCommitments(id);
   // Commitments go first and unswallowed: a failed cascade throws before
   // the roster is saved, so the agent is not deleted while its entries
   // survive to be inherited by a same-id recreate.
   deleteCommitmentsForAgent(id);
-  saveAgents(next);
+  try {
+    saveAgents(next);
+  } catch (err) {
+    restoreCommitments(id, commitmentsSnapshot);
+    throw err;
+  }
+  // The id is retired, not just vacated: a deleted agent's still-live engine
+  // process holds the old id, and a same-id recreate would let that process
+  // act as the new agent. Retired ids are never handed out again.
+  recordDeletedAgentId(id);
   deleteRoutinesForAgent(id);
   deleteJobWatchesForAgent(id).catch((err) => console.warn('[job-watches] cascade for a deleted agent failed:', (err as Error).message));
   try { deleteMessagePinsForAgent(id); } catch { /* pin pocket is ancillary to the agent record */ }

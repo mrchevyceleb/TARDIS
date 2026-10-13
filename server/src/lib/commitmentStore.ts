@@ -143,3 +143,19 @@ export function deleteCommitmentsForAgent(agentId: string): void {
   const next = all.filter((c) => c.agentId !== owner);
   if (next.length !== all.length) save(next);
 }
+
+/** Put a snapshot of an agent's entries back (deleteAgent's undo when the
+ *  roster save fails and the agent therefore stays alive). Fail-open and
+ *  logged, never thrown: a restore failure must not mask the roster error
+ *  it is unwinding. */
+export function restoreCommitments(agentId: string, snapshot: Commitment[]): void {
+  const owner = agentId.trim();
+  if (!owner) return;
+  try {
+    const others = readAll().filter((c) => c.agentId !== owner);
+    const restored = snapshot.filter((c) => c && c.agentId === owner && c.id && c.text);
+    save([...others, ...restored]);
+  } catch (err) {
+    console.warn(`[commitments] restore for ${owner} failed:`, (err as Error).message);
+  }
+}
