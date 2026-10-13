@@ -20,8 +20,11 @@ const FILE = join(STATE_DIR, 'agent-commitments.json');
 const TEXT_CAP = 160;
 const DUE_CAP = 40;
 /** Every line-break form, including the Unicode separators that could
- *  otherwise forge extra lines in the seed block. */
+ *  otherwise forge extra lines in the seed block. Non-global twin for
+ *  validation: a /g regex is stateful across .test() calls (lastIndex),
+ *  so an identical second value could slip past the check. */
 const LINE_BREAKS = /\r\n|\r|\n|\u2028|\u2029/g;
+const HAS_LINE_BREAK = /[\r\n\u2028\u2029]/;
 /** The list stays small enough to stitch into every seed: about ten lines. */
 const MAX_PER_AGENT = 12;
 
@@ -97,7 +100,7 @@ export function addCommitment(agentId: string, text: string, due?: string):
     return { error: `Keep it under ${TEXT_CAP} characters; a commitment must stay one line (got ${body.length}).` };
   }
   const trimmedDue = (due ?? '').trim();
-  if (LINE_BREAKS.test(body) || LINE_BREAKS.test(trimmedDue)) {
+  if (HAS_LINE_BREAK.test(body) || HAS_LINE_BREAK.test(trimmedDue)) {
     return { error: 'A commitment is one line; no line breaks in the text or the time.' };
   }
   if (trimmedDue.length > DUE_CAP) {

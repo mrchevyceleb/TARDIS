@@ -10,15 +10,21 @@ import { addCommitment, clearCommitment, listCommitments } from '../lib/commitme
 export const commitmentsRouter = Router();
 
 /** `agent` may be an id (exact, preferred) or a name. A name that matches
- *  more than one roster entry is refused, so a duplicate display name can
- *  never reach another agent's commitments. */
+ *  more than one roster entry is refused, and so is a needle that matches
+ *  one agent's id AND a different agent's display name (names are freely
+ *  editable, so a display name can equal another agent's id): neither match
+ *  is trustworthy, so no request can reach another agent's commitments. */
 function resolveAgent(agent: unknown): { id: string } | { ambiguous: string[] } | undefined {
   const needle = typeof agent === 'string' ? agent.trim().toLowerCase() : '';
   if (!needle) return undefined;
   const agents = listAgents();
   const byId = agents.filter((a) => a.id.toLowerCase() === needle);
-  if (byId.length > 0) return byId[0];
   const byName = agents.filter((a) => a.name.trim().toLowerCase() === needle);
+  if (byId.length > 0) {
+    const other = byName.find((a) => a.id !== byId[0].id);
+    if (other) return { ambiguous: [byId[0].name, other.name] };
+    return byId[0];
+  }
   if (byName.length === 1) return byName[0];
   if (byName.length > 1) return { ambiguous: byName.map((a) => a.name) };
   return undefined;

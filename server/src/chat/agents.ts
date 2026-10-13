@@ -399,11 +399,14 @@ export function deleteAgent(id: string): boolean {
   const agents = listAgents();
   const next = agents.filter((a) => a.id !== id);
   if (next.length === agents.length) return false;
+  // Commitments go first and unswallowed: a failed cascade throws before
+  // the roster is saved, so the agent is not deleted while its entries
+  // survive to be inherited by a same-id recreate.
+  deleteCommitmentsForAgent(id);
   saveAgents(next);
   deleteRoutinesForAgent(id);
   deleteJobWatchesForAgent(id).catch((err) => console.warn('[job-watches] cascade for a deleted agent failed:', (err as Error).message));
   try { deleteMessagePinsForAgent(id); } catch { /* pin pocket is ancillary to the agent record */ }
-  try { deleteCommitmentsForAgent(id); } catch { /* commitments are ancillary to the agent record */ }
   clearAvatarFiles(id);
   try { unlinkSync(join(AGENTS_DIR, `${id}.md`)); } catch { /* scope file optional */ }
   return true;
