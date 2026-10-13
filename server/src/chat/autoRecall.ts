@@ -39,7 +39,13 @@ const HIT_TITLE_CHARS = 160;
 const BLOCK_CHAR_BUDGET = 6000;
 const DONE_WINDOW_DAYS = 30;
 const MEMORY_FILES_CAP = 80;
-const MEMORY_FILE_CHARS = 12_000;
+/** The whole memory file is scanned and its links discovered, so nothing is
+ *  silently unread (Oct 13: a 203-line MEMORY.md loaded only its first 165
+ *  lines, and every link past that point was never even found). The cap only
+ *  bounds a pathological runaway file; real memory notes are tens of KB.
+ *  Injection stays capped (best-matching lines, HIT_EXCERPT_CHARS), so the
+ *  bigger scan adds zero per-turn context. */
+const MEMORY_FILE_CHARS = 128_000;
 /** Byte ceiling for one memory-file read (4 bytes per char is the worst
  *  case): a runaway file can never block the turn or outrun the deadline. */
 const MEMORY_FILE_BYTES = MEMORY_FILE_CHARS * 4;
