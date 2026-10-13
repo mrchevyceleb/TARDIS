@@ -30,6 +30,16 @@ const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
 export type PromisedTime = { due: string; dueAt: number; clause: string };
 
+/** A negated time is not a promise ("I can't finish by 5pm", "we won't ship
+ *  before 6pm"): the negation kills the whole sentence's promises. */
+const NEGATED = /\b(?:can'?t|cannot|won'?t|will not|wouldn'?t|not going to|didn'?t|doesn'?t|don'?t|never|no longer)\b[^.!?]{0,80}\b(?:by|before|due|no later than|new time)\b/i;
+
+/** Someone else's plan, not the sender's promise ("Sam will deliver by
+ *  6pm", "Max's report is due by 6pm", "the deploy must finish before 5pm"
+ *  when it is not the sender doing it). Deliberately high-precision: a
+ *  missed promise is a safe miss, a wrong one is a false escalation. */
+const THIRD_PERSON = /\b(?:he|she|they|it)\s+will\b[^.!?]{0,60}\b(?:by|before|due)\b|\b[A-Z][a-z]{2,}(?:'s)?\s+(?:will|is going to|plans to|needs to|has to|must)\b[^.!?]{0,60}\b(?:by|before|due)\b|\b[A-Z][a-z]+'s\b[^.!?]{0,60}\b(?:due|by|before)\b/i;
+
 /** The zone offset (ms) of an instant, so wall-clock times resolve in the
  *  team's timezone on any host and across DST changes. */
 function zoneOffsetMs(date: Date): number {
@@ -43,17 +53,20 @@ function zoneOffsetMs(date: Date): number {
 }
 
 /** Resolve a wall-clock in the team's zone to an epoch instant (two-pass, so
- *  a DST boundary lands on the right side). */
+ *  a DST boundary lands on the right side: the second pass recomputes the
+ *  offset AT the estimate and re-derives from the original guess). */
 function instantInZone(year: number, month0: number, day: number, hour: number, minute: number): number {
   const guess = Date.UTC(year, month0, day, hour, minute);
   let at = guess - zoneOffsetMs(new Date(guess));
-  at = at - zoneOffsetMs(new Date(at));
+  at = guess - zoneOffsetMs(new Date(at));
   return at;
 }
 
-/** `now` as a wall-clock in the team's zone. */
+/** `now` as a wall-clock in the team's zone: the instant shifted BY the
+ *  zone offset (the offset already carries its sign; adding it moves the
+ *  wall-clock fields into Eastern). */
 function wallInZone(date: Date): { y: number; m0: number; d: number; weekday: number } {
-  const shifted = new Date(date.getTime() - zoneOffsetMs(date));
+  const shifted = new Date(date.getTime() + zoneOffsetMs(date));
   return {
     y: shifted.getUTCFullYear(),
     m0: shifted.getUTCMonth(),
@@ -126,21 +139,29 @@ function resolveClock(text: string, dayWord: string | undefined, clockText: stri
   }
   let at = instantInZone(y, m0, d, hour, minute);
   if (rollsWhenPast && at <= now.getTime()) {
-    at = instantInZone(y, m0, d + 1, hour, minute);
+    d += 1;
+    at = instantInZone(y, m0, d, hour, minute);
   }
+  // A date that does not survive the round trip (Feb 31 normalizes into
+  // March) is not the requested date: refuse instead of placing the promise
+  // on a different day.
+  const resolved = wallInZone(new Date(at));
+  if (resolved.y !== y || resolved.m0 !== m0 || resolved.d !== d) return null;
   return at;
 }
 
 /** The display form: the clock, a trailing ET marker when the text carries
  *  one, and the day phrase in full ("10:00am ET Wed Oct 14", never a month
  *  word with its day number dropped). */
-function dueDisplay(text: string, dayWord: string | undefined, clockText: string, matchEnd: number): string {
-  const tz = text.slice(matchEnd).match(/^\s*(et|edt|est)\b/i);
+function dueDisplay(local: string, pairText: string, dayWord: string | undefined, clockText: string): string {
+  // The ET marker rides inside the pair match itself (the pair regex
+  // consumes it), so it is searched there, never after the clock.
+  const tz = pairText.match(/\b(et|edt|est)\b/i);
   let dayPhrase = '';
   if (dayWord) {
     const monthIdx = MONTHS.indexOf(dayWord.toLowerCase().slice(0, 3));
     if (monthIdx >= 0) {
-      const dayNum = (text.match(new RegExp(`${dayWord}\\s+(\\d{1,2})`, 'i')) ?? [])[1];
+      const dayNum = (local.match(new RegExp(`${dayWord}\\s+(\\d{1,2})`, 'i')) ?? [])[1];
       dayPhrase = dayNum ? `${dayWord} ${dayNum}` : dayWord;
     } else {
       dayPhrase = dayWord;
@@ -157,6 +178,7 @@ export function findPromisedTimes(text: string, now: Date = new Date()): Promise
   for (const raw of text.split(/(?<=[.!?])\s+|\n+/)) {
     const sentence = raw.trim();
     if (sentence.length < 8 || !MARKER.test(sentence)) continue;
+    if (NEGATED.test(sentence) || THIRD_PERSON.test(sentence)) continue;
     PAIR.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = PAIR.exec(sentence)) !== null) {
@@ -169,7 +191,7 @@ export function findPromisedTimes(text: string, now: Date = new Date()): Promise
       const day = dayWordNear(local, at - windowFrom);
       const dueAt = resolveClock(local, day?.word, clockText, now);
       if (dueAt === null) continue;
-      const due = dueDisplay(local, day?.word, clockText, at + match[0].length - windowFrom);
+      const due = dueDisplay(local, match[0], day?.word, clockText);
       out.push({ due, dueAt, clause: sentence });
     }
   }
@@ -198,15 +220,20 @@ export function scanOutgoingPromise(
   sourceId?: string,
   now: Date = new Date(),
 ): { added: Array<{ id: string; due: string }>; addError?: string; promise?: PromisedTime } {
-  if (sourceId && listCommitments(agentId).some((c) => c.sourceId === sourceId)) {
-    return { added: [] };
-  }
   const promises = findPromisedTimes(text, now);
   if (!promises.length) return { added: [] };
+  // Per-promise source ids (message # ordinal): one message never
+  // double-adds a promise, but a partial failure (the list cap, a store
+  // error) never poisons the others — a later retry still records the
+  // promises that did not land.
+  const existing = new Set(listCommitments(agentId).map((c) => c.sourceId));
   const added: Array<{ id: string; due: string }> = [];
-  for (const promise of promises) {
+  for (let i = 0; i < promises.length; i += 1) {
+    const promise = promises[i];
+    const perSource = sourceId ? `${sourceId}#${i}` : undefined;
+    if (perSource && existing.has(perSource)) continue;
     const clause = promise.clause.replace(/\s+/g, ' ').trim().slice(0, 160);
-    const result = addCommitment(agentId, clause, promise.due, { dueAt: promise.dueAt, sourceId });
+    const result = addCommitment(agentId, clause, promise.due, { dueAt: promise.dueAt, sourceId: perSource });
     if (result.error) return { added, addError: result.error, promise };
     added.push({ id: result.commitment!.id, due: promise.due });
   }

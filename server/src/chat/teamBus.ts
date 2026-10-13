@@ -1277,12 +1277,23 @@ export async function deliverTeamMessage(input: {
     const sender = findAgent(input.from);
     if (sender) {
       void Promise.resolve().then(() => {
-        const scan = scanOutgoingPromise(sender.id, text, record.id);
-        if (scan.addError && scan.promise) {
+        // The scan itself must never vanish an exception: a store failure
+        // would silently drop the promise with no commitment and no nudge.
+        let scan: ReturnType<typeof scanOutgoingPromise>;
+        try {
+          scan = scanOutgoingPromise(sender.id, text, record.id);
+        } catch (error) {
+          console.warn('[team] outgoing-promise scan failed:', (error as Error).message);
+          scan = { added: [], addError: (error as Error).message };
+        }
+        if (scan.addError) {
+          const promised = scan.promise
+            ? `You promised "${scan.promise.clause.replace(/\s+/g, ' ').slice(0, 120)}" (due ${scan.promise.due}) with no matching commitment, and the auto-add failed: ${scan.addError}. Add it with the commitments tool now.`
+            : `The outgoing-promise scan failed (${scan.addError}). Check your open commitments and add anything you promised with the commitments tool now.`;
           void deliverTeamMessage({
             from: 'TARDIS',
             to: sender.id,
-            text: `You promised "${scan.promise.clause.replace(/\s+/g, ' ').slice(0, 120)}" (due ${scan.promise.due}) with no matching commitment, and the auto-add failed: ${scan.addError}. Add it with the commitments tool now.`,
+            text: promised,
             wait: false,
             priority: true,
           }).catch(() => undefined);
