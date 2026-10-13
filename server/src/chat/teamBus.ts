@@ -1277,7 +1277,7 @@ export async function deliverTeamMessage(input: {
     const sender = findAgent(input.from);
     if (sender) {
       void Promise.resolve().then(() => {
-        const scan = scanOutgoingPromise(sender.id, text);
+        const scan = scanOutgoingPromise(sender.id, text, record.id);
         if (scan.addError && scan.promise) {
           void deliverTeamMessage({
             from: 'TARDIS',

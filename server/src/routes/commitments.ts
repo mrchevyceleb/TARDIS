@@ -6,6 +6,7 @@ import { Router } from 'express';
 import { asyncHandler } from './helpers.ts';
 import { listAgents } from '../chat/agents.ts';
 import { addCommitment, clearCommitment, listCommitments } from '../lib/commitmentStore.ts';
+import { parseDue } from '../lib/promiseScan.ts';
 
 export const commitmentsRouter = Router();
 
@@ -65,7 +66,11 @@ commitmentsRouter.post('/add', asyncHandler(async (req, res) => {
   const { agent, text, due } = req.body ?? {};
   const r = agentIdForMutation(agent);
   if ('error' in r) { res.status(r.status).json({ error: r.error }); return; }
-  const result = addCommitment(r.id, typeof text === 'string' ? text : '', typeof due === 'string' ? due : undefined);
+  const dueText = typeof due === 'string' && due.trim() ? due : undefined;
+  // The parsed instant is stored once, at add time: a relative display due
+  // never drifts with later reparsing.
+  const dueAt = dueText ? parseDue(dueText) ?? undefined : undefined;
+  const result = addCommitment(r.id, typeof text === 'string' ? text : '', dueText, { dueAt });
   if (result.error) { res.status(409).json({ error: result.error }); return; }
   res.json({ commitment: result.commitment });
 }));
