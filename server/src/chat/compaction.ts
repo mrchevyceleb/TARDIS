@@ -395,7 +395,7 @@ function takeOverflowBatch(overflow: VisibleTurn[]): VisibleTurn[] {
 const COMPACT_SYSTEM = `You are the memory keeper for a long-running AI-teammate conversation. You write the ONE rolling memory document that lets the thread continue FOREVER. Each time you run, you REPLACE the previous document entirely (never append a new primer).
 
 Rules for the document you produce:
-- LENGTH: keep the previous document's substance and fold in the new aged-out turns. Do not pad. Do not invent. Target 3000–5000 words only when the combined history actually supports that density; a short overflow should produce a modest update.
+- LENGTH: keep the previous document's substance and fold in the new aged-out turns. Do not pad. Do not invent. Target 2500–4000 words only when the combined history actually supports that density; a short overflow should produce a modest update. Stay under the cap: the document plus the durable-facts section must fit in one output, so never run long.
 - Capture: every decision made (and why), every open task and its state, every fact about people/projects/systems mentioned, every commitment or promise, every preference expressed, every technical detail that mattered (paths, models, endpoints, prices, IDs), and the current state of play.
 - Organize with clear headings (## ...) so it can be indexed: Overview / People & Projects / Decisions / Open Work / Facts & References / Preferences & Style / Current State.
 - Write in third person, past tense, no fluff, no meta commentary. Never invent content that is not in the previous document or the aged-out turns.
@@ -804,7 +804,15 @@ async function generateCompact(previous: string, overflow: VisibleTurn[]): Promi
     }),
   });
   if (!res.ok) throw new Error(`compact generation failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
-  const body = (await res.json()) as { content?: Array<{ type?: string; text?: string }> };
+  const body = (await res.json()) as { content?: Array<{ type?: string; text?: string }>; stop_reason?: string };
+  // A generation that hit the output cap ends mid-sentence and would become
+  // the next pass's baseline document, silently losing its tail forever
+  // (Oct 13: Max's rolling memory ends mid-sentence exactly this way). A
+  // capped generation fails instead, so the previous document stands and the
+  // next pass retries with the same material.
+  if (body.stop_reason === 'max_tokens') {
+    throw new Error(`compact hit the ${COMPACT_MAX_TOKENS}-token output cap before finishing — will retry`);
+  }
   const generated = (body.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text ?? '').join('\n').trim();
   // The durable-facts section rides the same generation call; keep it out of
   // the document itself so the rolling compact stays a pure summary. The
