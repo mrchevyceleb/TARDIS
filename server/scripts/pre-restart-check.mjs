@@ -192,6 +192,9 @@ try {
     : interrupted
       ? `\nFAIL — interrupted by signal before completion (logs kept in ${tmp}).`
       : `\nFAIL — see the output above (logs kept in ${tmp}).`);
+  // Cleanup only after the verdict is decided and printed: interrupted or
+  // failed runs keep their logs exactly as the report above promises.
+  if (ok && !KEEP) { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} }
   process.exit(ok ? 0 : 1);
 }
 
@@ -212,8 +215,9 @@ async function doTeardown() {
     });
   }
   try { execFileSync('git', ['worktree', 'remove', '--force', srcDir], { cwd: REPO, stdio: 'ignore' }); } catch {}
-  // Logs stay for inspection on any FAIL (the report says where they are).
-  if (pass && !KEEP) { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} }
+  // The tmp dir is NOT removed here: the finally block decides after the
+  // final verdict (an interrupted run must keep its logs, and the report
+  // must be able to say where they are).
 }
 
 function step(msg) { console.log(`[check] ${msg}`); }

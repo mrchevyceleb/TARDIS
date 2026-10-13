@@ -444,6 +444,11 @@ export function laneMcpServers(agentName?: string, backgroundLane = false, owner
  *  reachable while their desktop app is open). */
 let localMcpLogged = false;
 function withTeamMcp(configJson: string, cwd: string, chatId: string): string {
+  // A side-copy boot (pre-restart check) mounts no built-in MCPs either: the
+  // probe lane must not reach rivendell-team, rivendell-device or the office
+  // tools. With the optional proxies already gated, --strict-mcp-config then
+  // leaves the probe with zero MCP servers.
+  if (OPTIONAL_MCP_DISABLED) return configJson;
   try {
     if (!localMcpLogged) {
       localMcpLogged = true;
@@ -776,7 +781,13 @@ class ClaudeSession {
       // Block the tool so the model asks inline in plain text, which the user can
       // actually reply to in the composer. (Same fix as samwise-2.)
       '--disallowedTools', disallowedTools,
-      '--dangerously-skip-permissions',
+      // A side-copy probe never gets the permission bypass: auto-denied
+      // prompts are its enforcement boundary (it only needs to reply, never
+      // to act), so Bash/Write/Edit/web/MCP calls are all denied while a
+      // normal lane keeps the bypass.
+      ...(OPTIONAL_MCP_DISABLED
+        ? ['--permission-prompts', 'none']
+        : ['--dangerously-skip-permissions']),
       '--model', zaiCredential?.wireModel ?? this.spawnModel,
       // The claude binary's --effort has no `minimal`; only the Pi harness does.
       '--effort', this.spawnEffort === 'minimal' ? 'low' : this.spawnEffort,
