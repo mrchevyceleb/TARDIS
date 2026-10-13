@@ -35,24 +35,45 @@ client_stale() {
   [[ ! -f dist/index.html ]] && return 0
   local inputs=(src)
   local p
-  for p in index.html public vite.config.ts vite.config.mts vite.config.js; do
+  # Every input that can change the built client, not only the sources:
+  # dependency and build-config updates (lockfiles, package.json, tsconfig,
+  # the vite config family) change the bundle without touching src.
+  for p in index.html public package.json package-lock.json pnpm-lock.yaml yarn.lock tsconfig.json tsconfig.node.json vite.config.ts vite.config.mts vite.config.js vite.config.mjs vite.config.cjs vite.config.cts; do
     [[ -e "$p" ]] && inputs+=("$p")
   done
   [[ -n $(find "${inputs[@]}" -newer dist/index.html -print -quit 2>/dev/null) ]]
 }
 if [[ -x node_modules/.bin/vite ]] && client_stale; then
-  echo "[start] client bundle stale: rebuilding dist/ before boot" >&2
-  rm -rf dist.new
-  if node_modules/.bin/vite build --outDir dist.new --emptyOutDir >"$HOME/.rivendell/client-build.log" 2>&1 && [[ -f dist.new/index.html ]]; then
-    old="dist.old.$(date +%Y%m%d%H%M%S)"
-    mv dist "$old" 2>/dev/null || true
-    mv dist.new dist
-    # Keep the two newest previous bundles; a failed boot can flip back to one.
-    ls -dt dist.old.* 2>/dev/null | tail -n +3 | xargs -r rm -rf
-    echo "[start] client bundle rebuilt (previous kept at $old)" >&2
+  # One build at a time (non-blocking: a concurrent boot keeps the existing
+  # bundle rather than waiting), a unique build dir per process, a bounded
+  # build, and a swap that restores the previous bundle if it half-fails.
+  exec 9>"$HOME/.rivendell/client-build.lock"
+  if flock -n 9; then
+    echo "[start] client bundle stale: rebuilding dist/ before boot" >&2
+    build="dist.new.$$"
+    rm -rf "$build"
+    if timeout 120 node_modules/.bin/vite build --outDir "$build" --emptyOutDir >"$HOME/.rivendell/client-build.log" 2>&1 && [[ -f "$build/index.html" ]]; then
+      old="dist.old.$(date +%Y%m%d%H%M%S)"
+      if [[ ! -e dist ]] || mv dist "$old" 2>/dev/null; then
+        if mv "$build" dist; then
+          # Keep the two newest previous bundles; a failed boot can flip back to one.
+          ls -dt dist.old.* 2>/dev/null | tail -n +3 | xargs -r rm -rf
+          echo "[start] client bundle rebuilt (previous kept at $old)" >&2
+        else
+          [[ -e dist ]] || mv "$old" dist 2>/dev/null || true
+          rm -rf "$build"
+          echo "[start] WARN: bundle swap failed after the build; the previous bundle was restored (log: $HOME/.rivendell/client-build.log)" >&2
+        fi
+      else
+        rm -rf "$build"
+        echo "[start] WARN: bundle swap failed (log: $HOME/.rivendell/client-build.log); booting with the existing bundle" >&2
+      fi
+    else
+      rm -rf "$build"
+      echo "[start] WARN: client rebuild failed or timed out (log: $HOME/.rivendell/client-build.log); booting with the existing bundle" >&2
+    fi
   else
-    rm -rf dist.new
-    echo "[start] WARN: client rebuild failed (log: $HOME/.rivendell/client-build.log); booting with the existing bundle" >&2
+    echo "[start] WARN: another client build holds the lock; booting with the existing bundle" >&2
   fi
 fi
 
