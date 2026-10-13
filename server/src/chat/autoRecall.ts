@@ -234,15 +234,24 @@ async function deskCardHits(queryTokens: ReadonlySet<string>): Promise<RecallHit
       const since = Date.parse(card.columnSince ?? '') || Date.parse(card.updatedAt ?? '') || 0;
       if (since < cutoff) continue;
     }
-    const lastComment = Array.isArray(card.comments) ? card.comments[card.comments.length - 1] : undefined;
-    const hay = `${card.title ?? ''}\n${lastComment?.text ?? ''}`.toLowerCase();
+    // Match the card's whole recent surface, not just its last comment: a
+    // commitment or finding buried one comment back was invisible to recall
+    // (Oct 13 memory dive). The excerpt still points at the best-matching
+    // line of that surface.
+    const comments = Array.isArray(card.comments) ? card.comments.slice(-3) : [];
+    const surface = [
+      card.title ?? '',
+      card.description ?? '',
+      ...comments.map((c) => (c && typeof c.text === 'string' ? c.text : '')),
+    ].join('\n');
+    const hay = surface.toLowerCase();
     const score = matchCount(queryTokens, hay);
     if (score < MIN_MATCH_TOKENS) continue;
-    const who = lastComment?.author?.name ?? lastComment?.author?.id ?? 'comment';
+    const lastComment = Array.isArray(card.comments) ? card.comments[card.comments.length - 1] : undefined;
     hits.push({
       source: `desk:${card.id}|${card.column}`,
       title: card.title ?? card.id,
-      excerpt: lastComment?.text ? `${who}: ${lastComment.text}` : (card.description ?? ''),
+      excerpt: excerptAround(hay, queryTokens) || (card.description ?? ''),
       score,
       recency: Date.parse(card.updatedAt ?? '') || 0,
     });
