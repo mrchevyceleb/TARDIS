@@ -35,6 +35,38 @@ const EVICT_MIN_IDLE_MS = 60_000;
 const MAX_TABS = 8;
 const OP_DEADLINE_MS = 45_000;
 const SNAPSHOT_MAX = 40_000;
+
+/** Mask typed values of password-shaped fields in an accessibility snapshot.
+ *  The value sits on nested /value (and /placeholder) lines under a node
+ *  whose accessible name is "Password" and friends, a shape none of the
+ *  generic secret rules can see, so a typed password once reached chat and
+ *  the log through this snapshot (Oct 13, Wren's throwaway signup).
+ *  Line-scanned with state: inside a secret-named field, EVERY value or
+ *  placeholder descendant line is masked (the placeholder may precede the
+ *  value), an inline value after the field's colon is the secret itself,
+ *  and the field context ends at the next sibling node. */
+function maskSnapshotSecrets(snapshot: string): string {
+  const SECRET_FIELD = /(?:textbox|input|edittext|searchbox)\b[^\n]*\b(?:password|passcode|passphrase|pass phrase|pin|secret|api[ _-]?key|access[ _-]?key|token)\b/i;
+  const NODE_START = /^[ \t]*[-*]?[ \t]*(?:[a-z]+\b|\/)/;
+  const VALUE_LINE = /^([ \t]*[-*]?[ \t]*\/(?:value|placeholder)[ \t]*:[ \t]*)(.*)$/i;
+  let inSecretField = false;
+  return snapshot.split('\n').map((line) => {
+    if (NODE_START.test(line) && SECRET_FIELD.test(line)) {
+      inSecretField = true;
+      // An inline value after the field's trailing colon is the typed
+      // secret itself; a bare field header keeps its line as-is.
+      const inline = line.match(/(^[ \t]*[-*]?[ \t]*(?:[a-z]+[ \t]+)*[^\n]*?:[ \t]*)([^\n]*)$/);
+      if (inline && inline[2].trim()) return `${inline[1]}[redacted secret]`;
+      return line;
+    }
+    if (inSecretField) {
+      const valueLine = line.match(VALUE_LINE);
+      if (valueLine) return `${valueLine[1]}[redacted secret]`;
+      if (NODE_START.test(line)) inSecretField = false;
+    }
+    return line;
+  }).join('\n');
+}
 const TEXT_MAX = 30_000;
 const LOG_LINES = 40;
 const SHOT_MAX_BYTES = 1_500_000;
@@ -388,7 +420,7 @@ export async function runHeadlessOp(op: string, agent: string, a: Args): Promise
         }
         case 'snapshot': {
           const snapshot = await page.ariaSnapshot({ mode: 'ai', timeout: 10_000 });
-          return { ...(await stateOf(lane, id, page)), snapshot: clip(snapshot, SNAPSHOT_MAX) };
+          return { ...(await stateOf(lane, id, page)), snapshot: clip(maskSnapshotSecrets(snapshot), SNAPSHOT_MAX) };
         }
         case 'click': {
           await locatorFor(page, a).click({ timeout: 10_000, clickCount: a.double === true ? 2 : 1, button: a.button === 'right' ? 'right' : 'left' });
