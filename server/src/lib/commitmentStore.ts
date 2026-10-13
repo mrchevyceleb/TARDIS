@@ -19,6 +19,9 @@ export type Commitment = {
 const FILE = join(STATE_DIR, 'agent-commitments.json');
 const TEXT_CAP = 160;
 const DUE_CAP = 40;
+/** Every line-break form, including the Unicode separators that could
+ *  otherwise forge extra lines in the seed block. */
+const LINE_BREAKS = /\r\n|\r|\n|\u2028|\u2029/g;
 /** The list stays small enough to stitch into every seed: about ten lines. */
 const MAX_PER_AGENT = 12;
 
@@ -31,11 +34,12 @@ function normalizeCommitment(value: unknown): Commitment | null {
   const raw = value as Record<string, unknown>;
   const id = typeof raw.id === 'string' ? raw.id.trim() : '';
   const agentId = typeof raw.agentId === 'string' ? raw.agentId.trim() : '';
-  // One line per commitment, always: a CR/LF could spoof the seed block's
-  // line structure, so a stored value can never carry one through either.
-  const text = typeof raw.text === 'string' ? raw.text.replace(/\r|\n/g, ' ').trim() : '';
+  // One line per commitment, always: CR/LF or a Unicode line separator
+  // (U+2028/U+2029) could spoof the seed block's line structure, so a stored
+  // value can never carry one through either.
+  const text = typeof raw.text === 'string' ? raw.text.replace(LINE_BREAKS, ' ').trim() : '';
   if (!id || !agentId || !text) return null;
-  const due = typeof raw.due === 'string' ? raw.due.replace(/\r|\n/g, ' ').trim().slice(0, DUE_CAP) : '';
+  const due = typeof raw.due === 'string' ? raw.due.replace(LINE_BREAKS, ' ').trim().slice(0, DUE_CAP) : '';
   return {
     id,
     agentId,
@@ -93,7 +97,7 @@ export function addCommitment(agentId: string, text: string, due?: string):
     return { error: `Keep it under ${TEXT_CAP} characters; a commitment must stay one line (got ${body.length}).` };
   }
   const trimmedDue = (due ?? '').trim();
-  if (/[\r\n]/.test(body) || /[\r\n]/.test(trimmedDue)) {
+  if (LINE_BREAKS.test(body) || LINE_BREAKS.test(trimmedDue)) {
     return { error: 'A commitment is one line; no line breaks in the text or the time.' };
   }
   if (trimmedDue.length > DUE_CAP) {

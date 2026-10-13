@@ -44,11 +44,6 @@ const REPLY_NOW_ENABLED = process.env.RIVENDELL_REPLY_NOW === '1';
 const LANE = process.env.RIVENDELL_AGENT_LANE === 'bg' ? 'bg' : 'main';
 const FROM_PROP = { type: 'string', description: 'Your own teammate name. Only needed if TARDIS has not already identified you.' };
 
-// Identity for the owner-isolated commitments tool: the stable roster id the
-// runner passes when it names an agent, else the display name. A shared MCP
-// with neither (the banana serve process) never advertises the tool at all.
-const COMMITMENTS_IDENTITY = process.env.RIVENDELL_AGENT_ID || process.env.RIVENDELL_AGENT_NAME || '';
-
 const TOOLS = [
   {
     name: 'reply_now',
@@ -194,6 +189,7 @@ const TOOLS = [
         text: { type: 'string', description: 'One line, plain text, e.g. "Reply owed to Paula on the 3am tags" or "Restart TARDIS 4:00pm ET, prove with a round-trip"' },
         due: { type: 'string', description: 'Optional short time, e.g. "4:00pm ET today"' },
         id: { type: 'string', description: 'The commitment id to clear (from your list)' },
+        from: { type: 'string', description: 'Your own teammate name. Only needed on engines whose tool server carries no identity (banana); TARDIS has already identified you everywhere else.' },
       },
       required: ['action'],
       additionalProperties: false,
@@ -838,10 +834,12 @@ async function callTool(name, args, signal) {
   }
   if (name === 'commitments') {
     // The stable roster id when the runner passed it, else the display name.
-    // No local roster lookup: every action goes through the routes, which
-    // resolve ids first and refuse ambiguous or unknown names, so a display
-    // name that equals another agent's id can never reach the wrong list.
-    const agent = process.env.RIVENDELL_AGENT_ID || process.env.RIVENDELL_AGENT_NAME;
+    // Banana's shared MCP has neither, so its lanes self-identify per call
+    // with `from`, exactly like the desk/board tools. No local roster lookup:
+    // every action goes through the routes, which resolve ids first and
+    // refuse ambiguous or unknown names.
+    const agent = process.env.RIVENDELL_AGENT_ID || process.env.RIVENDELL_AGENT_NAME
+      || (typeof args.from === 'string' ? args.from.trim() : '');
     if (!agent) throw new Error('Only a named teammate keeps a commitments list.');
     const action = typeof args.action === 'string' ? args.action : 'list';
     if (action === 'add') {
@@ -992,7 +990,7 @@ rl.on('line', async (line) => {
     } else if (method === 'ping') {
       send({ jsonrpc: '2.0', id, result: {} });
     } else if (method === 'tools/list') {
-      send({ jsonrpc: '2.0', id, result: { tools: TOOLS.filter((t) => (t.name !== 'reply_now' || REPLY_NOW_ENABLED) && (t.name !== 'commitments' || COMMITMENTS_IDENTITY)) } });
+      send({ jsonrpc: '2.0', id, result: { tools: TOOLS.filter((t) => t.name !== 'reply_now' || REPLY_NOW_ENABLED) } });
     } else if (method === 'tools/call') {
       const controller = new AbortController();
       activeCalls.set(id, controller);
