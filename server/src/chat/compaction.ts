@@ -35,6 +35,9 @@ import {
   splitWindow,
   type VisibleTurn,
 } from './threadWindow.ts';
+import { bareChatId, isThreadLogKey } from './threadKey.ts';
+import { agentForChatId } from './agents.ts';
+import { listCommitments } from '../lib/commitmentStore.ts';
 
 const MIN_ACCEPT_WORDS = 400;
 const COMPACT_MAX_TOKENS = 8000;
@@ -332,11 +335,35 @@ export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev:
   migrateLegacyPrimer(key);
   const evs = events ?? loadEventLogForCompactionSync(key);
   const blob = loadCompactBlob(key);
-  return assembleForeverTurn({
+  const primer = assembleForeverTurn({
     events: evs,
     compact: blob?.compact ?? '',
     lastCompactedSeq: blob?.lastCompactedSeq,
   }).primer;
+  // The agent's open commitments lead every seed: a short code-carried
+  // list the rolling compact can never rewrite, drop, or fold away. Every
+  // engine seeds through here, so one stitch covers all four runners.
+  const block = commitmentsSeedBlock(key);
+  return block ? `${block}\n\n---\n\n${primer}` : primer;
+}
+
+/** The seed block for this thread's agent commitments, or ''. Fail-open: a
+ *  store hiccup must never block a session seed. */
+function commitmentsSeedBlock(key: string): string {
+  try {
+    if (!isThreadLogKey(key)) return '';
+    const agent = agentForChatId(bareChatId(key.slice(key.lastIndexOf('|') + 1)));
+    if (!agent) return '';
+    const list = listCommitments(agent.id);
+    if (list.length === 0) return '';
+    const lines = list.map((c) => `- [${c.id}] ${c.text}${c.due ? ` (due ${c.due})` : ''}`);
+    return [
+      'Your open commitments — your own always-there list, carried by code so no memory rewrite can drop it. Clear each one with the commitments tool (action clear, id in brackets) the moment it is done:',
+      ...lines,
+    ].join('\n');
+  } catch {
+    return '';
+  }
 }
 
 /** Build a seed from the COMPLETE durable hot log as it existed before the
