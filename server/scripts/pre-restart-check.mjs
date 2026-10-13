@@ -294,15 +294,19 @@ async function messageRoundTrip(port, repo, chatId, watermark) {
 }
 
 function collectAssistantText(frames) {
-  let out = '';
+  let deltaText = '';
+  let resultText = '';
   for (const m of frames) {
     if (m.type !== 'stream' || !m.event) continue;
     if (m.event.type === 'stream_event' && m.event.event?.type === 'content_block_delta' && m.event.event.delta?.type === 'text_delta') {
-      out += m.event.event.delta.text ?? '';
+      deltaText += m.event.event.delta.text ?? '';
     }
-    if (m.event.type === 'result' && typeof m.event.result === 'string') out += m.event.result;
+    if (m.event.type === 'result' && typeof m.event.result === 'string') resultText = m.event.result;
   }
-  return out.trim();
+  // The result event is the authoritative final text; the deltas are the
+  // streaming preview of the same content, so concatenating both would
+  // double it (a live dry run caught exactly "CHECKEDCHECKED").
+  return (resultText || deltaText).trim();
 }
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
