@@ -832,13 +832,12 @@ async function callTool(name, args, signal) {
       : 'Posted in the channel history; no fan-out (no @mentions in your reply).';
   }
   if (name === 'commitments') {
-    // The stable roster id when the runner passed it, else the display name
-    // (the route resolves ids first and refuses ambiguous names).
+    // The stable roster id when the runner passed it, else the display name.
+    // No local roster lookup: every action goes through the routes, which
+    // resolve ids first and refuse ambiguous or unknown names, so a display
+    // name that equals another agent's id can never reach the wrong list.
     const agent = process.env.RIVENDELL_AGENT_ID || process.env.RIVENDELL_AGENT_NAME;
     if (!agent) throw new Error('Only a named teammate keeps a commitments list.');
-    const { agents } = await api('/api/team', undefined, signal);
-    const me = agents.find((a) => a.id === agent || a.name.trim().toLowerCase() === agent.trim().toLowerCase());
-    if (!me) throw new Error(`No teammate record for ${agent}.`);
     const action = typeof args.action === 'string' ? args.action : 'list';
     if (action === 'add') {
       const result = await api('/api/commitments/add', { method: 'POST', body: JSON.stringify({ agent, text: args.text, due: args.due }) }, signal);
@@ -852,7 +851,7 @@ async function callTool(name, args, signal) {
       if (result?.error) throw new Error(result.error);
       return `Cleared ${args.id}.`;
     }
-    const { commitments } = await api(`/api/commitments?agent=${encodeURIComponent(me.id)}`, undefined, signal);
+    const { commitments } = await api(`/api/commitments?agent=${encodeURIComponent(agent)}`, undefined, signal);
     if (!commitments?.length) return 'Your commitments list is empty. Add one the moment you owe a reply or promise a time.';
     return commitments.map((c) => `- [${c.id}] ${c.text}${c.due ? ` — due ${c.due}` : ''}`).join('\n');
   }
