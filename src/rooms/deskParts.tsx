@@ -7,7 +7,7 @@ import { apiJson } from '../data/api';
 import { deskApi, useDeskWrite, type DeskActor, type DeskCard, type DeskPriority, type DeskTodo, type TodoAnswerInput } from '../data/desk';
 import { agentColor, DISC_INK, type Agent } from '../grok/agents';
 import { MarkdownLink } from '../chat/components/primitives/Markdown';
-import { parseWorkspaceMentionText } from '../chat/utils/proxyLinks';
+import { scanWorkspaceMentionSpans } from '../chat/utils/proxyLinks';
 
 /** Agents for owner pickers and name lookups. The sidebar already polls the
  *  roster; a minute of staleness is fine for a picker. */
@@ -23,19 +23,16 @@ export function useDeskAgents(): Agent[] {
 }
 
 const URL_RUN = /https?:\/\/[^\s<>]+/g;
-const WORD_RUN = /\S+/g;
-// The same trailing set proxyLinks strips when it parses a workspace mention,
-// mirrored here so the link covers only the path and the punctuation stays
-// plain text after it.
-const TOKEN_TRAILING = /[\s).,;:!?\]'"`>]+$/;
 
 /** Plain text with http(s) URLs and workspace-path mentions turned into
  *  links. URLs open in a new tab. Workspace paths (ASSISTANT-HUB/... or the
- *  absolute Windows / Unix forms) render through chat's own proxy-link
- *  component, so a path in a Needs-you detail opens exactly the surfaces a
- *  path in chat opens (this PC's app, the in-app folder list, Studio).
- *  Nothing but text and anchors is produced (no HTML), and trailing sentence
- *  punctuation (and an unmatched closing bracket) stays outside the link. */
+ *  absolute Windows / Unix forms) are found by chat's own mention scanner,
+ *  so a path in a Needs-you detail behaves exactly like the same path in
+ *  chat (paths with spaces included) and renders through chat's proxy-link
+ *  component, opening the same surfaces a path in chat opens (this PC's
+ *  app, the in-app folder list, Studio). Nothing but text and anchors is
+ *  produced (no HTML); sentence punctuation after a path stays outside the
+ *  link. */
 export function linkifyText(text: string): ReactNode[] {
   type Hit = { at: number; end: number; node: ReactNode };
   const hits: Hit[] = [];
@@ -56,22 +53,15 @@ export function linkifyText(text: string): ReactNode[] {
       node: <a key={`u-${at}`} className="desk-detail-link" href={url} target="_blank" rel="noreferrer noopener">{url}</a>,
     });
   }
-  for (const match of text.matchAll(WORD_RUN)) {
-    const token = match[0];
-    const at = match.index ?? 0;
+  for (const span of scanWorkspaceMentionSpans(text)) {
     // Never linkify inside a URL that was already matched above.
-    if (hits.some((hit) => at < hit.end && hit.at < at + token.length)) continue;
-    const target = parseWorkspaceMentionText(token);
-    if (!target) continue;
-    const trailing = TOKEN_TRAILING.exec(token)?.[0] ?? '';
-    const end = at + token.length - trailing.length;
-    if (end <= at) continue;
+    if (hits.some((hit) => span.at < hit.end && hit.at < span.end)) continue;
     hits.push({
-      at,
-      end,
+      at: span.at,
+      end: span.end,
       node: (
-        <MarkdownLink key={`w-${at}`} href={`rivendell-${target.kind}:${encodeURIComponent(target.path)}`}>
-          {target.display}
+        <MarkdownLink key={`w-${span.at}`} href={`rivendell-${span.kind}:${encodeURIComponent(span.path)}`}>
+          {span.display}
         </MarkdownLink>
       ),
     });

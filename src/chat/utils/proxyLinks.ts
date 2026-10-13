@@ -448,6 +448,60 @@ export function parseWorkspaceMentionText(value: string): { kind: 'doc' | 'folde
   return { kind: inferKind(path), path, display: toWindowsDisplay(path) };
 }
 
+/** One linked workspace mention in plain text: the span it covers in the
+ *  source (at..end) plus the proxy-link target chat would build for it. */
+export type WorkspaceMentionSpan = {
+  at: number;
+  end: number;
+  kind: 'doc' | 'folder';
+  path: string;
+  display: string;
+};
+
+// The `[label](rivendell-doc:…)` form parseWorkspaceMentionText accepts,
+// unanchored so it can be found anywhere in plain text.
+const PROXY_MD_LINK_RUN = /\[([^\]]+)\]\((rivendell-(?:doc|folder):[^)]+)\)/g;
+
+/** The same workspace-mention matches annotatePlainWorkspaceMentions turns
+ *  into markdown links, as spans over the original text (for plain-text
+ *  surfaces like the Desk's Needs-you detail, which renders React nodes,
+ *  not markdown). Raw mentions are found by chat's own MENTION_PATTERN, so
+ *  paths with spaces and quoted or parenthesized paths match exactly the
+ *  way they match in chat, and trailing punctuation and prose stay outside
+ *  the span. An explicit `[label](rivendell-doc:…)` link is kept whole
+ *  (label, href and closing paren inside the span) instead of re-annotated,
+ *  and raw mentions inside one are skipped. */
+export function scanWorkspaceMentionSpans(text: string): WorkspaceMentionSpan[] {
+  const spans: WorkspaceMentionSpan[] = [];
+  for (const match of text.matchAll(PROXY_MD_LINK_RUN)) {
+    const target = parseWorkspaceMentionText(match[0]);
+    if (!target) continue;
+    const at = match.index ?? 0;
+    spans.push({ at, end: at + match[0].length, kind: target.kind, path: target.path, display: match[1] || target.display });
+  }
+  if (mentionsWorkspace(text)) {
+    for (const match of text.matchAll(MENTION_PATTERN)) {
+      const raw = match[0];
+      const at = match.index ?? 0;
+      const rawEnd = at + raw.length;
+      if (spans.some((span) => at < span.end && span.at < rawEnd)) continue;
+      const trailingMatch = raw.match(TRAILING_PUNCT);
+      const trailing = trailingMatch ? trailingMatch[0] : '';
+      const cleanMatch = trailing ? raw.slice(0, raw.length - trailing.length) : raw;
+      const rel = extractRelativePath(cleanMatch);
+      if (rel === null) continue;
+      const pathParts = splitPathAndTrailingText(rel);
+      const finalRel = normalizeWorkspacePath(pathParts.path);
+      if (finalRel === null) continue;
+      const looksLikeFile = finalRel.length > 0 && /\.[A-Za-z0-9]+$/.test(finalRel.split('/').pop() ?? '');
+      const end = rawEnd - trailing.length - pathParts.trailingText.length;
+      if (end <= at) continue;
+      spans.push({ at, end, kind: looksLikeFile ? 'doc' : 'folder', path: finalRel, display: toWindowsDisplay(finalRel) });
+    }
+  }
+  return spans;
+}
+
 function annotatePlainWorkspaceMentions(input: string): string {
   return input.replace(MENTION_PATTERN, (match) => {
     const trailingMatch = match.match(TRAILING_PUNCT);
