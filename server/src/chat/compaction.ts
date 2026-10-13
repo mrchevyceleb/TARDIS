@@ -38,6 +38,10 @@ import {
 
 const MIN_ACCEPT_WORDS = 400;
 const COMPACT_MAX_TOKENS = 8000;
+/** The length target's ceiling (COMPACT_SYSTEM): the thin-document guard
+ *  measures the previous document against this, so a compliant replacement
+ *  for a legacy 5000-word compact is not read as thin and retried forever. */
+const COMPACT_TARGET_CEILING_WORDS = 4000;
 /** Event-pressure fold trigger: fold the aged batch early (below the 50-turn
  *  gate) once covering every aged turn would archive at least this many hot
  *  events. Streaming-heavy lanes add thousands of events per visible turn
@@ -823,7 +827,7 @@ async function generateCompact(previous: string, overflow: VisibleTurn[]): Promi
   const prevWords = safePrevious.trim() ? safePrevious.trim().split(/\s+/).length : 0;
   const overflowWordEst = Math.max(1, Math.floor(overflowChars(safeOverflow) / 5));
   const minWords = prevWords
-    ? Math.max(80, Math.floor(prevWords * 0.85))
+    ? Math.max(80, Math.floor(Math.min(prevWords, COMPACT_TARGET_CEILING_WORDS) * 0.85))
     : Math.max(80, Math.min(MIN_ACCEPT_WORDS, overflowWordEst));
   if (words < minWords) throw new Error(`compact came back thin (${words} words < ${minWords}) — will retry`);
   return { compact, words, facts };
