@@ -96,16 +96,29 @@ export function Composer(props: ComposerProps) {
   const [popSel, setPopSel] = useState(0);
   const [popDismissed, setPopDismissed] = useState(false);
   const [images, setImages] = useState<PendingImage[]>([]);
+  const [imageIngesting,setImageIngesting]=useState(0);
+  const imageIngestingRef=useRef(0);
   const [uploads, setUploads] = useState<PendingUpload[]>([]);
   const uploadAborts = useRef(new Map<string, () => void>());
   const [phIdx, setPhIdx] = useState(0);
   const [dictating,setDictating]=useState(false);
+  const [dictationOutcomeVersion,setDictationOutcomeVersion]=useState(0);
+  const pendingDictation=useRef<{chatId:string;completed:boolean}|null>(null);
   const latest=useRef(props);latest.current=props;
-  const insertDictation=(text:string)=>{
+  const queueDictation=(text:string)=>{
+    const dictated=text.trim();
+    if(!dictated)return;
     const current=taRef.current?.value??latest.current.value;
-    latest.current.onChange(current?`${current.trimEnd()}\n\n${text}`:text);
-    taRef.current?.focus();
+    latest.current.onChange(current.trim()?`${current.trimEnd()}\n\n${dictated}`:dictated);
+    pendingDictation.current={chatId:latest.current.chatId??'',completed:false};
   };
+  const completeDictation=()=>{
+    if(pendingDictation.current){
+      pendingDictation.current.completed=true;
+      setDictationOutcomeVersion(v=>v+1);
+    }
+  };
+  const discardDictation=()=>{pendingDictation.current=null;};
 
   // grok.com rotates the empty-composer placeholder every few seconds.
   const phrases = props.placeholders;
@@ -153,16 +166,39 @@ export function Composer(props: ComposerProps) {
 
   const ingest = async (files: FileList | File[]) => {
     if (!acceptImages) return;
-    const next: PendingImage[] = [];
-    for (const f of Array.from(files)) {
-      if (f.type.startsWith('image/') && f.size <= IMAGE_DIRECT_MAX) {
-        const img = await fileToImage(f);
-        if (img) next.push(img);
-        continue;
-      }
-      void uploadFile(f);
+    const selected=Array.from(files);
+    const directCount=selected.filter(f=>f.type.startsWith('image/')&&f.size<=IMAGE_DIRECT_MAX).length;
+    const next:PendingImage[]=[];
+    if(directCount){
+      imageIngestingRef.current+=directCount;
+      setImageIngesting(imageIngestingRef.current);
     }
-    if (next.length) setImages((prev) => [...prev, ...next]);
+    try {
+      for (const f of selected) {
+        if (f.type.startsWith('image/') && f.size <= IMAGE_DIRECT_MAX) {
+          try {
+            const img = await fileToImage(f);
+            if (img) next.push(img);
+          } catch (error) {
+            setUploads((prev) => [...prev, {
+              id:`imgerr${Math.random().toString(36).slice(2,8)}`,
+              name:f.name,
+              size:f.size,
+              progress:0,
+              error:error instanceof Error?error.message:'Image could not be read',
+            }]);
+          }
+          continue;
+        }
+        void uploadFile(f);
+      }
+      if(next.length)setImages(prev=>[...prev,...next]);
+    } finally {
+      if(directCount){
+        imageIngestingRef.current=Math.max(0,imageIngestingRef.current-directCount);
+        setImageIngesting(imageIngestingRef.current);
+      }
+    }
   };
   const removeImage = (id: string) =>
     setImages((prev) => {
@@ -230,6 +266,13 @@ export function Composer(props: ComposerProps) {
     const imgs = payload();
     const refs = (props.refCount ?? 0) > 0;
     const hasLiveContent = Boolean(v || imgs?.length || refs);
+    // A direct image is not part of the payload until fileToImage completes.
+    // Block both manual and automatic submission while that conversion is in
+    // flight so the image cannot arrive as a surprise second message.
+    if(imageIngesting>0||imageIngestingRef.current>0){
+      if(props.busy&&allowStop&&!hasLiveContent)props.onStop?.();
+      return;
+    }
     // A streaming upload is still writing its file; its path line is not in
     // the draft yet, so sending or steering now would drop it. An explicit
     // Stop tap on an empty draft still interrupts the running agent (it
@@ -249,6 +292,7 @@ export function Composer(props: ComposerProps) {
     }
     if (props.busy) {
       if (hasLiveContent && props.onSteer) {
+        pendingDictation.current=null;
         props.onSteer(v, imgs);
         props.onChange('');
         clearImages();
@@ -258,10 +302,31 @@ export function Composer(props: ComposerProps) {
       return;
     }
     if (!v && !imgs?.length && !refs) return;
+    pendingDictation.current=null;
     props.onSend(v, imgs);
     props.onChange('');
     clearImages();
   };
+
+  // Dictation finishes before ChatDictation reports itself inactive and before
+  // the controlled draft has committed. Wait for both, and also for any file
+  // upload to finish, then reuse the canonical Send/Steer path exactly once.
+  useEffect(()=>{
+    const pending=pendingDictation.current;
+    if(!pending||!pending.completed||dictating||pending.chatId!==(props.chatId??''))return;
+    // A failed attachment is not permission to send an incomplete request.
+    // Keep the dictated text in the draft and require an explicit Send after
+    // the person removes or replaces the failed upload.
+    if(uploads.some(u=>Boolean(u.error))){
+      pendingDictation.current=null;
+      return;
+    }
+    if(imageIngesting>0||imageIngestingRef.current>0)return;
+    if(uploads.some(u=>!u.error))return;
+    pendingDictation.current=null;
+    submit(false);
+  },[dictating,dictationOutcomeVersion,imageIngesting,props.value,props.chatId,uploads]);
+  useEffect(()=>()=>{pendingDictation.current=null;},[props.chatId]);
 
   const pick = (i: number) => {
     const c = matches[i];
@@ -489,12 +554,12 @@ export function Composer(props: ComposerProps) {
                 </span>
               )
             )}
-            {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating} />}
+            {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={queueDictation} onActive={setDictating} onComplete={completeDictation} onDiscard={discardDictation} />}
             {trailingBtn()}
           </div>
         ) : (
           <>
-            {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating} />}
+            {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={queueDictation} onActive={setDictating} onComplete={completeDictation} onDiscard={discardDictation} />}
             {trailingBtn()}
           </>
         )}
