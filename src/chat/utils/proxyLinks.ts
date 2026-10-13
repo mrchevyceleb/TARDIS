@@ -462,8 +462,11 @@ export type WorkspaceMentionSpan = {
 // unanchored so it can be found anywhere in plain text. One level of
 // balanced parentheses is allowed inside the href: encodeURIComponent
 // keeps parentheses, so `Report (1).pdf` encodes to `Report%20(1).pdf`
-// and a class stopping at the first ')' would truncate the link.
-const PROXY_MD_LINK_RUN = /\[([^\]]+)\]\((rivendell-(?:doc|folder):(?:[^()]|\([^()]*\))+)\)/g;
+// and a class stopping at the first ')' would truncate the link. The
+// payload may also be empty (a workspace-root link): parseProxyHref still
+// validates every target, and chat's own md renderer keeps such links
+// whole, so the Desk tokenizer must too.
+const PROXY_MD_LINK_RUN = /\[([^\]]+)\]\((rivendell-(?:doc|folder):(?:[^()]|\([^()]*\))*)\)/g;
 
 /** The same workspace-mention matches annotatePlainWorkspaceMentions turns
  *  into markdown links, as spans over the original text (for plain-text
