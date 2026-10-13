@@ -67,6 +67,7 @@ const bootLog = path.join(tmp, 'boot.log');
 let child = null;
 let teardownPromise = null; // one shared teardown: every caller awaits the same run
 let pass = false;
+let interrupted = false; // set SYNCHRONOUSLY on a signal, before any await
 let targetSha = '';
 let liveHead = '';
 
@@ -75,6 +76,10 @@ let liveHead = '';
 // kind of mess this check exists to prevent.
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
+    // Synchronous flag: the finally block's exit (registered first on the
+    // shared teardown promise) must not be able to report PASS after a
+    // signal cancelled the run.
+    interrupted = true;
     console.error(`[check] ${sig} received — tearing down`);
     void teardown().finally(() => process.exit(1));
   });
@@ -179,12 +184,15 @@ try {
 } finally {
   await teardown();
   const elapsed = Math.round((Date.now() - T0) / 1000);
-  console.log(pass
+  const ok = pass && !interrupted;
+  console.log(ok
     ? `\nPASS — ${targetSha.slice(0, 10)} boots clean${MESSAGE ? ' and answers the probe lane above a 5000-seq watermark' : ''} in ${elapsed}s.`
       + `\nRollback point if the live restart fails: ${liveHead.slice(0, 10)}.`
       + (KEEP ? `\nKept for inspection: ${tmp}` : '')
-    : `\nFAIL — see the output above (logs kept in ${tmp}).`);
-  process.exit(pass ? 0 : 1);
+    : interrupted
+      ? `\nFAIL — interrupted by signal before completion (logs kept in ${tmp}).`
+      : `\nFAIL — see the output above (logs kept in ${tmp}).`);
+  process.exit(ok ? 0 : 1);
 }
 
 function teardown() {
@@ -296,17 +304,23 @@ async function messageRoundTrip(port, repo, chatId, watermark) {
 function collectAssistantText(frames) {
   let deltaText = '';
   let resultText = '';
+  let sawResultString = false;
   for (const m of frames) {
     if (m.type !== 'stream' || !m.event) continue;
     if (m.event.type === 'stream_event' && m.event.event?.type === 'content_block_delta' && m.event.event.delta?.type === 'text_delta') {
       deltaText += m.event.event.delta.text ?? '';
     }
-    if (m.event.type === 'result' && typeof m.event.result === 'string') resultText = m.event.result;
+    if (m.event.type === 'result' && typeof m.event.result === 'string') {
+      resultText = m.event.result;
+      sawResultString = true;
+    }
   }
   // The result event is the authoritative final text; the deltas are the
   // streaming preview of the same content, so concatenating both would
-  // double it (a live dry run caught exactly "CHECKEDCHECKED").
-  return (resultText || deltaText).trim();
+  // double it (a live dry run caught exactly "CHECKEDCHECKED"). An observed
+  // string result wins even when EMPTY: a malformed empty final result must
+  // fail the probe, not silently pass on the streamed deltas.
+  return (sawResultString ? resultText : deltaText).trim();
 }
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
