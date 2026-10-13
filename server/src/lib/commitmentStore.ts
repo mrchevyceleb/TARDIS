@@ -13,6 +13,17 @@ export type Commitment = {
   agentId: string;
   text: string;
   due?: string;
+  /** The due parsed to an absolute instant at add time. The sweep and the
+   *  scanner match on this, never on reparsing the display text, so a
+   *  relative due ("10pm tomorrow") cannot drift with every reparse. */
+  dueAt?: number;
+  /** The outgoing message id that auto-added this entry, so one message can
+   *  never double-add. Undefined for hand-added entries. */
+  sourceId?: string;
+  /** When the past-due sweep raised this entry, per recipient. A recipient
+   *  is marked only after its delivery succeeded, so a failed raise retries
+   *  on the next tick instead of being silenced forever. */
+  raised?: { owner?: number; chief?: number };
   createdAt: number;
 };
 
@@ -43,11 +54,24 @@ function normalizeCommitment(value: unknown): Commitment | null {
   const text = typeof raw.text === 'string' ? raw.text.replace(LINE_BREAKS, ' ').trim() : '';
   if (!id || !agentId || !text) return null;
   const due = typeof raw.due === 'string' ? raw.due.replace(LINE_BREAKS, ' ').trim().slice(0, DUE_CAP) : '';
+  const dueAt = asFiniteNumber(raw.dueAt, 0);
+  const sourceId = typeof raw.sourceId === 'string' ? raw.sourceId.trim().slice(0, 120) : '';
+  const raisedRaw = raw.raised;
+  const raisedOwner = raisedRaw && typeof raisedRaw === 'object' ? asFiniteNumber((raisedRaw as { owner?: unknown }).owner, 0) : 0;
+  const raisedChief = raisedRaw && typeof raisedRaw === 'object' ? asFiniteNumber((raisedRaw as { chief?: unknown }).chief, 0) : 0;
   return {
     id,
     agentId,
     text: text.slice(0, TEXT_CAP),
     ...(due ? { due } : {}),
+    ...(dueAt > 0 ? { dueAt } : {}),
+    ...(sourceId ? { sourceId } : {}),
+    ...(raisedOwner > 0 || raisedChief > 0 ? {
+      raised: {
+        ...(raisedOwner > 0 ? { owner: raisedOwner } : {}),
+        ...(raisedChief > 0 ? { chief: raisedChief } : {}),
+      },
+    } : {}),
     createdAt: asFiniteNumber(raw.createdAt, 0),
   };
 }
@@ -89,8 +113,12 @@ export function listCommitments(agentId?: string): Commitment[] {
   return filtered.sort((a, b) => a.createdAt - b.createdAt);
 }
 
-export function addCommitment(agentId: string, text: string, due?: string):
-  { commitment?: Commitment; error?: string } {
+export function addCommitment(
+  agentId: string,
+  text: string,
+  due?: string,
+  opts?: { dueAt?: number; sourceId?: string },
+): { commitment?: Commitment; error?: string } {
   const owner = agentId.trim();
   const body = (text ?? '').trim();
   if (!owner || !body) return { error: 'agentId and text are required' };
@@ -108,16 +136,56 @@ export function addCommitment(agentId: string, text: string, due?: string):
   if (all.filter((c) => c.agentId === owner).length >= MAX_PER_AGENT) {
     return { error: `Your commitments list is full (${MAX_PER_AGENT}). Clear one that is done before adding another.` };
   }
+  const dueAt = asFiniteNumber(opts?.dueAt, 0);
+  const sourceId = typeof opts?.sourceId === 'string' ? opts.sourceId.trim().slice(0, 120) : '';
   const commitment: Commitment = {
     id: `cm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     agentId: owner,
     text: body,
     ...(trimmedDue ? { due: trimmedDue.slice(0, DUE_CAP) } : {}),
+    ...(dueAt > 0 ? { dueAt } : {}),
+    ...(sourceId ? { sourceId } : {}),
     createdAt: Date.now(),
   };
   all.push(commitment);
   save(all);
   return { commitment };
+}
+
+/** The past-due sweep records a raise per recipient, only after that
+ *  recipient's delivery succeeded: a failed raise retries on the next tick,
+ *  a succeeded one never repeats. A no-op never rewrites the file. */
+export function markCommitmentRaised(id: string, recipient: 'owner' | 'chief'): boolean {
+  const target = id.trim();
+  if (!target) return false;
+  const all = readAll();
+  let changed = false;
+  const next = all.map((c) => {
+    if (c.id === target && !c.raised?.[recipient]) {
+      changed = true;
+      return { ...c, raised: { ...c.raised, [recipient]: Date.now() } };
+    }
+    return c;
+  });
+  if (changed) save(next);
+  return changed;
+}
+
+/** Persist a legacy entry's parsed due as its absolute instant, so a
+ *  relative display due stops moving with every sweep reparse. */
+export function noteCommitmentDueAt(id: string, dueAt: number): void {
+  const target = id.trim();
+  if (!target || !Number.isFinite(dueAt) || dueAt <= 0) return;
+  const all = readAll();
+  let changed = false;
+  const next = all.map((c) => {
+    if (c.id === target && c.dueAt === undefined) {
+      changed = true;
+      return { ...c, dueAt };
+    }
+    return c;
+  });
+  if (changed) save(next);
 }
 
 /** Only the owner can clear its own entry; returns false when nothing matched. */

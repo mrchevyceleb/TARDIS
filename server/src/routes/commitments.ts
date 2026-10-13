@@ -6,6 +6,7 @@ import { Router } from 'express';
 import { asyncHandler } from './helpers.ts';
 import { listAgents } from '../chat/agents.ts';
 import { addCommitment, clearCommitment, listCommitments } from '../lib/commitmentStore.ts';
+import { parseDue } from '../lib/promiseScan.ts';
 
 export const commitmentsRouter = Router();
 
@@ -65,9 +66,22 @@ commitmentsRouter.post('/add', asyncHandler(async (req, res) => {
   const { agent, text, due } = req.body ?? {};
   const r = agentIdForMutation(agent);
   if ('error' in r) { res.status(r.status).json({ error: r.error }); return; }
-  const result = addCommitment(r.id, typeof text === 'string' ? text : '', typeof due === 'string' ? due : undefined);
+  const dueText = typeof due === 'string' && due.trim() ? due : undefined;
+  // The parsed instant is stored once, at add time: a relative display due
+  // never drifts with later reparsing. An unparseable due is never silent:
+  // the commitment is stored (it still shows in the seed), but the response
+  // says the sweeper cannot raise it, so the caller can restate the time.
+  const parsedAt = dueText ? parseDue(dueText) : undefined;
+  const dueAt = parsedAt ?? undefined;
+  const result = addCommitment(r.id, typeof text === 'string' ? text : '', dueText, { dueAt });
   if (result.error) { res.status(409).json({ error: result.error }); return; }
-  res.json({ commitment: result.commitment });
+  res.json({
+    commitment: result.commitment,
+    ...(dueText && parsedAt === undefined ? {
+      monitorable: false,
+      note: 'The due text could not be parsed to a time, so the past-due sweep cannot raise it. Restate as a clock form like "6:40pm ET today" or "Wed Oct 14 10:00am ET", or clear and re-add it.',
+    } : {}),
+  });
 }));
 
 commitmentsRouter.post('/clear', asyncHandler(async (req, res) => {
