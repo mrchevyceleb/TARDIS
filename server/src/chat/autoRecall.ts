@@ -122,11 +122,28 @@ function tokenize(text: string): Set<string> {
  *  fold on both the query and the candidate side, so "minis" finds "mini"
  *  and "Naomi's" finds "naomi". Applied consistently to both sides, so any
  *  form that folds the same way matches regardless of which side is
- *  inflected. */
+ *  inflected. The simple plural strip is a deliberate trade: it wins the
+ *  inflection matches (minis → mini) at the cost of a rare false root
+ *  (atlas → atla, which collides only with itself); a tested inflection
+ *  stemmer is future work, not this change. */
 function foldToken(token: string): string {
   let t = token.replace(/['\u2019]s$/i, '');
   if (t.length > 4 && /s$/i.test(t) && !/(?:ss|us|is)$/i.test(t)) t = t.replace(/s$/i, '');
   return t;
+}
+
+/** Hyphenated compounds contribute their components AND the whole compound,
+ *  on both the query and the candidate side: "cuttlefish" finds
+ *  "cuttlefish-related" and "Mac mini" finds "Mac-mini" (the bare root alone
+ *  regressed exactly these, which substring matching used to catch). */
+function* foldAll(token: string): Generator<string> {
+  const root = foldToken(token);
+  yield root;
+  if (root.includes('-')) {
+    for (const part of root.split('-')) {
+      if (part) yield foldToken(part);
+    }
+  }
 }
 
 /** How many distinct message roots the candidate text contains. Matching is
@@ -138,10 +155,12 @@ function foldToken(token: string): string {
  *  never two. */
 function matchCount(queryTokens: ReadonlySet<string>, candidate: string): number {
   const queryRoots = new Set<string>();
-  for (const token of queryTokens) queryRoots.add(foldToken(token));
+  for (const token of queryTokens) {
+    for (const root of foldAll(token)) queryRoots.add(root);
+  }
   const candidateTokens = new Set<string>();
   for (const word of candidate.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}'\u2019-]*/gu) ?? []) {
-    candidateTokens.add(foldToken(word.replace(/^-+|-+$/g, '')));
+    for (const root of foldAll(word.replace(/^-+|-+$/g, ''))) candidateTokens.add(root);
   }
   let matches = 0;
   for (const root of queryRoots) {
@@ -182,15 +201,13 @@ async function memoryFileHits(cli: string, cwd: string, queryTokens: ReadonlySet
   const hits: RecallHit[] = [];
   const scanDeadline = Date.now() + LOCAL_BUDGET_MS - 50;
   const yieldNow = () => new Promise<void>((resolve) => setImmediate(resolve));
-  let scanned = 0;
   for (const file of files.slice(0, MEMORY_FILES_CAP)) {
     // Cooperative deadline and event-loop yields, same as the transcript
-    // scan: a long memory-file chain must never block the turn, and the
-    // outer deadline timer can only fire if this loop yields.
-    if ((scanned++ & 7) === 0) {
-      if (Date.now() > scanDeadline) break;
-      await yieldNow();
-    }
+    // scan: checked after every file (and after the yield, so an expired
+    // deadline never runs on through more reads), so a long memory-file
+    // chain never blocks the turn or defeats the deadline timer.
+    await yieldNow();
+    if (Date.now() > scanDeadline) break;
     const path = join(dir, file);
     let content: string;
     let mtime = 0;
@@ -339,7 +356,13 @@ async function deskCardHits(queryTokens: ReadonlySet<string>, bar = MIN_MATCH_TO
   }
   const cutoff = Date.now() - DONE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
   const hits: RecallHit[] = [];
+  const scanDeadline = Date.now() + LOCAL_BUDGET_MS - 50;
+  const yieldNow = () => new Promise<void>((resolve) => setImmediate(resolve));
   for (const card of desk.cards ?? []) {
+    // Same cooperative cadence as the other scans: a large board never
+    // blocks the turn or defeats the deadline timer.
+    await yieldNow();
+    if (Date.now() > scanDeadline) break;
     if (!card || card.archived) continue;
     if (card.column === 'in_production') {
       const since = Date.parse(card.columnSince ?? '') || Date.parse(card.updatedAt ?? '') || 0;
