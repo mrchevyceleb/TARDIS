@@ -333,11 +333,11 @@ export function useRailGroups(agents: Agent[]): RailGroupsApi {
     const roster = agentsRef.current.map((a) => a.id);
     edit((base) => {
       // Pull the agent out of any group first: only loose agents hold seats.
+      // The group keeps its seat even when this was its last member: group
+      // deletion stays explicit (deleteGroup), exactly like moveAgent's release.
       let groups = base.groups;
       if (groups.some((g) => g.agentIds.includes(agentId))) {
-        groups = groups
-          .map((g) => (g.agentIds.includes(agentId) ? { ...g, agentIds: g.agentIds.filter((id) => id !== agentId) } : g))
-          .filter((g) => g.agentIds.length > 0);
+        groups = groups.map((g) => (g.agentIds.includes(agentId) ? { ...g, agentIds: g.agentIds.filter((id) => id !== agentId) } : g));
       }
       const memberIds = new Set<string>();
       for (const g of groups) for (const id of g.agentIds) memberIds.add(id);
@@ -357,9 +357,15 @@ export function useRailGroups(agents: Agent[]): RailGroupsApi {
       } else if (after === '__end__') {
         at = without.length;
       } else {
-        const i = without.indexOf(after);
-        if (i < 0) return base;
-        at = i + 1;
+        let i = without.indexOf(after);
+        if (i < 0) {
+          // A stale anchor (its seat folded away on a newer copy, its agent
+          // deleted): land next to the nearest surviving predecessor instead
+          // of silently dropping the drop.
+          const raw = savedOrder.indexOf(after);
+          for (let p = raw - 1; p >= 0 && i < 0; p--) i = without.indexOf(savedOrder[p]);
+        }
+        at = i < 0 ? 0 : i + 1;
       }
       without.splice(at, 0, agentId);
       // Write back only seats that already existed (or a group's), plus the
@@ -373,7 +379,18 @@ export function useRailGroups(agents: Agent[]): RailGroupsApi {
     });
   }, [edit]);
 
-  const ordered = layout.order ?? [];
+  // Exactly the ids that render: a stale seat (a deleted agent, or one that
+  // joined a group on another device) never reaches the UI, so drop targets
+  // and anchors always resolve.
+  const ordered = useMemo(() => {
+    const raw = layout.order ?? [];
+    if (!raw.length) return raw;
+    const memberIds = new Set<string>();
+    for (const g of layout.groups) for (const id of g.agentIds) memberIds.add(id);
+    const groupIds = new Set(layout.groups.map((g) => g.id));
+    const ids = new Set(agents.map((a) => a.id));
+    return raw.filter((id) => groupIds.has(id) || (ids.has(id) && !memberIds.has(id)));
+  }, [layout, agents]);
 
   return { groups, grouped: groups.some((g) => !g.isOther), toggle, create, rename, remove, shift, move, ordered, placeLoose, groupIdOf };
 }

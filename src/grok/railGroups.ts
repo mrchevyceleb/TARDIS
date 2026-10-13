@@ -148,7 +148,8 @@ export function deleteGroup(layout: RailLayout, id: string): RailLayout {
   // The group's seat in the rail sequence goes with it; its members come back
   // loose above the groups.
   const order = layout.order?.filter((entry) => entry !== id);
-  return { ...layout, groups, collapsed, order: order?.length ? order : undefined };
+  // An emptied sequence stays an explicit empty array (see moveAgent).
+  return { ...layout, groups, collapsed, order };
 }
 
 /** Put a group right before (side -1) or right after (side 1) another one. Named
@@ -197,7 +198,10 @@ export function moveAgent(layout: RailLayout, agentId: string, toGroupId: string
   const orderSame = savedOrder === undefined
     || (order?.length === savedOrder.length && order.every((entry, i) => entry === savedOrder[i]));
   if (same && orderSame) return layout;
-  return { ...layout, groups, order: order?.length ? order : undefined };
+  // An emptied sequence stays an explicit empty array: a cleared rail is a
+  // real state other devices must adopt, not one they may paper over with
+  // their own copy (absent means legacy/no opinion instead).
+  return { ...layout, groups, order };
 }
 
 /** Accepts anything (localStorage, the network) and returns a clean layout, or
@@ -247,7 +251,7 @@ export function normalizeLayout(raw: unknown): RailLayout | null {
       seen.add(id);
       seq.push(id);
     }
-    if (seq.length) order = seq;
+    order = seq;
   }
   const updatedAt = typeof src.updatedAt === 'number' && Number.isSafeInteger(src.updatedAt) && src.updatedAt > 0 && src.updatedAt <= Date.now() + MAX_SKEW_MS ? src.updatedAt : 0;
   return order ? { groups, collapsed, order, updatedAt } : { groups, collapsed, updatedAt };

@@ -81,7 +81,9 @@ export function normalizeRailLayout(value: unknown): RailLayout | null {
       seen.add(id);
       seq.push(id);
     }
-    if (seq.length) order = seq;
+    // An empty sequence is an explicit clear, preserved end to end: only an
+    // absent field means the sender predates the sequence (no opinion).
+    order = seq;
   }
   const updatedAt = typeof raw.updatedAt === 'number' && Number.isSafeInteger(raw.updatedAt) && raw.updatedAt > 0 && raw.updatedAt <= Date.now() + MAX_SKEW_MS ? raw.updatedAt : 0;
   return order ? { groups, collapsed, order, updatedAt } : { groups, collapsed, updatedAt };
