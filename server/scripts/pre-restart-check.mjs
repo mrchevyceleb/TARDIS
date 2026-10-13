@@ -50,6 +50,11 @@ const portFlag = args.indexOf('--port');
 const PORT = portFlag >= 0 ? Number(args[portFlag + 1]) : 8199;
 const TARGET = args.find((a) => !a.startsWith('--') && a !== String(PORT)) || 'origin/main';
 
+// Declared before the port validation below: fail() writes it, and a
+// top-level let below the validation would throw a TDZ ReferenceError
+// instead of the intended diagnostic.
+let failedMsg = null;
+
 if (PORT === 8091) fail('Refusing to run on the live port 8091.');
 if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) fail(`Bad --port ${PORT}.`);
 
@@ -60,9 +65,8 @@ const stateDir = path.join(tmp, 'state');
 const probeWs = path.join(tmp, 'probe-ws');
 const bootLog = path.join(tmp, 'boot.log');
 let child = null;
-let tornDown = false;
+let teardownPromise = null; // one shared teardown: every caller awaits the same run
 let pass = false;
-let failedMsg = null;
 let targetSha = '';
 let liveHead = '';
 
@@ -183,9 +187,15 @@ try {
   process.exit(pass ? 0 : 1);
 }
 
-async function teardown() {
-  if (tornDown) return;
-  tornDown = true;
+function teardown() {
+  // Memoized: a signal arriving while the finally-block teardown is already
+  // running must await THAT teardown, not return immediately and exit before
+  // the child is killed and the worktree removed.
+  if (!teardownPromise) teardownPromise = doTeardown();
+  return teardownPromise;
+}
+
+async function doTeardown() {
   if (child) {
     child.kill('SIGTERM');
     await new Promise((resolve) => {
@@ -276,7 +286,9 @@ async function messageRoundTrip(port, repo, chatId, watermark) {
   const resultSeq = typeof reply.seq === 'number' ? reply.seq : 0;
   if (!resultSeq || resultSeq <= echoSeq) fail(`the result seq (${resultSeq}) is not fresh above the echo (${echoSeq})`);
   const text = collectAssistantText(frames.slice(echoIdx));
-  if (!/CHECKED/i.test(text)) fail(`the reply did not contain CHECKED (got: ${JSON.stringify(text.slice(0, 120))})`);
+  // Exact match: a loose contains-test would pass on refusals like
+  // "NOT CHECKED" that merely mention the word.
+  if (text.trim() !== 'CHECKED') fail(`the reply was not exactly CHECKED (got: ${JSON.stringify(text.slice(0, 120))})`);
   try { ws.close(); } catch {}
   return { text, echoSeq, resultSeq };
 }
