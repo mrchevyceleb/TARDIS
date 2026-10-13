@@ -133,6 +133,15 @@ function resolveClock(text: string, dayWord: string | undefined, clockText: stri
       if (dayNum < 1 || dayNum > 31) return null;
       m0 = month;
       d = dayNum;
+      // Near year-end, an ordinary future promise ("by Jan 2 at 5pm" said
+      // in December) means the coming year: a month-day that resolved more
+      // than half a year into the past rolls forward, while a recently past
+      // month-day stays an already-late promise.
+      let probe = instantInZone(y, m0, d, hour, minute);
+      if (probe <= now.getTime() && now.getTime() - probe > 183 * 24 * 60 * 60_000) {
+        y += 1;
+        probe = instantInZone(y, m0, d, hour, minute);
+      }
     }
   } else {
     rollsWhenPast = true;
@@ -222,20 +231,33 @@ export function scanOutgoingPromise(
 ): { added: Array<{ id: string; due: string }>; addError?: string; promise?: PromisedTime } {
   const promises = findPromisedTimes(text, now);
   if (!promises.length) return { added: [] };
-  // Per-promise source ids (message # ordinal): one message never
-  // double-adds a promise, but a partial failure (the list cap, a store
-  // error) never poisons the others — a later retry still records the
-  // promises that did not land.
-  const existing = new Set(listCommitments(agentId).map((c) => c.sourceId));
+  // Per-promise source ids (message id capped, then # ordinal, always under
+  // the store's 120-char field): one message never double-adds a promise, a
+  // partial failure never poisons the others, and a long id never truncates
+  // into a collision. A promise already recorded is matched by identity (the
+  // normalized clause plus the same instant), so a verbatim restatement from
+  // a new message does not duplicate while a different promise at the same
+  // time still lands.
+  const sourcePrefix = sourceId ? `${sourceId.slice(0, 100)}#` : '';
+  const open = listCommitments(agentId);
+  const existingSources = new Set(open.map((c) => c.sourceId));
+  const norm = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase();
   const added: Array<{ id: string; due: string }> = [];
+  let firstError: { error: string; promise: PromisedTime } | undefined;
   for (let i = 0; i < promises.length; i += 1) {
     const promise = promises[i];
-    const perSource = sourceId ? `${sourceId}#${i}` : undefined;
-    if (perSource && existing.has(perSource)) continue;
+    const perSource = sourceId ? `${sourcePrefix}${i}` : undefined;
+    if (perSource && existingSources.has(perSource)) continue;
     const clause = promise.clause.replace(/\s+/g, ' ').trim().slice(0, 160);
+    if (open.some((c) => c.dueAt === promise.dueAt && norm(c.text) === norm(clause))) continue;
     const result = addCommitment(agentId, clause, promise.due, { dueAt: promise.dueAt, sourceId: perSource });
-    if (result.error) return { added, addError: result.error, promise };
+    if (result.error) {
+      // Keep going: the later promises in this message still land, and every
+      // failure is reported (the first one carries the nudge).
+      if (!firstError) firstError = { error: result.error, promise };
+      continue;
+    }
     added.push({ id: result.commitment!.id, due: promise.due });
   }
-  return { added };
+  return firstError ? { added, addError: firstError.error, promise: firstError.promise } : { added };
 }
