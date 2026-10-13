@@ -15,7 +15,8 @@
 //   node --import tsx server/scripts/rebuild-truncated-compacts.mjs --apply '<key>' [more]  # rebuild the reviewed list
 //   ... --max-batches 90                                                                     # raise the per-run bound
 
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from '../src/config.ts';
 import { isTruncatedCompact, listCompactBlobFiles, loadCompactBlob, rebuildTruncatedCompact } from '../src/chat/compaction.ts';
@@ -32,7 +33,18 @@ for (let i = 0; i < argv.length; i += 1) {
   if (a === '--apply') { apply = true; continue; }
   if (a === '--max-batches') {
     const v = argv[i + 1];
-    if (v !== undefined && /^\d+$/.test(v)) { maxBatches = parseInt(v, 10); i += 1; }
+    if (v !== undefined && /^\d+$/.test(v)) {
+      const n = Number(v);
+      if (!Number.isSafeInteger(n) || n < 1 || n > 10000) {
+        console.error(`[rebuild] invalid --max-batches value: ${v} (a positive integer up to 10000)`);
+        process.exit(2);
+      }
+      maxBatches = n;
+      i += 1;
+    } else {
+      console.error('[rebuild] --max-batches needs a positive integer value');
+      process.exit(2);
+    }
     continue;
   }
   if (a.startsWith('--')) continue;
@@ -120,8 +132,13 @@ for (const key of applyKeys) {
   const file = byKey.get(key);
   const blob = loadCompactBlob(key);
   if (!file || !blob) continue;
-  cpSync(join(COMPACTS_DIR, `${file.file}.json`), join(backup, 'thread-compacts', `${file.file}.json`));
-  manifest.push(`${key} -> ${file.file}.json (${blob.words}w, lastCompactedSeq ${blob.lastCompactedSeq}, lastAt ${new Date(blob.lastAt).toISOString()})`);
+  // Raw bytes, not a re-read through the parser: the backup holds exactly
+  // what was on disk, and the manifest records its digest so a restore (or
+  // an audit) can prove the version.
+  const bytes = readFileSync(join(COMPACTS_DIR, `${file.file}.json`));
+  const digest = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
+  writeFileSync(join(backup, 'thread-compacts', `${file.file}.json`), bytes);
+  manifest.push(`${key} -> ${file.file}.json (${blob.words}w, lastCompactedSeq ${blob.lastCompactedSeq}, lastAt ${new Date(blob.lastAt).toISOString()}, sha256 ${digest})`);
 }
 writeFileSync(join(backup, 'MANIFEST.txt'), `Backed-up targets only (restore by copying the named file back into ~/.rivendell/thread-compacts):
 ${manifest.join('\n')}
