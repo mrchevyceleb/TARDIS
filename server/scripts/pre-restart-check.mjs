@@ -20,7 +20,15 @@
  *      sequence watermark, sends one real message, and passes only if it
  *      renders with a FRESH seq ABOVE the watermark (the Oct 7 duplicate-drop
  *      class) and a real reply comes back.
- *   6. Prints PASS or FAIL with the target commit and the live HEAD (the
+ *   6. Replay leg (with --message): reconnects the websocket and requires
+ *      the probe turn to replay exactly once with the SAME seqs (no
+ *      duplicate, no re-allocation) — the reload/catch-up path.
+ *   7. Team leg (with --message): seeds two probe agents in the COPIED
+ *      roster and requires one team_message between their probe lanes to
+ *      arrive and get the exact reply back — inside the side copy, never
+ *      outside it (agent engines spawn in the probe sandbox via
+ *      ELROND_WORKSPACE_PATH).
+ *   8. Prints PASS or FAIL with the target commit and the live HEAD (the
  *      rollback point), then tears the side copy down — including on SIGINT
  *      and SIGTERM.
  *
@@ -138,6 +146,23 @@ try {
   fs.writeFileSync(path.join(probeWs, 'AGENTS.md'),
     'Sandbox workspace for the TARDIS pre-restart check. Answer the user directly and briefly. Do not use tools. Do not touch anything outside this directory.\n');
 
+  // 4b. Two probe agents in the COPIED roster: the team round trip runs
+  //     between two probe lanes whose engines live in the probe sandbox
+  //     (ELROND_WORKSPACE_PATH in the boot env below), never a live
+  //     workspace, and the copy is torn down with everything else. Filtered
+  //     by id so a reused state can never double-seed them.
+  const personasDir = path.join(stateDir, 'personas');
+  const agentsFile = path.join(personasDir, 'agents.json');
+  let roster = { agents: [] };
+  try { roster = JSON.parse(fs.readFileSync(agentsFile, 'utf8')); } catch { /* fresh copy */ }
+  if (!Array.isArray(roster.agents)) roster.agents = [];
+  roster.agents = roster.agents.filter((a) => a?.id !== 'restart-check-a' && a?.id !== 'restart-check-b');
+  for (const [id, name] of [['restart-check-a', 'Restart Check A'], ['restart-check-b', 'Restart Check B']]) {
+    roster.agents.push({ id, name, role: 'pre-restart check probe (side copy only)', engine: 'claude', home: `bot-${id}`, createdAt: Date.now() });
+  }
+  fs.mkdirSync(personasDir, { recursive: true });
+  fs.writeFileSync(agentsFile, JSON.stringify(roster, null, 2) + '\n');
+
   // 5. Seed the probe lane's durable log with a high sequence watermark, so
   //    the message test exercises allocation ABOVE an existing high-water
   //    mark — the Oct 7 duplicate-drop class — instead of an empty log.
@@ -163,6 +188,10 @@ try {
     HOST: '127.0.0.1',
     RIVENDELL_STATE_DIR: stateDir,
     RIVENDELL_SIDE_COPY: '1',
+    // Agent engines (the team leg's recipient) spawn in the probe sandbox,
+    // never in a live workspace: a check boot must not follow real
+    // workspace instructions no matter which lane a delivery targets.
+    ELROND_WORKSPACE_PATH: probeWs,
   };
   delete env.RIVENDELL_PREWARM_AGENTS;
   child = spawn('node', ['--import', 'tsx', 'src/index.ts'], { cwd: path.join(srcDir, 'server'), env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -182,6 +211,17 @@ try {
   if (MESSAGE) {
     const reply = await messageRoundTrip(PORT, probeWs, CHAT, WATERMARK);
     step(`probe lane round trip ok (reply: ${reply.text.slice(0, 60)}, watermark ${WATERMARK} -> echo ${reply.echoSeq} -> result ${reply.resultSeq})`);
+
+    // 7b. Replay: a reconnect must replay the probe turn exactly once, with
+    //     the SAME seqs — a reload path that drops, doubles or re-allocates
+    //     events would break the client on a real reload.
+    await replayCheck(PORT, probeWs, CHAT, WATERMARK, reply.clientMsgId, reply.echoSeq, reply.resultSeq);
+    step(`replay ok: the reconnect replays the probe message once with the same seqs (echo ${reply.echoSeq}, result ${reply.resultSeq}), no duplicates`);
+
+    // 7c. One team_message between the two probe lanes, entirely inside the
+    //     side copy: no real agent, no outside system, exact reply required.
+    const team = await teamRoundTrip(PORT);
+    step(`team round trip ok (reply: ${JSON.stringify(String(team.reply).slice(0, 40))})`);
   }
 
   pass = true;
@@ -192,7 +232,7 @@ try {
   const elapsed = Math.round((Date.now() - T0) / 1000);
   const ok = pass && !interrupted;
   console.log(ok
-    ? `\nPASS — ${targetSha.slice(0, 10)} boots clean${MESSAGE ? ' and answers the probe lane above a 5000-seq watermark' : ''} in ${elapsed}s.`
+    ? `\nPASS — ${targetSha.slice(0, 10)} boots clean${MESSAGE ? ' and answers the probe lane above a 5000-seq watermark, replays it once with the same seqs, and completes a probe-to-probe team round trip' : ''} in ${elapsed}s.`
       + `\nRollback point if the live restart fails: ${liveHead.slice(0, 10)}.`
       + (KEEP ? `\nKept for inspection: ${tmp}` : '')
     : interrupted
@@ -308,7 +348,7 @@ async function messageRoundTrip(port, repo, chatId, watermark) {
   // "NOT CHECKED" that merely mention the word.
   if (text.trim() !== 'CHECKED') fail(`the reply was not exactly CHECKED (got: ${JSON.stringify(text.slice(0, 120))})`);
   try { ws.close(); } catch {}
-  return { text, echoSeq, resultSeq };
+  return { text, echoSeq, resultSeq, clientMsgId };
 }
 
 function collectAssistantText(frames) {
@@ -331,6 +371,69 @@ function collectAssistantText(frames) {
   // string result wins even when EMPTY: a malformed empty final result must
   // fail the probe, not silently pass on the streamed deltas.
   return (sawResultString ? resultText : deltaText).trim();
+}
+
+/** Replay leg: reconnect and replay the lane above the watermark. The
+ *  probe turn must come back EXACTLY once per event with the SAME seqs
+ *  (a duplicate or re-allocation would drop or double messages on a real
+ *  reload). */
+async function replayCheck(port, repo, chatId, sinceSeq, clientMsgId, echoSeq, resultSeq) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/api/ws`);
+  const frames = [];
+  ws.onmessage = (ev) => {
+    try { frames.push(JSON.parse(ev.data)); } catch { /* not a frame */ }
+  };
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('replay websocket never opened')), 20_000);
+    ws.onopen = () => { clearTimeout(timer); resolve(); };
+    ws.onerror = () => { clearTimeout(timer); reject(new Error('replay websocket error')); };
+  });
+  ws.send(JSON.stringify({ type: 'hello', cli: 'claude', repo, chatId, sinceSeq, visible: false }));
+  // The replay is served after the hello barrier settles; 4s covers the
+  // seeded history plus the probe turn on a cold lane.
+  await sleep(4000);
+  try { ws.close(); } catch {}
+  const echoes = frames.filter((m) => m.type === 'stream' && m.event?.type === '_user_echo' && m.event?.clientMsgId === clientMsgId);
+  if (echoes.length !== 1) fail(`replay sent the probe message ${echoes.length} times (expected exactly 1)`);
+  if (echoes[0].seq !== echoSeq) fail(`replay re-allocated the echo seq (${echoes[0].seq} vs the original ${echoSeq})`);
+  const results = frames.filter((m) => m.type === 'stream' && m.event?.type === 'result' && m.seq === resultSeq);
+  if (results.length !== 1) fail(`replay sent the turn result ${results.length} times (expected exactly 1)`);
+  return { echoSeq: echoes[0].seq, resultSeq };
+}
+
+/** Team leg: one team_message between the two seeded probe lanes, entirely
+ *  inside the side copy. The recipient's engine runs in the probe sandbox;
+ *  the wait path returns its exact reply, which must be TEAMOK. */
+async function teamRoundTrip(port) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 150_000);
+  let res;
+  let body = null;
+  try {
+    res = await fetch(`http://127.0.0.1:${port}/api/team/message`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: 'Restart Check A',
+        to: 'Restart Check B',
+        text: 'This is the TARDIS pre-restart check. Reply with exactly the word TEAMOK and nothing else.',
+        wait: true,
+      }),
+      signal: controller.signal,
+    });
+    body = await res.json().catch(() => null);
+  } catch (err) {
+    fail(`team round trip request failed: ${String(err.message || err).split('\n')[0]}`);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!res.ok || !body?.delivered) {
+    fail(`team round trip was not delivered (HTTP ${res.status}): ${JSON.stringify(body).slice(0, 200)}`);
+  }
+  if (String(body.reply ?? '').trim() !== 'TEAMOK') {
+    fail(`team round trip reply was not exactly TEAMOK (got: ${JSON.stringify(String(body.reply ?? '').slice(0, 120))})`);
+  }
+  return body;
 }
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
