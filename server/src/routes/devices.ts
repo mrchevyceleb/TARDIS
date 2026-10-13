@@ -113,11 +113,15 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
       const resolved = ref ? findDevice(ref) : undefined;
       if (!resolved || (device && resolved.id !== device)) throw new Error('Requested/default computer is unavailable. Use an explicit online id or configure a default; never fall back to another machine.');
       device = resolved.id;
-      // A bot agent may name any linked computer the operator set to automatic
-      // control. That is an explicit choice, not a fallback, so the thread's
-      // picker selection does not block it. Human threads keep the picker lock.
-      const botExplicitAutomatic = !context.human && body.device === device && resolved.computer?.approvalMode === 'automatic';
-      if (selected && selected !== device && !botExplicitAutomatic) throw new Error('This is not the computer selected for this thread. Change the selection explicitly; never fall back to another machine.');
+      // An agent may name any linked computer the operator set to automatic
+      // control, on any turn, including one the person started. That is an
+      // explicit choice, not a fallback, so the thread's picker selection
+      // only picks the default and never blocks it (Matt, Oct 13 2026: "I
+      // shouldn't have to manually point you at a computer"). Omitting the id
+      // still resolves to the selection, then the default; consent-mode
+      // computers keep the picker lock.
+      const explicitAutomatic = body.device === device && resolved.computer?.approvalMode === 'automatic';
+      if (selected && selected !== device && !explicitAutomatic) throw new Error('This is not the computer selected for this thread. Change the selection explicitly; never fall back to another machine.');
     } catch (error) { res.status(409).json({ error: (error as Error).message }); return; }
   }
   const info = device ? findDevice(device) : undefined;
