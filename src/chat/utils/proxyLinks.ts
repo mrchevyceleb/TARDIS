@@ -459,8 +459,11 @@ export type WorkspaceMentionSpan = {
 };
 
 // The `[label](rivendell-doc:…)` form parseWorkspaceMentionText accepts,
-// unanchored so it can be found anywhere in plain text.
-const PROXY_MD_LINK_RUN = /\[([^\]]+)\]\((rivendell-(?:doc|folder):[^)]+)\)/g;
+// unanchored so it can be found anywhere in plain text. One level of
+// balanced parentheses is allowed inside the href: encodeURIComponent
+// keeps parentheses, so `Report (1).pdf` encodes to `Report%20(1).pdf`
+// and a class stopping at the first ')' would truncate the link.
+const PROXY_MD_LINK_RUN = /\[([^\]]+)\]\((rivendell-(?:doc|folder):(?:[^()]|\([^()]*\))+)\)/g;
 
 /** The same workspace-mention matches annotatePlainWorkspaceMentions turns
  *  into markdown links, as spans over the original text (for plain-text
@@ -474,10 +477,13 @@ const PROXY_MD_LINK_RUN = /\[([^\]]+)\]\((rivendell-(?:doc|folder):[^)]+)\)/g;
 export function scanWorkspaceMentionSpans(text: string): WorkspaceMentionSpan[] {
   const spans: WorkspaceMentionSpan[] = [];
   for (const match of text.matchAll(PROXY_MD_LINK_RUN)) {
-    const target = parseWorkspaceMentionText(match[0]);
-    if (!target) continue;
+    // Parsed from the captured href, not through parseWorkspaceMentionText:
+    // its anchored md-link form stops at the first ')' and would reject the
+    // parenthesized hrefs this run now matches.
+    const target = parseProxyHref(match[2]);
+    if (!target || target.kind === 'machine') continue;
     const at = match.index ?? 0;
-    spans.push({ at, end: at + match[0].length, kind: target.kind, path: target.path, display: match[1] || target.display });
+    spans.push({ at, end: at + match[0].length, kind: target.kind, path: target.path, display: match[1] || toWindowsDisplay(target.path) });
   }
   if (mentionsWorkspace(text)) {
     for (const match of text.matchAll(MENTION_PATTERN)) {
