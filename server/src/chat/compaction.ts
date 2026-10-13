@@ -456,6 +456,13 @@ export function isTruncatedCompact(compact: string): boolean {
   return !/[.!?:;)\]}"”…\]]$/.test(last);
 }
 
+/** The rebuild's own generation ceiling: its baseline document is a
+ *  4.4-5.5k-word truncated head (6-8k tokens before any batch output),
+ *  structurally over the live cap, so a rebuild under the live cap can
+ *  never finish its first batch. The live path keeps the live cap.
+ */
+const REBUILD_MAX_TOKENS = 16_000;
+
 /** Default bound on re-fed batches per rebuild run, so a huge lane reports
  *  instead of running all evening. Nothing partial is ever committed: a run
  *  that hits the bound writes nothing and reports, and a rerun with a
@@ -521,7 +528,7 @@ export async function rebuildTruncatedCompact(
       const batch = takeOverflowBatch(covered.slice(fed, fed + COMPACT_BATCH_TURNS));
       if (!batch.length) break;
       onProgress?.(`${key}: rebuild batch ${batches + 1} (${batch.length} covered turns)`);
-      const generated = await generateCompact(previous, batch);
+      const generated = await generateCompact(previous, batch, REBUILD_MAX_TOKENS);
       // Cross-process CAS against the ORIGINAL blob: this repair can run
       // beside the live server, whose inFlight and epoch guards cannot see
       // this process. A blob that changed on disk since the repair's first
@@ -1018,7 +1025,7 @@ async function saveDurableFacts(
   return { saved, resolvedKeys };
 }
 
-async function generateCompact(previous: string, overflow: VisibleTurn[]): Promise<{ compact: string; words: number; facts: DurableFact[] }> {
+async function generateCompact(previous: string, overflow: VisibleTurn[], maxTokens = COMPACT_MAX_TOKENS): Promise<{ compact: string; words: number; facts: DurableFact[] }> {
   // Redact BEFORE sending the prompt to the compaction provider, then redact
   // the generated document again before it touches local disk or RAG.
   const safePrevious = redactSecrets(previous);
@@ -1042,7 +1049,7 @@ async function generateCompact(previous: string, overflow: VisibleTurn[]): Promi
     },
     body: JSON.stringify({
       model: 'grok-4.7',
-      max_tokens: COMPACT_MAX_TOKENS,
+      max_tokens: maxTokens,
       system: COMPACT_SYSTEM,
       messages: [{ role: 'user', content: userContent }],
     }),
@@ -1055,7 +1062,7 @@ async function generateCompact(previous: string, overflow: VisibleTurn[]): Promi
   // capped generation fails instead, so the previous document stands and the
   // next pass retries with the same material.
   if (body.stop_reason === 'max_tokens') {
-    throw new Error(`compact hit the ${COMPACT_MAX_TOKENS}-token output cap before finishing — will retry`);
+    throw new Error(`compact hit the ${maxTokens}-token output cap before finishing — will retry`);
   }
   const generated = (body.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text ?? '').join('\n').trim();
   // The durable-facts section rides the same generation call; keep it out of
