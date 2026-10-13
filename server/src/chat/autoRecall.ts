@@ -117,11 +117,38 @@ function tokenize(text: string): Set<string> {
   return tokens;
 }
 
-/** How many distinct message tokens the candidate text contains. */
+/** Fold a token to a shared root so inflected forms meet: possessives
+ *  (Naomi's → naomi) and trailing plurals (minis → mini, bridges → bridge)
+ *  fold on both the query and the candidate side, so "minis" finds "mini"
+ *  and "Naomi's" finds "naomi". Applied consistently to both sides, so any
+ *  form that folds the same way matches regardless of which side is
+ *  inflected. */
+function foldToken(token: string): string {
+  let t = token.replace(/['\u2019]s$/i, '');
+  if (t.length > 4 && /s$/i.test(t) && !/(?:ss|us|is)$/i.test(t)) t = t.replace(/s$/i, '');
+  return t;
+}
+
+/** How many distinct message tokens the candidate text contains. Matching
+ *  is token-level with folding, not raw substring containment: a longer
+ *  inflected query form (minis) meets its shorter candidate root (mini), and
+ *  a shared prefix of four or more characters (min/mini, bridge/bridges)
+ *  counts as a match in both directions. Pure containment missed exactly
+ *  the longer-form direction. */
 function matchCount(queryTokens: ReadonlySet<string>, candidate: string): number {
+  const foldedQuery = [...queryTokens].map(foldToken);
+  const candidateTokens = new Set<string>();
+  for (const word of candidate.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}'\u2019-]*/gu) ?? []) {
+    candidateTokens.add(foldToken(word.replace(/^-+|-+$/g, '')));
+  }
   let matches = 0;
-  for (const token of queryTokens) {
-    if (candidate.includes(token)) matches += 1;
+  for (const q of foldedQuery) {
+    for (const c of candidateTokens) {
+      if (q === c || (q.length >= 4 && c.length >= 4 && (c.startsWith(q) || q.startsWith(c)))) {
+        matches += 1;
+        break;
+      }
+    }
   }
   return matches;
 }
@@ -150,7 +177,7 @@ function excerptAround(content: string, queryTokens: ReadonlySet<string>): strin
  *  linked notes beside it). Other engines have no such directory and simply
  *  contribute nothing. Async with a bounded byte read: the deadline can
  *  actually preempt the scan, and one file can never block the turn. */
-async function memoryFileHits(cli: string, cwd: string, queryTokens: ReadonlySet<string>): Promise<RecallHit[]> {
+async function memoryFileHits(cli: string, cwd: string, queryTokens: ReadonlySet<string>, bar = MIN_MATCH_TOKENS): Promise<RecallHit[]> {
   if (!CLAUDE_MEMORY_CLIS.has(cli)) return [];
   const dir = join(claudeConfigDir(cli), 'projects', encodeClaudeProject(cwd), 'memory');
   const files = await orderedMemoryFiles(dir);
@@ -174,7 +201,7 @@ async function memoryFileHits(cli: string, cwd: string, queryTokens: ReadonlySet
       continue;
     }
     const score = matchCount(queryTokens, content.toLowerCase());
-    if (score < MIN_MATCH_TOKENS) continue;
+    if (score < bar) continue;
     hits.push({
       source: `mem:${file}`,
       title: file.replace(/\.md$/i, '').replace(/[-_]+/g, ' '),
@@ -296,7 +323,7 @@ async function transcriptHits(chatId: string, queryTokens: ReadonlySet<string>):
 
 /** Source 2: Desk cards in every column, plus the last 30 days of done,
  *  matched on title plus the last comment. */
-async function deskCardHits(queryTokens: ReadonlySet<string>): Promise<RecallHit[]> {
+async function deskCardHits(queryTokens: ReadonlySet<string>, bar = MIN_MATCH_TOKENS): Promise<RecallHit[]> {
   let desk: Awaited<ReturnType<typeof readDesk>>;
   try {
     desk = await readDesk();
@@ -323,7 +350,7 @@ async function deskCardHits(queryTokens: ReadonlySet<string>): Promise<RecallHit
     ].join('\n');
     const hay = surface.toLowerCase();
     const score = matchCount(queryTokens, hay);
-    if (score < MIN_MATCH_TOKENS) continue;
+    if (score < bar) continue;
     hits.push({
       source: `desk:${card.id}|${card.column}`,
       title: card.title ?? card.id,
@@ -417,10 +444,15 @@ export async function recallBlockForTurn(args: {
     if (!isRecallLane(args.chatId)) return '';
     const queryTokens = tokenize(message);
     if (queryTokens.size === 0) return '';
+    // A single distinctive token ("the Mini", cuttlefish) is a real question,
+    // not chit-chat: it searches with the one-token bar instead of the default
+    // two-token bar that silently dropped it.
+    const lone = queryTokens.size === 1 ? [...queryTokens][0] : undefined;
+    const bar = lone !== undefined && lone.length >= 4 && !/^\d+$/.test(lone) ? 1 : MIN_MATCH_TOKENS;
     const work = (async () => {
       const [memoryHits, deskHits, mcpHits, notesHits] = await Promise.all([
-        withDeadline(memoryFileHits(args.cli, args.cwd, queryTokens), LOCAL_BUDGET_MS, [] as RecallHit[]),
-        withDeadline(deskCardHits(queryTokens), LOCAL_BUDGET_MS, [] as RecallHit[]),
+        withDeadline(memoryFileHits(args.cli, args.cwd, queryTokens, bar), LOCAL_BUDGET_MS, [] as RecallHit[]),
+        withDeadline(deskCardHits(queryTokens, bar), LOCAL_BUDGET_MS, [] as RecallHit[]),
         withDeadline(mcpMemoryHits(message, queryTokens), MCP_BUDGET_MS, [] as RecallHit[]),
         withDeadline(transcriptHits(args.chatId, queryTokens), TRANSCRIPT_BUDGET_MS, [] as RecallHit[]),
       ]);
