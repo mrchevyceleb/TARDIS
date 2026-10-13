@@ -99,8 +99,11 @@ for (const key of flagged) {
 console.log(`[rebuild] ${keys.length} state keys, ${withCompact} with a rolling compact, ${flagged.length} truncated (${candidates.length} pre-cap-retry candidates, ${investigate.length} post-cap-retry to investigate), ${orphanTruncated.length} orphan file(s)`);
 for (const key of candidates) {
   const blob = rawByKey.get(key);
-  const tail = (blob.compact.trim().split('\n').filter((l) => l.trim()).pop() ?? '').slice(-100);
-  console.log(`[rebuild]   candidate ${key} (${blob.words}w, lastAt ${new Date(blob.lastAt).toISOString()}) tail: ${JSON.stringify(tail)}`);
+  // Metadata only, never raw compact content: legacy compacts are exactly
+  // where credential material may still exist, and the dry run lands in
+  // terminals and chat logs.
+  const category = isTruncatedCompact(blob.compact) === (blob.compact.includes('```') && (blob.compact.match(/```/g) ?? []).length % 2 === 1) ? 'unclosed-fence' : 'mid-sentence-tail';
+  console.log(`[rebuild]   candidate ${key} (${blob.words}w, lastAt ${new Date(blob.lastAt).toISOString()}, truncation: ${category})`);
 }
 for (const key of investigate) {
   const blob = rawByKey.get(key);

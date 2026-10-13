@@ -562,7 +562,7 @@ export async function rebuildTruncatedCompact(
     if (previous === blob.compact) {
       throw new Error('the rebuilt document came back identical to the truncated original; nothing was written');
     }
-    if (isTruncatedCompact(previous) && !/^(?:```|~~~)\s*[a-z]*$/i.test(previous.trim().split('\n').filter((l) => l.trim()).at(-1) ?? '')) {
+    if (isTruncatedCompact(previous) && !/^(?:```|~~~)\s*$/i.test(previous.trim().split('\n').filter((l) => l.trim()).at(-1) ?? '')) {
       throw new Error('the rebuilt document still ends mid-sentence; nothing was written — rerun with a higher bound');
     }
     const words = previous.trim().split(/\s+/).filter(Boolean).length;
