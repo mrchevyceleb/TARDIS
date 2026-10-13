@@ -4,7 +4,7 @@
 // by the rolling compact, and the session seed stitches the list in.
 // Store: ~/.rivendell/agent-commitments.json
 
-import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 
@@ -74,14 +74,12 @@ function save(commitments: Commitment[]): void {
   mkdirSync(STATE_DIR, { recursive: true });
   const tmp = `${FILE}.tmp`;
   writeFileSync(tmp, `${JSON.stringify({ commitments }, null, 2)}\n`);
-  try {
-    renameSync(tmp, FILE);
-  } catch {
-    // Windows cannot replace via rename; overwrite in place so a failed
-    // write cannot leave the store deleted. Linux rename already replaced.
-    writeFileSync(FILE, readFileSync(tmp));
-    try { unlinkSync(tmp); } catch { /* leftover tmp is harmless */ }
-  }
+  // Atomic replace only. Never fall back to overwriting the live shared
+  // store in place: a partial in-place write could corrupt every live
+  // agent's commitments. A failed rename leaves the previous store fully
+  // intact and throws to the caller (the server never runs on Windows, so
+  // the old in-place fallback was dead code carrying exactly that risk).
+  renameSync(tmp, FILE);
 }
 
 /** Oldest first, so the seed reads like a queue. */

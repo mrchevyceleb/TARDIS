@@ -1090,7 +1090,11 @@ export class CodexSession {
           );
         }
       } else if (this.threadId) {
-        if (seed) await this.ackWindowSeed();
+        // Acknowledge the seed ATTEMPT, not only a nonempty seed: a fresh
+        // thread with an empty primer (no commitments, no history) must still
+        // consume the window seed here, or the second turn would re-seed the
+        // now-warm session with the first turn's history.
+        if (seed || seedWindow) await this.ackWindowSeed();
         await this.persistThreadId(this.threadId);
       }
       this.busy = false;

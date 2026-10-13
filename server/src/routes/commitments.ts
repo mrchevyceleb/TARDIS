@@ -39,6 +39,19 @@ function agentIdOrError(agent: unknown): { id: string } | { error: string; statu
   return { id: match.id };
 }
 
+/** Owner-scoped MUTATIONS resolve BY ID ONLY. Names are freely editable, so
+ *  name fallback would let a stale process from a deleted agent act on a
+ *  same-display-name replacement (the exact crossover the retired-id
+ *  tombstone prevents for ids). Reads keep name resolution; the list output
+ *  shows each id so a lane can pass it for add/clear. */
+function agentIdForMutation(agent: unknown): { id: string } | { error: string; status: number } {
+  const needle = typeof agent === 'string' ? agent.trim().toLowerCase() : '';
+  if (!needle) return { error: 'unknown agent', status: 422 };
+  const byId = listAgents().filter((a) => a.id.toLowerCase() === needle);
+  if (byId.length === 1) return { id: byId[0].id };
+  return { error: 'add/clear need the agent id (the list action shows it); a display name is not owner-proof', status: 422 };
+}
+
 commitmentsRouter.get('/', asyncHandler(async (req, res) => {
   const r = agentIdOrError(req.query.agent);
   if ('error' in r) { res.status(r.status).json({ error: r.error }); return; }
@@ -47,7 +60,7 @@ commitmentsRouter.get('/', asyncHandler(async (req, res) => {
 
 commitmentsRouter.post('/add', asyncHandler(async (req, res) => {
   const { agent, text, due } = req.body ?? {};
-  const r = agentIdOrError(agent);
+  const r = agentIdForMutation(agent);
   if ('error' in r) { res.status(r.status).json({ error: r.error }); return; }
   const result = addCommitment(r.id, typeof text === 'string' ? text : '', typeof due === 'string' ? due : undefined);
   if (result.error) { res.status(409).json({ error: result.error }); return; }
@@ -56,7 +69,7 @@ commitmentsRouter.post('/add', asyncHandler(async (req, res) => {
 
 commitmentsRouter.post('/clear', asyncHandler(async (req, res) => {
   const { agent, id } = req.body ?? {};
-  const r = agentIdOrError(agent);
+  const r = agentIdForMutation(agent);
   if ('error' in r) { res.status(r.status).json({ error: r.error }); return; }
   if (typeof id !== 'string' || !id.trim()) { res.status(400).json({ error: 'id is required' }); return; }
   if (!clearCommitment(r.id, id)) { res.status(404).json({ error: 'commitment not found' }); return; }

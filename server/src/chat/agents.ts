@@ -257,7 +257,13 @@ export function listAgents(): Agent[] {
 
 function saveAgents(agents: Agent[]): void {
   mkdirSync(AGENTS_DIR, { recursive: true });
-  writeFileSync(AGENTS_FILE, JSON.stringify({ agents }, null, 2));
+  // Atomic replace: a partial write can never truncate the live roster, and
+  // a failed rename leaves the previous roster fully intact (listAgents
+  // reads a parse failure as an empty roster, so a truncated file would
+  // orphan every agent and its commitments).
+  const tmp = `${AGENTS_FILE}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify({ agents }, null, 2)}\n`);
+  renameSync(tmp, AGENTS_FILE);
 }
 
 /** Seed exactly one agent (Chief of Staff) when the store is empty. */

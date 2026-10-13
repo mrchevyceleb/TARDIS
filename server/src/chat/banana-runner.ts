@@ -160,6 +160,10 @@ type BananaTurnState = {
   peerDeliveryId?: string;
   /** True when this prompt was prepended with an event-log recovery recap. */
   recoveryRecapUsed: boolean;
+  /** A seed was requested this turn (even if the primer came back empty):
+   *  consuming the ATTEMPT on acceptance stops a warm native session from
+   *  being re-seeded with the first turn on the next send. */
+  seedRequested: boolean;
   /** True once this turn has actually emitted or observed a tool_use part. */
   sawToolUse: boolean;
   /** True if the current opencode assistant message emitted visible text/tool content. */
@@ -2924,6 +2928,7 @@ export class BananaSession {
       promptAccepted: false,
       peerDeliveryId: opts.peerDeliveryId,
       recoveryRecapUsed: false,
+      seedRequested: false,
       sawToolUse: false,
       currentMessageVisibleContent: false,
       currentMessageHiddenCompactionSummary: false,
@@ -3016,6 +3021,9 @@ export class BananaSession {
     } else if (recoverContextThisTurn) {
       this.recoverContextOnNextTurn = false;
     }
+    // The seed attempt is consumed on prompt acceptance even when the primer
+    // was empty (fresh thread, no commitments): markPromptAccepted acks it.
+    if (seedWindow) this.turn.seedRequested = true;
     const localDirective = this.cli === 'banana-local'
       ? localThinkingDirective(requestedModelId, opts?.effort)
       : null;
@@ -3296,7 +3304,7 @@ export class BananaSession {
       });
     }
     state.promptAccepted = true;
-    if (state.recoveryRecapUsed) {
+    if (state.recoveryRecapUsed || state.seedRequested) {
       this.recoverContextOnNextTurn = false;
       this.ackWindowSeed();
     }
