@@ -7,7 +7,7 @@ import { SUBSCRIPTION_ENGINES, assertSubscriptionEngine } from './subscription-p
 // ONE agent (Chief of Staff) on first boot — everything else is created by
 // the user through the UI.
 
-import { readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, readdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { SESSIONS_FILE, STATE_DIR } from './config.ts';
 import { codexCapability } from './codex-models.ts';
@@ -16,7 +16,7 @@ import { OPENROUTER_LANE_EFFORT, OPENROUTER_LANE_MODEL, resolveOpenRouterEffort,
 import { deleteRoutinesForAgent } from './routines.ts';
 import { deleteJobWatchesForAgent } from './jobWatches.ts';
 import { deleteMessagePinsForAgent } from '../lib/messagePinStore.ts';
-import { deleteCommitmentsForAgent, listCommitments, restoreCommitments } from '../lib/commitmentStore.ts';
+import { deleteCommitmentsForAgent } from '../lib/commitmentStore.ts';
 import { bareChatId } from './threadKey.ts';
 
 const AGENTS_DIR = join(STATE_DIR, 'personas');
@@ -287,31 +287,45 @@ export function ensureAgents(): void {
 
 export type AgentInput = { name: string; role?: string; engine?: string; model?: string; effort?: string; voice?: string; pinned?: boolean; muted?: boolean; color?: AgentColor | null; scope?: string };
 
+/** Fail-closed: only a never-written ledger (ENOENT) reads as empty. An
+ * unreadable or corrupt ledger THROWS - id allocation and retirement both
+ * refuse to run on top of state they cannot trust, rather than silently
+ * reopening reuse of retired ids. */
 function readDeletedAgentIds(): string[] {
+  let raw: string;
   try {
-    const data = JSON.parse(readFileSync(DELETED_IDS_FILE, 'utf8')) as unknown;
-    const ids = Array.isArray(data)
-      ? data
-      : data && typeof data === 'object' && Array.isArray((data as { ids?: unknown }).ids)
-        ? (data as { ids: unknown[] }).ids
-        : [];
-    return ids.filter((v): v is string => typeof v === 'string' && v.trim() !== '').map((v) => v.trim());
-  } catch {
-    return [];
+    raw = readFileSync(DELETED_IDS_FILE, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw new Error(`retired-agent-id ledger unreadable, refusing id allocation/retirement: ${(err as Error).message}`);
   }
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`retired-agent-id ledger corrupt, refusing id allocation/retirement: ${(err as Error).message}`);
+  }
+  const ids = Array.isArray(data)
+    ? data
+    : data && typeof data === 'object' && Array.isArray((data as { ids?: unknown }).ids)
+      ? (data as { ids: unknown[] }).ids
+      : null;
+  if (!ids) throw new Error('retired-agent-id ledger corrupt (no ids array), refusing id allocation/retirement');
+  const clean = ids.filter((v): v is string => typeof v === 'string' && v.trim() !== '').map((v) => v.trim());
+  if (clean.length !== ids.length) throw new Error('retired-agent-id ledger has malformed entries, refusing id allocation/retirement');
+  return clean;
 }
 
+/** Atomic and fail-closed: a failed retirement THROWS so deleteAgent aborts
+ * BEFORE the roster entry is removed - a live agent never loses its id
+ * protection to a disk error. */
 function recordDeletedAgentId(id: string): void {
-  try {
-    const ids = new Set(readDeletedAgentIds());
-    ids.add(id);
-    mkdirSync(STATE_DIR, { recursive: true });
-    writeFileSync(DELETED_IDS_FILE, `${JSON.stringify({ ids: [...ids] }, null, 2)}\n`);
-  } catch (err) {
-    // Fail-open and logged: a lost tombstone only reopens id reuse, it never
-    // blocks a deletion that already succeeded.
-    console.warn('[agents] retired-id write failed:', (err as Error).message);
-  }
+  const ids = new Set(readDeletedAgentIds());
+  ids.add(id);
+  mkdirSync(STATE_DIR, { recursive: true });
+  const tmp = `${DELETED_IDS_FILE}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify({ ids: [...ids] }, null, 2)}\n`);
+  renameSync(tmp, DELETED_IDS_FILE);
 }
 
 export function createAgent(input: AgentInput): Agent {
@@ -431,23 +445,25 @@ export function deleteAgent(id: string): boolean {
   const agents = listAgents();
   const next = agents.filter((a) => a.id !== id);
   if (next.length === agents.length) return false;
-  // Snapshot first: if the roster save fails below, the agent stays alive
-  // and must not have permanently lost its commitments with it.
-  const commitmentsSnapshot = listCommitments(id);
-  // Commitments go first and unswallowed: a failed cascade throws before
-  // the roster is saved, so the agent is not deleted while its entries
-  // survive to be inherited by a same-id recreate.
-  deleteCommitmentsForAgent(id);
-  try {
-    saveAgents(next);
-  } catch (err) {
-    restoreCommitments(id, commitmentsSnapshot);
-    throw err;
-  }
-  // The id is retired, not just vacated: a deleted agent's still-live engine
+  // Retire the id FIRST, fail-closed: a deleted agent's still-live engine
   // process holds the old id, and a same-id recreate would let that process
-  // act as the new agent. Retired ids are never handed out again.
+  // act as the new agent. If retirement cannot be recorded, deletion aborts
+  // with the agent fully intact.
   recordDeletedAgentId(id);
+  // Roster save next, unswallowed: if it fails the agent stays alive AND its
+  // commitments were never touched (they are only cleaned after a successful
+  // save below), so there is nothing to restore. The tombstone stays behind:
+  // this id is burned either way, which only forces a future recreate onto a
+  // fresh id - never a data loss.
+  saveAgents(next);
+  // The agent is gone from the roster and its id is retired, so commitments
+  // orphaned by a failed cleanup here can never be inherited by a replacement
+  // agent: tolerate the failure with a warning instead of losing the deletion.
+  try {
+    deleteCommitmentsForAgent(id);
+  } catch (err) {
+    console.warn(`[agents] commitments cleanup for deleted agent ${id} failed (orphans unreachable, id retired):`, (err as Error).message);
+  }
   deleteRoutinesForAgent(id);
   deleteJobWatchesForAgent(id).catch((err) => console.warn('[job-watches] cascade for a deleted agent failed:', (err as Error).message));
   try { deleteMessagePinsForAgent(id); } catch { /* pin pocket is ancillary to the agent record */ }

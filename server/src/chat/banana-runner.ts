@@ -4106,10 +4106,14 @@ export async function getOrCreateBananaSession(opts: {
   const logKey = logKeyFor(cli, cwd, chatId);
   await flushEventLog(logKey);
   const durableHistory = loadEventLogForCompactionSync(logKey);
+  // Banana's native session is always new (no resume id concept), so it
+  // always seeds the primer on its first send - claude-family parity - and
+  // with it the agent's code-carried open commitments.
   const session = new BananaSession(cwd, chatId, null, {
     recoverContextOnNextTurn,
     cli,
     durableHistory,
+    seedFirst: true,
   });
   bananaSessions.set(key, session);
   return session;

@@ -1490,7 +1490,11 @@ export async function getOrCreateCodexSession(opts: {
   const logKey = logKeyFor(cli, cwd, chatId);
   await flushEventLog(logKey);
   const durableHistory = loadEventLogForCompactionSync(logKey);
-  const session = new CodexSession(cwd, chatId, threadId, { cli, durableHistory });
+  // seedFirst: !threadId mirrors claude-family spawnSession (it seeds exactly
+  // when there is no resume id), so an ordinary brand-new codex session also
+  // receives the primer - and with it the agent's code-carried open
+  // commitments - instead of only explicit Fresh and rotation paths.
+  const session = new CodexSession(cwd, chatId, threadId, { cli, durableHistory, seedFirst: !threadId });
   codexSessions.set(key, session);
   return session;
 }
