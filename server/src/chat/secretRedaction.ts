@@ -29,6 +29,7 @@ function redactOpaqueToken(token: string, offset: number, source: string): strin
  * 24-char Vercel key). Exact-value masking is the only reliable catch for
  * short shapeless tokens. */
 let knownSecretValues: string[] | null = null;
+let knownSecretMatcher: RegExp | null = null;
 
 function collectKnownSecretValues(): string[] {
   const out: string[] = [];
@@ -78,8 +79,12 @@ export function redactSecrets(text: string): string {
     // NAME here regardless of shape, so short shapeless tokens cannot slip
     // either. Bare lowercase "key"/"token" names stay readable on purpose
     // (keyboard events, token counters).
+    // The unquoted form masks the whole remainder of the line, like the
+    // header rule: a secret-named YAML scalar can be a multi-word passphrase
+    // ("PASSWORD: correct horse battery staple") and token-shape matching
+    // would leak most of it.
     .replace(
-      /(\b(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)*["']?\s*:\s*)(`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[A-Za-z0-9_~+\/=.-]{8,})/g,
+      /(\b(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)*["']?\s*:\s*)(`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\r\n]+)/g,
       (_all, prefix: string, value: string) => `${prefix}${preserveFence(value)}`,
     )
     .replace(
@@ -103,10 +108,18 @@ export function redactSecrets(text: string): string {
     /\b[A-Za-z0-9+/_=-]{64,}\b/g,
     (token: string, offset: number, source: string) => redactOpaqueToken(token, offset, source),
   );
-  if (knownSecretValues === null) knownSecretValues = collectKnownSecretValues();
-  for (const value of knownSecretValues) {
-    if (value !== REDACTED && out.includes(value)) out = out.split(value).join(REDACTED);
+  if (knownSecretValues === null) {
+    // Longest first: when one secret value is a prefix of another, the
+    // longer one must win or its suffix would stay exposed. One compiled
+    // alternation replaces them in a single pass — the emit path runs this
+    // on every event string, so a per-value split/join loop on large tool
+    // results would block the event loop.
+    knownSecretValues = [...new Set(collectKnownSecretValues())].sort((a, b) => b.length - a.length);
+    knownSecretMatcher = knownSecretValues.length
+      ? new RegExp(knownSecretValues.map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g')
+      : null;
   }
+  if (knownSecretMatcher) out = out.replace(knownSecretMatcher, REDACTED);
   return out.replaceAll(REDACTED_SENTINEL, REDACTED);
 }
 
@@ -119,8 +132,18 @@ export function redactEventSecrets<T>(value: T): T {
   if (typeof value === 'string') return redactSecrets(value) as unknown as T;
   if (Array.isArray(value)) return value.map((item) => redactEventSecrets(item)) as unknown as T;
   if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = redactEventSecrets(v);
+    const proto = Object.getPrototypeOf(value);
+    // Non-plain objects (Dates, Buffers, class instances) keep their shape:
+    // they have no string fields to redact this way, and JSON.stringify
+    // handles them itself. A null-prototype result object plus a skipped
+    // __proto__ key means a hostile JSON-echoed field can never reassign the
+    // prototype.
+    if (proto !== Object.prototype && proto !== null) return value;
+    const out = Object.create(null) as Record<string, unknown>;
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (k === '__proto__') continue;
+      out[k] = redactEventSecrets(v);
+    }
     return out as unknown as T;
   }
   return value;
