@@ -617,12 +617,18 @@ export function BotRail(props: BotRailProps) {
   // Group mode: sections of rows. Pinned agents stay in the strip, so each
   // section lists only its unpinned members (`rows` already leaves pins out).
   const groupsOn = railGroups.grouped && props.agents.length > 0 && !query.trim();
-  const sections = useMemo(() => {
-    if (!groupsOn) return [];
+  const agentRowsById = useMemo(() => {
     const byId = new Map<string, AgentRow>();
     for (const r of rows) if (r.kind === 'agent') byId.set(r.a.id, r);
-    return railGroups.groups.map((g) => {
-      const listed = g.agents.map((a) => byId.get(a.id)).filter((r): r is AgentRow => Boolean(r));
+    return byId;
+  }, [rows]);
+  // Named, collapsible groups only: unassigned agents are not a group anymore.
+  // They render loose right under the pinned strip (looseRows below), with no
+  // "Other" header, and dragging an agent onto them releases it from its group.
+  const sections = useMemo(() => {
+    if (!groupsOn) return [];
+    return railGroups.groups.filter((g) => !g.isOther).map((g) => {
+      const listed = g.agents.map((a) => agentRowsById.get(a.id)).filter((r): r is AgentRow => Boolean(r));
       return {
         g,
         rows: listed,
@@ -633,9 +639,16 @@ export function BotRail(props: BotRailProps) {
         jobs: listed.filter((r) => jobsByAgent.has(r.a.id)).length,
         unread: listed.reduce((sum, r) => sum + (r.a.muted ? 0 : r.a.unread ?? 0), 0),
       };
-      // "Other" only earns a header when someone is actually listed in it.
-    }).filter((sec) => !sec.g.isOther || sec.rows.length > 0);
-  }, [groupsOn, rows, railGroups.groups, busyAgents, jobsByAgent]);
+    });
+  }, [groupsOn, railGroups.groups, agentRowsById, busyAgents, jobsByAgent]);
+  // Unassigned agents, loose under the pins (no header, no collapse): also the
+  // drop zone that takes an agent out of a group.
+  const looseRows = useMemo(() => {
+    if (!groupsOn) return [];
+    const other = railGroups.groups.find((g) => g.isOther);
+    if (!other) return [];
+    return other.agents.map((a) => agentRowsById.get(a.id)).filter((r): r is AgentRow => Boolean(r));
+  }, [groupsOn, railGroups.groups, agentRowsById]);
   const realGroupCount = railGroups.groups.filter((g) => !g.isOther).length;
 
   const overGroup = (next: GroupDrop | null) => setGroupDrop((prev) => (
@@ -853,6 +866,20 @@ export function BotRail(props: BotRailProps) {
             })}
           </div>
         ) : null}
+        {groupsOn && (looseRows.length > 0 ? (
+          <div className="bt-loose" role="group" aria-label="Loose companions (no group)">
+            {looseRows.map((r, at) => renderRow(r, { group: OTHER_GROUP_ID, next: looseRows[at + 1]?.a.id ?? null }))}
+          </div>
+        ) : dragId ? (
+          // Every agent grouped: no loose row to drop on, so the loose area
+          // itself shows as an ungroup drop zone while a drag is live.
+          <div
+            className={`bt-dropzone${groupDrop?.head && groupDrop.group === OTHER_GROUP_ID ? ' on' : ''}`}
+            aria-label="Drop here to take the agent out of its group"
+            onDragOver={(e) => { e.preventDefault(); overGroup({ group: OTHER_GROUP_ID, before: null, head: true }); }}
+            onDrop={(e) => { e.preventDefault(); commitGroupDrop({ group: OTHER_GROUP_ID, before: null }); }}
+          />
+        ) : null)}
         {groupsOn ? (
           <div className="bt-groups">
             {sections.map((sec, i) => (
