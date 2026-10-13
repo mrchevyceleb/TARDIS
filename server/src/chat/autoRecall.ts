@@ -243,6 +243,10 @@ async function transcriptHits(chatId: string, queryTokens: ReadonlySet<string>):
   try {
     const fh = await open(path, 'r');
     try {
+      // Read from the start of the file, deliberately: the oldest material
+      // is where rolling compaction has cut detail the hardest, while the
+      // newest turns are still in the live window and the freshest compacts.
+      // Past the byte cap, the oldest prefix is what this source serves.
       const buf = Buffer.alloc(TRANSCRIPT_BYTES);
       const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
       content = buf.subarray(0, bytesRead).toString('utf8');
@@ -255,19 +259,33 @@ async function transcriptHits(chatId: string, queryTokens: ReadonlySet<string>):
   }
   const blocks = content.split(/\n\n+/);
   const hits: RecallHit[] = [];
+  const deadline = Date.now() + TRANSCRIPT_BUDGET_MS - 100;
+  const yieldNow = () => new Promise<void>((resolve) => setImmediate(resolve));
   let order = 0;
   for (const block of blocks) {
-    const score = matchCount(queryTokens, block.toLowerCase());
-    if (score >= TRANSCRIPT_MIN_TOKENS) {
+    // Cooperative deadline and event-loop yields: a 20MB scan must never
+    // block the runner's turn, and the outer withDeadline timer can only
+    // fire if this loop actually yields.
+    if ((order & 127) === 0) {
+      if (Date.now() > deadline) break;
+      await yieldNow();
+    }
+    const rawScore = matchCount(queryTokens, block.toLowerCase());
+    if (rawScore >= TRANSCRIPT_MIN_TOKENS) {
       const header = (block.split('\n')[0] ?? '').replace(/[*#]/g, '').trim().slice(0, HIT_TITLE_CHARS) || agent.id;
       hits.push({
         source: `notes:${agent.id}/transcript.md`,
         title: header,
         excerpt: excerptAround(block, queryTokens),
-        score,
-        // Block order is chronological: later blocks are newer, and on a
-        // score tie the newer block wins.
-        recency: order * 1000 + mtime % 1000,
+        // Score capped just above the admission bar: a long verbose block
+        // must not outrank and evict the other sources' authoritative hits
+        // from the shared five-slot pool by raw verbosity.
+        score: Math.min(rawScore, TRANSCRIPT_MIN_TOKENS + 2),
+        // Epoch-compatible recency derived from the file's mtime with the
+        // chronological block order preserved: later blocks sort newer on
+        // a score tie, and the values live in the same band as every other
+        // source's timestamps.
+        recency: mtime - (blocks.length - order),
       });
     }
     order += 1;
