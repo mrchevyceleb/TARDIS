@@ -15,17 +15,29 @@
 //   node --import tsx server/scripts/rebuild-truncated-compacts.mjs --apply '<key>' [more]  # rebuild the reviewed list
 //   ... --max-batches 90                                                                     # raise the per-run bound
 
-import { cpSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from '../src/config.ts';
 import { isTruncatedCompact, listCompactBlobFiles, loadCompactBlob, rebuildTruncatedCompact } from '../src/chat/compaction.ts';
 
 const argv = process.argv.slice(2);
-const applyIdx = argv.indexOf('--apply');
-const apply = applyIdx >= 0;
-const applyKeys = apply ? argv.slice(applyIdx + 1).filter((a) => !a.startsWith('--') && a !== '') : [];
-const maxBatchesIdx = argv.indexOf('--max-batches');
-const maxBatches = maxBatchesIdx >= 0 && /^\d+$/.test(argv[maxBatchesIdx + 1] ?? '') ? parseInt(argv[maxBatchesIdx + 1], 10) : undefined;
+// Structural parsing: options consume their own values, and only keys after
+// --apply are apply keys (so `--apply 'key' --max-batches 90` never reads 90
+// as a second key).
+let apply = false;
+let maxBatches;
+const applyKeys = [];
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (a === '--apply') { apply = true; continue; }
+  if (a === '--max-batches') {
+    const v = argv[i + 1];
+    if (v !== undefined && /^\d+$/.test(v)) { maxBatches = parseInt(v, 10); i += 1; }
+    continue;
+  }
+  if (a.startsWith('--')) continue;
+  if (apply && a) applyKeys.push(a);
+}
 const COMPACTS_DIR = join(STATE_DIR, 'thread-compacts');
 const STATE_FILE = join(STATE_DIR, 'compaction-state.json');
 // The output-cap retry went live at the Oct 13 2026 17:14:43 ET restart. A
@@ -95,18 +107,26 @@ if (unknown.length) {
   process.exit(2);
 }
 
-// A full backup first: the repair rewrites the compact blobs. Each blob file
-// is individually atomic (tmp+rename), so every copied file is coherent; a
-// live write during the copy can only leave the backup a mix of older and
-// newer per-file versions, never a torn file. On restore, prefer each blob's
-// own lastAt over the state file's cadence — adoptCompaction reconciles
-// newer-wins.
+// Backup exactly the reviewed targets, each blob copied whole (every blob
+// file is individually atomic, tmp+rename), with a manifest of the exact
+// versions taken. No unrelated lane is touched by the repair, so the restore
+// never needs to roll anything else back.
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const backup = join(STATE_DIR, `thread-compacts.bak-${stamp}`);
-cpSync(COMPACTS_DIR, join(backup, 'thread-compacts'), { recursive: true });
-cpSync(STATE_FILE, join(backup, 'compaction-state.json'));
-writeFileSync(join(backup, 'README.txt'), 'Backup taken before the truncated-compact rebuild. Restore by copying thread-compacts/* back into ~/.rivendell/thread-compacts and compaction-state.json back into ~/.rivendell. Each blob file is atomic; on restore prefer each blob\'s own lastAt over the state cadence (adoptCompaction reconciles newer-wins).\n');
-console.log(`[rebuild] backup written: ${backup}`);
+mkdirSync(join(backup, 'thread-compacts'), { recursive: true });
+const byKey = new Map(listCompactBlobFiles().map((f) => [f.key, f]));
+const manifest = [];
+for (const key of applyKeys) {
+  const file = byKey.get(key);
+  const blob = loadCompactBlob(key);
+  if (!file || !blob) continue;
+  cpSync(join(COMPACTS_DIR, `${file.file}.json`), join(backup, 'thread-compacts', `${file.file}.json`));
+  manifest.push(`${key} -> ${file.file}.json (${blob.words}w, lastCompactedSeq ${blob.lastCompactedSeq}, lastAt ${new Date(blob.lastAt).toISOString()})`);
+}
+writeFileSync(join(backup, 'MANIFEST.txt'), `Backed-up targets only (restore by copying the named file back into ~/.rivendell/thread-compacts):
+${manifest.join('\n')}
+`);
+console.log(`[rebuild] backup written: ${backup} (${manifest.length} target blob(s), manifest inside)`);
 
 let done = 0;
 let failed = 0;

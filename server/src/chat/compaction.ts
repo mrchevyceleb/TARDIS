@@ -494,7 +494,10 @@ export async function rebuildTruncatedCompact(
     const ordered = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
     const visible = extractVisibleTurns(ordered);
     const covered = visible.filter((t) => t.seq <= blob.lastCompactedSeq).sort((a, b) => a.seq - b.seq);
-    if (blob.lastCompactedSeq > 0 && covered.length === 0) {
+    if (!Number.isFinite(blob.lastCompactedSeq) || blob.lastCompactedSeq <= 0) {
+      throw new Error(`the blob's lastCompactedSeq (${blob.lastCompactedSeq}) is not a positive coverage boundary; refusing to rebuild`);
+    }
+    if (covered.length === 0) {
       throw new Error(`no covered events found in the archive or hot log (lastCompactedSeq ${blob.lastCompactedSeq}) — coverage cannot be proven; refusing to rebuild`);
     }
     const pendingFacts: DurableFact[] = [];
@@ -512,7 +515,10 @@ export async function rebuildTruncatedCompact(
       if (batches >= maxBatches) {
         throw new Error(`hit the ${maxBatches}-batch bound with ${covered.length - fed} covered turns still unfed; nothing was written, rerun with a higher bound`);
       }
-      const batch = takeOverflowBatch(covered.slice(fed));
+      // Exactly the live path's batch shape: the turn-count cap and the
+      // character budget together, so a rebuild's generations see the same
+      // material shape live compaction would.
+      const batch = takeOverflowBatch(covered.slice(fed, fed + COMPACT_BATCH_TURNS));
       if (!batch.length) break;
       onProgress?.(`${key}: rebuild batch ${batches + 1} (${batch.length} covered turns)`);
       const generated = await generateCompact(previous, batch);
@@ -549,7 +555,16 @@ export async function rebuildTruncatedCompact(
     }
     // One atomic final commit: all or nothing. A bound hit, a race, or a
     // crash mid-repair leaves the original truncated document untouched,
-    // so a rerun (a higher bound) always starts clean.
+    // so a rerun (a higher bound) always starts clean. The replacement must
+    // actually be a replacement, and it must not itself end mid-sentence
+    // (a truncated replacement would recreate the exact damage this
+    // repairs); either refusal writes nothing.
+    if (previous === blob.compact) {
+      throw new Error('the rebuilt document came back identical to the truncated original; nothing was written');
+    }
+    if (isTruncatedCompact(previous)) {
+      throw new Error('the rebuilt document still ends mid-sentence; nothing was written — rerun with a higher bound');
+    }
     const words = previous.trim().split(/\s+/).filter(Boolean).length;
     const wrote = writeCompactBlob(key, { ...blob, compact: previous, words, pendingFacts }, epoch);
     if (!wrote || epochOf(key) !== epoch) throw new Error('thread was fresh-started during the rebuild; nothing was written');
