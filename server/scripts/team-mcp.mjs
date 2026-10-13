@@ -176,6 +176,25 @@ const TOOLS = [
     },
   },
   {
+    name: 'commitments',
+    description:
+      'Your open commitments: owed replies, promises with times, parked items that must survive compaction. ' +
+      'Add one the moment you owe someone a reply or promise a time; clear it the moment it is done. ' +
+      'This list is stitched into every session start, so nothing here is ever summarized away. ' +
+      'It is capped, so keep each entry one short line and clear finished ones.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['add', 'clear', 'list'], description: 'add a commitment, clear one by id, or list yours' },
+        text: { type: 'string', description: 'One line, plain text, e.g. "Reply owed to Paula on the 3am tags" or "Restart TARDIS 4:00pm ET, prove with a round-trip"' },
+        due: { type: 'string', description: 'Optional short time, e.g. "4:00pm ET today"' },
+        id: { type: 'string', description: 'The commitment id to clear (from your list)' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'team_recent',
     description:
       "Read a teammate's recent thread messages (their last exchanges) — check what they " +
@@ -811,6 +830,29 @@ async function callTool(name, args, signal) {
     return who
       ? `Posted in the channel; delivered to ${who}.`
       : 'Posted in the channel history; no fan-out (no @mentions in your reply).';
+  }
+  if (name === 'commitments') {
+    const agent = process.env.RIVENDELL_AGENT_NAME;
+    if (!agent) throw new Error('Only a named teammate keeps a commitments list.');
+    const { agents } = await api('/api/team', undefined, signal);
+    const me = agents.find((a) => a.name.trim().toLowerCase() === agent.trim().toLowerCase() || a.id === agent);
+    if (!me) throw new Error(`No teammate record for ${agent}.`);
+    const action = typeof args.action === 'string' ? args.action : 'list';
+    if (action === 'add') {
+      const result = await api('/api/commitments/add', { method: 'POST', body: JSON.stringify({ agent, text: args.text, due: args.due }) }, signal);
+      if (result?.error) throw new Error(result.error);
+      const c = result?.commitment;
+      return c ? `Committed (id ${c.id}): ${c.text}${c.due ? ` — due ${c.due}` : ''}. Clear it with commitments action clear the moment it is done.` : 'Nothing committed.';
+    }
+    if (action === 'clear') {
+      if (typeof args.id !== 'string' || !args.id.trim()) throw new Error('Pass id: the commitment id from your list.');
+      const result = await api('/api/commitments/clear', { method: 'POST', body: JSON.stringify({ agent, id: args.id }) }, signal);
+      if (result?.error) throw new Error(result.error);
+      return `Cleared ${args.id}.`;
+    }
+    const { commitments } = await api(`/api/commitments?agent=${encodeURIComponent(me.id)}`, undefined, signal);
+    if (!commitments?.length) return 'Your commitments list is empty. Add one the moment you owe a reply or promise a time.';
+    return commitments.map((c) => `- [${c.id}] ${c.text}${c.due ? ` — due ${c.due}` : ''}`).join('\n');
   }
   if (name === 'team_recent') {
     const { messages } = await api(`/api/team/recent?name=${encodeURIComponent(args.name)}&limit=${args.limit ?? 8}`, undefined, signal);
