@@ -75,8 +75,15 @@ for (const f of orphanTruncated) {
 
 const flagged = [];
 let withCompact = 0;
+// Discovery is raw and read-only: loadCompactBlob's credential-redaction
+// upgrade can rewrite a blob in place, and discovery must never mutate
+// anything before the backup exists.
+const rawByKey = new Map();
+for (const f of listCompactBlobFiles()) {
+  if (f.key && f.blob) rawByKey.set(f.key, f.blob);
+}
 for (const key of keys) {
-  const blob = loadCompactBlob(key);
+  const blob = rawByKey.get(key);
   if (!blob) continue;
   withCompact += 1;
   if (isTruncatedCompact(blob.compact)) flagged.push(key);
@@ -85,18 +92,18 @@ for (const key of keys) {
 const candidates = [];
 const investigate = [];
 for (const key of flagged) {
-  const blob = loadCompactBlob(key);
+  const blob = rawByKey.get(key);
   if ((blob?.lastAt ?? 0) < CAP_RETRY_LIVE_AT) candidates.push(key);
   else investigate.push(key);
 }
 console.log(`[rebuild] ${keys.length} state keys, ${withCompact} with a rolling compact, ${flagged.length} truncated (${candidates.length} pre-cap-retry candidates, ${investigate.length} post-cap-retry to investigate), ${orphanTruncated.length} orphan file(s)`);
 for (const key of candidates) {
-  const blob = loadCompactBlob(key);
+  const blob = rawByKey.get(key);
   const tail = (blob.compact.trim().split('\n').filter((l) => l.trim()).pop() ?? '').slice(-100);
   console.log(`[rebuild]   candidate ${key} (${blob.words}w, lastAt ${new Date(blob.lastAt).toISOString()}) tail: ${JSON.stringify(tail)}`);
 }
 for (const key of investigate) {
-  const blob = loadCompactBlob(key);
+  const blob = rawByKey.get(key);
   console.log(`[rebuild]   INVESTIGATE (stamped after the cap-retry went live — a live-bug signal, do not rewrite): ${key} (${blob.words}w, lastAt ${new Date(blob.lastAt).toISOString()})`);
 }
 if (candidates.length) {
@@ -130,12 +137,20 @@ const byKey = new Map(listCompactBlobFiles().map((f) => [f.key, f]));
 const manifest = [];
 for (const key of applyKeys) {
   const file = byKey.get(key);
-  const blob = loadCompactBlob(key);
-  if (!file || !blob) continue;
-  // Raw bytes, not a re-read through the parser: the backup holds exactly
-  // what was on disk, and the manifest records its digest so a restore (or
-  // an audit) can prove the version.
-  const bytes = readFileSync(join(COMPACTS_DIR, `${file.file}.json`));
+  if (!file) {
+    console.error(`[rebuild] no compact file on disk for ${key}; aborting before any repair`);
+    process.exit(2);
+  }
+  // Fail-closed: a requested target that cannot be read and backed up
+  // exactly once aborts the whole apply, before any repair starts.
+  let bytes;
+  try {
+    bytes = readFileSync(join(COMPACTS_DIR, `${file.file}.json`));
+  } catch (err) {
+    console.error(`[rebuild] backup failed for ${key} (${file ? file.file : 'no file'}): ${err.message}; aborting before any repair`);
+    process.exit(2);
+  }
+  const blob = JSON.parse(bytes.toString('utf8'));
   const digest = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
   writeFileSync(join(backup, 'thread-compacts', `${file.file}.json`), bytes);
   manifest.push(`${key} -> ${file.file}.json (${blob.words}w, lastCompactedSeq ${blob.lastCompactedSeq}, lastAt ${new Date(blob.lastAt).toISOString()}, sha256 ${digest})`);
