@@ -249,10 +249,21 @@ export function adoptCompaction(fromKeys: string[], toKey: string): { blob: bool
 }
 
 /** Wipe rolling memory + cadence when the user fresh-starts a thread.
- * Remote deletion is staged first; callers clear the visible event log only
- * after this succeeds, so an MCP outage cannot leave a half-cleared thread. */
+ * The compaction state clears FIRST and fails closed: a corrupt or
+ * unwritable state file must throw before any compact copy is deleted, or
+ * the thread's only summary of its archived turns is destroyed while the
+ * Fresh aborts and the lane loses its older context. Every later failure
+ * point leaves the summary copies on disk, so a retried Fresh always
+ * starts from intact content. Callers clear the visible event log only
+ * after all of this succeeds. */
 export async function clearThreadMemory(key: string, chatId: string): Promise<void> {
   bumpCompactEpoch(key);
+  const stateCleared = await mutateState((state) => {
+    delete state[key];
+  });
+  if (!stateCleared) {
+    throw new Error('thread was not cleared because its compaction state could not be cleared');
+  }
   // Queue behind an in-flight replacement. The epoch bump makes that writer
   // discard its result; the lock then guarantees this deletion is last.
   try {
@@ -268,12 +279,6 @@ export async function clearThreadMemory(key: string, chatId: string): Promise<vo
     if (code !== 'ENOENT') {
       throw new Error(`thread was not cleared because its local compact could not be deleted: ${(err as Error).message}`);
     }
-  }
-  const stateCleared = await mutateState((state) => {
-    delete state[key];
-  });
-  if (!stateCleared) {
-    throw new Error('thread was not cleared because its compaction state could not be written');
   }
 }
 
