@@ -247,11 +247,12 @@ async function deskCardHits(queryTokens: ReadonlySet<string>): Promise<RecallHit
     const hay = surface.toLowerCase();
     const score = matchCount(queryTokens, hay);
     if (score < MIN_MATCH_TOKENS) continue;
-    const lastComment = Array.isArray(card.comments) ? card.comments[card.comments.length - 1] : undefined;
     hits.push({
       source: `desk:${card.id}|${card.column}`,
       title: card.title ?? card.id,
-      excerpt: excerptAround(hay, queryTokens) || (card.description ?? ''),
+      // excerptAround scores case-insensitively itself, so it gets the
+      // original-cased surface and the excerpt keeps proper nouns and paths.
+      excerpt: excerptAround(surface, queryTokens) || (card.description ?? ''),
       score,
       recency: Date.parse(card.updatedAt ?? '') || 0,
     });
