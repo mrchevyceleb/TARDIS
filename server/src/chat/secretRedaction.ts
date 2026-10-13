@@ -23,6 +23,24 @@ function redactOpaqueToken(token: string, offset: number, source: string): strin
   return REDACTED;
 }
 
+/** Secret-named values from this process's own environment, collected once
+ * at first use: every lane inherits this environment, so a printed value that
+ * matches one is a leaked credential even with no recognizable shape (a
+ * 24-char Vercel key). Exact-value masking is the only reliable catch for
+ * short shapeless tokens. */
+let knownSecretValues: string[] | null = null;
+
+function collectKnownSecretValues(): string[] {
+  const out: string[] = [];
+  for (const [name, value] of Object.entries(process.env)) {
+    if (typeof value !== 'string' || value.length < 8) continue;
+    if (!/(?:API_)?(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PASSCODE|CREDENTIAL|COOKIE)$/.test(name)) continue;
+    if (/^(?:true|false|null|undefined|none|0|1)$/i.test(value)) continue;
+    out.push(value);
+  }
+  return out;
+}
+
 /** Redact common credentials in prose, Markdown, env assignments, JSON/YAML,
  * command lines, URLs, and pasted key material. Idempotent by design. */
 export function redactSecrets(text: string): string {
@@ -54,6 +72,16 @@ export function redactSecrets(text: string): string {
       /(\b(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)*\s*=\s*)(`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\r\n]+)/gi,
       (_all, prefix: string, value: string) => `${prefix}${preserveFence(value)}`,
     )
+    // A value under a secret-shaped UPPERCASE name in JSON/YAML/JS object
+    // form: quotes and a colon instead of "=". The env rule above needs "=",
+    // so `"VERCEL_API_KEY": "abc"` slipped, and the value is masked by its
+    // NAME here regardless of shape, so short shapeless tokens cannot slip
+    // either. Bare lowercase "key"/"token" names stay readable on purpose
+    // (keyboard events, token counters).
+    .replace(
+      /(\b(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)*["']?\s*:\s*)(`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[A-Za-z0-9_~+\/=.-]{8,})/g,
+      (_all, prefix: string, value: string) => `${prefix}${preserveFence(value)}`,
+    )
     .replace(
       /(\b(?:password|passcode|passwd|pwd|api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|bearer token|client[_ -]?secret|refresh[_ -]?token|private[_ -]?key|credential|cookie|session token|otp|one[- ]time (?:password|code)|verification code|recovery code)\b[^:\r\n=]{0,80}(?::|=)\s*)(`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;]+)/gi,
       (_all, prefix: string, value: string) => `${prefix}${preserveFence(value)}`,
@@ -75,5 +103,25 @@ export function redactSecrets(text: string): string {
     /\b[A-Za-z0-9+/_=-]{64,}\b/g,
     (token: string, offset: number, source: string) => redactOpaqueToken(token, offset, source),
   );
+  if (knownSecretValues === null) knownSecretValues = collectKnownSecretValues();
+  for (const value of knownSecretValues) {
+    if (value !== REDACTED && out.includes(value)) out = out.split(value).join(REDACTED);
+  }
   return out.replaceAll(REDACTED_SENTINEL, REDACTED);
+}
+
+/** Deep redaction of one stored value (an event, a tool result, a message):
+ * every string field passes the secret redaction, so a printed key never
+ * lands wherever this value is stored or shown. Numbers, booleans, and the
+ * object's shape are untouched; strings inside arrays and nested objects
+ * are redacted too. */
+export function redactEventSecrets<T>(value: T): T {
+  if (typeof value === 'string') return redactSecrets(value) as unknown as T;
+  if (Array.isArray(value)) return value.map((item) => redactEventSecrets(item)) as unknown as T;
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = redactEventSecrets(v);
+    return out as unknown as T;
+  }
+  return value;
 }
