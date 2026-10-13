@@ -2139,17 +2139,24 @@ class ClaudeSession {
    *  from compact+50, the same way a context rotation does. */
   /** All in one tick, so no turn can be admitted onto this child in between;
    *  the banked rotation alone already forces a seed if the id write fails. */
-  private reseedAfterCompactFailure(): void {
+  private reseedAfterCompactFailure(lengthRejected: boolean): void {
     if (this.turnStartedAt !== null || this.disposed) return;
     bankRotation(this.logKey);
-    // Background work keeps this child; its next failed turn retires it.
-    if (this.hasBackgroundWork()) return;
+    // A length-rejected session can never serve another turn: any new
+    // prompt, including a background task's completion wake, hits the same
+    // oversized context. Work on that child is already undeliverable, so it
+    // is retired now (the ended note names what went with it) and the next
+    // send spawns fresh from the banked rotation. Oct 13: deferring the
+    // reseed behind background work held Maria's fireworks lane dead through
+    // 14 straight failed turns. A failed compact is different: that child
+    // can still serve turns, so its reseed keeps deferring behind live work.
+    if (this.hasBackgroundWork() && !lengthRejected) return;
     setSessionId(this.cli, this.cwd, '', this.chatId).catch((err) => {
       console.warn(`[chat ${this.cli}] could not clear the session after a failed compaction:`, (err as Error).message);
     });
     // A send waiting on the reseed barrier follows to the fresh process.
     this.contextRotated = true;
-    this.shutdown('compact-failed');
+    this.shutdown(lengthRejected ? 'length-rejected-reseed' : 'compact-failed');
   }
 
   awaitContextMaintenance(): Promise<void> { return this.contextMaintenance ?? Promise.resolve(); }
@@ -2629,7 +2636,7 @@ class ClaudeSession {
       // Installed before turnEnd, so a send admitted by a turnEnd subscriber
       // waits for the reseed instead of landing on the oversized session.
       if (reseed) {
-        this.contextMaintenance = Promise.resolve().then(() => this.reseedAfterCompactFailure())
+        this.contextMaintenance = Promise.resolve().then(() => this.reseedAfterCompactFailure(lengthRejected))
           .finally(() => { this.contextMaintenance = null; });
         // The compact failure's one automatic re-run (the copy above already
         // promised it). lengthRejected stays manual: its oversized prompt may
