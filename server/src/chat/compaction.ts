@@ -456,8 +456,10 @@ export function isTruncatedCompact(compact: string): boolean {
   return !/[.!?:;)\]}"”…\]]$/.test(last);
 }
 
-/** Hard bound on re-fed batches per rebuild run, so a huge lane reports
- *  instead of running all evening. */
+/** Default bound on re-fed batches per rebuild run, so a huge lane reports
+ *  instead of running all evening. Nothing partial is ever committed: a run
+ *  that hits the bound writes nothing and reports, and a rerun with a
+ *  higher bound starts clean from the original document. */
 const REBUILD_MAX_BATCHES = 60;
 
 /** Rebuild a truncated rolling compact from the durable log. The head stands;
@@ -471,7 +473,8 @@ const REBUILD_MAX_BATCHES = 60;
 export async function rebuildTruncatedCompact(
   key: string,
   onProgress?: (msg: string) => void,
-): Promise<{ batches: number; fed: number; covered: number; words: number; hitBound: boolean }> {
+  maxBatches = REBUILD_MAX_BATCHES,
+): Promise<{ batches: number; fed: number; covered: number; words: number }> {
   const blob = loadCompactBlob(key);
   if (!blob) throw new Error('no rolling compact for this thread');
   if (!isTruncatedCompact(blob.compact)) throw new Error('compact tail looks complete; refusing to rebuild');
@@ -505,20 +508,23 @@ export async function rebuildTruncatedCompact(
     let previous = blob.compact;
     let fed = 0;
     let batches = 0;
-    let words = blob.words;
-    while (fed < covered.length && batches < REBUILD_MAX_BATCHES) {
+    while (fed < covered.length) {
+      if (batches >= maxBatches) {
+        throw new Error(`hit the ${maxBatches}-batch bound with ${covered.length - fed} covered turns still unfed; nothing was written, rerun with a higher bound`);
+      }
       const batch = takeOverflowBatch(covered.slice(fed));
       if (!batch.length) break;
       onProgress?.(`${key}: rebuild batch ${batches + 1} (${batch.length} covered turns)`);
       const generated = await generateCompact(previous, batch);
-      // Cross-process CAS: this repair can run beside the live server, whose
-      // inFlight and epoch guards cannot see this process. A blob that
-      // changed on disk since this run's last read means a live compaction
-      // or fresh start won the race — abort with the last good document
-      // still on disk, and re-run later.
+      // Cross-process CAS against the ORIGINAL blob: this repair can run
+      // beside the live server, whose inFlight and epoch guards cannot see
+      // this process. A blob that changed on disk since the repair's first
+      // read means a live compaction or fresh start won the race. Nothing is
+      // written until the single final commit below, so every abort leaves
+      // the original document exactly as it was.
       const disk = loadCompactBlob(key);
-      if (!disk || disk.compact !== previous || disk.lastCompactedSeq !== blob.lastCompactedSeq) {
-        throw new Error('the compact changed under the rebuild (a live compaction or fresh start won the race); aborting with the last good document on disk');
+      if (!disk || disk.compact !== blob.compact || disk.lastCompactedSeq !== blob.lastCompactedSeq) {
+        throw new Error('the compact changed under the rebuild (a live compaction or fresh start won the race); nothing was written');
       }
       let compactText = generated.compact;
       let retainedFacts = '';
@@ -538,23 +544,30 @@ export async function rebuildTruncatedCompact(
         compactText = `${compactText}\n\nDurable facts kept in the document because the durable-fact outbox is at cap:${retainedFacts}`;
       }
       previous = compactText;
-      words = compactText.trim().split(/\s+/).filter(Boolean).length;
       fed += batch.length;
       batches += 1;
-      const wrote = writeCompactBlob(key, { ...blob, compact: compactText, words, pendingFacts }, epoch);
-      if (!wrote || epochOf(key) !== epoch) throw new Error('thread was fresh-started during the rebuild');
     }
+    // One atomic final commit: all or nothing. A bound hit, a race, or a
+    // crash mid-repair leaves the original truncated document untouched,
+    // so a rerun (a higher bound) always starts clean.
+    const words = previous.trim().split(/\s+/).filter(Boolean).length;
+    const wrote = writeCompactBlob(key, { ...blob, compact: previous, words, pendingFacts }, epoch);
+    if (!wrote || epochOf(key) !== epoch) throw new Error('thread was fresh-started during the rebuild; nothing was written');
     // The overwriteable RAG mirror must not keep serving the truncated
-    // document after a reported repair. Best effort: a failed save leaves
-    // the mirror stale until the next real compaction replaces it.
-    if (previous !== blob.compact && blob.chatId) {
+    // document after a reported repair. Re-check the blob first: if a live
+    // compaction slipped in between the commit and this save, skip — the
+    // mirror is then already newer, and that compaction owns it.
+    const beforeMirror = loadCompactBlob(key);
+    if (previous !== blob.compact && blob.chatId && beforeMirror && beforeMirror.compact === previous) {
       try {
         await saveCompactToMemory(key, epoch, 'rebuild', blob.chatId, previous);
       } catch (err) {
         console.warn(`[compaction] ${key}: RAG mirror not refreshed after the rebuild (the next real compaction replaces it): ${(err as Error).message}`);
       }
+    } else if (previous !== blob.compact) {
+      console.warn(`[compaction] ${key}: skipped the RAG mirror refresh (the blob changed after the rebuild commit); the newer document owns the mirror`);
     }
-    return { batches, fed, covered: covered.length, words, hitBound: fed < covered.length };
+    return { batches, fed, covered: covered.length, words };
   } finally {
     inFlight.delete(key);
   }
