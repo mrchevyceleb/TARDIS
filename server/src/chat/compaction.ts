@@ -529,6 +529,15 @@ export async function rebuildTruncatedCompact(
       if (!batch.length) break;
       onProgress?.(`${key}: rebuild batch ${batches + 1} (${batch.length} covered turns)`);
       const generated = await generateCompact(previous, batch, REBUILD_MAX_TOKENS);
+      // The larger generation budget is not a size acceptance: a response
+      // that finishes normally at 16k tokens would bloat every later prompt.
+      // Bounded growth only: the replacement may keep the head's substance
+      // plus the batch's new material, never a runaway.
+      const prevWords = previous.trim().split(/\s+/).filter(Boolean).length;
+      const ceiling = Math.ceil(prevWords * 1.25) + 500;
+      if (generated.words > ceiling) {
+        throw new Error(`rebuilt document came back oversized (${generated.words}w over the ${ceiling}w ceiling); nothing was written`);
+      }
       // Cross-process CAS against the ORIGINAL blob: this repair can run
       // beside the live server, whose inFlight and epoch guards cannot see
       // this process. A blob that changed on disk since the repair's first
