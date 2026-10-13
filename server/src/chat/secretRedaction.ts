@@ -7,7 +7,7 @@ const REDACTED = '[redacted secret]';
  *  credential: INPUT_TOKEN_COUNT, MAX_TOKEN_LIMIT, RATE_LIMIT_SECRET_PATH.
  *  Matched against the prefix tail so these lines are never masked (the
  *  unquoted rule would otherwise erase the whole remainder of the line). */
-const NON_SECRET_NAME = /(?:COUNT|LIMIT|SIZE|WIDTH|HEIGHT|LENGTH|URL|URI|ORIGIN|HOST|PORT|NAME|TITLE|PATH|DIR|PREFIX|SUFFIX|TTL|TIMEOUT|ID|IDS|VERSION|TYPE|MODE|FORMAT|LABEL|TAG|FLAG|DEBUG|RETRIES?|NUM|CAP|BUDGET|WINDOW|EXPIRY|EXPIRES|AT|ON|IN|OF)[A-Z0-9_]*\s*[:=]\s*$/;
+const NON_SECRET_NAME = /(?:COUNT|LIMIT|SIZE|WIDTH|HEIGHT|LENGTH|URL|URI|ORIGIN|HOST|PORT|NAME|TITLE|PATH|DIR|PREFIX|SUFFIX|TTL|TIMEOUT|ID|IDS|VERSION|TYPE|MODE|FORMAT|LABEL|TAG|FLAG|DEBUG|RETRIES?|NUM|CAP|BUDGET|WINDOW|EXPIRY|EXPIRES|AT|ON|IN|OF)[A-Z0-9_]*["']?\s*[:=]\s*$/;
 const REDACTED_SENTINEL = 'RIVENDELL_REDACTED_SECRET_VALUE';
 
 function preserveFence(value: string): string {
@@ -96,15 +96,15 @@ export function redactSecrets(text: string): string {
       (_all, prefix: string, value: string) => (NON_SECRET_NAME.test(prefix) ? _all : `${prefix}${preserveFence(value)}`),
     )
     .replace(
-      /(\b(?:password|passcode|passwd|pwd|api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|bearer token|client[_ -]?secret|refresh[_ -]?token|private[_ -]?key|credential|cookie|session token|otp|one[- ]time (?:password|code)|verification code|recovery code)\b[^:\r\n=]{0,80}(?::|=)\s*)(`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;]+)/gi,
+      /(\b(?:password|passcode|passwd|pwd|api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|bearer token|client[_ -]?secret|refresh[_ -]?token|private[_ -]?key|credential|cookie|session token|otp|one[- ]time (?:password|code)|verification code|recovery code)\b[^:\r\n=]{0,80}(?::|=)\s*)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/gi,
       (_all, prefix: string, value: string) => `${prefix}${preserveFence(value)}`,
     )
     .replace(
-      /(\b(?:password|passcode|passwd|pwd|api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|bearer token|client[_ -]?secret|refresh[_ -]?token|private[_ -]?key|credential|session token|otp|one[- ]time (?:password|code)|verification code|recovery code)\b\s+(?:is|was)\s+)(`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;]+)/gi,
+      /(\b(?:password|passcode|passwd|pwd|api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|bearer token|client[_ -]?secret|refresh[_ -]?token|private[_ -]?key|credential|session token|otp|one[- ]time (?:password|code)|verification code|recovery code)\b\s+(?:is|was)\s+)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/gi,
       (_all, prefix: string, value: string) => `${prefix}${preserveFence(value)}`,
     )
     .replace(
-      /((?:--?)(?:(?:api-?)?key|token|secret|password))(=|\s+)(`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;]+)/gi,
+      /((?:--?)(?:(?:api-?)?key|token|secret|password))(=|\s+)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/gi,
       (_all, flag: string, separator: string, value: string) => `${flag}${separator}${preserveFence(value)}`,
     )
     .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[redacted jwt]')
