@@ -2417,6 +2417,11 @@ export class BananaSession {
     // write keeps failing. A still-uncleared marker re-seeds the next spawn
     // once, so nothing ever runs blind.
     const retryClear = (attempt: number) => {
+      // Lifecycle- and cycle-bound: a dead session, or a newer window-seed
+      // cycle on this one (a fresh bank re-arms the flag before any retry
+      // fires), owns the marker now - an old retry must never clear newer
+      // debt.
+      if (this.dead || this.seedWindowOnNextTurn) return;
       clearRotation(this.logKey).then((cleared) => {
         if (!cleared && attempt < 3) setTimeout(() => retryClear(attempt + 1), 200 * 2 ** attempt);
       });

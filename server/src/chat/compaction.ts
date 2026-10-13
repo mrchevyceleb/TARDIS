@@ -93,24 +93,41 @@ function defaultRec(): CompactionRecord {
   return { userTurnsTotal: 0, lastCompactUserTurns: 0, count: 0, lastAt: 0, lastWords: 0 };
 }
 
-function loadState(): CompactionState {
+/** Tolerant by default (readers treat any problem as empty state). Strict
+ *  mode (mutations) refuses to run on state it cannot trust: only a
+ *  never-written file (ENOENT) reads as legitimately empty. */
+function loadState(strict = false): CompactionState {
+  let raw: string;
   try {
-    return JSON.parse(readFileSync(STATE_FILE, 'utf8')) as CompactionState;
-  } catch {
-    return {};
+    raw = readFileSync(STATE_FILE, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    if (!strict) return {};
+    throw new Error(`compaction state unreadable, refusing state mutations: ${(err as Error).message}`);
+  }
+  try {
+    return JSON.parse(raw) as CompactionState;
+  } catch (err) {
+    if (!strict) return {};
+    throw new Error(`compaction state corrupt, refusing state mutations: ${(err as Error).message}`);
   }
 }
 
 /** Serial state writes. Resolves false when the write failed (it is warned
  *  inside, never rejected), so a caller that must know can retry; callers
- *  that merely await keep their silent best-effort behavior. */
+ *  that merely await keep their silent best-effort behavior. The read is
+ *  strict and the write atomic (tmp + rename, same shape as the roster and
+ *  commitments saves): a truncated state file can never be silently read as
+ *  empty and rewritten, wiping every lane's banked rotations. */
 function mutateState(fn: (state: CompactionState) => void): Promise<boolean> {
   stateQueue = stateQueue.then(() => {
     try {
-      const state = loadState();
+      const state = loadState(true);
       fn(state);
       mkdirSync(STATE_DIR, { recursive: true });
-      writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+      const tmp = `${STATE_FILE}.tmp`;
+      writeFileSync(tmp, JSON.stringify(state, null, 2));
+      renameSync(tmp, STATE_FILE);
       return true;
     } catch (err) {
       console.warn('[compaction] state mutation failed:', (err as Error).message);
@@ -252,9 +269,12 @@ export async function clearThreadMemory(key: string, chatId: string): Promise<vo
       throw new Error(`thread was not cleared because its local compact could not be deleted: ${(err as Error).message}`);
     }
   }
-  await mutateState((state) => {
+  const stateCleared = await mutateState((state) => {
     delete state[key];
   });
+  if (!stateCleared) {
+    throw new Error('thread was not cleared because its compaction state could not be written');
+  }
 }
 
 export function countUserEchoes(events: Array<{ ev: any }>): number {
