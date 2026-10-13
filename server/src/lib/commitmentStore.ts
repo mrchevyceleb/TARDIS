@@ -31,9 +31,11 @@ function normalizeCommitment(value: unknown): Commitment | null {
   const raw = value as Record<string, unknown>;
   const id = typeof raw.id === 'string' ? raw.id.trim() : '';
   const agentId = typeof raw.agentId === 'string' ? raw.agentId.trim() : '';
-  const text = typeof raw.text === 'string' ? raw.text.trim() : '';
+  // One line per commitment, always: a CR/LF could spoof the seed block's
+  // line structure, so a stored value can never carry one through either.
+  const text = typeof raw.text === 'string' ? raw.text.replace(/\r|\n/g, ' ').trim() : '';
   if (!id || !agentId || !text) return null;
-  const due = typeof raw.due === 'string' ? raw.due.trim().slice(0, DUE_CAP) : '';
+  const due = typeof raw.due === 'string' ? raw.due.replace(/\r|\n/g, ' ').trim().slice(0, DUE_CAP) : '';
   return {
     id,
     agentId,
@@ -91,6 +93,9 @@ export function addCommitment(agentId: string, text: string, due?: string):
     return { error: `Keep it under ${TEXT_CAP} characters; a commitment must stay one line (got ${body.length}).` };
   }
   const trimmedDue = (due ?? '').trim();
+  if (/[\r\n]/.test(body) || /[\r\n]/.test(trimmedDue)) {
+    return { error: 'A commitment is one line; no line breaks in the text or the time.' };
+  }
   if (trimmedDue.length > DUE_CAP) {
     return { error: `Keep the time under ${DUE_CAP} characters (got ${trimmedDue.length}).` };
   }
@@ -120,4 +125,14 @@ export function clearCommitment(agentId: string, id: string): boolean {
   if (next.length === all.length) return false;
   save(next);
   return true;
+}
+
+/** Agent deletion cascade: a deleted teammate leaves no commitments behind,
+ *  so a recreated agent with the same id never inherits stale entries. */
+export function deleteCommitmentsForAgent(agentId: string): void {
+  const owner = agentId.trim();
+  if (!owner) return;
+  const all = readAll();
+  const next = all.filter((c) => c.agentId !== owner);
+  if (next.length !== all.length) save(next);
 }

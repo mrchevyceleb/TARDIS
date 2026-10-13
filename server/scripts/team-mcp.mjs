@@ -832,10 +832,12 @@ async function callTool(name, args, signal) {
       : 'Posted in the channel history; no fan-out (no @mentions in your reply).';
   }
   if (name === 'commitments') {
-    const agent = process.env.RIVENDELL_AGENT_NAME;
+    // The stable roster id when the runner passed it, else the display name
+    // (the route resolves ids first and refuses ambiguous names).
+    const agent = process.env.RIVENDELL_AGENT_ID || process.env.RIVENDELL_AGENT_NAME;
     if (!agent) throw new Error('Only a named teammate keeps a commitments list.');
     const { agents } = await api('/api/team', undefined, signal);
-    const me = agents.find((a) => a.name.trim().toLowerCase() === agent.trim().toLowerCase() || a.id === agent);
+    const me = agents.find((a) => a.id === agent || a.name.trim().toLowerCase() === agent.trim().toLowerCase());
     if (!me) throw new Error(`No teammate record for ${agent}.`);
     const action = typeof args.action === 'string' ? args.action : 'list';
     if (action === 'add') {

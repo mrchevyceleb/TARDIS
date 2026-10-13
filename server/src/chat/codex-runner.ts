@@ -763,7 +763,7 @@ export class CodexSession {
       );
     }
     const laneName = agentForChatId(this.chatId)?.name;
-    browserMcpArgs.push(...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId) }), ...officeMcpCodexArgs());
+    browserMcpArgs.push(...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId), agentId: agentForChatId(this.chatId)?.id }), ...officeMcpCodexArgs());
     const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
 
     // Wait for OneDrive to release its sync lock on .codex/config.toml so

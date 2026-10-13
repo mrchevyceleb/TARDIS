@@ -16,6 +16,7 @@ import { OPENROUTER_LANE_EFFORT, OPENROUTER_LANE_MODEL, resolveOpenRouterEffort,
 import { deleteRoutinesForAgent } from './routines.ts';
 import { deleteJobWatchesForAgent } from './jobWatches.ts';
 import { deleteMessagePinsForAgent } from '../lib/messagePinStore.ts';
+import { deleteCommitmentsForAgent } from '../lib/commitmentStore.ts';
 import { bareChatId } from './threadKey.ts';
 
 const AGENTS_DIR = join(STATE_DIR, 'personas');
@@ -402,6 +403,7 @@ export function deleteAgent(id: string): boolean {
   deleteRoutinesForAgent(id);
   deleteJobWatchesForAgent(id).catch((err) => console.warn('[job-watches] cascade for a deleted agent failed:', (err as Error).message));
   try { deleteMessagePinsForAgent(id); } catch { /* pin pocket is ancillary to the agent record */ }
+  try { deleteCommitmentsForAgent(id); } catch { /* commitments are ancillary to the agent record */ }
   clearAvatarFiles(id);
   try { unlinkSync(join(AGENTS_DIR, `${id}.md`)); } catch { /* scope file optional */ }
   return true;
