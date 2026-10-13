@@ -527,6 +527,9 @@ class ClaudeSession {
   private child: ChildProcessByStdio<Writable, Readable, Readable>;
   private contextMaintenance: Promise<void> | null = null;
   private contextRotated = false;
+  /** A length-rejected reseed was deferred behind background work: this child
+   *  is detached from the lane and retires once the work drains. */
+  private reseedPendingDrain = false;
   private stdoutBuf = '';
   private stderrBuf = '';
   private listeners = new Set<(e: SeqEvent) => void>();
@@ -1636,6 +1639,19 @@ class ClaudeSession {
       if (ev.status === 'stopped') this.stopWatch?.stopped.add(ev.task_id);
     }
     if (!this.hasBackgroundWork()) this.keptForBackground = undefined;
+    // A detached oversized child (reseed deferred behind background work)
+    // retires once its work drains. Deferred a beat so a completion wake can
+    // open its own turn first; that turn's result reseeds via the forced term
+    // at the boundary, and this timer is the no-wake backstop.
+    if (!this.hasBackgroundWork() && this.reseedPendingDrain && !this.disposed) {
+      const t = setTimeout(() => {
+        if (this.reseedPendingDrain && !this.disposed && !this.hasBackgroundWork() && this.turnStartedAt === null) {
+          this.reseedPendingDrain = false;
+          this.shutdown('oversized-context reseed after background work');
+        }
+      }, 5_000);
+      t.unref?.();
+    }
   }
 
   private openStopWatch(): void {
@@ -2142,13 +2158,24 @@ class ClaudeSession {
   private reseedAfterCompactFailure(): void {
     if (this.turnStartedAt !== null || this.disposed) return;
     bankRotation(this.logKey);
-    // Background work keeps this child; its next failed turn retires it.
-    if (this.hasBackgroundWork()) return;
+    // The oversized session must never be resumed (Oct 7 review): the saved
+    // id drops even when background work keeps this child, and the child is
+    // detached from the lane so no new turn lands on its oversized live
+    // context. The next send spawns fresh from the banked rotation; the child
+    // retires once its work drains (Oct 13: two CI watchers held Maria's
+    // fireworks lane dead through 14 straight length-rejected turns because
+    // the early return kept the oversized resume id and the live child both).
     setSessionId(this.cli, this.cwd, '', this.chatId).catch((err) => {
       console.warn(`[chat ${this.cli}] could not clear the session after a failed compaction:`, (err as Error).message);
     });
     // A send waiting on the reseed barrier follows to the fresh process.
     this.contextRotated = true;
+    if (this.hasBackgroundWork()) {
+      this.reseedPendingDrain = true;
+      if (sessions.get(this.key) === this) sessions.delete(this.key);
+      return;
+    }
+    this.reseedPendingDrain = false;
     this.shutdown('compact-failed');
   }
 
@@ -2616,7 +2643,10 @@ class ClaudeSession {
       if (!resultFailed) this.persistAppliedSelection();
       // A dead native session reseeds instead. A native compact rotates even
       // when the turn then failed, so no later turn runs on its lossy summary.
-      const reseed = (compactFailed || lengthRejected) && !authFailPending && !zaiStale && !zaiCut;
+      const reseed = (compactFailed || lengthRejected
+        // A reseed deferred behind background work completes at the first
+        // boundary after the work drains, whatever this turn's outcome was.
+        || (this.reseedPendingDrain && !this.hasBackgroundWork())) && !authFailPending && !zaiStale && !zaiCut;
       const rotationDue = !reseed && isClaudeFamilyCli(this.cli)
         && (this.rotateAfterNativeCompact || (!resultFailed && this.rotationWanted()));
       const rotateIfDue = async (): Promise<boolean> => {
