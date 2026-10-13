@@ -257,7 +257,7 @@ function MarkdownAnchor({ href, children }: { href?: string; children?: ReactNod
   return <MarkdownLink href={href}>{children}</MarkdownLink>;
 }
 
-function MarkdownLink({ href, children }: { href?: string; children?: ReactNode }) {
+export function MarkdownLink({ href, children }: { href?: string; children?: ReactNode }) {
   const proxyTarget = parseProxyHref(href);
   const openTarget = useWorkspaceTargetOpener(proxyTarget);
 
