@@ -194,17 +194,27 @@ try {
 }
 const stopChat = await registerChat(app, server);
 registerVoiceCalls(server);
-registerDeviceBridge(server);
-startRoutineScheduler(); // agent-scoped routine scheduler (30s tick)
-startJobWatchScheduler(); // background job watches (10s tick): pid/file/command → agent wake
-startJobScheduler(); // job_start jobs (5s tick): exit records → agent job-result
+// RIVENDELL_SIDE_COPY=1 boots the pre-restart check's isolated copy: lanes
+// and engines only. Every subsystem that fires on its own (routine prompts,
+// job watches and job results, Desk nudges and phone alerts, computer
+// control, the workspace watcher, restart wakes, cron pausing, durable team
+// delivery, agent prewarm) stays off, so a check boot can never message
+// anyone, touch another system, or spend agent turns beyond its own test
+// lane. Everything passive (chat WS, HTTP routes, scribe, voice socket)
+// stays available for the check to exercise.
+const SIDE_COPY = process.env.RIVENDELL_SIDE_COPY === '1';
+if (SIDE_COPY) console.log('[side-copy] lanes and engines only: schedulers, delivery, crons, Slack/Gmail sends and computer control are off');
+if (!SIDE_COPY) registerDeviceBridge(server);
+if (!SIDE_COPY) startRoutineScheduler(); // agent-scoped routine scheduler (30s tick)
+if (!SIDE_COPY) startJobWatchScheduler(); // background job watches (10s tick): pid/file/command → agent wake
+if (!SIDE_COPY) startJobScheduler(); // job_start jobs (5s tick): exit records → agent job-result
 // Needs-you phone alerts and digests, plus answer delivery retries (60s tick).
-if (DESK_ROOM_ENABLED) startDeskNotifier({ retryAnswer: (id) => deliverDeskAnswer(id) });
+if (!SIDE_COPY && DESK_ROOM_ENABLED) startDeskNotifier({ retryAnswer: (id) => deliverDeskAnswer(id) });
 registerScribeSocket(server);
-startWorkerQueue();
-startWorkspaceWatcher();
-startDeskHygieneScheduler(); // Desk card hygiene (60s tick): stale-card nudges at 8/10/12/2/4 ET
-startRestartWake(); // once, ~25s after boot: wake the lanes the last restart cut mid-turn
+if (!SIDE_COPY) startWorkerQueue();
+if (!SIDE_COPY) startWorkspaceWatcher();
+if (!SIDE_COPY) startDeskHygieneScheduler(); // Desk card hygiene (60s tick): stale-card nudges at 8/10/12/2/4 ET
+if (!SIDE_COPY) startRestartWake(); // once, ~25s after boot: wake the lanes the last restart cut mid-turn
 
 if (existsSync(STATIC_DIR)) {
   // index.html must always revalidate — a heuratively-cached shell pins the
@@ -234,10 +244,14 @@ let agentPrewarm: Promise<void> | null = null;
 const PREWARM_CHUNK = 3;
 
 server.listen(PORT, HOST, () => {
-  if (ASSISTANT_ADMIN_BASE_URL && ASSISTANT_ADMIN_TOKEN) {
+  if (!SIDE_COPY && ASSISTANT_ADMIN_BASE_URL && ASSISTANT_ADMIN_TOKEN) {
     void pauseRetiredCronJobs().catch(() => console.warn('[cron] Could not check retired TARDIS schedules at startup.'));
   }
   console.log(`tardis listening on http://${HOST}:${PORT}`);
+  if (SIDE_COPY) {
+    console.log('[side-copy] up: cron pausing and durable team delivery stay off');
+    return;
+  }
   void resumeQueuedTeamDeliveries().then((count) => {
     if (count > 0) console.log(`[team] resumed ${count} durable queued ${count === 1 ? 'delivery' : 'deliveries'}`);
   }).catch((error) => {
