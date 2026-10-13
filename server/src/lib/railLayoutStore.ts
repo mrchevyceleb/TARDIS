@@ -15,6 +15,9 @@ export type RailGroup = { id: string; name: string; agentIds: string[] };
 export type RailLayout = {
   groups: RailGroup[];
   collapsed: Record<string, true>;
+  /** Rail sequence, mirroring the client: group ids and loose agent ids
+   *  interleaved, absent when nothing was ever seated. */
+  order?: string[];
   updatedAt: number;
 };
 
@@ -35,7 +38,7 @@ function cleanName(value: unknown): string {
 /** Anything in, a well-formed layout (or null) out. Mirrors the client rules. */
 export function normalizeRailLayout(value: unknown): RailLayout | null {
   if (!value || typeof value !== 'object') return null;
-  const raw = value as { groups?: unknown; collapsed?: unknown; updatedAt?: unknown };
+  const raw = value as { groups?: unknown; collapsed?: unknown; order?: unknown; updatedAt?: unknown };
   if (!Array.isArray(raw.groups)) return null;
   const seenGroups = new Set<string>();
   const seenAgents = new Set<string>();
@@ -63,8 +66,27 @@ export function normalizeRailLayout(value: unknown): RailLayout | null {
       if (flag === true && (key === OTHER_GROUP_ID || seenGroups.has(key))) collapsed[key] = true;
     }
   }
+  // The rail sequence mirrors the client rules: group ids and loose agent
+  // ids (at most 240; a group's members are never seated), duplicates and
+  // the fallback id dropped, an empty sequence counts as none.
+  let order: string[] | undefined;
+  if (Array.isArray(raw.order)) {
+    const memberIds = new Set<string>();
+    for (const g of groups) for (const id of g.agentIds) memberIds.add(id);
+    const seen = new Set<string>();
+    const seq: string[] = [];
+    for (const item of raw.order.slice(0, 240)) {
+      const id = typeof item === 'string' ? item.trim() : '';
+      if (!id || id === OTHER_GROUP_ID || seen.has(id) || memberIds.has(id)) continue;
+      seen.add(id);
+      seq.push(id);
+    }
+    // An empty sequence is an explicit clear, preserved end to end: only an
+    // absent field means the sender predates the sequence (no opinion).
+    order = seq;
+  }
   const updatedAt = typeof raw.updatedAt === 'number' && Number.isSafeInteger(raw.updatedAt) && raw.updatedAt > 0 && raw.updatedAt <= Date.now() + MAX_SKEW_MS ? raw.updatedAt : 0;
-  return { groups, collapsed, updatedAt };
+  return order ? { groups, collapsed, order, updatedAt } : { groups, collapsed, updatedAt };
 }
 
 export function readRailLayout(): RailLayout | null {
