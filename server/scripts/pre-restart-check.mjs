@@ -221,16 +221,16 @@ async function messageRoundTrip(port) {
   await sleep(2500);
   ws.send(JSON.stringify({ type: 'send', chatId: CHAT, text: 'This is the pre-restart check. Reply with exactly the word CHECKED and nothing else.', clientMsgId }));
 
-  const echo = await next((m) => (m.type === 'event' && m.event?.type === '_user_echo' && m.event?.clientMsgId === clientMsgId)
-    || (m.type === '_user_echo' && m.clientMsgId === clientMsgId), 60_000, 'the message rendering in the event stream');
-  const echoSeq = echo.seq ?? echo.event?.seq ?? 0;
+  // Frames arrive as {type:'stream', event:{...}, seq, at} (register.ts dispatch).
+  const echo = await next((m) => m.type === 'stream' && m.event?.type === '_user_echo' && m.event?.clientMsgId === clientMsgId, 60_000, 'the message rendering in the event stream');
+  const echoSeq = typeof echo.seq === 'number' ? echo.seq : 0;
   if (!echoSeq) fail('the echo carried no seq — cannot prove fresh seqs');
 
-  const reply = await next((m) => m.type === 'result', 180_000, 'a completed turn (result)');
-  if (reply.is_error) fail('the test-lane turn failed: ' + JSON.stringify(reply).slice(0, 200));
+  const reply = await next((m) => m.type === 'stream' && m.event?.type === 'result', 180_000, 'a completed turn (result)');
+  if (reply.event?.is_error) fail('the test-lane turn failed: ' + JSON.stringify(reply.event).slice(0, 200));
   const text = collectAssistantText(frames);
   if (!/CHECKED/i.test(text)) fail(`the reply did not contain CHECKED (got: ${JSON.stringify(text.slice(0, 120))})`);
-  const replySeq = Math.max(...frames.filter((m) => typeof m.seq === 'number').map((m) => m.seq));
+  const replySeq = Math.max(...frames.filter((m) => typeof m.seq === 'number').map((m) => m.seq), echoSeq);
   if (replySeq <= echoSeq) fail(`no fresh seqs after the echo (echo ${echoSeq}, max ${replySeq}) — the Oct 7 duplicate-drop class`);
   try { ws.close(); } catch {}
   return { text, echoSeq, replySeq };
@@ -239,11 +239,11 @@ async function messageRoundTrip(port) {
 function collectAssistantText(frames) {
   let out = '';
   for (const m of frames) {
-    const inner = m.event ?? m;
-    if (m.type === 'stream_event' && inner?.event?.type === 'content_block_delta' && inner.event.delta?.type === 'text_delta') {
-      out += inner.event.delta.text ?? '';
+    if (m.type !== 'stream' || !m.event) continue;
+    if (m.event.type === 'stream_event' && m.event.event?.type === 'content_block_delta' && m.event.event.delta?.type === 'text_delta') {
+      out += m.event.event.delta.text ?? '';
     }
-    if (m.type === 'result' && typeof m.result === 'string') out += m.result;
+    if (m.event.type === 'result' && typeof m.event.result === 'string') out += m.event.result;
   }
   return out.trim();
 }
