@@ -78,9 +78,12 @@ try {
   if (liveLock !== tgtLock) fail('Lockfile differs from the live tree; run the build with a real install first.');
   fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(srcDir, 'node_modules'));
   fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(srcDir, 'server', 'node_modules'));
-  step('building the server...');
+  // The server compiles as a typecheck gate; the live boot runs the TS
+  // directly through tsx (scripts/start.sh -> npm start), and the side copy
+  // boots the exact same way.
+  step('typechecking the server...');
   run('npm', ['run', 'build', '--workspace', 'server'], srcDir, path.join(tmp, 'build.log'));
-  step('build green');
+  step('typecheck green');
 
   // 3. Copy state (selective: the copy must be fast; everything the check
   //    exercises — desk, roster, personas, compaction state, lane config —
@@ -107,7 +110,7 @@ try {
     RIVENDELL_SIDE_COPY: '1',
   };
   delete env.RIVENDELL_PREWARM_AGENTS;
-  child = spawn('node', ['dist/index.js'], { cwd: path.join(srcDir, 'server'), env, stdio: ['ignore', 'pipe', 'pipe'] });
+  child = spawn('node', ['--import', 'tsx', 'src/index.ts'], { cwd: path.join(srcDir, 'server'), env, stdio: ['ignore', 'pipe', 'pipe'] });
   const log = fs.createWriteStream(bootLog);
   child.stdout.pipe(log);
   child.stderr.pipe(log);
