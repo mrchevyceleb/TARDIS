@@ -692,7 +692,16 @@ export function startDeskHygieneScheduler(): boolean {
         // consumed, so a skipped nudge is a lost one).
         try {
           const sent = await deliverTeamMessage({ from: 'Desk', to: nudge.to, text: nudge.text, wait: false });
-          if (!sent.delivered) console.warn(`[desk-hygiene] quiet check to ${nudge.to} for ${nudge.card.id} not delivered: ${sent.reason}`);
+          if (!sent.delivered) {
+            console.warn(`[desk-hygiene] quiet check to ${nudge.to} for ${nudge.card.id} not delivered: ${sent.reason}`);
+            // A rate-limited delivery is transient: restore the mark so the
+            // nudge retries on the next tick instead of being consumed
+            // (every other failure keeps the mark — at-most-once).
+            if (typeof sent.reason === 'string' && /rate limit/i.test(sent.reason)) {
+              const { restoreCardCheckMark } = await import('./deskStore.ts');
+              await restoreCardCheckMark(nudge.card.id, nudge.kind);
+            }
+          }
         } catch (error) {
           console.warn(`[desk-hygiene] quiet check to ${nudge.to} for ${nudge.card.id} failed: ${(error as Error)?.message}`);
         }

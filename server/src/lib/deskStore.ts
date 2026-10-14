@@ -965,14 +965,20 @@ export function commentCard(id: string, text: unknown, author: DeskActor): Promi
  *  drop a nudge but never repeat one. An explicit delivery failure also
  *  keeps the mark (the same at-most-once trade as every existing hygiene
  *  piece: a nudge can be dropped but never repeated, and the log records
- *  the failure). A touch that sets a fresh nextCheckAt clears both marks.
+ *  the failure). The one exception is a rate-limited delivery, a transient
+ *  condition: the caller restores that mark (restoreCardCheckMark) so it
+ *  retries on the next tick. A touch that sets a fresh nextCheckAt clears
+ *  both marks.
  *  A dry-run sweep ({ dryRun: true }) returns the due nudges read-only:
  *  nothing is marked or written, so previewing never consumes a
  *  notification that would then never be delivered. */
-/** Delivery bound per sweep tick: deliverTeamMessage's global limiter is
- *  shared with every other sender, so a mass-silence burst marks and returns
- *  at most this many per tick; the rest stay unmarked for the next tick. */
-const MAX_SWEEP_DELIVERIES = 10;
+/** Delivery bound per sweep tick: deliverTeamMessage admits at most 8 per
+ *  sender/recipient pair per minute (PAIR_MAX) — every Chief escalation shares
+ *  the one Desk->Chief pair — plus a global 20/min shared with every other
+ *  sender. A mass-silence burst marks and returns at most this many per tick;
+ *  the rest stay unmarked for the next tick, and a rate-limited delivery
+ *  restores its mark (restoreCardCheckMark) so it retries too. */
+const MAX_SWEEP_DELIVERIES = 8;
 
 export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promise<Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>> {
   const dryRun = options.dryRun === true;
@@ -988,14 +994,17 @@ export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promi
   // empty roster as a sweep failure: the caller logs it, nothing is marked
   // or delivered.
   if (agents.length === 0) throw new Error('live roster unavailable (empty list) — sweep skipped, nothing marked');
-  const liveIds = new Set(agents.map((a) => a.id));
-  const liveNames = new Set(agents.map((a) => a.name));
+  // Case-insensitive like the rest of Desk routing: a legacy or externally
+  // repaired actor id/name with different casing is not a stale owner. The
+  // canonical roster id is returned, never the lowercased candidate.
+  const byLowerId = new Map(agents.map((a) => [a.id.toLowerCase(), a] as const));
+  const byLowerName = new Map(agents.map((a) => [a.name.toLowerCase(), a] as const));
   const resolveOwner = (card: DeskCard): string => {
     if (card.owner.kind !== 'agent') return 'chief-of-staff';
-    const candidate = typeof card.owner.id === 'string' && card.owner.id ? card.owner.id : card.owner.name;
-    if (!candidate) return 'chief-of-staff';
-    if (liveIds.has(candidate) || liveNames.has(candidate)) return candidate;
-    return 'chief-of-staff';
+    const raw = typeof card.owner.id === 'string' && card.owner.id ? card.owner.id : card.owner.name;
+    if (!raw) return 'chief-of-staff';
+    const hit = byLowerId.get(raw.toLowerCase()) ?? byLowerName.get(raw.toLowerCase());
+    return hit ? hit.id : 'chief-of-staff';
   };
   await mutate((data, now) => {
     const nowMs = Date.parse(now);
@@ -1054,6 +1063,24 @@ export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promi
       : due;
   });
   return due;
+}
+
+/** Undo a sweep mark so a rate-limited nudge retries on the next tick: the
+ *  one explicit delivery failure whose mark is restored (a transient,
+ *  retryable condition — every other failure or crash keeps the mark, the
+ *  documented at-most-once trade). No-op if the mark is already gone (a
+ *  concurrent touch cleared it). Fail-open. */
+export async function restoreCardCheckMark(cardId: string, kind: 'owner' | 'chief'): Promise<void> {
+  try {
+    await mutate((data) => {
+      const card = findCard(data, cardId);
+      if (kind === 'owner') delete card.nudgeAt;
+      else delete card.escalatedAt;
+      return card;
+    });
+  } catch {
+    // Fail-open: a missed restore leaves the at-most-once trade as-is.
+  }
 }
 
 export function deleteComment(cardId: string, commentId: string): Promise<DeskCard> {
