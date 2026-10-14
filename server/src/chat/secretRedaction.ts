@@ -108,10 +108,11 @@ export function redactSecrets(text: string): string {
     // (Oct 14 false positive: "8,000-token budget" was masked as a printed
     // key). Both flag styles are kept (-token=x, --token x) — only glued
     // compounds ("8,000-token cap", "café-token budget") are refused. The
-    // boundary is Unicode-aware (\w is ASCII-only) so non-ASCII letters
-    // cannot sneak a compound past it.
+    // boundary is Unicode-aware (\w is ASCII-only): letters, digits, marks
+    // (combining accents, composed or decomposed), and join controls all
+    // block it.
     .replace(
-      /((?<![\p{L}\p{N}_-])--?(?:(?:api-?)?key|token|secret|password))(=|\s+)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/giu,
+      /((?<![\p{L}\p{N}\p{M}_\u200C\u200D-])--?(?:(?:api-?)?key|token|secret|password))(=|\s+)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/giu,
       (_all, flag: string, separator: string, value: string) => `${flag}${separator}${preserveFence(value)}`,
     )
     .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[redacted jwt]')
