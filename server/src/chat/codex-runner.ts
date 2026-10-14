@@ -1025,14 +1025,16 @@ export class CodexSession {
         await setSessionId(this.cli, this.cwd, '', this.chatId);
         let retrySeed = seed;
         let retryAvailable = seedAvailable;
-        if (!retrySeed) {
+        // An unavailable primer is refetched even when nonempty (a partial
+        // primer: history without the commitments half), and never becomes
+        // a confirmed override: the window below stays open so the next
+        // turn retries the commitments half.
+        if (!retrySeed || !retryAvailable) {
           const retryStatus = await peekEnginePrimerThroughSeqWithStatus(this.logKey, historyThroughSeq, fallbackHistory)
             .catch(() => ({ primer: '', available: false }));
           retrySeed = retryStatus.primer;
           retryAvailable = retryStatus.available;
         }
-        // A retry primer the store could not confirm keeps the window open:
-        // the next turn re-seeds instead of running the retry unseeded.
         this.seedWindowOnNextTurn = !retryAvailable;
         this.recoverContextOnNextTurn = false;
         this.busy = false;
@@ -1103,14 +1105,12 @@ export class CodexSession {
           );
         }
       } else if (this.threadId) {
-        // Acknowledge a CONFIRMED seed, not a failed-open one: a fresh thread
-        // with a confirmed-empty primer (no commitments, no history) still
-        // consumes the window seed here — or the second turn would re-seed
-        // the now-warm session with the first turn's history — but an empty
-        // primer the store could not confirm leaves the window open, so the
-        // next turn retries the seed instead of silently skipping the
-        // agent's commitments for the whole warm session.
-        if (seed || (seedWindow && seedAvailable)) await this.ackWindowSeed();
+        // Acknowledge a CONFIRMED seed only: a real seed, or a confirmed-empty
+        // one (the second turn must not re-seed a warm session). An unconfirmed
+        // primer — empty OR nonempty-partial (history without the commitments
+        // half) — leaves the window open, so the next turn retries the
+        // commitments instead of the warm session silently losing them.
+        if (seedAvailable && (seed || seedWindow)) await this.ackWindowSeed();
         await this.persistThreadId(this.threadId);
       }
       this.busy = false;
