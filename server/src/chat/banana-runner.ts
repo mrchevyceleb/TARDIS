@@ -59,6 +59,9 @@ const synth = (prefix: string) => `${prefix}_${nextSyntheticId++}`;
 type ChatImage = { mediaType: string; base64: string };
 type BananaSessionOptions = {
   recoverContextOnNextTurn?: boolean;
+  /** Seed the primer on the first send. freshStart passes true so a reset
+   *  thread still receives its agent's code-carried open commitments. */
+  seedFirst?: boolean;
   cli?: CliKind;
   durableHistory?: PersistedEvent[];
 };
@@ -157,6 +160,10 @@ type BananaTurnState = {
   peerDeliveryId?: string;
   /** True when this prompt was prepended with an event-log recovery recap. */
   recoveryRecapUsed: boolean;
+  /** A seed was requested this turn (even if the primer came back empty):
+   *  consuming the ATTEMPT on acceptance stops a warm native session from
+   *  being re-seeded with the first turn on the next send. */
+  seedRequested: boolean;
   /** True once this turn has actually emitted or observed a tool_use part. */
   sawToolUse: boolean;
   /** True if the current opencode assistant message emitted visible text/tool content. */
@@ -2400,10 +2407,26 @@ export class BananaSession {
     return this.seedWindowOnNextTurn;
   }
 
-  private ackWindowSeed(): Promise<void> {
-    if (!this.seedWindowOnNextTurn) return Promise.resolve();
+  private ackWindowSeed(): void {
+    if (!this.seedWindowOnNextTurn) return;
     this.seedWindowOnNextTurn = false;
-    return clearRotation(this.logKey);
+    // The seed this turn was already delivered, so it stays consumed. A
+    // failed state write (clearRotation resolves false - mutateState never
+    // rejects) retries the CLEAR with bounded backoff; re-arming the seed
+    // instead would inject the full primer into every warm turn while the
+    // write keeps failing. A still-uncleared marker re-seeds the next spawn
+    // once, so nothing ever runs blind.
+    const retryClear = (attempt: number) => {
+      // Lifecycle- and cycle-bound: a dead session, or a newer window-seed
+      // cycle on this one (a fresh bank re-arms the flag before any retry
+      // fires), owns the marker now - an old retry must never clear newer
+      // debt.
+      if (this.dead || this.seedWindowOnNextTurn) return;
+      clearRotation(this.logKey).then((cleared) => {
+        if (!cleared && attempt < 3) setTimeout(() => retryClear(attempt + 1), 200 * 2 ** attempt);
+      });
+    };
+    retryClear(0);
   }
 
   /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
@@ -2471,6 +2494,7 @@ export class BananaSession {
     this.logKey = logKeyFor(this.cli, cwd, chatId);
     this.threadId = threadId;
     this.recoverContextOnNextTurn = opts.recoverContextOnNextTurn === true;
+    this.seedWindowOnNextTurn = opts.seedFirst === true;
 
     // Mirror the claude/codex path: rehydrate eventLog from disk so a server
     // restart between turns doesn't strand a reconnecting client.
@@ -2920,6 +2944,7 @@ export class BananaSession {
       promptAccepted: false,
       peerDeliveryId: opts.peerDeliveryId,
       recoveryRecapUsed: false,
+      seedRequested: false,
       sawToolUse: false,
       currentMessageVisibleContent: false,
       currentMessageHiddenCompactionSummary: false,
@@ -3012,6 +3037,9 @@ export class BananaSession {
     } else if (recoverContextThisTurn) {
       this.recoverContextOnNextTurn = false;
     }
+    // The seed attempt is consumed on prompt acceptance even when the primer
+    // was empty (fresh thread, no commitments): markPromptAccepted acks it.
+    if (seedWindow) this.turn.seedRequested = true;
     const localDirective = this.cli === 'banana-local'
       ? localThinkingDirective(requestedModelId, opts?.effort)
       : null;
@@ -3292,7 +3320,7 @@ export class BananaSession {
       });
     }
     state.promptAccepted = true;
-    if (state.recoveryRecapUsed) {
+    if (state.recoveryRecapUsed || state.seedRequested) {
       this.recoverContextOnNextTurn = false;
       this.ackWindowSeed();
     }
@@ -4102,10 +4130,14 @@ export async function getOrCreateBananaSession(opts: {
   const logKey = logKeyFor(cli, cwd, chatId);
   await flushEventLog(logKey);
   const durableHistory = loadEventLogForCompactionSync(logKey);
+  // Banana's native session is always new (no resume id concept), so it
+  // always seeds the primer on its first send - claude-family parity - and
+  // with it the agent's code-carried open commitments.
   const session = new BananaSession(cwd, chatId, null, {
     recoverContextOnNextTurn,
     cli,
     durableHistory,
+    seedFirst: true,
   });
   bananaSessions.set(key, session);
   return session;
@@ -4155,7 +4187,9 @@ export async function freshStartBanana(opts: {
   // failure leaves the old thread coherent and Fresh can be retried safely.
   await clearThreadMemory(logKey, chatId);
   await clearEventLog(logKey);
-  const session = new BananaSession(cwd, chatId, null, { cli, durableHistory: [] });
+  // seedFirst: a reset thread still seeds the primer on its first send, so
+  // the agent's code-carried open commitments survive a Fresh.
+  const session = new BananaSession(cwd, chatId, null, { cli, durableHistory: [], seedFirst: true });
   bananaSessions.set(key, session);
   return session;
 }

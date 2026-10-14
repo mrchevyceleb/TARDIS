@@ -409,7 +409,10 @@ const optionalMcpServers: Record<string, {
   args: string[];
   env?: Record<string, string>;
 }> = {};
-if (ASSISTANT_MCP_SERVER_URL && existsSync(ASSISTANT_MCP_PROXY)) {
+// A side-copy boot (pre-restart check) mounts no optional proxies: the
+// probe engine must never reach assistant-mcp (Railway) or the browser MCP.
+const OPTIONAL_MCP_DISABLED = process.env.RIVENDELL_SIDE_COPY === '1';
+if (!OPTIONAL_MCP_DISABLED && ASSISTANT_MCP_SERVER_URL && existsSync(ASSISTANT_MCP_PROXY)) {
   optionalMcpServers['assistant-mcp'] = {
     type: 'stdio',
     command: 'node',
@@ -417,7 +420,7 @@ if (ASSISTANT_MCP_SERVER_URL && existsSync(ASSISTANT_MCP_PROXY)) {
     env: { MCP_SERVER_URL: ASSISTANT_MCP_SERVER_URL },
   };
 }
-if (BROWSER_MCP_ENTRY && existsSync(BROWSER_MCP_ENTRY)) {
+if (!OPTIONAL_MCP_DISABLED && BROWSER_MCP_ENTRY && existsSync(BROWSER_MCP_ENTRY)) {
   optionalMcpServers['rivendell-browser'] = {
     type: 'stdio',
     command: 'node',
@@ -430,8 +433,8 @@ const ASSISTANT_MCP_CONFIG = JSON.stringify({ mcpServers: optionalMcpServers });
  *  themselves (the Pi bridge): the operator's optional backends (assistant-mcp
  *  proxy, browser) plus the built-in team and device servers. Same set the
  *  claude binary receives through --mcp-config. */
-export function laneMcpServers(agentName?: string, backgroundLane = false, owner?: string): Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> {
-  return { ...optionalMcpServers, ...localMcpServers(agentName, { backgroundLane, owner }) };
+export function laneMcpServers(agentName?: string, backgroundLane = false, owner?: string, agentId?: string): Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> {
+  return { ...optionalMcpServers, ...localMcpServers(agentName, { backgroundLane, owner, agentId }) };
 }
 
 
@@ -441,13 +444,18 @@ export function laneMcpServers(agentName?: string, backgroundLane = false, owner
  *  reachable while their desktop app is open). */
 let localMcpLogged = false;
 function withTeamMcp(configJson: string, cwd: string, chatId: string): string {
+  // A side-copy boot (pre-restart check) mounts no built-in MCPs either: the
+  // probe lane must not reach rivendell-team, rivendell-device or the office
+  // tools. With the optional proxies already gated, --strict-mcp-config then
+  // leaves the probe with zero MCP servers.
+  if (OPTIONAL_MCP_DISABLED) return configJson;
   try {
     if (!localMcpLogged) {
       localMcpLogged = true;
       console.log('[chat] built-in team and computer MCPs enabled');
     }
     const cfg = JSON.parse(configJson) as { mcpServers: Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> };
-    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name, { replyNow: true, backgroundLane: isBackgroundChatId(chatId), owner: computerOwnerKey(cwd, chatId) }), officeMcpServers());
+    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name, { replyNow: true, backgroundLane: isBackgroundChatId(chatId), owner: computerOwnerKey(cwd, chatId), agentId: agentForChatId(chatId)?.id }), officeMcpServers());
     return JSON.stringify(cfg);
   } catch {
     return configJson;
@@ -498,6 +506,13 @@ type ZaiCutDecision = { outcome: ZaiTurnOutcome; cut: ProviderCut; origin: TurnO
  *  of handoffs cannot starve the agent of any uninterrupted work. A person's
  *  message is never held off. */
 const PEER_BOUNDARY_INTERRUPT_GAP_MS = 60_000;
+
+/** How long a scheduled, wake- or job-result-started (automation) turn runs
+ *  before a teammate's handoff may end it at a tool boundary. Tim's
+ *  job-started turns ran 40+ minutes with Riley's handoffs queued the whole
+ *  time because automation turns were never interruptible for peers; the
+ *  grace only protects a just-started turn's chance to report. */
+const PEER_AUTOMATION_TURN_GRACE_MS = 60_000;
 
 /** Prepended to the turn that follows a boundary interrupt. */
 const PAUSED_FOR_MESSAGE_NOTE = '<rivendell-steer>Your previous turn was paused right after a tool call finished, so the message below reaches you as a normal message. Answer it first. Then, unless it changes the plan, carry on with what you were doing; the transcript above shows where you stopped.</rivendell-steer>';
@@ -766,7 +781,13 @@ class ClaudeSession {
       // Block the tool so the model asks inline in plain text, which the user can
       // actually reply to in the composer. (Same fix as samwise-2.)
       '--disallowedTools', disallowedTools,
-      '--dangerously-skip-permissions',
+      // A side-copy probe never gets the permission bypass: --tools ''
+      // disables every built-in tool outright, and auto-denied permission
+      // prompts are the second layer (it only needs to reply, never to act).
+      // A normal lane keeps the full toolbox and the bypass.
+      ...(OPTIONAL_MCP_DISABLED
+        ? ['--tools', '', '--permission-prompts', 'none']
+        : ['--dangerously-skip-permissions']),
       '--model', zaiCredential?.wireModel ?? this.spawnModel,
       // The claude binary's --effort has no `minimal`; only the Pi harness does.
       '--effort', this.spawnEffort === 'minimal' ? 'low' : this.spawnEffort,
@@ -1698,12 +1719,14 @@ class ClaudeSession {
    *  generation). If the turn finishes on
    *  its own first, nothing is interrupted. A scheduled or wake-started
    *  (automation) turn ends for a person's message too — immediately while
-   *  nothing is in flight, or at a tool boundary — but
-   *  is left to finish for a teammate's handoff. Returns a release function, or
-   *  null when there is no turn to end. */
+   *  nothing is in flight, or at a tool boundary — and a teammate's handoff
+   *  may end it as well, at a tool boundary only and never mid-tool, after a
+   *  short grace (PEER_AUTOMATION_TURN_GRACE_MS) so a just-started job-result
+   *  turn still gets to report. Returns a release function, or null when
+   *  there is no turn to end. */
   requestBoundaryInterrupt(opts: { human?: boolean } = {}): (() => void) | null {
     const human = opts.human === true;
-    if (this.turnStartedAt === null || (this.automationTurn && !human) || this.disposed || this.child.exitCode !== null) return null;
+    if (this.turnStartedAt === null || this.disposed || this.child.exitCode !== null) return null;
     this.boundaryInterruptWanted = true;
     this.boundaryWaiters += 1;
     if (human) this.boundaryHumanWaiters += 1;
@@ -2130,17 +2153,24 @@ class ClaudeSession {
    *  from compact+50, the same way a context rotation does. */
   /** All in one tick, so no turn can be admitted onto this child in between;
    *  the banked rotation alone already forces a seed if the id write fails. */
-  private reseedAfterCompactFailure(): void {
+  private reseedAfterCompactFailure(lengthRejected: boolean): void {
     if (this.turnStartedAt !== null || this.disposed) return;
     bankRotation(this.logKey);
-    // Background work keeps this child; its next failed turn retires it.
-    if (this.hasBackgroundWork()) return;
+    // A length-rejected session can never serve another turn: any new
+    // prompt, including a background task's completion wake, hits the same
+    // oversized context. Work on that child is already undeliverable, so it
+    // is retired now (the ended note names what went with it) and the next
+    // send spawns fresh from the banked rotation. Oct 13: deferring the
+    // reseed behind background work held Maria's fireworks lane dead through
+    // 14 straight failed turns. A failed compact is different: that child
+    // can still serve turns, so its reseed keeps deferring behind live work.
+    if (this.hasBackgroundWork() && !lengthRejected) return;
     setSessionId(this.cli, this.cwd, '', this.chatId).catch((err) => {
       console.warn(`[chat ${this.cli}] could not clear the session after a failed compaction:`, (err as Error).message);
     });
     // A send waiting on the reseed barrier follows to the fresh process.
     this.contextRotated = true;
-    this.shutdown('compact-failed');
+    this.shutdown(lengthRejected ? 'length-rejected-reseed' : 'compact-failed');
   }
 
   awaitContextMaintenance(): Promise<void> { return this.contextMaintenance ?? Promise.resolve(); }
@@ -2314,7 +2344,15 @@ class ClaudeSession {
           // hold a message back.
           if (this.hasInterruptHazard()) {
             this.boundaryInterruptWanted = false;
-          } else if (this.boundaryHumanWaiters > 0 || now - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS) {
+          } else if (
+            (this.boundaryHumanWaiters > 0 || now - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS)
+            // A teammate's handoff may end an automation (scheduled, wake- or
+            // job-result-started) turn only once it has run the grace, so a
+            // turn that just started still gets to report. A person's message
+            // never waits out the grace. Inside the grace the request stays
+            // armed and the next tool boundary after it fires.
+            && (this.boundaryHumanWaiters > 0 || !this.automationTurn || now - (this.turnStartedAt ?? 0) >= PEER_AUTOMATION_TURN_GRACE_MS)
+          ) {
             // A teammate inside the hold-off window stays armed for the next
             // tool boundary instead.
             this.boundaryInterruptWanted = false;
@@ -2326,6 +2364,10 @@ class ClaudeSession {
               if (this.boundaryWaiters === 0) return;
               // Another tool started before this ran: the request still stands.
               if (this.activeToolIds.size > 0) { this.boundaryInterruptWanted = true; return; }
+              // A background subagent can also have started between the outer
+              // check and this deferred fire. Same stand-down as that check:
+              // the turn is left to finish and the message starts the next one.
+              if (this.hasInterruptHazard()) { this.boundaryInterruptWanted = false; return; }
               this.lastBoundaryInterruptAt = Date.now();
               this.pausedForMessage = true;
               void this.interrupt('message-boundary').then((kept) => {
@@ -2598,14 +2640,17 @@ class ClaudeSession {
       const reseed = (compactFailed || lengthRejected) && !authFailPending && !zaiStale && !zaiCut;
       const rotationDue = !reseed && isClaudeFamilyCli(this.cli)
         && (this.rotateAfterNativeCompact || (!resultFailed && this.rotationWanted()));
-      const housekeeping = async () => {
+      const rotateIfDue = async (): Promise<boolean> => {
         if (seeded && !failed) await clearRotation(this.logKey);
-        if (!rotationDue || !(await this.rotateContextAtBoundary())) await this.maybeCompact();
+        return rotationDue && await this.rotateContextAtBoundary();
+      };
+      const housekeeping = async () => {
+        if (!(await rotateIfDue())) await this.maybeCompact();
       };
       // Installed before turnEnd, so a send admitted by a turnEnd subscriber
       // waits for the reseed instead of landing on the oversized session.
       if (reseed) {
-        this.contextMaintenance = Promise.resolve().then(() => this.reseedAfterCompactFailure())
+        this.contextMaintenance = Promise.resolve().then(() => this.reseedAfterCompactFailure(lengthRejected))
           .finally(() => { this.contextMaintenance = null; });
         // The compact failure's one automatic re-run (the copy above already
         // promised it). lengthRejected stays manual: its oversized prompt may
@@ -2625,7 +2670,13 @@ class ClaudeSession {
         }
       }
       if (rotationDue) {
-        this.contextMaintenance = Promise.resolve().then(housekeeping).catch((err) => {
+        // Only the rotation holds sends. When it can't rotate (background
+        // work), the durable compact is a slow model call that keeps the warm
+        // session, so it runs unbarriered: Oct 12 2026 it held Riley's lane
+        // (every hello and send) for four minutes and Matt's messages looked lost.
+        this.contextMaintenance = Promise.resolve().then(rotateIfDue).then((rotated) => {
+          if (!rotated) void this.maybeCompact();
+        }).catch((err) => {
           console.warn(`[context-rotation] ${this.logKey}: deferred after maintenance failure`, (err as Error).message);
         }).finally(() => { this.contextMaintenance = null; });
       }
@@ -3349,7 +3400,11 @@ export async function freshStart(opts: {
   await clearThreadMemory(logKey, chatId);
   await clearEventLog(logKey);
   if (opts.cli === 'xai') await ensureXaiProxy();
-  const fresh = await spawnSession(opts.cli, cwd, chatId, null, key, 0, opts.model, opts.effort);
+  // seedFirst=true: the fresh session still seeds the primer on its first
+  // turn, so the agent's code-carried open commitments survive a Fresh (the
+  // compact and log the primer normally carries were just wiped, so the seed
+  // is exactly the commitments block).
+  const fresh = await spawnSession(opts.cli, cwd, chatId, null, key, 0, opts.model, opts.effort, true);
   if (fresh instanceof ClaudeSession) {
     fresh.noteBackgroundWorkEndedBefore('stop', stoppedBeforeFresh);
     fresh.noteBackgroundWorkEndedBefore('fresh', endedByFresh);

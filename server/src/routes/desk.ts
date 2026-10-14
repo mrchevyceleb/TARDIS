@@ -286,6 +286,13 @@ function answerRecipient(todo: DeskTodo, card: DeskCard | undefined): Agent | un
   return match(todo.from) ?? match(cardAgent) ?? agents.find((a) => a.id === 'chief-of-staff');
 }
 
+/** Matt speaks individually with Becca and Riley only: answer copies to the
+ *  Chief of Staff skip those two, and skip the Chief's own answers. */
+const BECCA_OR_RILEY = ['becca', 'riley'];
+const isBeccaOrRiley = (actor: { id?: string; name?: string }): boolean =>
+  BECCA_OR_RILEY.includes((actor.id ?? '').trim().toLowerCase())
+  || BECCA_OR_RILEY.includes((actor.name ?? '').trim().toLowerCase());
+
 function answerMessage(todo: DeskTodo, recipient: Agent, card: DeskCard | undefined): string {
   const answer = todo.answer!;
   const askedByRecipient = todo.from.kind === 'agent'
@@ -332,14 +339,40 @@ export async function deliverDeskAnswer(todoId: string, deliver: TeamMessenger =
       notice = { delivered: false, to: recipient.name, reason: 'delivery failed' };
     }
   }
+  // Record the delivery outcome FIRST: a hanging or crashed copy below can
+  // never leave a delivered answer marked undelivered (which would re-send it).
+  let recorded: DeskTodo | undefined;
   try {
-    return { ...notice, todo: (await setAnswerDelivery(todo.id, notice.delivered ? 'sent' : 'failed', todo.answer.sendingAt)) ?? todo };
+    recorded = (await setAnswerDelivery(todo.id, notice.delivered ? 'sent' : 'failed', todo.answer.sendingAt)) ?? todo;
   } catch (error) {
     // The claim stays on disk and goes stale, so the notifier delivers this
     // answer again later; the Desk keeps showing it as not delivered.
     console.warn(`[desk] could not record the answer delivery for ${todo.id}: ${(error as Error).message}`);
-    return { ...notice, todo };
   }
+  // Best-effort copy to the Chief of Staff so answers to other agents are
+  // never missed, and only once the answer has actually gone out: the copy
+  // says it went out, so a failed main delivery must not produce one (the
+  // notifier's retry that finally lands will). A failed copy never changes
+  // the item's delivery status and never causes a re-send.
+  if (recipient && notice.delivered && recipient.id !== 'chief-of-staff' && !isBeccaOrRiley(todo.from) && !isBeccaOrRiley(recipient)) {
+    const askerName = todo.from.kind === 'agent' ? todo.from.name : DESK_OWNER_NAME;
+    const answer = todo.answer!;
+    const answerText = answer.choice
+      ? (answer.text ? `${answer.choice}; ${answer.text}` : answer.choice)
+      : (answer.text ?? '');
+    try {
+      await deliver({
+        from: DESK_OWNER_NAME,
+        to: 'chief-of-staff',
+        text: `Copy for Max: ${DESK_OWNER_NAME} answered ${askerName}'s Needs-you item [desk:${todo.id}] "${todo.title}". Answer: ${answerText}. It went to ${recipient.name}; make sure they act on it.`,
+        wait: false,
+        source: 'desk',
+      });
+    } catch (error) {
+      console.warn(`[desk] could not copy the answer to ${todo.id} to the Chief of Staff: ${(error as Error).message}`);
+    }
+  }
+  return recorded ? { ...notice, todo: recorded } : { ...notice, todo };
 }
 
 /** POST /todos/:id/answer. A factory so a scratch run can pass a stub

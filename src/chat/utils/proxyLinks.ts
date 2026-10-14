@@ -278,19 +278,22 @@ export function openWorkspaceLink(relPath: string, kind: 'doc' | 'folder', onFol
 
 function openWorkspaceLinkInBrowser(relPath: string, kind: 'doc' | 'folder', allowNativeScheme: boolean, onFolderFallback?: () => void): void {
   const { browserUrl, nativeUrl } = buildLinkUrls(relPath, kind);
+  // A folder never gambles on this PC's local copy from a browser: the
+  // OneDrive copy can be stale or missing entirely (a folder the ship just
+  // made), and a `rivendell://` fire that fails is completely silent. The
+  // closable in-app list is always current (the ship serves it), so it comes
+  // first; the native scheme stays the last resort when no list can be shown.
+  if (kind === 'folder') {
+    if (onFolderFallback) { onFolderFallback(); return; }
+    if (allowNativeScheme && isWindowsPlatform()) { fireNativeScheme(nativeUrl); return; }
+    showToast('That folder cannot be opened from here.');
+    return;
+  }
   if (allowNativeScheme && isWindowsPlatform()) {
     fireNativeScheme(nativeUrl);
     return;
   }
-  if (kind === 'doc') {
-    window.open(browserUrl, '_blank', 'noopener,noreferrer');
-    return;
-  }
-  // A folder that cannot open on this PC used to push the app into the legacy
-  // /library route, a screen with no way back. Never navigate the app away:
-  // show a closable file list instead.
-  if (onFolderFallback) onFolderFallback();
-  else showToast('That folder cannot be opened from here.');
+  window.open(browserUrl, '_blank', 'noopener,noreferrer');
 }
 
 // Workspace and OneDrive paths commonly contain spaces ("Client Dashboards/
@@ -443,6 +446,90 @@ export function parseWorkspaceMentionText(value: string): { kind: 'doc' | 'folde
   const path = normalizeWorkspacePath(rel);
   if (path === null) return null;
   return { kind: inferKind(path), path, display: toWindowsDisplay(path) };
+}
+
+/** One linked workspace mention in plain text: the span it covers in the
+ *  source (at..end) plus the proxy-link target chat would build for it. */
+export type WorkspaceMentionSpan = {
+  at: number;
+  end: number;
+  kind: 'doc' | 'folder';
+  path: string;
+  display: string;
+};
+
+// The `[label](rivendell-doc:…)` form parseWorkspaceMentionText accepts,
+// unanchored so it can be found anywhere in plain text. One level of
+// balanced parentheses is allowed inside the href: encodeURIComponent
+// keeps parentheses, so `Report (1).pdf` encodes to `Report%20(1).pdf`
+// and a class stopping at the first ')' would truncate the link. The
+// payload may also be empty (a workspace-root link): parseProxyHref still
+// validates every target, and chat's own md renderer keeps such links
+// whole, so the Desk tokenizer must too.
+const PROXY_MD_LINK_RUN = /\[([^\]]+)\]\((rivendell-(?:doc|folder):(?:[^()]|\([^()]*\))*)\)/g;
+
+// A proxy-markdown link the strict run above cannot match at all (nested
+// parentheses in the href, or no closing paren before the line ends). Not a
+// link source: only the region it shields, so the raw mention pass cannot
+// turn a workspace-looking label inside a malformed candidate into a
+// partial link. Bounded by the first ')' or the newline, so a raw mention
+// after the broken region on the same line still linkifies.
+const PROXY_MD_LINK_SHAPE = /\[[^\]\n]*\]\(rivendell-(?:doc|folder):[^)\n]*/g;
+
+/** The same workspace-mention matches annotatePlainWorkspaceMentions turns
+ *  into markdown links, as spans over the original text (for plain-text
+ *  surfaces like the Desk's Needs-you detail, which renders React nodes,
+ *  not markdown). Raw mentions are found by chat's own MENTION_PATTERN, so
+ *  paths with spaces and quoted or parenthesized paths match exactly the
+ *  way they match in chat, and trailing punctuation and prose stay outside
+ *  the span. An explicit `[label](rivendell-doc:…)` link is kept whole
+ *  (label, href and closing paren inside the span) instead of re-annotated,
+ *  and raw mentions inside one are skipped — including inside a candidate
+ *  whose href is malformed or not a workspace path: those fail safe as
+ *  plain text rather than re-linkifying their label. */
+export function scanWorkspaceMentionSpans(text: string): WorkspaceMentionSpan[] {
+  const spans: WorkspaceMentionSpan[] = [];
+  // Regions the raw mention pass must leave alone whether or not they became
+  // links: every proxy-link-shaped candidate in the text.
+  const reserved: Array<{ at: number; end: number }> = [];
+  for (const match of text.matchAll(PROXY_MD_LINK_RUN)) {
+    const at = match.index ?? 0;
+    reserved.push({ at, end: at + match[0].length });
+    // Parsed from the captured href, not through parseWorkspaceMentionText:
+    // its anchored md-link form stops at the first ')' and would reject the
+    // parenthesized hrefs this run now matches.
+    const target = parseProxyHref(match[2]);
+    if (!target || target.kind === 'machine') continue;
+    spans.push({ at, end: at + match[0].length, kind: target.kind, path: target.path, display: match[1] || toWindowsDisplay(target.path) });
+  }
+  // Candidates the strict run above cannot match at all keep their region
+  // reserved too: a rejected link fails safe as plain text, its label is
+  // not raw material for the mention pass.
+  for (const match of text.matchAll(PROXY_MD_LINK_SHAPE)) {
+    const at = match.index ?? 0;
+    reserved.push({ at, end: at + match[0].length });
+  }
+  if (mentionsWorkspace(text)) {
+    for (const match of text.matchAll(MENTION_PATTERN)) {
+      const raw = match[0];
+      const at = match.index ?? 0;
+      const rawEnd = at + raw.length;
+      if (reserved.some((region) => at < region.end && region.at < rawEnd)) continue;
+      const trailingMatch = raw.match(TRAILING_PUNCT);
+      const trailing = trailingMatch ? trailingMatch[0] : '';
+      const cleanMatch = trailing ? raw.slice(0, raw.length - trailing.length) : raw;
+      const rel = extractRelativePath(cleanMatch);
+      if (rel === null) continue;
+      const pathParts = splitPathAndTrailingText(rel);
+      const finalRel = normalizeWorkspacePath(pathParts.path);
+      if (finalRel === null) continue;
+      const looksLikeFile = finalRel.length > 0 && /\.[A-Za-z0-9]+$/.test(finalRel.split('/').pop() ?? '');
+      const end = rawEnd - trailing.length - pathParts.trailingText.length;
+      if (end <= at) continue;
+      spans.push({ at, end, kind: looksLikeFile ? 'doc' : 'folder', path: finalRel, display: toWindowsDisplay(finalRel) });
+    }
+  }
+  return spans;
 }
 
 function annotatePlainWorkspaceMentions(input: string): string {

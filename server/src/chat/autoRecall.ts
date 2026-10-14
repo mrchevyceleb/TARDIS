@@ -18,8 +18,13 @@ import { readdir, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { callMcp } from '../lib/mcp.ts';
 import { readDesk } from '../lib/deskStore.ts';
+import { STATE_DIR } from '../config.ts';
+import { agentForChatId } from './agents.ts';
 import { isAgentThread, bareChatId } from './threadKey.ts';
 import { claudeConfigDir, encodeClaudeProject } from './threadWindow.ts';
+
+/** The per-agent greppable history folder (transcript.md lives here). */
+const AGENT_NOTES_DIR = join(STATE_DIR, 'agent-notes');
 
 /** Hard ceiling for the whole recall step. Past it the turn proceeds without
  *  the block — never blocked by a slow search. */
@@ -39,11 +44,24 @@ const HIT_TITLE_CHARS = 160;
 const BLOCK_CHAR_BUDGET = 6000;
 const DONE_WINDOW_DAYS = 30;
 const MEMORY_FILES_CAP = 80;
-const MEMORY_FILE_CHARS = 12_000;
+/** The whole memory file is scanned and its links discovered, so nothing is
+ *  silently unread (Oct 13: a 203-line MEMORY.md loaded only its first 165
+ *  lines, and every link past that point was never even found). The cap only
+ *  bounds a pathological runaway file; real memory notes are tens of KB.
+ *  Injection stays capped (best-matching lines, HIT_EXCERPT_CHARS), so the
+ *  bigger scan adds zero per-turn context. */
+const MEMORY_FILE_CHARS = 128_000;
 /** Byte ceiling for one memory-file read (4 bytes per char is the worst
  *  case): a runaway file can never block the turn or outrun the deadline. */
 const MEMORY_FILE_BYTES = MEMORY_FILE_CHARS * 4;
 const MCP_HITS_TAKE = 3;
+/** Source 4: the agent's own transcript. A transcript is huge, so its match
+ *  bar is stronger than every other source (three distinctive tokens), it
+ *  gets its own deadline slice, and at most two blocks ride the block. */
+const TRANSCRIPT_BUDGET_MS = 900;
+const TRANSCRIPT_BYTES = 24 * 1024 * 1024;
+const TRANSCRIPT_MIN_TOKENS = 3;
+const TRANSCRIPT_HITS_TAKE = 2;
 
 /** Only Claude-family CLIs keep a project memory directory. */
 const CLAUDE_MEMORY_CLIS = new Set(['claude', 'assistant', 'zai', 'xai', 'fireworks', 'openrouter']);
@@ -211,6 +229,71 @@ async function orderedMemoryFiles(dir: string): Promise<string[]> {
   return [memoryName, ...linkedNames, ...rest];
 }
 
+/** Source 4: the agent's own transcript (the greppable history folder), so
+ *  older detail that shorter rolling compacts cut comes back when a turn
+ *  needs it. Chronological message blocks separated by blank lines, matched
+ *  on token overlap with a stronger bar, excerpts from the best-matching
+ *  lines, bounded bytes and its own deadline, fail-open like every source. */
+async function transcriptHits(chatId: string, queryTokens: ReadonlySet<string>): Promise<RecallHit[]> {
+  const agent = agentForChatId(bareChatId(chatId));
+  if (!agent) return [];
+  const path = join(AGENT_NOTES_DIR, agent.id, 'transcript.md');
+  let content: string;
+  let mtime = 0;
+  try {
+    const fh = await open(path, 'r');
+    try {
+      // Read from the start of the file, deliberately: the oldest material
+      // is where rolling compaction has cut detail the hardest, while the
+      // newest turns are still in the live window and the freshest compacts.
+      // Past the byte cap, the oldest prefix is what this source serves.
+      const buf = Buffer.alloc(TRANSCRIPT_BYTES);
+      const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+      content = buf.subarray(0, bytesRead).toString('utf8');
+      mtime = (await fh.stat()).mtimeMs;
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return [];
+  }
+  const blocks = content.split(/\n\n+/);
+  const hits: RecallHit[] = [];
+  const deadline = Date.now() + TRANSCRIPT_BUDGET_MS - 100;
+  const yieldNow = () => new Promise<void>((resolve) => setImmediate(resolve));
+  let order = 0;
+  for (const block of blocks) {
+    // Cooperative deadline and event-loop yields: a 20MB scan must never
+    // block the runner's turn, and the outer withDeadline timer can only
+    // fire if this loop actually yields.
+    if ((order & 127) === 0) {
+      if (Date.now() > deadline) break;
+      await yieldNow();
+    }
+    const rawScore = matchCount(queryTokens, block.toLowerCase());
+    if (rawScore >= TRANSCRIPT_MIN_TOKENS) {
+      const header = (block.split('\n')[0] ?? '').replace(/[*#]/g, '').trim().slice(0, HIT_TITLE_CHARS) || agent.id;
+      hits.push({
+        source: `notes:${agent.id}/transcript.md`,
+        title: header,
+        excerpt: excerptAround(block, queryTokens),
+        // Score capped just above the admission bar: a long verbose block
+        // must not outrank and evict the other sources' authoritative hits
+        // from the shared five-slot pool by raw verbosity.
+        score: Math.min(rawScore, TRANSCRIPT_MIN_TOKENS + 2),
+        // Epoch-compatible recency derived from the file's mtime with the
+        // chronological block order preserved: later blocks sort newer on
+        // a score tie, and the values live in the same band as every other
+        // source's timestamps.
+        recency: mtime - (blocks.length - order),
+      });
+    }
+    order += 1;
+  }
+  hits.sort((a, b) => b.score - a.score || b.recency - a.recency);
+  return hits.slice(0, TRANSCRIPT_HITS_TAKE);
+}
+
 /** Source 2: Desk cards in every column, plus the last 30 days of done,
  *  matched on title plus the last comment. */
 async function deskCardHits(queryTokens: ReadonlySet<string>): Promise<RecallHit[]> {
@@ -228,15 +311,25 @@ async function deskCardHits(queryTokens: ReadonlySet<string>): Promise<RecallHit
       const since = Date.parse(card.columnSince ?? '') || Date.parse(card.updatedAt ?? '') || 0;
       if (since < cutoff) continue;
     }
-    const lastComment = Array.isArray(card.comments) ? card.comments[card.comments.length - 1] : undefined;
-    const hay = `${card.title ?? ''}\n${lastComment?.text ?? ''}`.toLowerCase();
+    // Match the card's whole recent surface, not just its last comment: a
+    // commitment or finding buried one comment back was invisible to recall
+    // (Oct 13 memory dive). The excerpt still points at the best-matching
+    // line of that surface.
+    const comments = Array.isArray(card.comments) ? card.comments.slice(-3) : [];
+    const surface = [
+      card.title ?? '',
+      card.description ?? '',
+      ...comments.map((c) => (c && typeof c.text === 'string' ? c.text : '')),
+    ].join('\n');
+    const hay = surface.toLowerCase();
     const score = matchCount(queryTokens, hay);
     if (score < MIN_MATCH_TOKENS) continue;
-    const who = lastComment?.author?.name ?? lastComment?.author?.id ?? 'comment';
     hits.push({
       source: `desk:${card.id}|${card.column}`,
       title: card.title ?? card.id,
-      excerpt: lastComment?.text ? `${who}: ${lastComment.text}` : (card.description ?? ''),
+      // excerptAround scores case-insensitively itself, so it gets the
+      // original-cased surface and the excerpt keeps proper nouns and paths.
+      excerpt: excerptAround(surface, queryTokens) || (card.description ?? ''),
       score,
       recency: Date.parse(card.updatedAt ?? '') || 0,
     });
@@ -325,12 +418,13 @@ export async function recallBlockForTurn(args: {
     const queryTokens = tokenize(message);
     if (queryTokens.size === 0) return '';
     const work = (async () => {
-      const [memoryHits, deskHits, mcpHits] = await Promise.all([
+      const [memoryHits, deskHits, mcpHits, notesHits] = await Promise.all([
         withDeadline(memoryFileHits(args.cli, args.cwd, queryTokens), LOCAL_BUDGET_MS, [] as RecallHit[]),
         withDeadline(deskCardHits(queryTokens), LOCAL_BUDGET_MS, [] as RecallHit[]),
         withDeadline(mcpMemoryHits(message, queryTokens), MCP_BUDGET_MS, [] as RecallHit[]),
+        withDeadline(transcriptHits(args.chatId, queryTokens), TRANSCRIPT_BUDGET_MS, [] as RecallHit[]),
       ]);
-      const all = [...mcpHits, ...memoryHits, ...deskHits];
+      const all = [...mcpHits, ...memoryHits, ...notesHits, ...deskHits];
       all.sort((a, b) => b.score - a.score || b.recency - a.recency);
       const seen = new Set<string>();
       const lines: string[] = [];

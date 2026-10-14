@@ -15,14 +15,14 @@
 //
 // The durable event log the user sees is NEVER wiped.
 
-import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { STATE_DIR } from './config.ts';
 import { callMcp } from '../lib/mcp.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
 import { redactSecrets } from './secretRedaction.ts';
-import { flushEventLog, loadEventLogForCompactionSync, MAX_EVENTS_PER_LOG } from './event-log-store.ts';
+import { flushEventLog, loadEventLogArchiveSync, loadEventLogForCompactionSync, MAX_EVENTS_PER_LOG } from './event-log-store.ts';
 import { ROTATION_COMPACT_DEADLINE_MS, ROTATION_VERBATIM_TAIL_CHARS } from './contextBudget.ts';
 import {
   COMPACT_BATCH_TURNS,
@@ -35,9 +35,16 @@ import {
   splitWindow,
   type VisibleTurn,
 } from './threadWindow.ts';
+import { bareChatId, isThreadLogKey } from './threadKey.ts';
+import { agentForChatId } from './agents.ts';
+import { listCommitments } from '../lib/commitmentStore.ts';
 
 const MIN_ACCEPT_WORDS = 400;
 const COMPACT_MAX_TOKENS = 8000;
+/** The length target's ceiling (COMPACT_SYSTEM): the thin-document guard
+ *  measures the previous document against this, so a compliant replacement
+ *  for a legacy 5000-word compact is not read as thin and retried forever. */
+const COMPACT_TARGET_CEILING_WORDS = 4000;
 /** Event-pressure fold trigger: fold the aged batch early (below the 50-turn
  *  gate) once covering every aged turn would archive at least this many hot
  *  events. Streaming-heavy lanes add thousands of events per visible turn
@@ -80,29 +87,51 @@ type CompactionRecord = {
 };
 type CompactionState = Record<string, CompactionRecord>;
 
-let stateQueue: Promise<void> = Promise.resolve();
+let stateQueue: Promise<boolean> = Promise.resolve(true);
 
 function defaultRec(): CompactionRecord {
   return { userTurnsTotal: 0, lastCompactUserTurns: 0, count: 0, lastAt: 0, lastWords: 0 };
 }
 
-function loadState(): CompactionState {
+/** Tolerant by default (readers treat any problem as empty state). Strict
+ *  mode (mutations) refuses to run on state it cannot trust: only a
+ *  never-written file (ENOENT) reads as legitimately empty. */
+function loadState(strict = false): CompactionState {
+  let raw: string;
   try {
-    return JSON.parse(readFileSync(STATE_FILE, 'utf8')) as CompactionState;
-  } catch {
-    return {};
+    raw = readFileSync(STATE_FILE, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    if (!strict) return {};
+    throw new Error(`compaction state unreadable, refusing state mutations: ${(err as Error).message}`);
+  }
+  try {
+    return JSON.parse(raw) as CompactionState;
+  } catch (err) {
+    if (!strict) return {};
+    throw new Error(`compaction state corrupt, refusing state mutations: ${(err as Error).message}`);
   }
 }
 
-function mutateState(fn: (state: CompactionState) => void): Promise<void> {
+/** Serial state writes. Resolves false when the write failed (it is warned
+ *  inside, never rejected), so a caller that must know can retry; callers
+ *  that merely await keep their silent best-effort behavior. The read is
+ *  strict and the write atomic (tmp + rename, same shape as the roster and
+ *  commitments saves): a truncated state file can never be silently read as
+ *  empty and rewritten, wiping every lane's banked rotations. */
+function mutateState(fn: (state: CompactionState) => void): Promise<boolean> {
   stateQueue = stateQueue.then(() => {
     try {
-      const state = loadState();
+      const state = loadState(true);
       fn(state);
       mkdirSync(STATE_DIR, { recursive: true });
-      writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+      const tmp = `${STATE_FILE}.tmp`;
+      writeFileSync(tmp, JSON.stringify(state, null, 2));
+      renameSync(tmp, STATE_FILE);
+      return true;
     } catch (err) {
       console.warn('[compaction] state mutation failed:', (err as Error).message);
+      return false;
     }
   });
   return stateQueue;
@@ -220,10 +249,21 @@ export function adoptCompaction(fromKeys: string[], toKey: string): { blob: bool
 }
 
 /** Wipe rolling memory + cadence when the user fresh-starts a thread.
- * Remote deletion is staged first; callers clear the visible event log only
- * after this succeeds, so an MCP outage cannot leave a half-cleared thread. */
+ * The compaction state clears FIRST and fails closed: a corrupt or
+ * unwritable state file must throw before any compact copy is deleted, or
+ * the thread's only summary of its archived turns is destroyed while the
+ * Fresh aborts and the lane loses its older context. Every later failure
+ * point leaves the summary copies on disk, so a retried Fresh always
+ * starts from intact content. Callers clear the visible event log only
+ * after all of this succeeds. */
 export async function clearThreadMemory(key: string, chatId: string): Promise<void> {
   bumpCompactEpoch(key);
+  const stateCleared = await mutateState((state) => {
+    delete state[key];
+  });
+  if (!stateCleared) {
+    throw new Error('thread was not cleared because its compaction state could not be cleared');
+  }
   // Queue behind an in-flight replacement. The epoch bump makes that writer
   // discard its result; the lock then guarantees this deletion is last.
   try {
@@ -240,9 +280,6 @@ export async function clearThreadMemory(key: string, chatId: string): Promise<vo
       throw new Error(`thread was not cleared because its local compact could not be deleted: ${(err as Error).message}`);
     }
   }
-  await mutateState((state) => {
-    delete state[key];
-  });
 }
 
 export function countUserEchoes(events: Array<{ ev: any }>): number {
@@ -291,7 +328,10 @@ export function isRotationOwed(key: string): boolean {
   return recIsOwed(loadState()[key]);
 }
 
-export function clearRotation(key: string): Promise<void> {
+/** Consume a banked rotation. Resolves false when the state write failed:
+ *  the marker then stays set, so the next spawn re-seeds once (never blind),
+ *  and a caller that must know can retry the clear with bounded backoff. */
+export function clearRotation(key: string): Promise<boolean> {
   return mutateState((state) => {
     if (state[key]) {
       state[key].rotationOwed = false;
@@ -328,11 +368,39 @@ export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev:
   migrateLegacyPrimer(key);
   const evs = events ?? loadEventLogForCompactionSync(key);
   const blob = loadCompactBlob(key);
-  return assembleForeverTurn({
+  const primer = assembleForeverTurn({
     events: evs,
     compact: blob?.compact ?? '',
     lastCompactedSeq: blob?.lastCompactedSeq,
   }).primer;
+  // The agent's open commitments lead every seed: a short code-carried
+  // list the rolling compact can never rewrite, drop, or fold away. Every
+  // engine seeds through here, so one stitch covers all four runners.
+  const block = commitmentsSeedBlock(key);
+  // After a Fresh the primer body is empty (compact and log were wiped) while
+  // the commitments block lives on: the seed is then exactly the block, with
+  // no dangling separator.
+  return block && primer ? `${block}\n\n---\n\n${primer}` : (block || primer);
+}
+
+/** The seed block for this thread's agent commitments, or ''. A
+ *  roster-bound thread always seeds the block (an empty list seeds a one-line
+ *  "none") so the header's roster agent id reaches every lane — banana's
+ *  shared MCP has no identity env, and its display name may not even be
+ *  unique. Fail-open: a store hiccup must never block a session seed. */
+function commitmentsSeedBlock(key: string): string {
+  try {
+    if (!isThreadLogKey(key)) return '';
+    const agent = agentForChatId(bareChatId(key.slice(key.lastIndexOf('|') + 1)));
+    if (!agent) return '';
+    const lines = listCommitments(agent.id).map((c) => `- [${c.id}] ${c.text}${c.due ? ` (due ${c.due})` : ''}`);
+    return [
+      `Your open commitments — your own always-there list, carried by code so no memory rewrite can drop it. You are roster agent id ${agent.id}: pass it as from for the commitments tool's add and clear. Clear each one with the commitments tool (action clear, id in brackets) the moment it is done:`,
+      ...(lines.length ? lines : ['None right now. Add one the moment you owe a reply or promise a time.']),
+    ].join('\n');
+  } catch {
+    return '';
+  }
 }
 
 /** Build a seed from the COMPLETE durable hot log as it existed before the
@@ -373,6 +441,182 @@ export async function takeRotation(key: string): Promise<string | null> {
   return primer || null;
 }
 
+/** A compact whose tail was cut off. Before the output-cap retry (c7de444),
+ *  a generation that hit the token cap was accepted as the document, so its
+ *  tail was lost. The one-time rebuild maintenance keys off this: an unclosed
+ *  code fence, or a last line with no terminal punctuation that is not a
+ *  heading. */
+export function isTruncatedCompact(compact: string): boolean {
+  const text = compact.trim();
+  if (!text) return false;
+  if (((text.match(/```/g) ?? []).length) % 2 === 1) return true;
+  const lines = text.split('\n').filter((line) => line.trim());
+  const last = lines[lines.length - 1]?.trim() ?? '';
+  if (!last || last.startsWith('#')) return false;
+  return !/[.!?:;)\]}"”…\]]$/.test(last);
+}
+
+/** Default bound on re-fed batches per rebuild run, so a huge lane reports
+ *  instead of running all evening. Nothing partial is ever committed: a run
+ *  that hits the bound writes nothing and reports, and a rerun with a
+ *  higher bound starts clean from the original document. */
+const REBUILD_MAX_BATCHES = 60;
+
+/** Rebuild a truncated rolling compact from the durable log. The head stands;
+ *  the tail was lost. Every covered turn (seq <= the blob's lastCompactedSeq)
+ *  is re-fed batch by batch through the same generation path, with the head as
+ *  the baseline document, so the replacement is rebuilt from source instead
+ *  of from the truncated head alone. Coverage, cadence, and the state record
+ *  never move: this is repair, not compaction. Facts trimmed by a generation
+ *  ride the blob's pending outbox (drained by the next real compaction), with
+ *  over-cap facts retained in the document exactly like the live path. */
+export async function rebuildTruncatedCompact(
+  key: string,
+  onProgress?: (msg: string) => void,
+  maxBatches = REBUILD_MAX_BATCHES,
+): Promise<{ batches: number; fed: number; covered: number; words: number }> {
+  const blob = loadCompactBlob(key);
+  if (!blob) throw new Error('no rolling compact for this thread');
+  if (!isTruncatedCompact(blob.compact)) throw new Error('compact tail looks complete; refusing to rebuild');
+  if (inFlight.has(key)) throw new Error('a live compaction is in flight for this thread; retry after it');
+  const epoch = epochOf(key);
+  inFlight.add(key);
+  try {
+    await flushEventLog(key);
+    // The complete durable log: the archived prefix (events this compact
+    // already covers, which cleanup moved out of the hot file) plus the hot
+    // file, deduped by seq and ordered. Reading only the hot file would
+    // leave the oldest material — exactly what a truncated compact lost —
+    // unread, and a rebuild could then report success from a suffix.
+    const durable = [...loadEventLogArchiveSync(key), ...loadEventLogForCompactionSync(key)];
+    const bySeq = new Map<number, (typeof durable)[number]>();
+    for (const event of durable) bySeq.set(event.seq, event);
+    const ordered = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+    const visible = extractVisibleTurns(ordered);
+    const covered = visible.filter((t) => t.seq <= blob.lastCompactedSeq).sort((a, b) => a.seq - b.seq);
+    if (!Number.isFinite(blob.lastCompactedSeq) || blob.lastCompactedSeq <= 0) {
+      throw new Error(`the blob's lastCompactedSeq (${blob.lastCompactedSeq}) is not a positive coverage boundary; refusing to rebuild`);
+    }
+    if (covered.length === 0) {
+      throw new Error(`no covered events found in the archive or hot log (lastCompactedSeq ${blob.lastCompactedSeq}) — coverage cannot be proven; refusing to rebuild`);
+    }
+    const pendingFacts: DurableFact[] = [];
+    if (Array.isArray(blob.pendingFacts)) {
+      for (const fact of blob.pendingFacts.slice(0, PENDING_FACTS_CAP)) {
+        if (fact && typeof fact.title === 'string' && typeof fact.content === 'string' && fact.title.trim() && fact.content.trim()) {
+          pendingFacts.push({ title: fact.title.trim().slice(0, 120), content: fact.content.trim().slice(0, 500) });
+        }
+      }
+    }
+    let previous = blob.compact;
+    let fed = 0;
+    let batches = 0;
+    while (fed < covered.length) {
+      if (batches >= maxBatches) {
+        throw new Error(`hit the ${maxBatches}-batch bound with ${covered.length - fed} covered turns still unfed; nothing was written, rerun with a higher bound`);
+      }
+      // Exactly the live path's batch shape: the turn-count cap and the
+      // character budget together, so a rebuild's generations see the same
+      // material shape live compaction would.
+      const batch = takeOverflowBatch(covered.slice(fed, fed + COMPACT_BATCH_TURNS));
+      if (!batch.length) break;
+      onProgress?.(`${key}: rebuild batch ${batches + 1} (${batch.length} covered turns)`);
+      const generated = await generateCompact(previous, batch);
+      // Cross-process CAS against the ORIGINAL blob: this repair can run
+      // beside the live server, whose inFlight and epoch guards cannot see
+      // this process. A blob that changed on disk since the repair's first
+      // read means a live compaction or fresh start won the race. Nothing is
+      // written until the single final commit below, so every abort leaves
+      // the original document exactly as it was.
+      const disk = loadCompactBlob(key);
+      if (!disk || disk.compact !== blob.compact || disk.lastCompactedSeq !== blob.lastCompactedSeq) {
+        throw new Error('the compact changed under the rebuild (a live compaction or fresh start won the race); nothing was written');
+      }
+      let compactText = generated.compact;
+      let retainedFacts = '';
+      for (const fact of generated.facts) {
+        const factKey = durableFactKey(fact);
+        const queuedIdx = pendingFacts.findIndex((queued) => durableFactKey(queued) === factKey);
+        if (queuedIdx >= 0) {
+          // A re-extracted update supersedes the queued version in place, so
+          // the drain can never resolve an older version over a newer one.
+          pendingFacts[queuedIdx] = fact;
+          continue;
+        }
+        if (pendingFacts.length >= PENDING_FACTS_CAP) retainedFacts += `\n- ${fact.title}: ${fact.content}`;
+        else pendingFacts.push(fact);
+      }
+      if (retainedFacts) {
+        compactText = `${compactText}\n\nDurable facts kept in the document because the durable-fact outbox is at cap:${retainedFacts}`;
+      }
+      previous = compactText;
+      fed += batch.length;
+      batches += 1;
+    }
+    // One atomic final commit: all or nothing. A bound hit, a race, or a
+    // crash mid-repair leaves the original truncated document untouched,
+    // so a rerun (a higher bound) always starts clean. The replacement must
+    // actually be a replacement, and it must not itself end mid-sentence
+    // (a truncated replacement would recreate the exact damage this
+    // repairs); either refusal writes nothing.
+    if (previous === blob.compact) {
+      throw new Error('the rebuilt document came back identical to the truncated original; nothing was written');
+    }
+    if (isTruncatedCompact(previous) && !/^(?:```|~~~)\s*$/i.test(previous.trim().split('\n').filter((l) => l.trim()).at(-1) ?? '')) {
+      throw new Error('the rebuilt document still ends mid-sentence; nothing was written — rerun with a higher bound');
+    }
+    const words = previous.trim().split(/\s+/).filter(Boolean).length;
+    const wrote = writeCompactBlob(key, { ...blob, compact: previous, words, pendingFacts }, epoch);
+    if (!wrote || epochOf(key) !== epoch) throw new Error('thread was fresh-started during the rebuild; nothing was written');
+    // The overwriteable RAG mirror must not keep serving the truncated
+    // document after a reported repair. Re-check the blob first: if a live
+    // compaction slipped in between the commit and this save, skip — the
+    // mirror is then already newer, and that compaction owns it.
+    const beforeMirror = loadCompactBlob(key);
+    if (previous !== blob.compact && blob.chatId && beforeMirror && beforeMirror.compact === previous) {
+      try {
+        await saveCompactToMemory(key, epoch, 'rebuild', blob.chatId, previous);
+      } catch (err) {
+        console.warn(`[compaction] ${key}: RAG mirror not refreshed after the rebuild (the next real compaction replaces it): ${(err as Error).message}`);
+      }
+    } else if (previous !== blob.compact) {
+      console.warn(`[compaction] ${key}: skipped the RAG mirror refresh (the blob changed after the rebuild commit); the newer document owns the mirror`);
+    }
+    return { batches, fed, covered: covered.length, words };
+  } finally {
+    inFlight.delete(key);
+  }
+}
+
+/** Maintenance discovery: every compact blob on disk, each with the thread
+ *  key the compaction state still names for it (null when only the file
+ *  remains — a blob whose state write failed), plus the blob read raw from
+ *  the file. The one-time rebuild driver unions this with the state keys so
+ *  an orphaned truncated compact cannot be silently skipped. */
+export function listCompactBlobFiles(): { file: string; key: string | null; blob: CompactBlob | null }[] {
+  let names: string[] = [];
+  try {
+    names = readdirSync(COMPACTS_DIR).filter((n) => n.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  const keyByFile = new Map<string, string>();
+  for (const key of Object.keys(loadState())) keyByFile.set(compactFileId(key), key);
+  return names.map((name) => {
+    const file = name.slice(0, -5);
+    let blob: CompactBlob | null = null;
+    try {
+      // The name on disk IS the file id already; compactPath() would hash it
+      // again and read a nonexistent double-hashed path, reporting every real
+      // blob as unreadable and breaking orphan discovery.
+      blob = JSON.parse(readFileSync(join(COMPACTS_DIR, name), 'utf8')) as CompactBlob;
+    } catch {
+      // Unreadable file: reported with a null blob, never rebuilt.
+    }
+    return { file, key: keyByFile.get(file) ?? null, blob };
+  });
+}
+
 function formatTurnsForCompact(turns: VisibleTurn[]): string {
   return formatAgedTurns(turns);
 }
@@ -395,7 +639,7 @@ function takeOverflowBatch(overflow: VisibleTurn[]): VisibleTurn[] {
 const COMPACT_SYSTEM = `You are the memory keeper for a long-running AI-teammate conversation. You write the ONE rolling memory document that lets the thread continue FOREVER. Each time you run, you REPLACE the previous document entirely (never append a new primer).
 
 Rules for the document you produce:
-- LENGTH: keep the previous document's substance and fold in the new aged-out turns. Do not pad. Do not invent. Target 3000–5000 words only when the combined history actually supports that density; a short overflow should produce a modest update.
+- LENGTH: keep the previous document's substance and fold in the new aged-out turns. Do not pad. Do not invent. Target 2500–4000 words only when the combined history actually supports that density; a short overflow should produce a modest update. Stay under the cap: the document plus the durable-facts section must fit in one output, so never run long.
 - Capture: every decision made (and why), every open task and its state, every fact about people/projects/systems mentioned, every commitment or promise, every preference expressed, every technical detail that mattered (paths, models, endpoints, prices, IDs), and the current state of play.
 - Organize with clear headings (## ...) so it can be indexed: Overview / People & Projects / Decisions / Open Work / Facts & References / Preferences & Style / Current State.
 - Write in third person, past tense, no fluff, no meta commentary. Never invent content that is not in the previous document or the aged-out turns.
@@ -804,7 +1048,15 @@ async function generateCompact(previous: string, overflow: VisibleTurn[]): Promi
     }),
   });
   if (!res.ok) throw new Error(`compact generation failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
-  const body = (await res.json()) as { content?: Array<{ type?: string; text?: string }> };
+  const body = (await res.json()) as { content?: Array<{ type?: string; text?: string }>; stop_reason?: string };
+  // A generation that hit the output cap ends mid-sentence and would become
+  // the next pass's baseline document, silently losing its tail forever
+  // (Oct 13: Max's rolling memory ends mid-sentence exactly this way). A
+  // capped generation fails instead, so the previous document stands and the
+  // next pass retries with the same material.
+  if (body.stop_reason === 'max_tokens') {
+    throw new Error(`compact hit the ${COMPACT_MAX_TOKENS}-token output cap before finishing — will retry`);
+  }
   const generated = (body.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text ?? '').join('\n').trim();
   // The durable-facts section rides the same generation call; keep it out of
   // the document itself so the rolling compact stays a pure summary. The
@@ -815,7 +1067,7 @@ async function generateCompact(previous: string, overflow: VisibleTurn[]): Promi
   const prevWords = safePrevious.trim() ? safePrevious.trim().split(/\s+/).length : 0;
   const overflowWordEst = Math.max(1, Math.floor(overflowChars(safeOverflow) / 5));
   const minWords = prevWords
-    ? Math.max(80, Math.floor(prevWords * 0.85))
+    ? Math.max(80, Math.floor(Math.min(prevWords, COMPACT_TARGET_CEILING_WORDS) * 0.85))
     : Math.max(80, Math.min(MIN_ACCEPT_WORDS, overflowWordEst));
   if (words < minWords) throw new Error(`compact came back thin (${words} words < ${minWords}) — will retry`);
   return { compact, words, facts };

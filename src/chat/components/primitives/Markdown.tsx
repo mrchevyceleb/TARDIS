@@ -108,7 +108,12 @@ function useWorkspaceTargetOpener(target: WorkspaceTarget | null): () => void {
       return;
     }
 
-    openWorkspaceLink(path, kind);
+    // In a plain browser a folder opens the closable in-app list (the ship
+    // serves it, so it is always current); files keep their native scheme /
+    // browser-tab behavior.
+    openWorkspaceLink(path, kind, kind === 'folder' && viewer
+      ? () => viewer.open({ source: 'folder', path })
+      : undefined);
   }, [kind, path, studio, viewer]);
 }
 
@@ -252,7 +257,7 @@ function MarkdownAnchor({ href, children }: { href?: string; children?: ReactNod
   return <MarkdownLink href={href}>{children}</MarkdownLink>;
 }
 
-function MarkdownLink({ href, children }: { href?: string; children?: ReactNode }) {
+export function MarkdownLink({ href, children }: { href?: string; children?: ReactNode }) {
   const proxyTarget = parseProxyHref(href);
   const openTarget = useWorkspaceTargetOpener(proxyTarget);
 

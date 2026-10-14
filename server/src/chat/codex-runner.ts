@@ -172,6 +172,10 @@ type CodexSendOptions = {
 };
 type CodexSessionOptions = {
   recoverContextOnNextTurn?: boolean;
+  /** Seed the primer on the first send. freshStart passes true so a reset
+   *  thread still receives its agent's code-carried open commitments
+   *  (claude-family parity: spawnSession seeds whenever there is no resume id). */
+  seedFirst?: boolean;
   cli?: CliKind;
   durableHistory?: PersistedEvent[];
 };
@@ -242,9 +246,11 @@ export class CodexSession {
     return this.seedWindowOnNextTurn;
   }
 
-  private ackWindowSeed(): Promise<void> {
-    if (!this.seedWindowOnNextTurn) return Promise.resolve();
+  private ackWindowSeed(): Promise<boolean> {
+    if (!this.seedWindowOnNextTurn) return Promise.resolve(true);
     this.seedWindowOnNextTurn = false;
+    // Resolves false when the state write failed: the marker then stays set,
+    // so the next spawn re-seeds once (never blind).
     return clearRotation(this.logKey);
   }
 
@@ -320,6 +326,7 @@ export class CodexSession {
     this.replyWatch = new ReplyWatch(() => agentForChatId(chatId)?.id ?? chatId, this.cli);
     this.threadId = threadId;
     this.recoverContextOnNextTurn = opts.recoverContextOnNextTurn === true;
+    this.seedWindowOnNextTurn = opts.seedFirst === true;
 
     // Mirror the claude path: rehydrate eventLog from disk so a server
     // restart between turns doesn't strand a reconnecting client whose
@@ -804,7 +811,7 @@ export class CodexSession {
         '-c', `mcp_servers.rivendell-browser.args=${JSON.stringify([browserMcpEntry])}`,
       );
     }
-    browserMcpArgs.push(...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId) }), ...officeMcpCodexArgs());
+    browserMcpArgs.push(...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId), agentId: agentForChatId(this.chatId)?.id }), ...officeMcpCodexArgs());
     const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
 
     // Wait for OneDrive to release its sync lock on .codex/config.toml so
@@ -1105,7 +1112,11 @@ export class CodexSession {
           );
         }
       } else if (this.threadId) {
-        if (seed) await this.ackWindowSeed();
+        // Acknowledge the seed ATTEMPT, not only a nonempty seed: a fresh
+        // thread with an empty primer (no commitments, no history) must still
+        // consume the window seed here, or the second turn would re-seed the
+        // now-warm session with the first turn's history.
+        if (seed || seedWindow) await this.ackWindowSeed();
         await this.persistThreadId(this.threadId);
       }
       this.busy = false;
@@ -1483,7 +1494,11 @@ export async function getOrCreateCodexSession(opts: {
   const logKey = logKeyFor(cli, cwd, chatId);
   await flushEventLog(logKey);
   const durableHistory = loadEventLogForCompactionSync(logKey);
-  const session = new CodexSession(cwd, chatId, threadId, { cli, durableHistory });
+  // seedFirst: !threadId mirrors claude-family spawnSession (it seeds exactly
+  // when there is no resume id), so an ordinary brand-new codex session also
+  // receives the primer - and with it the agent's code-carried open
+  // commitments - instead of only explicit Fresh and rotation paths.
+  const session = new CodexSession(cwd, chatId, threadId, { cli, durableHistory, seedFirst: !threadId });
   codexSessions.set(key, session);
   return session;
 }
@@ -1531,7 +1546,10 @@ export async function freshStartCodex(opts: {
   // failure leaves the old thread coherent and Fresh can be retried safely.
   await clearThreadMemory(logKey, chatId);
   await clearEventLog(logKey);
-  const session = new CodexSession(cwd, chatId, null, { cli, durableHistory: [] });
+  // seedFirst: a reset thread still seeds the primer on its first send, so
+  // the agent's code-carried open commitments survive a Fresh (claude-family
+  // parity: freshStart passes seedFirst to spawnSession below).
+  const session = new CodexSession(cwd, chatId, null, { cli, durableHistory: [], seedFirst: true });
   codexSessions.set(key, session);
   return session;
 }

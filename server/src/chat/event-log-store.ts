@@ -3,6 +3,7 @@ import type { FileHandle } from 'node:fs/promises';
 import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
+import { redactEventSecrets, redactSecrets } from './secretRedaction.ts';
 import type { SessionEvent } from './runner.ts';
 import { isSyntheticApiErrorEvent } from './providerErrors.ts';
 
@@ -1024,13 +1025,7 @@ export function repairEventLogSequenceSync(key: string): { repaired: boolean; la
  * turns that just aged out of the last-50 window must remain available until
  * Grok has merged them into the rolling compact. compactEventLog below refuses
  * to archive past that compacted seq, so the hot file is the complete source. */
-export function loadEventLogForCompactionSync(key: string): PersistedEvent[] {
-  let raw: string;
-  try {
-    raw = readFileSync(logPath(key), 'utf8');
-  } catch {
-    return [];
-  }
+function parseEventLogLines(raw: string): PersistedEvent[] {
   const events: PersistedEvent[] = [];
   for (const line of raw.split('\n')) {
     if (!line) continue;
@@ -1047,6 +1042,25 @@ export function loadEventLogForCompactionSync(key: string): PersistedEvent[] {
     }
   }
   return events;
+}
+
+export function loadEventLogForCompactionSync(key: string): PersistedEvent[] {
+  try {
+    return parseEventLogLines(readFileSync(logPath(key), 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+/** The archived prefix of a thread's durable log: events the rolling
+ *  compact already covers, moved out of the hot file by cleanup. The hot
+ *  file plus this is the complete durable log. */
+export function loadEventLogArchiveSync(key: string): PersistedEvent[] {
+  try {
+    return parseEventLogLines(readFileSync(archivePath(key), 'utf8'));
+  } catch {
+    return [];
+  }
 }
 
 // Append-only writer keyed by sanitized session key. A per-key promise chain
@@ -1080,7 +1094,16 @@ export function appendEventLogSync(key: string, persisted: PersistedEvent): bool
   if (isPlumbingEvent(persisted.ev)) return true;
   try {
     mkdirSync(EVENT_LOG_DIR, { recursive: true });
-    appendFileSync(logPath(key), JSON.stringify(persisted) + '\n', 'utf8');
+    // The durable log is the single upstream for the chat render, the
+    // transcript, compaction, and resume: redacting here means a printed
+    // key can never land in any of them. The in-memory turn keeps its raw
+    // copy; only what becomes durable or visible is masked.
+    // Structure-aware walk first, then a final pass over the serialized line
+    // itself: whatever the walk's shape restrictions pass through untouched
+    // (a toJSON output, a hostile object key, raw prose a tool embedded in a
+    // non-plain instance) still gets one last text-level scan before the
+    // line is durable.
+    appendFileSync(logPath(key), redactSecrets(JSON.stringify(redactEventSecrets(persisted))) + '\n', 'utf8');
     bumpEventLogRevision(persisted.ev);
     return true;
   } catch (err) {
@@ -1104,7 +1127,10 @@ export function appendEventLog(key: string, persisted: PersistedEvent): void {
   observeNextSeq(key, persisted.seq + 1);
   if (isPlumbingEvent(persisted.ev)) return;
   const path = logPath(key);
-  const line = JSON.stringify(persisted) + '\n';
+  // Same live-path redaction as appendEventLogSync, including the final
+  // serialized-line pass: the durable line is what every later reader
+  // (render, transcript, resume, compaction) consumes.
+  const line = redactSecrets(JSON.stringify(redactEventSecrets(persisted))) + '\n';
   const prior = writeChains.get(key) ?? Promise.resolve();
   const next = prior
     .then(async () => {

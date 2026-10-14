@@ -1,0 +1,211 @@
+// Agent-scoped open commitments — the small always-there list that survives
+// compaction by construction. Agents add and clear their own entries (owed
+// replies, promises with times, parked items); nothing here is ever rewritten
+// by the rolling compact, and the session seed stitches the list in.
+// Store: ~/.rivendell/agent-commitments.json
+
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
+import { join } from 'node:path';
+import { STATE_DIR } from '../config.ts';
+
+export type Commitment = {
+  id: string;
+  agentId: string;
+  text: string;
+  due?: string;
+  /** The due parsed to an absolute instant at add time. The sweep and the
+   *  scanner match on this, never on reparsing the display text, so a
+   *  relative due ("10pm tomorrow") cannot drift with every reparse. */
+  dueAt?: number;
+  /** The outgoing message id that auto-added this entry, so one message can
+   *  never double-add. Undefined for hand-added entries. */
+  sourceId?: string;
+  /** When the past-due sweep raised this entry, per recipient. A recipient
+   *  is marked only after its delivery succeeded, so a failed raise retries
+   *  on the next tick instead of being silenced forever. */
+  raised?: { owner?: number; chief?: number };
+  createdAt: number;
+};
+
+const FILE = join(STATE_DIR, 'agent-commitments.json');
+const TEXT_CAP = 160;
+const DUE_CAP = 40;
+/** Every line-break form, including the Unicode separators that could
+ *  otherwise forge extra lines in the seed block. Non-global twin for
+ *  validation: a /g regex is stateful across .test() calls (lastIndex),
+ *  so an identical second value could slip past the check. */
+const LINE_BREAKS = /\r\n|\r|\n|\u2028|\u2029/g;
+const HAS_LINE_BREAK = /[\r\n\u2028\u2029]/;
+/** The list stays small enough to stitch into every seed: about ten lines. */
+const MAX_PER_AGENT = 12;
+
+function asFiniteNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function normalizeCommitment(value: unknown): Commitment | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+  const agentId = typeof raw.agentId === 'string' ? raw.agentId.trim() : '';
+  // One line per commitment, always: CR/LF or a Unicode line separator
+  // (U+2028/U+2029) could spoof the seed block's line structure, so a stored
+  // value can never carry one through either.
+  const text = typeof raw.text === 'string' ? raw.text.replace(LINE_BREAKS, ' ').trim() : '';
+  if (!id || !agentId || !text) return null;
+  const due = typeof raw.due === 'string' ? raw.due.replace(LINE_BREAKS, ' ').trim().slice(0, DUE_CAP) : '';
+  const dueAt = asFiniteNumber(raw.dueAt, 0);
+  const sourceId = typeof raw.sourceId === 'string' ? raw.sourceId.trim().slice(0, 120) : '';
+  const raisedRaw = raw.raised;
+  const raisedOwner = raisedRaw && typeof raisedRaw === 'object' ? asFiniteNumber((raisedRaw as { owner?: unknown }).owner, 0) : 0;
+  const raisedChief = raisedRaw && typeof raisedRaw === 'object' ? asFiniteNumber((raisedRaw as { chief?: unknown }).chief, 0) : 0;
+  return {
+    id,
+    agentId,
+    text: text.slice(0, TEXT_CAP),
+    ...(due ? { due } : {}),
+    ...(dueAt > 0 ? { dueAt } : {}),
+    ...(sourceId ? { sourceId } : {}),
+    ...(raisedOwner > 0 || raisedChief > 0 ? {
+      raised: {
+        ...(raisedOwner > 0 ? { owner: raisedOwner } : {}),
+        ...(raisedChief > 0 ? { chief: raisedChief } : {}),
+      },
+    } : {}),
+    createdAt: asFiniteNumber(raw.createdAt, 0),
+  };
+}
+
+function readAll(): Commitment[] {
+  let raw: string;
+  try {
+    raw = readFileSync(FILE, 'utf8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return [];
+    throw err;
+  }
+  const data = JSON.parse(raw) as { commitments?: unknown } | unknown;
+  const list = Array.isArray(data)
+    ? data
+    : data && typeof data === 'object' && Array.isArray((data as { commitments?: unknown }).commitments)
+      ? (data as { commitments: unknown[] }).commitments
+      : [];
+  return list.map(normalizeCommitment).filter((c): c is Commitment => Boolean(c));
+}
+
+function save(commitments: Commitment[]): void {
+  mkdirSync(STATE_DIR, { recursive: true });
+  const tmp = `${FILE}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify({ commitments }, null, 2)}\n`);
+  // Atomic replace only. Never fall back to overwriting the live shared
+  // store in place: a partial in-place write could corrupt every live
+  // agent's commitments. A failed rename leaves the previous store fully
+  // intact and throws to the caller (the server never runs on Windows, so
+  // the old in-place fallback was dead code carrying exactly that risk).
+  renameSync(tmp, FILE);
+}
+
+/** Oldest first, so the seed reads like a queue. */
+export function listCommitments(agentId?: string): Commitment[] {
+  const all = readAll();
+  const filtered = agentId ? all.filter((c) => c.agentId === agentId) : all;
+  return filtered.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+export function addCommitment(
+  agentId: string,
+  text: string,
+  due?: string,
+  opts?: { dueAt?: number; sourceId?: string },
+): { commitment?: Commitment; error?: string } {
+  const owner = agentId.trim();
+  const body = (text ?? '').trim();
+  if (!owner || !body) return { error: 'agentId and text are required' };
+  if (body.length > TEXT_CAP) {
+    return { error: `Keep it under ${TEXT_CAP} characters; a commitment must stay one line (got ${body.length}).` };
+  }
+  const trimmedDue = (due ?? '').trim();
+  if (HAS_LINE_BREAK.test(body) || HAS_LINE_BREAK.test(trimmedDue)) {
+    return { error: 'A commitment is one line; no line breaks in the text or the time.' };
+  }
+  if (trimmedDue.length > DUE_CAP) {
+    return { error: `Keep the time under ${DUE_CAP} characters (got ${trimmedDue.length}).` };
+  }
+  const all = readAll();
+  if (all.filter((c) => c.agentId === owner).length >= MAX_PER_AGENT) {
+    return { error: `Your commitments list is full (${MAX_PER_AGENT}). Clear one that is done before adding another.` };
+  }
+  const dueAt = asFiniteNumber(opts?.dueAt, 0);
+  const sourceId = typeof opts?.sourceId === 'string' ? opts.sourceId.trim().slice(0, 120) : '';
+  const commitment: Commitment = {
+    id: `cm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    agentId: owner,
+    text: body,
+    ...(trimmedDue ? { due: trimmedDue.slice(0, DUE_CAP) } : {}),
+    ...(dueAt > 0 ? { dueAt } : {}),
+    ...(sourceId ? { sourceId } : {}),
+    createdAt: Date.now(),
+  };
+  all.push(commitment);
+  save(all);
+  return { commitment };
+}
+
+/** The past-due sweep records a raise per recipient, only after that
+ *  recipient's delivery succeeded: a failed raise retries on the next tick,
+ *  a succeeded one never repeats. A no-op never rewrites the file. */
+export function markCommitmentRaised(id: string, recipient: 'owner' | 'chief'): boolean {
+  const target = id.trim();
+  if (!target) return false;
+  const all = readAll();
+  let changed = false;
+  const next = all.map((c) => {
+    if (c.id === target && !c.raised?.[recipient]) {
+      changed = true;
+      return { ...c, raised: { ...c.raised, [recipient]: Date.now() } };
+    }
+    return c;
+  });
+  if (changed) save(next);
+  return changed;
+}
+
+/** Persist a legacy entry's parsed due as its absolute instant, so a
+ *  relative display due stops moving with every sweep reparse. */
+export function noteCommitmentDueAt(id: string, dueAt: number): void {
+  const target = id.trim();
+  if (!target || !Number.isFinite(dueAt) || dueAt <= 0) return;
+  const all = readAll();
+  let changed = false;
+  const next = all.map((c) => {
+    if (c.id === target && c.dueAt === undefined) {
+      changed = true;
+      return { ...c, dueAt };
+    }
+    return c;
+  });
+  if (changed) save(next);
+}
+
+/** Only the owner can clear its own entry; returns false when nothing matched. */
+export function clearCommitment(agentId: string, id: string): boolean {
+  const owner = agentId.trim();
+  const target = id.trim();
+  if (!owner || !target) return false;
+  const all = readAll();
+  const next = all.filter((c) => !(c.id === target && c.agentId === owner));
+  if (next.length === all.length) return false;
+  save(next);
+  return true;
+}
+
+/** Agent deletion cascade: a deleted teammate leaves no commitments behind,
+ *  so a recreated agent with the same id never inherits stale entries. */
+export function deleteCommitmentsForAgent(agentId: string): void {
+  const owner = agentId.trim();
+  if (!owner) return;
+  const all = readAll();
+  const next = all.filter((c) => c.agentId !== owner);
+  if (next.length !== all.length) save(next);
+}

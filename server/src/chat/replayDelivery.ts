@@ -223,6 +223,20 @@ function rewriteArgsFrame<T extends { seq: number; ev: unknown }>(frame: T, part
 // so raising the count cap past that buys nothing.
 export const REPLAY_MAX_EVENTS = 4000;
 export const REPLAY_MAX_BYTES = 1_500_000;
+// Person-facing prose frames below the budget cut are still kept, under their
+// own bounded budget. They are the thread's spoken messages: evicting them let
+// a reconnect erase answers only minutes old on a fast lane (Oct 12 2026: a
+// reply_now answer vanished from the visible thread the moment the client
+// rebuilt from a clamped window, while the tool cards around it survived).
+// 500 frames / 512KB is hours of spoken messages on the busiest lane, and it
+// bounds the extra replay cost to about a third again of the byte budget.
+export const REPLAY_PROSE_MAX_FRAMES = 500;
+export const REPLAY_PROSE_MAX_BYTES = 512 * 1024;
+// On the busiest lanes, where between-tool narration counts as prose, 500
+// frames can still be under an hour of messages; older prose then falls out
+// of the window like today. The client's replayGap keep (useChat) covers what
+// the pane had already shown below its cursor, which the server can never
+// re-send there (both replay paths filter to seq > sinceSeq).
 // How far back into the log file a resuming device may be caught up from. The
 // in-memory window holds 2000 events, which a busy lane fills in hours; this is
 // raw file bytes, so it is generous next to the 1.5MB actually sent (most of a
@@ -247,15 +261,45 @@ export function replayLeavesHole(
   return replaySince > 0 && (!reachedSince || historyLength < fullLength);
 }
 
+/** Frames a reconnect must never lose: the person-facing messages themselves.
+ *  Assistant text (reply_now posts and final answers), user echoes, and peer
+ *  messages all render standalone in the client reducer — no message_start or
+ *  tool scaffolding needed — so they can survive window eviction where tool
+ *  frames cannot. A lone tool frame, by contrast, renders nothing useful
+ *  without its turn structure, which is why only prose is exempt. */
+function isPersonProseFrame(ev: unknown): boolean {
+  const frame = ev as Record<string, any> | null;
+  const inner = frame?.type === 'event' ? frame.event : null;
+  if (!inner || typeof inner !== 'object') return false;
+  // A subagent's own frames are private work even when they carry text: the
+  // client drops them unseen, and keeping them would only waste prose budget.
+  if (inner.parent_tool_use_id) return false;
+  if (inner.type === '_user_echo' || inner.type === 'peer_message') return true;
+  // A result frame can carry the turn's canonical answer when no assistant
+  // frame did; the reducer's result handler renders it standalone too.
+  if (inner.type === 'result' && inner.is_error !== true && typeof inner.result === 'string' && inner.result.trim().length > 0) return true;
+  if (inner.type !== 'assistant' || !Array.isArray(inner.message?.content)) return false;
+  return inner.message.content.some(
+    (c: unknown) => {
+      const part = c as { type?: string; text?: string } | null;
+      return part?.type === 'text' && typeof part.text === 'string' && part.text.trim().length > 0;
+    },
+  );
+}
+
 /** Keep the newest slice of a replay. Frames must be ascending by seq.
  *  Anything above `historyThrough` is live rather than history and is always
- *  kept: those are the events this socket has not seen yet. */
+ *  kept: those are the events this socket has not seen yet.
+ *  Person-facing prose frames below the budget cut are also kept (their own
+ *  bounded budget above), so a rebuild always carries the spoken messages;
+ *  only the tool/noise frames around them are evicted. */
 export function clampReplayWindow<T extends { seq: number; ev: unknown }>(
   frames: T[],
   historyThrough: number,
 ): T[] {
   let events = 0;
   let bytes = 0;
+  let cut = 0;
   // Walk back from the newest so the scan stops at the budget instead of
   // measuring a 40MB log we are about to discard anyway.
   for (let i = frames.length - 1; i >= 0; i -= 1) {
@@ -263,9 +307,29 @@ export function clampReplayWindow<T extends { seq: number; ev: unknown }>(
     if (frame.seq > historyThrough) continue;
     events += 1;
     bytes += JSON.stringify(frame.ev)?.length ?? 0;
-    if (events > REPLAY_MAX_EVENTS || bytes > REPLAY_MAX_BYTES) return frames.slice(i + 1);
+    if (events > REPLAY_MAX_EVENTS || bytes > REPLAY_MAX_BYTES) {
+      cut = i + 1;
+      break;
+    }
   }
-  return frames;
+  if (cut === 0) return frames;
+  const slice = frames.slice(cut);
+  const prose: T[] = [];
+  let proseBytes = 0;
+  for (let i = cut - 1; i >= 0 && prose.length < REPLAY_PROSE_MAX_FRAMES; i -= 1) {
+    if (!isPersonProseFrame(frames[i].ev)) continue;
+    const size = JSON.stringify(frames[i].ev)?.length ?? 0;
+    // Measure before keeping: one oversized frame must not ride in on a fresh
+    // budget, and a monster frame is skipped entirely so it cannot crowd out
+    // the many small messages behind it.
+    if (size > REPLAY_PROSE_MAX_BYTES) continue;
+    if (proseBytes + size > REPLAY_PROSE_MAX_BYTES) break;
+    prose.push(frames[i]);
+    proseBytes += size;
+  }
+  // Collected newest→oldest below the cut, so reversed it precedes the slice
+  // in ascending seq order with no overlap.
+  return prose.length ? [...prose.reverse(), ...slice] : slice;
 }
 
 // Frames the transcript never reads once they are history. A subagent's own

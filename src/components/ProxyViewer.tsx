@@ -228,6 +228,34 @@ function ProxyViewerOverlay({
   );
 }
 
+// Image leaves get a small thumbnail straight from the ship's file route, so
+// an image-heavy folder reads as a gallery without a second listing format.
+// Lazy: off-screen rows never fetch. The set matches the image types
+// /api/files/raw actually serves (server/src/routes/files.ts MIME_BY_EXT):
+// anything else would arrive as an octet-stream download, not an image.
+const THUMB_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico']);
+const thumbExt = (name: string): boolean => {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 && THUMB_EXTS.has(name.slice(dot + 1).toLowerCase());
+};
+
+// A thumb that fails to load (file raced away, bad bytes) falls back to the
+// plain file icon instead of an empty bordered square.
+function FolderThumb({ path }: { path: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return <FileIcon size={15} />;
+  return (
+    <img
+      className="proxy-folder-thumb"
+      src={`/api/files/raw?path=${encodeURIComponent(path)}`}
+      alt=""
+      loading="lazy"
+      decoding="async"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 /** A simple, closable file list for a workspace folder. Never leaves the app. */
 function FolderListing({ loaded }: { loaded: LoadedFolder }) {
   const viewer = useContext(ProxyViewerContext);
@@ -253,7 +281,9 @@ function FolderListing({ loaded }: { loaded: LoadedFolder }) {
       {rows.length === 0 ? <p className="proxy-viewer-status">This folder is empty.</p> : null}
       {rows.map((node) => (
         <button key={node.path} type="button" className="proxy-folder-row" onClick={() => openNode(node)}>
-          {node.type === 'directory' ? <Folder size={15} /> : <FileIcon size={15} />}
+          {node.type === 'directory' ? <Folder size={15} /> : thumbExt(node.name) ? (
+            <FolderThumb path={node.path} />
+          ) : <FileIcon size={15} />}
           <span className="proxy-folder-name">{node.name}</span>
           {node.type === 'file' && typeof node.size === 'number' ? <span className="proxy-folder-size">{formatBytes(node.size)}</span> : null}
         </button>
