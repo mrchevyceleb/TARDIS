@@ -534,7 +534,12 @@ export async function rebuildTruncatedCompact(
       // Bounded growth only: the replacement may keep the head's substance
       // plus the batch's new material, never a runaway.
       const prevWords = previous.trim().split(/\s+/).filter(Boolean).length;
-      const ceiling = Math.ceil(prevWords * 1.25) + 500;
+      // The rebuild's baseline is already 4.4-5.5k words: the model keeps its
+      // substance and folds the batch in, so the ceiling is the baseline plus
+      // generous room (half again plus 1000), not the live path's tighter bound.
+      // The COMPACT_SYSTEM word target still applies; this guard only stops a
+      // runaway.
+      const ceiling = Math.ceil(prevWords * 1.5) + 1000;
       if (generated.words > ceiling) {
         throw new Error(`rebuilt document came back oversized (${generated.words}w over the ${ceiling}w ceiling); nothing was written`);
       }
