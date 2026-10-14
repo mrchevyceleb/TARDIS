@@ -981,7 +981,7 @@ function durableFactKey(fact: DurableFact): string {
  *  Titles are prefixed like the rolling compact's own rows so the search
  *  query always matches them. Content rides along so a changed decision
  *  under the same title can be superseded instead of skipped. */
-async function durableFactNotes(key: string, chatId: string): Promise<Map<string, { id: string; content: string }>> {
+async function durableFactNotes(key: string, chatId: string, timeoutMs?: number): Promise<Map<string, { id: string; content: string }>> {
   const identity = compactMemoryIdentity(key, chatId);
   const found = await callMcp<MemorySearchResponse & { error?: unknown }>('memory', {
     action: 'search_memory',
@@ -992,7 +992,7 @@ async function durableFactNotes(key: string, chatId: string): Promise<Map<string
       tags: [identity.threadTag, 'durable-fact'],
       limit: 2000,
     },
-  });
+  }, timeoutMs);
   if (!found || typeof found !== 'object' || found.error !== undefined || !Array.isArray(found.memories)) {
     throw new Error('RAG search returned a malformed or failed response');
   }
@@ -1036,12 +1036,19 @@ async function saveDurableFacts(
   await withRagLock(key, async () => {
     if (epochOf(key) !== epoch) return;
     const identity = compactMemoryIdentity(key, chatId);
-    const existing = await durableFactNotes(key, chatId);
+    // Monotonic budget clock, clamped to the configured bound: a backward
+    // wall-clock jump must never inflate `remaining` past the pass budget.
+    const drainDeadline = performance.now() + DRAIN_DEADLINE_MS;
+    const remainingBudget = () =>
+      Math.min(Math.max(drainDeadline - performance.now(), 0), DRAIN_DEADLINE_MS);
+    // The dedupe search runs inside the pass budget too — left on callMcp's
+    // 30s default, one hung search would overrun the 15s pass before the
+    // first fact is even attempted.
+    const existing = await durableFactNotes(key, chatId, remainingBudget());
     if (epochOf(key) !== epoch) return;
     const drain = facts.slice(0, DRAIN_BATCH_MAX);
-    const drainDeadline = Date.now() + DRAIN_DEADLINE_MS;
     for (const fact of drain) {
-      const remaining = drainDeadline - Date.now();
+      const remaining = remainingBudget();
       if (remaining <= 0) break; // remainder stays pending
       const title = `Durable fact: ${fact.title}`.slice(0, 200);
       const content = redactSecrets(fact.content);
@@ -1060,6 +1067,14 @@ async function saveDurableFacts(
         await deleteCompactMemoryIds([prior.id], remaining);
         if (epochOf(key) !== epoch) return;
       }
+      // Recomputed after every await: the supersede-delete above may have
+      // consumed most of the budget, and reusing the stale `remaining` would
+      // hand the save a second nearly-full timeout, letting one fact overrun
+      // the pass deadline. The prior is already gone, so a budget exhausted
+      // here just leaves this fact pending for the next pass — no duplicate,
+      // no stale row.
+      const saveRemaining = remainingBudget();
+      if (saveRemaining <= 0) break;
       const result = await callMcp<MemorySaveResponse>('memory', {
         action: 'save_memory',
         params: {
@@ -1069,7 +1084,7 @@ async function saveDurableFacts(
           category: 'context',
           tags: [cli, chatId, identity.threadTag, 'durable-fact'],
         },
-      }, remaining);
+      }, saveRemaining);
       if (typeof result.memory?.id !== 'string' || !result.memory.id) {
         throw new Error('RAG save returned no memory id');
       }
