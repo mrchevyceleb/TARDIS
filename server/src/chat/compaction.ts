@@ -15,7 +15,7 @@
 //
 // The durable event log the user sees is NEVER wiped.
 
-import { readFileSync, readdirSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, mkdirSync, renameSync, unlinkSync, openSync, closeSync, writeSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { MAX_EVENTS_PER_LOG, STATE_DIR } from './config.ts';
@@ -188,7 +188,59 @@ export function compactedThroughSeq(key: string): number {
   return loadCompactBlob(key)?.lastCompactedSeq ?? 0;
 }
 
-function writeCompactBlob(key: string, blob: CompactBlob, epoch?: number): boolean {
+/** Interprocess commit lock for a thread's compact blob. The live server
+ *  and the out-of-band rebuild/regen processes both rewrite these blobs, and
+ *  the epoch and inFlight guards only see one process: a script committing
+ *  between a live writer's guard check and its rename could overwrite a
+ *  newer document, and a fresh start interleaving with a script's rename
+ *  could resurrect stale memory. Every blob commit section therefore runs
+ *  under this lock: the O_EXCL create is atomic against every other process,
+ *  a stale lock (a crashed holder) is broken after LOCK_STALE_MS, and
+ *  contention after bounded retries aborts the caller exactly like any
+ *  other lost race — nothing is ever written on a lost lock. Residual,
+ *  documented: two processes breaking the same long-stale lock in the exact
+ *  stat-to-unlink window can both hold once; the raw-text CAS in the commit
+ *  still guards the data in that case, which is today's behavior, not
+ *  worse. */
+const LOCK_STALE_MS = 30_000;
+const LOCK_ATTEMPTS = 25;
+/** A true sleep inside sync code: the holder's critical section is
+ *  rename-scale (microseconds), so waits are rare and the total block is
+ *  bounded at LOCK_ATTEMPTS waits of 2ms each. */
+const waitMs = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+
+function withCompactBlobLock<T>(key: string, critical: () => T): T | null {
+  mkdirSync(COMPACTS_DIR, { recursive: true });
+  const lockPath = `${compactPath(key)}.lock`;
+  let fd: number | null = null;
+  for (let attempt = 0; attempt < LOCK_ATTEMPTS && fd === null; attempt += 1) {
+    if (attempt > 0) waitMs(2);
+    try {
+      fd = openSync(lockPath, 'wx');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err;
+      try {
+        const age = Date.now() - statSync(lockPath).mtimeMs;
+        if (age > LOCK_STALE_MS) {
+          unlinkSync(lockPath);
+          continue;
+        }
+      } catch { /* the holder released between stat and here; plain retry */ }
+    }
+  }
+  if (fd === null) return null;
+  try {
+    writeSync(fd, `${process.pid}\n`);
+    return critical();
+  } finally {
+    try { closeSync(fd); } catch { /* already closed */ }
+    try { unlinkSync(lockPath); } catch { /* broken as stale by another process */ }
+  }
+}
+
+function writeCompactBlob(key: string, blob: CompactBlob, epoch?: number, expectRaw?: string): boolean {
   mkdirSync(COMPACTS_DIR, { recursive: true });
   const path = compactPath(key);
   const tmp = epoch != null ? `${path}.${epoch}.${process.pid}.tmp` : `${path}.${process.pid}.tmp`;
@@ -199,11 +251,33 @@ function writeCompactBlob(key: string, blob: CompactBlob, epoch?: number): boole
     words: compact.trim().split(/\s+/).filter(Boolean).length,
   };
   writeFileSync(tmp, JSON.stringify(safeBlob, null, 2));
-  if (epoch != null && epochOf(key) !== epoch) {
+  // The commit section runs under the interprocess lock: no rebuild/regen
+  // process can interleave between the guards and the rename. Lost
+  // contention aborts like any other lost race — the tmp is removed and
+  // nothing is written.
+  const committed = withCompactBlobLock(key, () => {
+    if (epoch != null && epochOf(key) !== epoch) return false;
+    // Cross-process CAS on the exact on-disk text the caller based its work
+    // on: any other writer's commit — a live fold, a durable-fact drain that
+    // only moved pendingFacts, a fresh start's delete — changes that text
+    // and aborts this write. A field-pinned compare could miss a
+    // pendingFacts-only change; the full text cannot.
+    if (expectRaw !== undefined) {
+      let diskRaw: string;
+      try {
+        diskRaw = readFileSync(path, 'utf8');
+      } catch {
+        return false; // deleted underneath us (a fresh start won)
+      }
+      if (diskRaw !== expectRaw) return false;
+    }
+    renameSync(tmp, path);
+    return true;
+  });
+  if (committed !== true) {
     try { unlinkSync(tmp); } catch { /* stale tmp only */ }
     return false;
   }
-  renameSync(tmp, path);
   return true;
 }
 
@@ -279,13 +353,23 @@ export async function clearThreadMemory(key: string, chatId: string): Promise<vo
     throw new Error(`thread was not cleared because its RAG compact could not be deleted: ${(err as Error).message}`);
   }
 
-  try {
-    unlinkSync(compactPath(key));
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== 'ENOENT') {
-      throw new Error(`thread was not cleared because its local compact could not be deleted: ${(err as Error).message}`);
+  // The blob deletion rides the interprocess lock too: a rebuild/regen
+  // process committing between the epoch bump and this unlink could
+  // resurrect the stale document the user just asked to wipe. Contention
+  // fails closed — the fresh start is retried, never half-done.
+  const cleared = withCompactBlobLock(key, () => {
+    try {
+      unlinkSync(compactPath(key));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        throw new Error(`thread was not cleared because its local compact could not be deleted: ${(err as Error).message}`);
+      }
     }
+    return true;
+  });
+  if (cleared !== true) {
+    throw new Error('thread was not cleared because its compact blob was locked by another writer; retry the fresh start');
   }
 }
 
@@ -355,13 +439,16 @@ function migrateLegacyPrimer(key: string): void {
   if (typeof pending !== 'string' || !pending.trim()) return;
   if (!loadCompactBlob(key)) {
     const compact = pending.trim();
-    writeCompactBlob(key, {
+    const wrote = writeCompactBlob(key, {
       compact,
       words: compact.split(/\s+/).length,
       count: Math.max(1, rec.count || 1),
       lastAt: rec.lastAt || Date.now(),
       lastCompactedSeq: 0,
     });
+    // Another writer held the blob lock: keep the primer pending and retry
+    // on the next peek instead of clearing it unwritten.
+    if (!wrote) return;
   }
   void mutateState((state) => {
     if (state[key]) {
@@ -517,6 +604,11 @@ export async function rebuildTruncatedCompact(
 ): Promise<{ batches: number; fed: number; covered: number; words: number }> {
   const blob = loadCompactBlob(key);
   if (!blob) throw new Error('no rolling compact for this thread');
+  // The exact on-disk text this rebuild is based on: the final commit CASes
+  // against it under the interprocess blob lock, so any other writer's
+  // commit (a live fold, a durable-fact drain, a fresh start) aborts the
+  // repair with the original untouched.
+  const originalRaw = readFileSync(compactPath(key), 'utf8');
   if (!isTruncatedCompact(blob.compact)) throw new Error('compact tail looks complete; refusing to rebuild');
   if (inFlight.has(key)) throw new Error('a live compaction is in flight for this thread; retry after it');
   const epoch = epochOf(key);
@@ -576,12 +668,13 @@ export async function rebuildTruncatedCompact(
       if (generated.words > ceiling) {
         throw new Error(`rebuilt document came back oversized (${generated.words}w over the ${ceiling}w ceiling); nothing was written`);
       }
-      // Cross-process CAS against the ORIGINAL blob: this repair can run
-      // beside the live server, whose inFlight and epoch guards cannot see
-      // this process. A blob that changed on disk since the repair's first
-      // read means a live compaction or fresh start won the race. Nothing is
-      // written until the single final commit below, so every abort leaves
-      // the original document exactly as it was.
+      // Fast-path re-check against the ORIGINAL blob (the authoritative CAS
+      // is the locked final commit, which compares the exact on-disk text):
+      // this repair can run beside the live server, whose inFlight and epoch
+      // guards cannot see this process. A blob that changed on disk since the
+      // repair's first read means a live compaction or fresh start won the
+      // race. Nothing is written until the single final commit below, so
+      // every abort leaves the original document exactly as it was.
       const disk = loadCompactBlob(key);
       if (!disk || disk.compact !== blob.compact || disk.lastCompactedSeq !== blob.lastCompactedSeq) {
         throw new Error('the compact changed under the rebuild (a live compaction or fresh start won the race); nothing was written');
@@ -620,8 +713,11 @@ export async function rebuildTruncatedCompact(
       throw new Error('the rebuilt document still ends mid-sentence; nothing was written — rerun with a higher bound');
     }
     const words = previous.trim().split(/\s+/).filter(Boolean).length;
-    const wrote = writeCompactBlob(key, { ...blob, compact: previous, words, pendingFacts }, epoch);
-    if (!wrote || epochOf(key) !== epoch) throw new Error('thread was fresh-started during the rebuild; nothing was written');
+    // The commit CASes the exact original on-disk text under the blob lock:
+    // a live fold, a durable-fact drain, or a fresh start that touched the
+    // file since this rebuild started aborts here with the original intact.
+    const wrote = writeCompactBlob(key, { ...blob, compact: previous, words, pendingFacts }, epoch, originalRaw);
+    if (!wrote || epochOf(key) !== epoch) throw new Error('the compact changed under the rebuild (a live compaction, a durable-fact drain, or a fresh start won the race); nothing was written');
     // The overwriteable RAG mirror must not keep serving the truncated
     // document after a reported repair. Re-check the blob first: if a live
     // compaction slipped in between the commit and this save, skip — the
@@ -1251,7 +1347,7 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
       );
       const generated = await generateCompact(previous, overflowBatch);
       if (epochOf(key) !== epoch) {
-        console.warn(`[compaction] ${key}: discarded compact — thread was fresh-started`);
+        console.warn(`[compaction] ${key}: discarded compact — thread was fresh-started or the blob lock was contended (retried)`);
         return false;
       }
       count += 1;
@@ -1295,7 +1391,7 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
         pendingFacts,
       }, epoch);
       if (!wrote || epochOf(key) !== epoch) {
-        console.warn(`[compaction] ${key}: discarded compact blob — thread was fresh-started`);
+        console.warn(`[compaction] ${key}: discarded compact blob — thread was fresh-started or the blob lock was contended (retried)`);
         return false;
       }
       await mutateState((s) => {
@@ -1352,7 +1448,7 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
           pendingFacts: unresolved,
         }, epoch);
         if (!wrote || epochOf(key) !== epoch) {
-          console.warn(`[compaction] ${key}: discarded durable-fact drain — thread was fresh-started`);
+          console.warn(`[compaction] ${key}: discarded durable-fact drain — thread was fresh-started or the blob lock was contended (retried)`);
           return false;
         }
         if (unresolved.length) {
