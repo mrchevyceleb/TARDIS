@@ -20,7 +20,7 @@ const SWEEPER = 'TARDIS';
 
 /** Owner raises go out as one digest per owner every 30 minutes (Matt,
  *  Oct 14, card-d7bf78 b), delivered through the same pseudo-sender. */
-const ownerDigest = createFlagDigest(async (ownerId, text) => {
+const ownerDigest = createFlagDigest('commitments', async (ownerId, text) => {
   try {
     const result = await deliverTeamMessage({ from: SWEEPER, to: ownerId, text, wait: false, priority: true });
     return result.delivered === true;
@@ -52,7 +52,10 @@ async function run(): Promise<void> {
     // of one message per item (Matt, Oct 14, card-d7bf78 b). The raise is
     // marked only when the digest actually delivers it.
     if (!commitment.raised?.owner) {
-      ownerDigest.queue(commitment.agentId, raise, () => markCommitmentRaised(commitment.id, 'owner'));
+      // The commitment id is the stable queue key: the every-minute sweep
+      // re-queues an undelivered raise, and the digest upserts it instead of
+      // stacking duplicates.
+      ownerDigest.queue(commitment.agentId, commitment.id, raise, () => markCommitmentRaised(commitment.id, 'owner'));
     }
     // The Chief copy escalates only once the owner raise actually went out
     // (the digest flush sets the raised mark), so it never claims a delivery

@@ -399,7 +399,7 @@ async function liveAgentIdsFromRunners(agents: HygieneAgent[]): Promise<Set<stri
  *  'desk', which is the human owner): it lands as a teammate handoff, so it
  *  waits out the 60s handoff hold-off and does not arm the reply-first
  *  nudge. */
-const deskDigest = createFlagDigest(async (to, text) => {
+const deskDigest = createFlagDigest('desk-hygiene', async (to, text) => {
   if (hygieneDryRun()) return true; // dry run: the pacing proceeds, nothing is delivered
   const { deliverTeamMessage } = await import('../chat/teamBus.ts');
   try {
@@ -422,7 +422,10 @@ function defaultDeps(): HygieneDeps {
       // owner's 30-minute digest instead of sending per item; the pacing
       // state sees this as delivered, and the digest flush (below) carries
       // the actual combined send.
-      deskDigest.queue(to, text);
+      // The text is the stable queue key: an identical nudge requeued while
+      // a window is pending upserts over its earlier entry; distinct nudges
+      // queue side by side and ride the same digest.
+      deskDigest.queue(to, text, text);
       return { delivered: true };
     },
     log: (line) => console.log(line),

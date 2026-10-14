@@ -123,7 +123,14 @@ try {
   // copy would still change the live files). A real copy: 249MB on NVMe,
   // a few seconds, fully isolated.
   run('cp', ['-a', path.join(REPO, 'node_modules'), path.join(srcDir, 'node_modules')]);
-  run('cp', ['-a', path.join(REPO, 'node_modules'), path.join(srcDir, 'server', 'node_modules')]);
+  // The live server workspace keeps its own node_modules for non-hoisted
+  // versions; copy it when present so the side copy resolves exactly what
+  // production resolves (the root tree alone can resolve differently).
+  if (fs.existsSync(path.join(REPO, 'server', 'node_modules'))) {
+    run('cp', ['-a', path.join(REPO, 'server', 'node_modules'), path.join(srcDir, 'server', 'node_modules')]);
+  } else {
+    run('cp', ['-a', path.join(REPO, 'node_modules'), path.join(srcDir, 'server', 'node_modules')]);
+  }
   step('typechecking the server...');
   run('npm', ['run', 'build', '--workspace', 'server'], srcDir, path.join(tmp, 'build.log'));
   step('typecheck green');
