@@ -3,7 +3,7 @@
 
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, ChevronDown, ChevronUp, X } from 'lucide-react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { fetchPriorityBoards, priorityAction, type PriorityAction, type PriorityBoard, type PriorityItem } from '../data/api';
 import { showToast } from '../native/shell';
 
@@ -18,24 +18,32 @@ export function MattsPriorities() {
   const [draft, setDraft] = useState('');
   const [editing, setEditing] = useState<{ id: string; text: string }>();
 
-  const run = async (op: PriorityAction) => {
+  // One write at a time, in tap order: a slow response can never land after
+  // a newer one and paint a stale board.
+  const queue = useRef<Promise<void>>(Promise.resolve());
+  const run = (op: PriorityAction, onFail?: () => void) => {
     if (!board) return;
-    try {
-      const { items } = await priorityAction(board.agentId, op);
-      qc.setQueryData<{ boards: PriorityBoard[] }>(KEY, (prev) => prev && ({
-        boards: prev.boards.map((b) => (b.agentId === board.agentId ? { ...b, items } : b)),
-      }));
-    } catch {
-      showToast("Couldn't save that priority. Try again.");
-      void query.refetch();
-    }
+    const agentId = board.agentId;
+    queue.current = queue.current.then(async () => {
+      try {
+        const { items } = await priorityAction(agentId, op);
+        qc.setQueryData<{ boards: PriorityBoard[] }>(KEY, (prev) => prev && ({
+          boards: prev.boards.map((b) => (b.agentId === agentId ? { ...b, items } : b)),
+        }));
+      } catch {
+        showToast("Couldn't save that priority. Try again.");
+        onFail?.();
+        void query.refetch();
+      }
+    });
   };
 
   const add = () => {
     const text = draft.trim();
     if (!text) return;
     setDraft('');
-    void run({ action: 'add', text });
+    // A failed add puts the text back so Matt never has to retype it.
+    run({ action: 'add', text }, () => setDraft((now) => now || text));
   };
 
   const saveEdit = () => {
@@ -43,7 +51,8 @@ export function MattsPriorities() {
     const text = editing.text.trim();
     const current = board?.items.find((i) => i.id === editing.id);
     setEditing(undefined);
-    if (text && current && text !== current.text) void run({ action: 'update', id: editing.id, text });
+    const { id } = editing;
+    if (text && current && text !== current.text) run({ action: 'update', id, text }, () => setEditing((now) => now ?? { id, text }));
   };
 
   if (!boards.length) return null;
@@ -52,7 +61,7 @@ export function MattsPriorities() {
   const done = items.filter((i) => i.done);
 
   const row = (item: PriorityItem) => {
-    const index = items.indexOf(item);
+    const index = open.indexOf(item);
     return (
       <li key={item.id} className={`mp-row${item.done ? ' is-done' : ''}`}>
         <button

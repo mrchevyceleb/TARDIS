@@ -599,6 +599,9 @@ export class CodexSession {
           : `${text}\n\n[Matt attached ${images.length === 1 ? 'a screenshot' : 'screenshots'} that could not be saved. Ask him to resend if it matters.]`;
       }
 
+      // Matt's Priorities ride steers too, read fresh.
+      const steerPriorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
+      if (steerPriorities) steerText = `${steerPriorities}\n\n${steerText}`;
       await this.sendNativeSteer(
         steerText,
         opts.peerDeliveryId ?? opts.clientMsgId ?? randomUUID(),

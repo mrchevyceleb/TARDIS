@@ -283,8 +283,18 @@
 .mp-text:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; border-radius: 4px; }
 .mp-tools { display: inline-flex; gap: 2px; opacity: 0.45; transition: opacity 0.15s ease; }
 .mp-row:hover .mp-tools, .mp-row:focus-within .mp-tools { opacity: 1; }
-/* Touch screens have no hover: keep the tools visible. */
-@media (hover: none) { .mp-tools { opacity: 0.85; } }
+/* Touch screens (iPad) have no hover: keep the tools visible, finger-sized
+   and spaced so delete is hard to hit by accident. */
+@media (hover: none), (pointer: coarse) {
+  .mp-tools { opacity: 0.85; gap: 6px; }
+  .mp-tools .mp-tool { width: 40px; height: 40px; border-radius: 10px; }
+  .mp-tools .mp-tool.is-danger { margin-left: 8px; }
+  .mp-row .mp-check { min-width: 36px; min-height: 36px; }
+  .mp-text { min-height: 36px; }
+  .mp-input { min-height: 40px; font-size: 16px; }
+  .mp-tab { min-height: 38px; }
+  .mp-row:hover, .mp-tab:hover { transform: none; }
+}
 .mp-tool {
   width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; color: var(--r-ink-mute);
   transition: color 0.15s ease, background 0.15s ease, transform 0.12s ease;

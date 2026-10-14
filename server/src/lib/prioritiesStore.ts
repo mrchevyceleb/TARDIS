@@ -3,7 +3,7 @@
 // stitched into every turn of that agent, read fresh from disk each time.
 // Store: ~/.rivendell/matts-priorities.json
 
-import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 
@@ -65,17 +65,40 @@ function readAll(): Boards {
   const boards: Boards = {};
   if (data?.boards && typeof data.boards === 'object') {
     for (const [agentId, list] of Object.entries(data.boards as Record<string, unknown>)) {
-      if (Array.isArray(list)) boards[agentId] = list.map(normalizeItem).filter((i): i is PriorityItem => Boolean(i));
+      if (Array.isArray(list)) boards[agentId] = openFirst(list.map(normalizeItem).filter((i): i is PriorityItem => Boolean(i)));
     }
   }
   return boards;
 }
 
+/** Open items above done ones, each group in stored order. Moves and the
+ *  Desk's open/done split both rely on this. */
+function openFirst(list: PriorityItem[]): PriorityItem[] {
+  return [...list.filter((i) => !i.done), ...list.filter((i) => i.done)];
+}
+
 function save(boards: Boards): void {
   mkdirSync(STATE_DIR, { recursive: true });
-  const tmp = `${FILE}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify({ boards }, null, 2)}\n`);
-  renameSync(tmp, FILE);
+  // Unique temp name, flushed before the rename: a crash mid-write leaves the
+  // old file intact, never a torn one.
+  const tmp = `${FILE}.${process.pid}.${Date.now().toString(36)}.tmp`;
+  try {
+    const fd = openSync(tmp, 'w');
+    try {
+      writeFileSync(fd, `${JSON.stringify({ boards }, null, 2)}\n`); // loops until every byte is written
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, FILE);
+    try {
+      const dir = openSync(STATE_DIR, 'r');
+      try { fsyncSync(dir); } finally { closeSync(dir); }
+    } catch { /* directory fsync is best-effort (unsupported on some platforms) */ }
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* already gone */ }
+    throw err;
+  }
 }
 
 /** Board order as stored (the owner's order). */
@@ -96,7 +119,7 @@ function mutate(agentId: string, fn: (list: PriorityItem[]) => Result): Result {
   const list = all[agentId] ?? [];
   const result = fn(list);
   if (result.error) return result;
-  all[agentId] = list;
+  all[agentId] = openFirst(list);
   save(all);
   return result;
 }
@@ -132,10 +155,18 @@ export function updatePriority(agentId: string, id: unknown, patch: { text?: unk
       if (!body) return { error: 'text cannot be empty', status: 400 };
       item.text = body;
     }
-    if (typeof patch.done === 'boolean') item.done = patch.done;
     item.updatedAt = Date.now();
     item.by = by;
-    list[idx] = item;
+    if (typeof patch.done === 'boolean' && patch.done !== item.done) {
+      // Done drops to the top of the done group; reopened goes to the bottom
+      // of the open group (openFirst keeps the rest in place).
+      item.done = patch.done;
+      list.splice(idx, 1);
+      const firstDone = list.findIndex((i) => i.done);
+      list.splice(firstDone === -1 ? list.length : firstDone, 0, item);
+    } else {
+      list[idx] = item;
+    }
     return { item };
   });
 }
@@ -153,9 +184,11 @@ export function movePriority(agentId: string, id: unknown, direction: 'up' | 'do
   return mutate(agentId, (list) => {
     const idx = findIndex(list, id);
     if (idx === -1) return { error: 'priority not found', status: 404 };
+    const item = list[idx];
     const to = direction === 'up' ? idx - 1 : idx + 1;
-    if (to >= 0 && to < list.length) [list[idx], list[to]] = [list[to], list[idx]];
-    return { item: list[to] ?? list[idx] };
+    // Moves stay inside the item's own group (open or done).
+    if (to >= 0 && to < list.length && list[to].done === item.done) [list[idx], list[to]] = [list[to], item];
+    return { item };
   });
 }
 
@@ -180,7 +213,8 @@ export function prioritiesBlockFor(agentId: string | undefined): string {
   return [
     '<matts-priorities>',
     "Matt's Priorities (his board for you, kept on his Desk; load-bearing every turn, never forget these):",
-    ...open.map((item, n) => `${n + 1}. ${item.text}`),
+    // Angle brackets escaped: item text can never close or forge the block.
+    ...open.map((item, n) => `${n + 1}. ${item.text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}`),
     '</matts-priorities>',
   ].join('\n');
 }
