@@ -30,11 +30,13 @@ const DELIVERY_TIMEOUT_MS = 10_000;
  *  automated asks must not grow the store unbounded on the event path. */
 const ASK_RETENTION_MS = 24 * 60 * 60_000;
 
-// One real close check per (logKey, lane) per process: streamed replies arrive
-// as many deltas, and re-reading and re-parsing the store on every delta would
-// block the event loop after the ask is already closed. A new Matt message
-// (noteMattAsk) re-arms its key.
-const closedLanes = new Set<string>();
+// One real close check per (logKey, lane) PER TURN: streamed replies arrive
+// as many deltas, and re-reading and re-parsing the store on every delta
+// would block the event loop after the ask is already closed. Keyed by the
+// turn start the check ran against, so a later turn's reply is never
+// skipped by an earlier turn's memo, and a new Matt message (noteMattAsk)
+// re-arms its key.
+const closedLanes = new Map<string, number>();
 
 export type MattAsk = {
   id: string;
@@ -134,7 +136,7 @@ export function noteMattAsk(logKey: string, lane: 'home' | 'bg', text: string): 
  *  or handoff reply never closes Matt's home-lane asks). Fail-open. */
 export function closeMattAsksForLane(logKey: string, lane: 'home' | 'bg', turnStartedAtMs: number): void {
   const memoKey = `${logKey}|${lane}`;
-  if (closedLanes.has(memoKey)) return;
+  if (closedLanes.get(memoKey) === turnStartedAtMs) return;
   try {
     const store = readAsks();
     const before = store.asks.length;
@@ -147,7 +149,7 @@ export function closeMattAsksForLane(logKey: string, lane: 'home' | 'bg', turnSt
     // failure must not suppress later close attempts (a visible reply
     // followed by a false nudge is exactly what this feature exists to
     // prevent).
-    closedLanes.add(memoKey);
+    closedLanes.set(memoKey, turnStartedAtMs);
   } catch {
     // Never block the reply path; the memo was not taken, so a later
     // delta retries the close.

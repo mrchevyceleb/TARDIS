@@ -1134,11 +1134,16 @@ function terminalResultText(frame: unknown): boolean {
   return typeof f.result === 'string' && f.result.trim().length > 0;
 }
 
-/** Latest provider-message (turn) start per (logKey, lane), recorded from
- *  persisted message_start frames: an ask only closes on output from a turn
- *  that started after the ask arrived (an older turn still streaming when
- *  Matt messaged must not close his newer ask with in-flight text). */
+/** Latest OUTER-turn start per (logKey, lane): an ask only closes on output
+ *  from a turn that started after the ask arrived (an older turn still
+ *  streaming when Matt messaged must not close his newer ask with in-flight
+ *  text). Providers emit multiple message_start frames per outer turn (tool
+ *  loops), so only the FIRST message_start after the previous turnEnd counts
+ *  as the outer turn's start — an internal round after a mid-turn steer must
+ *  not move the boundary. Both entries die at the turn's terminal turnEnd:
+ *  the maps never grow past the active turns. */
 const turnStartAtByLane = new Map<string, number>();
+const outerTurnStartRecorded = new Map<string, boolean>();
 
 function mattAskHooks(key: string, persisted: PersistedEvent): void {
   try {
@@ -1159,10 +1164,18 @@ function mattAskHooks(key: string, persisted: PersistedEvent): void {
       // replayDelivery apply): its text never closes an ask, its inner
       // echoes never open one, and its frames never count as turn starts.
       const subagent = typeof ev.parent_tool_use_id === 'string' || typeof inner.parent_tool_use_id === 'string';
-      if (inner.type === 'stream_event' && !subagent && frameType(inner.event) === 'message_start') {
-        // A new provider message = a new turn for this lane: only a turn
-        // that started AFTER an ask arrived can close it.
+      if (inner.type === 'stream_event' && !subagent && frameType(inner.event) === 'message_start' && outerTurnStartRecorded.get(laneKey) !== true) {
+        // The first provider message after the previous turnEnd starts this
+        // lane's outer turn: only a turn that started AFTER an ask arrived
+        // can close it. Internal rounds (tool loops) must not move it.
         turnStartAtByLane.set(laneKey, eventAt);
+        outerTurnStartRecorded.set(laneKey, true);
+      }
+      if (inner.type === 'turnEnd' && !subagent) {
+        // The outer turn ended: evict its boundary — the next message_start
+        // starts a fresh outer turn, and the maps never grow past live turns.
+        outerTurnStartRecorded.set(laneKey, false);
+        turnStartAtByLane.delete(laneKey);
       }
       if (inner.type === '_user_echo' && !subagent) {
         // Only a message Matt himself typed opens an ask: the client assigns
@@ -1190,8 +1203,13 @@ function mattAskHooks(key: string, persisted: PersistedEvent): void {
         }
       }
     }
-    if (ev.type === 'stream_event' && typeof ev.parent_tool_use_id !== 'string' && frameType(ev.event) === 'message_start') {
+    if (ev.type === 'stream_event' && typeof ev.parent_tool_use_id !== 'string' && frameType(ev.event) === 'message_start' && outerTurnStartRecorded.get(laneKey) !== true) {
       turnStartAtByLane.set(laneKey, eventAt);
+      outerTurnStartRecorded.set(laneKey, true);
+    }
+    if (ev.type === 'turnEnd' && typeof ev.parent_tool_use_id !== 'string') {
+      outerTurnStartRecorded.set(laneKey, false);
+      turnStartAtByLane.delete(laneKey);
     }
     if (ev.type === 'stream_event' || ev.type === 'result' || ev.type === 'assistant') {
       // No turn start on record (no message_start seen this process): skip
