@@ -238,21 +238,48 @@ function slugify(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'agent';
 }
 
+function loadAgents(): Agent[] {
+  const data = JSON.parse(readFileSync(AGENTS_FILE, 'utf8')) as { agents?: Agent[] };
+  const rawAgents = Array.isArray(data.agents) ? data.agents : [];
+  const agents = rawAgents.map(normalizeAgentBrain);
+  // One-time in-place migration makes the central brain explicit instead of
+  // recomputing hidden defaults independently on every device and worker.
+  if (JSON.stringify(agents) !== JSON.stringify(rawAgents)) saveAgents(agents);
+  // Fixed manual order first; unordered legacy/new agents append by age.
+  return agents.sort((a, b) =>
+    (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER)
+    || a.createdAt - b.createdAt);
+}
+
 export function listAgents(): Agent[] {
   try {
-    const data = JSON.parse(readFileSync(AGENTS_FILE, 'utf8')) as { agents?: Agent[] };
-    const rawAgents = Array.isArray(data.agents) ? data.agents : [];
-    const agents = rawAgents.map(normalizeAgentBrain);
-    // One-time in-place migration makes the central brain explicit instead of
-    // recomputing hidden defaults independently on every device and worker.
-    if (JSON.stringify(agents) !== JSON.stringify(rawAgents)) saveAgents(agents);
-    // Fixed manual order first; unordered legacy/new agents append by age.
-    return agents.sort((a, b) =>
-      (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER)
-      || a.createdAt - b.createdAt);
+    return loadAgents();
   } catch {
     return [];
   }
+}
+
+/** The strict roster read: read/parse/STRUCTURE failures propagate instead
+ *  of reading as an empty roster, so availability-sensitive callers can tell
+ *  a broken roster (unavailable) from a confirmed one: the file must be an
+ *  object whose `agents` is an array of objects each carrying a nonempty
+ *  string id. The fail-open listAgents() wrapper is unchanged for every
+ *  other caller. */
+export function listAgentsOrThrow(): Agent[] {
+  const data: unknown = JSON.parse(readFileSync(AGENTS_FILE, 'utf8'));
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('roster file is not an object');
+  }
+  const rawAgents = (data as { agents?: unknown }).agents;
+  if (!Array.isArray(rawAgents)) {
+    throw new Error('roster file has no agents array');
+  }
+  for (const raw of rawAgents) {
+    if (!raw || typeof raw !== 'object') throw new Error('roster agent entry is not an object');
+    const id = (raw as Record<string, unknown>).id;
+    if (typeof id !== 'string' || !id) throw new Error('roster agent entry is missing its id');
+  }
+  return loadAgents();
 }
 
 function saveAgents(agents: Agent[]): void {

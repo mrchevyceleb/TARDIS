@@ -36,7 +36,7 @@ import {
   type VisibleTurn,
 } from './threadWindow.ts';
 import { bareChatId, isThreadLogKey } from './threadKey.ts';
-import { agentForChatId } from './agents.ts';
+import { listAgentsOrThrow } from './agents.ts';
 import { listCommitments } from '../lib/commitmentStore.ts';
 
 const MIN_ACCEPT_WORDS = 400;
@@ -364,7 +364,7 @@ function migrateLegacyPrimer(key: string): void {
   });
 }
 
-export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev: any }>): string {
+export function peekEnginePrimerWithStatus(key: string, events?: Array<{ seq?: number; ev: any }>): { primer: string; available: boolean } {
   migrateLegacyPrimer(key);
   const evs = events ?? loadEventLogForCompactionSync(key);
   const blob = loadCompactBlob(key);
@@ -376,11 +376,18 @@ export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev:
   // The agent's open commitments lead every seed: a short code-carried
   // list the rolling compact can never rewrite, drop, or fold away. Every
   // engine seeds through here, so one stitch covers all four runners.
-  const block = commitmentsSeedBlock(key);
+  const block = commitmentsSeedBlockWithStatus(key);
   // After a Fresh the primer body is empty (compact and log were wiped) while
   // the commitments block lives on: the seed is then exactly the block, with
-  // no dangling separator.
-  return block && primer ? `${block}\n\n---\n\n${primer}` : (block || primer);
+  // no dangling separator. `available` reflects ONLY the commitments half: a
+  // store hiccup there (fail-open empty) is uncertainty the caller must not
+  // treat as a confirmed-empty seed.
+  const seed = block.block && primer ? `${block.block}\n\n---\n\n${primer}` : (block.block || primer);
+  return { primer: seed, available: block.available };
+}
+
+export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev: any }>): string {
+  return peekEnginePrimerWithStatus(key, events).primer;
 }
 
 /** The seed block for this thread's agent commitments, or ''. A
@@ -388,18 +395,29 @@ export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev:
  *  "none") so the header's roster agent id reaches every lane — banana's
  *  shared MCP has no identity env, and its display name may not even be
  *  unique. Fail-open: a store hiccup must never block a session seed. */
-function commitmentsSeedBlock(key: string): string {
+function commitmentsSeedBlockWithStatus(key: string): { block: string; available: boolean } {
   try {
-    if (!isThreadLogKey(key)) return '';
-    const agent = agentForChatId(bareChatId(key.slice(key.lastIndexOf('|') + 1)));
-    if (!agent) return '';
+    if (!isThreadLogKey(key)) return { block: '', available: true };
+    // Strict roster read: a roster read/parse failure must read as
+    // UNAVAILABLE (the seed window stays open and retries), never as
+    // "no agent" (which would acknowledge a commitments-free seed).
+    const agents = listAgentsOrThrow();
+    const bare = bareChatId(key.slice(key.lastIndexOf('|') + 1));
+    const agent = agents.find((a) => a.home === bare);
+    if (!agent) return { block: '', available: true };
     const lines = listCommitments(agent.id).map((c) => `- [${c.id}] ${c.text}${c.due ? ` (due ${c.due})` : ''}`);
-    return [
-      `Your open commitments — your own always-there list, carried by code so no memory rewrite can drop it. You are roster agent id ${agent.id}: pass it as from for the commitments tool's add and clear. Clear each one with the commitments tool (action clear, id in brackets) the moment it is done:`,
-      ...(lines.length ? lines : ['None right now. Add one the moment you owe a reply or promise a time.']),
-    ].join('\n');
+    return {
+      block: [
+        `Your open commitments — your own always-there list, carried by code so no memory rewrite can drop it. You are roster agent id ${agent.id}: pass it as from for the commitments tool's add and clear. Clear each one with the commitments tool (action clear, id in brackets) the moment it is done:`,
+        ...(lines.length ? lines : ['None right now. Add one the moment you owe a reply or promise a time.']),
+      ].join('\n'),
+      available: true,
+    };
   } catch {
-    return '';
+    // Fail-open on the block, but SAY so: an empty block from a store hiccup
+    // is uncertainty, not a confirmed-empty seed, and the caller must not
+    // consume a seed window on it.
+    return { block: '', available: false };
   }
 }
 
@@ -407,11 +425,11 @@ function commitmentsSeedBlock(key: string): string {
  * current user echo. Runners keep only 2,000 replay events in memory, which can
  * be less than one tool-heavy turn; using that tail here caused fresh engines
  * to forget the rest of an agent's conversation. */
-export async function peekEnginePrimerThroughSeq(
+export async function peekEnginePrimerThroughSeqWithStatus(
   key: string,
   throughSeq: number,
   fallbackEvents: Array<{ seq?: number; ev: any }> = [],
-): Promise<string> {
+): Promise<{ primer: string; available: boolean }> {
   await flushEventLog(key);
   const durable = loadEventLogForCompactionSync(key).filter((event) => event.seq <= throughSeq);
   // Durable appends deliberately fail soft so a disk hiccup cannot crash a
@@ -425,7 +443,15 @@ export async function peekEnginePrimerThroughSeq(
     merged.push(event);
   }
   merged.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
-  return peekEnginePrimer(key, merged);
+  return peekEnginePrimerWithStatus(key, merged);
+}
+
+export async function peekEnginePrimerThroughSeq(
+  key: string,
+  throughSeq: number,
+  fallbackEvents: Array<{ seq?: number; ev: any }> = [],
+): Promise<string> {
+  return (await peekEnginePrimerThroughSeqWithStatus(key, throughSeq, fallbackEvents)).primer;
 }
 
 export async function takeRotation(key: string): Promise<string | null> {

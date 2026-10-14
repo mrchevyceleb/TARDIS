@@ -13,7 +13,7 @@ import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './crashTombstone.ts';
-import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeq, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
+import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeq, peekEnginePrimerThroughSeqWithStatus, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
@@ -167,6 +167,10 @@ type CodexSendOptions = {
   emptyRetryDepth?: number;
   suppressEcho?: boolean;
   seedOverride?: string;
+  /** False when the caller could not confirm the override primer's
+   *  commitments half (the empty-exit retry passing a partial primer): an
+   *  unconfirmed override must not acknowledge the seed window. */
+  seedOverrideAvailable?: boolean;
   voiceMode?: boolean;
 };
 type CodexSessionOptions = {
@@ -725,11 +729,30 @@ export class CodexSession {
 
     const hasSeedOverride = typeof opts.seedOverride === 'string';
     const seedWindow = !hasSeedOverride && (this.consumeWindowSeed() || recoverContextThisTurn);
-    const seed = hasSeedOverride
-      ? opts.seedOverride as string
+    // The primer reports whether its commitments half is CONFIRMED: an empty
+    // primer from a fail-open store hiccup is uncertainty, and the seed
+    // window must not be consumed on it below.
+    const seedStatus = hasSeedOverride
+      ? { primer: opts.seedOverride as string, available: opts.seedOverrideAvailable !== false }
       : seedWindow
-        ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
-        : '';
+        ? await peekEnginePrimerThroughSeqWithStatus(this.logKey, historyThroughSeq, fallbackHistory).catch((e) => {
+            // A peek/compaction failure after the user's message was accepted
+            // must not strand a busy lane with the reply watcher armed: keep
+            // going unseeded, the same degradation the empty-retry path uses
+            // (and report it unavailable so the window retries next turn).
+            console.warn(`[chat codex] seed peek failed on ${this.logKey}, continuing unseeded: ${(e as Error).message}`);
+            return { primer: '', available: false };
+          })
+        : { primer: '', available: true };
+    const seed = seedStatus.primer;
+    const seedAvailable = seedStatus.available;
+    if (seedWindow && !seedAvailable) {
+      // An unconfirmed primer arms the window regardless of what triggered
+      // this seed: the recovery flag below is cleared while the window flag
+      // may never have been set, and without this the next turn would never
+      // retry the commitments half.
+      this.seedWindowOnNextTurn = true;
+    }
     if (seed) {
       this.recoverContextOnNextTurn = false;
       if (!hasSeedOverride) {
@@ -1019,10 +1042,18 @@ export class CodexSession {
         this.threadId = null;
         await setSessionId(this.cli, this.cwd, '', this.chatId);
         let retrySeed = seed;
-        if (!retrySeed) {
-          retrySeed = await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory).catch(() => '');
+        let retryAvailable = seedAvailable;
+        // An unavailable primer is refetched even when nonempty (a partial
+        // primer: history without the commitments half), and never becomes
+        // a confirmed override: the window below stays open so the next
+        // turn retries the commitments half.
+        if (!retrySeed || !retryAvailable) {
+          const retryStatus = await peekEnginePrimerThroughSeqWithStatus(this.logKey, historyThroughSeq, fallbackHistory)
+            .catch(() => ({ primer: '', available: false }));
+          retrySeed = retryStatus.primer;
+          retryAvailable = retryStatus.available;
         }
-        this.seedWindowOnNextTurn = false;
+        this.seedWindowOnNextTurn = !retryAvailable;
         this.recoverContextOnNextTurn = false;
         this.busy = false;
         console.warn(`[chat codex] empty exit from ${failedThread ?? 'new thread'} — retrying once on a fresh thread`);
@@ -1032,6 +1063,7 @@ export class CodexSession {
             emptyRetryDepth: (opts.emptyRetryDepth ?? 0) + 1,
             suppressEcho: true,
             seedOverride: retrySeed,
+            seedOverrideAvailable: retryAvailable,
             skipAttachments: true,
           });
         } catch (error) {
@@ -1092,12 +1124,24 @@ export class CodexSession {
           );
         }
       } else if (this.threadId) {
-        // Acknowledge the seed ATTEMPT, not only a nonempty seed: a fresh
-        // thread with an empty primer (no commitments, no history) must still
-        // consume the window seed here, or the second turn would re-seed the
-        // now-warm session with the first turn's history.
-        if (seed || seedWindow) await this.ackWindowSeed();
-        await this.persistThreadId(this.threadId);
+        // Acknowledge a CONFIRMED seed only: a real seed, or a confirmed-empty
+        // one (the second turn must not re-seed a warm session). An unconfirmed
+        // primer — empty OR nonempty-partial (history without the commitments
+        // half) — discards the thread and leaves the window open instead: the
+        // next turn seeds the full primer on a genuinely fresh thread, so the
+        // commitments are retried without re-seeding history into the warm
+        // one (a persistent failure must not replay growing history every
+        // turn).
+        if (seedAvailable && (seed || seedWindow)) await this.ackWindowSeed();
+        else if (seedWindow && !seedAvailable) {
+          const unconfirmedThread = this.threadId;
+          this.threadId = null;
+          await this.clearPersistedThreadId().catch(() => undefined);
+          console.warn(
+            `[chat codex] discarding unconfirmed-seed thread ${unconfirmedThread} on ${this.logKey} — the next turn reseeds fresh`,
+          );
+        }
+        if (this.threadId) await this.persistThreadId(this.threadId);
       }
       this.busy = false;
       const rotationDue = contextRotationDue(this.logKey) && code === 0;
