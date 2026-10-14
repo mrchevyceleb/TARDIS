@@ -9,14 +9,14 @@ import { localMcpCodexArgs } from './local-mcp.ts';
 import { officeMcpCodexArgs } from './office-mcp.ts';
 import { computerGuidance, computerOwnerKey } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
-import { laneTagFor, type CliKind, type SessionEvent, type SeqEvent } from './runner.ts';
+import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './crashTombstone.ts';
 import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeq, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
-import { lastEngineOf, logKeyFor } from './threadKey.ts';
+import { isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
@@ -1156,7 +1156,10 @@ export class CodexSession {
     msg = redactComputerImages(msg);
     if (isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
-    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now(), ...laneTagFor(this.chatId) };
+    // Lane stamp via the threadKey leaf: a runtime import of runner.ts's
+    // laneTagFor would create a module-evaluation cycle (the runners and
+    // runner.ts import each other's worlds; the type-only import stays).
+    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now(), ...(isBackgroundChatId(this.chatId) ? { lane: 'bg' as const } : {}) };
     const persisted = { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) };
     const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
     if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) {
