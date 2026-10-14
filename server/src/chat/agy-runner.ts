@@ -45,6 +45,9 @@ import { longCallGateEnv } from './longCallGate.ts';
 import { laneTagFor, shareBackgroundLaneEvent, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
+/** Init is immediate on a healthy spawn (probed); a live process that never
+ *  emits init is retired so the lane respawns instead of hanging a send. */
+const AGY_READY_TIMEOUT_MS = 45_000;
 
 type Listener = (e: SeqEvent) => void;
 type ChatImage = { mediaType: string; base64: string };
@@ -76,6 +79,8 @@ export class AgySession {
    *  --conversation on the next spawn. */
   private agyConversationId: string | null = null;
   private readonly startedResumeId: string | null;
+  /** A spawn that carried a saved --conversation id and died before init. */
+  private resumeFailed = false;
   private listeners = new Set<Listener>();
   private eventLog: SeqEvent[] = [];
   private nextSeq = 1;
@@ -89,11 +94,16 @@ export class AgySession {
   private seedWindowOnNextTurn = false;
   private terminalNoticeEmitted = false;
   private buffer = '';
+  /** Consecutive unparsable stdout frames; resets on any good frame. */
+  private malformedFrames = 0;
   private turnUsage = { input: 0, output: 0, cacheRead: 0 };
   private turnFailed: { message: string; code?: string } | null = null;
   private currentMsgId: string | null = null;
   /** A content block is open for the current agent_response step. */
   private stepBlockOpen = false;
+  /** Accumulated text_delta of the current agent_response step; the DONE
+   *  frame carries only deltas, never the assembled step text. */
+  private stepText = '';
   /** Final assistant text of the turn; the client's `result.result` recovery
    *  path re-renders it if the streamed blocks never made it on screen. */
   private lastAssistantText = '';
@@ -212,7 +222,8 @@ export class AgySession {
       if (line.endsWith('\r')) line = line.slice(0, -1);
       if (!line.trim()) continue;
       let msg: any;
-      try { msg = JSON.parse(line); } catch { continue; }
+      try { msg = JSON.parse(line); } catch { this.noteMalformedFrame(line); continue; }
+      this.malformedFrames = 0;
       try { this.handleEvent(msg); } catch (err) {
         console.error(`[chat ${this.cli}/agy] event handling failed:`, (err as Error).message);
       }
@@ -237,10 +248,12 @@ export class AgySession {
         if (typeof step.text_delta === 'string' && step.text_delta.length > 0) {
           if (!this.stepBlockOpen) {
             this.stepBlockOpen = true;
+            this.stepText = '';
             this.currentMsgId = randomUUID();
             stream({ type: 'message_start', message: { id: this.currentMsgId, type: 'message', role: 'assistant', content: [], model: this.spawnModel, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } } });
             stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
           }
+          this.stepText += step.text_delta;
           stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: step.text_delta } });
         }
         if (step.state === 'DONE') this.finishStep(stream, step);
@@ -273,13 +286,28 @@ export class AgySession {
     }
   }
 
+  /** Bounded diagnostics for unparsable frames: a protocol change must never
+   *  hang a turn silently. Three consecutive malformed frames while a turn is
+   *  open fail that turn as a protocol break; the counter resets on any good
+   *  frame, so an isolated bad line never kills a healthy turn. */
+  private noteMalformedFrame(line: string): void {
+    this.malformedFrames += 1;
+    if (this.malformedFrames <= 5) console.warn(`[chat ${this.cli}/agy] unparsable stdout frame (${this.malformedFrames}): ${line.slice(0, 200)}`);
+    if (this.turnStartedAt !== null && this.malformedFrames >= 3) {
+      this.malformedFrames = 0;
+      this.turnFailed = { message: 'agy stream frames became unparsable (protocol change?)', code: 'protocol' };
+      this.finishTurn();
+    }
+  }
+
   /** Close the streamed step into a full assistant message (claude-shaped). */
   private finishStep(stream: (event: Record<string, unknown>) => void, step: any): void {
     const usageRaw = step.usage ?? {};
+    const count = (v: unknown): number => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : 0; };
     const usage = {
-      input_tokens: Number(usageRaw.input_tokens ?? 0),
-      output_tokens: Number(usageRaw.output_tokens ?? 0),
-      cache_read_input_tokens: Number(usageRaw.cache_read_tokens ?? 0),
+      input_tokens: count(usageRaw.input_tokens),
+      output_tokens: count(usageRaw.output_tokens),
+      cache_read_input_tokens: count(usageRaw.cache_read_tokens),
       cache_creation_input_tokens: 0,
     };
     this.turnUsage.input += usage.input_tokens;
@@ -291,7 +319,8 @@ export class AgySession {
     if (!this.stepBlockOpen) return; // a step with no streamed text (not seen live; nothing to close)
     this.stepBlockOpen = false;
     const sid = this.agyConversationId ?? '';
-    const text = typeof step.text === 'string' ? step.text : '';
+    const text = this.stepText;
+    this.stepText = '';
     stream({ type: 'content_block_stop', index: 0 });
     if (text.trim()) this.lastAssistantText = text;
     const msgId = this.currentMsgId ?? randomUUID();
@@ -301,8 +330,23 @@ export class AgySession {
     this.currentMsgId = null;
   }
 
+  /** Unconditional stream finalization: a terminal path (result, exit,
+   *  interrupt) can arrive while a response step is still open, and an
+   *  unclosed block would let the next turn's deltas continue this message. */
+  private finalizeOpenStep(): void {
+    if (!this.stepBlockOpen) return;
+    this.stepBlockOpen = false;
+    const sid = this.agyConversationId ?? '';
+    const usage = { input_tokens: this.turnUsage.input, output_tokens: this.turnUsage.output, cache_read_input_tokens: this.turnUsage.cacheRead, cache_creation_input_tokens: 0 };
+    this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'content_block_stop', index: 0 }, session_id: sid } });
+    this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: this.turnFailed ? null : 'end_turn', stop_sequence: null }, usage }, session_id: sid } });
+    this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_stop' }, session_id: sid } });
+    this.currentMsgId = null;
+  }
+
   private finishTurn(): void {
     if (this.turnStartedAt === null) return;
+    this.finalizeOpenStep();
     const failed = this.turnFailed;
     if (failed && !this.terminalNoticeEmitted) {
       this.terminalNoticeEmitted = true;
@@ -371,7 +415,17 @@ export class AgySession {
   private onExit(code: number | null, signal: NodeJS.Signals | null): void {
     const intentional = this.disposed;
     console.log(`[chat ${this.cli}/agy] exit code=${code} signal=${signal ?? '-'} initSeen=${this.initSeen}${intentional ? ' (intentional)' : ''}`);
-    if (!this.initSeen) this.resolveReady(false);
+    if (!this.initSeen) {
+      this.resolveReady(false);
+      // A spawn that carried a saved --conversation id and died before init is
+      // a failed resume: clear the stored id so the next spawn starts fresh,
+      // and report it so the registry's fresh-session fallback engages instead
+      // of retrying the stale id forever.
+      if (this.startedResumeId) {
+        this.resumeFailed = true;
+        void setSessionId(this.cli, this.cwd, '', this.chatId);
+      }
+    }
     if (!intentional && this.turnStartedAt !== null) {
       this.turnFailed = { message: `agy exited (code ${code ?? signal})`, code: 'exit' };
       this.finishTurn();
@@ -420,7 +474,7 @@ export class AgySession {
   canAcceptNativeHumanSteer(): boolean { return false; }
   sessionId(): string | null { return this.agyConversationId; }
   startedWithResume(): boolean { return this.startedResumeId !== null; }
-  hasResumeFailed(): boolean { return false; }
+  hasResumeFailed(): boolean { return this.resumeFailed; }
   hasStaleZaiProvider(): boolean { return false; }
   activeSelection(): { model?: string; effort?: string } { return { model: this.spawnModel, effort: this.spawnEffort }; }
   async waitForInitOrExit(timeoutMs: number): Promise<'initialized' | 'closed' | 'timeout'> {
@@ -438,11 +492,29 @@ export class AgySession {
     assertSubscriptionLane(this.cli);
     if (opts.signal?.aborted) return;
     if (!this.isAlive()) throw new Error('session has exited');
-    await this.ready;
+    // A live process that never emits init would hang this send forever; race
+    // readiness against a generous bound and retire the hung lane so the next
+    // send respawns it instead of inheriting the zombie.
+    let readyTimer: NodeJS.Timeout | undefined;
+    const readyOk = await Promise.race([
+      this.ready,
+      new Promise<boolean>((resolve) => { readyTimer = setTimeout(() => resolve(false), AGY_READY_TIMEOUT_MS); }),
+    ]);
+    if (readyTimer) clearTimeout(readyTimer);
+    if (!readyOk) {
+      this.shutdown('ready-timeout');
+      throw new Error('the agy session never became ready; the lane was retired and the next message respawns it');
+    }
     const startsNewTurn = this.turnStartedAt === null;
+    // agy has no native steer: one input line runs one whole turn, and a second
+    // line written mid-turn would run concurrently whose result then lands as
+    // an unexpected result with no open bookkeeping. So every mid-turn send is
+    // rejected outright — peers quietly (the bus retries after the boundary),
+    // humans with the boundary error. This is exactly what
+    // canAcceptNativeHumanSteer(): false promises.
     if (!startsNewTurn) {
-      if (opts.peerFrom && !opts.allowNativePeerSteer) return;
-      if (!opts.peerFrom && !opts.allowNativeHumanSteer) throw new Error('the current turn must reach a safe boundary before guidance is delivered');
+      if (opts.peerFrom) return;
+      throw new Error('the current turn must reach a safe boundary before guidance is delivered');
     }
     const automationRequest = opts.peerFromRole === 'automation';
     if (startsNewTurn) {
@@ -451,6 +523,7 @@ export class AgySession {
       this.automationTurn = automationRequest;
       this.terminalNoticeEmitted = false;
       this.turnFailed = null;
+      this.turnUsage = { input: 0, output: 0, cacheRead: 0 };
       this.turnOrigin = emptyTurnOrigin();
       this.emit({ type: 'turnStart' });
     }
