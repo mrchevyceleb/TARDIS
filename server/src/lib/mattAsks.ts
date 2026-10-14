@@ -131,14 +131,19 @@ export function noteMattAsk(logKey: string, lane: 'home' | 'bg', text: string): 
 export function closeMattAsksForLane(logKey: string, lane: 'home' | 'bg'): void {
   const memoKey = `${logKey}|${lane}`;
   if (closedLanes.has(memoKey)) return;
-  closedLanes.add(memoKey);
   try {
     const store = readAsks();
     const before = store.asks.length;
     store.asks = store.asks.filter((a) => a.logKey !== logKey || a.lane !== lane);
     if (store.asks.length !== before) saveAsks(store);
+    // Memo only after successful processing: a transient read or write
+    // failure must not suppress later close attempts (a visible reply
+    // followed by a false nudge is exactly what this feature exists to
+    // prevent).
+    closedLanes.add(memoKey);
   } catch {
-    // Never block the reply path.
+    // Never block the reply path; the memo was not taken, so a later
+    // delta retries the close.
   }
 }
 

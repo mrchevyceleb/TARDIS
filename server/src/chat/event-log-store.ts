@@ -1120,6 +1120,17 @@ function streamedVisibleText(frame: unknown): boolean {
   return false;
 }
 
+/** A terminal non-error result with real text: the canonical final answer
+ *  for Codex/Banana turns (the client renders it when no assistant or
+ *  stream frame survived). Error results and blank text never close. */
+function terminalResultText(frame: unknown): boolean {
+  if (!frame || typeof frame !== 'object') return false;
+  const f = frame as { type?: unknown; subtype?: unknown; is_error?: unknown; result?: unknown };
+  if (f.type !== 'result') return false;
+  if (f.is_error === true || (typeof f.subtype === 'string' && f.subtype.includes('error'))) return false;
+  return typeof f.result === 'string' && f.result.trim().length > 0;
+}
+
 function mattAskHooks(key: string, persisted: PersistedEvent): void {
   try {
     // Lane identity: home and background sessions share one logKey, so an
@@ -1152,12 +1163,18 @@ function mattAskHooks(key: string, persisted: PersistedEvent): void {
         if (inner.type === 'stream_event' && streamedVisibleText(inner.event)) {
           closeMattAsksForLane(key, lane);
         }
+        if (inner.type === 'result' && terminalResultText(inner)) {
+          closeMattAsksForLane(key, lane);
+        }
       }
     }
     if (ev.type === 'stream_event' && typeof ev.parent_tool_use_id !== 'string' && streamedVisibleText(ev.event)) {
       closeMattAsksForLane(key, lane);
     }
-    if (ev.type === 'assistant' && ev.message && typeof ev.message === 'object' && ev.message.role === 'assistant') {
+    if (ev.type === 'result' && typeof ev.parent_tool_use_id !== 'string' && terminalResultText(ev)) {
+      closeMattAsksForLane(key, lane);
+    }
+    if (ev.type === 'assistant' && typeof ev.parent_tool_use_id !== 'string' && ev.message && typeof ev.message === 'object' && ev.message.role === 'assistant') {
       if (hasVisibleText(ev.message)) closeMattAsksForLane(key, lane);
     }
   } catch {
