@@ -948,11 +948,17 @@ export function commentCard(id: string, text: unknown, author: DeskActor): Promi
     // the close), best effort.
     touchCardNextCheck(card, now);
     try {
-      // Only a live roster agent's card comment closes their asks: a human
-      // or Desk actor commenting on a card must never close the agent's
-      // open Matt asks.
+      // Only a live roster agent's card comment closes their asks: a human,
+      // Desk actor, or stale agent id commenting on a card must never close
+      // the agent's open Matt asks.
       if (author.kind === 'agent' && typeof author.id === 'string' && author.id) {
-        closeMattAsksForAgent(author.id);
+        // Resolve the author against the live roster (same lazy import as the
+        // quiet sweep): a stale or forged id is not a teammate.
+        import('../chat/agents.ts').then(({ listAgents }) => listAgents()).then((agents) => {
+          if (agents.some((a) => a.id === author.id)) {
+            closeMattAsksForAgent(author.id);
+          }
+        }).catch(() => undefined);
       }
     } catch { /* never block the comment on an ask-store hiccup */ }
     return { card, comment };

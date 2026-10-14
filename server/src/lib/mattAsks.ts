@@ -159,17 +159,24 @@ export async function closeAnsweredMattAsksForLane(logKey: string, replyText: st
     // as the team_message path, idempotent per source message).
     const scan = scanOutgoingPromise(agent.id, replyText, `ask:${logKey}:${promises[0].dueAt}`);
     added.push(...scan.added.map((a) => a.id));
-    // The ask stays open: the promise is tracked by the commitment until it
-    // clears. The ask closes when the commitment clears (the sweep finds the
-    // matching open commitment and closes the ask then).
+    // The ask stays open through the commitment until it clears. But the
+    // commitment must actually exist: when the promise was already recorded
+    // (a restatement, so no new add) or the add failed, the ask closes now
+    // instead of dangling open with no committedId forever.
     const store = read();
-    for (const ask of store.asks) {
-      if (ask.logKey !== logKey) continue;
-      // A commitment was created for this ask: keep it open so the sweep
-      // raises it if the commitment goes past due.
-      ask.committedId = scan.added[0]?.id;
+    const commitmentId = scan.added[0]?.id;
+    if (commitmentId) {
+      for (const ask of store.asks) {
+        if (ask.logKey !== logKey) continue;
+        ask.committedId = commitmentId;
+      }
+      if (store.asks.some((a) => a.logKey === logKey)) save(store);
+    } else {
+      // No commitment landed (a restatement that already matched, or the add
+      // failed): the ask closes, because the promise is already tracked by
+      // an existing commitment or the agent needs to add it manually.
+      closeMattAsksForLane(logKey);
     }
-    if (store.asks.some((a) => a.logKey === logKey)) save(store);
     return { added, ...(scan.addError ? { addError: scan.addError } : {}) };
   } catch {
     // Fail-open: the reply is never blocked, and the ask closes plainly.
