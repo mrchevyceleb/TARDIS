@@ -72,9 +72,41 @@ export type DeskCard = {
   updatedAt: string;
   /** When the card entered its current column (for "parked 4d" ages). */
   columnSince: string;
+  /** Silence is an event (card-baadaf A): every In progress / In QA card
+   *  carries a check-in deadline set by the owner's last touch (create,
+   *  move, or comment: default and maximum 30 minutes out). The hygiene tick
+   *  nudges the owner when it passes; 15 quiet minutes later it nudges the
+   *  Chief. Only a new touch (a fresh nextCheckAt) clears the nudges. */
+  nextCheckAt?: string;
+  nudgeAt?: string;
+  escalatedAt?: string;
   createdBy?: DeskActor;
   archived?: boolean;
 };
+
+/** The check-in window: every owner touch sets a deadline this far out, and
+ *  no touch can push it further. */
+export const CARD_NEXT_CHECK_MS = 30 * 60_000;
+/** Quiet time after the owner nudge before the Chief copy. */
+export const CARD_CHECK_ESCALATE_MS = 15 * 60_000;
+
+function validIso(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '' && Number.isFinite(Date.parse(value));
+}
+
+function touchCardNextCheck(card: DeskCard, nowIso: string): void {
+  // Archived cards carry no check state even in a live column: a PATCH or
+  // comment on an archived card must not re-create a deadline.
+  if (!card.archived && (card.column === 'in_progress' || card.column === 'in_qa')) {
+    card.nextCheckAt = new Date(Date.parse(nowIso) + CARD_NEXT_CHECK_MS).toISOString();
+    delete card.nudgeAt;
+    delete card.escalatedAt;
+  } else {
+    delete card.nextCheckAt;
+    delete card.nudgeAt;
+    delete card.escalatedAt;
+  }
+}
 
 export type DeskData = { version: 1; rev: number; todos: DeskTodo[]; cards: DeskCard[] };
 
@@ -302,7 +334,42 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     createdAt: isoOr(raw.createdAt, now),
     updatedAt,
     columnSince: isoOr(raw.columnSince, updatedAt),
+    ...(validIso(raw.nextCheckAt) ? { nextCheckAt: raw.nextCheckAt as string } : {}),
+    ...(validIso(raw.nudgeAt) ? { nudgeAt: raw.nudgeAt as string } : {}),
+    ...(validIso(raw.escalatedAt) ? { escalatedAt: raw.escalatedAt as string } : {}),
   };
+  // P0 read-repair: an existing live card that never carried a check-in
+  // deadline (it predates this feature) gets one seeded from its last update,
+  // bounded to 30 minutes out from the moment it was read, so the sweep covers
+  // every live card from deployment day, not only new ones.
+  if (raw.archived === true || (card.column !== 'in_progress' && card.column !== 'in_qa')) {
+    // Archived and parked cards carry no check state: the sweep skips them,
+    // and a stale deadline or mark must not survive a read round-trip (an
+    // archive clears the fields; the next read must not re-create them).
+    // raw.archived, not card.archived: the copy onto card happens below.
+    delete card.nextCheckAt;
+    delete card.nudgeAt;
+    delete card.escalatedAt;
+  } else {
+    // Every deadline is clamped to at most now + 30 minutes (not only newly
+    // seeded ones): a parseable persisted nextCheckAt months ahead would
+    // suppress checks indefinitely. A missing deadline is seeded; an existing
+    // one is capped.
+    const cap = Date.parse(now) + CARD_NEXT_CHECK_MS;
+    if (!card.nextCheckAt) {
+      const base = Math.min(Date.parse(updatedAt || now), Date.parse(now));
+      card.nextCheckAt = new Date(base + CARD_NEXT_CHECK_MS).toISOString();
+    } else if (Date.parse(card.nextCheckAt) > cap) {
+      card.nextCheckAt = new Date(cap).toISOString();
+    }
+    // Mark invariants: escalation without a prior nudge is incoherent (it
+    // would suppress escalation forever while re-nudging the owner), a
+    // future nudgeAt would postpone escalation indefinitely, and an
+    // escalation older than its own nudge is inconsistent.
+    if (card.escalatedAt && !card.nudgeAt) delete card.escalatedAt;
+    if (card.nudgeAt && Date.parse(card.nudgeAt) > Date.parse(now)) delete card.nudgeAt;
+    if (card.escalatedAt && card.nudgeAt && Date.parse(card.escalatedAt) < Date.parse(card.nudgeAt)) delete card.escalatedAt;
+  }
   const description = clip(raw.description, DESK_LIMITS.description);
   if (description) card.description = description;
   const project = oneLine(raw.project, DESK_LIMITS.project);
@@ -816,6 +883,7 @@ export function createCard(input: CardInput, owner: DeskActor, by: DeskActor, op
     if (description) card.description = description;
     const project = requireOneLine(input.project, DESK_LIMITS.project, 'project');
     if (project) card.project = project;
+    touchCardNextCheck(card, now);
     pruneCards(data);
     placeCard(data, card, typeof input.index === 'number' ? input.index : undefined);
     return card;
@@ -847,6 +915,10 @@ export function updateCard(id: string, input: CardInput, owner?: DeskActor): Pro
       }
     }
     card.updatedAt = now;
+    // Every PATCH is an owner touch too: a column change into or out of the
+    // live columns sets or clears the deadline, and a reassignment refreshes
+    // it so the new owner gets their own 30-minute window, not the old one's.
+    touchCardNextCheck(card, now);
     return card;
   }));
 }
@@ -861,6 +933,7 @@ export function moveCard(id: string, column: unknown, index?: unknown): Promise<
     }
     delete card.archived;
     card.updatedAt = now;
+    touchCardNextCheck(card, now);
     const at = typeof index === 'number' && Number.isFinite(index) ? index : undefined;
     placeCard(data, card, at);
     return card;
@@ -883,8 +956,146 @@ export function commentCard(id: string, text: unknown, author: DeskActor): Promi
     };
     card.comments.push(comment);
     card.updatedAt = now;
+    // A comment is an owner touch: it refreshes the check-in deadline and
+    // clears any pending nudges, exactly like a create or a move. It also
+    // closes the commenter's open Matt asks (card-baadaf B: the card touch is
+    // the close), best effort.
+    touchCardNextCheck(card, now);
     return { card, comment };
   });
+}
+
+/** One hygiene sweep over the check-in deadlines (card-baadaf A): returns the
+ *  nudges that are due now (the owner nudge when a live card's nextCheckAt
+ *  passed with no touch since, the Chief copy 15 quiet minutes after the
+ *  owner nudge), having already marked them on the cards, so a crash can
+ *  drop a nudge but never repeat one. An explicit delivery failure also
+ *  keeps the mark (the same at-most-once trade as every existing hygiene
+ *  piece: a nudge can be dropped but never repeated, and the log records
+ *  the failure). The one exception is a rate-limited delivery, a transient
+ *  condition: the caller restores that mark (restoreCardCheckMark) so it
+ *  retries on the next tick. A touch that sets a fresh nextCheckAt clears
+ *  both marks.
+ *  A dry-run sweep ({ dryRun: true }) returns the due nudges read-only:
+ *  nothing is marked or written, so previewing never consumes a
+ *  notification that would then never be delivered. */
+/** Delivery bound per sweep tick: deliverTeamMessage admits at most 8 per
+ *  sender/recipient pair per minute (PAIR_MAX) — every Chief escalation shares
+ *  the one Desk->Chief pair — plus a global 20/min shared with every other
+ *  sender. A mass-silence burst marks and returns at most this many per tick;
+ *  the rest stay unmarked for the next tick, and a rate-limited delivery
+ *  restores its mark (restoreCardCheckMark) so it retries too. */
+const MAX_SWEEP_DELIVERIES = 8;
+
+export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promise<Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>> {
+  const dryRun = options.dryRun === true;
+  const due: Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }> = [];
+  // Resolve the live roster once before the sweep: a stale agent id routes to
+  // the Chief (a delivery to a dead id is a silent failure), and a human or
+  // Desk actor owner routes to the Chief immediately.
+  const { listAgents } = await import('../chat/agents.ts');
+  const agents = await listAgents();
+  // listAgents converts every roster read/parse failure into an empty list;
+  // an empty roster here would read as "every owner is stale" and reroute
+  // the whole due batch to the Chief while consuming its marks. Treat an
+  // empty roster as a sweep failure: the caller logs it, nothing is marked
+  // or delivered.
+  if (agents.length === 0) throw new Error('live roster unavailable (empty list) — sweep skipped, nothing marked');
+  // The Chief is the fallback recipient for every stale, human, and
+  // escalated card: validate it exists in the roster BEFORE marking, so an
+  // unavailable Chief aborts the sweep with nothing consumed instead of
+  // marking every nudge for a delivery that cannot land.
+  if (!agents.some((a) => a.id === 'chief-of-staff')) throw new Error('chief-of-staff is not in the live roster — sweep skipped, nothing marked');
+  // Case-insensitive like the rest of Desk routing: a legacy or externally
+  // repaired actor id/name with different casing is not a stale owner. The
+  // canonical roster id is returned, never the lowercased candidate.
+  const byLowerId = new Map(agents.map((a) => [a.id.toLowerCase(), a] as const));
+  const byLowerName = new Map(agents.map((a) => [a.name.toLowerCase(), a] as const));
+  const resolveOwner = (card: DeskCard): string => {
+    if (card.owner.kind !== 'agent') return 'chief-of-staff';
+    // Id first, then the name independently: a legacy or repaired card can
+    // carry a stale id with a valid canonical name, and the id is present on
+    // every normalized card, so a same-value name lookup would never fire.
+    const idHit = typeof card.owner.id === 'string' && card.owner.id ? byLowerId.get(card.owner.id.toLowerCase()) : undefined;
+    const nameHit = typeof card.owner.name === 'string' && card.owner.name ? byLowerName.get(card.owner.name.toLowerCase()) : undefined;
+    const hit = idHit ?? nameHit;
+    return hit ? hit.id : 'chief-of-staff';
+  };
+  await mutate((data, now) => {
+    const nowMs = Date.parse(now);
+    // Candidates are collected UNMARKED first: delivery is globally rate
+    // limited (deliverTeamMessage, shared with every other sender), so
+    // marking the whole batch up front would permanently consume nudges the
+    // limiter rejects — exactly the mass-silence burst this feature exists
+    // for. Only the deliverable head of the batch is marked; the rest stay
+    // unmarked and eligible for the next tick.
+    const candidates: Array<{ setMark: () => void; nudge: { kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string } }> = [];
+    for (const card of data.cards) {
+      if (card.archived) continue;
+      if (card.column !== 'in_progress' && card.column !== 'in_qa') continue;
+      const next = card.nextCheckAt ? Date.parse(card.nextCheckAt) : NaN;
+      if (!Number.isFinite(next) || next > nowMs) continue;
+      // Resolve the owner against the roster, not just the stored id: a
+      // human-owned card (owner.kind 'human', id 'owner') or a stale agent id
+      // is not a deliverable teammate, so those route to the Chief.
+      const ownerAgent = resolveOwner(card);
+      if (!card.nudgeAt) {
+        candidates.push({
+          setMark: () => { card.nudgeAt = now; },
+          nudge: {
+            kind: 'owner',
+            card,
+            to: ownerAgent,
+            text: ownerAgent === 'chief-of-staff'
+              ? `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since (you own this one). Comment on the card to set a new one.`
+              : `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since. Comment on the card to set a new one, or tell the Chief of Staff what is blocking it.`,
+          },
+        });
+      } else if (!card.escalatedAt && nowMs - Date.parse(card.nudgeAt) >= CARD_CHECK_ESCALATE_MS && ownerAgent !== 'chief-of-staff') {
+        // The Chief's own cards never get the separate Chief copy: the owner
+        // nudge already reached the Chief, so a second one is noise.
+        candidates.push({
+          setMark: () => { card.escalatedAt = now; },
+          nudge: {
+            kind: 'chief',
+            card,
+            to: 'chief-of-staff',
+            text: `Silence flag: ${ownerAgent}'s card [${card.id}] "${card.title}" (${card.column}) went quiet past its check-in time and stayed quiet 15 minutes after the nudge. It went to them; make sure they act on it.`,
+          },
+        });
+      }
+    }
+    // Dry run: nothing is marked or written — every candidate comes back
+    // read-only for logging. Real run: at most MAX_SWEEP_DELIVERIES are
+    // marked and returned; the rest reappear on the next tick.
+    const batch = dryRun ? candidates : candidates.slice(0, MAX_SWEEP_DELIVERIES);
+    for (const c of batch) {
+      if (!dryRun) c.setMark();
+      due.push(c.nudge);
+    }
+    return dryRun || batch.length === 0
+      ? (new Unchanged(due) as unknown as Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>)
+      : due;
+  });
+  return due;
+}
+
+/** Undo a sweep mark so a rate-limited nudge retries on the next tick: the
+ *  one explicit delivery failure whose mark is restored (a transient,
+ *  retryable condition — every other failure or crash keeps the mark, the
+ *  documented at-most-once trade). No-op if the mark is already gone (a
+ *  concurrent touch cleared it). Fail-open. */
+export async function restoreCardCheckMark(cardId: string, kind: 'owner' | 'chief'): Promise<void> {
+  try {
+    await mutate((data) => {
+      const card = findCard(data, cardId);
+      if (kind === 'owner') delete card.nudgeAt;
+      else delete card.escalatedAt;
+      return card;
+    });
+  } catch {
+    // Fail-open: a missed restore leaves the at-most-once trade as-is.
+  }
 }
 
 export function deleteComment(cardId: string, commentId: string): Promise<DeskCard> {
@@ -901,8 +1112,19 @@ export function deleteComment(cardId: string, commentId: string): Promise<DeskCa
 export function archiveCard(id: string, archived: boolean): Promise<DeskCard> {
   return mirrorAfter(mutate((data, now) => {
     const card = findCard(data, id);
-    if (archived) card.archived = true;
-    else delete card.archived;
+    if (archived) {
+      card.archived = true;
+      // Archiving clears the check state: a stale deadline or an old
+      // nudge/escalation mark must not survive into an unarchive.
+      delete card.nextCheckAt;
+      delete card.nudgeAt;
+      delete card.escalatedAt;
+    } else {
+      delete card.archived;
+      // Unarchiving into a live column seeds a fresh 30-minute window and
+      // clears stale marks; into a parked column this just clears the fields.
+      touchCardNextCheck(card, now);
+    }
     card.updatedAt = now;
     return card;
   }));
