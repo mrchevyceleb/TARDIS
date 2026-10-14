@@ -143,6 +143,13 @@ export function closeMattAsksForLane(logKey: string): void {
  *  via the existing promiseScan parser), and the ask stays open until the
  *  commitment clears. An answer with no promise closes the ask immediately
  *  (the existing behavior). Returns the commitment adds for logging. */
+/** The open commitment for this agent matching a promised due instant (a
+ *  restatement links to the commitment that already tracks the promise). */
+function matchingCommitmentId(agentId: string, dueAt: number): string | undefined {
+  const match = listCommitments(agentId).find((c) => c.dueAt === dueAt);
+  return match?.id;
+}
+
 export async function closeAnsweredMattAsksForLane(logKey: string, replyText: string): Promise<{ added: string[]; addError?: string }> {
   const added: string[] = [];
   try {
@@ -159,24 +166,27 @@ export async function closeAnsweredMattAsksForLane(logKey: string, replyText: st
     // as the team_message path, idempotent per source message).
     const scan = scanOutgoingPromise(agent.id, replyText, `ask:${logKey}:${promises[0].dueAt}`);
     added.push(...scan.added.map((a) => a.id));
-    // The ask stays open through the commitment until it clears. But the
-    // commitment must actually exist: when the promise was already recorded
-    // (a restatement, so no new add) or the add failed, the ask closes now
-    // instead of dangling open with no committedId forever.
+    // The ask stays open through a commitment until it clears, and NEVER
+    // closes on a failure:
+    // - A fresh add: the ask links to the new commitment (committedId).
+    // - A restatement (no new add, no error): the promise is already
+    //   tracked by an existing commitment — find the matching open one by
+    //   the same due instant and link the ask to it, so the ask stays alive
+    //   through the commitment it already has.
+    // - A failed add: the ask stays open with no committedId, so the
+    //   15-minute sweep nudges the agent. Never close on a failure.
     const store = read();
     const commitmentId = scan.added[0]?.id;
-    if (commitmentId) {
+    const linked = commitmentId ?? (scan.addError ? undefined : matchingCommitmentId(agent.id, promises[0].dueAt));
+    if (linked) {
       for (const ask of store.asks) {
         if (ask.logKey !== logKey) continue;
-        ask.committedId = commitmentId;
+        ask.committedId = linked;
       }
       if (store.asks.some((a) => a.logKey === logKey)) save(store);
-    } else {
-      // No commitment landed (a restatement that already matched, or the add
-      // failed): the ask closes, because the promise is already tracked by
-      // an existing commitment or the agent needs to add it manually.
-      closeMattAsksForLane(logKey);
     }
+    // A failed add (scan.addError set) or a restatement with no matching open
+    // commitment: the ask stays open (no committedId), so the sweep nudges it.
     return { added, ...(scan.addError ? { addError: scan.addError } : {}) };
   } catch {
     // Fail-open: the reply is never blocked, and the ask closes plainly.
