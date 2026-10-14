@@ -15,7 +15,7 @@
 //
 // The durable event log the user sees is NEVER wiped.
 
-import { readFileSync, readdirSync, writeFileSync, mkdirSync, renameSync, unlinkSync, openSync, closeSync, writeSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, mkdirSync, renameSync, unlinkSync, openSync, closeSync, writeSync, statSync, fstatSync, readSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { MAX_EVENTS_PER_LOG, STATE_DIR } from './config.ts';
@@ -170,8 +170,10 @@ export function loadCompactBlob(key: string): CompactBlob | null {
       words: compact.trim().split(/\s+/).filter(Boolean).length,
     };
     try {
-      writeCompactBlob(key, scrubbed);
-      console.warn(`[compaction] ${key}: redacted credential material from the rolling compact`);
+      const wrote = writeCompactBlob(key, scrubbed);
+      console.warn(wrote
+        ? `[compaction] ${key}: redacted credential material from the rolling compact`
+        : `[compaction] ${key}: redaction seen but the rewrite lost a blob-lock race; the on-disk copy still carries it and is re-scrubbed on the next load`);
     } catch (err) {
       // The safe in-memory copy is still usable even if a read-only/full disk
       // prevents the opportunistic upgrade from landing.
@@ -194,14 +196,24 @@ export function compactedThroughSeq(key: string): number {
  *  between a live writer's guard check and its rename could overwrite a
  *  newer document, and a fresh start interleaving with a script's rename
  *  could resurrect stale memory. Every blob commit section therefore runs
- *  under this lock: the O_EXCL create is atomic against every other process,
- *  a stale lock (a crashed holder) is broken after LOCK_STALE_MS, and
- *  contention after bounded retries aborts the caller exactly like any
+ *  under this lock. Ownership: the O_EXCL create is atomic against every
+ *  other process and stamps the lock with a unique per-acquisition token;
+ *  the release only unlinks while the path still resolves to the exact
+ *  inode the holder created AND still carries that token, so a holder that
+ *  paused past the stale window and lost its lock can never unlink a newer
+ *  holder's lock. A stale lock (a crashed holder) is CLAIMED BY RENAME
+ *  before it is broken: only one racing takeover can win the rename, the
+ *  rest find the path gone and plain-retry, and a takeover that
+ *  accidentally claimed a FRESH replacement restores it instead of
+ *  deleting it, so a racing takeover can never unlink a replacement.
+ *  Contention after bounded retries aborts the caller exactly like any
  *  other lost race — nothing is ever written on a lost lock. Residual,
- *  documented: two processes breaking the same long-stale lock in the exact
- *  stat-to-unlink window can both hold once; the raw-text CAS in the commit
- *  still guards the data in that case, which is today's behavior, not
- *  worse. */
+ *  documented: each verified read-to-unlink window is microseconds wide
+ *  and filesystems reuse inodes after a delete, so a takeover landing
+ *  exactly inside a release's verified window could still break a fresh
+ *  lock; every writer also carries the epoch CAS, and the cross-process
+ *  repair writers carry the raw-text CAS, so a survivor of that window
+ *  still cannot silently commit over a newer document. */
 const LOCK_STALE_MS = 30_000;
 const LOCK_ATTEMPTS = 25;
 /** A true sleep inside sync code: the holder's critical section is
@@ -211,32 +223,95 @@ const waitMs = (ms: number): void => {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 };
 
+/** One lock acquisition: the fd of the lock file this process created
+ *  (held open for the critical section), its inode identity, and the
+ *  unique ownership token written into it. */
+interface LockOwnership {
+  fd: number;
+  dev: number;
+  ino: number;
+  token: string;
+}
+
+/** Unlink the lock only while the path still resolves to the exact inode we
+ *  created and still carries our token: the open pins that inode, so the
+ *  checks read the same file the stat saw. Never unlinks what is not ours. */
+function releaseLockIfOwned(lockPath: string, own: LockOwnership): void {
+  let fd: number | null = null;
+  try {
+    fd = openSync(lockPath, 'r');
+    const st = fstatSync(fd);
+    if (st.dev !== own.dev || st.ino !== own.ino) return;
+    const buf = Buffer.alloc(512);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    if (buf.toString('utf8', 0, n).trim() !== own.token) return;
+    unlinkSync(lockPath);
+  } catch { /* gone or replaced: never unlink what is not ours */ }
+  finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+  }
+}
+
+/** Claim a stale lock by rename (atomic): only one racing takeover wins;
+ *  everyone else gets ENOENT and plain-retries. The claim is verified
+ *  against the inode and age stat'ed BEFORE a fresh replacement could have
+ *  appeared, and an accidentally claimed FRESH lock is restored
+ *  (link-then-unlink, EEXIST-safe) instead of deleted. */
+function claimStaleLock(lockPath: string, stale: { dev: number; ino: number }): boolean {
+  const claimPath = `${lockPath}.claim-${process.pid}-${randomBytes(8).toString('hex')}`;
+  try {
+    renameSync(lockPath, claimPath);
+  } catch {
+    return false; // released or claimed by another takeover: plain retry
+  }
+  try {
+    const cst = statSync(claimPath);
+    if (cst.dev === stale.dev && cst.ino === stale.ino && Date.now() - cst.mtimeMs > LOCK_STALE_MS) {
+      unlinkSync(claimPath); // the crashed holder's lock, ours to break
+      return true;
+    }
+    // We accidentally claimed a FRESH replacement (created between our
+    // stat and the rename): restore it without clobbering a newer lock.
+    try {
+      linkSync(claimPath, lockPath);
+    } catch { /* a newer lock already sits at the path */ }
+    unlinkSync(claimPath);
+  } catch { /* the claim vanished underneath us; plain retry */ }
+  return false;
+}
+
 function withCompactBlobLock<T>(key: string, critical: () => T): T | null {
   mkdirSync(COMPACTS_DIR, { recursive: true });
   const lockPath = `${compactPath(key)}.lock`;
-  let fd: number | null = null;
-  for (let attempt = 0; attempt < LOCK_ATTEMPTS && fd === null; attempt += 1) {
+  let own: LockOwnership | null = null;
+  for (let attempt = 0; attempt < LOCK_ATTEMPTS && own === null; attempt += 1) {
     if (attempt > 0) waitMs(2);
     try {
-      fd = openSync(lockPath, 'wx');
+      const fd = openSync(lockPath, 'wx');
+      const token = `${process.pid}-${randomBytes(16).toString('hex')}`;
+      writeSync(fd, `${token}\n`);
+      const st = fstatSync(fd);
+      own = { fd, dev: st.dev, ino: st.ino, token };
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err;
       try {
-        const age = Date.now() - statSync(lockPath).mtimeMs;
-        if (age > LOCK_STALE_MS) {
-          unlinkSync(lockPath);
-          continue;
+        const st = statSync(lockPath);
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          // Broken by rename-claim, never by a bare unlink: a racing
+          // takeover can no longer remove a replacement lock.
+          if (claimStaleLock(lockPath, { dev: st.dev, ino: st.ino })) continue;
         }
       } catch { /* the holder released between stat and here; plain retry */ }
     }
   }
-  if (fd === null) return null;
+  if (own === null) return null;
   try {
-    writeSync(fd, `${process.pid}\n`);
     return critical();
   } finally {
-    try { closeSync(fd); } catch { /* already closed */ }
-    try { unlinkSync(lockPath); } catch { /* broken as stale by another process */ }
+    try { closeSync(own.fd); } catch { /* already closed */ }
+    releaseLockIfOwned(lockPath, own);
   }
 }
 
@@ -602,13 +677,24 @@ export async function rebuildTruncatedCompact(
   onProgress?: (msg: string) => void,
   maxBatches = REBUILD_MAX_BATCHES,
 ): Promise<{ batches: number; fed: number; covered: number; words: number }> {
-  const blob = loadCompactBlob(key);
-  if (!blob) throw new Error('no rolling compact for this thread');
-  // The exact on-disk text this rebuild is based on: the final commit CASes
-  // against it under the interprocess blob lock, so any other writer's
+  // ONE atomic source snapshot: the parsed blob and the CAS text both come
+  // from this exact read. A writer that commits between a parse and a
+  // separate raw read (a durable-fact drain that only moved pendingFacts)
+  // could otherwise be resurrected by a repair that pins the newer raw
+  // while rebuilding from the older fields. The final commit CASes this
+  // exact text under the interprocess blob lock, so any other writer's
   // commit (a live fold, a durable-fact drain, a fresh start) aborts the
   // repair with the original untouched.
   const originalRaw = readFileSync(compactPath(key), 'utf8');
+  let blob: CompactBlob;
+  try {
+    blob = JSON.parse(originalRaw) as CompactBlob;
+  } catch {
+    throw new Error('no readable rolling compact for this thread');
+  }
+  if (!blob || typeof blob.compact !== 'string' || !blob.compact.trim()) {
+    throw new Error('no rolling compact for this thread');
+  }
   if (!isTruncatedCompact(blob.compact)) throw new Error('compact tail looks complete; refusing to rebuild');
   if (inFlight.has(key)) throw new Error('a live compaction is in flight for this thread; retry after it');
   const epoch = epochOf(key);
