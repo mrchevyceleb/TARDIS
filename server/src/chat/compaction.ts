@@ -154,13 +154,20 @@ function compactPath(key: string): string {
   return join(COMPACTS_DIR, `${compactFileId(key)}.json`);
 }
 
-/** The single overwriteable rolling memory for this thread. */
-export function loadCompactBlob(key: string): CompactBlob | null {
+/** The single overwriteable rolling memory for this thread, with the exact
+ *  on-disk text it was read from — the caller's CAS basis. Absent blob and
+ *  null text: no file. Null blob with text: the file exists but is corrupt
+ *  or unusable, so a recovery writer can still CAS against the exact broken
+ *  text instead of blindly overwriting whatever landed in between. */
+function loadCompactBlobWithRaw(key: string): { blob: CompactBlob | null; text: string | null } {
+  let text: string | null = null;
   try {
-    const raw = JSON.parse(readFileSync(compactPath(key), 'utf8')) as CompactBlob;
-    if (!raw || typeof raw.compact !== 'string' || !raw.compact.trim()) return null;
+    const read = readFileSync(compactPath(key), 'utf8');
+    text = read;
+    const raw = JSON.parse(read) as CompactBlob;
+    if (!raw || typeof raw.compact !== 'string' || !raw.compact.trim()) return { blob: null, text };
     const compact = redactSecrets(raw.compact);
-    if (compact === raw.compact) return raw;
+    if (compact === raw.compact) return { blob: raw, text };
 
     // Upgrade old compacts in place before they can seed another model turn.
     // Never log the matched value (or even a surrounding excerpt).
@@ -170,19 +177,34 @@ export function loadCompactBlob(key: string): CompactBlob | null {
       words: compact.trim().split(/\s+/).filter(Boolean).length,
     };
     try {
-      const wrote = writeCompactBlob(key, scrubbed);
-      console.warn(wrote
-        ? `[compaction] ${key}: redacted credential material from the rolling compact`
-        : `[compaction] ${key}: redaction seen but the rewrite lost a blob-lock race; the on-disk copy still carries it and is re-scrubbed on the next load`);
+      const committed = writeCompactBlob(key, scrubbed, { raw: read });
+      if (committed !== null) {
+        console.warn(`[compaction] ${key}: redacted credential material from the rolling compact`);
+        // The upgrade's own committed text is this caller's exact basis — a
+        // re-read could race another writer in between and hand the caller
+        // someone else's text as its basis.
+        return { blob: scrubbed, text: committed };
+      }
+      // Lost the lock or the CAS. If another writer committed, the disk no
+      // longer matches `text` and every caller's CAS fails (a safe abort); if
+      // it was pure contention, the text still matches and a caller's commit
+      // is still based on the exact read. The on-disk copy keeps the material
+      // until the next load re-scrubs it.
+      console.warn(`[compaction] ${key}: redaction seen but the rewrite lost a blob-lock race; the on-disk copy still carries it and is re-scrubbed on the next load`);
     } catch (err) {
       // The safe in-memory copy is still usable even if a read-only/full disk
       // prevents the opportunistic upgrade from landing.
       console.warn(`[compaction] ${key}: could not rewrite redacted rolling compact:`, (err as Error).message);
     }
-    return scrubbed;
+    return { blob: scrubbed, text };
   } catch {
-    return null;
+    return { blob: null, text };
   }
+}
+
+/** The single overwriteable rolling memory for this thread. */
+export function loadCompactBlob(key: string): CompactBlob | null {
+  return loadCompactBlobWithRaw(key).blob;
 }
 
 /** Highest visible-turn seq already represented by the rolling compact. */
@@ -198,32 +220,74 @@ export function compactedThroughSeq(key: string): number {
  *  could resurrect stale memory. Every blob commit section therefore runs
  *  under this lock. Ownership: the O_EXCL create is atomic, fails safe on
  *  every post-create step (no leaked fd, no abandoned own lock), and stamps
- *  a unique per-acquisition token; the release only unlinks while the path
- *  still resolves to the exact inode the holder created AND still carries
- *  that token. Stale locks (crashed holders) are taken over IN PLACE: the
- *  lock file is never moved or unlinked, so no gap ever exists at the lock
- *  path and a fresh replacement can never be displaced or destroyed by a
- *  takeover — the takeover rewrites the token through a pinned fd and only
- *  the last token writer owns it. The pre-commit fence (lockIsOurs
- *  immediately before every rename/unlink) makes every holder prove
- *  ownership at commit time, so a holder frozen past the stale window and
- *  taken over aborts instead of overwriting the newer document. Contention
- *  after bounded retries aborts the caller exactly like any other lost race
- *  — nothing is ever written on a lost lock. Residual, documented: each
- *  verified read-to-unlink window is microseconds wide and filesystems
- *  reuse inodes after a delete, so a takeover landing exactly inside a
- *  release's verified window could still break a fresh lock; every writer
- *  also carries the epoch CAS, and the cross-process repair writers carry
- *  the raw-text CAS, so a survivor of that window still cannot silently
- *  commit over a newer document. */
-const LOCK_STALE_MS = 30_000;
+ *  the holder's exact identity (pid, /proc start time, nonce); the release
+ *  only unlinks while the path still resolves to the exact inode the holder
+ *  created AND still carries that token.
+ *
+ *  Takeover is PID-LIVENESS, never time-based: a lock is only ever taken
+ *  over from a PROVABLY DEAD holder (its PID is gone, or the PID was
+ *  recycled to a different start time). A live holder — a slow clear, a
+ *  long compute — can never be stolen from mid-flight, so no fence can be
+ *  raced out from under a living writer and no renewal or heartbeat is
+ *  needed; a crashed holder's lock is cleaned up by the next writer after a
+ *  double-read verification of the same dead identity. Zombies read as
+ *  alive (conservative) until the OS reaps them. Residual, documented: the
+ *  verified read-to-unlink step of a takeover is microseconds wide and is
+ *  only reachable when two processes take over the SAME dead holder at the
+ *  same instant; the survivor of that window is stopped by the pre-commit
+ *  fence (lockIsOurs immediately before every rename/unlink) and by the
+ *  raw-CAS every writer carries, so it aborts instead of committing over a
+ *  replacement. Contention after bounded retries aborts the caller exactly
+ *  like any other lost race — nothing is ever written on a lost lock. */
 const LOCK_ATTEMPTS = 25;
 /** A true sleep inside sync code: the holder's critical section is
  *  rename-scale (microseconds), so waits are rare and the total block is
- *  bounded at LOCK_ATTEMPTS waits of 2ms each. */
+ *  bounded at LOCK_ATTEMPTS waits of 2ms each (plus the 5ms double-verify
+ *  on the rare dead-holder takeover path). */
 const waitMs = (ms: number): void => {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 };
+
+/** Field 22 of /proc/<pid>/stat (clock ticks since boot): a process's exact
+ *  identity. A recycled PID gets a different start time, so a lock's holder
+ *  can be proven gone without a clock ever stealing from a live process. */
+function procStartTime(pid: number): string | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // comm (field 2) may contain spaces and parens: everything after the
+    // LAST ')' is fields 3+, and starttime (field 22) is index 19 there.
+    const afterComm = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/);
+    return afterComm[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+const SELF_PID = process.pid;
+/** Fallback identity when /proc is unavailable: unique per boot, and any
+ *  holder whose identity cannot be verified reads as alive anyway, so a
+ *  fallback never widens takeover. */
+const SELF_START = procStartTime(SELF_PID) ?? `boot-${Date.now()}`;
+
+/** A lock holder is alive unless PROVEN dead: its PID is gone (ESRCH) or
+ *  was recycled to a different start time. Every unprovable case — EPERM on
+ *  the signal probe, an unreadable /proc, an unparseable lock, a zombie not
+ *  yet reaped — reads as ALIVE, so takeover only ever happens on hard proof
+ *  and every failure points away from theft. */
+function lockHolderIsAlive(content: string): boolean {
+  const [pidRaw, start] = content.trim().split(':');
+  const pid = Number(pidRaw);
+  if (!Number.isInteger(pid) || pid <= 0 || typeof start !== 'string' || !start) return true;
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ESRCH') return false;
+    return true;
+  }
+  const holderStart = procStartTime(pid);
+  if (holderStart === null) return true;
+  return holderStart === start;
+}
 
 /** One lock acquisition: the fd of the lock file this process holds (kept
  *  open for the critical section), its inode identity, and the unique
@@ -277,40 +341,10 @@ function releaseCompactBlobLock(lockPath: string, own: LockOwnership): void {
   }
 }
 
-/** Take over a stale lock IN PLACE: the lock file is never moved or
- *  unlinked, so no gap ever exists at the lock path and a fresh replacement
- *  can never be displaced or destroyed by a takeover. The stale lock's
- *  token is rewritten through a pinned fd (fstat-verified as the exact inode
- *  stat'ed and still past the stale window; the write also refreshes mtime
- *  so the lock is no longer stale), then read back: only the takeover whose
- *  token is on disk owns the lock — a racing takeover that lost the token
- *  write, or that raced inside the write-to-readback window (caught by the
- *  pre-commit fence), plain-retries. */
-function claimStaleLockInPlace(lockPath: string, stale: { dev: number; ino: number }): LockOwnership | null {
-  let fd: number | null = null;
-  try {
-    fd = openSync(lockPath, 'r+');
-    const st = fstatSync(fd);
-    if (st.dev !== stale.dev || st.ino !== stale.ino) return null; // replaced since the stat; plain retry
-    if (Date.now() - st.mtimeMs <= LOCK_STALE_MS) return null;    // freshened since the stat; plain retry
-    const token = `${process.pid}-${randomBytes(16).toString('hex')}`;
-    writeFileSync(fd, `${token}\n`);
-    const buf = Buffer.alloc(512);
-    const n = readSync(fd, buf, 0, buf.length, 0);
-    if (buf.toString('utf8', 0, n).trim() !== token) return null;  // a racing takeover won; plain retry
-    const fst = fstatSync(fd);
-    const claimed: LockOwnership = { fd, dev: fst.dev, ino: fst.ino, token };
-    fd = null; // the ownership carries the fd now
-    return claimed;
-  } catch { return null; }
-  finally {
-    if (fd !== null) { try { closeSync(fd); } catch { /* already closed */ } }
-  }
-}
-
-/** Acquire the blob lock: O_EXCL create (per-acquisition token + inode
- *  identity, failing safe on every post-create step), or in-place takeover
- *  of a stale lock. Null means contention: nothing was written. */
+/** Acquire the blob lock: O_EXCL create (per-acquisition token stamped with
+ *  the holder's exact pid + start-time identity, failing safe on every
+ *  post-create step), or takeover of a PROVABLY DEAD holder's lock. Null
+ *  means contention: nothing was written. */
 function acquireCompactBlobLock(key: string): LockOwnership | null {
   mkdirSync(COMPACTS_DIR, { recursive: true });
   const lockPath = lockPathForKey(key);
@@ -320,7 +354,7 @@ function acquireCompactBlobLock(key: string): LockOwnership | null {
     try {
       const fd = openSync(lockPath, 'wx');
       try {
-        const token = `${process.pid}-${randomBytes(16).toString('hex')}`;
+        const token = `${SELF_PID}:${SELF_START}:${randomBytes(16).toString('hex')}`;
         writeFileSync(fd, `${token}\n`); // complete write, never a partial single writeSync
         const st = fstatSync(fd);
         own = { fd, dev: st.dev, ino: st.ino, token };
@@ -334,14 +368,22 @@ function acquireCompactBlobLock(key: string): LockOwnership | null {
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err;
+      // A live holder is never stolen from — no clock, no stale window, so a
+      // long clear or a slow compute can never be interrupted mid-flight.
+      // Only a provably dead holder is taken over: double-read the same dead
+      // identity (a second takeover in between replaces the content and the
+      // retry loop re-reads the replacement as alive), then unlink so the
+      // next iteration's O_EXCL create decides the sole winner.
       try {
-        const st = statSync(lockPath);
-        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
-          // Taken over IN PLACE, never by a bare unlink or rename: no gap
-          // ever exists at the path and no replacement can be displaced.
-          own = claimStaleLockInPlace(lockPath, { dev: st.dev, ino: st.ino });
+        const content = readFileSync(lockPath, 'utf8');
+        if (!lockHolderIsAlive(content)) {
+          waitMs(5);
+          const again = readFileSync(lockPath, 'utf8');
+          if (again === content && !lockHolderIsAlive(again)) {
+            unlinkSync(lockPath);
+          }
         }
-      } catch { /* the holder released between stat and here; plain retry */ }
+      } catch { /* released or replaced between the reads: plain retry */ }
     }
   }
   return own;
@@ -357,51 +399,82 @@ function withCompactBlobLock<T>(key: string, critical: (own: LockOwnership) => T
   }
 }
 
-function writeCompactBlob(key: string, blob: CompactBlob, epoch?: number, expectRaw?: string): boolean {
+/** Every blob writer states the exact on-disk fact it based its work on: the
+ *  raw text it read, or that no blob existed. The required parameter means a
+ *  future call site cannot silently regress to an unguarded overwrite: two
+ *  writers that computed from the same snapshot can never sequentially
+ *  overwrite one another (the second one's CAS fails inside the lock), and a
+ *  writer that raced a fresh start's delete or another process's commit
+ *  resurrects nothing (a vanished file fails the raw CAS). */
+type CompactCommitExpectation = { raw: string } | { absent: true };
+
+/** A loader's snapshot → its writer's expectation: no on-disk text means the
+ *  thread's blob was absent, and the commit then requires it to still be. */
+function expectForRaw(raw: string | null): CompactCommitExpectation {
+  return raw === null ? { absent: true } : { raw };
+}
+
+/** Commit a blob: CAS the caller's expectation under the interprocess lock,
+ *  then atomically rename the fully-built text into place. Returns the exact
+ *  text committed — the caller's next CAS basis — or null when the race was
+ *  lost (another writer committed first, a fresh start deleted the blob, or
+ *  the lock was contended): nothing is written on a lost race. */
+function writeCompactBlob(
+  key: string,
+  blob: CompactBlob,
+  expect: CompactCommitExpectation,
+  epoch?: number,
+): string | null {
   mkdirSync(COMPACTS_DIR, { recursive: true });
   const path = compactPath(key);
-  const tmp = epoch != null ? `${path}.${epoch}.${process.pid}.tmp` : `${path}.${process.pid}.tmp`;
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   const compact = redactSecrets(blob.compact);
   const safeBlob: CompactBlob = {
     ...blob,
     compact,
     words: compact.trim().split(/\s+/).filter(Boolean).length,
   };
-  writeFileSync(tmp, JSON.stringify(safeBlob, null, 2));
+  const text = JSON.stringify(safeBlob, null, 2);
+  writeFileSync(tmp, text);
   // The commit section runs under the interprocess lock: no rebuild/regen
   // process can interleave between the guards and the rename. Lost
   // contention aborts like any other lost race — the tmp is removed and
   // nothing is written.
   const committed = withCompactBlobLock(key, (own) => {
     if (epoch != null && epochOf(key) !== epoch) return false;
-    // Cross-process CAS on the exact on-disk text the caller based its work
+    // Cross-process CAS on the exact on-disk fact the caller based its work
     // on: any other writer's commit — a live fold, a durable-fact drain that
-    // only moved pendingFacts, a fresh start's delete — changes that text
-    // and aborts this write. A field-pinned compare could miss a
-    // pendingFacts-only change; the full text cannot.
-    if (expectRaw !== undefined) {
+    // only moved pendingFacts, a fresh start's delete — changes that text or
+    // the file's existence and aborts this write. A field-pinned compare
+    // could miss a pendingFacts-only change; the full text cannot.
+    if ('absent' in expect) {
+      try {
+        statSync(path);
+        return false; // a blob appeared underneath us; the absence basis is gone
+      } catch { /* still absent as expected */ }
+    } else {
       let diskRaw: string;
       try {
         diskRaw = readFileSync(path, 'utf8');
       } catch {
-        return false; // deleted underneath us (a fresh start won)
+        return false; // deleted underneath us (a fresh start or clear won)
       }
-      if (diskRaw !== expectRaw) return false;
+      if (diskRaw !== expect.raw) return false;
     }
     // Pre-commit fence: prove the lock still carries OUR token immediately
-    // before the rename. A holder frozen past the stale window and taken
-    // over in place (the takeover rewrote the token) finds the takeover's
-    // token here and aborts instead of overwriting whatever the takeover's
-    // writer has since committed.
+    // before the rename. A live holder is never stolen from, so this is the
+    // backstop for the documented residual (a takeover racing another
+    // takeover of the same dead holder) and for external interference — the
+    // survivor aborts instead of committing over a replacement.
     if (!lockIsOurs(`${path}.lock`, own)) return false;
     renameSync(tmp, path);
     return true;
   });
   if (committed !== true) {
     try { unlinkSync(tmp); } catch { /* stale tmp only */ }
-    return false;
+    return null;
   }
-  return true;
+  return text;
 }
 
 /** Copy the newest rolling compact + cadence from leftover per-engine keys
@@ -412,7 +485,8 @@ export function adoptCompaction(fromKeys: string[], toKey: string): { blob: bool
   if (unique.length === 0) return { blob: false, state: false };
 
   const state = loadState();
-  const destBlob = loadCompactBlob(toKey);
+  const destSnap = loadCompactBlobWithRaw(toKey);
+  const destBlob = destSnap.blob;
   const destRec = state[toKey];
   let winKey = toKey;
   let winBlob = destBlob;
@@ -436,7 +510,7 @@ export function adoptCompaction(fromKeys: string[], toKey: string): { blob: bool
   let tookBlob = false;
   let tookState = false;
   if (winBlob) {
-    tookBlob = writeCompactBlob(toKey, winBlob);
+    tookBlob = writeCompactBlob(toKey, winBlob, expectForRaw(destSnap.text)) !== null;
   }
   if (winRec) {
     state[toKey] = winRec;
@@ -466,9 +540,10 @@ export async function clearThreadMemory(key: string, chatId: string): Promise<vo
   // half-done). The lock is then held across the whole clear: the RAG
   // deletion and the blob unlink run under it, so no rebuild/regen process
   // can commit between the epoch bump and the unlink and resurrect the
-  // stale document the user just asked to wipe. A crash mid-clear leaves
-  // the lock to the 30-second stale takeover, and every step is idempotent,
-  // so a retried Fresh completes it.
+  // stale document the user just asked to wipe. The lock is PID-liveness
+  // owned: a live clear is never stolen from, however long it runs; a crash
+  // mid-clear leaves the lock to the next writer's dead-holder takeover,
+  // and every step is idempotent, so a retried Fresh completes it.
   const own = acquireCompactBlobLock(key);
   if (own === null) {
     throw new Error('thread was not cleared because its compact blob was locked by another writer; nothing was cleared; retry the fresh start');
@@ -490,11 +565,12 @@ export async function clearThreadMemory(key: string, chatId: string): Promise<vo
     } catch (err) {
       throw new Error(`thread was not cleared because its RAG compact could not be deleted: ${(err as Error).message}`);
     }
-    // Fence before the irreversible unlink: if this clear was frozen past
-    // the stale window and the lock was taken over in place, abort instead
-    // of deleting whatever the takeover's writer has since committed.
+    // Fence before the irreversible unlink: a live holder is never stolen
+    // from, so this failing means the lock was lost another way (externally
+    // removed, or the last resort of the documented takeover race) — abort
+    // instead of deleting whatever the replacement writer has committed.
     if (!lockIsOurs(lockPath, own)) {
-      throw new Error('thread was not cleared because its blob lock was taken over as stale (this clear ran too long); retry the fresh start');
+      throw new Error('thread was not cleared because its blob lock was lost mid-clear; retry the fresh start');
     }
     try {
       unlinkSync(compactPath(key));
@@ -573,18 +649,20 @@ function migrateLegacyPrimer(key: string): void {
   const rec = loadState()[key];
   const pending = rec?.pendingRotation;
   if (typeof pending !== 'string' || !pending.trim()) return;
-  if (!loadCompactBlob(key)) {
+  const snap = loadCompactBlobWithRaw(key);
+  if (!snap.blob) {
     const compact = pending.trim();
-    const wrote = writeCompactBlob(key, {
+    const committed = writeCompactBlob(key, {
       compact,
       words: compact.split(/\s+/).length,
       count: Math.max(1, rec.count || 1),
       lastAt: rec.lastAt || Date.now(),
       lastCompactedSeq: 0,
-    });
-    // Another writer held the blob lock: keep the primer pending and retry
-    // on the next peek instead of clearing it unwritten.
-    if (!wrote) return;
+    }, expectForRaw(snap.text));
+    // Another writer held the blob lock or changed the blob underneath:
+    // keep the primer pending and retry on the next peek instead of
+    // clearing it unwritten.
+    if (committed === null) return;
   }
   void mutateState((state) => {
     if (state[key]) {
@@ -863,8 +941,8 @@ export async function rebuildTruncatedCompact(
     // The commit CASes the exact original on-disk text under the blob lock:
     // a live fold, a durable-fact drain, or a fresh start that touched the
     // file since this rebuild started aborts here with the original intact.
-    const wrote = writeCompactBlob(key, { ...blob, compact: previous, words, pendingFacts }, epoch, originalRaw);
-    if (!wrote || epochOf(key) !== epoch) throw new Error('the compact changed under the rebuild (a live compaction, a durable-fact drain, or a fresh start won the race); nothing was written');
+    const committed = writeCompactBlob(key, { ...blob, compact: previous, words, pendingFacts }, { raw: originalRaw }, epoch);
+    if (committed === null || epochOf(key) !== epoch) throw new Error('the compact changed under the rebuild (a live compaction, a durable-fact drain, or a fresh start won the race); nothing was written');
     // The overwriteable RAG mirror must not keep serving the truncated
     // document after a reported repair. Re-check the blob first: if a live
     // compaction slipped in between the commit and this save, skip — the
@@ -1439,7 +1517,14 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
   const events = durable.length ? durable : args.events;
   const visible = extractVisibleTurns(events);
   const { overflow } = splitWindow(visible);
-  const blob = loadCompactBlob(key);
+  const blobSnap = loadCompactBlobWithRaw(key);
+  const blob = blobSnap.blob;
+  // The fold's CAS basis: the exact on-disk text (or absence) this run
+  // computed from. Every successful batch commit replaces it with the text
+  // that commit actually wrote, so the next batch CASes against what it
+  // truly built on — and any other writer's commit in between (a manual
+  // rebuild/regen script, a repair) aborts the whole run to retry fresh.
+  let basisRaw = blobSnap.text;
   const lastSeq = blob?.lastCompactedSeq ?? 0;
   let overflowNew = overflow.filter((t) => t.seq > lastSeq);
   // Overflow is oldest-first: the newest aged turn's seq minus the compact's
@@ -1528,7 +1613,7 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
       previous = generated.compact;
       compactText = generated.compact;
       generatedWords = generated.words;
-      const wrote = writeCompactBlob(key, {
+      const committed = writeCompactBlob(key, {
         compact: generated.compact,
         words: generated.words,
         count,
@@ -1536,11 +1621,12 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
         lastCompactedSeq,
         chatId,
         pendingFacts,
-      }, epoch);
-      if (!wrote || epochOf(key) !== epoch) {
+      }, expectForRaw(basisRaw), epoch);
+      if (committed === null || epochOf(key) !== epoch) {
         console.warn(`[compaction] ${key}: discarded compact blob — thread was fresh-started or the blob lock was contended (retried)`);
         return false;
       }
+      basisRaw = committed;
       await mutateState((s) => {
         if (epochOf(key) !== epoch) return;
         s[key] = {
@@ -1585,7 +1671,7 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
         if (saved > 0) console.warn(`[compaction] ${key}: saved ${saved} durable-fact note(s) for auto-recall`);
         const resolved = new Set(resolvedKeys);
         const unresolved = pendingFacts.filter((fact) => !resolved.has(durableFactKey(fact)));
-        const wrote = writeCompactBlob(key, {
+        const committed = writeCompactBlob(key, {
           compact: compactText,
           words: generatedWords,
           count,
@@ -1593,11 +1679,12 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
           lastCompactedSeq,
           chatId,
           pendingFacts: unresolved,
-        }, epoch);
-        if (!wrote || epochOf(key) !== epoch) {
+        }, expectForRaw(basisRaw), epoch);
+        if (committed === null || epochOf(key) !== epoch) {
           console.warn(`[compaction] ${key}: discarded durable-fact drain — thread was fresh-started or the blob lock was contended (retried)`);
           return false;
         }
+        basisRaw = committed;
         if (unresolved.length) {
           console.warn(`[compaction] ${key}: ${unresolved.length} durable-fact note(s) still pending save (retried next compaction)`);
         }
