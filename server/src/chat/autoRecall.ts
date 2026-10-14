@@ -156,7 +156,11 @@ function* foldAll(token: string): Generator<string> {
 function matchCount(queryTokens: ReadonlySet<string>, candidate: string): number {
   const queryRoots = new Set<string>();
   for (const token of queryTokens) {
-    for (const root of foldAll(token)) queryRoots.add(root);
+    for (const root of foldAll(token)) {
+      // Folded stopwords are noise, not matches: "what's" folds to "what",
+      // which must not count as a distinctive concept in the candidate.
+      if (!STOPWORDS.has(root)) queryRoots.add(root);
+    }
   }
   const candidateTokens = new Set<string>();
   for (const word of candidate.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}'\u2019-]*/gu) ?? []) {
