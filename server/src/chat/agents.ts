@@ -131,9 +131,10 @@ function normalizeBrainModel(engine: string, value: unknown, fallback?: string):
   // the lane default instead of migrating to glm-5p3.
   if (engine === 'fireworks') return resolveFireworksModel(model, fallback);
   if (engine === 'openrouter') return resolveOpenRouterModel(model, fallback);
-  // The agy resolver migrates effort-suffixed pins to their base id and falls
-  // back to the lane default, same contract as the fireworks resolver.
-  if (engine === 'agy') return resolveAgyModel(model);
+  // The agy resolver migrates effort-suffixed pins to their base id and
+  // honors the caller's fallback (the operator-configured lane default)
+  // before its built-in default, same contract as the fireworks resolver.
+  if (engine === 'agy') return resolveAgyModel(model, fallback);
   const valid = engine === 'claude' ? CLAUDE_BRAIN_MODELS.has(model)
     : engine === 'codex' ? codexCapability(model) !== undefined
     : engine === 'xai' ? model === 'grok-4.7' || model === 'grok-4.6' || model === 'grok-4.5'

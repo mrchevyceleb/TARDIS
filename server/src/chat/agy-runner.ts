@@ -52,6 +52,15 @@ const AGY_READY_TIMEOUT_MS = 45_000;
 type Listener = (e: SeqEvent) => void;
 type ChatImage = { mediaType: string; base64: string };
 
+const finiteCount = (value: unknown): number => {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+};
+const sanitizedUsage = (usage: unknown): { input: number; output: number; cacheRead: number } => {
+  const rec = usage && typeof usage === 'object' ? usage as Record<string, unknown> : {};
+  return { input: finiteCount(rec.input_tokens), output: finiteCount(rec.output_tokens), cacheRead: finiteCount(rec.cache_read_tokens) };
+};
+
 /** The agy binary. Do NOT rely on bare `agy` through PATH (same rule as the
  *  codex resolver): TARDIS is started by npm, which prepends every ancestor
  *  node_modules/.bin, so a stale shadow could take the lane. Prefer the
@@ -97,6 +106,10 @@ export class AgySession {
   /** Consecutive unparsable stdout frames; resets on any good frame. */
   private malformedFrames = 0;
   private turnUsage = { input: 0, output: 0, cacheRead: 0 };
+  /** The terminal result's authoritative usage for the open turn, preferred
+   *  over the step accumulation (steps may repeat the conversation input per
+   *  API call, so summing them double-counts). */
+  private resultUsage: { input: number; output: number; cacheRead: number } | null = null;
   private turnFailed: { message: string; code?: string } | null = null;
   private currentMsgId: string | null = null;
   /** A content block is open for the current agent_response step. */
@@ -272,12 +285,16 @@ export class AgySession {
           console.warn(`[chat ${this.cli}/agy] result with no open turn: ${message.slice(0, 160)}`);
           return;
         }
-        if (result.status === 'ERROR') {
-          this.turnFailed = { message: String(result.error ?? 'agy returned an error'), code: 'error' };
+        // Fail closed: only the documented SUCCESS status commits a result;
+        // missing, renamed, malformed or unknown statuses are failures.
+        if (result.status !== 'SUCCESS') {
+          this.turnFailed = { message: String(result.error ?? `agy returned status ${String(result.status ?? 'missing')}`), code: 'error' };
         } else {
           const response = typeof result.response === 'string' ? result.response : '';
           if (response.trim()) this.lastAssistantText = response;
         }
+        // The terminal result's usage is the turn's authoritative accounting.
+        this.resultUsage = sanitizedUsage(result.usage);
         this.finishTurn();
         return;
       }
@@ -297,25 +314,27 @@ export class AgySession {
       this.malformedFrames = 0;
       this.turnFailed = { message: 'agy stream frames became unparsable (protocol change?)', code: 'protocol' };
       this.finishTurn();
+      // The process is still running the request whose frames we can no
+      // longer read; leaving it alive would let the now-idle lane accept
+      // another input line while that request executes (concurrent turns,
+      // misattributed results). Retire it: the next send spawns a fresh
+      // session with a clean protocol.
+      this.shutdown('protocol-break');
     }
   }
 
   /** Close the streamed step into a full assistant message (claude-shaped). */
   private finishStep(stream: (event: Record<string, unknown>) => void, step: any): void {
     const usageRaw = step.usage ?? {};
-    const count = (v: unknown): number => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : 0; };
     const usage = {
-      input_tokens: count(usageRaw.input_tokens),
-      output_tokens: count(usageRaw.output_tokens),
-      cache_read_input_tokens: count(usageRaw.cache_read_tokens),
+      input_tokens: finiteCount(usageRaw.input_tokens),
+      output_tokens: finiteCount(usageRaw.output_tokens),
+      cache_read_input_tokens: finiteCount(usageRaw.cache_read_tokens),
       cache_creation_input_tokens: 0,
     };
     this.turnUsage.input += usage.input_tokens;
     this.turnUsage.output += usage.output_tokens;
     this.turnUsage.cacheRead += usage.cache_read_input_tokens;
-    // Same context-size accounting as the other lanes: the last assistant
-    // message of a turn carries the live window size.
-    recordContextUsage(this.contextKey, 'agy', usage);
     if (!this.stepBlockOpen) return; // a step with no streamed text (not seen live; nothing to close)
     this.stepBlockOpen = false;
     const sid = this.agyConversationId ?? '';
@@ -354,11 +373,16 @@ export class AgySession {
       const plain = `Gemini could not answer this turn (${detail.slice(0, 160)}). Try again or switch brains.`;
       this.emit({ type: 'event', event: { type: '_terminal_error', message: plain, code: failed.code ?? 'error', retryable: true, ts: Date.now() } });
     }
-    this.emit({ type: 'event', event: { type: 'result', subtype: failed ? 'error' : 'success', is_error: Boolean(failed), ...(failed ? {} : { result: this.lastAssistantText }), session_id: this.agyConversationId ?? '', usage: { input_tokens: this.turnUsage.input, output_tokens: this.turnUsage.output, cache_read_input_tokens: this.turnUsage.cacheRead } } });
+    const usage = this.resultUsage ?? { input: this.turnUsage.input, output: this.turnUsage.output, cacheRead: this.turnUsage.cacheRead };
+    this.emit({ type: 'event', event: { type: 'result', subtype: failed ? 'error' : 'success', is_error: Boolean(failed), ...(failed ? {} : { result: this.lastAssistantText }), session_id: this.agyConversationId ?? '', usage: { input_tokens: usage.input, output_tokens: usage.output, cache_read_input_tokens: usage.cacheRead } } });
+    // The turn's context accounting, once, at the boundary: the terminal
+    // result's usage when it carried one, else the sanitized step accumulation.
+    recordContextUsage(this.contextKey, 'agy', { input_tokens: usage.input, output_tokens: usage.output, cache_read_input_tokens: usage.cacheRead, cache_creation_input_tokens: 0 });
     this.lastAssistantText = '';
     this.turnStartedAt = null;
     this.automationTurn = false;
     this.turnFailed = null;
+    this.resultUsage = null;
     this.emit({ type: 'turnEnd', sessionId: this.agyConversationId ?? undefined });
     // Keep the rolling memory current on the agy lane too: past the budget the
     // lane rotates at this boundary, exactly like the Pi lanes.
@@ -453,7 +477,7 @@ export class AgySession {
     return seq;
   }
   latestSeq(): number { return latestEventLogSeq(this.logKey, this.nextSeq - 1); }
-  async prewarm(): Promise<void> { await this.ready; }
+  async prewarm(): Promise<void> { await this.awaitReadyBounded(); }
   isPrewarming(): boolean { return !this.initSeen && !this.disposed; }
   listenerCount(): number { return this.listeners.size; }
   lastActivityAt(): number { return this.lastActivityAtMs; }
@@ -488,21 +512,29 @@ export class AgySession {
     for (const fn of this.listeners) fn(se);
   }
 
-  async send(text: string, images?: ChatImage[], opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; providerContinue?: unknown } = {}): Promise<void> {
-    assertSubscriptionLane(this.cli);
-    if (opts.signal?.aborted) return;
-    if (!this.isAlive()) throw new Error('session has exited');
-    // A live process that never emits init would hang this send forever; race
-    // readiness against a generous bound and retire the hung lane so the next
-    // send respawns it instead of inheriting the zombie.
+  /** Bounded readiness, shared by send and prewarm: a live child that never
+   *  emits init is retired (shutdown drops it from the registry) so the lane
+   *  respawns instead of hanging the caller. Init is immediate on a healthy
+   *  spawn, so the bound is generous, not tight. */
+  private async awaitReadyBounded(): Promise<boolean> {
     let readyTimer: NodeJS.Timeout | undefined;
-    const readyOk = await Promise.race([
+    const ok = await Promise.race([
       this.ready,
       new Promise<boolean>((resolve) => { readyTimer = setTimeout(() => resolve(false), AGY_READY_TIMEOUT_MS); }),
     ]);
     if (readyTimer) clearTimeout(readyTimer);
-    if (!readyOk) {
-      this.shutdown('ready-timeout');
+    if (!ok) this.shutdown('ready-timeout');
+    return ok;
+  }
+
+  async send(text: string, images?: ChatImage[], opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; providerContinue?: unknown } = {}): Promise<void> {
+    assertSubscriptionLane(this.cli);
+    if (opts.signal?.aborted) return;
+    if (!this.isAlive()) throw new Error('session has exited');
+    // A live process that never emits init would hang this send forever; the
+    // shared bounded readiness retires the hung lane so the next send
+    // respawns it instead of inheriting the zombie.
+    if (!(await this.awaitReadyBounded())) {
       throw new Error('the agy session never became ready; the lane was retired and the next message respawns it');
     }
     const startsNewTurn = this.turnStartedAt === null;
@@ -524,6 +556,7 @@ export class AgySession {
       this.terminalNoticeEmitted = false;
       this.turnFailed = null;
       this.turnUsage = { input: 0, output: 0, cacheRead: 0 };
+      this.resultUsage = null;
       this.turnOrigin = emptyTurnOrigin();
       this.emit({ type: 'turnStart' });
     }
@@ -535,69 +568,74 @@ export class AgySession {
     };
     const historyThroughSeq = this.latestSeq();
     const wantSeed = this.seedWindowOnNextTurn;
-    const seed = wantSeed ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, this.eventLog.slice()) : '';
-    if (opts.signal?.aborted) { abandon(); return; }
-
-    let attachments: Array<{ id: string; mediaType: string }> = [];
+    // One failure path for every fallible step between opening the turn and
+    // agy accepting the input line: a rejection anywhere in here (primer
+    // read, attachments, vision adaptation, log flush, the durable user
+    // echo, recall, the context helpers, the stdin write) abandons the opened
+    // turn instead of wedging the lane busy forever.
+    let message = '';
     try {
-      if (!opts.peerFrom && !opts.skipAttachments && images?.length) attachments = await saveChatAttachments(images);
-    } catch (error) { abandon(); throw error; }
-
-    // v1 sends text only: agy's image input over stream-json is unverified, so
-    // images ride as descriptions (see vision-adapter) rather than raw pixels.
-    let promptText = text;
-    if (images?.length) {
-      const result = await adaptImagesForTextModel({ text, images, modelSupportsImages: false });
-      if (result.adapted) { promptText = result.text; console.log(`[chat ${this.cli}/agy] vision adapter: ${result.note}`); }
-      if (opts.signal?.aborted || !this.isAlive()) { abandon(); return; }
-    }
-
-    if (opts.peerFrom) {
-      noteTurnPeer(this.turnOrigin, opts.peerFrom, opts.peerFromRole, opts.peerText ?? text);
-      if (isPersonMessageOrigin(opts)) this.turnOrigin.human = true;
-      if (startsNewTurn && automationRequest) this.turnOrigin.automation = true;
-      this.emit({ type: 'event', event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}), ts: Date.now() } });
-    } else {
-      await flushEventLog(this.logKey);
+      const seed = wantSeed ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, this.eventLog.slice()) : '';
       if (opts.signal?.aborted) { abandon(); return; }
-      this.emit({ type: 'event', event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ts: Date.now() } });
-      noteUserTurn(this.logKey);
-      noteAgentLane(this.chatId, this.cli);
-      this.turnOrigin.human = true;
-    }
 
-    const guidance = conversationGuidanceForTurn({
-      chatId: this.chatId, logKey: this.logKey, historyThroughSeq, peerFrom: opts.peerFrom,
-      peerFromRole: opts.peerFromRole,
-      hidden: false,
-    });
-    const laneContext = startsNewTurn
-      ? laneContextForTurn({ chatId: this.chatId, logKey: this.logKey, sinceSeq: this.laneSyncSeq ?? null, throughSeq: historyThroughSeq, seeded: Boolean(seed) })
-      : '';
-    // Auto-recall: recorded knowledge in front of every new human or teammate
-    // turn; automation traffic never spends the search, and every source fails
-    // open under a hard deadline.
-    const recall = startsNewTurn && !automationRequest
-      && recallEligibleTurn(this.chatId, { peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole, voiceMode: opts.voiceMode })
-      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, logKey: this.logKey, messageText: opts.peerText ?? text })
-      : '';
-    if (opts.signal?.aborted) { abandon(); return; }
-    const continuation = isAgentThread(this.chatId)
-      ? ['<rivendell-continuation>', `Warm continuation of the existing conversation. Host time: ${new Date().toString()}.`, 'Do not repeat session-start rituals.', '</rivendell-continuation>', ...(guidance ? ['', guidance] : []), ...(laneContext ? ['', laneContext] : []), ...(recall ? ['', recall] : []), ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []), '', promptText].join('\n')
-      : recall ? `${recall}\n\n${promptText}` : promptText;
-    const humanTurn = !opts.peerFrom && opts.peerFromRole !== 'automation';
-    // Full computer rules ride the seed message that starts a fresh agy window;
-    // later messages of the same warm process get the brief form.
-    const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
-    const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
-    const message = `${this.systemPromptBlock()}\n\n${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${continuation}`;
+      let attachments: Array<{ id: string; mediaType: string }> = [];
+      if (!opts.peerFrom && !opts.skipAttachments && images?.length) attachments = await saveChatAttachments(images);
 
-    try {
+      // v1 sends text only: agy's image input over stream-json is unverified, so
+      // images ride as descriptions (see vision-adapter) rather than raw pixels.
+      let promptText = text;
+      if (images?.length) {
+        const result = await adaptImagesForTextModel({ text, images, modelSupportsImages: false });
+        if (result.adapted) { promptText = result.text; console.log(`[chat ${this.cli}/agy] vision adapter: ${result.note}`); }
+        if (opts.signal?.aborted || !this.isAlive()) { abandon(); return; }
+      }
+
+      if (opts.peerFrom) {
+        noteTurnPeer(this.turnOrigin, opts.peerFrom, opts.peerFromRole, opts.peerText ?? text);
+        if (isPersonMessageOrigin(opts)) this.turnOrigin.human = true;
+        if (startsNewTurn && automationRequest) this.turnOrigin.automation = true;
+        this.emit({ type: 'event', event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}), ts: Date.now() } });
+      } else {
+        await flushEventLog(this.logKey);
+        if (opts.signal?.aborted) { abandon(); return; }
+        this.emit({ type: 'event', event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ts: Date.now() } });
+        noteUserTurn(this.logKey);
+        noteAgentLane(this.chatId, this.cli);
+        this.turnOrigin.human = true;
+      }
+
+      const guidance = conversationGuidanceForTurn({
+        chatId: this.chatId, logKey: this.logKey, historyThroughSeq, peerFrom: opts.peerFrom,
+        peerFromRole: opts.peerFromRole,
+        hidden: false,
+      });
+      const laneContext = startsNewTurn
+        ? laneContextForTurn({ chatId: this.chatId, logKey: this.logKey, sinceSeq: this.laneSyncSeq ?? null, throughSeq: historyThroughSeq, seeded: Boolean(seed) })
+        : '';
+      // Auto-recall: recorded knowledge in front of every new human or teammate
+      // turn; automation traffic never spends the search, and every source fails
+      // open under a hard deadline.
+      const recall = startsNewTurn && !automationRequest
+        && recallEligibleTurn(this.chatId, { peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole, voiceMode: opts.voiceMode })
+        ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, logKey: this.logKey, messageText: opts.peerText ?? text })
+        : '';
+      if (opts.signal?.aborted) { abandon(); return; }
+      const continuation = isAgentThread(this.chatId)
+        ? ['<rivendell-continuation>', `Warm continuation of the existing conversation. Host time: ${new Date().toString()}.`, 'Do not repeat session-start rituals.', '</rivendell-continuation>', ...(guidance ? ['', guidance] : []), ...(laneContext ? ['', laneContext] : []), ...(recall ? ['', recall] : []), ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []), '', promptText].join('\n')
+        : recall ? `${recall}\n\n${promptText}` : promptText;
+      const humanTurn = !opts.peerFrom && opts.peerFromRole !== 'automation';
+      // Full computer rules ride the seed message that starts a fresh agy window;
+      // later messages of the same warm process get the brief form.
+      const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
+      const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
+      message = `${this.systemPromptBlock()}\n\n${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${continuation}`;
+
       await this.writeUserLine(message);
     } catch (error) {
+      // The seed was not consumed by a delivered turn; keep it for the retry.
       if (wantSeed) this.seedWindowOnNextTurn = true;
       abandon();
-      this.emit({ type: 'error', message: `agy rejected the input: ${(error as Error).message}` });
+      this.emit({ type: 'error', message: `agy turn failed before its input was accepted: ${(error as Error).message}` });
       return;
     }
     // The recap reached the model; the next turn recaps only what came after.

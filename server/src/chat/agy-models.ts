@@ -48,11 +48,15 @@ function baseIdOf(model: string): string {
   return '';
 }
 
-/** Validate a brain model for the agy lane. Unknown ids fall back to the lane
- *  default rather than being forwarded (a wrong id would 400 every turn). */
-export function resolveAgyModel(model: string | undefined): string {
+/** Validate a brain model for the agy lane. A caller's fallback (the
+ *  operator-configured lane default) is honored before the built-in default,
+ *  so a configured Flash default survives normalization; unknown ids are
+ *  never forwarded (a wrong id would 400 every turn). */
+export function resolveAgyModel(model: string | undefined, fallback?: string): string {
   const base = baseIdOf(String(model ?? '').trim());
-  return base || DEFAULT_MODEL;
+  if (base) return base;
+  const fromFallback = baseIdOf(String(fallback ?? '').trim());
+  return fromFallback || DEFAULT_MODEL;
 }
 
 export function resolveAgyEffort(model: string, effort: string | undefined): string {
