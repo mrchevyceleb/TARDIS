@@ -657,15 +657,10 @@ export function startDeskHygieneScheduler(): boolean {
     // recurring failure in unrelated hygiene work must never suppress
     // deadline processing. Each leg's rejection is logged individually
     // (allSettled itself never rejects, so a plain catch would be dead).
-    void Promise.allSettled([runDeskHygieneTick(), sweepQuietChecks()])
-      .then((results) => {
-        for (const r of results) {
-          if (r.status === 'rejected') {
-            console.warn(`[desk-hygiene] leg failed: ${(r.reason as Error)?.message ?? String(r.reason)}`);
-          }
-        }
-      })
-      .finally(() => { inFlight = false; });
+    void Promise.allSettled([
+      runDeskHygieneTick().catch((e) => console.warn(`[desk-hygiene] tick: ${(e as Error)?.message}`)),
+      sweepQuietChecks().catch((e) => console.warn(`[desk-hygiene] quiet: ${(e as Error)?.message}`)),
+    ]).finally(() => { inFlight = false; });
   };
   /** Silence is an event (card-baadaf A): the check-in deadlines ride the
    *  same 60s tick. Best effort and fail-open like every hygiene piece. */
@@ -675,6 +670,10 @@ export function startDeskHygieneScheduler(): boolean {
       const { deliverTeamMessage } = await import('../chat/teamBus.ts');
       const due = await sweepCardChecks();
       for (const nudge of due) {
+        if (hygieneDryRun()) {
+          console.log(`[desk-hygiene] dry run, would quiet check ${nudge.to} for ${nudge.card.id}`);
+          continue;
+        }
         const sent = await deliverTeamMessage({ from: 'Desk', to: nudge.to, text: nudge.text, wait: false });
         if (!sent.delivered) console.warn(`[desk-hygiene] quiet check to ${nudge.to} for ${nudge.card.id} not delivered: ${sent.reason}`);
       }

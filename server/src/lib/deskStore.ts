@@ -94,16 +94,6 @@ function validIso(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '' && Number.isFinite(Date.parse(value));
 }
 
-/** The card owner's candidate recipient (an id or name). The quiet sweep
- *  resolves this against the live roster and routes to the Chief when the
- *  candidate is not a live agent; the data layer never resolves the roster
- *  itself (it has no dependency on the agent list). */
-function cardOwnerCandidate(card: DeskCard): string {
-  if (card.owner.kind !== 'agent') return 'chief-of-staff';
-  const candidate = typeof card.owner.id === 'string' && card.owner.id ? card.owner.id : card.owner.name;
-  return candidate || 'chief-of-staff';
-}
-
 function touchCardNextCheck(card: DeskCard, nowIso: string): void {
   if (card.column === 'in_progress' || card.column === 'in_qa') {
     card.nextCheckAt = new Date(Date.parse(nowIso) + CARD_NEXT_CHECK_MS).toISOString();
@@ -968,6 +958,20 @@ export function commentCard(id: string, text: unknown, author: DeskActor): Promi
  *  the failure). A touch that sets a fresh nextCheckAt clears both marks. */
 export async function sweepCardChecks(): Promise<Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>> {
   const due: Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }> = [];
+  // Resolve the live roster once before the sweep: a stale agent id routes to
+  // the Chief (a delivery to a dead id is a silent failure), and a human or
+  // Desk actor owner routes to the Chief immediately.
+  const { listAgents } = await import('../chat/agents.ts');
+  const agents = await listAgents();
+  const liveIds = new Set(agents.map((a) => a.id));
+  const liveNames = new Set(agents.map((a) => a.name));
+  const resolveOwner = (card: DeskCard): string => {
+    if (card.owner.kind !== 'agent') return 'chief-of-staff';
+    const candidate = typeof card.owner.id === 'string' && card.owner.id ? card.owner.id : card.owner.name;
+    if (!candidate) return 'chief-of-staff';
+    if (liveIds.has(candidate) || liveNames.has(candidate)) return candidate;
+    return 'chief-of-staff';
+  };
   await mutate((data, now) => {
     const nowMs = Date.parse(now);
     for (const card of data.cards) {
@@ -978,7 +982,7 @@ export async function sweepCardChecks(): Promise<Array<{ kind: 'owner' | 'chief'
       // Resolve the owner against the roster, not just the stored id: a
       // human-owned card (owner.kind 'human', id 'owner') or a stale agent id
       // is not a deliverable teammate, so those route to the Chief.
-      const ownerAgent = cardOwnerCandidate(card);
+      const ownerAgent = resolveOwner(card);
       if (!card.nudgeAt) {
         card.nudgeAt = now;
         due.push({
