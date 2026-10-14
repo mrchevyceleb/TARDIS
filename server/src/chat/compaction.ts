@@ -18,11 +18,11 @@
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { STATE_DIR } from './config.ts';
+import { MAX_EVENTS_PER_LOG, STATE_DIR } from './config.ts';
 import { callMcp } from '../lib/mcp.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
 import { redactSecrets } from './secretRedaction.ts';
-import { flushEventLog, loadEventLogArchiveSync, loadEventLogForCompactionSync, MAX_EVENTS_PER_LOG } from './event-log-store.ts';
+import { flushEventLog, loadEventLogArchiveSync, loadEventLogForCompactionSync } from './event-log-store.ts';
 import { ROTATION_COMPACT_DEADLINE_MS, ROTATION_VERBATIM_TAIL_CHARS } from './contextBudget.ts';
 import {
   COMPACT_BATCH_TURNS,

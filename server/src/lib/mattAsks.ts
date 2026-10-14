@@ -7,17 +7,18 @@
 //   a Matt message in any agent lane with no visible reply for 15 minutes
 //   nudges that lane's agent; 15 more minutes nudges the Chief. Never Matt.
 //
-//   any commitment past its due time nudges its owner; 15 more minutes
-//   nudges the Chief.
+//   Past-due commitment nudges are NOT here: the merged commitment sweeper
+//   (#180, startCommitmentSweeper) already owns them — a second sweep over
+//   the same store would double-nudge it.
 //
-// Both ride the 60s hygiene tick. Best effort, fail-open, at-most-once.
+// The asks ride their own 60s tick (startMattAsksScheduler). Best effort,
+// fail-open, at-most-once.
 
 import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 import { agentForChatId, type Agent } from '../chat/agents.ts';
 import { isAgentThread, bareChatId } from '../chat/threadKey.ts';
-import { listCommitments, markCommitmentRaised } from './commitmentStore.ts';
 
 const ASK_FILE = join(STATE_DIR, 'matt-asks.json');
 const NUDGE_AFTER_MS = 15 * 60_000;
@@ -28,6 +29,9 @@ export type MattAsk = {
   id: string;
   agentId: string;
   logKey: string;
+  /** Lane the ask landed in: home and bg sessions share a logKey, so an ask
+   *  only closes on visible output from its own lane. */
+  lane: 'home' | 'bg';
   text: string;
   askedAt: number;
   nudgedAt?: number;
@@ -56,6 +60,7 @@ function readAsks(): AskStore {
         id: a.id,
         agentId: a.agentId,
         logKey: a.logKey,
+        lane: a.lane === 'bg' ? 'bg' : 'home',
         text: a.text.slice(0, TEXT_SNIPPET),
         askedAt: typeof a.askedAt === 'number' && Number.isFinite(a.askedAt) ? a.askedAt : 0,
         ...(typeof a.nudgedAt === 'number' && a.nudgedAt > 0 ? { nudgedAt: a.nudgedAt } : {}),
@@ -85,7 +90,7 @@ function agentForLogKey(logKey: string): Agent | null {
 }
 
 /** A Matt message landed in an agent lane: start its timer. Fail-open. */
-export function noteMattAsk(logKey: string, text: string): void {
+export function noteMattAsk(logKey: string, lane: 'home' | 'bg', text: string): void {
   try {
     const agent = agentForLogKey(logKey);
     if (!agent) return;
@@ -94,6 +99,7 @@ export function noteMattAsk(logKey: string, text: string): void {
       id: `ask-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
       agentId: agent.id,
       logKey,
+      lane,
       text: text.replace(/\s+/g, ' ').trim().slice(0, TEXT_SNIPPET),
       askedAt: Date.now(),
     });
@@ -104,12 +110,13 @@ export function noteMattAsk(logKey: string, text: string): void {
 }
 
 /** The agent produced a visible reply in the lane: every open ask for that
- *  lane closes. Fail-open. */
-export function closeMattAsksForLane(logKey: string): void {
+ *  logKey AND lane closes (home and bg share a logKey, so a bg routine, job,
+ *  or handoff reply never closes Matt's home-lane asks). Fail-open. */
+export function closeMattAsksForLane(logKey: string, lane: 'home' | 'bg'): void {
   try {
     const store = readAsks();
     const before = store.asks.length;
-    store.asks = store.asks.filter((a) => a.logKey !== logKey);
+    store.asks = store.asks.filter((a) => a.logKey !== logKey || a.lane !== lane);
     if (store.asks.length !== before) saveAsks(store);
   } catch {
     // Never block the reply path.
@@ -131,9 +138,10 @@ export function closeMattAsksForAgent(agentId: string): void {
 
 /** One sweep: nudges the agent for a Matt ask open past 15 minutes (once),
  *  and the Chief for one still open 15 minutes after the nudge (once).
- *  Also nudges the owner of any commitment past its due time (once), and the
- *  Chief 15 minutes after (once). Never Matt. Returns the deliveries,
- *  having already marked them (at-most-once). */
+ *  Never Matt. Returns the deliveries, having already marked them
+ *  (at-most-once). Past-due commitment nudges are NOT here — the merged
+ *  commitment sweeper (startCommitmentSweeper, #180) already owns them, and
+ *  a second sweep over the same store would double-nudge it. */
 export function sweepMattAsks(): Array<{ kind: 'agent' | 'chief'; to: string; text: string }> {
   const due: Array<{ kind: 'agent' | 'chief'; to: string; text: string }> = [];
   try {
@@ -163,48 +171,41 @@ export function sweepMattAsks(): Array<{ kind: 'agent' | 'chief'; to: string; te
   } catch {
     // A sweep hiccup is a missed cycle, not a crash.
   }
-  // Piece C, the same simple idea: any commitment past its due time nudges
-  // its owner, and 15 minutes later nudges the Chief. No linking, no
-  // matching — the commitment store already has dueAt and the sweep just
-  // checks it. The commitment's own fields (raised.owner / raised.chief)
-  // are the at-most-once marks.
-  try {
-    const now = Date.now();
-    for (const c of listCommitments()) {
-      if (!c.due || !c.dueAt) continue;
-      if (c.dueAt > now) continue;
-      if (c.agentId === 'chief-of-staff') {
-        // A Chief-owned commitment nudges the Chief as the owner (once),
-        // deduplicated: no separate Chief copy of the Chief's own nudge.
-        if (!c.raised?.owner) {
-          due.push({
-            kind: 'agent',
-            to: c.agentId,
-            text: `Your commitment [${c.id}] "${c.text}" (due ${c.due}) is past due. Clear it with the commitments tool.`,
-          });
-          markCommitmentRaised(c.id, 'owner');
-        }
-        continue;
-      }
-      if (!c.raised?.owner) {
-        due.push({
-          kind: 'agent',
-          to: c.agentId,
-          text: `Your commitment [${c.id}] "${c.text}" (due ${c.due}) is past due. Clear it with the commitments tool.`,
-        });
-        markCommitmentRaised(c.id, 'owner');
-      }
-      if (!c.raised?.chief) {
-        due.push({
-          kind: 'chief',
-          to: 'chief-of-staff',
-          text: `Past-due commitment: ${c.agentId}'s [${c.id}] "${c.text}" (due ${c.due}). It went to them; make sure they act on it.`,
-        });
-        markCommitmentRaised(c.id, 'chief');
+  return due;
+}
+
+// ---- scheduler ------------------------------------------------------------------
+
+let asksTimer: ReturnType<typeof setInterval> | null = null;
+let asksSweepInFlight = false;
+
+/** The 60s tick that delivers the ask nudges: its own in-flight guard (a
+ *  hung sweep suppresses only its own future runs) and per-nudge isolated
+ *  delivery (one failed delivery never skips the later nudges of the same
+ *  sweep — their marks are already consumed). Fail-open. */
+export function startMattAsksScheduler(): boolean {
+  if (asksTimer) return true;
+  const run = async () => {
+    const due = sweepMattAsks();
+    if (!due.length) return;
+    const { deliverTeamMessage } = await import('../chat/teamBus.ts');
+    for (const nudge of due) {
+      try {
+        const sent = await deliverTeamMessage({ from: 'Desk', to: nudge.to, text: nudge.text, wait: false });
+        if (!sent.delivered) console.warn(`[matt-asks] nudge to ${nudge.to} not delivered: ${sent.reason}`);
+      } catch (error) {
+        console.warn(`[matt-asks] nudge to ${nudge.to} failed: ${(error as Error)?.message}`);
       }
     }
-  } catch {
-    // Same fail-open.
-  }
-  return due;
+    console.log(`[matt-asks] sweep: ${due.length} due, delivered best effort`);
+  };
+  asksTimer = setInterval(() => {
+    if (asksSweepInFlight) return;
+    asksSweepInFlight = true;
+    void run()
+      .catch((e) => console.warn(`[matt-asks] sweep: ${(e as Error)?.message}`))
+      .finally(() => { asksSweepInFlight = false; });
+  }, 60_000);
+  asksTimer.unref();
+  return true;
 }

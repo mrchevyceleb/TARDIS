@@ -2,7 +2,7 @@ import { appendFile, mkdir, open as openFile, rm } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { STATE_DIR } from './config.ts';
+import { MAX_EVENTS_PER_LOG, STATE_DIR } from './config.ts';
 import { redactEventSecrets, redactSecrets } from './secretRedaction.ts';
 import { noteMattAsk, closeMattAsksForLane } from '../lib/mattAsks.ts';
 import type { SessionEvent } from './runner.ts';
@@ -40,7 +40,9 @@ export type PersistedEvent = {
 };
 
 export const EVENT_LOG_DIR = join(STATE_DIR, 'event-logs');
-export const MAX_EVENTS_PER_LOG = 2000;
+// Retention window shared from config.ts (a leaf module) so import cycles
+// cannot evaluate it before initialization; re-exported for existing importers.
+export { MAX_EVENTS_PER_LOG };
 
 // Cheap process-local invalidation for the sidebar history result cache. Bump
 // only after a durable write/clear/trim succeeds; derived per-file entries still
@@ -1102,21 +1104,55 @@ function hasVisibleText(message: { content?: Array<{ type?: string; text?: strin
   return message.content.some((block) => block && block.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0);
 }
 
+/** A streamed visible-text frame (Codex, Banana, voice continuations): those
+ *  runners persist reply text as stream_event deltas, never as an aggregate
+ *  assistant.message, so the close check recognizes the text frames
+ *  themselves. Tool-use frames, thinking, and empty deltas never close. */
+function streamedVisibleText(frame: unknown): boolean {
+  if (!frame || typeof frame !== 'object') return false;
+  const f = frame as { type?: unknown; content_block?: { type?: unknown; text?: unknown }; delta?: { type?: unknown; text?: unknown } };
+  if (f.type === 'content_block_start') {
+    return f.content_block?.type === 'text' && typeof f.content_block.text === 'string' && f.content_block.text.trim().length > 0;
+  }
+  if (f.type === 'content_block_delta') {
+    return f.delta?.type === 'text_delta' && typeof f.delta.text === 'string' && f.delta.text.trim().length > 0;
+  }
+  return false;
+}
+
 function mattAskHooks(key: string, persisted: PersistedEvent): void {
   try {
-    const ev = persisted.ev as { type?: unknown; event?: { type?: unknown; text?: unknown }; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> } };
+    // Lane identity: home and background sessions share one logKey, so an
+    // ask only ever closes on visible output from its OWN lane — a routine,
+    // job, or handoff reply in the bg lane must not close Matt's unanswered
+    // home-lane asks.
+    const lane: 'home' | 'bg' = persisted.lane === 'bg' ? 'bg' : 'home';
+    const ev = persisted.ev as { type?: unknown; event?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> } };
     if (!ev || typeof ev !== 'object') return;
     if (ev.type === 'event' && ev.event && typeof ev.event === 'object') {
-      const inner = ev.event as { type?: unknown; text?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> } };
-      if (inner.type === '_user_echo' && typeof inner.text === 'string' && inner.text.trim()) {
-        noteMattAsk(key, inner.text);
+      const inner = ev.event as { type?: unknown; text?: unknown; imageCount?: unknown; attachments?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> }; event?: unknown };
+      if (inner.type === '_user_echo') {
+        // Image- or attachment-only echoes are asks too: with no text they
+        // open the timer on a placeholder snippet instead of being dropped.
+        const text = typeof inner.text === 'string' && inner.text.trim()
+          ? inner.text
+          : (typeof inner.imageCount === 'number' && inner.imageCount > 0) || (Array.isArray(inner.attachments) && inner.attachments.length > 0)
+            ? '[Matt sent an image or attachment]'
+            : '';
+        if (text) noteMattAsk(key, lane, text);
       }
       if (inner.type === 'assistant' && inner.message && typeof inner.message === 'object' && inner.message.role === 'assistant') {
-        if (hasVisibleText(inner.message)) closeMattAsksForLane(key);
+        if (hasVisibleText(inner.message)) closeMattAsksForLane(key, lane);
+      }
+      if (inner.type === 'stream_event' && streamedVisibleText(inner.event)) {
+        closeMattAsksForLane(key, lane);
       }
     }
+    if (ev.type === 'stream_event' && streamedVisibleText(ev.event)) {
+      closeMattAsksForLane(key, lane);
+    }
     if (ev.type === 'assistant' && ev.message && typeof ev.message === 'object' && ev.message.role === 'assistant') {
-      if (hasVisibleText(ev.message)) closeMattAsksForLane(key);
+      if (hasVisibleText(ev.message)) closeMattAsksForLane(key, lane);
     }
   } catch {
     // Never block the durable append on an ask-store hiccup.

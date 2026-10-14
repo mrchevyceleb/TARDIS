@@ -3,6 +3,11 @@ import { join } from 'node:path';
 
 export const PORT = Number(process.env.PORT) || 8091;
 
+// Event-log retention window (entries per lane log), on this leaf module
+// so the log store, compaction, and the runners can share it without an
+// import cycle evaluating it before initialization.
+export const MAX_EVENTS_PER_LOG = 2000;
+
 // Where to scan for repos. Each entry is a parent directory; first-level
 // children that contain a .git folder are treated as repos.
 export const REPO_SCAN_PATHS: string[] = [
