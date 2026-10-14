@@ -95,7 +95,9 @@ function validIso(value: unknown): value is string {
 }
 
 function touchCardNextCheck(card: DeskCard, nowIso: string): void {
-  if (card.column === 'in_progress' || card.column === 'in_qa') {
+  // Archived cards carry no check state even in a live column: a PATCH or
+  // comment on an archived card must not re-create a deadline.
+  if (!card.archived && (card.column === 'in_progress' || card.column === 'in_qa')) {
     card.nextCheckAt = new Date(Date.parse(nowIso) + CARD_NEXT_CHECK_MS).toISOString();
     delete card.nudgeAt;
     delete card.escalatedAt;
@@ -340,10 +342,11 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
   // deadline (it predates this feature) gets one seeded from its last update,
   // bounded to 30 minutes out from the moment it was read, so the sweep covers
   // every live card from deployment day, not only new ones.
-  if (card.archived || (card.column !== 'in_progress' && card.column !== 'in_qa')) {
+  if (raw.archived === true || (card.column !== 'in_progress' && card.column !== 'in_qa')) {
     // Archived and parked cards carry no check state: the sweep skips them,
     // and a stale deadline or mark must not survive a read round-trip (an
     // archive clears the fields; the next read must not re-create them).
+    // raw.archived, not card.archived: the copy onto card happens below.
     delete card.nextCheckAt;
     delete card.nudgeAt;
     delete card.escalatedAt;
@@ -966,6 +969,11 @@ export function commentCard(id: string, text: unknown, author: DeskActor): Promi
  *  A dry-run sweep ({ dryRun: true }) returns the due nudges read-only:
  *  nothing is marked or written, so previewing never consumes a
  *  notification that would then never be delivered. */
+/** Delivery bound per sweep tick: deliverTeamMessage's global limiter is
+ *  shared with every other sender, so a mass-silence burst marks and returns
+ *  at most this many per tick; the rest stay unmarked for the next tick. */
+const MAX_SWEEP_DELIVERIES = 10;
+
 export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promise<Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>> {
   const dryRun = options.dryRun === true;
   const due: Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }> = [];
@@ -991,6 +999,13 @@ export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promi
   };
   await mutate((data, now) => {
     const nowMs = Date.parse(now);
+    // Candidates are collected UNMARKED first: delivery is globally rate
+    // limited (deliverTeamMessage, shared with every other sender), so
+    // marking the whole batch up front would permanently consume nudges the
+    // limiter rejects — exactly the mass-silence burst this feature exists
+    // for. Only the deliverable head of the batch is marked; the rest stay
+    // unmarked and eligible for the next tick.
+    const candidates: Array<{ setMark: () => void; nudge: { kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string } }> = [];
     for (const card of data.cards) {
       if (card.archived) continue;
       if (card.column !== 'in_progress' && card.column !== 'in_qa') continue;
@@ -1001,30 +1016,40 @@ export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promi
       // is not a deliverable teammate, so those route to the Chief.
       const ownerAgent = resolveOwner(card);
       if (!card.nudgeAt) {
-        if (!dryRun) card.nudgeAt = now;
-        due.push({
-          kind: 'owner',
-          card,
-          to: ownerAgent,
-          text: ownerAgent === 'chief-of-staff'
-            ? `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since (you own this one). Comment on the card to set a new one.`
-            : `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since. Comment on the card to set a new one, or tell Max what is blocking it.`,
+        candidates.push({
+          setMark: () => { card.nudgeAt = now; },
+          nudge: {
+            kind: 'owner',
+            card,
+            to: ownerAgent,
+            text: ownerAgent === 'chief-of-staff'
+              ? `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since (you own this one). Comment on the card to set a new one.`
+              : `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since. Comment on the card to set a new one, or tell Max what is blocking it.`,
+          },
         });
       } else if (!card.escalatedAt && nowMs - Date.parse(card.nudgeAt) >= CARD_CHECK_ESCALATE_MS && ownerAgent !== 'chief-of-staff') {
         // The Chief's own cards never get the separate Chief copy: the owner
         // nudge already reached the Chief, so a second one is noise.
-        if (!dryRun) card.escalatedAt = now;
-        due.push({
-          kind: 'chief',
-          card,
-          to: 'chief-of-staff',
-          text: `Silence flag: ${ownerAgent}'s card [${card.id}] "${card.title}" (${card.column}) went quiet past its check-in time and stayed quiet 15 minutes after the nudge. It went to them; make sure they act on it.`,
+        candidates.push({
+          setMark: () => { card.escalatedAt = now; },
+          nudge: {
+            kind: 'chief',
+            card,
+            to: 'chief-of-staff',
+            text: `Silence flag: ${ownerAgent}'s card [${card.id}] "${card.title}" (${card.column}) went quiet past its check-in time and stayed quiet 15 minutes after the nudge. It went to them; make sure they act on it.`,
+          },
         });
       }
     }
-    // Dry run: nothing was marked, so there is nothing to write — the due
-    // nudges come back read-only for logging.
-    return dryRun || due.length === 0
+    // Dry run: nothing is marked or written — every candidate comes back
+    // read-only for logging. Real run: at most MAX_SWEEP_DELIVERIES are
+    // marked and returned; the rest reappear on the next tick.
+    const batch = dryRun ? candidates : candidates.slice(0, MAX_SWEEP_DELIVERIES);
+    for (const c of batch) {
+      if (!dryRun) c.setMark();
+      due.push(c.nudge);
+    }
+    return dryRun || batch.length === 0
       ? (new Unchanged(due) as unknown as Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>)
       : due;
   });
