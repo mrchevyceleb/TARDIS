@@ -23,10 +23,15 @@ type StampedEvent = SeqEvent & { eng?: string };
 export function latestThreadIdFromEvents(
   events: ReadonlyArray<StampedEvent>,
   cli: string,
+  exclude?: ReadonlySet<string>,
 ): string | null {
   let threadId: string | null = null;
   for (const se of events) {
-    if (typeof se.eng === 'string' && se.eng && se.eng !== cli) continue;
+    // Positively-known provenance only: an unstamped event might belong to
+    // any engine sharing this thread's log, and a foreign engine's session
+    // id must never be recovered as ours (the log is engine-neutral; the
+    // runner stamps its own events at emit, so unstamped means unknown).
+    if (se.eng !== cli) continue;
     const ev = se.ev;
     if (ev.type === 'turnEnd' && typeof ev.sessionId === 'string') {
       threadId = ev.sessionId;
@@ -43,6 +48,9 @@ export function latestThreadIdFromEvents(
       threadId = inner.session_id;
     }
   }
+  // A tombstoned latest id wins over any older fallback: the lane was
+  // explicitly cleared for a fresh start, so nothing may be resurrected.
+  if (threadId && exclude?.has(threadId)) return null;
   return threadId;
 }
 

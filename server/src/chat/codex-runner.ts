@@ -244,6 +244,9 @@ export class CodexSession {
   private threadId: string | null = null;
   /** Next turn seeds persona + rolling compact + last 50 on a fresh thread. */
   private seedWindowOnNextTurn = false;
+  /** Thread ids explicitly cleared as unresumable: the event-log recovery
+   *  must never resurrect one — shutdown passes this set. */
+  private readonly invalidatedThreadIds = new Set<string>();
   private contextMaintenance: Promise<void> | null = null;
 
   private consumeWindowSeed(): boolean {
@@ -499,7 +502,7 @@ export class CodexSession {
     this.dead = true;
     this.nativeSteerReady = false;
     this.rejectNativeSteers(new Error('Codex session stopped'));
-    const latestThreadId = this.threadId ?? latestThreadIdFromEvents(this.eventLog, this.cli);
+    const latestThreadId = this.threadId ?? latestThreadIdFromEvents(this.eventLog, this.cli, this.invalidatedThreadIds);
     if (latestThreadId) {
       await this.persistThreadId(latestThreadId);
     }
@@ -740,6 +743,10 @@ export class CodexSession {
     // window, which costs context rather than the answer.
     if (this.threadId && (await codexRolloutMissing(codexHomeFor(childEnv), this.threadId))) {
       const unresumable = this.threadId;
+      // Tombstone the cleared id: shutdown's event-log recovery must never
+      // resurrect it (the fresh turn may fail before minting a new session
+      // id, and the old id's turnEnd/init events still sit in the log).
+      this.invalidatedThreadIds.add(unresumable);
       // Drops the in-memory id synchronously; a failed write is not worth
       // wedging a busy lane over, and the next turn re-checks the rollout.
       await this.clearPersistedThreadId().catch(() => undefined);
@@ -1220,11 +1227,13 @@ export class CodexSession {
   private emit(msg: SessionEvent): void {
     msg = redactComputerImages(msg);
     if (isPlumbingEvent(msg)) return;
-    this.lastActivityAtMs = Date.now();
     // Lane stamp via the threadKey leaf: a runtime import of runner.ts's
     // laneTagFor would create a module-evaluation cycle (the runners and
     // runner.ts import each other's worlds; the type-only import stays).
-    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now(), ...(isBackgroundChatId(this.chatId) ? { lane: 'bg' as const } : {}) };
+    // Engine provenance at emit: the recovery only trusts positively-known
+    // provenance, so the runner's own events are stamped here (the persisted
+    // spread below re-stamps the same value, harmlessly).
+    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now(), eng: this.cli, ...(isBackgroundChatId(this.chatId) ? { lane: 'bg' as const } : {}) };
     const persisted = { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) };
     const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
     if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) {
