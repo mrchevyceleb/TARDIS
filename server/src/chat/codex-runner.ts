@@ -864,27 +864,13 @@ export class CodexSession {
       return;
     }
 
-    // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
-    // login; a per-agent pin (RIVENDELL_AGENT_ACCOUNTS) comes next; everything else
-    // keeps the per-repo account-map resolution. A pin that cannot be honored
-    // throws, so resolve inside a guard that unwedges the session instead of
-    // dying with busy still set (mirrors the config-lock failure path above).
-    let codexSpawnEnv: NodeJS.ProcessEnv;
-    try {
-      const forcedAccount = accountFromChatId(this.chatId) ?? accountForAgent(laneName);
-      codexSpawnEnv = forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd);
-    } catch (err) {
-      cleanupImages();
-      this.busy = false;
-      this.emit({
-        type: 'error',
-        code: 'CODEX_ACCOUNT_PIN_UNAVAILABLE',
-        retryable: true,
-        message: `account pin unavailable: ${(err as Error).message}`,
-      });
-      this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
-      return;
-    }
+    // The spawn reuses the account environment the guarded rollout-check
+    // resolution above already captured: resolving again here could race an
+    // account-config change between the check and the spawn (the check
+    // inspected one account's CODEX_HOME while the spawn would bill another),
+    // and one captured resolution is the same environment the turn bills. A
+    // pin that cannot be honored already unwedged the session above.
+    const codexSpawnEnv: NodeJS.ProcessEnv = childEnv;
     const turnStartedAtMs = Date.now();
     const child = spawn(process.execPath, [CODEX_APP_TURN_SCRIPT], {
       cwd: this.cwd,
