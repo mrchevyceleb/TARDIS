@@ -4,6 +4,7 @@ import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync,
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import { redactEventSecrets, redactSecrets } from './secretRedaction.ts';
+import { noteMattAsk, closeMattAsksForLane } from '../lib/mattAsks.ts';
 import type { SessionEvent } from './runner.ts';
 import { isSyntheticApiErrorEvent } from './providerErrors.ts';
 
@@ -1089,6 +1090,31 @@ export function flushAllEventChains(): Promise<void> {
  * cannot race process exit, and `_user_echo` admission records must hit disk
  * before listeners acknowledge or the model receives the prompt. Callers flush
  * the per-key async chain first when the process is staying alive. */
+/** card-baadaf B: Matt's asks open on every user echo in an agent lane and
+ *  close on any assistant text in that lane. Clean event-type markers, no
+ *  regex; fire-and-forget inside the write chain so a store hiccup never
+ *  blocks the durable append. */
+function mattAskHooks(key: string, persisted: PersistedEvent): void {
+  try {
+    const ev = persisted.ev as { type?: unknown; event?: { type?: unknown; text?: unknown }; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> } };
+    if (!ev || typeof ev !== 'object') return;
+    if (ev.type === 'event' && ev.event && typeof ev.event === 'object') {
+      const inner = ev.event as { type?: unknown; text?: unknown; message?: { role?: unknown } };
+      if (inner.type === '_user_echo' && typeof inner.text === 'string' && inner.text.trim()) {
+        noteMattAsk(key, inner.text);
+      }
+      if (inner.type === 'assistant' && inner.message && typeof inner.message === 'object' && inner.message.role === 'assistant') {
+        closeMattAsksForLane(key);
+      }
+    }
+    if (ev.type === 'assistant' && ev.message && typeof ev.message === 'object' && ev.message.role === 'assistant') {
+      closeMattAsksForLane(key);
+    }
+  } catch {
+    // Never block the durable append on an ask-store hiccup.
+  }
+}
+
 export function appendEventLogSync(key: string, persisted: PersistedEvent): boolean {
   observeNextSeq(key, persisted.seq + 1);
   if (isPlumbingEvent(persisted.ev)) return true;
@@ -1104,6 +1130,7 @@ export function appendEventLogSync(key: string, persisted: PersistedEvent): bool
     // non-plain instance) still gets one last text-level scan before the
     // line is durable.
     appendFileSync(logPath(key), redactSecrets(JSON.stringify(redactEventSecrets(persisted))) + '\n', 'utf8');
+    mattAskHooks(key, redactEventSecrets(persisted));
     bumpEventLogRevision(persisted.ev);
     return true;
   } catch (err) {
@@ -1138,6 +1165,7 @@ export function appendEventLog(key: string, persisted: PersistedEvent): void {
         await mkdir(EVENT_LOG_DIR, { recursive: true });
         await appendFile(path, line, 'utf8');
         bumpEventLogRevision(persisted.ev);
+        mattAskHooks(key, redactEventSecrets(persisted));
       } catch (err) {
         console.warn('[event-log-store] append failed', key, (err as Error).message);
       }
