@@ -845,7 +845,7 @@ export class CodexSession {
     // turn; automation deliveries never spend the search (the reply nudge
     // rides the steer path and never reaches here).
     const recall = recallEligibleTurn(this.chatId, { peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole, voiceMode: opts.voiceMode })
-      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, messageText: opts.peerText ?? text })
+      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, logKey: this.logKey, messageText: opts.peerText ?? text })
       : '';
     if (opts.signal?.aborted) {
       this.busy = false;
