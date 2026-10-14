@@ -1081,6 +1081,17 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
     ? `Previous rolling memory document (REPLACE this entirely with an updated version — do not stack primers):\n\n${safePrevious}\n\n---\n\nAged-out turns that just left the last-${WINDOW_TURNS} working window. Merge them in:\n\n${overflowText}`
     : `Turns older than the last-${WINDOW_TURNS} working window. Write the first rolling memory document:\n\n${overflowText}`;
 
+  // Soft size bound, never a refusal: a refused fold retries the same batch
+  // forever (the Oct 13-14 freeze). A baseline past the bound is told to stay
+  // under it, so the document can never grow toward the generation ceiling.
+  // The bound sits well above the thin guard's floor (85% of the 4000-word
+  // target), so a compliant tightened document is never read as thin.
+  const sizeBoundWords = COMPACT_TARGET_CEILING_WORDS + 500;
+  const baselineWords = safePrevious.trim() ? safePrevious.trim().split(/\s+/).length : 0;
+  if (baselineWords > sizeBoundWords) {
+    userContent = `${userContent}\n\nThe previous document is ${baselineWords} words, past the length target. Tighten while merging: the replacement must stay under ${sizeBoundWords} words. Compress older detail first; keep open commitments, decisions, and standing rules.`;
+  }
+
   // Unpredictable per-pass sentinel: hand the model the exact marker line to
   // emit so summarized user content can never forge the facts split point.
   const sentinel = durableFactsSentinel();
