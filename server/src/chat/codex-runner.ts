@@ -35,6 +35,9 @@ import { THREAD_VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, replyNudgeEvent, ReplyWatch } from './replyNudge.ts';
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 
+/** Delivery-path compaction probe rate — see probeCompactFromDeliveryPath. */
+const DELIVERY_COMPACT_PROBE_MS = 5 * 60_000;
+
 const CODEX_BIN = resolveCodexBin();
 console.log(`[chat codex] binary: ${CODEX_BIN}`);
 
@@ -304,6 +307,20 @@ export class CodexSession {
     } catch (err) {
       console.warn(`[chat ${this.cli}] compaction check failed for ${this.logKey}:`, (err as Error).message);
     }
+  }
+  /** A wedged marathon turn never exits cleanly, so the turn-end hook never
+   *  fires and the lane's rolling memory freezes (Oct 14: one live turn, zero
+   *  turn ends for five hours while every team delivery steered into it).
+   *  Each accepted delivery probes the compaction at most once per
+   *  DELIVERY_COMPACT_PROBE_MS. The probe runs the same maybeCompact the
+   *  turn-end hook runs, so every guard (busy lanes defer owed rotations,
+   *  the overflow gate, in-flight serialization) applies unchanged. */
+  private lastDeliveryCompactProbeAtMs = 0;
+  private probeCompactFromDeliveryPath(): void {
+    const now = Date.now();
+    if (now - this.lastDeliveryCompactProbeAtMs < DELIVERY_COMPACT_PROBE_MS) return;
+    this.lastDeliveryCompactProbeAtMs = now;
+    void this.maybeCompact();
   }
   private busy = false;
   private dead = false;
@@ -627,6 +644,7 @@ export class CodexSession {
             type: 'event',
             event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() },
           });
+          this.probeCompactFromDeliveryPath();
         }
       } else {
         this.emit({
@@ -980,6 +998,7 @@ export class CodexSession {
               event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() },
             });
             settlePeerAdmission(true);
+            this.probeCompactFromDeliveryPath();
           }
         }
         if (ev?.type === 'item.completed' && ev?.item?.type === 'agent_message') {
