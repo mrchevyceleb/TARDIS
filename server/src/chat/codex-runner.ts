@@ -167,6 +167,10 @@ type CodexSendOptions = {
   emptyRetryDepth?: number;
   suppressEcho?: boolean;
   seedOverride?: string;
+  /** False when the caller could not confirm the override primer's
+   *  commitments half (the empty-exit retry passing a partial primer): an
+   *  unconfirmed override must not acknowledge the seed window. */
+  seedOverrideAvailable?: boolean;
   voiceMode?: boolean;
 };
 type CodexSessionOptions = {
@@ -729,7 +733,7 @@ export class CodexSession {
     // primer from a fail-open store hiccup is uncertainty, and the seed
     // window must not be consumed on it below.
     const seedStatus = hasSeedOverride
-      ? { primer: opts.seedOverride as string, available: true }
+      ? { primer: opts.seedOverride as string, available: opts.seedOverrideAvailable !== false }
       : seedWindow
         ? await peekEnginePrimerThroughSeqWithStatus(this.logKey, historyThroughSeq, fallbackHistory).catch((e) => {
             // A peek/compaction failure after the user's message was accepted
@@ -742,6 +746,13 @@ export class CodexSession {
         : { primer: '', available: true };
     const seed = seedStatus.primer;
     const seedAvailable = seedStatus.available;
+    if (seedWindow && !seedAvailable) {
+      // An unconfirmed primer arms the window regardless of what triggered
+      // this seed: the recovery flag below is cleared while the window flag
+      // may never have been set, and without this the next turn would never
+      // retry the commitments half.
+      this.seedWindowOnNextTurn = true;
+    }
     if (seed) {
       this.recoverContextOnNextTurn = false;
       if (!hasSeedOverride) {
@@ -1052,6 +1063,7 @@ export class CodexSession {
             emptyRetryDepth: (opts.emptyRetryDepth ?? 0) + 1,
             suppressEcho: true,
             seedOverride: retrySeed,
+            seedOverrideAvailable: retryAvailable,
             skipAttachments: true,
           });
         } catch (error) {

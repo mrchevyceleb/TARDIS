@@ -36,7 +36,7 @@ import {
   type VisibleTurn,
 } from './threadWindow.ts';
 import { bareChatId, isThreadLogKey } from './threadKey.ts';
-import { agentForChatId } from './agents.ts';
+import { listAgentsOrThrow } from './agents.ts';
 import { listCommitments } from '../lib/commitmentStore.ts';
 
 const MIN_ACCEPT_WORDS = 400;
@@ -398,7 +398,12 @@ export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev:
 function commitmentsSeedBlockWithStatus(key: string): { block: string; available: boolean } {
   try {
     if (!isThreadLogKey(key)) return { block: '', available: true };
-    const agent = agentForChatId(bareChatId(key.slice(key.lastIndexOf('|') + 1)));
+    // Strict roster read: a roster read/parse failure must read as
+    // UNAVAILABLE (the seed window stays open and retries), never as
+    // "no agent" (which would acknowledge a commitments-free seed).
+    const agents = listAgentsOrThrow();
+    const bare = bareChatId(key.slice(key.lastIndexOf('|') + 1));
+    const agent = agents.find((a) => a.home === bare);
     if (!agent) return { block: '', available: true };
     const lines = listCommitments(agent.id).map((c) => `- [${c.id}] ${c.text}${c.due ? ` (due ${c.due})` : ''}`);
     return {
