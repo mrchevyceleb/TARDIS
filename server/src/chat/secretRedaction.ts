@@ -110,7 +110,7 @@ export function redactSecrets(text: string): string {
     .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[redacted jwt]')
     .replace(/\bAKIA[0-9A-Z]{16}\b/g, REDACTED)
     .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, REDACTED)
-    .replace(/\b(?:sk-(?:live|test)-|sk_|gh[pousr]_|github_pat_|glpat-|xox[baprs]-|dop_v1_|dpl_|rk_|sbp_)[A-Za-z0-9_=-]{12,}\b/gi, REDACTED);
+    .replace(/\b(?:sk-(?:live|test)-|sk_|pk_(?:live|test)_|gh[pousr]_|github_pat_|glpat-|xox[baprs]-|dop_v1_|dpl_|rk_|sbp_)[A-Za-z0-9_=-]{12,}\b/gi, REDACTED);
 
   out = out.replace(
     /\b[A-Za-z0-9+/_=-]{64,}\b/g,
