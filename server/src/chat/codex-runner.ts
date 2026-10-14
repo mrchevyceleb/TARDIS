@@ -271,7 +271,7 @@ export class CodexSession {
     if (!refreshed || this.busy || this.dead) return;
     await setSessionId(this.cli, this.cwd, '', this.chatId);
     if (this.dead) return;
-    this.threadId = null;
+    this.invalidateThreadId();
     this.seedWindowOnNextTurn = true;
     bankRotation(this.logKey);
     recordContextRotation(this.logKey);
@@ -289,7 +289,7 @@ export class CodexSession {
         emit: (ev) => this.emit(ev as any),
         rotate: async () => {
           this.seedWindowOnNextTurn = true;
-          this.threadId = null;
+          this.invalidateThreadId();
           await setSessionId(this.cli, this.cwd, '', this.chatId);
           bankRotation(this.logKey);
           return false;
@@ -360,7 +360,7 @@ export class CodexSession {
     const switchedFrom = priorEngine && priorEngine !== this.cli ? priorEngine : null;
     if (switchedFrom) {
       this.seedWindowOnNextTurn = true;
-      this.threadId = null;
+      this.invalidateThreadId();
       this.recoverContextOnNextTurn = true;
       void this.clearPersistedThreadId();
       console.warn(
@@ -375,7 +375,7 @@ export class CodexSession {
     const visible = extractVisibleTurns(history);
     if (!switchedFrom && (isRotationOwed(this.logKey) || visible.length > WINDOW_TURNS)) {
       this.seedWindowOnNextTurn = true;
-      this.threadId = null;
+      this.invalidateThreadId();
       this.recoverContextOnNextTurn = true;
       void this.clearPersistedThreadId();
       console.warn(
@@ -524,8 +524,17 @@ export class CodexSession {
     return this.threadIdWrite;
   }
 
-  private clearPersistedThreadId(): Promise<void> {
+  /** An intentional fresh-thread reset: the current id is tombstoned so the
+   *  event-log recovery (shutdown) can never resurrect a thread this session
+   *  explicitly dropped — rotated, engine-switched, seeded-fresh, poisoned,
+   *  or empty-retried. Every intentional reset goes through here. */
+  private invalidateThreadId(): void {
+    if (this.threadId) this.invalidatedThreadIds.add(this.threadId);
     this.threadId = null;
+  }
+
+  private clearPersistedThreadId(): Promise<void> {
+    this.invalidateThreadId();
     this.threadIdWrite = this.threadIdWrite.then(
       () => setSessionId(this.cli, this.cwd, '', this.chatId),
       () => setSessionId(this.cli, this.cwd, '', this.chatId),
@@ -740,9 +749,14 @@ export class CodexSession {
     // falsely prove its live rollout missing). A pin that cannot be honored
     // throws, so resolve inside a guard that unwedges the session (mirrors
     // the spawn's block below).
+    // Capture the lane's agent identity once: the roster can change mid-turn
+    // (a rename or reassignment between async steps), and the account
+    // resolution, the prompt, and the MCP identity must all describe the
+    // same agent.
+    const sessionAgent = agentForChatId(this.chatId);
     let childEnv: NodeJS.ProcessEnv;
     try {
-      const forcedAccount = accountFromChatId(this.chatId) ?? accountForAgent(agentForChatId(this.chatId)?.name);
+      const forcedAccount = accountFromChatId(this.chatId) ?? accountForAgent(sessionAgent?.name);
       childEnv = forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd);
     } catch (err) {
       cleanupImages();
@@ -827,7 +841,7 @@ export class CodexSession {
       this.busy = false;
       return;
     }
-    const prompt = `${computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, !(seedWindow || hasSeedOverride))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
+    const prompt = `${computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, !(seedWindow || hasSeedOverride))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
     // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
     // -c overrides rather than written into ~/.codex/config.toml so this stays
     // scoped to TARDIS.
@@ -839,8 +853,8 @@ export class CodexSession {
         '-c', `mcp_servers.rivendell-browser.args=${JSON.stringify([browserMcpEntry])}`,
       );
     }
-    const laneName = agentForChatId(this.chatId)?.name;
-    browserMcpArgs.push(...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId), agentId: agentForChatId(this.chatId)?.id }), ...officeMcpCodexArgs());
+    const laneName = sessionAgent?.name;
+    browserMcpArgs.push(...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId), agentId: sessionAgent?.id }), ...officeMcpCodexArgs());
     const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
 
     // Wait for OneDrive to release its sync lock on .codex/config.toml so
@@ -1072,7 +1086,7 @@ export class CodexSession {
       });
       if (retryEmptyTurn) {
         const failedThread = this.threadId;
-        this.threadId = null;
+        this.invalidateThreadId();
         await setSessionId(this.cli, this.cwd, '', this.chatId);
         let retrySeed = seed;
         let retryAvailable = seedAvailable;
@@ -1148,7 +1162,7 @@ export class CodexSession {
         // starts clean instead of resuming a corpse that keeps exiting 1.
         // Do not go through persistThreadId('') — that would leave this.threadId as ''.
         const deadThread = this.threadId;
-        this.threadId = null;
+        this.invalidateThreadId();
         await setSessionId(this.cli, this.cwd, '', this.chatId);
         this.seedWindowOnNextTurn = true;
         if (deadThread) {
