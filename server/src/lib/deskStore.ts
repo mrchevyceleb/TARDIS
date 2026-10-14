@@ -955,14 +955,24 @@ export function commentCard(id: string, text: unknown, author: DeskActor): Promi
  *  drop a nudge but never repeat one. An explicit delivery failure also
  *  keeps the mark (the same at-most-once trade as every existing hygiene
  *  piece: a nudge can be dropped but never repeated, and the log records
- *  the failure). A touch that sets a fresh nextCheckAt clears both marks. */
-export async function sweepCardChecks(): Promise<Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>> {
+ *  the failure). A touch that sets a fresh nextCheckAt clears both marks.
+ *  A dry-run sweep ({ dryRun: true }) returns the due nudges read-only:
+ *  nothing is marked or written, so previewing never consumes a
+ *  notification that would then never be delivered. */
+export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promise<Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>> {
+  const dryRun = options.dryRun === true;
   const due: Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }> = [];
   // Resolve the live roster once before the sweep: a stale agent id routes to
   // the Chief (a delivery to a dead id is a silent failure), and a human or
   // Desk actor owner routes to the Chief immediately.
   const { listAgents } = await import('../chat/agents.ts');
   const agents = await listAgents();
+  // listAgents converts every roster read/parse failure into an empty list;
+  // an empty roster here would read as "every owner is stale" and reroute
+  // the whole due batch to the Chief while consuming its marks. Treat an
+  // empty roster as a sweep failure: the caller logs it, nothing is marked
+  // or delivered.
+  if (agents.length === 0) throw new Error('live roster unavailable (empty list) — sweep skipped, nothing marked');
   const liveIds = new Set(agents.map((a) => a.id));
   const liveNames = new Set(agents.map((a) => a.name));
   const resolveOwner = (card: DeskCard): string => {
@@ -984,7 +994,7 @@ export async function sweepCardChecks(): Promise<Array<{ kind: 'owner' | 'chief'
       // is not a deliverable teammate, so those route to the Chief.
       const ownerAgent = resolveOwner(card);
       if (!card.nudgeAt) {
-        card.nudgeAt = now;
+        if (!dryRun) card.nudgeAt = now;
         due.push({
           kind: 'owner',
           card,
@@ -996,7 +1006,7 @@ export async function sweepCardChecks(): Promise<Array<{ kind: 'owner' | 'chief'
       } else if (!card.escalatedAt && nowMs - Date.parse(card.nudgeAt) >= CARD_CHECK_ESCALATE_MS && ownerAgent !== 'chief-of-staff') {
         // The Chief's own cards never get the separate Chief copy: the owner
         // nudge already reached the Chief, so a second one is noise.
-        card.escalatedAt = now;
+        if (!dryRun) card.escalatedAt = now;
         due.push({
           kind: 'chief',
           card,
@@ -1005,7 +1015,11 @@ export async function sweepCardChecks(): Promise<Array<{ kind: 'owner' | 'chief'
         });
       }
     }
-    return due.length > 0 ? due : (new Unchanged(due) as unknown as Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>);
+    // Dry run: nothing was marked, so there is nothing to write — the due
+    // nudges come back read-only for logging.
+    return dryRun || due.length === 0
+      ? (new Unchanged(due) as unknown as Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>)
+      : due;
   });
   return due;
 }
@@ -1024,8 +1038,19 @@ export function deleteComment(cardId: string, commentId: string): Promise<DeskCa
 export function archiveCard(id: string, archived: boolean): Promise<DeskCard> {
   return mirrorAfter(mutate((data, now) => {
     const card = findCard(data, id);
-    if (archived) card.archived = true;
-    else delete card.archived;
+    if (archived) {
+      card.archived = true;
+      // Archiving clears the check state: a stale deadline or an old
+      // nudge/escalation mark must not survive into an unarchive.
+      delete card.nextCheckAt;
+      delete card.nudgeAt;
+      delete card.escalatedAt;
+    } else {
+      delete card.archived;
+      // Unarchiving into a live column seeds a fresh 30-minute window and
+      // clears stale marks; into a parked column this just clears the fields.
+      touchCardNextCheck(card, now);
+    }
     card.updatedAt = now;
     return card;
   }));

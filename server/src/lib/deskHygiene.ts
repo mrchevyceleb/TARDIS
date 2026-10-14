@@ -638,7 +638,8 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
 // ---- scheduler ------------------------------------------------------------------
 
 let timer: ReturnType<typeof setInterval> | null = null;
-let inFlight = false;
+let tickInFlight = false;
+let quietInFlight = false;
 
 export function startDeskHygieneScheduler(): boolean {
   if (timer) return true;
@@ -651,16 +652,23 @@ export function startDeskHygieneScheduler(): boolean {
     return false;
   }
   const run = () => {
-    if (inFlight) return;
-    inFlight = true;
-    // The quiet check sweep runs independently of the hygiene tick: a
-    // recurring failure in unrelated hygiene work must never suppress
-    // deadline processing. Each leg's rejection is logged individually
-    // (allSettled itself never rejects, so a plain catch would be dead).
-    void Promise.allSettled([
-      runDeskHygieneTick().catch((e) => console.warn(`[desk-hygiene] tick: ${(e as Error)?.message}`)),
-      sweepQuietChecks().catch((e) => console.warn(`[desk-hygiene] quiet: ${(e as Error)?.message}`)),
-    ]).finally(() => { inFlight = false; });
+    // Independent guards per leg: the quiet check sweep runs independently
+    // of the hygiene tick, so a hung leg (a promise that never settles)
+    // suppresses only its own future runs and never deadline processing (and
+    // vice versa). Each leg's rejection is logged individually (a plain
+    // catch on allSettled would be dead, so each leg catches its own).
+    if (!tickInFlight) {
+      tickInFlight = true;
+      void runDeskHygieneTick()
+        .catch((e) => console.warn(`[desk-hygiene] tick: ${(e as Error)?.message}`))
+        .finally(() => { tickInFlight = false; });
+    }
+    if (!quietInFlight) {
+      quietInFlight = true;
+      void sweepQuietChecks()
+        .catch((e) => console.warn(`[desk-hygiene] quiet: ${(e as Error)?.message}`))
+        .finally(() => { quietInFlight = false; });
+    }
   };
   /** Silence is an event (card-baadaf A): the check-in deadlines ride the
    *  same 60s tick. Best effort and fail-open like every hygiene piece. */
@@ -668,14 +676,24 @@ export function startDeskHygieneScheduler(): boolean {
     try {
       const { sweepCardChecks } = await import('./deskStore.ts');
       const { deliverTeamMessage } = await import('../chat/teamBus.ts');
-      const due = await sweepCardChecks();
+      // The dry-run flag goes INTO the sweep: a dry run returns the due
+      // nudges read-only (nothing marked, nothing written), so previewing
+      // never consumes a notification that would then never be delivered.
+      const due = await sweepCardChecks({ dryRun: hygieneDryRun() });
       for (const nudge of due) {
         if (hygieneDryRun()) {
           console.log(`[desk-hygiene] dry run, would quiet check ${nudge.to} for ${nudge.card.id}`);
           continue;
         }
-        const sent = await deliverTeamMessage({ from: 'Desk', to: nudge.to, text: nudge.text, wait: false });
-        if (!sent.delivered) console.warn(`[desk-hygiene] quiet check to ${nudge.to} for ${nudge.card.id} not delivered: ${sent.reason}`);
+        // Each delivery is isolated: one throwing delivery must not skip
+        // the later nudges of the same sweep (their marks are already
+        // consumed, so a skipped nudge is a lost one).
+        try {
+          const sent = await deliverTeamMessage({ from: 'Desk', to: nudge.to, text: nudge.text, wait: false });
+          if (!sent.delivered) console.warn(`[desk-hygiene] quiet check to ${nudge.to} for ${nudge.card.id} not delivered: ${sent.reason}`);
+        } catch (error) {
+          console.warn(`[desk-hygiene] quiet check to ${nudge.to} for ${nudge.card.id} failed: ${(error as Error)?.message}`);
+        }
       }
       if (due.length) console.log(`[desk-hygiene] quiet checks: ${due.length} due, delivered best effort`);
     } catch (error) {
