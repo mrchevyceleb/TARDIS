@@ -349,7 +349,10 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
   // bounded to 30 minutes out from the moment it was read, so the sweep covers
   // every live card from deployment day, not only new ones.
   if ((card.column === 'in_progress' || card.column === 'in_qa') && !card.nextCheckAt) {
-    card.nextCheckAt = new Date(Date.parse(updatedAt || now) + CARD_NEXT_CHECK_MS).toISOString();
+    // Clamped to at most now + 30 minutes out, so a stale updatedAt can never
+    // postpone the first check past the maximum window.
+    const base = Math.min(Date.parse(updatedAt || now), Date.parse(now));
+    card.nextCheckAt = new Date(base + CARD_NEXT_CHECK_MS).toISOString();
   }
   const description = clip(raw.description, DESK_LIMITS.description);
   if (description) card.description = description;
@@ -971,9 +974,13 @@ export async function sweepCardChecks(): Promise<Array<{ kind: 'owner' | 'chief'
           kind: 'owner',
           card,
           to: ownerAgent,
-          text: `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since. Comment on the card to set a new one, or tell Max what is blocking it.`,
+          text: ownerAgent === 'chief-of-staff'
+            ? `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since (you own this one). Comment on the card to set a new one.`
+            : `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since. Comment on the card to set a new one, or tell Max what is blocking it.`,
         });
-      } else if (!card.escalatedAt && nowMs - Date.parse(card.nudgeAt) >= CARD_CHECK_ESCALATE_MS) {
+      } else if (!card.escalatedAt && nowMs - Date.parse(card.nudgeAt) >= CARD_CHECK_ESCALATE_MS && ownerAgent !== 'chief-of-staff') {
+        // The Chief's own cards never get the separate Chief copy: the owner
+        // nudge already reached the Chief, so a second one is noise.
         card.escalatedAt = now;
         due.push({
           kind: 'chief',

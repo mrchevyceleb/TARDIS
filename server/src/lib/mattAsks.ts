@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 import { agentForChatId, type Agent } from '../chat/agents.ts';
 import { isAgentThread, bareChatId } from '../chat/threadKey.ts';
+import { findPromisedTimes, scanOutgoingPromise } from './promiseScan.ts';
 
 const FILE = join(STATE_DIR, 'matt-asks.json');
 const TEXT_SNIPPET = 120;
@@ -32,34 +33,50 @@ export type MattAsk = {
   askedAt: number;
   nudgedAt?: number;
   escalatedAt?: number;
+  /** The auto-added commitment this ask is held open by (piece C). */
+  committedId?: string;
 };
 
 type Store = { asks: MattAsk[] };
 
 function read(): Store {
+  let raw: string;
   try {
-    const raw = JSON.parse(readFileSync(FILE, 'utf8')) as { asks?: unknown };
-    if (!raw || !Array.isArray(raw.asks)) return { asks: [] };
-    const asks: MattAsk[] = [];
-    for (const item of raw.asks.slice(0, 200)) {
-      if (!item || typeof item !== 'object') continue;
-      const a = item as Record<string, unknown>;
-      if (typeof a.id !== 'string' || typeof a.agentId !== 'string' || typeof a.logKey !== 'string' || typeof a.text !== 'string') continue;
-      asks.push({
-        id: a.id,
-        agentId: a.agentId,
-        logKey: a.logKey,
-        chatId: typeof a.chatId === 'string' ? a.chatId : '',
-        text: a.text.slice(0, TEXT_SNIPPET),
-        askedAt: typeof a.askedAt === 'number' && Number.isFinite(a.askedAt) ? a.askedAt : 0,
-        ...(typeof a.nudgedAt === 'number' && a.nudgedAt > 0 ? { nudgedAt: a.nudgedAt } : {}),
-        ...(typeof a.escalatedAt === 'number' && a.escalatedAt > 0 ? { escalatedAt: a.escalatedAt } : {}),
-      });
-    }
-    return { asks };
+    raw = readFileSync(FILE, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { asks: [] };
+    // A damaged or temporarily unreadable file is NOT empty: propagate so the
+    // fail-open caller skips the mutation instead of overwriting recoverable
+    // state with an empty store.
+    throw err;
+  }
+  let parsed: { asks?: unknown };
+  try {
+    parsed = JSON.parse(raw) as { asks?: unknown };
   } catch {
+    // A torn file is also not empty: the next successful mutation replaces
+    // it whole, which is the same recovery the commitment store uses.
     return { asks: [] };
   }
+  if (!parsed || !Array.isArray(parsed.asks)) return { asks: [] };
+  const asks: MattAsk[] = [];
+  for (const item of parsed.asks.slice(0, 200)) {
+    if (!item || typeof item !== 'object') continue;
+    const a = item as Record<string, unknown>;
+    if (typeof a.id !== 'string' || typeof a.agentId !== 'string' || typeof a.logKey !== 'string' || typeof a.text !== 'string') continue;
+    asks.push({
+      id: a.id,
+      agentId: a.agentId,
+      logKey: a.logKey,
+      chatId: typeof a.chatId === 'string' ? a.chatId : '',
+      text: a.text.slice(0, TEXT_SNIPPET),
+      askedAt: typeof a.askedAt === 'number' && Number.isFinite(a.askedAt) ? a.askedAt : 0,
+      ...(typeof a.nudgedAt === 'number' && a.nudgedAt > 0 ? { nudgedAt: a.nudgedAt } : {}),
+      ...(typeof a.escalatedAt === 'number' && a.escalatedAt > 0 ? { escalatedAt: a.escalatedAt } : {}),
+      ...(typeof a.committedId === 'string' && a.committedId ? { committedId: a.committedId } : {}),
+    });
+  }
+  return { asks };
 }
 
 function save(store: Store): void {
@@ -113,6 +130,48 @@ export function closeMattAsksForLane(logKey: string): void {
     if (store.asks.length !== before) save(store);
   } catch {
     // Never block the reply path on a store hiccup.
+  }
+}
+
+/** An answer that promises a time: if the reply text carries a clock-time
+ *  promise (our house rule means every promise carries one, like "8:45pm
+ *  ET" or "by 9:00pm ET"), the sentence auto-adds a commitment for this
+ *  agent using that exact due time (deterministic on our own time format
+ *  via the existing promiseScan parser), and the ask stays open until the
+ *  commitment clears. An answer with no promise closes the ask immediately
+ *  (the existing behavior). Returns the commitment adds for logging. */
+export async function closeAnsweredMattAsksForLane(logKey: string, replyText: string): Promise<{ added: string[]; addError?: string }> {
+  const added: string[] = [];
+  try {
+    const agent = agentForLogKey(logKey);
+    if (!agent) return { added };
+    // Deterministic on our own format: the existing findPromisedTimes only
+    // matches marker + clock with am/pm, never meaning.
+    const promises = findPromisedTimes(replyText);
+    if (promises.length === 0) {
+      closeMattAsksForLane(logKey);
+      return { added };
+    }
+    // Auto-add the first unmatched promise as a commitment (the same logic
+    // as the team_message path, idempotent per source message).
+    const scan = scanOutgoingPromise(agent.id, replyText, `ask:${logKey}:${promises[0].dueAt}`);
+    added.push(...scan.added.map((a) => a.id));
+    // The ask stays open: the promise is tracked by the commitment until it
+    // clears. The ask closes when the commitment clears (the sweep finds the
+    // matching open commitment and closes the ask then).
+    const store = read();
+    for (const ask of store.asks) {
+      if (ask.logKey !== logKey) continue;
+      // A commitment was created for this ask: keep it open so the sweep
+      // raises it if the commitment goes past due.
+      ask.committedId = scan.added[0]?.id;
+    }
+    if (store.asks.some((a) => a.logKey === logKey)) save(store);
+    return { added, ...(scan.addError ? { addError: scan.addError } : {}) };
+  } catch {
+    // Fail-open: the reply is never blocked, and the ask closes plainly.
+    closeMattAsksForLane(logKey);
+    return { added };
   }
 }
 

@@ -4,7 +4,7 @@ import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync,
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import { redactEventSecrets, redactSecrets } from './secretRedaction.ts';
-import { noteMattAsk, closeMattAsksForLane } from '../lib/mattAsks.ts';
+import { noteMattAsk, closeMattAsksForLane, closeAnsweredMattAsksForLane } from '../lib/mattAsks.ts';
 import type { SessionEvent } from './runner.ts';
 import { isSyntheticApiErrorEvent } from './providerErrors.ts';
 
@@ -1093,6 +1093,21 @@ export function flushAllEventChains(): Promise<void> {
 /** card-baadaf B: Matt's asks open on every user echo in an agent lane and
  *  close on any assistant text in that lane. Clean event-type markers, no
  *  regex; fail-open, so the durable path is never blocked. */
+function assistantTextOf(ev: unknown): string | null {
+  try {
+    const message = (ev as { message?: { content?: Array<{ type?: string; text?: string }> } }).message;
+    if (!message || !Array.isArray(message.content)) return null;
+    const text = message.content
+      .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
+      .map((p) => p.text)
+      .join('\n')
+      .trim();
+    return text || null;
+  } catch {
+    return null;
+  }
+}
+
 function noteMattAskHooks(key: string, persisted: PersistedEvent): void {
   try {
     const ev = persisted.ev as { type?: unknown; event?: { type?: unknown; text?: unknown }; message?: { role?: unknown } };
@@ -1104,7 +1119,14 @@ function noteMattAskHooks(key: string, persisted: PersistedEvent): void {
       }
     }
     if (ev.type === 'assistant' && ev.message && typeof ev.message === 'object' && ev.message.role === 'assistant') {
-      closeMattAsksForLane(key);
+      // card-baadaf C: an answer that promises a time (our house rule means
+      // every promise carries one) auto-adds the commitment before the ask
+      // closes; an answer with no promise closes the ask immediately. The
+      // commitment add is async, so it fires and forgets: the reply is never
+      // blocked by the scan.
+      const text = assistantTextOf(ev);
+      if (text) void closeAnsweredMattAsksForLane(key, text).catch(() => closeMattAsksForLane(key));
+      else closeMattAsksForLane(key);
     }
   } catch {
     // Never block the durable append on an ask-store hiccup.
@@ -1153,7 +1175,6 @@ export function appendEventLog(key: string, persisted: PersistedEvent): void {
   // Same live-path redaction as appendEventLogSync, including the final
   // serialized-line pass: the durable line is what every later reader
   // (render, transcript, resume, compaction) consumes.
-  noteMattAskHooks(key, persisted);
   const line = redactSecrets(JSON.stringify(redactEventSecrets(persisted))) + '\n';
   const prior = writeChains.get(key) ?? Promise.resolve();
   const next = prior
@@ -1162,6 +1183,7 @@ export function appendEventLog(key: string, persisted: PersistedEvent): void {
         await mkdir(EVENT_LOG_DIR, { recursive: true });
         await appendFile(path, line, 'utf8');
         bumpEventLogRevision(persisted.ev);
+        noteMattAskHooks(key, persisted);
       } catch (err) {
         console.warn('[event-log-store] append failed', key, (err as Error).message);
       }
