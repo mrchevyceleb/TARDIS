@@ -8,26 +8,16 @@
 // copies never run it.
 
 import { deliverTeamMessage } from '../chat/teamBus.ts';
-import { createFlagDigest } from './flagDigest.ts';
+import { flushFlagDigests, queueFlagDigest } from './flagDigest.ts';
 import { listCommitments, markCommitmentRaised, noteCommitmentDueAt } from './commitmentStore.ts';
 import { parseDue } from './promiseScan.ts';
 
 const TICK_MS = 60_000;
 const CHIEF_ID = 'chief-of-staff';
 /** The pseudo-sender the raises arrive from: not a roster agent, so the
- *  outgoing-promise scan itself never re-processes a raise message. */
+ *  outgoing-promise scan itself never re-processes a raise message. The
+ *  owner digest delivers through the same pseudo-sender (flagDigest.ts). */
 const SWEEPER = 'TARDIS';
-
-/** Owner raises go out as one digest per owner every 30 minutes (Matt,
- *  Oct 14, card-d7bf78 b), delivered through the same pseudo-sender. */
-const ownerDigest = createFlagDigest('commitments', async (ownerId, text) => {
-  try {
-    const result = await deliverTeamMessage({ from: SWEEPER, to: ownerId, text, wait: false, priority: true });
-    return result.delivered === true;
-  } catch {
-    return false;
-  }
-});
 
 let busy = false;
 
@@ -53,9 +43,9 @@ async function run(): Promise<void> {
     // marked only when the digest actually delivers it.
     if (!commitment.raised?.owner) {
       // The commitment id is the stable queue key: the every-minute sweep
-      // re-queues an undelivered raise, and the digest upserts it instead of
-      // stacking duplicates.
-      ownerDigest.queue(commitment.agentId, commitment.id, raise, () => markCommitmentRaised(commitment.id, 'owner'));
+      // re-queues an undelivered raise, and the shared owner digest upserts
+      // it instead of stacking duplicates.
+      queueFlagDigest(commitment.agentId, commitment.id, raise, () => markCommitmentRaised(commitment.id, 'owner'));
     }
     // The Chief copy escalates only once the owner raise actually went out
     // (the digest flush sets the raised mark), so it never claims a delivery
@@ -80,7 +70,7 @@ async function run(): Promise<void> {
       }
     }
   }
-  await ownerDigest.flush();
+  await flushFlagDigests();
 }
 
 export function startCommitmentSweeper(): void {

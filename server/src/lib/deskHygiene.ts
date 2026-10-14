@@ -32,7 +32,7 @@ import { dirname, join } from 'node:path';
 import { DESK_OWNER_NAME, DESK_ROOM_ENABLED, STATE_DIR } from '../config.ts';
 import { readDesk, type DeskCard, type DeskData } from './deskStore.ts';
 import { bareChatId } from '../chat/threadKey.ts';
-import { createFlagDigest } from './flagDigest.ts';
+import { flushFlagDigests, queueFlagDigest } from './flagDigest.ts';
 
 const TICK_MS = 60_000;
 const FIRST_TICK_MS = 15_000;
@@ -391,25 +391,6 @@ async function liveAgentIdsFromRunners(agents: HygieneAgent[]): Promise<Set<stri
   return out;
 }
 
-/** Desk silence flags go out as one digest per owner every 30 minutes
- *  (Matt, Oct 14, card-d7bf78 b) instead of one message per item. The pacing
- *  state marks delivery when the entry queues (the flush carries the actual
- *  combined send, at most 30 minutes later); a digest lost to a restart is
- *  re-raised by the next hygiene cycle. A plain named sender (never source
- *  'desk', which is the human owner): it lands as a teammate handoff, so it
- *  waits out the 60s handoff hold-off and does not arm the reply-first
- *  nudge. */
-const deskDigest = createFlagDigest('desk-hygiene', async (to, text) => {
-  if (hygieneDryRun()) return true; // dry run: the pacing proceeds, nothing is delivered
-  const { deliverTeamMessage } = await import('../chat/teamBus.ts');
-  try {
-    const result = await deliverTeamMessage({ from: 'Desk', to, text, wait: false });
-    return result.delivered === true;
-  } catch {
-    return false;
-  }
-});
-
 function defaultDeps(): HygieneDeps {
   return {
     now: () => Date.now(),
@@ -425,7 +406,7 @@ function defaultDeps(): HygieneDeps {
       // The text is the stable queue key: an identical nudge requeued while
       // a window is pending upserts over its earlier entry; distinct nudges
       // queue side by side and ride the same digest.
-      deskDigest.queue(to, text, text);
+      queueFlagDigest(to, text, text);
       return { delivered: true };
     },
     log: (line) => console.log(line),
@@ -657,8 +638,10 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
 
   if (dirty) await save(state);
   // The digest flush rides the tick: one combined message per owner every
-  // 30 minutes carries everything the sweep legs queued.
-  await deskDigest.flush();
+  // 30 minutes carries everything the sweep legs queued. Dry run never
+  // delivers (and never queued anything: the legs log instead of calling
+  // deliver in dry-run mode).
+  if (!hygieneDryRun()) await flushFlagDigests();
   return report;
 }
 
