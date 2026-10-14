@@ -32,6 +32,7 @@ import { dirname, join } from 'node:path';
 import { DESK_OWNER_NAME, DESK_ROOM_ENABLED, STATE_DIR } from '../config.ts';
 import { readDesk, type DeskCard, type DeskData } from './deskStore.ts';
 import { bareChatId } from '../chat/threadKey.ts';
+import { createFlagDigest } from './flagDigest.ts';
 
 const TICK_MS = 60_000;
 const FIRST_TICK_MS = 15_000;
@@ -390,6 +391,25 @@ async function liveAgentIdsFromRunners(agents: HygieneAgent[]): Promise<Set<stri
   return out;
 }
 
+/** Desk silence flags go out as one digest per owner every 30 minutes
+ *  (Matt, Oct 14, card-d7bf78 b) instead of one message per item. The pacing
+ *  state marks delivery when the entry queues (the flush carries the actual
+ *  combined send, at most 30 minutes later); a digest lost to a restart is
+ *  re-raised by the next hygiene cycle. A plain named sender (never source
+ *  'desk', which is the human owner): it lands as a teammate handoff, so it
+ *  waits out the 60s handoff hold-off and does not arm the reply-first
+ *  nudge. */
+const deskDigest = createFlagDigest(async (to, text) => {
+  if (hygieneDryRun()) return true; // dry run: the pacing proceeds, nothing is delivered
+  const { deliverTeamMessage } = await import('../chat/teamBus.ts');
+  try {
+    const result = await deliverTeamMessage({ from: 'Desk', to, text, wait: false });
+    return result.delivered === true;
+  } catch {
+    return false;
+  }
+});
+
 function defaultDeps(): HygieneDeps {
   return {
     now: () => Date.now(),
@@ -398,11 +418,12 @@ function defaultDeps(): HygieneDeps {
     liveAgentIds: liveAgentIdsFromRunners,
     occupiedAgentActivity: occupiedAgentActivityFromRunners,
     deliver: async ({ to, text }) => {
-      const { deliverTeamMessage } = await import('../chat/teamBus.ts');
-      // A plain named sender (never source 'desk', which is the human owner):
-      // it lands as a teammate handoff, so it waits out the 60s handoff
-      // hold-off and does not arm the reply-first nudge.
-      return deliverTeamMessage({ from: 'Desk', to, text, wait: false });
+      // Matt, Oct 14 (card-d7bf78 b): Desk silence flags queue into the
+      // owner's 30-minute digest instead of sending per item; the pacing
+      // state sees this as delivered, and the digest flush (below) carries
+      // the actual combined send.
+      deskDigest.queue(to, text);
+      return { delivered: true };
     },
     log: (line) => console.log(line),
     stateFile: hygieneStateFile(),
@@ -632,6 +653,9 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
   }
 
   if (dirty) await save(state);
+  // The digest flush rides the tick: one combined message per owner every
+  // 30 minutes carries everything the sweep legs queued.
+  await deskDigest.flush();
   return report;
 }
 

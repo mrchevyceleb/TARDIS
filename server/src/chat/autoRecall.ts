@@ -37,7 +37,9 @@ const MIN_MESSAGE_CHARS = 12;
  *  a single shared token matches far too much of the board. */
 const MIN_MATCH_TOKENS = 2;
 const MCP_MIN_MATCH_TOKENS = 1;
-const MAX_HITS = 5;
+// Matt, Oct 14 (card-d7bf78 b): auto-recall injects at most the 2 most
+// relevant items so the context stays tight.
+const MAX_HITS = 2;
 const HIT_EXCERPT_CHARS = 400;
 const HIT_TITLE_CHARS = 160;
 /** ~1.5k tokens for the whole block. */
