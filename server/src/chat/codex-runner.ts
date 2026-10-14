@@ -160,6 +160,7 @@ type CodexSendOptions = {
   allowNativeHumanSteer?: boolean;
   signal?: AbortSignal;
   clientMsgId?: string;
+  humanOrigin?: boolean;
   skipAttachments?: boolean;
   /** A human steer's images ride the mid-turn channel as saved files named in
    * the text (the channel itself is text only), so a picture never has to wait
@@ -636,6 +637,7 @@ export class CodexSession {
             imageCount: images?.length ?? 0,
             attachments: steerAttachments,
             clientMsgId: opts.clientMsgId,
+            humanOrigin: opts.humanOrigin === true,
             ts: Date.now(),
           },
         });
@@ -697,7 +699,7 @@ export class CodexSession {
       try {
         this.emit({
           type: 'event',
-          event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, ts: Date.now() },
+          event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ts: Date.now() },
         });
       } catch (error) {
         this.busy = false;

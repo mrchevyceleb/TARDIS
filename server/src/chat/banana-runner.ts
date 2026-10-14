@@ -74,6 +74,7 @@ type BananaSendOptions = {
   /** Team-bus delivery: sender-tagged peer_message echo, no compaction tick. */
   peerFrom?: string;
   clientMsgId?: string;
+  humanOrigin?: boolean;
   skipAttachments?: boolean;
   peerFromRole?: string;
   /** Visible peer_message body. Full `text` still goes to the model. */
@@ -2776,7 +2777,7 @@ export class BananaSession {
       try {
         this.emit({
           type: 'event',
-          event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, ts: Date.now() },
+          event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ts: Date.now() },
         });
       } catch (error) {
         this.busy = false;
