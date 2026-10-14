@@ -3,7 +3,7 @@
 // /api/desk data as the Desk room, through the same hooks, so a check-off here
 // is a check-off there.
 
-import { ArrowUpRight, Check, RotateCcw } from 'lucide-react';
+import { ArrowUpRight, Check, ChevronDown, RotateCcw } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Chip } from '../components/Primitives';
 import {
@@ -26,6 +26,7 @@ import { showToast } from '../native/shell';
 import { ActorChip, AnswerBar, AnsweredNote, answerRecipient, canAnswer, errorText, priorityClass, useDeskAgents, useTodoAnswers } from '../rooms/deskParts';
 import '../rooms/desk.css';
 import './myDesk.css';
+import { MattsPriorities } from './MattsPriorities';
 
 /** How many rows each list shows before "N more on the Desk". */
 export type MyDeskLimits = { todos: number; cards: number };
@@ -56,6 +57,8 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
   const data = desk.data;
   const [leaving, setLeaving] = useState<Set<string>>(() => new Set());
   const [announce, setAnnounce] = useState('');
+  // Matt reads Needs you and his priorities; My cards stays one tap away.
+  const [cardsOpen, setCardsOpen] = useState(false);
   const sectionRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   /** Where keyboard focus goes once a checked row has left the list. */
@@ -72,7 +75,7 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
   const openCount = todos.filter((t) => t.status === 'open' && !answering.has(t.id)).length;
   const shownTodos = todos.slice(0, limits.todos);
   const shownCards = cards.slice(0, limits.cards);
-  const hidden = todos.length - shownTodos.length + (cards.length - shownCards.length);
+  const hidden = todos.length - shownTodos.length + (cardsOpen ? cards.length - shownCards.length : 0);
   const columnTitle = (key: DeskColumn) => data?.columns.find((c) => c.key === key)?.title ?? key;
 
   // A checked row lingers (struck through) for LEAVE_MS, then the write goes out
@@ -197,11 +200,14 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
               </div>
             )}
 
-            <div className="md-sub">
+            <MattsPriorities />
+
+            <button type="button" className="md-sub md-sub-toggle" aria-expanded={cardsOpen} onClick={() => setCardsOpen((v) => !v)}>
               My cards
               {cards.length ? <span className="desk-count is-quiet">{cards.length}</span> : null}
-            </div>
-            {shownCards.length ? (
+              <ChevronDown size={12} aria-hidden="true" className="md-sub-chevron" />
+            </button>
+            {!cardsOpen ? null : shownCards.length ? (
               <ul className="md-list">
                 {shownCards.map((card) => (
                   <li key={card.id}>

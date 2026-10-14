@@ -233,3 +233,77 @@
   .md-todo, .md-todo.is-leaving .md-check, .md-todo.is-answered .md-check, .md-empty > svg, .md-skeleton i { animation: none; }
   .md-todo:hover, .md-card:hover, .md-card:hover .md-card-dot { transform: none; }
 }
+
+/* ---------- My cards: collapsed by default ---------- */
+.md-sub-toggle { width: 100%; cursor: pointer; text-align: left; border-radius: 6px; transition: color 0.15s ease; }
+.md-sub-toggle:hover { color: var(--r-ink); }
+.md-sub-toggle:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; }
+.md-sub-chevron { margin-left: auto; transition: transform 0.24s cubic-bezier(0.2, 1.6, 0.4, 1); }
+.md-sub-toggle[aria-expanded='true'] .md-sub-chevron { transform: rotate(180deg); }
+
+/* ---------- Matt's Priorities ---------- */
+.mp-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+.mp-tab {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 11px;
+  border: 1px solid var(--r-line); border-radius: 999px; background: var(--r-bg-raised);
+  font-size: 12.5px; font-weight: 600; color: var(--r-ink-mute);
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease, transform 0.12s ease;
+}
+.mp-tab:hover { color: var(--r-ink); transform: translateY(-1px); }
+.mp-tab:active { transform: scale(0.94); }
+.mp-tab[aria-selected='true'] {
+  color: var(--r-ink); border-color: color-mix(in srgb, var(--r-gold) 45%, transparent);
+  background: color-mix(in srgb, var(--r-gold) 16%, var(--r-bg-raised));
+}
+.mp-tab:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 1px; }
+.mp-tab-count { font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--r-ink-faint); }
+
+.mp-input {
+  width: 100%; min-height: 34px; padding: 6px 10px; margin-bottom: 8px;
+  border: 1px solid var(--r-line); border-radius: 10px; background: var(--r-bg-card);
+  font-size: 13px; color: var(--r-ink);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.mp-input:focus { outline: none; border-color: var(--r-line-gold); box-shadow: 0 0 0 3px rgba(217, 168, 90, 0.14); }
+.mp-input::placeholder { color: var(--r-ink-faint); }
+
+.mp-list { list-style: none; margin: 0 0 6px; padding: 0; display: grid; gap: 5px; }
+.mp-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center;
+  padding: 6px 8px; border: 1px solid var(--r-line); border-radius: 11px; background: var(--r-bg-card);
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease, opacity 0.2s ease;
+  animation: bt-msg-in 0.22s ease;
+}
+.mp-row:hover { transform: translateY(-1px); border-color: var(--r-line-gold); box-shadow: 0 6px 14px rgba(0, 0, 0, 0.2); }
+.mp-row .mp-edit { margin: 0; min-height: 28px; padding: 3px 8px; }
+.mp-text {
+  min-width: 0; padding: 2px 0; text-align: left; font-size: 13px; line-height: 1.35; color: var(--r-ink);
+  overflow-wrap: anywhere; cursor: text;
+}
+.mp-text:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; border-radius: 4px; }
+.mp-tools { display: inline-flex; gap: 2px; opacity: 0.45; transition: opacity 0.15s ease; }
+.mp-row:hover .mp-tools, .mp-row:focus-within .mp-tools { opacity: 1; }
+/* Touch screens (iPad) have no hover: keep the tools visible, finger-sized
+   and spaced so delete is hard to hit by accident. */
+@media (hover: none), (pointer: coarse) {
+  .mp-tools { opacity: 0.85; gap: 6px; }
+  .mp-tools .mp-tool { width: 40px; height: 40px; border-radius: 10px; }
+  .mp-tools .mp-tool.is-danger { margin-left: 8px; }
+  .mp-row .mp-check { min-width: 36px; min-height: 36px; }
+  .mp-text { min-height: 36px; }
+  .mp-input { min-height: 40px; font-size: 16px; }
+  .mp-tab { min-height: 38px; }
+  .mp-row:hover, .mp-tab:hover { transform: none; }
+}
+.mp-tool {
+  width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; color: var(--r-ink-mute);
+  transition: color 0.15s ease, background 0.15s ease, transform 0.12s ease;
+}
+.mp-tool:hover:not(:disabled) { color: var(--r-ink); background: var(--r-bg-raised); transform: scale(1.1); }
+.mp-tool:active:not(:disabled) { transform: scale(0.88); }
+.mp-tool:disabled { opacity: 0.3; cursor: default; }
+.mp-tool.is-danger:hover { color: var(--r-rose); }
+.mp-tool:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 1px; }
+.mp-row.is-done { opacity: 0.6; }
+.mp-row.is-done .mp-text { text-decoration: line-through; text-decoration-color: var(--r-ink-faint); color: var(--r-ink-mute); }
+.mp-row.is-done .mp-check { color: var(--r-emerald); border-color: var(--r-emerald); }

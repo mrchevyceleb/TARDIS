@@ -37,6 +37,7 @@ import { contextRotationDue, recordContextUsage, recordContextRotation } from '.
 import { isAgentThread, isBackgroundChatId, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
+import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { providerLabel } from './providerErrors.ts';
@@ -789,7 +790,8 @@ export class PiSession {
     // Full computer rules ride the seed message that starts a fresh pi window; later
     // messages of the same warm process get the brief form (fresh token + device + policy).
     const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
-    const message = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuation}`;
+    const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
+    const message = `${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuation}`;
     const piImages = outImages?.map((img) => ({ type: 'image', data: img.base64, mimeType: img.mediaType }));
 
     const command = startsNewTurn
