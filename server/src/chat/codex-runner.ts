@@ -294,12 +294,21 @@ export class CodexSession {
         cli: this.cli,
         chatId: this.chatId,
         events: this.eventLog,
-        isBusy: () => this.busy,
+        // busy || dead: the delivery-path probe can start a fold that outlives
+        // this session, and shutdown clears busy — a replaced instance must
+        // keep reading as busy or its rotate can fire after the fact.
+        isBusy: () => this.busy || this.dead,
         emit: (ev) => this.emit(ev as any),
         rotate: async () => {
+          // Same outlive risk: a dead instance must never mutate thread or
+          // persisted session state — the clear would wipe the id the
+          // replacement session now owns. Every supersede path (engine
+          // switch, idle prune, interrupt, shutdown-all) sets dead first.
+          if (this.dead) return false;
           this.seedWindowOnNextTurn = true;
           this.invalidateThreadId();
           await setSessionId(this.cli, this.cwd, '', this.chatId);
+          if (this.dead) return false;
           bankRotation(this.logKey);
           return false;
         },
@@ -315,11 +324,13 @@ export class CodexSession {
    *  DELIVERY_COMPACT_PROBE_MS. The probe runs the same maybeCompact the
    *  turn-end hook runs, so every guard (busy lanes defer owed rotations,
    *  the overflow gate, in-flight serialization) applies unchanged. */
-  private lastDeliveryCompactProbeAtMs = 0;
+  private lastDeliveryCompactProbeMs = 0;
   private probeCompactFromDeliveryPath(): void {
-    const now = Date.now();
-    if (now - this.lastDeliveryCompactProbeAtMs < DELIVERY_COMPACT_PROBE_MS) return;
-    this.lastDeliveryCompactProbeAtMs = now;
+    // Monotonic on purpose: a wall-clock correction must not stretch the
+    // window (recreating the starvation) or shrink it (probe storms).
+    const now = performance.now();
+    if (now - this.lastDeliveryCompactProbeMs < DELIVERY_COMPACT_PROBE_MS) return;
+    this.lastDeliveryCompactProbeMs = now;
     void this.maybeCompact();
   }
   private busy = false;
