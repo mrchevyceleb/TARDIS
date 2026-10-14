@@ -641,6 +641,83 @@ export async function rebuildTruncatedCompact(
   }
 }
 
+/** Regenerate a rolling compact in plain English after the COMPACT_SYSTEM
+ *  prompt changed (Matt, Oct 14): the current document is rewritten by ONE
+ *  generation of the same prompt the live path uses, with no new material,
+ *  so coverage, cadence, and the state record never move. Same discipline as
+ *  the truncation repair: single atomic commit, cross-process CAS against
+ *  the original blob, the RAG mirror refreshed, nothing written on any
+ *  abort. */
+export async function regenerateCompactPlainEnglish(
+  key: string,
+  onProgress?: (msg: string) => void,
+): Promise<{ words: number }> {
+  const blob = loadCompactBlob(key);
+  if (!blob) throw new Error('no rolling compact for this thread');
+  if (inFlight.has(key)) throw new Error('a live compaction is in flight for this thread; retry after it');
+  const epoch = epochOf(key);
+  inFlight.add(key);
+  try {
+    const pendingFacts: DurableFact[] = [];
+    if (Array.isArray(blob.pendingFacts)) {
+      for (const fact of blob.pendingFacts.slice(0, PENDING_FACTS_CAP)) {
+        if (fact && typeof fact.title === 'string' && typeof fact.content === 'string' && fact.title.trim() && fact.content.trim()) {
+          pendingFacts.push({ title: fact.title.trim().slice(0, 120), content: fact.content.trim().slice(0, 500) });
+        }
+      }
+    }
+    onProgress?.(`${key}: regenerating in plain English (${blob.words ?? 'unknown'}w baseline)`);
+    const generated = await generateCompact(blob.compact, [], REBUILD_MAX_TOKENS);
+    let compactText = generated.compact;
+    let retainedFacts = '';
+    for (const fact of generated.facts) {
+      const factKey = durableFactKey(fact);
+      const queuedIdx = pendingFacts.findIndex((queued) => durableFactKey(queued) === factKey);
+      if (queuedIdx >= 0) {
+        pendingFacts[queuedIdx] = fact;
+        continue;
+      }
+      if (pendingFacts.length >= PENDING_FACTS_CAP) retainedFacts += `\n- ${fact.title}: ${fact.content}`;
+      else pendingFacts.push(fact);
+    }
+    if (retainedFacts) {
+      compactText = `${compactText}\n\nDurable facts kept in the document because the durable-fact outbox is at cap:${retainedFacts}`;
+    }
+    const prevWords = blob.compact.trim().split(/\s+/).filter(Boolean).length;
+    const ceiling = Math.ceil(prevWords * 1.5) + 1000;
+    if (generated.words > ceiling) {
+      throw new Error(`regenerated document came back oversized (${generated.words}w over the ${ceiling}w ceiling); nothing was written`);
+    }
+    if (compactText === blob.compact) {
+      throw new Error('the regenerated document came back identical to the original; nothing was written');
+    }
+    if (isTruncatedCompact(compactText) && !/^(?:```|~~~)\s*$/i.test(compactText.trim().split('\n').filter((l) => l.trim()).at(-1) ?? '')) {
+      throw new Error('the regenerated document still ends mid-sentence; nothing was written');
+    }
+    // Cross-process CAS against the ORIGINAL blob: nothing is written until
+    // the single final commit below, so every abort leaves the original
+    // document exactly as it was.
+    const disk = loadCompactBlob(key);
+    if (!disk || disk.compact !== blob.compact || disk.lastCompactedSeq !== blob.lastCompactedSeq) {
+      throw new Error('the compact changed under the regeneration (a live compaction or fresh start won the race); nothing was written');
+    }
+    const words = compactText.trim().split(/\s+/).filter(Boolean).length;
+    const wrote = writeCompactBlob(key, { ...blob, compact: compactText, words, pendingFacts }, epoch);
+    if (!wrote || epochOf(key) !== epoch) throw new Error('thread was fresh-started during the regeneration; nothing was written');
+    const beforeMirror = loadCompactBlob(key);
+    if (blob.chatId && beforeMirror && beforeMirror.compact === compactText) {
+      try {
+        await saveCompactToMemory(key, epoch, 'rebuild', blob.chatId, compactText);
+      } catch (err) {
+        console.warn(`[compaction] ${key}: RAG mirror not refreshed after the plain-English regeneration (the next real compaction replaces it): ${(err as Error).message}`);
+      }
+    }
+    return { words };
+  } finally {
+    inFlight.delete(key);
+  }
+}
+
 /** Maintenance discovery: every compact blob on disk, each with the thread
  *  key the compaction state still names for it (null when only the file
  *  remains — a blob whose state write failed), plus the blob read raw from
@@ -696,6 +773,7 @@ Rules for the document you produce:
 - Capture: every decision made (and why), every open task and its state, every fact about people/projects/systems mentioned, every commitment or promise, every preference expressed, every technical detail that mattered (paths, models, endpoints, prices, IDs), and the current state of play.
 - Organize with clear headings (## ...) so it can be indexed: Overview / People & Projects / Decisions / Open Work / Facts & References / Preferences & Style / Current State.
 - Write in third person, past tense, no fluff, no meta commentary. Never invent content that is not in the previous document or the aged-out turns.
+- PLAIN ENGLISH: complete sentences, normal spacing between words, no telegraphic fragments. No internal codes or hashes in the prose: no commit SHAs, card or ticket IDs, PR numbers, or jargon shorthand. Describe the work in words (what changed, where, who owns it) so any reader can follow it without the internal tracker. A genuinely load-bearing name (a file path, a machine name) may stay, but keep those rare.
 - SECURITY: never retain passwords, passcodes, OTPs, API keys, access/auth tokens, cookies, private keys, or other credential values. Replace every value with [redacted secret]. Keep only the fact that a credential exists and where the user intentionally stored it (for example, a vault service/account name).
 - The last ~50 visible turns stay in the live working window and are NOT your job — only merge what just aged out of that window.
 - DURABLE FACTS: after the document, output one line with exactly the durable-facts marker given in the user message (it has the form <<<DURABLE_FACTS:hex>>>) and then a bare JSON array (no markdown fence) of at most 10 objects like {"title":"short label","content":"one or two self-contained sentences"}. Include only durable facts stated in the previous document or the aged-out turns that the new document above no longer states in full: standing decisions and their reasons, ownership or lane assignments, standing user rules or preferences, and long-lived technical commitments (paths, models, endpoints, prices). Facts the new document already keeps in full do not belong there. Output [] when there are none. Never include credentials.`;
