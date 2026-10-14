@@ -9,6 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { copyFile, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { DESK_FILE } from '../config.ts';
+import { closeMattAsksForAgent } from './mattAsks.ts';
 import { queueMirror } from './deskMirror.ts';
 
 // Matt's five stages (2026-10-09; order staging-first per the locked rally
@@ -89,6 +90,17 @@ export type DeskCard = {
 export const CARD_NEXT_CHECK_MS = 30 * 60_000;
 /** Quiet time after the owner nudge before the Chief copy. */
 export const CARD_CHECK_ESCALATE_MS = 15 * 60_000;
+
+function validIso(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '' && Number.isFinite(Date.parse(value));
+}
+
+/** The deliverable recipient for a card's owner: the live roster agent, or
+ *  the Chief when the owner is human or the id no longer resolves. */
+function resolveCardOwner(card: DeskCard): string {
+  const candidate = typeof card.owner.id === 'string' && card.owner.id && card.owner.id !== 'owner' ? card.owner.id : card.owner.name;
+  return candidate || 'chief-of-staff';
+}
 
 function touchCardNextCheck(card: DeskCard, nowIso: string): void {
   if (card.column === 'in_progress' || card.column === 'in_qa') {
@@ -328,10 +340,17 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     createdAt: isoOr(raw.createdAt, now),
     updatedAt,
     columnSince: isoOr(raw.columnSince, updatedAt),
-    ...(typeof raw.nextCheckAt === 'string' && raw.nextCheckAt ? { nextCheckAt: raw.nextCheckAt } : {}),
-    ...(typeof raw.nudgeAt === 'string' && raw.nudgeAt ? { nudgeAt: raw.nudgeAt } : {}),
-    ...(typeof raw.escalatedAt === 'string' && raw.escalatedAt ? { escalatedAt: raw.escalatedAt } : {}),
+    ...(validIso(raw.nextCheckAt) ? { nextCheckAt: raw.nextCheckAt as string } : {}),
+    ...(validIso(raw.nudgeAt) ? { nudgeAt: raw.nudgeAt as string } : {}),
+    ...(validIso(raw.escalatedAt) ? { escalatedAt: raw.escalatedAt as string } : {}),
   };
+  // P0 read-repair: an existing live card that never carried a check-in
+  // deadline (it predates this feature) gets one seeded from its last update,
+  // bounded to 30 minutes out from the moment it was read, so the sweep covers
+  // every live card from deployment day, not only new ones.
+  if ((card.column === 'in_progress' || card.column === 'in_qa') && !card.nextCheckAt) {
+    card.nextCheckAt = new Date(Date.parse(updatedAt || now) + CARD_NEXT_CHECK_MS).toISOString();
+  }
   const description = clip(raw.description, DESK_LIMITS.description);
   if (description) card.description = description;
   const project = oneLine(raw.project, DESK_LIMITS.project);
@@ -915,8 +934,14 @@ export function commentCard(id: string, text: unknown, author: DeskActor): Promi
     card.comments.push(comment);
     card.updatedAt = now;
     // A comment is an owner touch: it refreshes the check-in deadline and
-    // clears any pending nudges, exactly like a create or a move.
+    // clears any pending nudges, exactly like a create or a move. It also
+    // closes the commenter's open Matt asks (card-baadaf B: the card touch is
+    // the close), best effort.
     touchCardNextCheck(card, now);
+    try {
+      if (typeof author.id === 'string' && author.id) closeMattAsksForAgent(author.id);
+      else if (typeof author.name === 'string' && author.name) closeMattAsksForAgent(author.name);
+    } catch { /* never block the comment on an ask-store hiccup */ }
     return { card, comment };
   });
 }
@@ -936,7 +961,10 @@ export async function sweepCardChecks(): Promise<Array<{ kind: 'owner' | 'chief'
       if (card.column !== 'in_progress' && card.column !== 'in_qa') continue;
       const next = card.nextCheckAt ? Date.parse(card.nextCheckAt) : NaN;
       if (!Number.isFinite(next) || next > nowMs) continue;
-      const ownerAgent = typeof card.owner.id === 'string' && card.owner.id ? card.owner.id : card.owner.name;
+      // Resolve the owner against the roster, not just the stored id: a
+      // human-owned card (owner.kind 'human', id 'owner') or a stale agent id
+      // is not a deliverable teammate, so those route to the Chief.
+      const ownerAgent = resolveCardOwner(card);
       if (!card.nudgeAt) {
         card.nudgeAt = now;
         due.push({

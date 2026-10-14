@@ -653,8 +653,10 @@ export function startDeskHygieneScheduler(): boolean {
   const run = () => {
     if (inFlight) return;
     inFlight = true;
-    void runDeskHygieneTick()
-      .then(() => sweepQuietChecks())
+    // The quiet check sweep runs independently of the hygiene tick: a
+    // recurring failure in unrelated hygiene work must never suppress
+    // deadline processing.
+    void Promise.allSettled([runDeskHygieneTick(), sweepQuietChecks()])
       .catch((error) => console.warn(`[desk-hygiene] tick failed: ${(error as Error).message}`))
       .finally(() => { inFlight = false; });
   };

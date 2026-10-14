@@ -4,6 +4,7 @@ import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync,
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import { redactEventSecrets, redactSecrets } from './secretRedaction.ts';
+import { noteMattAsk, closeMattAsksForLane } from '../lib/mattAsks.ts';
 import type { SessionEvent } from './runner.ts';
 import { isSyntheticApiErrorEvent } from './providerErrors.ts';
 
@@ -1089,6 +1090,27 @@ export function flushAllEventChains(): Promise<void> {
  * cannot race process exit, and `_user_echo` admission records must hit disk
  * before listeners acknowledge or the model receives the prompt. Callers flush
  * the per-key async chain first when the process is staying alive. */
+/** card-baadaf B: Matt's asks open on every user echo in an agent lane and
+ *  close on any assistant text in that lane. Clean event-type markers, no
+ *  regex; fail-open, so the durable path is never blocked. */
+function noteMattAskHooks(key: string, persisted: PersistedEvent): void {
+  try {
+    const ev = persisted.ev as { type?: unknown; event?: { type?: unknown; text?: unknown }; message?: { role?: unknown } };
+    if (!ev || typeof ev !== 'object') return;
+    if (ev.type === 'event' && ev.event && typeof ev.event === 'object') {
+      const inner = ev.event as { type?: unknown; text?: unknown };
+      if (inner.type === '_user_echo' && typeof inner.text === 'string') {
+        noteMattAsk(key, inner.text);
+      }
+    }
+    if (ev.type === 'assistant' && ev.message && typeof ev.message === 'object' && ev.message.role === 'assistant') {
+      closeMattAsksForLane(key);
+    }
+  } catch {
+    // Never block the durable append on an ask-store hiccup.
+  }
+}
+
 export function appendEventLogSync(key: string, persisted: PersistedEvent): boolean {
   observeNextSeq(key, persisted.seq + 1);
   if (isPlumbingEvent(persisted.ev)) return true;
@@ -1104,6 +1126,7 @@ export function appendEventLogSync(key: string, persisted: PersistedEvent): bool
     // non-plain instance) still gets one last text-level scan before the
     // line is durable.
     appendFileSync(logPath(key), redactSecrets(JSON.stringify(redactEventSecrets(persisted))) + '\n', 'utf8');
+    noteMattAskHooks(key, persisted);
     bumpEventLogRevision(persisted.ev);
     return true;
   } catch (err) {
@@ -1130,6 +1153,7 @@ export function appendEventLog(key: string, persisted: PersistedEvent): void {
   // Same live-path redaction as appendEventLogSync, including the final
   // serialized-line pass: the durable line is what every later reader
   // (render, transcript, resume, compaction) consumes.
+  noteMattAskHooks(key, persisted);
   const line = redactSecrets(JSON.stringify(redactEventSecrets(persisted))) + '\n';
   const prior = writeChains.get(key) ?? Promise.resolve();
   const next = prior
