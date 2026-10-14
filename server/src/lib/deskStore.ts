@@ -95,9 +95,9 @@ function validIso(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '' && Number.isFinite(Date.parse(value));
 }
 
-/** The deliverable recipient for a card's owner: the live roster agent, or
- *  the Chief when the owner is human or the id no longer resolves. */
-function resolveCardOwner(card: DeskCard): string {
+/** The card owner's candidate recipient (an id or name), before roster
+ *  resolution. The sweep resolves it against the live roster. */
+function cardOwnerCandidate(card: DeskCard): string {
   const candidate = typeof card.owner.id === 'string' && card.owner.id && card.owner.id !== 'owner' ? card.owner.id : card.owner.name;
   return candidate || 'chief-of-staff';
 }
@@ -899,6 +899,10 @@ export function updateCard(id: string, input: CardInput, owner?: DeskActor): Pro
       }
     }
     card.updatedAt = now;
+    // Every PATCH is an owner touch too: a column change into or out of the
+    // live columns sets or clears the deadline, and a reassignment refreshes
+    // it so the new owner gets their own 30-minute window, not the old one's.
+    touchCardNextCheck(card, now);
     return card;
   }));
 }
@@ -967,7 +971,7 @@ export async function sweepCardChecks(): Promise<Array<{ kind: 'owner' | 'chief'
       // Resolve the owner against the roster, not just the stored id: a
       // human-owned card (owner.kind 'human', id 'owner') or a stale agent id
       // is not a deliverable teammate, so those route to the Chief.
-      const ownerAgent = resolveCardOwner(card);
+      const ownerAgent = cardOwnerCandidate(card);
       if (!card.nudgeAt) {
         card.nudgeAt = now;
         due.push({

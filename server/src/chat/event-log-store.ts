@@ -1093,11 +1093,11 @@ export function flushAllEventChains(): Promise<void> {
 /** card-baadaf B: Matt's asks open on every user echo in an agent lane and
  *  close on any assistant text in that lane. Clean event-type markers, no
  *  regex; fail-open, so the durable path is never blocked. */
-function assistantTextOf(ev: unknown): string | null {
+function assistantTextOfMessage(message: unknown): string | null {
   try {
-    const message = (ev as { message?: { content?: Array<{ type?: string; text?: string }> } }).message;
-    if (!message || !Array.isArray(message.content)) return null;
-    const text = message.content
+    const msg = message as { content?: Array<{ type?: string; text?: string }> };
+    if (!msg || !Array.isArray(msg.content)) return null;
+    const text = msg.content
       .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
       .map((p) => p.text)
       .join('\n')
@@ -1112,20 +1112,36 @@ function noteMattAskHooks(key: string, persisted: PersistedEvent): void {
   try {
     const ev = persisted.ev as { type?: unknown; event?: { type?: unknown; text?: unknown }; message?: { role?: unknown } };
     if (!ev || typeof ev !== 'object') return;
+    // Durable replies come in two shapes: the runner emits { type: 'event',
+    // event: { type: 'assistant', message } } (the outer wrapper) and the
+    // codex/banana paths emit raw { type: 'assistant', message } events.
+    // Handle both; extract text from whichever carries it.
+    let replyText: string | null = null;
+    let isUserEcho = false;
+    let userEchoText = '';
     if (ev.type === 'event' && ev.event && typeof ev.event === 'object') {
-      const inner = ev.event as { type?: unknown; text?: unknown };
+      const inner = ev.event as { type?: unknown; text?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> } };
       if (inner.type === '_user_echo' && typeof inner.text === 'string') {
-        noteMattAsk(key, inner.text);
+        isUserEcho = true;
+        userEchoText = inner.text;
+      }
+      if (inner.type === 'assistant' && inner.message && typeof inner.message === 'object' && inner.message.role === 'assistant') {
+        replyText = assistantTextOfMessage(inner.message);
       }
     }
     if (ev.type === 'assistant' && ev.message && typeof ev.message === 'object' && ev.message.role === 'assistant') {
+      replyText = assistantTextOfMessage(ev.message);
+    }
+    if (isUserEcho && userEchoText.trim()) {
+      noteMattAsk(key, userEchoText);
+    }
+    if (replyText !== null) {
       // card-baadaf C: an answer that promises a time (our house rule means
       // every promise carries one) auto-adds the commitment before the ask
       // closes; an answer with no promise closes the ask immediately. The
       // commitment add is async, so it fires and forgets: the reply is never
       // blocked by the scan.
-      const text = assistantTextOf(ev);
-      if (text) void closeAnsweredMattAsksForLane(key, text).catch(() => closeMattAsksForLane(key));
+      if (replyText) void closeAnsweredMattAsksForLane(key, replyText).catch(() => closeMattAsksForLane(key));
       else closeMattAsksForLane(key);
     }
   } catch {
@@ -1148,7 +1164,7 @@ export function appendEventLogSync(key: string, persisted: PersistedEvent): bool
     // non-plain instance) still gets one last text-level scan before the
     // line is durable.
     appendFileSync(logPath(key), redactSecrets(JSON.stringify(redactEventSecrets(persisted))) + '\n', 'utf8');
-    noteMattAskHooks(key, persisted);
+    noteMattAskHooks(key, redactEventSecrets(persisted));
     bumpEventLogRevision(persisted.ev);
     return true;
   } catch (err) {
@@ -1183,7 +1199,7 @@ export function appendEventLog(key: string, persisted: PersistedEvent): void {
         await mkdir(EVENT_LOG_DIR, { recursive: true });
         await appendFile(path, line, 'utf8');
         bumpEventLogRevision(persisted.ev);
-        noteMattAskHooks(key, persisted);
+        noteMattAskHooks(key, redactEventSecrets(persisted));
       } catch (err) {
         console.warn('[event-log-store] append failed', key, (err as Error).message);
       }

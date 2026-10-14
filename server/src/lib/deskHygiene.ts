@@ -653,12 +653,28 @@ export function startDeskHygieneScheduler(): boolean {
   const run = () => {
     if (inFlight) return;
     inFlight = true;
-    // The quiet check sweep runs independently of the hygiene tick: a
-    // recurring failure in unrelated hygiene work must never suppress
-    // deadline processing.
-    void Promise.allSettled([runDeskHygieneTick(), sweepQuietChecks()])
+    // The quiet check sweep and the Matt ask sweep run independently of the
+    // hygiene tick: a recurring failure in unrelated hygiene work must never
+    // suppress either.
+    void Promise.allSettled([runDeskHygieneTick(), sweepQuietChecks(), sweepMattAskNudges()])
       .catch((error) => console.warn(`[desk-hygiene] tick failed: ${(error as Error).message}`))
       .finally(() => { inFlight = false; });
+  };
+  /** card-baadaf B: the Matt ask sweep rides the same 60s tick. Best effort
+   *  and fail-open like every hygiene piece. */
+  const sweepMattAskNudges = async () => {
+    try {
+      const { sweepMattAsks } = await import('./mattAsks.ts');
+      const { deliverTeamMessage } = await import('../chat/teamBus.ts');
+      const due = await sweepMattAsks();
+      for (const nudge of due) {
+        const sent = await deliverTeamMessage({ from: 'Desk', to: nudge.to, text: nudge.text, wait: false });
+        if (!sent.delivered) console.warn(`[desk-hygiene] Matt ask nudge to ${nudge.to} not delivered: ${sent.reason}`);
+      }
+      if (due.length) console.log(`[desk-hygiene] Matt ask nudges: ${due.length} due, delivered best effort`);
+    } catch (error) {
+      console.warn(`[desk-hygiene] Matt ask sweep failed: ${(error as Error).message}`);
+    }
   };
   /** Silence is an event (card-baadaf A): the check-in deadlines ride the
    *  same 60s tick. Best effort and fail-open like every hygiene piece. */

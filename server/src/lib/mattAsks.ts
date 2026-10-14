@@ -13,6 +13,7 @@ import { STATE_DIR } from '../config.ts';
 import { agentForChatId, type Agent } from '../chat/agents.ts';
 import { isAgentThread, bareChatId } from '../chat/threadKey.ts';
 import { findPromisedTimes, scanOutgoingPromise } from './promiseScan.ts';
+import { listCommitments } from './commitmentStore.ts';
 
 const FILE = join(STATE_DIR, 'matt-asks.json');
 const TEXT_SNIPPET = 120;
@@ -53,10 +54,12 @@ function read(): Store {
   let parsed: { asks?: unknown };
   try {
     parsed = JSON.parse(raw) as { asks?: unknown };
-  } catch {
-    // A torn file is also not empty: the next successful mutation replaces
-    // it whole, which is the same recovery the commitment store uses.
-    return { asks: [] };
+  } catch (err) {
+    // A malformed file is NOT empty: propagate so the fail-open caller skips
+    // the mutation instead of overwriting recoverable state. (The commitment
+    // store treats a torn file the same way: the next accepted write replaces
+    // it, but nothing silently loses the old content first.)
+    throw err;
   }
   if (!parsed || !Array.isArray(parsed.asks)) return { asks: [] };
   const asks: MattAsk[] = [];
@@ -192,13 +195,29 @@ export function closeMattAsksForAgent(agentId: string): void {
  *  15 minutes (once), and the Chief for one still open 15 minutes after the
  *  nudge (once). Returns the deliveries to make, having already marked them,
  *  so a crash can drop a nudge but never repeat one. */
-export function sweepMattAsks(): Array<{ kind: 'agent' | 'chief'; ask: MattAsk; to: string; text: string }> {
+export async function sweepMattAsks(): Promise<Array<{ kind: 'agent' | 'chief'; ask: MattAsk; to: string; text: string }>> {
   const due: Array<{ kind: 'agent' | 'chief'; ask: MattAsk; to: string; text: string }> = [];
   try {
     const store = read();
     const now = Date.now();
     let changed = false;
     for (const ask of store.asks) {
+      // An ask held open by a commitment (piece C): it nudges only when the
+      // commitment itself is past due or has vanished (cleared without closing
+      // the ask), and it closes when the commitment clears. The commitment's
+      // own sweep already flags past-due ones, so this sweep only handles the
+      // ask lifecycle, not the commitment.
+      if (ask.committedId) {
+        const stillOpen = listCommitments(ask.agentId).some((c) => c.id === ask.committedId);
+        if (!stillOpen) {
+          // The commitment cleared: the ask closes.
+          ask.escalatedAt = now; // mark so it doesn't nudge after removal
+          continue;
+        }
+        // The commitment is still open: the ask is alive through it, not
+        // through the 15-minute timer.
+        continue;
+      }
       if (!ask.nudgedAt && now - ask.askedAt >= NUDGE_AFTER_MS) {
         ask.nudgedAt = now;
         changed = true;
