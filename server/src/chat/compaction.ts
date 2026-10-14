@@ -826,14 +826,13 @@ async function clearCompactMemoryMirror(key: string, chatId: string): Promise<vo
     // this deletion is serialized behind the same lock) past the user's
     // reset. Mid-drain saves are stopped by the epoch rechecks in
     // saveDurableFacts; any that still land are deleted here.
-    const [compactIds, factNotes] = await Promise.all([
+    const [compactIds, factRows] = await Promise.all([
       compactMemoryIds(key, chatId),
       durableFactNotes(key, chatId),
     ]);
     await deleteCompactMemoryIds([
       ...compactIds,
-      ...[...factNotes.notes.values()].map((note) => note.id),
-      ...factNotes.extras,
+      ...[...factRows.values()].flat().map((row) => row.id),
     ]);
   });
 }
@@ -978,21 +977,23 @@ function durableFactKey(fact: DurableFact): string {
   return factIdentity(title);
 }
 
-/** This thread's already-saved durable-fact notes, keyed by normalized title.
- *  Titles are prefixed like the rolling compact's own rows so the search
- *  query always matches them. Content rides along so a changed decision
- *  under the same title can be superseded instead of skipped.
+/** This thread's already-saved durable-fact rows from the mirror, grouped
+ *  by normalized identity. Titles are prefixed like the rolling compact's
+ *  own rows so the search query always matches them. Content rides along so
+ *  a changed decision under the same title can be superseded instead of
+ *  skipped.
  *
  *  A save that timed out on our side can still commit on the mirror after
  *  the timeout, so a later retry can insert a second row under the same
- *  identity. The first row per identity is retained in `notes`; every
- *  further row for that identity is returned in `extras` so the drain can
- *  reconcile the mirror back to one row per fact. */
+ *  identity. Every row for an identity is kept (a repeated memory id in the
+ *  search results is ignored) so the drain can reconcile against the
+ *  pending fact's own content — the authoritative decision — instead of
+ *  guessing by search order. */
 async function durableFactNotes(
   key: string,
   chatId: string,
   timeoutMs?: number,
-): Promise<{ notes: Map<string, { id: string; content: string }>; extras: string[] }> {
+): Promise<Map<string, { id: string; content: string }[]>> {
   const identity = compactMemoryIdentity(key, chatId);
   const found = await callMcp<MemorySearchResponse & { error?: unknown }>('memory', {
     action: 'search_memory',
@@ -1007,24 +1008,25 @@ async function durableFactNotes(
   if (!found || typeof found !== 'object' || found.error !== undefined || !Array.isArray(found.memories)) {
     throw new Error('RAG search returned a malformed or failed response');
   }
-  const notes = new Map<string, { id: string; content: string }>();
-  const extras: string[] = [];
+  const rows = new Map<string, { id: string; content: string }[]>();
+  const seenIds = new Set<string>();
   for (const memory of found.memories) {
     if (memory?.project !== 'rivendell') continue;
     if (!Array.isArray(memory.tags) || !memory.tags.includes(identity.threadTag) || !memory.tags.includes('durable-fact')) continue;
     if (typeof memory.title !== 'string' || !memory.title) continue;
     if (typeof memory.id !== 'string' || !memory.id) continue;
+    // One search can repeat a row; a repeated id must never be counted as a
+    // second row for the identity, or the reconcile could delete the one row
+    // the identity actually has.
+    if (seenIds.has(memory.id)) continue;
+    seenIds.add(memory.id);
     const content = typeof memory.content === 'string' ? memory.content : '';
     const key = factIdentity(memory.title);
-    if (notes.has(key)) {
-      // A duplicate row for an identity we already retained: delete the
-      // later one and keep the retained row, whichever content it carries.
-      extras.push(memory.id);
-      continue;
-    }
-    notes.set(key, { id: memory.id, content });
+    const list = rows.get(key) ?? [];
+    list.push({ id: memory.id, content });
+    rows.set(key, list);
   }
-  return { notes, extras };
+  return rows;
 }
 
 function normalizeFactContent(content: string): string {
@@ -1032,9 +1034,12 @@ function normalizeFactContent(content: string): string {
 }
 
 /** Save each trimmed durable fact as its own memory note so auto-recall can
- *  find it later. Dedupes on title AND content: a title whose content changed
- *  supersedes its old note (delete first, then save) so recall never serves a
- *  stale decision under a reused label. Bounded per pass (DRAIN_BATCH_MAX
+ *  find it later. Dedupes on title AND content: the pending fact is the
+ *  authoritative decision for its identity, a mirror row whose content
+ *  matches it is the live row, and every other row for that identity (a
+ *  stale decision, or a duplicate left by a save that timed out here but
+ *  still committed late on the mirror) is deleted so one title never carries
+ *  two rows. Bounded per pass (DRAIN_BATCH_MAX
  *  facts, DRAIN_DEADLINE_MS, every call timed to the pass's remaining
  *  budget) so a backlog drains across compactions without
  *  stalling this lane's turn; the remainder stays pending. Resolves every
@@ -1062,21 +1067,8 @@ async function saveDurableFacts(
     // The dedupe search runs inside the pass budget too — left on callMcp's
     // 30s default, one hung search would overrun the 15s pass before the
     // first fact is even attempted.
-    const { notes: existing, extras } = await durableFactNotes(key, chatId, remainingBudget());
+    const existing = await durableFactNotes(key, chatId, remainingBudget());
     if (epochOf(key) !== epoch) return;
-    // Reconcile: a save that timed out on our side can still commit on the
-    // mirror after the timeout, and a retry that raced ahead of that late
-    // insert leaves two rows under one identity with no later pass to clean
-    // them. The search retained one row per identity; delete the extras now
-    // so the mirror is back to one row per fact before this pass saves
-    // anything. A failed delete aborts the pass and the next compaction
-    // reconciles again.
-    if (extras.length > 0) {
-      const reconcileRemaining = remainingBudget();
-      if (reconcileRemaining <= 0) return; // next compaction reconciles
-      await deleteCompactMemoryIds(extras, reconcileRemaining);
-      if (epochOf(key) !== epoch) return;
-    }
     const drain = facts.slice(0, DRAIN_BATCH_MAX);
     for (const fact of drain) {
       const remaining = remainingBudget();
@@ -1084,26 +1076,38 @@ async function saveDurableFacts(
       const title = `Durable fact: ${fact.title}`.slice(0, 200);
       const content = redactSecrets(fact.content);
       const factKey = factIdentity(title);
-      const prior = existing.get(factKey);
-      if (prior && normalizeFactContent(prior.content) === normalizeFactContent(content)) {
+      const rows = existing.get(factKey) ?? [];
+      // The pending fact is the authoritative decision for this identity.
+      // A row whose content matches it is the live mirror row; every other
+      // row for the identity is a stale or duplicate leftover — typically a
+      // save that timed out here but still committed late on the mirror —
+      // and is deleted so the identity carries exactly one current row.
+      const match = rows.find((row) => normalizeFactContent(row.content) === normalizeFactContent(content));
+      if (match) {
+        const staleIds = rows.filter((row) => row.id !== match.id).map((row) => row.id);
+        if (staleIds.length > 0) {
+          await deleteCompactMemoryIds(staleIds, remainingBudget());
+          if (epochOf(key) !== epoch) return;
+        }
         resolvedKeys.push(factKey);
         continue;
       }
-      if (prior) {
-        // Supersede: remove the stale note first so one title can never
-        // carry both the old and the new decision. A failure here throws,
-        // the outbox keeps the fact pending, and the next compaction
-        // restores it — losing a save-first race would instead leave a
-        // permanent duplicate row no later pass can clean.
-        await deleteCompactMemoryIds([prior.id], remaining);
+      if (rows.length > 0) {
+        // Supersede: remove every row this identity has first (they carry
+        // stale or duplicate content) so one title can never carry both the
+        // old and the new decision. A failure here throws, the outbox keeps
+        // the fact pending, and the next compaction restores it — losing a
+        // save-first race would instead leave a permanent duplicate row no
+        // later pass can clean.
+        await deleteCompactMemoryIds(rows.map((row) => row.id), remaining);
         if (epochOf(key) !== epoch) return;
       }
       // Recomputed after every await: the supersede-delete above may have
       // consumed most of the budget, and reusing the stale `remaining` would
       // hand the save a second nearly-full timeout, letting one fact overrun
-      // the pass deadline. The prior is already gone, so a budget exhausted
-      // here just leaves this fact pending for the next pass — no duplicate,
-      // no stale row.
+      // the pass deadline. The prior rows are already gone, so a budget
+      // exhausted here just leaves this fact pending for the next pass — no
+      // duplicate, no stale row.
       const saveRemaining = remainingBudget();
       if (saveRemaining <= 0) break;
       const result = await callMcp<MemorySaveResponse>('memory', {
@@ -1120,7 +1124,7 @@ async function saveDurableFacts(
         throw new Error('RAG save returned no memory id');
       }
       if (epochOf(key) !== epoch) return; // queued fresh-start wipe removes this row
-      existing.set(factKey, { id: result.memory.id, content });
+      existing.set(factKey, [{ id: result.memory.id, content }]);
       resolvedKeys.push(factKey);
       saved += 1;
     }
