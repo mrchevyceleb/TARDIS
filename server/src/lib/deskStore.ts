@@ -95,9 +95,10 @@ function validIso(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '' && Number.isFinite(Date.parse(value));
 }
 
-/** The card owner's candidate recipient (an id or name), before roster
- *  resolution. The sweep resolves it against the live roster and routes
- *  to the Chief when the candidate is not a live agent. */
+/** The card owner's candidate recipient (an id or name). The quiet sweep
+ *  resolves this against the live roster and routes to the Chief when the
+ *  candidate is not a live agent; the data layer never resolves the roster
+ *  itself (it has no dependency on the agent list). */
 function cardOwnerCandidate(card: DeskCard): string {
   if (card.owner.kind !== 'agent') return 'chief-of-staff';
   const candidate = typeof card.owner.id === 'string' && card.owner.id ? card.owner.id : card.owner.name;
@@ -926,7 +927,17 @@ export function moveCard(id: string, column: unknown, index?: unknown): Promise<
   }));
 }
 
-export function commentCard(id: string, text: unknown, author: DeskActor): Promise<{ card: DeskCard; comment: DeskComment }> {
+export async function commentCard(id: string, text: unknown, author: DeskActor): Promise<{ card: DeskCard; comment: DeskComment }> {
+  // Resolve the author against the live roster BEFORE the mutation, so the
+  // close is decided with real data and the mutate callback stays sync.
+  let isLiveAgent = false;
+  if (author.kind === 'agent' && typeof author.id === 'string' && author.id) {
+    try {
+      const { listAgents } = await import('../chat/agents.ts');
+      const agents = await listAgents();
+      isLiveAgent = agents.some((a) => a.id === author.id);
+    } catch { /* a roster hiccup must never block the comment */ }
+  }
   return mutate((data, now) => {
     const card = findCard(data, id);
     const body = requireClip(text, DESK_LIMITS.comment, 'text');
@@ -947,20 +958,12 @@ export function commentCard(id: string, text: unknown, author: DeskActor): Promi
     // closes the commenter's open Matt asks (card-baadaf B: the card touch is
     // the close), best effort.
     touchCardNextCheck(card, now);
-    try {
-      // Only a live roster agent's card comment closes their asks: a human,
-      // Desk actor, or stale agent id commenting on a card must never close
-      // the agent's open Matt asks.
-      if (author.kind === 'agent' && typeof author.id === 'string' && author.id) {
-        // Resolve the author against the live roster (same lazy import as the
-        // quiet sweep): a stale or forged id is not a teammate.
-        import('../chat/agents.ts').then(({ listAgents }) => listAgents()).then((agents) => {
-          if (agents.some((a) => a.id === author.id)) {
-            closeMattAsksForAgent(author.id);
-          }
-        }).catch(() => undefined);
-      }
-    } catch { /* never block the comment on an ask-store hiccup */ }
+    // Only a live roster agent's card comment closes their asks (resolved
+    // before the mutation): a human, Desk actor, or stale agent id commenting
+    // on a card must never close the agent's open Matt asks.
+    if (isLiveAgent && typeof author.id === 'string' && author.id) {
+      try { closeMattAsksForAgent(author.id); } catch { /* never block the comment */ }
+    }
     return { card, comment };
   });
 }

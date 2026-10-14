@@ -17,7 +17,6 @@ import { listCommitments } from './commitmentStore.ts';
 
 const FILE = join(STATE_DIR, 'matt-asks.json');
 const TEXT_SNIPPET = 120;
-const MAX_OPEN_PER_AGENT = 8;
 /** Quiet time before the agent nudge. */
 const NUDGE_AFTER_MS = 15 * 60_000;
 /** Quiet time after the agent nudge before the Chief copy. */
@@ -103,12 +102,10 @@ export function noteMattAsk(logKey: string, text: string): void {
     const agent = agentForLogKey(logKey);
     if (!agent) return;
     const store = read();
-    const open = store.asks.filter((a) => a.agentId === agent.id);
-    if (open.length >= MAX_OPEN_PER_AGENT) {
-      // The oldest open ask drops when the list is full: the newest ask is
-      // always the live one, and a stale one is noise past the nudge cycle.
-      store.asks = store.asks.filter((a) => a !== open[0]);
-    }
+    // No cap: every ask stays open until it is answered or card-touched. A
+    // dropped ask is exactly the miss this piece exists to stop (Max, Oct 13
+    // 2026: "the 8-ask cap is the one I care most about, since it drops asks
+    // without a word"). The file stays small because the sweep closes asks.
     store.asks.push({
       id: `ask-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
       agentId: agent.id,
@@ -145,8 +142,11 @@ export function closeMattAsksForLane(logKey: string): void {
  *  (the existing behavior). Returns the commitment adds for logging. */
 /** The open commitment for this agent matching a promised due instant (a
  *  restatement links to the commitment that already tracks the promise). */
-function matchingCommitmentId(agentId: string, dueAt: number): string | undefined {
-  const match = listCommitments(agentId).find((c) => c.dueAt === dueAt);
+function matchingCommitmentId(agentId: string, dueAt: number, clause: string): string | undefined {
+  // Match on the normalized clause AND the due instant, not the instant
+  // alone: two unrelated commitments at the same instant must never link.
+  const norm = (t: string) => t.replace(/\s+/g, ' ').trim().toLowerCase();
+  const match = listCommitments(agentId).find((c) => c.dueAt === dueAt && norm(c.text).includes(norm(clause).slice(0, 80)));
   return match?.id;
 }
 
@@ -177,7 +177,7 @@ export async function closeAnsweredMattAsksForLane(logKey: string, replyText: st
     //   15-minute sweep nudges the agent. Never close on a failure.
     const store = read();
     const commitmentId = scan.added[0]?.id;
-    const linked = commitmentId ?? (scan.addError ? undefined : matchingCommitmentId(agent.id, promises[0].dueAt));
+    const linked = commitmentId ?? (scan.addError ? undefined : matchingCommitmentId(agent.id, promises[0].dueAt, promises[0].clause));
     if (linked) {
       for (const ask of store.asks) {
         if (ask.logKey !== logKey) continue;
