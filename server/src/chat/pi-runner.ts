@@ -780,7 +780,7 @@ export class PiSession {
     // open under a hard deadline.
     const recall = startsNewTurn && !continuing && !automationRequest
       && recallEligibleTurn(this.chatId, { peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole, voiceMode: opts.voiceMode })
-      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, messageText: opts.peerText ?? text })
+      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, logKey: this.logKey, messageText: opts.peerText ?? text })
       : '';
     if (opts.signal?.aborted) { abandon(); return; }
     const continuation = isAgentThread(this.chatId)

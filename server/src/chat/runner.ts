@@ -1298,7 +1298,7 @@ class ClaudeSession {
     // spends the search; every source fails open under a hard deadline.
     const recall = startsNewTurn && !continuing && !replyNudge && !automationRequest
       && recallEligibleTurn(this.chatId, { peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole, voiceMode: opts.voiceMode })
-      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, messageText: opts.peerText ?? text })
+      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, logKey: this.logKey, messageText: opts.peerText ?? text })
       : '';
     if (sendAborted()) {
       abandonUnsentTurn();

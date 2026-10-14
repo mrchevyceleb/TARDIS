@@ -22,6 +22,7 @@ import { STATE_DIR } from '../config.ts';
 import { agentForChatId } from './agents.ts';
 import { isAgentThread, bareChatId } from './threadKey.ts';
 import { claudeConfigDir, encodeClaudeProject } from './threadWindow.ts';
+import { compactMemoryIdentity } from './compaction.ts';
 
 /** The per-agent greppable history folder (transcript.md lives here). */
 const AGENT_NOTES_DIR = join(STATE_DIR, 'agent-notes');
@@ -400,20 +401,27 @@ async function deskCardHits(queryTokens: ReadonlySet<string>, bar = MIN_MATCH_TO
   return hits;
 }
 
-/** Source 3: assistant-mcp semantic memory, scoped to this project's own
- *  notes (rolling compacts and durable facts live there): other projects'
- *  memories never surface in a lane. Ranked results lead the pool, but a hit
- *  must still share a distinctive token with the message so weak semantic
- *  matches cannot flood every turn with noise. */
-async function mcpMemoryHits(message: string, queryTokens: ReadonlySet<string>): Promise<RecallHit[]> {
-  const found = await callMcp<{ memories?: Array<{ title?: unknown; content?: unknown }> }>('memory', {
+/** Source 3: assistant-mcp semantic memory, scoped to THIS lane's own notes
+ *  (its rolling compact and its durable facts): another lane's compacts and
+ *  facts never surface here, and neither do other projects' memories. The
+ *  remote rag_search accepts no tags filter (its schema drops unknown params
+ *  and match_memories filters only project and category — verified Oct 14),
+ *  but every returned row carries its tags, so the lane scope is enforced on
+ *  the rows and the fetch over-fetches (10 rows for a take of 3) so the
+ *  lane's own notes can still rank in. Ranked results lead the pool, but a
+ *  hit must still share a distinctive token with the message so weak
+ *  semantic matches cannot flood every turn with noise. */
+async function mcpMemoryHits(message: string, queryTokens: ReadonlySet<string>, threadTag: string): Promise<RecallHit[]> {
+  const found = await callMcp<{ memories?: Array<{ title?: unknown; content?: unknown; tags?: unknown }> }>('memory', {
     action: 'rag_search',
-    params: { query: message.slice(0, 500), project: 'rivendell', limit: 5 },
+    params: { query: message.slice(0, 500), project: 'rivendell', limit: 10 },
   });
   if (!found || typeof found !== 'object' || !Array.isArray(found.memories)) return [];
   const hits: RecallHit[] = [];
   for (const memory of found.memories) {
     if (!memory || typeof memory !== 'object') continue;
+    // Lane scope: only this thread's own mirror rows survive.
+    if (!Array.isArray(memory.tags) || !memory.tags.includes(threadTag)) continue;
     const title = typeof memory.title === 'string' ? memory.title.trim() : '';
     const content = typeof memory.content === 'string' ? memory.content.trim() : '';
     if (!title) continue;
@@ -472,6 +480,7 @@ export async function recallBlockForTurn(args: {
   cli: string;
   cwd: string;
   chatId: string;
+  logKey: string;
   messageText: string;
 }): Promise<string> {
   try {
@@ -485,11 +494,15 @@ export async function recallBlockForTurn(args: {
     // two-token bar that silently dropped it.
     const lone = queryTokens.size === 1 ? foldToken([...queryTokens][0]) : undefined;
     const bar = lone !== undefined && lone.length >= 4 && !STOPWORDS.has(lone) && !/^\p{N}+$/u.test(lone) ? 1 : MIN_MATCH_TOKENS;
+    // This lane's own RAG identity: the same hashed thread tag compaction
+    // stamps on every mirror row it saves for this thread, so the semantic
+    // memory source can be scoped to the lane's own notes.
+    const threadTag = compactMemoryIdentity(args.logKey, args.chatId).threadTag;
     const work = (async () => {
       const [memoryHits, deskHits, mcpHits, notesHits] = await Promise.all([
         withDeadline(memoryFileHits(args.cli, args.cwd, queryTokens, bar), LOCAL_BUDGET_MS, [] as RecallHit[]),
         withDeadline(deskCardHits(queryTokens, bar), LOCAL_BUDGET_MS, [] as RecallHit[]),
-        withDeadline(mcpMemoryHits(message, queryTokens), MCP_BUDGET_MS, [] as RecallHit[]),
+        withDeadline(mcpMemoryHits(message, queryTokens, threadTag), MCP_BUDGET_MS, [] as RecallHit[]),
         withDeadline(transcriptHits(args.chatId, queryTokens), TRANSCRIPT_BUDGET_MS, [] as RecallHit[]),
       ]);
       const all = [...mcpHits, ...memoryHits, ...notesHits, ...deskHits];

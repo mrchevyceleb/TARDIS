@@ -3022,7 +3022,7 @@ export class BananaSession {
       automation: (opts.autoContinueDepth ?? 0) > 0,
       voiceMode: opts.voiceMode,
     })
-      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, messageText: opts.peerText ?? text })
+      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, logKey: this.logKey, messageText: opts.peerText ?? text })
       : '';
     if (opts.signal?.aborted || this.dead) {
       this.busy = false;

@@ -760,7 +760,7 @@ async function withRagLock(key: string, operation: () => Promise<void>): Promise
 
 type CompactMemoryIdentity = { title: string; threadTag: string };
 
-function compactMemoryIdentity(key: string, chatId: string): CompactMemoryIdentity {
+export function compactMemoryIdentity(key: string, chatId: string): CompactMemoryIdentity {
   // `chatId=main` exists in every repo and agent ids can also repeat across
   // workspaces. Hash the complete durable log key so replacement/reset can
   // never touch another thread that happens to share the display id. Account
