@@ -9,6 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { copyFile, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { DESK_FILE } from '../config.ts';
+import { closeMattAsksForAgent } from './mattAsks.ts';
 import { queueMirror } from './deskMirror.ts';
 
 // Matt's five stages (2026-10-09; order staging-first per the locked rally
@@ -940,8 +941,19 @@ export function moveCard(id: string, column: unknown, index?: unknown): Promise<
   }));
 }
 
-export function commentCard(id: string, text: unknown, author: DeskActor): Promise<{ card: DeskCard; comment: DeskComment }> {
-  return mutate((data, now) => {
+export async function commentCard(id: string, text: unknown, author: DeskActor): Promise<{ card: DeskCard; comment: DeskComment }> {
+  // Resolve the author against the live roster BEFORE the mutation (so the
+  // close is decided with real data), then close AFTER the save (so a failed
+  // save never deletes asks).
+  let isLiveAgent = false;
+  if (author.kind === 'agent' && typeof author.id === 'string' && author.id) {
+    try {
+      const { listAgents } = await import('../chat/agents.ts');
+      const agents = await listAgents();
+      isLiveAgent = agents.some((a) => a.id === author.id);
+    } catch { /* a roster hiccup must never block the comment */ }
+  }
+  const result = await mutate((data, now) => {
     const card = findCard(data, id);
     const body = requireClip(text, DESK_LIMITS.comment, 'text');
     if (!body) throw new DeskError(400, 'text is required');
@@ -963,6 +975,12 @@ export function commentCard(id: string, text: unknown, author: DeskActor): Promi
     touchCardNextCheck(card, now);
     return { card, comment };
   });
+  // Only a live roster agent's card comment closes their asks, and only after
+  // the mutate successfully committed (a failed save never deletes asks).
+  if (isLiveAgent && typeof author.id === 'string' && author.id) {
+    try { closeMattAsksForAgent(author.id); } catch { /* never block the comment */ }
+  }
+  return result;
 }
 
 /** One hygiene sweep over the check-in deadlines (card-baadaf A): returns the
