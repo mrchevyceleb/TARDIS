@@ -407,36 +407,57 @@ async function deskCardHits(queryTokens: ReadonlySet<string>, bar = MIN_MATCH_TO
  *  remote rag_search accepts no tags filter (its schema drops unknown params
  *  and match_memories filters only project and category — verified Oct 14),
  *  but every returned row carries its tags, so the lane scope is enforced on
- *  the rows and the fetch over-fetches (10 rows for a take of 3) so the
- *  lane's own notes can still rank in. Ranked results lead the pool, but a
- *  hit must still share a distinctive token with the message so weak
- *  semantic matches cannot flood every turn with noise. */
+ *  the returned rows. The ranked pass takes a small top slice; other lanes'
+ *  notes can outrank this lane's and leave the slice with no row of ours, so
+ *  a slice with zero lane rows falls back to one corpus-wide pass (the whole
+ *  rivendell corpus measured 558 rows / ~840KB on Oct 14; 700 covers
+ *  growth). Filtering by tag BEFORE ranking is the structurally right shape
+ *  and needs a server-side tags filter in rag_search/match_memories — noted
+ *  follow-up. A hit must still share a distinctive token with the message so
+ *  weak semantic matches cannot flood every turn with noise. */
+const MCP_RANKED_LIMIT = 10;
+const MCP_EXHAUST_LIMIT = 700;
+
 async function mcpMemoryHits(message: string, queryTokens: ReadonlySet<string>, threadTag: string): Promise<RecallHit[]> {
-  const found = await callMcp<{ memories?: Array<{ title?: unknown; content?: unknown; tags?: unknown }> }>('memory', {
-    action: 'rag_search',
-    params: { query: message.slice(0, 500), project: 'rivendell', limit: 10 },
-  });
-  if (!found || typeof found !== 'object' || !Array.isArray(found.memories)) return [];
-  const hits: RecallHit[] = [];
-  for (const memory of found.memories) {
-    if (!memory || typeof memory !== 'object') continue;
-    // Lane scope: only this thread's own mirror rows survive.
-    if (!Array.isArray(memory.tags) || !memory.tags.includes(threadTag)) continue;
-    const title = typeof memory.title === 'string' ? memory.title.trim() : '';
-    const content = typeof memory.content === 'string' ? memory.content.trim() : '';
-    if (!title) continue;
-    if (matchCount(queryTokens, `${title}\n${content}`.toLowerCase()) < MCP_MIN_MATCH_TOKENS) continue;
-    hits.push({
-      source: `mcp:${title.slice(0, 80)}`,
-      title,
-      excerpt: content,
-      // Semantic rank leads the pool; the index keeps the provider's order.
-      score: 100 - hits.length,
-      recency: 0,
+  type MemoryRow = { title?: unknown; content?: unknown; tags?: unknown };
+  const fetchRows = async (limit: number): Promise<MemoryRow[] | null> => {
+    const found = await callMcp<{ memories?: MemoryRow[] }>('memory', {
+      action: 'rag_search',
+      params: { query: message.slice(0, 500), project: 'rivendell', limit },
     });
-    if (hits.length >= MCP_HITS_TAKE) break;
-  }
-  return hits;
+    if (!found || typeof found !== 'object' || !Array.isArray(found.memories)) return null;
+    return found.memories;
+  };
+  // Lane scope: only this thread's own mirror rows survive.
+  const isLaneRow = (memory: MemoryRow): boolean =>
+    !!memory && typeof memory === 'object' && Array.isArray(memory.tags) && memory.tags.includes(threadTag);
+  const collect = (rows: MemoryRow[]): RecallHit[] => {
+    const hits: RecallHit[] = [];
+    for (const memory of rows) {
+      if (!isLaneRow(memory)) continue;
+      const title = typeof memory.title === 'string' ? memory.title.trim() : '';
+      const content = typeof memory.content === 'string' ? memory.content.trim() : '';
+      if (!title) continue;
+      if (matchCount(queryTokens, `${title}\n${content}`.toLowerCase()) < MCP_MIN_MATCH_TOKENS) continue;
+      hits.push({
+        source: `mcp:${title.slice(0, 80)}`,
+        title,
+        excerpt: content,
+        // Semantic rank leads the pool; the index keeps the provider's order.
+        score: 100 - hits.length,
+        recency: 0,
+      });
+      if (hits.length >= MCP_HITS_TAKE) break;
+    }
+    return hits;
+  };
+  const ranked = await fetchRows(MCP_RANKED_LIMIT);
+  if (!ranked) return [];
+  if (ranked.some(isLaneRow)) return collect(ranked);
+  // No row of this lane made the ranked slice: exhaust the corpus once so
+  // the lane's own notes still surface (fail-open if this pass is slow).
+  const exhausted = await fetchRows(MCP_EXHAUST_LIMIT);
+  return exhausted ? collect(exhausted) : collect(ranked);
 }
 
 function withDeadline<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
