@@ -22,6 +22,7 @@ import { backgroundChatId, isAgentThread, isBackgroundChatId, isThreadLogKey, la
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateSettings } from './longCallGate.ts';
+import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { crashTombstoneEvent, crashTombstoneText, restartMarkerEvent } from './crashTombstone.ts';
@@ -1012,7 +1013,7 @@ class ClaudeSession {
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
-  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge; compactRerun?: boolean } = {}): Promise<void> {
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge; compactRerun?: boolean } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
@@ -1255,6 +1256,7 @@ class ClaudeSession {
           imageCount: images?.length ?? 0,
           attachments,
           clientMsgId: opts.clientMsgId,
+          humanOrigin: opts.humanOrigin === true,
           ts: Date.now(),
         },
       });
@@ -1297,7 +1299,7 @@ class ClaudeSession {
     // spends the search; every source fails open under a hard deadline.
     const recall = startsNewTurn && !continuing && !replyNudge && !automationRequest
       && recallEligibleTurn(this.chatId, { peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole, voiceMode: opts.voiceMode })
-      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, messageText: opts.peerText ?? text })
+      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, logKey: this.logKey, messageText: opts.peerText ?? text })
       : '';
     if (sendAborted()) {
       abandonUnsentTurn();
@@ -1321,7 +1323,9 @@ class ClaudeSession {
     // Full computer rules only on the message that seeds a fresh window; every later
     // message of the same warm process carries the brief form (fresh token + device + policy).
     const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
-    const stdinText = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}`;
+    // Matt's Priorities ride every turn (continues and steers too), read fresh.
+    const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
+    const stdinText = `${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}`;
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];

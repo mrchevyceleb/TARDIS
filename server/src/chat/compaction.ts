@@ -21,6 +21,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { MAX_EVENTS_PER_LOG, STATE_DIR } from './config.ts';
 import { callMcp } from '../lib/mcp.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
+import { Agent, fetch as undiciFetch } from 'undici';
 import { redactSecrets } from './secretRedaction.ts';
 import { flushEventLog, loadEventLogArchiveSync, loadEventLogForCompactionSync } from './event-log-store.ts';
 import { ROTATION_COMPACT_DEADLINE_MS, ROTATION_VERBATIM_TAIL_CHARS } from './contextBudget.ts';
@@ -40,7 +41,13 @@ import { listAgentsOrThrow } from './agents.ts';
 import { listCommitments } from '../lib/commitmentStore.ts';
 
 const MIN_ACCEPT_WORDS = 400;
-const COMPACT_MAX_TOKENS = 8000;
+/** Live generation ceiling. Every lane's rolling document now sits at
+ *  4.2-4.6k words, so a full rewrite plus the durable-facts section no
+ *  longer fits in 8000 tokens: from Oct 13 every live fold hit the cap, was
+ *  refused (#170) and retried the same batch forever, freezing every lane's
+ *  memory. Same ceiling as the rebuild; the COMPACT_SYSTEM word target still
+ *  governs length. */
+const COMPACT_MAX_TOKENS = 16_000;
 /** The length target's ceiling (COMPACT_SYSTEM): the thin-document guard
  *  measures the previous document against this, so a compliant replacement
  *  for a legacy 5000-word compact is not read as thin and retried forever. */
@@ -690,6 +697,7 @@ Rules for the document you produce:
 - Capture: every decision made (and why), every open task and its state, every fact about people/projects/systems mentioned, every commitment or promise, every preference expressed, every technical detail that mattered (paths, models, endpoints, prices, IDs), and the current state of play.
 - Organize with clear headings (## ...) so it can be indexed: Overview / People & Projects / Decisions / Open Work / Facts & References / Preferences & Style / Current State.
 - Write in third person, past tense, no fluff, no meta commentary. Never invent content that is not in the previous document or the aged-out turns.
+- PLAIN ENGLISH: complete sentences, normal spacing between words, no telegraphic fragments. No internal codes or hashes in the prose: no commit SHAs, card or ticket IDs, PR numbers, or jargon shorthand. Describe the work in words (what changed, where, who owns it) so any reader can follow it without the internal tracker. A genuinely load-bearing name (a file path, a machine name) may stay, but keep those rare. IDs a teammate needs to act on (card, PR or commitment IDs, a pinned commit) go only in the Facts & References section as a short list, never in the prose.
 - SECURITY: never retain passwords, passcodes, OTPs, API keys, access/auth tokens, cookies, private keys, or other credential values. Replace every value with [redacted secret]. Keep only the fact that a credential exists and where the user intentionally stored it (for example, a vault service/account name).
 - The last ~50 visible turns stay in the live working window and are NOT your job — only merge what just aged out of that window.
 - DURABLE FACTS: after the document, output one line with exactly the durable-facts marker given in the user message (it has the form <<<DURABLE_FACTS:hex>>>) and then a bare JSON array (no markdown fence) of at most 10 objects like {"title":"short label","content":"one or two self-contained sentences"}. Include only durable facts stated in the previous document or the aged-out turns that the new document above no longer states in full: standing decisions and their reasons, ownership or lane assignments, standing user rules or preferences, and long-lived technical commitments (paths, models, endpoints, prices). Facts the new document already keeps in full do not belong there. Output [] when there are none. Never include credentials.`;
@@ -753,7 +761,7 @@ async function withRagLock(key: string, operation: () => Promise<void>): Promise
 
 type CompactMemoryIdentity = { title: string; threadTag: string };
 
-function compactMemoryIdentity(key: string, chatId: string): CompactMemoryIdentity {
+export function compactMemoryIdentity(key: string, chatId: string): CompactMemoryIdentity {
   // `chatId=main` exists in every repo and agent ids can also repeat across
   // workspaces. Hash the complete durable log key so replacement/reset can
   // never touch another thread that happens to share the display id. Account
@@ -884,8 +892,13 @@ const PENDING_FACTS_CAP = 100;
 /** Drain bounds: at most this many pending facts are saved per compaction
  *  pass, and the drain gives up softly after this long so a slow or partially
  *  failing RAG cannot stall the triggering lane's turn for minutes. The
- *  remainder stays in the outbox and retries on the next compaction. */
-const DRAIN_BATCH_MAX = 20;
+ *  remainder stays in the outbox and retries on the next compaction. The
+ *  full outbox drains per pass (Matt, Oct 14, Max's diagnosis): at 20 per
+ *  pass the outbox pinned at its 100 cap while hot folds extracted 10 facts
+ *  each, and every extraction at the cap was retained inside the document
+ *  instead, bloating it past its word target and squeezing the newest
+ *  batch's material out of every regeneration. */
+const DRAIN_BATCH_MAX = 100;
 const DRAIN_DEADLINE_MS = 15_000;
 
 /** Unpredictable per-generation durable-facts marker. A fixed marker is
@@ -1065,6 +1078,14 @@ async function saveDurableFacts(
   return { saved, resolvedKeys };
 }
 
+/** One undici agent for the compaction generation call only: a big fold's
+ *  generation runs long past undici's 300s default headers/body timeouts
+ *  (Oct 14: Tim's 46.8k-char batch died four times at 307-317s, each a bare
+ *  "fetch failed" with the real error hidden in the cause). Generous bounded
+ *  timeouts, never unbounded — and only for this call; every other fetch
+ *  keeps the defaults. */
+const COMPACT_GENERATION_AGENT = new Agent({ headersTimeout: 900_000, bodyTimeout: 900_000 });
+
 async function generateCompact(previous: string, overflow: VisibleTurn[], maxTokens = COMPACT_MAX_TOKENS): Promise<{ compact: string; words: number; facts: DurableFact[] }> {
   // Redact BEFORE sending the prompt to the compaction provider, then redact
   // the generated document again before it touches local disk or RAG.
@@ -1075,14 +1096,26 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
     ? `Previous rolling memory document (REPLACE this entirely with an updated version — do not stack primers):\n\n${safePrevious}\n\n---\n\nAged-out turns that just left the last-${WINDOW_TURNS} working window. Merge them in:\n\n${overflowText}`
     : `Turns older than the last-${WINDOW_TURNS} working window. Write the first rolling memory document:\n\n${overflowText}`;
 
+  // Soft size bound, never a refusal: a refused fold retries the same batch
+  // forever (the Oct 13-14 freeze). A baseline past the bound is told to stay
+  // under it, so the document can never grow toward the generation ceiling.
+  // The bound sits well above the thin guard's floor (85% of the 4000-word
+  // target), so a compliant tightened document is never read as thin.
+  const sizeBoundWords = COMPACT_TARGET_CEILING_WORDS + 500;
+  const baselineWords = safePrevious.trim() ? safePrevious.trim().split(/\s+/).length : 0;
+  if (baselineWords > sizeBoundWords) {
+    userContent = `${userContent}\n\nThe previous document is ${baselineWords} words, past the length target. Tighten while merging: the replacement must stay under ${sizeBoundWords} words. Compress older detail first; keep open commitments, decisions, and standing rules.`;
+  }
+
   // Unpredictable per-pass sentinel: hand the model the exact marker line to
   // emit so summarized user content can never forge the facts split point.
   const sentinel = durableFactsSentinel();
   userContent = `${userContent}\n\nEnd the document with the durable-facts section your rules describe: one line containing exactly ${sentinel} followed immediately by the bare JSON array (or ${sentinel} followed by [] when there are no durable facts).`;
 
   await ensureXaiProxy();
-  const res = await fetch(`${xaiProxyBaseUrl().replace(/\/$/, '')}/v1/messages`, {
+  const res = await undiciFetch(`${xaiProxyBaseUrl().replace(/\/$/, '')}/v1/messages`, {
     method: 'POST',
+    dispatcher: COMPACT_GENERATION_AGENT,
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${xaiProxySecret()}`,
@@ -1391,7 +1424,11 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
     );
     return true;
   } catch (err) {
-    console.warn(`[compaction] ${key}: compact failed, will retry:`, (err as Error).message);
+    // The bare message hides the transport cause (an undici timeout shows up
+    // as "fetch failed" with the real error in .cause), so surface the cause
+    // too: the Oct 14 timeout diagnosis took four blind retries to pin.
+    const cause = (err as { cause?: unknown })?.cause;
+    console.warn(`[compaction] ${key}: compact failed, will retry:`, (err as Error).message, cause ? `cause: ${String(cause)}` : '');
     return false;
   } finally {
     inFlight.delete(key);

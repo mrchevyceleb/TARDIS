@@ -20,6 +20,7 @@ import { isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
+import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
@@ -159,6 +160,7 @@ type CodexSendOptions = {
   allowNativeHumanSteer?: boolean;
   signal?: AbortSignal;
   clientMsgId?: string;
+  humanOrigin?: boolean;
   skipAttachments?: boolean;
   /** A human steer's images ride the mid-turn channel as saved files named in
    * the text (the channel itself is text only), so a picture never has to wait
@@ -598,6 +600,9 @@ export class CodexSession {
           : `${text}\n\n[Matt attached ${images.length === 1 ? 'a screenshot' : 'screenshots'} that could not be saved. Ask him to resend if it matters.]`;
       }
 
+      // Matt's Priorities ride steers too, read fresh.
+      const steerPriorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
+      if (steerPriorities) steerText = `${steerPriorities}\n\n${steerText}`;
       await this.sendNativeSteer(
         steerText,
         opts.peerDeliveryId ?? opts.clientMsgId ?? randomUUID(),
@@ -632,6 +637,7 @@ export class CodexSession {
             imageCount: images?.length ?? 0,
             attachments: steerAttachments,
             clientMsgId: opts.clientMsgId,
+            humanOrigin: opts.humanOrigin === true,
             ts: Date.now(),
           },
         });
@@ -693,7 +699,7 @@ export class CodexSession {
       try {
         this.emit({
           type: 'event',
-          event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, ts: Date.now() },
+          event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ts: Date.now() },
         });
       } catch (error) {
         this.busy = false;
@@ -839,13 +845,14 @@ export class CodexSession {
     // turn; automation deliveries never spend the search (the reply nudge
     // rides the steer path and never reaches here).
     const recall = recallEligibleTurn(this.chatId, { peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole, voiceMode: opts.voiceMode })
-      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, messageText: opts.peerText ?? text })
+      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, logKey: this.logKey, messageText: opts.peerText ?? text })
       : '';
     if (opts.signal?.aborted) {
       this.busy = false;
       return;
     }
-    const prompt = `${computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, !(seedWindow || hasSeedOverride))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
+    const priorities = prioritiesBlockFor(sessionAgent?.id);
+    const prompt = `${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, !(seedWindow || hasSeedOverride))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
     // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
     // -c overrides rather than written into ~/.codex/config.toml so this stays
     // scoped to TARDIS.

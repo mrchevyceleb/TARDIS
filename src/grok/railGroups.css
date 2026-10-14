@@ -6,6 +6,13 @@
 .bt-groups { padding: 4px 0 10px; }
 .bt-group { margin-top: 2px; }
 
+/* Boundary seats between rail items appear the moment a drag starts. They take
+   no layout space, so nothing shifts out from under the pointer (a collapsed
+   header is a small target); the hit strip straddles the boundary instead. */
+.bt-dropzone.bt-seatzone { height: 0; position: relative; box-shadow: none; border: 0; }
+.bt-seatzone::before { content: ''; position: absolute; left: 0; right: 0; top: -4px; height: 8px; z-index: 1; }
+.bt-seatzone.on::after { content: ''; position: absolute; left: 0; right: 0; top: -1px; height: 2px; background: var(--r-gold); pointer-events: none; z-index: 1; }
+
 /* header: chevron, name, count, and (folded shut) the working/unread chips */
 .bt-group-head {
   display: flex; align-items: center; gap: 2px;

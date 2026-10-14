@@ -22,6 +22,7 @@ import { STATE_DIR } from '../config.ts';
 import { agentForChatId } from './agents.ts';
 import { isAgentThread, bareChatId } from './threadKey.ts';
 import { claudeConfigDir, encodeClaudeProject } from './threadWindow.ts';
+import { compactMemoryIdentity } from './compaction.ts';
 
 /** The per-agent greppable history folder (transcript.md lives here). */
 const AGENT_NOTES_DIR = join(STATE_DIR, 'agent-notes');
@@ -37,7 +38,9 @@ const MIN_MESSAGE_CHARS = 12;
  *  a single shared token matches far too much of the board. */
 const MIN_MATCH_TOKENS = 2;
 const MCP_MIN_MATCH_TOKENS = 1;
-const MAX_HITS = 5;
+// Matt, Oct 14 (card-d7bf78 b): auto-recall injects at most the 2 most
+// relevant items so the context stays tight.
+const MAX_HITS = 2;
 const HIT_EXCERPT_CHARS = 400;
 const HIT_TITLE_CHARS = 160;
 /** ~1.5k tokens for the whole block. */
@@ -398,35 +401,63 @@ async function deskCardHits(queryTokens: ReadonlySet<string>, bar = MIN_MATCH_TO
   return hits;
 }
 
-/** Source 3: assistant-mcp semantic memory, scoped to this project's own
- *  notes (rolling compacts and durable facts live there): other projects'
- *  memories never surface in a lane. Ranked results lead the pool, but a hit
- *  must still share a distinctive token with the message so weak semantic
- *  matches cannot flood every turn with noise. */
-async function mcpMemoryHits(message: string, queryTokens: ReadonlySet<string>): Promise<RecallHit[]> {
-  const found = await callMcp<{ memories?: Array<{ title?: unknown; content?: unknown }> }>('memory', {
-    action: 'rag_search',
-    params: { query: message.slice(0, 500), project: 'rivendell', limit: 5 },
-  });
-  if (!found || typeof found !== 'object' || !Array.isArray(found.memories)) return [];
-  const hits: RecallHit[] = [];
-  for (const memory of found.memories) {
-    if (!memory || typeof memory !== 'object') continue;
-    const title = typeof memory.title === 'string' ? memory.title.trim() : '';
-    const content = typeof memory.content === 'string' ? memory.content.trim() : '';
-    if (!title) continue;
-    if (matchCount(queryTokens, `${title}\n${content}`.toLowerCase()) < MCP_MIN_MATCH_TOKENS) continue;
-    hits.push({
-      source: `mcp:${title.slice(0, 80)}`,
-      title,
-      excerpt: content,
-      // Semantic rank leads the pool; the index keeps the provider's order.
-      score: 100 - hits.length,
-      recency: 0,
+/** Source 3: assistant-mcp semantic memory, scoped to THIS lane's own notes
+ *  (its rolling compact and its durable facts): another lane's compacts and
+ *  facts never surface here, and neither do other projects' memories. The
+ *  remote rag_search accepts no tags filter (its schema drops unknown params
+ *  and match_memories filters only project and category — verified Oct 14),
+ *  but every returned row carries its tags, so the lane scope is enforced on
+ *  the returned rows. The ranked pass takes a small top slice; other lanes'
+ *  notes can outrank this lane's and leave the slice with no row of ours, so
+ *  a slice with zero lane rows falls back to one corpus-wide pass (the whole
+ *  rivendell corpus measured 558 rows / ~840KB on Oct 14; 700 covers
+ *  growth). Filtering by tag BEFORE ranking is the structurally right shape
+ *  and needs a server-side tags filter in rag_search/match_memories — noted
+ *  follow-up. A hit must still share a distinctive token with the message so
+ *  weak semantic matches cannot flood every turn with noise. */
+const MCP_RANKED_LIMIT = 10;
+const MCP_EXHAUST_LIMIT = 700;
+
+async function mcpMemoryHits(message: string, queryTokens: ReadonlySet<string>, threadTag: string): Promise<RecallHit[]> {
+  type MemoryRow = { title?: unknown; content?: unknown; tags?: unknown };
+  const fetchRows = async (limit: number): Promise<MemoryRow[] | null> => {
+    const found = await callMcp<{ memories?: MemoryRow[] }>('memory', {
+      action: 'rag_search',
+      params: { query: message.slice(0, 500), project: 'rivendell', limit },
     });
-    if (hits.length >= MCP_HITS_TAKE) break;
-  }
-  return hits;
+    if (!found || typeof found !== 'object' || !Array.isArray(found.memories)) return null;
+    return found.memories;
+  };
+  // Lane scope: only this thread's own mirror rows survive.
+  const isLaneRow = (memory: MemoryRow): boolean =>
+    !!memory && typeof memory === 'object' && Array.isArray(memory.tags) && memory.tags.includes(threadTag);
+  const collect = (rows: MemoryRow[]): RecallHit[] => {
+    const hits: RecallHit[] = [];
+    for (const memory of rows) {
+      if (!isLaneRow(memory)) continue;
+      const title = typeof memory.title === 'string' ? memory.title.trim() : '';
+      const content = typeof memory.content === 'string' ? memory.content.trim() : '';
+      if (!title) continue;
+      if (matchCount(queryTokens, `${title}\n${content}`.toLowerCase()) < MCP_MIN_MATCH_TOKENS) continue;
+      hits.push({
+        source: `mcp:${title.slice(0, 80)}`,
+        title,
+        excerpt: content,
+        // Semantic rank leads the pool; the index keeps the provider's order.
+        score: 100 - hits.length,
+        recency: 0,
+      });
+      if (hits.length >= MCP_HITS_TAKE) break;
+    }
+    return hits;
+  };
+  const ranked = await fetchRows(MCP_RANKED_LIMIT);
+  if (!ranked) return [];
+  if (ranked.some(isLaneRow)) return collect(ranked);
+  // No row of this lane made the ranked slice: exhaust the corpus once so
+  // the lane's own notes still surface (fail-open if this pass is slow).
+  const exhausted = await fetchRows(MCP_EXHAUST_LIMIT);
+  return exhausted ? collect(exhausted) : collect(ranked);
 }
 
 function withDeadline<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
@@ -470,6 +501,7 @@ export async function recallBlockForTurn(args: {
   cli: string;
   cwd: string;
   chatId: string;
+  logKey: string;
   messageText: string;
 }): Promise<string> {
   try {
@@ -483,11 +515,15 @@ export async function recallBlockForTurn(args: {
     // two-token bar that silently dropped it.
     const lone = queryTokens.size === 1 ? foldToken([...queryTokens][0]) : undefined;
     const bar = lone !== undefined && lone.length >= 4 && !STOPWORDS.has(lone) && !/^\p{N}+$/u.test(lone) ? 1 : MIN_MATCH_TOKENS;
+    // This lane's own RAG identity: the same hashed thread tag compaction
+    // stamps on every mirror row it saves for this thread, so the semantic
+    // memory source can be scoped to the lane's own notes.
+    const threadTag = compactMemoryIdentity(args.logKey, args.chatId).threadTag;
     const work = (async () => {
       const [memoryHits, deskHits, mcpHits, notesHits] = await Promise.all([
         withDeadline(memoryFileHits(args.cli, args.cwd, queryTokens, bar), LOCAL_BUDGET_MS, [] as RecallHit[]),
         withDeadline(deskCardHits(queryTokens, bar), LOCAL_BUDGET_MS, [] as RecallHit[]),
-        withDeadline(mcpMemoryHits(message, queryTokens), MCP_BUDGET_MS, [] as RecallHit[]),
+        withDeadline(mcpMemoryHits(message, queryTokens, threadTag), MCP_BUDGET_MS, [] as RecallHit[]),
         withDeadline(transcriptHits(args.chatId, queryTokens), TRANSCRIPT_BUDGET_MS, [] as RecallHit[]),
       ]);
       const all = [...mcpHits, ...memoryHits, ...notesHits, ...deskHits];

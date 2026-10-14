@@ -196,6 +196,24 @@ const TOOLS = [
     },
   },
   {
+    name: 'priorities',
+    description:
+      "Matt's Priorities: the board Matt keeps for you on his Desk. Open items are stitched into every turn you get. " +
+      'Matt usually adds; you may list, add, reword, mark done, or remove items on your own board. ' +
+      'Mark an item done the moment it is truly finished.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'add', 'update', 'done', 'remove'], description: 'list your board, add an item, update an item\'s text, mark one done, or remove one' },
+        text: { type: 'string', description: 'One line: the item text (add) or the new text (update)' },
+        id: { type: 'string', description: 'The item id (from list) for update, done, or remove' },
+        from: { type: 'string', description: 'Your roster agent id. Only needed on engines whose tool server carries no identity (banana).' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'team_recent',
     description:
       "Read a teammate's recent thread messages (their last exchanges) — check what they " +
@@ -596,6 +614,18 @@ function describeCard(c) {
   return `- [${c.id}] ${c.title} · ${bits.join(' · ')}${lastLine}`;
 }
 
+/** Matt, Oct 14 (card-d7bf78 c): the deny list's command match. No lane may
+ *  run gh workflow disable through a TARDIS-run command. The match is on
+ *  the parsed token shape (whitespace-split with quotes stripped), never a
+ *  substring of the raw source, so trivially obfuscated spellings and
+ *  harmless commands that merely contain the phrase are both handled; shell
+ *  indirection ($(echo ...)) remains outside any text match and is the
+ *  stated open edge. */
+function deniesGhWorkflowDisable(command) {
+  const tokens = String(command ?? '').split(/\s+/).map((t) => t.replace(/^["']+|["']+$/g, '')).filter(Boolean);
+  return tokens[0]?.toLowerCase() === 'gh' && tokens[1]?.toLowerCase() === 'workflow' && tokens[2]?.toLowerCase() === 'disable';
+}
+
 async function callTool(name, args, signal) {
   // The runner turns this call into a visible message in the thread; the tool itself only acknowledges.
   if (name === 'reply_now' && REPLY_NOW_ENABLED) {
@@ -862,6 +892,39 @@ async function callTool(name, args, signal) {
       ...commitments.map((c) => `- [${c.id}] ${c.text}${c.due ? ` — due ${c.due}` : ''}`),
     ].join('\n');
   }
+  if (name === 'priorities') {
+    // Boards are keyed by roster id only; a display name is not owner-proof.
+    const agent = process.env.RIVENDELL_AGENT_ID || (typeof args.from === 'string' ? args.from.trim() : '');
+    if (!agent) throw new Error('Pass from: your roster agent id.');
+    const action = typeof args.action === 'string' ? args.action : 'list';
+    const post = (path, body) => api(`/api/priorities/${path}`, { method: 'POST', body: JSON.stringify({ agent, by: agent, ...body }) }, signal);
+    const needId = () => {
+      if (typeof args.id !== 'string' || !args.id.trim()) throw new Error('Pass id: the item id from your list.');
+      return args.id;
+    };
+    if (action === 'add') {
+      const { item } = await post('add', { text: args.text });
+      return `Added to Matt's Priorities (id ${item.id}): ${item.text}`;
+    }
+    if (action === 'update') {
+      const { item } = await post('update', { id: needId(), text: args.text });
+      return `Updated ${item.id}: ${item.text}`;
+    }
+    if (action === 'done') {
+      const { item } = await post('update', { id: needId(), done: true });
+      return `Marked done: ${item.text}`;
+    }
+    if (action === 'remove') {
+      await post('remove', { id: needId() });
+      return `Removed ${args.id}.`;
+    }
+    const { items } = await api(`/api/priorities?agent=${encodeURIComponent(agent)}`, undefined, signal);
+    if (!items?.length) return "Matt's Priorities board for you is empty.";
+    return [
+      "Matt's Priorities (your board, in Matt's order):",
+      ...items.map((i, n) => `${n + 1}. [${i.id}]${i.done ? ' (done)' : ''} ${i.text}`),
+    ].join('\n');
+  }
   if (name === 'team_recent') {
     const { messages } = await api(`/api/team/recent?name=${encodeURIComponent(args.name)}&limit=${args.limit ?? 8}`, undefined, signal);
     if (!messages?.length) return `No recent messages for ${args.name}.`;
@@ -870,6 +933,12 @@ async function callTool(name, args, signal) {
   if (name === 'watch_job') {
     const self = process.env.RIVENDELL_AGENT_NAME;
     if (!self) throw new Error('Watch jobs from a named teammate so the wake can find your thread.');
+    // Matt, Oct 14 (card-d7bf78 c): the deny list — no lane may run gh
+    // workflow disable through a TARDIS-run command, watch_job's command
+    // path included.
+    if (deniesGhWorkflowDisable(args.command)) {
+      throw new Error('gh workflow disable is blocked from lanes; only Matt or Max may disable a workflow.');
+    }
     const picked = ['pid', 'file', 'command'].filter((key) => args[key] !== undefined && args[key] !== null && String(args[key]).trim() !== '');
     if (picked.length !== 1) throw new Error('Pass exactly one of pid, file, or command.');
     const agent = await resolveAgent(self, signal);
@@ -921,6 +990,13 @@ async function callTool(name, args, signal) {
     }
     if (!self) throw new Error('Start jobs from a named teammate so the result can find your thread.');
     const agent = await resolveAgent(self, signal);
+    // Matt, Oct 14 (card-d7bf78 c): the deny list — no lane may disable a
+    // GitHub Actions workflow through a TARDIS-run command. Engine-native
+    // shells are outside this server's reach and are reported as the open
+    // edge.
+    if (deniesGhWorkflowDisable(args.command)) {
+      throw new Error('gh workflow disable is blocked from lanes; only Matt or Max may disable a workflow.');
+    }
     const { job } = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ agentId: agent.id, lane: LANE, name: args.name, command: args.command, cwd: args.cwd, timeoutMin: args.timeoutMin }) }, signal);
     return [
       `Started job "${job.name}" (id ${job.id.slice(0, 8)}), detached in its own scope. It survives TARDIS restarts and shows in the chat UI with a Stop button.`,
@@ -951,6 +1027,10 @@ async function callTool(name, args, signal) {
       return `Created for ${agent.name}:\n${describeRoutine({ ...routine, agentName: agent.name })}\nCall routine_run with id ${routine.id} to prove it works.`;
     }
     if (name === 'routine_update') {
+      // Matt, Oct 14 (card-d7bf78 c): the deny list — no lane may pause or
+      // disable a routine; that is exactly the silent-off class this exists
+      // to stop. Matt and Max keep full control through the panel.
+      if (args.paused === true || args.paused === 'true') throw new Error('routine pause/disable is blocked from lanes; only Matt or Max can pause a routine.');
       const patch = {};
       for (const key of ['name', 'schedule', 'prompt', 'paused']) if (args[key] !== undefined) patch[key] = args[key];
       if (!Object.keys(patch).length) throw new Error('Nothing to change.');

@@ -229,3 +229,21 @@ export async function fetchDeploymentFlags(): Promise<{ contentRoom: boolean; de
     return { contentRoom: true, deskRoom: true };
   }
 }
+
+// Matt's Priorities: one ordered board per enabled agent (/api/priorities).
+export type PriorityItem = { id: string; text: string; done: boolean; createdAt: number; updatedAt: number; by: string };
+export type PriorityBoard = { agentId: string; name: string; items: PriorityItem[] };
+export type PriorityAction =
+  | { action: 'add'; text: string }
+  | { action: 'update'; id: string; text?: string; done?: boolean }
+  | { action: 'remove'; id: string }
+  | { action: 'move'; id: string; direction: 'up' | 'down' }
+  | { action: 'clear-done' };
+
+export function fetchPriorityBoards(): Promise<{ boards: PriorityBoard[] }> {
+  return apiJson('/api/priorities');
+}
+
+export function priorityAction(agent: string, { action, ...body }: PriorityAction): Promise<{ items: PriorityItem[] }> {
+  return apiJson(`/api/priorities/${action}`, { method: 'POST', body: JSON.stringify({ agent, ...body }) });
+}

@@ -147,6 +147,9 @@ async function runRoutineFor(routine: Routine, agent: Agent, opts: { manual?: bo
     peerFrom: `⚙︎ ${routine.name}`,
     peerFromRole: 'automation',
     peerText: routine.name,
+    // A manual press lands in the thread Matt is looking at; scheduled
+    // fires keep their normal background lane.
+    lane: opts.manual ? 'main' : undefined,
   });
   if (result.delivered) {
     commitGate?.();

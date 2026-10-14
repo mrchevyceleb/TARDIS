@@ -8,13 +8,15 @@
 // copies never run it.
 
 import { deliverTeamMessage } from '../chat/teamBus.ts';
+import { flushFlagDigests, queueFlagDigest } from './flagDigest.ts';
 import { listCommitments, markCommitmentRaised, noteCommitmentDueAt } from './commitmentStore.ts';
 import { parseDue } from './promiseScan.ts';
 
 const TICK_MS = 60_000;
 const CHIEF_ID = 'chief-of-staff';
 /** The pseudo-sender the raises arrive from: not a roster agent, so the
- *  outgoing-promise scan itself never re-processes a raise message. */
+ *  outgoing-promise scan itself never re-processes a raise message. The
+ *  owner digest delivers through the same pseudo-sender (flagDigest.ts). */
 const SWEEPER = 'TARDIS';
 
 let busy = false;
@@ -36,26 +38,23 @@ async function run(): Promise<void> {
     }
     if (dueAt > now.getTime()) continue;
     const raise = `Past-due commitment [${commitment.id}] "${commitment.text}" (due ${commitment.due}) is past due. Clear it with the commitments tool the moment it is done, or tell Max the new time if it slipped.`;
-    let ownerDelivered: boolean | null = null;
+    // Owner raises go out as one digest per owner every 30 minutes instead
+    // of one message per item (Matt, Oct 14, card-d7bf78 b). The raise is
+    // marked only when the digest actually delivers it.
     if (!commitment.raised?.owner) {
-      try {
-        const toOwner = await deliverTeamMessage({ from: SWEEPER, to: commitment.agentId, text: raise, wait: false, priority: true });
-        ownerDelivered = toOwner.delivered === true;
-        if (toOwner.delivered) markCommitmentRaised(commitment.id, 'owner');
-        else console.warn(`[commitments] past-due raise to ${commitment.agentId} not delivered (retried next tick): ${toOwner.reason}`);
-      } catch (error) {
-        ownerDelivered = false;
-        console.warn(`[commitments] past-due raise to ${commitment.agentId} failed (retried next tick): ${(error as Error).message}`);
-      }
+      // The commitment id is the stable queue key: the every-minute sweep
+      // re-queues an undelivered raise, and the shared owner digest upserts
+      // it instead of stacking duplicates.
+      queueFlagDigest(commitment.agentId, commitment.id, raise, () => markCommitmentRaised(commitment.id, 'owner'));
     }
-    if (commitment.agentId !== CHIEF_ID && !commitment.raised?.chief) {
-      // The copy's wording says what actually happened: "it went to them"
-      // only when it did; a failing owner delivery must not read as done to
-      // the Chief it is escalating to.
-      const wentWell = ownerDelivered === null ? Boolean(commitment.raised?.owner) : ownerDelivered;
-      const outcome = wentWell
-        ? 'It went to them; make sure they act on it.'
-        : 'Their raise is currently NOT delivering (it retries every minute) — chase them directly.';
+    // The Chief copy escalates only once the owner raise actually went out
+    // (the digest flush sets the raised mark), so it never claims a delivery
+    // that is still queued.
+    if (commitment.agentId !== CHIEF_ID && commitment.raised?.owner && !commitment.raised?.chief) {
+      // The copy's wording says what actually happened: it only runs once
+      // the owner raise was delivered, so "it went to them" is always true
+      // here; a queued-but-undelivered raise never escalates as done.
+      const outcome = 'It went to them; make sure they act on it.';
       try {
         const copy = await deliverTeamMessage({
           from: SWEEPER,
@@ -71,6 +70,7 @@ async function run(): Promise<void> {
       }
     }
   }
+  await flushFlagDigests();
 }
 
 export function startCommitmentSweeper(): void {

@@ -103,14 +103,22 @@ export function redactSecrets(text: string): string {
       /(\b(?:password|passcode|passwd|pwd|api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|bearer token|client[_ -]?secret|refresh[_ -]?token|private[_ -]?key|credential|session token|otp|one[- ]time (?:password|code)|verification code|recovery code)\b\s+(?:is|was)\s+)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/gi,
       (_all, prefix: string, value: string) => `${prefix}${preserveFence(value)}`,
     )
+    // A CLI flag starts on its own: the dashes must not be glued to a
+    // preceding word, or the rule eats the following word as a "value"
+    // (Oct 14 false positive: "8,000-token budget" was masked as a printed
+    // key). Both flag styles are kept (-token=x, --token x) — only glued
+    // compounds ("8,000-token cap", "café-token budget") are refused. The
+    // boundary is Unicode-aware (\w is ASCII-only): letters, digits, marks
+    // (combining accents, composed or decomposed), and join controls all
+    // block it.
     .replace(
-      /((?:--?)(?:(?:api-?)?key|token|secret|password))(=|\s+)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/gi,
+      /((?<![\p{L}\p{N}\p{M}_\u200C\u200D-])--?(?:(?:api-?)?key|token|secret|password))(=|\s+)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/giu,
       (_all, flag: string, separator: string, value: string) => `${flag}${separator}${preserveFence(value)}`,
     )
     .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[redacted jwt]')
     .replace(/\bAKIA[0-9A-Z]{16}\b/g, REDACTED)
     .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, REDACTED)
-    .replace(/\b(?:sk-(?:live|test)-|sk_|gh[pousr]_|github_pat_|glpat-|xox[baprs]-|dop_v1_|dpl_|rk_|sbp_)[A-Za-z0-9_=-]{12,}\b/gi, REDACTED);
+    .replace(/\b(?:sk-(?:live|test)-|sk_|pk_(?:live|test)_|gh[pousr]_|github_pat_|glpat-|xox[baprs]-|dop_v1_|dpl_|rk_|sbp_)[A-Za-z0-9_=-]{12,}\b/gi, REDACTED);
 
   out = out.replace(
     /\b[A-Za-z0-9+/_=-]{64,}\b/g,

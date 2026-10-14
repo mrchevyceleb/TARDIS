@@ -37,6 +37,7 @@ import { contextRotationDue, recordContextUsage, recordContextRotation } from '.
 import { isAgentThread, isBackgroundChatId, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
+import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { providerLabel } from './providerErrors.ts';
@@ -679,7 +680,7 @@ export class PiSession {
     for (const fn of this.listeners) fn(se);
   }
 
-  async send(text: string, images?: ChatImage[], opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean; providerContinue?: ProviderContinueOpts } = {}): Promise<void> {
+  async send(text: string, images?: ChatImage[], opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; providerContinue?: ProviderContinueOpts } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
     if (opts.signal?.aborted) return;
     if (!this.isAlive()) throw new Error('session has exited');
@@ -757,7 +758,7 @@ export class PiSession {
     } else {
       await flushEventLog(this.logKey);
       if (opts.signal?.aborted) { abandon(); return; }
-      this.emit({ type: 'event', event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, ts: Date.now() } });
+      this.emit({ type: 'event', event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ts: Date.now() } });
       noteUserTurn(this.logKey);
       noteAgentLane(this.chatId, this.cli);
       this.turnOrigin.human = true;
@@ -779,7 +780,7 @@ export class PiSession {
     // open under a hard deadline.
     const recall = startsNewTurn && !continuing && !automationRequest
       && recallEligibleTurn(this.chatId, { peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole, voiceMode: opts.voiceMode })
-      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, messageText: opts.peerText ?? text })
+      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, logKey: this.logKey, messageText: opts.peerText ?? text })
       : '';
     if (opts.signal?.aborted) { abandon(); return; }
     const continuation = isAgentThread(this.chatId)
@@ -789,7 +790,8 @@ export class PiSession {
     // Full computer rules ride the seed message that starts a fresh pi window; later
     // messages of the same warm process get the brief form (fresh token + device + policy).
     const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
-    const message = `${computerContext}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuation}`;
+    const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
+    const message = `${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuation}`;
     const piImages = outImages?.map((img) => ({ type: 'image', data: img.base64, mimeType: img.mediaType }));
 
     const command = startsNewTurn

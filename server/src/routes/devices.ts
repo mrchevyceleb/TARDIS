@@ -14,7 +14,7 @@ import {
   type DeviceOp,
 } from '../devices/bridge.ts';
 import { asyncHandler } from './helpers.ts';
-import { backgroundComputerAllowed, computerSelectionKey, computerTarget, computerTargetFor, configuredDefaultComputer, readComputerContext, setComputerTarget, validComputerMcpToken } from '../devices/context.ts';
+import { backgroundComputerAllowed, computerSelectionKey, computerTarget, computerTargetFor, configuredDefaultComputer, noteComputerToolUse, readComputerContext, setComputerTarget, validComputerMcpToken } from '../devices/context.ts';
 import { bareChatId } from '../chat/threadKey.ts';
 import { ComputerStepJournal } from '../devices/stepJournal.ts';
 import { computerOcr } from '../devices/ocr.ts';
@@ -86,6 +86,13 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
   const op = String(req.params.op);
   if (!['start', 'inspect', 'capture', 'window_capture', 'uia', 'uia_value', 'uia_focus', 'uia_invoke', 'uia_key', 'focus', 'type', 'key', 'act', 'step', 'stop'].includes(op)) { res.status(400).json({ error: 'Unknown computer operation.' }); return; }
   const body = req.body ?? {};
+  // Matt, Oct 14 (card-d7bf78 b): every computer_* call marks the caller's
+  // lane as a computer user — a failed attempt counts, so a first attempt
+  // without the guidance block re-arms it for the next turn. Lane-bound
+  // shims name their owner on every call; the shared shim resolves it from
+  // the context when one is presented.
+  const recordingOwner = req.get('x-rivendell-computer-owner') || (() => { try { return readComputerContext(body.context)?.owner ?? ''; } catch { return ''; } })();
+  if (recordingOwner) noteComputerToolUse(recordingOwner);
   let device = typeof body.device === 'string' ? body.device : '';
   let context: ReturnType<typeof readComputerContext> | undefined;
   if (op === 'start') {
@@ -113,6 +120,8 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
       const resolved = ref ? findDevice(ref) : undefined;
       if (!resolved || (device && resolved.id !== device)) throw new Error('Requested/default computer is unavailable. Use an explicit online id or configure a default; never fall back to another machine.');
       device = resolved.id;
+      const trenzalore = trenzaloreRefusal(device, callerOwner || context.owner);
+      if (trenzalore) throw new Error(trenzalore);
       // An agent may name any linked computer the operator set to automatic
       // control, on any turn, including one the person started. That is an
       // explicit choice, not a fallback, so the thread's picker selection
@@ -201,6 +210,25 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
   }
 }));
 
+/** Matt, Oct 9 2026 (card-d7bf78 piece 2, rules become code): Trenzalore
+ *  is game dev only. A lane-bound caller outside the game lanes is refused
+ *  before anything reaches that machine. Ownerless callers (Matt's own plain
+ *  chats) keep access. Shell ssh from a lane is outside this server and stays
+ *  a persona rule. */
+const TRENZALORE_LANES = new Set(['riley', 'tim', 'piper', 'felix']);
+export function trenzaloreRefusal(deviceRef: string, owner: string): string | null {
+  let target: ReturnType<typeof findDevice>;
+  // An empty ref resolves to the sole linked computer, exactly as callDevice does.
+  try { target = findDevice(deviceRef); } catch { return null; }
+  if (!target || target.name.trim().toLowerCase() !== 'trenzalore') return null;
+  if (!owner) return null;
+  let chatId = owner;
+  try { const parsed = JSON.parse(owner); if (Array.isArray(parsed)) chatId = String(parsed[1] ?? ''); } catch { /* a bare chat id */ }
+  const lane = chatId.replace(/^bot-/, '').split('__')[0].toLowerCase();
+  if (TRENZALORE_LANES.has(lane)) return null;
+  return 'Trenzalore is game dev only (Riley, Tim, Piper and Felix). Use Moria, the Mac Mini or your own headless browser instead.';
+}
+
 function timeoutOf(value: unknown): number {
   const asked = Number(value);
   if (!Number.isFinite(asked) || asked <= 0) return DEVICE_DEFAULT_TIMEOUT_MS;
@@ -215,6 +243,11 @@ function relay(op: DeviceOp, pick: (body: Record<string, unknown>) => Record<str
     const params = pick(body);
     if (typeof params === 'string') {
       res.status(400).json({ error: params });
+      return;
+    }
+    const trenzalore = trenzaloreRefusal(String(body.device ?? ''), req.get('x-rivendell-computer-owner') || '');
+    if (trenzalore) {
+      res.status(403).json({ error: trenzalore });
       return;
     }
     const reply = await callDevice(String(body.device ?? ''), op, params, timeoutOf(body.timeoutMs));

@@ -1144,7 +1144,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         // fire-and-forget, so guard the promise or a rejection escapes the outer
         // try/catch as an unhandled rejection.
         if ('send' in retrySession) {
-          void Promise.resolve((retrySession as any).send(text, images, { model, clientMsgId, voiceMode, skipAttachments: true })).catch((e: Error) => {
+          void Promise.resolve((retrySession as any).send(text, images, { model, clientMsgId, voiceMode, skipAttachments: true, humanOrigin: true })).catch((e: Error) => {
             // Don't just log: a rejected retry-send would otherwise strand the
             // client with busy=true and no turnEnd. Clean up the turn like the
             // synchronous catch below.
@@ -1950,6 +1950,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                   model: steerModel,
                   effort: steerEffort,
                   clientMsgId: msg.clientMsgId,
+                  humanOrigin: true,
                   allowNativeHumanSteer: nativeActiveSteer,
                   voiceMode: msg.voice === true,
                   imagesAsFiles: nativeActiveSteer && steerImagesAsFiles,
@@ -2347,6 +2348,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             model: authoritativeAgent ? sendBrain.model : msg.model,
             effort: authoritativeAgent ? sendBrain.effort : msg.effort,
             clientMsgId: msg.clientMsgId,
+            humanOrigin: true,
             voiceMode: msg.voice === true,
             signal: sendAborter.signal,
           });

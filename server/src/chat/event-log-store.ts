@@ -1158,7 +1158,7 @@ function mattAskHooks(key: string, persisted: PersistedEvent): void {
     const eventAt = typeof persisted.at === 'number' && Number.isFinite(persisted.at) ? persisted.at : Date.now();
     const frameType = (frame: unknown): unknown => (!frame || typeof frame !== 'object') ? undefined : (frame as { type?: unknown }).type;
     if (ev.type === 'event' && ev.event && typeof ev.event === 'object') {
-      const inner = ev.event as { type?: unknown; text?: unknown; imageCount?: unknown; attachments?: unknown; clientMsgId?: unknown; parent_tool_use_id?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> }; event?: unknown };
+      const inner = ev.event as { type?: unknown; text?: unknown; imageCount?: unknown; attachments?: unknown; clientMsgId?: unknown; humanOrigin?: unknown; parent_tool_use_id?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> }; event?: unknown };
       // A subagent's stream is private work, not the lane's visible reply to
       // Matt (the same parent_tool_use_id filtering reads.ts, useChat, and
       // replayDelivery apply): its text never closes an ask, its inner
@@ -1178,17 +1178,19 @@ function mattAskHooks(key: string, persisted: PersistedEvent): void {
         turnStartAtByLane.delete(laneKey);
       }
       if (inner.type === '_user_echo' && !subagent) {
-        // Only a message Matt himself typed opens an ask: the client assigns
-        // every person-typed message (including mid-turn steers) a
-        // clientMsgId, while server-side deliveries (routines, jobs,
-        // handoffs) carry none. Image- or attachment-only echoes are asks
-        // too: with no text they open the timer on a placeholder snippet.
+        // Only a message Matt himself typed opens an ask. The trust is the
+        // server-side origin stamp, never the raw clientMsgId: the register
+        // stamps humanOrigin on the person-socket admission (send, steer,
+        // retry), so a server-side delivery that merely carries a stray
+        // clientMsgId can never fabricate an ask. The clientMsgId still
+        // dedupes. Image- or attachment-only echoes are asks too: with no
+        // text they open the timer on a placeholder snippet.
         const text = typeof inner.text === 'string' && inner.text.trim()
           ? inner.text
           : (typeof inner.imageCount === 'number' && inner.imageCount > 0) || (Array.isArray(inner.attachments) && inner.attachments.length > 0)
             ? '[Matt sent an image or attachment]'
             : '';
-        if (text && typeof inner.clientMsgId === 'string' && inner.clientMsgId) noteMattAsk(key, lane, text);
+        if (text && inner.humanOrigin === true && typeof inner.clientMsgId === 'string' && inner.clientMsgId) noteMattAsk(key, lane, text);
       }
       const turnStart = turnStartAtByLane.get(laneKey);
       if (!subagent && typeof turnStart === 'number') {

@@ -18,6 +18,7 @@ import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
+import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import {
   ASSISTANT_HUB_PATH,
@@ -73,6 +74,7 @@ type BananaSendOptions = {
   /** Team-bus delivery: sender-tagged peer_message echo, no compaction tick. */
   peerFrom?: string;
   clientMsgId?: string;
+  humanOrigin?: boolean;
   skipAttachments?: boolean;
   peerFromRole?: string;
   /** Visible peer_message body. Full `text` still goes to the model. */
@@ -2775,7 +2777,7 @@ export class BananaSession {
       try {
         this.emit({
           type: 'event',
-          event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, ts: Date.now() },
+          event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ts: Date.now() },
         });
       } catch (error) {
         this.busy = false;
@@ -3021,13 +3023,14 @@ export class BananaSession {
       automation: (opts.autoContinueDepth ?? 0) > 0,
       voiceMode: opts.voiceMode,
     })
-      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, messageText: opts.peerText ?? text })
+      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, logKey: this.logKey, messageText: opts.peerText ?? text })
       : '';
     if (opts.signal?.aborted || this.dead) {
       this.busy = false;
       return;
     }
-    const effectiveText = `${computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation')}\n\n${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${commandExpandedText}`;
+    const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
+    const effectiveText = `${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, false, true)}\n\n${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${commandExpandedText}`;
     if (seed) {
       this.turn.recoveryRecapUsed = true;
       this.emit({
