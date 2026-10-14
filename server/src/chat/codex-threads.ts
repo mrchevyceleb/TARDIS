@@ -86,23 +86,63 @@ export async function codexRolloutMissing(codexHome: string, threadId: string): 
     // Stream the directory instead of materializing a full listing: readdir
     // had already allocated every entry before the budget was ever checked,
     // so a huge rollout store could still spike memory and stall the read
-    // despite the cap. opendir hands out one entry at a time, the budget is
-    // consumed per streamed entry, and the bounded slice is still walked
-    // newest-first.
-    const entries: Dirent[] = [];
-    let moreBeyondBudget = false;
+    // despite the cap. opendir hands out one entry at a time, every read
+    // consumes budget, and the budget is checked BEFORE each read, so
+    // neither the read count nor the memory can exceed the cap (no lookahead
+    // probe: a cap reached mid-stream is conservatively inconclusive).
+    //
+    // Newest-first: opendir order is arbitrary filesystem order, so streamed
+    // entries feed a bounded newest-set — a min-heap on name whose root is
+    // the oldest kept entry. The kept set is always the newest entries READ
+    // so far, and the walk examines it newest-first. A directory larger than
+    // the remaining budget degrades to inconclusive (null), never a false
+    // missing. Sibling reads are charged before descent (the old code charged
+    // during iteration); realistic date-partitioned stores spend a handful of
+    // entries per level, and a pathological fan-out only costs certainty,
+    // never correctness.
+    const heapCap = budget;
+    const heap: Dirent[] = [];
+    const siftUp = (i: number): void => {
+      for (; i > 0; ) {
+        const parent = (i - 1) >> 1;
+        if (!(heap[i].name < heap[parent].name)) break;
+        [heap[i], heap[parent]] = [heap[parent], heap[i]];
+        i = parent;
+      }
+    };
+    const siftDown = (i: number): void => {
+      for (;;) {
+        const left = 2 * i + 1;
+        const right = left + 1;
+        let oldest = i;
+        if (left < heap.length && heap[left].name < heap[oldest].name) oldest = left;
+        if (right < heap.length && heap[right].name < heap[oldest].name) oldest = right;
+        if (oldest === i) break;
+        [heap[i], heap[oldest]] = [heap[oldest], heap[i]];
+        i = oldest;
+      }
+    };
+    let cutByBudget = false;
     try {
       const handle = await opendir(dir);
       try {
         for (;;) {
-          const entry = await handle.read();
-          if (!entry) break;
           if (budget <= 0) {
-            moreBeyondBudget = true;
+            cutByBudget = true;
             break;
           }
+          const entry = await handle.read();
+          if (!entry) break;
           budget -= 1;
-          entries.push(entry);
+          if (heap.length < heapCap) {
+            heap.push(entry);
+            siftUp(heap.length - 1);
+          } else if (heap.length > 0 && heap[0].name < entry.name) {
+            // Newer than the oldest kept entry: it replaces that entry. An
+            // older one can never be part of the newest set.
+            heap[0] = entry;
+            siftDown(0);
+          }
         }
       } finally {
         await handle.close().catch(() => {});
@@ -112,7 +152,7 @@ export async function codexRolloutMissing(codexHome: string, threadId: string): 
     }
     // Rollout paths are date-ordered (sessions/YYYY/MM/DD/rollout-<ts>-<id>),
     // so newest-first finds a live thread in the first few reads.
-    entries.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0));
+    const entries = heap.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0));
     for (const entry of entries) {
       if (entry.isDirectory()) {
         const found = await walk(join(dir, entry.name));
@@ -130,7 +170,7 @@ export async function codexRolloutMissing(codexHome: string, threadId: string): 
       if (entry.name.endsWith(`-${threadId}.jsonl`) || entry.name.endsWith(`-${threadId}.jsonl.zst`)) return true;
     }
     // Entries the budget never let us read could still hold the target.
-    return moreBeyondBudget ? null : false;
+    return cutByBudget ? null : false;
   };
   const result = await walk(join(codexHome, 'sessions'));
   if (result !== false) return false;
