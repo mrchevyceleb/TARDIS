@@ -96,9 +96,11 @@ function validIso(value: unknown): value is string {
 }
 
 /** The card owner's candidate recipient (an id or name), before roster
- *  resolution. The sweep resolves it against the live roster. */
+ *  resolution. The sweep resolves it against the live roster and routes
+ *  to the Chief when the candidate is not a live agent. */
 function cardOwnerCandidate(card: DeskCard): string {
-  const candidate = typeof card.owner.id === 'string' && card.owner.id && card.owner.id !== 'owner' ? card.owner.id : card.owner.name;
+  if (card.owner.kind !== 'agent') return 'chief-of-staff';
+  const candidate = typeof card.owner.id === 'string' && card.owner.id ? card.owner.id : card.owner.name;
   return candidate || 'chief-of-staff';
 }
 
@@ -946,8 +948,12 @@ export function commentCard(id: string, text: unknown, author: DeskActor): Promi
     // the close), best effort.
     touchCardNextCheck(card, now);
     try {
-      if (typeof author.id === 'string' && author.id) closeMattAsksForAgent(author.id);
-      else if (typeof author.name === 'string' && author.name) closeMattAsksForAgent(author.name);
+      // Only a live roster agent's card comment closes their asks: a human
+      // or Desk actor commenting on a card must never close the agent's
+      // open Matt asks.
+      if (author.kind === 'agent' && typeof author.id === 'string' && author.id) {
+        closeMattAsksForAgent(author.id);
+      }
     } catch { /* never block the comment on an ask-store hiccup */ }
     return { card, comment };
   });
