@@ -13,7 +13,7 @@ import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './crashTombstone.ts';
-import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeq, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
+import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeq, peekEnginePrimerThroughSeqWithStatus, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { lastEngineOf, logKeyFor } from './threadKey.ts';
@@ -725,11 +725,16 @@ export class CodexSession {
 
     const hasSeedOverride = typeof opts.seedOverride === 'string';
     const seedWindow = !hasSeedOverride && (this.consumeWindowSeed() || recoverContextThisTurn);
-    const seed = hasSeedOverride
-      ? opts.seedOverride as string
+    // The primer reports whether its commitments half is CONFIRMED: an empty
+    // primer from a fail-open store hiccup is uncertainty, and the seed
+    // window must not be consumed on it below.
+    const seedStatus = hasSeedOverride
+      ? { primer: opts.seedOverride as string, available: true }
       : seedWindow
-        ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
-        : '';
+        ? await peekEnginePrimerThroughSeqWithStatus(this.logKey, historyThroughSeq, fallbackHistory)
+        : { primer: '', available: true };
+    const seed = seedStatus.primer;
+    const seedAvailable = seedStatus.available;
     if (seed) {
       this.recoverContextOnNextTurn = false;
       if (!hasSeedOverride) {
@@ -1019,10 +1024,16 @@ export class CodexSession {
         this.threadId = null;
         await setSessionId(this.cli, this.cwd, '', this.chatId);
         let retrySeed = seed;
+        let retryAvailable = seedAvailable;
         if (!retrySeed) {
-          retrySeed = await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory).catch(() => '');
+          const retryStatus = await peekEnginePrimerThroughSeqWithStatus(this.logKey, historyThroughSeq, fallbackHistory)
+            .catch(() => ({ primer: '', available: false }));
+          retrySeed = retryStatus.primer;
+          retryAvailable = retryStatus.available;
         }
-        this.seedWindowOnNextTurn = false;
+        // A retry primer the store could not confirm keeps the window open:
+        // the next turn re-seeds instead of running the retry unseeded.
+        this.seedWindowOnNextTurn = !retryAvailable;
         this.recoverContextOnNextTurn = false;
         this.busy = false;
         console.warn(`[chat codex] empty exit from ${failedThread ?? 'new thread'} — retrying once on a fresh thread`);
@@ -1092,11 +1103,14 @@ export class CodexSession {
           );
         }
       } else if (this.threadId) {
-        // Acknowledge the seed ATTEMPT, not only a nonempty seed: a fresh
-        // thread with an empty primer (no commitments, no history) must still
-        // consume the window seed here, or the second turn would re-seed the
-        // now-warm session with the first turn's history.
-        if (seed || seedWindow) await this.ackWindowSeed();
+        // Acknowledge a CONFIRMED seed, not a failed-open one: a fresh thread
+        // with a confirmed-empty primer (no commitments, no history) still
+        // consumes the window seed here — or the second turn would re-seed
+        // the now-warm session with the first turn's history — but an empty
+        // primer the store could not confirm leaves the window open, so the
+        // next turn retries the seed instead of silently skipping the
+        // agent's commitments for the whole warm session.
+        if (seed || (seedWindow && seedAvailable)) await this.ackWindowSeed();
         await this.persistThreadId(this.threadId);
       }
       this.busy = false;
