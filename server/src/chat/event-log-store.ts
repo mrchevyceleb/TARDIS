@@ -1127,10 +1127,10 @@ function mattAskHooks(key: string, persisted: PersistedEvent): void {
     // job, or handoff reply in the bg lane must not close Matt's unanswered
     // home-lane asks.
     const lane: 'home' | 'bg' = persisted.lane === 'bg' ? 'bg' : 'home';
-    const ev = persisted.ev as { type?: unknown; event?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> } };
+    const ev = persisted.ev as { type?: unknown; event?: unknown; parent_tool_use_id?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> } };
     if (!ev || typeof ev !== 'object') return;
     if (ev.type === 'event' && ev.event && typeof ev.event === 'object') {
-      const inner = ev.event as { type?: unknown; text?: unknown; imageCount?: unknown; attachments?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> }; event?: unknown };
+      const inner = ev.event as { type?: unknown; text?: unknown; imageCount?: unknown; attachments?: unknown; parent_tool_use_id?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> }; event?: unknown };
       if (inner.type === '_user_echo') {
         // Image- or attachment-only echoes are asks too: with no text they
         // open the timer on a placeholder snippet instead of being dropped.
@@ -1141,14 +1141,20 @@ function mattAskHooks(key: string, persisted: PersistedEvent): void {
             : '';
         if (text) noteMattAsk(key, lane, text);
       }
-      if (inner.type === 'assistant' && inner.message && typeof inner.message === 'object' && inner.message.role === 'assistant') {
-        if (hasVisibleText(inner.message)) closeMattAsksForLane(key, lane);
-      }
-      if (inner.type === 'stream_event' && streamedVisibleText(inner.event)) {
-        closeMattAsksForLane(key, lane);
+      // A subagent's stream is private work, not the lane's visible reply to
+      // Matt (the same parent_tool_use_id filtering reads.ts, useChat, and
+      // replayDelivery apply): its text never closes an ask.
+      const subagent = typeof ev.parent_tool_use_id === 'string' || typeof inner.parent_tool_use_id === 'string';
+      if (!subagent) {
+        if (inner.type === 'assistant' && inner.message && typeof inner.message === 'object' && inner.message.role === 'assistant') {
+          if (hasVisibleText(inner.message)) closeMattAsksForLane(key, lane);
+        }
+        if (inner.type === 'stream_event' && streamedVisibleText(inner.event)) {
+          closeMattAsksForLane(key, lane);
+        }
       }
     }
-    if (ev.type === 'stream_event' && streamedVisibleText(ev.event)) {
+    if (ev.type === 'stream_event' && typeof ev.parent_tool_use_id !== 'string' && streamedVisibleText(ev.event)) {
       closeMattAsksForLane(key, lane);
     }
     if (ev.type === 'assistant' && ev.message && typeof ev.message === 'object' && ev.message.role === 'assistant') {
