@@ -614,6 +614,18 @@ function describeCard(c) {
   return `- [${c.id}] ${c.title} · ${bits.join(' · ')}${lastLine}`;
 }
 
+/** Matt, Oct 14 (card-d7bf78 c): the deny list's command match. No lane may
+ *  run gh workflow disable through a TARDIS-run command. The match is on
+ *  the parsed token shape (whitespace-split with quotes stripped), never a
+ *  substring of the raw source, so trivially obfuscated spellings and
+ *  harmless commands that merely contain the phrase are both handled; shell
+ *  indirection ($(echo ...)) remains outside any text match and is the
+ *  stated open edge. */
+function deniesGhWorkflowDisable(command) {
+  const tokens = String(command ?? '').split(/\s+/).map((t) => t.replace(/^["']+|["']+$/g, '')).filter(Boolean);
+  return tokens[0]?.toLowerCase() === 'gh' && tokens[1]?.toLowerCase() === 'workflow' && tokens[2]?.toLowerCase() === 'disable';
+}
+
 async function callTool(name, args, signal) {
   // The runner turns this call into a visible message in the thread; the tool itself only acknowledges.
   if (name === 'reply_now' && REPLY_NOW_ENABLED) {
@@ -924,7 +936,7 @@ async function callTool(name, args, signal) {
     // Matt, Oct 14 (card-d7bf78 c): the deny list — no lane may run gh
     // workflow disable through a TARDIS-run command, watch_job's command
     // path included.
-    if (/\bgh\s+workflow\s+disable\b/i.test(String(args.command ?? ''))) {
+    if (deniesGhWorkflowDisable(args.command)) {
       throw new Error('gh workflow disable is blocked from lanes; only Matt or Max may disable a workflow.');
     }
     const picked = ['pid', 'file', 'command'].filter((key) => args[key] !== undefined && args[key] !== null && String(args[key]).trim() !== '');
@@ -982,7 +994,7 @@ async function callTool(name, args, signal) {
     // GitHub Actions workflow through a TARDIS-run command. Engine-native
     // shells are outside this server's reach and are reported as the open
     // edge.
-    if (/\bgh\s+workflow\s+disable\b/i.test(String(args.command ?? ''))) {
+    if (deniesGhWorkflowDisable(args.command)) {
       throw new Error('gh workflow disable is blocked from lanes; only Matt or Max may disable a workflow.');
     }
     const { job } = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ agentId: agent.id, lane: LANE, name: args.name, command: args.command, cwd: args.cwd, timeoutMin: args.timeoutMin }) }, signal);
@@ -1018,7 +1030,7 @@ async function callTool(name, args, signal) {
       // Matt, Oct 14 (card-d7bf78 c): the deny list — no lane may pause or
       // disable a routine; that is exactly the silent-off class this exists
       // to stop. Matt and Max keep full control through the panel.
-      if (args.paused === true) throw new Error('routine pause/disable is blocked from lanes; only Matt or Max can pause a routine.');
+      if (args.paused === true || args.paused === 'true') throw new Error('routine pause/disable is blocked from lanes; only Matt or Max can pause a routine.');
       const patch = {};
       for (const key of ['name', 'schedule', 'prompt', 'paused']) if (args[key] !== undefined) patch[key] = args[key];
       if (!Object.keys(patch).length) throw new Error('Nothing to change.');
