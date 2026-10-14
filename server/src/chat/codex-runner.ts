@@ -637,6 +637,7 @@ export class CodexSession {
             imageCount: images?.length ?? 0,
             attachments: steerAttachments,
             clientMsgId: opts.clientMsgId,
+            humanOrigin: opts.humanOrigin === true,
             ts: Date.now(),
           },
         });
