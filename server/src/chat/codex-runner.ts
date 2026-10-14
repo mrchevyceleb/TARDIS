@@ -1127,10 +1127,21 @@ export class CodexSession {
         // Acknowledge a CONFIRMED seed only: a real seed, or a confirmed-empty
         // one (the second turn must not re-seed a warm session). An unconfirmed
         // primer — empty OR nonempty-partial (history without the commitments
-        // half) — leaves the window open, so the next turn retries the
-        // commitments instead of the warm session silently losing them.
+        // half) — discards the thread and leaves the window open instead: the
+        // next turn seeds the full primer on a genuinely fresh thread, so the
+        // commitments are retried without re-seeding history into the warm
+        // one (a persistent failure must not replay growing history every
+        // turn).
         if (seedAvailable && (seed || seedWindow)) await this.ackWindowSeed();
-        await this.persistThreadId(this.threadId);
+        else if (seedWindow && !seedAvailable) {
+          const unconfirmedThread = this.threadId;
+          this.threadId = null;
+          await this.clearPersistedThreadId().catch(() => undefined);
+          console.warn(
+            `[chat codex] discarding unconfirmed-seed thread ${unconfirmedThread} on ${this.logKey} — the next turn reseeds fresh`,
+          );
+        }
+        if (this.threadId) await this.persistThreadId(this.threadId);
       }
       this.busy = false;
       const rotationDue = contextRotationDue(this.logKey) && code === 0;

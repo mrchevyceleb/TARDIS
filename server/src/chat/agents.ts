@@ -259,10 +259,26 @@ export function listAgents(): Agent[] {
   }
 }
 
-/** The strict roster read: read/parse failures propagate instead of reading
- *  as an empty roster, so availability-sensitive callers can tell a broken
- *  roster (unavailable) from a confirmed one. */
+/** The strict roster read: read/parse/STRUCTURE failures propagate instead
+ *  of reading as an empty roster, so availability-sensitive callers can tell
+ *  a broken roster (unavailable) from a confirmed one: the file must be an
+ *  object whose `agents` is an array of objects each carrying a nonempty
+ *  string id. The fail-open listAgents() wrapper is unchanged for every
+ *  other caller. */
 export function listAgentsOrThrow(): Agent[] {
+  const data: unknown = JSON.parse(readFileSync(AGENTS_FILE, 'utf8'));
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('roster file is not an object');
+  }
+  const rawAgents = (data as { agents?: unknown }).agents;
+  if (!Array.isArray(rawAgents)) {
+    throw new Error('roster file has no agents array');
+  }
+  for (const raw of rawAgents) {
+    if (!raw || typeof raw !== 'object') throw new Error('roster agent entry is not an object');
+    const id = (raw as Record<string, unknown>).id;
+    if (typeof id !== 'string' || !id) throw new Error('roster agent entry is missing its id');
+  }
   return loadAgents();
 }
 
