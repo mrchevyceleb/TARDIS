@@ -72,9 +72,49 @@ export type DeskCard = {
   updatedAt: string;
   /** When the card entered its current column (for "parked 4d" ages). */
   columnSince: string;
+  /** Silence is an event (card-baadaf A): every In progress / In QA card
+   *  carries a check-in deadline set by the owner's last touch (create,
+   *  move, or comment: default and maximum 30 minutes out). The hygiene tick
+   *  nudges the owner when it passes; 15 quiet minutes later it nudges the
+   *  Chief. Only a new touch (a fresh nextCheckAt) clears the nudges. */
+  nextCheckAt?: string;
+  nudgeAt?: string;
+  escalatedAt?: string;
   createdBy?: DeskActor;
   archived?: boolean;
 };
+
+/** The check-in window: every owner touch sets a deadline this far out, and
+ *  no touch can push it further. */
+export const CARD_NEXT_CHECK_MS = 30 * 60_000;
+/** Quiet time after the owner nudge before the Chief copy. */
+export const CARD_CHECK_ESCALATE_MS = 15 * 60_000;
+
+function validIso(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '' && Number.isFinite(Date.parse(value));
+}
+
+/** The card owner's candidate recipient (an id or name). The quiet sweep
+ *  resolves this against the live roster and routes to the Chief when the
+ *  candidate is not a live agent; the data layer never resolves the roster
+ *  itself (it has no dependency on the agent list). */
+function cardOwnerCandidate(card: DeskCard): string {
+  if (card.owner.kind !== 'agent') return 'chief-of-staff';
+  const candidate = typeof card.owner.id === 'string' && card.owner.id ? card.owner.id : card.owner.name;
+  return candidate || 'chief-of-staff';
+}
+
+function touchCardNextCheck(card: DeskCard, nowIso: string): void {
+  if (card.column === 'in_progress' || card.column === 'in_qa') {
+    card.nextCheckAt = new Date(Date.parse(nowIso) + CARD_NEXT_CHECK_MS).toISOString();
+    delete card.nudgeAt;
+    delete card.escalatedAt;
+  } else {
+    delete card.nextCheckAt;
+    delete card.nudgeAt;
+    delete card.escalatedAt;
+  }
+}
 
 export type DeskData = { version: 1; rev: number; todos: DeskTodo[]; cards: DeskCard[] };
 
@@ -302,7 +342,20 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     createdAt: isoOr(raw.createdAt, now),
     updatedAt,
     columnSince: isoOr(raw.columnSince, updatedAt),
+    ...(validIso(raw.nextCheckAt) ? { nextCheckAt: raw.nextCheckAt as string } : {}),
+    ...(validIso(raw.nudgeAt) ? { nudgeAt: raw.nudgeAt as string } : {}),
+    ...(validIso(raw.escalatedAt) ? { escalatedAt: raw.escalatedAt as string } : {}),
   };
+  // P0 read-repair: an existing live card that never carried a check-in
+  // deadline (it predates this feature) gets one seeded from its last update,
+  // bounded to 30 minutes out from the moment it was read, so the sweep covers
+  // every live card from deployment day, not only new ones.
+  if ((card.column === 'in_progress' || card.column === 'in_qa') && !card.nextCheckAt) {
+    // Clamped to at most now + 30 minutes out, so a stale updatedAt can never
+    // postpone the first check past the maximum window.
+    const base = Math.min(Date.parse(updatedAt || now), Date.parse(now));
+    card.nextCheckAt = new Date(base + CARD_NEXT_CHECK_MS).toISOString();
+  }
   const description = clip(raw.description, DESK_LIMITS.description);
   if (description) card.description = description;
   const project = oneLine(raw.project, DESK_LIMITS.project);
@@ -816,6 +869,7 @@ export function createCard(input: CardInput, owner: DeskActor, by: DeskActor, op
     if (description) card.description = description;
     const project = requireOneLine(input.project, DESK_LIMITS.project, 'project');
     if (project) card.project = project;
+    touchCardNextCheck(card, now);
     pruneCards(data);
     placeCard(data, card, typeof input.index === 'number' ? input.index : undefined);
     return card;
@@ -847,6 +901,10 @@ export function updateCard(id: string, input: CardInput, owner?: DeskActor): Pro
       }
     }
     card.updatedAt = now;
+    // Every PATCH is an owner touch too: a column change into or out of the
+    // live columns sets or clears the deadline, and a reassignment refreshes
+    // it so the new owner gets their own 30-minute window, not the old one's.
+    touchCardNextCheck(card, now);
     return card;
   }));
 }
@@ -861,6 +919,7 @@ export function moveCard(id: string, column: unknown, index?: unknown): Promise<
     }
     delete card.archived;
     card.updatedAt = now;
+    touchCardNextCheck(card, now);
     const at = typeof index === 'number' && Number.isFinite(index) ? index : undefined;
     placeCard(data, card, at);
     return card;
@@ -883,8 +942,59 @@ export function commentCard(id: string, text: unknown, author: DeskActor): Promi
     };
     card.comments.push(comment);
     card.updatedAt = now;
+    // A comment is an owner touch: it refreshes the check-in deadline and
+    // clears any pending nudges, exactly like a create or a move. It also
+    // closes the commenter's open Matt asks (card-baadaf B: the card touch is
+    // the close), best effort.
+    touchCardNextCheck(card, now);
     return { card, comment };
   });
+}
+
+/** One hygiene sweep over the check-in deadlines (card-baadaf A): returns the
+ *  nudges that are due now (the owner nudge when a live card's nextCheckAt
+ *  passed with no touch since, the Chief copy 15 quiet minutes after the
+ *  owner nudge), having already marked them on the cards, so a crash can
+ *  drop a nudge but never repeat one. A touch that sets a fresh nextCheckAt
+ *  clears both marks. */
+export async function sweepCardChecks(): Promise<Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>> {
+  const due: Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }> = [];
+  await mutate((data, now) => {
+    const nowMs = Date.parse(now);
+    for (const card of data.cards) {
+      if (card.archived) continue;
+      if (card.column !== 'in_progress' && card.column !== 'in_qa') continue;
+      const next = card.nextCheckAt ? Date.parse(card.nextCheckAt) : NaN;
+      if (!Number.isFinite(next) || next > nowMs) continue;
+      // Resolve the owner against the roster, not just the stored id: a
+      // human-owned card (owner.kind 'human', id 'owner') or a stale agent id
+      // is not a deliverable teammate, so those route to the Chief.
+      const ownerAgent = cardOwnerCandidate(card);
+      if (!card.nudgeAt) {
+        card.nudgeAt = now;
+        due.push({
+          kind: 'owner',
+          card,
+          to: ownerAgent,
+          text: ownerAgent === 'chief-of-staff'
+            ? `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since (you own this one). Comment on the card to set a new one.`
+            : `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since. Comment on the card to set a new one, or tell Max what is blocking it.`,
+        });
+      } else if (!card.escalatedAt && nowMs - Date.parse(card.nudgeAt) >= CARD_CHECK_ESCALATE_MS && ownerAgent !== 'chief-of-staff') {
+        // The Chief's own cards never get the separate Chief copy: the owner
+        // nudge already reached the Chief, so a second one is noise.
+        card.escalatedAt = now;
+        due.push({
+          kind: 'chief',
+          card,
+          to: 'chief-of-staff',
+          text: `Silence flag: ${ownerAgent}'s card [${card.id}] "${card.title}" (${card.column}) went quiet past its check-in time and stayed quiet 15 minutes after the nudge. It went to them; make sure they act on it.`,
+        });
+      }
+    }
+    return due.length > 0 ? due : (new Unchanged(due) as unknown as Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>);
+  });
+  return due;
 }
 
 export function deleteComment(cardId: string, commentId: string): Promise<DeskCard> {

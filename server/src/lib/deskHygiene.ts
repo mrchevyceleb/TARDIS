@@ -653,9 +653,28 @@ export function startDeskHygieneScheduler(): boolean {
   const run = () => {
     if (inFlight) return;
     inFlight = true;
-    void runDeskHygieneTick()
+    // The quiet check sweep runs independently of the hygiene tick: a
+    // recurring failure in unrelated hygiene work must never suppress
+    // deadline processing.
+    void Promise.allSettled([runDeskHygieneTick(), sweepQuietChecks()])
       .catch((error) => console.warn(`[desk-hygiene] tick failed: ${(error as Error).message}`))
       .finally(() => { inFlight = false; });
+  };
+  /** Silence is an event (card-baadaf A): the check-in deadlines ride the
+   *  same 60s tick. Best effort and fail-open like every hygiene piece. */
+  const sweepQuietChecks = async () => {
+    try {
+      const { sweepCardChecks } = await import('./deskStore.ts');
+      const { deliverTeamMessage } = await import('../chat/teamBus.ts');
+      const due = await sweepCardChecks();
+      for (const nudge of due) {
+        const sent = await deliverTeamMessage({ from: 'Desk', to: nudge.to, text: nudge.text, wait: false });
+        if (!sent.delivered) console.warn(`[desk-hygiene] quiet check to ${nudge.to} for ${nudge.card.id} not delivered: ${sent.reason}`);
+      }
+      if (due.length) console.log(`[desk-hygiene] quiet checks: ${due.length} due, delivered best effort`);
+    } catch (error) {
+      console.warn(`[desk-hygiene] quiet check sweep failed: ${(error as Error).message}`);
+    }
   };
   timer = setInterval(run, TICK_MS);
   timer.unref();
