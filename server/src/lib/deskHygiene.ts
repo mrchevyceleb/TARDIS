@@ -62,11 +62,12 @@ const MAX_LINES = 10;
 const MAX_SENDS_PER_TICK = 4;
 const TITLE_MAX = 80;
 
-// Only Kip and Max create, move or update cards (Matt, Oct 9 2026). Every nudge
-// to anyone else reports movement instead of telling them to touch the board.
+// Stale-card nudges tell every owner to move their own cards (Matt, Oct 14
+// 2026, changing Oct 9): move it yourself, then report the movement in one
+// line to Kip (Rally) or Max (the rest). The no-card reminder below still
+// splits by who cards the work (board_cards first) vs reporting it.
 const BOARD_MUTATORS = new Set(['kip', 'chief-of-staff']);
-const STALE_HEAD = 'These Desk cards look stale. Move or update each one now (board_card_move / board_card_comment), or tell me why not.\nParking in Pipeline is not a way to clear this list.';
-const STALE_HEAD_REPORT = 'These Desk cards look stale. Report movement for each one to Kip (Rally) or Max via team_message (what moved, and where it stands), or tell me why not.';
+const STALE_HEAD = 'These Desk cards look stale. Move or update each one now (board_card_move / board_card_comment), then tell Kip (Rally) or Max in one line what moved and where it stands, or tell me why not.\nParking in Pipeline is not a way to clear this list.';
 
 const PIPELINE_HEAD = 'Pipeline is only for work blocked outside the team or parked by Matt. For each card: restart it (Up next), finish it (Done: shipped is Done, owed proof is not a reason to keep a card open), hand it to whoever has the ball (board_card_update owner), or close it as Done if it\'s a duplicate or dead. Re-parking needs a new reason and what restarts it.';
 
@@ -251,7 +252,7 @@ function composeMessage(finding: Finding, ownerName: string, nowMs: number, reci
       return `[desk:${card.id}] "${cleanTitle(card.title)}" (${why})`;
     });
     if (finding.stale.length > MAX_LINES) lines.push(`+${finding.stale.length - MAX_LINES} more`);
-    blocks.push([BOARD_MUTATORS.has(recipientId) ? STALE_HEAD : STALE_HEAD_REPORT, ...lines].join('\n'));
+    blocks.push([STALE_HEAD, ...lines].join('\n'));
   }
   if (finding.pipeline.length) {
     const lines = finding.pipeline.slice(0, MAX_LINES).map(({ card, lastMs }) =>
