@@ -731,7 +731,14 @@ export class CodexSession {
     const seedStatus = hasSeedOverride
       ? { primer: opts.seedOverride as string, available: true }
       : seedWindow
-        ? await peekEnginePrimerThroughSeqWithStatus(this.logKey, historyThroughSeq, fallbackHistory)
+        ? await peekEnginePrimerThroughSeqWithStatus(this.logKey, historyThroughSeq, fallbackHistory).catch((e) => {
+            // A peek/compaction failure after the user's message was accepted
+            // must not strand a busy lane with the reply watcher armed: keep
+            // going unseeded, the same degradation the empty-retry path uses
+            // (and report it unavailable so the window retries next turn).
+            console.warn(`[chat codex] seed peek failed on ${this.logKey}, continuing unseeded: ${(e as Error).message}`);
+            return { primer: '', available: false };
+          })
         : { primer: '', available: true };
     const seed = seedStatus.primer;
     const seedAvailable = seedStatus.available;
