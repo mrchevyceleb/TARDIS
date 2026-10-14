@@ -34,11 +34,19 @@ import { isSyntheticApiErrorEvent, isSyntheticApiErrorText } from './providerErr
 export const WINDOW_TURNS = 50;
 /** Clip a single visible turn so one essay cannot blow the window. */
 export const MAX_TURN_CHARS = 3000;
-/** Fold aged-out conversation in predictable 50-message batches. The last
- *  50 remain the working window; the next 50 accumulate visibly behind that
- *  window before one rolling-compact overwrite. Never compact merely because
- *  a single answer was long or the raw event log is busy. */
-export const COMPACT_BATCH_TURNS = 50;
+/** Fold aged-out conversation in predictable batches. The last 50 remain
+ *  the working window; the next batch accumulates visibly behind that window
+ *  before one rolling-compact overwrite. Never compact merely because a
+ *  single answer was long or the raw event log is busy. 75 messages per
+ *  batch (Matt, Oct 14, Max's diagnosis; review round 1 bounded it): the
+ *  old 50-message cap was the binding constraint (the byte budget is 244k
+ *  chars and observed batches ran 13-32k), and one 50-message fold per
+ *  ~5-minute generation could not keep up with a hot lane at 15-25 messages
+ *  a minute, so the rolling document lagged hours behind while its covered
+ *  sequence advanced. 75 is the largest batch that can never exceed the
+ *  240 KiB raw-overflow slot (75 x the 3000-char turn cap = 225k chars), so
+ *  no aged turn ever falls out of model context between folds. */
+export const COMPACT_BATCH_TURNS = 75;
 /** Skip --resume of a jsonl that is already a tool-novel dump. Spawn-time only. */
 export const JSONL_RESUME_SKIP_BYTES = 64 * 1024;
 /** Raw unmerged overflow in the compact slot is bounded so a restart cannot

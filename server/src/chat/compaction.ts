@@ -891,8 +891,13 @@ const PENDING_FACTS_CAP = 100;
 /** Drain bounds: at most this many pending facts are saved per compaction
  *  pass, and the drain gives up softly after this long so a slow or partially
  *  failing RAG cannot stall the triggering lane's turn for minutes. The
- *  remainder stays in the outbox and retries on the next compaction. */
-const DRAIN_BATCH_MAX = 20;
+ *  remainder stays in the outbox and retries on the next compaction. The
+ *  full outbox drains per pass (Matt, Oct 14, Max's diagnosis): at 20 per
+ *  pass the outbox pinned at its 100 cap while hot folds extracted 10 facts
+ *  each, and every extraction at the cap was retained inside the document
+ *  instead, bloating it past its word target and squeezing the newest
+ *  batch's material out of every regeneration. */
+const DRAIN_BATCH_MAX = 100;
 const DRAIN_DEADLINE_MS = 15_000;
 
 /** Unpredictable per-generation durable-facts marker. A fixed marker is
