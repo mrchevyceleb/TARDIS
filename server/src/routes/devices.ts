@@ -218,7 +218,8 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
 const TRENZALORE_LANES = new Set(['riley', 'tim', 'piper', 'felix']);
 export function trenzaloreRefusal(deviceRef: string, owner: string): string | null {
   let target: ReturnType<typeof findDevice>;
-  try { target = deviceRef ? findDevice(deviceRef) : undefined; } catch { return null; }
+  // An empty ref resolves to the sole linked computer, exactly as callDevice does.
+  try { target = findDevice(deviceRef); } catch { return null; }
   if (!target || target.name.trim().toLowerCase() !== 'trenzalore') return null;
   if (!owner) return null;
   let chatId = owner;
