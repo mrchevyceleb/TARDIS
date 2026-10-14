@@ -21,6 +21,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { MAX_EVENTS_PER_LOG, STATE_DIR } from './config.ts';
 import { callMcp } from '../lib/mcp.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
+import { Agent, fetch as undiciFetch } from 'undici';
 import { redactSecrets } from './secretRedaction.ts';
 import { flushEventLog, loadEventLogArchiveSync, loadEventLogForCompactionSync } from './event-log-store.ts';
 import { ROTATION_COMPACT_DEADLINE_MS, ROTATION_VERBATIM_TAIL_CHARS } from './contextBudget.ts';
@@ -1071,6 +1072,14 @@ async function saveDurableFacts(
   return { saved, resolvedKeys };
 }
 
+/** One undici agent for the compaction generation call only: a big fold's
+ *  generation runs long past undici's 300s default headers/body timeouts
+ *  (Oct 14: Tim's 46.8k-char batch died four times at 307-317s, each a bare
+ *  "fetch failed" with the real error hidden in the cause). Generous bounded
+ *  timeouts, never unbounded — and only for this call; every other fetch
+ *  keeps the defaults. */
+const COMPACT_GENERATION_AGENT = new Agent({ headersTimeout: 900_000, bodyTimeout: 900_000 });
+
 async function generateCompact(previous: string, overflow: VisibleTurn[], maxTokens = COMPACT_MAX_TOKENS): Promise<{ compact: string; words: number; facts: DurableFact[] }> {
   // Redact BEFORE sending the prompt to the compaction provider, then redact
   // the generated document again before it touches local disk or RAG.
@@ -1098,8 +1107,9 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
   userContent = `${userContent}\n\nEnd the document with the durable-facts section your rules describe: one line containing exactly ${sentinel} followed immediately by the bare JSON array (or ${sentinel} followed by [] when there are no durable facts).`;
 
   await ensureXaiProxy();
-  const res = await fetch(`${xaiProxyBaseUrl().replace(/\/$/, '')}/v1/messages`, {
+  const res = await undiciFetch(`${xaiProxyBaseUrl().replace(/\/$/, '')}/v1/messages`, {
     method: 'POST',
+    dispatcher: COMPACT_GENERATION_AGENT,
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${xaiProxySecret()}`,
@@ -1408,7 +1418,11 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
     );
     return true;
   } catch (err) {
-    console.warn(`[compaction] ${key}: compact failed, will retry:`, (err as Error).message);
+    // The bare message hides the transport cause (an undici timeout shows up
+    // as "fetch failed" with the real error in .cause), so surface the cause
+    // too: the Oct 14 timeout diagnosis took four blind retries to pin.
+    const cause = (err as { cause?: unknown })?.cause;
+    console.warn(`[compaction] ${key}: compact failed, will retry:`, (err as Error).message, cause ? `cause: ${String(cause)}` : '');
     return false;
   } finally {
     inFlight.delete(key);
