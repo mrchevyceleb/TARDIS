@@ -732,11 +732,30 @@ export class CodexSession {
     }
 
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
-    // login; everything else keeps the per-repo account-map resolution. Resolved
-    // before the seed so the rollout lookup below reads the same CODEX_HOME the
-    // turn will bill.
-    const forcedAccount = accountFromChatId(this.chatId);
-    const childEnv = forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd);
+    // login; a per-agent pin (RIVENDELL_AGENT_ACCOUNTS) comes next; everything
+    // else keeps the per-repo account-map resolution. Resolved before the seed
+    // so the rollout lookup below reads the same CODEX_HOME the turn will bill
+    // and spawn in — the SAME resolution the spawn uses (a chat-only lookup
+    // here would scan the default account's home for an agent-pinned lane and
+    // falsely prove its live rollout missing). A pin that cannot be honored
+    // throws, so resolve inside a guard that unwedges the session (mirrors
+    // the spawn's block below).
+    let childEnv: NodeJS.ProcessEnv;
+    try {
+      const forcedAccount = accountFromChatId(this.chatId) ?? accountForAgent(agentForChatId(this.chatId)?.name);
+      childEnv = forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd);
+    } catch (err) {
+      cleanupImages();
+      this.busy = false;
+      this.emit({
+        type: 'error',
+        code: 'CODEX_ACCOUNT_PIN_UNAVAILABLE',
+        retryable: true,
+        message: `account pin unavailable: ${(err as Error).message}`,
+      });
+      this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
+      return;
+    }
     // Resuming a rollout codex no longer has fails the whole turn with "no
     // rollout found for thread id …" before the model sees the prompt. Check
     // first: an unresumable thread becomes a fresh one seeded with the compact

@@ -100,10 +100,14 @@ export async function codexRolloutMissing(codexHome: string, threadId: string): 
         continue;
       }
       if (!entry.isFile()) continue;
-      // `.jsonl` and codex's compressed `.jsonl.zst` are both live rollouts.
-      if (!entry.name.startsWith('rollout-') || !entry.name.includes('.jsonl')) continue;
+      // `.jsonl` and codex's compressed `.jsonl.zst` are both live rollouts:
+      // anchored extensions only (a `rollout-*.jsonl.bak` is not one), and the
+      // thread id must be the filename's final segment before the extension,
+      // matched exactly — a substring id must never match an unrelated rollout.
+      const isRolloutFile = /\.(jsonl|jsonl\.zst)$/.test(entry.name);
+      if (!entry.name.startsWith('rollout-') || !isRolloutFile) continue;
       sawAnyRollout = true;
-      if (entry.name.includes(threadId)) return true;
+      if (entry.name.endsWith(`-${threadId}.jsonl`) || entry.name.endsWith(`-${threadId}.jsonl.zst`)) return true;
     }
     return false;
   };
