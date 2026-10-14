@@ -127,7 +127,7 @@ function tokenize(text: string): Set<string> {
  *  (atlas → atla, which collides only with itself); a tested inflection
  *  stemmer is future work, not this change. */
 function foldToken(token: string): string {
-  let t = token.replace(/['\u2019]s$/i, '');
+  let t = token.replace(/s?['\u2019]$/i, '').replace(/['\u2019]s$/i, '');
   if (t.length > 4 && /s$/i.test(t) && !/(?:ss|us|is)$/i.test(t)) t = t.replace(/s$/i, '');
   return t;
 }
@@ -477,8 +477,8 @@ export async function recallBlockForTurn(args: {
     // A single distinctive token ("the Mini", cuttlefish) is a real question,
     // not chit-chat: it searches with the one-token bar instead of the default
     // two-token bar that silently dropped it.
-    const lone = queryTokens.size === 1 ? [...queryTokens][0] : undefined;
-    const bar = lone !== undefined && lone.length >= 4 && !/^\p{N}+$/u.test(lone) ? 1 : MIN_MATCH_TOKENS;
+    const lone = queryTokens.size === 1 ? foldToken([...queryTokens][0]) : undefined;
+    const bar = lone !== undefined && lone.length >= 4 && !STOPWORDS.has(lone) && !/^\p{N}+$/u.test(lone) ? 1 : MIN_MATCH_TOKENS;
     const work = (async () => {
       const [memoryHits, deskHits, mcpHits, notesHits] = await Promise.all([
         withDeadline(memoryFileHits(args.cli, args.cwd, queryTokens, bar), LOCAL_BUDGET_MS, [] as RecallHit[]),
