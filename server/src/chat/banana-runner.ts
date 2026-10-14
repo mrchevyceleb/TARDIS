@@ -3029,7 +3029,7 @@ export class BananaSession {
       return;
     }
     const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
-    const effectiveText = `${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation')}\n\n${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${commandExpandedText}`;
+    const effectiveText = `${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, false, true)}\n\n${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${commandExpandedText}`;
     if (seed) {
       this.turn.recoveryRecapUsed = true;
       this.emit({
