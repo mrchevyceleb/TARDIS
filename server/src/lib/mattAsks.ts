@@ -48,7 +48,7 @@ function readAsks(): AskStore {
     const parsed = JSON.parse(raw) as { asks?: unknown };
     if (!parsed || !Array.isArray(parsed.asks)) return { asks: [] };
     const asks: MattAsk[] = [];
-    for (const item of parsed.asks.slice(0, 500)) {
+    for (const item of parsed.asks) {
       if (!item || typeof item !== 'object') continue;
       const a = item as Record<string, unknown>;
       if (typeof a.id !== 'string' || typeof a.agentId !== 'string' || typeof a.logKey !== 'string' || typeof a.text !== 'string') continue;
@@ -173,37 +173,38 @@ export function sweepMattAsks(): Array<{ kind: 'agent' | 'chief'; to: string; te
     for (const c of listCommitments()) {
       if (!c.due || !c.dueAt) continue;
       if (c.dueAt > now) continue;
-      if (c.agentId === 'chief-of-staff') continue;
-      if (!c.raised?.owner && !c.raised?.chief) {
-        // First encounter: nudge the owner and the Chief together (the
-        // commitment sweep in PR #180 does this per-recipient with
-        // delivery-confirmed marks; this is the simple version).
+      if (c.agentId === 'chief-of-staff') {
+        // A Chief-owned commitment nudges the Chief as the owner (once),
+        // deduplicated: no separate Chief copy of the Chief's own nudge.
+        if (!c.raised?.owner) {
+          due.push({
+            kind: 'agent',
+            to: c.agentId,
+            text: `Your commitment [${c.id}] "${c.text}" (due ${c.due}) is past due. Clear it with the commitments tool.`,
+          });
+          markCommitmentRaised(c.id, 'owner');
+        }
+        continue;
+      }
+      if (!c.raised?.owner) {
         due.push({
           kind: 'agent',
           to: c.agentId,
           text: `Your commitment [${c.id}] "${c.text}" (due ${c.due}) is past due. Clear it with the commitments tool.`,
         });
+        markCommitmentRaised(c.id, 'owner');
+      }
+      if (!c.raised?.chief) {
         due.push({
           kind: 'chief',
           to: 'chief-of-staff',
           text: `Past-due commitment: ${c.agentId}'s [${c.id}] "${c.text}" (due ${c.due}). It went to them; make sure they act on it.`,
         });
-        // Mark both so the next sweep doesn't repeat.
-        markRaised(c.id);
+        markCommitmentRaised(c.id, 'chief');
       }
     }
   } catch {
     // Same fail-open.
   }
   return due;
-}
-
-/** Mark a commitment raised (both recipients) in the commitment store. */
-function markRaised(id: string): void {
-  try {
-    markCommitmentRaised(id, 'owner');
-    markCommitmentRaised(id, 'chief');
-  } catch {
-    // Never block the sweep on a store hiccup.
-  }
 }

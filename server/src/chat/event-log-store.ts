@@ -1094,21 +1094,29 @@ export function flushAllEventChains(): Promise<void> {
  *  close on any assistant text in that lane. Clean event-type markers, no
  *  regex; fire-and-forget inside the write chain so a store hiccup never
  *  blocks the durable append. */
+/** Only a visible text block (the reply Matt actually sees) closes an ask:
+ *  thinking-only, tool-use-only, or empty assistant messages must not stop
+ *  the timer (the exact miss from Oct 8 and Oct 11). */
+function hasVisibleText(message: { content?: Array<{ type?: string; text?: string }> }): boolean {
+  if (!Array.isArray(message.content)) return false;
+  return message.content.some((block) => block && block.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0);
+}
+
 function mattAskHooks(key: string, persisted: PersistedEvent): void {
   try {
     const ev = persisted.ev as { type?: unknown; event?: { type?: unknown; text?: unknown }; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> } };
     if (!ev || typeof ev !== 'object') return;
     if (ev.type === 'event' && ev.event && typeof ev.event === 'object') {
-      const inner = ev.event as { type?: unknown; text?: unknown; message?: { role?: unknown } };
+      const inner = ev.event as { type?: unknown; text?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> } };
       if (inner.type === '_user_echo' && typeof inner.text === 'string' && inner.text.trim()) {
         noteMattAsk(key, inner.text);
       }
       if (inner.type === 'assistant' && inner.message && typeof inner.message === 'object' && inner.message.role === 'assistant') {
-        closeMattAsksForLane(key);
+        if (hasVisibleText(inner.message)) closeMattAsksForLane(key);
       }
     }
     if (ev.type === 'assistant' && ev.message && typeof ev.message === 'object' && ev.message.role === 'assistant') {
-      closeMattAsksForLane(key);
+      if (hasVisibleText(ev.message)) closeMattAsksForLane(key);
     }
   } catch {
     // Never block the durable append on an ask-store hiccup.
