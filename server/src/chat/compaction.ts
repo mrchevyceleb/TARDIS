@@ -40,7 +40,13 @@ import { listAgentsOrThrow } from './agents.ts';
 import { listCommitments } from '../lib/commitmentStore.ts';
 
 const MIN_ACCEPT_WORDS = 400;
-const COMPACT_MAX_TOKENS = 8000;
+/** Live generation ceiling. Every lane's rolling document now sits at
+ *  4.2-4.6k words, so a full rewrite plus the durable-facts section no
+ *  longer fits in 8000 tokens: from Oct 13 every live fold hit the cap, was
+ *  refused (#170) and retried the same batch forever, freezing every lane's
+ *  memory. Same ceiling as the rebuild; the COMPACT_SYSTEM word target still
+ *  governs length. */
+const COMPACT_MAX_TOKENS = 16_000;
 /** The length target's ceiling (COMPACT_SYSTEM): the thin-document guard
  *  measures the previous document against this, so a compliant replacement
  *  for a legacy 5000-word compact is not read as thin and retried forever. */
