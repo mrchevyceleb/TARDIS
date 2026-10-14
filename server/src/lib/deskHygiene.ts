@@ -676,12 +676,14 @@ export function startDeskHygieneScheduler(): boolean {
     try {
       const { sweepCardChecks } = await import('./deskStore.ts');
       const { deliverTeamMessage } = await import('../chat/teamBus.ts');
-      // The dry-run flag goes INTO the sweep: a dry run returns the due
-      // nudges read-only (nothing marked, nothing written), so previewing
-      // never consumes a notification that would then never be delivered.
-      const due = await sweepCardChecks({ dryRun: hygieneDryRun() });
+      // The dry-run flag goes INTO the sweep, captured ONCE: a dry run
+      // returns the due nudges read-only (nothing marked, nothing written),
+      // so previewing never consumes a notification that would then never be
+      // delivered — and the flag cannot flip between marking and delivery.
+      const dryRun = hygieneDryRun();
+      const due = await sweepCardChecks({ dryRun });
       for (const nudge of due) {
-        if (hygieneDryRun()) {
+        if (dryRun) {
           console.log(`[desk-hygiene] dry run, would quiet check ${nudge.to} for ${nudge.card.id}`);
           continue;
         }

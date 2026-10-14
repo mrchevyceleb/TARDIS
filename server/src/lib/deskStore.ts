@@ -340,7 +340,14 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
   // deadline (it predates this feature) gets one seeded from its last update,
   // bounded to 30 minutes out from the moment it was read, so the sweep covers
   // every live card from deployment day, not only new ones.
-  if (card.column === 'in_progress' || card.column === 'in_qa') {
+  if (card.archived || (card.column !== 'in_progress' && card.column !== 'in_qa')) {
+    // Archived and parked cards carry no check state: the sweep skips them,
+    // and a stale deadline or mark must not survive a read round-trip (an
+    // archive clears the fields; the next read must not re-create them).
+    delete card.nextCheckAt;
+    delete card.nudgeAt;
+    delete card.escalatedAt;
+  } else {
     // Every deadline is clamped to at most now + 30 minutes (not only newly
     // seeded ones): a parseable persisted nextCheckAt months ahead would
     // suppress checks indefinitely. A missing deadline is seeded; an existing
