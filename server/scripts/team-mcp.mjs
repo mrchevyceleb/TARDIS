@@ -196,6 +196,24 @@ const TOOLS = [
     },
   },
   {
+    name: 'priorities',
+    description:
+      "Matt's Priorities: the board Matt keeps for you on his Desk. Open items are stitched into every turn you get. " +
+      'Matt usually adds; you may list, add, reword, mark done, or remove items on your own board. ' +
+      'Mark an item done the moment it is truly finished.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'add', 'update', 'done', 'remove'], description: 'list your board, add an item, update an item\'s text, mark one done, or remove one' },
+        text: { type: 'string', description: 'One line: the item text (add) or the new text (update)' },
+        id: { type: 'string', description: 'The item id (from list) for update, done, or remove' },
+        from: { type: 'string', description: 'Your roster agent id. Only needed on engines whose tool server carries no identity (banana).' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'team_recent',
     description:
       "Read a teammate's recent thread messages (their last exchanges) — check what they " +
@@ -860,6 +878,39 @@ async function callTool(name, args, signal) {
     return [
       `Your open commitments (roster agent id ${agentId}; pass it as from for add/clear):`,
       ...commitments.map((c) => `- [${c.id}] ${c.text}${c.due ? ` — due ${c.due}` : ''}`),
+    ].join('\n');
+  }
+  if (name === 'priorities') {
+    // Boards are keyed by roster id only; a display name is not owner-proof.
+    const agent = process.env.RIVENDELL_AGENT_ID || (typeof args.from === 'string' ? args.from.trim() : '');
+    if (!agent) throw new Error('Pass from: your roster agent id.');
+    const action = typeof args.action === 'string' ? args.action : 'list';
+    const post = (path, body) => api(`/api/priorities/${path}`, { method: 'POST', body: JSON.stringify({ agent, by: agent, ...body }) }, signal);
+    const needId = () => {
+      if (typeof args.id !== 'string' || !args.id.trim()) throw new Error('Pass id: the item id from your list.');
+      return args.id;
+    };
+    if (action === 'add') {
+      const { item } = await post('add', { text: args.text });
+      return `Added to Matt's Priorities (id ${item.id}): ${item.text}`;
+    }
+    if (action === 'update') {
+      const { item } = await post('update', { id: needId(), text: args.text });
+      return `Updated ${item.id}: ${item.text}`;
+    }
+    if (action === 'done') {
+      const { item } = await post('update', { id: needId(), done: true });
+      return `Marked done: ${item.text}`;
+    }
+    if (action === 'remove') {
+      await post('remove', { id: needId() });
+      return `Removed ${args.id}.`;
+    }
+    const { items } = await api(`/api/priorities?agent=${encodeURIComponent(agent)}`, undefined, signal);
+    if (!items?.length) return "Matt's Priorities board for you is empty.";
+    return [
+      "Matt's Priorities (your board, in Matt's order):",
+      ...items.map((i, n) => `${n + 1}. [${i.id}]${i.done ? ' (done)' : ''} ${i.text}`),
     ].join('\n');
   }
   if (name === 'team_recent') {
