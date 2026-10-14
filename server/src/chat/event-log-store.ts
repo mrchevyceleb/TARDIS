@@ -1127,9 +1127,18 @@ function terminalResultText(frame: unknown): boolean {
   if (!frame || typeof frame !== 'object') return false;
   const f = frame as { type?: unknown; subtype?: unknown; is_error?: unknown; result?: unknown };
   if (f.type !== 'result') return false;
-  if (f.is_error === true || (typeof f.subtype === 'string' && f.subtype.includes('error'))) return false;
+  // Explicit success only: cancelled, interrupted, timed-out, or
+  // differently-cased/encoded error results must never close an ask on
+  // diagnostic text.
+  if (f.subtype !== 'success' || f.is_error === true) return false;
   return typeof f.result === 'string' && f.result.trim().length > 0;
 }
+
+/** Latest provider-message (turn) start per (logKey, lane), recorded from
+ *  persisted message_start frames: an ask only closes on output from a turn
+ *  that started after the ask arrived (an older turn still streaming when
+ *  Matt messaged must not close his newer ask with in-flight text). */
+const turnStartAtByLane = new Map<string, number>();
 
 function mattAskHooks(key: string, persisted: PersistedEvent): void {
   try {
@@ -1138,44 +1147,61 @@ function mattAskHooks(key: string, persisted: PersistedEvent): void {
     // job, or handoff reply in the bg lane must not close Matt's unanswered
     // home-lane asks.
     const lane: 'home' | 'bg' = persisted.lane === 'bg' ? 'bg' : 'home';
+    const laneKey = `${key}|${lane}`;
     const ev = persisted.ev as { type?: unknown; event?: unknown; parent_tool_use_id?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> } };
     if (!ev || typeof ev !== 'object') return;
+    const eventAt = typeof persisted.at === 'number' && Number.isFinite(persisted.at) ? persisted.at : Date.now();
+    const frameType = (frame: unknown): unknown => (!frame || typeof frame !== 'object') ? undefined : (frame as { type?: unknown }).type;
     if (ev.type === 'event' && ev.event && typeof ev.event === 'object') {
-      const inner = ev.event as { type?: unknown; text?: unknown; imageCount?: unknown; attachments?: unknown; parent_tool_use_id?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> }; event?: unknown };
-      if (inner.type === '_user_echo') {
-        // Image- or attachment-only echoes are asks too: with no text they
-        // open the timer on a placeholder snippet instead of being dropped.
+      const inner = ev.event as { type?: unknown; text?: unknown; imageCount?: unknown; attachments?: unknown; clientMsgId?: unknown; parent_tool_use_id?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> }; event?: unknown };
+      // A subagent's stream is private work, not the lane's visible reply to
+      // Matt (the same parent_tool_use_id filtering reads.ts, useChat, and
+      // replayDelivery apply): its text never closes an ask, its inner
+      // echoes never open one, and its frames never count as turn starts.
+      const subagent = typeof ev.parent_tool_use_id === 'string' || typeof inner.parent_tool_use_id === 'string';
+      if (inner.type === 'stream_event' && !subagent && frameType(inner.event) === 'message_start') {
+        // A new provider message = a new turn for this lane: only a turn
+        // that started AFTER an ask arrived can close it.
+        turnStartAtByLane.set(laneKey, eventAt);
+      }
+      if (inner.type === '_user_echo' && !subagent) {
+        // Only a message Matt himself typed opens an ask: the client assigns
+        // every person-typed message (including mid-turn steers) a
+        // clientMsgId, while server-side deliveries (routines, jobs,
+        // handoffs) carry none. Image- or attachment-only echoes are asks
+        // too: with no text they open the timer on a placeholder snippet.
         const text = typeof inner.text === 'string' && inner.text.trim()
           ? inner.text
           : (typeof inner.imageCount === 'number' && inner.imageCount > 0) || (Array.isArray(inner.attachments) && inner.attachments.length > 0)
             ? '[Matt sent an image or attachment]'
             : '';
-        if (text) noteMattAsk(key, lane, text);
+        if (text && typeof inner.clientMsgId === 'string' && inner.clientMsgId) noteMattAsk(key, lane, text);
       }
-      // A subagent's stream is private work, not the lane's visible reply to
-      // Matt (the same parent_tool_use_id filtering reads.ts, useChat, and
-      // replayDelivery apply): its text never closes an ask.
-      const subagent = typeof ev.parent_tool_use_id === 'string' || typeof inner.parent_tool_use_id === 'string';
-      if (!subagent) {
+      const turnStart = turnStartAtByLane.get(laneKey);
+      if (!subagent && typeof turnStart === 'number') {
         if (inner.type === 'assistant' && inner.message && typeof inner.message === 'object' && inner.message.role === 'assistant') {
-          if (hasVisibleText(inner.message)) closeMattAsksForLane(key, lane);
+          if (hasVisibleText(inner.message)) closeMattAsksForLane(key, lane, turnStart);
         }
         if (inner.type === 'stream_event' && streamedVisibleText(inner.event)) {
-          closeMattAsksForLane(key, lane);
+          closeMattAsksForLane(key, lane, turnStart);
         }
         if (inner.type === 'result' && terminalResultText(inner)) {
-          closeMattAsksForLane(key, lane);
+          closeMattAsksForLane(key, lane, turnStart);
         }
       }
     }
-    if (ev.type === 'stream_event' && typeof ev.parent_tool_use_id !== 'string' && streamedVisibleText(ev.event)) {
-      closeMattAsksForLane(key, lane);
+    if (ev.type === 'stream_event' && typeof ev.parent_tool_use_id !== 'string' && frameType(ev.event) === 'message_start') {
+      turnStartAtByLane.set(laneKey, eventAt);
     }
-    if (ev.type === 'result' && typeof ev.parent_tool_use_id !== 'string' && terminalResultText(ev)) {
-      closeMattAsksForLane(key, lane);
-    }
-    if (ev.type === 'assistant' && typeof ev.parent_tool_use_id !== 'string' && ev.message && typeof ev.message === 'object' && ev.message.role === 'assistant') {
-      if (hasVisibleText(ev.message)) closeMattAsksForLane(key, lane);
+    if (ev.type === 'stream_event' || ev.type === 'result' || ev.type === 'assistant') {
+      // No turn start on record (no message_start seen this process): skip
+      // the close — the next turn always opens with one and closes properly.
+      const turnStart = turnStartAtByLane.get(laneKey);
+      if (typeof ev.parent_tool_use_id !== 'string' && typeof turnStart === 'number') {
+        if (ev.type === 'stream_event' && streamedVisibleText(ev.event)) closeMattAsksForLane(key, lane, turnStart);
+        if (ev.type === 'result' && terminalResultText(ev)) closeMattAsksForLane(key, lane, turnStart);
+        if (ev.type === 'assistant' && ev.message && typeof ev.message === 'object' && ev.message.role === 'assistant' && hasVisibleText(ev.message)) closeMattAsksForLane(key, lane, turnStart);
+      }
     }
   } catch {
     // Never block the durable append on an ask-store hiccup.

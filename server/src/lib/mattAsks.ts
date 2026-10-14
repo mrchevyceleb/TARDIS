@@ -25,6 +25,10 @@ const NUDGE_AFTER_MS = 15 * 60_000;
 const ESCALATE_AFTER_MS = 15 * 60_000;
 const TEXT_SNIPPET = 120;
 const DELIVERY_TIMEOUT_MS = 10_000;
+/** A terminally escalated ask (the Chief copy already sent) is pruned after
+ *  a day: dead weight from deleted agents, abandoned threads, or false
+ *  automated asks must not grow the store unbounded on the event path. */
+const ASK_RETENTION_MS = 24 * 60 * 60_000;
 
 // One real close check per (logKey, lane) per process: streamed replies arrive
 // as many deltas, and re-reading and re-parsing the store on every delta would
@@ -128,13 +132,16 @@ export function noteMattAsk(logKey: string, lane: 'home' | 'bg', text: string): 
 /** The agent produced a visible reply in the lane: every open ask for that
  *  logKey AND lane closes (home and bg share a logKey, so a bg routine, job,
  *  or handoff reply never closes Matt's home-lane asks). Fail-open. */
-export function closeMattAsksForLane(logKey: string, lane: 'home' | 'bg'): void {
+export function closeMattAsksForLane(logKey: string, lane: 'home' | 'bg', turnStartedAtMs: number): void {
   const memoKey = `${logKey}|${lane}`;
   if (closedLanes.has(memoKey)) return;
   try {
     const store = readAsks();
     const before = store.asks.length;
-    store.asks = store.asks.filter((a) => a.logKey !== logKey || a.lane !== lane);
+    // Only a turn that STARTED after the ask arrived can close it: an older
+    // turn still streaming when Matt messaged must not close his newer ask
+    // with its already-in-flight text. The ask stays open for the next turn.
+    store.asks = store.asks.filter((a) => a.logKey !== logKey || a.lane !== lane || a.askedAt >= turnStartedAtMs);
     if (store.asks.length !== before) saveAsks(store);
     // Memo only after successful processing: a transient read or write
     // failure must not suppress later close attempts (a visible reply
@@ -210,6 +217,12 @@ export function sweepMattAsks(): Array<{ askId: string; kind: 'agent' | 'chief';
           text: `Matt's ask flag: ${ask.agentId}'s lane has an unanswered Matt message ("${ask.text}") open ${Math.round((now - ask.askedAt) / 60000)} minutes with no reply. It went to them; make sure they act on it.`,
         });
       }
+    }
+    // Bounded retention: prune terminally escalated asks past their day.
+    const kept = store.asks.filter((a) => !(a.escalatedAt && now - a.escalatedAt > ASK_RETENTION_MS));
+    if (kept.length !== store.asks.length) {
+      store.asks = kept;
+      dirty = true;
     }
     if (dirty) saveAsks(store);
   } catch {
