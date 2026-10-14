@@ -1,5 +1,5 @@
 import type { Dirent } from 'node:fs';
-import { readdir } from 'node:fs/promises';
+import { opendir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { SeqEvent } from './runner.ts';
@@ -83,9 +83,30 @@ export async function codexRolloutMissing(codexHome: string, threadId: string): 
   // The walk is async so a huge rollout store can never stall the event loop
   // (and with it every HTTP/WebSocket turn) mid-lookup.
   const walk = async (dir: string): Promise<boolean | null> => {
-    let entries: Dirent[];
+    // Stream the directory instead of materializing a full listing: readdir
+    // had already allocated every entry before the budget was ever checked,
+    // so a huge rollout store could still spike memory and stall the read
+    // despite the cap. opendir hands out one entry at a time, the budget is
+    // consumed per streamed entry, and the bounded slice is still walked
+    // newest-first.
+    const entries: Dirent[] = [];
+    let moreBeyondBudget = false;
     try {
-      entries = await readdir(dir, { withFileTypes: true });
+      const handle = await opendir(dir);
+      try {
+        for (;;) {
+          const entry = await handle.read();
+          if (!entry) break;
+          if (budget <= 0) {
+            moreBeyondBudget = true;
+            break;
+          }
+          budget -= 1;
+          entries.push(entry);
+        }
+      } finally {
+        await handle.close().catch(() => {});
+      }
     } catch {
       return null;
     }
@@ -93,7 +114,6 @@ export async function codexRolloutMissing(codexHome: string, threadId: string): 
     // so newest-first finds a live thread in the first few reads.
     entries.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0));
     for (const entry of entries) {
-      if (budget-- <= 0) return null;
       if (entry.isDirectory()) {
         const found = await walk(join(dir, entry.name));
         if (found !== false) return found;
@@ -109,7 +129,8 @@ export async function codexRolloutMissing(codexHome: string, threadId: string): 
       sawAnyRollout = true;
       if (entry.name.endsWith(`-${threadId}.jsonl`) || entry.name.endsWith(`-${threadId}.jsonl.zst`)) return true;
     }
-    return false;
+    // Entries the budget never let us read could still hold the target.
+    return moreBeyondBudget ? null : false;
   };
   const result = await walk(join(codexHome, 'sessions'));
   if (result !== false) return false;
