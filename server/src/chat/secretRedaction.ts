@@ -103,13 +103,15 @@ export function redactSecrets(text: string): string {
       /(\b(?:password|passcode|passwd|pwd|api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|bearer token|client[_ -]?secret|refresh[_ -]?token|private[_ -]?key|credential|session token|otp|one[- ]time (?:password|code)|verification code|recovery code)\b\s+(?:is|was)\s+)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/gi,
       (_all, prefix: string, value: string) => `${prefix}${preserveFence(value)}`,
     )
-    // A CLI flag is exactly two dashes, and the dashes must start on their
-    // own: a single hyphen is a hyphenated compound ("8,000-token cap",
-    // "one-time password" prose), and the flag rule must never eat the word
-    // after it as a "value" (Oct 14 false positive). The lookbehind keeps a
-    // compound ending in "--token" from matching too.
+    // A CLI flag starts on its own: the dashes must not be glued to a
+    // preceding word, or the rule eats the following word as a "value"
+    // (Oct 14 false positive: "8,000-token budget" was masked as a printed
+    // key). Both flag styles are kept (-token=x, --token x) — only glued
+    // compounds ("8,000-token cap", "café-token budget") are refused. The
+    // boundary is Unicode-aware (\w is ASCII-only) so non-ASCII letters
+    // cannot sneak a compound past it.
     .replace(
-      /((?<![\w-])--(?:(?:api-?)?key|token|secret|password))(=|\s+)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/gi,
+      /((?<![\p{L}\p{N}_-])--?(?:(?:api-?)?key|token|secret|password))(=|\s+)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/giu,
       (_all, flag: string, separator: string, value: string) => `${flag}${separator}${preserveFence(value)}`,
     )
     .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[redacted jwt]')
