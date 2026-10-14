@@ -50,6 +50,7 @@ export const WORKSPACE_COMPANIONS: {
   { id: 'zai', cli: 'zai', label: 'GLM' },
   { id: 'fireworks', cli: 'fireworks', label: 'Fireworks' },
   { id: 'openrouter', cli: 'openrouter', label: 'OpenRouter' },
+  { id: 'agy', cli: 'agy', label: 'Gemini' },
 ];
 
 // Optional named profile for custom/private picker extensions. Public entries
@@ -68,6 +69,7 @@ export function companionAuthBlurb(cli: CompanionId, account: RepoAccount | null
     case 'zai':              return 'GLM via your Z.ai coding plan.';
     case 'fireworks':        return 'Any serverless Fireworks model via your Fireworks API key.';
     case 'openrouter':       return 'Any tool-capable OpenRouter model via your OpenRouter API key.';
+    case 'agy':               return 'Gemini via your Google AI subscription (Antigravity CLI login).';
     default:                 return '';
   }
 }
@@ -81,12 +83,13 @@ function readLS(key: string, fallback: string): string {
  *  `fireworks` is the API-key provider lane (any serverless Fireworks model);
  *  the retired `banana-fireworks` engine maps onto it. `openrouter` is the
  *  same kind of lane for any tool-capable OpenRouter model. */
-export function normalizeCompanion(engine: string | undefined): 'claude' | 'codex' | 'xai' | 'zai' | 'fireworks' | 'openrouter' {
+export function normalizeCompanion(engine: string | undefined): 'claude' | 'codex' | 'xai' | 'zai' | 'fireworks' | 'openrouter' | 'agy' {
   if (engine === 'claude' || engine === 'assistant' || engine === 'claude-kim') return 'claude';
   if (engine === 'codex' || engine === 'codex-kim') return 'codex';
   if (engine === 'zai') return 'zai';
   if (engine === 'fireworks' || engine === 'banana-fireworks') return 'fireworks';
   if (engine === 'openrouter') return 'openrouter';
+  if (engine === 'agy') return 'agy';
   return 'xai';
 }
 
@@ -182,6 +185,41 @@ export function readStoredXaiEffort(): string {
   return effort;
 }
 
+// Gemini on Matt's Google subscription (the agy CLI lane). Two base models,
+// each taking low/medium/high as the lane's effort value; the server resolves
+// the pair into the agy binary's --model/--effort spawn args.
+export const DEFAULT_AGY_MODEL = 'gemini-4-argon';
+export const DEFAULT_AGY_EFFORT = 'medium';
+export const AGY_MODELS: { id: string; label: string }[] = [
+  { id: 'gemini-4-argon', label: 'Gemini 4 Argon' },
+  { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
+];
+export const AGY_EFFORTS = ['low', 'medium', 'high'];
+
+export function normalizeAgyModel(model: string): string {
+  return AGY_MODELS.some((entry) => entry.id === model) ? model : DEFAULT_AGY_MODEL;
+}
+
+export function normalizeAgyEffort(effort: string): string {
+  return AGY_EFFORTS.includes(effort) ? effort : DEFAULT_AGY_EFFORT;
+}
+
+export function readStoredAgyModel(): string {
+  if (typeof window === 'undefined') return DEFAULT_AGY_MODEL;
+  const raw = localStorage.getItem('rivendell:agy-model') || DEFAULT_AGY_MODEL;
+  const model = normalizeAgyModel(raw);
+  if (model !== raw) localStorage.setItem('rivendell:agy-model', model);
+  return model;
+}
+
+export function readStoredAgyEffort(): string {
+  if (typeof window === 'undefined') return DEFAULT_AGY_EFFORT;
+  const raw = localStorage.getItem('rivendell:agy-effort') || DEFAULT_AGY_EFFORT;
+  const effort = normalizeAgyEffort(raw);
+  if (effort !== raw) localStorage.setItem('rivendell:agy-effort', effort);
+  return effort;
+}
+
 function normalizeClaudeEffort(value?: string): string {
   return value && CLAUDE_EFFORTS.includes(value) ? value : 'xhigh';
 }
@@ -231,6 +269,8 @@ export function useCompanionPicker(storageKey: string) {
   const [xaiEffort, setXaiEffortState] = useState(readStoredXaiEffort);
   const [zaiModel, setZaiModelState] = useState(readStoredZaiModel);
   const [zaiEffort, setZaiEffortState] = useState(readStoredZaiEffort);
+  const [agyModel, setAgyModelState] = useState(readStoredAgyModel);
+  const [agyEffort, setAgyEffortState] = useState(readStoredAgyEffort);
   const [fireworksModel, setFireworksModelState] = useState(readStoredFireworksModel);
   const [fireworksEffort, setFireworksEffortState] = useState(readStoredFireworksEffort);
   // Mirror the Codex reconciliation: when the live catalog lands, a stored
@@ -336,6 +376,18 @@ export function useCompanionPicker(storageKey: string) {
     setZaiEffortState(effort);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:zai-effort', effort);
   };
+  const setAgyModel = (v: string) => {
+    markSelectionChanged('agy');
+    const model = normalizeAgyModel(v);
+    setAgyModelState(model);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:agy-model', model);
+  };
+  const setAgyEffort = (v: string) => {
+    markSelectionChanged('agy');
+    const effort = normalizeAgyEffort(v);
+    setAgyEffortState(effort);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:agy-effort', effort);
+  };
   const setFireworksModel = (v: string) => {
     markSelectionChanged('fireworks');
     const model = normalizeFireworksModel(v);
@@ -417,6 +469,15 @@ export function useCompanionPicker(storageKey: string) {
         localStorage.setItem('rivendell:zai-model', nextModel);
         localStorage.setItem('rivendell:zai-effort', nextEffort);
       }
+    } else if (lane === 'agy') {
+      const nextModel = normalizeAgyModel(model ?? '');
+      const nextEffort = normalizeAgyEffort(effort ?? '');
+      setAgyModelState(nextModel);
+      setAgyEffortState(nextEffort);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rivendell:agy-model', nextModel);
+        localStorage.setItem('rivendell:agy-effort', nextEffort);
+      }
     } else if (lane === 'fireworks') {
       const nextModel = normalizeFireworksModel(model ?? '');
       const nextEffort = normalizeFireworksEffort(nextModel, effort ?? '');
@@ -445,18 +506,20 @@ export function useCompanionPicker(storageKey: string) {
   const isZai = cli === 'zai';
   const isFireworks = cli === 'fireworks';
   const isOpenRouter = cli === 'openrouter';
-  const model = isZai ? zaiModel : isFireworks ? fireworksModel : isOpenRouter ? openRouterModel : isXai ? xaiModel : isCodex ? codexModel : claudeModel;
-  const effort = isZai ? zaiEffort : isFireworks ? fireworksEffort : isOpenRouter ? openRouterEffort : isXai ? xaiEffort : isCodex ? codexEffort : claudeEffort;
+  const isAgy = cli === 'agy';
+  const model = isZai ? zaiModel : isFireworks ? fireworksModel : isOpenRouter ? openRouterModel : isAgy ? agyModel : isXai ? xaiModel : isCodex ? codexModel : claudeModel;
+  const effort = isZai ? zaiEffort : isFireworks ? fireworksEffort : isOpenRouter ? openRouterEffort : isAgy ? agyEffort : isXai ? xaiEffort : isCodex ? codexEffort : claudeEffort;
 
   return {
     companion, setCompanion, applyAuthoritativeBrain,
     cli, account, model, effort, selectionRevision: selectionRevisions[companion] ?? 0,
     brainPending: false,
-    isClaude, isCodex, isXai, isZai, isFireworks, isOpenRouter,
+    isClaude, isCodex, isXai, isZai, isFireworks, isOpenRouter, isAgy,
     claudeModel, setClaudeModel, claudeEffort, setClaudeEffort,
     codexModel, setCodexModel, codexEffort, setCodexEffort,
     xaiModel, setXaiModel, xaiEffort, setXaiEffort,
     zaiModel, setZaiModel, zaiEffort, setZaiEffort,
+    agyModel, setAgyModel, agyEffort, setAgyEffort,
     fireworksModel, setFireworksModel, fireworksEffort, setFireworksEffort,
     openRouterModel, setOpenRouterModel, openRouterEffort, setOpenRouterEffort,
   };

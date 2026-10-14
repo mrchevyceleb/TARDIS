@@ -55,6 +55,9 @@ const DEFAULT_WINDOW_TOKENS = 200_000;
 const LARGE_WINDOW_TOKENS = 1_000_000;
 const BANANA_WINDOW_TOKENS = 200_000; // banana default model context
 const GROK_WINDOW_TOKENS = 500_000; // Grok 4.x context window
+// Gemini 4 class on the agy subscription lane: unmeasured, pinned to the
+// expected class so the meter starts honest; refine when measured.
+const AGY_WINDOW_TOKENS = 1_000_000;
 
 // Pick the starting context window for a given CLI before we've seen any model
 // id. Codex uses the selected catalog entry; current Claude (Opus 4.6/4.7/4.8,
@@ -68,6 +71,7 @@ function defaultWindowForCli(cli: CompanionId, model?: string): number {
   // xAI always runs Grok (500K). Pin before system/init arrives so the meter
   // never flashes the 200K non-claude default.
   if (cli === 'xai') return GROK_WINDOW_TOKENS;
+  if (cli === 'agy') return AGY_WINDOW_TOKENS;
   return windowForClaudeModel(model); // Claude/Z.ai model ids carry the real window.
 }
 

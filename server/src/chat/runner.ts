@@ -44,6 +44,8 @@ import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { fireworksCapability, fireworksContextWindow, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
 import { openRouterCapability, openRouterContextWindow, openRouterMaxOutput, resolveOpenRouterEffort, resolveOpenRouterModel } from './openrouter-models.ts';
+import { AgySession } from './agy-runner.ts';
+import { resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
 import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { PiSession, usePiHarness } from './pi-runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, REPLY_NUDGE_NOTE_TOOL, replyNowText, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
@@ -109,7 +111,8 @@ export type CliKind =
   | 'zai'
   | 'xai'
   | 'fireworks'
-  | 'openrouter';
+  | 'openrouter'
+  | 'agy';
 
 export type StreamEvent = unknown;
 
@@ -353,6 +356,7 @@ function openRouterEnv(model: string): NodeJS.ProcessEnv {
 }
 
 const resolveClaudeModel = (cli: CliKind, m?: string): string => {
+  if (cli === 'agy') return resolveAgyModel(m);
   if (cli === 'zai') return resolveZaiModel(m, ZAI_MODEL);
   if (cli === 'xai') return resolveXaiModel(m, XAI_MODEL);
   if (cli === 'fireworks') return resolveFireworksModel(m);
@@ -371,7 +375,8 @@ export function isClaudeUnrecognizedModelWarning(message: string): boolean {
 }
 
 const resolveClaudeEffort = (cli: CliKind, e?: string, model?: string): string =>
-  cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT)
+  cli === 'agy' ? resolveAgyEffort(model ?? '', e)
+  : cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT)
   : cli === 'xai' ? resolveXaiEffort(e, XAI_EFFORT)
   : cli === 'fireworks' ? resolveFireworksEffort(e, model)
   : cli === 'openrouter' ? resolveOpenRouterEffort(e, model)
@@ -2820,9 +2825,10 @@ function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
 }
 
 // Returned by getOrCreateSession — common interface across all runners.
-export type AnySession = ClaudeSession | PiSession | CodexSession | BananaSession;
-/** The claude-family registry holds both harnesses for the zai/xai lanes. */
-export type LaneSession = ClaudeSession | PiSession;
+export type AnySession = ClaudeSession | PiSession | AgySession | CodexSession | BananaSession;
+/** The claude-family registry holds both harnesses for the zai/xai lanes, plus
+ *  the agy subscription lane (Google Antigravity CLI, agy-runner.ts). */
+export type LaneSession = ClaudeSession | PiSession | AgySession;
 
 export async function getOrCreateSession(opts: {
   cli: CliKind;
@@ -3133,8 +3139,11 @@ async function spawnSession(
   }
   assertMemoryAvailableForSpawn(cli);
   // GLM and Grok run in the Pi harness by default: the persona is the whole
-  // system prompt there, and the providers are spoken to natively.
-  const session: LaneSession = usePiHarness(cli)
+  // system prompt there, and the providers are spoken to natively. The agy
+  // lane (Gemini on Matt's Google subscription) is its own runner.
+  const session: LaneSession = cli === 'agy'
+    ? new AgySession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort, model), seedFirst, switchedFrom)
+    : usePiHarness(cli)
     ? new PiSession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort), seedFirst, switchedFrom)
     : new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, seedFirst, switchedFrom);
   sessions.set(key, session);

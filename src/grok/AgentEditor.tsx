@@ -3,6 +3,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, Loader2, Play, Square, X } from 'lucide-react';
 import {
+  AGY_EFFORTS,
+  AGY_MODELS,
+  DEFAULT_AGY_EFFORT,
+  DEFAULT_AGY_MODEL,
   DEFAULT_XAI_EFFORT,
   DEFAULT_XAI_MODEL,
   DEFAULT_ZAI_EFFORT,
@@ -32,6 +36,7 @@ function defaultBrainSelection(engine: string): { model: string; effort: string 
   if (engine === 'zai') return { model: DEFAULT_ZAI_MODEL, effort: DEFAULT_ZAI_EFFORT };
   if (engine === 'fireworks') return { model: DEFAULT_FIREWORKS_MODEL, effort: DEFAULT_FIREWORKS_EFFORT };
   if (engine === 'openrouter') return { model: DEFAULT_OPENROUTER_MODEL, effort: DEFAULT_OPENROUTER_EFFORT };
+  if (engine === 'agy') return { model: DEFAULT_AGY_MODEL, effort: DEFAULT_AGY_EFFORT };
   return { model: '', effort: 'medium' };
 }
 
@@ -42,6 +47,7 @@ function effortOptions(engine: string, model: string): string[] {
   if (engine === 'zai') return ZAI_EFFORTS;
   if (engine === 'fireworks') return fireworksEffortsForModel(model);
   if (engine === 'openrouter') return openRouterEffortsForModel(model);
+  if (engine === 'agy') return AGY_EFFORTS;
   return XAI_EFFORTS;
 }
 
@@ -52,6 +58,7 @@ function staticModelOptions(engine: string): BrainModelOption[] {
   if (engine === 'zai') return ZAI_MODELS;
   if (engine === 'fireworks') return FIREWORKS_MODELS;
   if (engine === 'openrouter') return OPENROUTER_MODELS;
+  if (engine === 'agy') return AGY_MODELS;
   return [];
 }
 
@@ -417,7 +424,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
           </label>
 
           <label className="bt-agent-field">
-            <span>{engine === 'xai' || engine === 'fireworks' || engine === 'openrouter' ? 'Thinking' : engine === 'zai' ? 'Effort' : 'Reasoning effort'}</span>
+            <span>{engine === 'xai' || engine === 'fireworks' || engine === 'openrouter' || engine === 'agy' ? 'Thinking' : engine === 'zai' ? 'Effort' : 'Reasoning effort'}</span>
             <select value={effort} onChange={(e) => setEffort(e.target.value)}>
               {availableEfforts.map((option) => (
                 <option key={option} value={option}>{option[0].toUpperCase() + option.slice(1)}</option>

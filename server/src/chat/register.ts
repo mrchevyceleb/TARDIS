@@ -14,6 +14,7 @@ import { ASSISTANT_HUB_PATH } from './config.ts';
 import { codexCatalogPayload, startCodexCatalog } from './codex-models.ts';
 import { fireworksCatalogPayload, startFireworksCatalog } from './fireworks-models.ts';
 import { openRouterCatalogPayload, startOpenRouterCatalog } from './openrouter-models.ts';
+import { agyCatalogPayload } from './agy-models.ts';
 import {
   clampReplayWindow,
   REPLAY_CATCHUP_MAX_BYTES,
@@ -329,6 +330,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
     res.json(openRouterCatalogPayload());
   });
 
+  // The agy (Gemini on Matt's Google subscription) catalog is hand-verified
+  // (no live poller in v1), so this route is a stable read of the same list.
+  app.get('/api/agy/models', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(agyCatalogPayload());
+  });
+
   app.get('/api/repos', async (_req, res) => {
     try {
       res.json({ repos: await discoverRepos() });
@@ -366,7 +374,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
       cli !== 'zai' &&
       cli !== 'xai' &&
       cli !== 'fireworks' &&
-      cli !== 'openrouter'
+      cli !== 'openrouter' &&
+      cli !== 'agy'
     ) {
       res.status(400).json({ error: 'invalid cli' });
       return;
