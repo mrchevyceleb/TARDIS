@@ -832,7 +832,8 @@ async function clearCompactMemoryMirror(key: string, chatId: string): Promise<vo
     ]);
     await deleteCompactMemoryIds([
       ...compactIds,
-      ...[...factNotes.values()].map((note) => note.id),
+      ...[...factNotes.notes.values()].map((note) => note.id),
+      ...factNotes.extras,
     ]);
   });
 }
@@ -980,8 +981,18 @@ function durableFactKey(fact: DurableFact): string {
 /** This thread's already-saved durable-fact notes, keyed by normalized title.
  *  Titles are prefixed like the rolling compact's own rows so the search
  *  query always matches them. Content rides along so a changed decision
- *  under the same title can be superseded instead of skipped. */
-async function durableFactNotes(key: string, chatId: string, timeoutMs?: number): Promise<Map<string, { id: string; content: string }>> {
+ *  under the same title can be superseded instead of skipped.
+ *
+ *  A save that timed out on our side can still commit on the mirror after
+ *  the timeout, so a later retry can insert a second row under the same
+ *  identity. The first row per identity is retained in `notes`; every
+ *  further row for that identity is returned in `extras` so the drain can
+ *  reconcile the mirror back to one row per fact. */
+async function durableFactNotes(
+  key: string,
+  chatId: string,
+  timeoutMs?: number,
+): Promise<{ notes: Map<string, { id: string; content: string }>; extras: string[] }> {
   const identity = compactMemoryIdentity(key, chatId);
   const found = await callMcp<MemorySearchResponse & { error?: unknown }>('memory', {
     action: 'search_memory',
@@ -997,6 +1008,7 @@ async function durableFactNotes(key: string, chatId: string, timeoutMs?: number)
     throw new Error('RAG search returned a malformed or failed response');
   }
   const notes = new Map<string, { id: string; content: string }>();
+  const extras: string[] = [];
   for (const memory of found.memories) {
     if (memory?.project !== 'rivendell') continue;
     if (!Array.isArray(memory.tags) || !memory.tags.includes(identity.threadTag) || !memory.tags.includes('durable-fact')) continue;
@@ -1004,9 +1016,15 @@ async function durableFactNotes(key: string, chatId: string, timeoutMs?: number)
     if (typeof memory.id !== 'string' || !memory.id) continue;
     const content = typeof memory.content === 'string' ? memory.content : '';
     const key = factIdentity(memory.title);
-    if (!notes.has(key)) notes.set(key, { id: memory.id, content });
+    if (notes.has(key)) {
+      // A duplicate row for an identity we already retained: delete the
+      // later one and keep the retained row, whichever content it carries.
+      extras.push(memory.id);
+      continue;
+    }
+    notes.set(key, { id: memory.id, content });
   }
-  return notes;
+  return { notes, extras };
 }
 
 function normalizeFactContent(content: string): string {
@@ -1044,8 +1062,21 @@ async function saveDurableFacts(
     // The dedupe search runs inside the pass budget too — left on callMcp's
     // 30s default, one hung search would overrun the 15s pass before the
     // first fact is even attempted.
-    const existing = await durableFactNotes(key, chatId, remainingBudget());
+    const { notes: existing, extras } = await durableFactNotes(key, chatId, remainingBudget());
     if (epochOf(key) !== epoch) return;
+    // Reconcile: a save that timed out on our side can still commit on the
+    // mirror after the timeout, and a retry that raced ahead of that late
+    // insert leaves two rows under one identity with no later pass to clean
+    // them. The search retained one row per identity; delete the extras now
+    // so the mirror is back to one row per fact before this pass saves
+    // anything. A failed delete aborts the pass and the next compaction
+    // reconciles again.
+    if (extras.length > 0) {
+      const reconcileRemaining = remainingBudget();
+      if (reconcileRemaining <= 0) return; // next compaction reconciles
+      await deleteCompactMemoryIds(extras, reconcileRemaining);
+      if (epochOf(key) !== epoch) return;
+    }
     const drain = facts.slice(0, DRAIN_BATCH_MAX);
     for (const fact of drain) {
       const remaining = remainingBudget();
