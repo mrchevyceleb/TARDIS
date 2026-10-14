@@ -18,11 +18,11 @@
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { STATE_DIR } from './config.ts';
+import { MAX_EVENTS_PER_LOG, STATE_DIR } from './config.ts';
 import { callMcp } from '../lib/mcp.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
 import { redactSecrets } from './secretRedaction.ts';
-import { flushEventLog, loadEventLogArchiveSync, loadEventLogForCompactionSync, MAX_EVENTS_PER_LOG } from './event-log-store.ts';
+import { flushEventLog, loadEventLogArchiveSync, loadEventLogForCompactionSync } from './event-log-store.ts';
 import { ROTATION_COMPACT_DEADLINE_MS, ROTATION_VERBATIM_TAIL_CHARS } from './contextBudget.ts';
 import {
   COMPACT_BATCH_TURNS,
@@ -36,7 +36,7 @@ import {
   type VisibleTurn,
 } from './threadWindow.ts';
 import { bareChatId, isThreadLogKey } from './threadKey.ts';
-import { agentForChatId } from './agents.ts';
+import { listAgentsOrThrow } from './agents.ts';
 import { listCommitments } from '../lib/commitmentStore.ts';
 
 const MIN_ACCEPT_WORDS = 400;
@@ -398,7 +398,12 @@ export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev:
 function commitmentsSeedBlockWithStatus(key: string): { block: string; available: boolean } {
   try {
     if (!isThreadLogKey(key)) return { block: '', available: true };
-    const agent = agentForChatId(bareChatId(key.slice(key.lastIndexOf('|') + 1)));
+    // Strict roster read: a roster read/parse failure must read as
+    // UNAVAILABLE (the seed window stays open and retries), never as
+    // "no agent" (which would acknowledge a commitments-free seed).
+    const agents = listAgentsOrThrow();
+    const bare = bareChatId(key.slice(key.lastIndexOf('|') + 1));
+    const agent = agents.find((a) => a.home === bare);
     if (!agent) return { block: '', available: true };
     const lines = listCommitments(agent.id).map((c) => `- [${c.id}] ${c.text}${c.due ? ` (due ${c.due})` : ''}`);
     return {
@@ -477,6 +482,13 @@ export function isTruncatedCompact(compact: string): boolean {
   return !/[.!?:;)\]}"”…\]]$/.test(last);
 }
 
+/** The rebuild's own generation ceiling: its baseline document is a
+ *  4.4-5.5k-word truncated head (6-8k tokens before any batch output),
+ *  structurally over the live cap, so a rebuild under the live cap can
+ *  never finish its first batch. The live path keeps the live cap.
+ */
+const REBUILD_MAX_TOKENS = 16_000;
+
 /** Default bound on re-fed batches per rebuild run, so a huge lane reports
  *  instead of running all evening. Nothing partial is ever committed: a run
  *  that hits the bound writes nothing and reports, and a rerun with a
@@ -542,7 +554,21 @@ export async function rebuildTruncatedCompact(
       const batch = takeOverflowBatch(covered.slice(fed, fed + COMPACT_BATCH_TURNS));
       if (!batch.length) break;
       onProgress?.(`${key}: rebuild batch ${batches + 1} (${batch.length} covered turns)`);
-      const generated = await generateCompact(previous, batch);
+      const generated = await generateCompact(previous, batch, REBUILD_MAX_TOKENS);
+      // The larger generation budget is not a size acceptance: a response
+      // that finishes normally at 16k tokens would bloat every later prompt.
+      // Bounded growth only: the replacement may keep the head's substance
+      // plus the batch's new material, never a runaway.
+      const prevWords = previous.trim().split(/\s+/).filter(Boolean).length;
+      // The rebuild's baseline is already 4.4-5.5k words: the model keeps its
+      // substance and folds the batch in, so the ceiling is the baseline plus
+      // generous room (half again plus 1000), not the live path's tighter bound.
+      // The COMPACT_SYSTEM word target still applies; this guard only stops a
+      // runaway.
+      const ceiling = Math.ceil(prevWords * 1.5) + 1000;
+      if (generated.words > ceiling) {
+        throw new Error(`rebuilt document came back oversized (${generated.words}w over the ${ceiling}w ceiling); nothing was written`);
+      }
       // Cross-process CAS against the ORIGINAL blob: this repair can run
       // beside the live server, whose inFlight and epoch guards cannot see
       // this process. A blob that changed on disk since the repair's first
@@ -1039,7 +1065,7 @@ async function saveDurableFacts(
   return { saved, resolvedKeys };
 }
 
-async function generateCompact(previous: string, overflow: VisibleTurn[]): Promise<{ compact: string; words: number; facts: DurableFact[] }> {
+async function generateCompact(previous: string, overflow: VisibleTurn[], maxTokens = COMPACT_MAX_TOKENS): Promise<{ compact: string; words: number; facts: DurableFact[] }> {
   // Redact BEFORE sending the prompt to the compaction provider, then redact
   // the generated document again before it touches local disk or RAG.
   const safePrevious = redactSecrets(previous);
@@ -1063,7 +1089,7 @@ async function generateCompact(previous: string, overflow: VisibleTurn[]): Promi
     },
     body: JSON.stringify({
       model: 'grok-4.7',
-      max_tokens: COMPACT_MAX_TOKENS,
+      max_tokens: maxTokens,
       system: COMPACT_SYSTEM,
       messages: [{ role: 'user', content: userContent }],
     }),
@@ -1076,7 +1102,7 @@ async function generateCompact(previous: string, overflow: VisibleTurn[]): Promi
   // capped generation fails instead, so the previous document stands and the
   // next pass retries with the same material.
   if (body.stop_reason === 'max_tokens') {
-    throw new Error(`compact hit the ${COMPACT_MAX_TOKENS}-token output cap before finishing — will retry`);
+    throw new Error(`compact hit the ${maxTokens}-token output cap before finishing — will retry`);
   }
   const generated = (body.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text ?? '').join('\n').trim();
   // The durable-facts section rides the same generation call; keep it out of

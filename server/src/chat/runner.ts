@@ -493,7 +493,7 @@ const EVENT_BUFFER_SIZE = 2000;
 
 /** `at` = wall-clock ms when the event was emitted, so replayed history can
  *  show real times (absent on events logged before 2026-09-23). */
-export type SeqEvent = { seq: number; ev: SessionEvent; at?: number; lane?: 'bg' };
+export type SeqEvent = { seq: number; ev: SessionEvent; at?: number; lane?: 'bg'; eng?: string };
 
 /** Tag for events written by an agent's background lane (see threadKey.ts). */
 export function laneTagFor(chatId: string): { lane?: 'bg' } {

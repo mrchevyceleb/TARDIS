@@ -13,10 +13,10 @@ import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './crashTombstone.ts';
-import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeq, peekEnginePrimerThroughSeqWithStatus, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
+import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeqWithStatus, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
-import { lastEngineOf, logKeyFor } from './threadKey.ts';
+import { isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
@@ -168,6 +168,10 @@ type CodexSendOptions = {
   emptyRetryDepth?: number;
   suppressEcho?: boolean;
   seedOverride?: string;
+  /** False when the caller could not confirm the override primer's
+   *  commitments half (the empty-exit retry passing a partial primer): an
+   *  unconfirmed override must not acknowledge the seed window. */
+  seedOverrideAvailable?: boolean;
   voiceMode?: boolean;
 };
 type CodexSessionOptions = {
@@ -240,6 +244,9 @@ export class CodexSession {
   private threadId: string | null = null;
   /** Next turn seeds persona + rolling compact + last 50 on a fresh thread. */
   private seedWindowOnNextTurn = false;
+  /** Thread ids explicitly cleared as unresumable: the event-log recovery
+   *  must never resurrect one — shutdown passes this set. */
+  private readonly invalidatedThreadIds = new Set<string>();
   private contextMaintenance: Promise<void> | null = null;
 
   private consumeWindowSeed(): boolean {
@@ -262,9 +269,13 @@ export class CodexSession {
       isBusy: () => this.busy || this.dead, emit: (ev) => this.emit(ev as any), rotate: () => false,
     });
     if (!refreshed || this.busy || this.dead) return;
+    // Tombstone synchronously BEFORE the awaited clear: a shutdown landing
+    // during setSessionId must not resurrect the id this rotation is dropping
+    // (the recovery excludes tombstoned ids, and the dead-return below can no
+    // longer skip the tombstone).
+    this.invalidateThreadId();
     await setSessionId(this.cli, this.cwd, '', this.chatId);
     if (this.dead) return;
-    this.threadId = null;
     this.seedWindowOnNextTurn = true;
     bankRotation(this.logKey);
     recordContextRotation(this.logKey);
@@ -282,7 +293,7 @@ export class CodexSession {
         emit: (ev) => this.emit(ev as any),
         rotate: async () => {
           this.seedWindowOnNextTurn = true;
-          this.threadId = null;
+          this.invalidateThreadId();
           await setSessionId(this.cli, this.cwd, '', this.chatId);
           bankRotation(this.logKey);
           return false;
@@ -353,7 +364,7 @@ export class CodexSession {
     const switchedFrom = priorEngine && priorEngine !== this.cli ? priorEngine : null;
     if (switchedFrom) {
       this.seedWindowOnNextTurn = true;
-      this.threadId = null;
+      this.invalidateThreadId();
       this.recoverContextOnNextTurn = true;
       void this.clearPersistedThreadId();
       console.warn(
@@ -368,7 +379,7 @@ export class CodexSession {
     const visible = extractVisibleTurns(history);
     if (!switchedFrom && (isRotationOwed(this.logKey) || visible.length > WINDOW_TURNS)) {
       this.seedWindowOnNextTurn = true;
-      this.threadId = null;
+      this.invalidateThreadId();
       this.recoverContextOnNextTurn = true;
       void this.clearPersistedThreadId();
       console.warn(
@@ -495,7 +506,7 @@ export class CodexSession {
     this.dead = true;
     this.nativeSteerReady = false;
     this.rejectNativeSteers(new Error('Codex session stopped'));
-    const latestThreadId = this.threadId ?? latestThreadIdFromEvents(this.eventLog, this.cli);
+    const latestThreadId = this.threadId ?? latestThreadIdFromEvents(this.eventLog, this.cli, this.invalidatedThreadIds);
     if (latestThreadId) {
       await this.persistThreadId(latestThreadId);
     }
@@ -517,8 +528,17 @@ export class CodexSession {
     return this.threadIdWrite;
   }
 
-  private clearPersistedThreadId(): Promise<void> {
+  /** An intentional fresh-thread reset: the current id is tombstoned so the
+   *  event-log recovery (shutdown) can never resurrect a thread this session
+   *  explicitly dropped — rotated, engine-switched, seeded-fresh, poisoned,
+   *  or empty-retried. Every intentional reset goes through here. */
+  private invalidateThreadId(): void {
+    if (this.threadId) this.invalidatedThreadIds.add(this.threadId);
     this.threadId = null;
+  }
+
+  private clearPersistedThreadId(): Promise<void> {
+    this.invalidateThreadId();
     this.threadIdWrite = this.threadIdWrite.then(
       () => setSessionId(this.cli, this.cwd, '', this.chatId),
       () => setSessionId(this.cli, this.cwd, '', this.chatId),
@@ -724,14 +744,23 @@ export class CodexSession {
       return;
     }
 
-    const laneName = agentForChatId(this.chatId)?.name;
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
-    // login; everything else keeps the per-repo account-map resolution. Resolved
-    // before the seed so the rollout lookup below reads the same CODEX_HOME the
-    // turn will bill.
+    // login; a per-agent pin (RIVENDELL_AGENT_ACCOUNTS) comes next; everything
+    // else keeps the per-repo account-map resolution. Resolved before the seed
+    // so the rollout lookup below reads the same CODEX_HOME the turn will bill
+    // and spawn in — the SAME resolution the spawn uses (a chat-only lookup
+    // here would scan the default account's home for an agent-pinned lane and
+    // falsely prove its live rollout missing). A pin that cannot be honored
+    // throws, so resolve inside a guard that unwedges the session (mirrors
+    // the spawn's block below).
+    // Capture the lane's agent identity once: the roster can change mid-turn
+    // (a rename or reassignment between async steps), and the account
+    // resolution, the prompt, and the MCP identity must all describe the
+    // same agent.
+    const sessionAgent = agentForChatId(this.chatId);
     let childEnv: NodeJS.ProcessEnv;
     try {
-      const forcedAccount = accountFromChatId(this.chatId) ?? accountForAgent(laneName);
+      const forcedAccount = accountFromChatId(this.chatId) ?? accountForAgent(sessionAgent?.name);
       childEnv = forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd);
     } catch (err) {
       cleanupImages();
@@ -751,6 +780,10 @@ export class CodexSession {
     // window, which costs context rather than the answer.
     if (this.threadId && (await codexRolloutMissing(codexHomeFor(childEnv), this.threadId))) {
       const unresumable = this.threadId;
+      // Tombstone the cleared id: shutdown's event-log recovery must never
+      // resurrect it (the fresh turn may fail before minting a new session
+      // id, and the old id's turnEnd/init events still sit in the log).
+      this.invalidatedThreadIds.add(unresumable);
       // Drops the in-memory id synchronously; a failed write is not worth
       // wedging a busy lane over, and the next turn re-checks the rollout.
       await this.clearPersistedThreadId().catch(() => undefined);
@@ -765,18 +798,26 @@ export class CodexSession {
     // primer from a fail-open store hiccup is uncertainty, and the seed
     // window must not be consumed on it below.
     const seedStatus = hasSeedOverride
-      ? { primer: opts.seedOverride as string, available: true }
+      ? { primer: opts.seedOverride as string, available: opts.seedOverrideAvailable !== false }
       : seedWindow
         ? await peekEnginePrimerThroughSeqWithStatus(this.logKey, historyThroughSeq, fallbackHistory).catch((e) => {
             // A peek/compaction failure after the user's message was accepted
             // must not strand a busy lane with the reply watcher armed: keep
-            // going unseeded, the same degradation the empty-retry path uses.
+            // going unseeded, the same degradation the empty-retry path uses
+            // (and report it unavailable so the window retries next turn).
             console.warn(`[chat codex] seed peek failed on ${this.logKey}, continuing unseeded: ${(e as Error).message}`);
             return { primer: '', available: false };
           })
         : { primer: '', available: true };
     const seed = seedStatus.primer;
     const seedAvailable = seedStatus.available;
+    if (seedWindow && !seedAvailable) {
+      // An unconfirmed primer arms the window regardless of what triggered
+      // this seed: the recovery flag below is cleared while the window flag
+      // may never have been set, and without this the next turn would never
+      // retry the commitments half.
+      this.seedWindowOnNextTurn = true;
+    }
     if (seed) {
       this.recoverContextOnNextTurn = false;
       if (!hasSeedOverride) {
@@ -804,7 +845,7 @@ export class CodexSession {
       this.busy = false;
       return;
     }
-    const prompt = `${computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, !(seedWindow || hasSeedOverride))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
+    const prompt = `${computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, !(seedWindow || hasSeedOverride))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
     // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
     // -c overrides rather than written into ~/.codex/config.toml so this stays
     // scoped to TARDIS.
@@ -816,7 +857,8 @@ export class CodexSession {
         '-c', `mcp_servers.rivendell-browser.args=${JSON.stringify([browserMcpEntry])}`,
       );
     }
-    browserMcpArgs.push(...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId), agentId: agentForChatId(this.chatId)?.id }), ...officeMcpCodexArgs());
+    const laneName = sessionAgent?.name;
+    browserMcpArgs.push(...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId), agentId: sessionAgent?.id }), ...officeMcpCodexArgs());
     const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
 
     // Wait for OneDrive to release its sync lock on .codex/config.toml so
@@ -840,11 +882,18 @@ export class CodexSession {
       return;
     }
 
+    // The spawn reuses the account environment the guarded rollout-check
+    // resolution above already captured: resolving again here could race an
+    // account-config change between the check and the spawn (the check
+    // inspected one account's CODEX_HOME while the spawn would bill another),
+    // and one captured resolution is the same environment the turn bills. A
+    // pin that cannot be honored already unwedged the session above.
+    const codexSpawnEnv: NodeJS.ProcessEnv = childEnv;
     const turnStartedAtMs = Date.now();
     const child = spawn(process.execPath, [CODEX_APP_TURN_SCRIPT], {
       cwd: this.cwd,
       // The marker tells the installed long-call gate hook this is a TARDIS agent turn.
-      env: { ...childEnv, ...longCallGateEnv(this.chatId) },
+      env: { ...codexSpawnEnv, ...longCallGateEnv(this.chatId) },
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -1041,7 +1090,7 @@ export class CodexSession {
       });
       if (retryEmptyTurn) {
         const failedThread = this.threadId;
-        this.threadId = null;
+        this.invalidateThreadId();
         await setSessionId(this.cli, this.cwd, '', this.chatId);
         let retrySeed = seed;
         let retryAvailable = seedAvailable;
@@ -1065,6 +1114,7 @@ export class CodexSession {
             emptyRetryDepth: (opts.emptyRetryDepth ?? 0) + 1,
             suppressEcho: true,
             seedOverride: retrySeed,
+            seedOverrideAvailable: retryAvailable,
             skipAttachments: true,
           });
         } catch (error) {
@@ -1116,7 +1166,7 @@ export class CodexSession {
         // starts clean instead of resuming a corpse that keeps exiting 1.
         // Do not go through persistThreadId('') — that would leave this.threadId as ''.
         const deadThread = this.threadId;
-        this.threadId = null;
+        this.invalidateThreadId();
         await setSessionId(this.cli, this.cwd, '', this.chatId);
         this.seedWindowOnNextTurn = true;
         if (deadThread) {
@@ -1128,10 +1178,21 @@ export class CodexSession {
         // Acknowledge a CONFIRMED seed only: a real seed, or a confirmed-empty
         // one (the second turn must not re-seed a warm session). An unconfirmed
         // primer — empty OR nonempty-partial (history without the commitments
-        // half) — leaves the window open, so the next turn retries the
-        // commitments instead of the warm session silently losing them.
+        // half) — discards the thread and leaves the window open instead: the
+        // next turn seeds the full primer on a genuinely fresh thread, so the
+        // commitments are retried without re-seeding history into the warm
+        // one (a persistent failure must not replay growing history every
+        // turn).
         if (seedAvailable && (seed || seedWindow)) await this.ackWindowSeed();
-        await this.persistThreadId(this.threadId);
+        else if (seedWindow && !seedAvailable) {
+          const unconfirmedThread = this.threadId;
+          this.threadId = null;
+          await this.clearPersistedThreadId().catch(() => undefined);
+          console.warn(
+            `[chat codex] discarding unconfirmed-seed thread ${unconfirmedThread} on ${this.logKey} — the next turn reseeds fresh`,
+          );
+        }
+        if (this.threadId) await this.persistThreadId(this.threadId);
       }
       this.busy = false;
       const rotationDue = contextRotationDue(this.logKey) && code === 0;
@@ -1189,8 +1250,13 @@ export class CodexSession {
   private emit(msg: SessionEvent): void {
     msg = redactComputerImages(msg);
     if (isPlumbingEvent(msg)) return;
-    this.lastActivityAtMs = Date.now();
-    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now() };
+    // Lane stamp via the threadKey leaf: a runtime import of runner.ts's
+    // laneTagFor would create a module-evaluation cycle (the runners and
+    // runner.ts import each other's worlds; the type-only import stays).
+    // Engine provenance at emit: the recovery only trusts positively-known
+    // provenance, so the runner's own events are stamped here (the persisted
+    // spread below re-stamps the same value, harmlessly).
+    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now(), eng: this.cli, ...(isBackgroundChatId(this.chatId) ? { lane: 'bg' as const } : {}) };
     const persisted = { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) };
     const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
     if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) {

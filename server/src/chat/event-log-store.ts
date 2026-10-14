@@ -2,8 +2,9 @@ import { appendFile, mkdir, open as openFile, rm } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { STATE_DIR } from './config.ts';
+import { MAX_EVENTS_PER_LOG, STATE_DIR } from './config.ts';
 import { redactEventSecrets, redactSecrets } from './secretRedaction.ts';
+import { noteMattAsk, closeMattAsksForLane } from '../lib/mattAsks.ts';
 import type { SessionEvent } from './runner.ts';
 import { isSyntheticApiErrorEvent } from './providerErrors.ts';
 
@@ -39,7 +40,9 @@ export type PersistedEvent = {
 };
 
 export const EVENT_LOG_DIR = join(STATE_DIR, 'event-logs');
-export const MAX_EVENTS_PER_LOG = 2000;
+// Retention window shared from config.ts (a leaf module) so import cycles
+// cannot evaluate it before initialization; re-exported for existing importers.
+export { MAX_EVENTS_PER_LOG };
 
 // Cheap process-local invalidation for the sidebar history result cache. Bump
 // only after a durable write/clear/trim succeeds; derived per-file entries still
@@ -1089,6 +1092,140 @@ export function flushAllEventChains(): Promise<void> {
  * cannot race process exit, and `_user_echo` admission records must hit disk
  * before listeners acknowledge or the model receives the prompt. Callers flush
  * the per-key async chain first when the process is staying alive. */
+/** card-baadaf B: Matt's asks open on every user echo in an agent lane and
+ *  close on any assistant text in that lane. Clean event-type markers, no
+ *  regex; fire-and-forget inside the write chain so a store hiccup never
+ *  blocks the durable append. */
+/** Only a visible text block (the reply Matt actually sees) closes an ask:
+ *  thinking-only, tool-use-only, or empty assistant messages must not stop
+ *  the timer (the exact miss from Oct 8 and Oct 11). */
+function hasVisibleText(message: { content?: Array<{ type?: string; text?: string }> }): boolean {
+  if (!Array.isArray(message.content)) return false;
+  return message.content.some((block) => block && block.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0);
+}
+
+/** A streamed visible-text frame (Codex, Banana, voice continuations): those
+ *  runners persist reply text as stream_event deltas, never as an aggregate
+ *  assistant.message, so the close check recognizes the text frames
+ *  themselves. Tool-use frames, thinking, and empty deltas never close. */
+function streamedVisibleText(frame: unknown): boolean {
+  if (!frame || typeof frame !== 'object') return false;
+  const f = frame as { type?: unknown; content_block?: { type?: unknown; text?: unknown }; delta?: { type?: unknown; text?: unknown } };
+  if (f.type === 'content_block_start') {
+    return f.content_block?.type === 'text' && typeof f.content_block.text === 'string' && f.content_block.text.trim().length > 0;
+  }
+  if (f.type === 'content_block_delta') {
+    return f.delta?.type === 'text_delta' && typeof f.delta.text === 'string' && f.delta.text.trim().length > 0;
+  }
+  return false;
+}
+
+/** A terminal non-error result with real text: the canonical final answer
+ *  for Codex/Banana turns (the client renders it when no assistant or
+ *  stream frame survived). Error results and blank text never close. */
+function terminalResultText(frame: unknown): boolean {
+  if (!frame || typeof frame !== 'object') return false;
+  const f = frame as { type?: unknown; subtype?: unknown; is_error?: unknown; result?: unknown };
+  if (f.type !== 'result') return false;
+  // Explicit success only: cancelled, interrupted, timed-out, or
+  // differently-cased/encoded error results must never close an ask on
+  // diagnostic text.
+  if (f.subtype !== 'success' || f.is_error === true) return false;
+  return typeof f.result === 'string' && f.result.trim().length > 0;
+}
+
+/** Latest OUTER-turn start per (logKey, lane): an ask only closes on output
+ *  from a turn that started after the ask arrived (an older turn still
+ *  streaming when Matt messaged must not close his newer ask with in-flight
+ *  text). Providers emit multiple message_start frames per outer turn (tool
+ *  loops), so only the FIRST message_start after the previous turnEnd counts
+ *  as the outer turn's start — an internal round after a mid-turn steer must
+ *  not move the boundary. Both entries die at the turn's terminal turnEnd:
+ *  the maps never grow past the active turns. */
+const turnStartAtByLane = new Map<string, number>();
+const outerTurnStartRecorded = new Map<string, boolean>();
+
+function mattAskHooks(key: string, persisted: PersistedEvent): void {
+  try {
+    // Lane identity: home and background sessions share one logKey, so an
+    // ask only ever closes on visible output from its OWN lane — a routine,
+    // job, or handoff reply in the bg lane must not close Matt's unanswered
+    // home-lane asks.
+    const lane: 'home' | 'bg' = persisted.lane === 'bg' ? 'bg' : 'home';
+    const laneKey = `${key}|${lane}`;
+    const ev = persisted.ev as { type?: unknown; event?: unknown; parent_tool_use_id?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> } };
+    if (!ev || typeof ev !== 'object') return;
+    const eventAt = typeof persisted.at === 'number' && Number.isFinite(persisted.at) ? persisted.at : Date.now();
+    const frameType = (frame: unknown): unknown => (!frame || typeof frame !== 'object') ? undefined : (frame as { type?: unknown }).type;
+    if (ev.type === 'event' && ev.event && typeof ev.event === 'object') {
+      const inner = ev.event as { type?: unknown; text?: unknown; imageCount?: unknown; attachments?: unknown; clientMsgId?: unknown; parent_tool_use_id?: unknown; message?: { role?: unknown; content?: Array<{ type?: string; text?: string }> }; event?: unknown };
+      // A subagent's stream is private work, not the lane's visible reply to
+      // Matt (the same parent_tool_use_id filtering reads.ts, useChat, and
+      // replayDelivery apply): its text never closes an ask, its inner
+      // echoes never open one, and its frames never count as turn starts.
+      const subagent = typeof ev.parent_tool_use_id === 'string' || typeof inner.parent_tool_use_id === 'string';
+      if (inner.type === 'stream_event' && !subagent && frameType(inner.event) === 'message_start' && outerTurnStartRecorded.get(laneKey) !== true) {
+        // The first provider message after the previous turnEnd starts this
+        // lane's outer turn: only a turn that started AFTER an ask arrived
+        // can close it. Internal rounds (tool loops) must not move it.
+        turnStartAtByLane.set(laneKey, eventAt);
+        outerTurnStartRecorded.set(laneKey, true);
+      }
+      if (inner.type === 'turnEnd' && !subagent) {
+        // The outer turn ended: evict its boundary — the next message_start
+        // starts a fresh outer turn, and the maps never grow past live turns.
+        outerTurnStartRecorded.set(laneKey, false);
+        turnStartAtByLane.delete(laneKey);
+      }
+      if (inner.type === '_user_echo' && !subagent) {
+        // Only a message Matt himself typed opens an ask: the client assigns
+        // every person-typed message (including mid-turn steers) a
+        // clientMsgId, while server-side deliveries (routines, jobs,
+        // handoffs) carry none. Image- or attachment-only echoes are asks
+        // too: with no text they open the timer on a placeholder snippet.
+        const text = typeof inner.text === 'string' && inner.text.trim()
+          ? inner.text
+          : (typeof inner.imageCount === 'number' && inner.imageCount > 0) || (Array.isArray(inner.attachments) && inner.attachments.length > 0)
+            ? '[Matt sent an image or attachment]'
+            : '';
+        if (text && typeof inner.clientMsgId === 'string' && inner.clientMsgId) noteMattAsk(key, lane, text);
+      }
+      const turnStart = turnStartAtByLane.get(laneKey);
+      if (!subagent && typeof turnStart === 'number') {
+        if (inner.type === 'assistant' && inner.message && typeof inner.message === 'object' && inner.message.role === 'assistant') {
+          if (hasVisibleText(inner.message)) closeMattAsksForLane(key, lane, turnStart);
+        }
+        if (inner.type === 'stream_event' && streamedVisibleText(inner.event)) {
+          closeMattAsksForLane(key, lane, turnStart);
+        }
+        if (inner.type === 'result' && terminalResultText(inner)) {
+          closeMattAsksForLane(key, lane, turnStart);
+        }
+      }
+    }
+    if (ev.type === 'stream_event' && typeof ev.parent_tool_use_id !== 'string' && frameType(ev.event) === 'message_start' && outerTurnStartRecorded.get(laneKey) !== true) {
+      turnStartAtByLane.set(laneKey, eventAt);
+      outerTurnStartRecorded.set(laneKey, true);
+    }
+    if (ev.type === 'turnEnd' && typeof ev.parent_tool_use_id !== 'string') {
+      outerTurnStartRecorded.set(laneKey, false);
+      turnStartAtByLane.delete(laneKey);
+    }
+    if (ev.type === 'stream_event' || ev.type === 'result' || ev.type === 'assistant') {
+      // No turn start on record (no message_start seen this process): skip
+      // the close — the next turn always opens with one and closes properly.
+      const turnStart = turnStartAtByLane.get(laneKey);
+      if (typeof ev.parent_tool_use_id !== 'string' && typeof turnStart === 'number') {
+        if (ev.type === 'stream_event' && streamedVisibleText(ev.event)) closeMattAsksForLane(key, lane, turnStart);
+        if (ev.type === 'result' && terminalResultText(ev)) closeMattAsksForLane(key, lane, turnStart);
+        if (ev.type === 'assistant' && ev.message && typeof ev.message === 'object' && ev.message.role === 'assistant' && hasVisibleText(ev.message)) closeMattAsksForLane(key, lane, turnStart);
+      }
+    }
+  } catch {
+    // Never block the durable append on an ask-store hiccup.
+  }
+}
+
 export function appendEventLogSync(key: string, persisted: PersistedEvent): boolean {
   observeNextSeq(key, persisted.seq + 1);
   if (isPlumbingEvent(persisted.ev)) return true;
@@ -1104,6 +1241,7 @@ export function appendEventLogSync(key: string, persisted: PersistedEvent): bool
     // non-plain instance) still gets one last text-level scan before the
     // line is durable.
     appendFileSync(logPath(key), redactSecrets(JSON.stringify(redactEventSecrets(persisted))) + '\n', 'utf8');
+    mattAskHooks(key, redactEventSecrets(persisted));
     bumpEventLogRevision(persisted.ev);
     return true;
   } catch (err) {
@@ -1138,6 +1276,7 @@ export function appendEventLog(key: string, persisted: PersistedEvent): void {
         await mkdir(EVENT_LOG_DIR, { recursive: true });
         await appendFile(path, line, 'utf8');
         bumpEventLogRevision(persisted.ev);
+        mattAskHooks(key, redactEventSecrets(persisted));
       } catch (err) {
         console.warn('[event-log-store] append failed', key, (err as Error).message);
       }

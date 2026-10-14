@@ -36,8 +36,9 @@ test('our own thread id still wins, stamped or freshly emitted', () => {
     init(2, 'claude-session', 'claude'),
     turnEnd(783, 'claude-session', 'claude'),
     init(784, 'codex-thread-a', 'codex'),
-    // Events this process just emitted carry no provenance stamp yet.
-    turnEnd(790, 'codex-thread-b'),
+    // Events this process just emitted are stamped at emit now (the runner
+    // sets eng on its own SeqEvents), so a fresh emit is positively ours.
+    turnEnd(790, 'codex-thread-b', 'codex'),
   ];
   assert.equal(latestThreadIdFromEvents(log, 'codex'), 'codex-thread-b');
 });

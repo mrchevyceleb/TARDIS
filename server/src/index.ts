@@ -37,6 +37,7 @@ import { registerScribeSocket } from './worker/scribe.ts';
 import { startWorkerQueue, stopWorkerQueue } from './worker/queue.ts';
 import { startWorkspaceWatcher, stopWorkspaceWatcher } from './lib/workspaceWatcher.ts';
 import { startDeskHygieneScheduler } from './lib/deskHygiene.ts';
+import { startMattAsksScheduler } from './lib/mattAsks.ts';
 import { startCommitmentSweeper } from './lib/commitmentSweep.ts';
 import { startRestartWake } from './lib/restartWake.ts';
 import { tasksRouter } from './routes/tasks.ts';
@@ -222,6 +223,7 @@ registerScribeSocket(server);
 if (!SIDE_COPY) startWorkerQueue();
 if (!SIDE_COPY) startWorkspaceWatcher();
 if (!SIDE_COPY) startDeskHygieneScheduler(); // Desk card hygiene (60s tick): stale-card nudges at 8/10/12/2/4 ET
+if (!SIDE_COPY) startMattAsksScheduler(); // Matt's asks timer (60s tick): 15-min no-reply nudge, then the Chief
 if (!SIDE_COPY) startCommitmentSweeper(); // past-due commitments (60s tick): raise to owner + Chief, once each
 if (!SIDE_COPY) startRestartWake(); // once, ~25s after boot: wake the lanes the last restart cut mid-turn
 

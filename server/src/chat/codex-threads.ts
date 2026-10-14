@@ -23,10 +23,15 @@ type StampedEvent = SeqEvent & { eng?: string };
 export function latestThreadIdFromEvents(
   events: ReadonlyArray<StampedEvent>,
   cli: string,
+  exclude?: ReadonlySet<string>,
 ): string | null {
   let threadId: string | null = null;
   for (const se of events) {
-    if (typeof se.eng === 'string' && se.eng && se.eng !== cli) continue;
+    // Positively-known provenance only: an unstamped event might belong to
+    // any engine sharing this thread's log, and a foreign engine's session
+    // id must never be recovered as ours (the log is engine-neutral; the
+    // runner stamps its own events at emit, so unstamped means unknown).
+    if (se.eng !== cli) continue;
     const ev = se.ev;
     if (ev.type === 'turnEnd' && typeof ev.sessionId === 'string') {
       threadId = ev.sessionId;
@@ -43,6 +48,9 @@ export function latestThreadIdFromEvents(
       threadId = inner.session_id;
     }
   }
+  // A tombstoned latest id wins over any older fallback: the lane was
+  // explicitly cleared for a fresh start, so nothing may be resurrected.
+  if (threadId && exclude?.has(threadId)) return null;
   return threadId;
 }
 
@@ -92,10 +100,14 @@ export async function codexRolloutMissing(codexHome: string, threadId: string): 
         continue;
       }
       if (!entry.isFile()) continue;
-      // `.jsonl` and codex's compressed `.jsonl.zst` are both live rollouts.
-      if (!entry.name.startsWith('rollout-') || !entry.name.includes('.jsonl')) continue;
+      // `.jsonl` and codex's compressed `.jsonl.zst` are both live rollouts:
+      // anchored extensions only (a `rollout-*.jsonl.bak` is not one), and the
+      // thread id must be the filename's final segment before the extension,
+      // matched exactly — a substring id must never match an unrelated rollout.
+      const isRolloutFile = /\.(jsonl|jsonl\.zst)$/.test(entry.name);
+      if (!entry.name.startsWith('rollout-') || !isRolloutFile) continue;
       sawAnyRollout = true;
-      if (entry.name.includes(threadId)) return true;
+      if (entry.name.endsWith(`-${threadId}.jsonl`) || entry.name.endsWith(`-${threadId}.jsonl.zst`)) return true;
     }
     return false;
   };
