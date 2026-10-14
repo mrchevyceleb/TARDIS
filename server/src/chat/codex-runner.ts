@@ -269,9 +269,13 @@ export class CodexSession {
       isBusy: () => this.busy || this.dead, emit: (ev) => this.emit(ev as any), rotate: () => false,
     });
     if (!refreshed || this.busy || this.dead) return;
+    // Tombstone synchronously BEFORE the awaited clear: a shutdown landing
+    // during setSessionId must not resurrect the id this rotation is dropping
+    // (the recovery excludes tombstoned ids, and the dead-return below can no
+    // longer skip the tombstone).
+    this.invalidateThreadId();
     await setSessionId(this.cli, this.cwd, '', this.chatId);
     if (this.dead) return;
-    this.invalidateThreadId();
     this.seedWindowOnNextTurn = true;
     bankRotation(this.logKey);
     recordContextRotation(this.logKey);
