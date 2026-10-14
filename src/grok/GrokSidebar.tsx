@@ -923,7 +923,7 @@ export function BotRail(props: BotRailProps) {
           // The boundary above the sequence: below the never-seated loose
           // block, or the top of the rail when every loose agent is seated.
           <div
-            className={`bt-dropzone${seqZone === '__top__' ? ' on' : ''}`}
+            className={`bt-dropzone bt-seatzone${seqZone === '__top__' ? ' on' : ''}`}
             aria-label="Drop here to seat the companion loose, above the groups"
             onDragOver={(e) => { e.preventDefault(); setSeqZone('__top__'); }}
             onDrop={(e) => { e.preventDefault(); commitSeqZone(null); }}
@@ -961,7 +961,7 @@ export function BotRail(props: BotRailProps) {
                     </RailGroupSection>
                     {dragId ? (
                       <div
-                        className={`bt-dropzone${seqZone === sec.g.id ? ' on' : ''}`}
+                        className={`bt-dropzone bt-seatzone${seqZone === sec.g.id ? ' on' : ''}`}
                         aria-label="Drop here to seat the companion loose, below this group"
                         onDragOver={(e) => { e.preventDefault(); setSeqZone(sec.g.id); }}
                         onDrop={(e) => { e.preventDefault(); commitSeqZone(sec.g.id); }}
@@ -977,7 +977,7 @@ export function BotRail(props: BotRailProps) {
                   </div>
                   {dragId ? (
                     <div
-                      className={`bt-dropzone${seqZone === item.row.a.id ? ' on' : ''}`}
+                      className={`bt-dropzone bt-seatzone${seqZone === item.row.a.id ? ' on' : ''}`}
                       aria-label="Drop here to seat the companion loose, below this companion"
                       onDragOver={(e) => { e.preventDefault(); setSeqZone(item.row.a.id); }}
                       onDrop={(e) => { e.preventDefault(); commitSeqZone(item.row.a.id); }}
