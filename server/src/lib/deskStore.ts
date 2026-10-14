@@ -350,11 +350,18 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
   // deadline (it predates this feature) gets one seeded from its last update,
   // bounded to 30 minutes out from the moment it was read, so the sweep covers
   // every live card from deployment day, not only new ones.
-  if ((card.column === 'in_progress' || card.column === 'in_qa') && !card.nextCheckAt) {
-    // Clamped to at most now + 30 minutes out, so a stale updatedAt can never
-    // postpone the first check past the maximum window.
-    const base = Math.min(Date.parse(updatedAt || now), Date.parse(now));
-    card.nextCheckAt = new Date(base + CARD_NEXT_CHECK_MS).toISOString();
+  if (card.column === 'in_progress' || card.column === 'in_qa') {
+    // Every deadline is clamped to at most now + 30 minutes (not only newly
+    // seeded ones): a parseable persisted nextCheckAt months ahead would
+    // suppress checks indefinitely. A missing deadline is seeded; an existing
+    // one is capped.
+    const cap = Date.parse(now) + CARD_NEXT_CHECK_MS;
+    if (!card.nextCheckAt) {
+      const base = Math.min(Date.parse(updatedAt || now), Date.parse(now));
+      card.nextCheckAt = new Date(base + CARD_NEXT_CHECK_MS).toISOString();
+    } else if (Date.parse(card.nextCheckAt) > cap) {
+      card.nextCheckAt = new Date(cap).toISOString();
+    }
   }
   const description = clip(raw.description, DESK_LIMITS.description);
   if (description) card.description = description;
@@ -955,8 +962,10 @@ export function commentCard(id: string, text: unknown, author: DeskActor): Promi
  *  nudges that are due now (the owner nudge when a live card's nextCheckAt
  *  passed with no touch since, the Chief copy 15 quiet minutes after the
  *  owner nudge), having already marked them on the cards, so a crash can
- *  drop a nudge but never repeat one. A touch that sets a fresh nextCheckAt
- *  clears both marks. */
+ *  drop a nudge but never repeat one. An explicit delivery failure also
+ *  keeps the mark (the same at-most-once trade as every existing hygiene
+ *  piece: a nudge can be dropped but never repeated, and the log records
+ *  the failure). A touch that sets a fresh nextCheckAt clears both marks. */
 export async function sweepCardChecks(): Promise<Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>> {
   const due: Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }> = [];
   await mutate((data, now) => {

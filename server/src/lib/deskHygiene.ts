@@ -655,9 +655,16 @@ export function startDeskHygieneScheduler(): boolean {
     inFlight = true;
     // The quiet check sweep runs independently of the hygiene tick: a
     // recurring failure in unrelated hygiene work must never suppress
-    // deadline processing.
+    // deadline processing. Each leg's rejection is logged individually
+    // (allSettled itself never rejects, so a plain catch would be dead).
     void Promise.allSettled([runDeskHygieneTick(), sweepQuietChecks()])
-      .catch((error) => console.warn(`[desk-hygiene] tick failed: ${(error as Error).message}`))
+      .then((results) => {
+        for (const r of results) {
+          if (r.status === 'rejected') {
+            console.warn(`[desk-hygiene] leg failed: ${(r.reason as Error)?.message ?? String(r.reason)}`);
+          }
+        }
+      })
       .finally(() => { inFlight = false; });
   };
   /** Silence is an event (card-baadaf A): the check-in deadlines ride the
