@@ -119,11 +119,11 @@ try {
   if (liveLock !== tgtLock) fail('Lockfile differs from the live tree; run the build with a real install first.');
   // Standing rule (Max, Oct 14 11:14): a side copy NEVER symlinks the live
   // checkout's node_modules (an npm ci through such a symlink emptied the
-  // live tree once). Hardlink copies instead: fast on the same filesystem,
-  // fully isolated, and replacing a hardlinked file never touches the
-  // original.
-  run('cp', ['-rl', path.join(REPO, 'node_modules'), path.join(srcDir, 'node_modules')]);
-  run('cp', ['-rl', path.join(REPO, 'node_modules'), path.join(srcDir, 'server', 'node_modules')]);
+  // live tree once), and never hardlinks either (an in-place write in the
+  // copy would still change the live files). A real copy: 249MB on NVMe,
+  // a few seconds, fully isolated.
+  run('cp', ['-a', path.join(REPO, 'node_modules'), path.join(srcDir, 'node_modules')]);
+  run('cp', ['-a', path.join(REPO, 'node_modules'), path.join(srcDir, 'server', 'node_modules')]);
   step('typechecking the server...');
   run('npm', ['run', 'build', '--workspace', 'server'], srcDir, path.join(tmp, 'build.log'));
   step('typecheck green');
