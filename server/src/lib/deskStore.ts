@@ -362,6 +362,13 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     } else if (Date.parse(card.nextCheckAt) > cap) {
       card.nextCheckAt = new Date(cap).toISOString();
     }
+    // Mark invariants: escalation without a prior nudge is incoherent (it
+    // would suppress escalation forever while re-nudging the owner), a
+    // future nudgeAt would postpone escalation indefinitely, and an
+    // escalation older than its own nudge is inconsistent.
+    if (card.escalatedAt && !card.nudgeAt) delete card.escalatedAt;
+    if (card.nudgeAt && Date.parse(card.nudgeAt) > Date.parse(now)) delete card.nudgeAt;
+    if (card.escalatedAt && card.nudgeAt && Date.parse(card.escalatedAt) < Date.parse(card.nudgeAt)) delete card.escalatedAt;
   }
   const description = clip(raw.description, DESK_LIMITS.description);
   if (description) card.description = description;
@@ -994,6 +1001,11 @@ export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promi
   // empty roster as a sweep failure: the caller logs it, nothing is marked
   // or delivered.
   if (agents.length === 0) throw new Error('live roster unavailable (empty list) — sweep skipped, nothing marked');
+  // The Chief is the fallback recipient for every stale, human, and
+  // escalated card: validate it exists in the roster BEFORE marking, so an
+  // unavailable Chief aborts the sweep with nothing consumed instead of
+  // marking every nudge for a delivery that cannot land.
+  if (!agents.some((a) => a.id === 'chief-of-staff')) throw new Error('chief-of-staff is not in the live roster — sweep skipped, nothing marked');
   // Case-insensitive like the rest of Desk routing: a legacy or externally
   // repaired actor id/name with different casing is not a stale owner. The
   // canonical roster id is returned, never the lowercased candidate.
@@ -1001,9 +1013,12 @@ export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promi
   const byLowerName = new Map(agents.map((a) => [a.name.toLowerCase(), a] as const));
   const resolveOwner = (card: DeskCard): string => {
     if (card.owner.kind !== 'agent') return 'chief-of-staff';
-    const raw = typeof card.owner.id === 'string' && card.owner.id ? card.owner.id : card.owner.name;
-    if (!raw) return 'chief-of-staff';
-    const hit = byLowerId.get(raw.toLowerCase()) ?? byLowerName.get(raw.toLowerCase());
+    // Id first, then the name independently: a legacy or repaired card can
+    // carry a stale id with a valid canonical name, and the id is present on
+    // every normalized card, so a same-value name lookup would never fire.
+    const idHit = typeof card.owner.id === 'string' && card.owner.id ? byLowerId.get(card.owner.id.toLowerCase()) : undefined;
+    const nameHit = typeof card.owner.name === 'string' && card.owner.name ? byLowerName.get(card.owner.name.toLowerCase()) : undefined;
+    const hit = idHit ?? nameHit;
     return hit ? hit.id : 'chief-of-staff';
   };
   await mutate((data, now) => {
@@ -1033,7 +1048,7 @@ export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promi
             to: ownerAgent,
             text: ownerAgent === 'chief-of-staff'
               ? `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since (you own this one). Comment on the card to set a new one.`
-              : `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since. Comment on the card to set a new one, or tell Max what is blocking it.`,
+              : `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since. Comment on the card to set a new one, or tell the Chief of Staff what is blocking it.`,
           },
         });
       } else if (!card.escalatedAt && nowMs - Date.parse(card.nudgeAt) >= CARD_CHECK_ESCALATE_MS && ownerAgent !== 'chief-of-staff') {
