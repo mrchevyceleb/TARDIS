@@ -107,10 +107,33 @@ export function revokeComputerContext(owner: string): void {
  *  rules were sent once with the seed that started this window, so only the fresh
  *  token, the device line and the policy line ride along. Callers must pass brief=false
  *  (full rules) on the first message a process sees: each spawn, each context rotation. */
+/** Last computer-tool use per owner key, recorded by the devices API on
+ *  every computer_* call — a failed attempt counts, so a first attempt
+ *  without the block re-arms it for the next turn. In-memory: after a
+ *  restart a lane that uses computers pays at most one failed attempt. */
+const lastComputerToolUse = new Map<string, number>();
+export function noteComputerToolUse(owner: string): void {
+  lastComputerToolUse.set(owner, Date.now());
+}
+/** The block rides while the lane has used a computer tool this recently;
+ *  24h stands in for "the last N turns" (turns are not cheaply countable
+ *  here) and is tunable. */
+const COMPUTER_BLOCK_WINDOW_MS = 24 * 60 * 60_000;
+
 export function computerGuidance(cwd: string, chatId: string, label: string, human = true, sameTurn = false, brief = false): string {
   const now = Date.now();
   const owner = computerOwnerKey(cwd, chatId);
   for (const [ownerKey, context] of contexts) if (context.hardExpires <= now) contexts.delete(ownerKey);
+  // Matt, Oct 14 (card-d7bf78 b): the full computer block is injected only
+  // for lanes that have used a computer tool recently — a lane that never
+  // touches computers was paying the whole rules block every turn. A steer
+  // into a running turn always re-issues it (the turn may hold a context);
+  // a fresh turn on a lane with no recent use omits it, and a first computer
+  // attempt without the block lands as a clear failure whose API call
+  // re-arms the block for the next turn.
+  if (!sameTurn && now - (lastComputerToolUse.get(owner) ?? 0) > COMPUTER_BLOCK_WINDOW_MS) {
+    return '';
+  }
   const held = sameTurn ? contexts.get(owner) : undefined;
   const context = held && held.human === human && held.hardExpires > now
     ? { ...held, expires: now + CONTEXT_IDLE_MS }

@@ -14,7 +14,7 @@ import {
   type DeviceOp,
 } from '../devices/bridge.ts';
 import { asyncHandler } from './helpers.ts';
-import { backgroundComputerAllowed, computerSelectionKey, computerTarget, computerTargetFor, configuredDefaultComputer, readComputerContext, setComputerTarget, validComputerMcpToken } from '../devices/context.ts';
+import { backgroundComputerAllowed, computerSelectionKey, computerTarget, computerTargetFor, configuredDefaultComputer, noteComputerToolUse, readComputerContext, setComputerTarget, validComputerMcpToken } from '../devices/context.ts';
 import { bareChatId } from '../chat/threadKey.ts';
 import { ComputerStepJournal } from '../devices/stepJournal.ts';
 import { computerOcr } from '../devices/ocr.ts';
@@ -86,6 +86,13 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
   const op = String(req.params.op);
   if (!['start', 'inspect', 'capture', 'window_capture', 'uia', 'uia_value', 'uia_focus', 'uia_invoke', 'uia_key', 'focus', 'type', 'key', 'act', 'step', 'stop'].includes(op)) { res.status(400).json({ error: 'Unknown computer operation.' }); return; }
   const body = req.body ?? {};
+  // Matt, Oct 14 (card-d7bf78 b): every computer_* call marks the caller's
+  // lane as a computer user — a failed attempt counts, so a first attempt
+  // without the guidance block re-arms it for the next turn. Lane-bound
+  // shims name their owner on every call; the shared shim resolves it from
+  // the context when one is presented.
+  const recordingOwner = req.get('x-rivendell-computer-owner') || (() => { try { return readComputerContext(body.context)?.owner ?? ''; } catch { return ''; } })();
+  if (recordingOwner) noteComputerToolUse(recordingOwner);
   let device = typeof body.device === 'string' ? body.device : '';
   let context: ReturnType<typeof readComputerContext> | undefined;
   if (op === 'start') {
