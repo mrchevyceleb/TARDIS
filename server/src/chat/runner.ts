@@ -158,6 +158,18 @@ export function wrapSlashArgs(text: string): string {
 // live lever is the `--effort` flag (low|medium|high|xhigh|max). "max" is top.
 const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', 'claude-opus-5-5', 'xhigh');
 
+// Usage-limit rollover (Matt, Oct 15 2026): a Claude-family lane on one of the
+// accounts named in RIVENDELL_USAGE_FALLBACK_ACCOUNTS reruns its turn on the
+// agy subscription lane instead of dead-ending on "switch brains". The
+// account names are deployment config, never repo identity: unset/empty
+// disables the rollover entirely. The lane keeps its own model, so the next
+// turn tries Claude again as soon as the limit resets.
+const USAGE_FALLBACK_ACCOUNTS = new Set(
+  (process.env.RIVENDELL_USAGE_FALLBACK_ACCOUNTS ?? '')
+    .split(',').map((name) => name.trim()).filter(Boolean),
+);
+const USAGE_FALLBACK = { cli: 'agy' as const, model: 'gemini-4-argon', effort: 'high' };
+
 // Z.ai coding plan — GLM models served over the Anthropic-compatible endpoint.
 // Runs through the same `claude` binary with the base URL + auth token
 // redirected and a dedicated, OAuth-free CLAUDE_CONFIG_DIR, so the GLM token
@@ -631,6 +643,9 @@ class ClaudeSession {
   /** The context a seeded process started with. */
   private startTokens = 0;
   private providerAccount = '';
+  /** Named subscription account this child runs under (SAMWISE_ACCOUNT);
+   *  'default' when no account map is configured. */
+  private providerAccountName = 'default';
   /** Text-block seqs for the current Claude stream. A later synthetic marker
    * lets us surgically remove only its protocol prose from durable storage. */
   private streamTextBlocks = new Map<number, { text: string; seqs: number[] }>();
@@ -871,6 +886,9 @@ class ClaudeSession {
     this.nativeCompactWindow = Number(spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW) || 0;
     const profileDir = spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
     this.providerAccount = existsSync(profileDir) ? realpathSync(profileDir) : profileDir;
+    this.providerAccountName = typeof spawnEnv.SAMWISE_ACCOUNT === 'string' && spawnEnv.SAMWISE_ACCOUNT.trim()
+      ? spawnEnv.SAMWISE_ACCOUNT.trim()
+      : 'default';
     this.child = spawn('claude', args, {
       cwd,
       env: spawnEnv,
@@ -2548,6 +2566,14 @@ class ClaudeSession {
     if (terminal?.usageLimit) {
       noteProviderUsageLimit(this.providerAccount, agentForChatId(this.chatId)?.name ?? 'a lane', terminal);
     }
+    // The usage-limit rollover: same turn, backup engine. Only an account the
+    // deployment named may roll over, only with the turn's opening prompt in
+    // hand, and never stacked on the compact re-run below.
+    const usageFallbackDue = terminal?.usageLimit === true
+      && (this.cli === 'claude' || this.cli === 'assistant')
+      && USAGE_FALLBACK_ACCOUNTS.has(this.providerAccountName)
+      && this.compactRerunPrompt !== null
+      && this.compactRerunPrompt.text.trim() !== '';
     // Z.ai meters the coding plan in fixed windows, so an exhausted window is
     // never a balance problem and topping up credits cannot clear it. Attribute
     // the failure to the provider THIS child is actually talking to: a 1308
@@ -2590,6 +2616,25 @@ class ClaudeSession {
         zaiCut ? this.zaiCutNoticeFields(zaiCut) : undefined,
       );
       zaiCutNoticeSeq = this.nextSeq - 1;
+      if (usageFallbackDue) {
+        this.emit({
+          type: 'event',
+          event: {
+            type: '_terminal_error',
+            message: `Claude's usage window is full, so this turn is rerunning automatically on the Gemini backup (${USAGE_FALLBACK.model}). The lane returns to Claude when the limit resets.`,
+            code: 'usage_fallback',
+            ts: Date.now(),
+          },
+        });
+        scheduleUsageFallback({
+          cwd: this.cwd,
+          chatId: this.chatId,
+          logKey: this.logKey,
+          text: this.compactRerunPrompt!.text,
+          images: this.compactRerunPrompt!.images,
+          retiring: this,
+        });
+      }
     } else {
       this.emit({ type: 'event', event: ev });
     }
@@ -2692,7 +2737,9 @@ class ClaudeSession {
         // The compact failure's one automatic re-run (the copy above already
         // promised it). lengthRejected stays manual: its oversized prompt may
         // still be oversized after the reseed, so a human decides there.
-        if (compactFailed && compactRerunPlanned) {
+        // The usage rollover above already reruns this turn on the backup
+        // engine; a second, same-engine replay here would double-answer.
+        if (compactFailed && compactRerunPlanned && !usageFallbackDue) {
           scheduleCompactRerun({
             cli: this.cli,
             cwd: this.cwd,
@@ -3330,6 +3377,80 @@ function scheduleCompactRerun(job: CompactRerunJob): void {
       compactRerunJobs.delete(job);
     }
   })();
+}
+
+type UsageFallbackJob = {
+  cwd: string;
+  chatId: string;
+  logKey: string;
+  text: string;
+  images?: Array<{ mediaType: string; base64: string }>;
+  retiring: ClaudeSession;
+};
+const usageFallbackJobs = new Set<UsageFallbackJob>();
+
+/** Rerun one usage-limited turn on the backup engine (USAGE_FALLBACK). One per
+ *  lane: while a rerun is still landing, a second limited turn on the same
+ *  thread folds into it instead of stacking a second replay of its prompt. */
+function scheduleUsageFallback(job: UsageFallbackJob): void {
+  for (const pending of usageFallbackJobs) {
+    if (pending.logKey === job.logKey && pending.chatId === job.chatId) return;
+  }
+  usageFallbackJobs.add(job);
+  console.warn(`[chat] usage limit on ${job.logKey}; rerunning the turn on ${USAGE_FALLBACK.cli} ${USAGE_FALLBACK.model}`);
+  void (async () => {
+    try {
+      // Wait for the limited turn's boundary: the backup engine takes the
+      // thread by retiring this one, and retirement only lands on an idle
+      // session (retireOtherEnginesOnThread skips a busy child).
+      const started = Date.now();
+      while (job.retiring.isBusy() && Date.now() - started < 15_000) {
+        await new Promise((resolve) => { const t = setTimeout(resolve, 250); t.unref?.(); });
+      }
+      if (job.retiring.isBusy()) throw new Error('the limited turn never went idle');
+      const session = await getOrCreateSession({
+        cli: USAGE_FALLBACK.cli,
+        repoPath: job.cwd,
+        chatId: job.chatId,
+        model: USAGE_FALLBACK.model,
+        effort: USAGE_FALLBACK.effort,
+      });
+      await session.send(job.text, job.images, {});
+    } catch (err) {
+      usageFallbackJobs.delete(job);
+      await postUsageFallbackFailureNotice(job, (err as Error).message);
+      return;
+    } finally {
+      usageFallbackJobs.delete(job);
+    }
+  })();
+}
+
+async function postUsageFallbackFailureNotice(job: UsageFallbackJob, reason: string): Promise<void> {
+  try {
+    const event = {
+      type: '_terminal_error',
+      message: `Claude's usage window is full and the automatic rerun on the Gemini backup did not land (${reason}). Send the message again, or switch brains.`,
+      code: 'usage_fallback_failed',
+    };
+    const deadline = Date.now() + COMPACT_RERUN_NOTICE_IDLE_WAIT_MS;
+    for (;;) {
+      const live = liveLaneSession(job.logKey, job.chatId);
+      if (!live?.isBusy()) {
+        if (live?.postNotice(event)) return;
+        break;
+      }
+      if (Date.now() >= deadline) {
+        console.warn(`[chat] usage-fallback failure notice on ${job.logKey} dropped: the thread never went idle`);
+        return;
+      }
+      await new Promise((resolve) => { const t = setTimeout(resolve, 250); t.unref?.(); });
+    }
+    const persisted = { ...laneTagFor(job.chatId), seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event' as const, event }, eng: USAGE_FALLBACK.cli, mdl: USAGE_FALLBACK.model };
+    const saved = appendEventLogDurable(job.logKey, persisted);
+    publishExternalThreadEvent(job.logKey, persisted);
+    await saved;
+  } catch { /* best effort */ }
 }
 
 export function shutdownAllSessions(): void {
