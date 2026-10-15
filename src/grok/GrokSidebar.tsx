@@ -1098,5 +1098,5 @@ function AgentPrsSub({ name, fallback }: { name: string; fallback?: string }) {
   const line = mine
     .map((p) => `${p.repo.split('/')[1]} #${p.number} · ${p.reviewer ? `with ${p.reviewer}` : p.state === 'merged' ? 'merged' : p.state === 'ci' ? 'CI' : p.state}`)
     .join(' · ');
-  return <span className="bt-conv-sub">{line || fallback ?? 'No work yet — give them something real.'}</span>;
+  return <span className="bt-conv-sub">{line || (fallback ?? 'No work yet — give them something real.')}</span>;
 }

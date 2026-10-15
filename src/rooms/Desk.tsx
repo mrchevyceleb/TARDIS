@@ -119,7 +119,7 @@ export function Desk() {
       return;
     }
     setOpenCardId(null);
-    setTab('needs');
+    setTab('home');
     if (todoId && found) setFlash({ id: todoId, at: Date.now() });
   }, [focusReq, data, dataUpdatedAt, errorUpdatedAt, isFetching, refetch, openCardId]);
   const openTodos = useMemo(() => sortOpenTodos((data?.todos ?? []).filter((t) => t.status === 'open')), [data]);
