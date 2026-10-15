@@ -352,6 +352,9 @@ export class QuietAutomationSpans {
    *  by it. */
   private terminal: string | null = null;
   private deltaAcc = '';
+  /** Cap-tripped: the rest of THIS span passes through unfiltered. Cleared
+   *  when the next span starts or on reset. */
+  private gaveUp = false;
 
   /** Feed one sequenced event; returns the frames to emit now, in order. */
   accept(se: DispatchSeqEvent): DispatchSeqEvent[] {
@@ -365,13 +368,26 @@ export class QuietAutomationSpans {
       return out;
     }
     if (se.lane !== 'bg') return [se];
-    if (this.span.length === 0) this.automation = t === 'peer_message' && isAutomationPeerEvent(se.ev);
+    if (this.span.length === 0) {
+      this.automation = t === 'peer_message' && isAutomationPeerEvent(se.ev);
+      this.gaveUp = false;
+    }
     this.observe(se, t);
     if (!this.automation) return [se];
+    // Cap-tripped: the remainder of this turn shows itself, unfiltered.
+    if (this.gaveUp) return [se];
     this.span.push(se);
     // Safety valve: a runaway automation turn must not grow an unbounded
-    // hold buffer. Past the cap the span gives up hiding and shows itself.
-    if (this.span.length > QUIET_SPAN_HOLD_CAP) return this.settle();
+    // hold buffer. Past the cap the span gives up hiding and shows itself:
+    // the whole buffer goes out UNFILTERED and the rest of the turn is
+    // pass-through. Never settle() here — a partial verdict that happens to
+    // be a no-op token would delete real text (review 3, P1).
+    if (this.span.length > QUIET_SPAN_HOLD_CAP) {
+      this.gaveUp = true;
+      const out = this.span;
+      this.span = [];
+      return out;
+    }
     return [];
   }
 
@@ -424,8 +440,13 @@ export class QuietAutomationSpans {
       this.terminal = this.deltaAcc;
       this.deltaAcc = '';
     }
+    // An EMPTY result payload is absent for the verdict (review 3, P0): agy
+    // emits result:'' when streamed text already carried the response, and
+    // letting '' overwrite a valid streamed candidate (a streamed NO_UPDATE)
+    // would release the whole span unfiltered. The frame still matches by
+    // shape in settle() for payload blanking.
     const r = resultPayloadText(se);
-    if (r !== null) this.terminal = r;
+    if (r !== null && r.trim() !== '') this.terminal = r;
   }
 
   private reset(): void {
@@ -433,6 +454,7 @@ export class QuietAutomationSpans {
     this.automation = false;
     this.terminal = null;
     this.deltaAcc = '';
+    this.gaveUp = false;
   }
 
   /** Discard any held span without emitting it: a socket re-binding onto
@@ -444,16 +466,18 @@ export class QuietAutomationSpans {
   }
 }
 
-function hideQuietAutomationTurnText(events: DispatchSeqEvent[]): DispatchSeqEvent[] {
-  const spans = new QuietAutomationSpans();
-  const out: DispatchSeqEvent[] = [];
-  for (const se of events) out.push(...spans.accept(se));
-  out.push(...spans.finish());
-  return out;
-}
-
-export function filterReplayEvents(events: DispatchSeqEvent[]): DispatchSeqEvent[] {
-  events = hideQuietAutomationTurnText(events);
+export function filterReplayEvents(events: DispatchSeqEvent[], spans?: QuietAutomationSpans): DispatchSeqEvent[] {
+  // With a caller-owned tracker (the socket's live-path instance), classify
+  // through IT and leave an open tail HELD: the batch boundary is artificial,
+  // and the live continuation settles the span at its real boundary with the
+  // full verdict. Settling an open span on partial replay data can delete
+  // frames a completed non-quiet span needed (review 3, P0). Ownerless
+  // callers get a local tracker that settles at the end, as before.
+  const tracker = spans ?? new QuietAutomationSpans();
+  const classified: DispatchSeqEvent[] = [];
+  for (const se of events) classified.push(...tracker.accept(se));
+  if (!spans) classified.push(...tracker.finish());
+  events = classified;
   let lastSuccessSeq = -1;
   for (const se of events) {
     if (isSuccessfulResult(se)) lastSuccessSeq = se.seq;
@@ -1067,13 +1091,20 @@ export async function registerChat(app: express.Express, server: Server): Promis
       for (const frame of bgQuiet.finish()) sendBgFrame(frame);
     };
 
-    const dispatch = (se: DispatchSeqEvent) => {
+    const dispatch = (se: DispatchSeqEvent, alreadyClassified = false) => {
       const sev = se.ev;
       if (se.seq > lastDeliveredSeq) lastDeliveredSeq = se.seq;
       // The agent's background lane shares this thread's transcript, never its
       // busy state: only its transcript frames reach the viewer, tagged so the
       // client keeps a separate reply cursor for them.
       if (se.lane === 'bg') {
+        // History frames were already classified by the replay feed through
+        // this same tracker: re-feeding them would fold released frames into
+        // an open tail. Send them straight out.
+        if (alreadyClassified) {
+          sendBgFrame(se);
+          return;
+        }
         // Matt, Oct 15 (card-e2bd7a): the lane's working and turn-end state
         // reaches the viewer too, tagged, so a teammate's running turn shows
         // the same working indicator as a home-lane turn. The socket's own
@@ -1083,11 +1114,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
         for (const frame of bgQuiet.accept(se)) sendBgFrame(frame);
         return;
       }
-      // A home-lane frame is a span boundary exactly as in the replay filter:
-      // settle any held background span first (visibly — a partial verdict is
-      // never a no-op token) so live ordering matches the replay ordering and
-      // a held span can never linger past a lane gap.
-      flushBgQuiet();
+      // A live home-lane frame is a span boundary exactly as in the replay
+      // filter: settle any held background span first so live ordering
+      // matches replay ordering and a held span can never linger past a lane
+      // gap. History frames skip this: the replay feed already settled spans
+      // at their own boundaries, and flushing here would settle an open tail
+      // on partial data (review 3, P0).
+      if (!alreadyClassified) flushBgQuiet();
       if (sev.type === 'event') {
         const admittedClientMsgId = userEchoClientMsgId(sev.event);
         if (admittedClientMsgId && cliKind && repoPath) {
@@ -1286,6 +1319,16 @@ export async function registerChat(app: express.Express, server: Server): Promis
             return true;
           });
         replaying = false;
+        // Atomic re-bind reset FIRST: the old subscription is detached above
+        // and the new binding's history starts now, so any span the previous
+        // binding was holding dies here (a deduped re-hello that skips this
+        // replay keeps the held span untouched). This replay then rebuilds
+        // span state from the log THROUGH THE SAME TRACKER the live path
+        // uses, so an open tail at the end of the batch stays held and the
+        // live continuation settles it at its real boundary with the full
+        // verdict — the artificial batch boundary never settles a span on
+        // partial data (review 3, P0).
+        bgQuiet.discard();
         // Bound the history half only. Live events buffered during the bind
         // are new to this socket and must all arrive.
         // Collapse streamed tool-argument noise and trim old tool output first,
@@ -1293,7 +1336,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         // redrawing old tool cards, and the byte budget measures what actually
         // goes out. Live frames above `latest` are new to this socket and are
         // neither rewritten nor dropped.
-        const full = collapseHistoricalToolArgs(filterReplayEvents(merged), latest)
+        const full = collapseHistoricalToolArgs(filterReplayEvents(merged, bgQuiet), latest)
           .map((se) => (se.seq <= latest ? historicalDelivery(se) : se))
           .filter((se): se is DispatchSeqEvent => se !== null);
         const history = clampReplayWindow(full, latest);
@@ -1304,16 +1347,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (replayLeavesHole(replaySince, catchUp.reachedSince, full.length, history.length)) {
           safeSend({ type: 'replayGap' });
         }
-        // Atomic re-bind reset: the old subscription is detached above and the
-        // new binding's history starts now, so any span the previous binding
-        // was holding dies here and this replay rebuilds span state from the
-        // log. An OPEN tail at the end of the batch is intentionally NOT
-        // flushed: the batch boundary is not a turn boundary, and the live
-        // continuation of a mid-turn attach settles the same held span at its
-        // real boundary (a deduped re-hello that skips this replay keeps the
-        // held span untouched).
-        bgQuiet.discard();
-        for (const se of history) dispatch(se);
+        // History frames were classified by the feed above: dispatch them as
+        // already-classified so released frames are not re-fed into the open
+        // tail and home history frames do not flush it early.
+        for (const se of history) dispatch(se, true);
       }
       return session;
     };
@@ -1355,18 +1392,22 @@ export async function registerChat(app: express.Express, server: Server): Promis
           .sort((a, b) => a.seq - b.seq)
           .filter((event, index, all) => index === 0 || event.seq !== all[index - 1].seq)
           .map((event) => ({ seq: event.seq, ev: event.ev as any, at: event.at, ...(event.lane ? { lane: event.lane } : {}) }));
-        const full = collapseHistoricalToolArgs(filterReplayEvents(pending), latest)
+        // Same atomic re-bind reset as bindSession, FIRST: the previous
+        // binding's held span dies, and this replay rebuilds span state from
+        // the log through the same tracker the live path uses, leaving an
+        // open tail held for the live continuation (review 3, P0: the batch
+        // boundary never settles a span on partial data).
+        bgQuiet.discard();
+        const full = collapseHistoricalToolArgs(filterReplayEvents(pending, bgQuiet), latest)
           .map((se) => historicalDelivery(se))
           .filter((se): se is DispatchSeqEvent => se !== null);
         const history = clampReplayWindow(full, latest);
         if (replayLeavesHole(replaySince, catchUp.reachedSince, full.length, history.length)) {
           safeSend({ type: 'replayGap' });
         }
-        // Same atomic re-bind reset as bindSession: discard any held span from
-        // the previous binding, let this replay rebuild it, and leave an open
-        // tail held for the live continuation.
-        bgQuiet.discard();
-        for (const se of history) dispatch(se);
+        // History frames were classified by the feed above: dispatch them as
+        // already-classified (no re-feed, no early flush).
+        for (const se of history) dispatch(se, true);
       }
       return latest;
     };
