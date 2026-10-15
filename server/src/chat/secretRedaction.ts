@@ -139,6 +139,43 @@ export function redactSecrets(text: string): string {
   return out.replaceAll(REDACTED_SENTINEL, REDACTED);
 }
 
+/** Oct 15 spill guard: a credential chunked mid-value across adjacent array
+ *  elements (two tool-result text blocks split one Mongo URI mid-password)
+ *  stayed in cleartext as fragments, because every element was scanned alone
+ *  and no fragment matched a rule on its own. Adjacent plain objects with
+ *  identical key sets and a string `text` field in each are the chunked-run
+ *  shape: mask the concatenated text and compare against per-element masking.
+ *  A difference means a rule matched across the join, so the run collapses to
+ *  one element carrying the masked concatenation: the secret never persists
+ *  as halves, and the masked evidence (scheme, user, host) survives exactly
+ *  like the old whole-line pass, without ever eating JSON structure. Only a
+ *  run whose non-text fields are all identical collapses, so no other shape
+ *  is lost. String arrays are deliberately not joined: a list of values is
+ *  not one chunked string, and joining list elements would false-positive on
+ *  adjacent opaque digests. */
+function chunkedSecretCollapse(items: unknown[]): unknown[] | null {
+  if (items.length < 2) return null;
+  for (const it of items) {
+    if (!(it && typeof it === 'object' && !Array.isArray(it)
+      && (Object.getPrototypeOf(it) === Object.prototype || Object.getPrototypeOf(it) === null)
+      && typeof (it as Record<string, unknown>).text === 'string')) return null;
+  }
+  const shapes = new Set(items.map((it) => Object.keys(it as object).sort().join(',')));
+  if (shapes.size !== 1) return null;
+  const raw = items.map((it) => (it as Record<string, unknown>).text as string);
+  const maskedConcat = redactSecrets(raw.join(''));
+  if (maskedConcat === raw.map((s) => redactSecrets(s)).join('')) return null;
+  const nonText = items.map((it) => {
+    const rest: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(it as Record<string, unknown>)) if (k !== 'text') rest[k] = v;
+    return JSON.stringify(rest, Object.keys(rest).sort());
+  });
+  if (new Set(nonText).size !== 1) return null;
+  const first = redactEventSecrets(items[0]) as Record<string, unknown>;
+  first.text = maskedConcat;
+  return [first];
+}
+
 /** Deep redaction of one stored value (an event, a tool result, a message):
  * every string field passes the secret redaction, so a printed key never
  * lands wherever this value is stored or shown. Numbers, booleans, and the
@@ -146,7 +183,11 @@ export function redactSecrets(text: string): string {
  * are redacted too. */
 export function redactEventSecrets<T>(value: T): T {
   if (typeof value === 'string') return redactSecrets(value) as unknown as T;
-  if (Array.isArray(value)) return value.map((item) => redactEventSecrets(item)) as unknown as T;
+  if (Array.isArray(value)) {
+    const collapsed = chunkedSecretCollapse(value as unknown[]);
+    if (collapsed) return collapsed as unknown as T;
+    return value.map((item) => redactEventSecrets(item)) as unknown as T;
+  }
   if (value && typeof value === 'object') {
     const proto = Object.getPrototypeOf(value);
     // Non-plain objects (Dates, Buffers, class instances) keep their shape:
@@ -165,4 +206,45 @@ export function redactEventSecrets<T>(value: T): T {
     return out as unknown as T;
   }
   return value;
+}
+
+/** Structure-safe final pass for one serialized JSON line (Oct 15). The
+ *  serialized-line pass used to run redactSecrets over the whole line, and a
+ *  credential chunked across adjacent JSON fields (a Mongo connection string
+ *  split mid-password across two tool-result content blocks, Oct 15 6:11am)
+ *  let a value class eat the `","` structure between the fields, leaving one
+ *  broken-JSON line in a hot log. This variant applies the same rules only
+ *  inside each JSON string span, so no match can ever cross a field boundary
+ *  or eat structural characters, and each span is masked on its decoded text
+ *  so a token can never end up malformed: the durable line always still
+ *  parses. A credential chunked across adjacent text blocks is collapsed by
+ *  the deep walk's spill guard before serialization (chunkedSecretCollapse);
+ *  other cross-field chunk shapes remain a fragment-level residual that
+ *  belongs to the tool-result chunking boundary, not the mask. */
+export function redactSerializedSecrets(line: string): string {
+  if (!line) return line;
+  let out = '';
+  let last = 0;
+  for (const m of line.matchAll(/"(?:\\.|[^"\\])*"/g)) {
+    const idx = m.index ?? 0;
+    out += line.slice(last, idx);
+    out += maskStringToken(m[0]);
+    last = idx + m[0].length;
+  }
+  return out + line.slice(last);
+}
+
+/** One JSON string token, masked on its decoded text (Oct 15 review): the
+ *  rules are built for prose (real newlines, real quotes), and
+ *  JSON.stringify re-escapes whatever the mask leaves, so the result is
+ *  always a valid JSON string token — the escaped-content pass could split
+ *  an escape sequence or match across escape boundaries. A token that fails
+ *  to decode falls back to the escaped pass: this runs on the sync append
+ *  path and must never throw. */
+function maskStringToken(token: string): string {
+  try {
+    return JSON.stringify(redactSecrets(JSON.parse(token)));
+  } catch {
+    return '"' + redactSecrets(token.slice(1, -1)) + '"';
+  }
 }
