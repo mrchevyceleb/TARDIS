@@ -1388,6 +1388,19 @@ type LogLine = { raw: string; seq: number | null; plumbing: boolean };
 /** Remove old invisible protocol chatter without sacrificing the allocator's
  * high-water mark. If the newest record is plumbing, retain that ONE line so a
  * restart cannot reuse its seq; loadEventLogSync still hides it from replay. */
+/** writeSync can short-write; loop until the whole payload lands, like
+ *  writeFileSync does internally. A zero/negative count is an error, not a
+ *  silent truncation. */
+function writeAllSync(fd: number, data: string | Buffer): void {
+  const buf = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
+  let written = 0;
+  while (written < buf.length) {
+    const n = writeSync(fd, buf, written, buf.length - written);
+    if (n <= 0) throw new Error(`short write of ${n} byte(s)`);
+    written += n;
+  }
+}
+
 /** Byte budget of parsed head text per trim pass. The Oct 15 freeze: one
  *  pass loaded and parsed the WHOLE hot log (a giant-overflow lane held
  *  ~9-10k events of big tool results, far past the 50-190 MB this code was
@@ -1412,7 +1425,12 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
   // effect, and it is not worth rewriting a giant file no compact boundary
   // covers yet.
   if (compactedThroughSeq <= 0) return;
-  const fd = openSync(path, 'r');
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return; // vanished between existsSync and open: leave untouched
+  }
   const tmp = `${path}.compact-${process.pid}`;
   try {
     const size = fstatSync(fd).size;
@@ -1424,39 +1442,58 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
     const keep = MAX_EVENTS_PER_LOG + 1;
     const ring: number[] = [];
     let ringStart = 0;
-    let totalLines = 0;
+    let newlines = 0;
     const scan = Buffer.alloc(1 << 20);
     let scanned = 0;
     let lastWasNewline = true;
-    while (scanned < size) {
-      const n = readSync(fd, scan, 0, scan.length, scanned);
-      if (n <= 0) break;
-      for (let i = 0; i < n; i += 1) {
-        if (scan[i] === 0x0a) {
-          totalLines += 1;
-          ring.push(scanned + i + 1);
-          if (ring.length - ringStart > keep) ringStart += 1;
+    try {
+      while (scanned < size) {
+        const n = readSync(fd, scan, 0, scan.length, scanned);
+        if (n <= 0) break;
+        for (let i = 0; i < n; i += 1) {
+          if (scan[i] === 0x0a) {
+            newlines += 1;
+            ring.push(scanned + i + 1);
+            if (ring.length - ringStart > keep) ringStart += 1;
+          }
         }
+        lastWasNewline = scan[n - 1] === 0x0a;
+        scanned += n;
       }
-      lastWasNewline = scan[n - 1] === 0x0a;
-      scanned += n;
+    } catch {
+      return; // an unreadable log stays untouched, like the old read failure path
     }
-    if (!lastWasNewline) totalLines += 1;
+    const totalLines = newlines + (lastWasNewline ? 0 : 1);
     const desiredDrop = Math.max(0, totalLines - MAX_EVENTS_PER_LOG);
-    if (desiredDrop <= 0) return;
-    const headEnd = ring.length - ringStart === keep ? ring[ringStart] : size;
-    if (headEnd <= 0) return;
-    // Budget the parsed head per pass; a giant head (the freeze shape) trims
+    // The head boundary: the newline ending the desiredDrop-th line — the
+    // (newlines - desiredDrop + 1)-th newline from the end, correct whether
+    // or not the file ends with a newline. A ring that cannot answer means a
+    // miscounted file: skip the pass rather than guess the whole file.
+    let scopeEnd: number;
+    let coverageDrops = true;
+    if (desiredDrop > 0) {
+      const kFromEnd = newlines - desiredDrop + 1;
+      if (kFromEnd < 1 || ring.length - kFromEnd < ringStart) return;
+      scopeEnd = ring[ring.length - kFromEnd];
+    } else {
+      // Within the cap there is no head to archive, but the pass still
+      // strips plumbing from the front of the file (bounded), so plumbing
+      // never strands forever in the retained window.
+      scopeEnd = Math.min(size, TRIM_PASS_BUDGET_BYTES);
+      coverageDrops = false;
+    }
+    if (scopeEnd <= 0) return;
+    // Budget the parsed scope per pass; a giant head (the freeze shape) trims
     // across passes instead of stalling the loop once for minutes. A single
     // event line bigger than the budget still processes whole — one line,
     // never the whole file.
-    let processedEnd = headEnd;
-    if (headEnd > TRIM_PASS_BUDGET_BYTES) {
+    let processedEnd = scopeEnd;
+    if (scopeEnd > TRIM_PASS_BUDGET_BYTES) {
       const slice = readRange(fd, 0, TRIM_PASS_BUDGET_BYTES);
       const lastNl = slice.lastIndexOf(0x0a);
       processedEnd = lastNl >= 0
         ? lastNl + 1
-        : readRange(fd, 0, headEnd).lastIndexOf(0x0a) + 1 || headEnd;
+        : readRange(fd, 0, scopeEnd).lastIndexOf(0x0a) + 1 || scopeEnd;
     }
     // Parse each processed head line ONCE (the old path parsed every line of
     // the whole file, twice). Only archive records the rolling compact
@@ -1474,8 +1511,19 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
         return { raw, seq: null, plumbing: false };
       }
     });
+    // Watermark: the plumbing line with the greatest seq in the processed
+    // scope (ties: the later one). Sequence allocation observes the retained
+    // plumbing seq; keeping a lower-seq line while a higher-seq plumbing
+    // line is dropped could let a restart reuse sequence numbers.
     let watermarkIdx = -1;
-    for (let i = 0; i < parsedHeads.length; i += 1) if (parsedHeads[i].plumbing) watermarkIdx = i;
+    let watermarkSeq = -1;
+    for (let i = 0; i < parsedHeads.length; i += 1) {
+      const p = parsedHeads[i];
+      if (p.plumbing && typeof p.seq === 'number' && p.seq >= watermarkSeq) {
+        watermarkSeq = p.seq;
+        watermarkIdx = i;
+      }
+    }
     const dropped: string[] = [];
     const retainedHead: string[] = [];
     let plumbingRemoved = 0;
@@ -1486,7 +1534,7 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
         else plumbingRemoved += 1;
         continue;
       }
-      if (typeof p.seq === 'number' && p.seq <= compactedThroughSeq) dropped.push(p.raw);
+      if (coverageDrops && typeof p.seq === 'number' && p.seq <= compactedThroughSeq) dropped.push(p.raw);
       else retainedHead.push(p.raw);
     }
     if (dropped.length === 0 && plumbingRemoved === 0) {
@@ -1505,7 +1553,7 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
       // a time — never one whole-file join string.
       const afd = openSync(archivePath(key), 'a');
       try {
-        for (const line of dropped) writeSync(afd, `${line}\n`, null, 'utf8');
+        for (const line of dropped) writeAllSync(afd, `${line}\n`);
         closeSync(afd);
       } catch (err) {
         try { closeSync(afd); } catch { /* already closed */ }
@@ -1519,14 +1567,14 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
     try {
       const wfd = openSync(tmp, 'w');
       try {
-        for (const line of retainedHead) writeSync(wfd, `${line}\n`, null, 'utf8');
+        for (const line of retainedHead) writeAllSync(wfd, `${line}\n`);
         // Verbatim remainder — the unprocessed head plus the retained window
         // — copied in 1 MB ranges: never parsed, never joined.
         const chunk = 1 << 20;
         for (let off = processedEnd; off < size; off += chunk) {
           const end = Math.min(off + chunk, size);
           const buf = readRange(fd, off, end);
-          if (buf.length) writeSync(wfd, buf);
+          if (buf.length) writeAllSync(wfd, buf);
         }
       } finally {
         closeSync(wfd);
