@@ -402,8 +402,19 @@ export class QuietAutomationSpans {
 
   private observe(se: DispatchSeqEvent, t: string | undefined): void {
     const a = assistantFrameText(se);
-    if (a !== null) this.lastText = a;
-    if (t === 'content_block_start') this.deltaAcc = '';
+    if (a !== null) {
+      this.lastText = a;
+      this.deltaAcc = '';
+    }
+    // The wrapped stream envelope types as `stream_event` at the inner level;
+    // the block boundary lives one level deeper (the same unwrap
+    // streamedDeltaText uses), so a multi-message turn resets its accumulation
+    // at each new text block instead of concatenating across them.
+    const inner = eventInner(se.ev);
+    const holderType = inner && inner.type === 'stream_event' && inner.event && typeof inner.event === 'object'
+      ? (inner.event as Record<string, unknown>).type
+      : t;
+    if (holderType === 'content_block_start') this.deltaAcc = '';
     const d = streamedDeltaText(se);
     if (d !== null) this.deltaAcc += d;
     const r = resultPayloadText(se);
@@ -416,6 +427,14 @@ export class QuietAutomationSpans {
     this.resultText = null;
     this.lastText = null;
     this.deltaAcc = '';
+  }
+
+  /** Discard any held span without emitting it: a socket re-binding onto
+   *  another thread (or replaying this one from scratch) must never receive
+   *  frames the previous binding was still holding. The replay re-establishes
+   *  state from the durable log. */
+  discard(): void {
+    this.reset();
   }
 }
 
@@ -1010,6 +1029,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
       busy = false;
       unsubscribe?.();
       unsubscribe = null;
+      // A held bg span belongs to the binding being detached, never to the
+      // next one; the re-bind's replay re-establishes state from the log.
+      bgQuiet.discard();
     };
 
     /** Highest seq this socket has been sent. A rebind resumes from here so
@@ -1032,6 +1054,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
       else if (f.type === 'turnEnd') safeSend({ type: 'turnEnd', sessionId: f.sessionId, seq: frame.seq, lane: 'bg' });
     };
 
+    /** Settle any held background span and send what it releases (a lane gap
+     *  in dispatch, or the end of a replayed history batch — the tail of a
+     *  batch cut mid-span must not stay held forever). */
+    const flushBgQuiet = () => {
+      for (const frame of bgQuiet.finish()) sendBgFrame(frame);
+    };
+
     const dispatch = (se: DispatchSeqEvent) => {
       const sev = se.ev;
       if (se.seq > lastDeliveredSeq) lastDeliveredSeq = se.seq;
@@ -1048,6 +1077,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
         for (const frame of bgQuiet.accept(se)) sendBgFrame(frame);
         return;
       }
+      // A home-lane frame is a span boundary exactly as in the replay filter:
+      // settle any held background span first (visibly — a partial verdict is
+      // never a no-op token) so live ordering matches the replay ordering and
+      // a held span can never linger past a lane gap.
+      flushBgQuiet();
       if (sev.type === 'event') {
         const admittedClientMsgId = userEchoClientMsgId(sev.event);
         if (admittedClientMsgId && cliKind && repoPath) {
@@ -1265,6 +1299,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           safeSend({ type: 'replayGap' });
         }
         for (const se of history) dispatch(se);
+        flushBgQuiet();
       }
       return session;
     };
@@ -1314,6 +1349,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           safeSend({ type: 'replayGap' });
         }
         for (const se of history) dispatch(se);
+        flushBgQuiet();
       }
       return latest;
     };
@@ -1396,6 +1432,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
             helloSeen = true;
             finishHello = settleHelloBarrier;
           }
+          // A new hello re-binds this socket (another thread, a fresh start,
+          // or this thread replayed from scratch): whatever the previous
+          // binding was still holding never crosses into it. The replay
+          // below re-establishes span state from the durable log.
+          bgQuiet.discard();
           repoPath = msg.repo;
           chatId = normalizeChatId(msg.chatId);
           const desiredBrain = resolvedBrain(chatId, { cli: msg.cli, model: msg.model, effort: msg.effort });
