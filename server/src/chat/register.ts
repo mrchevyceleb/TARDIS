@@ -291,44 +291,139 @@ function assistantFrameText(se: DispatchSeqEvent): string | null {
   return parts.length ? parts.join('\n') : null;
 }
 
-/** Matt, Oct 15 (card-f38410): a background-lane automation turn that ends in
- *  NO_UPDATE is protocol quiet, but its between-tool notes and summary text
- *  render like spoken messages in the person's chat. Drop that turn's
- *  assistant text frames from the replay; the durable log and the agent's own
- *  session window keep them, so only the person-facing render changes. Scope:
- *  full assistant frames (the shape every reported lane used); streamed-
- *  engine text is a follow-up if those lanes report the same noise. A span
- *  hides only when its own origin was seen as an automation delivery and its
- *  last text is exactly a no-op token; a mid-turn steer or an unseen origin
- *  stays visible. */
-function hideQuietAutomationTurnText(events: DispatchSeqEvent[]): DispatchSeqEvent[] {
-  const out: DispatchSeqEvent[] = [];
-  let span: DispatchSeqEvent[] = [];
-  let spanIsAutomation = false;
-  const flushSpan = () => {
-    if (!span.length) return;
-    if (spanIsAutomation) {
-      let lastText: string | null = null;
-      for (let i = span.length - 1; i >= 0; i -= 1) {
-        lastText = assistantFrameText(span[i]);
-        if (lastText !== null) break;
-      }
-      if (lastText === null || !isNoopToken(lastText)) out.push(...span);
-      else for (const se of span) if (assistantFrameText(se) === null) out.push(se);
-    } else out.push(...span);
-    span = [];
-    spanIsAutomation = false;
-  };
-  for (const se of events) {
+/** Streamed text of a bg frame: a content_block_delta carrying text (the
+ *  streamed envelope every engine's background lane uses — agy, claude with
+ *  partial messages, grok), else null. Works on both the wrapped
+ *  stream_event form and a bare delta. */
+function streamedDeltaText(se: DispatchSeqEvent): string | null {
+  const inner = eventInner(se.ev);
+  if (!inner) return null;
+  const holder = inner.type === 'stream_event' && inner.event && typeof inner.event === 'object'
+    ? (inner.event as Record<string, unknown>)
+    : inner;
+  if (holder.type !== 'content_block_delta') return null;
+  const delta = (holder as { delta?: { type?: unknown; text?: unknown } }).delta;
+  if (delta && delta.type === 'text_delta' && typeof delta.text === 'string' && delta.text) return delta.text;
+  return null;
+}
+
+/** The terminal reply payload of a bg result frame, else null. Only a
+ *  successful result carries the turn's answer; an error result's payload is
+ *  transport output, never the reply. */
+function resultPayloadText(se: DispatchSeqEvent): string | null {
+  const inner = eventInner(se.ev);
+  if (!inner || inner.type !== 'result' || inner.is_error === true) return null;
+  return typeof inner.result === 'string' ? inner.result : null;
+}
+
+/** A copy of a result frame with its reply payload blanked. The frame still
+ *  closes the turn client-side (the reducer treats an empty final text as
+ *  "close, append nothing"), but the quiet token never re-enters the render. */
+function blankResultPayload(se: DispatchSeqEvent): DispatchSeqEvent {
+  const clone = structuredClone(se);
+  const inner = eventInner(clone.ev);
+  if (inner && typeof inner === 'object') (inner as { result?: unknown }).result = '';
+  return clone;
+}
+
+/** Matt, Oct 15 (card-f38410, streamed half): a background-lane automation
+ *  turn that ends in a no-op token is protocol quiet, but its streamed
+ *  between-tool notes and terminal summary render like spoken messages, and
+ *  the terminal result payload can recreate text the replay filter already
+ *  dropped. One span classifier now feeds BOTH the replay filter and the
+ *  live socket path, so what a viewer watches live is exactly what a
+ *  reconnect replays: a span collects bg-lane frames from an automation
+ *  delivery to the next delivery, turn end or lane gap; a span whose terminal
+ *  text is exactly a no-op token drops its text-bearing frames (assistant
+ *  text, streamed deltas) and blanks the result payload, while every other
+ *  frame (tools, boundaries, the trigger card) passes so the turn's shape
+ *  survives. A mid-turn steer or an unseen origin keeps everything visible.
+ *  Held frames of a running span are released only at the span boundary — a
+ *  live viewer watches an automation turn settle all at once, exactly as the
+ *  replay and the client's own fold already present it. */
+const QUIET_SPAN_HOLD_CAP = 4000;
+
+export class QuietAutomationSpans {
+  private span: DispatchSeqEvent[] = [];
+  private automation = false;
+  private resultText: string | null = null;
+  private lastText: string | null = null;
+  private deltaAcc = '';
+
+  /** Feed one sequenced event; returns the frames to emit now, in order. */
+  accept(se: DispatchSeqEvent): DispatchSeqEvent[] {
     const t = eventType(se.ev);
-    // Home and background lanes interleave in one log; a background turn's
-    // span runs from its delivery to the next delivery, turn end or lane gap.
-    if (span.length && (se.lane !== 'bg' || t === 'peer_message' || t === 'turnEnd')) flushSpan();
-    if (se.lane !== 'bg') { out.push(se); continue; }
-    if (span.length === 0) spanIsAutomation = t === 'peer_message' && isAutomationPeerEvent(se.ev);
-    span.push(se);
+    if (this.span.length && (se.lane !== 'bg' || t === 'peer_message' || t === 'turnEnd')) {
+      const out = this.settle();
+      // The boundary frame may itself START the next span (an automation
+      // delivery arriving back to back): re-enter on the now-empty span so it
+      // gets the same treatment instead of bypassing classification.
+      out.push(...this.accept(se));
+      return out;
+    }
+    if (se.lane !== 'bg') return [se];
+    if (this.span.length === 0) this.automation = t === 'peer_message' && isAutomationPeerEvent(se.ev);
+    this.observe(se, t);
+    if (!this.automation) return [se];
+    this.span.push(se);
+    // Safety valve: a runaway automation turn must not grow an unbounded
+    // hold buffer. Past the cap the span gives up hiding and shows itself.
+    if (this.span.length > QUIET_SPAN_HOLD_CAP) return this.settle();
+    return [];
   }
-  flushSpan();
+
+  /** Flush any held tail (end of a replay batch). */
+  finish(): DispatchSeqEvent[] {
+    return this.settle();
+  }
+
+  private verdict(): string | null {
+    if (this.resultText !== null) return this.resultText;
+    if (this.lastText !== null) return this.lastText;
+    return this.deltaAcc.trim() ? this.deltaAcc : null;
+  }
+
+  private settle(): DispatchSeqEvent[] {
+    if (!this.span.length) {
+      this.reset();
+      return [];
+    }
+    const verdict = this.verdict();
+    const quiet = this.automation && verdict !== null && isNoopToken(verdict);
+    const out: DispatchSeqEvent[] = [];
+    for (const held of this.span) {
+      if (!quiet) out.push(held);
+      else if (resultPayloadText(held) !== null) out.push(blankResultPayload(held));
+      else if (assistantFrameText(held) === null && streamedDeltaText(held) === null) out.push(held);
+    }
+    this.reset();
+    return out;
+  }
+
+  private observe(se: DispatchSeqEvent, t: string | undefined): void {
+    const a = assistantFrameText(se);
+    if (a !== null) this.lastText = a;
+    if (t === 'content_block_start') this.deltaAcc = '';
+    const d = streamedDeltaText(se);
+    if (d !== null) this.deltaAcc += d;
+    const r = resultPayloadText(se);
+    if (r !== null) this.resultText = r;
+  }
+
+  private reset(): void {
+    this.span = [];
+    this.automation = false;
+    this.resultText = null;
+    this.lastText = null;
+    this.deltaAcc = '';
+  }
+}
+
+function hideQuietAutomationTurnText(events: DispatchSeqEvent[]): DispatchSeqEvent[] {
+  const spans = new QuietAutomationSpans();
+  const out: DispatchSeqEvent[] = [];
+  for (const se of events) out.push(...spans.accept(se));
+  out.push(...spans.finish());
   return out;
 }
 
@@ -924,6 +1019,19 @@ export async function registerChat(app: express.Express, server: Server): Promis
      *  the lane's replacement process to exist. */
     let rebindPending = false;
 
+    /** Live-side twin of the replay filter (card-f38410 streamed half): bg
+     *  frames pass through the same quiet-automation span classifier the
+     *  reconnect replay uses, so a viewer never watches text live that a
+     *  reload would hide. Held frames of a running automation span are
+     *  released at the span boundary with the verdict applied. */
+    const bgQuiet = new QuietAutomationSpans();
+    const sendBgFrame = (frame: DispatchSeqEvent) => {
+      const f = frame.ev;
+      if (f.type === 'event') safeSend({ type: 'stream', event: f.event, seq: frame.seq, at: frame.at, lane: 'bg' });
+      else if (f.type === 'turnStart') safeSend({ type: 'turnStart', seq: frame.seq, lane: 'bg' });
+      else if (f.type === 'turnEnd') safeSend({ type: 'turnEnd', sessionId: f.sessionId, seq: frame.seq, lane: 'bg' });
+    };
+
     const dispatch = (se: DispatchSeqEvent) => {
       const sev = se.ev;
       if (se.seq > lastDeliveredSeq) lastDeliveredSeq = se.seq;
@@ -935,9 +1043,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
         // reaches the viewer too, tagged, so a teammate's running turn shows
         // the same working indicator as a home-lane turn. The socket's own
         // busy flag stays home-lane-only: a bg turn never gates sends.
-        if (sev.type === 'event') safeSend({ type: 'stream', event: sev.event, seq: se.seq, at: se.at, lane: 'bg' });
-        else if (sev.type === 'turnStart') safeSend({ type: 'turnStart', seq: se.seq, lane: 'bg' });
-        else if (sev.type === 'turnEnd') safeSend({ type: 'turnEnd', sessionId: sev.sessionId, seq: se.seq, lane: 'bg' });
+        // card-f38410 streamed half: frames route through the quiet-span
+        // classifier first; only what it releases reaches the viewer.
+        for (const frame of bgQuiet.accept(se)) sendBgFrame(frame);
         return;
       }
       if (sev.type === 'event') {
