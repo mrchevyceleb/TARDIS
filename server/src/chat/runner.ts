@@ -3003,7 +3003,8 @@ function retireOtherEnginesOnThread(cli: CliKind, repoPath: string, chatId: stri
   // session accessor, so their child lingers until idle timeout after a switch.
 }
 
-/** Live, already-spawned session for a Claude-family lane, or null.
+/** Live, already-spawned session for a persistent-process lane (claude
+ *  binary family or agy), or null.
  *  A passive `hello` uses this to attach to a warm lane WITHOUT spawning.
  *  Reconnects used to run getOrCreateSession, so a client holding N sockets on a
  *  lane started N CLI children; spawning a claude process (multi-KB argv) is
@@ -3015,7 +3016,7 @@ export function peekClaudeSession(opts: {
   repoPath: string;
   chatId?: string;
 }): AnySession | null {
-  if (!isClaudeFamilyCli(opts.cli)) return null;
+  if (!isPersistentProcessCli(opts.cli)) return null;
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, opts.chatId || 'main');
   const live = sessions.get(key);

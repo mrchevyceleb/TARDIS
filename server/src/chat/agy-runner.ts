@@ -590,7 +590,12 @@ export class AgySession {
   listenerCount(): number { return this.listeners.size; }
   lastActivityAt(): number { return this.lastActivityAtMs; }
   isAlive(): boolean { return this.child.exitCode === null && !this.disposed && !this.retiring; }
-  isDisposed(): boolean { return this.disposed; }
+  /** True from the moment Stop begins (retiring) as well: a retiring session
+   *  is teardown-in-progress, so the registry's replacement guard waits for
+   *  the dying process to exit (its kill backstop bounds the wait) before a
+   *  replacement resumes the same conversation — no concurrent conversation
+   *  access or duplicated side effects during the kill grace. */
+  isDisposed(): boolean { return this.disposed || this.retiring; }
   /** True once the agy process is gone, not merely asked to go. */
   processExited(): boolean { return this.child.exitCode !== null || this.child.signalCode !== null; }
   /** Append a standalone notice to this thread (between turns). */

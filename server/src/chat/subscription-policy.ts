@@ -29,7 +29,11 @@ export function subscriptionEnvironment(source: NodeJS.ProcessEnv): NodeJS.Proce
   const env = { ...source };
   for (const key of Object.keys(env)) {
     if (/^TARDIS_OFFICE_ADMIN_TOKEN$/i.test(key)) delete env[key];
-    if (/^(ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)|OPENAI_(API_KEY|BASE_URL)|CODEX_API_KEY|OPENROUTER_|FIREWORKS_|GOOGLE_API_KEY|GEMINI_API_KEY|GOOGLE_GENERATIVEAI_API_KEY|GROK_PERSONAL_API_KEY|XAI_API_KEY|Z_AI_API_KEY|RIVENDELL_ZAI_FALLBACK_API_KEY|RIVENDELL_OPENROUTER_API_KEY|TYPESAFE_|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))/i.test(key)) delete env[key];
+    // The Google set also scrubs credential/routing variables (service
+    // account files, Vertex enablement, project/location routing): the agy
+    // subscription lane signs in with its own stored auth and must never
+    // inherit an unrelated service-account or Vertex path or billing.
+    if (/^(ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)|OPENAI_(API_KEY|BASE_URL)|CODEX_API_KEY|OPENROUTER_|FIREWORKS_|GOOGLE_API_KEY|GEMINI_API_KEY|GOOGLE_GENERATIVEAI_API_KEY|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_GENAI_USE_VERTEXAI|GOOGLE_CLOUD_PROJECT|GOOGLE_CLOUD_LOCATION|GROK_PERSONAL_API_KEY|XAI_API_KEY|Z_AI_API_KEY|RIVENDELL_ZAI_FALLBACK_API_KEY|RIVENDELL_OPENROUTER_API_KEY|TYPESAFE_|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))/i.test(key)) delete env[key];
   }
   return env;
 }
