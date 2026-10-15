@@ -111,22 +111,46 @@ const WRITTEN_CHECK_TIME = /(?:\b(\d{1,2}):(\d{2})\s*(am|pm)?|\b(\d{1,2})\s*(am|
 const WRITTEN_CHECK_ISO_DATE = /\b(\d{4})-(\d{2})-(\d{2})\b/;
 const WRITTEN_CHECK_MONTH_DATE = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?\b/i;
 const WRITTEN_CHECK_MONTHS: Record<string, number> = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+/** A month abbreviation's period ("Oct. 15") is part of the date, not a
+ *  sentence break. */
+const WRITTEN_CHECK_MONTH_ABBR_PERIOD = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.(?=\s)/gi;
 
 /** ET wall clock -> UTC instant. Every written Desk time is Eastern (the
  *  team's convention), so a check-in time is read in America/New_York. Two
- *  passes because the DST offset depends on the instant being found. */
+ *  passes because the DST offset depends on the instant being found. A wall
+ *  time that does not exist on the ET calendar returns NaN so it can never
+ *  become a deadline: a spring-forward gap like 2:30 AM on the jump day, or
+ *  an impossible date like February 31, which Date.UTC silently rolls over.
+ *  A duplicated fall-back time resolves to its first occurrence. */
 function etWallToInstant(year: number, month: number, day: number, hour: number, minute: number): number {
   const wall = Date.UTC(year, month - 1, day, hour, minute);
-  const etOffsetMs = (at: number): number => {
+  const etWall = (at: number) => {
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone: 'America/New_York', hourCycle: 'h23',
       year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
     }).formatToParts(new Date(at));
     const n = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? '0');
-    return Date.UTC(n('year'), n('month') - 1, n('day'), n('hour') % 24, n('minute')) - at;
+    return { year: n('year'), month: n('month'), day: n('day'), hour: n('hour') % 24, minute: n('minute') };
+  };
+  const etOffsetMs = (at: number): number => {
+    const w = etWall(at);
+    return Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute) - at;
   };
   const guess = wall - etOffsetMs(wall);
-  return wall - etOffsetMs(guess);
+  const instant = wall - etOffsetMs(guess);
+  // Round-trip the result through America/New_York: only a real ET wall
+  // time maps back onto itself.
+  const got = etWall(instant);
+  if (got.year !== year || got.month !== month || got.day !== day || got.hour !== hour || got.minute !== minute) return Number.NaN;
+  return instant;
+}
+
+/** The Eastern calendar year of an instant: a year-less month date uses it,
+ *  never the host's year, which has already rolled over during the
+ *  late-evening ET hours of December 31. */
+function etCalendarYear(nowMs: number): number {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric' }).formatToParts(new Date(nowMs));
+  return Number(parts.find((p) => p.type === 'year')?.value ?? '0');
 }
 
 /** Parse a written next check-in time out of a comment: "Next check-in: 5:00
@@ -135,7 +159,10 @@ function etWallToInstant(year: number, month: number, day: number, hour: number,
  *  time elsewhere in a comment never moves a deadline), a "last check-in"
  *  retrospective is skipped, the time is required and Eastern is assumed,
  *  the date is optional (a time-only statement already past means tomorrow),
- *  and a dated statement already past is stale and ignored. The LAST usable
+ *  and a dated statement already past is stale and ignored; a wall time that
+ *  does not exist on the ET calendar (a DST gap or an impossible date) is
+ *  ignored, and a duplicated fall-back time resolves to its first
+ *  occurrence. The LAST usable
  *  statement in the comment wins. Returns the instant, or null when the
  *  comment sets no usable check-in time. */
 export function parseWrittenNextCheck(text: string, nowMs: number): number | null {
@@ -143,8 +170,11 @@ export function parseWrittenNextCheck(text: string, nowMs: number): number | nul
   for (const phrase of text.matchAll(WRITTEN_CHECK_PHRASE)) {
     const start = phrase.index ?? 0;
     if (/\blast\s*$/i.test(text.slice(0, start))) continue;
-    // The statement lives between the phrase and the next sentence break.
-    const rest = text.slice(start + phrase[0].length);
+    // The statement lives between the phrase and the next sentence break; a
+    // month abbreviation's period is part of the date, not a break.
+    const rest = text
+      .slice(start + phrase[0].length)
+      .replace(WRITTEN_CHECK_MONTH_ABBR_PERIOD, '$1');
     const cut = rest.search(/[.;\n]/);
     const window = (cut === -1 ? rest : rest.slice(0, cut)).slice(0, 80);
     const time = WRITTEN_CHECK_TIME.exec(window);
@@ -166,7 +196,7 @@ export function parseWrittenNextCheck(text: string, nowMs: number): number | nul
     } else if (monthDate) {
       const day = Number(monthDate[2]);
       if (day < 1 || day > 31) continue;
-      const year = monthDate[3] ? Number(monthDate[3]) : new Date(nowMs).getFullYear();
+      const year = monthDate[3] ? Number(monthDate[3]) : etCalendarYear(nowMs);
       instant = etWallToInstant(year, WRITTEN_CHECK_MONTHS[monthDate[1].toLowerCase()], day, hour, minute);
     } else {
       // No date: today in ET, or tomorrow when that time has already passed.
@@ -178,6 +208,7 @@ export function parseWrittenNextCheck(text: string, nowMs: number): number | nul
       instant = etWallToInstant(n('year'), n('month'), n('day'), hour, minute);
       if (instant <= nowMs) instant = etWallToInstant(n('year'), n('month'), n('day') + 1, hour, minute);
     }
+    if (!Number.isFinite(instant)) continue; // nonexistent ET wall time or impossible date
     // A stated time already passed is a stale statement, not a park.
     if (instant > nowMs) found = instant;
   }
