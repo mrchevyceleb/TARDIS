@@ -119,14 +119,25 @@ deskRouter.get('/', route(async (req, res) => {
   const data = await readDesk();
   const cards = req.query.archived === '0' ? data.cards.filter((c) => !c.archived) : data.cards;
   const prs = deskPrs();
-  res.json({ rev: data.rev, owner: ownerActor(), columns: COLUMN_META, todos: data.todos, cards, prs: prs.prs, ...(prs.stale ? { prsStale: true } : {}), ...(prs.pending ? { prsPending: true } : {}) });
+  // Disabled (no configured repos) serves no PR fields at all: exactly an
+  // older server's payload, so the client degrades by design.
+  const prsPayload = prs.disabled ? {} : {
+    prs: prs.prs,
+    ...(prs.stale ? { prsStale: true } : {}),
+    ...(prs.pending ? { prsPending: true } : {}),
+    ...(prs.unknown ? { prsUnknown: true } : {}),
+  };
+  res.json({ rev: data.rev, owner: ownerActor(), columns: COLUMN_META, todos: data.todos, cards, ...prsPayload });
 }));
 
 // The sidebar's light poll: the same cached snapshot as the room's read, so
 // an older server without the route simply 404s and the client keeps its
 // snippet lines.
 deskRouter.get('/prs', route(async (_req, res) => {
-  res.json(deskPrs());
+  const prs = deskPrs();
+  // Not configured: an older server's 404, so the sidebar falls back.
+  if (prs.disabled) { res.status(404).json({ error: 'desk PRs not configured' }); return; }
+  res.json(prs);
 }));
 
 /** Cheap poll for the workspace badge and desktop alerts. */

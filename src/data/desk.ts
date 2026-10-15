@@ -75,6 +75,9 @@ export type DeskSnapshot = {
   prsStale?: boolean;
   /** The first PR pull has not landed yet; do not assert idle. */
   prsPending?: boolean;
+  /** A configured repo has never yielded data (a failed first pull): idle
+   *  cannot be asserted for anyone. */
+  prsUnknown?: boolean;
 };
 
 /** An open high-priority item, as the summary poll lists it (newest first). */

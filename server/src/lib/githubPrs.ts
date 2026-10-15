@@ -1,10 +1,10 @@
 // Open pull requests per teammate for the Desk. Pulled with gh's existing
-// read-only auth across both owners. Every author shares one login, so the
+// read-only auth across the configured repos. Every author shares one login, so the
 // branch prefix is the owner map (naomi/ -> Naomi, ...); an unmapped prefix
 // renders under its login. States: draft / ci (a check still running) /
 // open + reviewer (a pending review request on an otherwise open PR; Kip and
 // Riley mapped by login) / merged (within the 48h staging window, and for
-// TARDIS only until the live tree contains the merge).
+// the live repo only until the live tree contains the merge).
 // The pull never blocks the request path: it runs async in the background
 // (kicked at boot and whenever the cache expires), a failed repo keeps its
 // last-known-good PRs and marks the snapshot stale, and the server always
@@ -22,24 +22,21 @@ export type DeskPr = {
   updatedAt: string;
 };
 
-export type DeskPrSnapshot = { prs: DeskPr[]; stale: boolean; pending: boolean };
+export type DeskPrSnapshot = { prs: DeskPr[]; stale: boolean; pending: boolean; unknown: boolean; disabled: boolean };
 
-const DEFAULT_REPOS = [
-  'mrchevyceleb/TARDIS',
-  'R-Link-LLC/operly',
-  'R-Link-LLC/r-link-studio-rebuild',
-  'mrchevyceleb/penguin-rush-2',
-  'mrchevyceleb/FiscalPilot',
-];
-/** Overridable (RIVENDELL_DESK_PR_REPOS, comma-separated owner/name) so the
- *  integration never assumes these identities outside this deployment. It
- *  stays on for this install by design: the API serves them on the same
- *  local trust boundary as the rest of the desk, with gh's existing
- *  read-only auth and no new secrets. */
+/** Deployment configuration, never code (AGENTS.md open-source safety: an
+ *  optional private integration stays disabled until explicitly configured
+ *  by environment, and no deployment identity is baked into the repo).
+ *  RIVENDELL_DESK_PR_REPOS (comma-separated owner/name) turns the pull on;
+ *  unset, empty or "off" leaves it disabled and the routes serve no PR data
+ *  at all, exactly like an older server (the client degrades by design).
+ *  Credentials stay gh's own configured auth; a purpose-scoped token can be
+ *  pinned by the deployment env later (gh honors GH_TOKEN) with no code
+ *  change. */
 const REPOS = (() => {
   const configured = (process.env.RIVENDELL_DESK_PR_REPOS ?? '')
     .split(',').map((s) => s.trim()).filter(Boolean);
-  return configured.length ? configured : DEFAULT_REPOS;
+  return configured.length && configured[0].toLowerCase() !== 'off' ? configured : [];
 })();
 
 const PREFIX_OWNERS: Record<string, string> = {
@@ -91,6 +88,25 @@ function liveTreeContains(oid?: string): Promise<boolean> {
   });
 }
 
+/** The repo whose live-tree drop applies (a merge disappears from the board
+ *  once the running service's tree contains it): derived from this
+ *  checkout's own origin remote so no identity is hard-coded;
+ *  RIVENDELL_DESK_PR_LIVE_REPO overrides, and a checkout whose remote cannot
+ *  be parsed simply uses the 48h window for every repo. */
+let liveRepoCache: string | null | undefined;
+function liveRepo(): Promise<string | null> {
+  if (liveRepoCache !== undefined) return Promise.resolve(liveRepoCache);
+  const configured = (process.env.RIVENDELL_DESK_PR_LIVE_REPO ?? '').trim();
+  if (configured) { liveRepoCache = configured; return Promise.resolve(configured); }
+  return new Promise((resolve) => {
+    execFile('git', ['remote', 'get-url', 'origin'], { encoding: 'utf8', timeout: 5_000 }, (error, stdout) => {
+      const m = error ? null : /([^/:@\s]+)\/([^/\s]+?)(?:\.git)?\s*$/.exec(stdout.trim());
+      liveRepoCache = m ? `${m[1]}/${m[2]}` : null;
+      resolve(liveRepoCache);
+    });
+  });
+}
+
 function ownerFor(pr: RawPr): string {
   const branch = pr.headRefName ?? '';
   const slash = branch.indexOf('/');
@@ -129,13 +145,17 @@ function hasPendingChecks(pr: RawPr): boolean {
 /** Last-known-good PR list per repo, so a failed pull keeps yesterday's truth
  *  on the board instead of erasing teammates into "idle". */
 const lastGood = new Map<string, DeskPr[]>();
-let snapshot: DeskPrSnapshot = { prs: [], stale: false, pending: true };
+let snapshot: DeskPrSnapshot = REPOS.length
+  ? { prs: [], stale: false, pending: true, unknown: false, disabled: false }
+  : { prs: [], stale: false, pending: false, unknown: false, disabled: true };
 let refreshedAt = 0;
 let refreshing: Promise<void> | null = null;
 
-async function pullAll(): Promise<{ prs: DeskPr[]; stale: boolean }> {
+async function pullAll(): Promise<{ prs: DeskPr[]; stale: boolean; unknown: boolean }> {
   const mergedCutoff = new Date(Date.now() - MERGED_WINDOW_MS).toISOString();
   const staleRepos: string[] = [];
+  const unknownRepos: string[] = [];
+  const live = await liveRepo();
   const pulls = await Promise.all(REPOS.map(async (repo) => ({
     repo,
     open: await gh(['-R', repo, '--state', 'open', '--limit', '50', '--json', LIST_FIELDS]),
@@ -146,40 +166,50 @@ async function pullAll(): Promise<{ prs: DeskPr[]; stale: boolean }> {
   for (const { repo, open, merged } of pulls) {
     if (!open || !merged) {
       staleRepos.push(repo);
-      prs.push(...(lastGood.get(repo) ?? []));
+      // Serving last-known-good re-applies the merged cutoff, so a repo that
+      // keeps failing cannot pin "merged to staging" past the window; a repo
+      // with no data ever is unknown, so the client never asserts idle.
+      const cached = lastGood.get(repo);
+      if (!cached) unknownRepos.push(repo);
+      else prs.push(...cached.filter((p) => p.state !== 'merged' || Date.parse(p.updatedAt) >= Date.now() - MERGED_WINDOW_MS));
       continue;
     }
-    const repoPrs: DeskPr[] = [];
+    // One PR can appear in both lists (it merged between the two requests):
+    // deduplicate by number, preferring the merged record, else the newer.
+    const byNumber = new Map<number, DeskPr>();
     for (const pr of [...open, ...merged]) {
       const state = pr.state ?? 'OPEN';
       if (state === 'MERGED') {
         const at = Date.parse(pr.mergedAt ?? '');
         if (!Number.isFinite(at) || at < Date.now() - MERGED_WINDOW_MS) continue;
-        // TARDIS drops exactly when the live tree contains the merge (the
-        // running service is on it); other repos use the 48h window proxy.
-        if (repo === 'mrchevyceleb/TARDIS' && await liveTreeContains(pr.mergeCommit?.oid)) continue;
-        repoPrs.push({ owner: ownerFor(pr), repo, number: pr.number, title: pr.title, state: 'merged', url: pr.url ?? '', updatedAt: pr.mergedAt ?? pr.updatedAt ?? '' });
+        // The live repo drops exactly when the live tree contains the merge
+        // (the running service is on it); other repos use the 48h window.
+        if (live && repo === live && await liveTreeContains(pr.mergeCommit?.oid)) continue;
+        byNumber.set(pr.number, { owner: ownerFor(pr), repo, number: pr.number, title: pr.title, state: 'merged', url: pr.url ?? '', updatedAt: pr.mergedAt ?? pr.updatedAt ?? '' });
         continue;
       }
       const deskState: DeskPr['state'] = pr.isDraft ? 'draft' : hasPendingChecks(pr) ? 'ci' : 'open';
       const reviewer = deskState === 'open' ? reviewerFor(pr) : undefined;
-      repoPrs.push({ owner: ownerFor(pr), repo, number: pr.number, title: pr.title, state: deskState, ...(reviewer ? { reviewer } : {}), url: pr.url ?? '', updatedAt: pr.updatedAt ?? '' });
+      const candidate: DeskPr = { owner: ownerFor(pr), repo, number: pr.number, title: pr.title, state: deskState, ...(reviewer ? { reviewer } : {}), url: pr.url ?? '', updatedAt: pr.updatedAt ?? '' };
+      const prev = byNumber.get(pr.number);
+      if (!prev || candidate.state === 'merged' || (prev.state !== 'merged' && candidate.updatedAt > prev.updatedAt)) byNumber.set(pr.number, candidate);
     }
+    const repoPrs = [...byNumber.values()];
     lastGood.set(repo, repoPrs);
     prs.push(...repoPrs);
   }
-  if (staleRepos.length) console.warn('[deskPrs] stale repos (serving last-known-good):', staleRepos.join(', '));
+  if (staleRepos.length) console.warn('[deskPrs] stale repos (serving last-known-good):', staleRepos.join(', '), unknownRepos.length ? `never pulled: ${unknownRepos.join(', ')}` : '');
   prs.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : a.repo === b.repo ? a.number - b.number : a.repo < b.repo ? -1 : 1));
-  return { prs, stale: staleRepos.length > 0 };
+  return { prs, stale: staleRepos.length > 0, unknown: unknownRepos.length > 0 };
 }
 
 /** Serve the last snapshot immediately; refresh in the background whenever it
  *  has expired. Never blocks, never throws. */
 export function deskPrs(): DeskPrSnapshot {
-  if (!refreshing && Date.now() - refreshedAt >= CACHE_MS) {
+  if (REPOS.length && !refreshing && Date.now() - refreshedAt >= CACHE_MS) {
     refreshing = (async () => {
       try {
-        snapshot = { ...await pullAll(), pending: false };
+        snapshot = { ...await pullAll(), pending: false, disabled: false };
       } catch (error) {
         console.warn('[deskPrs] pull failed:', (error as Error)?.message ?? error);
       } finally {
@@ -192,5 +222,5 @@ export function deskPrs(): DeskPrSnapshot {
 }
 
 // Kick the first background pull at boot so the first request already finds
-// data settling in.
-void deskPrs();
+// data settling in — only when the deployment configured repos.
+if (REPOS.length) void deskPrs();
