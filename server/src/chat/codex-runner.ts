@@ -1540,6 +1540,14 @@ function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
 /** Manager keyed by cwd + chat id, matching the claude session map. */
 const codexSessions = new Map<string, CodexSession>();
 
+/** Live codex session for a lane, read-only, never a spawn (register.ts
+ *  bg-lane busy: a lane that never ran is simply not busy). */
+export function peekCodexSession(opts: { repoPath: string; chatId?: string; cli?: CliKind }): CodexSession | null {
+  const key = keyOf(opts.cli ?? 'codex', opts.repoPath, opts.chatId || 'main');
+  const live = codexSessions.get(key);
+  return live && live.isAlive() ? live : null;
+}
+
 export function publishCodexExternalEvent(logKey: string, se: SeqEvent): void {
   for (const session of codexSessions.values()) {
     if (session.logKey === logKey) session.ingestExternalEvent(se);

@@ -4034,6 +4034,14 @@ function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
 /** Manager keyed by cwd + chat id, matching the claude/codex session maps. */
 const bananaSessions = new Map<string, BananaSession>();
 
+/** Live banana session for a lane, read-only, never a spawn (register.ts
+ *  bg-lane busy: a lane that never ran is simply not busy). */
+export function peekBananaSession(opts: { repoPath: string; chatId?: string; cli?: CliKind }): BananaSession | null {
+  const key = keyOf(opts.cli ?? 'banana', opts.repoPath, opts.chatId || 'main');
+  const live = bananaSessions.get(key);
+  return live && live.isAlive() ? live : null;
+}
+
 export function publishBananaExternalEvent(logKey: string, se: SeqEvent): void {
   for (const session of bananaSessions.values()) {
     if (session.logKey === logKey) session.ingestExternalEvent(se);

@@ -51,11 +51,13 @@ import { durableUserEchoClientMsgId, flushEventLog, loadEventLogCatchUp, loadEve
 import { isReactionEmoji, recordReaction } from './reactions.ts';
 import {
   activeCodexSessions,
+  peekCodexSession,
   pruneIdleCodexSessions,
   shutdownAllCodexSessions,
 } from './codex-runner.ts';
 import {
   activeBananaSessions,
+  peekBananaSession,
   pruneIdleBananaSessions,
   shutdownAllBananaSessions,
 } from './banana-runner.ts';
@@ -65,7 +67,7 @@ import { watchThread, unwatchThread, setWatchVisible } from './threadWatch.ts';
 import { agentForChatId, brainForAgent, cliForAgentEngine } from './agents.ts';
 import { loadThreadResetEpochs, persistThreadResetEpoch } from './threadResetStore.ts';
 import { setQueuedHumanProbe } from './providerSwitch.ts';
-import { bareChatId, isBackgroundChatId } from './threadKey.ts';
+import { bareChatId, isBackgroundChatId, backgroundChatId } from './threadKey.ts';
 
 type ClientSelection = {
   model?: string;
@@ -348,6 +350,24 @@ export function filterReplayEvents(events: DispatchSeqEvent[]): DispatchSeqEvent
     if (!isBananaTaggedError(se)) return true;
     return se.seq === latestUnresolvedBananaErrorSeq;
   });
+}
+
+/** The thread's background-lane busy state for the ready frame (card-e2bd7a):
+ *  the bg lane's live session, when one exists, reports its own turn state.
+ *  A peek, never a spawn: a lane that never ran is not busy. Engine-neutral:
+ *  the persistent-process registry covers the claude family and agy, and the
+ *  codex and banana registries get their own read-only peeks, so no engine's
+ *  bg lane reports a hardcoded false. Only isBusy is read. */
+function bgLaneBusy(cli: CliKind, repoPath: string, chatId: string): boolean {
+  const bgId = backgroundChatId(chatId);
+  if (isPersistentProcessCli(cli)) {
+    const live = peekClaudeSession({ cli, repoPath, chatId: bgId });
+    return live ? live.isBusy() : false;
+  }
+  const codex = peekCodexSession({ repoPath, chatId: bgId, cli });
+  if (codex) return codex.isBusy();
+  const banana = peekBananaSession({ repoPath, chatId: bgId, cli });
+  return banana ? banana.isBusy() : false;
 }
 
 /** Set on service shutdown: new turns are rejected (existing sockets get a
@@ -911,7 +931,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
       // busy state: only its transcript frames reach the viewer, tagged so the
       // client keeps a separate reply cursor for them.
       if (se.lane === 'bg') {
+        // Matt, Oct 15 (card-e2bd7a): the lane's working and turn-end state
+        // reaches the viewer too, tagged, so a teammate's running turn shows
+        // the same working indicator as a home-lane turn. The socket's own
+        // busy flag stays home-lane-only: a bg turn never gates sends.
         if (sev.type === 'event') safeSend({ type: 'stream', event: sev.event, seq: se.seq, at: se.at, lane: 'bg' });
+        else if (sev.type === 'turnStart') safeSend({ type: 'turnStart', seq: se.seq, lane: 'bg' });
+        else if (sev.type === 'turnEnd') safeSend({ type: 'turnEnd', sessionId: sev.sessionId, seq: se.seq, lane: 'bg' });
         return;
       }
       if (sev.type === 'event') {
@@ -1312,6 +1338,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               effort: desiredBrain.effort,
               brainRevision: desiredBrain.revision,
               activeCli,
+              bgBusy: bgLaneBusy(activeCli, msg.repo, chatId),
               activeModel: activeSelection.model ?? desiredBrain.model,
               activeEffort: activeSelection.effort ?? desiredBrain.effort,
               brainPending: activeCli !== desiredBrain.cli
@@ -1389,6 +1416,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               chatId,
               latestSeq: coldLatestSeq,
               busy: false,
+              bgBusy: bgLaneBusy(desiredBrain.cli, msg.repo, chatId),
               queuedClientMsgIds,
               deliveredClientMsgIds,
               resetAt,
@@ -1430,6 +1458,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             effort: desiredBrain.effort,
             brainRevision: desiredBrain.revision,
             activeCli,
+            bgBusy: bgLaneBusy(activeCli, msg.repo, chatId),
             activeModel: activeSelection.model ?? desiredBrain.model,
             activeEffort: activeSelection.effort ?? desiredBrain.effort,
             brainPending: activeCli !== desiredBrain.cli

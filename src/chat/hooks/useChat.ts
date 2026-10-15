@@ -443,37 +443,47 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const finalText = ev.type === 'result' && ev.is_error !== true && typeof ev.result === 'string'
       ? ev.result.trim()
       : '';
-    const sameReply = (left: string, right: string) => left.replace(/\s+/g, ' ').trim() === right.replace(/\s+/g, ' ').trim();
-    // Only this turn when we still know it. A replay (or a result that lands
-    // after the cursor was cleared) has no turn id, and an exact match then
-    // misses a reply the stream already showed with different line breaks.
-    // That paints the same answer twice. A closing copy is never a new bubble
-    // once any visible text already contains it.
-    // Legacy thought blocks never join the dedup: a thought that an older
-    // build surfaced must not suppress the real reply as "already rendered".
-    // Pending streaming blocks stay in: matching the live stream is the
-    // double-paint guard this dedup exists for.
-    const finalTurnParts = closed
-      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && !b.thought && (!finalTurnId || b.turnId === finalTurnId))
-      .map((b) => b.text);
-    const finalAlreadyRendered = finalTurnParts.some((part) => sameReply(part, finalText))
-      || ['', '\n', '\n\n'].some((separator) => sameReply(finalTurnParts.join(separator), finalText))
-      || closed.some((b) => b.kind === 'text' && !b.thought && b.text.trim().length > 0 && sameReply(b.text, finalText));
-    if (finalText && !finalAlreadyRendered) {
-      return [...closed, {
-        kind: 'text',
-        id: id(),
-        text: finalText,
-        ...eventTime(ev),
-        turnId: finalTurnId,
-        peerId: finalPeerId,
-        ...laneStamp(turnIdRef),
-        cbIndex: -1,
-        open: false,
-        seq: typeof ev.seq === 'number' ? ev.seq : undefined,
-      }];
+    // The canonical result reconciles with what the stream already rendered,
+    // instead of dropping it (presence) or duplicating it (exact-equality).
+    // The Gemini CLI's result carries the streamed reply plus its own
+    // narration, so the streamed text is a whitespace-insensitive prefix of
+    // it: swap the fuller canonical copy in, in place, so it renders exactly
+    // once. A partial stream cut mid-answer is also a prefix, so the
+    // canonical result recovers the full answer the deltas lost. A stream
+    // that ran past the result keeps its richer copy; genuinely disjoint
+    // text keeps both, because dropping either can lose a real answer.
+    // Legacy thought blocks never count, and an empty streamed block is not
+    // a delivered answer: only non-empty parts reconcile.
+    const finalTextBlocks = closed
+      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && !b.thought && b.text.trim().length > 0 && (!finalTurnId || b.turnId === finalTurnId));
+    if (!finalText) return closed;
+    const appendResult = (): ChatBlock[] => [...closed, {
+      kind: 'text',
+      id: id(),
+      text: finalText,
+      ...eventTime(ev),
+      turnId: finalTurnId,
+      peerId: finalPeerId,
+      ...laneStamp(turnIdRef),
+      cbIndex: -1,
+      open: false,
+      seq: typeof ev.seq === 'number' ? ev.seq : undefined,
+    }];
+    if (finalTextBlocks.length === 0) return appendResult();
+    const squash = (s: string) => s.replace(/\s+/g, '');
+    const streamedSq = squash(finalTextBlocks.map((b) => b.text).join(''));
+    const finalSq = squash(finalText);
+    if (finalSq.startsWith(streamedSq) && finalSq.length > streamedSq.length) {
+      // The canonical result is the streamed text's own completion: swap it
+      // in, in place, and drop the turn's other streamed copies.
+      const first = finalTextBlocks[0];
+      const dropIds = new Set(finalTextBlocks.slice(1).map((b) => b.id));
+      return closed
+        .filter((b) => !dropIds.has(b.id))
+        .map((b) => (b.id === first.id ? { ...b, text: finalText } : b));
     }
-    return closed;
+    if (streamedSq.startsWith(finalSq)) return closed;
+    return appendResult();
   }
 
   if (ev.type === 'message_delta') {
@@ -1141,6 +1151,11 @@ export function useChat(opts: {
   /** When the current turn started — ref powers watchdog math; state powers UI. */
   const turnStartRef = useRef<number>(0);
   const [turnStartedAt, setTurnStartedAt] = useState(0);
+  /** Per-lane working state (card-e2bd7a): a background-lane turn runs beside
+   *  the home lane and shows the same working indicator, but never gates
+   *  home-lane sends, so the two lanes track their own busy flags. */
+  const homeBusyRef = useRef(false);
+  const bgBusyRef = useRef(false);
   /** Background shells/subagents still running after the visible turn ended,
    *  keyed by task id. Mirrors the server's tracking from the same events. */
   const backgroundTasksRef = useRef<Map<string, string>>(new Map());
@@ -1664,6 +1679,13 @@ export function useChat(opts: {
           }
           socketReadyRef.current = true;
           busyConfirmedRef.current = true;
+          // The ready frame is the authoritative lane state (card-e2bd7a): the
+          // home lane's busy is the server's own busy report, and the bg lane
+          // resets to the server's word when it sends one (bgBusy; absent on
+          // an older server, so an in-flight bg turn's indicator waits for its
+          // turnEnd rather than a stale flag stranding streaming forever).
+          homeBusyRef.current = msg.busy === true;
+          bgBusyRef.current = msg.bgBusy === true;
           serverCliRef.current = typeof msg.activeCli === 'string'
             ? msg.activeCli as CompanionId
             : cli;
@@ -1698,10 +1720,16 @@ export function useChat(opts: {
           // TURN_KEEPALIVE_MS (15s) - worse across back-to-back reconnects,
           // which is exactly what made a live turn look dead. No-op if a
           // start time already survived the reconnect (turnStartRef > 0).
-          if (msg.busy === true) {
+          // Visible activity is either lane's (card-e2bd7a): a bg turn in
+          // flight shows the working indicator on attach/reconnect too, while
+          // send gating below stays home-busy alone.
+          const laneBusy = msg.busy === true || msg.bgBusy === true;
+          if (laneBusy) {
             // Seed from the server's real turn start when it sent one: the
             // reattach clock restarting at zero made a mid-turn reopen show
-            // "0:10" instead of the true elapsed time (Oct 15).
+            // "0:10" instead of the true elapsed time (Oct 15). A bg-only
+            // busy turn has no home start to seed from, so its timer starts
+            // at attach (the live bg turnStart frame keeps it honest after).
             const serverTurnStart = typeof msg.turnStartedAt === 'number' && msg.turnStartedAt > 0 ? msg.turnStartedAt : 0;
             markTurnStarted(serverTurnStart > 0 ? serverTurnStart : Date.now(), serverTurnStart > 0);
           }
@@ -1719,11 +1747,12 @@ export function useChat(opts: {
             // Keep its visible queued state across reconnect; the durable
             // _user_echo will clear it when the next turn is actually admitted.
             const steerQueued = queuedSteerRef.current.size > 0;
-            setStatus(msg.busy || steerQueued ? 'streaming' : 'ready');
+            setStatus(laneBusy || steerQueued ? 'streaming' : 'ready');
             if (!msg.busy && !steerQueued) {
               pendingSendRef.current = false;
               compactingRef.current = false;
-              clearTurnStarted();
+              // A bg turn in flight keeps its timer and indicator.
+              if (!laneBusy) clearTurnStarted();
             }
           }
         }
@@ -1804,6 +1833,15 @@ export function useChat(opts: {
           setError(null);
         }
         else if (msg.type === 'turnStart') {
+          // A background-lane turn (card-e2bd7a): the same working indicator
+          // without any home-lane send gating. The timer seeds from arrival,
+          // which is the live start for a frame the viewer gets as it happens.
+          if (msg.lane === 'bg') {
+            bgBusyRef.current = true;
+            if (statusRef.current === 'ready') { markTurnStarted(Date.now()); setError(null); setStatus('streaming'); }
+            return;
+          }
+          homeBusyRef.current = true;
           if (!socketReady) return; // replayed control message from the hello buffer
           const beginsQueuedSteer = Boolean(
             msg.clientMsgId && queuedSteerRef.current.has(msg.clientMsgId),
@@ -1819,6 +1857,18 @@ export function useChat(opts: {
           setStatus('streaming');
         }
         else if (msg.type === 'turnEnd') {
+          // A background-lane turn's end (card-e2bd7a): clears the indicator
+          // only when no home-lane turn is running; the home state stays.
+          if (msg.lane === 'bg') {
+            bgBusyRef.current = false;
+            window.dispatchEvent(new Event('rivendell:history-changed'));
+            if (!homeBusyRef.current && statusRef.current === 'streaming' && queuedSteerRef.current.size === 0 && !pendingSendRef.current) {
+              clearTurnStarted();
+              setStatus('ready');
+            }
+            return;
+          }
+          homeBusyRef.current = false;
           if (!socketReady) {
             // Replayed turnEnd from the hello buffer: the turn it closed ended
             // before this reconnect. With nothing queued behind it, a
@@ -1857,7 +1907,7 @@ export function useChat(opts: {
               flushOutboundRef.current();
             }
           } else {
-            setStatus('ready');
+            setStatus(bgBusyRef.current ? 'streaming' : 'ready');
           }
         }
         else if (msg.type === 'compacted') {
@@ -1884,6 +1934,9 @@ export function useChat(opts: {
           settleInitialMessage();
           queuedSteerRef.current = new Set();
           pendingSendRef.current = false;
+          // A fresh start is a clean slate for both lanes' busy flags.
+          homeBusyRef.current = false;
+          bgBusyRef.current = false;
           socketReadyRef.current = msg.remote !== true;
           dropReplayOps();
           setBlocks([]);

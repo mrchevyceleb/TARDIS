@@ -17,12 +17,43 @@ function preserveFence(value: string): string {
   return REDACTED;
 }
 
+/** A path segment that is itself an opaque credential run (a disguised
+ *  secret must not ride the path exemption): pure hex 32+ (a digest or a
+ *  token), or a long no-separator token-charset run (base64/base64url,
+ *  URL-safe keys) carrying both cases. Plain lowercase path words, however
+ *  long, stay paths; a dotted filename never reaches this charset test. */
+function isOpaquePathSegment(segment: string): boolean {
+  if (/^[0-9a-fA-F]{32,}$/.test(segment)) return true;
+  return segment.length >= 32 && /^[A-Za-z0-9_+=-]+$/.test(segment) && /[a-z]/.test(segment) && /[A-Z]/.test(segment);
+}
+
 function redactOpaqueToken(token: string, offset: number, source: string): string {
   // A 64-char hex string is a credential unless nearby context positively
   // identifies a checksum/object digest. Ordinary 40-char Git SHAs never
   // reach this matcher; they remain useful references by default.
   const context = source.slice(Math.max(0, offset - 96), offset);
   if (/(?:\b(?:commit|sha(?:-?256)?|checksum|digest|git hash|object hash|revision|rev)\b\s*(?::|=|is|was|at)?\s*|\/commit\/)$/i.test(context)) {
+    return token;
+  }
+  // A path, not a credential (Matt, Oct 15: Felix's Fangorn replies printed
+  // file:///C:/... links as [redacted secret]). With a file-scheme attempt in
+  // the context, only a real form keeps: file: plus two or more slashes and
+  // an optional drive letter — the first landing's \/+ typo matched a literal
+  // plus, so real file:/// links never kept, and a bogus form (file:/+C:/)
+  // must not fall through to the bare drive rules below. Without any scheme
+  // attempt, a bare drive prefix glued to a separator-leading token is
+  // positively a filesystem path. Either way, no path segment may itself be
+  // an opaque run (pure hex, or a long token-charset run with mixed case): a
+  // credential disguised as a path still redacts. Everything else stays under
+  // the opaque rule: an opaque URL path segment (https://host/<token>)
+  // redacts by default, and a bare multi-segment run is more likely a base64
+  // blob than a path.
+  const tail = context.slice(-16);
+  const schemeInTail = /file:/i.test(tail);
+  const isFilePathPrefix = schemeInTail
+    ? /file:\/{2,}\/?(?:[A-Za-z]:[\\/]?)?$/i.test(tail)
+    : /^[A-Za-z]:[\\/]$/.test(tail.slice(-3)) || (/[A-Za-z]:$/.test(tail.slice(-2)) && /^[\\/]/.test(token));
+  if (isFilePathPrefix && !token.split('/').some(isOpaquePathSegment)) {
     return token;
   }
   return REDACTED;

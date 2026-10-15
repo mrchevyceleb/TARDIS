@@ -3567,11 +3567,14 @@ export function subscribeExternalThreadEvents(fn: (logKey: string, se: SeqEvent)
 }
 
 /** Mirror a background-lane event to the home lane's viewers (warm sockets
- *  ride the home session; cold ones the external listeners). Only transcript
- *  frames cross: the background lane's turnStart/turnEnd/closed stay its own,
- *  so they never flip the home lane's busy state or end its waits. */
+ *  ride the home session; cold ones the external listeners). Transcript
+ *  frames cross, and so do the lane's turnStart/turnEnd (card-e2bd7a, Oct
+ *  15): they reach the viewer tagged with the bg lane, so a running bg turn
+ *  shows the same working indicator as a home turn without ever flipping the
+ *  home lane's own busy state or gating its sends (the client keeps bg busy
+ *  separately). Everything else (closed, errors) stays the bg lane's own. */
 export function shareBackgroundLaneEvent(source: { chatId: string; logKey: string }, se: SeqEvent): void {
-  if (se.lane !== 'bg' || se.ev.type !== 'event') return;
+  if (se.lane !== 'bg' || (se.ev.type !== 'event' && se.ev.type !== 'turnStart' && se.ev.type !== 'turnEnd')) return;
   for (const session of sessions.values()) {
     if (session !== source && session.logKey === source.logKey && !isBackgroundChatId(session.chatId)) session.ingestExternalEvent(se);
   }
