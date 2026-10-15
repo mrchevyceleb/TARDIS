@@ -660,6 +660,12 @@ export class PiSession {
     this.emit({ type: 'event', event });
     return true;
   }
+  /** The active turn's start (ms) for the client's elapsed timer on reattach
+   *  (register.ts ready payload); null when no turn is open. */
+  activeTurnStartedAt(): number | null {
+    return this.turnStartedAt;
+  }
+
   isBusy(): boolean { return this.turnStartedAt !== null; }
   isAutomationTurn(): boolean { return this.turnStartedAt !== null && this.automationTurn; }
   /** Pi's `steer` is delivered at the next tool boundary — always safe. */

@@ -92,6 +92,21 @@ export function resolveAgyBin(): string {
   return existsSync(standalone) ? standalone : 'agy';
 }
 
+/** One buffered step per step_index while the pump serializes emission (see
+ *  AgySession.pumpSteps). */
+type AgyStepBuffer = {
+  kind: 'text' | 'tool';
+  text: string;
+  done: boolean;
+  opened: boolean;
+  closed: boolean;
+  name?: string;
+  parameters?: unknown;
+  output?: string;
+  toolUseId?: string;
+  usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number };
+};
+
 export class AgySession {
   readonly key: string;
   readonly logKey: string;
@@ -143,12 +158,17 @@ export class AgySession {
    *  API call, so summing them double-counts). */
   private resultUsage: { input: number; output: number; cacheRead: number } | null = null;
   private turnFailed: { message: string; code?: string } | null = null;
-  private currentMsgId: string | null = null;
-  /** A content block is open for the current agent_response step. */
-  private stepBlockOpen = false;
-  /** Accumulated text_delta of the current agent_response step; the DONE
-   *  frame carries only deltas, never the assembled step text. */
-  private stepText = '';
+  /** Buffered step frames by step_index, emitted strictly in step order (see
+   *  pumpSteps): text accumulates until its message opens; a tool step buffers
+   *  its card fields until it opens. DONE frames carry only deltas, never the
+   *  assembled step text. */
+  private stepBuffers = new Map<number, AgyStepBuffer>();
+  /** The step_index whose message is currently open in the stream. The
+   *  stream protocol addresses blocks by index inside ONE open message, so
+   *  two concurrently open messages would misroute later deltas into the
+   *  wrong bubble: a step only opens once every lower step_index has
+   *  closed. */
+  private liveStepIdx: number | null = null;
   /** Final assistant text of the turn; the client's `result.result` recovery
    *  path re-renders it if the streamed blocks never made it on screen. */
   private lastAssistantText = '';
@@ -346,21 +366,53 @@ export class AgySession {
       }
       case 'step_update': {
         const step = ev.step_update;
-        if (!step || step.step_type !== 'agent_response') return;
+        if (!step) return;
+        if (step.step_type !== 'tool' && step.step_type !== 'agent_response') return;
         const sid = this.agyConversationId ?? '';
         const stream = (event: Record<string, unknown>) => this.emit({ type: 'event', event: { type: 'stream_event', event, session_id: sid } });
-        if (typeof step.text_delta === 'string' && step.text_delta.length > 0) {
-          if (!this.stepBlockOpen) {
-            this.stepBlockOpen = true;
-            this.stepText = '';
-            this.currentMsgId = randomUUID();
-            stream({ type: 'message_start', message: { id: this.currentMsgId, type: 'message', role: 'assistant', content: [], model: this.spawnModel, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } } });
-            stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+        const idx = typeof step.step_index === 'number' ? step.step_index : -1;
+        let buf = this.stepBuffers.get(idx);
+        if (!buf) {
+          buf = step.step_type === 'tool'
+            ? { kind: 'tool', text: '', done: false, opened: false, closed: false }
+            : { kind: 'text', text: '', done: false, opened: false, closed: false };
+          this.stepBuffers.set(idx, buf);
+        }
+        if (buf.closed) return; // a late frame for an already-emitted step
+        const wasLiveText = buf.kind === 'text' && buf.opened && this.liveStepIdx === idx;
+        if (buf.kind === 'tool') {
+          const info = step.tool_info && typeof step.tool_info === 'object' ? step.tool_info : {};
+          if (typeof step.tool_name === 'string' && step.tool_name) buf.name = step.tool_name;
+          else if (typeof info.name === 'string' && info.name) buf.name = info.name;
+          if (info.parameters !== undefined) buf.parameters = info.parameters;
+          if (step.state === 'DONE') {
+            buf.done = true;
+            const raw = info.output;
+            buf.output = typeof raw === 'string' ? raw : raw == null ? '' : JSON.stringify(raw) ?? '';
           }
-          this.stepText += step.text_delta;
+        } else {
+          if (typeof step.text_delta === 'string' && step.text_delta.length > 0) buf.text += step.text_delta;
+          if (step.state === 'DONE') {
+            buf.done = true;
+            const u = step.usage ?? {};
+            const usage = {
+              input_tokens: finiteCount(u.input_tokens),
+              output_tokens: finiteCount(u.output_tokens),
+              cache_read_input_tokens: finiteCount(u.cache_read_tokens),
+            };
+            buf.usage = usage;
+            this.turnUsage.input += usage.input_tokens;
+            this.turnUsage.output += usage.output_tokens;
+            this.turnUsage.cacheRead += usage.cache_read_input_tokens;
+          }
+        }
+        // A live step's new delta streams immediately (before any close this
+        // DONE frame may carry); a not-yet-opened step's text emits with its
+        // message when the pump opens it.
+        if (wasLiveText && typeof step.text_delta === 'string' && step.text_delta.length > 0) {
           stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: step.text_delta } });
         }
-        if (step.state === 'DONE') this.finishStep(stream, step);
+        this.pumpSteps(stream);
         return;
       }
       case 'result': {
@@ -442,29 +494,72 @@ export class AgySession {
   }
 
   /** Close the streamed step into a full assistant message (claude-shaped). */
-  private finishStep(stream: (event: Record<string, unknown>) => void, step: any): void {
-    const usageRaw = step.usage ?? {};
-    const usage = {
-      input_tokens: finiteCount(usageRaw.input_tokens),
-      output_tokens: finiteCount(usageRaw.output_tokens),
-      cache_read_input_tokens: finiteCount(usageRaw.cache_read_tokens),
-      cache_creation_input_tokens: 0,
-    };
-    this.turnUsage.input += usage.input_tokens;
-    this.turnUsage.output += usage.output_tokens;
-    this.turnUsage.cacheRead += usage.cache_read_input_tokens;
-    if (!this.stepBlockOpen) return; // a step with no streamed text (not seen live; nothing to close)
-    this.stepBlockOpen = false;
-    const sid = this.agyConversationId ?? '';
-    const text = this.stepText;
-    this.stepText = '';
+  /** Serialize step emission strictly by step_index. agy interleaves steps
+   *  (planner, tool, and agent steps overlap inside one turn), but the stream
+   *  protocol addresses blocks by index inside one open message, so two
+   *  concurrently open messages would misroute later deltas into the wrong
+   *  bubble. A step only opens once every lower step_index has closed; a
+   *  higher step's frames buffer meanwhile, its accumulated text emitting as
+   *  one delta when its message opens. Emission order is therefore step
+   *  order: one assistant message per step, in the order the steps began,
+   *  tool steps as tool_use cards with their tool_result frames (the shapes
+   *  the Claude lanes deliver — Oct 15: 14 GENERIC steps rendered zero tool
+   *  cards, and planner bubbles rendered out of step order). */
+  private pumpSteps(stream: (event: Record<string, unknown>) => void): void {
+    const order = [...this.stepBuffers.entries()].filter(([, b]) => !b.closed).sort((a, b) => a[0] - b[0]);
+    for (const [idx, buf] of order) {
+      if (this.liveStepIdx !== null && this.liveStepIdx !== idx) break; // a lower step is still live
+      if (!buf.opened) {
+        // A tool card waits for its DONE frame: only then are the final name
+        // and parameters known (a card opened on the first ACTIVE frame would
+        // permanently freeze whatever that frame carried, and later frames
+        // can never update a closed card).
+        if (buf.kind === 'tool' && !buf.done) break;
+        buf.opened = true;
+        this.liveStepIdx = idx;
+        if (buf.kind === 'tool') {
+          this.emitToolCard(stream, buf);
+        } else {
+          stream({ type: 'message_start', message: { id: randomUUID(), type: 'message', role: 'assistant', content: [], model: this.spawnModel, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } } });
+          stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+          if (buf.text) stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: buf.text } });
+        }
+      }
+      if (!buf.done) break; // the live step is still streaming
+      if (buf.kind === 'tool') {
+        this.emit({ type: 'event', event: { type: 'user', parent_tool_use_id: null, session_id: this.agyConversationId ?? '', uuid: randomUUID(), timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: buf.toolUseId ?? '', content: [{ type: 'text', text: String(buf.output ?? '').slice(0, 8000) }] }] } } });
+      } else {
+        // Serialized close, not arrival: lastAssistantText must end as the
+        // final step's text, or a late-finishing lower-index planner step
+        // would overwrite the response recovery when result.response is empty.
+        if (buf.text.trim()) this.lastAssistantText = buf.text;
+        stream({ type: 'content_block_stop', index: 0 });
+        stream({ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { input_tokens: buf.usage?.input_tokens ?? 0, output_tokens: buf.usage?.output_tokens ?? 0, cache_read_input_tokens: buf.usage?.cache_read_input_tokens ?? 0, cache_creation_input_tokens: 0 } });
+        stream({ type: 'message_stop' });
+      }
+      buf.closed = true;
+      this.liveStepIdx = null;
+      // continue: pump the next buffered step
+    }
+  }
+
+  /** The active turn's start (ms) for the client's elapsed timer on reattach
+   *  (register.ts ready payload); null when no turn is open. */
+  activeTurnStartedAt(): number | null {
+    return this.turnStartedAt;
+  }
+
+  private emitToolCard(stream: (event: Record<string, unknown>) => void, buf: AgyStepBuffer): void {
+    const toolUseId = randomUUID();
+    buf.toolUseId = toolUseId;
+    const name = buf.name ?? 'tool';
+    const input = buf.parameters == null ? '{}' : JSON.stringify(buf.parameters) ?? '{}';
+    stream({ type: 'message_start', message: { id: randomUUID(), type: 'message', role: 'assistant', content: [], model: this.spawnModel, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } } });
+    stream({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: toolUseId, name, input: {} } });
+    stream({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: input } });
     stream({ type: 'content_block_stop', index: 0 });
-    if (text.trim()) this.lastAssistantText = text;
-    const msgId = this.currentMsgId ?? randomUUID();
-    this.emit({ type: 'event', event: { type: 'assistant', parent_tool_use_id: null, session_id: sid, uuid: randomUUID(), timestamp: new Date().toISOString(), message: { id: msgId, type: 'message', role: 'assistant', model: this.spawnModel, content: [{ type: 'text', text: String(text ?? '') }], stop_reason: 'end_turn', stop_sequence: null, usage } } });
-    this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage }, session_id: sid } });
-    this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_stop' }, session_id: sid } });
-    this.currentMsgId = null;
+    stream({ type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } });
+    stream({ type: 'message_stop' });
   }
 
   /** Unconditional stream finalization: a terminal path (result, exit,
@@ -474,19 +569,26 @@ export class AgySession {
    *  message (and lastAssistantText), exactly like a DONE-closed step, so an
    *  empty terminal result.response cannot lose already-streamed text. */
   private finalizeOpenStep(): void {
-    if (!this.stepBlockOpen) return;
-    this.stepBlockOpen = false;
+    // A turn ending mid-step: close the live step's message (only one can be
+    // open — see pumpSteps). The client's result handling also closes open
+    // blocks and running tool cards, so this is belt-and-suspenders for the
+    // stream protocol. No completion-time full-`assistant` frames.
     const sid = this.agyConversationId ?? '';
-    const text = this.stepText;
-    this.stepText = '';
-    const usage = { input_tokens: this.turnUsage.input, output_tokens: this.turnUsage.output, cache_read_input_tokens: this.turnUsage.cacheRead, cache_creation_input_tokens: 0 };
-    this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'content_block_stop', index: 0 }, session_id: sid } });
-    if (text.trim()) this.lastAssistantText = text;
-    const msgId = this.currentMsgId ?? randomUUID();
-    this.emit({ type: 'event', event: { type: 'assistant', parent_tool_use_id: null, session_id: sid, uuid: randomUUID(), timestamp: new Date().toISOString(), message: { id: msgId, type: 'message', role: 'assistant', model: this.spawnModel, content: [{ type: 'text', text: String(text ?? '') }], stop_reason: this.turnFailed ? null : 'end_turn', stop_sequence: null, usage } } });
-    this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: this.turnFailed ? null : 'end_turn', stop_sequence: null }, usage }, session_id: sid } });
-    this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_stop' }, session_id: sid } });
-    this.currentMsgId = null;
+    if (this.liveStepIdx !== null) {
+      const buf = this.stepBuffers.get(this.liveStepIdx);
+      if (buf && buf.kind === 'text' && buf.opened && !buf.closed) {
+        // Commit the accumulated text exactly like a serialized DONE close:
+        // finishTurn reads this.lastAssistantText for the result event, so an
+        // empty terminal result.response must not lose already-streamed
+        // text to a stale or empty recovery string (Oct 15 final review).
+        if (buf.text.trim()) this.lastAssistantText = buf.text;
+        this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'content_block_stop', index: 0 }, session_id: sid } });
+        this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: this.turnFailed ? null : 'end_turn', stop_sequence: null }, usage: { input_tokens: this.turnUsage.input, output_tokens: this.turnUsage.output, cache_read_input_tokens: this.turnUsage.cacheRead, cache_creation_input_tokens: 0 } }, session_id: sid } });
+        this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_stop' }, session_id: sid } });
+      }
+    }
+    this.stepBuffers.clear();
+    this.liveStepIdx = null;
   }
 
   private finishTurn(): void {

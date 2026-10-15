@@ -340,6 +340,9 @@ export class CodexSession {
     void this.maybeCompact();
   }
   private busy = false;
+  /** When the active turn opened (ms), for the client's elapsed timer on
+   *  reattach (register.ts ready payload); meaningful only while busy. */
+  private busySince: number | null = null;
   private dead = false;
   private currentChild: ChildProcess | null = null;
   /** True after app-server announces turn/started and until turn/completed. */
@@ -462,6 +465,12 @@ export class CodexSession {
 
   isAlive(): boolean {
     return !this.dead;
+  }
+
+  /** The active turn's start (ms) for the client's elapsed timer on reattach
+   *  (register.ts ready payload); null when no turn is open. */
+  activeTurnStartedAt(): number | null {
+    return this.busy ? this.busySince : null;
   }
 
   isBusy(): boolean {
@@ -689,6 +698,7 @@ export class CodexSession {
     this.turnModel = codexModel;
     this.turnEffort = codexEffort;
     this.busy = true;
+    this.busySince = Date.now();
     this.cancellationEmitted = false;
     if (!opts.suppressEcho) this.replyWatch.reset();
     const recoverContextThisTurn = this.recoverContextOnNextTurn;
