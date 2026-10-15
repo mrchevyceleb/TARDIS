@@ -44,7 +44,7 @@ async function getRunner() {
   return mod as unknown as {
     getOrCreateSession: (opts: { cli: string; repoPath: string; chatId: string; model?: string; effort?: string; recycleOnMismatch?: boolean }) => Promise<SessionLike>;
     activeChatSessions: () => Array<{ cli: string; cwd: string; chatId: string; busy: boolean }>;
-    isClaudeFamilyCli: (cli: string) => boolean;
+    isPersistentProcessCli: (cli: string) => boolean;
   };
 }
 
@@ -54,11 +54,12 @@ export type AgentLane = 'main' | 'bg';
 
 /** Everything that is not the person typing or speaking runs in the
  *  background lane, unless the kill switch is off. Codex and Banana engines
- *  keep their single lane: background lanes live on the Claude-family
- *  registry (claude binary or Pi), which mirrors them into the home view. */
-function resolveLane(cli: string, requested: AgentLane, runner: { isClaudeFamilyCli: (cli: string) => boolean }): AgentLane {
+ *  keep their single lane: background lanes live on the persistent-process
+ *  registry (claude binary, Pi, or the agy subscription lane), which mirrors
+ *  them into the home view. */
+function resolveLane(cli: string, requested: AgentLane, runner: { isPersistentProcessCli: (cli: string) => boolean }): AgentLane {
   if (requested === 'main' || !backgroundLaneEnabled()) return 'main';
-  return runner.isClaudeFamilyCli(cli) ? 'bg' : 'main';
+  return runner.isPersistentProcessCli(cli) ? 'bg' : 'main';
 }
 
 /** An event from the other lane, mirrored into a home session for viewers. */

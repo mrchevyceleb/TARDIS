@@ -7,6 +7,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CompanionPicker } from '../../hooks/useCompanionPicker';
 import {
+  AGY_EFFORTS,
+  AGY_MODELS,
   WORKSPACE_COMPANIONS,
   XAI_MODELS,
   XAI_EFFORTS,
@@ -29,6 +31,8 @@ const LANE_META: Record<string, LaneMeta> = {
   zai: { ring: 'Z', short: 'Z.ai coding plan', word: 'effort' },
   fireworks: { ring: 'F', short: 'Fireworks API models', word: 'thinking' },
   openrouter: { ring: 'O', short: 'OpenRouter API models', word: 'thinking' },
+  // 'G' is taken by Grok; Gemini takes the M of GeMini.
+  agy: { ring: 'M', short: 'Google AI subscription', word: 'thinking' },
 };
 
 function labelFor(id: string, list: Array<{ id: string; label: string }>): string {
@@ -47,6 +51,7 @@ export function counselChipInfo(picker: CompanionPicker) {
   else if (picker.isZai) name = labelFor(picker.zaiModel, ZAI_MODELS);
   else if (picker.isFireworks) name = labelFor(picker.fireworksModel, FIREWORKS_MODELS);
   else if (picker.isOpenRouter) name = labelFor(picker.openRouterModel, OPENROUTER_MODELS);
+  else if (picker.isAgy) name = labelFor(picker.agyModel, AGY_MODELS);
   const lane = WORKSPACE_COMPANIONS.find((c) => c.id === picker.companion);
   const blurb = companionAuthBlurb(picker.cli, picker.account);
   return { ring: meta.ring, name, effort, word: meta.word, short: meta.short, blurb, laneLabel: lane?.label ?? name };
@@ -331,6 +336,23 @@ function LaneControls({ picker }: { picker: CompanionPicker }) {
           ))}
           <span className="ctl-lab">effort</span>
           <EffortPills options={ZAI_EFFORTS} current={picker.zaiEffort} onPick={picker.setZaiEffort} />
+        </>
+      )}
+      {picker.isAgy && (
+        <>
+          <span className="ctl-lab">model</span>
+          {AGY_MODELS.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              className={`mini${picker.agyModel === m.id ? ' on' : ''}`}
+              onClick={() => picker.setAgyModel(m.id)}
+            >
+              {m.label}
+            </button>
+          ))}
+          <span className="ctl-lab">thinking</span>
+          <EffortPills options={AGY_EFFORTS} current={picker.agyEffort} onPick={picker.setAgyEffort} />
         </>
       )}
       {picker.isFireworks && (

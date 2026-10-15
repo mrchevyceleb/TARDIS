@@ -53,7 +53,7 @@ function count(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
-export function recordContextUsage(key: string, engine: 'claude' | 'codex' | 'pi', usage: any): void {
+export function recordContextUsage(key: string, engine: 'claude' | 'codex' | 'pi' | 'agy', usage: any): void {
   if (!usage || typeof usage !== 'object') return;
   // Codex reports cache tokens differently; Claude and the Pi harness (GLM/Grok)
   // report Anthropic-shaped usage where cache reads still occupy the context window.

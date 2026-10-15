@@ -7,6 +7,8 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useChat } from '../chat/hooks/useChat';
 import {
+  normalizeAgyEffort,
+  normalizeAgyModel,
   normalizeCompanion,
   normalizeXaiEffort,
   normalizeXaiModel,
@@ -55,6 +57,9 @@ function canonicalBrain(brain: BrainDraft): BrainDraft {
     const nextModel = normalizeOpenRouterModel(model ?? '');
     return { engine, model: nextModel, effort: normalizeOpenRouterEffort(nextModel, effort ?? '') };
   }
+  if (engine === 'agy') {
+    return { engine, model: normalizeAgyModel(model ?? ''), effort: normalizeAgyEffort(effort ?? '') };
+  }
   return { engine, model: normalizeXaiModel(model ?? ''), effort: normalizeXaiEffort(effort ?? '') };
 }
 
@@ -101,6 +106,7 @@ export function GrokChat(props: GrokChatProps) {
           : seed === 'zai' ? 'rivendell:zai-model'
           : seed === 'fireworks' ? 'rivendell:fireworks-model'
           : seed === 'openrouter' ? 'rivendell:openrouter-model'
+          : seed === 'agy' ? 'rivendell:agy-model'
           : null;
         if (model && modelKey) localStorage.setItem(modelKey, model);
         if (effort) {
@@ -110,6 +116,7 @@ export function GrokChat(props: GrokChatProps) {
             : seed === 'zai' ? 'rivendell:zai-effort'
             : seed === 'fireworks' ? 'rivendell:fireworks-effort'
             : seed === 'openrouter' ? 'rivendell:openrouter-effort'
+            : seed === 'agy' ? 'rivendell:agy-effort'
             : null;
           if (effortKey) localStorage.setItem(effortKey, effort);
         }
@@ -199,6 +206,7 @@ export function GrokChat(props: GrokChatProps) {
       : engine === 'zai' ? picker.zaiModel
       : engine === 'fireworks' ? picker.fireworksModel
       : engine === 'openrouter' ? picker.openRouterModel
+      : engine === 'agy' ? picker.agyModel
       : undefined
     );
     const effort = effortOverride ?? (
@@ -208,6 +216,7 @@ export function GrokChat(props: GrokChatProps) {
       : engine === 'zai' ? picker.zaiEffort
       : engine === 'fireworks' ? picker.fireworksEffort
       : engine === 'openrouter' ? picker.openRouterEffort
+      : engine === 'agy' ? picker.agyEffort
       : undefined
     );
     return { engine, model, effort };
@@ -274,6 +283,8 @@ export function GrokChat(props: GrokChatProps) {
     setFireworksEffort: (value: string) => persistBrain({ engine: 'fireworks', effort: normalizeFireworksEffort(picker.fireworksModel, value) }),
     setOpenRouterModel: (value: string) => persistBrain({ engine: 'openrouter', model: normalizeOpenRouterModel(value) }),
     setOpenRouterEffort: (value: string) => persistBrain({ engine: 'openrouter', effort: normalizeOpenRouterEffort(picker.openRouterModel, value) }),
+    setAgyModel: (value: string) => persistBrain({ engine: 'agy', model: normalizeAgyModel(value) }),
+    setAgyEffort: (value: string) => persistBrain({ engine: 'agy', effort: normalizeAgyEffort(value) }),
   };
 
   const s = useChatShell({ chat, picker: pickerForUi });
