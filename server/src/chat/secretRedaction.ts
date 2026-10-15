@@ -25,6 +25,18 @@ function redactOpaqueToken(token: string, offset: number, source: string): strin
   if (/(?:\b(?:commit|sha(?:-?256)?|checksum|digest|git hash|object hash|revision|rev)\b\s*(?::|=|is|was|at)?\s*|\/commit\/)$/i.test(context)) {
     return token;
   }
+  // A path, not a credential (Matt, Oct 15: Felix's Fangorn replies printed
+  // file:///C:/... links as [redacted secret]): keep a token under a URL
+  // scheme or a Windows drive prefix (the tail of the context), and keep
+  // heavily path-shaped tokens (three or more slash-separated segments).
+  // Real opaque credentials are not paths, and credentials riding inside
+  // URLs are handled by the earlier URL rules, so this only rescues paths.
+  if (context.slice(-8).includes('://') || /[A-Za-z]:[\\/]?$/.test(context.slice(-3))) {
+    return token;
+  }
+  if ((token.match(/\//g) ?? []).length >= 3) {
+    return token;
+  }
   return REDACTED;
 }
 

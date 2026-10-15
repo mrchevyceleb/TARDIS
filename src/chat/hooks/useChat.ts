@@ -443,23 +443,18 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const finalText = ev.type === 'result' && ev.is_error !== true && typeof ev.result === 'string'
       ? ev.result.trim()
       : '';
-    const sameReply = (left: string, right: string) => left.replace(/\s+/g, ' ').trim() === right.replace(/\s+/g, ' ').trim();
-    // Only this turn when we still know it. A replay (or a result that lands
-    // after the cursor was cleared) has no turn id, and an exact match then
-    // misses a reply the stream already showed with different line breaks.
-    // That paints the same answer twice. A closing copy is never a new bubble
-    // once any visible text already contains it.
-    // Legacy thought blocks never join the dedup: a thought that an older
-    // build surfaced must not suppress the real reply as "already rendered".
-    // Pending streaming blocks stay in: matching the live stream is the
-    // double-paint guard this dedup exists for.
+    // The closing copy is a fallback for turns whose stream never delivered
+    // text: once any visible text part of this turn rendered the answer, a
+    // provider result must not paint it again. Exact-match dedup missed
+    // whenever the result added or re-wrapped anything (the Gemini CLI's
+    // result carries the whole reply plus its own narration, so Felix's
+    // reply rendered twice), so the gate is turn-scoped presence, not
+    // equality. Legacy thought blocks never count: a thought an older build
+    // surfaced must not suppress the real reply as "already rendered".
     const finalTurnParts = closed
       .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && !b.thought && (!finalTurnId || b.turnId === finalTurnId))
       .map((b) => b.text);
-    const finalAlreadyRendered = finalTurnParts.some((part) => sameReply(part, finalText))
-      || ['', '\n', '\n\n'].some((separator) => sameReply(finalTurnParts.join(separator), finalText))
-      || closed.some((b) => b.kind === 'text' && !b.thought && b.text.trim().length > 0 && sameReply(b.text, finalText));
-    if (finalText && !finalAlreadyRendered) {
+    if (finalText && finalTurnParts.length === 0) {
       return [...closed, {
         kind: 'text',
         id: id(),
@@ -1141,6 +1136,11 @@ export function useChat(opts: {
   /** When the current turn started — ref powers watchdog math; state powers UI. */
   const turnStartRef = useRef<number>(0);
   const [turnStartedAt, setTurnStartedAt] = useState(0);
+  /** Per-lane working state (card-e2bd7a): a background-lane turn runs beside
+   *  the home lane and shows the same working indicator, but never gates
+   *  home-lane sends, so the two lanes track their own busy flags. */
+  const homeBusyRef = useRef(false);
+  const bgBusyRef = useRef(false);
   /** Background shells/subagents still running after the visible turn ended,
    *  keyed by task id. Mirrors the server's tracking from the same events. */
   const backgroundTasksRef = useRef<Map<string, string>>(new Map());
@@ -1804,6 +1804,15 @@ export function useChat(opts: {
           setError(null);
         }
         else if (msg.type === 'turnStart') {
+          // A background-lane turn (card-e2bd7a): the same working indicator
+          // without any home-lane send gating. The timer seeds from arrival,
+          // which is the live start for a frame the viewer gets as it happens.
+          if (msg.lane === 'bg') {
+            bgBusyRef.current = true;
+            if (statusRef.current === 'ready') { markTurnStarted(Date.now()); setError(null); setStatus('streaming'); }
+            return;
+          }
+          homeBusyRef.current = true;
           if (!socketReady) return; // replayed control message from the hello buffer
           const beginsQueuedSteer = Boolean(
             msg.clientMsgId && queuedSteerRef.current.has(msg.clientMsgId),
@@ -1819,6 +1828,18 @@ export function useChat(opts: {
           setStatus('streaming');
         }
         else if (msg.type === 'turnEnd') {
+          // A background-lane turn's end (card-e2bd7a): clears the indicator
+          // only when no home-lane turn is running; the home state stays.
+          if (msg.lane === 'bg') {
+            bgBusyRef.current = false;
+            window.dispatchEvent(new Event('rivendell:history-changed'));
+            if (!homeBusyRef.current && statusRef.current === 'streaming' && queuedSteerRef.current.size === 0 && !pendingSendRef.current) {
+              clearTurnStarted();
+              setStatus('ready');
+            }
+            return;
+          }
+          homeBusyRef.current = false;
           if (!socketReady) {
             // Replayed turnEnd from the hello buffer: the turn it closed ended
             // before this reconnect. With nothing queued behind it, a
@@ -1857,7 +1878,7 @@ export function useChat(opts: {
               flushOutboundRef.current();
             }
           } else {
-            setStatus('ready');
+            setStatus(bgBusyRef.current ? 'streaming' : 'ready');
           }
         }
         else if (msg.type === 'compacted') {

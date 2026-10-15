@@ -911,7 +911,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
       // busy state: only its transcript frames reach the viewer, tagged so the
       // client keeps a separate reply cursor for them.
       if (se.lane === 'bg') {
+        // Matt, Oct 15 (card-e2bd7a): the lane's working and turn-end state
+        // reaches the viewer too, tagged, so a teammate's running turn shows
+        // the same working indicator as a home-lane turn. The socket's own
+        // busy flag stays home-lane-only: a bg turn never gates sends.
         if (sev.type === 'event') safeSend({ type: 'stream', event: sev.event, seq: se.seq, at: se.at, lane: 'bg' });
+        else if (sev.type === 'turnStart') safeSend({ type: 'turnStart', seq: se.seq, lane: 'bg' });
+        else if (sev.type === 'turnEnd') safeSend({ type: 'turnEnd', sessionId: sev.sessionId, seq: se.seq, lane: 'bg' });
         return;
       }
       if (sev.type === 'event') {
