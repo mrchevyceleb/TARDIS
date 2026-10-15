@@ -34,6 +34,7 @@ import {
   overflowChars,
   shouldCompactOverflow,
   splitWindow,
+  uncoveredPeerTurns,
   type VisibleTurn,
 } from './threadWindow.ts';
 import { bareChatId, isThreadLogKey } from './threadKey.ts';
@@ -1255,9 +1256,17 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
   const durable = loadEventLogForCompactionSync(key);
   const events = durable.length ? durable : args.events;
   const visible = extractVisibleTurns(events);
-  const { overflow } = splitWindow(visible);
+  const windowed = splitWindow(visible);
   const blob = loadCompactBlob(key);
   const lastSeq = blob?.lastCompactedSeq ?? 0;
+  // Delivery-heavy lanes: peer messages that never became visible turns
+  // (automation-classified traffic — job results, flag digests, routine
+  // fires) join the overflow here, past the compact's coverage boundary, so
+  // their content still reaches the rolling summary. They never enter the
+  // working window (the model never saw them there), so this cannot duplicate
+  // what the window shows — it is the only path their content survives on.
+  const peerOverflow = uncoveredPeerTurns(events, lastSeq);
+  const overflow = [...windowed.overflow, ...peerOverflow].sort((a, b) => a.seq - b.seq);
   let overflowNew = overflow.filter((t) => t.seq > lastSeq);
   // Overflow is oldest-first: the newest aged turn's seq minus the compact's
   // last covered seq is the event span folding every aged turn would archive.

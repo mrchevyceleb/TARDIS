@@ -331,6 +331,12 @@ export class CodexSession {
     const now = performance.now();
     if (now - this.lastDeliveryCompactProbeMs < DELIVERY_COMPACT_PROBE_MS) return;
     this.lastDeliveryCompactProbeMs = now;
+    // An accepted delivery is real input pressure on this lane even though it
+    // never becomes a user turn: note one pressure unit per probe window (the
+    // limiter above is the rate bound) so the compaction counter tracks
+    // delivery-heavy lanes instead of freezing for days (Oct 14: two days of
+    // team deliveries left userTurnsTotal unmoved while the lane worked).
+    noteUserTurn(this.logKey);
     void this.maybeCompact();
   }
   private busy = false;
