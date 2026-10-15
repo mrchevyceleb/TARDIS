@@ -577,6 +577,11 @@ export class AgySession {
     if (this.liveStepIdx !== null) {
       const buf = this.stepBuffers.get(this.liveStepIdx);
       if (buf && buf.kind === 'text' && buf.opened && !buf.closed) {
+        // Commit the accumulated text exactly like a serialized DONE close:
+        // finishTurn reads this.lastAssistantText for the result event, so an
+        // empty terminal result.response must not lose already-streamed
+        // text to a stale or empty recovery string (Oct 15 final review).
+        if (buf.text.trim()) this.lastAssistantText = buf.text;
         this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'content_block_stop', index: 0 }, session_id: sid } });
         this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: this.turnFailed ? null : 'end_turn', stop_sequence: null }, usage: { input_tokens: this.turnUsage.input, output_tokens: this.turnUsage.output, cache_read_input_tokens: this.turnUsage.cacheRead, cache_creation_input_tokens: 0 } }, session_id: sid } });
         this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_stop' }, session_id: sid } });

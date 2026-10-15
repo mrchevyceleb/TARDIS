@@ -2458,6 +2458,9 @@ export class BananaSession {
   private threadId: string | null = null;
   private threadServeGeneration: number | null = null;
   private busy = false;
+  /** When the active turn opened (ms), for the client's elapsed timer on
+   *  reattach (register.ts ready payload); meaningful only while busy. */
+  private busySince: number | null = null;
   private dead = false;
   private eventLog: SeqEvent[] = [];
   private nextSeq = 1;
@@ -2581,6 +2584,12 @@ export class BananaSession {
 
   isAlive(): boolean {
     return !this.dead;
+  }
+
+  /** The active turn's start (ms) for the client's elapsed timer on reattach
+   *  (register.ts ready payload); null when no turn is open. */
+  activeTurnStartedAt(): number | null {
+    return this.busy ? this.busySince : null;
   }
 
   isBusy(): boolean {
@@ -2735,6 +2744,7 @@ export class BananaSession {
       return;
     }
     this.busy = true;
+    this.busySince = Date.now();
     this.wipedThisTurn = false;
     if (opts.hidden) this.emit({ type: 'turnStart' });
     const recoverContextThisTurn = this.recoverContextOnNextTurn;
