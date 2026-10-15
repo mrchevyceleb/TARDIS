@@ -22,15 +22,25 @@ export type DeskPr = {
   updatedAt: string;
 };
 
-export type DeskPrSnapshot = { prs: DeskPr[]; stale: boolean };
+export type DeskPrSnapshot = { prs: DeskPr[]; stale: boolean; pending: boolean };
 
-const REPOS = [
+const DEFAULT_REPOS = [
   'mrchevyceleb/TARDIS',
   'R-Link-LLC/operly',
   'R-Link-LLC/r-link-studio-rebuild',
   'mrchevyceleb/penguin-rush-2',
   'mrchevyceleb/FiscalPilot',
 ];
+/** Overridable (RIVENDELL_DESK_PR_REPOS, comma-separated owner/name) so the
+ *  integration never assumes these identities outside this deployment. It
+ *  stays on for this install by design: the API serves them on the same
+ *  local trust boundary as the rest of the desk, with gh's existing
+ *  read-only auth and no new secrets. */
+const REPOS = (() => {
+  const configured = (process.env.RIVENDELL_DESK_PR_REPOS ?? '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  return configured.length ? configured : DEFAULT_REPOS;
+})();
 
 const PREFIX_OWNERS: Record<string, string> = {
   naomi: 'Naomi', jill: 'Jill', christina: 'Christina', maria: 'Maria', adam: 'Adam',
@@ -53,7 +63,7 @@ type RawPr = {
   updatedAt?: string;
   mergedAt?: string;
   reviewRequests?: Array<{ login?: string }>;
-  statusCheckRollup?: Array<{ state?: string }>;
+  statusCheckRollup?: Array<{ state?: string; status?: string }>;
   mergeCommit?: { oid?: string };
 };
 
@@ -104,19 +114,26 @@ function reviewerFor(pr: RawPr): string | undefined {
 }
 
 /** A check still running (a completed check, passing or failing, is not CI
- *  state; the PR is simply open with its checks done). */
+ *  state; the PR is simply open with its checks done). Check runs report
+ *  `status` (QUEUED/IN_PROGRESS/COMPLETED); commit statuses report `state`
+ *  (PENDING/SUCCESS/FAILURE/ERROR). Only a genuinely unfinished one counts. */
 function hasPendingChecks(pr: RawPr): boolean {
-  return (pr.statusCheckRollup ?? []).some((c) => (c.state ?? '').toUpperCase() !== 'COMPLETED');
+  return (pr.statusCheckRollup ?? []).some((c) => {
+    const status = typeof c.status === 'string' ? c.status.toUpperCase() : '';
+    if (status) return status !== 'COMPLETED';
+    const state = typeof c.state === 'string' ? c.state.toUpperCase() : '';
+    return state === 'PENDING';
+  });
 }
 
 /** Last-known-good PR list per repo, so a failed pull keeps yesterday's truth
  *  on the board instead of erasing teammates into "idle". */
 const lastGood = new Map<string, DeskPr[]>();
-let snapshot: DeskPrSnapshot = { prs: [], stale: false };
+let snapshot: DeskPrSnapshot = { prs: [], stale: false, pending: true };
 let refreshedAt = 0;
 let refreshing: Promise<void> | null = null;
 
-async function pullAll(): Promise<DeskPrSnapshot> {
+async function pullAll(): Promise<{ prs: DeskPr[]; stale: boolean }> {
   const mergedCutoff = new Date(Date.now() - MERGED_WINDOW_MS).toISOString();
   const staleRepos: string[] = [];
   const pulls = await Promise.all(REPOS.map(async (repo) => ({
@@ -152,7 +169,7 @@ async function pullAll(): Promise<DeskPrSnapshot> {
     prs.push(...repoPrs);
   }
   if (staleRepos.length) console.warn('[deskPrs] stale repos (serving last-known-good):', staleRepos.join(', '));
-  prs.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+  prs.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : a.repo === b.repo ? a.number - b.number : a.repo < b.repo ? -1 : 1));
   return { prs, stale: staleRepos.length > 0 };
 }
 
@@ -162,7 +179,7 @@ export function deskPrs(): DeskPrSnapshot {
   if (!refreshing && Date.now() - refreshedAt >= CACHE_MS) {
     refreshing = (async () => {
       try {
-        snapshot = await pullAll();
+        snapshot = { ...await pullAll(), pending: false };
       } catch (error) {
         console.warn('[deskPrs] pull failed:', (error as Error)?.message ?? error);
       } finally {

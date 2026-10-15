@@ -119,7 +119,7 @@ deskRouter.get('/', route(async (req, res) => {
   const data = await readDesk();
   const cards = req.query.archived === '0' ? data.cards.filter((c) => !c.archived) : data.cards;
   const prs = deskPrs();
-  res.json({ rev: data.rev, owner: ownerActor(), columns: COLUMN_META, todos: data.todos, cards, prs: prs.prs, ...(prs.stale ? { prsStale: true } : {}) });
+  res.json({ rev: data.rev, owner: ownerActor(), columns: COLUMN_META, todos: data.todos, cards, prs: prs.prs, ...(prs.stale ? { prsStale: true } : {}), ...(prs.pending ? { prsPending: true } : {}) });
 }));
 
 // The sidebar's light poll: the same cached snapshot as the room's read, so

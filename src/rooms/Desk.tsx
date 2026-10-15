@@ -655,6 +655,7 @@ function PeopleRows({ desk, agents, onOpenCard }: { desk: DeskSnapshot; agents: 
               <span className="desk-person-name">{a.name}</span>
               {mine.length ? renderPrs(mine)
                 : onCard ? <button type="button" className="desk-person-on" onClick={() => onOpenCard(onCard.id)}>{onCard.title}</button>
+                : desk.prsPending ? <span className="desk-person-on is-quiet">checking PRs…</span>
                 : <span className="desk-person-on is-quiet">idle</span>}
             </li>
           );
