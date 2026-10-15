@@ -48,6 +48,10 @@ const EVENT_BUFFER_SIZE = 2000;
 /** Init is immediate on a healthy spawn (probed); a live process that never
  *  emits init is retired so the lane respawns instead of hanging a send. */
 export const AGY_READY_TIMEOUT_MS = 45_000;
+/** A turn with no frames at all for this long is stalled (a healthy turn
+ *  streams steps continuously): fail it and retire the lane instead of
+ *  staying busy forever on a silent protocol break. */
+const AGY_TURN_STALL_MS = 10 * 60_000;
 
 type Listener = (e: SeqEvent) => void;
 type ChatImage = { mediaType: string; base64: string };
@@ -56,19 +60,18 @@ const finiteCount = (value: unknown): number => {
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? n : 0;
 };
-const sanitizedUsage = (usage: unknown): { input: number; output: number; cacheRead: number } | null => {
+const mergeUsage = (usage: unknown, fallback: { input: number; output: number; cacheRead: number }): { input: number; output: number; cacheRead: number } => {
   const rec = usage && typeof usage === 'object' && !Array.isArray(usage) ? usage as Record<string, unknown> : {};
-  const present = (v: unknown) => v !== undefined;
-  const valid = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
-  // No counters at all means the result carried no usage: stay null so the
-  // sanitized step accumulation remains the turn's accounting. Malformed
-  // counters (wrong type, negative) are the same — never zeros that would
-  // silently suppress the fallback and starve context rotation.
-  if (!present(rec.input_tokens) && !present(rec.output_tokens) && !present(rec.cache_read_tokens)) return null;
-  if ((present(rec.input_tokens) && !valid(rec.input_tokens))
-    || (present(rec.output_tokens) && !valid(rec.output_tokens))
-    || (present(rec.cache_read_tokens) && !valid(rec.cache_read_tokens))) return null;
-  return { input: finiteCount(rec.input_tokens), output: finiteCount(rec.output_tokens), cacheRead: finiteCount(rec.cache_read_tokens) };
+  const pick = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined);
+  // Per-field: a terminal counter present and valid wins for its field; a
+  // missing or malformed one keeps the sanitized step accumulation for that
+  // field, so a partial terminal usage can never zero out real counts and
+  // starve rotation.
+  return {
+    input: pick(rec.input_tokens) ?? fallback.input,
+    output: pick(rec.output_tokens) ?? fallback.output,
+    cacheRead: pick(rec.cache_read_tokens) ?? fallback.cacheRead,
+  };
 };
 
 /** The agy binary. Do NOT rely on bare `agy` through PATH (same rule as the
@@ -113,8 +116,11 @@ export class AgySession {
   private seedWindowOnNextTurn = false;
   private terminalNoticeEmitted = false;
   private buffer = '';
-  /** Consecutive unparsable stdout frames; resets on any good frame. */
+  /** Consecutive unparsable or unrecognized stdout frames; resets on a
+   *  recognized envelope. */
   private malformedFrames = 0;
+  /** Self-extending stall watchdog for the open turn (see armStallWatchdog). */
+  private stallTimer: NodeJS.Timeout | null = null;
   private turnUsage = { input: 0, output: 0, cacheRead: 0 };
   /** The terminal result's authoritative usage for the open turn, preferred
    *  over the step accumulation (steps may repeat the conversation input per
@@ -178,6 +184,10 @@ export class AgySession {
       // A headless lane cannot answer agy's permission prompts; without this
       // a tool step would hang the turn forever waiting for a review.
       '--dangerously-skip-permissions',
+      // agy's own absolute turn bound (a Go duration string, like its 0s
+      // default): a protocol change that renames the terminal event still
+      // ends the turn server-side.
+      '--print-timeout', '3600s',
       ...(resumeId ? ['--conversation', resumeId] : []),
     ];
     this.child = spawn(resolveAgyBin(), args, { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessByStdio<Writable, Readable, Readable>;
@@ -199,6 +209,10 @@ export class AgySession {
 
   private markInit(conversationId: string, model: string): void {
     if (this.initSeen) return;
+    // A late init from a process already retired (ready-timeout, shutdown)
+    // must never persist its conversation id or emit: the next spawn would
+    // resume a conversation belonging to a dead process.
+    if (this.disposed) return;
     this.initSeen = true;
     this.agyConversationId = conversationId;
     console.log(`[chat ${this.cli}/agy] ready ${model} conversation=${conversationId.slice(0, 8)}`);
@@ -251,6 +265,14 @@ export class AgySession {
       // shaped frame (null, an array, a changed schema) counts toward the
       // protocol-break retirement exactly like an unparsable one.
       if (!msg || typeof msg !== 'object' || Array.isArray(msg) || typeof msg.event !== 'string') {
+        this.noteMalformedFrame(line);
+        continue;
+      }
+      // Only a RECOGNIZED envelope resets the malformed-frame counter: an
+      // unrecognized event name (a protocol change that renamed the terminal
+      // event) counts toward the protocol-break retirement, never passes as
+      // healthy traffic.
+      if (msg.event !== 'init' && msg.event !== 'step_update' && msg.event !== 'result') {
         this.noteMalformedFrame(line);
         continue;
       }
@@ -311,8 +333,10 @@ export class AgySession {
           const response = typeof result.response === 'string' ? result.response : '';
           if (response.trim()) this.lastAssistantText = response;
         }
-        // The terminal result's usage is the turn's authoritative accounting.
-        this.resultUsage = sanitizedUsage(result.usage);
+        // The terminal result's usage merges with the step accumulation
+        // per field: a present, valid terminal counter wins for its field;
+        // a missing or malformed one keeps the accumulated count.
+        this.resultUsage = mergeUsage(result.usage, { input: this.turnUsage.input, output: this.turnUsage.output, cacheRead: this.turnUsage.cacheRead });
         this.finishTurn();
         return;
       }
@@ -321,10 +345,11 @@ export class AgySession {
     }
   }
 
-  /** Bounded diagnostics for unparsable frames: a protocol change must never
-   *  hang a turn silently. Three consecutive malformed frames while a turn is
-   *  open fail that turn as a protocol break; the counter resets on any good
-   *  frame, so an isolated bad line never kills a healthy turn. */
+  /** Bounded diagnostics for unparsable or unrecognized frames: a protocol
+   *  change must never hang a turn silently. Three consecutive such frames
+   *  while a turn is open fail that turn as a protocol break (and retire the
+   *  process, see below); the counter resets on any recognized envelope, so
+   *  an isolated bad line never kills a healthy turn. */
   private noteMalformedFrame(line: string): void {
     this.malformedFrames += 1;
     if (this.malformedFrames <= 5) console.warn(`[chat ${this.cli}/agy] unparsable stdout frame (${this.malformedFrames}): ${line.slice(0, 200)}`);
@@ -339,6 +364,24 @@ export class AgySession {
       // session with a clean protocol.
       this.shutdown('protocol-break');
     }
+  }
+
+  /** Self-extending stall watchdog: armed once at turn open, re-arms at each
+   *  ~10-minute checkpoint while frames keep arriving, and fails the turn
+   *  (retiring the lane) when a checkpoint finds no frame for the whole
+   *  window. A healthy turn streams steps continuously; total silence is a
+   *  stall, never patience. */
+  private armStallWatchdog(): void {
+    if (this.stallTimer) clearTimeout(this.stallTimer);
+    this.stallTimer = setTimeout(() => {
+      this.stallTimer = null;
+      if (this.disposed || this.turnStartedAt === null) return;
+      if (Date.now() - this.lastActivityAtMs < AGY_TURN_STALL_MS) { this.armStallWatchdog(); return; }
+      this.turnFailed = { message: `agy turn stalled (no frames for ${Math.round(AGY_TURN_STALL_MS / 60_000)} minutes)`, code: 'stalled' };
+      this.finishTurn();
+      this.shutdown('turn-stall');
+    }, AGY_TURN_STALL_MS + 2_000);
+    this.stallTimer.unref();
   }
 
   /** Close the streamed step into a full assistant message (claude-shaped). */
@@ -383,6 +426,7 @@ export class AgySession {
 
   private finishTurn(): void {
     if (this.turnStartedAt === null) return;
+    if (this.stallTimer) { clearTimeout(this.stallTimer); this.stallTimer = null; }
     this.finalizeOpenStep();
     const failed = this.turnFailed;
     if (failed && !this.terminalNoticeEmitted) {
@@ -577,6 +621,7 @@ export class AgySession {
       this.resultUsage = null;
       this.turnOrigin = emptyTurnOrigin();
       this.emit({ type: 'turnStart' });
+      this.armStallWatchdog();
     }
     const openedSeq = this.turnSeq;
     const abandon = () => {
@@ -678,21 +723,30 @@ export class AgySession {
     if (opts.peerDeliveryId) this.emit({ type: 'event', event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() } });
   }
 
-  /** Stop: agy has no abort input event, so v1 signals the process. A SIGINT
-   *  that agy catches or ignores would leave the turn busy forever, so a
-   *  bounded backstop closes the turn as cancelled and escalates to a hard
-   *  retire of the process group — Stop always ends in a terminal state. */
+  /** Stop: agy has no abort input event, so v1 signals the process. Stop
+   *  must end every side effect of the turn, not just the turn's books: agy
+   *  runs its tools in-process, and a SIGINT the leader catches can leave
+   *  shell children running after the turn itself closes. So the process
+   *  GROUP is terminated on a short grace, unconditionally of whether the
+   *  turn closed in between (a dead group's signal just throws ESRCH), and
+   *  the books close on agy's own result or as cancelled here. The lane
+   *  respawns (resuming its conversation id) on the next send. */
   async interrupt(reason = 'interrupt'): Promise<boolean> {
     if (!this.isAlive() || this.turnStartedAt === null) return false;
     this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
+    const pid = this.child.pid;
     try { this.child.kill('SIGINT'); } catch { /* gone */ }
     void reason;
+    setTimeout(() => {
+      if (!pid || pid <= 1) return;
+      try { process.kill(-pid, 'SIGTERM'); } catch { /* gone */ }
+      setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } }, 3_000).unref();
+    }, 1_500).unref();
     const turnSeq = this.turnSeq;
     setTimeout(() => {
       if (this.disposed || this.turnStartedAt === null || this.turnSeq !== turnSeq) return;
       this.turnFailed = { message: 'This turn was cancelled before it finished.', code: 'aborted' };
       this.finishTurn();
-      this.shutdown('interrupt-escalation');
     }, 5_000).unref();
     return true;
   }
@@ -700,6 +754,7 @@ export class AgySession {
   shutdown(reason = 'unspecified'): void {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.stallTimer) { clearTimeout(this.stallTimer); this.stallTimer = null; }
     console.log(`[chat ${this.cli}/agy] shutdown key=${this.key} reason=${reason}`);
     try { this.child.stdin.end(); } catch { /* closed */ }
     // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
