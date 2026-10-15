@@ -1354,6 +1354,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const sessionBusy = (session as any).isBusy?.() === true
             || Boolean(pendingAdmissionForLogKey(requestedLogKey));
           busy = sessionBusy;
+          // The active turn's real start, so a reconnecting client seeds its
+          // elapsed timer from turnStart instead of the reattach clock (Oct 15).
+          const sessionTurnStartedAt = sessionBusy
+            && typeof (session as any).activeTurnStartedAt === 'function'
+            ? (session as any).activeTurnStartedAt() : undefined;
+          const readyTurnStartedAt = typeof sessionTurnStartedAt === 'number' && sessionTurnStartedAt > 0
+            ? sessionTurnStartedAt : undefined;
           console.log(`[chat ws#${wsId}] session ready key=${session.key} latestSeq=${session.latestSeq()} busy=${sessionBusy}`);
           const queuedClientMsgIds = pendingSteerIds(activeCli, msg.repo, chatId);
           refreshDeliveredClientMsgIds(activeCli, msg.repo, chatId);
@@ -1374,6 +1381,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             chatId,
             latestSeq: session.latestSeq(),
             busy: sessionBusy,
+            turnStartedAt: readyTurnStartedAt,
             queuedClientMsgIds,
             deliveredClientMsgIds,
             resetAt,

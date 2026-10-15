@@ -977,6 +977,12 @@ class ClaudeSession {
   /** Most recent turn start (ms) — used for telegram-ping duration. */
   private turnStartedAt: number | null = null;
 
+  /** The active turn's start (ms) for the client's elapsed timer on reattach
+   *  (register.ts ready payload); null when no turn is open. */
+  activeTurnStartedAt(): number | null {
+    return this.turnStartedAt;
+  }
+
   /** Initialize Claude plus every configured MCP without invoking the model or
    * exposing any tool. `mcp_status` is a read-only stream-json control request. */
   async prewarm(): Promise<void> {

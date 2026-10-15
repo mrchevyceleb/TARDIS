@@ -1698,7 +1698,13 @@ export function useChat(opts: {
           // TURN_KEEPALIVE_MS (15s) - worse across back-to-back reconnects,
           // which is exactly what made a live turn look dead. No-op if a
           // start time already survived the reconnect (turnStartRef > 0).
-          if (msg.busy === true) markTurnStarted();
+          if (msg.busy === true) {
+            // Seed from the server's real turn start when it sent one: the
+            // reattach clock restarting at zero made a mid-turn reopen show
+            // "0:10" instead of the true elapsed time (Oct 15).
+            const serverTurnStart = typeof msg.turnStartedAt === 'number' && msg.turnStartedAt > 0 ? msg.turnStartedAt : 0;
+            markTurnStarted(serverTurnStart > 0 ? serverTurnStart : Date.now(), serverTurnStart > 0);
+          }
           // Every composer and threshold send waits in the same stable-ID FIFO
           // until this ready boundary, then remains there until durable echo.
           const queued = outboundQueue.get(conversationKey(cli, repo.path, chatId));

@@ -143,12 +143,17 @@ export class AgySession {
    *  API call, so summing them double-counts). */
   private resultUsage: { input: number; output: number; cacheRead: number } | null = null;
   private turnFailed: { message: string; code?: string } | null = null;
-  private currentMsgId: string | null = null;
-  /** A content block is open for the current agent_response step. */
-  private stepBlockOpen = false;
-  /** Accumulated text_delta of the current agent_response step; the DONE
-   *  frame carries only deltas, never the assembled step text. */
-  private stepText = '';
+  /** One open streaming message per step_index. agy interleaves steps (planner,
+   *  tool, and agent steps overlap inside one turn), so the old single open
+   *  block merged concurrent steps and re-opened their tails as new blocks
+   *  appended out of step order (Oct 15: planner bubbles rendered 9:32 above
+   *  9:27). Each step streams as its own message: opened at its first delta in
+   *  step order, closed by its own DONE frame. DONE frames carry only deltas,
+   *  never the assembled step text. */
+  private openSteps = new Map<number, { msgId: string; text: string }>();
+  /** One open tool card per step_index (GENERIC tool steps stream as
+   *  tool_use cards, like a Claude lane). */
+  private openToolSteps = new Map<number, { toolUseId: string; name: string }>();
   /** Final assistant text of the turn; the client's `result.result` recovery
    *  path re-renders it if the streamed blocks never made it on screen. */
   private lastAssistantText = '';
@@ -346,18 +351,24 @@ export class AgySession {
       }
       case 'step_update': {
         const step = ev.step_update;
-        if (!step || step.step_type !== 'agent_response') return;
+        if (!step) return;
         const sid = this.agyConversationId ?? '';
         const stream = (event: Record<string, unknown>) => this.emit({ type: 'event', event: { type: 'stream_event', event, session_id: sid } });
+        if (step.step_type === 'tool') {
+          this.handleToolStep(stream, step);
+          return;
+        }
+        if (step.step_type !== 'agent_response') return;
         if (typeof step.text_delta === 'string' && step.text_delta.length > 0) {
-          if (!this.stepBlockOpen) {
-            this.stepBlockOpen = true;
-            this.stepText = '';
-            this.currentMsgId = randomUUID();
-            stream({ type: 'message_start', message: { id: this.currentMsgId, type: 'message', role: 'assistant', content: [], model: this.spawnModel, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } } });
+          const idx = typeof step.step_index === 'number' ? step.step_index : -1;
+          let open = this.openSteps.get(idx);
+          if (!open) {
+            open = { msgId: randomUUID(), text: '' };
+            this.openSteps.set(idx, open);
+            stream({ type: 'message_start', message: { id: open.msgId, type: 'message', role: 'assistant', content: [], model: this.spawnModel, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } } });
             stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
           }
-          this.stepText += step.text_delta;
+          open.text += step.text_delta;
           stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: step.text_delta } });
         }
         if (step.state === 'DONE') this.finishStep(stream, step);
@@ -453,18 +464,65 @@ export class AgySession {
     this.turnUsage.input += usage.input_tokens;
     this.turnUsage.output += usage.output_tokens;
     this.turnUsage.cacheRead += usage.cache_read_input_tokens;
-    if (!this.stepBlockOpen) return; // a step with no streamed text (not seen live; nothing to close)
-    this.stepBlockOpen = false;
-    const sid = this.agyConversationId ?? '';
-    const text = this.stepText;
-    this.stepText = '';
+    const idx = typeof step.step_index === 'number' ? step.step_index : -1;
+    const open = this.openSteps.get(idx);
+    this.openSteps.delete(idx);
+    if (!open) return; // a step with no streamed text (not seen live; nothing to close)
+    const text = open.text;
     stream({ type: 'content_block_stop', index: 0 });
     if (text.trim()) this.lastAssistantText = text;
-    const msgId = this.currentMsgId ?? randomUUID();
-    this.emit({ type: 'event', event: { type: 'assistant', parent_tool_use_id: null, session_id: sid, uuid: randomUUID(), timestamp: new Date().toISOString(), message: { id: msgId, type: 'message', role: 'assistant', model: this.spawnModel, content: [{ type: 'text', text: String(text ?? '') }], stop_reason: 'end_turn', stop_sequence: null, usage } } });
-    this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage }, session_id: sid } });
-    this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_stop' }, session_id: sid } });
-    this.currentMsgId = null;
+    // No completion-time full-`assistant` frame: the deltas already delivered
+    // this step's text in step order, and a second copy appended at DONE time
+    // painted planner steps out of order (Oct 15).
+    stream({ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage });
+    stream({ type: 'message_stop' });
+  }
+
+  /** The active turn's start (ms) for the client's elapsed timer on reattach
+   *  (register.ts ready payload); null when no turn is open. */
+  activeTurnStartedAt(): number | null {
+    return this.turnStartedAt;
+  }
+
+  /** GENERIC tool steps stream as tool_use cards plus a tool_result frame,
+   *  the same shapes the Claude lanes deliver, so an agy turn renders tool
+   *  activity like a Claude lane instead of dropping every tool step (Oct
+   *  15: 14 GENERIC steps, zero tool cards). */
+  private handleToolStep(stream: (event: Record<string, unknown>) => void, step: any): void {
+    const idx = typeof step.step_index === 'number' ? step.step_index : -1;
+    const info = step.tool_info && typeof step.tool_info === 'object' ? step.tool_info : {};
+    const name = typeof step.tool_name === 'string' && step.tool_name
+      ? step.tool_name
+      : typeof info.name === 'string' && info.name ? info.name : 'tool';
+    let card = this.openToolSteps.get(idx);
+    if (!card && step.state !== 'DONE') {
+      card = { toolUseId: randomUUID(), name };
+      this.openToolSteps.set(idx, card);
+      this.emitToolCard(stream, card.toolUseId, card.name, info.parameters);
+    }
+    if (step.state === 'DONE') {
+      if (!card) {
+        // A DONE frame with no live ACTIVE (a fast tool or a replay): open and
+        // close the card in one pass so the step still renders.
+        card = { toolUseId: randomUUID(), name };
+        this.emitToolCard(stream, card.toolUseId, card.name, info.parameters);
+      }
+      this.openToolSteps.delete(idx);
+      const rawOutput = info.output;
+      const output = typeof rawOutput === 'string' ? rawOutput
+        : rawOutput == null ? '' : JSON.stringify(rawOutput) ?? '';
+      this.emit({ type: 'event', event: { type: 'user', parent_tool_use_id: null, session_id: this.agyConversationId ?? '', uuid: randomUUID(), timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: card.toolUseId, content: [{ type: 'text', text: output.slice(0, 8000) }] }] } } });
+    }
+  }
+
+  private emitToolCard(stream: (event: Record<string, unknown>) => void, toolUseId: string, name: string, parameters: unknown): void {
+    const input = parameters == null ? '{}' : JSON.stringify(parameters) ?? '{}';
+    stream({ type: 'message_start', message: { id: randomUUID(), type: 'message', role: 'assistant', content: [], model: this.spawnModel, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } } });
+    stream({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: toolUseId, name, input: {} } });
+    stream({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: input } });
+    stream({ type: 'content_block_stop', index: 0 });
+    stream({ type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } });
+    stream({ type: 'message_stop' });
   }
 
   /** Unconditional stream finalization: a terminal path (result, exit,
@@ -474,19 +532,23 @@ export class AgySession {
    *  message (and lastAssistantText), exactly like a DONE-closed step, so an
    *  empty terminal result.response cannot lose already-streamed text. */
   private finalizeOpenStep(): void {
-    if (!this.stepBlockOpen) return;
-    this.stepBlockOpen = false;
+    // Close every still-open step message in step order. Each step's own DONE
+    // frame normally closed it (and the next message_start closed it on the
+    // client); this covers a turn ending mid-step. No completion-time
+    // full-`assistant` frames (see finishStep). The client's result handling
+    // closes any still-running tool cards.
     const sid = this.agyConversationId ?? '';
-    const text = this.stepText;
-    this.stepText = '';
     const usage = { input_tokens: this.turnUsage.input, output_tokens: this.turnUsage.output, cache_read_input_tokens: this.turnUsage.cacheRead, cache_creation_input_tokens: 0 };
-    this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'content_block_stop', index: 0 }, session_id: sid } });
-    if (text.trim()) this.lastAssistantText = text;
-    const msgId = this.currentMsgId ?? randomUUID();
-    this.emit({ type: 'event', event: { type: 'assistant', parent_tool_use_id: null, session_id: sid, uuid: randomUUID(), timestamp: new Date().toISOString(), message: { id: msgId, type: 'message', role: 'assistant', model: this.spawnModel, content: [{ type: 'text', text: String(text ?? '') }], stop_reason: this.turnFailed ? null : 'end_turn', stop_sequence: null, usage } } });
-    this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: this.turnFailed ? null : 'end_turn', stop_sequence: null }, usage }, session_id: sid } });
-    this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_stop' }, session_id: sid } });
-    this.currentMsgId = null;
+    for (const idx of [...this.openSteps.keys()].sort((a, b) => a - b)) {
+      const open = this.openSteps.get(idx);
+      if (!open) continue;
+      if (open.text.trim()) this.lastAssistantText = open.text;
+      this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'content_block_stop', index: 0 }, session_id: sid } });
+      this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: this.turnFailed ? null : 'end_turn', stop_sequence: null }, usage }, session_id: sid } });
+      this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_stop' }, session_id: sid } });
+    }
+    this.openSteps.clear();
+    this.openToolSteps.clear();
   }
 
   private finishTurn(): void {
