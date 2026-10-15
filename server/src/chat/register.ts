@@ -346,8 +346,11 @@ const QUIET_SPAN_HOLD_CAP = 4000;
 export class QuietAutomationSpans {
   private span: DispatchSeqEvent[] = [];
   private automation = false;
-  private resultText: string | null = null;
-  private lastText: string | null = null;
+  /** The chronologically latest COMPLETE text (assistant frame, closed delta
+   *  block, or result payload) — one ordered candidate, so a later streamed
+   *  block always supersedes an earlier full frame instead of being outranked
+   *  by it. */
+  private terminal: string | null = null;
   private deltaAcc = '';
 
   /** Feed one sequenced event; returns the frames to emit now, in order. */
@@ -378,8 +381,7 @@ export class QuietAutomationSpans {
   }
 
   private verdict(): string | null {
-    if (this.resultText !== null) return this.resultText;
-    if (this.lastText !== null) return this.lastText;
+    if (this.terminal !== null) return this.terminal;
     return this.deltaAcc.trim() ? this.deltaAcc : null;
   }
 
@@ -401,31 +403,35 @@ export class QuietAutomationSpans {
   }
 
   private observe(se: DispatchSeqEvent, t: string | undefined): void {
-    const a = assistantFrameText(se);
-    if (a !== null) {
-      this.lastText = a;
-      this.deltaAcc = '';
-    }
     // The wrapped stream envelope types as `stream_event` at the inner level;
     // the block boundary lives one level deeper (the same unwrap
     // streamedDeltaText uses), so a multi-message turn resets its accumulation
-    // at each new text block instead of concatenating across them.
+    // at each new text block and COMPLETES the candidate at each block stop,
+    // keeping the verdict chronologically ordered across mixed frame shapes.
     const inner = eventInner(se.ev);
     const holderType = inner && inner.type === 'stream_event' && inner.event && typeof inner.event === 'object'
       ? (inner.event as Record<string, unknown>).type
       : t;
+    const a = assistantFrameText(se);
+    if (a !== null) {
+      this.terminal = a;
+      this.deltaAcc = '';
+    }
     if (holderType === 'content_block_start') this.deltaAcc = '';
     const d = streamedDeltaText(se);
     if (d !== null) this.deltaAcc += d;
+    if (holderType === 'content_block_stop' && this.deltaAcc.trim()) {
+      this.terminal = this.deltaAcc;
+      this.deltaAcc = '';
+    }
     const r = resultPayloadText(se);
-    if (r !== null) this.resultText = r;
+    if (r !== null) this.terminal = r;
   }
 
   private reset(): void {
     this.span = [];
     this.automation = false;
-    this.resultText = null;
-    this.lastText = null;
+    this.terminal = null;
     this.deltaAcc = '';
   }
 
@@ -1054,9 +1060,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
       else if (f.type === 'turnEnd') safeSend({ type: 'turnEnd', sessionId: f.sessionId, seq: frame.seq, lane: 'bg' });
     };
 
-    /** Settle any held background span and send what it releases (a lane gap
-     *  in dispatch, or the end of a replayed history batch — the tail of a
-     *  batch cut mid-span must not stay held forever). */
+    /** Settle any held background span and send what it releases: a home-lane
+     *  frame through dispatch is a lane gap, exactly as in the replay filter,
+     *  so the held span settles visibly before the home frame forwards. */
     const flushBgQuiet = () => {
       for (const frame of bgQuiet.finish()) sendBgFrame(frame);
     };
@@ -1298,8 +1304,16 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (replayLeavesHole(replaySince, catchUp.reachedSince, full.length, history.length)) {
           safeSend({ type: 'replayGap' });
         }
+        // Atomic re-bind reset: the old subscription is detached above and the
+        // new binding's history starts now, so any span the previous binding
+        // was holding dies here and this replay rebuilds span state from the
+        // log. An OPEN tail at the end of the batch is intentionally NOT
+        // flushed: the batch boundary is not a turn boundary, and the live
+        // continuation of a mid-turn attach settles the same held span at its
+        // real boundary (a deduped re-hello that skips this replay keeps the
+        // held span untouched).
+        bgQuiet.discard();
         for (const se of history) dispatch(se);
-        flushBgQuiet();
       }
       return session;
     };
@@ -1348,8 +1362,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (replayLeavesHole(replaySince, catchUp.reachedSince, full.length, history.length)) {
           safeSend({ type: 'replayGap' });
         }
+        // Same atomic re-bind reset as bindSession: discard any held span from
+        // the previous binding, let this replay rebuild it, and leave an open
+        // tail held for the live continuation.
+        bgQuiet.discard();
         for (const se of history) dispatch(se);
-        flushBgQuiet();
       }
       return latest;
     };
@@ -1432,11 +1449,6 @@ export async function registerChat(app: express.Express, server: Server): Promis
             helloSeen = true;
             finishHello = settleHelloBarrier;
           }
-          // A new hello re-binds this socket (another thread, a fresh start,
-          // or this thread replayed from scratch): whatever the previous
-          // binding was still holding never crosses into it. The replay
-          // below re-establishes span state from the durable log.
-          bgQuiet.discard();
           repoPath = msg.repo;
           chatId = normalizeChatId(msg.chatId);
           const desiredBrain = resolvedBrain(chatId, { cli: msg.cli, model: msg.model, effort: msg.effort });
