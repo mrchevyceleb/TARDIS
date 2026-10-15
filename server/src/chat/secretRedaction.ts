@@ -166,3 +166,26 @@ export function redactEventSecrets<T>(value: T): T {
   }
   return value;
 }
+
+/** Structure-safe final pass for one serialized JSON line (Oct 15). The
+ *  serialized-line pass used to run redactSecrets over the whole line, and a
+ *  credential chunked across adjacent JSON fields (a Mongo connection string
+ *  split mid-password across two tool-result content blocks, Oct 15 6:11am)
+ *  let a value class eat the `","` structure between the fields, leaving one
+ *  broken-JSON line in a hot log. This variant applies the same rules only
+ *  inside each JSON string span, so no match can ever cross a field boundary
+ *  or eat structural characters: the durable line always still parses. A
+ *  credential chunked across fields stays as fragments (the known residual:
+ *  that belongs to the tool-result chunking boundary, not the mask). */
+export function redactSerializedSecrets(line: string): string {
+  if (!line) return line;
+  let out = '';
+  let last = 0;
+  for (const m of line.matchAll(/"(?:\\.|[^"\\])*"/g)) {
+    const idx = m.index ?? 0;
+    out += line.slice(last, idx);
+    out += '"' + redactSecrets(m[0].slice(1, -1)) + '"';
+    last = idx + m[0].length;
+  }
+  return out + line.slice(last);
+}

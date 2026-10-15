@@ -3,7 +3,7 @@ import type { FileHandle } from 'node:fs/promises';
 import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MAX_EVENTS_PER_LOG, STATE_DIR } from './config.ts';
-import { redactEventSecrets, redactSecrets } from './secretRedaction.ts';
+import { redactEventSecrets, redactSerializedSecrets } from './secretRedaction.ts';
 import { noteMattAsk, closeMattAsksForLane } from '../lib/mattAsks.ts';
 import type { SessionEvent } from './runner.ts';
 import { isSyntheticApiErrorEvent } from './providerErrors.ts';
@@ -1237,12 +1237,15 @@ export function appendEventLogSync(key: string, persisted: PersistedEvent): bool
     // transcript, compaction, and resume: redacting here means a printed
     // key can never land in any of them. The in-memory turn keeps its raw
     // copy; only what becomes durable or visible is masked.
-    // Structure-aware walk first, then a final pass over the serialized line
-    // itself: whatever the walk's shape restrictions pass through untouched
-    // (a toJSON output, a hostile object key, raw prose a tool embedded in a
-    // non-plain instance) still gets one last text-level scan before the
-    // line is durable.
-    appendFileSync(logPath(key), redactSecrets(JSON.stringify(redactEventSecrets(persisted))) + '\n', 'utf8');
+    // Structure-aware walk first, then a structure-safe final pass over the
+    // serialized line's string spans (Oct 15: the whole-line pass ate the
+    // `","` between adjacent content fields when a Mongo URI chunked
+    // mid-password across them, leaving one broken-JSON hot-log line; a
+    // span-local scan can never cross a field boundary): whatever the
+    // walk's shape restrictions pass through untouched (a toJSON output, a
+    // hostile object key, raw prose a tool embedded in a non-plain instance)
+    // still gets one last text-level scan before the line is durable.
+    appendFileSync(logPath(key), redactSerializedSecrets(JSON.stringify(redactEventSecrets(persisted))) + '\n', 'utf8');
     mattAskHooks(key, redactEventSecrets(persisted));
     bumpEventLogRevision(persisted.ev);
     return true;
@@ -1267,10 +1270,10 @@ export function appendEventLog(key: string, persisted: PersistedEvent): void {
   observeNextSeq(key, persisted.seq + 1);
   if (isPlumbingEvent(persisted.ev)) return;
   const path = logPath(key);
-  // Same live-path redaction as appendEventLogSync, including the final
-  // serialized-line pass: the durable line is what every later reader
-  // (render, transcript, resume, compaction) consumes.
-  const line = redactSecrets(JSON.stringify(redactEventSecrets(persisted))) + '\n';
+  // Same live-path redaction as appendEventLogSync, including the
+  // structure-safe serialized-line pass: the durable line is what every later
+  // reader (render, transcript, resume, compaction) consumes.
+  const line = redactSerializedSecrets(JSON.stringify(redactEventSecrets(persisted))) + '\n';
   const prior = writeChains.get(key) ?? Promise.resolve();
   const next = prior
     .then(async () => {
