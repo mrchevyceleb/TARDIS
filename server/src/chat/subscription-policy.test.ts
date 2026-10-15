@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertSubscriptionLane, subscriptionEnvironment } from './subscription-policy.ts';
+import { assertSubscriptionLane, agySubscriptionEnvironment, subscriptionEnvironment } from './subscription-policy.ts';
 import { brainForAgent } from './agents.ts';
 import { completeSubscription, validateCompletionMessage, validateCompletionRequest } from './content-completion.ts';
 import { subscriptionCronPayload, isTardisOwnedCron, isSubscriptionCronEngine } from '../routes/cron.ts';
@@ -34,6 +34,25 @@ test('subscription child environments cannot inherit metered credentials or prov
   const env = subscriptionEnvironment({ PATH: 'safe', ANTHROPIC_API_KEY: 'key', ANTHROPIC_AUTH_TOKEN: 'key', ANTHROPIC_BASE_URL: 'https://other.example', OPENAI_API_KEY: 'key', OPENAI_BASE_URL: 'https://other.example', OPENROUTER_API_KEY: 'key', FIREWORKS_API_KEY: 'key', GROK_PERSONAL_API_KEY: 'key', Z_AI_API_KEY: 'key', RIVENDELL_ZAI_FALLBACK_API_KEY: 'key', CLAUDE_CODE_USE_BEDROCK: '1' });
   assert.deepEqual(env, { PATH: 'safe' });
   assert.deepEqual(subscriptionEnvironment({ Path: 'safe', OpenAI_API_Key: 'key', Anthropic_Auth_Token: 'key', Fireworks_Api_Key: 'key' }), { Path: 'safe' });
+});
+
+test('only the agy spawn scrubs Google credentials and project routing', () => {
+  const ambient = {
+    PATH: 'safe',
+    GOOGLE_APPLICATION_CREDENTIALS: '/svc.json', GOOGLE_CLOUD_PROJECT: 'proj', GOOGLE_CLOUD_LOCATION: 'us',
+    GOOGLE_CLOUD_QUOTA_PROJECT: 'quota', GOOGLE_GENAI_USE_VERTEXAI: '1',
+    GOOGLE_API_KEY: 'key', GEMINI_API_KEY: 'key', GOOGLE_GENERATIVEAI_API_KEY: 'key',
+    GCLOUD_PROJECT: 'proj', CLOUDSDK_CORE_PROJECT: 'proj', CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: '/x.json',
+  };
+  // Other engines keep ambient ADC and gcloud project routing: the Google
+  // set is agy-only, so the shared scrub leaves every key above in place.
+  assert.deepEqual(subscriptionEnvironment(ambient), ambient);
+  // The agy spawn strips the whole Google set plus the common providers.
+  assert.deepEqual(agySubscriptionEnvironment(ambient), { PATH: 'safe' });
+  assert.deepEqual(
+    agySubscriptionEnvironment({ PATH: 'safe', ANTHROPIC_API_KEY: 'key', GOOGLE_CLOUD_PROJECT: 'proj' }),
+    { PATH: 'safe' },
+  );
 });
 
 test('cron defaults pin subscriptions and fleet migration requires explicit TARDIS ownership', () => {

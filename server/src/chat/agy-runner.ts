@@ -23,7 +23,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
-import { assertSubscriptionLane, subscriptionEnvironment } from './subscription-policy.ts';
+import { assertSubscriptionLane, agySubscriptionEnvironment } from './subscription-policy.ts';
 import { computerGuidance } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import { setSessionId } from './sessions.ts';
@@ -187,7 +187,7 @@ export class AgySession {
       this.emit({ type: 'event', event: { type: '_engine_switch', from: switchedFrom, to: cli, model: this.spawnModel, ts: Date.now() } } as SessionEvent);
     }
 
-    const env = subscriptionEnvironment(process.env);
+    const env = agySubscriptionEnvironment(process.env);
     env.SAMWISE_ACCOUNT = cli;
     // Marks this as a TARDIS agent turn for the long-call gate extension (see longCallGate.ts).
     Object.assign(env, longCallGateEnv(chatId));
