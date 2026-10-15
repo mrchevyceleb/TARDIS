@@ -63,14 +63,21 @@ const finiteCount = (value: unknown): number => {
 const mergeUsage = (usage: unknown, fallback: { input: number; output: number; cacheRead: number }): { input: number; output: number; cacheRead: number } => {
   const rec = usage && typeof usage === 'object' && !Array.isArray(usage) ? usage as Record<string, unknown> : {};
   const pick = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined);
-  // Per-field: a terminal counter present and valid wins for its field; a
-  // missing or malformed one keeps the sanitized step accumulation for that
-  // field, so a partial terminal usage can never zero out real counts and
-  // starve rotation.
+  // Per-field: a terminal counter present, valid and positive wins for its
+  // field; a missing or malformed one keeps the sanitized step accumulation
+  // for that field; an explicit zero keeps a positive accumulation (a broken
+  // terminal counter reports 0; a genuine 0 matches a 0 accumulation), so a
+  // partial terminal usage can never zero out real counts and starve rotation.
+  const mergeField = (v: unknown, fb: number): number => {
+    const n = pick(v);
+    if (n === undefined) return fb;
+    if (n === 0 && fb > 0) return fb;
+    return n;
+  };
   return {
-    input: pick(rec.input_tokens) ?? fallback.input,
-    output: pick(rec.output_tokens) ?? fallback.output,
-    cacheRead: pick(rec.cache_read_tokens) ?? fallback.cacheRead,
+    input: mergeField(rec.input_tokens, fallback.input),
+    output: mergeField(rec.output_tokens, fallback.output),
+    cacheRead: mergeField(rec.cache_read_tokens, fallback.cacheRead),
   };
 };
 
@@ -107,6 +114,15 @@ export class AgySession {
   private eventLog: SeqEvent[] = [];
   private nextSeq = 1;
   private lastActivityAtMs = Date.now();
+  /** Updated only on a valid stdout frame (never by local emits/notices):
+   *  the stall watchdog's clock, so unrelated session events cannot postpone
+   *  the retirement of a silently-stalled agy process. */
+  private lastFrameAtMs = Date.now();
+  /** Set the moment Stop begins: the process group is being terminated, so
+   *  this instance must never accept another send — a terminal result during
+   *  the kill grace would otherwise close the turn's books and make it look
+   *  idle while the group dies. */
+  private retiring = false;
   private disposed = false;
   private initSeen = false;
   private turnStartedAt: number | null = null;
@@ -119,7 +135,7 @@ export class AgySession {
   /** Consecutive unparsable or unrecognized stdout frames; resets on a
    *  recognized envelope. */
   private malformedFrames = 0;
-  /** Self-extending stall watchdog for the open turn (see armStallWatchdog). */
+  /** Stall watchdog for the open turn (see armStallWatchdog). */
   private stallTimer: NodeJS.Timeout | null = null;
   private turnUsage = { input: 0, output: 0, cacheRead: 0 };
   /** The terminal result's authoritative usage for the open turn, preferred
@@ -276,6 +292,21 @@ export class AgySession {
         this.noteMalformedFrame(line);
         continue;
       }
+      // A recognized name is not yet a healthy frame: the envelope's required
+      // payload must be present (init: a conversation_id string; step_update:
+      // a step object carrying a step_type; result: a result object — the
+      // pinned protocol carries all three). A recognized name with a missing
+      // or wrong-typed payload counts as a malformed frame, so a stream of
+      // empty step_update envelopes cannot keep a broken turn alive
+      // (resetting the counter, refreshing activity) until the CLI's timeout.
+      const payloadOk =
+        (msg.event === 'init' && typeof msg.conversation_id === 'string' && msg.conversation_id.length > 0) ||
+        (msg.event === 'step_update' && msg.step_update && typeof msg.step_update === 'object' && !Array.isArray(msg.step_update) && typeof msg.step_update.step_type === 'string') ||
+        (msg.event === 'result' && msg.result && typeof msg.result === 'object' && !Array.isArray(msg.result));
+      if (!payloadOk) {
+        this.noteMalformedFrame(line);
+        continue;
+      }
       this.malformedFrames = 0;
       try { this.handleEvent(msg); } catch (err) {
         console.error(`[chat ${this.cli}/agy] event handling failed:`, (err as Error).message);
@@ -287,6 +318,7 @@ export class AgySession {
 
   private handleEvent(ev: any): void {
     this.lastActivityAtMs = Date.now();
+    this.lastFrameAtMs = Date.now();
     switch (ev.event) {
       case 'init': {
         const conversationId = typeof ev.conversation_id === 'string' ? ev.conversation_id : '';
@@ -367,21 +399,27 @@ export class AgySession {
   }
 
   /** Self-extending stall watchdog: armed once at turn open, re-arms at each
-   *  ~10-minute checkpoint while frames keep arriving, and fails the turn
-   *  (retiring the lane) when a checkpoint finds no frame for the whole
-   *  window. A healthy turn streams steps continuously; total silence is a
-   *  stall, never patience. */
+   *  ~10-minute checkpoint while frames keep arriving — re-armed for the
+   *  REMAINING silence, never a fresh full window — and fails the turn
+   *  (retiring the lane) when a checkpoint finds no real stdout frame for
+   *  the whole window (the clock is lastFrameAtMs, never the general
+   *  activity clock). A healthy turn streams steps continuously; total
+   *  silence is a stall, never patience. */
   private armStallWatchdog(): void {
     if (this.stallTimer) clearTimeout(this.stallTimer);
-    this.stallTimer = setTimeout(() => {
-      this.stallTimer = null;
-      if (this.disposed || this.turnStartedAt === null) return;
-      if (Date.now() - this.lastActivityAtMs < AGY_TURN_STALL_MS) { this.armStallWatchdog(); return; }
-      this.turnFailed = { message: `agy turn stalled (no frames for ${Math.round(AGY_TURN_STALL_MS / 60_000)} minutes)`, code: 'stalled' };
-      this.finishTurn();
-      this.shutdown('turn-stall');
-    }, AGY_TURN_STALL_MS + 2_000);
-    this.stallTimer.unref();
+    const arm = (ms: number): void => {
+      this.stallTimer = setTimeout(() => {
+        this.stallTimer = null;
+        if (this.disposed || this.turnStartedAt === null) return;
+        const silentFor = Date.now() - this.lastFrameAtMs;
+        if (silentFor < AGY_TURN_STALL_MS) { arm(Math.max(AGY_TURN_STALL_MS - silentFor, 2_000)); return; }
+        this.turnFailed = { message: `agy turn stalled (no frames for ${Math.round(AGY_TURN_STALL_MS / 60_000)} minutes)`, code: 'stalled' };
+        this.finishTurn();
+        this.shutdown('turn-stall');
+      }, ms);
+      this.stallTimer.unref();
+    };
+    arm(AGY_TURN_STALL_MS + 2_000);
   }
 
   /** Close the streamed step into a full assistant message (claude-shaped). */
@@ -412,13 +450,21 @@ export class AgySession {
 
   /** Unconditional stream finalization: a terminal path (result, exit,
    *  interrupt) can arrive while a response step is still open, and an
-   *  unclosed block would let the next turn's deltas continue this message. */
+   *  unclosed block would let the next turn's deltas continue this message.
+   *  The open step's accumulated text is committed as the durable assistant
+   *  message (and lastAssistantText), exactly like a DONE-closed step, so an
+   *  empty terminal result.response cannot lose already-streamed text. */
   private finalizeOpenStep(): void {
     if (!this.stepBlockOpen) return;
     this.stepBlockOpen = false;
     const sid = this.agyConversationId ?? '';
+    const text = this.stepText;
+    this.stepText = '';
     const usage = { input_tokens: this.turnUsage.input, output_tokens: this.turnUsage.output, cache_read_input_tokens: this.turnUsage.cacheRead, cache_creation_input_tokens: 0 };
     this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'content_block_stop', index: 0 }, session_id: sid } });
+    if (text.trim()) this.lastAssistantText = text;
+    const msgId = this.currentMsgId ?? randomUUID();
+    this.emit({ type: 'event', event: { type: 'assistant', parent_tool_use_id: null, session_id: sid, uuid: randomUUID(), timestamp: new Date().toISOString(), message: { id: msgId, type: 'message', role: 'assistant', model: this.spawnModel, content: [{ type: 'text', text: String(text ?? '') }], stop_reason: this.turnFailed ? null : 'end_turn', stop_sequence: null, usage } } });
     this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: this.turnFailed ? null : 'end_turn', stop_sequence: null }, usage }, session_id: sid } });
     this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_stop' }, session_id: sid } });
     this.currentMsgId = null;
@@ -543,7 +589,7 @@ export class AgySession {
   isPrewarming(): boolean { return !this.initSeen && !this.disposed; }
   listenerCount(): number { return this.listeners.size; }
   lastActivityAt(): number { return this.lastActivityAtMs; }
-  isAlive(): boolean { return this.child.exitCode === null && !this.disposed; }
+  isAlive(): boolean { return this.child.exitCode === null && !this.disposed && !this.retiring; }
   isDisposed(): boolean { return this.disposed; }
   /** True once the agy process is gone, not merely asked to go. */
   processExited(): boolean { return this.child.exitCode !== null || this.child.signalCode !== null; }
@@ -733,6 +779,12 @@ export class AgySession {
    *  respawns (resuming its conversation id) on the next send. */
   async interrupt(reason = 'interrupt'): Promise<boolean> {
     if (!this.isAlive() || this.turnStartedAt === null) return false;
+    // The process group is being terminated: retire from reuse immediately,
+    // so a terminal result landing during the kill grace (which closes the
+    // turn's books and would make this instance look idle) can never accept a
+    // new send into a process that is about to die. The registry spawns a
+    // replacement (resuming the conversation id) on the next send.
+    this.retiring = true;
     this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
     const pid = this.child.pid;
     try { this.child.kill('SIGINT'); } catch { /* gone */ }
