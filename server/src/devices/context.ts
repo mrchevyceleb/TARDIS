@@ -114,6 +114,9 @@ export function revokeComputerContext(owner: string): void {
  *  24h stands in for "the last N turns" (turns are not cheaply countable
  *  here) and is tunable. */
 const COMPUTER_BLOCK_WINDOW_MS = 24 * 60 * 60_000;
+/** Small forward tolerance for clock skew, so a note taken just before a
+ *  clock step back is not rejected as a future timestamp. */
+const COMPUTER_USE_SKEW_MS = 5 * 60_000;
 /** Last computer-tool use per owner key, recorded by the devices API on
  *  every computer_* call — a failed attempt counts, so a first attempt
  *  without the block re-arms it for the next turn. Persisted under the
@@ -122,6 +125,12 @@ const COMPUTER_BLOCK_WINDOW_MS = 24 * 60 * 60_000;
  *  window. Signed contexts stay in memory: the per-boot signing secret must
  *  never outlive the process that minted them. */
 const COMPUTER_USE_RECORD_FILE = 'computer-use-record.json';
+/** Accepted record timestamps: inside the window, and no further ahead of
+ *  now than the skew tolerance, so a corrupted future entry cannot hold a
+ *  lane's gate open past the window. */
+function acceptedRecordAt(at: number, now: number): boolean {
+  return at > now - COMPUTER_BLOCK_WINDOW_MS && at <= now + COMPUTER_USE_SKEW_MS;
+}
 function readComputerUseRecord(): Record<string, number> {
   try {
     const parsed: unknown = JSON.parse(readFileSync(join(stateDir(), COMPUTER_USE_RECORD_FILE), 'utf8'));
@@ -135,23 +144,31 @@ function writeComputerUseRecord(): void {
   try {
     const dir = stateDir();
     const file = join(dir, COMPUTER_USE_RECORD_FILE);
-    const cutoff = Date.now() - COMPUTER_BLOCK_WINDOW_MS;
+    const now = Date.now();
     // Merge the on-disk copy under the window: a second writer pointed at the
     // same dir must not drop a live lane's entry with a last-writer-wins file.
     const merged: Record<string, number> = {};
-    for (const [id, at] of Object.entries(readComputerUseRecord())) if (at >= cutoff) merged[id] = at;
-    for (const [id, at] of lastComputerToolUse) if (at >= cutoff) merged[id] = at;
+    for (const [id, at] of Object.entries(readComputerUseRecord())) if (acceptedRecordAt(at, now)) merged[id] = at;
+    for (const [id, at] of computerUseRecord()) if (acceptedRecordAt(at, now)) merged[id] = at;
     mkdirSync(dir, { recursive: true });
     const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
     writeFileSync(temporary, `${JSON.stringify(merged)}\n`, 'utf8');
     renameSync(temporary, file);
   } catch { /* best-effort: this boot's in-memory window still gates */ }
 }
-const lastComputerToolUse = new Map<string, number>(
-  Object.entries(readComputerUseRecord()).filter(([, at]) => at > Date.now() - COMPUTER_BLOCK_WINDOW_MS),
-);
+/** Lazy so a test can redirect RIVENDELL_STATE_DIR after the static imports
+ *  and still seed from its temp dir, not the real one. */
+let lastComputerToolUse: Map<string, number> | undefined;
+function computerUseRecord(): Map<string, number> {
+  if (!lastComputerToolUse) {
+    const now = Date.now();
+    lastComputerToolUse = new Map<string, number>();
+    for (const [id, at] of Object.entries(readComputerUseRecord())) if (acceptedRecordAt(at, now)) lastComputerToolUse.set(id, at);
+  }
+  return lastComputerToolUse;
+}
 export function noteComputerToolUse(owner: string): void {
-  lastComputerToolUse.set(owner, Date.now());
+  computerUseRecord().set(owner, Date.now());
   writeComputerUseRecord();
 }
 
@@ -164,7 +181,7 @@ export function computerGuidance(cwd: string, chatId: string, label: string, hum
   // file drops the same aged entries on its next write; persist the purge so
   // the file and the map stay level.
   let purgedUseRecord = false;
-  for (const [ownerKey, lastUse] of lastComputerToolUse) if (now - lastUse > COMPUTER_BLOCK_WINDOW_MS) { lastComputerToolUse.delete(ownerKey); purgedUseRecord = true; }
+  for (const [ownerKey, lastUse] of computerUseRecord()) if (now - lastUse > COMPUTER_BLOCK_WINDOW_MS) { computerUseRecord().delete(ownerKey); purgedUseRecord = true; }
   if (purgedUseRecord) writeComputerUseRecord();
   // Matt, Oct 14 (card-d7bf78 b): the full computer block is injected only
   // for lanes that have used a computer tool recently — a lane that never
@@ -178,7 +195,7 @@ export function computerGuidance(cwd: string, chatId: string, label: string, hum
   // unrelated to prior computer use and still rides along, and any stale
   // context from an earlier turn is revoked here so no still-valid token
   // floats past the omitted guidance.
-  if (!ungated && !sameTurn && now - (lastComputerToolUse.get(owner) ?? 0) > COMPUTER_BLOCK_WINDOW_MS) {
+  if (!ungated && !sameTurn && now - (computerUseRecord().get(owner) ?? 0) > COMPUTER_BLOCK_WINDOW_MS) {
     contexts.delete(owner);
     // One-line stub (Matt, Oct 15): a prompt with no block was never told that
     // a single failed attempt re-arms it, so lanes routed around the attempt
