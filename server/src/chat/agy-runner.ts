@@ -215,9 +215,23 @@ export class AgySession {
       if (line) console.warn(`[chat ${cli}/agy] ${line.slice(0, 300)}`);
     });
     this.child.on('error', (err) => {
-      console.error(`[chat ${cli}/agy] spawn error:`, err.message);
-      this.emit({ type: 'error', message: `agy failed to start: ${err.message}`, fatal: true });
+      console.error(`[chat ${cli}/agy] process error:`, err.message);
+      this.emit({ type: 'error', message: `agy process error: ${err.message}`, fatal: true });
       this.resolveReady(false);
+      // Pre-init, resolveReady(false) routes the failure through the spawn
+      // flow (breaker count, registry delete, honest startup error), so
+      // nothing else is needed. Mid-session that flow is long done: an open
+      // turn would wait out the full watchdog on a dead process, and with no
+      // exit event (some error kinds never fire one) exitCode stays null so
+      // isAlive() would keep handing the dead session out. Close the turn
+      // honestly, then retire the process.
+      if (this.initSeen) {
+        if (this.turnStartedAt !== null) {
+          this.turnFailed = { message: `agy process error: ${err.message}`, code: 'error' };
+          this.finishTurn();
+        }
+        this.shutdown('child-error');
+      }
     });
     this.child.on('exit', (code, signal) => this.onExit(code, signal));
     console.log(`[chat ${cli}/agy] spawned model=${this.spawnModel} effort=${this.spawnEffort}${resumeId ? ' (resume)' : ''}`);
@@ -555,10 +569,12 @@ export class AgySession {
     if (!this.initSeen) {
       this.resolveReady(false);
       // A spawn that carried a saved --conversation id and died before init is
-      // a failed resume: clear the stored id so the next spawn starts fresh,
-      // and report it so the registry's fresh-session fallback engages instead
-      // of retrying the stale id forever.
-      if (this.startedResumeId) {
+      // a failed resume — but only an UNINTENTIONAL exit proves that. An
+      // intentional close (shutdown, ready-timeout retirement, or Stop racing
+      // init) killed a healthy resume in progress and its saved id is still
+      // valid: retain it so the next spawn resumes the same conversation
+      // instead of silently starting a fresh one.
+      if (this.startedResumeId && !intentional) {
         this.resumeFailed = true;
         void setSessionId(this.cli, this.cwd, '', this.chatId);
       }
