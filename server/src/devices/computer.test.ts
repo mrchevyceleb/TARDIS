@@ -1,11 +1,21 @@
-import test from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import sharp from 'sharp';
 import { ComputerController, COMPUTER_GRANT_MINUTES, COMPUTER_GRANT_MS, trustedComputerUrl } from '../../../desktop/native/computer.mjs';
 import { localMcpServers, localMcpBananaServers, localMcpCodexArgs } from '../chat/local-mcp.ts';
 import { computerGuidance, computerOwnerKey, noteComputerToolUse, readComputerContext } from './context.ts';
 import { ComputerStepJournal } from './stepJournal.ts';
 import { redactComputerImages } from './transcript.ts';
+
+// Isolate the persisted computer-use record from live state: noteComputerToolUse
+// writes <state>/computer-use-record.json (Matt, Oct 15), and these tests note.
+// The path resolves per call, so redirecting after the imports is enough.
+const recordState = mkdtempSync(join(tmpdir(), 'computer-use-record-'));
+process.env.RIVENDELL_STATE_DIR = recordState;
+after(() => { rmSync(recordState, { recursive: true, force: true }); });
 
 async function fixture(approve: () => Promise<boolean> = async () => true, automatic: () => boolean = () => false) {
   const bounds = { x: -3200, y: 0, width: 3200, height: 1600 };

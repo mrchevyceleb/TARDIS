@@ -57,7 +57,10 @@ export const PORT = Number(process.env.PORT || process.env.RIVENDELL_PORT) || 80
 // no app-layer login. Bind loopback unless the operator explicitly opts into a
 // trusted network interface (Tailscale Serve can still proxy to 127.0.0.1).
 export const HOST = process.env.HOST || '127.0.0.1';
-export const STATE_DIR = process.env.RIVENDELL_STATE_DIR || join(homedir(), '.rivendell');
+/** Late-binding twin of STATE_DIR: resolves the env override per call, so a
+ *  test can redirect state after the module chain has already loaded. */
+export function stateDir(): string { return process.env.RIVENDELL_STATE_DIR || join(homedir(), '.rivendell'); }
+export const STATE_DIR = stateDir();
 /** The Desk: what needs the owner, plus the board of agent work. On unless
  *  RIVENDELL_DESK_ROOM is off/0/false/no, which hides the room and drops the
  *  per-agent Desk guidance (the API and tools stay harmless either way). */
