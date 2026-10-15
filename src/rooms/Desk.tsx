@@ -53,7 +53,7 @@ import { DeskBoard } from './DeskBoard';
 import { DeskCardDrawer } from './DeskCardDrawer';
 import './desk.css';
 
-type Tab = 'needs' | 'board';
+type Tab = 'home' | 'board';
 const TAB_KEY = 'rivendell:desk-tab';
 
 export function Desk() {
@@ -61,7 +61,7 @@ export function Desk() {
   const agents = useDeskAgents();
   // The shell's summary poll says whether this server takes answers yet.
   const answerable = useDeskSummary(false).data?.answerable === true;
-  const [tab, setTab] = useState<Tab>(() => (localStorage.getItem(TAB_KEY) === 'board' ? 'board' : 'needs'));
+  const [tab, setTab] = useState<Tab>(() => (localStorage.getItem(TAB_KEY) === 'board' ? 'board' : 'home'));
   const [openCardId, setOpenCardId] = useState<string | null>(null);
   const [flash, setFlash] = useState<{ id: string; at: number } | null>(null);
   useEffect(() => { localStorage.setItem(TAB_KEY, tab); }, [tab]);
@@ -119,7 +119,7 @@ export function Desk() {
       return;
     }
     setOpenCardId(null);
-    setTab('needs');
+    setTab('home');
     if (todoId && found) setFlash({ id: todoId, at: Date.now() });
   }, [focusReq, data, dataUpdatedAt, errorUpdatedAt, isFetching, refetch, openCardId]);
   const openTodos = useMemo(() => sortOpenTodos((data?.todos ?? []).filter((t) => t.status === 'open')), [data]);
@@ -140,8 +140,8 @@ export function Desk() {
     <div className="desk-room">
       <RoomHeader eyebrow={ROOM_NAMES.desk.eyebrow} title="Desk" subtitle={subtitle} actions={<DesktopAlertsButton />} />
       <div className="desk-tabs" role="tablist" aria-label="Desk view">
-        <button type="button" role="tab" aria-selected={tab === 'needs'} onClick={() => setTab('needs')}>
-          <Inbox size={15} aria-hidden="true" /> Needs you
+        <button type="button" role="tab" aria-selected={tab === 'home'} onClick={() => setTab('home')}>
+          <Inbox size={15} aria-hidden="true" /> Home
           {openTodos.length ? <span className="desk-count">{openTodos.length}</span> : null}
         </button>
         <button type="button" role="tab" aria-selected={tab === 'board'} onClick={() => setTab('board')}>
@@ -164,8 +164,13 @@ export function Desk() {
       ) : null}
 
       {data ? (
-        tab === 'needs'
-          ? <NeedsYou desk={data} agents={agents} onOpenCard={setOpenCardId} flash={flash} answerable={answerable} />
+        tab === 'home'
+          ? (
+            <>
+              <NeedsYou desk={data} agents={agents} onOpenCard={setOpenCardId} flash={flash} answerable={answerable} />
+              <PeopleRows desk={data} agents={agents} onOpenCard={setOpenCardId} />
+            </>
+          )
           : <DeskBoard desk={data} agents={agents} onOpenCard={setOpenCardId} />
       ) : null}
 
@@ -612,3 +617,57 @@ function TodoRow({
   );
 }
 
+
+// ---- People ---------------------------------------------------------------------------
+
+const PR_STATE_LABEL: Record<string, string> = { draft: 'draft', ci: 'CI', merged: 'merged to staging', open: 'open' };
+
+/** One row per teammate: the open PRs they own, else their in-progress card
+ *  title, else idle. PRs arrive with the snapshot (an older server sends no
+ *  prs, so the rows degrade to the card/idle line until the server rides).
+ *  PR owners that match no teammate (an unmapped branch prefix renders under
+ *  its GitHub login) still get their own row, so real work never vanishes
+ *  behind a false idle. */
+function PeopleRows({ desk, agents, onOpenCard }: { desk: DeskSnapshot; agents: Agent[]; onOpenCard: (id: string) => void }) {
+  const prs = desk.prs ?? [];
+  const known = new Set(agents.map((a) => a.name));
+  const unmatchedOwners = [...new Set(prs.map((p) => p.owner).filter((owner) => !known.has(owner)))];
+  const renderPrs = (mine: typeof prs) => (
+    <ul className="desk-person-prs">
+      {mine.map((p) => (
+        <li key={`${p.repo}#${p.number}`}>
+          <a href={p.url} target="_blank" rel="noreferrer">{p.repo.split('/')[1]} #{p.number}</a>
+          <span className="desk-pr-state">{p.reviewer ? `with ${p.reviewer}` : (PR_STATE_LABEL[p.state] ?? p.state)}</span>
+          <span className="desk-pr-title">{p.title}</span>
+        </li>
+      ))}
+    </ul>
+  );
+  return (
+    <section className="desk-people" aria-label="What each teammate has open">
+      <h3 className="desk-people-title">What everyone has open{desk.prsStale ? <span className="desk-pr-stale"> · PR data stale</span> : null}</h3>
+      <ul className="desk-people-list">
+        {agents.map((a) => {
+          const mine = prs.filter((p) => p.owner === a.name);
+          const onCard = desk.cards.find((c) => c.column === 'in_progress' && !c.archived && c.owner.name === a.name);
+          return (
+            <li key={a.id} className="desk-person">
+              <span className="desk-person-name">{a.name}</span>
+              {mine.length ? renderPrs(mine)
+                : onCard ? <button type="button" className="desk-person-on" onClick={() => onOpenCard(onCard.id)}>{onCard.title}</button>
+                : desk.prsPending ? <span className="desk-person-on is-quiet">checking PRs…</span>
+                : desk.prsStale && desk.prsUnknown ? <span className="desk-person-on is-quiet">PR status unavailable</span>
+                : <span className="desk-person-on is-quiet">idle</span>}
+            </li>
+          );
+        })}
+        {unmatchedOwners.map((owner) => (
+          <li key={`owner:${owner}`} className="desk-person">
+            <span className="desk-person-name">{owner}</span>
+            {renderPrs(prs.filter((p) => p.owner === owner))}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
