@@ -107,7 +107,11 @@ function validIso(value: unknown): value is string {
 }
 
 const WRITTEN_CHECK_PHRASE = /\bcheck[\s-]?in\b/gi;
-const WRITTEN_CHECK_TIME = /(?:\b(\d{1,2}):(\d{2})\s*(am|pm)?|\b(\d{1,2})\s*(am|pm))(?:\s*(?:et|eastern))?\b/i;
+// A time may state its zone: ET/Eastern is the team convention and honored;
+// any other recognized zone is rejected rather than silently rescheduled as
+// Eastern (a PT time would otherwise fire three hours early). The list is
+// deliberately conservative: an unrecognized zone still assumes Eastern.
+const WRITTEN_CHECK_TIME = /(?:\b(\d{1,2}):(\d{2})\s*(am|pm)?|\b(\d{1,2})\s*(am|pm))(?:\s*(et|eastern|pt|pacific|pst|pdt|ct|central|cst|cdt|mt|mountain|mst|mdt|utc|gmt|cet))?\b/i;
 const WRITTEN_CHECK_ISO_DATE = /\b(\d{4})-(\d{2})-(\d{2})\b/;
 const WRITTEN_CHECK_MONTH_DATE = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?\b/i;
 const WRITTEN_CHECK_MONTHS: Record<string, number> = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
@@ -157,8 +161,10 @@ function etCalendarYear(nowMs: number): number {
  *  AM ET October 15", "Next check-in is 2026-10-15 07:30 ET, when ...",
  *  "next check-in 7:30pm". Anchored on the phrase "check-in" (a lone date or
  *  time elsewhere in a comment never moves a deadline), a "last check-in"
- *  retrospective is skipped, the time is required and Eastern is assumed,
- *  the date is optional (a time-only statement already past means tomorrow),
+ *  retrospective is skipped, the time is required (a meridiem-bearing hour
+ *  is 1-12; a stated ET/Eastern zone is honored, a recognized non-Eastern
+ *  zone rejects the statement, Eastern is otherwise assumed), the date is
+ *  optional (a time-only statement already past means tomorrow),
  *  and a dated statement already past is stale and ignored; a wall time that
  *  does not exist on the ET calendar (a DST gap or an impossible date) is
  *  ignored, and a duplicated fall-back time resolves to its first
@@ -179,12 +185,20 @@ export function parseWrittenNextCheck(text: string, nowMs: number): number | nul
     const window = (cut === -1 ? rest : rest.slice(0, cut)).slice(0, 80);
     const time = WRITTEN_CHECK_TIME.exec(window);
     if (!time) continue;
+    const zone = (time[6] ?? '').toLowerCase();
+    if (zone && zone !== 'et' && zone !== 'eastern') continue; // never silently reschedule a stated non-ET zone
     let hour = time[1] !== undefined ? Number(time[1]) : Number(time[4]);
     const minute = time[2] !== undefined ? Number(time[2]) : 0;
     const meridiem = (time[3] ?? time[5] ?? '').toLowerCase();
-    if (meridiem === 'pm' && hour < 12) hour += 12;
-    if (meridiem === 'am' && hour === 12) hour = 0;
-    if (hour > 23 || minute > 59) continue;
+    if (meridiem) {
+      // A 12-hour time is 1-12: "13 PM" and "0 AM" are not clock times.
+      if (hour < 1 || hour > 12) continue;
+      if (meridiem === 'pm' && hour < 12) hour += 12;
+      if (meridiem === 'am' && hour === 12) hour = 0;
+    } else if (hour > 23) {
+      continue;
+    }
+    if (minute > 59) continue;
     const isoDate = WRITTEN_CHECK_ISO_DATE.exec(window);
     const monthDate = WRITTEN_CHECK_MONTH_DATE.exec(window);
     let instant: number;
@@ -206,7 +220,12 @@ export function parseWrittenNextCheck(text: string, nowMs: number): number | nul
       }).formatToParts(new Date(nowMs));
       const n = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? '0');
       instant = etWallToInstant(n('year'), n('month'), n('day'), hour, minute);
-      if (instant <= nowMs) instant = etWallToInstant(n('year'), n('month'), n('day') + 1, hour, minute);
+      if (instant <= nowMs) {
+        // Tomorrow is a real calendar increment: a raw "day + 1" would hand
+        // etWallToInstant an impossible January 32 at a month boundary.
+        const tomorrow = new Date(Date.UTC(n('year'), n('month') - 1, n('day') + 1));
+        instant = etWallToInstant(tomorrow.getUTCFullYear(), tomorrow.getUTCMonth() + 1, tomorrow.getUTCDate(), hour, minute);
+      }
     }
     if (!Number.isFinite(instant)) continue; // nonexistent ET wall time or impossible date
     // A stated time already passed is a stale statement, not a park.
