@@ -65,7 +65,7 @@ import { watchThread, unwatchThread, setWatchVisible } from './threadWatch.ts';
 import { agentForChatId, brainForAgent, cliForAgentEngine } from './agents.ts';
 import { loadThreadResetEpochs, persistThreadResetEpoch } from './threadResetStore.ts';
 import { setQueuedHumanProbe } from './providerSwitch.ts';
-import { bareChatId, isBackgroundChatId } from './threadKey.ts';
+import { bareChatId, isBackgroundChatId, backgroundChatId } from './threadKey.ts';
 
 type ClientSelection = {
   model?: string;
@@ -348,6 +348,15 @@ export function filterReplayEvents(events: DispatchSeqEvent[]): DispatchSeqEvent
     if (!isBananaTaggedError(se)) return true;
     return se.seq === latestUnresolvedBananaErrorSeq;
   });
+}
+
+/** The thread's background-lane busy state for the ready frame (card-e2bd7a):
+ *  the bg lane's live session, when one exists, reports its own turn state.
+ *  A peek, never a spawn: a lane that never ran is not busy. The peek helper
+ *  is Claude-named but returns any engine's session, and only isBusy is read. */
+function bgLaneBusy(cli: CliKind, repoPath: string, chatId: string): boolean {
+  const live = peekClaudeSession({ cli, repoPath, chatId: backgroundChatId(chatId) });
+  return live ? live.isBusy() : false;
 }
 
 /** Set on service shutdown: new turns are rejected (existing sockets get a
@@ -1318,6 +1327,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               effort: desiredBrain.effort,
               brainRevision: desiredBrain.revision,
               activeCli,
+              bgBusy: bgLaneBusy(activeCli, msg.repo, chatId),
               activeModel: activeSelection.model ?? desiredBrain.model,
               activeEffort: activeSelection.effort ?? desiredBrain.effort,
               brainPending: activeCli !== desiredBrain.cli
@@ -1395,6 +1405,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               chatId,
               latestSeq: coldLatestSeq,
               busy: false,
+              bgBusy: bgLaneBusy(desiredBrain.cli, msg.repo, chatId),
               queuedClientMsgIds,
               deliveredClientMsgIds,
               resetAt,
@@ -1436,6 +1447,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             effort: desiredBrain.effort,
             brainRevision: desiredBrain.revision,
             activeCli,
+            bgBusy: bgLaneBusy(activeCli, msg.repo, chatId),
             activeModel: activeSelection.model ?? desiredBrain.model,
             activeEffort: activeSelection.effort ?? desiredBrain.effort,
             brainPending: activeCli !== desiredBrain.cli
