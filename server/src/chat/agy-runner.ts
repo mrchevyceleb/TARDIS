@@ -394,7 +394,6 @@ export class AgySession {
           if (typeof step.text_delta === 'string' && step.text_delta.length > 0) buf.text += step.text_delta;
           if (step.state === 'DONE') {
             buf.done = true;
-            if (buf.text.trim()) this.lastAssistantText = buf.text;
             const u = step.usage ?? {};
             const usage = {
               input_tokens: finiteCount(u.input_tokens),
@@ -511,6 +510,11 @@ export class AgySession {
     for (const [idx, buf] of order) {
       if (this.liveStepIdx !== null && this.liveStepIdx !== idx) break; // a lower step is still live
       if (!buf.opened) {
+        // A tool card waits for its DONE frame: only then are the final name
+        // and parameters known (a card opened on the first ACTIVE frame would
+        // permanently freeze whatever that frame carried, and later frames
+        // can never update a closed card).
+        if (buf.kind === 'tool' && !buf.done) break;
         buf.opened = true;
         this.liveStepIdx = idx;
         if (buf.kind === 'tool') {
@@ -525,6 +529,10 @@ export class AgySession {
       if (buf.kind === 'tool') {
         this.emit({ type: 'event', event: { type: 'user', parent_tool_use_id: null, session_id: this.agyConversationId ?? '', uuid: randomUUID(), timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: buf.toolUseId ?? '', content: [{ type: 'text', text: String(buf.output ?? '').slice(0, 8000) }] }] } } });
       } else {
+        // Serialized close, not arrival: lastAssistantText must end as the
+        // final step's text, or a late-finishing lower-index planner step
+        // would overwrite the response recovery when result.response is empty.
+        if (buf.text.trim()) this.lastAssistantText = buf.text;
         stream({ type: 'content_block_stop', index: 0 });
         stream({ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { input_tokens: buf.usage?.input_tokens ?? 0, output_tokens: buf.usage?.output_tokens ?? 0, cache_read_input_tokens: buf.usage?.cache_read_input_tokens ?? 0, cache_creation_input_tokens: 0 } });
         stream({ type: 'message_stop' });
