@@ -3387,53 +3387,100 @@ type UsageFallbackJob = {
   images?: Array<{ mediaType: string; base64: string }>;
   retiring: ClaudeSession;
 };
+/** One FIFO queue per thread: replays run serially, oldest prompt first, so
+ *  two limited turns on one lane each get their answer in order. */
+const usageFallbackQueues = new Map<string, UsageFallbackJob[]>();
+const usageFallbackDraining = new Set<string>();
 
-/** Rerun one usage-limited turn on the backup engine (USAGE_FALLBACK). One
- *  schedule per limited turn result — a second limited turn on the same lane
- *  gets its own replay, and the sends queue on the backup session in order,
- *  so both turns get their answers. */
+/** Rerun one usage-limited turn on the backup engine (USAGE_FALLBACK). */
 function scheduleUsageFallback(job: UsageFallbackJob): void {
   console.warn(`[chat] usage limit on ${job.logKey}; rerunning the turn on ${USAGE_FALLBACK.cli} ${USAGE_FALLBACK.model}`);
-  void (async () => {
+  const queue = usageFallbackQueues.get(job.logKey) ?? [];
+  queue.push(job);
+  usageFallbackQueues.set(job.logKey, queue);
+  void drainUsageFallback(job.logKey);
+}
+
+function drainUsageFallback(logKey: string): Promise<void> {
+  if (usageFallbackDraining.has(logKey)) return Promise.resolve();
+  usageFallbackDraining.add(logKey);
+  return (async () => {
     try {
-      // Wait for the limited turn's boundary: the backup engine takes the
-      // thread by retiring this one, and retirement only lands on an idle
-      // session (retireOtherEnginesOnThread skips a busy child).
-      const started = Date.now();
-      while (job.retiring.isBusy() && Date.now() - started < 15_000) {
-        await new Promise((resolve) => { const t = setTimeout(resolve, 250); t.unref?.(); });
-      }
-      if (job.retiring.isBusy()) throw new Error('the limited turn never went idle');
-      const session = await Promise.race([
-        getOrCreateSession({
-          cli: USAGE_FALLBACK.cli,
-          repoPath: job.cwd,
-          chatId: job.chatId,
-          model: USAGE_FALLBACK.model,
-          effort: USAGE_FALLBACK.effort,
-        }),
-        new Promise<never>((_, reject) => {
-          const t = setTimeout(() => reject(new Error('the backup engine did not start within 120s')), 120_000);
-          t.unref?.();
-        }),
-      ]);
-      // Same synchronous slice as send(): a newer turn on the lane's own
-      // engine may have started while the backup session was being created
-      // (retirement skips busy children, so both engines can briefly be live).
-      // The newest turn owns the thread, so if it is busy this replay stands
-      // down and that turn's own result handles whatever happens to it.
-      for (const s of sessions.values()) {
-        if (s.logKey === job.logKey && s.cli !== USAGE_FALLBACK.cli && s.isAlive()
-          && typeof s.isBusy === 'function' && s.isBusy()) {
-          console.warn(`[chat] usage fallback on ${job.logKey} stood down: a newer turn is running on ${s.cli}`);
+      for (;;) {
+        const job = usageFallbackQueues.get(logKey)?.shift();
+        if (!job) {
+          usageFallbackQueues.delete(logKey);
           return;
         }
+        await runUsageFallback(job);
       }
-      await session.send(job.text, job.images, {});
-    } catch (err) {
-      await postUsageFallbackFailureNotice(job, (err as Error).message);
+    } finally {
+      usageFallbackDraining.delete(logKey);
     }
   })();
+}
+
+async function runUsageFallback(job: UsageFallbackJob): Promise<void> {
+  const sleep = (ms: number) => new Promise<void>((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
+  const otherEngineBusy = () => {
+    for (const s of [...sessions.values()]) {
+      if (s.logKey === job.logKey && s.cli !== USAGE_FALLBACK.cli && s.isAlive()
+        && typeof s.isBusy === 'function' && s.isBusy()) return true;
+    }
+    return false;
+  };
+  try {
+    // Wait for the limited turn's boundary: the backup engine takes the
+    // thread by retiring this one, and retirement only lands on an idle
+    // session (retireOtherEnginesOnThread skips a busy child).
+    const limitedStart = Date.now();
+    while (job.retiring.isBusy() && Date.now() - limitedStart < 15_000) await sleep(250);
+    if (job.retiring.isBusy()) throw new Error('the limited turn never went idle');
+    // A newer turn on the lane's own engine owns the thread while it runs;
+    // wait it out (bounded) instead of discarding this replay.
+    const freeStart = Date.now();
+    while (otherEngineBusy() && Date.now() - freeStart < 60_000) await sleep(250);
+    if (otherEngineBusy()) throw new Error('a newer turn on the lane is still running');
+    let startupTimer: NodeJS.Timeout | undefined;
+    const startup = getOrCreateSession({
+      cli: USAGE_FALLBACK.cli,
+      repoPath: job.cwd,
+      chatId: job.chatId,
+      model: USAGE_FALLBACK.model,
+      effort: USAGE_FALLBACK.effort,
+    });
+    const startupTimeout = new Promise<never>((_, reject) => {
+      startupTimer = setTimeout(() => reject(new Error('the backup engine did not start within 120s')), 120_000);
+      startupTimer.unref?.();
+    });
+    let session: Awaited<typeof startup>;
+    try {
+      session = await Promise.race([startup, startupTimeout]);
+    } catch (err) {
+      // The startup itself keeps running. A late success must not leave a
+      // stray backup session holding the thread or retiring things under a
+      // newer turn: close it the moment it lands, unless a newer turn is
+      // already using it (a newer job's getOrCreate may have joined the same
+      // in-flight startup, which is fine).
+      void startup.then((late) => {
+        if (!late.isAlive() || (typeof late.isBusy === 'function' && late.isBusy())) return;
+        console.warn(`[chat] usage fallback on ${job.logKey}: closing a late backup session after the startup timeout`);
+        for (const [key, s] of [...sessions]) {
+          if (s === late) {
+            late.shutdown('usage-fallback-startup-timeout');
+            if (sessions.get(key) === late) sessions.delete(key);
+            break;
+          }
+        }
+      }).catch(() => { /* the startup failed too; the notice below already said so */ });
+      throw err;
+    } finally {
+      if (startupTimer) clearTimeout(startupTimer);
+    }
+    await session.send(job.text, job.images, {});
+  } catch (err) {
+    await postUsageFallbackFailureNotice(job, (err as Error).message);
+  }
 }
 
 async function postUsageFallbackFailureNotice(job: UsageFallbackJob, reason: string): Promise<void> {
