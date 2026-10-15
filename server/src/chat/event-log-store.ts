@@ -1414,6 +1414,108 @@ function writeAllSync(fd: number, data: string | Buffer): void {
  *  a pass well under a second. */
 const TRIM_PASS_BUDGET_BYTES = 32 * 1024 * 1024;
 
+/** Deep-scan window size (bytes): the early-exit granularity of the
+ *  past-the-head scan. The first window holding a droppable record is
+ *  processed alone, so a pass finds progress without parsing further. */
+const TRIM_DEEP_WINDOW_BYTES = 1 << 20;
+
+/** Per-key scan frontier: the furthest byte offset verified droppable-free
+ *  under a given coverage seq and file identity, so a later pass resumes the
+ *  window scan instead of re-parsing the same empty prefix on every retry
+ *  (the Oct 15 verify finding). Invalidated by a coverage advance (seq
+ *  mismatch), by a rewrite (deleted on success — byte offsets shift), and by
+ *  a replaced or truncated log (ino/size mismatch); appends keep offsets
+ *  valid, so a growing lane still resumes where it stopped. */
+const trimScanFrontier = new Map<string, { at: number; seq: number; ino: number }>();
+
+/** One pass's partition of a parsed byte range. */
+type TrimDecisions = { dropped: string[]; retained: string[]; plumbingRemoved: number };
+
+/** Parse each line of a line-aligned byte range ONCE (the old path parsed
+ *  every line of the whole file, twice). Only archive records the rolling
+ *  compact already covers; uncovered lines (not compacted yet, no seq, or
+ *  unparseable) are retained in place, in order — nothing the rolling
+ *  compact does not cover ever leaves the hot file. Plumbing lines drop
+ *  except the watermark: the greatest-seq plumbing line in the range (ties:
+ *  the later one), kept in place. Sequence allocation observes the retained
+ *  plumbing seq; keeping a lower-seq line while a higher-seq plumbing line
+ *  is dropped could let a restart reuse sequence numbers. */
+function decideTrimRange(
+  fd: number,
+  start: number,
+  end: number,
+  coverageDrops: boolean,
+  compactedThroughSeq: number,
+): TrimDecisions {
+  const lines = readRange(fd, start, end).toString('utf8').split('\n').filter(Boolean);
+  const parsed = lines.map((raw) => {
+    try {
+      const record = JSON.parse(raw);
+      return { raw, seq: typeof record?.seq === 'number' ? record.seq : null, plumbing: Boolean(record?.ev && isPlumbingEvent(record.ev)) };
+    } catch {
+      return { raw, seq: null, plumbing: false };
+    }
+  });
+  let watermarkIdx = -1;
+  let watermarkSeq = -1;
+  for (let i = 0; i < parsed.length; i += 1) {
+    const p = parsed[i];
+    if (p.plumbing && typeof p.seq === 'number' && p.seq >= watermarkSeq) {
+      watermarkSeq = p.seq;
+      watermarkIdx = i;
+    }
+  }
+  const dropped: string[] = [];
+  const retained: string[] = [];
+  let plumbingRemoved = 0;
+  for (let i = 0; i < parsed.length; i += 1) {
+    const p = parsed[i];
+    if (p.plumbing) {
+      if (i === watermarkIdx) retained.push(p.raw);
+      else plumbingRemoved += 1;
+      continue;
+    }
+    if (coverageDrops && typeof p.seq === 'number' && p.seq <= compactedThroughSeq) dropped.push(p.raw);
+    else retained.push(p.raw);
+  }
+  return { dropped, retained, plumbingRemoved };
+}
+
+/** Walk line-aligned deep windows from `from` toward `cap` and return the
+ *  first window holding a droppable record — the bytes in front of it stay
+ *  verbatim, unparsed — plus how far the walk verified droppable-free when
+ *  nothing was found. A line crossing the whole window extends to its own
+ *  end, bounded by `cap` — one line, never the whole file; a line crossing
+ *  `cap` itself stops the walk (defer, never split the record). */
+function scanDroppableWindow(
+  fd: number,
+  size: number,
+  from: number,
+  cap: number,
+  coverageDrops: boolean,
+  compactedThroughSeq: number,
+): { found: true; start: number; end: number; decisions: TrimDecisions } | { found: false; scannedTo: number } {
+  let at = from;
+  while (at < size && at < cap) {
+    const want = Math.min(at + TRIM_DEEP_WINDOW_BYTES, cap, size);
+    const slice = readRange(fd, at, want);
+    let windowEnd = -1;
+    const lastNl = slice.lastIndexOf(0x0a);
+    if (lastNl >= 0) windowEnd = at + lastNl + 1;
+    else if (cap > want) {
+      const nl = readRange(fd, want, cap).indexOf(0x0a);
+      if (nl >= 0) windowEnd = want + nl + 1;
+    }
+    if (windowEnd < 0) return { found: false, scannedTo: at };
+    const decisions = decideTrimRange(fd, at, windowEnd, coverageDrops, compactedThroughSeq);
+    if (decisions.dropped.length > 0 || decisions.plumbingRemoved > 0) {
+      return { found: true, start: at, end: windowEnd, decisions };
+    }
+    at = windowEnd;
+  }
+  return { found: false, scannedTo: at };
+}
+
 function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void {
   const path = logPath(key);
   if (!existsSync(path)) return;
@@ -1433,15 +1535,21 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
   }
   const tmp = `${path}.compact-${process.pid}`;
   try {
-    const size = fstatSync(fd).size;
+    const st = fstatSync(fd);
+    const size = st.size;
     if (size <= 0) return;
     // Streaming line count in 1 MB scan buffers — no whole-file string, no
     // line array, nothing retained. The newline ring keeps the byte offsets
     // of the last MAX_EVENTS_PER_LOG+1 newlines, so the over-cap head's end
     // is known without a second scan.
     const keep = MAX_EVENTS_PER_LOG + 1;
-    const ring: number[] = [];
-    let ringStart = 0;
+    // A true bounded ring: exactly `keep` slots, overwritten circularly. A
+    // growing offsets array (push plus an advancing start index) still held
+    // every newline offset in memory — the unbounded growth this rewrite
+    // exists to remove (Oct 15 verify finding).
+    const ring = new Array<number>(keep);
+    let ringLen = 0;
+    let ringHead = 0;
     let newlines = 0;
     const scan = Buffer.alloc(1 << 20);
     let scanned = 0;
@@ -1453,8 +1561,9 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
         for (let i = 0; i < n; i += 1) {
           if (scan[i] === 0x0a) {
             newlines += 1;
-            ring.push(scanned + i + 1);
-            if (ring.length - ringStart > keep) ringStart += 1;
+            ring[ringHead] = scanned + i + 1;
+            ringHead = (ringHead + 1) % keep;
+            if (ringLen < keep) ringLen += 1;
           }
         }
         lastWasNewline = scan[n - 1] === 0x0a;
@@ -1473,8 +1582,9 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
     let coverageDrops = true;
     if (desiredDrop > 0) {
       const kFromEnd = newlines - desiredDrop + 1;
-      if (kFromEnd < 1 || ring.length - kFromEnd < ringStart) return;
-      scopeEnd = ring[ring.length - kFromEnd];
+      if (kFromEnd < 1 || kFromEnd > ringLen) return;
+      const slot = ((ringHead - kFromEnd) % keep + keep) % keep;
+      scopeEnd = ring[slot];
     } else {
       // Within the cap there is no head to archive, but the pass still
       // strips plumbing from the front of the file (bounded), so plumbing
@@ -1486,72 +1596,117 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
     // Budget the parsed scope per pass; a giant head (the freeze shape) trims
     // across passes instead of stalling the loop once for minutes. A single
     // event line bigger than the budget still processes whole — one line,
-    // never the whole file.
-    let processedEnd = scopeEnd;
-    if (scopeEnd > TRIM_PASS_BUDGET_BYTES) {
-      const slice = readRange(fd, 0, TRIM_PASS_BUDGET_BYTES);
-      const lastNl = slice.lastIndexOf(0x0a);
-      processedEnd = lastNl >= 0
-        ? lastNl + 1
-        : readRange(fd, 0, scopeEnd).lastIndexOf(0x0a) + 1 || scopeEnd;
-    }
-    // Parse each processed head line ONCE (the old path parsed every line of
-    // the whole file, twice). Only archive records the rolling compact
-    // already covers; uncovered head lines (not compacted yet, no seq, or
-    // unparseable) are retained in place, in order — nothing the rolling
-    // compact does not cover ever leaves the hot file. Plumbing lines drop
-    // except the last one seen (the watermark); the untouched remainder keeps
-    // every plumbing line until a later pass reaches it, so nothing is lost.
-    const headLines = readRange(fd, 0, processedEnd).toString('utf8').split('\n').filter(Boolean);
-    const parsedHeads = headLines.map((raw) => {
-      try {
-        const record = JSON.parse(raw);
-        return { raw, seq: typeof record?.seq === 'number' ? record.seq : null, plumbing: Boolean(record?.ev && isPlumbingEvent(record.ev)) };
-      } catch {
-        return { raw, seq: null, plumbing: false };
-      }
-    });
-    // Watermark: the plumbing line with the greatest seq in the processed
-    // scope (ties: the later one). Sequence allocation observes the retained
-    // plumbing seq; keeping a lower-seq line while a higher-seq plumbing
-    // line is dropped could let a restart reuse sequence numbers.
-    let watermarkIdx = -1;
-    let watermarkSeq = -1;
-    for (let i = 0; i < parsedHeads.length; i += 1) {
-      const p = parsedHeads[i];
-      if (p.plumbing && typeof p.seq === 'number' && p.seq >= watermarkSeq) {
-        watermarkSeq = p.seq;
-        watermarkIdx = i;
-      }
-    }
-    const dropped: string[] = [];
-    const retainedHead: string[] = [];
+    // never the whole file — and the processed scope always ends on a line
+    // boundary: a mid-line cut would split that record across the parsed
+    // head and the verbatim remainder (two corrupt lines) on any log past
+    // the budget, within cap too, where the budget cut is not a head
+    // boundary (found while fixing the Oct 15 verify round). The fallback
+    // also processes exactly the FIRST giant line, not every complete line
+    // in the head scope (the round-1 fallback parsed the whole scope on a
+    // multi-giant-line head — the freeze shape again).
+    let untouchedHeadEnd = 0;
+    let dropped: string[] = [];
+    let retainedHead: string[] = [];
     let plumbingRemoved = 0;
-    for (let i = 0; i < parsedHeads.length; i += 1) {
-      const p = parsedHeads[i];
-      if (p.plumbing) {
-        if (i === watermarkIdx) retainedHead.push(p.raw);
-        else plumbingRemoved += 1;
-        continue;
+    let processedEnd = 0;
+    let headLineCount = 0;
+    const cursor = trimScanFrontier.get(key);
+    if (cursor !== undefined && cursor.seq === compactedThroughSeq && cursor.ino === st.ino && cursor.at <= size) {
+      // A prior pass verified [0, cursor.at) droppable-free under this
+      // coverage seq on this same file, and the log has only grown since
+      // (appends keep offsets valid). Resume the window scan with a full
+      // budget — no head re-parse — so retries advance instead of
+      // rescanning the same empty prefix.
+      const scan = scanDroppableWindow(fd, size, cursor.at, Math.min(size, cursor.at + TRIM_PASS_BUDGET_BYTES), coverageDrops, compactedThroughSeq);
+      if (!scan.found) {
+        trimScanFrontier.set(key, { at: scan.scannedTo, seq: compactedThroughSeq, ino: st.ino });
+        if (desiredDrop > 0) {
+          console.log(
+            `[event-log-store] trim deferred for ${key}: ${desiredDrop} event(s) are not compacted yet`,
+          );
+        }
+        return;
       }
-      if (coverageDrops && typeof p.seq === 'number' && p.seq <= compactedThroughSeq) dropped.push(p.raw);
-      else retainedHead.push(p.raw);
-    }
-    if (dropped.length === 0 && plumbingRemoved === 0) {
-      if (desiredDrop > 0) {
-        console.log(
-          `[event-log-store] trim deferred for ${key}: ${desiredDrop} event(s) are not compacted yet`,
-        );
+      untouchedHeadEnd = scan.start;
+      ({ dropped, retained: retainedHead, plumbingRemoved } = scan.decisions);
+      processedEnd = scan.end;
+    } else {
+      const budgetEnd = Math.min(scopeEnd, TRIM_PASS_BUDGET_BYTES);
+      if (budgetEnd >= size) {
+        processedEnd = size;
+      } else {
+        const slice = readRange(fd, 0, budgetEnd);
+        let boundary = slice.lastIndexOf(0x0a);
+        if (boundary >= 0) {
+          processedEnd = boundary + 1;
+        } else {
+          // No complete line inside the budget: the first line alone
+          // exceeds it. Process exactly that one line, bounded past the
+          // budget by the head scope (over cap) or one extra budget (within
+          // cap); a line bigger than that defers the pass rather than
+          // splitting it.
+          const probeEnd = scopeEnd > budgetEnd
+            ? scopeEnd
+            : Math.min(size, budgetEnd + TRIM_PASS_BUDGET_BYTES);
+          const nl = readRange(fd, budgetEnd, probeEnd).indexOf(0x0a);
+          if (nl < 0) {
+            console.log(
+              `[event-log-store] trim deferred for ${key}: head line exceeds pass budget`,
+            );
+            return;
+          }
+          processedEnd = budgetEnd + nl + 1;
+        }
       }
-      return;
+      const head = decideTrimRange(fd, 0, processedEnd, coverageDrops, compactedThroughSeq);
+      headLineCount = head.dropped.length + head.retained.length + head.plumbingRemoved;
+      if (head.dropped.length > 0 || head.plumbingRemoved > 0) {
+        ({ dropped, retained: retainedHead, plumbingRemoved } = head);
+      } else {
+        // Nothing removable in the parsed head. Returning here pinned every
+        // droppable record past it — an all-live oldest window (the
+        // fold-coverage residual) keeps covered records and plumbing deeper
+        // in the file forever, and every retry re-parses the same empty
+        // prefix. Scan past the head instead, inside the remaining pass
+        // budget (at least one window, so a budget-sized empty head still
+        // advances), and record the frontier when nothing is found.
+        // The remaining pass budget, floored at one window so a head that
+        // already consumed the budget still advances one window per pass.
+        const cap = processedEnd + Math.max(TRIM_DEEP_WINDOW_BYTES, TRIM_PASS_BUDGET_BYTES - processedEnd);
+        const scan = scanDroppableWindow(fd, size, processedEnd, cap, coverageDrops, compactedThroughSeq);
+        if (!scan.found) {
+          trimScanFrontier.set(key, { at: scan.scannedTo, seq: compactedThroughSeq, ino: st.ino });
+          if (desiredDrop > 0) {
+            console.log(
+              `[event-log-store] trim deferred for ${key}: ${desiredDrop} event(s) are not compacted yet`,
+            );
+          }
+          return;
+        }
+        untouchedHeadEnd = scan.start;
+        ({ dropped, retained: retainedHead, plumbingRemoved } = scan.decisions);
+        processedEnd = scan.end;
+      }
     }
     if (dropped.length > 0) {
       // Archive must land BEFORE the rewrite. Keep the whole critical section
       // synchronous: shutdown tombstones use appendEventLogSync(), and any
       // await between read and rename would let that terminal line land in the
       // old file and then be overwritten by our snapshot. Written one line at
-      // a time — never one whole-file join string.
-      const afd = openSync(archivePath(key), 'a');
+      // a time — never one whole-file join string. An archive open failure
+      // leaves the log untrimmed, silently, exactly like a write failure: the
+      // open sits inside its own guard (the Oct 15 verify finding — a bare
+      // open let the throw escape the trim instead).
+      let afd: number;
+      try {
+        afd = openSync(archivePath(key), 'a');
+      } catch (err) {
+        console.warn(
+          `[event-log-store] archive failed for ${key}, leaving log untrimmed:`,
+          (err as Error).message,
+        );
+        return;
+      }
       try {
         for (const line of dropped) writeAllSync(afd, `${line}\n`);
         closeSync(afd);
@@ -1567,10 +1722,19 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
     try {
       const wfd = openSync(tmp, 'w');
       try {
-        for (const line of retainedHead) writeAllSync(wfd, `${line}\n`);
-        // Verbatim remainder — the unprocessed head plus the retained window
-        // — copied in 1 MB ranges: never parsed, never joined.
         const chunk = 1 << 20;
+        if (untouchedHeadEnd > 0) {
+          // Deep pass: the verified-droppable-free head in front of the
+          // processed window, copied verbatim — never parsed, never joined.
+          for (let off = 0; off < untouchedHeadEnd; off += chunk) {
+            const end = Math.min(off + chunk, untouchedHeadEnd);
+            const buf = readRange(fd, off, end);
+            if (buf.length) writeAllSync(wfd, buf);
+          }
+        }
+        for (const line of retainedHead) writeAllSync(wfd, `${line}\n`);
+        // Verbatim remainder — the unprocessed window tail plus the retained
+        // window — copied in 1 MB ranges: never parsed, never joined.
         for (let off = processedEnd; off < size; off += chunk) {
           const end = Math.min(off + chunk, size);
           const buf = readRange(fd, off, end);
@@ -1580,15 +1744,20 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
         closeSync(wfd);
       }
       renameSync(tmp, path);
+      // The rewrite shifted every offset: the frontier is stale until the
+      // next pass re-verifies it.
+      trimScanFrontier.delete(key);
       bumpEventLogRevision();
       console.log(
-        `[event-log-store] cleaned ${key}: dropped ${plumbingRemoved} plumbing event(s), archived ${dropped.length} compacted event(s), retained ${retainedHead.length} uncovered event(s)`,
+        `[event-log-store] cleaned ${key}: dropped ${plumbingRemoved} plumbing event(s), archived ${dropped.length} compacted event(s), retained ${untouchedHeadEnd > 0 ? `a verbatim head plus ${retainedHead.length} window` : `${retainedHead.length} uncovered`} event(s)`,
       );
-      const remainingHead = desiredDrop - headLines.length;
-      if (remainingHead > 0) {
-        console.log(
-          `[event-log-store] trim pass budget reached for ${key}: ${remainingHead} head line(s) remain for the next pass`,
-        );
+      if (untouchedHeadEnd === 0) {
+        const remainingHead = desiredDrop - headLineCount;
+        if (remainingHead > 0) {
+          console.log(
+            `[event-log-store] trim pass budget reached for ${key}: ${remainingHead} head line(s) remain for the next pass`,
+          );
+        }
       }
     } catch (err) {
       try { unlinkSync(tmp); } catch { /* best-effort stale temp cleanup */ }
