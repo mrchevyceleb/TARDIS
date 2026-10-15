@@ -437,19 +437,45 @@ export class AgySession {
         } else {
           const response = typeof result.response === 'string' ? result.response : '';
           if (response.trim()) this.lastAssistantText = response;
-          // The terminal result repeats a narration step's text verbatim
-          // (squash-equal): that is thinking, not an answer, and re-emitting
-          // it as the result re-prints the narration after the streamed
-          // answer (card-e2bd7a double answer). Suppress the copy; an empty
-          // result text reconciles to nothing on the client, and the
-          // empty-terminal recovery only ever fires when no text step ran.
+          // The terminal result is the only reliable narration signal
+          // (card-e2bd7a): the CLI repeats narration verbatim ahead of the
+          // answer, so a closed text step whose text the result carries as a
+          // whitespace-insensitive prefix — or equals, when a LATER text step
+          // streamed the actual answer — is thinking, not a reply. Demote
+          // those steps with agy_thinking markers emitted BEFORE the result
+          // event (live and replay mark the same blocks) and strip the
+          // narration out of the emitted result text, so the answer renders
+          // exactly once and thinking never prints as it. Step position
+          // alone is never the signal: a genuine multi-part reply separated
+          // by tool activity carries no narration repeat and stays visible.
           if (response.trim()) {
             const squash = (s: string) => s.replace(/\s+/g, '');
-            const rSq = squash(response);
-            for (const [, b] of this.stepBuffers) {
-              if (b.kind !== 'text' || !b.text.trim()) continue;
-              if (squash(b.text) === rSq) { this.suppressResultText = true; break; }
+            let effective = response;
+            const ordered = [...this.stepBuffers.entries()].sort((a, b) => a[0] - b[0]);
+            for (const [idx, b] of ordered) {
+              if (b.kind !== 'text' || !b.text.trim() || b.demoted) continue;
+              const bSq = squash(b.text);
+              const rSq = squash(effective);
+              if (bSq === rSq) {
+                const laterAnswer = ordered.some(([j, o]) => j > idx && o.kind === 'text' && o.text.trim());
+                if (laterAnswer) {
+                  // The result repeats only the narration while a later step
+                  // already streamed the answer: demote the narration and
+                  // suppress the copy.
+                  b.demoted = true;
+                  this.emit({ type: 'event', event: { type: 'agy_thinking', step_index: idx, session_id: this.agyConversationId ?? '' } });
+                }
+                // Either way the result adds nothing over streamed text.
+                this.suppressResultText = true;
+              } else if (rSq.startsWith(bSq) && rSq.length > bSq.length) {
+                // Narration prefix ahead of a longer answer: demote the
+                // narration and strip it from the emitted result text.
+                b.demoted = true;
+                this.emit({ type: 'event', event: { type: 'agy_thinking', step_index: idx, session_id: this.agyConversationId ?? '' } });
+                if (effective.startsWith(b.text)) effective = effective.slice(b.text.length);
+              }
             }
+            if (effective.trim() && effective !== response) this.lastAssistantText = effective;
           }
         }
         // The terminal result's usage merges with the step accumulation
@@ -533,21 +559,10 @@ export class AgySession {
         if (buf.kind === 'tool' && !buf.done) break;
         buf.opened = true;
         this.liveStepIdx = idx;
-        // Gemini narration ("Running ls in …", mid-turn commentary) streams
-        // as plain agent-response text steps. Any text step that a LATER step
-        // supersedes is thinking, not the answer (card-e2bd7a: thinking must
-        // never print as the answer). Emit the demotion marker BEFORE the
-        // superseding step's frames, so live viewers and replay viewers mark
-        // the same narration block identically.
-        for (const [pIdx, pBuf] of this.stepBuffers) {
-          if (pIdx >= idx || pBuf.kind !== 'text' || !pBuf.closed || pBuf.demoted) continue;
-          pBuf.demoted = true;
-          this.emit({ type: 'event', event: { type: 'agy_thinking', step_index: pIdx, session_id: this.agyConversationId ?? '' } });
-        }
         if (buf.kind === 'tool') {
           this.emitToolCard(stream, buf);
         } else {
-          stream({ type: 'message_start', message: { id: randomUUID(), type: 'message', role: 'assistant', content: [], model: this.spawnModel, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } } });
+          stream({ type: 'message_start', step_index: idx, session_id: this.agyConversationId ?? '', message: { id: randomUUID(), type: 'message', role: 'assistant', content: [], model: this.spawnModel, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } } });
           stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
           if (buf.text) stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: buf.text } });
         }

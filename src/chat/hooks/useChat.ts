@@ -135,7 +135,7 @@ function isSyntheticApiErrorEvent(ev: any): boolean {
 // Pure reducer — all per-turn state lives on the blocks themselves
 // (turnId + cbIndex). This keeps it safe under React Strict Mode, which
 // invokes reducers twice for purity-checking.
-type ReducerCursor = { current: string; peerId?: string; lane?: 'bg'; bg?: ReducerCursor };
+type ReducerCursor = { current: string; peerId?: string; lane?: 'bg'; bg?: ReducerCursor; agyStep?: number; agySession?: string };
 
 /** Blocks this cursor's lane owns. The agent's background lane streams into
  *  the same thread as the home lane, so closing one lane's turn must never
@@ -412,6 +412,11 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // content_block_stop, and one stale running/open flag suppresses the
     // typing indicator forever (hasOpen scans the whole history).
     turnIdRef.current = `t${nextId++}`;
+    // Agy frames stamp the emitting step's identity (card-e2bd7a): blocks
+    // created inside this message carry it, so a later agy_thinking marker
+    // resolves to the exact block, not a positional guess.
+    turnIdRef.agyStep = typeof ev.step_index === 'number' ? ev.step_index : undefined;
+    turnIdRef.agySession = typeof ev.session_id === 'string' ? ev.session_id : undefined;
     return blocks.map((b) => {
       if (!ownsBlock(turnIdRef, b)) return b;
       if (b.kind === 'text' && b.open) return { ...b, open: false };
@@ -427,6 +432,8 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const finalPeerId = turnIdRef.peerId;
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
+    turnIdRef.agyStep = undefined;
+    turnIdRef.agySession = undefined;
     const closed = blocks.map((b) => {
       if (b.kind === 'text' && b.turnId === finalTurnId) {
         return { ...b, open: false, seq: b.seq ?? resultSeq };
@@ -473,11 +480,13 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const squash = (s: string) => s.replace(/\s+/g, '');
     const streamedSq = squash(finalTextBlocks.map((b) => b.text).join(''));
     const finalSq = squash(finalText);
-    if (finalSq.includes(streamedSq) && finalSq.length > streamedSq.length) {
-      // The canonical result contains the streamed reply — the Gemini CLI's
-      // result can carry its narration ahead of the answer, so containment,
-      // not just a prefix, proves the same reply: swap the fuller canonical
-      // copy in, in place, and drop the turn's other streamed copies.
+    if (streamedSq.length > 0 && finalSq.endsWith(streamedSq) && finalSq.length > streamedSq.length) {
+      // The canonical result carries the streamed reply as its TAIL — the
+      // Gemini CLI's result can put its narration ahead of the answer, so a
+      // tail match (not bare containment) proves the same reply: a short or
+      // common streamed answer that merely occurs inside unrelated canonical
+      // text must never trigger a swap. Swap the fuller canonical copy in,
+      // in place, and drop the turn's other streamed copies.
       const first = finalTextBlocks[0];
       const dropIds = new Set(finalTextBlocks.slice(1).map((b) => b.id));
       return closed
@@ -488,18 +497,47 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     return appendResult();
   }
 
-  // Agy narration demoted to thinking (card-e2bd7a): the runner marks every
-  // text step a later step supersedes, so thinking never prints as the
-  // answer. The marker names no block: the nearest preceding closed,
-  // non-empty, non-thinking text block of this lane is its target — both
-  // live and replay order place the marker right before the superseding
-  // step's frames. Thought blocks never render and never count as answers.
+  // Agy narration demoted to thinking (card-e2bd7a): the runner emits this
+  // marker at result time, keyed to the exact text step whose content the
+  // terminal result repeats (the known narration/result relationship — step
+  // position alone is never the signal, because a genuine multi-part reply
+  // separated by tool activity must stay visible). The marker carries the
+  // step's index and session; blocks created from the runner's frames carry
+  // the same identity, so the demotion targets that block and nothing else.
+  // The positional fallback (pre-identity frames) is lane-scoped and SKIPS
+  // ineligible blocks instead of stopping at them: the target is the nearest
+  // preceding closed, non-empty, non-thinking text block of this lane, which
+  // can sit behind an open step, an empty per-step artifact, or an
+  // already-demoted thought. Thought blocks never render and never count as
+  // answers.
   if (ev.type === 'agy_thinking') {
+    const stepIdx = typeof ev.step_index === 'number' ? ev.step_index : undefined;
+    const sessionId = typeof ev.session_id === 'string' ? ev.session_id : '';
+    const eligible = (b: ChatBlock): b is Extract<ChatBlock, { kind: 'text' }> =>
+      b.kind === 'text' && ownsBlock(turnIdRef, b) && !b.open && !b.thought && b.text.trim().length > 0;
+    if (stepIdx !== undefined) {
+      let exact = -1;
+      for (let i = blocks.length - 1; i >= 0; i -= 1) {
+        const b = blocks[i];
+        if (b.kind !== 'text' || !ownsBlock(turnIdRef, b) || (b as { agyStep?: number }).agyStep !== stepIdx) continue;
+        const bs = (b as { agySession?: string }).agySession;
+        if (sessionId && bs !== undefined && bs !== sessionId) continue;
+        exact = i;
+        break;
+      }
+      if (exact >= 0) {
+        const b = blocks[exact] as Extract<ChatBlock, { kind: 'text' }>;
+        if (!eligible(b)) return blocks; // an open or already-thought step is never the target
+        const next = blocks.slice();
+        next[exact] = { ...b, thought: true };
+        return next;
+      }
+      // No identity match: the block predates identity stamping. Fall through
+      // to the lane-scoped positional walk below.
+    }
     for (let i = blocks.length - 1; i >= 0; i -= 1) {
       const b = blocks[i];
-      if (b.kind !== 'text') continue;
-      if (b.open) return blocks; // a live streaming step is never the target
-      if (!b.text.trim() || b.thought) return blocks; // no target behind this block
+      if (!eligible(b)) continue;
       const next = blocks.slice();
       next[i] = { ...b, thought: true };
       return next;
@@ -526,6 +564,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       const block: ChatBlock = {
         kind: 'text', id: id(), text: '', ...eventTime(ev),
         turnId, peerId: turnIdRef.peerId, ...laneStamp(turnIdRef), cbIndex: idx, open: true,
+        ...(turnIdRef.agyStep !== undefined ? { agyStep: turnIdRef.agyStep, agySession: turnIdRef.agySession } : {}),
         presentation: cb.phase === 'commentary' ? 'update' : cb.phase === 'final_answer' ? 'answer' : undefined,
         ...(cb.phase === 'commentary' ? { commentary: true } : {}),
         seq: typeof ev.seq === 'number' ? ev.seq : undefined,
@@ -645,8 +684,16 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // Whitespace-only text is not a real reply, so it paints no blank bubble.
     if (fullText.trim()) {
       if (isSyntheticApiErrorEvent(ev)) return blocks;
-      const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '');
-      if (!hasText) {
+      // Thought blocks are narration, not delivered answers: only a VISIBLE
+      // text block proves the turn answered. When only thought blocks exist,
+      // a terminal answer that differs from the narration still renders
+      // (recovery must not leave the person with no response); a
+      // whitespace-insensitive verbatim repeat of the narration does not,
+      // because re-printing it would put thinking back into the answer.
+      const sq = (s: string) => s.replace(/\s+/g, '');
+      const hasVisible = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && !b.thought && b.text.trim().length > 0);
+      const narrationRepeat = !hasVisible && blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.thought && b.text.trim().length > 0 && sq(b.text) === sq(fullText));
+      if (!hasVisible && !narrationRepeat) {
         return [...annotated, { kind: 'text', id: id(), text: fullText, ...eventTime(ev), turnId, peerId: turnIdRef.peerId, ...laneStamp(turnIdRef), cbIndex: -1, open: false, presentation, seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
       }
     }
