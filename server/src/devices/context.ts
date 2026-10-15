@@ -180,7 +180,13 @@ export function computerGuidance(cwd: string, chatId: string, label: string, hum
   // floats past the omitted guidance.
   if (!ungated && !sameTurn && now - (lastComputerToolUse.get(owner) ?? 0) > COMPUTER_BLOCK_WINDOW_MS) {
     contexts.delete(owner);
-    return robotGuidance();
+    // One-line stub (Matt, Oct 15): a prompt with no block was never told that
+    // a single failed attempt re-arms it, so lanes routed around the attempt
+    // instead of making it. Rides the ungated path only.
+    return [
+      'No computer-use block this turn: this lane has used no computer tool in the last 24h. One computer_* call from this turn, even one that fails, re-arms the block for the next turn.',
+      robotGuidance(),
+    ].filter(Boolean).join('\n');
   }
   const held = sameTurn ? contexts.get(owner) : undefined;
   const context = held && held.human === human && held.hardExpires > now
