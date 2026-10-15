@@ -1301,6 +1301,10 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
     let lastCompactedSeq = lastSeq;
     let generatedWords = 0;
     let compactText = previous;
+    // The reconstructed counter value this fold itself last wrote (0 before
+    // its first write): later writes preserve it plus any newer increments
+    // instead of adding the reconstruction again.
+    let selfTotalWritten = 0;
     // Durable-facts outbox: facts already trimmed out of the document whose
     // memory save is not yet confirmed. Leftovers from a failed save retry
     // here; malformed disk entries are dropped on load.
@@ -1388,12 +1392,19 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
       await mutateState((s) => {
         if (epochOf(key) !== epoch) return;
         // Preserve a counter that moved while this fold awaited (a delivery
-        // probe's pressure unit landing mid-fold); a reconstructed total
-        // adds the live record's count (it did not exist at snapshot time).
+        // probe's pressure unit landing mid-fold). A reconstructed total (no
+        // state record existed at snapshot) is written ONCE as the snapshot
+        // count plus the increments the new record already holds; every later
+        // write preserves that value and any newer increments — the record
+        // now carries the reconstruction, so adding `total` again would
+        // double it (once per batch write, up to 9x an 8-batch fold).
         // The watermark stays at the captured total: only what this fold
         // actually processed is claimed as covered.
         const liveNow = s[key]?.userTurnsTotal ?? 0;
-        const totalNow = totalWasReconstructed ? total + liveNow : Math.max(liveNow, total);
+        const totalNow = totalWasReconstructed
+          ? (selfTotalWritten === 0 ? total + liveNow : Math.max(liveNow, selfTotalWritten))
+          : Math.max(liveNow, total);
+        selfTotalWritten = totalNow;
         s[key] = {
           userTurnsTotal: totalNow,
           lastCompactUserTurns: total,
@@ -1408,10 +1419,15 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
 
     await mutateState((s) => {
       if (epochOf(key) !== epoch) return;
-      // Same preservation as the in-loop write; the watermark stays at the
-      // captured total so the compact never claims coverage it lacks.
+      // Same preservation as the in-loop write (the reconstruction lands
+      // once; later writes preserve it and any newer increments); the
+      // watermark stays at the captured total so the compact never claims
+      // coverage it lacks.
       const liveNow = s[key]?.userTurnsTotal ?? 0;
-      const totalNow = totalWasReconstructed ? total + liveNow : Math.max(liveNow, total);
+      const totalNow = totalWasReconstructed
+        ? (selfTotalWritten === 0 ? total + liveNow : Math.max(liveNow, selfTotalWritten))
+        : Math.max(liveNow, total);
+      selfTotalWritten = totalNow;
       s[key] = {
         userTurnsTotal: totalNow,
         lastCompactUserTurns: total,

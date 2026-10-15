@@ -372,19 +372,26 @@ export function shouldCompactOverflow(overflow: VisibleTurn[]): boolean {
  *  foldable user turns so the overflow pipeline carries their content into
  *  the rolling summary. They never enter the working window: the model never
  *  saw them there, so the compact is the only place their content survives,
- *  and folding them cannot duplicate what the window shows. */
+ *  and folding them cannot duplicate what the window shows. Delivery ids
+ *  are recorded from every copy in the log — including ones at or below the
+ *  coverage boundary — so a retried delivery never re-folds as new. */
 export function uncoveredPeerTurns(events: Seqish[], lastSeq: number): VisibleTurn[] {
   const seen = new Set<string>();
   const turns: VisibleTurn[] = [];
   for (const event of events) {
     const seq = typeof event.seq === 'number' && event.seq > 0 ? event.seq : 0;
-    if (!(seq > lastSeq)) continue;
     const inner = unwrapInner(event.ev);
     if (!inner || inner.type !== 'peer_message') continue;
+    // Record every copy's delivery id, including copies at or below the
+    // coverage boundary, BEFORE the sequence filter: a delivery retried
+    // after the boundary (its original already folded) is a duplicate, not
+    // new coverage — skipping the old copy would re-fold the same content
+    // into a later summary and advance the boundary twice.
     if (typeof inner.deliveryId === 'string' && inner.deliveryId) {
       if (seen.has(inner.deliveryId)) continue;
       seen.add(inner.deliveryId);
     }
+    if (!(seq > lastSeq)) continue;
     // Human/teammate peer messages already became visible turns in
     // extractLaneTurns; folding them again here would duplicate them. Only
     // the ones extractLaneTurns skipped join the overflow here.
