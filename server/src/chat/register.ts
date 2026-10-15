@@ -35,6 +35,7 @@ import {
   getOrCreateSession,
   interruptSession,
   isClaudeFamilyCli,
+  isPersistentProcessCli,
   isClaudeUnrecognizedModelWarning,
   laneLogKey,
   MemoryPressureSpawnError,
@@ -1294,7 +1295,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 chatId,
               })
             : peekClaudeSession({ cli: desiredBrain.cli, repoPath: msg.repo, chatId });
-          if (!warm && isClaudeFamilyCli(desiredBrain.cli)) {
+          if (!warm && isPersistentProcessCli(desiredBrain.cli)) {
             // Drop any session this socket was already bound to. Without it a
             // socket that re-helloes onto a different, cold lane keeps the old
             // lane's subscription - those events would stream into the new
@@ -2236,7 +2237,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // every idle send also resolves a replacement made by another socket;
           // recycleOnMismatch remains explicit, so stale device defaults cannot
           // cause replacement themselves.
-          if (!initiallyBusy && isClaudeFamilyCli(sendCli) && repoPath) {
+          if (!initiallyBusy && isPersistentProcessCli(sendCli) && repoPath) {
             // This can wait out a boundary rotation's compaction; keep the
             // keepalive going so the client's silence watchdog does not fire.
             holdKeepalive++;

@@ -155,7 +155,7 @@ function normalizeBrainEffort(engine: string, model: string | undefined, value: 
   // Fireworks steps to the model's nearest tier, the same pick the runner spawns with.
   if (engine === 'fireworks') return resolveFireworksEffort(effort, model, fallback);
   if (engine === 'openrouter') return resolveOpenRouterEffort(effort, model, fallback);
-  if (engine === 'agy') return resolveAgyEffort(model ?? '', effort);
+  if (engine === 'agy') return resolveAgyEffort(model ?? '', effort, fallback);
   if (engine === 'xai' && effort === 'max') effort = 'xhigh';
   const allowed = engine === 'codex' && model ? new Set(codexCapability(model)?.efforts)
     : engine === 'xai' ? XAI_BRAIN_EFFORTS

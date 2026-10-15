@@ -44,8 +44,8 @@ import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { fireworksCapability, fireworksContextWindow, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
 import { openRouterCapability, openRouterContextWindow, openRouterMaxOutput, resolveOpenRouterEffort, resolveOpenRouterModel } from './openrouter-models.ts';
-import { AgySession } from './agy-runner.ts';
-import { resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
+import { AgySession, AGY_READY_TIMEOUT_MS } from './agy-runner.ts';
+import { AGY_LANE_EFFORT, AGY_LANE_MODEL, resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
 import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { PiSession, usePiHarness } from './pi-runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, REPLY_NUDGE_NOTE_TOOL, replyNowText, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
@@ -285,6 +285,16 @@ const REACTIVE_COMPACT_GAP = 40_000;
  *  and a seed needs twice that much room to grow or rotating cannot help. */
 const ROTATE_BEFORE_NATIVE = 10_000;
 /** Persistent `claude` binary lanes (Anthropic, Z.ai, xAI). Not Codex/Banana. */
+/** Persistent process lanes: the claude-binary family plus the agy
+ *  subscription lane. Callers that mean "a warm process whose model/effort
+ *  apply at spawn and whose idle sessions recycle on a changed pick" (hello
+ *  laziness, send-path reconciliation) use this, not the claude-binary
+ *  predicate: agy is its own binary and protocol but shares exactly those
+ *  lane semantics. */
+export function isPersistentProcessCli(cli: CliKind | null | undefined): boolean {
+  return isClaudeFamilyCli(cli) || cli === 'agy';
+}
+
 export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' | 'fireworks' | 'openrouter' {
   return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai' || cli === 'fireworks' || cli === 'openrouter';
 }
@@ -356,7 +366,7 @@ function openRouterEnv(model: string): NodeJS.ProcessEnv {
 }
 
 const resolveClaudeModel = (cli: CliKind, m?: string): string => {
-  if (cli === 'agy') return resolveAgyModel(m);
+  if (cli === 'agy') return resolveAgyModel(m, AGY_LANE_MODEL);
   if (cli === 'zai') return resolveZaiModel(m, ZAI_MODEL);
   if (cli === 'xai') return resolveXaiModel(m, XAI_MODEL);
   if (cli === 'fireworks') return resolveFireworksModel(m);
@@ -375,7 +385,7 @@ export function isClaudeUnrecognizedModelWarning(message: string): boolean {
 }
 
 const resolveClaudeEffort = (cli: CliKind, e?: string, model?: string): string =>
-  cli === 'agy' ? resolveAgyEffort(model ?? '', e)
+  cli === 'agy' ? resolveAgyEffort(model ?? '', e, AGY_LANE_EFFORT)
   : cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT)
   : cli === 'xai' ? resolveXaiEffort(e, XAI_EFFORT)
   : cli === 'fireworks' ? resolveFireworksEffort(e, model)
@@ -3155,7 +3165,17 @@ async function spawnSession(
     }
   }, -1, false);
 
-  const ok = await session.ready;
+  // Agy bounds its own readiness (a live child that never emits init is
+  // retired so the lookup cannot wedge on it); the other lanes keep their own
+  // readiness shapes (claude warmups legitimately run long).
+  let ok: boolean;
+  if (session instanceof AgySession) {
+    const state = await session.waitForInitOrExit(AGY_READY_TIMEOUT_MS);
+    ok = state === 'initialized';
+    if (state === 'timeout') session.shutdown('ready-timeout');
+  } else {
+    ok = await session.ready;
+  }
   if (!ok) {
     if (session.isDisposed() || sessionsShuttingDown) {
       throw new Error('claude startup was intentionally cancelled');

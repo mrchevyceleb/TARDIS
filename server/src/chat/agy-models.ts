@@ -59,10 +59,14 @@ export function resolveAgyModel(model: string | undefined, fallback?: string): s
   return fromFallback || DEFAULT_MODEL;
 }
 
-export function resolveAgyEffort(model: string, effort: string | undefined): string {
+export function resolveAgyEffort(model: string, effort: string | undefined, fallback?: string): string {
   const info = HAND_BY_ID.get(resolveAgyModel(model)) ?? HAND_MODELS[0];
   const want = String(effort ?? '').trim().toLowerCase();
-  return info.efforts.includes(want) ? want : info.defaultEffort;
+  if (info.efforts.includes(want)) return want;
+  // Honor the caller's fallback (the operator-configured lane default) when
+  // the model accepts it; the model's own default only if neither fits.
+  const fromFallback = String(fallback ?? '').trim().toLowerCase();
+  return info.efforts.includes(fromFallback) ? fromFallback : info.defaultEffort;
 }
 
 export function agyModelSpec(model: string): AgyModelInfo | undefined {

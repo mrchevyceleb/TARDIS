@@ -47,7 +47,7 @@ import { laneTagFor, shareBackgroundLaneEvent, type CliKind, type SeqEvent, type
 const EVENT_BUFFER_SIZE = 2000;
 /** Init is immediate on a healthy spawn (probed); a live process that never
  *  emits init is retired so the lane respawns instead of hanging a send. */
-const AGY_READY_TIMEOUT_MS = 45_000;
+export const AGY_READY_TIMEOUT_MS = 45_000;
 
 type Listener = (e: SeqEvent) => void;
 type ChatImage = { mediaType: string; base64: string };
@@ -56,8 +56,18 @@ const finiteCount = (value: unknown): number => {
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? n : 0;
 };
-const sanitizedUsage = (usage: unknown): { input: number; output: number; cacheRead: number } => {
-  const rec = usage && typeof usage === 'object' ? usage as Record<string, unknown> : {};
+const sanitizedUsage = (usage: unknown): { input: number; output: number; cacheRead: number } | null => {
+  const rec = usage && typeof usage === 'object' && !Array.isArray(usage) ? usage as Record<string, unknown> : {};
+  const present = (v: unknown) => v !== undefined;
+  const valid = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  // No counters at all means the result carried no usage: stay null so the
+  // sanitized step accumulation remains the turn's accounting. Malformed
+  // counters (wrong type, negative) are the same — never zeros that would
+  // silently suppress the fallback and starve context rotation.
+  if (!present(rec.input_tokens) && !present(rec.output_tokens) && !present(rec.cache_read_tokens)) return null;
+  if ((present(rec.input_tokens) && !valid(rec.input_tokens))
+    || (present(rec.output_tokens) && !valid(rec.output_tokens))
+    || (present(rec.cache_read_tokens) && !valid(rec.cache_read_tokens))) return null;
   return { input: finiteCount(rec.input_tokens), output: finiteCount(rec.output_tokens), cacheRead: finiteCount(rec.cache_read_tokens) };
 };
 
@@ -236,6 +246,14 @@ export class AgySession {
       if (!line.trim()) continue;
       let msg: any;
       try { msg = JSON.parse(line); } catch { this.noteMalformedFrame(line); continue; }
+      // Only a structurally valid envelope (an object carrying a string
+      // `event`) clears the malformed-frame counter: a parsable but wrong-
+      // shaped frame (null, an array, a changed schema) counts toward the
+      // protocol-break retirement exactly like an unparsable one.
+      if (!msg || typeof msg !== 'object' || Array.isArray(msg) || typeof msg.event !== 'string') {
+        this.noteMalformedFrame(line);
+        continue;
+      }
       this.malformedFrames = 0;
       try { this.handleEvent(msg); } catch (err) {
         console.error(`[chat ${this.cli}/agy] event handling failed:`, (err as Error).message);
@@ -630,7 +648,19 @@ export class AgySession {
       const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
       message = `${this.systemPromptBlock()}\n\n${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${continuation}`;
 
-      await this.writeUserLine(message);
+      try {
+        await this.writeUserLine(message);
+      } catch (error) {
+        // A failed stdin write is an indeterminate protocol boundary: the old
+        // request or a partial line may already be executing, so a later send
+        // could recreate the overlapping-turn corruption. Retire the process;
+        // the next send spawns a fresh session.
+        if (wantSeed) this.seedWindowOnNextTurn = true;
+        abandon();
+        this.emit({ type: 'error', message: `agy input write failed: ${(error as Error).message}` });
+        this.shutdown('stdin-write-failure');
+        return;
+      }
     } catch (error) {
       // The seed was not consumed by a delivered turn; keep it for the retry.
       if (wantSeed) this.seedWindowOnNextTurn = true;
@@ -649,13 +679,21 @@ export class AgySession {
   }
 
   /** Stop: agy has no abort input event, so v1 signals the process. A SIGINT
-   *  that agy treats as a kill is still recoverable — the exit path closes the
-   *  turn as failed and the next send respawns the lane. */
+   *  that agy catches or ignores would leave the turn busy forever, so a
+   *  bounded backstop closes the turn as cancelled and escalates to a hard
+   *  retire of the process group — Stop always ends in a terminal state. */
   async interrupt(reason = 'interrupt'): Promise<boolean> {
     if (!this.isAlive() || this.turnStartedAt === null) return false;
     this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
     try { this.child.kill('SIGINT'); } catch { /* gone */ }
     void reason;
+    const turnSeq = this.turnSeq;
+    setTimeout(() => {
+      if (this.disposed || this.turnStartedAt === null || this.turnSeq !== turnSeq) return;
+      this.turnFailed = { message: 'This turn was cancelled before it finished.', code: 'aborted' };
+      this.finishTurn();
+      this.shutdown('interrupt-escalation');
+    }, 5_000).unref();
     return true;
   }
 
