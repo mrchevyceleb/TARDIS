@@ -1,6 +1,6 @@
 import { appendFile, mkdir, open as openFile, rm } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
-import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { MAX_EVENTS_PER_LOG, STATE_DIR } from './config.ts';
 import { redactEventSecrets, redactSerializedSecrets } from './secretRedaction.ts';
@@ -1388,39 +1388,18 @@ type LogLine = { raw: string; seq: number | null; plumbing: boolean };
 /** Remove old invisible protocol chatter without sacrificing the allocator's
  * high-water mark. If the newest record is plumbing, retain that ONE line so a
  * restart cannot reuse its seq; loadEventLogSync still hides it from replay. */
-function stripPlumbingLines(lines: string[]): { lines: string[]; removed: number } {
-  const parsed: LogLine[] = lines.map((raw) => {
-    try {
-      const record = JSON.parse(raw);
-      return {
-        raw,
-        seq: typeof record?.seq === 'number' ? record.seq : null,
-        plumbing: Boolean(record?.ev && isPlumbingEvent(record.ev)),
-      };
-    } catch {
-      return { raw, seq: null, plumbing: false };
-    }
-  });
-
-  let maxSemanticSeq = -1;
-  let maxPlumbingSeq = -1;
-  let watermarkIndex = -1;
-  for (let i = 0; i < parsed.length; i += 1) {
-    const line = parsed[i];
-    if (line.seq === null) continue;
-    if (line.plumbing) {
-      if (line.seq > maxPlumbingSeq) {
-        maxPlumbingSeq = line.seq;
-        watermarkIndex = i;
-      }
-    } else if (line.seq > maxSemanticSeq) {
-      maxSemanticSeq = line.seq;
-    }
-  }
-  const keepWatermark = maxPlumbingSeq > maxSemanticSeq ? watermarkIndex : -1;
-  const kept = parsed.filter((line, index) => !line.plumbing || index === keepWatermark).map((line) => line.raw);
-  return { lines: kept, removed: lines.length - kept.length };
-}
+/** Byte budget of parsed head text per trim pass. The Oct 15 freeze: one
+ *  pass loaded and parsed the WHOLE hot log (a giant-overflow lane held
+ *  ~9-10k events of big tool results, far past the 50-190 MB this code was
+ *  sized against), then built two whole-file strings for the archive append
+ *  and the rewrite — several times the file size in transient allocations, a
+ *  ballooned heap (the unit cgroup peaked at 15.99 GB), and a stalled main
+ *  thread from 9:06:12 until the process died at 9:12:47. A pass now parses
+ *  at most this much head text and copies the untouched remainder verbatim;
+ *  a bigger head trims across passes (every session spawn retries the trim)
+ *  instead of stalling the loop once for minutes. 32 MB of parsed text keeps
+ *  a pass well under a second. */
+const TRIM_PASS_BUDGET_BYTES = 32 * 1024 * 1024;
 
 function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void {
   const path = logPath(key);
@@ -1433,77 +1412,142 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
   // effect, and it is not worth rewriting a giant file no compact boundary
   // covers yet.
   if (compactedThroughSeq <= 0) return;
-  let raw: string;
+  const fd = openSync(path, 'r');
+  const tmp = `${path}.compact-${process.pid}`;
   try {
-    raw = readFileSync(path, 'utf8');
-  } catch {
-    return;
-  }
-  const original = raw.split('\n').filter(Boolean);
-  const cleaned = stripPlumbingLines(original);
-  const lines = cleaned.lines;
-  const desiredDrop = Math.max(0, lines.length - MAX_EVENTS_PER_LOG);
-
-  // Only archive records the rolling compact already covers — checked PER
-  // LINE across the whole over-cap head, not only up to the first uncovered
-  // one. The old break-at-first-uncovered rule let one late-arriving
-  // high-seq line (or one unparseable line) pin every compacted line behind it
-  // forever (one lane: a single bad line held 41k archived-ready events;
-  // another: the cap break held 201k), and those pinned files are what made
-  // startup restores expensive. Uncovered head lines (not compacted yet, no
-  // seq, or unparseable) are retained in place, in order; nothing the rolling
-  // compact does not cover ever leaves the hot file.
-  const head = lines.slice(0, desiredDrop);
-  const dropped: string[] = [];
-  const retainedHead: string[] = [];
-  for (const line of head) {
-    let seq: unknown;
-    try {
-      seq = JSON.parse(line)?.seq;
-    } catch {
-      seq = undefined;
+    const size = fstatSync(fd).size;
+    if (size <= 0) return;
+    // Streaming line count in 1 MB scan buffers — no whole-file string, no
+    // line array, nothing retained. The newline ring keeps the byte offsets
+    // of the last MAX_EVENTS_PER_LOG+1 newlines, so the over-cap head's end
+    // is known without a second scan.
+    const keep = MAX_EVENTS_PER_LOG + 1;
+    const ring: number[] = [];
+    let ringStart = 0;
+    let totalLines = 0;
+    const scan = Buffer.alloc(1 << 20);
+    let scanned = 0;
+    let lastWasNewline = true;
+    while (scanned < size) {
+      const n = readSync(fd, scan, 0, scan.length, scanned);
+      if (n <= 0) break;
+      for (let i = 0; i < n; i += 1) {
+        if (scan[i] === 0x0a) {
+          totalLines += 1;
+          ring.push(scanned + i + 1);
+          if (ring.length - ringStart > keep) ringStart += 1;
+        }
+      }
+      lastWasNewline = scan[n - 1] === 0x0a;
+      scanned += n;
     }
-    if (typeof seq === 'number' && seq <= compactedThroughSeq) dropped.push(line);
-    else retainedHead.push(line);
-  }
-
-  if (cleaned.removed === 0 && dropped.length === 0) {
-    if (desiredDrop > 0) {
-      console.log(
-        `[event-log-store] trim deferred for ${key}: ${desiredDrop} event(s) are not compacted yet`,
-      );
+    if (!lastWasNewline) totalLines += 1;
+    const desiredDrop = Math.max(0, totalLines - MAX_EVENTS_PER_LOG);
+    if (desiredDrop <= 0) return;
+    const headEnd = ring.length - ringStart === keep ? ring[ringStart] : size;
+    if (headEnd <= 0) return;
+    // Budget the parsed head per pass; a giant head (the freeze shape) trims
+    // across passes instead of stalling the loop once for minutes. A single
+    // event line bigger than the budget still processes whole — one line,
+    // never the whole file.
+    let processedEnd = headEnd;
+    if (headEnd > TRIM_PASS_BUDGET_BYTES) {
+      const slice = readRange(fd, 0, TRIM_PASS_BUDGET_BYTES);
+      const lastNl = slice.lastIndexOf(0x0a);
+      processedEnd = lastNl >= 0
+        ? lastNl + 1
+        : readRange(fd, 0, headEnd).lastIndexOf(0x0a) + 1 || headEnd;
     }
-    return;
-  }
-  if (dropped.length > 0) {
-    try {
+    // Parse each processed head line ONCE (the old path parsed every line of
+    // the whole file, twice). Only archive records the rolling compact
+    // already covers; uncovered head lines (not compacted yet, no seq, or
+    // unparseable) are retained in place, in order — nothing the rolling
+    // compact does not cover ever leaves the hot file. Plumbing lines drop
+    // except the last one seen (the watermark); the untouched remainder keeps
+    // every plumbing line until a later pass reaches it, so nothing is lost.
+    const headLines = readRange(fd, 0, processedEnd).toString('utf8').split('\n').filter(Boolean);
+    const parsedHeads = headLines.map((raw) => {
+      try {
+        const record = JSON.parse(raw);
+        return { raw, seq: typeof record?.seq === 'number' ? record.seq : null, plumbing: Boolean(record?.ev && isPlumbingEvent(record.ev)) };
+      } catch {
+        return { raw, seq: null, plumbing: false };
+      }
+    });
+    let watermarkIdx = -1;
+    for (let i = 0; i < parsedHeads.length; i += 1) if (parsedHeads[i].plumbing) watermarkIdx = i;
+    const dropped: string[] = [];
+    const retainedHead: string[] = [];
+    let plumbingRemoved = 0;
+    for (let i = 0; i < parsedHeads.length; i += 1) {
+      const p = parsedHeads[i];
+      if (p.plumbing) {
+        if (i === watermarkIdx) retainedHead.push(p.raw);
+        else plumbingRemoved += 1;
+        continue;
+      }
+      if (typeof p.seq === 'number' && p.seq <= compactedThroughSeq) dropped.push(p.raw);
+      else retainedHead.push(p.raw);
+    }
+    if (dropped.length === 0 && plumbingRemoved === 0) {
+      if (desiredDrop > 0) {
+        console.log(
+          `[event-log-store] trim deferred for ${key}: ${desiredDrop} event(s) are not compacted yet`,
+        );
+      }
+      return;
+    }
+    if (dropped.length > 0) {
       // Archive must land BEFORE the rewrite. Keep the whole critical section
       // synchronous: shutdown tombstones use appendEventLogSync(), and any
       // await between read and rename would let that terminal line land in the
-      // old file and then be overwritten by our snapshot.
-      appendFileSync(archivePath(key), dropped.join('\n') + '\n', 'utf8');
-    } catch (err) {
-      console.warn(
-        `[event-log-store] archive failed for ${key}, leaving log untrimmed:`,
-        (err as Error).message,
-      );
-      return;
+      // old file and then be overwritten by our snapshot. Written one line at
+      // a time — never one whole-file join string.
+      const afd = openSync(archivePath(key), 'a');
+      try {
+        for (const line of dropped) writeSync(afd, `${line}\n`, null, 'utf8');
+        closeSync(afd);
+      } catch (err) {
+        try { closeSync(afd); } catch { /* already closed */ }
+        console.warn(
+          `[event-log-store] archive failed for ${key}, leaving log untrimmed:`,
+          (err as Error).message,
+        );
+        return;
+      }
     }
-  }
-
-  const keptLines = [...retainedHead, ...lines.slice(desiredDrop)];
-  const kept = keptLines.length ? keptLines.join('\n') + '\n' : '';
-  const tmp = `${path}.compact-${process.pid}`;
-  try {
-    writeFileSync(tmp, kept, 'utf8');
-    renameSync(tmp, path);
-    bumpEventLogRevision();
-    console.log(
-      `[event-log-store] cleaned ${key}: dropped ${cleaned.removed} plumbing event(s), archived ${dropped.length} compacted event(s), retained ${retainedHead.length} uncovered event(s)`,
-    );
-  } catch (err) {
-    try { unlinkSync(tmp); } catch { /* best-effort stale temp cleanup */ }
-    console.warn('[event-log-store] compact failed', key, (err as Error).message);
+    try {
+      const wfd = openSync(tmp, 'w');
+      try {
+        for (const line of retainedHead) writeSync(wfd, `${line}\n`, null, 'utf8');
+        // Verbatim remainder — the unprocessed head plus the retained window
+        // — copied in 1 MB ranges: never parsed, never joined.
+        const chunk = 1 << 20;
+        for (let off = processedEnd; off < size; off += chunk) {
+          const end = Math.min(off + chunk, size);
+          const buf = readRange(fd, off, end);
+          if (buf.length) writeSync(wfd, buf);
+        }
+      } finally {
+        closeSync(wfd);
+      }
+      renameSync(tmp, path);
+      bumpEventLogRevision();
+      console.log(
+        `[event-log-store] cleaned ${key}: dropped ${plumbingRemoved} plumbing event(s), archived ${dropped.length} compacted event(s), retained ${retainedHead.length} uncovered event(s)`,
+      );
+      const remainingHead = desiredDrop - headLines.length;
+      if (remainingHead > 0) {
+        console.log(
+          `[event-log-store] trim pass budget reached for ${key}: ${remainingHead} head line(s) remain for the next pass`,
+        );
+      }
+    } catch (err) {
+      try { unlinkSync(tmp); } catch { /* best-effort stale temp cleanup */ }
+      console.warn('[event-log-store] compact failed', key, (err as Error).message);
+    }
+  } finally {
+    closeSync(fd);
   }
 }
 
