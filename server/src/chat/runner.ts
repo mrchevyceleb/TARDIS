@@ -3170,15 +3170,22 @@ async function spawnSession(
   // retired so the lookup cannot wedge on it); the other lanes keep their own
   // readiness shapes (claude warmups legitimately run long).
   let ok: boolean;
+  let readyTimedOut = false;
   if (session instanceof AgySession) {
     const state = await session.waitForInitOrExit(AGY_READY_TIMEOUT_MS);
     ok = state === 'initialized';
+    readyTimedOut = state === 'timeout';
     if (state === 'timeout') session.shutdown('ready-timeout');
   } else {
     ok = await session.ready;
   }
   if (!ok) {
-    if (session.isDisposed() || sessionsShuttingDown) {
+    // A ready-timeout is a startup FAILURE, not an intentional cancellation.
+    // Routed as intentional it bypassed the breaker and the stale-resume
+    // retry, so a hanging --conversation resume was retried forever with no
+    // cooldown. It flows into the normal failure path: one fresh retry
+    // without the resume id, then the breaker.
+    if (!readyTimedOut && (session.isDisposed() || sessionsShuttingDown)) {
       throw new Error('claude startup was intentionally cancelled');
     }
     const owner = sessions.get(key);

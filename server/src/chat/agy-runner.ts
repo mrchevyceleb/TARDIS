@@ -227,7 +227,11 @@ export class AgySession {
       // honestly, then retire the process.
       if (this.initSeen) {
         if (this.turnStartedAt !== null) {
-          this.turnFailed = { message: `agy process error: ${err.message}`, code: 'error' };
+          // A process error during Stop's kill grace is the cancellation Stop
+          // asked for, not an engine failure (same honesty as onExit).
+          this.turnFailed = this.retiring
+            ? { message: 'This turn was cancelled before it finished.', code: 'aborted' }
+            : { message: `agy process error: ${err.message}`, code: 'error' };
           this.finishTurn();
         }
         this.shutdown('child-error');
@@ -838,6 +842,17 @@ export class AgySession {
 
   shutdown(reason = 'unspecified'): void {
     if (this.disposed) return;
+    // A cancellation Stop promised must land before disposal: emit() refuses
+    // every event from a disposed session, so a turn still open here (shutdown
+    // racing Stop's kill grace) would lose its promised cancelled terminal and
+    // turnEnd at both later close sites — the 5s backstop returns on disposed,
+    // and onExit's retiring branch finishes after disposal with every emit
+    // swallowed. Close it now, while emit still works; turnStartedAt going
+    // null makes both later sites skip, so the cancellation lands exactly once.
+    if (this.retiring && this.turnStartedAt !== null) {
+      this.turnFailed = { message: 'This turn was cancelled before it finished.', code: 'aborted' };
+      this.finishTurn();
+    }
     this.disposed = true;
     if (this.stallTimer) { clearTimeout(this.stallTimer); this.stallTimer = null; }
     console.log(`[chat ${this.cli}/agy] shutdown key=${this.key} reason=${reason}`);
