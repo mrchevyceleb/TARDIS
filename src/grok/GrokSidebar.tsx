@@ -48,6 +48,7 @@ import { MoveToGroupMenu, RailGroupSection, RailNewGroup } from './RailGroups';
 import { OTHER_GROUP_ID, OTHER_GROUP_NAME } from './railGroups';
 import { useRailGroups } from './useRailGroups';
 import { agentMark, DISC_INK, agentColor, agentAvatarUrl, sameChatId, CHAT_COLORS, chatColorOf, type Agent, type AgentFlagPatch, type ChatColor } from './agents';
+import { useDeskPrs } from '../data/desk';
 import { useLive } from '../chat/hooks/useLive';
 import { useJobsSummary } from '../chat/hooks/useJobs';
 import { RailJobsBadge } from '../chat/components/jobs/RailJobsBadge';
@@ -798,7 +799,7 @@ export function BotRail(props: BotRailProps) {
                 <Pencil size={12} />
               </span>
             </span>
-            <span className="bt-conv-sub">{r.item?.preview ?? 'No work yet — give them something real.'}</span>
+            <AgentPrsSub name={a.name} fallback={r.item?.preview} />
             {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
           </span>
         </button>
@@ -1086,4 +1087,16 @@ export function BotRail(props: BotRailProps) {
       />
     </aside>
   );
+}
+
+// The snippet line under a teammate's name: their open PRs when the server
+// serves them (feature-detected: an older server 404s and the line keeps the
+// chat preview), else the chat preview.
+function AgentPrsSub({ name, fallback }: { name: string; fallback?: string }) {
+  const { data } = useDeskPrs(true);
+  const mine = (data?.prs ?? []).filter((p) => p.owner === name);
+  const line = mine
+    .map((p) => `${p.repo.split('/')[1]} #${p.number} · ${p.reviewer ? `with ${p.reviewer}` : p.state === 'merged' ? 'merged' : p.state === 'ci' ? 'CI' : p.state}`)
+    .join(' · ');
+  return <span className="bt-conv-sub">{line || fallback ?? 'No work yet — give them something real.'}</span>;
 }

@@ -50,12 +50,27 @@ export type DeskCard = {
   archived?: boolean;
 };
 
+/** An open (or just-merged) pull request a teammate owns, pulled from GitHub
+ *  by the server. Absent on an older server: the client falls back to its
+ *  lines, so a dist swap lands before the server piece rides. */
+export type DeskPr = {
+  owner: string;
+  repo: string;
+  number: number;
+  title: string;
+  state: 'draft' | 'ci' | 'merged' | 'open';
+  reviewer?: string;
+  url: string;
+  updatedAt: string;
+};
+
 export type DeskSnapshot = {
   rev: number;
   owner: DeskActor;
   columns: Array<{ key: DeskColumn; title: string }>;
   todos: DeskTodo[];
   cards: DeskCard[];
+  prs?: DeskPr[];
 };
 
 /** An open high-priority item, as the summary poll lists it (newest first). */
@@ -219,6 +234,7 @@ export function deskDeepLinkUrl(ref: DeskRef): string {
 
 const DESK_KEY = ['desk'] as const;
 const SUMMARY_KEY = ['desk-summary'] as const;
+const PRS_KEY = ['desk-prs'] as const;
 const fetchDesk = ({ signal }: { signal: AbortSignal }) => apiJson<DeskSnapshot>('/api/desk', { signal, cache: 'no-store' });
 
 /** Full desk, polled while the room is open. Agents write here from their own
@@ -256,6 +272,21 @@ export function useDeskSummary(enabled: boolean) {
     refetchInterval: 20_000,
     refetchOnWindowFocus: 'always',
     staleTime: 5_000,
+    retry: false,
+  });
+}
+
+/** The sidebar's PR lines: a light poll of the cached server pull. An older
+ *  server without /api/desk/prs 404s and this stays empty, so the dist swap
+ *  works against the current server (feature-detected). */
+export function useDeskPrs(enabled: boolean) {
+  return useQuery({
+    queryKey: PRS_KEY,
+    queryFn: ({ signal }) => apiJson<{ prs: DeskPr[] }>('/api/desk/prs', { signal, cache: 'no-store' }),
+    enabled,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: 'always',
+    staleTime: 30_000,
     retry: false,
   });
 }
