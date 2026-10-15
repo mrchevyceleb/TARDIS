@@ -1,4 +1,5 @@
 import { assertSubscriptionLane } from './subscription-policy.ts';
+import { eventInner, eventType, isAutomationPeerEvent, isNoopToken } from './routineNoise.ts';
 import type express from 'express';
 import type { Server } from 'node:http';
 import { basename } from 'node:path';
@@ -273,7 +274,64 @@ function isSuccessfulResult(se: DispatchSeqEvent): boolean {
   return event?.type === 'result' && event.is_error === false;
 }
 
-function filterReplayEvents(events: DispatchSeqEvent[]): DispatchSeqEvent[] {
+/** The frame's assistant text when it is a full assistant message carrying
+ *  non-empty text content, else null (tool-only and non-assistant frames). */
+function assistantFrameText(se: DispatchSeqEvent): string | null {
+  const inner = eventInner(se.ev);
+  if (!inner || inner.type !== 'assistant') return null;
+  const message = inner.message as { content?: unknown } | undefined;
+  if (!Array.isArray(message?.content)) return null;
+  const parts: string[] = [];
+  for (const block of message.content) {
+    const b = block as { type?: string; text?: unknown } | null;
+    if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) parts.push(b.text);
+  }
+  return parts.length ? parts.join('\n') : null;
+}
+
+/** Matt, Oct 15 (card-f38410): a background-lane automation turn that ends in
+ *  NO_UPDATE is protocol quiet, but its between-tool notes and summary text
+ *  render like spoken messages in the person's chat. Drop that turn's
+ *  assistant text frames from the replay; the durable log and the agent's own
+ *  session window keep them, so only the person-facing render changes. Scope:
+ *  full assistant frames (the shape every reported lane used); streamed-
+ *  engine text is a follow-up if those lanes report the same noise. A span
+ *  hides only when its own origin was seen as an automation delivery and its
+ *  last text is exactly a no-op token; a mid-turn steer or an unseen origin
+ *  stays visible. */
+function hideQuietAutomationTurnText(events: DispatchSeqEvent[]): DispatchSeqEvent[] {
+  const out: DispatchSeqEvent[] = [];
+  let span: DispatchSeqEvent[] = [];
+  let spanIsAutomation = false;
+  const flushSpan = () => {
+    if (!span.length) return;
+    if (spanIsAutomation) {
+      let lastText: string | null = null;
+      for (let i = span.length - 1; i >= 0; i -= 1) {
+        lastText = assistantFrameText(span[i]);
+        if (lastText !== null) break;
+      }
+      if (lastText === null || !isNoopToken(lastText)) out.push(...span);
+      else for (const se of span) if (assistantFrameText(se) === null) out.push(se);
+    } else out.push(...span);
+    span = [];
+    spanIsAutomation = false;
+  };
+  for (const se of events) {
+    const t = eventType(se.ev);
+    // Home and background lanes interleave in one log; a background turn's
+    // span runs from its delivery to the next delivery, turn end or lane gap.
+    if (span.length && (se.lane !== 'bg' || t === 'peer_message' || t === 'turnEnd')) flushSpan();
+    if (se.lane !== 'bg') { out.push(se); continue; }
+    if (span.length === 0) spanIsAutomation = t === 'peer_message' && isAutomationPeerEvent(se.ev);
+    span.push(se);
+  }
+  flushSpan();
+  return out;
+}
+
+export function filterReplayEvents(events: DispatchSeqEvent[]): DispatchSeqEvent[] {
+  events = hideQuietAutomationTurnText(events);
   let lastSuccessSeq = -1;
   for (const se of events) {
     if (isSuccessfulResult(se)) lastSuccessSeq = se.seq;
