@@ -1425,8 +1425,11 @@ const TRIM_DEEP_WINDOW_BYTES = 1 << 20;
  *  (the Oct 15 verify finding). Invalidated by a coverage advance (seq
  *  mismatch), by a rewrite (deleted on success — byte offsets shift), and by
  *  a replaced or truncated log (ino/size mismatch); appends keep offsets
- *  valid, so a growing lane still resumes where it stopped. */
-const trimScanFrontier = new Map<string, { at: number; seq: number; ino: number }>();
+ *  valid, so a growing lane still resumes where it stopped. The frontier is
+ *  mode-scoped too (drops): a within-cap frontier was verified for the
+ *  plumbing strip only and must never skip the head once appends make the
+ *  log over-cap (the Oct 15 final-verify finding). */
+const trimScanFrontier = new Map<string, { at: number; seq: number; ino: number; drops: boolean }>();
 
 /** One pass's partition of a parsed byte range. */
 type TrimDecisions = { dropped: string[]; retained: string[]; plumbingRemoved: number };
@@ -1611,15 +1614,26 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
     let processedEnd = 0;
     let headLineCount = 0;
     const cursor = trimScanFrontier.get(key);
-    if (cursor !== undefined && cursor.seq === compactedThroughSeq && cursor.ino === st.ino && cursor.at <= size) {
+    if (cursor !== undefined && cursor.seq === compactedThroughSeq && cursor.ino === st.ino && cursor.drops === coverageDrops && cursor.at <= size) {
       // A prior pass verified [0, cursor.at) droppable-free under this
-      // coverage seq on this same file, and the log has only grown since
-      // (appends keep offsets valid). Resume the window scan with a full
+      // coverage seq AND this drop mode on this same file, and the log has
+      // only grown since (appends keep offsets valid). The mode guard
+      // matters: a within-cap frontier was verified for the plumbing strip
+      // only, so it must never skip the head once appends make the log
+      // over-cap — the newly droppable old prefix needs the head pass (the
+      // Oct 15 final-verify finding). Resume the window scan with a full
       // budget — no head re-parse — so retries advance instead of
-      // rescanning the same empty prefix.
-      const scan = scanDroppableWindow(fd, size, cursor.at, Math.min(size, cursor.at + TRIM_PASS_BUDGET_BYTES), coverageDrops, compactedThroughSeq);
+      // rescanning the same empty prefix. Over cap the cap clamps to
+      // scopeEnd: removal stays limited to the over-cap head, and the
+      // retained window keeps its covered records until the head boundary
+      // reaches them. Within cap the strip stays unclamped — plumbing
+      // anywhere is noise, and stripping it is the point.
+      const cursorCap = coverageDrops
+        ? Math.min(scopeEnd, cursor.at + TRIM_PASS_BUDGET_BYTES)
+        : cursor.at + TRIM_PASS_BUDGET_BYTES;
+      const scan = scanDroppableWindow(fd, size, cursor.at, Math.min(size, cursorCap), coverageDrops, compactedThroughSeq);
       if (!scan.found) {
-        trimScanFrontier.set(key, { at: scan.scannedTo, seq: compactedThroughSeq, ino: st.ino });
+        trimScanFrontier.set(key, { at: scan.scannedTo, seq: compactedThroughSeq, ino: st.ino, drops: coverageDrops });
         if (desiredDrop > 0) {
           console.log(
             `[event-log-store] trim deferred for ${key}: ${desiredDrop} event(s) are not compacted yet`,
@@ -1641,21 +1655,30 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
           processedEnd = boundary + 1;
         } else {
           // No complete line inside the budget: the first line alone
-          // exceeds it. Process exactly that one line, bounded past the
-          // budget by the head scope (over cap) or one extra budget (within
-          // cap); a line bigger than that defers the pass rather than
-          // splitting it.
-          const probeEnd = scopeEnd > budgetEnd
-            ? scopeEnd
-            : Math.min(size, budgetEnd + TRIM_PASS_BUDGET_BYTES);
-          const nl = readRange(fd, budgetEnd, probeEnd).indexOf(0x0a);
+          // exceeds it. Find its end in bounded 1 MB reads — never one
+          // allocation spanning the whole head scope, which a huge over-cap
+          // head could turn straight back into the memory spike this
+          // rewrite exists to prevent (the Oct 15 final-verify finding).
+          // One line, never the whole file; a line bigger than two budgets
+          // defers the pass rather than splitting it.
+          const hardEnd = Math.min(
+            scopeEnd > budgetEnd ? scopeEnd : size,
+            budgetEnd + TRIM_PASS_BUDGET_BYTES,
+          );
+          let nl = -1;
+          for (let off = budgetEnd; off < hardEnd; off += (1 << 20)) {
+            const probe = readRange(fd, off, Math.min(off + (1 << 20), hardEnd));
+            if (probe.length === 0) break;
+            const hit = probe.indexOf(0x0a);
+            if (hit >= 0) { nl = off + hit; break; }
+          }
           if (nl < 0) {
             console.log(
               `[event-log-store] trim deferred for ${key}: head line exceeds pass budget`,
             );
             return;
           }
-          processedEnd = budgetEnd + nl + 1;
+          processedEnd = nl + 1;
         }
       }
       const head = decideTrimRange(fd, 0, processedEnd, coverageDrops, compactedThroughSeq);
@@ -1667,15 +1690,20 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
         // droppable record past it — an all-live oldest window (the
         // fold-coverage residual) keeps covered records and plumbing deeper
         // in the file forever, and every retry re-parses the same empty
-        // prefix. Scan past the head instead, inside the remaining pass
-        // budget (at least one window, so a budget-sized empty head still
-        // advances), and record the frontier when nothing is found.
-        // The remaining pass budget, floored at one window so a head that
-        // already consumed the budget still advances one window per pass.
-        const cap = processedEnd + Math.max(TRIM_DEEP_WINDOW_BYTES, TRIM_PASS_BUDGET_BYTES - processedEnd);
+        // prefix. Scan the rest of the head scope instead, inside the
+        // remaining pass budget (at least one window, so a budget-sized
+        // empty head still advances), and record the frontier when nothing
+        // is found. Over cap the cap clamps to scopeEnd — removal stays
+        // limited to the over-cap head, so the retained window keeps its
+        // covered records until the head boundary reaches them (the Oct 15
+        // final-verify finding). Within cap the strip is unclamped:
+        // plumbing anywhere is noise, and stripping it is the point.
+        const cap = coverageDrops
+          ? Math.min(scopeEnd, processedEnd + Math.max(TRIM_DEEP_WINDOW_BYTES, TRIM_PASS_BUDGET_BYTES - processedEnd))
+          : processedEnd + Math.max(TRIM_DEEP_WINDOW_BYTES, TRIM_PASS_BUDGET_BYTES - processedEnd);
         const scan = scanDroppableWindow(fd, size, processedEnd, cap, coverageDrops, compactedThroughSeq);
         if (!scan.found) {
-          trimScanFrontier.set(key, { at: scan.scannedTo, seq: compactedThroughSeq, ino: st.ino });
+          trimScanFrontier.set(key, { at: scan.scannedTo, seq: compactedThroughSeq, ino: st.ino, drops: coverageDrops });
           if (desiredDrop > 0) {
             console.log(
               `[event-log-store] trim deferred for ${key}: ${desiredDrop} event(s) are not compacted yet`,
