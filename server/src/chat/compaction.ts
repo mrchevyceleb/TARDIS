@@ -1266,15 +1266,19 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
   // working window (the model never saw them there), so this cannot duplicate
   // what the window shows — it is the only path their content survives on.
   //
-  // A pseudo-turn's seq must NEVER advance the coverage boundary past a
-  // visible turn that has not folded yet (windowed or aged): once the
-  // boundary passes it, that turn is considered covered and is dropped
-  // forever when it later ages out. So pseudo-turns only join the overflow
-  // below the frontier of the oldest unfolded visible turn; newer ones wait
-  // for the window to age past them and join a later fold.
-  const unfoldedVisible = visible.filter((t) => t.seq > lastSeq);
-  const visibleFrontier = unfoldedVisible.length ? unfoldedVisible[0].seq : Number.POSITIVE_INFINITY;
-  const peerOverflow = uncoveredPeerTurns(events, lastSeq).filter((t) => t.seq < visibleFrontier);
+  // A pseudo-turn's seq must NEVER advance the coverage boundary past
+  // material that was not folded. Capping at the oldest unfolded visible
+  // turn is not enough: the catch-up loop folds MANY aged turns in one
+  // pass, so the boundary would leap past delivery turns excluded above
+  // that frontier and mark them covered unsummarized. The correct cap is
+  // the WINDOW boundary — the oldest retained working-window turn: every
+  // merged overflow member (aged turns and capped delivery turns alike)
+  // then sits below the window boundary, so every batch boundary lands
+  // below it, the windowed turns are never marked covered, and delivery
+  // turns still inside the window wait for the window to age past them
+  // and join a later fold.
+  const windowStartSeq = windowed.window.length ? windowed.window[0].seq : Number.POSITIVE_INFINITY;
+  const peerOverflow = uncoveredPeerTurns(events, lastSeq).filter((t) => t.seq < windowStartSeq);
   const overflow = [...windowed.overflow, ...peerOverflow].sort((a, b) => a.seq - b.seq);
   let overflowNew = overflow.filter((t) => t.seq > lastSeq);
   // Overflow is oldest-first: the newest aged turn's seq minus the compact's
@@ -1313,6 +1317,11 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
       }
     }
     const total = rec?.userTurnsTotal ?? countUserEchoes(events);
+    // A reconstructed total (no state record existed at read time) must ADD
+    // the live record's count at write time — the record was created after
+    // the event snapshot, so its whole count is post-snapshot pressure a
+    // Math.max would lose. A captured total is preserved with Math.max.
+    const totalWasReconstructed = !rec;
 
     for (let batch = 0; batch < MAX_CATCHUP_BATCHES; batch++) {
       overflowNew = overflow.filter((t) => t.seq > lastCompactedSeq);
@@ -1379,12 +1388,15 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
       await mutateState((s) => {
         if (epochOf(key) !== epoch) return;
         // Preserve a counter that moved while this fold awaited (a delivery
-        // probe's pressure unit landing mid-fold): the captured total must
-        // never overwrite a newer count.
-        const totalNow = Math.max(s[key]?.userTurnsTotal ?? 0, total);
+        // probe's pressure unit landing mid-fold); a reconstructed total
+        // adds the live record's count (it did not exist at snapshot time).
+        // The watermark stays at the captured total: only what this fold
+        // actually processed is claimed as covered.
+        const liveNow = s[key]?.userTurnsTotal ?? 0;
+        const totalNow = totalWasReconstructed ? total + liveNow : Math.max(liveNow, total);
         s[key] = {
           userTurnsTotal: totalNow,
-          lastCompactUserTurns: totalNow,
+          lastCompactUserTurns: total,
           count,
           lastAt: Date.now(),
           lastWords: generated.words,
@@ -1396,12 +1408,13 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
 
     await mutateState((s) => {
       if (epochOf(key) !== epoch) return;
-      // Same preservation as the in-loop write: a counter that moved while
-      // this fold awaited is never overwritten by the captured total.
-      const totalNow = Math.max(s[key]?.userTurnsTotal ?? 0, total);
+      // Same preservation as the in-loop write; the watermark stays at the
+      // captured total so the compact never claims coverage it lacks.
+      const liveNow = s[key]?.userTurnsTotal ?? 0;
+      const totalNow = totalWasReconstructed ? total + liveNow : Math.max(liveNow, total);
       s[key] = {
         userTurnsTotal: totalNow,
-        lastCompactUserTurns: totalNow,
+        lastCompactUserTurns: total,
         count,
         lastAt: Date.now(),
         lastWords: generatedWords,
