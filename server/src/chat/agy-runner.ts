@@ -225,10 +225,11 @@ export class AgySession {
 
   private markInit(conversationId: string, model: string): void {
     if (this.initSeen) return;
-    // A late init from a process already retired (ready-timeout, shutdown)
-    // must never persist its conversation id or emit: the next spawn would
-    // resume a conversation belonging to a dead process.
-    if (this.disposed) return;
+    // A late init from a process already retired (ready-timeout, shutdown,
+    // or Stop's kill grace) must never persist its conversation id, emit, or
+    // resolve readiness: the next spawn would resume a conversation
+    // belonging to a dead process.
+    if (this.disposed || this.retiring) return;
     this.initSeen = true;
     this.agyConversationId = conversationId;
     console.log(`[chat ${this.cli}/agy] ready ${model} conversation=${conversationId.slice(0, 8)}`);
@@ -545,7 +546,11 @@ export class AgySession {
   }
 
   private onExit(code: number | null, signal: NodeJS.Signals | null): void {
-    const intentional = this.disposed;
+    // A Stop-begun retirement is an intentional close: an exit during the
+    // kill grace must not masquerade as a crash (a retryable engine failure
+    // instead of the cancellation it is), and the closed event rides the
+    // intentional path.
+    const intentional = this.disposed || this.retiring;
     console.log(`[chat ${this.cli}/agy] exit code=${code} signal=${signal ?? '-'} initSeen=${this.initSeen}${intentional ? ' (intentional)' : ''}`);
     if (!this.initSeen) {
       this.resolveReady(false);
@@ -560,6 +565,13 @@ export class AgySession {
     }
     if (!intentional && this.turnStartedAt !== null) {
       this.turnFailed = { message: `agy exited (code ${code ?? signal})`, code: 'exit' };
+      this.finishTurn();
+    }
+    if (this.retiring && this.turnStartedAt !== null) {
+      // Stop owns this turn: close it as cancelled, exactly once (the books
+      // are still open only when agy's own result never landed during the
+      // grace; finishTurn guards the rest).
+      this.turnFailed = { message: 'This turn was cancelled before it finished.', code: 'aborted' };
       this.finishTurn();
     }
     if (intentional) {
