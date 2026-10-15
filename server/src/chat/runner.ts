@@ -2573,7 +2573,7 @@ class ClaudeSession {
       && (this.cli === 'claude' || this.cli === 'assistant')
       && USAGE_FALLBACK_ACCOUNTS.has(this.providerAccountName)
       && this.compactRerunPrompt !== null
-      && this.compactRerunPrompt.text.trim() !== '';
+      && (this.compactRerunPrompt.text.trim() !== '' || (this.compactRerunPrompt.images?.length ?? 0) > 0);
     // Z.ai meters the coding plan in fixed windows, so an exhausted window is
     // never a balance problem and topping up credits cannot clear it. Attribute
     // the failure to the provider THIS child is actually talking to: a 1308
@@ -3387,16 +3387,12 @@ type UsageFallbackJob = {
   images?: Array<{ mediaType: string; base64: string }>;
   retiring: ClaudeSession;
 };
-const usageFallbackJobs = new Set<UsageFallbackJob>();
 
-/** Rerun one usage-limited turn on the backup engine (USAGE_FALLBACK). One per
- *  lane: while a rerun is still landing, a second limited turn on the same
- *  thread folds into it instead of stacking a second replay of its prompt. */
+/** Rerun one usage-limited turn on the backup engine (USAGE_FALLBACK). One
+ *  schedule per limited turn result — a second limited turn on the same lane
+ *  gets its own replay, and the sends queue on the backup session in order,
+ *  so both turns get their answers. */
 function scheduleUsageFallback(job: UsageFallbackJob): void {
-  for (const pending of usageFallbackJobs) {
-    if (pending.logKey === job.logKey && pending.chatId === job.chatId) return;
-  }
-  usageFallbackJobs.add(job);
   console.warn(`[chat] usage limit on ${job.logKey}; rerunning the turn on ${USAGE_FALLBACK.cli} ${USAGE_FALLBACK.model}`);
   void (async () => {
     try {
@@ -3408,20 +3404,34 @@ function scheduleUsageFallback(job: UsageFallbackJob): void {
         await new Promise((resolve) => { const t = setTimeout(resolve, 250); t.unref?.(); });
       }
       if (job.retiring.isBusy()) throw new Error('the limited turn never went idle');
-      const session = await getOrCreateSession({
-        cli: USAGE_FALLBACK.cli,
-        repoPath: job.cwd,
-        chatId: job.chatId,
-        model: USAGE_FALLBACK.model,
-        effort: USAGE_FALLBACK.effort,
-      });
+      const session = await Promise.race([
+        getOrCreateSession({
+          cli: USAGE_FALLBACK.cli,
+          repoPath: job.cwd,
+          chatId: job.chatId,
+          model: USAGE_FALLBACK.model,
+          effort: USAGE_FALLBACK.effort,
+        }),
+        new Promise<never>((_, reject) => {
+          const t = setTimeout(() => reject(new Error('the backup engine did not start within 120s')), 120_000);
+          t.unref?.();
+        }),
+      ]);
+      // Same synchronous slice as send(): a newer turn on the lane's own
+      // engine may have started while the backup session was being created
+      // (retirement skips busy children, so both engines can briefly be live).
+      // The newest turn owns the thread, so if it is busy this replay stands
+      // down and that turn's own result handles whatever happens to it.
+      for (const s of sessions.values()) {
+        if (s.logKey === job.logKey && s.cli !== USAGE_FALLBACK.cli && s.isAlive()
+          && typeof s.isBusy === 'function' && s.isBusy()) {
+          console.warn(`[chat] usage fallback on ${job.logKey} stood down: a newer turn is running on ${s.cli}`);
+          return;
+        }
+      }
       await session.send(job.text, job.images, {});
     } catch (err) {
-      usageFallbackJobs.delete(job);
       await postUsageFallbackFailureNotice(job, (err as Error).message);
-      return;
-    } finally {
-      usageFallbackJobs.delete(job);
     }
   })();
 }
