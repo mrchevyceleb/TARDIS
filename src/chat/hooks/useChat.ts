@@ -450,9 +450,12 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // result carries the whole reply plus its own narration, so Felix's
     // reply rendered twice), so the gate is turn-scoped presence, not
     // equality. Legacy thought blocks never count: a thought an older build
-    // surfaced must not suppress the real reply as "already rendered".
+    // surfaced must not suppress the real reply as "already rendered". An
+    // empty streamed block is not a delivered answer: only non-empty parts
+    // count, so an empty block before a disconnect cannot swallow the
+    // canonical result.
     const finalTurnParts = closed
-      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && !b.thought && (!finalTurnId || b.turnId === finalTurnId))
+      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && !b.thought && b.text.trim().length > 0 && (!finalTurnId || b.turnId === finalTurnId))
       .map((b) => b.text);
     if (finalText && finalTurnParts.length === 0) {
       return [...closed, {
@@ -1664,6 +1667,13 @@ export function useChat(opts: {
           }
           socketReadyRef.current = true;
           busyConfirmedRef.current = true;
+          // The ready frame is the authoritative lane state (card-e2bd7a): the
+          // home lane's busy is the server's own busy report, and the bg lane
+          // resets to the server's word when it sends one (bgBusy; absent on
+          // an older server, so an in-flight bg turn's indicator waits for its
+          // turnEnd rather than a stale flag stranding streaming forever).
+          homeBusyRef.current = msg.busy === true;
+          bgBusyRef.current = msg.bgBusy === true;
           serverCliRef.current = typeof msg.activeCli === 'string'
             ? msg.activeCli as CompanionId
             : cli;
@@ -1905,6 +1915,9 @@ export function useChat(opts: {
           settleInitialMessage();
           queuedSteerRef.current = new Set();
           pendingSendRef.current = false;
+          // A fresh start is a clean slate for both lanes' busy flags.
+          homeBusyRef.current = false;
+          bgBusyRef.current = false;
           socketReadyRef.current = msg.remote !== true;
           dropReplayOps();
           setBlocks([]);
