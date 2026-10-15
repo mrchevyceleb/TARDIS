@@ -361,6 +361,18 @@ function openRouterEnv(model: string): NodeJS.ProcessEnv {
   // card-faf580): text-only OpenRouter models reject native image blocks the
   // same way. Mirrors the session's textOnlyLane.
   if (!openRouterCapability(model)?.imageInput) env.RIVENDELL_NO_VISION = '1';
+  // Long tool calls (file writes over SSH, long shell) died at the CLI's
+  // 2-minute Bash-tool default, retried twice, then ended the turn as
+  // error_during_execution mid tool call (Oct 15: 127 aborted_streaming
+  // results on Felix's lane; short calls always fine). No lane in the family
+  // sets these, so the defaults only bit where long tool calls are normal
+  // work. House allowance: 10-minute default per Bash call, 1-hour ceilings
+  // for Bash, MCP tools, and API requests (the agy lane passes
+  // --print-timeout 3600s for the same hour).
+  env.BASH_DEFAULT_TIMEOUT_MS = '600000';
+  env.BASH_MAX_TIMEOUT_MS = '3600000';
+  env.MCP_TOOL_TIMEOUT = '3600000';
+  env.API_TIMEOUT_MS = '3600000';
   env.SAMWISE_ACCOUNT = 'openrouter';
   return env;
 }
