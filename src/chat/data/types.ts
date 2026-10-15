@@ -156,6 +156,12 @@ export type ChatBlock =
       /** Written by the agent's background lane, which streams alongside the home lane. */
       lane?: 'bg';
       cbIndex?: number;
+      /** Agy step identity (card-e2bd7a): the runner stamps the emitting
+       *  step's index and conversation on its message_start frames, so an
+       *  agy_thinking demotion marker targets this exact block, never a
+       *  same-shaped block from another lane or session. */
+      agyStep?: number;
+      agySession?: string;
       open?: boolean;
       /** Durable event-log seq for this block. Used to pin emoji reactions. */
       seq?: number;

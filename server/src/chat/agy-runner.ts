@@ -100,6 +100,7 @@ type AgyStepBuffer = {
   done: boolean;
   opened: boolean;
   closed: boolean;
+  demoted?: boolean;
   name?: string;
   parameters?: unknown;
   output?: string;
@@ -172,6 +173,7 @@ export class AgySession {
   /** Final assistant text of the turn; the client's `result.result` recovery
    *  path re-renders it if the streamed blocks never made it on screen. */
   private lastAssistantText = '';
+  private suppressResultText = false;
   /** Who the current turn is for (see ClaudeSession.turnOrigin). */
   private turnOrigin: TurnOrigin = emptyTurnOrigin();
   /** Last shared-log seq this process was told about by the lane recap. */
@@ -435,6 +437,46 @@ export class AgySession {
         } else {
           const response = typeof result.response === 'string' ? result.response : '';
           if (response.trim()) this.lastAssistantText = response;
+          // The terminal result is the only reliable narration signal
+          // (card-e2bd7a): the CLI repeats narration verbatim ahead of the
+          // answer, so a closed text step whose text the result carries as a
+          // whitespace-insensitive prefix — or equals, when a LATER text step
+          // streamed the actual answer — is thinking, not a reply. Demote
+          // those steps with agy_thinking markers emitted BEFORE the result
+          // event (live and replay mark the same blocks) and strip the
+          // narration out of the emitted result text, so the answer renders
+          // exactly once and thinking never prints as it. Step position
+          // alone is never the signal: a genuine multi-part reply separated
+          // by tool activity carries no narration repeat and stays visible.
+          if (response.trim()) {
+            const squash = (s: string) => s.replace(/\s+/g, '');
+            let effective = response;
+            const ordered = [...this.stepBuffers.entries()].sort((a, b) => a[0] - b[0]);
+            for (const [idx, b] of ordered) {
+              if (b.kind !== 'text' || !b.text.trim() || b.demoted) continue;
+              const bSq = squash(b.text);
+              const rSq = squash(effective);
+              if (bSq === rSq) {
+                const laterAnswer = ordered.some(([j, o]) => j > idx && o.kind === 'text' && o.text.trim());
+                if (laterAnswer) {
+                  // The result repeats only the narration while a later step
+                  // already streamed the answer: demote the narration and
+                  // suppress the copy.
+                  b.demoted = true;
+                  this.emit({ type: 'event', event: { type: 'agy_thinking', step_index: idx, session_id: this.agyConversationId ?? '' } });
+                }
+                // Either way the result adds nothing over streamed text.
+                this.suppressResultText = true;
+              } else if (rSq.startsWith(bSq) && rSq.length > bSq.length) {
+                // Narration prefix ahead of a longer answer: demote the
+                // narration and strip it from the emitted result text.
+                b.demoted = true;
+                this.emit({ type: 'event', event: { type: 'agy_thinking', step_index: idx, session_id: this.agyConversationId ?? '' } });
+                if (effective.startsWith(b.text)) effective = effective.slice(b.text.length);
+              }
+            }
+            if (effective.trim() && effective !== response) this.lastAssistantText = effective;
+          }
         }
         // The terminal result's usage merges with the step accumulation
         // per field: a present, valid terminal counter wins for its field;
@@ -520,7 +562,7 @@ export class AgySession {
         if (buf.kind === 'tool') {
           this.emitToolCard(stream, buf);
         } else {
-          stream({ type: 'message_start', message: { id: randomUUID(), type: 'message', role: 'assistant', content: [], model: this.spawnModel, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } } });
+          stream({ type: 'message_start', step_index: idx, session_id: this.agyConversationId ?? '', message: { id: randomUUID(), type: 'message', role: 'assistant', content: [], model: this.spawnModel, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } } });
           stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
           if (buf.text) stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: buf.text } });
         }
@@ -603,7 +645,8 @@ export class AgySession {
       this.emit({ type: 'event', event: { type: '_terminal_error', message: plain, code: failed.code ?? 'error', retryable: true, ts: Date.now() } });
     }
     const usage = this.resultUsage ?? { input: this.turnUsage.input, output: this.turnUsage.output, cacheRead: this.turnUsage.cacheRead };
-    this.emit({ type: 'event', event: { type: 'result', subtype: failed ? 'error' : 'success', is_error: Boolean(failed), ...(failed ? {} : { result: this.lastAssistantText }), session_id: this.agyConversationId ?? '', usage: { input_tokens: usage.input, output_tokens: usage.output, cache_read_input_tokens: usage.cacheRead } } });
+    this.emit({ type: 'event', event: { type: 'result', subtype: failed ? 'error' : 'success', is_error: Boolean(failed), ...(failed ? {} : { result: this.suppressResultText ? '' : this.lastAssistantText }), session_id: this.agyConversationId ?? '', usage: { input_tokens: usage.input, output_tokens: usage.output, cache_read_input_tokens: usage.cacheRead } } });
+    this.suppressResultText = false;
     // The turn's context accounting, once, at the boundary: the terminal
     // result's usage when it carried one, else the sanitized step accumulation.
     recordContextUsage(this.contextKey, 'agy', { input_tokens: usage.input, output_tokens: usage.output, cache_read_input_tokens: usage.cacheRead, cache_creation_input_tokens: 0 });
@@ -802,6 +845,7 @@ export class AgySession {
       this.automationTurn = automationRequest;
       this.terminalNoticeEmitted = false;
       this.turnFailed = null;
+      this.suppressResultText = false;
       this.turnUsage = { input: 0, output: 0, cacheRead: 0 };
       this.resultUsage = null;
       this.turnOrigin = emptyTurnOrigin();
