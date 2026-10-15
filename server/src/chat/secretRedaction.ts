@@ -27,12 +27,18 @@ function redactOpaqueToken(token: string, offset: number, source: string): strin
   }
   // A path, not a credential (Matt, Oct 15: Felix's Fangorn replies printed
   // file:///C:/... links as [redacted secret]): keep only a token that sits
-  // directly under the file scheme or a Windows drive prefix, which is
-  // positively a filesystem path. Everything else stays under the opaque
-  // rule: an opaque URL path segment (https://host/<token>) is redacted by
-  // default, and a bare multi-segment run is more likely a base64 blob than
-  // a path.
-  if (/(?:[A-Za-z]:[\\/]?|file:\/{1,4})$/.test(context.slice(-12))) {
+  // directly under the file scheme or a drive prefix glued to a
+  // separator-leading token, which is positively a filesystem path, and only
+  // when no path segment is itself a long high-entropy run: an opaque
+  // credential disguised as a path (or glued after one) still redacts.
+  // Everything else stays under the opaque rule: an opaque URL path segment
+  // (https://host/<token>) redacts by default, and a bare multi-segment run
+  // is more likely a base64 blob than a path.
+  const tail = context.slice(-16);
+  const isFilePathPrefix = /file:\/\+\/?[A-Za-z]?:?$/.test(tail)
+    || /^[A-Za-z]:[\\/]$/.test(tail.slice(-3))
+    || (/[A-Za-z]:$/.test(tail.slice(-2)) && /^[\\/]/.test(token));
+  if (isFilePathPrefix && !token.split('/').some((segment) => /^[0-9a-fA-F]{32,}$/.test(segment))) {
     return token;
   }
   return REDACTED;
