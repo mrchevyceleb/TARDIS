@@ -75,19 +75,30 @@ export type DeskCard = {
   columnSince: string;
   /** Silence is an event (card-baadaf A): every In progress / In QA card
    *  carries a check-in deadline set by the owner's last touch (create,
-   *  move, or comment: default and maximum 30 minutes out). The hygiene tick
+   *  move, or comment: 30 minutes out by default, or a written check-in
+   *  time in the comment honored up to 12 hours out). The hygiene tick
    *  nudges the owner when it passes; 15 quiet minutes later it nudges the
    *  Chief. Only a new touch (a fresh nextCheckAt) clears the nudges. */
   nextCheckAt?: string;
+  /** True when nextCheckAt came from a written check-in time in a comment
+   *  (not the computed touch window): the read-repair caps it at
+   *  CARD_NEXT_CHECK_WRITTEN_MAX_MS instead of CARD_NEXT_CHECK_MS, so a
+   *  legitimate park (an overnight quiet-hours park) survives reloads while
+   *  no deadline can suppress checks indefinitely. */
+  nextCheckWritten?: boolean;
   nudgeAt?: string;
   escalatedAt?: string;
   createdBy?: DeskActor;
   archived?: boolean;
 };
 
-/** The check-in window: every owner touch sets a deadline this far out, and
- *  no touch can push it further. */
+/** The check-in window: every owner touch without a written time sets a
+ *  deadline this far out, and no such touch can push it further. */
 export const CARD_NEXT_CHECK_MS = 30 * 60_000;
+/** A written next check-in time in a comment is honored up to this far out:
+ *  long enough for an overnight quiet-hours park, never long enough to
+ *  suppress checks on a live card indefinitely. */
+export const CARD_NEXT_CHECK_WRITTEN_MAX_MS = 12 * 60 * 60_000;
 /** Quiet time after the owner nudge before the Chief copy. */
 export const CARD_CHECK_ESCALATE_MS = 15 * 60_000;
 
@@ -95,15 +106,154 @@ function validIso(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '' && Number.isFinite(Date.parse(value));
 }
 
-function touchCardNextCheck(card: DeskCard, nowIso: string): void {
+const WRITTEN_CHECK_PHRASE = /\bcheck[\s-]?in\b/gi;
+// A time may state its zone: ET/Eastern is the team convention and honored;
+// any other recognized zone is rejected rather than silently rescheduled as
+// Eastern (a PT time would otherwise fire three hours early). The list is
+// deliberately conservative: an unrecognized zone still assumes Eastern.
+const WRITTEN_CHECK_TIME = /(?:\b(\d{1,2}):(\d{2})\s*(am|pm)?|\b(\d{1,2})\s*(am|pm))(?:\s*(et|eastern|pt|pacific|pst|pdt|ct|central|cst|cdt|mt|mountain|mst|mdt|utc|gmt|cet))?\b/i;
+const WRITTEN_CHECK_ISO_DATE = /\b(\d{4})-(\d{2})-(\d{2})\b/;
+const WRITTEN_CHECK_MONTH_DATE = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?\b/i;
+const WRITTEN_CHECK_MONTHS: Record<string, number> = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+/** A month abbreviation's period ("Oct. 15") is part of the date, not a
+ *  sentence break. */
+const WRITTEN_CHECK_MONTH_ABBR_PERIOD = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.(?=\s)/gi;
+
+/** ET wall clock -> UTC instant. Every written Desk time is Eastern (the
+ *  team's convention), so a check-in time is read in America/New_York. Two
+ *  passes because the DST offset depends on the instant being found. A wall
+ *  time that does not exist on the ET calendar returns NaN so it can never
+ *  become a deadline: a spring-forward gap like 2:30 AM on the jump day, or
+ *  an impossible date like February 31, which Date.UTC silently rolls over.
+ *  A duplicated fall-back time resolves to its first occurrence. */
+function etWallToInstant(year: number, month: number, day: number, hour: number, minute: number): number {
+  const wall = Date.UTC(year, month - 1, day, hour, minute);
+  const etWall = (at: number) => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    }).formatToParts(new Date(at));
+    const n = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? '0');
+    return { year: n('year'), month: n('month'), day: n('day'), hour: n('hour') % 24, minute: n('minute') };
+  };
+  const etOffsetMs = (at: number): number => {
+    const w = etWall(at);
+    return Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute) - at;
+  };
+  const guess = wall - etOffsetMs(wall);
+  const instant = wall - etOffsetMs(guess);
+  // Round-trip the result through America/New_York: only a real ET wall
+  // time maps back onto itself.
+  const got = etWall(instant);
+  if (got.year !== year || got.month !== month || got.day !== day || got.hour !== hour || got.minute !== minute) return Number.NaN;
+  return instant;
+}
+
+/** The Eastern calendar year of an instant: a year-less month date uses it,
+ *  never the host's year, which has already rolled over during the
+ *  late-evening ET hours of December 31. */
+function etCalendarYear(nowMs: number): number {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric' }).formatToParts(new Date(nowMs));
+  return Number(parts.find((p) => p.type === 'year')?.value ?? '0');
+}
+
+/** Parse a written next check-in time out of a comment: "Next check-in: 5:00
+ *  AM ET October 15", "Next check-in is 2026-10-15 07:30 ET, when ...",
+ *  "next check-in 7:30pm". Anchored on the phrase "check-in" (a lone date or
+ *  time elsewhere in a comment never moves a deadline), a "last check-in"
+ *  retrospective is skipped, the time is required (a meridiem-bearing hour
+ *  is 1-12; a stated ET/Eastern zone is honored, a recognized non-Eastern
+ *  zone rejects the statement, Eastern is otherwise assumed), the date is
+ *  optional (a time-only statement already past means tomorrow),
+ *  and a dated statement already past is stale and ignored; a wall time that
+ *  does not exist on the ET calendar (a DST gap or an impossible date) is
+ *  ignored, and a duplicated fall-back time resolves to its first
+ *  occurrence. The LAST usable
+ *  statement in the comment wins. Returns the instant, or null when the
+ *  comment sets no usable check-in time. */
+export function parseWrittenNextCheck(text: string, nowMs: number): number | null {
+  let found: number | null = null;
+  for (const phrase of text.matchAll(WRITTEN_CHECK_PHRASE)) {
+    const start = phrase.index ?? 0;
+    if (/\blast\s*$/i.test(text.slice(0, start))) continue;
+    // The statement lives between the phrase and the next sentence break; a
+    // month abbreviation's period is part of the date, not a break.
+    const rest = text
+      .slice(start + phrase[0].length)
+      .replace(WRITTEN_CHECK_MONTH_ABBR_PERIOD, '$1');
+    const cut = rest.search(/[.;\n]/);
+    const window = (cut === -1 ? rest : rest.slice(0, cut)).slice(0, 80);
+    const time = WRITTEN_CHECK_TIME.exec(window);
+    if (!time) continue;
+    const zone = (time[6] ?? '').toLowerCase();
+    if (zone && zone !== 'et' && zone !== 'eastern') continue; // never silently reschedule a stated non-ET zone
+    let hour = time[1] !== undefined ? Number(time[1]) : Number(time[4]);
+    const minute = time[2] !== undefined ? Number(time[2]) : 0;
+    const meridiem = (time[3] ?? time[5] ?? '').toLowerCase();
+    if (meridiem) {
+      // A 12-hour time is 1-12: "13 PM" and "0 AM" are not clock times.
+      if (hour < 1 || hour > 12) continue;
+      if (meridiem === 'pm' && hour < 12) hour += 12;
+      if (meridiem === 'am' && hour === 12) hour = 0;
+    } else if (hour > 23) {
+      continue;
+    }
+    if (minute > 59) continue;
+    const isoDate = WRITTEN_CHECK_ISO_DATE.exec(window);
+    const monthDate = WRITTEN_CHECK_MONTH_DATE.exec(window);
+    let instant: number;
+    if (isoDate) {
+      const month = Number(isoDate[2]);
+      const day = Number(isoDate[3]);
+      if (month < 1 || month > 12 || day < 1 || day > 31) continue;
+      instant = etWallToInstant(Number(isoDate[1]), month, day, hour, minute);
+    } else if (monthDate) {
+      const day = Number(monthDate[2]);
+      if (day < 1 || day > 31) continue;
+      const year = monthDate[3] ? Number(monthDate[3]) : etCalendarYear(nowMs);
+      instant = etWallToInstant(year, WRITTEN_CHECK_MONTHS[monthDate[1].toLowerCase()], day, hour, minute);
+    } else {
+      // No date: today in ET, or tomorrow when that time has already passed.
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', hourCycle: 'h23',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+      }).formatToParts(new Date(nowMs));
+      const n = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? '0');
+      instant = etWallToInstant(n('year'), n('month'), n('day'), hour, minute);
+      if (instant <= nowMs) {
+        // Tomorrow is a real calendar increment: a raw "day + 1" would hand
+        // etWallToInstant an impossible January 32 at a month boundary.
+        const tomorrow = new Date(Date.UTC(n('year'), n('month') - 1, n('day') + 1));
+        instant = etWallToInstant(tomorrow.getUTCFullYear(), tomorrow.getUTCMonth() + 1, tomorrow.getUTCDate(), hour, minute);
+      }
+    }
+    if (!Number.isFinite(instant)) continue; // nonexistent ET wall time or impossible date
+    // A stated time already passed is a stale statement, not a park.
+    if (instant > nowMs) found = instant;
+  }
+  return found;
+}
+
+function touchCardNextCheck(card: DeskCard, nowIso: string, writtenNextCheckMs?: number | null): void {
   // Archived cards carry no check state even in a live column: a PATCH or
   // comment on an archived card must not re-create a deadline.
   if (!card.archived && (card.column === 'in_progress' || card.column === 'in_qa')) {
-    card.nextCheckAt = new Date(Date.parse(nowIso) + CARD_NEXT_CHECK_MS).toISOString();
+    const nowMs = Date.parse(nowIso);
+    if (typeof writtenNextCheckMs === 'number' && Number.isFinite(writtenNextCheckMs) && writtenNextCheckMs > nowMs) {
+      // A written check-in time in the comment is honored, capped at the
+      // written maximum so no comment can park a live card indefinitely:
+      // parking until a stated time actually silences the card until then.
+      card.nextCheckAt = new Date(Math.min(writtenNextCheckMs, nowMs + CARD_NEXT_CHECK_WRITTEN_MAX_MS)).toISOString();
+      card.nextCheckWritten = true;
+    } else {
+      card.nextCheckAt = new Date(nowMs + CARD_NEXT_CHECK_MS).toISOString();
+      delete card.nextCheckWritten;
+    }
     delete card.nudgeAt;
     delete card.escalatedAt;
   } else {
     delete card.nextCheckAt;
+    delete card.nextCheckWritten;
     delete card.nudgeAt;
     delete card.escalatedAt;
   }
@@ -336,6 +486,7 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     updatedAt,
     columnSince: isoOr(raw.columnSince, updatedAt),
     ...(validIso(raw.nextCheckAt) ? { nextCheckAt: raw.nextCheckAt as string } : {}),
+    ...(raw.nextCheckWritten === true ? { nextCheckWritten: true } : {}),
     ...(validIso(raw.nudgeAt) ? { nudgeAt: raw.nudgeAt as string } : {}),
     ...(validIso(raw.escalatedAt) ? { escalatedAt: raw.escalatedAt as string } : {}),
   };
@@ -349,14 +500,19 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     // archive clears the fields; the next read must not re-create them).
     // raw.archived, not card.archived: the copy onto card happens below.
     delete card.nextCheckAt;
+    delete card.nextCheckWritten;
     delete card.nudgeAt;
     delete card.escalatedAt;
   } else {
-    // Every deadline is clamped to at most now + 30 minutes (not only newly
-    // seeded ones): a parseable persisted nextCheckAt months ahead would
-    // suppress checks indefinitely. A missing deadline is seeded; an existing
-    // one is capped.
-    const cap = Date.parse(now) + CARD_NEXT_CHECK_MS;
+    // Every computed deadline is clamped to at most now + 30 minutes (not
+    // only newly seeded ones): a parseable persisted nextCheckAt months ahead
+    // would suppress checks indefinitely. A written check-in deadline carries
+    // its own larger cap, so a legitimate park (an overnight quiet-hours park)
+    // survives reloads while still never suppressing checks indefinitely; a
+    // marker without a deadline is incoherent and drops. A missing deadline is
+    // seeded; an existing one is capped.
+    if (card.nextCheckWritten && !card.nextCheckAt) delete card.nextCheckWritten;
+    const cap = Date.parse(now) + (card.nextCheckWritten ? CARD_NEXT_CHECK_WRITTEN_MAX_MS : CARD_NEXT_CHECK_MS);
     if (!card.nextCheckAt) {
       const base = Math.min(Date.parse(updatedAt || now), Date.parse(now));
       card.nextCheckAt = new Date(base + CARD_NEXT_CHECK_MS).toISOString();
@@ -969,10 +1125,12 @@ export async function commentCard(id: string, text: unknown, author: DeskActor):
     card.comments.push(comment);
     card.updatedAt = now;
     // A comment is an owner touch: it refreshes the check-in deadline and
-    // clears any pending nudges, exactly like a create or a move. It also
-    // closes the commenter's open Matt asks (card-baadaf B: the card touch is
-    // the close), best effort.
-    touchCardNextCheck(card, now);
+    // clears any pending nudges, exactly like a create or a move. A written
+    // next check-in time in the comment body is honored (capped), so a
+    // quiet-hours park with a stated time stays silent until that time. It
+    // also closes the commenter's open Matt asks (card-baadaf B: the card
+    // touch is the close), best effort.
+    touchCardNextCheck(card, now, parseWrittenNextCheck(body, Date.parse(now)));
     return { card, comment };
   });
   // Only a live roster agent's card comment closes their asks, and only after
@@ -1135,6 +1293,7 @@ export function archiveCard(id: string, archived: boolean): Promise<DeskCard> {
       // Archiving clears the check state: a stale deadline or an old
       // nudge/escalation mark must not survive into an unarchive.
       delete card.nextCheckAt;
+      delete card.nextCheckWritten;
       delete card.nudgeAt;
       delete card.escalatedAt;
     } else {
