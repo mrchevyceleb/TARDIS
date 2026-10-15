@@ -118,14 +118,15 @@ function flag(value: unknown): boolean {
 deskRouter.get('/', route(async (req, res) => {
   const data = await readDesk();
   const cards = req.query.archived === '0' ? data.cards.filter((c) => !c.archived) : data.cards;
-  res.json({ rev: data.rev, owner: ownerActor(), columns: COLUMN_META, todos: data.todos, cards, prs: deskPrs() });
+  const prs = deskPrs();
+  res.json({ rev: data.rev, owner: ownerActor(), columns: COLUMN_META, todos: data.todos, cards, prs: prs.prs, ...(prs.stale ? { prsStale: true } : {}) });
 }));
 
-// The sidebar's light poll: the same cached pull as the room's snapshot, so
+// The sidebar's light poll: the same cached snapshot as the room's read, so
 // an older server without the route simply 404s and the client keeps its
 // snippet lines.
 deskRouter.get('/prs', route(async (_req, res) => {
-  res.json({ prs: deskPrs() });
+  res.json(deskPrs());
 }));
 
 /** Cheap poll for the workspace badge and desktop alerts. */

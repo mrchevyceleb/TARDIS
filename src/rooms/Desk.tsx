@@ -624,12 +624,28 @@ const PR_STATE_LABEL: Record<string, string> = { draft: 'draft', ci: 'CI', merge
 
 /** One row per teammate: the open PRs they own, else their in-progress card
  *  title, else idle. PRs arrive with the snapshot (an older server sends no
- *  prs, so the rows degrade to the card/idle line until the server rides). */
+ *  prs, so the rows degrade to the card/idle line until the server rides).
+ *  PR owners that match no teammate (an unmapped branch prefix renders under
+ *  its GitHub login) still get their own row, so real work never vanishes
+ *  behind a false idle. */
 function PeopleRows({ desk, agents, onOpenCard }: { desk: DeskSnapshot; agents: Agent[]; onOpenCard: (id: string) => void }) {
   const prs = desk.prs ?? [];
+  const known = new Set(agents.map((a) => a.name));
+  const unmatchedOwners = [...new Set(prs.map((p) => p.owner).filter((owner) => !known.has(owner)))];
+  const renderPrs = (mine: typeof prs) => (
+    <ul className="desk-person-prs">
+      {mine.map((p) => (
+        <li key={`${p.repo}#${p.number}`}>
+          <a href={p.url} target="_blank" rel="noreferrer">{p.repo.split('/')[1]} #{p.number}</a>
+          <span className="desk-pr-state">{p.reviewer ? `with ${p.reviewer}` : (PR_STATE_LABEL[p.state] ?? p.state)}</span>
+          <span className="desk-pr-title">{p.title}</span>
+        </li>
+      ))}
+    </ul>
+  );
   return (
     <section className="desk-people" aria-label="What each teammate has open">
-      <h3 className="desk-people-title">What everyone has open</h3>
+      <h3 className="desk-people-title">What everyone has open{desk.prsStale ? <span className="desk-pr-stale"> · PR data stale</span> : null}</h3>
       <ul className="desk-people-list">
         {agents.map((a) => {
           const mine = prs.filter((p) => p.owner === a.name);
@@ -637,24 +653,18 @@ function PeopleRows({ desk, agents, onOpenCard }: { desk: DeskSnapshot; agents: 
           return (
             <li key={a.id} className="desk-person">
               <span className="desk-person-name">{a.name}</span>
-              {mine.length ? (
-                <ul className="desk-person-prs">
-                  {mine.map((p) => (
-                    <li key={`${p.repo}#${p.number}`}>
-                      <a href={p.url} target="_blank" rel="noreferrer">{p.repo.split('/')[1]} #{p.number}</a>
-                      <span className="desk-pr-state">{p.reviewer ? `with ${p.reviewer}` : (PR_STATE_LABEL[p.state] ?? p.state)}</span>
-                      <span className="desk-pr-title">{p.title}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : onCard ? (
-                <button type="button" className="desk-person-on" onClick={() => onOpenCard(onCard.id)}>{onCard.title}</button>
-              ) : (
-                <span className="desk-person-on is-quiet">idle</span>
-              )}
+              {mine.length ? renderPrs(mine)
+                : onCard ? <button type="button" className="desk-person-on" onClick={() => onOpenCard(onCard.id)}>{onCard.title}</button>
+                : <span className="desk-person-on is-quiet">idle</span>}
             </li>
           );
         })}
+        {unmatchedOwners.map((owner) => (
+          <li key={`owner:${owner}`} className="desk-person">
+            <span className="desk-person-name">{owner}</span>
+            {renderPrs(prs.filter((p) => p.owner === owner))}
+          </li>
+        ))}
       </ul>
     </section>
   );

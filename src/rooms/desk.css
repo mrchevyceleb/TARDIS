@@ -747,3 +747,4 @@ span.desk-todo-text { cursor: default; }
 .desk-person-on { background: none; border: none; padding: 0; color: inherit; text-align: left; font: inherit; font-size: 12.5px; cursor: pointer; }
 .desk-person-on:hover { text-decoration: underline; }
 .desk-person-on.is-quiet { cursor: default; opacity: 0.55; }
+.desk-pr-stale { font-weight: 400; opacity: 0.6; font-size: 12px; }

@@ -71,6 +71,8 @@ export type DeskSnapshot = {
   todos: DeskTodo[];
   cards: DeskCard[];
   prs?: DeskPr[];
+  /** The PR pull served last-known-good data (a repo's pull failed). */
+  prsStale?: boolean;
 };
 
 /** An open high-priority item, as the summary poll lists it (newest first). */
@@ -282,7 +284,7 @@ export function useDeskSummary(enabled: boolean) {
 export function useDeskPrs(enabled: boolean) {
   return useQuery({
     queryKey: PRS_KEY,
-    queryFn: ({ signal }) => apiJson<{ prs: DeskPr[] }>('/api/desk/prs', { signal, cache: 'no-store' }),
+    queryFn: ({ signal }) => apiJson<{ prs: DeskPr[]; stale?: boolean }>('/api/desk/prs', { signal, cache: 'no-store' }),
     enabled,
     refetchInterval: 60_000,
     refetchOnWindowFocus: 'always',
