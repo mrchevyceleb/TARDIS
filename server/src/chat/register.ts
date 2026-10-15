@@ -51,11 +51,13 @@ import { durableUserEchoClientMsgId, flushEventLog, loadEventLogCatchUp, loadEve
 import { isReactionEmoji, recordReaction } from './reactions.ts';
 import {
   activeCodexSessions,
+  peekCodexSession,
   pruneIdleCodexSessions,
   shutdownAllCodexSessions,
 } from './codex-runner.ts';
 import {
   activeBananaSessions,
+  peekBananaSession,
   pruneIdleBananaSessions,
   shutdownAllBananaSessions,
 } from './banana-runner.ts';
@@ -352,11 +354,20 @@ export function filterReplayEvents(events: DispatchSeqEvent[]): DispatchSeqEvent
 
 /** The thread's background-lane busy state for the ready frame (card-e2bd7a):
  *  the bg lane's live session, when one exists, reports its own turn state.
- *  A peek, never a spawn: a lane that never ran is not busy. The peek helper
- *  is Claude-named but returns any engine's session, and only isBusy is read. */
+ *  A peek, never a spawn: a lane that never ran is not busy. Engine-neutral:
+ *  the persistent-process registry covers the claude family and agy, and the
+ *  codex and banana registries get their own read-only peeks, so no engine's
+ *  bg lane reports a hardcoded false. Only isBusy is read. */
 function bgLaneBusy(cli: CliKind, repoPath: string, chatId: string): boolean {
-  const live = peekClaudeSession({ cli, repoPath, chatId: backgroundChatId(chatId) });
-  return live ? live.isBusy() : false;
+  const bgId = backgroundChatId(chatId);
+  if (isPersistentProcessCli(cli)) {
+    const live = peekClaudeSession({ cli, repoPath, chatId: bgId });
+    return live ? live.isBusy() : false;
+  }
+  const codex = peekCodexSession({ repoPath, chatId: bgId, cli });
+  if (codex) return codex.isBusy();
+  const banana = peekBananaSession({ repoPath, chatId: bgId, cli });
+  return banana ? banana.isBusy() : false;
 }
 
 /** Set on service shutdown: new turns are rejected (existing sockets get a

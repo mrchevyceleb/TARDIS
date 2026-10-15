@@ -443,35 +443,47 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const finalText = ev.type === 'result' && ev.is_error !== true && typeof ev.result === 'string'
       ? ev.result.trim()
       : '';
-    // The closing copy is a fallback for turns whose stream never delivered
-    // text: once any visible text part of this turn rendered the answer, a
-    // provider result must not paint it again. Exact-match dedup missed
-    // whenever the result added or re-wrapped anything (the Gemini CLI's
-    // result carries the whole reply plus its own narration, so Felix's
-    // reply rendered twice), so the gate is turn-scoped presence, not
-    // equality. Legacy thought blocks never count: a thought an older build
-    // surfaced must not suppress the real reply as "already rendered". An
-    // empty streamed block is not a delivered answer: only non-empty parts
-    // count, so an empty block before a disconnect cannot swallow the
-    // canonical result.
-    const finalTurnParts = closed
-      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && !b.thought && b.text.trim().length > 0 && (!finalTurnId || b.turnId === finalTurnId))
-      .map((b) => b.text);
-    if (finalText && finalTurnParts.length === 0) {
-      return [...closed, {
-        kind: 'text',
-        id: id(),
-        text: finalText,
-        ...eventTime(ev),
-        turnId: finalTurnId,
-        peerId: finalPeerId,
-        ...laneStamp(turnIdRef),
-        cbIndex: -1,
-        open: false,
-        seq: typeof ev.seq === 'number' ? ev.seq : undefined,
-      }];
+    // The canonical result reconciles with what the stream already rendered,
+    // instead of dropping it (presence) or duplicating it (exact-equality).
+    // The Gemini CLI's result carries the streamed reply plus its own
+    // narration, so the streamed text is a whitespace-insensitive prefix of
+    // it: swap the fuller canonical copy in, in place, so it renders exactly
+    // once. A partial stream cut mid-answer is also a prefix, so the
+    // canonical result recovers the full answer the deltas lost. A stream
+    // that ran past the result keeps its richer copy; genuinely disjoint
+    // text keeps both, because dropping either can lose a real answer.
+    // Legacy thought blocks never count, and an empty streamed block is not
+    // a delivered answer: only non-empty parts reconcile.
+    const finalTextBlocks = closed
+      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && !b.thought && b.text.trim().length > 0 && (!finalTurnId || b.turnId === finalTurnId));
+    if (!finalText) return closed;
+    const appendResult = (): ChatBlock[] => [...closed, {
+      kind: 'text',
+      id: id(),
+      text: finalText,
+      ...eventTime(ev),
+      turnId: finalTurnId,
+      peerId: finalPeerId,
+      ...laneStamp(turnIdRef),
+      cbIndex: -1,
+      open: false,
+      seq: typeof ev.seq === 'number' ? ev.seq : undefined,
+    }];
+    if (finalTextBlocks.length === 0) return appendResult();
+    const squash = (s: string) => s.replace(/\s+/g, '');
+    const streamedSq = squash(finalTextBlocks.map((b) => b.text).join(''));
+    const finalSq = squash(finalText);
+    if (finalSq.startsWith(streamedSq) && finalSq.length > streamedSq.length) {
+      // The canonical result is the streamed text's own completion: swap it
+      // in, in place, and drop the turn's other streamed copies.
+      const first = finalTextBlocks[0];
+      const dropIds = new Set(finalTextBlocks.slice(1).map((b) => b.id));
+      return closed
+        .filter((b) => !dropIds.has(b.id))
+        .map((b) => (b.id === first.id ? { ...b, text: finalText } : b));
     }
-    return closed;
+    if (streamedSq.startsWith(finalSq)) return closed;
+    return appendResult();
   }
 
   if (ev.type === 'message_delta') {
@@ -1708,10 +1720,16 @@ export function useChat(opts: {
           // TURN_KEEPALIVE_MS (15s) - worse across back-to-back reconnects,
           // which is exactly what made a live turn look dead. No-op if a
           // start time already survived the reconnect (turnStartRef > 0).
-          if (msg.busy === true) {
+          // Visible activity is either lane's (card-e2bd7a): a bg turn in
+          // flight shows the working indicator on attach/reconnect too, while
+          // send gating below stays home-busy alone.
+          const laneBusy = msg.busy === true || msg.bgBusy === true;
+          if (laneBusy) {
             // Seed from the server's real turn start when it sent one: the
             // reattach clock restarting at zero made a mid-turn reopen show
-            // "0:10" instead of the true elapsed time (Oct 15).
+            // "0:10" instead of the true elapsed time (Oct 15). A bg-only
+            // busy turn has no home start to seed from, so its timer starts
+            // at attach (the live bg turnStart frame keeps it honest after).
             const serverTurnStart = typeof msg.turnStartedAt === 'number' && msg.turnStartedAt > 0 ? msg.turnStartedAt : 0;
             markTurnStarted(serverTurnStart > 0 ? serverTurnStart : Date.now(), serverTurnStart > 0);
           }
@@ -1729,11 +1747,12 @@ export function useChat(opts: {
             // Keep its visible queued state across reconnect; the durable
             // _user_echo will clear it when the next turn is actually admitted.
             const steerQueued = queuedSteerRef.current.size > 0;
-            setStatus(msg.busy || steerQueued ? 'streaming' : 'ready');
+            setStatus(laneBusy || steerQueued ? 'streaming' : 'ready');
             if (!msg.busy && !steerQueued) {
               pendingSendRef.current = false;
               compactingRef.current = false;
-              clearTurnStarted();
+              // A bg turn in flight keeps its timer and indicator.
+              if (!laneBusy) clearTurnStarted();
             }
           }
         }
