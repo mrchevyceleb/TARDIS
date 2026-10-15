@@ -1265,7 +1265,16 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
   // their content still reaches the rolling summary. They never enter the
   // working window (the model never saw them there), so this cannot duplicate
   // what the window shows — it is the only path their content survives on.
-  const peerOverflow = uncoveredPeerTurns(events, lastSeq);
+  //
+  // A pseudo-turn's seq must NEVER advance the coverage boundary past a
+  // visible turn that has not folded yet (windowed or aged): once the
+  // boundary passes it, that turn is considered covered and is dropped
+  // forever when it later ages out. So pseudo-turns only join the overflow
+  // below the frontier of the oldest unfolded visible turn; newer ones wait
+  // for the window to age past them and join a later fold.
+  const unfoldedVisible = visible.filter((t) => t.seq > lastSeq);
+  const visibleFrontier = unfoldedVisible.length ? unfoldedVisible[0].seq : Number.POSITIVE_INFINITY;
+  const peerOverflow = uncoveredPeerTurns(events, lastSeq).filter((t) => t.seq < visibleFrontier);
   const overflow = [...windowed.overflow, ...peerOverflow].sort((a, b) => a.seq - b.seq);
   let overflowNew = overflow.filter((t) => t.seq > lastSeq);
   // Overflow is oldest-first: the newest aged turn's seq minus the compact's
@@ -1369,9 +1378,13 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
       }
       await mutateState((s) => {
         if (epochOf(key) !== epoch) return;
+        // Preserve a counter that moved while this fold awaited (a delivery
+        // probe's pressure unit landing mid-fold): the captured total must
+        // never overwrite a newer count.
+        const totalNow = Math.max(s[key]?.userTurnsTotal ?? 0, total);
         s[key] = {
-          userTurnsTotal: total,
-          lastCompactUserTurns: total,
+          userTurnsTotal: totalNow,
+          lastCompactUserTurns: totalNow,
           count,
           lastAt: Date.now(),
           lastWords: generated.words,
@@ -1383,9 +1396,12 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
 
     await mutateState((s) => {
       if (epochOf(key) !== epoch) return;
+      // Same preservation as the in-loop write: a counter that moved while
+      // this fold awaited is never overwritten by the captured total.
+      const totalNow = Math.max(s[key]?.userTurnsTotal ?? 0, total);
       s[key] = {
-        userTurnsTotal: total,
-        lastCompactUserTurns: total,
+        userTurnsTotal: totalNow,
+        lastCompactUserTurns: totalNow,
         count,
         lastAt: Date.now(),
         lastWords: generatedWords,
