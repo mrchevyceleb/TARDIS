@@ -473,9 +473,11 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const squash = (s: string) => s.replace(/\s+/g, '');
     const streamedSq = squash(finalTextBlocks.map((b) => b.text).join(''));
     const finalSq = squash(finalText);
-    if (finalSq.startsWith(streamedSq) && finalSq.length > streamedSq.length) {
-      // The canonical result is the streamed text's own completion: swap it
-      // in, in place, and drop the turn's other streamed copies.
+    if (finalSq.includes(streamedSq) && finalSq.length > streamedSq.length) {
+      // The canonical result contains the streamed reply — the Gemini CLI's
+      // result can carry its narration ahead of the answer, so containment,
+      // not just a prefix, proves the same reply: swap the fuller canonical
+      // copy in, in place, and drop the turn's other streamed copies.
       const first = finalTextBlocks[0];
       const dropIds = new Set(finalTextBlocks.slice(1).map((b) => b.id));
       return closed
@@ -484,6 +486,25 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     }
     if (streamedSq.startsWith(finalSq)) return closed;
     return appendResult();
+  }
+
+  // Agy narration demoted to thinking (card-e2bd7a): the runner marks every
+  // text step a later step supersedes, so thinking never prints as the
+  // answer. The marker names no block: the nearest preceding closed,
+  // non-empty, non-thinking text block of this lane is its target — both
+  // live and replay order place the marker right before the superseding
+  // step's frames. Thought blocks never render and never count as answers.
+  if (ev.type === 'agy_thinking') {
+    for (let i = blocks.length - 1; i >= 0; i -= 1) {
+      const b = blocks[i];
+      if (b.kind !== 'text') continue;
+      if (b.open) return blocks; // a live streaming step is never the target
+      if (!b.text.trim() || b.thought) return blocks; // no target behind this block
+      const next = blocks.slice();
+      next[i] = { ...b, thought: true };
+      return next;
+    }
+    return blocks;
   }
 
   if (ev.type === 'message_delta') {
@@ -624,7 +645,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // Whitespace-only text is not a real reply, so it paints no blank bubble.
     if (fullText.trim()) {
       if (isSyntheticApiErrorEvent(ev)) return blocks;
-      const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '' && !b.thought);
+      const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '');
       if (!hasText) {
         return [...annotated, { kind: 'text', id: id(), text: fullText, ...eventTime(ev), turnId, peerId: turnIdRef.peerId, ...laneStamp(turnIdRef), cbIndex: -1, open: false, presentation, seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
       }
@@ -787,7 +808,7 @@ function pendingSteersFor(key: string): PendingSteer[] {
 // latestSeq assertion as coverage (deduped hello, no replay) saved head
 // cursors over holed blocks. The writer is fixed below; bump once to purge
 // every copy poisoned before the fix (a desktop client, Oct 9 2026).
-const CHAT_CACHE_VERSION = 'v11';
+const CHAT_CACHE_VERSION = 'v12';
 
 function blocksStorageKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
   // Browser snapshots are disposable; transcript history remains on the server.

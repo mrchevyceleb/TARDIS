@@ -100,6 +100,7 @@ type AgyStepBuffer = {
   done: boolean;
   opened: boolean;
   closed: boolean;
+  demoted?: boolean;
   name?: string;
   parameters?: unknown;
   output?: string;
@@ -172,6 +173,7 @@ export class AgySession {
   /** Final assistant text of the turn; the client's `result.result` recovery
    *  path re-renders it if the streamed blocks never made it on screen. */
   private lastAssistantText = '';
+  private suppressResultText = false;
   /** Who the current turn is for (see ClaudeSession.turnOrigin). */
   private turnOrigin: TurnOrigin = emptyTurnOrigin();
   /** Last shared-log seq this process was told about by the lane recap. */
@@ -435,6 +437,20 @@ export class AgySession {
         } else {
           const response = typeof result.response === 'string' ? result.response : '';
           if (response.trim()) this.lastAssistantText = response;
+          // The terminal result repeats a narration step's text verbatim
+          // (squash-equal): that is thinking, not an answer, and re-emitting
+          // it as the result re-prints the narration after the streamed
+          // answer (card-e2bd7a double answer). Suppress the copy; an empty
+          // result text reconciles to nothing on the client, and the
+          // empty-terminal recovery only ever fires when no text step ran.
+          if (response.trim()) {
+            const squash = (s: string) => s.replace(/\s+/g, '');
+            const rSq = squash(response);
+            for (const [, b] of this.stepBuffers) {
+              if (b.kind !== 'text' || !b.text.trim()) continue;
+              if (squash(b.text) === rSq) { this.suppressResultText = true; break; }
+            }
+          }
         }
         // The terminal result's usage merges with the step accumulation
         // per field: a present, valid terminal counter wins for its field;
@@ -517,6 +533,17 @@ export class AgySession {
         if (buf.kind === 'tool' && !buf.done) break;
         buf.opened = true;
         this.liveStepIdx = idx;
+        // Gemini narration ("Running ls in …", mid-turn commentary) streams
+        // as plain agent-response text steps. Any text step that a LATER step
+        // supersedes is thinking, not the answer (card-e2bd7a: thinking must
+        // never print as the answer). Emit the demotion marker BEFORE the
+        // superseding step's frames, so live viewers and replay viewers mark
+        // the same narration block identically.
+        for (const [pIdx, pBuf] of this.stepBuffers) {
+          if (pIdx >= idx || pBuf.kind !== 'text' || !pBuf.closed || pBuf.demoted) continue;
+          pBuf.demoted = true;
+          this.emit({ type: 'event', event: { type: 'agy_thinking', step_index: pIdx, session_id: this.agyConversationId ?? '' } });
+        }
         if (buf.kind === 'tool') {
           this.emitToolCard(stream, buf);
         } else {
@@ -603,7 +630,8 @@ export class AgySession {
       this.emit({ type: 'event', event: { type: '_terminal_error', message: plain, code: failed.code ?? 'error', retryable: true, ts: Date.now() } });
     }
     const usage = this.resultUsage ?? { input: this.turnUsage.input, output: this.turnUsage.output, cacheRead: this.turnUsage.cacheRead };
-    this.emit({ type: 'event', event: { type: 'result', subtype: failed ? 'error' : 'success', is_error: Boolean(failed), ...(failed ? {} : { result: this.lastAssistantText }), session_id: this.agyConversationId ?? '', usage: { input_tokens: usage.input, output_tokens: usage.output, cache_read_input_tokens: usage.cacheRead } } });
+    this.emit({ type: 'event', event: { type: 'result', subtype: failed ? 'error' : 'success', is_error: Boolean(failed), ...(failed ? {} : { result: this.suppressResultText ? '' : this.lastAssistantText }), session_id: this.agyConversationId ?? '', usage: { input_tokens: usage.input, output_tokens: usage.output, cache_read_input_tokens: usage.cacheRead } } });
+    this.suppressResultText = false;
     // The turn's context accounting, once, at the boundary: the terminal
     // result's usage when it carried one, else the sanitized step accumulation.
     recordContextUsage(this.contextKey, 'agy', { input_tokens: usage.input, output_tokens: usage.output, cache_read_input_tokens: usage.cacheRead, cache_creation_input_tokens: 0 });
@@ -802,6 +830,7 @@ export class AgySession {
       this.automationTurn = automationRequest;
       this.terminalNoticeEmitted = false;
       this.turnFailed = null;
+      this.suppressResultText = false;
       this.turnUsage = { input: 0, output: 0, cacheRead: 0 };
       this.resultUsage = null;
       this.turnOrigin = emptyTurnOrigin();

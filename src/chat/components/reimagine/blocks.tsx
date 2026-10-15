@@ -1249,7 +1249,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   for (const b of blocks) {
     // Hidden: the reply-case marker, and any legacy thought block. Thinking is
     // private reasoning and never renders; only real reply text does.
-    if (b.kind === 'replyask' || (b.kind === 'text' && (b.pending || b.thought))) continue;
+    if (b.kind === 'replyask' || (b.kind === 'text' && (b.pending || b.thought || (!b.open && !b.text.trim())))) continue;
     const day = dayLabel(b.ts);
     if (b.kind === 'compact') {
       groups.push({ type: 'compact', block: b, day: lastDay || day });
