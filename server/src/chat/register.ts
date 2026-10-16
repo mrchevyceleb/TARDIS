@@ -82,10 +82,10 @@ type ClientWatch = { type: 'watch'; visible?: boolean };
 // `model` / `effort` ride on send/steer. Banana and Codex apply them per turn.
 // Claude-family lanes (claude/assistant/zai/xai) apply them at spawn; a live
 // steer must reuse that spawn, not the Counsel picker's current id.
-type ClientSend = { type: 'send'; cli?: CliKind; repo?: string; chatId?: string; sinceSeq?: number; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string; voice?: boolean } & ClientSelection;
+type ClientSend = { type: 'send'; cli?: CliKind; repo?: string; chatId?: string; sinceSeq?: number; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string; voice?: boolean; replyTo?: { from: string; snippet: string } } & ClientSelection;
 type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string; chatId?: string } & ClientSelection;
 type ClientStop = { type: 'stop'; cli: CliKind; repo: string; chatId?: string };
-type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string; voice?: boolean; queue?: boolean } & ClientSelection;
+type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string; voice?: boolean; queue?: boolean; replyTo?: { from: string; snippet: string } } & ClientSelection;
 type ClientReact = { type: 'react'; cli?: CliKind; repo?: string; chatId?: string; targetSeq: number; emoji: string; removed?: boolean };
 type ClientMsg = ClientHello | ClientWatch | ClientSend | ClientFresh | ClientStop | ClientSteer | ClientReact;
 type ResumeWatchableSession = AnySession & {
@@ -2266,7 +2266,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
               if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
               if (!nativeActiveSteer) safeSend({ type: 'turnStart', clientMsgId: msg.clientMsgId });
               try {
-                await (session as any).send(msg.text, msg.images, {
+                // Reply-to-message (card-cbb4af): the quote rides the outgoing
+                // text so every engine and every replay sees what is answered.
+                const replyQuote = msg.replyTo?.from?.trim()
+                  ? (() => {
+                      const quoted = (msg.replyTo!.snippet ?? '').replace(/\s+/g, ' ').trim().slice(0, 400);
+                      return `Replying to ${msg.replyTo!.from!.trim()}${quoted ? `:\n"${quoted}"` : ''}\n\n`;
+                    })()
+                  : '';
+                await (session as any).send(`${replyQuote}${msg.text}`, msg.images, {
                   model: steerModel,
                   effort: steerEffort,
                   clientMsgId: msg.clientMsgId,
@@ -2463,6 +2471,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // this send, oldest first, so nothing the user said is ever lost.
           let outgoingText = msg.text;
           let outgoingImages = msg.images;
+          // Reply-to-message (card-cbb4af): the quote rides the outgoing text
+          // so every engine and every replay sees what is being answered.
+          if (msg.replyTo?.from?.trim()) {
+            const quoted = msg.replyTo.snippet.replace(/\s+/g, ' ').trim().slice(0, 400);
+            outgoingText = `Replying to ${msg.replyTo.from.trim()}${quoted ? `:\n"${quoted}"` : ''}\n\n${outgoingText}`;
+          }
           const heldRide = takeHeldSteers(sendRepo, chatId);
           if (heldRide.length > 0) {
             const heldPrefix = heldRide.map((held) => held.text).join('\n\n');
