@@ -655,6 +655,7 @@ function PeerMessageBubble({
                 pinned={peerPinned}
                 blockId={block.id}
                 mobile={mobile}
+                onReply={onReply ? () => onReply({ id: block.id, snippet: text.slice(0, 400), from: block.from }) : undefined}
                 onTogglePin={() => pin.onToggle({ blockId: block.id, text, ts: block.ts })}
                 onPinLink={pin && !mobile ? (url) =>
                   pin.onToggle({ blockId: `${block.id}::link-${shortHash(url)}`, text: url, ts: block.ts })
@@ -847,7 +848,7 @@ function BackgroundNote({ block }: { block: Extract<ChatBlock, { kind: 'backgrou
 }
 
 // ── user bubble ───────────────────────────────────────────────────────────
-function UserBubble({ block, agentName, onRetry }: { block: Extract<ChatBlock, { kind: 'user' }>; agentName?: string; onRetry?: (clientMsgId: string) => void }) {
+function UserBubble({ block, agentName, onRetry, onReply }: { block: Extract<ChatBlock, { kind: 'user' }>; agentName?: string; onRetry?: (clientMsgId: string) => void; onReply?: (target: { id: string; snippet: string; from: string }) => void }) {
   const images = block.images ?? [];
   const missing = Math.max(0, (block.imageCount ?? images.length) - images.length);
   // data: URLs can't be top-level navigated to in Chrome — clone via blob.
@@ -870,9 +871,14 @@ function UserBubble({ block, agentName, onRetry }: { block: Extract<ChatBlock, {
   return (
     <div className="msg m-user">
       {block.replyTo ? (
-        <div className="reply-quote" aria-label={`Replying to ${block.replyTo.from}`}>
+        <div className="reply-quote" role="blockquote" aria-label={`Replying to ${block.replyTo.from}`}>
           <span className="reply-from">{block.replyTo.from}</span>
           <span className="reply-text">{block.replyTo.snippet}</span>
+        </div>
+      ) : null}
+      {onReply && block.text.trim() ? (
+        <div className="u-acts">
+          <button type="button" className="act" title="Reply with this message as context" aria-label="Reply to this message" onClick={() => onReply({ id: block.id, snippet: block.text.slice(0, 400), from: 'Matt' })}>reply</button>
         </div>
       ) : null}
       {images.length ? (
@@ -1259,7 +1265,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   // Reply-to-message (card-cbb4af): groups report their id and a snippet
   // (and their own speaker when they have one — channel member posts); the
   // thread fills the agent name so the armed composer knows who is quoted.
-  const replyFrom = agentName?.trim() || 'assistant';
+  const replyFrom = agentName?.trim() || BRAND;
   const onReplyElrond = onReply ? (t: { id: string; snippet: string; from?: string }) => onReply({ id: t.id, snippet: t.snippet, from: t.from?.trim() || replyFrom }) : undefined;
   // The indicator lives until something VISIBLE lands in the CURRENT turn.
   // Looking across the whole transcript made any historical terminal-error or
@@ -1468,7 +1474,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       lastDay = g.day;
     }
     if (g.type === 'user') {
-      nodes.push(<UserBubble key={g.block.id} block={g.block} agentName={agentName} onRetry={onRetry} />);
+      nodes.push(<UserBubble key={g.block.id} block={g.block} agentName={agentName} onRetry={onRetry} onReply={onReply} />);
     } else if (g.type === 'compact') {
       nodes.push(<CompactDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'restart') {

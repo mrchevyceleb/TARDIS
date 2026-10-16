@@ -1,4 +1,5 @@
 import { assertSubscriptionLane } from './subscription-policy.ts';
+import { normalizeReplyTo, withReplyQuote } from './reply-quote.ts';
 import { eventInner, eventType, isAutomationPeerEvent, isNoopToken } from './routineNoise.ts';
 import type express from 'express';
 import type { Server } from 'node:http';
@@ -762,6 +763,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
     model?: string;
     effort?: string;
     voice?: boolean;
+    /** The reply target captured when the steer was held, so the merged send
+     *  keeps its quote (card-cbb4af, review 1 P2 9). */
+    replyTo?: { from: string; snippet: string };
     selectionRevision?: number;
     /** Monotonic enqueue order across every lane, so a replay after Stop keeps
      *  the order the user typed even when steers sat on different engine lanes. */
@@ -1898,6 +1902,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             model: msg.model,
             effort: msg.effort,
             voice: msg.voice,
+            replyTo: normalizeReplyTo(msg.replyTo) ?? undefined,
             selectionRevision: msg.selectionRevision,
           };
           const steerToken = `${msg.clientMsgId ?? 'anon'}\0${Date.now()}\0${Math.random()}`;
@@ -2266,15 +2271,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
               if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
               if (!nativeActiveSteer) safeSend({ type: 'turnStart', clientMsgId: msg.clientMsgId });
               try {
-                // Reply-to-message (card-cbb4af): the quote rides the outgoing
-                // text so every engine and every replay sees what is answered.
-                const replyQuote = msg.replyTo?.from?.trim()
-                  ? (() => {
-                      const quoted = (msg.replyTo!.snippet ?? '').replace(/\s+/g, ' ').trim().slice(0, 400);
-                      return `Replying to ${msg.replyTo!.from!.trim()}${quoted ? `:\n"${quoted}"` : ''}\n\n`;
-                    })()
-                  : '';
-                await (session as any).send(`${replyQuote}${msg.text}`, msg.images, {
+                // Reply-to-message (card-cbb4af): only the engine prompt gets
+                // the quote (slash-safe placement); the stored echo carries the
+                // raw text plus replyTo as its own field, so every device
+                // renders the same chip (review 1, P1 2 and P1 3).
+                await (session as any).send(withReplyQuote(msg.text, msg.replyTo), msg.images, {
                   model: steerModel,
                   effort: steerEffort,
                   clientMsgId: msg.clientMsgId,
@@ -2283,6 +2284,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
                   voiceMode: msg.voice === true,
                   imagesAsFiles: nativeActiveSteer && steerImagesAsFiles,
                   signal: steerAborter.signal,
+                  echoText: msg.text,
+                  replyTo: normalizeReplyTo(msg.replyTo) ?? undefined,
                 });
                 break;
               } catch (error) {
@@ -2471,17 +2474,20 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // this send, oldest first, so nothing the user said is ever lost.
           let outgoingText = msg.text;
           let outgoingImages = msg.images;
-          // Reply-to-message (card-cbb4af): the quote rides the outgoing text
-          // so every engine and every replay sees what is being answered.
-          if (msg.replyTo?.from?.trim()) {
-            const quoted = msg.replyTo.snippet.replace(/\s+/g, ' ').trim().slice(0, 400);
-            outgoingText = `Replying to ${msg.replyTo.from.trim()}${quoted ? `:\n"${quoted}"` : ''}\n\n${outgoingText}`;
-          }
+          // Reply-to-message (card-cbb4af): only the engine prompt gets the
+          // quote (slash-safe placement); the stored echo carries the raw text
+          // plus replyTo as its own field, so every device renders the same
+          // chip (review 1, P1 2/P1 3/P2 8 — and a malformed replyTo can never
+          // throw here: normalizeReplyTo decides, before the lane is claimed).
+          const outgoingReplyTo = normalizeReplyTo(msg.replyTo) ?? undefined;
+          outgoingText = withReplyQuote(outgoingText, msg.replyTo);
+          let outgoingEchoText = msg.text;
           const heldRide = takeHeldSteers(sendRepo, chatId);
           if (heldRide.length > 0) {
-            const heldPrefix = heldRide.map((held) => held.text).join('\n\n');
+            const heldPrefix = heldRide.map((held) => withReplyQuote(held.text, held.replyTo)).join('\n\n');
             const heldImages = heldRide.flatMap((held) => held.images ?? []);
             outgoingText = `${heldPrefix}\n\n${outgoingText}`;
+            outgoingEchoText = `${heldRide.map((held) => held.text).join('\n\n')}\n\n${outgoingEchoText}`;
             if (heldImages.length > 0) outgoingImages = [...heldImages, ...(outgoingImages ?? [])];
             for (const held of heldRide) {
               if (held.clientMsgId) rememberDeliveredClientMsgId(held.clientMsgId);
@@ -2692,6 +2698,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
             humanOrigin: true,
             voiceMode: msg.voice === true,
             signal: sendAborter.signal,
+            echoText: outgoingEchoText,
+            replyTo: outgoingReplyTo,
           });
           if (sendCanceled()) return;
           if (selectionApplied) {

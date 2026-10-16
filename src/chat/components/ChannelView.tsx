@@ -52,6 +52,7 @@ function messageBlocks(list: ChannelMessage[]): ChatBlock[] {
         id: m.id,
         text: m.text,
         ts,
+        ...(m.replyTo ? { replyTo: m.replyTo } : {}),
         ...(m.images?.length
           ? { images: m.images.map((a) => ({ mediaType: a.mediaType, dataUrl: `/api/chat/attachments/${a.id}` })) }
           : {}),
@@ -267,6 +268,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
     try {
       const clean = images?.map(({ mediaType, base64 }) => ({ mediaType, base64 }));
       const replyCtx = reply ? { from: reply.from, snippet: reply.snippet } : undefined;
+      const sentReplyId = reply?.id;
       await actions.post.mutateAsync({
         channelId,
         from: 'Matt',
@@ -276,7 +278,9 @@ export function ChannelView({ channelId, agents, onDeleted }: {
         ...(replyCtx ? { replyTo: replyCtx } : {}),
         ...(clean?.length ? { images: clean } : {}),
       });
-      setReply(null);
+      // Clear only the reply this send captured: a different reply armed
+      // while an upload was in flight must survive (review 1, P2 10).
+      setReply((current) => (current && sentReplyId && current.id === sentReplyId ? null : current));
       setText('');
       return true;
     } catch (e) {

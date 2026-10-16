@@ -112,7 +112,12 @@ export function useChatShell({ chat, picker }: ShellProps) {
     workingSince: chat.turnStartedAt,
     backgroundWork: chat.backgroundWork,
     send, steer, sendQueued, reply, setReply, retry: chat.retry, react: chat.react, stop,
-    fresh: chat.freshStart,
+    // Fresh start wipes the thread, so a reply armed against a message that
+    // is no longer visible must not survive it (card-cbb4af, review 1 P2 11).
+    fresh: () => {
+      chat.freshStart();
+      setReply(null);
+    },
     pickChronicle,
     blocks: chat.blocks as ChatBlock[],
     hydrating: chat.hydrating,

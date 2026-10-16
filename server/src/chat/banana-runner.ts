@@ -71,6 +71,11 @@ type BananaSendOptions = {
   /** Reasoning effort (e.g. low|medium|high) for OpenRouter/openai-compatible models. */
   effort?: string;
   hidden?: boolean;
+  /** The raw text the stored echo should carry when the engine prompt got the
+   *  reply quote prepended (card-cbb4af). */
+  echoText?: string;
+  /** The reply target the echo carries as its own field. */
+  replyTo?: { from: string; snippet: string };
   /** Team-bus delivery: sender-tagged peer_message echo, no compaction tick. */
   peerFrom?: string;
   clientMsgId?: string;
@@ -2787,7 +2792,7 @@ export class BananaSession {
       try {
         this.emit({
           type: 'event',
-          event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ts: Date.now() },
+          event: { type: '_user_echo', text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
         });
       } catch (error) {
         this.busy = false;

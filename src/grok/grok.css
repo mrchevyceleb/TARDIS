@@ -718,19 +718,68 @@
   color: var(--r-ink-mute); font-size: 12px; padding: 2px 4px;
 }
 .bot-app .rc .composer .reply-clear:hover { color: var(--r-ink); }
+/* Reply chip on the user bubble (card-cbb4af, review 1 P1 5): muted, left
+   rule, name and snippet separated, two-line clamp, bounded width. */
+.bot-app .rc .m-user .reply-quote {
+  display: flex; align-items: baseline; gap: 6px;
+  max-width: min(560px, 92%);
+  margin: 0 0 3px auto;
+  font-size: 11.5px; line-height: 1.35;
+  color: var(--r-ink-mute);
+  border-left: 2px solid color-mix(in srgb, currentColor 35%, transparent);
+  padding-left: 8px;
+}
+.bot-app .rc .m-user .reply-from { flex: none; color: var(--r-ink); font-weight: 600; }
+.bot-app .rc .m-user .reply-text {
+  min-width: 0;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+/* Reply action on the user bubble (review 1, P1 7): hover-revealed on
+   desktop, always visible on coarse pointers. */
+.bot-app .rc .m-user .u-acts {
+  display: flex; justify-content: flex-end; gap: 6px;
+  margin: 0 0 2px auto;
+  opacity: 0; transition: opacity 0.12s ease;
+}
+.bot-app .rc .m-user:hover .u-acts,
+.bot-app .rc .m-user:focus-within .u-acts { opacity: 1; }
+@media (pointer: coarse) {
+  .bot-app .rc .m-user .u-acts { opacity: 1; }
+}
+.bot-app .rc .m-user .u-acts .act {
+  border: none; background: none; cursor: pointer;
+  color: var(--r-ink-mute); font-size: 11.5px; padding: 1px 4px;
+}
+.bot-app .rc .m-user .u-acts .act:hover { color: var(--r-ink); }
 .bot-app .rc .composer .attach-thumb {
   width: 36px;
   height: 36px;
 }
-/* Images present: rounded rect hugging the two rows, not a stadium capsule. */
+/* Images present: rounded rect hugging the two rows, not a stadium capsule.
+   A reply armed alone also grows the composer to two rows, so it joins the
+   rounded-rect case (review 1, P1 6). */
 .bot-app .rc .composer.has-attach,
-.bot-app .rc .composer:has(.attach-tray) {
+.bot-app .rc .composer:has(.attach-tray),
+.bot-app .rc .composer:has(.reply-arm) {
   border-radius: 22px;
   min-height: 0;
   padding: 10px 18px 8px;
   row-gap: 6px;
   align-items: end;
 }
+/* Explicit rows when a reply is armed: quote 1, tray 2, controls 3 — with
+   no tray the empty auto row collapses, so reply-alone still reads as two
+   rows (review 1, P1 6). */
+.bot-app .rc .composer:has(.reply-arm) > .reply-arm { grid-row: 1; }
+.bot-app .rc .composer:has(.reply-arm) > .attach-tray { grid-row: 2; }
+.bot-app .rc .composer:has(.reply-arm) > .grok-attach,
+.bot-app .rc .composer:has(.reply-arm) textarea,
+.bot-app .rc .composer:has(.reply-arm) .model-chip,
+.bot-app .rc .composer:has(.reply-arm) .chat-dictation,
+.bot-app .rc .composer:has(.reply-arm) .send,
+.bot-app .rc .composer:has(.reply-arm) .bt-mic { grid-row: 3; }
 .bot-app .rc .composer.has-attach > .grok-attach,
 .bot-app .rc .composer.has-attach textarea,
 .bot-app .rc .composer.has-attach .model-chip,

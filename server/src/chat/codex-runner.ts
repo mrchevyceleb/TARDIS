@@ -158,6 +158,11 @@ type CodexSendOptions = {
   peerFromRole?: string;
   peerText?: string;
   peerDeliveryId?: string;
+  /** The raw text the stored echo should carry when the engine prompt got the
+   *  reply quote prepended (card-cbb4af). */
+  echoText?: string;
+  /** The reply target the echo carries as its own field. */
+  replyTo?: { from: string; snippet: string };
   /** App-server `turn/steer` admission was checked by teamBus/register. */
   allowNativePeerSteer?: boolean;
   allowNativeHumanSteer?: boolean;
@@ -677,11 +682,12 @@ export class CodexSession {
           type: 'event',
           event: {
             type: '_user_echo',
-            text,
+            text: opts.echoText ?? text,
             imageCount: images?.length ?? 0,
             attachments: steerAttachments,
             clientMsgId: opts.clientMsgId,
             humanOrigin: opts.humanOrigin === true,
+            ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
             ts: Date.now(),
           },
         });
@@ -744,7 +750,7 @@ export class CodexSession {
       try {
         this.emit({
           type: 'event',
-          event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ts: Date.now() },
+          event: { type: '_user_echo', text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
         });
       } catch (error) {
         this.busy = false;

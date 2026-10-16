@@ -173,6 +173,11 @@ export function Composer(props: ComposerProps) {
   // grok.com rotates the empty-composer placeholder every few seconds.
   const phrases = props.placeholders;
   useEffect(() => {
+    // Arming a reply moves the conversation: focus the draft so the next
+    // words land where they are going (card-cbb4af, review 1 P2 14).
+    if (props.replyTo) taRef.current?.focus();
+  }, [props.replyTo]);
+  useEffect(() => {
     if (!phrases || phrases.length < 2) return;
     const iv = window.setInterval(() => setPhIdx((i) => (i + 1) % phrases.length), 6000);
     return () => window.clearInterval(iv);
@@ -413,6 +418,11 @@ export function Composer(props: ComposerProps) {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Escape' && props.replyTo && props.onClearReply) {
+      e.stopPropagation();
+      props.onClearReply();
+      return;
+    }
     if (popOpen && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) {
       const count = slashOpen ? matches.length : (mention?.hits.length ?? 0);
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {

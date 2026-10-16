@@ -402,7 +402,10 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // Feature-present echo with zero kept attachments: every image failed to
     // persist — say "not kept", not "attached".
     const attachmentsLost = Boolean(imageCount && Array.isArray(ev.attachments) && ev.attachments.length === 0) || undefined;
-    return [...blocks, { kind: 'user', id: id(), text: ev.text, imageCount, images: echoImages, clientMsgId: cmid ?? undefined, attachmentsLost, ts }];
+    const echoReplyTo = typeof (ev as { replyTo?: { from?: unknown } }).replyTo?.from === 'string'
+      ? (ev as { replyTo: { from: string; snippet: string } }).replyTo
+      : undefined;
+    return [...blocks, { kind: 'user', id: id(), text: ev.text, imageCount, images: echoImages, clientMsgId: cmid ?? undefined, attachmentsLost, ...(echoReplyTo ? { replyTo: echoReplyTo } : {}), ts }];
   }
 
   if (ev.type === 'message_start') {
@@ -822,6 +825,9 @@ function cancelOutbound(key: string): QueuedOutbound[] {
 type PendingSteer = {
   text: string;
   images?: ChatSendImage[];
+  /** The reply target captured with the steer, so a restored queued bubble
+   *  keeps its chip (card-cbb4af, review 1 P2 9). */
+  replyTo?: { from: string; snippet: string };
   clientMsgId: string;
   ts: number;
 };
@@ -2841,7 +2847,7 @@ export function useChat(opts: {
     ]);
     queuedSteerRef.current.add(clientMsgId);
     pendingSendRef.current = true;
-    rememberPendingSteer(key, { text, images, clientMsgId, ts: Date.now() });
+    rememberPendingSteer(key, { text, images, clientMsgId, ts: Date.now(), ...(replyTo ? { replyTo } : {}) });
     setError(null);
     ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), clientMsgId, ...(queue ? { queue: true } : {}), ...(replyTo ? { replyTo } : {}), model: modelRef.current, effort: effortRef.current, ...selectionIntent() }));
     lastMessageAtRef.current = Date.now();
@@ -2856,8 +2862,8 @@ export function useChat(opts: {
     const failed = blocks.find((block) => block.kind === 'user' && block.clientMsgId === clientMsgId && block.deliveryState === 'failed');
     if (!failed || failed.kind !== 'user' || failed.noRetry || failed.imageCount || failed.images?.length) return;
     setBlocks((prev) => prev.filter((block) => !(block.kind === 'user' && block.clientMsgId === clientMsgId)));
-    if (pendingSendRef.current || statusRef.current === 'streaming') steer(failed.text, undefined, failed.queue === true);
-    else send(failed.text);
+    if (pendingSendRef.current || statusRef.current === 'streaming') steer(failed.text, undefined, failed.queue === true, failed.replyTo);
+    else send(failed.text, undefined, false, failed.replyTo);
   };
 
   const react = (targetSeq: number, emoji: string) => {

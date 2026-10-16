@@ -6,6 +6,7 @@
 import { JsonStore } from '../lib/jsonStore.ts';
 import { type AgentColor } from './agents.ts';
 import { MAX_TEXT, agentLaneKeys, deliverTeamMessage, dropQueuedChannelDeliveries, liveChannelTurnLanesByName, teamRoster } from './teamBus.ts';
+import { formatReplyQuote } from './reply-quote.ts';
 import { activeChatSessions, interruptSession } from './runner.ts';
 import { laneChatId } from './threadKey.ts';
 import { chatAttachmentPath } from '../routes/chatAttachments.ts';
@@ -303,13 +304,9 @@ export async function deliverChannelPost(
     + ' Channel talk stays in the channel; never move it into a one-on-one thread.';
   const header = `[#${channel.name} group channel \u2014 handoff ${hop}] ${poster} posted:\n\n`;
   // Reply-to-message (card-cbb4af): the quoted message rides the delivered
-  // bundle so members see exactly what the post answers.
-  const replyQuote = replyTo?.from?.trim()
-    ? (() => {
-        const quoted = (replyTo!.snippet ?? '').replace(/\s+/g, ' ').trim().slice(0, 400);
-        return `Replying to ${replyTo!.from!.trim()}${quoted ? `:\n"${quoted}"` : ''}\n\n`;
-      })()
-    : '';
+  // bundle so members see exactly what the post answers, through the same
+  // shared shape as the steer/send paths (review 1, P2 8).
+  const replyQuote = formatReplyQuote(replyTo);
   const imagePaths = (images ?? []).map((a) => chatAttachmentPath(a.id));
   const imageBlock = imagePaths.length
     ? `${text.trim() ? '\n\n' : ''}[${poster} attached ${imagePaths.length === 1 ? 'an image' : `${imagePaths.length} images`}. Open ${imagePaths.length === 1 ? 'it' : 'them'} with Read before replying: ${imagePaths.join(', ')}]`

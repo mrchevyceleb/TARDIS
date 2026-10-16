@@ -16,7 +16,7 @@ export function channelColorOf(color: string | undefined): ChatColor | undefined
 }
 /** Image attachments land as file refs (the same attachment store as the
  *  main chat); the client renders them through /api/chat/attachments/<id>. */
-export type ChannelMessage = { id: string; channelId: string; from: string; text: string; createdAt?: string; updatedAt?: string; images?: Array<{ id: string; mediaType: string }> };
+export type ChannelMessage = { id: string; channelId: string; from: string; text: string; createdAt?: string; updatedAt?: string; images?: Array<{ id: string; mediaType: string }>; replyTo?: { from: string; snippet: string } };
 
 async function channelRequest<T>(path: string, method: string, body?: unknown): Promise<T> {
   return apiJson<T>(`/api/channels${path}`, {
