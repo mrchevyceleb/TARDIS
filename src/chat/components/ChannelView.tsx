@@ -10,8 +10,8 @@
 // render with the sender's identity like any teammate message.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Ellipsis, Hash, Pencil, Trash2, Users, X } from 'lucide-react';
-import { channelError, useChannelActions, useChannelMessages, useChannels, type ChannelMessage } from '../hooks/useChannels';
+import { Check, Ellipsis, Hash, Pencil, Square, Trash2, Users, X } from 'lucide-react';
+import { channelError, useChannelActions, useChannelLive, useChannelMessages, useChannels, type ChannelMessage } from '../hooks/useChannels';
 import type { Agent } from '../../grok/agents';
 import type { ChatBlock } from '../data/types';
 import { ChatThread } from './reimagine/blocks';
@@ -51,6 +51,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
   const channels = useChannels();
   const messages = useChannelMessages(channelId);
   const actions = useChannelActions();
+  const live = useChannelLive(channelId);
   const channel = channels.data?.channels.find((c) => c.id === channelId);
 
   const [text, setText] = useState('');
@@ -59,7 +60,19 @@ export function ChannelView({ channelId, agents, onDeleted }: {
   const [name, setName] = useState('');
   const [picked, setPicked] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState<Record<string, boolean>>({});
+  const [stoppedNote, setStoppedNote] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const noteTimer = useRef<number | null>(null);
+  // Stop state belongs to one channel: switching channels must not carry a
+  // pending Stop, a note, or its timer into the next view, and the timer
+  // must never outlive this component (review 3, P2 9).
+  useEffect(() => {
+    setStopping({});
+    setStoppedNote(null);
+    if (noteTimer.current) { window.clearTimeout(noteTimer.current); noteTimer.current = null; }
+  }, [channelId]);
+  useEffect(() => () => { if (noteTimer.current) window.clearTimeout(noteTimer.current); }, []);
 
   const memberKey = channel?.members.join(',') ?? '';
   useEffect(() => {
@@ -69,11 +82,22 @@ export function ChannelView({ channelId, agents, onDeleted }: {
 
   const list = messages.data?.messages ?? [];
   const listKey = list.map((m) => m.id).join(',');
+  const working = live.isError ? [] : live.data?.working ?? [];
   const blocks = useMemo(() => messageBlocks(list), [listKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  // New messages always pin the list to the bottom; working-chip changes
+  // only re-pin a reader who was already there, so chips arriving never
+  // yank someone who scrolled up to read (review finding 11).
   useEffect(() => {
     const node = listRef.current;
     if (node) node.scrollTop = node.scrollHeight;
   }, [listKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const stoppingCount = Object.keys(stopping).length;
+  useEffect(() => {
+    const node = listRef.current;
+    if (!node) return;
+    const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+    if (nearBottom) node.scrollTop = node.scrollHeight;
+  }, [working.length, stoppingCount, stoppedNote !== null]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const closeMenu = () => { setMenuOpen(false); setError(null); };
 
@@ -84,12 +108,32 @@ export function ChannelView({ channelId, agents, onDeleted }: {
       await actions.post.mutateAsync({
         channelId,
         from: 'Matt',
+        person: true,
         text: sendText,
         ...(clean?.length ? { images: clean } : {}),
       });
       setText('');
     } catch (e) {
       setError(channelError(e));
+    }
+  };
+
+  const stopMember = async (member: string) => {
+    setStopping((s) => ({ ...s, [member]: true }));
+    try {
+      const { stopped, dropped } = await actions.stopMember.mutateAsync({ channelId, member });
+      if (!stopped.length) {
+        const note = dropped > 0
+          ? `Cleared ${dropped} queued ping${dropped === 1 ? '' : 's'} for ${member}.`
+          : `${member} had nothing from this channel running.`;
+        setStoppedNote(note);
+        if (noteTimer.current) window.clearTimeout(noteTimer.current);
+        noteTimer.current = window.setTimeout(() => setStoppedNote(null), 4000);
+      }
+    } catch (e) {
+      setError(channelError(e));
+    } finally {
+      setStopping((s) => { const next = { ...s }; delete next[member]; return next; });
     }
   };
 
@@ -196,6 +240,30 @@ export function ChannelView({ channelId, agents, onDeleted }: {
           </div>
           <button type="button" className="ch-create-go" onClick={() => void saveMembers()}>Save</button>
           <button type="button" className="ch-create-x" onClick={() => setEditing('none')}><X size={11} /> Cancel</button>
+        </div>
+      ) : null}
+
+      {(working.length || Object.keys(stopping).length || stoppedNote) ? (
+        <div className="ch-working">
+          {working.map((w) => (
+            <span key={w.member} className="ch-working-chip">
+              <span className="ch-working-dot" aria-hidden="true" />
+              {w.fromChannel
+                ? <>{w.member} working{w.lane === 'main' ? '' : ' (background)'}…</>
+                : <>{w.member} busy elsewhere…</>}
+              {w.fromChannel ? (
+                <button type="button" className="ch-working-stop" title={`Stop ${w.member}'s turn in this channel`}
+                  aria-label={`Stop ${w.member}'s turn in this channel`} disabled={stopping[w.member] === true}
+                  onClick={() => { void stopMember(w.member); }}>
+                  <Square size={9} aria-hidden="true" /> Stop
+                </button>
+              ) : null}
+            </span>
+          ))}
+          {Object.keys(stopping).filter((m) => !working.some((w) => w.member === m && w.fromChannel)).map((m) => (
+            <span key={`stopping-${m}`} className="ch-working-chip">Stopping {m}…</span>
+          ))}
+          {stoppedNote ? <span className="ch-working-chip">{stoppedNote}</span> : null}
         </div>
       ) : null}
 

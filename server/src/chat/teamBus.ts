@@ -133,6 +133,11 @@ type QueuedTeamDelivery = StoredRecord & {
   /** Explicit priority flag from team_message: this record sorts with
    *  person-sourced records, ahead of older teammate chatter. */
   priority?: true;
+  /** A channel post authored by the person (Matt), not an agent. Person-class
+   *  admission: human interrupt boundary plus the person lane preference, so
+   *  his channel posts steer members' live turns exactly like a one-on-one
+   *  message (card-1327b9). Batch class stays 'channel' — same reply rules. */
+  personPosted?: true;
   chainId?: string;
   chainEdges?: string[];
   chainRoute?: string[];
@@ -459,11 +464,33 @@ function personSourced(record: { fromRole?: string }): boolean {
 }
 
 /** Records that sort to the front of an admitted batch: person-sourced
- *  (Desk answers, voice continuations) plus explicitly priority-flagged
- *  teammate messages. Sort order only; lane routing and interrupt class
- *  key off from.role, never off this. */
-function sortsAhead(record: { fromRole?: string; priority?: boolean }): boolean {
-  return personSourced(record) || record.priority === true;
+ *  (Desk answers, voice continuations), explicitly priority-flagged teammate
+ *  messages, and the person's own channel posts. Sort order only; the
+ *  interrupt class and lane policy are derived inside runTeamDelivery. */
+function sortsAhead(record: { fromRole?: string; priority?: boolean; personPosted?: boolean }): boolean {
+  return personSourced(record) || record.priority === true
+    || (record.fromRole === 'channel' && record.personPosted === true);
+}
+
+/** Interrupt class for one delivery: person senders (voice, desk) and the
+ *  person's own channel posts get the human boundary (steers a live turn
+ *  within a step), automation is never interruptible, everything else is
+ *  peer class. Exported for tests. */
+export function deliveryInterruptClass(fromRole: string | undefined, personPosted?: boolean): false | 'human' | 'peer' {
+  if (fromRole === 'automation') return false;
+  if (fromRole === 'desk' || fromRole === 'voice') return 'human';
+  if (fromRole === 'channel' && personPosted === true) return 'human';
+  return 'peer';
+}
+
+/** Lane policy for one delivery: person senders follow the person lane
+ *  preference (an idle main lane first, steering the busy live lane when it
+ *  is the only one running), everything else runs in the background lane.
+ *  Exported for tests. */
+export function deliveryLanePolicy(fromRole: string | undefined, personPosted?: boolean): 'person' | 'bg' {
+  return fromRole === 'desk' || fromRole === 'voice' || (fromRole === 'channel' && personPosted === true)
+    ? 'person'
+    : 'bg';
 }
 
 async function getRecipientSessionForDelivery(
@@ -576,6 +603,108 @@ export function agentLogKey(agent: Agent, lane: AgentLane = 'main'): { cli: stri
   };
 }
 
+/** Lane log keys for one teammate by name (null when not on the roster): the
+ *  (cli, chatKey) pair for the main and background lanes. Read-only use:
+ *  the channel working-state check and Stop. An account-pinned session on
+ *  the same lane is a rare edge; callers match on the busy session itself. */
+export function agentLaneKeys(name: string): Array<{ lane: AgentLane; cli: string; chatKey: string }> | null {
+  const agent = findAgent(name);
+  if (!agent) return null;
+  return (['main', 'bg'] as const).map((lane) => ({ lane, ...agentLogKey(agent, lane) }));
+}
+
+/** One channel delivery in flight: an abort handle so channel Stop can
+ *  cancel the worker sitting at a turn boundary, plus (once admitted) the
+ *  lane and session it sent to, so later person posts from the same channel
+ *  steer that exact turn and the channel view can tell channel work from a
+ *  member's other work. Exported type for tests. */
+export type InFlightChannelDelivery = {
+  controller: AbortController;
+  lane?: AgentLane;
+  cli?: string;
+  chatKey?: string;
+  admittedAt?: number;
+};
+
+const inFlightChannelDeliveries = new Map<string, InFlightChannelDelivery[]>();
+const channelDeliveryKey = (toId: string, fromId: string) => `${toId}|${fromId}`;
+
+/** Exported for tests. */
+export function registerInFlightChannelDelivery(toId: string, fromId: string): InFlightChannelDelivery {
+  const entry: InFlightChannelDelivery = { controller: new AbortController() };
+  const key = channelDeliveryKey(toId, fromId);
+  const list = inFlightChannelDeliveries.get(key) ?? [];
+  list.push(entry);
+  inFlightChannelDeliveries.set(key, list);
+  return entry;
+}
+
+/** Exported for tests. */
+export function releaseInFlightChannelDelivery(toId: string, fromId: string, entry: InFlightChannelDelivery): void {
+  const key = channelDeliveryKey(toId, fromId);
+  const list = inFlightChannelDeliveries.get(key);
+  if (!list) return;
+  const next = list.filter((item) => item !== entry);
+  if (next.length) inFlightChannelDeliveries.set(key, next);
+  else inFlightChannelDeliveries.delete(key);
+}
+
+/** A channel delivery's own turn, if it is live right now: the lanes whose
+ *  busy session an in-flight delivery from this channel sent to. Admitted
+ *  entries whose turn has ended (busy gone false for over five seconds —
+ *  never inside the spawn-to-send gap) are pruned as a side effect, so a
+ *  finished conversation stops claiming follow-ups. Exported for tests. */
+export function liveChannelTurnLanes(memberId: string, fromId: string, activeSessions: Array<{ cli: string; chatId: string; busy: boolean }> = []): AgentLane[] {
+  const key = channelDeliveryKey(memberId, fromId);
+  const list = inFlightChannelDeliveries.get(key);
+  if (!list?.length) return [];
+  const active = activeSessions;
+  const isBusy = (entry: InFlightChannelDelivery) => !!entry.chatKey && !!entry.cli
+    && active.some((session) => session.cli === entry.cli && session.chatId === entry.chatKey && session.busy === true);
+  const finished = list.filter((entry) =>
+    entry.admittedAt !== undefined && entry.admittedAt < Date.now() - 5000 && !isBusy(entry));
+  if (finished.length) {
+    const next = list.filter((entry) => !finished.includes(entry));
+    if (next.length) inFlightChannelDeliveries.set(key, next);
+    else inFlightChannelDeliveries.delete(key);
+  }
+  return [...new Set(list.filter(isBusy).map((entry) => entry.lane as AgentLane))];
+}
+
+/** Abort every in-flight delivery worker from one channel to one member.
+ *  Used by channel Stop before the interrupt: a worker waiting at a turn
+ *  boundary would otherwise send its already-built batch the moment the
+ *  Stop's interrupt ends the busy turn. Exported for tests. */
+export function abortInFlightChannelDeliveries(memberId: string, fromId: string): number {
+  const list = inFlightChannelDeliveries.get(channelDeliveryKey(memberId, fromId));
+  if (!list?.length) return 0;
+  for (const entry of list) entry.controller.abort();
+  return list.length;
+}
+
+/** Drop a member's still-queued deliveries from one channel (channel Stop):
+ *  the posts stay in the channel history, but they no longer wake the
+ *  member. In-flight delivery workers from this channel are aborted first —
+ *  removing the store row alone leaves the worker holding its built batch,
+ *  and the interrupt that follows would hand it exactly the idle session it
+ *  was waiting for, re-delivering the post Stop meant to kill (review
+ *  finding 1). The drain also re-checks the outbox right before its send,
+ *  so the abort and the row removal close the race from both sides.
+ *  Returns how many records were dropped. */
+export async function dropQueuedChannelDeliveries(memberName: string, channelId: string): Promise<number> {
+  const agent = findAgent(memberName);
+  if (!agent) return 0;
+  const fromId = `channel:${channelId}`;
+  abortInFlightChannelDeliveries(agent.id, fromId);
+  let dropped = 0;
+  await queueStoreOperation(() => queuedDeliveryStore.modify((items) => {
+    const keep = items.filter((item) => !(item.toId === agent.id && item.fromId === fromId));
+    dropped = items.length - keep.length;
+    return keep;
+  }));
+  return dropped;
+}
+
 /** Fire-and-forget delivery into an agent's home thread (routines path). */
 export async function sendToAgentHome(
   agent: Agent,
@@ -667,6 +796,13 @@ type TeamDelivery = {
   /** True when a joined batch carries messages from several senders, so the
    *  closing reply instruction must not name only the lead's sender. */
   mixedSenders?: boolean;
+  /** The person authored this channel post: person-class admission. */
+  personPosted?: boolean;
+  /** Final gate before the prompt is sent: resolves false when the record
+   *  was dropped from the outbox while its worker waited at a turn boundary
+   *  (channel Stop), so a dropped post can never ride the turn the Stop's
+   *  interrupt just made room for. */
+  stillWanted?: () => Promise<boolean>;
   onAdmitted?: (session: SessionLike) => Promise<void>;
 };
 
@@ -683,9 +819,47 @@ function hasDurableDeliveryReceipt(logKey: string, deliveryId: string): boolean 
 }
 
 async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResult> {
-  const { from, to, text, hop, chain, waitForReply, signal, onAdmitted, deferIfBusy = false } = delivery;
+  // Channel deliveries register in flight so Stop can abort a worker
+  // waiting at a turn boundary and later person posts from the same channel
+  // can find the turn they should steer. A fire-and-forget delivery returns
+  // at its ack while its turn keeps running, so its entry deliberately
+  // outlives this call and is pruned once the turn ends.
+  if (delivery.from.role !== 'channel') return runTeamDeliveryInner(delivery, null);
+  const entry = registerInFlightChannelDelivery(delivery.to.id, delivery.from.id);
+  let result: TeamMessageResult;
+  try {
+    result = await runTeamDeliveryInner(delivery, entry);
+  } catch (error) {
+    releaseInFlightChannelDelivery(delivery.to.id, delivery.from.id, entry);
+    throw error;
+  }
+  if (!(result.delivered && !delivery.waitForReply)) {
+    releaseInFlightChannelDelivery(delivery.to.id, delivery.from.id, entry);
+  }
+  return result;
+}
+
+async function liveChannelTurnLanesForMember(agent: Agent, fromId: string): Promise<AgentLane[]> {
+  const runner = await getRunner();
+  return liveChannelTurnLanes(agent.id, fromId, runner.activeChatSessions());
+}
+
+/** Lanes with a live turn one channel's delivery started, by member name.
+ *  Read-only use: the channel working-state feed and Stop scoping. */
+export async function liveChannelTurnLanesByName(memberName: string, channelId: string): Promise<AgentLane[]> {
+  const agent = findAgent(memberName);
+  if (!agent) return [];
+  return liveChannelTurnLanesForMember(agent, `channel:${channelId}`);
+}
+
+async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InFlightChannelDelivery | null): Promise<TeamMessageResult> {
+  const { from, to, text, hop, chain, waitForReply, onAdmitted, deferIfBusy = false } = delivery;
   const deliveryId = delivery.deliveryId ?? randomUUID();
   const deadline = Date.now() + RECIPIENT_IDLE_WAIT_MS;
+  // A channel Stop aborts the in-flight entry; a synchronous caller's own
+  // stop signal is honoured alongside it.
+  const signals = [delivery.signal, channelInFlight?.controller.signal].filter((s): s is AbortSignal => !!s);
+  const signal = signals.length ? AbortSignal.any(signals) : undefined;
   let waited = false;
   let providerRefusals = 0;
   const replyInstruction = from.role === 'voice'
@@ -715,12 +889,24 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
     let effort: string | undefined;
     let lane: AgentLane;
     try {
-      // The person's own voice continues in their lane; every other sender
-      // (teammates, the Desk, TARDIS notices, robots) runs in the background.
+      // The person's own voice continues in their lane; the person's channel
+      // posts steer a live turn like a one-on-one message; every other
+      // sender (teammates, the Desk, TARDIS notices, robots) runs in the
+      // background. A channel delivery whose member has a live turn from
+      // this same channel steers that exact turn (its lane), so follow-ups
+      // join the conversation instead of spawning a parallel turn — this
+      // applies even to a post without an @, because the turn being steered
+      // is already this channel's own (review 3, P1 3). Person posts reach
+      // the person lane preference only when there is no channel turn to
+      // steer, so a room post to an unmentioned member never takes over
+      // their main lane or interrupts unrelated work.
+      const liveChannelLanes = from.role === 'channel' ? await liveChannelTurnLanesForMember(to, from.id) : [];
+      const personClass = delivery.personPosted === true || liveChannelLanes.length > 0;
+      const wantsPersonLane = personClass || deliveryLanePolicy(from.role, delivery.personPosted) === 'person';
       const admission = await getRecipientSessionForDelivery(
         to, deadline, signal, deferIfBusy,
-        from.role === 'automation' ? false : from.role === 'desk' || from.role === 'voice' ? 'human' : 'peer',
-        from.role === 'voice' || from.role === 'desk' ? await personLanePreference(to) : 'bg',
+        deliveryInterruptClass(from.role, personClass),
+        wantsPersonLane ? (liveChannelLanes[0] ?? await personLanePreference(to)) : 'bg',
       );
       session = admission.session;
       lane = admission.lane;
@@ -740,6 +926,10 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
     ) {
       await onAdmitted?.(session);
       admittedQueuedDeliveries.delete(deliveryId);
+      // This delivery already rode a previous turn; nothing of this channel
+      // is running on the session we just resolved, so the entry must not
+      // claim it (review 3, P2 8).
+      if (channelInFlight) releaseInFlightChannelDelivery(to.id, from.id, channelInFlight);
       return { delivered: true, to: to.name, hop, queued: true, reason: 'delivery was already accepted before retry' };
     }
 
@@ -797,8 +987,19 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
         }
         if (event.ev?.type === 'turnEnd' && providerAccepted && admittedSeq !== null && (event.seq ?? 0) > admittedSeq) {
           finishWait({ kind: 'completed', endSeq: event.seq ?? session.latestSeq() });
+          // THIS channel's turn ended: the in-flight entry must go with it,
+          // or a later post from the channel would steer whatever unrelated
+          // turn admits next on that lane (review 3, P0 2).
+          if (channelInFlight) {
+            releaseInFlightChannelDelivery(to.id, from.id, channelInFlight);
+            if (!waitForReply) unsubscribe?.();
+          }
         } else if (event.ev?.type === 'closed' && admittedSeq !== null) {
           finishWait({ kind: 'closed' });
+          if (channelInFlight) {
+            releaseInFlightChannelDelivery(to.id, from.id, channelInFlight);
+            if (!waitForReply) unsubscribe?.();
+          }
         }
       }, session.latestSeq(), false);
     } catch (error) {
@@ -806,6 +1007,13 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
     }
 
     try {
+      // Channel Stop can land between admission and the send. Re-check the
+      // outbox right before the prompt goes out: a record dropped by Stop
+      // must not ride the turn its interrupt just made room for (review 1).
+      if (delivery.stillWanted && !(await delivery.stillWanted())) {
+        unsubscribe?.();
+        return { delivered: false, to: to.name, hop, queued: waited || undefined, reason: 'dropped while waiting for a turn boundary' };
+      }
       await session.send(prompt, undefined, {
         peerFrom: from.name,
         peerFromRole: from.role,
@@ -849,6 +1057,17 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
       continue;
     }
 
+    // The turn now provably carries this delivery (its peer echo was seen
+    // and the provider accepted the prompt), so the in-flight entry may
+    // claim exactly this turn: lane, cli and chat id identify it until the
+    // turn ends. Recording these earlier would let the entry claim a turn
+    // another sender won (review 3, P0 2).
+    if (channelInFlight) {
+      channelInFlight.lane = lane;
+      channelInFlight.cli = agentLogKey(to, lane).cli;
+      channelInFlight.chatKey = session.chatId ?? (lane === 'bg' ? backgroundChatId(to.home) : to.home);
+      channelInFlight.admittedAt = Date.now();
+    }
     if (delivery.deliveryId) admittedQueuedDeliveries.add(deliveryId);
     try {
       await onAdmitted?.(session);
@@ -860,7 +1079,10 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
     }
 
     if (!waitForReply) {
-      unsubscribe?.();
+      // The turn keeps running after the ack, so the listener above stays
+      // alive purely to release the in-flight entry at this turn's end;
+      // non-channel deliveries have no entry and simply unsubscribe.
+      if (!channelInFlight) unsubscribe?.();
       return { delivered: true, to: to.name, hop, queued: waited || undefined };
     }
 
@@ -971,9 +1193,16 @@ function batchRoleClass(record: { fromRole?: string }): 'desk' | 'voice' | 'auto
  *  can read from the thread. Chain-identity joins left every differently
  *  chained handoff a singleton batch: Tim's queue held 11 records, one
  *  admitted per idle break. */
-function batchJoinable(lead: QueuedTeamDelivery, record: QueuedTeamDelivery): boolean {
+/** Exported for tests. */
+export function batchJoinable(lead: QueuedTeamDelivery, record: QueuedTeamDelivery): boolean {
   if (batchRoleClass(lead) !== batchRoleClass(record)) return false;
-  if (batchRoleClass(lead) === 'channel') return lead.fromId === record.fromId;
+  if (batchRoleClass(lead) === 'channel') {
+    // Same channel, and the same person-hood: a person post (human interrupt
+    // class, steering lane policy) must never share a batch with an agent
+    // reply from the same channel, or the lead's class would decide for both
+    // (review finding 5).
+    return lead.fromId === record.fromId && (lead.personPosted === true) === (record.personPosted === true);
+  }
   return true;
 }
 
@@ -1125,11 +1354,23 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         chain: chainForQueuedDelivery(lead),
         waitForReply: false,
         deliveryId: lead.id,
+        personPosted: lead.personPosted === true,
         mixedSenders: siblings.some((sibling) => sibling.fromId !== lead.fromId),
+        stillWanted: async () => {
+          // Every record that rides this batch must still be queued when the
+          // prompt finally goes out: a Stop that dropped any of them must
+          // not see the dropped text delivered anyway (review finding 1).
+          const rows = await queueStoreOperation(() => queuedDeliveryStore.list());
+          return siblings.every((sibling) => rows.some((row) => row.id === sibling.id));
+        },
         onAdmitted: (session) => acknowledgeQueuedBatch(lead, session),
       });
       const remains = await queueStoreOperation(async () =>
         (await queuedDeliveryStore.list()).some((item) => item.id === record.id));
+      // A dropped or gone lead needs neither the warning nor the retry wait:
+      // sleeping here would stall the member's other queued deliveries for a
+      // full retry interval after every channel Stop (review 3, P2 7).
+      if (!result.delivered && !remains) continue;
       if (!result.delivered || remains) {
         console.warn(`[team] queued delivery ${lead.fromName} -> ${to.name} will retry: ${result.reason ?? 'durable acknowledgement pending'}`);
         await retryDelay();
@@ -1203,6 +1444,11 @@ export async function deliverTeamMessage(input: {
   /** Priority flag: this record sorts with person-sourced records, ahead of
    *  older teammate chatter. Sort order only; nothing else changes. */
   priority?: boolean;
+  /** True when source:'channel' and the post was authored by the person
+   *  (Matt) rather than an agent: the record gets person-class admission
+   *  (human interrupt boundary, person lane preference) so his channel
+   *  posts steer members' live turns like his one-on-one messages do. */
+  personPosted?: boolean;
   signal?: AbortSignal;
   /** The sender's own lane (from its team MCP), for chain inheritance. */
   fromLane?: AgentLane;
@@ -1256,6 +1502,7 @@ export async function deliverTeamMessage(input: {
       text,
       hop,
       priority: input.priority === true ? true : undefined,
+      personPosted: input.source === 'channel' && input.personPosted === true ? true : undefined,
       chainId: chain.id,
       chainEdges: chain.edges,
       chainRoute: chain.route,
@@ -1338,7 +1585,10 @@ export async function deliverTeamMessage(input: {
     waitForReply: true,
     signal: input.signal,
     deliveryId: record.id,
+    personPosted: input.source === 'channel' && input.personPosted === true,
     deferIfBusy: true,
+    stillWanted: async () => queueStoreOperation(async () =>
+      (await queuedDeliveryStore.list()).some((row) => row.id === record.id)),
     onAdmitted: (session) => acknowledgeQueuedDelivery(record, session),
   }));
   if (!job) {
