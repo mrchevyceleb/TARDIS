@@ -336,22 +336,28 @@ export function Composer(props: ComposerProps) {
     }
     if (props.busy) {
       if (hasLiveContent && props.onSteer) {
-        if (queueArmed && props.onSendQueued) {
+        if (queueArmed && props.onSendQueued && (canSteer || props.queueAvailable === true)) {
           props.onSendQueued(v, imgs);
+          props.onChange('');
+          clearImages();
+          setQueueArmed(false);
         } else {
           props.onSteer(v, imgs);
+          props.onChange('');
+          clearImages();
         }
-        props.onChange('');
-        clearImages();
-        setQueueArmed(false);
       } else if (allowStop && !hasLiveContent) {
         props.onStop?.();
       }
       return;
     }
     if (!v && !imgs?.length && !refs) return;
+    // A queued send on a channel (never busy-blocked there): the chip arms
+    // the next-turn choice even when the composer itself is not busy.
+    const sendQueued = queueArmed && props.onSendQueued && (canSteer || props.queueAvailable === true);
+    setQueueArmed(false);
     const prevImages = images;
-    const res = props.onSend(v, imgs);
+    const res = sendQueued ? props.onSendQueued!(v, imgs) : props.onSend(v, imgs);
     props.onChange('');
     if (res && typeof (res as Promise<boolean | void>).then === 'function') {
       setImages([]);
@@ -515,15 +521,26 @@ export function Composer(props: ComposerProps) {
   const queueChip = props.onSendQueued && hasContent && !uploading && (canSteer || props.queueAvailable === true) ? (
     <button
       type="button"
-      className={`hint queue-chip${queueArmed ? ' on' : ''}`}
+      className={`queue-chip${queueArmed ? ' on' : ''}`}
       aria-pressed={queueArmed}
       title="Send as the next message after this turn, instead of steering it"
       aria-label="Queue this message for the next turn"
+      onPointerDown={(e) => {
+        // Same as the send button: a touch tap must not blur the textarea
+        // first — the keyboard resize moves the chip and eats the tap.
+        if (e.pointerType === 'touch') e.preventDefault();
+      }}
       onClick={() => setQueueArmed((a) => !a)}
     >
       Next turn
     </button>
   ) : null;
+  // The arm is strictly one-shot and strictly visible: it can never linger
+  // armed into a later busy period, a channel switch, or an idle send.
+  const queueLive = Boolean(queueChip);
+  useEffect(() => {
+    if (!queueLive) setQueueArmed(false);
+  }, [queueLive]);
 
   const popListId = props.chatId ? `composer-pop-${props.chatId}` : 'composer-pop';
   const popCount = slashOpen ? matches.length : (mention?.hits.length ?? 0);
@@ -716,14 +733,18 @@ export function Composer(props: ComposerProps) {
               )
             )}
             {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating} />}
-            {queueChip}
-            {trailingBtn()}
+            <div className="send-slot">
+              {queueChip}
+              {trailingBtn()}
+            </div>
           </div>
         ) : (
           <>
             {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating} />}
-            {queueChip}
-            {trailingBtn()}
+            <div className="send-slot">
+              {queueChip}
+              {trailingBtn()}
+            </div>
           </>
         )}
       </div>

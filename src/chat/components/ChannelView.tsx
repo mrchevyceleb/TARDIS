@@ -540,6 +540,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
         <div className="bt-dock">
           <div className="bt-dock-inner">
             <Composer
+              key={`channel:${channelId}`}
               chatId={`channel:${channelId}`}
               robotControl={false}
               value={text}
