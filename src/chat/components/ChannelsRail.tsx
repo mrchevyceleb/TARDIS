@@ -75,7 +75,11 @@ export function ChannelsRail({ agents, activeChannelId, onOpenChannel }: {
     }
   };
 
-  const summary = `Channels, ${list.length} ${list.length === 1 ? 'channel' : 'channels'}`;
+  const totalUnread = list.reduce((sum, c) => sum + (c.unread ?? 0), 0);
+  const summary = [
+    `Channels, ${list.length} ${list.length === 1 ? 'channel' : 'channels'}`,
+    totalUnread ? `${totalUnread} unread` : '',
+  ].filter(Boolean).join(', ');
 
   return (
     <section className={`bt-group ch-rail${collapsed ? ' is-collapsed' : ''}`} data-group="__channels__">
@@ -92,6 +96,11 @@ export function ChannelsRail({ agents, activeChannelId, onOpenChannel }: {
           <ChevronRight className="bt-group-chev" size={15} aria-hidden="true" />
           <span className="bt-group-name ch-rail-title">Channels</span>
           <span className="bt-group-count" aria-hidden="true">{list.length}</span>
+          {collapsed && totalUnread > 0 ? (
+            <span className="bt-group-chips" aria-hidden="true">
+              <span className="bt-unread" title={`${totalUnread} waiting`}>{totalUnread > 9 ? '9+' : totalUnread}</span>
+            </span>
+          ) : null}
         </button>
         <button
           type="button"
@@ -150,13 +159,14 @@ export function ChannelsRail({ agents, activeChannelId, onOpenChannel }: {
           {list.map((channel) => {
             const isActive = activeChannelId === channel.id;
             const memberLabel = channel.members.length ? channel.members.join(', ') : 'No members';
+            const unread = channel.unread ?? 0;
             return (
               <button
                 key={channel.id}
                 type="button"
                 className={`bt-conv ch-row${isActive ? ' on active' : ''}`}
                 onClick={() => onOpenChannel(channel.id)}
-                title={`#${channel.name} · ${memberLabel}`}
+                title={`#${channel.name} · ${memberLabel}${unread ? ` · ${unread} unread` : ''}`}
               >
                 <span className="bt-disc ch-row-disc" aria-hidden="true">
                   <Hash size={18} />
@@ -164,6 +174,11 @@ export function ChannelsRail({ agents, activeChannelId, onOpenChannel }: {
                 <span className="bt-conv-main">
                   <span className="bt-conv-top">
                     <span className="bt-conv-title ch-row-name">{channel.name}</span>
+                    {unread > 0 && !isActive ? (
+                      <span className="bt-unread" title={`${unread} waiting`} aria-label={`${unread} unread`}>
+                        {unread > 9 ? '9+' : unread}
+                      </span>
+                    ) : null}
                     <span className="bt-group-count ch-row-count">{channel.members.length}</span>
                   </span>
                   <span className="bt-conv-sub ch-row-members">{memberLabel}</span>

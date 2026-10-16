@@ -4098,6 +4098,7 @@ export function activeBananaSessions(): {
     busy: s.isBusy(),
     sessionId: s.sessionId(),
     lastActivityAt: s.lastActivityAt(),
+    busySince: s.activeTurnStartedAt() ?? undefined,
   }));
 }
 

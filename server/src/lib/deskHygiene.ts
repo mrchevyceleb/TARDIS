@@ -44,6 +44,20 @@ const SLOT_WINDOW_MIN = 20;
 const PENDING_TTL_MS = 60 * 60_000;
 const IN_PROGRESS_STALE_MS = 6 * 60 * 60_000;
 const NO_CARD_MINUTES = 30;
+/** A turn only starts counting toward the no-card tally once it has run this
+ *  long (wall clock, from the lane's own turn-start stamp): check turns and
+ *  other sub-minute work never reach it, however tightly they chain, because
+ *  each turn's clock starts fresh. */
+const SUSTAINED_TURN_MS = 2 * 60_000;
+/** Minutes a single tick may newly credit: the buffered opening at most, so
+ *  a tick after a long unobserved gap (paused timers, a sleeping host) never
+ *  dumps hours nobody watched into the tally. */
+const MAX_CREDIT_PER_TICK = SUSTAINED_TURN_MS / TICK_MS;
+/** Fallback for lanes that cannot report a turn-start stamp (none today:
+ *  Claude, Codex and banana all expose busySince): a turn's minutes enter the
+ *  tally only after it stays live past this many minute ticks, the buffered
+ *  tick credited at that point. */
+const SHORT_TURN_TICKS = 1;
 /** Pipeline cards with no activity this long are reviewed in the 10:00 slot. */
 const PIPELINE_STALE_MS = 3 * 24 * 60 * 60_000;
 /** The one daily slot that carries the Pipeline review. */
@@ -84,6 +98,11 @@ export type HygieneDeps = {
   /** Ids of agents with a live turn right now (routine and job wakes left out
    *  where the lane can tell them apart). */
   liveAgentIds: (agents: HygieneAgent[]) => Set<string> | Promise<Set<string>>;
+  /** agent id -> epoch ms that agent's OLDEST currently-live non-automation
+   *  turn started, per the lane's own turn-start stamp. Lanes that cannot
+   *  report a start are absent and fall back to the buffered-tick rule.
+   *  Optional: falls back to no map (tick-based). */
+  liveTurnStarts?: (agents: HygieneAgent[], nowMs: number) => Map<string, number> | Promise<Map<string, number>>;
   /** agent id -> epoch ms that lane was last known active: busy sessions
    *  report nowMs, automation wakes included (a lane mid-turn is not idle),
    *  and a session that went quiet between ticks still reports its last
@@ -101,8 +120,12 @@ type HygieneState = {
   version: 1;
   /** Eastern YYYY-MM-DD the minute tallies belong to. */
   day: string;
-  /** agent id -> minutes with a live turn today. */
+  /** agent id -> minutes with a live turn today (excluding short check turns). */
   minutes: Record<string, number>;
+  /** agent id -> consecutive minute ticks currently busy in the active turn. */
+  streak: Record<string, number>;
+  /** agent id -> epoch ms through which sustained minutes were already credited. */
+  creditedThrough: Record<string, number>;
   /** Slot keys ("YYYY-MM-DD HH:00") already handled today, sent or not. */
   fired: string[];
   /** Agents still to check for the latest slot (deliveries are paced). */
@@ -285,6 +308,12 @@ function parseState(raw: string): HygieneState | null {
   for (const [id, value] of Object.entries(obj.minutes as Record<string, unknown>)) {
     if (typeof value === 'number' && Number.isFinite(value) && value > 0) minutes[id] = Math.floor(value);
   }
+  const streak: Record<string, number> = {};
+  if (obj.streak && typeof obj.streak === 'object' && !Array.isArray(obj.streak)) {
+    for (const [id, value] of Object.entries(obj.streak as Record<string, unknown>)) {
+      if (typeof value === 'number' && Number.isFinite(value) && value > 0) streak[id] = Math.floor(value);
+    }
+  }
   const rawPending = obj.pending as Record<string, unknown> | null | undefined;
   const pending = rawPending && typeof rawPending.slot === 'string' && typeof rawPending.at === 'number' && Array.isArray(rawPending.agents)
     ? { slot: rawPending.slot, at: rawPending.at, agents: rawPending.agents.filter((a): a is string => typeof a === 'string') }
@@ -302,10 +331,12 @@ function parseState(raw: string): HygieneState | null {
     version: 1,
     day: obj.day,
     minutes,
+    streak,
     fired: obj.fired.filter((s): s is string => typeof s === 'string'),
     pending,
     lastBusy: epochMap(obj.lastBusy),
     lastIdleNudge: epochMap(obj.lastIdleNudge),
+    creditedThrough: epochMap(obj.creditedThrough),
   };
 }
 
@@ -347,6 +378,8 @@ function seedState(clock: { day: string; minute: number }): HygieneState {
     version: 1,
     day: clock.day,
     minutes: {},
+    streak: {},
+    creditedThrough: {},
     fired: SLOT_HOURS.filter((hour) => hour * 60 <= clock.minute).map((hour) => slotKey(clock.day, hour)),
     pending: null,
     lastBusy: {},
@@ -392,12 +425,34 @@ async function liveAgentIdsFromRunners(agents: HygieneAgent[]): Promise<Set<stri
   return out;
 }
 
+async function liveTurnStartsFromRunners(agents: HygieneAgent[], nowMs: number): Promise<Map<string, number>> {
+  const runner = await import('../chat/runner.ts');
+  const byHome = new Map(agents.map((a) => [a.home, a.id]));
+  const out = new Map<string, number>();
+  for (const session of runner.activeChatSessions()) {
+    if (!session.busy) continue;
+    const id = byHome.get(bareChatId(session.chatId));
+    if (!id) continue;
+    const lane = runner.liveLaneSession(runner.laneLogKey(session.cli, session.cwd, session.chatId));
+    if (lane && lane.cli === session.cli && lane.isAutomationTurn()) continue;
+    // The agent's tally keys on its OLDEST live turn: a fresh short turn in
+    // another lane never resets a genuinely long one, and a chain of short
+    // turns never accumulates a false age.
+    const started = session.busySince;
+    if (started === undefined || !Number.isFinite(started) || started > nowMs) continue;
+    const prev = out.get(id);
+    if (prev === undefined || started < prev) out.set(id, started);
+  }
+  return out;
+}
+
 function defaultDeps(): HygieneDeps {
   return {
     now: () => Date.now(),
     readDesk,
     listAgents: async () => (await import('../chat/agents.ts')).listAgents(),
     liveAgentIds: liveAgentIdsFromRunners,
+    liveTurnStarts: liveTurnStartsFromRunners,
     occupiedAgentActivity: occupiedAgentActivityFromRunners,
     deliver: async ({ to, text }) => {
       // Matt, Oct 14 (card-d7bf78 b): Desk silence flags queue into the
@@ -435,6 +490,10 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
         ? (agents, nowMs) => Promise.resolve(overrides.liveAgentIds!(agents))
           .then((ids) => new Map(Array.from(ids, (id) => [id, nowMs] as const)))
         : defaults.occupiedAgentActivity),
+    // Same stand-in rule: a caller that stubs liveAgentIds is driving its own
+    // lanes, so the real runner scan must not leak real turn starts in.
+    liveTurnStarts: overrides.liveTurnStarts
+      ?? (overrides.liveAgentIds ? undefined : defaults.liveTurnStarts),
   };
   const nowMs = deps.now();
   const clock = etClock(nowMs);
@@ -451,6 +510,8 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
   if (state.day !== clock.day) {
     state.day = clock.day;
     state.minutes = {};
+    state.streak = {};
+    state.creditedThrough = {};
     dirty = true;
   }
   const today = `${clock.day} `;
@@ -473,7 +534,7 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
   // only delay a pickup, never burst one) instead of inheriting stale
   // stamps. An empty roster (a transient hiccup) never wipes state.
   if (rosterIds.size) {
-    for (const map of [state.minutes, state.lastBusy, state.lastIdleNudge]) {
+    for (const map of [state.minutes, state.streak, state.lastBusy, state.lastIdleNudge, state.creditedThrough]) {
       for (const id of Object.keys(map)) {
         if (!rosterIds.has(id)) {
           delete map[id];
@@ -482,14 +543,56 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
       }
     }
   }
-  for (const id of await deps.liveAgentIds(agents)) {
+  const liveNow = await deps.liveAgentIds(agents);
+  const turnStarts = deps.liveTurnStarts ? await deps.liveTurnStarts(agents, nowMs) : undefined;
+  for (const id of Object.keys(state.streak)) {
+    if (!liveNow.has(id) || (turnStarts !== undefined && turnStarts.has(id))) {
+      delete state.streak[id];
+      dirty = true;
+    }
+  }
+  for (const id of liveNow) {
     if (!known.has(id)) continue;
-    state.minutes[id] = (state.minutes[id] ?? 0) + 1;
+    const started = turnStarts?.get(id);
+    if (turnStarts !== undefined) {
+      // Per-turn wall-clock credit (the root fix): a minute counts only once
+      // the turn itself has run SUSTAINED_TURN_MS, so a chain of short turns
+      // — each starting its own clock, even back to back, even across lanes —
+      // accrues nothing. Credit covers only minutes no earlier credit already
+      // paid for: a turn's first sustained tick credits its buffered opening
+      // (the ticks that watched it get here), then one per further tick. The
+      // credited-through watermark keeps overlapping lanes (home plus bg; the
+      // live map reports the OLDEST turn's start, and jumps to the other lane
+      // when that one ends) from re-crediting the same minutes, the Eastern
+      // day-start clamp keeps a turn dormant across midnight from reaching
+      // back into yesterday, and the per-tick cap keeps one tick after a long
+      // unobserved gap from crediting hours no tick saw (the cap lets later
+      // ticks catch the rest back up while the turn stays live).
+      if (started !== undefined && nowMs - started >= SUSTAINED_TURN_MS) {
+        const floorMs = Math.max(started, state.creditedThrough[id] ?? 0, nowMs - clock.minute * 60_000);
+        const credit = Math.min(Math.floor((nowMs - floorMs) / TICK_MS), MAX_CREDIT_PER_TICK);
+        if (credit > 0) {
+          state.minutes[id] = (state.minutes[id] ?? 0) + credit;
+          state.creditedThrough[id] = floorMs + credit * TICK_MS;
+          dirty = true;
+        }
+      }
+      continue;
+    }
+    // Fallback (no turn-start stamps available): buffered-tick streak, so a
+    // turn's first tick only lands in the tally once it proves sustained.
+    const streak = (state.streak[id] ?? 0) + 1;
+    state.streak[id] = streak;
+    if (streak === SHORT_TURN_TICKS + 1) {
+      state.minutes[id] = (state.minutes[id] ?? 0) + streak;
+    } else if (streak > SHORT_TURN_TICKS + 1) {
+      state.minutes[id] = (state.minutes[id] ?? 0) + 1;
+    }
     dirty = true;
   }
   const activity = deps.occupiedAgentActivity
     ? await deps.occupiedAgentActivity(agents, nowMs)
-    : new Map(Array.from(await deps.liveAgentIds(agents), (id) => [id, nowMs] as const));
+    : new Map(Array.from(liveNow, (id) => [id, nowMs] as const));
   for (const [id, ms] of activity) {
     if (!known.has(id) || !Number.isFinite(ms)) continue;
     const last = Math.min(ms, nowMs); // a future stamp can never extend the clock

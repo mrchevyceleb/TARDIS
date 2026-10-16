@@ -31,6 +31,9 @@ const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'im
 
 export type ComposerProps = {
   chatId?: string;
+  /** false hides the robot remote control (channel composers keep dictation
+   *  but have no robot to drive). Default keeps it. */
+  robotControl?: boolean;
   mobile?: boolean;
   value: string;
   onChange: (v: string) => void;
@@ -576,7 +579,7 @@ export function Composer(props: ComposerProps) {
           ))}
         </div>
       ) : null}
-      {props.chatId && <RobotControl />}
+      {props.chatId && props.robotControl !== false && <RobotControl />}
       {props.attachMenu}
       <div
         className={`composer${images.length > 0 || refCount > 0 || uploads.length > 0 ? ' has-attach' : ''}${dictating ? ' dictating' : ''}`}
