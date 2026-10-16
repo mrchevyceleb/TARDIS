@@ -80,6 +80,10 @@ export function useChatShell({ chat, picker }: ShellProps) {
     chat.steer(text, images);
     requestAnimationFrame(() => sticky.forcePin());
   };
+  const sendQueued = (text: string, images?: SendImage[]) => {
+    chat.sendQueued(text, images);
+    requestAnimationFrame(() => sticky.forcePin());
+  };
   const stop = () => chat.stop();
 
   const pickChronicle = (e: ChronicleEvent) => {
@@ -97,7 +101,7 @@ export function useChatShell({ chat, picker }: ShellProps) {
     busy,
     workingSince: chat.turnStartedAt,
     backgroundWork: chat.backgroundWork,
-    send, steer, retry: chat.retry, react: chat.react, stop,
+    send, steer, sendQueued, retry: chat.retry, react: chat.react, stop,
     fresh: chat.freshStart,
     pickChronicle,
     blocks: chat.blocks as ChatBlock[],

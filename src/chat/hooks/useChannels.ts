@@ -116,11 +116,12 @@ export function useChannelActions() {
     onSuccess: refreshList,
   });
   const post = useMutation({
-    mutationFn: (input: { channelId: string; from: string; text: string; person?: boolean; images?: Array<{ mediaType: string; base64: string }> }) =>
+    mutationFn: (input: { channelId: string; from: string; text: string; person?: boolean; queue?: boolean; images?: Array<{ mediaType: string; base64: string }> }) =>
       channelRequest<{ message: ChannelMessage }>(`/${encodeURIComponent(input.channelId)}/messages`, 'POST', {
         from: input.from,
         text: input.text,
         person: input.person === true,
+        ...(input.queue === true ? { queue: true } : {}),
         ...(input.images?.length ? { images: input.images } : {}),
       }),
     onSuccess: () => {

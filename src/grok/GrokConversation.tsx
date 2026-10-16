@@ -157,6 +157,7 @@ export function GrokConversation(props: BotConversationProps) {
       onSend={dock ? (text, images) => s.send(dock.takeOutgoing(text), images) : s.send}
       onStop={s.stop}
       onSteer={dock ? (text, images) => s.steer(dock.takeOutgoing(text), images) : s.steer}
+      onSendQueued={dock ? (text, images) => s.sendQueued(dock.takeOutgoing(text), images) : s.sendQueued}
       busy={s.busy}
       commands={s.commands}
       placeholders={placeholders}

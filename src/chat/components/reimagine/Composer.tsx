@@ -38,6 +38,13 @@ export type ComposerProps = {
   value: string;
   onChange: (v: string) => void;
   onSend: (text: string, images?: SendImage[]) => void | Promise<boolean | void>;
+  /** Queue-next-turn (card-504beb): when present alongside a busy lane, the
+ *  composer shows a Next turn chip; a send with it armed goes to the next
+ *  turn instead of steering the live one. */
+  onSendQueued?: (text: string, images?: SendImage[]) => void | Promise<boolean | void>;
+  /** Surfaces the chip even without a steerable one-on-one lane (channel
+ *  composers: any member working means a queued post is meaningful). */
+  queueAvailable?: boolean;
   onStop?: () => void;
   onSteer?: (text: string, images?: SendImage[]) => void;
   /** Wipe the conversation and start a fresh thread (desktop row button). */
@@ -146,6 +153,7 @@ export function Composer(props: ComposerProps) {
   const [caret, setCaret] = useState(0);
   const [images, setImages] = useState<PendingImage[]>([]);
   const [uploads, setUploads] = useState<PendingUpload[]>([]);
+  const [queueArmed, setQueueArmed] = useState(false);
   const uploadAborts = useRef(new Map<string, () => void>());
   const [phIdx, setPhIdx] = useState(0);
   const [dictating,setDictating]=useState(false);
@@ -328,9 +336,14 @@ export function Composer(props: ComposerProps) {
     }
     if (props.busy) {
       if (hasLiveContent && props.onSteer) {
-        props.onSteer(v, imgs);
+        if (queueArmed && props.onSendQueued) {
+          props.onSendQueued(v, imgs);
+        } else {
+          props.onSteer(v, imgs);
+        }
         props.onChange('');
         clearImages();
+        setQueueArmed(false);
       } else if (allowStop && !hasLiveContent) {
         props.onStop?.();
       }
@@ -495,6 +508,22 @@ export function Composer(props: ComposerProps) {
 
   const trailingBtn = (extraClass = '') =>
     dictating ? null : !ready && !props.busy && props.idleAction ? props.idleAction : sendBtn(extraClass);
+
+  // Next-turn chip (card-504beb): one-shot arm — the send after arming goes
+  // to the next turn instead of steering. Shown only when a queued send is
+  // meaningful (busy one-on-one lane, or working channel members).
+  const queueChip = props.onSendQueued && hasContent && !uploading && (canSteer || props.queueAvailable === true) ? (
+    <button
+      type="button"
+      className={`hint queue-chip${queueArmed ? ' on' : ''}`}
+      aria-pressed={queueArmed}
+      title="Send as the next message after this turn, instead of steering it"
+      aria-label="Queue this message for the next turn"
+      onClick={() => setQueueArmed((a) => !a)}
+    >
+      Next turn
+    </button>
+  ) : null;
 
   const popListId = props.chatId ? `composer-pop-${props.chatId}` : 'composer-pop';
   const popCount = slashOpen ? matches.length : (mention?.hits.length ?? 0);
@@ -687,11 +716,13 @@ export function Composer(props: ComposerProps) {
               )
             )}
             {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating} />}
+            {queueChip}
             {trailingBtn()}
           </div>
         ) : (
           <>
             {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={insertDictation} onActive={setDictating} />}
+            {queueChip}
             {trailingBtn()}
           </>
         )}

@@ -261,7 +261,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
     onToggle: togglePin,
   };
 
-  const send = async (sendText: string, images?: SendImage[]): Promise<boolean> => {
+  const send = async (sendText: string, images?: SendImage[], queue = false): Promise<boolean> => {
     if ((!sendText.trim() && !images?.length) || actions.post.isPending) return false;
     try {
       const clean = images?.map(({ mediaType, base64 }) => ({ mediaType, base64 }));
@@ -270,6 +270,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
         from: 'Matt',
         person: true,
         text: sendText,
+        ...(queue ? { queue: true } : {}),
         ...(clean?.length ? { images: clean } : {}),
       });
       setText('');
@@ -544,6 +545,8 @@ export function ChannelView({ channelId, agents, onDeleted }: {
               value={text}
               onChange={setText}
               onSend={(sendText, images) => send(sendText, images)}
+              onSendQueued={(sendText, images) => send(sendText, images, true)}
+              queueAvailable={(live.data?.working?.length ?? 0) > 0}
               busy={actions.post.isPending}
               placeholder={`Message ${channel?.name ?? 'channel'}`}
               mentionMembers={memberAgents.map((a) => a.name)}

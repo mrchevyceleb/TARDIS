@@ -2753,6 +2753,7 @@ export function useChat(opts: {
   const steer = (
     text: string,
     images?: ChatSendImage[],
+    queue = false,
   ) => {
     if (!repo) return;
     const ws = wsRef.current;
@@ -2794,7 +2795,7 @@ export function useChat(opts: {
     pendingSendRef.current = true;
     rememberPendingSteer(key, { text, images, clientMsgId, ts: Date.now() });
     setError(null);
-    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), clientMsgId, model: modelRef.current, effort: effortRef.current, ...selectionIntent() }));
+    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), clientMsgId, model: modelRef.current, effort: effortRef.current, ...(queue ? { queue: true } : {}), ...selectionIntent() }));
     lastMessageAtRef.current = Date.now();
     compactingRef.current = false;
     setStatus('streaming');
@@ -2842,7 +2843,7 @@ export function useChat(opts: {
 
   return {
     chatId,
-    blocks: visibleBlocks, status, error, send, steer, retry, react, freshStart, stop, reconnect, usage, serverBrain, automationBusy,
+    blocks: visibleBlocks, status, error, send, steer, sendQueued: (text: string, images?: ChatSendImage[]) => steer(text, images, true), retry, react, freshStart, stop, reconnect, usage, serverBrain, automationBusy,
     hydrating,
     turnStartedAt,
     backgroundWork,
