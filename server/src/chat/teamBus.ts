@@ -495,8 +495,13 @@ function sortsAhead(record: { fromRole?: string; priority?: boolean; personPoste
  *  peer class. Exported for tests. */
 export function deliveryInterruptClass(fromRole: string | undefined, personPosted?: boolean, queue?: boolean): false | 'human' | 'peer' {
   if (fromRole === 'automation') return false;
+  // A queued delivery (card-504beb) never interrupts: no human or peer
+  // boundary request, on the first admission attempt or any drain retry. It
+  // waits out the live turn and rides the next-turn admission, exactly like
+  // a peer message that cannot steer.
+  if (queue === true) return false;
   if (fromRole === 'desk' || fromRole === 'voice') return 'human';
-  if (fromRole === 'channel' && personPosted === true) return queue === true ? 'peer' : 'human';
+  if (fromRole === 'channel' && personPosted === true) return 'human';
   return 'peer';
 }
 
@@ -517,6 +522,10 @@ async function getRecipientSessionForDelivery(
   deferIfBusy = false,
   interruptAtBoundary: false | 'human' | 'peer' = false,
   requestedLane: AgentLane = 'main',
+  /** A queued delivery (card-504beb) must never join the live turn: no
+   *  native-steer admission on Claude, no steerable early exit in the wait,
+   *  no boundary interrupt on agy. Only a real turn end admits it. */
+  neverSteer = false,
 ): Promise<{ session: SessionLike; waited: boolean; nativeSteer: boolean; model?: string; effort?: string; lane: AgentLane }> {
   const runner = await getRunner();
   let waited = false;
@@ -575,7 +584,7 @@ async function getRecipientSessionForDelivery(
       return (!brain.model || selected.model === brain.model)
         && (!brain.effort || selected.effort === brain.effort);
     };
-    if (steerAdmissible() && session.canAcceptNativeHumanSteer?.() === true) {
+    if (!neverSteer && steerAdmissible() && session.canAcceptNativeHumanSteer?.() === true) {
       return { session, waited, nativeSteer: true, model, effort, lane };
     }
     // A synchronous MCP tool call must never sit behind somebody else's long
@@ -591,7 +600,7 @@ async function getRecipientSessionForDelivery(
       session,
       Math.max(1, deadline - Date.now()),
       signal,
-      steerAdmissible,
+      neverSteer ? () => false : steerAdmissible,
       interruptAtBoundary,
     );
     if (outcome === 'aborted') throw new Error('sender stopped before delivery');
@@ -964,6 +973,7 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
         to, deadline, signal, deferIfBusy,
         deliveryInterruptClass(from.role, personClass, delivery.queue === true),
         wantsPersonLane ? (liveChannelLanes[0] ?? await personLanePreference(to)) : 'bg',
+        delivery.queue === true,
       );
       session = admission.session;
       lane = admission.lane;

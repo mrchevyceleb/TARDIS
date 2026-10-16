@@ -164,6 +164,24 @@ test('the person’s channel posts get person-class delivery, agent posts stay p
   assert.equal(deliveryLanePolicy(undefined, true), 'bg');
 });
 
+test('a queued delivery never requests any interrupt class, on any admission or retry', () => {
+  // card-504beb: queue keeps the person class and lane preference, but the
+  // delivery never interrupts the live turn — no human boundary request, no
+  // peer boundary request, not even on the member's own live channel turn or
+  // a drain retry. It waits for the turn to end like a peer message that
+  // cannot steer.
+  assert.equal(deliveryInterruptClass('channel', true, true), false);
+  assert.equal(deliveryInterruptClass('channel', false, true), false);
+  assert.equal(deliveryInterruptClass('channel', undefined, true), false);
+  assert.equal(deliveryInterruptClass('desk', undefined, true), false);
+  assert.equal(deliveryInterruptClass('voice', undefined, true), false);
+  assert.equal(deliveryInterruptClass(undefined, true, true), false);
+  // Without queue the person classes are exactly as before.
+  assert.equal(deliveryInterruptClass('channel', true, false), 'human');
+  assert.equal(deliveryInterruptClass('channel', true, undefined), 'human');
+  assert.equal(deliveryInterruptClass('desk', undefined, false), 'human');
+});
+
 test('a channel Stop aborts the in-flight delivery worker holding its batch', () => {
   // Review finding 1: removing the outbox row alone leaves the drain worker
   // waiting at a turn boundary with its batch already built. Stop must abort
