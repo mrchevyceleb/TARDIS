@@ -1194,6 +1194,10 @@
   background: var(--r-bg-card);
   animation: bt-msg-in 0.25s ease both;
 }
+/* A teammate message pinned to an agent's board carries the same accent the
+   assistant bubbles use, so a pinned handoff reads at a glance. */
+.bt-peer.pinned { border-color: var(--r-line-gold); }
+.bt-peer-acts { padding: 0 12px 8px; }
 .bt-peer-toggle {
   display: block;
   width: 100%;

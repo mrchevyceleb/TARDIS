@@ -66,6 +66,34 @@
 }
 .ch-menu-row:hover { background: color-mix(in srgb, currentColor 9%, transparent); }
 .ch-menu-row.danger { color: #e5484d; }
+
+/* Pin drawer (card-1327b9): every member's own board, reachable from the
+   channel header. Same stacking as the channel menu. */
+.ch-pins {
+  position: absolute; top: 42px; right: 44px; z-index: 41; width: min(340px, calc(100% - 24px));
+  max-height: min(420px, 60vh); overflow-y: auto;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  background: var(--bt-panel, #1e222b); border-radius: 10px; padding: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.ch-pins-head { font-size: 12.5px; font-weight: 650; opacity: 0.85; }
+.ch-pins-empty { font-size: 12px; opacity: 0.55; line-height: 1.45; }
+.ch-pins-sec { display: flex; flex-direction: column; gap: 4px; }
+.ch-pins-title {
+  font-size: 11px; font-weight: 650; opacity: 0.6;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  padding-bottom: 3px;
+}
+.ch-pins-row { display: flex; align-items: flex-start; gap: 6px; }
+.ch-pins-text {
+  flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.45; text-align: left;
+  overflow-wrap: anywhere; border: 0; background: none; color: inherit;
+  padding: 0; cursor: pointer;
+}
+span.ch-pins-text { cursor: default; }
+.ch-pins-unpin { flex: none; opacity: 0.6; }
+.ch-pins-unpin:hover { opacity: 1; }
 .ch-edit-bar {
   display: flex; align-items: center; gap: 8px; padding: 8px 14px; flex-wrap: wrap;
   border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
