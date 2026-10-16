@@ -445,6 +445,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
               onSend={(sendText, images) => void send(sendText, images)}
               busy={actions.post.isPending}
               placeholder={`Message ${channel?.name ?? 'channel'}`}
+              mentionMembers={channel?.members}
             />
           </div>
         </div>

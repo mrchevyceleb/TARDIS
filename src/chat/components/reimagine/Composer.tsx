@@ -38,6 +38,9 @@ export type ComposerProps = {
   busy: boolean;
   commands?: CommandEntry[];
   commandPrefix?: string;
+  /** Channel member names for @-tag autocomplete (card-1327b9). Absent in
+   *  one-on-one threads: @-addressing is a channel thing. */
+  mentionMembers?: string[];
   modelChip?: React.ReactNode;
   hint?: React.ReactNode;
   attachButton?: React.ReactNode;
@@ -95,6 +98,9 @@ export function Composer(props: ComposerProps) {
   const cap = mobile ? 128 : 148;
   const [popSel, setPopSel] = useState(0);
   const [popDismissed, setPopDismissed] = useState(false);
+  // Caret of the composer textarea, synced on type, keys and clicks so the
+  // @-mention token can be scoped to where the typing is.
+  const [caret, setCaret] = useState(0);
   const [images, setImages] = useState<PendingImage[]>([]);
   const [uploads, setUploads] = useState<PendingUpload[]>([]);
   const uploadAborts = useRef(new Map<string, () => void>());
@@ -121,11 +127,30 @@ export function Composer(props: ComposerProps) {
     const q = m[1];
     return (props.commands ?? []).filter((c) => c.name.startsWith(q));
   }, [props.value, props.commands]);
-  const popOpen = matches.length > 0 && !popDismissed;
+  const slashOpen = matches.length > 0 && !popDismissed;
+  // @-tag autocomplete (card-1327b9): a caret-scoped mention token, so the
+  // popover opens mid-draft wherever the typing is, not only at the start.
+  // Any name word matches the prefix; picking inserts the full name plus
+  // the trailing space the server's mention matcher needs as its boundary.
+  const mention = useMemo(() => {
+    const members = props.mentionMembers;
+    if (!members?.length) return null;
+    const before = props.value.slice(0, caret);
+    const m = /(?:^|\s)@([A-Za-z0-9_]*)$/.exec(before);
+    if (!m) return null;
+    const q = m[1].toLowerCase();
+    const hits = members
+      .filter((name) => name.trim().toLowerCase().split(/\s+/).some((w) => w.startsWith(q)))
+      .slice(0, 8);
+    if (!hits.length) return null;
+    return { at: caret - m[1].length - 1, len: m[1].length + 1, hits };
+  }, [props.value, caret, props.mentionMembers]);
+  const mentionOpen = !slashOpen && mention !== null && !popDismissed;
+  const popOpen = slashOpen || mentionOpen;
 
   useEffect(() => {
     setPopSel(0);
-  }, [props.value]);
+  }, [props.value, caret]);
 
   // Let the mobile attach menu open the file picker imperatively.
   useEffect(() => {
@@ -270,17 +295,34 @@ export function Composer(props: ComposerProps) {
     taRef.current?.focus();
   };
 
+  const pickMention = (i: number) => {
+    const name = mention?.hits[i];
+    if (!name) return;
+    const before = props.value.slice(0, mention.at);
+    const after = props.value.slice(mention.at + mention.len);
+    const next = `${before}@${name} ${after}`;
+    const pos = (before + `@${name} `).length;
+    setCaret(pos);
+    props.onChange(next);
+    requestAnimationFrame(() => {
+      taRef.current?.focus();
+      taRef.current?.setSelectionRange(pos, pos);
+    });
+  };
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (popOpen) {
+      const count = slashOpen ? matches.length : (mention?.hits.length ?? 0);
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
-        setPopSel((s) => (s + (e.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length);
+        setPopSel((s) => (s + (e.key === 'ArrowDown' ? 1 : -1) + count) % count);
         return;
       }
       if (e.key === 'Enter' || e.key === 'Tab') {
         if (e.nativeEvent.isComposing) return;
         e.preventDefault();
-        pick(Math.min(popSel, matches.length - 1));
+        if (slashOpen) pick(Math.min(popSel, matches.length - 1));
+        else pickMention(Math.min(popSel, count - 1));
         return;
       }
       if (e.key === 'Escape') {
@@ -383,13 +425,23 @@ export function Composer(props: ComposerProps) {
           {props.busy && !uploading ? <span className="steer-cue">Reply will send next ↪</span> : null}
         </div>
       ) : null}
-      {popOpen ? (
+      {slashOpen ? (
         <div className="pop show" role="listbox">
           <div className="pop-h">Console commands</div>
           {matches.map((c, i) => (
             <button key={c.name} type="button" className={`cmd${i === popSel ? ' sel' : ''}`} onClick={() => pick(i)}>
               <span className="cn">/{c.name}</span>
               <span className="ch">{c.description ?? c.title ?? ''}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {mentionOpen ? (
+        <div className="pop show" role="listbox">
+          <div className="pop-h">Members</div>
+          {mention?.hits.map((name, i) => (
+            <button key={name} type="button" className={`cmd${i === popSel ? ' sel' : ''}`} onClick={() => pickMention(i)}>
+              <span className="cn">@{name}</span>
             </button>
           ))}
         </div>
@@ -432,9 +484,12 @@ export function Composer(props: ComposerProps) {
           aria-label="Message"
           onChange={(e) => {
             setPopDismissed(false);
+            setCaret(e.target.selectionStart ?? 0);
             props.onChange(e.target.value);
           }}
           onKeyDown={onKeyDown}
+          onKeyUp={() => setCaret(taRef.current?.selectionStart ?? 0)}
+          onClick={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
           onPaste={(e) => {
             if (!acceptImages) return;
             const files: File[] = [];
