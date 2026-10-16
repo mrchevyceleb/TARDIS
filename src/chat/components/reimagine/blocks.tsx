@@ -570,8 +570,9 @@ function PeerMessageBubble({
   const initial = (block.from || '?').trim().slice(0, 1).toUpperCase();
   const routineResult = block.fromRole === 'automation-result';
   // Quiet routines stay hidden. Deliverable ones (dashboards, briefs) are
-  // something Matt has to read, so they start open in the thread.
-  const [open, setOpen] = useState(routineResult);
+  // something Matt has to read, so they start open in the thread. Channel
+  // history marks member posts expanded: the post is the message.
+  const [open, setOpen] = useState(block.expanded ?? routineResult);
   const text = cleanPeerMessageText(block.text);
   const bodyId = `peer-message-${block.id}`;
   const hasResponse = responseBlocks.length > 0;
@@ -580,6 +581,10 @@ function PeerMessageBubble({
   const publicResponseBlocks = publicPeerResponse(responseBlocks, streaming);
   const responseToolCount = responseBlocks.filter((item) => item.kind === 'tool').length;
   const responseBusy = peerResponseBusy(responseBlocks, responseActive);
+  // Pin affordance for a teammate's own message (channels, card-1327b9, and
+  // one-on-one handoffs alike): the row toggles this bubble onto the thread
+  // agent's board through the same ThreadPin the assistant prose uses.
+  const peerPinned = pin ? pin.pinnedBlockIds.includes(block.id) : false;
   const role = routineResult
     ? 'routine update'
     : block.fromRole
@@ -589,7 +594,7 @@ function PeerMessageBubble({
 
   return (
     <>
-    <div className={`bt-peer${routineResult ? ' routine-result' : ''}${open ? ' open' : ''}`}>
+    <div className={`bt-peer${routineResult ? ' routine-result' : ''}${open ? ' open' : ''}${peerPinned ? ' pinned' : ''}`} data-pin-block={block.id} id={`msg-pin-${block.id}`}>
       <button
         type="button"
         className="bt-peer-toggle"
@@ -624,6 +629,23 @@ function PeerMessageBubble({
               ? <div className="bt-peer-turn-text prose"><Markdown>{text}</Markdown></div>
               : <div className="bt-peer-turn-text"><DeskRefText text={text} /></div>}
           </section>
+          {pin ? (
+            <div className="bt-peer-acts">
+              <ActionsRow
+                getText={() => text}
+                pinned={peerPinned}
+                blockId={block.id}
+                mobile={mobile}
+                onTogglePin={() => pin.onToggle({ blockId: block.id, text, ts: block.ts })}
+                onPinLink={pin && !mobile ? (url) =>
+                  pin.onToggle({ blockId: `${block.id}::link-${shortHash(url)}`, text: url, ts: block.ts })
+                : undefined}
+                onPinSelection={pin && !mobile ? (sel) =>
+                  pin.onToggle({ blockId: `${block.id}::sel-${shortHash(sel)}`, text: sel, ts: block.ts })
+                : undefined}
+              />
+            </div>
+          ) : null}
           {hasResponse ? (
             <section className="bt-peer-turn bt-peer-response">
               <span className="bt-peer-turn-label">Reply</span>

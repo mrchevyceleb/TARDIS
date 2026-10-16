@@ -10,15 +10,28 @@
 // render with the sender's identity like any teammate message.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Ellipsis, Hash, Pencil, Square, Trash2, Users, X } from 'lucide-react';
+import { Check, Ellipsis, Hash, Pencil, Pin, PinOff, Square, Trash2, Users, X } from 'lucide-react';
 import { channelError, useChannelActions, useChannelLive, useChannelMessages, useChannels, type ChannelMessage } from '../hooks/useChannels';
 import type { Agent } from '../../grok/agents';
 import type { ChatBlock } from '../data/types';
-import { ChatThread } from './reimagine/blocks';
+import { ChatThread, type ThreadPin } from './reimagine/blocks';
 import { Composer, type SendImage } from './reimagine/Composer';
+import { apiJson } from '../../data/api';
+import { MESSAGE_PINS_CHANGED, scrollToPinnedMessage } from '../../grok/messagePins';
+import { parsePinLinkTarget } from '../utils/proxyLinks';
 import './channels.css';
 
 type EditMode = 'none' | 'rename' | 'members';
+
+/** One pin row from a member's own board (message pins and team_pin notes
+ *  alike — the store is the same). */
+type ChannelPin = { id: string; agentId: string; member: string; blockId: string; text: string; ts: number };
+
+/** Base message id of a pin target: link/selection pins use synthetic
+ *  `<msg>::link-…` / `<msg>::sel-…` ids on top of the real message id. */
+function pinBaseId(blockId: string): string {
+  return blockId.includes('::') ? blockId.split('::')[0] : blockId;
+}
 
 /** Channel history through the main chat's block model: Matt's posts are
  *  user bubbles (markdown + image attachments served from the same
@@ -39,7 +52,7 @@ function messageBlocks(list: ChannelMessage[]): ChatBlock[] {
           : {}),
       };
     }
-    return { kind: 'peer' as const, id: m.id, from: m.from, text: m.text, ts };
+    return { kind: 'peer' as const, id: m.id, from: m.from, text: m.text, ts, expanded: true };
   });
 }
 
@@ -62,6 +75,8 @@ export function ChannelView({ channelId, agents, onDeleted }: {
   const [error, setError] = useState<string | null>(null);
   const [stopping, setStopping] = useState<Record<string, boolean>>({});
   const [stoppedNote, setStoppedNote] = useState<string | null>(null);
+  const [pins, setPins] = useState<ChannelPin[]>([]);
+  const [pinsOpen, setPinsOpen] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const noteTimer = useRef<number | null>(null);
   // Stop state belongs to one channel: switching channels must not carry a
@@ -75,6 +90,60 @@ export function ChannelView({ channelId, agents, onDeleted }: {
   useEffect(() => () => { if (noteTimer.current) window.clearTimeout(noteTimer.current); }, []);
 
   const memberKey = channel?.members.join(',') ?? '';
+  // Roster ids for the channel's members: a member's pin board is keyed by
+  // its agent id, so a name without a live roster entry has no board here.
+  const memberAgents = useMemo(
+    () => (channel?.members ?? [])
+      .map((name) => ({ name, agent: agents.find((a) => a.name === name) }))
+      .filter((m): m is { name: string; agent: Agent } => Boolean(m.agent))
+      .map((m) => ({ name: m.name, id: m.agent.id })),
+    [memberKey, agents], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const memberAgentKey = memberAgents.map((m) => m.id).join(',');
+
+  // Every member's board in one list, refreshed on the same events the
+  // one-on-one pane uses (agents pin server-side, which raises no browser
+  // event — hence the poll) so the drawer and the message rows stay true.
+  // Per-agent failures keep that member's previous rows (a transient 5xx
+  // must never blank a board and turn the next pin click into an unpin),
+  // and a request sequence drops out-of-order responses.
+  const pullSeq = useRef(0);
+  useEffect(() => {
+    let alive = true;
+    const pull = async () => {
+      // Fresh sequence per pull: the newest request wins, so an older
+      // interval pull resolving last can never revert a fresh event pull.
+      const seq = ++pullSeq.current;
+      const ids = memberAgentKey ? memberAgentKey.split(',') : [];
+      const rows = await Promise.all(ids.map(async (agentId) => {
+        try {
+          const r = await apiJson<{ pins: Array<{ id: string; blockId: string; text: string; ts: number }> }>(`/api/message-pins?agentId=${encodeURIComponent(agentId)}`);
+          const member = memberAgents.find((m) => m.id === agentId)?.name ?? agentId;
+          return { ok: true as const, pins: (r.pins ?? []).map((p) => ({ ...p, agentId, member })) };
+        } catch {
+          return { ok: false as const, agentId, pins: [] as ChannelPin[] };
+        }
+      }));
+      if (!alive || seq !== pullSeq.current) return;
+      setPins((prev) => {
+        const next = rows.flatMap((r) => r.pins);
+        // Keep the previous rows for agents whose fetch failed: a transient
+        // 5xx must never blank a board and turn the next pin click into an unpin.
+        const failed = new Set(rows.filter((r) => !r.ok).map((r) => r.agentId));
+        const kept = prev.filter((p) => failed.has(p.agentId));
+        return [...kept, ...next];
+      });
+    };
+    void pull();
+    const onChange = () => { void pull(); };
+    window.addEventListener(MESSAGE_PINS_CHANGED, onChange);
+    const iv = window.setInterval(pull, 20_000);
+    return () => {
+      alive = false;
+      window.removeEventListener(MESSAGE_PINS_CHANGED, onChange);
+      window.clearInterval(iv);
+    };
+  }, [memberAgentKey]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     setName(channel?.name ?? '');
     setPicked(channel?.members ?? []);
@@ -100,6 +169,47 @@ export function ChannelView({ channelId, agents, onDeleted }: {
   }, [working.length, stoppingCount, stoppedNote !== null]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const closeMenu = () => { setMenuOpen(false); setError(null); };
+
+  // Pin a channel message to the sender's own board (card-1327b9: each
+  // member's pin board works in the channel too). The POST is a toggle
+  // server-side, exactly like the one-on-one pane, and the change event
+  // refreshes this view immediately — a stale list would turn the next
+  // click into an accidental unpin.
+  const togglePin = async (target: { blockId: string; text: string; ts: number }): Promise<boolean | 'error'> => {
+    const sender = list.find((m) => m.id === pinBaseId(target.blockId))?.from ?? '';
+    const agentId = memberAgents.find((m) => m.name === sender)?.id;
+    if (!agentId) {
+      setStoppedNote(`${sender || 'That sender'} has no board here.`);
+      if (noteTimer.current) window.clearTimeout(noteTimer.current);
+      noteTimer.current = window.setTimeout(() => setStoppedNote(null), 4000);
+      return 'error';
+    }
+    try {
+      const r = await apiJson<{ pinned: boolean }>('/api/message-pins', {
+        method: 'POST',
+        body: JSON.stringify({ agentId, ...target }),
+      });
+      return Boolean(r.pinned);
+    } catch {
+      return 'error';
+    } finally {
+      window.dispatchEvent(new Event(MESSAGE_PINS_CHANGED));
+    }
+  };
+
+  const unpin = async (id: string) => {
+    try {
+      await apiJson(`/api/message-pins/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    } catch {
+      /* the next poll restores the row if the delete missed */
+    }
+    window.dispatchEvent(new Event(MESSAGE_PINS_CHANGED));
+  };
+
+  const pin: ThreadPin = {
+    pinnedBlockIds: pins.map((p) => p.blockId),
+    onToggle: togglePin,
+  };
 
   const send = async (sendText: string, images?: SendImage[]) => {
     if ((!sendText.trim() && !images?.length) || actions.post.isPending) return;
@@ -194,21 +304,70 @@ export function ChannelView({ channelId, agents, onDeleted }: {
         <Hash size={15} aria-hidden="true" />
         <span className="ch-head-name">{channel?.name ?? '…'}</span>
         <span className="ch-head-members" title={channel?.members.join(', ')}>{channel?.members.length ?? 0} members</span>
+        <button type="button" className="bt-iconbtn" onClick={() => { setPinsOpen((o) => !o); }}
+          title="Pinned from members" aria-label="Pinned from members" aria-expanded={pinsOpen}>
+          <Pin size={15} />
+        </button>
         <button type="button" className="bt-iconbtn" onClick={() => setMenuOpen((o) => !o)} title="Channel menu" aria-label="Channel menu" aria-expanded={menuOpen}>
           <Ellipsis size={15} />
         </button>
-      </header>
 
-      {menuOpen ? (
-        <>
-          <div className="ch-menu-scrim" onClick={closeMenu} />
+        {pinsOpen ? (
+          <div className="ch-pins" role="dialog" aria-label="Members' pin boards">
+            <div className="ch-pins-head">Members’ boards in #{channel?.name ?? 'channel'}</div>
+            {!pins.length ? (
+              <div className="ch-pins-empty">Nothing pinned yet. Open a teammate’s message and pin it to their board.</div>
+            ) : (() => {
+              const inChannel = new Set(list.map((m) => m.id));
+              const order = [...(channel?.members ?? []).filter((m) => pins.some((p) => p.member === m)),
+                ...[...new Set(pins.map((p) => p.member))].filter((m) => !(channel?.members ?? []).includes(m))];
+              return order.map((member) => (
+                <div key={member} className="ch-pins-sec">
+                  <div className="ch-pins-title">{`Pinned from ${member}`}</div>
+                  {pins.filter((p) => p.member === member).map((p) => {
+                    const target = parsePinLinkTarget(p.text);
+                    const note = (p.text ?? '').trim() || 'Empty note';
+                    const jumpable = !target && !p.blockId.startsWith('note-') && inChannel.has(pinBaseId(p.blockId));
+                    const body = target?.kind === 'web' ? (
+                      <button type="button" className="ch-pins-text" title={`Open ${target.url}`}
+                        onClick={() => window.open(target.url, '_blank', 'noopener,noreferrer')}>{note} ↗</button>
+                    ) : target ? (
+                      <span className="ch-pins-text" title="Workspace link — open it from the one-on-one pane">{note}</span>
+                    ) : p.blockId.startsWith('note-') ? (
+                      <span className="ch-pins-text" title="Pinned by the agent">{note}</span>
+                    ) : jumpable ? (
+                      <button type="button" className="ch-pins-text" title="Jump to this message"
+                        onClick={() => { setPinsOpen(false); scrollToPinnedMessage(p.blockId); }}>{note}</button>
+                    ) : (
+                      <span className="ch-pins-text" title="Pinned in another conversation">{note}</span>
+                    );
+                    return (
+                      <div key={p.id} className="ch-pins-row">
+                        {body}
+                        <button type="button" className="bt-iconbtn ch-pins-unpin" title={`Unpin from ${member}`}
+                          aria-label={`Unpin from ${member}`} onClick={() => { void unpin(p.id); }}>
+                          <PinOff size={12} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ));
+            })()}
+          </div>
+        ) : null}
+
+        {menuOpen ? (
           <div className="ch-menu" role="menu">
             <button type="button" className="ch-menu-row" onClick={() => { setEditing('rename'); closeMenu(); }}><Pencil size={13} /> Rename</button>
             <button type="button" className="ch-menu-row" onClick={() => { setEditing('members'); closeMenu(); }}><Users size={13} /> Members</button>
             <button type="button" className="ch-menu-row danger" onClick={() => { void remove(); closeMenu(); }}><Trash2 size={13} /> Delete channel</button>
           </div>
-        </>
-      ) : null}
+        ) : null}
+      </header>
+
+      {pinsOpen ? <div className="ch-menu-scrim" onClick={() => setPinsOpen(false)} /> : null}
+      {menuOpen ? <div className="ch-menu-scrim" onClick={closeMenu} /> : null}
 
       {editing === 'rename' ? (
         <div className="ch-edit-bar">
@@ -268,7 +427,9 @@ export function ChannelView({ channelId, agents, onDeleted }: {
       ) : null}
 
       <div className="ch-list" ref={listRef}>
-        <ChatThread blocks={blocks} status="idle" suppressTyping />
+        <div className="rc rc-desktop ch-thread">
+          <ChatThread blocks={blocks} status="idle" suppressTyping pin={pin} />
+        </div>
         {messages.isError ? <div className="ch-empty">Could not load messages. <button type="button" className="ch-create-x" onClick={() => void messages.refetch()}>Retry</button></div> : null}
         {!list.length && !messages.isError ? <div className="ch-empty">No messages yet. Say hello.</div> : null}
       </div>
