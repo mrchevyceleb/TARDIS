@@ -5,7 +5,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiJson } from '../../data/api';
 
-export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string };
+export type Channel = { id: string; name: string; members: string[]; unread?: number; createdAt?: string; updatedAt?: string };
 /** Image attachments land as file refs (the same attachment store as the
  *  main chat); the client renders them through /api/chat/attachments/<id>. */
 export type ChannelMessage = { id: string; channelId: string; from: string; text: string; createdAt?: string; updatedAt?: string; images?: Array<{ id: string; mediaType: string }> };
@@ -31,8 +31,8 @@ export function useChannels() {
   return useQuery({
     queryKey: ['channels'],
     queryFn: () => channelRequest<{ channels: Channel[] }>('', 'GET'),
-    staleTime: 10_000,
-    refetchInterval: 15_000,
+    staleTime: 2_000,
+    refetchInterval: 4_000,
   });
 }
 
@@ -110,5 +110,25 @@ export function useChannelActions() {
     onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['channel-live'] }); },
   });
 
-  return { create, patch, remove, post, stopMember };
+  const markRead = useMutation({
+    mutationFn: (vars: { id: string; upTo?: string }) =>
+      channelRequest<{ ok: boolean; unread: number }>(
+        `/${encodeURIComponent(vars.id)}/read`,
+        'POST',
+        { upTo: vars.upTo },
+      ),
+    onMutate: async (vars) => {
+      // Cancel any in-flight list refetch first, or it can land after the
+      // optimistic clear and resurrect the badge for a poll cycle.
+      await queryClient.cancelQueries({ queryKey: ['channels'] }).catch(() => {});
+      queryClient.setQueryData<{ channels: Channel[] }>(['channels'], (prev) =>
+        prev && vars.upTo === undefined
+          ? { channels: prev.channels.map((c) => (c.id === vars.id ? { ...c, unread: 0 } : c)) }
+          : prev,
+      );
+    },
+    onSuccess: refreshList,
+  });
+
+  return { create, patch, remove, post, stopMember, markRead };
 }

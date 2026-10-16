@@ -21,6 +21,7 @@ import { DRAFT_APPEND_EVENT, type DraftAppendDetail } from '../../native/shell';
 import { apiJson } from '../../data/api';
 import { MESSAGE_PINS_CHANGED, scrollToPinnedMessage } from '../../grok/messagePins';
 import { parsePinLinkTarget } from '../utils/proxyLinks';
+import { onPresenceChange, userPresent } from '../utils/userPresence';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import './channels.css';
 
@@ -190,6 +191,23 @@ export function ChannelView({ channelId, agents, onDeleted }: {
     const node = listRef.current;
     if (node) node.scrollTop = node.scrollHeight;
   }, [listKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Unread badge hygiene: while someone is actually looking at this channel,
+  // keep the server's read marker at the last message RENDERED here — never
+  // the server's head — so a reply nobody saw keeps its badge until it is on
+  // screen. Fires when the rendered head changes or presence flips; the
+  // server skips the write entirely when the marker already sits there.
+  const renderedHeadId = list.length ? list[list.length - 1].id : '';
+  useEffect(() => {
+    if (!userPresent() || !renderedHeadId) return;
+    void actions.markRead.mutateAsync({ id: channelId, upTo: renderedHeadId }).catch(() => {});
+  }, [channelId, renderedHeadId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(
+    () => onPresenceChange((present) => {
+      if (present && renderedHeadId) void actions.markRead.mutateAsync({ id: channelId, upTo: renderedHeadId }).catch(() => {});
+    }),
+    [channelId, renderedHeadId], // eslint-disable-line react-hooks/exhaustive-deps
+  );
   const stoppingCount = Object.keys(stopping).length;
   useEffect(() => {
     const node = listRef.current;
@@ -472,6 +490,8 @@ export function ChannelView({ channelId, agents, onDeleted }: {
         <div className="bt-dock">
           <div className="bt-dock-inner">
             <Composer
+              chatId={`channel:${channelId}`}
+              robotControl={false}
               value={text}
               onChange={setText}
               onSend={(sendText, images) => send(sendText, images)}

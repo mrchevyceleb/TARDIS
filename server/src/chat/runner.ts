@@ -3529,6 +3529,10 @@ export type LiveSession = {
   sessionId: string | null;
   /** ms since epoch of the most recent event (or spawn time if no events yet). */
   lastActivityAt: number;
+  /** ms since epoch the CURRENT turn started, when the lane can report it
+   *  (Claude, Codex, banana); absent when idle or unknown. Per-turn, so a
+   *  chained sequence of short turns never looks like one long turn. */
+  busySince?: number;
   /** Background tasks running inside the process (Claude lanes only). A
    *  restart ends them, so deploys check this alongside busy turns. */
   backgroundTasks?: string[];
@@ -3544,6 +3548,7 @@ export function activeClaudeSessions(): LiveSession[] {
       busy: s.isBusy(),
       sessionId: s.sessionId(),
       lastActivityAt: s.lastActivityAt(),
+      busySince: s.activeTurnStartedAt() ?? undefined,
       ...(s instanceof ClaudeSession && s.hasBackgroundWork() ? { backgroundTasks: s.backgroundWork() } : {}),
     });
   }

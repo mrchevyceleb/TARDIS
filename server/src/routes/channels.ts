@@ -8,12 +8,14 @@ import {
   CHANNEL_TEXT_LIMIT,
   channelHistory,
   channelMemberActivity,
+  channelNameTaken,
   createChannel,
   deliverChannelPost,
   deleteChannel,
   deleteChannelMessages,
   findChannel,
   listChannels,
+  markChannelRead,
   postChannelMessage,
   stopChannelMember,
   unknownTeammates,
@@ -50,8 +52,7 @@ channelsRouter.post('/', asyncHandler(async (req, res) => {
     return;
   }
   const trimmed = name.trim();
-  const conflict = (await listChannels()).some((channel) => channel.name.toLowerCase() === trimmed.toLowerCase());
-  if (conflict) {
+  if (await channelNameTaken(trimmed)) {
     res.status(409).json({ error: `a channel named ${trimmed} already exists` });
     return;
   }
@@ -73,7 +74,7 @@ channelsRouter.patch('/:id', asyncHandler(async (req, res) => {
       return;
     }
     const trimmed = name.trim();
-    const conflict = (await listChannels()).some((c) => c.id !== channel.id && c.name.toLowerCase() === trimmed.toLowerCase());
+    const conflict = await channelNameTaken(name, channel.id);
     if (conflict) {
       res.status(409).json({ error: `a channel named ${trimmed} already exists` });
       return;
@@ -185,6 +186,32 @@ channelsRouter.post('/:id/stop', asyncHandler(async (req, res) => {
   }
 }));
 
+channelsRouter.post('/:id/read', asyncHandler(async (req, res) => {
+  const channel = await findChannel(String(req.params.id));
+  if (!channel) {
+    res.status(404).json({ error: 'no such channel' });
+    return;
+  }
+  // upTo names the last message the viewer actually SAW (the client's
+  // rendered head): the marker never advances past it, so an unseen reply
+  // keeps its badge. Absent upTo marks to the channel head (person posts).
+  const rawUpTo = (req.body ?? {}).upTo;
+  if (rawUpTo !== undefined && typeof rawUpTo !== 'string') {
+    res.status(400).json({ error: 'upTo must be a message id' });
+    return;
+  }
+  try {
+    const { unread } = await markChannelRead(channel.id, rawUpTo);
+    res.json({ ok: true, unread });
+  } catch (error) {
+    if ((error as Error).message === 'unknown message in channel') {
+      res.status(400).json({ error: 'unknown message in channel' });
+      return;
+    }
+    throw error;
+  }
+}));
+
 channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
   const channel = await findChannel(String(req.params.id));
   if (!channel) {
@@ -235,6 +262,9 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
   const person = wantsPerson && !posterIsRoster;
   const poster = person ? DESK_OWNER_NAME : from.trim();
   const message = await postChannelMessage(channel.id, poster, text, attachmentRefs.length ? attachmentRefs : undefined);
+  if (person) {
+    await markChannelRead(channel.id, message).catch(() => {});
+  }
   // The post is already durable; a fan-out failure never fails the post.
   const fanOut = await deliverChannelPost(
     channel,

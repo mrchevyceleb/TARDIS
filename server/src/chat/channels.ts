@@ -10,16 +10,57 @@ import { laneChatId } from './threadKey.ts';
 import { chatAttachmentPath } from '../routes/chatAttachments.ts';
 
 export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string };
+/** What listChannels returns: the stored channel plus its current unread
+ *  count. `unread` is computed per request and is never persisted. */
+export type ChannelWithUnread = Channel & { unread: number };
 /** Image attachments ride the same file store as the main chat: the post
  *  body carries base64 images, the route persists them as attachment files
  *  and only these refs land on the message record. */
 export type ChannelMessage = { id: string; channelId: string; from: string; text: string; createdAt?: string; updatedAt?: string; images?: Array<{ id: string; mediaType: string }> };
+type ChannelRead = { id: string; lastReadId: string; lastReadAt: string; createdAt?: string; updatedAt?: string };
 
 /** One channel post is bounded, like every other write surface here. */
 export const CHANNEL_TEXT_LIMIT = 20_000;
 
 const channels = new JsonStore<Channel>('channels.json', []);
 const messages = new JsonStore<ChannelMessage>('channel-messages.json', []);
+const channelReads = new JsonStore<ChannelRead>('channel-reads.json', []);
+
+function chronologicalForChannel(channelId: string, allMessages: ChannelMessage[]): ChannelMessage[] {
+  // JsonStore.create prepends new records; reversing first preserves creation
+  // order when two posts land in the same millisecond.
+  const rows = allMessages.filter((message) => message.channelId === channelId).reverse();
+  rows.sort((a, b) => String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
+  return rows;
+}
+
+function groupChronologicalByChannel(allMessages: ChannelMessage[]): Map<string, ChannelMessage[]> {
+  const byChannel = new Map<string, ChannelMessage[]>();
+  for (let i = allMessages.length - 1; i >= 0; i--) {
+    const message = allMessages[i];
+    const bucket = byChannel.get(message.channelId);
+    if (bucket) {
+      bucket.push(message);
+    } else {
+      byChannel.set(message.channelId, [message]);
+    }
+  }
+  for (const rows of byChannel.values()) {
+    rows.sort((a, b) => String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
+  }
+  return byChannel;
+}
+
+function countUnreadMessages(rows: ChannelMessage[], read: ChannelRead | undefined): number {
+  if (!rows.length || !read) return 0;
+  if (read.lastReadId) {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i].id === read.lastReadId) return rows.length - 1 - i;
+    }
+    return rows.filter((m) => String(m.createdAt ?? '') > read.lastReadAt).length;
+  }
+  return rows.filter((m) => !read.lastReadAt || String(m.createdAt ?? '') > read.lastReadAt).length;
+}
 
 /** Names in the list that are not teammates (empty when all are known). */
 export async function unknownTeammates(names: string[]): Promise<string[]> {
@@ -28,16 +69,140 @@ export async function unknownTeammates(names: string[]): Promise<string[]> {
   return names.filter((name) => !known.has(name));
 }
 
-export async function listChannels(): Promise<Channel[]> {
-  return channels.list();
+export async function listChannels(): Promise<ChannelWithUnread[]> {
+  const list = await channels.list();
+  // The unread layer is best-effort: a malformed reads/messages file or a
+  // failed seed write must never take the channel list (and with it create
+  // and rename) down.
+  const [allMessages, reads] = await Promise.all([
+    messages.list().catch(() => [] as ChannelMessage[]),
+    channelReads.list().catch(() => [] as ChannelRead[]),
+  ]);
+  const byChannel = groupChronologicalByChannel(allMessages);
+  const readById = new Map(reads.map((r) => [r.id, r]));
+  const unseeded = list.filter((channel) => !readById.has(channel.id));
+  let seedFailed = false;
+  if (unseeded.length) {
+    // Seed pre-existing channels to their current head on first sight so
+    // historical messages do not false-badge on upgrade; any post after this
+    // seed increments unread until the channel is marked read.
+    const now = new Date().toISOString();
+    const seeded: ChannelRead[] = unseeded.map((channel) => {
+      const rows = byChannel.get(channel.id) ?? [];
+      const last = rows[rows.length - 1];
+      return {
+        id: channel.id,
+        lastReadId: last?.id ?? '',
+        lastReadAt: last?.createdAt ?? channel.createdAt ?? now,
+        createdAt: now,
+        updatedAt: now,
+      };
+    });
+    try {
+      await channelReads.modify((items) => {
+        const existing = new Set(items.map((i) => i.id));
+        return [...items, ...seeded.filter((s) => !existing.has(s.id))];
+      });
+      for (const s of seeded) readById.set(s.id, s);
+    } catch {
+      // Unread state is unknown for these until a seed lands; show 0 rather
+      // than a wall of false badges.
+      seedFailed = true;
+    }
+  }
+  return list.map((channel) => {
+    if (seedFailed && !readById.has(channel.id)) return { ...channel, unread: 0 };
+    const rows = byChannel.get(channel.id) ?? [];
+    return { ...channel, unread: countUnreadMessages(rows, readById.get(channel.id)) };
+  });
+}
+
+/** Case-insensitive name conflict check against the stored channels only
+ *  (no unread computation), so rename/create validation never depends on the
+ *  reads or messages files. */
+export async function channelNameTaken(name: string, exceptId?: string): Promise<boolean> {
+  const trimmed = name.trim().toLowerCase();
+  if (!trimmed) return false;
+  return (await channels.list()).some((c) => c.id !== exceptId && c.name.toLowerCase() === trimmed);
 }
 
 export async function findChannel(id: string): Promise<Channel | null> {
   return (await channels.list()).find((channel) => channel.id === id) ?? null;
 }
 
-export async function createChannel(name: string, members: string[]): Promise<Channel> {
-  return channels.create({ name, members });
+export async function createChannel(name: string, members: string[]): Promise<ChannelWithUnread> {
+  const created = await channels.create({ name, members });
+  const now = created.createdAt ?? new Date().toISOString();
+  await channelReads.modify((items) => [
+    ...items.filter((r) => r.id !== created.id),
+    { id: created.id, lastReadId: '', lastReadAt: '', createdAt: now, updatedAt: now },
+  ]);
+  return { ...created, unread: 0 };
+}
+
+export async function markChannelRead(
+  channelId: string,
+  upTo?: ChannelMessage | string,
+): Promise<{ unread: number }> {
+  const rows = chronologicalForChannel(channelId, await messages.list());
+  const indexById = new Map(rows.map((row, idx) => [row.id, idx]));
+  let target: ChannelMessage | undefined;
+  if (typeof upTo === 'string') {
+    if (upTo) {
+      const idx = indexById.get(upTo);
+      if (idx === undefined) {
+        throw new Error('unknown message in channel');
+      }
+      target = rows[idx];
+    } else if (!rows.length) {
+      target = undefined;
+    } else {
+      // Empty string when the client has not loaded any message yet should not
+      // mark unseen messages read; keep the existing marker.
+      const existing = (await channelReads.list()).find((r) => r.id === channelId);
+      return { unread: countUnreadMessages(rows, existing) };
+    }
+  } else if (upTo) {
+    target = upTo;
+  } else {
+    target = rows[rows.length - 1];
+  }
+  const now = new Date().toISOString();
+  const nextReadId = target?.id ?? '';
+  const nextReadAt = target?.createdAt ?? now;
+  const nextIdx = nextReadId ? (indexById.get(nextReadId) ?? -1) : -1;
+  let effectiveRead: ChannelRead = { id: channelId, lastReadId: nextReadId, lastReadAt: nextReadAt, createdAt: now, updatedAt: now };
+  const existingRow = (await channelReads.list()).find((r) => r.id === channelId);
+  if (existingRow && existingRow.lastReadId === nextReadId) {
+    // Idempotent: the marker already sits here (the common case for presence
+    // ticks), so no write at all.
+    return { unread: countUnreadMessages(rows, existingRow) };
+  }
+  await channelReads.modify((items) => {
+    const idx = items.findIndex((r) => r.id === channelId);
+    if (idx === -1) {
+      return [effectiveRead, ...items];
+    }
+    const prev = items[idx];
+    const prevIdx = prev.lastReadId ? (indexById.get(prev.lastReadId) ?? -1) : -1;
+    // Never move the read marker backward. Ids resolve to positions when
+    // both survive; a non-empty prev id that no longer resolves must point
+    // PAST this snapshot (messages are only purged whole), so it wins too;
+    // the timestamp comparison is the last resort and keeps prev on ties.
+    if (
+      (prevIdx !== -1 && nextIdx !== -1 && prevIdx >= nextIdx)
+      || (prev.lastReadId && prevIdx === -1 && nextIdx !== -1)
+      || ((prevIdx === -1 || nextIdx === -1) && prev.lastReadAt && prev.lastReadAt >= nextReadAt)
+    ) {
+      effectiveRead = prev;
+      return items;
+    }
+    effectiveRead = { ...prev, lastReadId: nextReadId, lastReadAt: nextReadAt, updatedAt: now };
+    const next = [...items];
+    next[idx] = effectiveRead;
+    return next;
+  });
+  return { unread: countUnreadMessages(rows, effectiveRead) };
 }
 
 export async function updateChannel(id: string, patch: Partial<Channel>): Promise<Channel | null> {
@@ -52,6 +217,7 @@ export async function deleteChannel(id: string): Promise<boolean> {
  * so a post landing mid-purge cannot be erased by a stale list. */
 export async function deleteChannelMessages(channelId: string): Promise<void> {
   await messages.modify((items) => items.filter((message) => message.channelId !== channelId));
+  await channelReads.modify((items) => items.filter((read) => read.id !== channelId));
 }
 
 export async function postChannelMessage(channelId: string, from: string, text: string, images?: Array<{ id: string; mediaType: string }>): Promise<ChannelMessage> {
@@ -60,9 +226,7 @@ export async function postChannelMessage(channelId: string, from: string, text: 
 
 /** Most recent history, oldest first, capped. */
 export async function channelHistory(channelId: string, limit: number): Promise<ChannelMessage[]> {
-  const rows = (await messages.list()).filter((message) => message.channelId === channelId);
-  rows.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
-  return rows.slice(-limit);
+  return chronologicalForChannel(channelId, await messages.list()).slice(-limit);
 }
 
 // ---------------------------------------------------------------------------
