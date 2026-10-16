@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { ASSISTANT_HUB_PATH } from './config.ts';
-import { localMcpServers } from './local-mcp.ts';
+import { localMcpServers, writeClaudeMcpConfigFile } from './local-mcp.ts';
 import { officeMcpServers } from './office-mcp.ts';
 import { computerGuidance, computerOwnerKey } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
@@ -495,8 +495,9 @@ function withTeamMcp(configJson: string, cwd: string, chatId: string): string {
       console.log('[chat] built-in team and computer MCPs enabled');
     }
     const cfg = JSON.parse(configJson) as { mcpServers: Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> };
-    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name, { replyNow: true, backgroundLane: isBackgroundChatId(chatId), owner: computerOwnerKey(cwd, chatId), agentId: agentForChatId(chatId)?.id }), officeMcpServers());
-    return JSON.stringify(cfg);
+    const owner = computerOwnerKey(cwd, chatId);
+    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name, { replyNow: true, backgroundLane: isBackgroundChatId(chatId), owner, agentId: agentForChatId(chatId)?.id }), officeMcpServers());
+    return writeClaudeMcpConfigFile(owner, JSON.stringify(cfg));
   } catch {
     return configJson;
   }

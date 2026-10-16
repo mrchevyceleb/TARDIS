@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CODEX_APP_TURN_SCRIPT } from '../config.ts';
-import { localMcpCodexArgs } from './local-mcp.ts';
+import { localMcpCodexArgs, localMcpSecretEnv } from './local-mcp.ts';
 import { officeMcpCodexArgs } from './office-mcp.ts';
 import { computerGuidance, computerOwnerKey } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
@@ -945,7 +945,7 @@ export class CodexSession {
     const child = spawn(process.execPath, [CODEX_APP_TURN_SCRIPT], {
       cwd: this.cwd,
       // The marker tells the installed long-call gate hook this is a TARDIS agent turn.
-      env: { ...codexSpawnEnv, ...longCallGateEnv(this.chatId) },
+      env: { ...codexSpawnEnv, ...localMcpSecretEnv(laneName ?? 'Teammate', { unnamedLane: !laneName }), ...longCallGateEnv(this.chatId) },
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
