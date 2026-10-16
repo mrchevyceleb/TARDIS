@@ -183,6 +183,10 @@ export async function deliverChannelPost(
         // a live turn from this channel is still steered at admission time
         // even without an @, so follow-ups join the same conversation.
         personPosted: personPoster && (mentioned.includes(member) || channel.members.length === 1),
+        // Quiet hours (card-6b6916): Matt's own channel post is person-sourced
+        // for every member of the room even when unmentioned (where personPosted
+        // stays false so the post uses the bg lane instead of interrupting main).
+        personSourced: personPoster ? true : undefined,
         // Ordering only: person posts already sort ahead via personPosted;
         // the flag is kept so the mention tier stays explicit (review 3, P2 10).
         priority: !isAgent && mentioned.includes(member) ? true : undefined,

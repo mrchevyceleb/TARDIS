@@ -11,6 +11,7 @@ import { dirname } from 'node:path';
 import { DESK_FILE } from '../config.ts';
 import { closeMattAsksForAgent } from './mattAsks.ts';
 import { queueMirror } from './deskMirror.ts';
+import { inQuietHours, isMaxLane, lastQuietEndMs } from './quietHours.ts';
 
 // Matt's five stages (2026-10-09; order staging-first per the locked rally
 // release process, 2026-10-10). Old ids (pipeline, up_next, waiting, done)
@@ -1216,29 +1217,50 @@ export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promi
       // is not a deliverable teammate, so those route to the Chief.
       const ownerAgent = resolveOwner(card);
       if (!card.nudgeAt) {
-        candidates.push({
-          setMark: () => { card.nudgeAt = now; },
-          nudge: {
-            kind: 'owner',
-            card,
-            to: ownerAgent,
-            text: ownerAgent === 'chief-of-staff'
-              ? `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since (you own this one). Comment on the card to set a new one.`
-              : `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since. Comment on the card to set a new one, or tell the Chief of Staff what is blocking it.`,
-          },
-        });
-      } else if (!card.escalatedAt && nowMs - Date.parse(card.nudgeAt) >= CARD_CHECK_ESCALATE_MS && ownerAgent !== 'chief-of-staff') {
+        // Quiet hours (Matt, Oct 15 2026): the owner nudge to a non-Max lane
+        // holds through 22:00-05:00 ET. The card stays unmarked, so the
+        // first sweep after 05:00 nudges it unchanged — held never means
+        // lost. Chief escalation below targets Max's lane and always goes.
+        if (inQuietHours(nowMs) && !isMaxLane(ownerAgent)) {
+          // held: unmarked, retried by the next post-05:00 sweep
+        } else {
+          candidates.push({
+            setMark: () => { card.nudgeAt = now; },
+            nudge: {
+              kind: 'owner',
+              card,
+              to: ownerAgent,
+              text: ownerAgent === 'chief-of-staff'
+                ? `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since (you own this one). Comment on the card to set a new one.`
+                : `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since. Comment on the card to set a new one, or tell the Chief of Staff what is blocking it.`,
+            },
+          });
+        }
+      } else if (!card.escalatedAt && ownerAgent !== 'chief-of-staff') {
         // The Chief's own cards never get the separate Chief copy: the owner
         // nudge already reached the Chief, so a second one is noise.
-        candidates.push({
-          setMark: () => { card.escalatedAt = now; },
-          nudge: {
-            kind: 'chief',
-            card,
-            to: 'chief-of-staff',
-            text: `Silence flag: ${ownerAgent}'s card [${card.id}] "${card.title}" (${card.column}) went quiet past its check-in time and stayed quiet 15 minutes after the nudge. It went to them; make sure they act on it.`,
-          },
-        });
+        // Quiet hours (Oct 15 2026): the escalation asserts the nudge WENT
+        // OUT, but during the window a non-Max owner's nudge can still be
+        // held in the delivery queue, so escalating would tell the Chief a
+        // falsehood. Never escalate a held owner inside the window, and
+        // after 05:00 count the 15 minutes from the later of the nudge and
+        // the last quiet end — the held nudge only just landed then (Opus
+        // verify, Oct 16). Max-lane nudges deliver immediately, so their
+        // timing is unchanged.
+        const escalateFrom = isMaxLane(ownerAgent)
+          ? Date.parse(card.nudgeAt)
+          : Math.max(Date.parse(card.nudgeAt), lastQuietEndMs(nowMs));
+        if (nowMs - escalateFrom >= CARD_CHECK_ESCALATE_MS && !(inQuietHours(nowMs) && !isMaxLane(ownerAgent))) {
+          candidates.push({
+            setMark: () => { card.escalatedAt = now; },
+            nudge: {
+              kind: 'chief',
+              card,
+              to: 'chief-of-staff',
+              text: `Silence flag: ${ownerAgent}'s card [${card.id}] "${card.title}" (${card.column}) went quiet past its check-in time and stayed quiet 15 minutes after the nudge. It went to them; make sure they act on it.`,
+            },
+          });
+        }
       }
     }
     // Dry run: nothing is marked or written — every candidate comes back
