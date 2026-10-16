@@ -428,7 +428,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
 
       <div className="ch-body rc rc-desktop">
         <div className="ch-list" ref={listRef}>
-          <div className="rc rc-desktop ch-thread">
+          <div className="ch-thread">
             <ChatThread blocks={blocks} status="idle" suppressTyping pin={pin} />
           </div>
           {messages.isError ? <div className="ch-empty">Could not load messages. <button type="button" className="ch-create-x" onClick={() => void messages.refetch()}>Retry</button></div> : null}

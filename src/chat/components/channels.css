@@ -107,7 +107,7 @@ span.ch-pins-text { cursor: default; }
 .ch-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .ch-list { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
 .ch-body > .ch-error { padding-inline: 14px; }
-.ch-body > .bt-dock { padding-inline: 14px; }
+.ch-body > .bt-dock { padding-inline: 14px; z-index: 20; }
 /* Working state (card-1327b9): members woken or steered by a channel post
    show as chips under the header, each with a Stop that ends that member's
    live turn, mirroring the one-on-one chat's Stop. Colors derive from
