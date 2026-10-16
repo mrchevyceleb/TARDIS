@@ -7,6 +7,7 @@ import { JsonStore } from '../lib/jsonStore.ts';
 import { MAX_TEXT, agentLaneKeys, deliverTeamMessage, dropQueuedChannelDeliveries, liveChannelTurnLanesByName, teamRoster } from './teamBus.ts';
 import { activeChatSessions, interruptSession } from './runner.ts';
 import { laneChatId } from './threadKey.ts';
+import { chatAttachmentPath } from '../routes/chatAttachments.ts';
 
 export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string };
 /** Image attachments ride the same file store as the main chat: the post
@@ -104,7 +105,14 @@ export type ChannelFanOut = { delivered: string[]; skipped: string[]; hop: numbe
  *  members the post actually @mentions, so a room post never cuts every
  *  member's unrelated work mid-turn; unmentioned members get the ordinary
  *  peer/background wake (review finding 4). */
-export async function deliverChannelPost(channel: Channel, poster: string, text: string, receivedHop: number, personPoster = false): Promise<ChannelFanOut> {
+export async function deliverChannelPost(
+  channel: Channel,
+  poster: string,
+  text: string,
+  receivedHop: number,
+  personPoster = false,
+  images?: Array<{ id: string; mediaType: string }>,
+): Promise<ChannelFanOut> {
   const roster = await teamRoster();
   const isAgent = roster.some((agent) => agent.name === poster);
   // Matt's own post is hop 1. An agent reply must carry the hop number from
@@ -127,27 +135,35 @@ export async function deliverChannelPost(channel: Channel, poster: string, text:
     + ' if nothing is needed from you, stay silent (do not reply at all, never send NO_UPDATE).'
     + ' Channel talk stays in the channel; never move it into a one-on-one thread.';
   const header = `[#${channel.name} group channel \u2014 handoff ${hop}] ${poster} posted:\n\n`;
+  const imagePaths = (images ?? []).map((a) => chatAttachmentPath(a.id));
+  const imageBlock = imagePaths.length
+    ? `${text.trim() ? '\n\n' : ''}[${poster} attached ${imagePaths.length === 1 ? 'an image' : `${imagePaths.length} images`}. Open ${imagePaths.length === 1 ? 'it' : 'them'} with Read before replying: ${imagePaths.join(', ')}]`
+    : '';
   // The delivered bundle must fit MAX_TEXT with the reply rules intact, so
   // the post text is clamped (with a visible note) and the history block is
   // clamped per message and dropped first when there is no room.
   const truncationNote = '\n(post text truncated for delivery; the full text is in the channel history)\n';
-  const roomForText = MAX_TEXT - header.length - guidance.length - 2;
+  const roomForText = MAX_TEXT - header.length - imageBlock.length - guidance.length - 2;
   const textPart = text.length > roomForText
     ? `${text.slice(0, Math.max(0, roomForText - truncationNote.length))}${truncationNote}`
     : text;
+  const bodyPart = `${textPart}${imageBlock}`;
   let historyBlock = '';
   if (earlier.length) {
-    let used = header.length + textPart.length + guidance.length + 2;
+    let used = header.length + bodyPart.length + guidance.length + 2;
     const kept: string[] = [];
     for (const m of earlier) {
-      const line = `${m.from}: ${m.text.length > 400 ? `${m.text.slice(0, 400)}\u2026` : m.text}`;
+      const mPaths = (m.images ?? []).map((a) => chatAttachmentPath(a.id));
+      const mText = m.text.length > 400 ? `${m.text.slice(0, 400)}\u2026` : m.text;
+      const mImg = mPaths.length ? `${mText.trim() ? ' ' : ''}[images: ${mPaths.join(', ')}]` : '';
+      const line = `${m.from}: ${mText}${mImg}`;
       if (used + line.length + 2 > MAX_TEXT) break;
       kept.push(line);
       used += line.length + 1;
     }
     historyBlock = kept.length ? `\nEarlier in this channel:\n${kept.join('\n')}\n` : '';
   }
-  const bundle = `${header}${textPart}\n\n${guidance}` + historyBlock;
+  const bundle = `${header}${bodyPart}\n\n${guidance}` + historyBlock;
   const delivered: string[] = [];
   const skipped: string[] = [];
   for (const member of targets) {

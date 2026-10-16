@@ -20,17 +20,21 @@ export type SendImage = { mediaType: string; base64: string; previewDataUrl?: st
 type PendingImage = { id: string; mediaType: string; base64: string; previewUrl: string };
 type PendingUpload = { id: string; name: string; size: number; progress: number; error?: string };
 
-/** Images up to this size go as base64 vision attachments, exactly as before
- *  (mirrors the server's per-image cap). Anything bigger, and any non-image,
- *  streams to the server's upload store instead. */
+/** Images up to this size in server-supported vision formats go as base64
+ *  vision attachments (mirroring saveChatAttachments: PNG/JPEG/WebP/GIF,
+ *  <=12 MB each, <=6 images, <=18 MB raw / <=24 MB encoded total). Anything
+ *  else streams to the server's upload store so no file is silently dropped. */
 const IMAGE_DIRECT_MAX = 12 * 1024 * 1024;
+const IMAGE_DIRECT_MAX_COUNT = 6;
+const IMAGE_DIRECT_MAX_TURN_BYTES = 18 * 1024 * 1024;
+const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 
 export type ComposerProps = {
   chatId?: string;
   mobile?: boolean;
   value: string;
   onChange: (v: string) => void;
-  onSend: (text: string, images?: SendImage[]) => void;
+  onSend: (text: string, images?: SendImage[]) => void | Promise<boolean | void>;
   onStop?: () => void;
   onSteer?: (text: string, images?: SendImage[]) => void;
   /** Wipe the conversation and start a fresh thread (desktop row button). */
@@ -189,12 +193,16 @@ export function Composer(props: ComposerProps) {
     }
   }, [props.openFileInputRef]);
 
-  // Revoke object URLs on unmount so we never leak preview blobs.
+  // Revoke object URLs only on unmount (not on every images array change,
+  // which would revoke existing thumbnails when a second image is added or
+  // while an async send is in flight).
+  const imagesRef = useRef<PendingImage[]>([]);
+  imagesRef.current = images;
   useEffect(
     () => () => {
-      for (const img of images) URL.revokeObjectURL(img.previewUrl);
+      for (const img of imagesRef.current) URL.revokeObjectURL(img.previewUrl);
     },
-    [images],
+    [],
   );
   // Unmount mid-upload aborts it (the path line never landed, so the draft
   // must not pretend the file is attached).
@@ -209,11 +217,22 @@ export function Composer(props: ComposerProps) {
   const ingest = async (files: FileList | File[]) => {
     if (!acceptImages) return;
     const next: PendingImage[] = [];
+    let inlineCount = imagesRef.current.length;
+    let inlineBytes = imagesRef.current.reduce((sum, img) => sum + Math.floor((img.base64.length * 3) / 4), 0);
     for (const f of Array.from(files)) {
-      if (f.type.startsWith('image/') && f.size <= IMAGE_DIRECT_MAX) {
+      if (
+        INLINE_IMAGE_TYPES.has(f.type)
+        && f.size <= IMAGE_DIRECT_MAX
+        && inlineCount < IMAGE_DIRECT_MAX_COUNT
+        && inlineBytes + f.size <= IMAGE_DIRECT_MAX_TURN_BYTES
+      ) {
         const img = await fileToImage(f);
-        if (img) next.push(img);
-        continue;
+        if (img) {
+          next.push(img);
+          inlineCount += 1;
+          inlineBytes += f.size;
+          continue;
+        }
       }
       void uploadFile(f);
     }
@@ -315,9 +334,28 @@ export function Composer(props: ComposerProps) {
       return;
     }
     if (!v && !imgs?.length && !refs) return;
-    props.onSend(v, imgs);
+    const prevImages = images;
+    const res = props.onSend(v, imgs);
     props.onChange('');
-    clearImages();
+    if (res && typeof (res as Promise<boolean | void>).then === 'function') {
+      setImages([]);
+      void (res as Promise<boolean | void>).then(
+        (ok) => {
+          if (ok === false) {
+            props.onChange(v);
+            setImages((cur) => (cur.length ? cur : prevImages));
+          } else {
+            for (const i of prevImages) URL.revokeObjectURL(i.previewUrl);
+          }
+        },
+        () => {
+          props.onChange(v);
+          setImages((cur) => (cur.length ? cur : prevImages));
+        },
+      );
+    } else {
+      clearImages();
+    }
   };
 
   const pick = (i: number) => {
@@ -459,6 +497,36 @@ export function Composer(props: ComposerProps) {
   const popCount = slashOpen ? matches.length : (mention?.hits.length ?? 0);
   const activeOptIdx = popCount > 0 ? Math.min(popSel, popCount - 1) : 0;
 
+  const ingestRef = useRef(ingest);
+  ingestRef.current = ingest;
+  // Pasting a screenshot right after opening a channel or chat (before
+  // clicking inside the textarea) should still attach the image, while never
+  // stealing a paste from another focused input/textarea/editable element.
+  useEffect(() => {
+    if (!acceptImages) return;
+    const onWindowPaste = (e: ClipboardEvent) => {
+      if (e.defaultPrevented) return;
+      const active = document.activeElement as HTMLElement | null;
+      if (active && active !== taRef.current && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
+        return;
+      }
+      const files: File[] = [];
+      for (const item of Array.from(e.clipboardData?.items ?? [])) {
+        if (item.kind === 'file') {
+          const f = item.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length) {
+        e.preventDefault();
+        void ingestRef.current(files);
+        taRef.current?.focus();
+      }
+    };
+    window.addEventListener('paste', onWindowPaste);
+    return () => window.removeEventListener('paste', onWindowPaste);
+  }, [acceptImages]);
+
   return (
     <>
       {mobile && (props.modelChip || props.busy) ? (
@@ -510,7 +578,25 @@ export function Composer(props: ComposerProps) {
       ) : null}
       {props.chatId && <RobotControl />}
       {props.attachMenu}
-      <div className={`composer${images.length > 0 || refCount > 0 || uploads.length > 0 ? ' has-attach' : ''}${dictating ? ' dictating' : ''}`}>
+      <div
+        className={`composer${images.length > 0 || refCount > 0 || uploads.length > 0 ? ' has-attach' : ''}${dictating ? ' dictating' : ''}`}
+        onDragOver={(e) => {
+          if (acceptImages && Array.from(e.dataTransfer.types).includes('Files')) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.dataTransfer.dropEffect = 'copy';
+          }
+        }}
+        onDrop={(e) => {
+          if (!acceptImages) return;
+          const files = Array.from(e.dataTransfer.files);
+          if (files.length) {
+            e.preventDefault();
+            e.stopPropagation();
+            void ingest(files);
+          }
+        }}
+      >
         {images.length > 0 || refCount > 0 || uploads.length > 0 ? (
           <div className={`attach-tray${refCount > 0 ? ' has-refs' : ''}`}>
             {refCount > 0 ? props.refChips : null}
@@ -566,20 +652,6 @@ export function Composer(props: ComposerProps) {
                 if (f) files.push(f);
               }
             }
-            if (files.length) {
-              e.preventDefault();
-              void ingest(files);
-            }
-          }}
-          onDragOver={(e) => {
-            if (acceptImages && Array.from(e.dataTransfer.types).includes('Files')) {
-              e.preventDefault();
-              e.dataTransfer.dropEffect = 'copy';
-            }
-          }}
-          onDrop={(e) => {
-            if (!acceptImages) return;
-            const files = Array.from(e.dataTransfer.files);
             if (files.length) {
               e.preventDefault();
               void ingest(files);

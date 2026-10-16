@@ -15,7 +15,9 @@ import { channelError, useChannelActions, useChannelLive, useChannelMessages, us
 import type { Agent } from '../../grok/agents';
 import type { ChatBlock } from '../data/types';
 import { ChatThread, type ThreadPin } from './reimagine/blocks';
-import { Composer, type SendImage } from './reimagine/Composer';
+import { AttachButton, Composer, type SendImage } from './reimagine/Composer';
+import { Plus } from './reimagine/icons';
+import { DRAFT_APPEND_EVENT, type DraftAppendDetail } from '../../native/shell';
 import { apiJson } from '../../data/api';
 import { MESSAGE_PINS_CHANGED, scrollToPinnedMessage } from '../../grok/messagePins';
 import { parsePinLinkTarget } from '../utils/proxyLinks';
@@ -87,8 +89,26 @@ export function ChannelView({ channelId, agents, onDeleted }: {
   const [stoppedNote, setStoppedNote] = useState<string | null>(null);
   const [pins, setPins] = useState<ChannelPin[]>([]);
   const [pinsOpen, setPinsOpen] = useState(false);
+  const attachRef = useRef<() => void>(() => {});
   const listRef = useRef<HTMLDivElement>(null);
   const noteTimer = useRef<number | null>(null);
+
+  // Files dropped onto the window announce their workspace path via DRAFT_APPEND_EVENT,
+  // mirroring GrokConversation so drag-and-drop works identically in channels.
+  useEffect(() => {
+    const onAppend = (event: Event) => {
+      const detail = (event as CustomEvent<DraftAppendDetail>).detail;
+      if (!detail?.text) return;
+      detail.handled = true;
+      setText((prev) => {
+        const current = prev.replace(/\s+$/, '');
+        return current ? `${current} ${detail.text} ` : `${detail.text} `;
+      });
+    };
+    window.addEventListener(DRAFT_APPEND_EVENT, onAppend);
+    return () => window.removeEventListener(DRAFT_APPEND_EVENT, onAppend);
+  }, []);
+
   // Stop state belongs to one channel: switching channels must not carry a
   // pending Stop, a note, or its timer into the next view, and the timer
   // must never outlive this component (review 3, P2 9).
@@ -221,8 +241,8 @@ export function ChannelView({ channelId, agents, onDeleted }: {
     onToggle: togglePin,
   };
 
-  const send = async (sendText: string, images?: SendImage[]) => {
-    if ((!sendText.trim() && !images?.length) || actions.post.isPending) return;
+  const send = async (sendText: string, images?: SendImage[]): Promise<boolean> => {
+    if ((!sendText.trim() && !images?.length) || actions.post.isPending) return false;
     try {
       const clean = images?.map(({ mediaType, base64 }) => ({ mediaType, base64 }));
       await actions.post.mutateAsync({
@@ -233,8 +253,10 @@ export function ChannelView({ channelId, agents, onDeleted }: {
         ...(clean?.length ? { images: clean } : {}),
       });
       setText('');
+      return true;
     } catch (e) {
       setError(channelError(e));
+      return false;
     }
   };
 
@@ -452,10 +474,23 @@ export function ChannelView({ channelId, agents, onDeleted }: {
             <Composer
               value={text}
               onChange={setText}
-              onSend={(sendText, images) => void send(sendText, images)}
+              onSend={(sendText, images) => send(sendText, images)}
               busy={actions.post.isPending}
               placeholder={`Message ${channel?.name ?? 'channel'}`}
               mentionMembers={memberAgents.map((a) => a.name)}
+              leadingSlot={
+                <button
+                  type="button"
+                  className="grok-attach"
+                  aria-label="Attach a file"
+                  title="Attach a file"
+                  onClick={() => attachRef.current()}
+                >
+                  <Plus />
+                </button>
+              }
+              attachButton={<AttachButton onClick={() => attachRef.current()} />}
+              openFileInputRef={attachRef}
               hint={
                 <span className="hint">
                   <b>@</b> mention · <b>shift+enter</b> new line

@@ -864,7 +864,9 @@ function UserBubble({ block, agentName, onRetry }: { block: Extract<ChatBlock, {
             : `${missing} image${missing === 1 ? '' : 's'} attached`}
         </span>
       ) : null}
-      <div className="bubble"><DeskRefText text={block.text} /></div>
+      {(block.text.trim() || (!images.length && !missing)) ? (
+        <div className="bubble"><DeskRefText text={block.text} /></div>
+      ) : null}
       {block.deliveryState ? (
         <span className={`delivery-state ${block.deliveryState}`} role={block.deliveryState === 'failed' ? 'alert' : 'status'}>
           {block.deliveryState === 'sending'

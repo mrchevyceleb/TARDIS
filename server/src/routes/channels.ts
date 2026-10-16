@@ -196,12 +196,17 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
     res.status(400).json({ error: 'from is required' });
     return;
   }
-  if (typeof text !== 'string' || !text.trim()) {
+  if (typeof text !== 'string') {
     res.status(400).json({ error: 'text is required' });
     return;
   }
   if (text.length > CHANNEL_TEXT_LIMIT) {
     res.status(400).json({ error: `text is limited to ${CHANNEL_TEXT_LIMIT} characters` });
+    return;
+  }
+  const hasRawImages = Array.isArray(req.body?.images) && req.body.images.length > 0;
+  if (!text.trim() && !hasRawImages) {
+    res.status(400).json({ error: 'text is required' });
     return;
   }
   // The hop rides with agent replies (from the channel_post tool) so the
@@ -213,6 +218,10 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
   // the identical caps, whitelist, and magic-byte checks, never throws, and
   // drops anything invalid one image at a time.
   const attachmentRefs = await saveChatAttachments(req.body?.images);
+  if (hasRawImages && attachmentRefs.length < req.body.images.length) {
+    res.status(400).json({ error: 'image attachment could not be saved (unsupported format, over 6 images, or over the 12 MB / 24 MB limit)' });
+    return;
+  }
   // Person-hood is an explicit flag the owner's UI sends, decided on the
   // flag alone so a customized owner name cannot silently disable steering
   // (the client always sends the default display name); when it holds, the
@@ -227,7 +236,14 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
   const poster = person ? DESK_OWNER_NAME : from.trim();
   const message = await postChannelMessage(channel.id, poster, text, attachmentRefs.length ? attachmentRefs : undefined);
   // The post is already durable; a fan-out failure never fails the post.
-  const fanOut = await deliverChannelPost(channel, poster, text, receivedHop, person).catch((error) => {
+  const fanOut = await deliverChannelPost(
+    channel,
+    poster,
+    text,
+    receivedHop,
+    person,
+    attachmentRefs.length ? attachmentRefs : undefined,
+  ).catch((error) => {
     console.warn('[channels] fan-out failed:', (error as Error).message);
     return { delivered: [] as string[], skipped: channel.members, hop: 0 };
   });
