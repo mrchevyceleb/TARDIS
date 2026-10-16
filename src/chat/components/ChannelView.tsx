@@ -92,6 +92,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
   const [stoppedNote, setStoppedNote] = useState<string | null>(null);
   const [pins, setPins] = useState<ChannelPin[]>([]);
   const [pinsOpen, setPinsOpen] = useState(false);
+  const [reply, setReply] = useState<{ id: string; from: string; snippet: string } | null>(null);
   const attachRef = useRef<() => void>(() => {});
   const listRef = useRef<HTMLDivElement>(null);
   const noteTimer = useRef<number | null>(null);
@@ -265,14 +266,17 @@ export function ChannelView({ channelId, agents, onDeleted }: {
     if ((!sendText.trim() && !images?.length) || actions.post.isPending) return false;
     try {
       const clean = images?.map(({ mediaType, base64 }) => ({ mediaType, base64 }));
+      const replyCtx = reply ? { from: reply.from, snippet: reply.snippet } : undefined;
       await actions.post.mutateAsync({
         channelId,
         from: 'Matt',
         person: true,
         text: sendText,
         ...(queue ? { queue: true } : {}),
+        ...(replyCtx ? { replyTo: replyCtx } : {}),
         ...(clean?.length ? { images: clean } : {}),
       });
+      setReply(null);
       setText('');
       return true;
     } catch (e) {
@@ -529,7 +533,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
       <div className={`ch-body rc ${isMobile ? 'rc-mobile' : 'rc-desktop'}`}>
         <div className="ch-list" ref={listRef}>
           <div className="ch-thread">
-            <ChatThread mobile={isMobile} blocks={blocks} status="idle" suppressTyping pin={pin} />
+            <ChatThread mobile={isMobile} blocks={blocks} status="idle" suppressTyping pin={pin} onReply={setReply} />
           </div>
           {messages.isError ? <div className="ch-empty">Could not load messages. <button type="button" className="ch-create-x" onClick={() => void messages.refetch()}>Retry</button></div> : null}
           {!list.length && !messages.isError ? <div className="ch-empty">No messages yet. Say hello.</div> : null}
@@ -548,6 +552,8 @@ export function ChannelView({ channelId, agents, onDeleted }: {
               onSend={(sendText, images) => send(sendText, images)}
               onSendQueued={(sendText, images) => send(sendText, images, true)}
               queueAvailable={(live.data?.working?.length ?? 0) > 0}
+              replyTo={reply ? { from: reply.from, snippet: reply.snippet } : null}
+              onClearReply={() => setReply(null)}
               busy={actions.post.isPending}
               placeholder={`Message ${channel?.name ?? 'channel'}`}
               mentionMembers={memberAgents.map((a) => a.name)}

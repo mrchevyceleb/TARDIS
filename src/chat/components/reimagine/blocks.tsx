@@ -159,6 +159,7 @@ export function ActionsRow({
   mine,
   onPinLink,
   onPinSelection,
+  onReply,
   mobile,
   blockId,
 }: {
@@ -169,6 +170,9 @@ export function ActionsRow({
   mine?: string[];
   onPinLink?: (url: string) => void | Promise<void | boolean | 'error'>;
   onPinSelection?: (text: string) => void | Promise<void | boolean | 'error'>;
+  /** Reply-to-message (card-cbb4af): arms the composer with this message as
+   *  context. Present wherever pin and react are. */
+  onReply?: () => void;
   /** Quick-access pin extras are desktop-only for now (phone lands in piece 2). */
   mobile?: boolean;
   blockId?: string;
@@ -198,6 +202,19 @@ export function ActionsRow({
       >
         {copied ? 'copied ✓' : 'copy'}
       </button>
+      {onReply ? (
+        <button
+          type="button"
+          className="act"
+          title="Reply with this message as context"
+          onClick={(e) => {
+            e.stopPropagation();
+            onReply();
+          }}
+        >
+          reply
+        </button>
+      ) : null}
       {onReact ? (
         <span className={`react-wrap${pickerOpen ? ' open' : ''}`}>
           <button
@@ -557,6 +574,7 @@ function PeerMessageBubble({
   collapseSteps,
   pin,
   onReact,
+  onReply,
 }: {
   block: Extract<ChatBlock, { kind: 'peer' }>;
   responseBlocks: AssistantBlock[];
@@ -566,6 +584,7 @@ function PeerMessageBubble({
   collapseSteps: boolean;
   pin?: ThreadPin;
   onReact?: (targetSeq: number, emoji: string) => void;
+  onReply?: (target: { id: string; snippet: string; from?: string }) => void;
 }) {
   const initial = (block.from || '?').trim().slice(0, 1).toUpperCase();
   const routineResult = block.fromRole === 'automation-result';
@@ -656,6 +675,7 @@ function PeerMessageBubble({
                 collapseSteps={collapseSteps}
                 pin={pin}
                 onReact={onReact}
+                onReply={onReply}
               />
             </section>
           ) : null}
@@ -671,6 +691,7 @@ function PeerMessageBubble({
           collapseSteps={collapseSteps}
           pin={pin}
           onReact={onReact}
+          onReply={onReply}
         />
       </div>
     ) : null}
@@ -848,6 +869,12 @@ function UserBubble({ block, agentName, onRetry }: { block: Extract<ChatBlock, {
   };
   return (
     <div className="msg m-user">
+      {block.replyTo ? (
+        <div className="reply-quote" aria-label={`Replying to ${block.replyTo.from}`}>
+          <span className="reply-from">{block.replyTo.from}</span>
+          <span className="reply-text">{block.replyTo.snippet}</span>
+        </div>
+      ) : null}
       {images.length ? (
         <div className="uimg-row">
           {images.map((img, i) => (
@@ -1023,6 +1050,7 @@ function RoutineResultBubble({
   collapseSteps,
   pin,
   onReact,
+  onReply,
 }: {
   block: Extract<ChatBlock, { kind: 'peer' }>;
   streaming: boolean;
@@ -1030,6 +1058,7 @@ function RoutineResultBubble({
   collapseSteps: boolean;
   pin?: ThreadPin;
   onReact?: (targetSeq: number, emoji: string) => void;
+  onReply?: (target: { id: string; snippet: string; from?: string }) => void;
 }) {
   const text = cleanPeerMessageText(block.text);
   const asMessage: AssistantBlock[] = [{
@@ -1046,7 +1075,7 @@ function RoutineResultBubble({
       <div className="bt-peer-role" style={{ fontSize: 11, opacity: 0.65, margin: '0 0 4px 2px' }}>
         ⚙ {block.from} · routine update
       </div>
-      <ElrondGroup blocks={asMessage} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} />
+      <ElrondGroup blocks={asMessage} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply ? () => onReply({ id: block.id, snippet: text.slice(0, 400), from: block.from }) : undefined} />
     </div>
   );
 }
@@ -1059,6 +1088,7 @@ function ElrondGroup({
   collapseSteps = false,
   pin,
   onReact,
+  onReply,
 }: {
   blocks: AssistantBlock[];
   streaming: boolean;
@@ -1068,6 +1098,10 @@ function ElrondGroup({
   collapseSteps?: boolean;
   pin?: ThreadPin;
   onReact?: (targetSeq: number, emoji: string) => void;
+  /** Reply-to-message (card-cbb4af): report this group's id, a snippet,
+   *  and the group's own speaker when it has one (channel member posts);
+   *  the thread adds the agent name otherwise. */
+  onReply?: (target: { id: string; snippet: string; from?: string }) => void;
 }) {
   const [acted, setActed] = useState(false);
   const visible = visibleAssistantBlocks(blocks, collapseSteps);
@@ -1158,6 +1192,7 @@ function ElrondGroup({
                 blockId={first.id}
                 mobile={mobile}
                 onReact={canReact ? (emoji) => onReact!(targetSeq!, emoji) : undefined}
+                onReply={onReply ? () => onReply({ id: first.id, snippet: copyText().slice(0, 400), ...('from' in first && first.from ? { from: first.from } : {}) }) : undefined}
                 onTogglePin={pin ? () => {
                   const src = textBlocks.filter(isAnswerProse);
                   const visible = src.length ? src : textBlocks.filter(hasVisibleProse);
@@ -1194,6 +1229,9 @@ export type ChatThreadProps = {
   pin?: ThreadPin;
   /** Persist an emoji reaction on a finished assistant bubble. */
   onReact?: (targetSeq: number, emoji: string) => void;
+  /** Reply-to-message (card-cbb4af): arms the caller's composer with the
+   *  targeted message (its id, the sender, and a snippet) as context. */
+  onReply?: (target: { id: string; from: string; snippet: string }) => void;
   /** Suppress the typing indicator entirely (silent automation turn running). */
   suppressTyping?: boolean;
   /** Wall-clock start of the active turn, used for visible proof-of-life time. */
@@ -1216,8 +1254,13 @@ export type ChatThreadProps = {
 // Renders the full feed: day marks on day changes, user bubbles, per-turn
 // assistant groups (tool cards + streaming prose), and the live-turn pill
 // while a turn is live but no content has landed yet.
-export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, suppressTyping = false, workingSince, backgroundWork = [], waitingOn = [], agentName, onRetry }: ChatThreadProps) {
+export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, onReply, suppressTyping = false, workingSince, backgroundWork = [], waitingOn = [], agentName, onRetry }: ChatThreadProps) {
   const streaming = status === 'streaming';
+  // Reply-to-message (card-cbb4af): groups report their id and a snippet
+  // (and their own speaker when they have one — channel member posts); the
+  // thread fills the agent name so the armed composer knows who is quoted.
+  const replyFrom = agentName?.trim() || 'assistant';
+  const onReplyElrond = onReply ? (t: { id: string; snippet: string; from?: string }) => onReply({ id: t.id, snippet: t.snippet, from: t.from?.trim() || replyFrom }) : undefined;
   // The indicator lives until something VISIBLE lands in the CURRENT turn.
   // Looking across the whole transcript made any historical terminal-error or
   // stale open block suppress every future thinking indicator.
@@ -1449,6 +1492,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
           collapseSteps={collapseSteps}
           pin={pin}
           onReact={onReact}
+          onReply={onReplyElrond}
         />,
       );
     } else if (g.type === 'peer') {
@@ -1463,6 +1507,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
           collapseSteps={collapseSteps}
           pin={pin}
           onReact={onReact}
+          onReply={onReplyElrond}
         />
       );
       // Settled and silent: it was answered (so it is not waiting on anyone),
@@ -1481,7 +1526,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         ? { fold: true, key: g.block.id, from: g.block.from, ts: g.block.ts, tsApprox: g.block.tsApprox, node: bubble }
         : bubble);
     } else {
-      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} turnLive={streaming && g === lastElrondGroup} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} />);
+      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} turnLive={streaming && g === lastElrondGroup} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReplyElrond} />);
     }
   }
 

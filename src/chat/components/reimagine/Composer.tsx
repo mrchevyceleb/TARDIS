@@ -45,6 +45,10 @@ export type ComposerProps = {
   /** Surfaces the chip even without a steerable one-on-one lane (channel
  *  composers: any member working means a queued post is meaningful). */
   queueAvailable?: boolean;
+  /** Reply-to-message (card-cbb4af): the armed reply context — shown as a
+   *  quote bar above the draft, cleared with its ✕ or after the send. */
+  replyTo?: { from: string; snippet: string } | null;
+  onClearReply?: () => void;
   onStop?: () => void;
   onSteer?: (text: string, images?: SendImage[]) => void;
   /** Wipe the conversation and start a fresh thread (desktop row button). */
@@ -646,6 +650,15 @@ export function Composer(props: ComposerProps) {
           }
         }}
       >
+        {props.replyTo && props.onClearReply ? (
+          <div className="reply-arm" role="status" aria-label={`Replying to ${props.replyTo.from}`}>
+            <span className="reply-quote">
+              <b>{props.replyTo.from}</b>
+              {props.replyTo.snippet}
+            </span>
+            <button type="button" className="reply-clear" aria-label="Clear reply" title="Clear reply" onClick={props.onClearReply}>✕</button>
+          </div>
+        ) : null}
         {images.length > 0 || refCount > 0 || uploads.length > 0 ? (
           <div className={`attach-tray${refCount > 0 ? ' has-refs' : ''}`}>
             {refCount > 0 ? props.refChips : null}

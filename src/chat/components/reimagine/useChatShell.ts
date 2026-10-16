@@ -70,14 +70,24 @@ export function useChatShell({ chat, picker }: ShellProps) {
     prevStatus.current = chat.status;
   }, [chat.status, noteUnread]);
 
+  // Reply-to-message (card-cbb4af): the armed reply context, set by the
+  // thread's reply action, attached to the next send/steer, then cleared.
+  const [reply, setReply] = useState<{ id: string; from: string; snippet: string } | null>(null);
+  const replyArmed = () => (reply ? { from: reply.from, snippet: reply.snippet } : undefined);
+  const clearReply = () => setReply(null);
+
   const send = (text: string, images?: SendImage[]) => {
-    chat.send(text, images);
+    const reply = replyArmed();
+    chat.send(text, images, false, reply);
+    clearReply();
     setRoom('hall');
     // §3.6: sending force-follows the feed.
     requestAnimationFrame(() => sticky.forcePin());
   };
   const steer = (text: string, images?: SendImage[]) => {
-    chat.steer(text, images);
+    const reply = replyArmed();
+    chat.steer(text, images, reply);
+    clearReply();
     requestAnimationFrame(() => sticky.forcePin());
   };
   const sendQueued = (text: string, images?: SendImage[]) => {
@@ -101,7 +111,7 @@ export function useChatShell({ chat, picker }: ShellProps) {
     busy,
     workingSince: chat.turnStartedAt,
     backgroundWork: chat.backgroundWork,
-    send, steer, sendQueued, retry: chat.retry, react: chat.react, stop,
+    send, steer, sendQueued, reply, setReply, retry: chat.retry, react: chat.react, stop,
     fresh: chat.freshStart,
     pickChronicle,
     blocks: chat.blocks as ChatBlock[],

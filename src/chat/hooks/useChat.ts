@@ -781,7 +781,7 @@ function conversationKey(cli: CompanionId, repoPath: string, chatId = 'main'): s
 /** Outbound turns waiting for a live `ready` socket. Module-level so a click
  *  to another agent (unmount) does not drop a message the user already sent —
  *  coming back to the thread flushes it. */
-type QueuedOutbound = { text: string; images?: ChatSendImage[]; clientMsgId: string; queue?: true };
+type QueuedOutbound = { text: string; images?: ChatSendImage[]; clientMsgId: string; queue?: true; replyTo?: { from: string; snippet: string } };
 const outboundQueue = new Map<string, QueuedOutbound[]>();
 
 function enqueueOutbound(key: string, item: QueuedOutbound): void {
@@ -1424,6 +1424,7 @@ export function useChat(opts: {
         images: payloadImages(item.images),
         clientMsgId: item.clientMsgId,
         ...(item.queue ? { queue: true } : {}),
+        ...(item.replyTo ? { replyTo: item.replyTo } : {}),
         model: modelRef.current,
         effort: effortRef.current,
         ...selectionIntent(),
@@ -2670,6 +2671,7 @@ export function useChat(opts: {
     text: string,
     images?: ChatSendImage[],
     labelSending = false,
+    replyTo?: { from: string; snippet: string },
   ) => {
     if (!repo) {
       setError('Sam is not on the line. Please wait a moment.');
@@ -2678,14 +2680,14 @@ export function useChat(opts: {
     const clientMsgId = `cm-${Date.now().toString(36)}-${nextId++}`;
     setBlocks((prev) => [
       ...prev,
-      { kind: 'user', id: id(), text, images: imagePreviews(images), imageCount: images?.length, clientMsgId, ts: Date.now(), ...(labelSending ? { deliveryState: 'sending' as const } : {}) },
+      { kind: 'user', id: id(), text, images: imagePreviews(images), imageCount: images?.length, clientMsgId, ts: Date.now(), ...(replyTo ? { replyTo } : {}), ...(labelSending ? { deliveryState: 'sending' as const } : {}) },
     ]);
     // Someone typing into a chat that is still catching up must see their
     // own message land, even if that means showing the saved copy early.
     setHydrating(false);
     const key = conversationKey(cli, repo.path, chatId);
     const inFlight = pendingSendRef.current || statusRef.current === 'streaming';
-    enqueueOutbound(key, { text, images, clientMsgId });
+    enqueueOutbound(key, { text, images, clientMsgId, ...(replyTo ? { replyTo } : {}) });
     pendingSendRef.current = true;
     setError(null);
     if (!inFlight) markTurnStarted(Date.now(), true);
@@ -2766,6 +2768,7 @@ export function useChat(opts: {
     text: string,
     images?: ChatSendImage[],
     queue = false,
+    replyTo?: { from: string; snippet: string },
   ) => {
     if (!repo) return;
     const ws = wsRef.current;
@@ -2814,7 +2817,7 @@ export function useChat(opts: {
       // Only the stale-busy case reads as a fresh send: label it Sending so
       // it never shows the mid-step queue wording. Transport waits keep the
       // plain send look, same as before.
-      send(text, images, !busyConfirmedRef.current);
+      send(text, images, !busyConfirmedRef.current, replyTo);
       return;
     }
     const clientMsgId = `cm-${Date.now().toString(36)}-${nextId++}`;
@@ -2833,13 +2836,14 @@ export function useChat(opts: {
         deliveryState: 'queued',
         ...(queue ? { queue: true } : {}),
         ts: Date.now(),
+        ...(replyTo ? { replyTo } : {}),
       },
     ]);
     queuedSteerRef.current.add(clientMsgId);
     pendingSendRef.current = true;
     rememberPendingSteer(key, { text, images, clientMsgId, ts: Date.now() });
     setError(null);
-    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), clientMsgId, model: modelRef.current, effort: effortRef.current, ...(queue ? { queue: true } : {}), ...selectionIntent() }));
+    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), clientMsgId, ...(queue ? { queue: true } : {}), ...(replyTo ? { replyTo } : {}), model: modelRef.current, effort: effortRef.current, ...selectionIntent() }));
     lastMessageAtRef.current = Date.now();
     compactingRef.current = false;
     setStatus('streaming');

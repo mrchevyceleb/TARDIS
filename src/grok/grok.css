@@ -696,6 +696,28 @@
   margin: 0;
   padding: 2px 4px 2px;
 }
+/* Reply-to-message (card-cbb4af): the armed quote bar above the draft. */
+.bot-app .rc .composer .reply-arm {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 4px 2px;
+  max-width: 100%;
+}
+.bot-app .rc .composer .reply-quote {
+  flex: 1; min-width: 0;
+  display: block;
+  font-size: 11.5px; line-height: 1.35;
+  color: var(--r-ink-mute);
+  border-left: 2px solid color-mix(in srgb, currentColor 35%, transparent);
+  padding-left: 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.bot-app .rc .composer .reply-quote b { color: var(--r-ink); margin-right: 4px; }
+.bot-app .rc .composer .reply-clear {
+  flex: none; border: none; background: none; cursor: pointer;
+  color: var(--r-ink-mute); font-size: 12px; padding: 2px 4px;
+}
+.bot-app .rc .composer .reply-clear:hover { color: var(--r-ink); }
 .bot-app .rc .composer .attach-thumb {
   width: 36px;
   height: 36px;
