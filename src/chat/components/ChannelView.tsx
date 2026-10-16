@@ -10,8 +10,9 @@
 // render with the sender's identity like any teammate message.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Ellipsis, Hash, Pencil, Pin, PinOff, Square, Trash2, Users, X } from 'lucide-react';
-import { channelError, useChannelActions, useChannelLive, useChannelMessages, useChannels, type ChannelMessage } from '../hooks/useChannels';
+import { Check, Ellipsis, Hash, Palette, Pencil, Pin, PinOff, Square, Trash2, Users, X } from 'lucide-react';
+import { CHAT_COLORS } from '../../grok/agents';
+import { channelColorOf, channelError, useChannelActions, useChannelLive, useChannelMessages, useChannels, type ChannelMessage } from '../hooks/useChannels';
 import type { Agent } from '../../grok/agents';
 import type { ChatBlock } from '../data/types';
 import { ChatThread, type ThreadPin } from './reimagine/blocks';
@@ -82,6 +83,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
 
   const [text, setText] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
+  const [colorOpen, setColorOpen] = useState(false);
   const [editing, setEditing] = useState<EditMode>('none');
   const [name, setName] = useState('');
   const [picked, setPicked] = useState<string[]>([]);
@@ -216,7 +218,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
     if (nearBottom) node.scrollTop = node.scrollHeight;
   }, [working.length, stoppingCount, stoppedNote !== null]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const closeMenu = () => { setMenuOpen(false); setError(null); };
+  const closeMenu = () => { setMenuOpen(false); setColorOpen(false); setError(null); };
 
   // Pin a channel message to the sender's own board (card-1327b9: each
   // member's pin board works in the channel too). The POST is a toggle
@@ -322,6 +324,19 @@ export function ChannelView({ channelId, agents, onDeleted }: {
     }
   };
 
+  const applyColor = async (color: string | null) => {
+    // Skip no-op clicks (they would still write and bump updatedAt) and
+    // clicks racing a pending change; the optimistic mutation moves the
+    // tint immediately and rolls back on failure.
+    if ((channelColorOf(channel?.color) ?? null) === color || actions.setColor.isPending) return;
+    setError(null);
+    try {
+      await actions.setColor.mutateAsync({ id: channelId, color });
+    } catch (e) {
+      setError(channelError(e));
+    }
+  };
+
   const remove = async () => {
     setError(null);
     if (!window.confirm(`Delete #${channel?.name ?? 'channel'}? Its history is removed with it.`)) return;
@@ -351,14 +366,16 @@ export function ChannelView({ channelId, agents, onDeleted }: {
   return (
     <div className="ch-view">
       <header className="ch-head">
-        <Hash size={15} aria-hidden="true" />
+        <span className="ch-head-hash" data-chat-color={channelColorOf(channel?.color)} aria-hidden="true">
+          <Hash size={15} />
+        </span>
         <span className="ch-head-name">{channel?.name ?? '…'}</span>
         <span className="ch-head-members" title={channel?.members.join(', ')}>{channel?.members.length ?? 0} members</span>
         <button type="button" className="bt-iconbtn" onClick={() => { setPinsOpen((o) => !o); }}
           title="Pinned from members" aria-label="Pinned from members" aria-expanded={pinsOpen}>
           <Pin size={15} />
         </button>
-        <button type="button" className="bt-iconbtn" onClick={() => setMenuOpen((o) => !o)} title="Channel menu" aria-label="Channel menu" aria-expanded={menuOpen}>
+        <button type="button" className="bt-iconbtn" onClick={() => { if (menuOpen) closeMenu(); else setMenuOpen(true); }} title="Channel menu" aria-label="Channel menu" aria-expanded={menuOpen}>
           <Ellipsis size={15} />
         </button>
 
@@ -411,6 +428,38 @@ export function ChannelView({ channelId, agents, onDeleted }: {
           <div className="ch-menu" role="menu">
             <button type="button" className="ch-menu-row" onClick={() => { setEditing('rename'); closeMenu(); }}><Pencil size={13} /> Rename</button>
             <button type="button" className="ch-menu-row" onClick={() => { setEditing('members'); closeMenu(); }}><Users size={13} /> Members</button>
+            <button type="button" className="ch-menu-row" onClick={() => setColorOpen((o) => !o)} aria-expanded={colorOpen}><Palette size={13} /> Color</button>
+            {colorOpen ? (
+              <div className="ch-swatches" role="group" aria-label="Channel color">
+                {CHAT_COLORS.map((c) => (
+                  <button
+                    key={c.key}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={channelColorOf(channel?.color) === c.key}
+                    aria-label={c.label}
+                    title={c.label}
+                    className="bt-swatch"
+                    data-swatch=""
+                    data-chat-color={c.key}
+                    onClick={() => void applyColor(c.key)}
+                  >
+                    {channelColorOf(channel?.color) === c.key ? <Check size={13} strokeWidth={3} aria-hidden="true" /> : null}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={!channelColorOf(channel?.color)}
+                  aria-label="No color"
+                  title="No color"
+                  className="bt-swatch bt-swatch-none"
+                  data-swatch=""
+                  onClick={() => void applyColor(null)}
+                />
+                {error ? <div className="ch-swatch-error" role="alert">{error}</div> : null}
+              </div>
+            ) : null}
             <button type="button" className="ch-menu-row danger" onClick={() => { void remove(); closeMenu(); }}><Trash2 size={13} /> Delete channel</button>
           </div>
         ) : null}

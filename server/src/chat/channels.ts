@@ -4,12 +4,13 @@
 // fan-out delivery and reply routing layer on top of it later.
 
 import { JsonStore } from '../lib/jsonStore.ts';
+import { type AgentColor } from './agents.ts';
 import { MAX_TEXT, agentLaneKeys, deliverTeamMessage, dropQueuedChannelDeliveries, liveChannelTurnLanesByName, teamRoster } from './teamBus.ts';
 import { activeChatSessions, interruptSession } from './runner.ts';
 import { laneChatId } from './threadKey.ts';
 import { chatAttachmentPath } from '../routes/chatAttachments.ts';
 
-export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string };
+export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string; color?: AgentColor };
 /** What listChannels returns: the stored channel plus its current unread
  *  count. `unread` is computed per request and is never persisted. */
 export type ChannelWithUnread = Channel & { unread: number };

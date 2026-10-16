@@ -4,8 +4,16 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiJson } from '../../data/api';
+import type { ChatColor } from '../../grok/agents';
+import { CHAT_COLORS } from '../../grok/agents';
 
-export type Channel = { id: string; name: string; members: string[]; unread?: number; createdAt?: string; updatedAt?: string };
+export type Channel = { id: string; name: string; members: string[]; unread?: number; createdAt?: string; updatedAt?: string; color?: ChatColor };
+
+/** The channel's color when it is a label the client knows how to paint
+ *  (the same set agents use); anything else renders as no color. */
+export function channelColorOf(color: string | undefined): ChatColor | undefined {
+  return CHAT_COLORS.find((c) => c.key === color)?.key;
+}
 /** Image attachments land as file refs (the same attachment store as the
  *  main chat); the client renders them through /api/chat/attachments/<id>. */
 export type ChannelMessage = { id: string; channelId: string; from: string; text: string; createdAt?: string; updatedAt?: string; images?: Array<{ id: string; mediaType: string }> };
@@ -73,13 +81,35 @@ export function useChannelActions() {
     onSuccess: refreshList,
   });
   const patch = useMutation({
-    mutationFn: (input: { id: string; name?: string; addMembers?: string[]; removeMembers?: string[] }) =>
+    mutationFn: (input: { id: string; name?: string; addMembers?: string[]; removeMembers?: string[]; color?: string | null }) =>
       channelRequest<{ channel: Channel }>(`/${encodeURIComponent(input.id)}`, 'PATCH', {
         ...(input.name === undefined ? {} : { name: input.name }),
         ...(input.addMembers === undefined ? {} : { addMembers: input.addMembers }),
         ...(input.removeMembers === undefined ? {} : { removeMembers: input.removeMembers }),
+        ...(input.color === undefined ? {} : { color: input.color }),
       }),
     onSuccess: refreshList,
+  });
+  // Color changes get their own mutation so the tint moves optimistically
+  // (one round trip, no list refetch wait) and rolls back on failure.
+  const setColor = useMutation({
+    mutationFn: (input: { id: string; color: string | null }) =>
+      channelRequest<{ channel: Channel }>(`/${encodeURIComponent(input.id)}`, 'PATCH', { color: input.color }),
+    onMutate: async ({ id, color }) => {
+      await queryClient.cancelQueries({ queryKey: ['channels'] });
+      const prev = queryClient.getQueryData<{ channels: Channel[] }>(['channels']);
+      if (prev) {
+        queryClient.setQueryData(['channels'], {
+          ...prev,
+          channels: prev.channels.map((c) => (c.id === id ? { ...c, color: color || undefined } : c)),
+        });
+      }
+      return { prev };
+    },
+    onError: (_error, _input, context) => {
+      if (context?.prev) queryClient.setQueryData(['channels'], context.prev);
+    },
+    onSettled: () => { void queryClient.invalidateQueries({ queryKey: ['channels'] }); },
   });
   const remove = useMutation({
     mutationFn: (id: string) => channelRequest<{ deleted: boolean }>(`/${encodeURIComponent(id)}`, 'DELETE'),
@@ -130,5 +160,5 @@ export function useChannelActions() {
     onSuccess: refreshList,
   });
 
-  return { create, patch, remove, post, stopMember, markRead };
+  return { create, patch, setColor, remove, post, stopMember, markRead };
 }

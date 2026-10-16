@@ -22,6 +22,7 @@ import {
   updateChannel,
 } from '../chat/channels.ts';
 import { saveChatAttachments } from './chatAttachments.ts';
+import { isAgentColor, type AgentColor } from '../chat/agents.ts';
 import { teamRoster } from '../chat/teamBus.ts';
 import { DESK_OWNER_NAME } from '../config.ts';
 
@@ -66,8 +67,8 @@ channelsRouter.patch('/:id', asyncHandler(async (req, res) => {
     res.status(404).json({ error: 'no such channel' });
     return;
   }
-  const { name, addMembers, removeMembers } = req.body ?? {};
-  const patch: { name?: string; members?: string[] } = {};
+  const { name, addMembers, removeMembers, color } = req.body ?? {};
+  const patch: { name?: string; members?: string[]; color?: AgentColor } = {};
   if (name !== undefined) {
     if (invalidName(name)) {
       res.status(400).json({ error: 'a channel name is 1-80 characters' });
@@ -102,7 +103,23 @@ channelsRouter.patch('/:id', asyncHandler(async (req, res) => {
     const gone = new Set(removeMembers.map((m) => m.trim()));
     members = members.filter((m) => !gone.has(m));
   }
-  patch.members = members;
+  if (color !== undefined) {
+    // Color keys come from the same fixed label set the sidebar already
+    // paints agents with (isAgentColor), so shades stay theme-tuned and a
+    // channel accent can never carry arbitrary CSS. null or '' clears.
+    if (color === null || color === '') {
+      patch.color = undefined;
+    } else if (!isAgentColor(color)) {
+      res.status(400).json({ error: 'color must be a known color label, or null to clear' });
+      return;
+    } else {
+      patch.color = color;
+    }
+  }
+  // Only carry members when this request actually changes them: writing a
+  // members array read outside the store's queue on every rename or color
+  // tweak can race a concurrent members change and drop it.
+  if (addMembers !== undefined || removeMembers !== undefined) patch.members = members;
   const updated = await updateChannel(channel.id, patch);
   if (!updated) {
     res.status(404).json({ error: 'no such channel' });

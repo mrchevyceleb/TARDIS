@@ -5,7 +5,7 @@
 
 import { useId, useState } from 'react';
 import { Check, ChevronRight, Hash, Plus, X } from 'lucide-react';
-import { channelError, useChannelActions, useChannels } from '../hooks/useChannels';
+import { channelColorOf, channelError, useChannelActions, useChannels } from '../hooks/useChannels';
 import type { Agent } from '../../grok/agents';
 import '../../grok/railGroups.css';
 import './channels.css';
@@ -165,6 +165,7 @@ export function ChannelsRail({ agents, activeChannelId, onOpenChannel }: {
                 key={channel.id}
                 type="button"
                 className={`bt-conv ch-row${isActive ? ' on active' : ''}`}
+                data-chat-color={channelColorOf(channel.color)}
                 onClick={() => onOpenChannel(channel.id)}
                 title={`#${channel.name} · ${memberLabel}${unread ? ` · ${unread} unread` : ''}`}
               >
