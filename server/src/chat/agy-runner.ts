@@ -52,6 +52,29 @@ export const AGY_READY_TIMEOUT_MS = 45_000;
  *  streams steps continuously): fail it and retire the lane instead of
  *  staying busy forever on a silent protocol break. */
 const AGY_TURN_STALL_MS = 10 * 60_000;
+/** Minimum gap between teammate-triggered boundary interrupts on the same
+ *  lane (human messages are never rate-limited). Matches ClaudeSession. */
+const PEER_BOUNDARY_INTERRUPT_GAP_MS = 60_000;
+/** How long an automation turn runs before a teammate's handoff may end it
+ *  at a tool boundary. Matches ClaudeSession. */
+const PEER_AUTOMATION_TURN_GRACE_MS = 60_000;
+/** Short settle window after a tool step closes before firing a boundary
+ *  interrupt, so a batched sibling tool's ACTIVE frame arrives and holds the
+ *  turn open instead of getting hit by SIGINT. */
+const BOUNDARY_SETTLE_MS = 100;
+const PAUSED_NOTE_TTL_MS = 10 * 60_000;
+const KEY_STATE_MAX_AGE_MS = 60 * 60_000;
+/** Prepended to the turn that follows a boundary interrupt. */
+const PAUSED_FOR_MESSAGE_NOTE = '<rivendell-steer>Your previous turn was paused right after a tool call finished, so the message below reaches you as a normal message. Answer it first. Then, unless it changes the plan, carry on with what you were doing; the transcript above shows where you stopped.</rivendell-steer>';
+/** Preserved across AgySession replacements (interrupt retires the old
+ *  process and getOrCreateSession spawns a new one for the same key). */
+const pausedForMessageByKey = new Map<string, { at: number; summary: string }>();
+const lastBoundaryInterruptAtByKey = new Map<string, number>();
+
+function pruneKeyState(now: number): void {
+  for (const [k, v] of pausedForMessageByKey) if (now - v.at > PAUSED_NOTE_TTL_MS) pausedForMessageByKey.delete(k);
+  for (const [k, at] of lastBoundaryInterruptAtByKey) if (now - at > KEY_STATE_MAX_AGE_MS) lastBoundaryInterruptAtByKey.delete(k);
+}
 
 type Listener = (e: SeqEvent) => void;
 type ChatImage = { mediaType: string; base64: string };
@@ -145,6 +168,13 @@ export class AgySession {
   /** Bumped whenever a turn opens, so a late failure can tell its turn from a newer one. */
   private turnSeq = 0;
   private automationTurn = false;
+  private boundaryInterruptWanted = false;
+  private boundaryWaiters = 0;
+  private boundaryHumanWaiters = 0;
+  private boundaryGeneration = 0;
+  private boundarySettleTimer: NodeJS.Timeout | null = null;
+  private lastBoundaryInterruptAt = 0;
+  private pausedForMessage = false;
   private seedWindowOnNextTurn = false;
   private terminalNoticeEmitted = false;
   private buffer = '';
@@ -190,6 +220,8 @@ export class AgySession {
     this.chatId = chatId;
     this.key = `${cli}|${cwd}|${chatId}`;
     this.logKey = logKeyFor(cli, cwd, chatId);
+    pruneKeyState(Date.now());
+    this.lastBoundaryInterruptAt = lastBoundaryInterruptAtByKey.get(this.key) ?? 0;
     this.spawnModel = model;
     this.spawnEffort = effort;
     this.seedWindowOnNextTurn = seedFirst;
@@ -250,10 +282,13 @@ export class AgySession {
       if (this.initSeen) {
         if (this.turnStartedAt !== null) {
           // A process error during Stop's kill grace is the cancellation Stop
-          // asked for, not an engine failure (same honesty as onExit).
-          this.turnFailed = this.retiring
-            ? { message: 'This turn was cancelled before it finished.', code: 'aborted' }
-            : { message: `agy process error: ${err.message}`, code: 'error' };
+          // asked for, not an engine failure (same honesty as onExit); a
+          // message-boundary pause closes cleanly without failing the turn.
+          if (!this.pausedForMessage) {
+            this.turnFailed = this.retiring
+              ? { message: 'This turn was cancelled before it finished.', code: 'aborted' }
+              : { message: `agy process error: ${err.message}`, code: 'error' };
+          }
           this.finishTurn();
         }
         this.shutdown('child-error');
@@ -382,19 +417,20 @@ export class AgySession {
         }
         if (buf.closed) return; // a late frame for an already-emitted step
         const wasLiveText = buf.kind === 'text' && buf.opened && this.liveStepIdx === idx;
+        const isTerminalState = step.state === 'DONE' || step.state === 'ERROR' || step.state === 'FAILED' || step.state === 'CANCELLED';
         if (buf.kind === 'tool') {
           const info = step.tool_info && typeof step.tool_info === 'object' ? step.tool_info : {};
           if (typeof step.tool_name === 'string' && step.tool_name) buf.name = step.tool_name;
           else if (typeof info.name === 'string' && info.name) buf.name = info.name;
           if (info.parameters !== undefined) buf.parameters = info.parameters;
-          if (step.state === 'DONE') {
+          if (isTerminalState) {
             buf.done = true;
-            const raw = info.output;
+            const raw = info.output ?? info.error;
             buf.output = typeof raw === 'string' ? raw : raw == null ? '' : JSON.stringify(raw) ?? '';
           }
         } else {
           if (typeof step.text_delta === 'string' && step.text_delta.length > 0) buf.text += step.text_delta;
-          if (step.state === 'DONE') {
+          if (isTerminalState) {
             buf.done = true;
             const u = step.usage ?? {};
             const usage = {
@@ -420,6 +456,7 @@ export class AgySession {
       case 'result': {
         const result = ev.result ?? {};
         if (this.turnStartedAt === null) {
+          if (this.pausedForMessage) return;
           // A result with no open turn of ours: an input line agy rejected
           // outright, or a self-run we never asked for. Surface it, never drop it.
           const error = typeof result.error === 'string' && result.error ? result.error : '';
@@ -431,9 +468,13 @@ export class AgySession {
           return;
         }
         // Fail closed: only the documented SUCCESS status commits a result;
-        // missing, renamed, malformed or unknown statuses are failures.
+        // missing, renamed, malformed or unknown statuses are failures (except
+        // when retiring for a message-boundary pause, where SIGINT ends the
+        // turn cleanly at the completed tool boundary).
         if (result.status !== 'SUCCESS') {
-          this.turnFailed = { message: String(result.error ?? `agy returned status ${String(result.status ?? 'missing')}`), code: 'error' };
+          if (!this.pausedForMessage) {
+            this.turnFailed = { message: String(result.error ?? `agy returned status ${String(result.status ?? 'missing')}`), code: 'error' };
+          }
         } else {
           const response = typeof result.response === 'string' ? result.response : '';
           if (response.trim()) this.lastAssistantText = response;
@@ -549,6 +590,7 @@ export class AgySession {
    *  cards, and planner bubbles rendered out of step order). */
   private pumpSteps(stream: (event: Record<string, unknown>) => void): void {
     const order = [...this.stepBuffers.entries()].filter(([, b]) => !b.closed).sort((a, b) => a[0] - b[0]);
+    let closedToolStep = false;
     for (const [idx, buf] of order) {
       if (this.liveStepIdx !== null && this.liveStepIdx !== idx) break; // a lower step is still live
       if (!buf.opened) {
@@ -570,6 +612,7 @@ export class AgySession {
       if (!buf.done) break; // the live step is still streaming
       if (buf.kind === 'tool') {
         this.emit({ type: 'event', event: { type: 'user', parent_tool_use_id: null, session_id: this.agyConversationId ?? '', uuid: randomUUID(), timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: buf.toolUseId ?? '', content: [{ type: 'text', text: String(buf.output ?? '').slice(0, 8000) }] }] } } });
+        closedToolStep = true;
       } else {
         // Serialized close, not arrival: lastAssistantText must end as the
         // final step's text, or a late-finishing lower-index planner step
@@ -583,6 +626,56 @@ export class AgySession {
       this.liveStepIdx = null;
       // continue: pump the next buffered step
     }
+    if (closedToolStep) this.maybeFireBoundaryInterrupt();
+  }
+
+  /** True while any buffered tool step has not yet finished and emitted its
+   *  tool_result. Boundary interrupts never fire while a tool is in flight. */
+  private hasOpenToolStep(): boolean {
+    for (const b of this.stepBuffers.values()) {
+      if (b.kind === 'tool' && !b.closed) return true;
+    }
+    return false;
+  }
+
+  private completedToolSummary(): string {
+    const tools = [...this.stepBuffers.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .filter(([, b]) => b.kind === 'tool' && b.closed)
+      .map(([, b]) => b.name ?? 'tool');
+    return tools.length > 0 ? `Completed tool steps before pause: ${tools.join(', ')}.` : '';
+  }
+
+  private maybeFireBoundaryInterrupt(): void {
+    if (!this.boundaryInterruptWanted || this.turnStartedAt === null || this.disposed || this.retiring) return;
+    if (this.hasOpenToolStep()) return;
+    const now = Date.now();
+    const eligible =
+      (this.boundaryHumanWaiters > 0 || now - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS)
+      && (this.boundaryHumanWaiters > 0 || !this.automationTurn || now - this.turnStartedAt >= PEER_AUTOMATION_TURN_GRACE_MS);
+    if (!eligible) return;
+    if (this.boundarySettleTimer) return; // already settling
+    const turn = this.turnStartedAt;
+    const turnSeq = this.turnSeq;
+    // Wait a short settle window so the completed tool_result event flushes and
+    // any batched sibling tool's ACTIVE frame arrives before we signal the
+    // leader process.
+    this.boundarySettleTimer = setTimeout(() => {
+      this.boundarySettleTimer = null;
+      if (!this.boundaryInterruptWanted || this.turnStartedAt === null || this.turnStartedAt !== turn || this.turnSeq !== turnSeq || this.disposed || this.retiring) return;
+      if (this.boundaryWaiters === 0) return;
+      if (this.hasOpenToolStep()) return;
+      const firedAt = Date.now();
+      const stillEligible =
+        (this.boundaryHumanWaiters > 0 || firedAt - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS)
+        && (this.boundaryHumanWaiters > 0 || !this.automationTurn || firedAt - (this.turnStartedAt ?? 0) >= PEER_AUTOMATION_TURN_GRACE_MS);
+      if (!stillEligible) return;
+      this.boundaryInterruptWanted = false;
+      this.lastBoundaryInterruptAt = firedAt;
+      lastBoundaryInterruptAtByKey.set(this.key, firedAt);
+      void this.interrupt('message-boundary');
+    }, BOUNDARY_SETTLE_MS);
+    this.boundarySettleTimer.unref?.();
   }
 
   /** The active turn's start (ms) for the client's elapsed timer on reattach
@@ -636,6 +729,9 @@ export class AgySession {
   private finishTurn(): void {
     if (this.turnStartedAt === null) return;
     if (this.stallTimer) { clearTimeout(this.stallTimer); this.stallTimer = null; }
+    if (this.pausedForMessage) {
+      pausedForMessageByKey.set(this.key, { at: Date.now(), summary: this.completedToolSummary() });
+    }
     this.finalizeOpenStep();
     const failed = this.turnFailed;
     if (failed && !this.terminalNoticeEmitted) {
@@ -653,12 +749,15 @@ export class AgySession {
     this.lastAssistantText = '';
     this.turnStartedAt = null;
     this.automationTurn = false;
+    this.clearBoundaryRequest();
     this.turnFailed = null;
     this.resultUsage = null;
     this.emit({ type: 'turnEnd', sessionId: this.agyConversationId ?? undefined });
     // Keep the rolling memory current on the agy lane too: past the budget the
-    // lane rotates at this boundary, exactly like the Pi lanes.
-    if (!failed) {
+    // lane rotates at this boundary, exactly like the Pi lanes. Skip on a
+    // retiring/paused session so it never wipes the conversation id under the
+    // replacement session that is about to resume it.
+    if (!failed && !this.retiring && !this.pausedForMessage) {
       const rotationDue = contextRotationDue(this.contextKey);
       const housekeeping = async () => {
         if (rotationDue && (await this.rotateContextAtBoundary())) return;
@@ -673,16 +772,16 @@ export class AgySession {
    *  shut the warm process down; the next prompt respawns seeded with compact
    *  plus the last 50 turns. */
   private async rotateContextAtBoundary(): Promise<boolean> {
-    if (!contextRotationDue(this.contextKey) || this.turnStartedAt !== null || this.disposed) return false;
+    if (!contextRotationDue(this.contextKey) || this.turnStartedAt !== null || this.disposed || this.retiring) return false;
     const refreshed = await refreshCompactForRotation({
       key: this.logKey, cli: this.cli, chatId: this.chatId, events: this.eventLog,
-      isBusy: () => this.turnStartedAt !== null || this.disposed,
+      isBusy: () => this.turnStartedAt !== null || this.disposed || this.retiring,
       emit: (ev) => this.emit(ev as SessionEvent), rotate: () => false,
     });
-    if (!refreshed || this.turnStartedAt !== null || this.disposed) return true;
+    if (!refreshed || this.turnStartedAt !== null || this.disposed || this.retiring) return true;
     await setSessionId(this.cli, this.cwd, '', this.chatId);
-    if (this.turnStartedAt !== null || this.disposed) {
-      if (!this.disposed) await setSessionId(this.cli, this.cwd, this.agyConversationId ?? '', this.chatId);
+    if (this.turnStartedAt !== null || this.disposed || this.retiring) {
+      if (!this.disposed && !this.retiring) await setSessionId(this.cli, this.cwd, this.agyConversationId ?? '', this.chatId);
       return true;
     }
     bankRotation(this.logKey);
@@ -693,13 +792,14 @@ export class AgySession {
 
   /** Forever-thread compaction check, see compaction.ts. */
   private async maybeCompact(): Promise<void> {
+    if (this.disposed || this.retiring) return;
     try {
       await maybeAutoCompact({
         key: this.logKey,
         cli: this.cli,
         chatId: this.chatId,
         events: this.eventLog,
-        isBusy: () => this.turnStartedAt !== null,
+        isBusy: () => this.turnStartedAt !== null || this.disposed || this.retiring,
         emit: (ev) => this.emit(ev as SessionEvent),
         rotate: () => !this.disposed && this.isAlive(),
       });
@@ -735,8 +835,11 @@ export class AgySession {
     if (this.retiring && this.turnStartedAt !== null) {
       // Stop owns this turn: close it as cancelled, exactly once (the books
       // are still open only when agy's own result never landed during the
-      // grace; finishTurn guards the rest).
-      this.turnFailed = { message: 'This turn was cancelled before it finished.', code: 'aborted' };
+      // grace; finishTurn guards the rest). A message-boundary pause closes
+      // cleanly without marking the turn failed.
+      if (!this.pausedForMessage) {
+        this.turnFailed = { message: 'This turn was cancelled before it finished.', code: 'aborted' };
+      }
       this.finishTurn();
     }
     if (intentional) {
@@ -786,6 +889,50 @@ export class AgySession {
   /** agy runs one turn per input line and never steers mid-turn, so a human
    *  message during a busy turn bounces to a boundary instead (see send). */
   canAcceptNativeHumanSteer(): boolean { return false; }
+  /** Ask the open turn to end once the current tool step has finished (never
+   *  while a tool is mid-flight), so the queued message can start the next turn
+   *  on the same conversation id. Human messages also fire if no tool is
+   *  currently open after a prior tool step completed; peer messages respect
+   *  PEER_BOUNDARY_INTERRUPT_GAP_MS and PEER_AUTOMATION_TURN_GRACE_MS. */
+  requestBoundaryInterrupt(opts: { human?: boolean } = {}): (() => void) | null {
+    const human = opts.human === true;
+    if (this.turnStartedAt === null || !this.isAlive()) return null;
+    this.boundaryInterruptWanted = true;
+    this.boundaryWaiters += 1;
+    if (human) this.boundaryHumanWaiters += 1;
+    // If a human message arrives between tool steps (after at least one tool
+    // step already finished and with no tool currently in flight), run the
+    // settled boundary check immediately instead of waiting for another tool.
+    if (human && !this.hasOpenToolStep() && [...this.stepBuffers.values()].some((b) => b.kind === 'tool' && b.closed)) {
+      this.maybeFireBoundaryInterrupt();
+    }
+    const generation = this.boundaryGeneration;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      if (generation !== this.boundaryGeneration) return;
+      this.boundaryWaiters = Math.max(0, this.boundaryWaiters - 1);
+      if (human) this.boundaryHumanWaiters = Math.max(0, this.boundaryHumanWaiters - 1);
+      if (this.boundaryWaiters === 0) {
+        this.boundaryInterruptWanted = false;
+        if (this.boundarySettleTimer) {
+          clearTimeout(this.boundarySettleTimer);
+          this.boundarySettleTimer = null;
+        }
+      }
+    };
+  }
+  private clearBoundaryRequest(): void {
+    this.boundaryInterruptWanted = false;
+    this.boundaryWaiters = 0;
+    this.boundaryHumanWaiters = 0;
+    this.boundaryGeneration += 1;
+    if (this.boundarySettleTimer) {
+      clearTimeout(this.boundarySettleTimer);
+      this.boundarySettleTimer = null;
+    }
+  }
   sessionId(): string | null { return this.agyConversationId; }
   startedWithResume(): boolean { return this.startedResumeId !== null; }
   hasResumeFailed(): boolean { return this.resumeFailed; }
@@ -843,6 +990,8 @@ export class AgySession {
       this.turnStartedAt = Date.now();
       this.turnSeq++;
       this.automationTurn = automationRequest;
+      this.clearBoundaryRequest();
+      this.pausedForMessage = false;
       this.terminalNoticeEmitted = false;
       this.turnFailed = null;
       this.suppressResultText = false;
@@ -856,10 +1005,12 @@ export class AgySession {
     const abandon = () => {
       if (!startsNewTurn || this.turnStartedAt === null || this.turnSeq !== openedSeq) return;
       this.turnStartedAt = null; this.automationTurn = false;
+      this.clearBoundaryRequest();
       if (!this.disposed) this.emit({ type: 'turnEnd', sessionId: this.agyConversationId ?? undefined });
     };
     const historyThroughSeq = this.latestSeq();
     const wantSeed = this.seedWindowOnNextTurn;
+    let pausedNote = '';
     // One failure path for every fallible step between opening the turn and
     // agy accepting the input line: a rejection anywhere in here (primer
     // read, attachments, vision adaptation, log flush, the durable user
@@ -912,9 +1063,17 @@ export class AgySession {
         ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, logKey: this.logKey, messageText: opts.peerText ?? text })
         : '';
       if (opts.signal?.aborted) { abandon(); return; }
+      const pausedEntry = startsNewTurn && !automationRequest ? pausedForMessageByKey.get(this.key) : undefined;
+      if (pausedEntry && Date.now() - pausedEntry.at <= PAUSED_NOTE_TTL_MS) {
+        pausedNote = pausedEntry.summary
+          ? PAUSED_FOR_MESSAGE_NOTE.replace('</rivendell-steer>', ` ${pausedEntry.summary}</rivendell-steer>`)
+          : PAUSED_FOR_MESSAGE_NOTE;
+      } else if (pausedEntry) {
+        pausedForMessageByKey.delete(this.key);
+      }
       const continuation = isAgentThread(this.chatId)
-        ? ['<rivendell-continuation>', `Warm continuation of the existing conversation. Host time: ${new Date().toString()}.`, 'Do not repeat session-start rituals.', '</rivendell-continuation>', ...(guidance ? ['', guidance] : []), ...(laneContext ? ['', laneContext] : []), ...(recall ? ['', recall] : []), ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []), '', promptText].join('\n')
-        : recall ? `${recall}\n\n${promptText}` : promptText;
+        ? ['<rivendell-continuation>', `Warm continuation of the existing conversation. Host time: ${new Date().toString()}.`, 'Do not repeat session-start rituals.', '</rivendell-continuation>', ...(pausedNote ? ['', pausedNote] : []), ...(guidance ? ['', guidance] : []), ...(laneContext ? ['', laneContext] : []), ...(recall ? ['', recall] : []), ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []), '', promptText].join('\n')
+        : [pausedNote, recall, promptText].filter(Boolean).join('\n\n');
       const humanTurn = !opts.peerFrom && opts.peerFromRole !== 'automation';
       // Full computer rules ride the seed message that starts a fresh agy window;
       // later messages of the same warm process get the brief form.
@@ -943,7 +1102,10 @@ export class AgySession {
       return;
     }
     // The recap reached the model; the next turn recaps only what came after.
-    if (startsNewTurn) this.laneSyncSeq = historyThroughSeq;
+    if (startsNewTurn) {
+      this.laneSyncSeq = historyThroughSeq;
+      if (pausedNote) pausedForMessageByKey.delete(this.key);
+    }
     if (wantSeed) {
       this.seedWindowOnNextTurn = false;
       // The seed was delivered, so the rotation debt that asked for it is paid.
@@ -955,32 +1117,49 @@ export class AgySession {
   /** Stop: agy has no abort input event, so v1 signals the process. Stop
    *  must end every side effect of the turn, not just the turn's books: agy
    *  runs its tools in-process, and a SIGINT the leader catches can leave
-   *  shell children running after the turn itself closes. So the process
-   *  GROUP is terminated on a short grace, unconditionally of whether the
-   *  turn closed in between (a dead group's signal just throws ESRCH), and
-   *  the books close on agy's own result or as cancelled here. The lane
-   *  respawns (resuming its conversation id) on the next send. */
+   *  shell children running after the turn itself closes. So an explicit Stop
+   *  terminates the process GROUP on a short grace. A message-boundary pause,
+   *  by contrast, fires only after the tool step finished and signals ONLY the
+   *  agy leader process so any backgrounded shell/ssh job in the process group
+   *  is never killed. The lane respawns (resuming its conversation id) on the
+   *  next send. */
   async interrupt(reason = 'interrupt'): Promise<boolean> {
+    const boundaryPause = reason === 'message-boundary';
+    if (!boundaryPause) {
+      this.pausedForMessage = false;
+      pausedForMessageByKey.delete(this.key);
+    }
     if (!this.isAlive() || this.turnStartedAt === null) return false;
-    // The process group is being terminated: retire from reuse immediately,
-    // so a terminal result landing during the kill grace (which closes the
-    // turn's books and would make this instance look idle) can never accept a
-    // new send into a process that is about to die. The registry spawns a
+    if (boundaryPause) {
+      this.pausedForMessage = true;
+      pausedForMessageByKey.set(this.key, { at: Date.now(), summary: this.completedToolSummary() });
+    }
+    // The process is being terminated: retire from reuse immediately, so a
+    // terminal result landing during the kill grace (which closes the turn's
+    // books and would make this instance look idle) can never accept a new
+    // send into a process that is about to die. The registry spawns a
     // replacement (resuming the conversation id) on the next send.
     this.retiring = true;
+    this.clearBoundaryRequest();
     this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
     const pid = this.child.pid;
     try { this.child.kill('SIGINT'); } catch { /* gone */ }
-    void reason;
     setTimeout(() => {
       if (!pid || pid <= 1) return;
-      try { process.kill(-pid, 'SIGTERM'); } catch { /* gone */ }
-      setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } }, 3_000).unref();
+      if (boundaryPause) {
+        try { this.child.kill('SIGTERM'); } catch { /* gone */ }
+        setTimeout(() => { try { this.child.kill('SIGKILL'); } catch { /* gone */ } }, 3_000).unref();
+      } else {
+        try { process.kill(-pid, 'SIGTERM'); } catch { /* gone */ }
+        setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } }, 3_000).unref();
+      }
     }, 1_500).unref();
     const turnSeq = this.turnSeq;
     setTimeout(() => {
       if (this.disposed || this.turnStartedAt === null || this.turnSeq !== turnSeq) return;
-      this.turnFailed = { message: 'This turn was cancelled before it finished.', code: 'aborted' };
+      if (!this.pausedForMessage) {
+        this.turnFailed = { message: 'This turn was cancelled before it finished.', code: 'aborted' };
+      }
       this.finishTurn();
     }, 5_000).unref();
     return true;
@@ -996,9 +1175,12 @@ export class AgySession {
     // swallowed. Close it now, while emit still works; turnStartedAt going
     // null makes both later sites skip, so the cancellation lands exactly once.
     if (this.retiring && this.turnStartedAt !== null) {
-      this.turnFailed = { message: 'This turn was cancelled before it finished.', code: 'aborted' };
+      if (!this.pausedForMessage) {
+        this.turnFailed = { message: 'This turn was cancelled before it finished.', code: 'aborted' };
+      }
       this.finishTurn();
     }
+    this.clearBoundaryRequest();
     this.disposed = true;
     if (this.stallTimer) { clearTimeout(this.stallTimer); this.stallTimer = null; }
     console.log(`[chat ${this.cli}/agy] shutdown key=${this.key} reason=${reason}`);
@@ -1006,8 +1188,13 @@ export class AgySession {
     // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
     const pid = this.child.pid;
     if (!pid || pid <= 1) return;
-    try { process.kill(-pid, 'SIGTERM'); } catch { try { this.child.kill('SIGTERM'); } catch { /* gone */ } }
-    setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } }, 3000).unref();
+    if (this.pausedForMessage) {
+      try { this.child.kill('SIGTERM'); } catch { /* gone */ }
+      setTimeout(() => { try { this.child.kill('SIGKILL'); } catch { /* gone */ } }, 3000).unref();
+    } else {
+      try { process.kill(-pid, 'SIGTERM'); } catch { try { this.child.kill('SIGTERM'); } catch { /* gone */ } }
+      setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } }, 3000).unref();
+    }
   }
 
   private emit(msg: SessionEvent): void {
