@@ -142,6 +142,8 @@ export type ChatBlock =
       id: string;
       text: string;
       ts: number;
+      /** Sender name when rendered in a multi-agent channel. */
+      from?: string;
       /** Time unknown (history logged before events were time-stamped). */
       tsApprox?: boolean;
       folio?: string;

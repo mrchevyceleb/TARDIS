@@ -1105,7 +1105,7 @@ function ElrondGroup({
       onClick={mobile ? () => setActed((a) => !a) : undefined}
     >
       <div className="who">
-        <span className="mini">✦</span> {BRAND} {'tsApprox' in first && first.tsApprox ? null : <span className="when">{timeLabel(first.ts)}</span>}
+        <span className="mini">✦</span> {'from' in first && first.from ? <span className="who-from">{first.from}</span> : BRAND} {'tsApprox' in first && first.tsApprox ? null : <span className="when">{timeLabel(first.ts)}</span>}
       </div>
       {visible.map((b) => {
         switch (b.kind) {
@@ -1335,8 +1335,10 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         ? last.blocks.findLast((block) => block.kind === 'text') : undefined;
       const phaseChanged = b.kind === 'text' && priorText?.kind === 'text'
         && b.presentation && priorText.presentation && b.presentation !== priorText.presentation;
+      const fromChanged = ((last?.type === 'elrond' ? (last.blocks[0] as { from?: string }).from : undefined) ?? '')
+        !== ((b as { from?: string }).from ?? '');
       const merge = last?.type === 'elrond' && turnId
-        && (last.blocks[0] as { turnId?: string }).turnId === turnId && !phaseChanged;
+        && (last.blocks[0] as { turnId?: string }).turnId === turnId && !phaseChanged && !fromChanged;
       if (merge) {
         last.blocks.push(b);
         last.day = day;

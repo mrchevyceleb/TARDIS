@@ -19,6 +19,7 @@ import { Composer, type SendImage } from './reimagine/Composer';
 import { apiJson } from '../../data/api';
 import { MESSAGE_PINS_CHANGED, scrollToPinnedMessage } from '../../grok/messagePins';
 import { parsePinLinkTarget } from '../utils/proxyLinks';
+import { useMediaQuery } from '../hooks/useMediaQuery';
 import './channels.css';
 
 type EditMode = 'none' | 'rename' | 'members';
@@ -36,7 +37,7 @@ function pinBaseId(blockId: string): string {
 /** Channel history through the main chat's block model: Matt's posts are
  *  user bubbles (markdown + image attachments served from the same
  *  /api/chat/attachments files the main chat uses), and members' posts
- *  carry the sender's identity like any teammate message. */
+ *  render as assistant bubbles with the sender's name. */
 function messageBlocks(list: ChannelMessage[]): ChatBlock[] {
   return list.map((m) => {
     const parsed = m.createdAt ? Date.parse(m.createdAt) : NaN;
@@ -52,7 +53,15 @@ function messageBlocks(list: ChannelMessage[]): ChatBlock[] {
           : {}),
       };
     }
-    return { kind: 'peer' as const, id: m.id, from: m.from, text: m.text, ts, expanded: true };
+    return {
+      kind: 'text' as const,
+      id: m.id,
+      from: m.from,
+      text: m.text,
+      ts,
+      presentation: 'answer' as const,
+      open: false,
+    };
   });
 }
 
@@ -61,6 +70,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
   agents: Agent[];
   onDeleted: () => void;
 }) {
+  const isMobile = useMediaQuery('(max-width: 760px), (pointer: coarse) and (max-width: 1180px)');
   const channels = useChannels();
   const messages = useChannelMessages(channelId);
   const actions = useChannelActions();
@@ -316,7 +326,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
           <div className="ch-pins" role="dialog" aria-label="Members' pin boards">
             <div className="ch-pins-head">Members’ boards in #{channel?.name ?? 'channel'}</div>
             {!pins.length ? (
-              <div className="ch-pins-empty">Nothing pinned yet. Open a teammate’s message and pin it to their board.</div>
+              <div className="ch-pins-empty">Nothing pinned yet. Hover or tap a teammate’s message and pin it to their board.</div>
             ) : (() => {
               const inChannel = new Set(list.map((m) => m.id));
               const order = [...(channel?.members ?? []).filter((m) => pins.some((p) => p.member === m)),
@@ -426,10 +436,10 @@ export function ChannelView({ channelId, agents, onDeleted }: {
         </div>
       ) : null}
 
-      <div className="ch-body rc rc-desktop">
+      <div className={`ch-body rc ${isMobile ? 'rc-mobile' : 'rc-desktop'}`}>
         <div className="ch-list" ref={listRef}>
           <div className="ch-thread">
-            <ChatThread blocks={blocks} status="idle" suppressTyping pin={pin} />
+            <ChatThread mobile={isMobile} blocks={blocks} status="idle" suppressTyping pin={pin} />
           </div>
           {messages.isError ? <div className="ch-empty">Could not load messages. <button type="button" className="ch-create-x" onClick={() => void messages.refetch()}>Retry</button></div> : null}
           {!list.length && !messages.isError ? <div className="ch-empty">No messages yet. Say hello.</div> : null}
