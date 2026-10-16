@@ -2634,6 +2634,9 @@ class ClaudeSession {
           logKey: this.logKey,
           text: this.compactRerunPrompt!.text,
           images: this.compactRerunPrompt!.images,
+          echoText: this.compactRerunPrompt!.echoText,
+          replyTo: this.compactRerunPrompt!.replyTo,
+          clientMsgId: this.compactRerunPrompt!.clientMsgId,
           retiring: this,
         });
       }
@@ -3401,6 +3404,13 @@ type UsageFallbackJob = {
   logKey: string;
   text: string;
   images?: Array<{ mediaType: string; base64: string }>;
+  /** The raw echo text and reply target of the original send (card-cbb4af,
+   *  review 3 P1 2), so the backup replay's echo matches the first one and
+   *  the client dedupes by clientMsgId instead of adding a quoted
+   *  duplicate bubble. */
+  echoText?: string;
+  replyTo?: { from: string; snippet: string };
+  clientMsgId?: string;
   retiring: ClaudeSession;
 };
 /** One FIFO queue per thread: replays run serially, oldest prompt first, so
@@ -3493,7 +3503,11 @@ async function runUsageFallback(job: UsageFallbackJob): Promise<void> {
     } finally {
       if (startupTimer) clearTimeout(startupTimer);
     }
-    await session.send(job.text, job.images, {});
+    await session.send(job.text, job.images, {
+      ...(job.echoText !== undefined ? { echoText: job.echoText } : {}),
+      ...(job.replyTo ? { replyTo: job.replyTo } : {}),
+      ...(job.clientMsgId ? { clientMsgId: job.clientMsgId } : {}),
+    });
   } catch (err) {
     await postUsageFallbackFailureNotice(job, (err as Error).message);
   }

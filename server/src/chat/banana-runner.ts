@@ -2755,7 +2755,7 @@ export class BananaSession {
     const recoverContextThisTurn = this.recoverContextOnNextTurn;
     const historyThroughSeq = this.latestSeq();
     const fallbackHistory = this.eventLog.slice();
-    const gmailApprovedDraft = opts.hidden ? null : this.approvedGmailDraftForText(text);
+    const gmailApprovedDraft = opts.hidden ? null : this.approvedGmailDraftForText(opts.echoText ?? text);
     // Echo for reconnect replay (banana's events don't re-emit the user prompt).
     // Internal auto-continues are intentionally hidden; they are just TARDIS
     // nudging Banana past an opencode compaction summary.

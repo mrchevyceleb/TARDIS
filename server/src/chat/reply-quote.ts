@@ -19,7 +19,7 @@ export function normalizeReplyTo(raw: unknown): ReplyToRef | null {
   const snippet = (raw as { snippet?: unknown }).snippet;
   if (typeof from !== 'string' || !from.trim()) return null;
   return {
-    from: clipCodePoints(from.trim(), 80),
+    from: clipCodePoints(from.trim().replace(/\s+/g, ' '), 80),
     snippet: typeof snippet === 'string' ? clipSnippet(snippet) : '',
   };
 }

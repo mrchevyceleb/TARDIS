@@ -1620,6 +1620,7 @@ export function useChat(opts: {
             images: imagePreviews(item.images),
             imageCount: item.images?.length,
             clientMsgId: item.clientMsgId,
+            ...(item.replyTo ? { replyTo: item.replyTo } : {}),
             deliveryState: 'queued' as const,
             ts: item.ts,
           })),

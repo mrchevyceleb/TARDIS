@@ -284,8 +284,10 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
   const poster = person ? DESK_OWNER_NAME : from.trim();
   // Reply-to-message (card-cbb4af): bounded, stored on the message record
   // and quoted into every member's delivered bundle. One shared normalizer
-  // (verify P2 12): the stored and delivered shapes can never differ.
-  const replyTo = normalizeReplyTo(req.body?.replyTo) ?? undefined;
+  // (verify P2 12): the stored and delivered shapes can never differ, and
+  // only the person's own posts may carry one (review 3 P2 10: an agent
+  // poster cannot forge a "Replying to Matt" quote in members' messages).
+  const replyTo = person ? normalizeReplyTo(req.body?.replyTo) ?? undefined : undefined;
   const message = await postChannelMessage(channel.id, poster, text, attachmentRefs.length ? attachmentRefs : undefined, replyTo);
   if (person) {
     await markChannelRead(channel.id, message).catch(() => {});

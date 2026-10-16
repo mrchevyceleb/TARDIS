@@ -748,6 +748,12 @@
 .bot-app .rc .m-user:hover .u-acts,
 .bot-app .rc .m-user:focus-within .u-acts,
 .bot-app .rc .m-user:active .u-acts { opacity: 1; pointer-events: auto; }
+/* The hover area is continuous with the bubble (review 3 P1 3): a transparent
+   strip below the overlay bridges the gap so a slow mouse move from the
+   bubble never drops hover before the cursor reaches the button. */
+.bot-app .rc .m-user .u-acts::after {
+  content: ''; position: absolute; top: 100%; left: 0; right: 0; height: 12px;
+}
 .bot-app .rc .m-user .u-acts .act {
   border: none; background: none; cursor: pointer;
   color: var(--r-ink-mute); font-size: 11.5px; padding: 1px 4px;

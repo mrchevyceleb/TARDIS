@@ -6,7 +6,7 @@
 import { JsonStore } from '../lib/jsonStore.ts';
 import { type AgentColor } from './agents.ts';
 import { MAX_TEXT, agentLaneKeys, deliverTeamMessage, dropQueuedChannelDeliveries, liveChannelTurnLanesByName, teamRoster } from './teamBus.ts';
-import { formatReplyQuote } from './reply-quote.ts';
+import { formatReplyQuote, normalizeReplyTo } from './reply-quote.ts';
 import { activeChatSessions, interruptSession } from './runner.ts';
 import { laneChatId } from './threadKey.ts';
 import { chatAttachmentPath } from '../routes/chatAttachments.ts';
@@ -223,7 +223,11 @@ export async function deleteChannelMessages(channelId: string): Promise<void> {
 }
 
 export async function postChannelMessage(channelId: string, from: string, text: string, images?: Array<{ id: string; mediaType: string }>, replyTo?: { from: string; snippet: string }): Promise<ChannelMessage> {
-  return messages.create({ channelId, from, text, ...(images?.length ? { images } : {}), ...(replyTo?.from?.trim() ? { replyTo: { from: replyTo.from.trim(), snippet: (replyTo.snippet ?? '').slice(0, 400) } } : {}) });
+  // Store the caller-normalized target as-is (verify P2 12 / review 3 P2 7):
+  // re-clipping here by UTF-16 units could split a surrogate pair that no
+  // member was sent, so the stored record would differ from every delivery.
+  const normalizedReplyTo = normalizeReplyTo(replyTo);
+  return messages.create({ channelId, from, text, ...(images?.length ? { images } : {}), ...(normalizedReplyTo ? { replyTo: normalizedReplyTo } : {}) });
 }
 
 /** Most recent history, oldest first, capped. */

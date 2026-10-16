@@ -86,7 +86,9 @@ export function useChatShell({ chat, picker }: ShellProps) {
   };
   const steer = (text: string, images?: SendImage[]) => {
     const reply = replyArmed();
-    chat.steer(text, images, reply);
+    // (review 3 P2 12) steer's third parameter is the queue flag on the
+    // merged branch: replyTo rides fourth, never in queue's slot.
+    chat.steer(text, images, undefined, reply);
     clearReply();
     requestAnimationFrame(() => sticky.forcePin());
   };
