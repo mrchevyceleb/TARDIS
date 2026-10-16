@@ -139,6 +139,11 @@ type QueuedTeamDelivery = StoredRecord & {
    *  his channel posts steer members' live turns exactly like a one-on-one
    *  message (card-1327b9). Batch class stays 'channel' — same reply rules. */
   personPosted?: true;
+  /** The person chose to queue this channel post for the member's NEXT turn
+   *  (card-504beb) instead of steering the live one: person class and lane
+   *  preference are kept, but the delivery never interrupts — it waits for
+   *  the current turn to end, exactly like a peer message. */
+  queue?: true;
   /** Explicit person-sourced wake (Matt's Desk answer, voice continuation,
    *  Matt's channel post including unmentioned members, or an overnight Matt
    *  ask nudge): exempt from the 22:00-05:00 ET quiet-hours hold. */
@@ -488,10 +493,10 @@ function sortsAhead(record: { fromRole?: string; priority?: boolean; personPoste
  *  person's own channel posts get the human boundary (steers a live turn
  *  within a step), automation is never interruptible, everything else is
  *  peer class. Exported for tests. */
-export function deliveryInterruptClass(fromRole: string | undefined, personPosted?: boolean): false | 'human' | 'peer' {
+export function deliveryInterruptClass(fromRole: string | undefined, personPosted?: boolean, queue?: boolean): false | 'human' | 'peer' {
   if (fromRole === 'automation') return false;
   if (fromRole === 'desk' || fromRole === 'voice') return 'human';
-  if (fromRole === 'channel' && personPosted === true) return 'human';
+  if (fromRole === 'channel' && personPosted === true) return queue === true ? 'peer' : 'human';
   return 'peer';
 }
 
@@ -837,6 +842,11 @@ type TeamDelivery = {
   mixedSenders?: boolean;
   /** The person authored this channel post: person-class admission. */
   personPosted?: boolean;
+  /** The person chose to queue this post for the member's NEXT turn
+   *  (card-504beb) instead of steering the live one: person class and lane
+   *  preference are kept, but the delivery never interrupts — it waits for
+   *  the current turn to end, exactly like a peer message. */
+  queue?: boolean;
   /** Person-sourced provenance for quiet-hours exemptions and wake tracking. */
   personSourced?: boolean;
   /** Final gate before the prompt is sent: resolves false when the record
@@ -952,7 +962,7 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
       const wantsPersonLane = personClass || deliveryLanePolicy(from.role, delivery.personPosted) === 'person';
       const admission = await getRecipientSessionForDelivery(
         to, deadline, signal, deferIfBusy,
-        deliveryInterruptClass(from.role, personClass),
+        deliveryInterruptClass(from.role, personClass, delivery.queue === true),
         wantsPersonLane ? (liveChannelLanes[0] ?? await personLanePreference(to)) : 'bg',
       );
       session = admission.session;
@@ -1261,6 +1271,7 @@ export function batchJoinable(lead: QueuedTeamDelivery, record: QueuedTeamDelive
     // lead's class would decide for both (review finding 5).
     return lead.fromId === record.fromId
       && (lead.personPosted === true) === (record.personPosted === true)
+      && (lead.queue === true) === (record.queue === true)
       && (lead.personSourced === true) === (record.personSourced === true);
   }
   return true;
@@ -1434,6 +1445,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         waitForReply: false,
         deliveryId: lead.id,
         personPosted: lead.personPosted === true,
+        queue: lead.queue === true,
         personSourced: batchIsPersonSourced,
         mixedSenders: siblings.some((sibling) => sibling.fromId !== lead.fromId),
         stillWanted: async () => {
@@ -1571,6 +1583,11 @@ export async function deliverTeamMessage(input: {
    *  (human interrupt boundary, person lane preference) so his channel
    *  posts steer members' live turns like his one-on-one messages do. */
   personPosted?: boolean;
+  /** True when the person chose to queue this channel post for the
+   *  recipient's NEXT turn instead of steering the live one (card-504beb):
+   *  person class and lane preference stay, but the delivery never
+   *  interrupts — it waits out the current turn like a peer message. */
+  queue?: boolean;
   /** Person-sourced provenance the role cannot carry (an unmentioned member's
    *  human channel post or an overnight Matt ask nudge). Person-sourced
    *  records deliver to non-Max lanes even during quiet hours. */
@@ -1641,6 +1658,7 @@ export async function deliverTeamMessage(input: {
       hop,
       priority: input.priority === true ? true : undefined,
       personPosted: input.source === 'channel' && input.personPosted === true ? true : undefined,
+      queue: input.source === 'channel' && input.queue === true ? true : undefined,
       personSourced: input.personSourced === true ? true : undefined,
       chainId: chain.id,
       chainEdges: chain.edges,
@@ -1732,6 +1750,7 @@ export async function deliverTeamMessage(input: {
     signal: input.signal,
     deliveryId: record.id,
     personPosted: input.source === 'channel' && input.personPosted === true,
+    queue: input.source === 'channel' && input.queue === true,
     personSourced: isPersonSourced,
     deferIfBusy: true,
     stillWanted: async () => queueStoreOperation(async () =>

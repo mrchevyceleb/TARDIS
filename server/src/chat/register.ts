@@ -85,7 +85,7 @@ type ClientWatch = { type: 'watch'; visible?: boolean };
 type ClientSend = { type: 'send'; cli?: CliKind; repo?: string; chatId?: string; sinceSeq?: number; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string; voice?: boolean } & ClientSelection;
 type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string; chatId?: string } & ClientSelection;
 type ClientStop = { type: 'stop'; cli: CliKind; repo: string; chatId?: string };
-type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string; voice?: boolean } & ClientSelection;
+type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string; voice?: boolean; queue?: boolean } & ClientSelection;
 type ClientReact = { type: 'react'; cli?: CliKind; repo?: string; chatId?: string; targetSeq: number; emoji: string; removed?: boolean };
 type ClientMsg = ClientHello | ClientWatch | ClientSend | ClientFresh | ClientStop | ClientSteer | ClientReact;
 type ResumeWatchableSession = AnySession & {
@@ -2036,6 +2036,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
             session
             && !needsAuthoritativeBoundary
             && !hasSteerImages
+            // A queued send (card-504beb) never injects mid-turn: it waits
+            // for the natural turn end and rides the existing next-turn
+            // admission below, so the user can choose next-turn over steer.
+            && msg.queue !== true
             && supportsNativeTurnSteer(steerCli)
             && (session as { canAcceptNativeHumanSteer?: () => boolean })
               .canAcceptNativeHumanSteer?.() === true,
@@ -2045,11 +2049,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
               session,
               steerAborter.signal,
               30 * 60_000,
-              !hasSteerImages && !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli),
+              !hasSteerImages && !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli) && msg.queue !== true,
             );
             if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') { rejectSteer(); releaseSteer(); return; }
             if (boundary === 'steerable') {
-              if (hasSteerImages) continue;
+              if (hasSteerImages || msg.queue === true) continue;
               nativeActiveSteer = true;
               break;
             }

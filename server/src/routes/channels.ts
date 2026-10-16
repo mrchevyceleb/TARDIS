@@ -277,6 +277,9 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
   const wantsPerson = req.body?.person === true;
   const posterIsRoster = (await teamRoster()).some((agent) => agent.name === from.trim());
   const person = wantsPerson && !posterIsRoster;
+  // Queue-next-turn (card-504beb): only the person may choose it, and only
+  // while posting as a person; an agent flag is ignored.
+  const queue = req.body?.queue === true && person;
   const poster = person ? DESK_OWNER_NAME : from.trim();
   const message = await postChannelMessage(channel.id, poster, text, attachmentRefs.length ? attachmentRefs : undefined);
   if (person) {
@@ -290,6 +293,7 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
     receivedHop,
     person,
     attachmentRefs.length ? attachmentRefs : undefined,
+    queue,
   ).catch((error) => {
     console.warn('[channels] fan-out failed:', (error as Error).message);
     return { delivered: [] as string[], skipped: channel.members, hop: 0 };

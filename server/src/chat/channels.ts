@@ -277,6 +277,7 @@ export async function deliverChannelPost(
   receivedHop: number,
   personPoster = false,
   images?: Array<{ id: string; mediaType: string }>,
+  queue = false,
 ): Promise<ChannelFanOut> {
   const roster = await teamRoster();
   const isAgent = roster.some((agent) => agent.name === poster);
@@ -348,6 +349,10 @@ export async function deliverChannelPost(
         // a live turn from this channel is still steered at admission time
         // even without an @, so follow-ups join the same conversation.
         personPosted: personPoster && (mentioned.includes(member) || channel.members.length === 1),
+        // Queued person posts (card-504beb) keep person class and lane
+        // preference but never interrupt: they wait for the member's
+        // current turn to end and run as the next one.
+        queue: queue && personPoster ? true : undefined,
         // Quiet hours (card-6b6916): Matt's own channel post is person-sourced
         // for every member of the room even when unmentioned (where personPosted
         // stays false so the post uses the bg lane instead of interrupting main).
