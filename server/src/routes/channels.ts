@@ -17,6 +17,7 @@ import {
   unknownTeammates,
   updateChannel,
 } from '../chat/channels.ts';
+import { saveChatAttachments } from './chatAttachments.ts';
 
 export const channelsRouter = Router();
 
@@ -158,7 +159,12 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
   // agent-to-agent cap can count hops across the whole fan-out chain.
   const hopInput = req.body?.hop;
   const receivedHop = Number.isFinite(Number(hopInput)) ? Math.max(0, Math.floor(Number(hopInput))) : 0;
-  const message = await postChannelMessage(channel.id, from.trim(), text);
+  // Images ride the same attachment store as the main chat (Matt, Oct 16:
+  // channels work exactly like the main chat): saveChatAttachments applies
+  // the identical caps, whitelist, and magic-byte checks, never throws, and
+  // drops anything invalid one image at a time.
+  const attachmentRefs = await saveChatAttachments(req.body?.images);
+  const message = await postChannelMessage(channel.id, from.trim(), text, attachmentRefs.length ? attachmentRefs : undefined);
   // The post is already durable; a fan-out failure never fails the post.
   const fanOut = await deliverChannelPost(channel, from.trim(), text, receivedHop).catch((error) => {
     console.warn('[channels] fan-out failed:', (error as Error).message);

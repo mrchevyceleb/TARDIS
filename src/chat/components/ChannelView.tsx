@@ -2,14 +2,46 @@
 // channel's management (rename, members, delete) in the header menu.
 // Channel talk lives only here; it never lands in a teammate's one-on-one
 // thread.
+//
+// Channels work exactly like the main chat (Matt, Oct 16): the same Composer
+// (images, attachments, dictation, keys) and the same message rendering
+// through the block renderer — Matt's posts render as user bubbles with
+// image attachments from the shared attachment store, and members' posts
+// render with the sender's identity like any teammate message.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Ellipsis, Hash, Pencil, Trash2, Users, X } from 'lucide-react';
-import { channelError, useChannelActions, useChannelMessages, useChannels } from '../hooks/useChannels';
+import { channelError, useChannelActions, useChannelMessages, useChannels, type ChannelMessage } from '../hooks/useChannels';
 import type { Agent } from '../../grok/agents';
+import type { ChatBlock } from '../data/types';
+import { ChatThread } from './reimagine/blocks';
+import { Composer, type SendImage } from './reimagine/Composer';
 import './channels.css';
 
 type EditMode = 'none' | 'rename' | 'members';
+
+/** Channel history through the main chat's block model: Matt's posts are
+ *  user bubbles (markdown + image attachments served from the same
+ *  /api/chat/attachments files the main chat uses), and members' posts
+ *  carry the sender's identity like any teammate message. */
+function messageBlocks(list: ChannelMessage[]): ChatBlock[] {
+  return list.map((m) => {
+    const parsed = m.createdAt ? Date.parse(m.createdAt) : NaN;
+    const ts = Number.isFinite(parsed) ? parsed : 0;
+    if (m.from === 'Matt') {
+      return {
+        kind: 'user' as const,
+        id: m.id,
+        text: m.text,
+        ts,
+        ...(m.images?.length
+          ? { images: m.images.map((a) => ({ mediaType: a.mediaType, dataUrl: `/api/chat/attachments/${a.id}` })) }
+          : {}),
+      };
+    }
+    return { kind: 'peer' as const, id: m.id, from: m.from, text: m.text, ts };
+  });
+}
 
 export function ChannelView({ channelId, agents, onDeleted }: {
   channelId: string;
@@ -37,6 +69,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
 
   const list = messages.data?.messages ?? [];
   const listKey = list.map((m) => m.id).join(',');
+  const blocks = useMemo(() => messageBlocks(list), [listKey]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const node = listRef.current;
     if (node) node.scrollTop = node.scrollHeight;
@@ -44,10 +77,16 @@ export function ChannelView({ channelId, agents, onDeleted }: {
 
   const closeMenu = () => { setMenuOpen(false); setError(null); };
 
-  const send = async () => {
-    if (!text.trim() || actions.post.isPending) return;
+  const send = async (sendText: string, images?: SendImage[]) => {
+    if ((!sendText.trim() && !images?.length) || actions.post.isPending) return;
     try {
-      await actions.post.mutateAsync({ channelId, from: 'Matt', text });
+      const clean = images?.map(({ mediaType, base64 }) => ({ mediaType, base64 }));
+      await actions.post.mutateAsync({
+        channelId,
+        from: 'Matt',
+        text: sendText,
+        ...(clean?.length ? { images: clean } : {}),
+      });
       setText('');
     } catch (e) {
       setError(channelError(e));
@@ -161,13 +200,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
       ) : null}
 
       <div className="ch-list" ref={listRef}>
-        {list.map((m) => (
-          <div key={m.id} className="ch-msg">
-            <span className="ch-msg-from">{m.from}</span>
-            <span className="ch-msg-text">{m.text}</span>
-            <span className="ch-msg-time">{m.createdAt ? new Date(m.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : ''}</span>
-          </div>
-        ))}
+        <ChatThread blocks={blocks} status="idle" suppressTyping />
         {messages.isError ? <div className="ch-empty">Could not load messages. <button type="button" className="ch-create-x" onClick={() => void messages.refetch()}>Retry</button></div> : null}
         {!list.length && !messages.isError ? <div className="ch-empty">No messages yet. Say hello.</div> : null}
       </div>
@@ -175,17 +208,13 @@ export function ChannelView({ channelId, agents, onDeleted }: {
       {error && !menuOpen ? <div className="ch-error" role="alert">{error}</div> : null}
 
       <div className="ch-composer">
-        <textarea
-          className="ch-input"
-          placeholder={`Message ${channel?.name ?? 'channel'}`}
+        <Composer
           value={text}
-          rows={2}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); }
-          }}
+          onChange={setText}
+          onSend={(sendText, images) => void send(sendText, images)}
+          busy={actions.post.isPending}
+          placeholder={`Message ${channel?.name ?? 'channel'}`}
         />
-        <button type="button" className="ch-send" disabled={!text.trim() || actions.post.isPending} onClick={() => void send()}>Send</button>
       </div>
     </div>
   );

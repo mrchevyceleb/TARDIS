@@ -6,7 +6,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiJson } from '../../data/api';
 
 export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string };
-export type ChannelMessage = { id: string; channelId: string; from: string; text: string; createdAt?: string; updatedAt?: string };
+/** Image attachments land as file refs (the same attachment store as the
+ *  main chat); the client renders them through /api/chat/attachments/<id>. */
+export type ChannelMessage = { id: string; channelId: string; from: string; text: string; createdAt?: string; updatedAt?: string; images?: Array<{ id: string; mediaType: string }> };
 
 async function channelRequest<T>(path: string, method: string, body?: unknown): Promise<T> {
   return apiJson<T>(`/api/channels${path}`, {
@@ -69,8 +71,12 @@ export function useChannelActions() {
     onSuccess: refreshList,
   });
   const post = useMutation({
-    mutationFn: (input: { channelId: string; from: string; text: string }) =>
-      channelRequest<{ message: ChannelMessage }>(`/${encodeURIComponent(input.channelId)}/messages`, 'POST', { from: input.from, text: input.text }),
+    mutationFn: (input: { channelId: string; from: string; text: string; images?: Array<{ mediaType: string; base64: string }> }) =>
+      channelRequest<{ message: ChannelMessage }>(`/${encodeURIComponent(input.channelId)}/messages`, 'POST', {
+        from: input.from,
+        text: input.text,
+        ...(input.images?.length ? { images: input.images } : {}),
+      }),
     onSuccess: () => { refreshList(); refreshMessages(); },
   });
 

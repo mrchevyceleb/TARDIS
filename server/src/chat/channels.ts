@@ -7,7 +7,10 @@ import { JsonStore } from '../lib/jsonStore.ts';
 import { MAX_TEXT, deliverTeamMessage, teamRoster } from './teamBus.ts';
 
 export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string };
-export type ChannelMessage = { id: string; channelId: string; from: string; text: string; createdAt?: string; updatedAt?: string };
+/** Image attachments ride the same file store as the main chat: the post
+ *  body carries base64 images, the route persists them as attachment files
+ *  and only these refs land on the message record. */
+export type ChannelMessage = { id: string; channelId: string; from: string; text: string; createdAt?: string; updatedAt?: string; images?: Array<{ id: string; mediaType: string }> };
 
 /** One channel post is bounded, like every other write surface here. */
 export const CHANNEL_TEXT_LIMIT = 20_000;
@@ -48,8 +51,8 @@ export async function deleteChannelMessages(channelId: string): Promise<void> {
   await messages.modify((items) => items.filter((message) => message.channelId !== channelId));
 }
 
-export async function postChannelMessage(channelId: string, from: string, text: string): Promise<ChannelMessage> {
-  return messages.create({ channelId, from, text });
+export async function postChannelMessage(channelId: string, from: string, text: string, images?: Array<{ id: string; mediaType: string }>): Promise<ChannelMessage> {
+  return messages.create(images?.length ? { channelId, from, text, images } : { channelId, from, text });
 }
 
 /** Most recent history, oldest first, capped. */
