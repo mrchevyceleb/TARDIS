@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 import { agentForChatId, type Agent } from '../chat/agents.ts';
 import { isAgentThread, bareChatId } from '../chat/threadKey.ts';
+import { inQuietHours, isMaxLane, lastQuietEndMs, recordQuietExemptWake } from './quietHours.ts';
 
 const ASK_FILE = join(STATE_DIR, 'matt-asks.json');
 const NUDGE_AFTER_MS = 15 * 60_000;
@@ -116,14 +117,16 @@ export function noteMattAsk(logKey: string, lane: 'home' | 'bg', text: string): 
     closedLanes.delete(`${logKey}|${lane}`);
     const agent = agentForLogKey(logKey);
     if (!agent) return;
+    const now = Date.now();
+    if (inQuietHours(now)) recordQuietExemptWake(agent.id, now);
     const store = readAsks();
     store.asks.push({
-      id: `ask-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      id: `ask-${now.toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
       agentId: agent.id,
       logKey,
       lane,
       text: text.replace(/\s+/g, ' ').trim().slice(0, TEXT_SNIPPET),
-      askedAt: Date.now(),
+      askedAt: now,
     });
     saveAsks(store);
   } catch {
@@ -193,31 +196,46 @@ export function restoreAskMark(askId: string, kind: 'agent' | 'chief'): void {
  *  (at-most-once). Past-due commitment nudges are NOT here — the merged
  *  commitment sweeper (startCommitmentSweeper, #180) already owns them, and
  *  a second sweep over the same store would double-nudge it. */
-export function sweepMattAsks(): Array<{ askId: string; kind: 'agent' | 'chief'; to: string; text: string }> {
-  const due: Array<{ askId: string; kind: 'agent' | 'chief'; to: string; text: string }> = [];
+export function sweepMattAsks(now: number = Date.now()): Array<{ askId: string; kind: 'agent' | 'chief'; to: string; text: string; personSourced?: boolean }> {
+  const due: Array<{ askId: string; kind: 'agent' | 'chief'; to: string; text: string; personSourced?: boolean }> = [];
   try {
-    const now = Date.now();
     const store = readAsks();
     let dirty = false;
     for (const ask of store.asks) {
+      const overnightAsk = inQuietHours(ask.askedAt);
       if (!ask.nudgedAt && now - ask.askedAt >= NUDGE_AFTER_MS) {
+        // An ask Matt sent before 22:00 on a non-Max lane waits until 05:00 ET
+        // to nudge the agent so we neither wake them overnight for a daytime
+        // ask nor stamp nudgedAt with a stale pre-05:00 age. An ask Matt sent
+        // inside quiet hours is an explicit overnight wake: nudge immediately
+        // with personSourced so the 15m nudge and 30m Chief escalation both
+        // work overnight (review 3, P1 #3).
+        if (inQuietHours(now) && !isMaxLane(ask.agentId) && !overnightAsk) continue;
         ask.nudgedAt = now;
         dirty = true;
+        const ageMin = Math.max(15, Math.round((now - ask.askedAt) / 60000));
         due.push({
           askId: ask.id,
           kind: 'agent',
           to: ask.agentId,
-          text: `Matt's message in your lane is 15 minutes old with no reply: "${ask.text}". Answer him in the lane.`,
+          text: `Matt's message in your lane is ${ageMin} minutes old with no reply: "${ask.text}". Answer him in the lane.`,
+          ...(overnightAsk ? { personSourced: true } : {}),
         });
-      } else if (ask.nudgedAt && !ask.escalatedAt && now - ask.nudgedAt >= ESCALATE_AFTER_MS) {
-        ask.escalatedAt = now;
-        dirty = true;
-        due.push({
-          askId: ask.id,
-          kind: 'chief',
-          to: 'chief-of-staff',
-          text: `Matt's ask flag: ${ask.agentId}'s lane has an unanswered Matt message ("${ask.text}") open ${Math.round((now - ask.askedAt) / 60000)} minutes with no reply. It went to them; make sure they act on it.`,
-        });
+      } else if (ask.nudgedAt && !ask.escalatedAt) {
+        const escalateFrom = isMaxLane(ask.agentId) || overnightAsk
+          ? ask.nudgedAt
+          : Math.max(ask.nudgedAt, lastQuietEndMs(now));
+        const holdEscalation = inQuietHours(now) && !isMaxLane(ask.agentId) && !overnightAsk;
+        if (now - escalateFrom >= ESCALATE_AFTER_MS && !holdEscalation) {
+          ask.escalatedAt = now;
+          dirty = true;
+          due.push({
+            askId: ask.id,
+            kind: 'chief',
+            to: 'chief-of-staff',
+            text: `Matt's ask flag: ${ask.agentId}'s lane has an unanswered Matt message ("${ask.text}") open ${Math.round((now - ask.askedAt) / 60000)} minutes with no reply. It went to them; make sure they act on it.`,
+          });
+        }
       }
     }
     // Bounded retention: prune terminally escalated asks past their day.
@@ -253,7 +271,13 @@ export function startMattAsksScheduler(): boolean {
         // A delivery that never settles must not hang the scheduler (the
         // in-flight guard would never clear): every delivery is bounded.
         const sent = await Promise.race([
-          deliverTeamMessage({ from: 'Desk', to: nudge.to, text: nudge.text, wait: false }),
+          deliverTeamMessage({
+            from: 'Desk',
+            to: nudge.to,
+            text: nudge.text,
+            wait: false,
+            ...(nudge.personSourced ? { personSourced: true } : {}),
+          }),
           new Promise<{ delivered: false; reason: 'delivery timed out' }>((resolve) => {
             setTimeout(() => resolve({ delivered: false, reason: 'delivery timed out' }), DELIVERY_TIMEOUT_MS).unref();
           }),

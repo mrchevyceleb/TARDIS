@@ -24,6 +24,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 import { JsonStore } from '../lib/jsonStore.ts';
+import { inQuietHours, isMaxLane, isQuietExemptWork } from '../lib/quietHours.ts';
 import { listAgents } from './agents.ts';
 import { canLaunchInScope, pidMatches, pidStart, visibleWakeText } from './jobWatches.ts';
 import { sendToAgentHome } from './teamBus.ts';
@@ -106,22 +107,17 @@ const BOOT_ID = (() => {
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const retryUntil = new Map<string, number>();
 
-const etHourFmt = new Intl.DateTimeFormat('en-US', {
-  timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23',
-});
-function etHour(ms: number): number {
-  return Number(etHourFmt.format(new Date(ms)));
-}
-
-/** Quiet hours hold (Matt, Oct 8 2026): an owed wake for a job STARTED
- *  outside 22:00-05:00 ET holds through the window and resumes after 05:00.
- *  A job started inside the window was started on purpose (overnight
- *  emergency work) and delivers normally. */
+/** Quiet hours hold (Matt, Oct 8 2026; widened Oct 15 2026; tightened Oct 16):
+ *  every owed wake to a non-Max lane holds through 22:00-05:00 ET and resumes
+ *  after 05:00 on the next tick. Max's lanes stay exempt (overnight outage
+ *  duty). A non-Max job only delivers overnight when it started inside the
+ *  CURRENT quiet window after an exempt wake (Matt's message or an explicit
+ *  quietExempt routine), so a turn started before 22:00 ET cannot self-feed
+ *  jobs all night and a job from a previous night's window still holds. */
 function heldForQuietHours(job: Job, now: number): boolean {
-  const h = etHour(now);
-  if (h >= 5 && h < 22) return false;
-  const started = etHour(job.startedAt);
-  return !(started >= 22 || started < 5);
+  if (!inQuietHours(now)) return false;
+  if (isMaxLane(job.agentId)) return false;
+  return !isQuietExemptWork(job.agentId, job.startedAt, now);
 }
 
 const logPath = (id: string) => join(JOBS_DIR, `${id}.log`);
@@ -627,8 +623,11 @@ async function runTick(): Promise<void> {
   // Owed results deliver as ONE bundled wake per agent+lane per tick, oldest
   // first: a busy lane accumulates results all day, and waking it once per
   // result floods it the moment it goes idle (Oct 8: 139 single-result turns
-  // to one lane between 22:03 and 00:31). Jobs started inside quiet hours
-  // deliver normally; results owed from before the window hold until 05:00 ET.
+  // to one lane between 22:03 and 00:31). Results owed to non-Max lanes hold
+  // through the quiet window (22:00-05:00 ET) and the first tick after 05:00
+  // delivers them; Max's lanes deliver immediately (Oct 15, widened Oct 16);
+  // jobs started inside the window keep the Oct 8 carve-out — overnight
+  // emergency work must be able to report back (Opus verify, Oct 16).
   const owed = new Map<string, { agentId: string; lane: string; jobs: Job[] }>();
   for (const job of jobs) {
     if (!job.wakeText || job.state === 'running' || delivering.has(job.id)) continue;
@@ -676,11 +675,18 @@ async function deliverBundle(agentId: string, jobs: Job[]): Promise<void> {
       return;
     }
     const text = jobs.map((job) => job.wakeText!).join('\n\n');
+    const now = Date.now();
     const result = await sendToAgentHome(agent, text, {
       peerFrom: jobs.length === 1 ? `⏱ ${jobs[0].name}` : `⏱ ${jobs.length} finished jobs`,
       peerFromRole: 'automation',
       peerText: visibleWakeText(text),
       lane: jobs[0].lane === 'main' ? 'main' : 'bg',
+      // Quiet hours (Opus review 3, Oct 16): every job in this bundle must
+      // qualify as exempt work in the current quiet window (started after an
+      // exempt wake in this window, or on a Max lane) so a bundle formed at
+      // 21:59:59 that mixes daytime jobs cannot bypass the post-admission
+      // hold after 22:00 ET.
+      quietExempt: jobs.length > 0 && jobs.every((job) => isQuietExemptWork(job.agentId, job.startedAt, now)),
     });
     if (result.delivered) {
       await clearDelivered(jobs);
