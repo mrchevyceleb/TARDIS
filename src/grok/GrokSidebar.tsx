@@ -915,6 +915,7 @@ export function BotRail(props: BotRailProps) {
             })}
           </div>
         ) : null}
+        {!query.trim() ? <ChannelsRail agents={props.agents} activeChannelId={props.activeChannelId} onOpenChannel={props.onOpenChannel} /> : null}
         {groupsOn && implicitRows.length > 0 ? (
           <div className="bt-loose" role="group" aria-label="Loose companions (no group)">
             {implicitRows.map((r, at) => renderRow(r, { group: OTHER_GROUP_ID, next: implicitRows[at + 1]?.a.id ?? null }))}
@@ -1003,8 +1004,6 @@ export function BotRail(props: BotRailProps) {
         ) : null}
         {props.agents.length && !query.trim() ? <RailNewGroup onCreate={railGroups.create} /> : null}
       </div>
-
-      <ChannelsRail agents={props.agents} activeChannelId={props.activeChannelId} onOpenChannel={props.onOpenChannel} />
 
       <div className="bt-rail-foot" style={{ position: 'relative' }} ref={pluginsRef}>
         {pluginsOpen ? (
