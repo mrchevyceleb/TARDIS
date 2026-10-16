@@ -9,7 +9,11 @@ import { activeChatSessions, interruptSession } from './runner.ts';
 import { laneChatId } from './threadKey.ts';
 import { chatAttachmentPath } from '../routes/chatAttachments.ts';
 
-export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string };
+export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string; color?: string };
+
+/** The fixed channel color palette. Mirrored client-side in
+ *  src/chat/hooks/useChannels.ts — keep the two lists in sync. */
+export const CHANNEL_COLORS = ['#f59e0b', '#ef4444', '#ec4899', '#8b5cf6', '#3b82f6', '#10b981', '#84cc16', '#64748b'] as const;
 /** Image attachments ride the same file store as the main chat: the post
  *  body carries base64 images, the route persists them as attachment files
  *  and only these refs land on the message record. */

@@ -5,6 +5,7 @@
 import { Router } from 'express';
 import { asyncHandler } from './helpers.ts';
 import {
+  CHANNEL_COLORS,
   CHANNEL_TEXT_LIMIT,
   channelHistory,
   channelMemberActivity,
@@ -65,8 +66,8 @@ channelsRouter.patch('/:id', asyncHandler(async (req, res) => {
     res.status(404).json({ error: 'no such channel' });
     return;
   }
-  const { name, addMembers, removeMembers } = req.body ?? {};
-  const patch: { name?: string; members?: string[] } = {};
+  const { name, addMembers, removeMembers, color } = req.body ?? {};
+  const patch: { name?: string; members?: string[]; color?: string } = {};
   if (name !== undefined) {
     if (invalidName(name)) {
       res.status(400).json({ error: 'a channel name is 1-80 characters' });
@@ -100,6 +101,18 @@ channelsRouter.patch('/:id', asyncHandler(async (req, res) => {
     }
     const gone = new Set(removeMembers.map((m) => m.trim()));
     members = members.filter((m) => !gone.has(m));
+  }
+  if (color !== undefined) {
+    // Palette-locked so a channel accent can never carry arbitrary CSS into
+    // clients: null or '' clears the accent back to the default look.
+    if (color === null || color === '') {
+      patch.color = undefined;
+    } else if (typeof color !== 'string' || !(CHANNEL_COLORS as readonly string[]).includes(color)) {
+      res.status(400).json({ error: 'color must be one of the palette values, or null to clear' });
+      return;
+    } else {
+      patch.color = color;
+    }
   }
   patch.members = members;
   const updated = await updateChannel(channel.id, patch);

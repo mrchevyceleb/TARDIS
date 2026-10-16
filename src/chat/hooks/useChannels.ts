@@ -5,7 +5,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiJson } from '../../data/api';
 
-export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string };
+export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string; color?: string };
+/** The fixed channel accent palette. Mirrored server-side in
+ *  server/src/chat/channels.ts (CHANNEL_COLORS) — keep the two in sync. */
+export const CHANNEL_COLORS = ['#f59e0b', '#ef4444', '#ec4899', '#8b5cf6', '#3b82f6', '#10b981', '#84cc16', '#64748b'] as const;
 /** Image attachments land as file refs (the same attachment store as the
  *  main chat); the client renders them through /api/chat/attachments/<id>. */
 export type ChannelMessage = { id: string; channelId: string; from: string; text: string; createdAt?: string; updatedAt?: string; images?: Array<{ id: string; mediaType: string }> };
@@ -73,11 +76,12 @@ export function useChannelActions() {
     onSuccess: refreshList,
   });
   const patch = useMutation({
-    mutationFn: (input: { id: string; name?: string; addMembers?: string[]; removeMembers?: string[] }) =>
+    mutationFn: (input: { id: string; name?: string; addMembers?: string[]; removeMembers?: string[]; color?: string | null }) =>
       channelRequest<{ channel: Channel }>(`/${encodeURIComponent(input.id)}`, 'PATCH', {
         ...(input.name === undefined ? {} : { name: input.name }),
         ...(input.addMembers === undefined ? {} : { addMembers: input.addMembers }),
         ...(input.removeMembers === undefined ? {} : { removeMembers: input.removeMembers }),
+        ...(input.color === undefined ? {} : { color: input.color }),
       }),
     onSuccess: refreshList,
   });

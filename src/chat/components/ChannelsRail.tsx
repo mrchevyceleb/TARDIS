@@ -158,7 +158,11 @@ export function ChannelsRail({ agents, activeChannelId, onOpenChannel }: {
                 onClick={() => onOpenChannel(channel.id)}
                 title={`#${channel.name} · ${memberLabel}`}
               >
-                <span className="bt-disc ch-row-disc" aria-hidden="true">
+                <span
+                  className={`bt-disc ch-row-disc${channel.color ? ' ch-tinted' : ''}`}
+                  aria-hidden="true"
+                  style={channel.color ? ({ '--ch-color': channel.color } as React.CSSProperties) : undefined}
+                >
                   <Hash size={18} />
                 </span>
                 <span className="bt-conv-main">
