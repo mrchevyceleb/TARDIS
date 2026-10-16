@@ -426,24 +426,28 @@ export function ChannelView({ channelId, agents, onDeleted }: {
         </div>
       ) : null}
 
-      <div className="ch-list" ref={listRef}>
-        <div className="rc rc-desktop ch-thread">
-          <ChatThread blocks={blocks} status="idle" suppressTyping pin={pin} />
+      <div className="ch-body rc rc-desktop">
+        <div className="ch-list" ref={listRef}>
+          <div className="rc rc-desktop ch-thread">
+            <ChatThread blocks={blocks} status="idle" suppressTyping pin={pin} />
+          </div>
+          {messages.isError ? <div className="ch-empty">Could not load messages. <button type="button" className="ch-create-x" onClick={() => void messages.refetch()}>Retry</button></div> : null}
+          {!list.length && !messages.isError ? <div className="ch-empty">No messages yet. Say hello.</div> : null}
         </div>
-        {messages.isError ? <div className="ch-empty">Could not load messages. <button type="button" className="ch-create-x" onClick={() => void messages.refetch()}>Retry</button></div> : null}
-        {!list.length && !messages.isError ? <div className="ch-empty">No messages yet. Say hello.</div> : null}
-      </div>
 
-      {error && !menuOpen ? <div className="ch-error" role="alert">{error}</div> : null}
+        {error && !menuOpen ? <div className="ch-error" role="alert">{error}</div> : null}
 
-      <div className="ch-composer">
-        <Composer
-          value={text}
-          onChange={setText}
-          onSend={(sendText, images) => void send(sendText, images)}
-          busy={actions.post.isPending}
-          placeholder={`Message ${channel?.name ?? 'channel'}`}
-        />
+        <div className="bt-dock">
+          <div className="bt-dock-inner">
+            <Composer
+              value={text}
+              onChange={setText}
+              onSend={(sendText, images) => void send(sendText, images)}
+              busy={actions.post.isPending}
+              placeholder={`Message ${channel?.name ?? 'channel'}`}
+            />
+          </div>
+        </div>
       </div>
     </div>
   );
