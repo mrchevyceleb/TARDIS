@@ -179,6 +179,11 @@ const queuedDeliveryStore = new JsonStore<QueuedTeamDelivery>('team-delivery-que
 let queueStoreTail: Promise<void> = Promise.resolve();
 const activeQueuedRecipients = new Set<string>();
 const queuedRetryTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; due: number }>();
+/** A queued lead's admission wait, abortable by a newer non-queued record for
+ *  the same recipient (card-504beb, review 3 P0 2): a queued record never
+ *  holds the recipient's single delivery line for its whole 30-minute wait
+ *  while a person-sourced record waits behind it. */
+const queuedLeadAborters = new Map<string, AbortController>();
 
 function queueStoreOperation<T>(operation: () => Promise<T>): Promise<T> {
   const result = queueStoreTail.then(operation, operation);
@@ -969,12 +974,37 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
       const liveChannelLanes = from.role === 'channel' ? await liveChannelTurnLanesForMember(to, from.id) : [];
       const personClass = delivery.personPosted === true || liveChannelLanes.length > 0;
       const wantsPersonLane = personClass || deliveryLanePolicy(from.role, delivery.personPosted) === 'person';
-      const admission = await getRecipientSessionForDelivery(
-        to, deadline, signal, deferIfBusy,
-        deliveryInterruptClass(from.role, personClass, delivery.queue === true),
-        wantsPersonLane ? (liveChannelLanes[0] ?? await personLanePreference(to)) : 'bg',
-        delivery.queue === true,
-      );
+      // (review 3 P0 2) The queued admission's wait is abortable: a newer
+      // non-queued record for this recipient aborts it so the drain re-runs
+      // with that record leading. The abort covers the wait only - once the
+      // send starts, the original signal governs alone.
+      let admissionSignal = signal;
+      let queuedWaitKey: string | null = null;
+      if (delivery.queue === true) {
+        queuedWaitKey = queueKeyOf({ toId: to.id });
+        const waitAbort = new AbortController();
+        queuedLeadAborters.set(queuedWaitKey, waitAbort);
+        if (signal) {
+          const combined = new AbortController();
+          const forward = () => combined.abort();
+          signal.addEventListener('abort', forward, { once: true });
+          waitAbort.signal.addEventListener('abort', forward, { once: true });
+          admissionSignal = combined.signal;
+        } else {
+          admissionSignal = waitAbort.signal;
+        }
+      }
+      let admission;
+      try {
+        admission = await getRecipientSessionForDelivery(
+          to, deadline, admissionSignal, deferIfBusy,
+          deliveryInterruptClass(from.role, personClass, delivery.queue === true),
+          wantsPersonLane ? (liveChannelLanes[0] ?? await personLanePreference(to)) : 'bg',
+          delivery.queue === true,
+        );
+      } finally {
+        if (queuedWaitKey) queuedLeadAborters.delete(queuedWaitKey);
+      }
       session = admission.session;
       lane = admission.lane;
       nativeSteer = admission.nativeSteer;
@@ -1396,12 +1426,14 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       }
       if (seenRows.length > 0) candidates = candidates.filter((item) => item.acked !== true);
       if (candidates.length === 0) break;
-      // (card-504beb, verify P1 3) A queued record never leads over a
-      // non-queued one in the same tier: it would wait out the live turn for
-      // up to 30 minutes with no interrupt, blocking the recipient's
-      // ordinary person-sourced records behind it. The non-queued record
-      // steers now; the queued one runs as the next turn.
-      const lead = candidates.find((item) => item.queue !== true) ?? candidates[0];
+      // (card-504beb, verify P1 3 + review 3 P1 7) A queued record never
+      // leads over a non-queued one in its OWN tier: it would wait out the
+      // live turn for up to 30 minutes with no interrupt, blocking the
+      // recipient's records behind it. Ordinary teammate chatter never
+      // jumps ahead of the person's queued post either: the pick stays
+      // inside the first record's tier, so person-first delivery holds.
+      const firstTier = sortsAhead(candidates[0]);
+      const lead = candidates.find((item) => item.queue !== true && sortsAhead(item) === firstTier) ?? candidates[0];
       let siblings: QueuedTeamDelivery[];
       if (lead.batchLeadId === lead.id) {
         // Frozen batch from a send attempt that already ran (the lead's
@@ -1414,7 +1446,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       } else {
         siblings = [lead];
         let batchChars = lead.text.length;
-        for (const candidate of candidates.slice(1)) {
+        for (const candidate of candidates.filter((item) => item.id !== lead.id)) {
           if (siblings.length >= MAX_BATCH_DELIVERIES) break;
           // Siblings must share the lead's sortsAhead tier. A priority-flagged
           // teammate lead that joined ordinary chatter would strand a queued
@@ -1497,8 +1529,14 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       // full retry interval after every channel Stop (review 3, P2 7).
       if (!result.delivered && !remains) continue;
       if (!result.delivered || remains) {
-        console.warn(`[team] queued delivery ${lead.fromName} -> ${to.name} will retry: ${result.reason ?? 'durable acknowledgement pending'}`);
-        await retryDelay();
+        // (review 3 P0 2 / P1 7) A queued lead aborted by a newer non-queued
+        // record re-runs immediately: that record must not wait a retry
+        // interval behind the abort that let it lead.
+        const abortedQueuedWait = lead.queue === true && result.reason === 'sender stopped before delivery';
+        if (!abortedQueuedWait) {
+          console.warn(`[team] queued delivery ${lead.fromName} -> ${to.name} will retry: ${result.reason ?? 'durable acknowledgement pending'}`);
+          await retryDelay();
+        }
         continue;
       }
       break;
@@ -1723,6 +1761,11 @@ export async function deliverTeamMessage(input: {
   }
 
   if (!waitForReply) {
+    // (review 3 P0 2) A newer non-queued record that can lead (person-sourced
+    // or priority) never waits behind a queued lead's admission wait: abort
+    // it so the drain re-runs with this record leading; the queued record
+    // stays durable and delivers after it.
+    if (record.queue !== true && sortsAhead(record)) queuedLeadAborters.get(queueKeyOf(record))?.abort();
     scheduleQueuedRecipient(queueKeyOf(record));
     return {
       delivered: true,
@@ -1744,6 +1787,7 @@ export async function deliverTeamMessage(input: {
   }
 
   if (queuedBehindAnotherTurn) {
+    if (record.queue !== true && sortsAhead(record)) queuedLeadAborters.get(queueKeyOf(record))?.abort();
     scheduleQueuedRecipient(queueKeyOf(record));
     return {
       delivered: true,

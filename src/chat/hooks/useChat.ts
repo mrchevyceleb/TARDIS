@@ -1407,6 +1407,10 @@ export function useChat(opts: {
     // a handshake rejection or disconnect safely retryable.
     sentOutboundRef.current = { key, clientMsgId: item.clientMsgId };
     try {
+      // (review 3 P0 3) The server owns a queued item the moment it flushes,
+      // not before: the turnEnd guard and reconnect reconcile treat
+      // queuedSteerRef as "the server holds this".
+      if (item.queue) queuedSteerRef.current.add(item.clientMsgId);
       ws.send(JSON.stringify({
         // (card-504beb, verify P1 5) A queued outbound item flushes as a
         // steer with queue, never as a plain send: a send on a busy lane
@@ -2234,6 +2238,10 @@ export function useChat(opts: {
             // back restores it as "Queued · will run next" on a busy lane.
             if (repo) forgetPendingSteer(conversationKey(cli, repo.path, chatId), msg.clientMsgId);
             settleOnReadyRef.current.delete(msg.clientMsgId);
+            // (review 3 P1 4) The outbound item is settled too: a rejected
+            // steer left at the head of the queue wedges every later send and
+            // re-sends itself on reconnect.
+            if (repo) acknowledgeOutbound(conversationKey(cli, repo.path, chatId), msg.clientMsgId);
             setBlocks((prev) => prev.map((block) => (
               block.kind === 'user' && block.clientMsgId === msg.clientMsgId
                 ? { ...block, deliveryState: 'failed' as const }
@@ -2792,7 +2800,10 @@ export function useChat(opts: {
             ts: Date.now(),
           },
         ]);
-        queuedSteerRef.current.add(clientMsgId);
+        // (review 3 P0 3) The fallback item lives in the outbound queue ONLY
+        // until the flush actually sends it: queuedSteerRef means "the server
+        // owns this", and marking it before the flush strands the outbound
+        // queue behind the turnEnd guard and false-fails it on reconnect.
         pendingSendRef.current = true;
         rememberPendingSteer(key, { text, images, clientMsgId, ts: Date.now() });
         setError(null);
