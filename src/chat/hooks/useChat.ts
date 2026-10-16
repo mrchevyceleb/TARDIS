@@ -781,7 +781,7 @@ function conversationKey(cli: CompanionId, repoPath: string, chatId = 'main'): s
 /** Outbound turns waiting for a live `ready` socket. Module-level so a click
  *  to another agent (unmount) does not drop a message the user already sent —
  *  coming back to the thread flushes it. */
-type QueuedOutbound = { text: string; images?: ChatSendImage[]; clientMsgId: string };
+type QueuedOutbound = { text: string; images?: ChatSendImage[]; clientMsgId: string; queue?: true };
 const outboundQueue = new Map<string, QueuedOutbound[]>();
 
 function enqueueOutbound(key: string, item: QueuedOutbound): void {
@@ -1408,14 +1408,18 @@ export function useChat(opts: {
     sentOutboundRef.current = { key, clientMsgId: item.clientMsgId };
     try {
       ws.send(JSON.stringify({
-        type: 'send',
+        // (card-504beb, verify P1 5) A queued outbound item flushes as a
+        // steer with queue, never as a plain send: a send on a busy lane
+        // would steer the live turn the user chose to wait out.
+        type: item.queue ? 'steer' : 'send',
         cli,
         repo: repo.path,
         chatId,
-        sinceSeq: lastSeqRef.current,
+        ...(item.queue ? {} : { sinceSeq: lastSeqRef.current }),
         text: item.text,
         images: payloadImages(item.images),
         clientMsgId: item.clientMsgId,
+        ...(item.queue ? { queue: true } : {}),
         model: modelRef.current,
         effort: effortRef.current,
         ...selectionIntent(),
@@ -2768,6 +2772,34 @@ export function useChat(opts: {
       // guidance the server would have to run as a fresh turn anyway.
       || !busyConfirmedRef.current;
     if (waiting) {
+      if (queue) {
+        // (card-504beb, verify P1 5) A queued message never degrades to a
+        // plain send on the fallback path: a send on a busy lane would steer
+        // the live turn. Hold it as a queued outbound steer; the flush sends
+        // it as a steer with queue once the socket is ready.
+        const clientMsgId = `cm-${Date.now().toString(36)}-${nextId++}`;
+        setBlocks((prev) => [
+          ...prev,
+          {
+            kind: 'user',
+            id: id(),
+            text,
+            images: imagePreviews(images),
+            imageCount: images?.length,
+            clientMsgId,
+            deliveryState: 'queued',
+            queue: true,
+            ts: Date.now(),
+          },
+        ]);
+        queuedSteerRef.current.add(clientMsgId);
+        pendingSendRef.current = true;
+        rememberPendingSteer(key, { text, images, clientMsgId, ts: Date.now() });
+        setError(null);
+        enqueueOutbound(key, { text, images, clientMsgId, queue: true });
+        lastMessageAtRef.current = Date.now();
+        return;
+      }
       // Only the stale-busy case reads as a fresh send: label it Sending so
       // it never shows the mid-step queue wording. Transport waits keep the
       // plain send look, same as before.
@@ -2788,6 +2820,7 @@ export function useChat(opts: {
         imageCount: images?.length,
         clientMsgId,
         deliveryState: 'queued',
+        ...(queue ? { queue: true } : {}),
         ts: Date.now(),
       },
     ]);
@@ -2808,7 +2841,7 @@ export function useChat(opts: {
     const failed = blocks.find((block) => block.kind === 'user' && block.clientMsgId === clientMsgId && block.deliveryState === 'failed');
     if (!failed || failed.kind !== 'user' || failed.noRetry || failed.imageCount || failed.images?.length) return;
     setBlocks((prev) => prev.filter((block) => !(block.kind === 'user' && block.clientMsgId === clientMsgId)));
-    if (pendingSendRef.current || statusRef.current === 'streaming') steer(failed.text);
+    if (pendingSendRef.current || statusRef.current === 'streaming') steer(failed.text, undefined, failed.queue === true);
     else send(failed.text);
   };
 

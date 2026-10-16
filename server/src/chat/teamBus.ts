@@ -1396,7 +1396,12 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       }
       if (seenRows.length > 0) candidates = candidates.filter((item) => item.acked !== true);
       if (candidates.length === 0) break;
-      const lead = candidates[0];
+      // (card-504beb, verify P1 3) A queued record never leads over a
+      // non-queued one in the same tier: it would wait out the live turn for
+      // up to 30 minutes with no interrupt, blocking the recipient's
+      // ordinary person-sourced records behind it. The non-queued record
+      // steers now; the queued one runs as the next turn.
+      const lead = candidates.find((item) => item.queue !== true) ?? candidates[0];
       let siblings: QueuedTeamDelivery[];
       if (lead.batchLeadId === lead.id) {
         // Frozen batch from a send attempt that already ran (the lead's

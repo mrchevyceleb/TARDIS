@@ -797,6 +797,14 @@
   display: flex; align-items: center; justify-content: flex-end; gap: 4px;
   min-width: 0;
 }
+/* Studio surfaces (chat-reimagine) use the same slot without the .bot-app
+ * scope: keep Send pushed right and the slot on the attach row there too
+ * (card-504beb, verify P1 6). */
+.rc .composer .send-slot { margin-left: auto; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.rc .composer.has-attach .send-slot,
+.rc .composer:has(.attach-tray) .send-slot { grid-row: 2; }
+.bot-app .rc .composer.has-attach .send-slot,
+.bot-app .rc .composer:has(.attach-tray) .send-slot { grid-row: 2; }
 .bot-app .rc .queue-chip {
   flex: none;
   color: var(--r-ink-mute); cursor: pointer; font-size: 11px;

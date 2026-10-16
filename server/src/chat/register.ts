@@ -116,6 +116,7 @@ function waitForSteerOrTurnEnd(
   signal: AbortSignal,
   timeoutMs = 30 * 60_000,
   allowNativeSteer = false,
+  requestInterrupt = true,
 ): Promise<SteerBoundary> {
   if (signal.aborted) return Promise.resolve('aborted');
   if (!sessionHasActiveBoundary(session)) return Promise.resolve('turn-complete');
@@ -123,7 +124,11 @@ function waitForSteerOrTurnEnd(
   // The message is waiting on a busy Claude-family session: have its turn end
   // at the next tool boundary so the message starts a real turn (see
   // ClaudeSession.canAcceptNativeHumanSteer). Codex takes turn/steer natively.
-  const releaseBoundary = (session as { requestBoundaryInterrupt?: (opts?: { human?: boolean }) => (() => void) | null }).requestBoundaryInterrupt?.({ human: true }) ?? null;
+  // A queued message (card-504beb, verify P0 1) never requests the interrupt:
+  // it waits for the natural turn end, on every engine.
+  const releaseBoundary = requestInterrupt
+    ? (session as { requestBoundaryInterrupt?: (opts?: { human?: boolean }) => (() => void) | null }).requestBoundaryInterrupt?.({ human: true }) ?? null
+    : null;
   return new Promise((resolve) => {
     let settled = false;
     let unsubscribe: () => void = () => {};
@@ -1950,7 +1955,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
             busy: true,
             activeCli: steerCli,
           });
-          enqueueThreadSteer(steerRepo, chatId, async () => {
+          // (card-504beb, verify P1 4) A queued message never joins the
+          // thread's steer chain: it waits for the natural turn end off the
+          // chain, so later normal steers are never held behind it.
+          const steerRun = async (): Promise<void> => {
           try {
           if (steerAborter.signal.aborted) { rejectSteer(); releaseSteer(); return; }
           let laneGen = peekLaneGen(steerCli, steerRepo, chatId);
@@ -2050,6 +2058,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               steerAborter.signal,
               30 * 60_000,
               !hasSteerImages && !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli) && msg.queue !== true,
+              msg.queue !== true,
             );
             if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') { rejectSteer(); releaseSteer(); return; }
             if (boundary === 'steerable') {
@@ -2281,7 +2290,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
                     session,
                     steerAborter.signal,
                     30 * 60_000,
-                    !hasSteerImages && !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli),
+                    !hasSteerImages && !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli) && msg.queue !== true,
+                    msg.queue !== true,
                   );
                   if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') {
                     rejectSteer();
@@ -2289,6 +2299,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
                     return;
                   }
                   if (boundary === 'steerable') {
+                    // A queued message never turns a steerable boundary into a
+                    // mid-turn injection (verify P0 2): keep waiting for the
+                    // natural turn end instead.
+                    if (msg.queue === true) continue;
                     nativeActiveSteer = true;
                     break;
                   }
@@ -2346,7 +2360,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
             }
             releaseSteer();
           }
-          });
+          };
+          if (msg.queue === true) void steerRun().catch((e) => console.warn('[chat] queued steer run failed:', e));
+          else enqueueThreadSteer(steerRepo, chatId, steerRun);
           return;
         }
 
