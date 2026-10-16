@@ -5,7 +5,6 @@
 import { Router } from 'express';
 import { asyncHandler } from './helpers.ts';
 import {
-  CHANNEL_COLORS,
   CHANNEL_TEXT_LIMIT,
   channelHistory,
   channelMemberActivity,
@@ -21,6 +20,7 @@ import {
   updateChannel,
 } from '../chat/channels.ts';
 import { saveChatAttachments } from './chatAttachments.ts';
+import { isAgentColor, type AgentColor } from '../chat/agents.ts';
 import { teamRoster } from '../chat/teamBus.ts';
 import { DESK_OWNER_NAME } from '../config.ts';
 
@@ -67,7 +67,7 @@ channelsRouter.patch('/:id', asyncHandler(async (req, res) => {
     return;
   }
   const { name, addMembers, removeMembers, color } = req.body ?? {};
-  const patch: { name?: string; members?: string[]; color?: string } = {};
+  const patch: { name?: string; members?: string[]; color?: AgentColor } = {};
   if (name !== undefined) {
     if (invalidName(name)) {
       res.status(400).json({ error: 'a channel name is 1-80 characters' });
@@ -103,18 +103,22 @@ channelsRouter.patch('/:id', asyncHandler(async (req, res) => {
     members = members.filter((m) => !gone.has(m));
   }
   if (color !== undefined) {
-    // Palette-locked so a channel accent can never carry arbitrary CSS into
-    // clients: null or '' clears the accent back to the default look.
+    // Color keys come from the same fixed label set the sidebar already
+    // paints agents with (isAgentColor), so shades stay theme-tuned and a
+    // channel accent can never carry arbitrary CSS. null or '' clears.
     if (color === null || color === '') {
       patch.color = undefined;
-    } else if (typeof color !== 'string' || !(CHANNEL_COLORS as readonly string[]).includes(color)) {
-      res.status(400).json({ error: 'color must be one of the palette values, or null to clear' });
+    } else if (!isAgentColor(color)) {
+      res.status(400).json({ error: 'color must be a known color label, or null to clear' });
       return;
     } else {
       patch.color = color;
     }
   }
-  patch.members = members;
+  // Only carry members when this request actually changes them: writing a
+  // members array read outside the store's queue on every rename or color
+  // tweak can race a concurrent members change and drop it.
+  if (addMembers !== undefined || removeMembers !== undefined) patch.members = members;
   const updated = await updateChannel(channel.id, patch);
   if (!updated) {
     res.status(404).json({ error: 'no such channel' });

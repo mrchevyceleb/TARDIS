@@ -4,11 +4,16 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiJson } from '../../data/api';
+import type { ChatColor } from '../../grok/agents';
+import { CHAT_COLORS } from '../../grok/agents';
 
-export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string; color?: string };
-/** The fixed channel accent palette. Mirrored server-side in
- *  server/src/chat/channels.ts (CHANNEL_COLORS) — keep the two in sync. */
-export const CHANNEL_COLORS = ['#f59e0b', '#ef4444', '#ec4899', '#8b5cf6', '#3b82f6', '#10b981', '#84cc16', '#64748b'] as const;
+export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string; color?: ChatColor };
+
+/** The channel's color when it is a label the client knows how to paint
+ *  (the same set agents use); anything else renders as no color. */
+export function channelColorOf(color: string | undefined): ChatColor | undefined {
+  return CHAT_COLORS.find((c) => c.key === color)?.key;
+}
 /** Image attachments land as file refs (the same attachment store as the
  *  main chat); the client renders them through /api/chat/attachments/<id>. */
 export type ChannelMessage = { id: string; channelId: string; from: string; text: string; createdAt?: string; updatedAt?: string; images?: Array<{ id: string; mediaType: string }> };
@@ -85,6 +90,27 @@ export function useChannelActions() {
       }),
     onSuccess: refreshList,
   });
+  // Color changes get their own mutation so the tint moves optimistically
+  // (one round trip, no list refetch wait) and rolls back on failure.
+  const setColor = useMutation({
+    mutationFn: (input: { id: string; color: string | null }) =>
+      channelRequest<{ channel: Channel }>(`/${encodeURIComponent(input.id)}`, 'PATCH', { color: input.color }),
+    onMutate: async ({ id, color }) => {
+      await queryClient.cancelQueries({ queryKey: ['channels'] });
+      const prev = queryClient.getQueryData<{ channels: Channel[] }>(['channels']);
+      if (prev) {
+        queryClient.setQueryData(['channels'], {
+          ...prev,
+          channels: prev.channels.map((c) => (c.id === id ? { ...c, color: color || undefined } : c)),
+        });
+      }
+      return { prev };
+    },
+    onError: (_error, _input, context) => {
+      if (context?.prev) queryClient.setQueryData(['channels'], context.prev);
+    },
+    onSettled: () => { void queryClient.invalidateQueries({ queryKey: ['channels'] }); },
+  });
   const remove = useMutation({
     mutationFn: (id: string) => channelRequest<{ deleted: boolean }>(`/${encodeURIComponent(id)}`, 'DELETE'),
     onSuccess: refreshList,
@@ -114,5 +140,5 @@ export function useChannelActions() {
     onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['channel-live'] }); },
   });
 
-  return { create, patch, remove, post, stopMember };
+  return { create, patch, setColor, remove, post, stopMember };
 }

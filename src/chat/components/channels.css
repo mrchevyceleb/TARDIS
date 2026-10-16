@@ -13,12 +13,12 @@
   border-color: color-mix(in srgb, var(--r-tardis-lit, #2b6cb0) 35%, var(--r-line-strong));
   color: var(--r-ink);
 }
-/* A color-coded channel tints its disc through the same mix recipe, in the
- * channel's own accent instead of the TARDIS blue. --ch-color is always one
- * of the server-validated palette values. */
-.ch-row-disc.ch-tinted {
-  background: color-mix(in srgb, var(--ch-color, var(--r-tardis-lit, #2b6cb0)) 16%, var(--r-bg-hover));
-  border-color: color-mix(in srgb, var(--ch-color, var(--r-tardis-lit, #2b6cb0)) 50%, var(--r-line-strong));
+/* A color-coded channel rides the same system as agent rows: the label on
+ * the row drives --bt-chat (stripe, tint and selected ring come from
+ * grok.css), and the disc picks up the tuned shade through it. */
+.ch-row[data-chat-color] .ch-row-disc {
+  background: color-mix(in oklch, var(--bt-chat) 22%, var(--r-bg-hover));
+  border-color: color-mix(in oklch, var(--bt-chat) 50%, var(--r-line-strong));
 }
 .ch-row-count { flex: none; }
 
@@ -76,20 +76,20 @@
 }
 .ch-menu-row:hover { background: color-mix(in srgb, currentColor 9%, transparent); }
 .ch-menu-row.danger { color: #e5484d; }
-/* Channel color picker: the fixed palette, plus a slashed swatch for none.
- * The menu stays open while picking so the rail disc and header tint live. */
-.ch-swatches { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 10px; }
-.ch-swatch {
-  width: 20px; height: 20px; border-radius: 50%; cursor: pointer; padding: 0;
-  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+/* Channel color picker: the swatch buttons are the shared bt-swatch set
+ * (theme-tuned shades, check glyph, focus ring, coarse-pointer sizing);
+ * this is only the container, sized so opening Color never widens the
+ * menu, and the error line for failed picks. */
+.ch-swatches {
+  width: 200px;
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 8px 12px 10px;
 }
-.ch-swatch.on { outline: 2px solid color-mix(in srgb, currentColor 55%, transparent); outline-offset: 1px; }
-.ch-swatch-none { position: relative; background: color-mix(in srgb, currentColor 10%, transparent); }
-.ch-swatch-none::after {
-  content: ''; position: absolute; left: 1px; right: 1px; top: 50%;
-  border-top: 1.5px solid color-mix(in srgb, currentColor 55%, transparent);
-  transform: rotate(-45deg);
+.ch-swatch-error {
+  flex-basis: 100%; font-size: 11.5px; color: #e5484d; padding-top: 2px;
 }
+.ch-head-hash { display: inline-flex; }
+.ch-head-hash[data-chat-color] { color: var(--bt-chat); }
 
 /* Pin drawer (card-1327b9): every member's own board, reachable from the
    channel header. Anchored to the sticky header (top: 100% of its box),
