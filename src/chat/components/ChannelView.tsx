@@ -110,8 +110,10 @@ export function ChannelView({ channelId, agents, onDeleted }: {
   const pullSeq = useRef(0);
   useEffect(() => {
     let alive = true;
-    const seq = ++pullSeq.current;
     const pull = async () => {
+      // Fresh sequence per pull: the newest request wins, so an older
+      // interval pull resolving last can never revert a fresh event pull.
+      const seq = ++pullSeq.current;
       const ids = memberAgentKey ? memberAgentKey.split(',') : [];
       const rows = await Promise.all(ids.map(async (agentId) => {
         try {
@@ -119,14 +121,15 @@ export function ChannelView({ channelId, agents, onDeleted }: {
           const member = memberAgents.find((m) => m.id === agentId)?.name ?? agentId;
           return { ok: true as const, pins: (r.pins ?? []).map((p) => ({ ...p, agentId, member })) };
         } catch {
-          return { ok: false as const, pins: [] as ChannelPin[] };
+          return { ok: false as const, agentId, pins: [] as ChannelPin[] };
         }
       }));
       if (!alive || seq !== pullSeq.current) return;
       setPins((prev) => {
         const next = rows.flatMap((r) => r.pins);
-        const failed = new Set(rows.filter((r) => !r.ok).map((r) => r.pins[0]?.agentId).filter(Boolean) as string[]);
-        // Keep the previous rows for agents whose fetch failed.
+        // Keep the previous rows for agents whose fetch failed: a transient
+        // 5xx must never blank a board and turn the next pin click into an unpin.
+        const failed = new Set(rows.filter((r) => !r.ok).map((r) => r.agentId));
         const kept = prev.filter((p) => failed.has(p.agentId));
         return [...kept, ...next];
       });
@@ -308,11 +311,8 @@ export function ChannelView({ channelId, agents, onDeleted }: {
         <button type="button" className="bt-iconbtn" onClick={() => setMenuOpen((o) => !o)} title="Channel menu" aria-label="Channel menu" aria-expanded={menuOpen}>
           <Ellipsis size={15} />
         </button>
-      </header>
 
-      {pinsOpen ? (
-        <>
-          <div className="ch-menu-scrim" onClick={() => setPinsOpen(false)} />
+        {pinsOpen ? (
           <div className="ch-pins" role="dialog" aria-label="Members' pin boards">
             <div className="ch-pins-head">Members’ boards in #{channel?.name ?? 'channel'}</div>
             {!pins.length ? (
@@ -355,19 +355,19 @@ export function ChannelView({ channelId, agents, onDeleted }: {
               ));
             })()}
           </div>
-        </>
-      ) : null}
+        ) : null}
 
-      {menuOpen ? (
-        <>
-          <div className="ch-menu-scrim" onClick={closeMenu} />
+        {menuOpen ? (
           <div className="ch-menu" role="menu">
             <button type="button" className="ch-menu-row" onClick={() => { setEditing('rename'); closeMenu(); }}><Pencil size={13} /> Rename</button>
             <button type="button" className="ch-menu-row" onClick={() => { setEditing('members'); closeMenu(); }}><Users size={13} /> Members</button>
             <button type="button" className="ch-menu-row danger" onClick={() => { void remove(); closeMenu(); }}><Trash2 size={13} /> Delete channel</button>
           </div>
-        </>
-      ) : null}
+        ) : null}
+      </header>
+
+      {pinsOpen ? <div className="ch-menu-scrim" onClick={() => setPinsOpen(false)} /> : null}
+      {menuOpen ? <div className="ch-menu-scrim" onClick={closeMenu} /> : null}
 
       {editing === 'rename' ? (
         <div className="ch-edit-bar">
