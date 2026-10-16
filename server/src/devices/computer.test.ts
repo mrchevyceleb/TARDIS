@@ -1,11 +1,11 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
 import { ComputerController, COMPUTER_GRANT_MINUTES, COMPUTER_GRANT_MS, trustedComputerUrl } from '../../../desktop/native/computer.mjs';
-import { localMcpServers, localMcpBananaServers, localMcpCodexArgs } from '../chat/local-mcp.ts';
+import { localMcpServers, localMcpBananaServers, localMcpCodexArgs, writeClaudeMcpConfigFile } from '../chat/local-mcp.ts';
 import { computerGuidance, computerOwnerKey, noteComputerToolUse, readComputerContext } from './context.ts';
 import { ComputerStepJournal } from './stepJournal.ts';
 import { redactComputerImages } from './transcript.ts';
@@ -135,10 +135,31 @@ test('concurrent and retried targeted keyboard operations execute at most once',
 });
 
 test('all runner configurations include identical reserved device tools; turn identity is signed', () => {
-  const env = localMcpServers('Test')['rivendell-device'].env;
+  const servers = localMcpServers('Test');
+  const env = servers['rivendell-device'].env;
   assert.deepEqual(localMcpBananaServers()['rivendell-device'].environment, env);
   assert.equal(localMcpServers('Test', { owner: 'chat:9' })['rivendell-device'].env.RIVENDELL_COMPUTER_OWNER, 'chat:9');
-  assert.ok(localMcpCodexArgs('Test').some(arg => arg.includes('mcp_servers.rivendell-device.args=')));
+  const codexArgs = localMcpCodexArgs('Test');
+  assert.ok(codexArgs.some(arg => arg.includes('mcp_servers.rivendell-device.args=')));
+  assert.ok(codexArgs.some(arg => arg === 'mcp_servers.rivendell-device.env_vars=["RIVENDELL_COMPUTER_MCP_TOKEN"]'));
+  assert.ok(codexArgs.some(arg => arg === 'mcp_servers.rivendell-headless.env_vars=["RIVENDELL_HEADLESS_TOKEN"]'));
+  assert.ok(codexArgs.some(arg => arg === 'shell_environment_policy.exclude=["RIVENDELL_COMPUTER_MCP_TOKEN","RIVENDELL_HEADLESS_TOKEN"]'));
+  const headlessEnv = servers['rivendell-headless'].env;
+  for (const arg of codexArgs) {
+    assert.ok(!arg.includes(env.RIVENDELL_COMPUTER_MCP_TOKEN), 'Codex CLI args must not expose RIVENDELL_COMPUTER_MCP_TOKEN');
+    assert.ok(!arg.includes(headlessEnv.RIVENDELL_HEADLESS_TOKEN), 'Codex CLI args must not expose RIVENDELL_HEADLESS_TOKEN');
+  }
+  const cfgPath = writeClaudeMcpConfigFile('test-owner', JSON.stringify({ mcpServers: servers }));
+  try {
+    assert.ok(!cfgPath.includes(env.RIVENDELL_COMPUTER_MCP_TOKEN));
+    assert.ok(!cfgPath.includes(headlessEnv.RIVENDELL_HEADLESS_TOKEN));
+    assert.equal(statSync(cfgPath).mode & 0o777, 0o600);
+    const parsed = JSON.parse(readFileSync(cfgPath, 'utf8'));
+    assert.equal(parsed.mcpServers['rivendell-device'].env.RIVENDELL_COMPUTER_MCP_TOKEN, env.RIVENDELL_COMPUTER_MCP_TOKEN);
+    assert.equal(parsed.mcpServers['rivendell-headless'].env.RIVENDELL_HEADLESS_TOKEN, headlessEnv.RIVENDELL_HEADLESS_TOKEN);
+  } finally {
+    rmSync(cfgPath, { force: true });
+  }
   // The guidance block only rides lanes that have used a computer tool
   // recently (card-d7bf78 b): seed this lane as a computer user so the
   // signed-turn assertions below see the full block.

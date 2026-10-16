@@ -1,6 +1,42 @@
-import { DESK_OWNER_NAME, DEVICE_MCP_SCRIPT, HEADLESS_MCP_SCRIPT, PORT, TEAM_MCP_SCRIPT } from '../config.ts';
+import { createHash } from 'node:crypto';
+import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { DESK_OWNER_NAME, DEVICE_MCP_SCRIPT, HEADLESS_MCP_SCRIPT, PORT, stateDir, TEAM_MCP_SCRIPT } from '../config.ts';
 import { COMPUTER_MCP_TOKEN } from '../devices/context.ts';
 import { headlessLaneToken } from '../headless/pool.ts';
+
+export const MCP_SECRET_ENV_KEYS = ['RIVENDELL_COMPUTER_MCP_TOKEN', 'RIVENDELL_HEADLESS_TOKEN'] as const;
+const SECRET_ENV_KEYS = new Set<string>(MCP_SECRET_ENV_KEYS);
+
+/** Runtime MCP tokens passed to Codex's environment for `mcp_servers.<name>.env_vars`
+ *  expansion while excluded from Codex shell subprocesses via
+ *  `shell_environment_policy.exclude`, keeping tokens off process command lines
+ *  (`ps` / `/proc/<pid>/cmdline`) and out of agent shell commands (card-667aa9). */
+export function localMcpSecretEnv(agentName?: string, opts: { unnamedLane?: boolean } = {}): Record<string, string> {
+  if (process.env.RIVENDELL_SIDE_COPY === '1') return {};
+  const headlessAgent = opts.unnamedLane ? undefined : agentName;
+  return {
+    RIVENDELL_COMPUTER_MCP_TOKEN: COMPUTER_MCP_TOKEN,
+    RIVENDELL_HEADLESS_TOKEN: headlessLaneToken(headlessAgent),
+  };
+}
+
+/** Write a mode-0600 MCP config file for Claude `--mcp-config <path>` so runtime
+ *  MCP tokens stay out of both `claude`'s command-line arguments (`argv`) and
+ *  `claude`'s top-level process environment (preventing inheritance by Bash tool
+ *  subprocesses). */
+export function writeClaudeMcpConfigFile(key: string, configJson: string): string {
+  const dir = join(stateDir(), 'mcp-configs');
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  const digest = createHash('sha256').update(key).digest('hex').slice(0, 24);
+  const target = join(dir, `mcp-${digest}.json`);
+  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, configJson, { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, target);
+  return target;
+}
 
 /** Reserved built-ins, independent of global/private MCP configs. Banana uses
  * one server across threads: computer identity comes from signed turn context,
@@ -31,11 +67,21 @@ export function localMcpServers(agentName?: string, opts: { replyNow?: boolean; 
   };
 }
 export function localMcpCodexArgs(agentName?: string, opts: { unnamedLane?: boolean; owner?: string; agentId?: string } = {}): string[] {
-  return Object.entries(localMcpServers(agentName, opts)).flatMap(([name, server]) => [
-    '-c', `mcp_servers.${name}.command=${JSON.stringify(server.command)}`,
-    '-c', `mcp_servers.${name}.args=${JSON.stringify(server.args)}`,
-    ...Object.entries(server.env).flatMap(([key, value]) => ['-c', `mcp_servers.${name}.env.${key}=${JSON.stringify(value)}`]),
-  ]);
+  const serverArgs = Object.entries(localMcpServers(agentName, opts)).flatMap(([name, server]) => {
+    const envEntries = Object.entries(server.env);
+    const publicEnv = envEntries.filter(([key]) => !SECRET_ENV_KEYS.has(key));
+    const secretVars = envEntries.filter(([key]) => SECRET_ENV_KEYS.has(key)).map(([key]) => key);
+    return [
+      '-c', `mcp_servers.${name}.command=${JSON.stringify(server.command)}`,
+      '-c', `mcp_servers.${name}.args=${JSON.stringify(server.args)}`,
+      ...publicEnv.flatMap(([key, value]) => ['-c', `mcp_servers.${name}.env.${key}=${JSON.stringify(value)}`]),
+      ...(secretVars.length ? ['-c', `mcp_servers.${name}.env_vars=${JSON.stringify(secretVars)}`] : []),
+    ];
+  });
+  return [
+    ...serverArgs,
+    '-c', `shell_environment_policy.exclude=${JSON.stringify(MCP_SECRET_ENV_KEYS)}`,
+  ];
 }
 export function localMcpBananaServers() {
   return Object.fromEntries(Object.entries(localMcpServers()).map(([name, server]) => [name, {
