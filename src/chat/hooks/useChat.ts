@@ -375,6 +375,12 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // but DO upgrade it with the server's attachment URLs — those survive
     // storage (the optimistic data: URLs get stripped).
     const cmid = typeof ev.clientMsgId === 'string' && ev.clientMsgId ? ev.clientMsgId : null;
+    // (card-cbb4af, verify P1 7) The echo's replyTo is computed once, before
+    // the match, so the matched optimistic bubble can adopt it when it never
+    // had one (a restored queued bubble gets its chip back on the echo).
+    const echoReplyTo = typeof (ev as { replyTo?: { from?: unknown } }).replyTo?.from === 'string'
+      ? (ev as { replyTo: { from: string; snippet: string } }).replyTo
+      : undefined;
     const match = cmid
       ? blocks.find((b) => b.kind === 'user' && b.clientMsgId === cmid)
       : [...blocks].reverse().find((b) => b.kind === 'user' && b.text === ev.text);
@@ -385,6 +391,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       const nextMatch: Extract<ChatBlock, { kind: 'user' }> = {
         ...match,
         deliveryState: undefined,
+        ...(match.replyTo ? {} : echoReplyTo ? { replyTo: echoReplyTo } : {}),
         ...(echoImages && !match.images?.some((i) => i.dataUrl.startsWith('/')) ? { images: echoImages } : {}),
         ...(imageCountFlag(ev) && Array.isArray(ev.attachments) && ev.attachments.length === 0
           ? { attachmentsLost: true }
@@ -394,6 +401,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         match.deliveryState === undefined
         && nextMatch.images === match.images
         && nextMatch.attachmentsLost === match.attachmentsLost
+        && nextMatch.replyTo === match.replyTo
       ) return blocks;
       return blocks.map((b) => (b.id === match.id ? nextMatch : b));
     }
@@ -402,9 +410,6 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // Feature-present echo with zero kept attachments: every image failed to
     // persist — say "not kept", not "attached".
     const attachmentsLost = Boolean(imageCount && Array.isArray(ev.attachments) && ev.attachments.length === 0) || undefined;
-    const echoReplyTo = typeof (ev as { replyTo?: { from?: unknown } }).replyTo?.from === 'string'
-      ? (ev as { replyTo: { from: string; snippet: string } }).replyTo
-      : undefined;
     return [...blocks, { kind: 'user', id: id(), text: ev.text, imageCount, images: echoImages, clientMsgId: cmid ?? undefined, attachmentsLost, ...(echoReplyTo ? { replyTo: echoReplyTo } : {}), ts }];
   }
 
@@ -1593,11 +1598,12 @@ export function useChat(opts: {
       ? stored.map((block) => {
         if (block.kind !== 'user' || !block.clientMsgId) return block;
         const item = rememberedById.get(block.clientMsgId);
-        if (!item?.images?.length) return block;
+        if (!item) return block;
+        const rememberedImages = item.images?.length ? item.images : null;
         return {
           ...block,
-          images: imagePreviews(item.images) ?? block.images,
-          imageCount: item.images.length,
+          ...(rememberedImages ? { images: imagePreviews(rememberedImages) ?? block.images, imageCount: rememberedImages.length } : {}),
+          ...(item.replyTo && !block.replyTo ? { replyTo: item.replyTo } : {}),
           deliveryState: block.deliveryState ?? 'queued' as const,
         };
       })

@@ -4,6 +4,7 @@
 
 import { Router } from 'express';
 import { asyncHandler } from './helpers.ts';
+import { normalizeReplyTo } from '../chat/reply-quote.ts';
 import {
   CHANNEL_TEXT_LIMIT,
   channelHistory,
@@ -282,10 +283,9 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
   const queue = req.body?.queue === true && person;
   const poster = person ? DESK_OWNER_NAME : from.trim();
   // Reply-to-message (card-cbb4af): bounded, stored on the message record
-  // and quoted into every member's delivered bundle.
-  const replyTo = req.body?.replyTo && typeof req.body.replyTo.from === 'string' && typeof req.body.replyTo.snippet === 'string'
-    ? { from: String(req.body.replyTo.from).slice(0, 80), snippet: String(req.body.replyTo.snippet).slice(0, 400) }
-    : undefined;
+  // and quoted into every member's delivered bundle. One shared normalizer
+  // (verify P2 12): the stored and delivered shapes can never differ.
+  const replyTo = normalizeReplyTo(req.body?.replyTo) ?? undefined;
   const message = await postChannelMessage(channel.id, poster, text, attachmentRefs.length ? attachmentRefs : undefined, replyTo);
   if (person) {
     await markChannelRead(channel.id, message).catch(() => {});

@@ -876,11 +876,6 @@ function UserBubble({ block, agentName, onRetry, onReply }: { block: Extract<Cha
           <span className="reply-text">{block.replyTo.snippet}</span>
         </div>
       ) : null}
-      {onReply && block.text.trim() ? (
-        <div className="u-acts">
-          <button type="button" className="act" title="Reply with this message as context" aria-label="Reply to this message" onClick={() => onReply({ id: block.id, snippet: block.text.slice(0, 400), from: 'Matt' })}>reply</button>
-        </div>
-      ) : null}
       {images.length ? (
         <div className="uimg-row">
           {images.map((img, i) => (
@@ -899,6 +894,11 @@ function UserBubble({ block, agentName, onRetry, onReply }: { block: Extract<Cha
       ) : null}
       {(block.text.trim() || (!images.length && !missing)) ? (
         <div className="bubble"><DeskRefText text={block.text} /></div>
+      ) : null}
+      {onReply && block.text.trim() ? (
+        <div className="u-acts">
+          <button type="button" className="act" title="Reply with this message as context" aria-label="Reply to this message" onClick={() => onReply({ id: block.id, snippet: block.text.slice(0, 400), from: 'Matt' })}>reply</button>
+        </div>
       ) : null}
       {block.deliveryState ? (
         <span className={`delivery-state ${block.deliveryState}`} role={block.deliveryState === 'failed' ? 'alert' : 'status'}>

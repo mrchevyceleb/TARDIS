@@ -12,16 +12,28 @@ export interface ReplyToRef {
   snippet: string;
 }
 
-/** Anything in, a safe target out — or null when it is not one. */
+/** Anything in, a safe target out - or null when it is not one. */
 export function normalizeReplyTo(raw: unknown): ReplyToRef | null {
   if (!raw || typeof raw !== 'object') return null;
   const from = (raw as { from?: unknown }).from;
   const snippet = (raw as { snippet?: unknown }).snippet;
   if (typeof from !== 'string' || !from.trim()) return null;
   return {
-    from: from.trim().slice(0, 80),
-    snippet: typeof snippet === 'string' ? snippet.replace(/\s+/g, ' ').trim().slice(0, 400) : '',
+    from: clipCodePoints(from.trim(), 80),
+    snippet: typeof snippet === 'string' ? clipSnippet(snippet) : '',
   };
+}
+
+/** Slice by code points, never UTF-16 units: a surrogate pair split at the
+ *  boundary leaves a lone high surrogate that Anthropic rejects with a 400 on
+ *  every later turn of the lane (verify P1 9), and a trailing lone surrogate
+ *  is stripped before it can reach any engine. */
+function clipCodePoints(value: string, max: number): string {
+  return Array.from(value).slice(0, max).join('').replace(/[\uD800-\uDBFF]$/, '');
+}
+
+function clipSnippet(snippet: string): string {
+  return clipCodePoints(snippet.replace(/\s+/g, ' ').trim(), 400);
 }
 
 /** The quote block the agent sees. Empty string when there is no target. */

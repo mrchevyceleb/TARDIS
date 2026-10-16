@@ -174,9 +174,12 @@ export function Composer(props: ComposerProps) {
   const phrases = props.placeholders;
   useEffect(() => {
     // Arming a reply moves the conversation: focus the draft so the next
-    // words land where they are going (card-cbb4af, review 1 P2 14).
+    // words land where they are going (card-cbb4af, review 1 P2 14). The deps
+    // are the primitive fields, not the object identity: parents pass a fresh
+    // object each render, and an object dep would steal focus on every
+    // re-render (verify P1 4).
     if (props.replyTo) taRef.current?.focus();
-  }, [props.replyTo]);
+  }, [props.replyTo?.from, props.replyTo?.snippet]);
   useEffect(() => {
     if (!phrases || phrases.length < 2) return;
     const iv = window.setInterval(() => setPhIdx((i) => (i + 1) % phrases.length), 6000);

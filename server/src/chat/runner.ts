@@ -698,7 +698,7 @@ class ClaudeSession {
    *  every turn start and overwritten by the next; a steer never touches it,
    * and a native query adopted without send() leaves it null so that turn
    *  still reports for a human. */
-  private compactRerunPrompt: { text: string; images?: Array<{ mediaType: string; base64: string }>; rerun: boolean } | null = null;
+  private compactRerunPrompt: { text: string; images?: Array<{ mediaType: string; base64: string }>; rerun: boolean; echoText?: string; replyTo?: { from: string; snippet: string }; clientMsgId?: string } | null = null;
   /** Boot/rotation warmup uses Claude's read-only `mcp_status` control request:
    * no model turn, no tool call, and no transcript event. */
   private mcpPrewarmed = false;
@@ -1131,7 +1131,7 @@ class ClaudeSession {
       this.syntheticApiErrorSeen = false;
       this.syntheticApiErrorReason = null;
       this.compactFailure = null;
-      this.compactRerunPrompt = { text, images, rerun: opts.compactRerun === true };
+      this.compactRerunPrompt = { text, images, rerun: opts.compactRerun === true, echoText: opts.echoText, replyTo: opts.replyTo, clientMsgId: opts.clientMsgId };
       this.streamTextBlocks.clear();
       this.preparingTurnAborter = preparationAborter;
       this.turnPromptSubmitted = false;
@@ -2751,6 +2751,9 @@ class ClaudeSession {
             effort: this.spawnEffort,
             text: this.compactRerunPrompt!.text,
             images: this.compactRerunPrompt!.images,
+            echoText: this.compactRerunPrompt!.echoText,
+            replyTo: this.compactRerunPrompt!.replyTo,
+            clientMsgId: this.compactRerunPrompt!.clientMsgId,
             retiring: this,
           });
         }
@@ -3303,6 +3306,12 @@ type CompactRerunJob = {
   effort: string;
   text: string;
   images?: Array<{ mediaType: string; base64: string }>;
+  /** The raw echo text and reply target of the original send (card-cbb4af,
+   *  verify P1 2), so the re-run's echo matches the first one and the client
+   *  dedupes by clientMsgId instead of adding a quoted duplicate bubble. */
+  echoText?: string;
+  replyTo?: { from: string; snippet: string };
+  clientMsgId?: string;
   retiring: ClaudeSession;
 };
 const compactRerunJobs = new Set<CompactRerunJob>();
@@ -3367,7 +3376,12 @@ function scheduleCompactRerun(job: CompactRerunJob): void {
         model: job.model,
         effort: job.effort,
       });
-      await session.send(job.text, job.images, { compactRerun: true });
+      await session.send(job.text, job.images, {
+        compactRerun: true,
+        ...(job.echoText !== undefined ? { echoText: job.echoText } : {}),
+        ...(job.replyTo ? { replyTo: job.replyTo } : {}),
+        ...(job.clientMsgId ? { clientMsgId: job.clientMsgId } : {}),
+      });
     } catch (err) {
       console.warn(`[chat ${job.cli}] automatic re-run after the failed compact did not land:`, (err as Error).message);
       // The re-run is finished and failed, so free the lane's dedupe key now:

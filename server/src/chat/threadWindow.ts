@@ -22,6 +22,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { formatReplyQuote } from './reply-quote.ts';
 import {
   isAutomationPeerEvent,
   isExactNoUpdate,
@@ -200,13 +201,17 @@ function extractLaneTurns(events: Seqish[]): VisibleTurn[] {
     if (t === '_user_echo' && typeof inner.text === 'string') {
       flushAssistant();
       const message = inner.text.trim();
+      // (card-cbb4af, verify P1 8) history rebuilt from the log keeps the
+      // reply context: the quote is re-attached to the recovered turn so a
+      // short reply still points at what it answered.
+      const replyQuote = formatReplyQuote((inner as { replyTo?: unknown }).replyTo);
       const imageCount = typeof inner.imageCount === 'number' && inner.imageCount > 0
         ? Math.floor(inner.imageCount)
         : 0;
       const imageRecoveryNote = imageCount > 0
         ? `[${imageCount} image${imageCount === 1 ? ' was' : 's were'} attached to this message. ${imageCount === 1 ? 'Its' : 'Their'} visual contents are unavailable in recovered text history; do not infer them from earlier conversation.]`
         : '';
-      const text = [message, imageRecoveryNote].filter(Boolean).join('\n\n');
+      const text = [replyQuote ? replyQuote.trimEnd() : '', message, imageRecoveryNote].filter(Boolean).join('\n\n');
       if (!text) continue;
       if (isRoutinePromptText(message)) {
         afterAutomation = true;

@@ -736,18 +736,18 @@
   overflow: hidden;
   overflow-wrap: anywhere;
 }
-/* Reply action on the user bubble (review 1, P1 7): hover-revealed on
-   desktop, always visible on coarse pointers. */
+/* Reply action on the user bubble (review 1 P1 7, verify P1 6): an absolute
+   hover overlay above the message, so it never takes layout space and never
+   detaches the quote chip from its bubble; :active covers touch. */
+.bot-app .rc .m-user { position: relative; }
 .bot-app .rc .m-user .u-acts {
+  position: absolute; top: -22px; right: 0;
   display: flex; justify-content: flex-end; gap: 6px;
-  margin: 0 0 2px auto;
-  opacity: 0; transition: opacity 0.12s ease;
+  opacity: 0; pointer-events: none; transition: opacity 0.12s ease;
 }
 .bot-app .rc .m-user:hover .u-acts,
-.bot-app .rc .m-user:focus-within .u-acts { opacity: 1; }
-@media (pointer: coarse) {
-  .bot-app .rc .m-user .u-acts { opacity: 1; }
-}
+.bot-app .rc .m-user:focus-within .u-acts,
+.bot-app .rc .m-user:active .u-acts { opacity: 1; pointer-events: auto; }
 .bot-app .rc .m-user .u-acts .act {
   border: none; background: none; cursor: pointer;
   color: var(--r-ink-mute); font-size: 11.5px; padding: 1px 4px;
@@ -769,17 +769,7 @@
   row-gap: 6px;
   align-items: end;
 }
-/* Explicit rows when a reply is armed: quote 1, tray 2, controls 3 — with
-   no tray the empty auto row collapses, so reply-alone still reads as two
-   rows (review 1, P1 6). */
-.bot-app .rc .composer:has(.reply-arm) > .reply-arm { grid-row: 1; }
-.bot-app .rc .composer:has(.reply-arm) > .attach-tray { grid-row: 2; }
-.bot-app .rc .composer:has(.reply-arm) > .grok-attach,
-.bot-app .rc .composer:has(.reply-arm) textarea,
-.bot-app .rc .composer:has(.reply-arm) .model-chip,
-.bot-app .rc .composer:has(.reply-arm) .chat-dictation,
-.bot-app .rc .composer:has(.reply-arm) .send,
-.bot-app .rc .composer:has(.reply-arm) .bt-mic { grid-row: 3; }
+/* Explicit rows when a reply is armed live after the has-attach rules below. */
 .bot-app .rc .composer.has-attach > .grok-attach,
 .bot-app .rc .composer.has-attach textarea,
 .bot-app .rc .composer.has-attach .model-chip,
@@ -794,6 +784,25 @@
 .bot-app .rc .composer:has(.attach-tray) .bt-mic {
   grid-row: 2;
 }
+/* Explicit rows when a reply is armed (card-cbb4af, review 1 P1 6 + verify
+   P1 5): quote 1, tray 2, controls 3. These come after and outrank the
+   has-attach row-2 rules above (the double-:has selectors are more
+   specific), so a reply plus attachments never stacks the controls on top
+   of the tray; reply alone is two rows with no empty gap. */
+.bot-app .rc .composer:has(.reply-arm) > .reply-arm { grid-row: 1; }
+.bot-app .rc .composer:has(.reply-arm) > .attach-tray { grid-row: 2; }
+.bot-app .rc .composer:has(.reply-arm):not(:has(.attach-tray)) > .grok-attach,
+.bot-app .rc .composer:has(.reply-arm):not(:has(.attach-tray)) textarea,
+.bot-app .rc .composer:has(.reply-arm):not(:has(.attach-tray)) .model-chip,
+.bot-app .rc .composer:has(.reply-arm):not(:has(.attach-tray)) .chat-dictation,
+.bot-app .rc .composer:has(.reply-arm):not(:has(.attach-tray)) .send,
+.bot-app .rc .composer:has(.reply-arm):not(:has(.attach-tray)) .bt-mic { grid-row: 2; }
+.bot-app .rc .composer:has(.reply-arm):has(.attach-tray) > .grok-attach,
+.bot-app .rc .composer:has(.reply-arm):has(.attach-tray) textarea,
+.bot-app .rc .composer:has(.reply-arm):has(.attach-tray) .model-chip,
+.bot-app .rc .composer:has(.reply-arm):has(.attach-tray) .chat-dictation,
+.bot-app .rc .composer:has(.reply-arm):has(.attach-tray) .send,
+.bot-app .rc .composer:has(.reply-arm):has(.attach-tray) .bt-mic { grid-row: 3; }
 .bot-app .rc .composer textarea {
   grid-column: 2;
   min-width: 0;
