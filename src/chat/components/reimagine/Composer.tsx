@@ -88,8 +88,44 @@ async function fileToImage(f: File): Promise<PendingImage | null> {
   };
 }
 
+type MentionMatch = {
+  at: number;
+  len: number;
+  hits: string[];
+};
+
+function matchMentionToken(value: string, rawCaret: number, members?: string[]): MentionMatch | null {
+  if (!members?.length) return null;
+  const caret = Math.max(0, Math.min(rawCaret, value.length));
+  const before = value.slice(0, caret);
+  const m = /(?<![\p{L}\p{N}_])@([\p{L}\p{N}_'-]*)$/u.exec(before);
+  if (!m) return null;
+  const afterCaret = value.slice(caret);
+  const tail = /^([\p{L}\p{N}_'-]*)/u.exec(afterCaret)?.[1] ?? '';
+  const q = m[1].toLowerCase();
+  const scored: { name: string; rank: number; idx: number }[] = [];
+  members.forEach((rawName, idx) => {
+    const name = rawName.trim();
+    const norm = name.toLowerCase();
+    if (!norm) return;
+    let rank: number | null = null;
+    if (!q || norm === q) rank = 0;
+    else if (norm.startsWith(q)) rank = 1;
+    else if (norm.split(/[\s'-]+/).some((w) => w.startsWith(q))) rank = 2;
+    if (rank !== null) scored.push({ name, rank, idx });
+  });
+  if (!scored.length) return null;
+  scored.sort((a, b) => a.rank - b.rank || a.idx - b.idx);
+  return {
+    at: caret - m[1].length - 1,
+    len: 1 + m[1].length + tail.length,
+    hits: scored.slice(0, 12).map((s) => s.name),
+  };
+}
+
 export function Composer(props: ComposerProps) {
   const { mobile = false, acceptImages = true } = props;
+  const hasMentions = Boolean(props.mentionMembers && props.mentionMembers.length > 0);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const sendRef = useRef<HTMLButtonElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -98,8 +134,8 @@ export function Composer(props: ComposerProps) {
   const cap = mobile ? 128 : 148;
   const [popSel, setPopSel] = useState(0);
   const [popDismissed, setPopDismissed] = useState(false);
-  // Caret of the composer textarea, synced on type, keys and clicks so the
-  // @-mention token can be scoped to where the typing is.
+  // Caret of the composer textarea, tracked only when mentionMembers is set so
+  // one-on-one threads pay zero selection-state overhead.
   const [caret, setCaret] = useState(0);
   const [images, setImages] = useState<PendingImage[]>([]);
   const [uploads, setUploads] = useState<PendingUpload[]>([]);
@@ -109,7 +145,9 @@ export function Composer(props: ComposerProps) {
   const latest=useRef(props);latest.current=props;
   const insertDictation=(text:string)=>{
     const current=taRef.current?.value??latest.current.value;
-    latest.current.onChange(current?`${current.trimEnd()}\n\n${text}`:text);
+    const next=current?`${current.trimEnd()}\n\n${text}`:text;
+    if ( latest.current.mentionMembers?.length ) setCaret(next.length);
+    latest.current.onChange(next);
     taRef.current?.focus();
   };
 
@@ -130,27 +168,19 @@ export function Composer(props: ComposerProps) {
   const slashOpen = matches.length > 0 && !popDismissed;
   // @-tag autocomplete (card-1327b9): a caret-scoped mention token, so the
   // popover opens mid-draft wherever the typing is, not only at the start.
-  // Any name word matches the prefix; picking inserts the full name plus
-  // the trailing space the server's mention matcher needs as its boundary.
-  const mention = useMemo(() => {
-    const members = props.mentionMembers;
-    if (!members?.length) return null;
-    const before = props.value.slice(0, caret);
-    const m = /(?:^|\s)@([A-Za-z0-9_]*)$/.exec(before);
-    if (!m) return null;
-    const q = m[1].toLowerCase();
-    const hits = members
-      .filter((name) => name.trim().toLowerCase().split(/\s+/).some((w) => w.startsWith(q)))
-      .slice(0, 8);
-    if (!hits.length) return null;
-    return { at: caret - m[1].length - 1, len: m[1].length + 1, hits };
-  }, [props.value, caret, props.mentionMembers]);
+  // Exact full-name match ranks first, then full-name prefix, then word prefix;
+  // picking replaces the whole @token (including any tail past the caret) and
+  // adds a separating space unless whitespace already follows.
+  const mention = useMemo(
+    () => (hasMentions ? matchMentionToken(props.value, caret, props.mentionMembers) : null),
+    [hasMentions, props.value, caret, props.mentionMembers],
+  );
   const mentionOpen = !slashOpen && mention !== null && !popDismissed;
   const popOpen = slashOpen || mentionOpen;
 
   useEffect(() => {
     setPopSel(0);
-  }, [props.value, caret]);
+  }, [props.value, hasMentions ? caret : 0]);
 
   // Let the mobile attach menu open the file picker imperatively.
   useEffect(() => {
@@ -213,7 +243,9 @@ export function Composer(props: ComposerProps) {
         // can open the file at that path.
         const line = `${saved.name} (${humanFileSize(saved.bytes)}): ${saved.path}`;
         const cur = taRef.current?.value ?? props.value;
-        props.onChange(cur ? `${cur.trimEnd()}\n${line}` : line);
+        const next = cur ? `${cur.trimEnd()}\n${line}` : line;
+        if (latest.current.mentionMembers?.length) setCaret(next.length);
+        props.onChange(next);
       },
       (error) => {
         uploadAborts.current.delete(id);
@@ -296,14 +328,20 @@ export function Composer(props: ComposerProps) {
   };
 
   const pickMention = (i: number) => {
-    const name = mention?.hits[i];
-    if (!name) return;
-    const before = props.value.slice(0, mention.at);
-    const after = props.value.slice(mention.at + mention.len);
-    const next = `${before}@${name} ${after}`;
-    const pos = (before + `@${name} `).length;
+    const curVal = taRef.current?.value ?? props.value;
+    const curCaret = taRef.current?.selectionStart ?? caret;
+    const live = matchMentionToken(curVal, curCaret, props.mentionMembers) ?? mention;
+    const name = live?.hits[i] ?? mention?.hits[i];
+    if (!live || !name) return;
+    const before = curVal.slice(0, live.at);
+    const after = curVal.slice(live.at + live.len);
+    const hasLeadingSpace = /^\s/.test(after);
+    const sep = hasLeadingSpace ? '' : ' ';
+    const next = `${before}@${name}${sep}${after}`;
+    const pos = (before + `@${name}`).length + 1;
     setCaret(pos);
     props.onChange(next);
+    taRef.current?.focus();
     requestAnimationFrame(() => {
       taRef.current?.focus();
       taRef.current?.setSelectionRange(pos, pos);
@@ -311,21 +349,21 @@ export function Composer(props: ComposerProps) {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (popOpen) {
+    if (popOpen && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) {
       const count = slashOpen ? matches.length : (mention?.hits.length ?? 0);
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
         setPopSel((s) => (s + (e.key === 'ArrowDown' ? 1 : -1) + count) % count);
         return;
       }
-      if (e.key === 'Enter' || e.key === 'Tab') {
-        if (e.nativeEvent.isComposing) return;
+      if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
         e.preventDefault();
         if (slashOpen) pick(Math.min(popSel, matches.length - 1));
         else pickMention(Math.min(popSel, count - 1));
         return;
       }
       if (e.key === 'Escape') {
+        e.preventDefault();
         setPopDismissed(true);
         return;
       }
@@ -417,6 +455,10 @@ export function Composer(props: ComposerProps) {
   const trailingBtn = (extraClass = '') =>
     dictating ? null : !ready && !props.busy && props.idleAction ? props.idleAction : sendBtn(extraClass);
 
+  const popListId = props.chatId ? `composer-pop-${props.chatId}` : 'composer-pop';
+  const popCount = slashOpen ? matches.length : (mention?.hits.length ?? 0);
+  const activeOptIdx = popCount > 0 ? Math.min(popSel, popCount - 1) : 0;
+
   return (
     <>
       {mobile && (props.modelChip || props.busy) ? (
@@ -426,10 +468,20 @@ export function Composer(props: ComposerProps) {
         </div>
       ) : null}
       {slashOpen ? (
-        <div className="pop show" role="listbox">
+        <div id={popListId} className="pop show" role="listbox" aria-label="Console commands">
           <div className="pop-h">Console commands</div>
           {matches.map((c, i) => (
-            <button key={c.name} type="button" className={`cmd${i === popSel ? ' sel' : ''}`} onClick={() => pick(i)}>
+            <button
+              key={c.name}
+              id={`${popListId}-opt-${i}`}
+              type="button"
+              role="option"
+              aria-selected={i === activeOptIdx}
+              className={`cmd${i === activeOptIdx ? ' sel' : ''}`}
+              onMouseDown={(e) => e.preventDefault()}
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={() => pick(i)}
+            >
               <span className="cn">/{c.name}</span>
               <span className="ch">{c.description ?? c.title ?? ''}</span>
             </button>
@@ -437,10 +489,20 @@ export function Composer(props: ComposerProps) {
         </div>
       ) : null}
       {mentionOpen ? (
-        <div className="pop show" role="listbox">
+        <div id={popListId} className="pop show" role="listbox" aria-label="Channel members">
           <div className="pop-h">Members</div>
           {mention?.hits.map((name, i) => (
-            <button key={name} type="button" className={`cmd${i === popSel ? ' sel' : ''}`} onClick={() => pickMention(i)}>
+            <button
+              key={name}
+              id={`${popListId}-opt-${i}`}
+              type="button"
+              role="option"
+              aria-selected={i === activeOptIdx}
+              className={`cmd${i === activeOptIdx ? ' sel' : ''}`}
+              onMouseDown={(e) => e.preventDefault()}
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={() => pickMention(i)}
+            >
               <span className="cn">@{name}</span>
             </button>
           ))}
@@ -482,14 +544,19 @@ export function Composer(props: ComposerProps) {
           value={props.value}
           placeholder={dictating ? 'Listening…' : props.busy ? 'Reply — it will send next…' : props.placeholder ?? phrases?.[phIdx] ?? 'Where to, Doctor?'}
           aria-label="Message"
+          aria-autocomplete={hasMentions || (props.commands?.length ?? 0) > 0 ? 'list' : undefined}
+          aria-expanded={popOpen ? true : undefined}
+          aria-controls={popOpen ? popListId : undefined}
+          aria-activedescendant={popOpen && popCount > 0 ? `${popListId}-opt-${activeOptIdx}` : undefined}
           onChange={(e) => {
             setPopDismissed(false);
-            setCaret(e.target.selectionStart ?? 0);
+            if (hasMentions) setCaret(e.target.selectionStart ?? e.target.value.length);
             props.onChange(e.target.value);
           }}
+          onSelect={(e) => {
+            if (hasMentions) setCaret(e.currentTarget.selectionStart ?? 0);
+          }}
           onKeyDown={onKeyDown}
-          onKeyUp={() => setCaret(taRef.current?.selectionStart ?? 0)}
-          onClick={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
           onPaste={(e) => {
             if (!acceptImages) return;
             const files: File[] = [];

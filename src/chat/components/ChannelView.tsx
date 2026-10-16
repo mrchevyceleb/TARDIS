@@ -445,7 +445,12 @@ export function ChannelView({ channelId, agents, onDeleted }: {
               onSend={(sendText, images) => void send(sendText, images)}
               busy={actions.post.isPending}
               placeholder={`Message ${channel?.name ?? 'channel'}`}
-              mentionMembers={channel?.members}
+              mentionMembers={memberAgents.map((a) => a.name)}
+              hint={
+                <span className="hint">
+                  <b>@</b> mention · <b>shift+enter</b> new line
+                </span>
+              }
             />
           </div>
         </div>
