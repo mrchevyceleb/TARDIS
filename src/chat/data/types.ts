@@ -79,6 +79,9 @@ export type ChatBlock =
       tsApprox?: boolean;
       /** Delivered into the agent's background lane. */
       lane?: 'bg';
+      /** Render the bubble expanded on first paint (channel history: a
+       * member post IS the message, not a collapsed handoff card). */
+      expanded?: boolean;
     }
   | {
       /** Auto-compaction marker — the thread's model context rotated with a

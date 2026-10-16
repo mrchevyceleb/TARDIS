@@ -52,7 +52,7 @@ function messageBlocks(list: ChannelMessage[]): ChatBlock[] {
           : {}),
       };
     }
-    return { kind: 'peer' as const, id: m.id, from: m.from, text: m.text, ts };
+    return { kind: 'peer' as const, id: m.id, from: m.from, text: m.text, ts, expanded: true };
   });
 }
 

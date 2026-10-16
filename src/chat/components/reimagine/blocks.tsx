@@ -570,8 +570,9 @@ function PeerMessageBubble({
   const initial = (block.from || '?').trim().slice(0, 1).toUpperCase();
   const routineResult = block.fromRole === 'automation-result';
   // Quiet routines stay hidden. Deliverable ones (dashboards, briefs) are
-  // something Matt has to read, so they start open in the thread.
-  const [open, setOpen] = useState(routineResult);
+  // something Matt has to read, so they start open in the thread. Channel
+  // history marks member posts expanded: the post is the message.
+  const [open, setOpen] = useState(block.expanded ?? routineResult);
   const text = cleanPeerMessageText(block.text);
   const bodyId = `peer-message-${block.id}`;
   const hasResponse = responseBlocks.length > 0;
