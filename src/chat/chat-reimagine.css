@@ -146,6 +146,9 @@
 /* action pills (copy / pin) */
 .rc .acts { display: flex; gap: 6px; height: 24px; opacity: 0; transition: opacity .18s ease; }
 .rc-desktop .m-elrond:hover .acts, .rc-desktop .m-elrond:focus-within .acts { opacity: 1; }
+/* A teammate message's action row sits inside the open peer body, not an
+   .m-elrond, so the hover-reveal selectors never catch it: always visible. */
+.rc .bt-peer-acts .acts { opacity: 1; }
 .rc .m-elrond:has(.acts.react-open) { overflow: visible; }
 .rc-desktop .msg:hover .when { opacity: 1; }
 .rc-desktop .m-user .when, .rc-desktop .m-elrond .when { opacity: .75; transition: opacity .2s ease; }

@@ -104,20 +104,32 @@ export function ChannelView({ channelId, agents, onDeleted }: {
   // Every member's board in one list, refreshed on the same events the
   // one-on-one pane uses (agents pin server-side, which raises no browser
   // event — hence the poll) so the drawer and the message rows stay true.
+  // Per-agent failures keep that member's previous rows (a transient 5xx
+  // must never blank a board and turn the next pin click into an unpin),
+  // and a request sequence drops out-of-order responses.
+  const pullSeq = useRef(0);
   useEffect(() => {
     let alive = true;
+    const seq = ++pullSeq.current;
     const pull = async () => {
       const ids = memberAgentKey ? memberAgentKey.split(',') : [];
       const rows = await Promise.all(ids.map(async (agentId) => {
         try {
           const r = await apiJson<{ pins: Array<{ id: string; blockId: string; text: string; ts: number }> }>(`/api/message-pins?agentId=${encodeURIComponent(agentId)}`);
           const member = memberAgents.find((m) => m.id === agentId)?.name ?? agentId;
-          return (r.pins ?? []).map((p) => ({ ...p, agentId, member }));
+          return { ok: true as const, pins: (r.pins ?? []).map((p) => ({ ...p, agentId, member })) };
         } catch {
-          return [] as ChannelPin[];
+          return { ok: false as const, pins: [] as ChannelPin[] };
         }
       }));
-      if (alive) setPins(rows.flat());
+      if (!alive || seq !== pullSeq.current) return;
+      setPins((prev) => {
+        const next = rows.flatMap((r) => r.pins);
+        const failed = new Set(rows.filter((r) => !r.ok).map((r) => r.pins[0]?.agentId).filter(Boolean) as string[]);
+        // Keep the previous rows for agents whose fetch failed.
+        const kept = prev.filter((p) => failed.has(p.agentId));
+        return [...kept, ...next];
+      });
     };
     void pull();
     const onChange = () => { void pull(); };
@@ -157,12 +169,16 @@ export function ChannelView({ channelId, agents, onDeleted }: {
 
   // Pin a channel message to the sender's own board (card-1327b9: each
   // member's pin board works in the channel too). The POST is a toggle
-  // server-side, exactly like the one-on-one pane.
+  // server-side, exactly like the one-on-one pane, and the change event
+  // refreshes this view immediately — a stale list would turn the next
+  // click into an accidental unpin.
   const togglePin = async (target: { blockId: string; text: string; ts: number }): Promise<boolean | 'error'> => {
     const sender = list.find((m) => m.id === pinBaseId(target.blockId))?.from ?? '';
     const agentId = memberAgents.find((m) => m.name === sender)?.id;
     if (!agentId) {
-      setError('Pin a teammate\u2019s message — it lands on that teammate\u2019s board.');
+      setStoppedNote(`${sender || 'That sender'} has no board here.`);
+      if (noteTimer.current) window.clearTimeout(noteTimer.current);
+      noteTimer.current = window.setTimeout(() => setStoppedNote(null), 4000);
       return 'error';
     }
     try {
@@ -173,6 +189,8 @@ export function ChannelView({ channelId, agents, onDeleted }: {
       return Boolean(r.pinned);
     } catch {
       return 'error';
+    } finally {
+      window.dispatchEvent(new Event(MESSAGE_PINS_CHANGED));
     }
   };
 
@@ -295,11 +313,12 @@ export function ChannelView({ channelId, agents, onDeleted }: {
       {pinsOpen ? (
         <>
           <div className="ch-menu-scrim" onClick={() => setPinsOpen(false)} />
-          <div className="ch-pins" role="dialog" aria-label="Pinned from members">
-            <div className="ch-pins-head">Pinned in #{channel?.name ?? 'channel'}</div>
+          <div className="ch-pins" role="dialog" aria-label="Members' pin boards">
+            <div className="ch-pins-head">Members’ boards in #{channel?.name ?? 'channel'}</div>
             {!pins.length ? (
               <div className="ch-pins-empty">Nothing pinned yet. Open a teammate’s message and pin it to their board.</div>
             ) : (() => {
+              const inChannel = new Set(list.map((m) => m.id));
               const order = [...(channel?.members ?? []).filter((m) => pins.some((p) => p.member === m)),
                 ...[...new Set(pins.map((p) => p.member))].filter((m) => !(channel?.members ?? []).includes(m))];
               return order.map((member) => (
@@ -308,6 +327,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
                   {pins.filter((p) => p.member === member).map((p) => {
                     const target = parsePinLinkTarget(p.text);
                     const note = (p.text ?? '').trim() || 'Empty note';
+                    const jumpable = !target && !p.blockId.startsWith('note-') && inChannel.has(pinBaseId(p.blockId));
                     const body = target?.kind === 'web' ? (
                       <button type="button" className="ch-pins-text" title={`Open ${target.url}`}
                         onClick={() => window.open(target.url, '_blank', 'noopener,noreferrer')}>{note} ↗</button>
@@ -315,9 +335,11 @@ export function ChannelView({ channelId, agents, onDeleted }: {
                       <span className="ch-pins-text" title="Workspace link — open it from the one-on-one pane">{note}</span>
                     ) : p.blockId.startsWith('note-') ? (
                       <span className="ch-pins-text" title="Pinned by the agent">{note}</span>
-                    ) : (
+                    ) : jumpable ? (
                       <button type="button" className="ch-pins-text" title="Jump to this message"
-                        onClick={() => scrollToPinnedMessage(p.blockId)}>{note}</button>
+                        onClick={() => { setPinsOpen(false); scrollToPinnedMessage(p.blockId); }}>{note}</button>
+                    ) : (
+                      <span className="ch-pins-text" title="Pinned in another conversation">{note}</span>
                     );
                     return (
                       <div key={p.id} className="ch-pins-row">
@@ -405,7 +427,9 @@ export function ChannelView({ channelId, agents, onDeleted }: {
       ) : null}
 
       <div className="ch-list" ref={listRef}>
-        <ChatThread blocks={blocks} status="idle" suppressTyping pin={pin} />
+        <div className="rc rc-desktop ch-thread">
+          <ChatThread blocks={blocks} status="idle" suppressTyping pin={pin} />
+        </div>
         {messages.isError ? <div className="ch-empty">Could not load messages. <button type="button" className="ch-create-x" onClick={() => void messages.refetch()}>Retry</button></div> : null}
         {!list.length && !messages.isError ? <div className="ch-empty">No messages yet. Say hello.</div> : null}
       </div>

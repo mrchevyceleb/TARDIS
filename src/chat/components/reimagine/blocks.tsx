@@ -594,7 +594,7 @@ function PeerMessageBubble({
 
   return (
     <>
-    <div className={`bt-peer${routineResult ? ' routine-result' : ''}${open ? ' open' : ''}${peerPinned ? ' pinned' : ''}`} data-pin-block={block.id}>
+    <div className={`bt-peer${routineResult ? ' routine-result' : ''}${open ? ' open' : ''}${peerPinned ? ' pinned' : ''}`} data-pin-block={block.id} id={`msg-pin-${block.id}`}>
       <button
         type="button"
         className="bt-peer-toggle"
@@ -623,7 +623,7 @@ function PeerMessageBubble({
       </button>
       {open ? (
         <div className="bt-peer-body" id={bodyId}>
-          <section className="bt-peer-turn" id={`msg-pin-${block.id}`}>
+          <section className="bt-peer-turn">
             <span className="bt-peer-turn-label">{block.from}</span>
             {routineResult
               ? <div className="bt-peer-turn-text prose"><Markdown>{text}</Markdown></div>

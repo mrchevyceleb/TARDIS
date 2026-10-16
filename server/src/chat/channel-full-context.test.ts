@@ -2,8 +2,11 @@
 // channel post runs in its own lane, and that lane shares the home thread's
 // durable identity — same agent record (persona), same durable log and
 // rolling compact (history + memory), same recall eligibility as a one-on-one
-// teammate handoff. These tests pin the identity chain so a future lane
-// change cannot silently strip an agent's context in channels.
+// teammate handoff. These tests pin the IDENTITY PRIMITIVES of that chain
+// (threadKey, logKeyFor, compact identity, recall eligibility). The lane and
+// role the channel delivery path itself uses are covered by the teamBus
+// channel tests; if those move, these primitives are what keep the strip
+// visible.
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
