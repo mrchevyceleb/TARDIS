@@ -48,6 +48,21 @@ export function useChannelMessages(channelId: string) {
   });
 }
 
+/** Which members have a live busy turn right now, for the channel view's
+ *  working state. react-query's refetchInterval handles the polling; the
+ *  refetchOnWindowFocus default covers the throttled-background-tab case
+ *  the same way useLive's visibility listener does. */
+export type MemberActivity = { member: string; lane: 'main' | 'bg'; lastActivityMs: number; fromChannel: boolean };
+
+export function useChannelLive(channelId: string) {
+  return useQuery({
+    queryKey: ['channel-live', channelId],
+    queryFn: () => channelRequest<{ working: MemberActivity[] }>(`/${encodeURIComponent(channelId)}/live`, 'GET'),
+    staleTime: 2_000,
+    refetchInterval: 4_000,
+  });
+}
+
 export function useChannelActions() {
   const queryClient = useQueryClient();
   const refreshList = () => { void queryClient.invalidateQueries({ queryKey: ['channels'] }); };
@@ -71,14 +86,29 @@ export function useChannelActions() {
     onSuccess: refreshList,
   });
   const post = useMutation({
-    mutationFn: (input: { channelId: string; from: string; text: string; images?: Array<{ mediaType: string; base64: string }> }) =>
+    mutationFn: (input: { channelId: string; from: string; text: string; person?: boolean; images?: Array<{ mediaType: string; base64: string }> }) =>
       channelRequest<{ message: ChannelMessage }>(`/${encodeURIComponent(input.channelId)}/messages`, 'POST', {
         from: input.from,
         text: input.text,
+        person: input.person === true,
         ...(input.images?.length ? { images: input.images } : {}),
       }),
-    onSuccess: () => { refreshList(); refreshMessages(); },
+    onSuccess: () => {
+      refreshList();
+      refreshMessages();
+      // Working chips are polled on a short interval; invalidate so a fresh
+      // post's wake shows immediately instead of up to one poll later.
+      void queryClient.invalidateQueries({ queryKey: ['channel-live'] });
+    },
   });
 
-  return { create, patch, remove, post };
+  const stopMember = useMutation({
+    mutationFn: (input: { channelId: string; member: string }) =>
+      channelRequest<{ stopped: Array<'main' | 'bg'>; dropped: number }>(`/${encodeURIComponent(input.channelId)}/stop`, 'POST', {
+        member: input.member,
+      }),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['channel-live'] }); },
+  });
+
+  return { create, patch, remove, post, stopMember };
 }

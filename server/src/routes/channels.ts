@@ -7,6 +7,7 @@ import { asyncHandler } from './helpers.ts';
 import {
   CHANNEL_TEXT_LIMIT,
   channelHistory,
+  channelMemberActivity,
   createChannel,
   deliverChannelPost,
   deleteChannel,
@@ -14,10 +15,13 @@ import {
   findChannel,
   listChannels,
   postChannelMessage,
+  stopChannelMember,
   unknownTeammates,
   updateChannel,
 } from '../chat/channels.ts';
 import { saveChatAttachments } from './chatAttachments.ts';
+import { teamRoster } from '../chat/teamBus.ts';
+import { DESK_OWNER_NAME } from '../config.ts';
 
 export const channelsRouter = Router();
 
@@ -136,6 +140,51 @@ channelsRouter.get('/:id/messages', asyncHandler(async (req, res) => {
   res.json({ channel: { id: channel.id, name: channel.name }, messages: await channelHistory(channel.id, limit) });
 }));
 
+channelsRouter.get('/:id/live', asyncHandler(async (req, res) => {
+  const channel = await findChannel(String(req.params.id));
+  if (!channel) {
+    res.status(404).json({ error: 'no such channel' });
+    return;
+  }
+  // Working state for the channel view: which members have a live busy
+  // turn right now (either lane) and whether it is this channel's work.
+  // Polled, so no-store keeps it fresh.
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ working: await channelMemberActivity(channel.id, channel.members) });
+}));
+
+channelsRouter.post('/:id/stop', asyncHandler(async (req, res) => {
+  const channel = await findChannel(String(req.params.id));
+  if (!channel) {
+    res.status(404).json({ error: 'no such channel' });
+    return;
+  }
+  const { member } = req.body ?? {};
+  if (typeof member !== 'string' || !member.trim()) {
+    res.status(400).json({ error: 'member is required' });
+    return;
+  }
+  const name = member.trim();
+  if (!channel.members.includes(name)) {
+    res.status(404).json({ error: `${name} is not a member of this channel` });
+    return;
+  }
+  try {
+    const { stopped, dropped } = await stopChannelMember(channel.id, name);
+    res.json({ stopped, dropped });
+  } catch (error) {
+    // A gone member (left the roster but still on the channel) is a miss,
+    // not a server fault; anything else is a real failure and must not hide
+    // behind a 404 (review finding 6).
+    if (/no teammate named/.test((error as Error).message)) {
+      res.status(404).json({ error: (error as Error).message });
+      return;
+    }
+    console.error('[channels] stop failed:', error);
+    res.status(500).json({ error: `could not stop ${name}: ${(error as Error).message}` });
+  }
+}));
+
 channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
   const channel = await findChannel(String(req.params.id));
   if (!channel) {
@@ -164,9 +213,21 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
   // the identical caps, whitelist, and magic-byte checks, never throws, and
   // drops anything invalid one image at a time.
   const attachmentRefs = await saveChatAttachments(req.body?.images);
-  const message = await postChannelMessage(channel.id, from.trim(), text, attachmentRefs.length ? attachmentRefs : undefined);
+  // Person-hood is an explicit flag the owner's UI sends, decided on the
+  // flag alone so a customized owner name cannot silently disable steering
+  // (the client always sends the default display name); when it holds, the
+  // configured owner name is stamped as the poster. A roster name carrying
+  // the flag fails closed to agent treatment, so an agent cannot post
+  // itself into person class. Best-effort within the same tailnet-only
+  // trust model as the rest of /api, not a cryptographic signal (review 3,
+  // P1 5 and P2 8): the agent MCP sends its own name and no flag.
+  const wantsPerson = req.body?.person === true;
+  const posterIsRoster = (await teamRoster()).some((agent) => agent.name === from.trim());
+  const person = wantsPerson && !posterIsRoster;
+  const poster = person ? DESK_OWNER_NAME : from.trim();
+  const message = await postChannelMessage(channel.id, poster, text, attachmentRefs.length ? attachmentRefs : undefined);
   // The post is already durable; a fan-out failure never fails the post.
-  const fanOut = await deliverChannelPost(channel, from.trim(), text, receivedHop).catch((error) => {
+  const fanOut = await deliverChannelPost(channel, poster, text, receivedHop, person).catch((error) => {
     console.warn('[channels] fan-out failed:', (error as Error).message);
     return { delivered: [] as string[], skipped: channel.members, hop: 0 };
   });

@@ -46,6 +46,13 @@ export function backgroundLaneEnabled(): boolean {
   return !['false', '0', 'off', 'no'].includes(raw);
 }
 
+/** chatId with only the account pin removed. The background-lane suffix
+ *  stays, so a main-lane chat id and its background sibling never compare
+ *  equal (unlike bareChatId, which also strips `__bg`). */
+export function laneChatId(chatId: string): string {
+  return (chatId || 'main').replace(ACCOUNT_SUFFIX, '');
+}
+
 /** The account pinned into a chatId, if any. */
 export function accountOfChatId(chatId: string): string | null {
   const m = ACCOUNT_SUFFIX.exec(chatId || '');

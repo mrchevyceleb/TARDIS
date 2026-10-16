@@ -4,7 +4,9 @@
 // fan-out delivery and reply routing layer on top of it later.
 
 import { JsonStore } from '../lib/jsonStore.ts';
-import { MAX_TEXT, deliverTeamMessage, teamRoster } from './teamBus.ts';
+import { MAX_TEXT, agentLaneKeys, deliverTeamMessage, dropQueuedChannelDeliveries, liveChannelTurnLanesByName, teamRoster } from './teamBus.ts';
+import { activeChatSessions, interruptSession } from './runner.ts';
+import { laneChatId } from './threadKey.ts';
 
 export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string };
 /** Image attachments ride the same file store as the main chat: the post
@@ -92,8 +94,17 @@ export type ChannelFanOut = { delivered: string[]; skipped: string[]; hop: numbe
  *  history and the reply rules. The poster's own post (a human posting) wakes
  *  every member; an agent's reply wakes only the members it @mentions, one hop
  *  deeper, and never past the cap. A capped reply still lands in history but
- *  wakes no one. Fan-out failures are collected, never thrown at the caller. */
-export async function deliverChannelPost(channel: Channel, poster: string, text: string, receivedHop: number): Promise<ChannelFanOut> {
+ *  wakes no one. Fan-out failures are collected, never thrown at the caller.
+ *
+ *  personPoster must come from a trusted signal (the route's explicit owner
+ *  check), never inferred from a non-roster name: the agent MCP posts through
+ *  the same route with its own name, and sessions without an agent identity
+ *  send names like "Companion" that are not on the roster (review finding 1).
+ *  Person-class steering (human interrupt, main lane) applies ONLY to the
+ *  members the post actually @mentions, so a room post never cuts every
+ *  member's unrelated work mid-turn; unmentioned members get the ordinary
+ *  peer/background wake (review finding 4). */
+export async function deliverChannelPost(channel: Channel, poster: string, text: string, receivedHop: number, personPoster = false): Promise<ChannelFanOut> {
   const roster = await teamRoster();
   const isAgent = roster.some((agent) => agent.name === poster);
   // Matt's own post is hop 1. An agent reply must carry the hop number from
@@ -148,6 +159,16 @@ export async function deliverChannelPost(channel: Channel, poster: string, text:
         source: 'channel',
         channel: { id: channel.id, name: `#${channel.name}` },
         hop,
+        // Person-class goes to the members the post actually addresses: an
+        // @mention, or every member when the channel has just one (nothing
+        // Matt says there should need an @). Other members get the ordinary
+        // peer/background wake, so a room post never takes over their main
+        // lane or interrupts unrelated work (review 3, P1 3). A member with
+        // a live turn from this channel is still steered at admission time
+        // even without an @, so follow-ups join the same conversation.
+        personPosted: personPoster && (mentioned.includes(member) || channel.members.length === 1),
+        // Ordering only: person posts already sort ahead via personPosted;
+        // the flag is kept so the mention tier stays explicit (review 3, P2 10).
         priority: !isAgent && mentioned.includes(member) ? true : undefined,
         wait: false,
       });
@@ -158,4 +179,66 @@ export async function deliverChannelPost(channel: Channel, poster: string, text:
     }
   }
   return { delivered, skipped, hop, ...(isAgent && hop > CHANNEL_HOP_CAP ? { capped: true } : {}) };
+}
+
+// ---------------------------------------------------------------------------
+// Working state and Stop (card-1327b9): Matt's channel posts wake and steer
+// members, and the channel view shows who is working with a Stop control,
+// exactly like the one-on-one chat.
+
+export type ChannelMemberActivity = { member: string; lane: 'main' | 'bg'; lastActivityMs: number; fromChannel: boolean };
+
+/** Which channel members have a live busy turn right now, in either lane,
+ *  and whether that turn is THIS channel's work. A busy member whose turn
+ *  came from elsewhere (one-on-one work, another channel, routines) shows
+ *  as busy elsewhere — visible, but never Stoppable from here, so a channel
+ *  Stop cannot kill work the channel did not start (review finding 4).
+ *  Read-only: roster lane keys plus the runner's live session list.
+ *  lastActivityMs is the last event time, not the turn's start. A lane
+ *  matches on cli plus the account-pin-stripped chat id — the background
+ *  suffix is kept, so main and background never compare equal (review 3,
+ *  P0 1). This channel's lanes are checked first, so a member running a
+ *  channel turn on background while busy on main with one-on-one work
+ *  still shows the channel's turn with its Stop (review 3, P1 4). */
+export async function channelMemberActivity(channelId: string, members: string[]): Promise<ChannelMemberActivity[]> {
+  const live = activeChatSessions();
+  const out: ChannelMemberActivity[] = [];
+  for (const member of members) {
+    const keys = agentLaneKeys(member);
+    if (!keys) continue;
+    const channelLanes = new Set(await liveChannelTurnLanesByName(member, channelId));
+    const ordered = [...keys].sort((a, b) => Number(channelLanes.has(b.lane)) - Number(channelLanes.has(a.lane)));
+    for (const { lane, cli, chatKey } of ordered) {
+      const session = live.find((s) => s.busy === true && s.cli === cli && laneChatId(s.chatId) === chatKey);
+      if (session) {
+        out.push({ member, lane, lastActivityMs: session.lastActivityAt, fromChannel: channelLanes.has(lane) });
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/** Stop a channel member's live turn in THIS channel: drop the member's
+ *  still-queued pings from this channel first (aborting any delivery worker
+ *  already holding its batch, so the dropped post cannot re-fire the moment
+ *  the interrupt ends the busy turn), then interrupt only the lanes running
+ *  a turn this channel started — a member busy on unrelated work is left
+ *  alone. Interrupting the main lane still ends its background siblings by
+ *  engine design, exactly like the one-on-one Stop. Empty stopped lanes
+ *  means nothing from this channel was running; the UI can say so. */
+export async function stopChannelMember(channelId: string, member: string): Promise<{ stopped: Array<'main' | 'bg'>; dropped: number }> {
+  const keys = agentLaneKeys(member);
+  if (!keys) throw new Error(`no teammate named "${member}" — they may have left the roster`);
+  const dropped = await dropQueuedChannelDeliveries(member, channelId);
+  const channelLanes = new Set(await liveChannelTurnLanesByName(member, channelId));
+  const stopped: Array<'main' | 'bg'> = [];
+  for (const { lane, cli, chatKey } of keys) {
+    if (!channelLanes.has(lane)) continue;
+    const session = activeChatSessions().find((s) => s.busy === true && s.cli === cli && laneChatId(s.chatId) === chatKey);
+    if (!session) continue;
+    await interruptSession({ cli: session.cli, repoPath: session.cwd, chatId: session.chatId });
+    stopped.push(lane);
+  }
+  return { stopped, dropped };
 }
