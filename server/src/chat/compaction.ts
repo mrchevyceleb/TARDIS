@@ -719,7 +719,7 @@ function takeOverflowBatch(overflow: VisibleTurn[]): VisibleTurn[] {
 const COMPACT_SYSTEM = `You are the memory keeper for a long-running AI-teammate conversation. You write the ONE rolling memory document that lets the thread continue FOREVER. Each time you run, you REPLACE the previous document entirely (never append a new primer).
 
 Rules for the document you produce:
-- LENGTH: the document must fit under ${COMPACT_TARGET_CEILING_WORDS} words; while a document sits over that ceiling, each fold only has to be smaller than the last, never larger. Merge the new aged-out turns into the previous document, and PRUNE while merging: drop any item the aged turns show is closed, shipped, finished, cancelled or superseded, and drop detail whose only remaining value is historical (the transcript can bring it back when it matters). Always keep open commitments, decisions in force, standing rules and stated preferences — pruning never touches those. Do not pad. Do not invent. A short history should produce a short document.
+- LENGTH: the document must never exceed ${COMPACT_TARGET_CEILING_WORDS} words — a hard ceiling, not a target. Merge the new aged-out turns into the previous document, and PRUNE while merging: drop any item the aged turns show is closed, shipped, finished, cancelled or superseded, and drop detail whose only remaining value is historical (the transcript can bring it back when it matters). Always keep open commitments, decisions in force, standing rules and stated preferences — pruning never touches those. Do not pad. Do not invent. A short history should produce a short document.
 - Capture: the CURRENT standing state — every decision as it now stands (and why), every open task and its state, every fact about people/projects/systems mentioned, every commitment or promise, every preference expressed, every technical detail that mattered (paths, models, endpoints, prices, IDs), and the current state of play.
 - NEWER WINS: when the aged turns change or reverse an earlier decision, the newer statement REPLACES the old one. Never keep both a decision and its reversal; the document shows only the decision now in force, with its reason.
 - Organize with clear headings (## ...) so it can be indexed: Overview / People & Projects / Decisions / Open Work / Facts & References / Preferences & Style / Current State.
@@ -1384,15 +1384,16 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
   } else {
     // Ceiling instruction, never a refusal: a refused fold retries the same
     // batch forever (the Oct 13-14 freeze). A baseline over the ceiling is
-    // told to step down toward it, and the guard below accepts exactly the
-    // folds this instruction describes, so instruction and guard can never
-    // disagree. The aim sits under the ceiling (Max's cap call, Oct 17): the
-    // hard 2,800-word aim made the writer drop keep-list items the checker
-    // then rejected, and every softer aim made it grow the document, so the
-    // aim is 5,000 words against a 6,000-word ceiling.
+    // told to cut under it. The guard below quietly accepts a fold that only
+    // steps down from an over-ceiling baseline, and that acceptance is
+    // deliberately never stated to the writer: across three shas of fold
+    // evidence (Oct 17) any stated acceptance made the writer stop cutting
+    // and grow the document, while the hard wording reliably cut. The aim
+    // sits under the ceiling (Max's cap call, Oct 17) because the earlier
+    // 2,800-word aim dropped keep-list items the checker then rejected.
     const baselineWords = safePrevious.trim() ? countWords(safePrevious) : 0;
     if (baselineWords > COMPACT_TARGET_CEILING_WORDS) {
-      userContent = `${userContent}\n\nThe previous document is ${baselineWords} words, over the ${COMPACT_TARGET_CEILING_WORDS}-word ceiling. Prune while merging: drop closed, finished or superseded work; replace reversed decisions with the current one. NEVER drop open commitments, decisions in force, standing rules or stated preferences to make a length target; cut further only where the aged turns show work is closed or superseded. Step the document down toward ${COMPACT_TARGET_CEILING_WORDS} words, aiming for about ${COMPACT_WRITER_AIM_WORDS}. A replacement smaller than the previous document is accepted even while it is still over the ceiling, so keep everything that still stands and cut only what the turns show is finished.`;
+      userContent = `${userContent}\n\nThe previous document is ${baselineWords} words, over the hard ${COMPACT_TARGET_CEILING_WORDS}-word ceiling. Prune while merging: drop closed, finished or superseded work; replace reversed decisions with the current one. NEVER drop open commitments, decisions in force, standing rules or stated preferences to make a length target; cut further only where the aged turns show work is closed or superseded. The replacement must stay under ${COMPACT_TARGET_CEILING_WORDS} words — aim for about ${COMPACT_WRITER_AIM_WORDS}.`;
     } else {
       userContent = `${userContent}\n\nThe replacement must stay under the hard ${COMPACT_TARGET_CEILING_WORDS}-word ceiling; aim for about ${COMPACT_WRITER_AIM_WORDS} words.`;
     }
