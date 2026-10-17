@@ -72,6 +72,28 @@ function resolveAuthor(value: unknown): DeskActor {
   return { kind: 'agent', id: raw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'agent', name: raw };
 }
 
+/** Who wrote a desk WRITE. The Desk UI (the owner's app) identifies itself
+ *  with source:'ui'; every other caller must name a teammate through agent
+ *  (the team MCP field) or the author alias (what lanes that curl this API
+ *  directly tend to send). A write with no identity, and a write that names
+ *  the owner from outside the UI, is refused: a missing author must never
+ *  silently credit the owner (Oct 17 2026: raw curls posted teammate
+ *  check-ins as the owner, which also woke cards as fake owner comments). */
+export function resolveWriteAuthor(input: Record<string, unknown>): DeskActor {
+  const agentRaw = typeof input.agent === 'string' ? input.agent : '';
+  const authorRaw = typeof input.author === 'string' ? input.author : '';
+  const raw = agentRaw.trim() ? agentRaw : (authorRaw.trim() ? authorRaw : '');
+  if (raw) {
+    const author = resolveAuthor(raw);
+    if (author.kind === 'owner') {
+      throw new DeskError(400, 'Owner-attributed writes come from the Desk UI. Pass agent (or author): your own teammate name.');
+    }
+    return author;
+  }
+  if (input.source === 'ui' || input.ui === true) return ownerActor();
+  throw new DeskError(400, 'Pass agent (or author): your teammate name, so the Desk can credit you. The owner UI sends source:"ui".');
+}
+
 /** Who a card belongs to. Strict: a typo must not invent a ghost owner. */
 function resolveOwner(value: unknown, fallback?: DeskActor): DeskActor | undefined {
   if (value === undefined || value === null || value === '') return fallback;
@@ -174,7 +196,7 @@ deskRouter.get('/todos', route(async (req, res) => {
 
 deskRouter.post('/todos', route(async (req, res) => {
   const input = body(req);
-  const todo = await createTodo(input, resolveAuthor(input.agent));
+  const todo = await createTodo(input, resolveWriteAuthor(input));
   notifyTodoTouched();
   res.status(201).json({ todo });
 }));
@@ -244,7 +266,7 @@ deskRouter.post('/mirror-sync', route(async (_req, res) => {
 
 deskRouter.post('/cards', route(async (req, res) => {
   const input = body(req);
-  const by = resolveAuthor(input.agent);
+  const by = resolveWriteAuthor(input);
   const owner = resolveOwner(input.owner, by)!;
   res.status(201).json({ card: await createCard(input, owner, by, { dedupe: input.dedupe === true }) });
 }));
@@ -416,12 +438,13 @@ export function answerTodoHandler(deliver: TeamMessenger = deliverTeamMessage) {
 
 deskRouter.post('/cards/:id/comments', route(async (req, res) => {
   const input = body(req);
-  // The Desk UI never names an author; the team MCP always does. Only a real
-  // owner comment wakes anyone, so agents answering on the card cannot loop.
-  const fromOwnerUi = input.agent === undefined || input.agent === null;
-  const author = resolveAuthor(input.agent);
+  // Only the owner UI can credit the owner (source:'ui'); every other
+  // caller names a teammate through agent or the author alias. A real owner
+  // comment wakes the card owner; an agent answering on the card cannot loop.
+  const author = resolveWriteAuthor(input);
+  const fromOwnerUi = author.kind === 'owner';
   const result = await commentCard(param(req, 'id'), input.text, author);
-  const notified = fromOwnerUi && author.kind === 'owner' ? await notifyCardOwner(result.card, result.comment) : undefined;
+  const notified = fromOwnerUi ? await notifyCardOwner(result.card, result.comment) : undefined;
   res.status(201).json(notified ? { ...result, notified } : result);
 }));
 
