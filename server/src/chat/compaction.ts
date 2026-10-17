@@ -1178,9 +1178,22 @@ const COMPACT_CHECK_AGENT = new Agent({ headersTimeout: 240_000, bodyTimeout: 24
 const COMPACT_CHECK_MODEL = process.env.RIVENDELL_COMPACT_CHECK_MODEL?.trim() || 'google/gemini-4-argon';
 
 /** The check is unavailable (transport, config, key): the fold continues with
- *  the UNCHECKED writer document and a warning, so memory keeps updating
- *  (Max, Oct 17: one bad line never stalls the summary). */
+ *  the UNCHECKED writer document and a warning — gated by the placeholder
+ *  guard in generateCompact — so memory keeps updating (Max, Oct 17: one bad
+ *  line never stalls the summary). */
 class CompactCheckUnavailable extends Error {}
+
+/** Placeholder guard (Max, Oct 17): fail-open saves an unchecked writer
+ *  document only when it looks like a real replacement — at least half the
+ *  previous document. A check that can't be reached must never let a
+ *  one-line placeholder replace a real memory: keep the old document
+ *  instead, and the fold retries like a rejection. */
+export function uncheckedSaveAllowed(words: number, previousWords: number): boolean {
+  // No previous document (a fresh lane) has no real memory to protect, so
+  // fail-open stands; exactly half is a real-looking replacement, not a
+  // placeholder.
+  return previousWords === 0 || words * 2 >= previousWords;
+}
 
 /** Word count for the guards (review 1 P0-1): markdown structure markers —
  *  heading hashes, list dashes, table pipes — are not words; counting them
@@ -1469,6 +1482,15 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
     verdict = await checkCompact(compact, safePrevious, overflowText, facts);
   } catch (err) {
     if (err instanceof CompactCheckUnavailable) {
+      // Placeholder guard (Max, Oct 17): an unreachable check fails open
+      // only for a real-looking replacement. Under half the previous
+      // document, keep the old one — a placeholder must never replace a
+      // real memory — and the fold retries like a rejection.
+      const previousWords = safePrevious.trim() ? countWords(safePrevious) : 0;
+      if (!uncheckedSaveAllowed(words, previousWords)) {
+        console.warn(`[compaction] ${key}: check unavailable and the writer document is ${words} of ${previousWords} words — keeping the previous document`);
+        throw new Error(`compact check unavailable and the writer document is under half the previous one — the previous document stands (${err.message})`);
+      }
       // Unavailable (transport, config, key): save the UNCHECKED writer
       // document with a warning, so memory keeps updating (Max, Oct 17).
       console.warn(`[compaction] ${key}: check unavailable, saving the unchecked writer document: ${err.message}`);

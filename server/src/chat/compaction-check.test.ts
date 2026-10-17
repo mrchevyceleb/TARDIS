@@ -4,10 +4,11 @@
 // verdict — approve, or reject with reasons — stripping exactly one
 // surrounding fence and treating anything unparseable as a rejection (the
 // previous document stands; nothing unverifiable ever becomes the next
-// baseline).
+// baseline). uncheckedSaveAllowed gates the fail-open save: a placeholder
+// under half the previous document never replaces a real memory.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { countWords, parseVerdict } from './compaction.ts';
+import { countWords, parseVerdict, uncheckedSaveAllowed } from './compaction.ts';
 
 test('countWords ignores markdown structure markers', () => {
   assert.equal(countWords('## Overview\n\nThe build passed all 149 tests.'), 7);
@@ -39,4 +40,16 @@ test('parseVerdict accepts a bare JSON verdict, nothing unverifiable', () => {
   reject('["approve"]', /not a JSON object/);
   reject('{"verdict":"maybe"}', /not a valid verdict/);
   reject('{"verdict":"reject","reasons":[1]}', /not a valid verdict/);
+});
+
+test('uncheckedSaveAllowed fails open except for a placeholder', () => {
+  // A real-looking replacement (at least half the previous document): an
+  // unreachable check fails open so memory keeps updating.
+  assert.equal(uncheckedSaveAllowed(3_000, 6_000), true);
+  assert.equal(uncheckedSaveAllowed(6_000, 5_000), true);
+  // A fresh lane has no previous document to protect.
+  assert.equal(uncheckedSaveAllowed(3, 0), true);
+  // A placeholder under half the old one: the old document is kept.
+  assert.equal(uncheckedSaveAllowed(2_999, 6_000), false);
+  assert.equal(uncheckedSaveAllowed(12, 6_000), false);
 });
