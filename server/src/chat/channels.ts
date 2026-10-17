@@ -259,6 +259,28 @@ export function mentionedMembers(text: string, members: string[]): string[] {
   return sorted.filter((member) => seen.has(member));
 }
 
+/** @Name tokens in the text that name real teammates who are NOT members of
+ *  this channel. The posting route already holds the roster, so it is passed
+ *  in; matching mirrors mentionedMembers (case-insensitive full names, longest
+ *  first) so @Sam Wise never counts as a tag of a member named Sam. A post
+ *  carrying one of these is refused with the member list (Matt, Oct 17:
+ *  agents kept addressing people who were never in the channel). */
+export function nonMemberTags(text: string, members: string[], rosterNames: string[]): string[] {
+  if (!rosterNames.length) return [];
+  const sorted = [...new Set(rosterNames)].sort((a, b) => b.length - a.length);
+  const pattern = `@(?:${sorted.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})(?![\\w])`;
+  const re = new RegExp(pattern, 'gi');
+  const memberSet = new Set(members.map((m) => m.toLowerCase()));
+  const tagged: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    const raw = match[0].slice(1);
+    const name = sorted.find((n) => n.length === raw.length && n.toLowerCase() === raw.toLowerCase());
+    if (name && !memberSet.has(name.toLowerCase()) && !tagged.includes(name)) tagged.push(name);
+  }
+  return tagged;
+}
+
 export type ChannelFanOut = { delivered: string[]; skipped: string[]; hop: number; capped?: boolean };
 
 /** Deliver one channel post to whoever should hear it: the post with recent
@@ -305,7 +327,8 @@ export async function deliverChannelPost(
     + ' including the hop number from this ping. Include @Name to address one member; only they need to answer.'
     + ' Without an @, answer only if the message is for you or you have something real to add;'
     + ' if nothing is needed from you, stay silent (do not reply at all, never send NO_UPDATE).'
-    + ' Channel talk stays in the channel; never move it into a one-on-one thread.';
+    + ' Channel talk stays in the channel; never move it into a one-on-one thread.'
+    + ` This channel's members: ${channel.members.join(', ')}. @Name reaches only them; a post tagging anyone else is refused with this list.`;
   const header = `[#${channel.name} group channel \u2014 handoff ${hop}] ${poster} posted:\n\n`;
   // Reply-to-message (card-cbb4af): the quoted message rides the delivered
   // bundle so members see exactly what the post answers, through the same

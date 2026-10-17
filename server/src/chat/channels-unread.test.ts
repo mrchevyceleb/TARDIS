@@ -10,6 +10,7 @@ import test, { after } from 'node:test';
 import { rmSync } from 'node:fs';
 import {
   createChannel,
+  nonMemberTags,
   postChannelMessage,
   listChannels,
   markChannelRead,
@@ -83,6 +84,22 @@ test('a purged channel re-seeds to its head with no stale unread', async () => {
   assert.equal(await unreadIn(channel.id), 0);
   await postChannelMessage(channel.id, 'max', 'fresh');
   assert.equal(await unreadIn(channel.id), 1);
+});
+
+test('nonMemberTags names tagged teammates who are not members, and nothing else', () => {
+  const roster = ['Max', 'Kip', 'Sam Wise', 'Sam', 'Naomi'];
+  // A tagged teammate outside the channel is named (case-insensitive).
+  assert.deepEqual(nonMemberTags('hey @Kip and @naomi, look', ['Max', 'Sam'], roster), ['Kip', 'Naomi']);
+  // Tags of members and unknown names are not refusals.
+  assert.deepEqual(nonMemberTags('thanks @Max and @Stranger', ['Max', 'Sam'], roster), []);
+  // Longest-name match: @Sam Wise is Sam Wise, not the member Sam.
+  assert.deepEqual(nonMemberTags('ping @Sam Wise please', ['Max', 'Sam'], roster), ['Sam Wise']);
+  // A member tag never refuses, and longer names still win for members.
+  assert.deepEqual(nonMemberTags('ping @Sam please', ['Max', 'Sam'], roster), []);
+  // Same token semantics as delivery: an @ inside a longer token still
+  // counts (mirroring mentionedMembers), and each name is named once.
+  assert.deepEqual(nonMemberTags('mail a@kip.example or @Kip attached', ['Max'], roster), ['Kip']);
+  assert.deepEqual(nonMemberTags('no tags at all', ['Max'], roster), []);
 });
 
 after(() => {

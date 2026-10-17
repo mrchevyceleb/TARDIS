@@ -17,6 +17,7 @@ import {
   findChannel,
   listChannels,
   markChannelRead,
+  nonMemberTags,
   postChannelMessage,
   stopChannelMember,
   unknownTeammates,
@@ -254,6 +255,21 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
     res.status(400).json({ error: 'text is required' });
     return;
   }
+  // A post tagging a teammate who is not a member of this channel is
+  // refused with the real member list (Matt, Oct 17): the fan-out silently
+  // matched such tags to nothing, so agents kept addressing people who were
+  // never in the channel. The refusal names who is actually in it, so the
+  // poster can add them or address a member instead. The roster is loaded
+  // once here and reused for the person-hood check below.
+  const rosterNames = (await teamRoster()).map((agent) => agent.name);
+  const taggedOutsiders = nonMemberTags(text, channel.members, rosterNames);
+  if (taggedOutsiders.length) {
+    res.status(400).json({
+      error: `not posted: ${taggedOutsiders.map((n) => `@${n}`).join(', ')} ${taggedOutsiders.length === 1 ? 'is' : 'are'} not in this channel. Members: ${channel.members.join(', ')}. Address a member or add them to the channel first.`,
+      members: channel.members,
+    });
+    return;
+  }
   // The hop rides with agent replies (from the channel_post tool) so the
   // agent-to-agent cap can count hops across the whole fan-out chain.
   const hopInput = req.body?.hop;
@@ -276,7 +292,7 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
   // trust model as the rest of /api, not a cryptographic signal (review 3,
   // P1 5 and P2 8): the agent MCP sends its own name and no flag.
   const wantsPerson = req.body?.person === true;
-  const posterIsRoster = (await teamRoster()).some((agent) => agent.name === from.trim());
+  const posterIsRoster = rosterNames.includes(from.trim());
   const person = wantsPerson && !posterIsRoster;
   // Queue-next-turn (card-504beb): only the person may choose it, and only
   // while posting as a person; an agent flag is ignored.
