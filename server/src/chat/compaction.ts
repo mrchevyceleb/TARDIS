@@ -1385,12 +1385,14 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
     const baselineWords = safePrevious.trim() ? countWords(safePrevious) : 0;
     const tightenTarget = Math.floor(COMPACT_TARGET_CEILING_WORDS * 0.7);
     if (baselineWords > COMPACT_TARGET_CEILING_WORDS) {
-      // Step down (Sam's real-fold check, Oct 17): one fold cutting an 8k-word
-      // document to 4k drops keep-list items or overshoots; each fold cuts
-      // about 20% and the document converges under the cap over a few folds.
-      // The aim is the step target, never below the steady aim.
-      const stepTarget = Math.max(tightenTarget, Math.floor(baselineWords * 0.8));
-      userContent = `${userContent}\n\nThe previous document is ${baselineWords} words, over the hard ${COMPACT_TARGET_CEILING_WORDS}-word cap. Prune while merging: drop closed, finished or superseded work; replace reversed decisions with the current one. NEVER drop open commitments, decisions in force, standing rules or stated preferences to make a length target — cut further only where the aged turns show work is closed or superseded. This fold: aim for about ${stepTarget} words (the document converges under ${COMPACT_TARGET_CEILING_WORDS} over the next few folds).`;
+      // The aim stays the hard target (Sam's retest, Oct 17): a softer 80%
+      // step aim made the writer GROW the document (3 of 3 tries bigger),
+      // while the hard aim reliably cuts 30-45% — just rarely under the cap
+      // in one fold. The guard below accepts an over-cap result that is at
+      // least 15% smaller than the previous document, so the hard cut
+      // converges under the cap over a few folds without ever demanding
+      // keep-list sacrifices.
+      userContent = `${userContent}\n\nThe previous document is ${baselineWords} words, over the hard ${COMPACT_TARGET_CEILING_WORDS}-word cap. Prune while merging: drop closed, finished or superseded work; replace reversed decisions with the current one. NEVER drop open commitments, decisions in force, standing rules or stated preferences to make a length target — cut further only where the aged turns show work is closed or superseded. The replacement must stay under ${COMPACT_TARGET_CEILING_WORDS} words — aim for about ${tightenTarget}.`;
     } else {
       userContent = `${userContent}\n\nThe replacement must stay under the hard ${COMPACT_TARGET_CEILING_WORDS}-word cap — aim for about ${tightenTarget} words.`;
     }
