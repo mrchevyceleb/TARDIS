@@ -7,8 +7,8 @@ import { useChecklist } from './useChecklist';
 
 const initial = (name: string): string => (name.trim()[0] ?? '?').toUpperCase();
 
-export function ChecklistSection({ owner, name }: { owner: string; name: string }) {
-  const { checklist, loadError } = useChecklist(owner);
+export function ChecklistSection({ owner, name, pollMs }: { owner: string; name: string; pollMs?: number }) {
+  const { checklist, loadError } = useChecklist(owner, pollMs);
   // A missing or empty checklist renders nothing: the section appears the
   // moment the agent creates its first list (the live push mounts it).
   if ((!checklist || !checklist.items.length) && !loadError) return null;

@@ -182,11 +182,13 @@ const TOOLS = [
       'then keep it current as the work moves: a short status line per item, check items off the moment they finish, ' +
       'assign teammates where they carry a step. Every write is live in the sidebar immediately. ' +
       'Actions: create (a fresh list, replacing any existing one), add, update (text/status), done (check off or uncheck), ' +
-      'assign, remove (one item), clear (the whole list). Pass item ids from the last call.',
+      'assign, remove (one item), clear (the whole list). Pass item ids from the last call. ' +
+      'In a channel, pass channel: the channel id from the ping, so the checklist is the channel\'s own (shown from its header) instead of yours.',
     inputSchema: {
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['create', 'add', 'update', 'done', 'assign', 'remove', 'clear'], description: 'what to do with the checklist' },
+        channel: { type: 'string', description: 'the channel id from the ping, when working in a channel: the checklist becomes the channel\'s own' },
         title: { type: 'string', description: 'the checklist title (create/add only)' },
         items: { type: 'array', items: { type: 'object', properties: { text: { type: 'string' }, assignee: { type: 'string' } }, required: ['text'], additionalProperties: false }, description: 'create only: the initial items' },
         id: { type: 'string', description: 'the item id (update/done/assign/remove)' },
@@ -716,6 +718,9 @@ async function callTool(name, args, signal) {
     const { agents } = await api('/api/team', undefined, signal);
     const me = agents.find((a) => a.name.trim().toLowerCase() === agent.trim().toLowerCase() || a.id === agent);
     if (!me) throw new Error(`No teammate record for ${agent}.`);
+    // In a channel, the checklist is the channel's own (the id from the ping);
+    // otherwise it is yours, shown in your sidebar next to your chat.
+    const owner = typeof args.channel === 'string' && args.channel.trim() ? args.channel.trim().slice(0, 48) : me.id;
     const body = { action: args.action === 'create' ? 'reset' : args.action, by: me.id };
     if (args.title !== undefined) body.title = args.title;
     if (args.id !== undefined) body.id = args.id;
@@ -724,7 +729,7 @@ async function callTool(name, args, signal) {
     if (args.assignee !== undefined) body.assignee = args.assignee;
     if (args.done !== undefined) body.done = args.done;
     if (Array.isArray(args.items)) body.items = args.items;
-    const result = await api(`/api/checklists/${encodeURIComponent(me.id)}`, { method: 'POST', body: JSON.stringify(body) }, signal);
+    const result = await api(`/api/checklists/${encodeURIComponent(owner)}`, { method: 'POST', body: JSON.stringify(body) }, signal);
     const list = result?.checklist;
     if (!list || !list.items?.length) return list ? 'The checklist is empty.' : 'The checklist is cleared.';
     const lines = list.items.map((it) => {

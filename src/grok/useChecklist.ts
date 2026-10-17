@@ -25,7 +25,7 @@ export type Checklist = {
 
 export const CHECKLIST_EVENT = 'rivendell:checklist';
 
-export function useChecklist(owner: string | undefined): { checklist: Checklist | null; loadError: boolean } {
+export function useChecklist(owner: string | undefined, pollMs?: number): { checklist: Checklist | null; loadError: boolean } {
   const [checklist, setChecklist] = useState<Checklist | null>(null);
   const [loadError, setLoadError] = useState(false);
 
@@ -34,26 +34,37 @@ export function useChecklist(owner: string | undefined): { checklist: Checklist 
     setChecklist(null);
     setLoadError(false);
     if (!owner) return;
-    apiJson<{ checklist: Checklist | null }>(`/api/checklists/${encodeURIComponent(owner)}`)
-      .then((r) => {
-        if (!alive) return;
-        setChecklist(r.checklist ?? null);
-        setLoadError(false);
-      })
-      .catch(() => { if (alive) setLoadError(true); });
+    const pull = () => {
+      apiJson<{ checklist: Checklist | null }>(`/api/checklists/${encodeURIComponent(owner)}`)
+        .then((r) => {
+          if (!alive) return;
+          setChecklist(r.checklist ?? null);
+          setLoadError(false);
+        })
+        .catch(() => { if (alive) setLoadError(true); });
+    };
+    pull();
     // The chat socket dispatches server-pushed checklist updates as window
     // events (useChat's onmessage); a push for another owner is ignored.
+    // Channel surfaces hold no chat socket yet, so no push arrives there: a
+    // modest interim refresh (plus focus) keeps the channel strip current
+    // until channels gain their own socket and the push path lights up.
     const onPush = (e: Event) => {
       const detail = (e as CustomEvent<{ owner?: string; checklist?: Checklist | null }>).detail;
       if (!alive || detail?.owner !== owner) return;
       setChecklist(detail.checklist ?? null);
     };
+    const onFocus = () => pull();
     window.addEventListener(CHECKLIST_EVENT, onPush as EventListener);
+    window.addEventListener('focus', onFocus);
+    const iv = pollMs ? window.setInterval(pull, pollMs) : null;
     return () => {
       alive = false;
       window.removeEventListener(CHECKLIST_EVENT, onPush as EventListener);
+      window.removeEventListener('focus', onFocus);
+      if (iv) window.clearInterval(iv);
     };
-  }, [owner]);
+  }, [owner, pollMs]);
 
   return { checklist, loadError };
 }

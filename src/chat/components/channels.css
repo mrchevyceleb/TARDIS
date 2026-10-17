@@ -192,3 +192,13 @@ span.ch-pins-text { cursor: default; }
   opacity: 0.5;
   cursor: default;
 }
+
+/* The channel's live checklist slide-over (card-a77246): the header-button
+   pattern from ch-pins; the animated list itself styles in grok.css. */
+.ch-cl {
+  position: absolute; top: 100%; right: 84px; z-index: 41; width: min(340px, calc(100% - 24px));
+  max-height: min(480px, 64vh); overflow-y: auto;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  background: var(--bt-panel, #1e222b); border-radius: 10px; padding: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
