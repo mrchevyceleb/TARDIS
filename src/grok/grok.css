@@ -1649,12 +1649,18 @@
 }
 
 /* Desktop rail collapse: slides out; the menu button (outside the rail)
-   reappears while collapsed. Mobile keeps its drawer behavior untouched. */
+   reappears while collapsed. Mobile keeps its drawer behavior untouched.
+   The rail hides only after the slide-out finishes (delayed visibility):
+   a ghost rail parked off-canvas stays in the accessibility tree and keeps
+   promising dead buttons (Naomi, Oct 17: a persisted collapsed rail left a
+   fully dead rail for screen readers and automation). */
 @media (min-width: 761px) {
-  .bt-rail { transition: margin-left 0.25s cubic-bezier(0.16, 1, 0.3, 1); }
+  .bt-rail { transition: margin-left 0.25s cubic-bezier(0.16, 1, 0.3, 1), visibility 0s linear 0s; }
   .bot-app.rail-collapsed .bt-rail {
     margin-left: calc(-1 * var(--bt-rail-w, 350px) - 1px); /* width + border */
     pointer-events: none;
+    visibility: hidden;
+    transition: margin-left 0.25s cubic-bezier(0.16, 1, 0.3, 1), visibility 0s linear 0.25s;
   }
   .bot-app.rail-collapsed .bt-menubtn { display: grid; place-items: center; }
   .bot-app.rail-collapsed .bt-menubtn.is-open { visibility: hidden; pointer-events: none; }
