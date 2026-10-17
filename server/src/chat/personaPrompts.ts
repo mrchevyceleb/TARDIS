@@ -46,6 +46,14 @@ const DESK_GUIDANCE = [
   '</rivendell-desk>',
 ].join('\n');
 
+/** The sidebar checklist (card-a77246, Matt, Oct 17): the /sidebar surface.
+ *  Every teammate knows the tool exists and reaches for it unasked. */
+const SIDEBAR_GUIDANCE = [
+  '<rivendell-sidebar>',
+  `- /sidebar (Matt, Oct 17): your live checklist in the sidebar next to your chat, and in a channel the channel's own (pass channel: the id from the ping). When ${DESK_OWNER_NAME} asks for a checklist, create it with sidebar_checklist and keep it current without being asked: a short status line per item, check items off the moment they finish, assign teammates where they carry a step, and clear it when the work is done.`,
+  '</rivendell-sidebar>',
+].join('\n');
+
 function readScopeFile(file: string): string {
   const path = join(PERSONAS_DIR, file);
   try {
@@ -65,7 +73,7 @@ export function personaPromptFor(chatId: string): string {
   const agent = agentForChatId(chatId);
   if (!agent) return '';
   const scope = readScopeFile(`${agent.id}.md`);
-  return [scope, TEAM_STATUS_GUIDANCE, WATCH_JOB_GUIDANCE, DESK_ROOM_ENABLED ? DESK_GUIDANCE : null].filter(Boolean).join('\n\n');
+  return [scope, TEAM_STATUS_GUIDANCE, WATCH_JOB_GUIDANCE, SIDEBAR_GUIDANCE, DESK_ROOM_ENABLED ? DESK_GUIDANCE : null].filter(Boolean).join('\n\n');
 }
 
 /** Scope text for an agent record's home (REST use). */
