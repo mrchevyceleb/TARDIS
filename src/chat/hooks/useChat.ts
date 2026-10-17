@@ -1737,6 +1737,14 @@ export function useChat(opts: {
         // Oct 9 2026). The cursor therefore advances ONLY on event seqs this
         // socket actually received; a trailing control-frame tail is simply
         // replayed (and deduped) on the next connect.
+        // A server-pushed checklist update (card-a77246): no event seq, so
+        // it never advances the replay cursor; the sidebar's checklist hook
+        // listens for the window event and re-renders the moment the owning
+        // agent's tool writes.
+        if (msg.type === 'checklist') {
+          window.dispatchEvent(new CustomEvent('rivendell:checklist', { detail: msg }));
+          return;
+        }
         if (msg.type === 'working') {
           // First authoritative busy report on this socket: from here a
           // 'streaming' status is server-confirmed, not reconnect-kept.
