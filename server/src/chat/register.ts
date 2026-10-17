@@ -10,6 +10,7 @@ import { readChronicle } from './chronicle.ts';
 import { readCommands } from './commands.ts';
 import { clearThreadSessionIds, ensureStateDir } from './sessions.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
+import { setLanePushAll } from './laneEvents.ts';
 import { stopComputersForOwner } from '../devices/bridge.ts';
 import { computerOwnerKey } from '../devices/context.ts';
 import { ASSISTANT_HUB_PATH } from './config.ts';
@@ -902,6 +903,14 @@ export async function registerChat(app: express.Express, server: Server): Promis
       source.send(JSON.stringify({ ...payload, remote: false }));
     }
   };
+  // Routes push live payloads through this one hook (card-a77246): the
+  // checklist route broadcasts tool writes to every open lane socket without
+  // reaching into this closure. Cleared on teardown below.
+  setLanePushAll((payload) => {
+    for (const [client] of socketThreads) {
+      if (client.readyState === client.OPEN) client.send(JSON.stringify(payload));
+    }
+  });
   let wsCounter = 0;
   // Backstop for a client that leaks sockets: a long-lived tab whose orphaned
   // WebSockets keep their handlers attached and keep re-helloing. One browser
@@ -2810,6 +2819,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
     shutdownAllSessions();
     shutdownAllCodexSessions();
     shutdownAllBananaSessions();
+    setLanePushAll(null);
     wss.close();
   };
 }

@@ -1964,3 +1964,23 @@ body.bt-rail-resizing { cursor: col-resize; user-select: none; }
   .bt-swatch, .bot-app .bt-conv[data-chat-color]::before { transition: none; }
   .bt-swatch:hover, .bt-swatch:active { transform: none; }
 }
+
+/* Live checklist (card-a77246): slide-in items, animated check-off, progress
+   fill. The agent's tool owns every write; this surface only renders. */
+.bt-checklist .bt-cl-progress{height:4px;border-radius:2px;background:rgba(255,255,255,.08);margin:8px 0 10px;overflow:hidden}
+.bt-checklist .bt-cl-progress-fill{height:100%;border-radius:2px;background:linear-gradient(90deg,#8ab4f8,#7dd8b3);transition:width .5s cubic-bezier(.22,1,.36,1)}
+.bt-checklist .bt-cl-progress-num{font-size:11px;opacity:.65;margin-left:8px}
+.bt-cl-items{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.bt-cl-item{display:flex;gap:8px;align-items:flex-start;padding:6px 8px;border-radius:8px;background:rgba(255,255,255,.04);animation:bt-cl-slide .35s cubic-bezier(.22,1,.36,1) both}
+.bt-cl-item.done{opacity:.62}
+.bt-cl-check{flex:0 0 18px;width:18px;height:18px;border-radius:50%;border:1.5px solid rgba(255,255,255,.35);display:flex;align-items:center;justify-content:center;font-size:11px;margin-top:1px;transition:border-color .3s,background .3s}
+.bt-cl-item.done .bt-cl-check{background:#7dd8b3;border-color:#7dd8b3;color:#0d1117;animation:bt-cl-pop .35s cubic-bezier(.22,1.4,.36,1)}
+.bt-cl-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.bt-cl-text{font-size:12.5px;line-height:1.35;word-wrap:break-word}
+.bt-cl-item.done .bt-cl-text{text-decoration:line-through;text-decoration-color:rgba(255,255,255,.4)}
+.bt-cl-status{font-size:11px;opacity:.7;font-style:italic}
+.bt-cl-assignee{display:inline-flex;align-items:center;gap:4px;font-size:11px;opacity:.85;margin-top:2px}
+.bt-cl-face{width:16px;height:16px;border-radius:50%;background:linear-gradient(135deg,#8ab4f8,#c58af9);color:#0d1117;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center}
+@keyframes bt-cl-slide{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}
+@keyframes bt-cl-pop{0%{transform:scale(.4)}70%{transform:scale(1.25)}100%{transform:scale(1)}}
+@media (prefers-reduced-motion: reduce){.bt-cl-item,.bt-cl-item.done .bt-cl-check{animation:none}.bt-checklist .bt-cl-progress-fill{transition:none}}

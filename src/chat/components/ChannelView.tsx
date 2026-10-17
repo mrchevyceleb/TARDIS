@@ -10,13 +10,15 @@
 // render with the sender's identity like any teammate message.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Ellipsis, Hash, Palette, Pencil, Pin, PinOff, Square, Trash2, Users, X } from 'lucide-react';
+import { Check, Ellipsis, Hash, ListChecks, Palette, Pencil, Pin, PinOff, Square, Trash2, Users, X } from 'lucide-react';
 import { CHAT_COLORS } from '../../grok/agents';
 import { channelColorOf, channelError, useChannelActions, useChannelLive, useChannelMessages, useChannels, type ChannelMessage } from '../hooks/useChannels';
 import type { Agent } from '../../grok/agents';
 import type { ChatBlock } from '../data/types';
 import { ChatThread, type ThreadPin } from './reimagine/blocks';
 import { AttachButton, Composer, type SendImage } from './reimagine/Composer';
+import { ChecklistSection } from '../../grok/ChecklistSection';
+import { useChecklist } from '../../grok/useChecklist';
 import { Plus } from './reimagine/icons';
 import { DRAFT_APPEND_EVENT, type DraftAppendDetail } from '../../native/shell';
 import { apiJson } from '../../data/api';
@@ -80,6 +82,15 @@ export function ChannelView({ channelId, agents, onDeleted }: {
   const messages = useChannelMessages(channelId);
   const actions = useChannelActions();
   const live = useChannelLive(channelId);
+  // The channel's live checklist (card-a77246): the header button appears
+  // once the channel's lead creates a checklist; the slide-over follows the
+  // pins pattern.
+  const [clOpen, setClOpen] = useState(false);
+  // The header hook needs the interim refresh too (Sam's check, Oct 17): the
+  // channel view opens no chat socket, so without it the button stays hidden
+  // until a focus or reload — and the slide-over cannot open without the
+  // button.
+  const channelChecklist = useChecklist(channelId, 10_000);
   const channel = channels.data?.channels.find((c) => c.id === channelId);
 
   const [text, setText] = useState('');
@@ -380,6 +391,17 @@ export function ChannelView({ channelId, agents, onDeleted }: {
         </span>
         <span className="ch-head-name">{channel?.name ?? '…'}</span>
         <span className="ch-head-members" title={channel?.members.join(', ')}>{channel?.members.length ?? 0} members</span>
+        {channelChecklist.checklist?.items.length ? (
+          <button type="button" className="bt-iconbtn" onClick={() => { setClOpen((o) => !o); }}
+            title="Channel checklist" aria-label="Channel checklist" aria-expanded={clOpen}>
+            <ListChecks size={15} />
+          </button>
+        ) : null}
+        {clOpen && channelChecklist.checklist?.items.length ? (
+          <div className="ch-cl" role="dialog" aria-label="Channel checklist">
+            <ChecklistSection owner={channelId} name={channel?.name ?? 'the channel'} pollMs={10_000} />
+          </div>
+        ) : null}
         <button type="button" className="bt-iconbtn" onClick={() => { setPinsOpen((o) => !o); }}
           title="Pinned from members" aria-label="Pinned from members" aria-expanded={pinsOpen}>
           <Pin size={15} />

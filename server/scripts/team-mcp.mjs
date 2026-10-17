@@ -176,6 +176,32 @@ const TOOLS = [
     },
   },
   {
+    name: 'sidebar_checklist',
+    description:
+      'Your live checklist in the sidebar next to your chat (/sidebar). Create it when the owner asks for a checklist, ' +
+      'then keep it current as the work moves: a short status line per item, check items off the moment they finish, ' +
+      'assign teammates where they carry a step. Every write is live in the sidebar immediately. ' +
+      'Actions: create (a fresh list, replacing any existing one), add, update (text/status), done (check off or uncheck), ' +
+      'assign, remove (one item), clear (the whole list). Pass item ids from the last call. ' +
+      'In a channel, pass channel: the channel id from the ping, so the checklist is the channel\'s own (shown from its header) instead of yours.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['create', 'add', 'update', 'done', 'assign', 'remove', 'clear'], description: 'what to do with the checklist' },
+        channel: { type: 'string', description: 'the channel id from the ping, when working in a channel: the checklist becomes the channel\'s own' },
+        title: { type: 'string', description: 'the checklist title (create/add only)' },
+        items: { type: 'array', items: { type: 'object', properties: { text: { type: 'string' }, assignee: { type: 'string' } }, required: ['text'], additionalProperties: false }, description: 'create only: the initial items' },
+        id: { type: 'string', description: 'the item id (update/done/assign/remove)' },
+        text: { type: 'string', description: 'the item text (add) or its new text (update)' },
+        status: { type: 'string', description: 'a short live status line for the item (update; empty string clears it)' },
+        assignee: { type: 'string', description: 'the teammate carrying this item (add/assign; empty clears it)' },
+        done: { type: 'boolean', description: 'done only: true checks it off, false unchecks' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'commitments',
     description:
       'Your open commitments: owed replies, promises with times, parked items that must survive compaction. ' +
@@ -685,6 +711,34 @@ async function callTool(name, args, signal) {
     const { pins } = await api(`/api/message-pins?agentId=${encodeURIComponent(me.id)}`, undefined, signal);
     if (!pins?.length) return 'Nothing is pinned on your desk.';
     return pins.map((p) => `- [${p.id}] ${p.text}`).join('\n');
+  }
+  if (name === 'sidebar_checklist') {
+    const agent = process.env.RIVENDELL_AGENT_NAME;
+    if (!agent) throw new Error('Only a named teammate has a sidebar checklist.');
+    const { agents } = await api('/api/team', undefined, signal);
+    const me = agents.find((a) => a.name.trim().toLowerCase() === agent.trim().toLowerCase() || a.id === agent);
+    if (!me) throw new Error(`No teammate record for ${agent}.`);
+    // In a channel, the checklist is the channel's own (the id from the ping);
+    // otherwise it is yours, shown in your sidebar next to your chat.
+    const owner = typeof args.channel === 'string' && args.channel.trim() ? args.channel.trim().slice(0, 48) : me.id;
+    const body = { action: args.action === 'create' ? 'reset' : args.action, by: me.id };
+    if (args.title !== undefined) body.title = args.title;
+    if (args.id !== undefined) body.id = args.id;
+    if (args.text !== undefined) body.text = args.text;
+    if (args.status !== undefined) body.status = args.status;
+    if (args.assignee !== undefined) body.assignee = args.assignee;
+    if (args.done !== undefined) body.done = args.done;
+    if (Array.isArray(args.items)) body.items = args.items;
+    const result = await api(`/api/checklists/${encodeURIComponent(owner)}`, { method: 'POST', body: JSON.stringify(body) }, signal);
+    const list = result?.checklist;
+    if (!list || !list.items?.length) return list ? 'The checklist is empty.' : 'The checklist is cleared.';
+    const lines = list.items.map((it) => {
+      const mark = it.done ? 'x' : ' ';
+      const who = it.assignee ? ` (assigned: ${it.assignee})` : '';
+      const status = it.status ? ` — ${it.status}` : '';
+      return `- [${mark}] ${it.id}: ${it.text}${status}${who}`;
+    });
+    return `Checklist "${list.title}" (${list.items.filter((i) => i.done).length}/${list.items.length} done):\n${lines.join('\n')}`;
   }
   if (name.startsWith('desk_') || name.startsWith('board_')) {
     const self = process.env.RIVENDELL_AGENT_NAME || (typeof args.from === 'string' ? args.from.trim() : '');
