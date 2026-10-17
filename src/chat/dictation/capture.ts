@@ -16,14 +16,23 @@ export async function capture(onSection:(audio:Blob)=>void,onInterrupted:()=>voi
   stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}});
   await context.audioWorklet.addModule(workletUrl);
   node=new AudioWorkletNode(context,'dictation-pcm');
-  const QUIET=393;
+  const QUIET=393,FRAME=320,MIN_SPEECH_FRAMES=13;
   const samples=new Int16Array(16000*60);let length=0,quiet=0;
-  //Silent audio never reaches the model (Sam's check, Oct 17): whisper invents
-  //a phrase for a silent section ("Thank you.") and a completed dictation
-  //auto-sends it. The trailing quiet of a section is trimmed before it is
-  //sent, so a section that never rose above the quiet level trims to nothing
-  //and is dropped whole — the "No speech heard" path stays reachable.
-  const flush=()=>{while(length>0&&Math.abs(samples[length-1])<QUIET)length--;if(length)onSection(wav(samples.slice(0,length),16000));length=0;quiet=0;};
+  //A section is judged by sustained speech, not single samples (Sam's retest,
+  //Oct 17): whisper invents a phrase for a silent stretch ("Thank you.") and
+  //a completed dictation auto-sends it, and a single 4ms click kept a whole
+  //silent stretch alive when the trim walked sample by sample. ~20ms frames:
+  //trailing quiet frames trim, and a section with under ~250ms of frames
+  //above the quiet level — room noise, one click — never reaches the model,
+  //so the "No speech heard" path stays reachable.
+  const above=(from:number)=>{for(let i=from;i<from+FRAME;i++)if(Math.abs(samples[i])>=QUIET)return true;return false;};
+  const flush=()=>{
+    let end=Math.floor(length/FRAME)*FRAME;
+    while(end>=FRAME&&!above(end-FRAME))end-=FRAME;
+    let speech=0;for(let i=0;i<end;i+=FRAME)if(above(i))speech++;
+    if(speech>=MIN_SPEECH_FRAMES)onSection(wav(samples.slice(0,end),16000));
+    length=0;quiet=0;
+  };
   let stopped=()=>{};
   node.port.onmessage=({data})=>{
    if(data.pcm){for(const sample of data.pcm as Int16Array){samples[length++]=sample;quiet=Math.abs(sample)<QUIET?quiet+1:0;if(length===samples.length||(length>=16000*35&&quiet>16000*.4))flush();}node!.port.postMessage('ack');}
