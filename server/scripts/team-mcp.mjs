@@ -719,8 +719,29 @@ async function callTool(name, args, signal) {
     const me = agents.find((a) => a.name.trim().toLowerCase() === agent.trim().toLowerCase() || a.id === agent);
     if (!me) throw new Error(`No teammate record for ${agent}.`);
     // In a channel, the checklist is the channel's own (the id from the ping);
-    // otherwise it is yours, shown in your sidebar next to your chat.
-    const owner = typeof args.channel === 'string' && args.channel.trim() ? args.channel.trim().slice(0, 48) : me.id;
+    // otherwise it is yours, shown in your sidebar next to your chat. A
+    // channel checklist is limited to a channel the calling agent belongs
+    // to (Sam's check, Oct 17): the id must name a real channel that carries
+    // the agent as a member — no writing a checklist onto a room you are
+    // not in.
+    let owner = me.id;
+    if (typeof args.channel === 'string' && args.channel.trim()) {
+      // Full-value validation: the id must exactly match a real channel. No
+      // truncation before the match (a sliced id could alias a real one) —
+      // a slice appears only in the refusal text, to bound what gets echoed.
+      const channelId = args.channel.trim();
+      const { channels } = await api('/api/channels', undefined, signal);
+      const channel = Array.isArray(channels) ? channels.find((c) => c && c.id === channelId) : undefined;
+      if (!channel) {
+        const shown = channelId.length > 48 ? `${channelId.slice(0, 48)}…` : channelId;
+        throw new Error(`No channel ${shown} — pass the channel id from the ping, or drop channel to write your own sidebar checklist.`);
+      }
+      const memberNames = (Array.isArray(channel.members) ? channel.members : []).map((m) => String(m ?? '').trim().toLowerCase());
+      if (!memberNames.includes(me.name.trim().toLowerCase())) {
+        throw new Error(`Not a member of ${channel.name || channelId} — a channel checklist is limited to a channel you belong to.`);
+      }
+      owner = channelId;
+    }
     const body = { action: args.action === 'create' ? 'reset' : args.action, by: me.id };
     if (args.title !== undefined) body.title = args.title;
     if (args.id !== undefined) body.id = args.id;
