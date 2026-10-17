@@ -44,6 +44,7 @@ import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { fireworksCapability, fireworksContextWindow, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
 import { openRouterCapability, openRouterContextWindow, openRouterMaxOutput, resolveOpenRouterEffort, resolveOpenRouterModel } from './openrouter-models.ts';
+import { plainEnglishWritingBlockFor } from './plain-english-guidance.ts';
 import { AgySession, AGY_READY_TIMEOUT_MS } from './agy-runner.ts';
 import { AGY_LANE_EFFORT, AGY_LANE_MODEL, resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
 import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
@@ -1378,7 +1379,18 @@ class ClaudeSession {
     const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
     // Matt's Priorities ride every turn (continues and steers too), read fresh.
     const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
-    const stdinText = `${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}`;
+    // Plain-English writing block (card-0d1015): the OpenRouter lane's
+    // Gemini models lose a writing rule buried at the top of this long
+    // message, so it rides at the very END instead. Voice turns keep their
+    // own spoken-style addendum, and automation, peer, reply-nudge and
+    // continuation traffic stays silent or exact (review 1 P0/P1).
+    const plainEnglishWriting = plainEnglishWritingBlockFor({
+      cli: this.cli,
+      model: this.spawnModel,
+      voiceMode: opts.voiceMode,
+      humanTurn: humanTurn && !continuing && !replyNudge,
+    });
+    const stdinText = `${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}${plainEnglishWriting ? `\n\n${plainEnglishWriting}` : ''}`;
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];

@@ -43,6 +43,7 @@ import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { emptyTurnOrigin, noteTurnPeer, type TurnOrigin } from './providerSwitch.ts';
 import { longCallGateEnv } from './longCallGate.ts';
 import { laneTagFor, shareBackgroundLaneEvent, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
+import { plainEnglishWritingBlockFor } from './plain-english-guidance.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
 /** Init is immediate on a healthy spawn (probed); a live process that never
@@ -1079,7 +1080,14 @@ export class AgySession {
       // later messages of the same warm process get the brief form.
       const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
       const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
-      message = `${this.systemPromptBlock()}\n\n${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${continuation}`;
+      // Plain-English writing block (card-0d1015): agy is Gemini, whose
+      // buried instructions lost to the long context, so the block rides at
+      // the very END of the turn. Voice turns keep their own spoken-style
+      // addendum, and automation/peer turns must stay silent or exact
+      // (review 1 P0/P1: a last-position writing rule would push Gemini to
+      // chatter instead of NO_UPDATE, or to speak backticks on a call).
+      const plainEnglish = plainEnglishWritingBlockFor({ cli: this.cli, model: '', voiceMode: opts.voiceMode, humanTurn });
+      message = `${this.systemPromptBlock()}\n\n${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${continuation}${plainEnglish ? `\n\n${plainEnglish}` : ''}`;
 
       try {
         await this.writeUserLine(message);
