@@ -51,13 +51,13 @@ import { listCommitments } from '../lib/commitmentStore.ts';
  *  ~1.5k-token durable-facts section; at 16k a full fold can hit the cap,
  *  which rolls the fold back and repeats every turn end. */
 const COMPACT_MAX_TOKENS = 32_000;
-/** The hard ceiling (Max's cap call, Oct 17): the writer is told to stay
- *  under it, and while a document sits over it every fold only has to be
- *  smaller than the last, never larger. Sam's real-fold checks showed the
- *  big lanes' must-keep content does not fit in 4,000 words (checker-approved
- *  folds sat at 5,500-5,900), so the ceiling is 6,000 with the writer aiming
+/** The hard ceiling (Max's cap calls, Oct 17): the writer is told to stay
+ *  under it. Above the ceiling a fold only has to be smaller than the last,
+ *  never larger; under it a fold saves whenever the checker approves. The
+ *  6,000 call sat below the checker-approved documents (post-cut folds
+ *  landed at 6,286-7,296), so the ceiling is 8,000, the writer still aiming
  *  at 5,000. */
-const COMPACT_TARGET_CEILING_WORDS = 6000;
+const COMPACT_TARGET_CEILING_WORDS = 8000;
 /** The writer's stated aim (Max, Oct 17), sitting under the ceiling. A fold
  *  that overshoots past the ceiling is caught by the guard below. */
 const COMPACT_WRITER_AIM_WORDS = 5000;
@@ -1452,16 +1452,16 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
   const words = countWords(compact);
   if (!words) throw new Error('compact generation came back empty — will retry');
   if (!opts?.rebuild && words > COMPACT_TARGET_CEILING_WORDS) {
-    // Smaller while over the ceiling (Max's cap call, Oct 17): live documents
-    // sit at 5-8.5k words, and their must-keep content does not fit under the
-    // ceiling in one fold, so demanding the full cut makes the writer
-    // overshoot, drop keep-list items (the checker rejects it) or give up.
-    // While the previous document sits over the ceiling, a fold is accepted
-    // only if it is smaller than the previous one, never larger: big documents
-    // converge under the ceiling over a few folds, the checker still guards
-    // every dropped rule, and a fold that neither fits nor shrinks fails as
-    // before. A first document (no previous) must fit the ceiling outright,
-    // and a document already under the ceiling can never fold back over it.
+    // Smaller while over the ceiling (Max's cap calls, Oct 17): the 6,000
+    // ceiling sat below the checker-approved documents (post-cut folds landed
+    // at 6,286-7,296), so the ceiling is 8,000. While the previous document
+    // sits over the ceiling, a fold is accepted only if it is smaller than
+    // the previous one, never larger; under the ceiling a fold saves whenever
+    // the checker approves. Big documents converge under the ceiling over a
+    // few folds, the checker still guards every dropped rule, and a fold that
+    // neither fits nor shrinks fails as before. A first document (no previous)
+    // must fit the ceiling outright, and a document already under the
+    // ceiling can never fold back over it.
     const prevWords = safePrevious.trim() ? countWords(safePrevious) : 0;
     const steppedDown = prevWords > COMPACT_TARGET_CEILING_WORDS && words < prevWords;
     if (!prevWords || !steppedDown) {
