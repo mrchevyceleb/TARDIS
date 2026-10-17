@@ -43,6 +43,7 @@ import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { emptyTurnOrigin, noteTurnPeer, type TurnOrigin } from './providerSwitch.ts';
 import { longCallGateEnv } from './longCallGate.ts';
 import { laneTagFor, shareBackgroundLaneEvent, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
+import { PLAIN_ENGLISH_WRITING_BLOCK } from './plain-english-guidance.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
 /** Init is immediate on a healthy spawn (probed); a live process that never
@@ -1079,7 +1080,12 @@ export class AgySession {
       // later messages of the same warm process get the brief form.
       const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
       const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
-      message = `${this.systemPromptBlock()}\n\n${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${continuation}`;
+      // Plain-English writing block (card-0d1015): agy is Gemini, whose
+      // instructions buried at the top of a long message lost to the long
+      // context; this block rides at the very END of every turn, the last
+      // thing the model reads, with one before/after example instead of a
+      // list of don'ts.
+      message = `${this.systemPromptBlock()}\n\n${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${continuation}\n\n${PLAIN_ENGLISH_WRITING_BLOCK}`;
 
       try {
         await this.writeUserLine(message);
