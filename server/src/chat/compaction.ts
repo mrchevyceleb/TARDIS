@@ -51,10 +51,16 @@ import { listCommitments } from '../lib/commitmentStore.ts';
  *  ~1.5k-token durable-facts section; at 16k a full fold can hit the cap,
  *  which rolls the fold back and repeats every turn end. */
 const COMPACT_MAX_TOKENS = 32_000;
-/** The hard cap (COMPACT_SYSTEM + card-0a3653): the writer is told to stay
- *  under it and the returned document is enforced against the same number,
- *  so instruction and guard can never disagree. */
-const COMPACT_TARGET_CEILING_WORDS = 4000;
+/** The hard ceiling (Max's cap call, Oct 17): the writer is told to stay
+ *  under it, and while a document sits over it every fold only has to be
+ *  smaller than the last, never larger. Sam's real-fold checks showed the
+ *  big lanes' must-keep content does not fit in 4,000 words (checker-approved
+ *  folds sat at 5,500-5,900), so the ceiling is 6,000 with the writer aiming
+ *  at 5,000. */
+const COMPACT_TARGET_CEILING_WORDS = 6000;
+/** The writer's stated aim (Max, Oct 17), sitting under the ceiling. A fold
+ *  that overshoots past the ceiling is caught by the guard below. */
+const COMPACT_WRITER_AIM_WORDS = 5000;
 /** Event-pressure fold trigger: fold the aged batch early (below the 50-turn
  *  gate) once covering every aged turn would archive at least this many hot
  *  events. Streaming-heavy lanes add thousands of events per visible turn
@@ -713,7 +719,7 @@ function takeOverflowBatch(overflow: VisibleTurn[]): VisibleTurn[] {
 const COMPACT_SYSTEM = `You are the memory keeper for a long-running AI-teammate conversation. You write the ONE rolling memory document that lets the thread continue FOREVER. Each time you run, you REPLACE the previous document entirely (never append a new primer).
 
 Rules for the document you produce:
-- LENGTH: the document must never exceed ${COMPACT_TARGET_CEILING_WORDS} words — a hard cap, not a target. Merge the new aged-out turns into the previous document, and PRUNE while merging: drop any item the aged turns show is closed, shipped, finished, cancelled or superseded, and drop detail whose only remaining value is historical (the transcript can bring it back when it matters). Always keep open commitments, decisions in force, standing rules and stated preferences — pruning never touches those. Do not pad. Do not invent. A short history should produce a short document.
+- LENGTH: the document must fit under ${COMPACT_TARGET_CEILING_WORDS} words; while a document sits over that ceiling, each fold only has to be smaller than the last, never larger. Merge the new aged-out turns into the previous document, and PRUNE while merging: drop any item the aged turns show is closed, shipped, finished, cancelled or superseded, and drop detail whose only remaining value is historical (the transcript can bring it back when it matters). Always keep open commitments, decisions in force, standing rules and stated preferences — pruning never touches those. Do not pad. Do not invent. A short history should produce a short document.
 - Capture: the CURRENT standing state — every decision as it now stands (and why), every open task and its state, every fact about people/projects/systems mentioned, every commitment or promise, every preference expressed, every technical detail that mattered (paths, models, endpoints, prices, IDs), and the current state of play.
 - NEWER WINS: when the aged turns change or reverse an earlier decision, the newer statement REPLACES the old one. Never keep both a decision and its reversal; the document shows only the decision now in force, with its reason.
 - Organize with clear headings (## ...) so it can be indexed: Overview / People & Projects / Decisions / Open Work / Facts & References / Preferences & Style / Current State.
@@ -1376,25 +1382,19 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
   if (opts?.rebuild) {
     userContent = `${userContent}\n\nThese turns are OLDER than the head document: they add history and never override it. Restore and keep the head's substance; fold them in without pruning.`;
   } else {
-    // Hard cap instruction, never a refusal: a refused fold retries the same
-    // batch forever (the Oct 13-14 freeze). A baseline over the hard cap is
-    // told to prune to it; the returned document is enforced against the same
-    // number below, so instruction and guard can never disagree. The
-    // aim-below target is always stated with margin (writers overshoot by
-    // about a third: 2,800 × 4/3 clears the cap's underside).
+    // Ceiling instruction, never a refusal: a refused fold retries the same
+    // batch forever (the Oct 13-14 freeze). A baseline over the ceiling is
+    // told to step down toward it, and the guard below accepts exactly the
+    // folds this instruction describes, so instruction and guard can never
+    // disagree. The aim sits under the ceiling (Max's cap call, Oct 17): the
+    // hard 2,800-word aim made the writer drop keep-list items the checker
+    // then rejected, and every softer aim made it grow the document, so the
+    // aim is 5,000 words against a 6,000-word ceiling.
     const baselineWords = safePrevious.trim() ? countWords(safePrevious) : 0;
-    const tightenTarget = Math.floor(COMPACT_TARGET_CEILING_WORDS * 0.7);
     if (baselineWords > COMPACT_TARGET_CEILING_WORDS) {
-      // The aim stays the hard target (Sam's retest, Oct 17): a softer 80%
-      // step aim made the writer GROW the document (3 of 3 tries bigger),
-      // while the hard aim reliably cuts 30-45% — just rarely under the cap
-      // in one fold. The guard below accepts an over-cap result that is at
-      // least 15% smaller than the previous document, so the hard cut
-      // converges under the cap over a few folds without ever demanding
-      // keep-list sacrifices.
-      userContent = `${userContent}\n\nThe previous document is ${baselineWords} words, over the hard ${COMPACT_TARGET_CEILING_WORDS}-word cap. Prune while merging: drop closed, finished or superseded work; replace reversed decisions with the current one. NEVER drop open commitments, decisions in force, standing rules or stated preferences to make a length target — cut further only where the aged turns show work is closed or superseded. The replacement must stay under ${COMPACT_TARGET_CEILING_WORDS} words — aim for about ${tightenTarget}.`;
+      userContent = `${userContent}\n\nThe previous document is ${baselineWords} words, over the ${COMPACT_TARGET_CEILING_WORDS}-word ceiling. Prune while merging: drop closed, finished or superseded work; replace reversed decisions with the current one. NEVER drop open commitments, decisions in force, standing rules or stated preferences to make a length target; cut further only where the aged turns show work is closed or superseded. Step the document down toward ${COMPACT_TARGET_CEILING_WORDS} words, aiming for about ${COMPACT_WRITER_AIM_WORDS}. A replacement smaller than the previous document is accepted even while it is still over the ceiling, so keep everything that still stands and cut only what the turns show is finished.`;
     } else {
-      userContent = `${userContent}\n\nThe replacement must stay under the hard ${COMPACT_TARGET_CEILING_WORDS}-word cap — aim for about ${tightenTarget} words.`;
+      userContent = `${userContent}\n\nThe replacement must stay under the hard ${COMPACT_TARGET_CEILING_WORDS}-word ceiling; aim for about ${COMPACT_WRITER_AIM_WORDS} words.`;
     }
   }
 
@@ -1451,18 +1451,20 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
   const words = countWords(compact);
   if (!words) throw new Error('compact generation came back empty — will retry');
   if (!opts?.rebuild && words > COMPACT_TARGET_CEILING_WORDS) {
-    // Step down, not a cliff (Sam's real-fold check, Oct 17): live documents
-    // sit at 4-8.5k words, and demanding the full cut in one fold makes the
-    // writer overshoot, drop keep-list items (the checker rejects it) or
-    // give up — the fold fails and, with backoff, the lane stops updating.
-    // A fold over the cap is accepted when it is at least 15% smaller than
-    // the previous document: big documents converge under the cap over a
-    // few folds, the checker still guards every dropped rule, and a fold
-    // that neither fits nor shrinks fails as before. A first document (no
-    // previous) must fit the cap outright.
+    // Smaller while over the ceiling (Max's cap call, Oct 17): live documents
+    // sit at 5-8.5k words, and their must-keep content does not fit under the
+    // ceiling in one fold, so demanding the full cut makes the writer
+    // overshoot, drop keep-list items (the checker rejects it) or give up.
+    // While the previous document sits over the ceiling, a fold is accepted
+    // only if it is smaller than the previous one, never larger: big documents
+    // converge under the ceiling over a few folds, the checker still guards
+    // every dropped rule, and a fold that neither fits nor shrinks fails as
+    // before. A first document (no previous) must fit the ceiling outright,
+    // and a document already under the ceiling can never fold back over it.
     const prevWords = safePrevious.trim() ? countWords(safePrevious) : 0;
-    if (!prevWords || words > Math.floor(prevWords * 0.85)) {
-      throw new Error(`compact writer came back over the ${COMPACT_TARGET_CEILING_WORDS}-word hard cap (${words} words, previous ${prevWords}) — will retry`);
+    const steppedDown = prevWords > COMPACT_TARGET_CEILING_WORDS && words < prevWords;
+    if (!prevWords || !steppedDown) {
+      throw new Error(`compact writer came back over the ${COMPACT_TARGET_CEILING_WORDS}-word ceiling (${words} words, previous ${prevWords}) without stepping down from it; will retry`);
     }
   }
   // Check pass (card-0a3653, the small version, Max Oct 17): a different
