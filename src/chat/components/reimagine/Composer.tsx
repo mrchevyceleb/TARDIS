@@ -106,6 +106,25 @@ async function fileToImage(f: File): Promise<PendingImage | null> {
   };
 }
 
+// A stalled read must never wedge the attach gate shut (review 3): the gate
+// blocks every send while a conversion runs, so conversion is bounded. On
+// timeout the existing error chip shows and is dismissible, and the gate
+// opens again.
+const IMAGE_CONVERT_TIMEOUT_MS = 30_000;
+async function fileToImageBounded(f: File): Promise<PendingImage | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      fileToImage(f),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('image read timed out')), IMAGE_CONVERT_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 type MentionMatch = {
   at: number;
   len: number;
@@ -307,7 +326,7 @@ export function Composer(props: ComposerProps) {
           && inlineBytes + f.size <= IMAGE_DIRECT_MAX_TURN_BYTES
         ) {
           try {
-            const img = await fileToImage(f);
+            const img = await fileToImageBounded(f);
             if (img) {
               next.push(img);
               inlineCount += 1;
@@ -365,6 +384,10 @@ export function Composer(props: ComposerProps) {
         const next = cur ? `${cur.trimEnd()}\n${line}` : line;
         if (latest.current.mentionMembers?.length) setCaret(next.length);
         props.onChange(next);
+        // Write the DOM value in the same tick (review 3): the dictation
+        // snapshot and the dictation append both read the DOM, so a path
+        // line that has not committed yet must not be invisible to them.
+        if (taRef.current) taRef.current.value = next;
         // An upload finishing after dictation completion may extend the
         // waiting send's snapshot with its path line — and nothing else.
         if (pendingDictation.current?.completed) pendingDictation.current.text = next;
@@ -416,10 +439,14 @@ export function Composer(props: ComposerProps) {
     // a streaming upload is still writing its file. One gate covers both
     // (attachPending above): neither can be sent past, and an explicit Stop
     // tap on an empty draft still interrupts the running agent (it sends
-    // nothing), so an in-flight attachment never locks the person out of
-    // Stop (review 1).
+    // nothing), so an in-flight upload never locks the person out of Stop
+    // (review 1). A converting image is the exception (review 3): the person
+    // just pasted it and the tray says so, so a tap in that moment means
+    // send, never stop — the button promises "Attaching an image" and
+    // keeps that promise.
     if(attachPending||imageIngestingRef.current>0){
-      if(props.busy&&allowStop&&!hasLiveContent)props.onStop?.();
+      const converting=imageIngesting>0||imageIngestingRef.current>0;
+      if(props.busy&&allowStop&&!hasLiveContent&&!converting)props.onStop?.();
       return false;
     }
     // While the backend still owns a turn, any text OR image is queued guidance.
@@ -589,7 +616,10 @@ export function Composer(props: ComposerProps) {
   const phoneSurface = mobile || (typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches);
   const trimmed = props.value.trim();
   const refCount = props.refCount ?? 0;
-  const hasContent = trimmed.length > 0 || images.length > 0 || refCount > 0;
+  // A converting image counts as content (review 3): the tray shows it, it
+  // settles in seconds, and it must never leave the send button in
+  // destructive Stop mode while the person waits to send it.
+  const hasContent = trimmed.length > 0 || images.length > 0 || refCount > 0 || imageIngesting > 0;
   const ready = hasContent && !props.busy && !attachPending;
   // Text and image-only drafts both queue safely. An attached image must never
   // leave the button in destructive Stop mode.
@@ -658,7 +688,13 @@ export function Composer(props: ComposerProps) {
   // Next-turn chip (card-504beb): one-shot arm — the send after arming goes
   // to the next turn instead of steering. Shown only when a queued send is
   // meaningful (busy one-on-one lane, or working channel members).
-  const queueChip = props.onSendQueued && hasContent && !uploading && (canSteer || props.queueAvailable === true) ? (
+  // Eligibility is the delivery-mode choice, not attachment timing (review
+  // 3): a converting image or streaming upload must not disarm an armed
+  // chip — the person pastes a screenshot and the Next-turn choice they
+  // made survives it. The send itself still waits on attachPending either
+  // way.
+  const queueEligible = props.busy && Boolean(props.onSteer);
+  const queueChip = props.onSendQueued && hasContent && (queueEligible || props.queueAvailable === true) ? (
     <button
       type="button"
       className={`queue-chip${queueArmed ? ' on' : ''}`}
@@ -689,7 +725,7 @@ export function Composer(props: ComposerProps) {
     <button
       type="button"
       className="queue-chip on"
-      title="This dictated message sends itself when the upload finishes"
+      title="This dictated message sends itself when attachments finish"
       aria-label="Cancel the waiting auto-send"
       onClick={clearPendingDictation}
     >
@@ -817,8 +853,8 @@ export function Composer(props: ComposerProps) {
           <div className={`attach-tray${refCount > 0 ? ' has-refs' : ''}`}>
             {refCount > 0 ? props.refChips : null}
             {imageIngesting > 0 ? (
-              <div className="up-chip" aria-busy="true">
-                <span className="up-txt">Converting image…</span>
+              <div className="up-chip" role="status" aria-busy="true">
+                <span className="up-txt">{imageIngesting > 1 ? `Converting ${imageIngesting} images…` : 'Converting image…'}</span>
               </div>
             ) : null}
             {uploads.map((u) => (
