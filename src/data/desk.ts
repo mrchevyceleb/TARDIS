@@ -386,8 +386,9 @@ export type TodoAnswerResult = { todo: DeskTodo; notified?: CommentNotice; dupli
 export type CardPatch = Partial<{ title: string; description: string; owner: string; project: string; priority: DeskPriority; links: string[]; column: DeskColumn }>;
 
 export const deskApi = {
-  // Every write that credits an author carries source:'ui' — the Desk UI is
-  // the owner's own app, the one caller allowed to post as the owner.
+  // Writes carry source:'ui' so the server can tell an app request from a
+  // lane that forgot its identity (friendlier error); the owner credit
+  // itself rides on the browser's same-origin fetch, which curl can't send.
   addTodo: (input: TodoPatch & { title: string }) => apiJson<{ todo: DeskTodo }>('/api/desk/todos', json('POST', { ...input, source: 'ui' })),
   updateTodo: (id: string, patch: TodoPatch) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}`, json('PATCH', patch)),
   completeTodo: (id: string) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/complete`, json('POST', {})),
