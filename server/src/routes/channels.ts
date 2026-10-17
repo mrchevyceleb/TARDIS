@@ -262,10 +262,21 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
   // poster can add them or address a member instead. The roster is loaded
   // once here and reused for the person-hood check below.
   const rosterNames = (await teamRoster()).map((agent) => agent.name);
+  const posterIsRoster = rosterNames.includes(from.trim());
   const taggedOutsiders = nonMemberTags(text, channel.members, rosterNames);
   if (taggedOutsiders.length) {
+    const memberLine = channel.members.length
+      ? `Members: ${channel.members.join(', ')}.`
+      : 'This channel has no members.';
+    // Agents have no tool that changes membership, so their refusal says to
+    // ask Matt; only the person's own refusal can say to add the teammate
+    // (review 1: telling an agent to add a member pushes it into a shell or
+    // a one-on-one message).
+    const action = posterIsRoster
+      ? 'Address a member, or ask Matt to add them.'
+      : 'Address a member or add them to the channel first.';
     res.status(400).json({
-      error: `not posted: ${taggedOutsiders.map((n) => `@${n}`).join(', ')} ${taggedOutsiders.length === 1 ? 'is' : 'are'} not in this channel. Members: ${channel.members.join(', ')}. Address a member or add them to the channel first.`,
+      error: `not posted: ${taggedOutsiders.map((n) => `@${n}`).join(', ')} ${taggedOutsiders.length === 1 ? 'is' : 'are'} not in this channel. ${memberLine} ${action}`,
       members: channel.members,
     });
     return;
@@ -292,7 +303,6 @@ channelsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
   // trust model as the rest of /api, not a cryptographic signal (review 3,
   // P1 5 and P2 8): the agent MCP sends its own name and no flag.
   const wantsPerson = req.body?.person === true;
-  const posterIsRoster = rosterNames.includes(from.trim());
   const person = wantsPerson && !posterIsRoster;
   // Queue-next-turn (card-504beb): only the person may choose it, and only
   // while posting as a person; an agent flag is ignored.

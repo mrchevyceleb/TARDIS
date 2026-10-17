@@ -261,22 +261,29 @@ export function mentionedMembers(text: string, members: string[]): string[] {
 
 /** @Name tokens in the text that name real teammates who are NOT members of
  *  this channel. The posting route already holds the roster, so it is passed
- *  in; matching mirrors mentionedMembers (case-insensitive full names, longest
- *  first) so @Sam Wise never counts as a tag of a member named Sam. A post
- *  carrying one of these is refused with the member list (Matt, Oct 17:
- *  agents kept addressing people who were never in the channel). */
+ *  in. Matching mirrors delivery (case-insensitive full names, longest name
+ *  first so @Sam Wise never counts as a tag of a member named Sam), with two
+ *  refusal-specific guards (Matt, Oct 17: agents kept addressing people who
+ *  were never in the channel):
+ *  - a tag must start at a word boundary: an @ inside a word (an email
+ *    address, a host in a pasted log line, code) is not a tag and never
+ *    refuses a post;
+ *  - member names ride the alternation too, so a stale member name (renamed
+ *    after the member list was written) still wins over a shorter roster
+ *    name and a real member is never refused. */
 export function nonMemberTags(text: string, members: string[], rosterNames: string[]): string[] {
   if (!rosterNames.length) return [];
-  const sorted = [...new Set(rosterNames)].sort((a, b) => b.length - a.length);
-  const pattern = `@(?:${sorted.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})(?![\\w])`;
+  const names = [...new Set([...members, ...rosterNames])].sort((a, b) => b.length - a.length);
+  const pattern = `(?<![\\w.@])@(?:${names.map((name) => name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')).join('|')})(?![\\w])`;
   const re = new RegExp(pattern, 'gi');
   const memberSet = new Set(members.map((m) => m.toLowerCase()));
+  const rosterSet = new Set(rosterNames.map((n) => n.toLowerCase()));
   const tagged: string[] = [];
   let match: RegExpExecArray | null;
   while ((match = re.exec(text)) !== null) {
     const raw = match[0].slice(1);
-    const name = sorted.find((n) => n.length === raw.length && n.toLowerCase() === raw.toLowerCase());
-    if (name && !memberSet.has(name.toLowerCase()) && !tagged.includes(name)) tagged.push(name);
+    const name = names.find((n) => n.length === raw.length && n.toLowerCase() === raw.toLowerCase());
+    if (name && rosterSet.has(name.toLowerCase()) && !memberSet.has(name.toLowerCase()) && !tagged.includes(name)) tagged.push(name);
   }
   return tagged;
 }
@@ -328,7 +335,7 @@ export async function deliverChannelPost(
     + ' Without an @, answer only if the message is for you or you have something real to add;'
     + ' if nothing is needed from you, stay silent (do not reply at all, never send NO_UPDATE).'
     + ' Channel talk stays in the channel; never move it into a one-on-one thread.'
-    + ` This channel's members: ${channel.members.join(', ')}. @Name reaches only them; a post tagging anyone else is refused with this list.`;
+    + ` This channel's members: ${channel.members.length ? channel.members.join(', ') : 'none yet'}. @Name reaches only them; tagging another teammate who is not a member is refused with this list.`;
   const header = `[#${channel.name} group channel \u2014 handoff ${hop}] ${poster} posted:\n\n`;
   // Reply-to-message (card-cbb4af): the quoted message rides the delivered
   // bundle so members see exactly what the post answers, through the same

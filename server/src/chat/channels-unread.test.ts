@@ -96,9 +96,13 @@ test('nonMemberTags names tagged teammates who are not members, and nothing else
   assert.deepEqual(nonMemberTags('ping @Sam Wise please', ['Max', 'Sam'], roster), ['Sam Wise']);
   // A member tag never refuses, and longer names still win for members.
   assert.deepEqual(nonMemberTags('ping @Sam please', ['Max', 'Sam'], roster), []);
-  // Same token semantics as delivery: an @ inside a longer token still
-  // counts (mirroring mentionedMembers), and each name is named once.
-  assert.deepEqual(nonMemberTags('mail a@kip.example or @Kip attached', ['Max'], roster), ['Kip']);
+  // An @ inside a word is not a tag: emails, hosts and pasted log lines
+  // never refuse a post (review 1 P1).
+  assert.deepEqual(nonMemberTags('contact ops@kip.dev or root@kip-host', ['Max'], roster), []);
+  // A stale member name (renamed after the member list was written) still
+  // wins over a shorter roster name, so a real member is never refused
+  // (review 1 P2).
+  assert.deepEqual(nonMemberTags('hi @Sam Wise', ['Sam Wise'], ['Sam', 'Samwise']), []);
   assert.deepEqual(nonMemberTags('no tags at all', ['Max'], roster), []);
 });
 
