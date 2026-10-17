@@ -386,16 +386,19 @@ export type TodoAnswerResult = { todo: DeskTodo; notified?: CommentNotice; dupli
 export type CardPatch = Partial<{ title: string; description: string; owner: string; project: string; priority: DeskPriority; links: string[]; column: DeskColumn }>;
 
 export const deskApi = {
-  addTodo: (input: TodoPatch & { title: string }) => apiJson<{ todo: DeskTodo }>('/api/desk/todos', json('POST', input)),
+  // Writes carry source:'ui' so the server can tell an app request from a
+  // lane that forgot its identity (friendlier error); the owner credit
+  // itself rides on the browser's same-origin fetch, which curl can't send.
+  addTodo: (input: TodoPatch & { title: string }) => apiJson<{ todo: DeskTodo }>('/api/desk/todos', json('POST', { ...input, source: 'ui' })),
   updateTodo: (id: string, patch: TodoPatch) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}`, json('PATCH', patch)),
   completeTodo: (id: string) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/complete`, json('POST', {})),
   reopenTodo: (id: string) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/reopen`, json('POST', {})),
   deleteTodo: (id: string) => apiJson<void>(`/api/desk/todos/${enc(id)}`, json('DELETE')),
-  answerTodo: (id: string, input: TodoAnswerInput) => apiJson<TodoAnswerResult>(`/api/desk/todos/${enc(id)}/answer`, json('POST', input)),
-  createCard: (input: CardPatch & { title: string; index?: number }) => apiJson<{ card: DeskCard }>('/api/desk/cards', json('POST', input)),
+  answerTodo: (id: string, input: TodoAnswerInput) => apiJson<TodoAnswerResult>(`/api/desk/todos/${enc(id)}/answer`, json('POST', { ...input, source: 'ui' })),
+  createCard: (input: CardPatch & { title: string; index?: number }) => apiJson<{ card: DeskCard }>('/api/desk/cards', json('POST', { ...input, source: 'ui' })),
   updateCard: (id: string, patch: CardPatch) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${enc(id)}`, json('PATCH', patch)),
   moveCard: (id: string, column: DeskColumn, index?: number) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${enc(id)}/move`, json('POST', { column, index })),
-  comment: (id: string, text: string) => apiJson<{ card: DeskCard; notified?: CommentNotice }>(`/api/desk/cards/${enc(id)}/comments`, json('POST', { text })),
+  comment: (id: string, text: string) => apiJson<{ card: DeskCard; notified?: CommentNotice }>(`/api/desk/cards/${enc(id)}/comments`, json('POST', { text, source: 'ui' })),
   deleteComment: (id: string, commentId: string) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${enc(id)}/comments/${enc(commentId)}`, json('DELETE')),
   archiveCard: (id: string, archived: boolean) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${enc(id)}/archive`, json('POST', { archived })),
 };
