@@ -144,12 +144,18 @@ try {
     filter: (s) => {
       const rel = path.relative(LIVE_STATE, s);
       if (!rel) return true;
+      // desk.json is core check state (named above) and it outgrew the bulk
+      // cap (15.8MB, Oct 17): always copied, whatever its size, so the side
+      // copy always boots the real Desk — a Deskless side copy exercises
+      // none of the Desk routes it is supposed to prove.
+      if (rel === 'desk.json') return true;
       const top = rel.split(path.sep)[0];
       if (big.includes(top)) return false;
       try { return fs.statSync(s).size <= 8 * 1024 * 1024; } catch { return true; }
     },
   });
-  step(`state copied to ${stateDir} (${mb(stateDir)} MB)`);
+  const deskCopy = path.join(stateDir, 'desk.json');
+  step(`state copied to ${stateDir} (${mb(stateDir)} MB${fs.existsSync(deskCopy) ? `, desk.json ${Math.round(fs.statSync(deskCopy).size / 1024 / 1024)} MB` : ''})`);
 
   // 4. A synthetic probe workspace: the probe engine's cwd is never a live
   //    repo, so no unproven code or unexpected agent behavior can touch real
