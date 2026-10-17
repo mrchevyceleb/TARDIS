@@ -81,7 +81,10 @@ checklistsRouter.post('/:owner', asyncHandler(async (req, res) => {
         if (!list) { error = 'no checklist yet'; return list; }
         const item = find(list);
         if (!item) { error = `no item ${id}`; return list; }
-        const done = body.done === true;
+        // A missing done means true (Sam's check, Oct 17): an agent sending
+        // {action:'done', id} means check it off; only done === false
+        // unchecks.
+        const done = body.done !== false;
         return patchItem(list, done
           ? { done: true, doneAt: Date.now(), doneBy: by }
           : { done: false, doneAt: undefined, doneBy: undefined });

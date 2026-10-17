@@ -7,10 +7,14 @@
 // (hand edits do not reach the tool or the live event).
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { writeJsonAtomic } from './deskStore.ts';
+import { STATE_DIR } from '../chat/config.ts';
 
-const FILE = process.env.RIVENDELL_CHECKLIST_FILE || join(homedir(), '.rivendell', 'checklists.json');
+// Inside the shared state folder (Sam's check, Oct 17): every other store
+// joins STATE_DIR, so a pre-restart side copy or check writing here follows
+// its own state dir instead of the live file. The env override stays for
+// throwaway harnesses.
+const FILE = process.env.RIVENDELL_CHECKLIST_FILE || join(STATE_DIR, 'checklists.json');
 
 export type ChecklistItem = {
   id: string;
@@ -55,11 +59,25 @@ export async function readChecklist(owner: string): Promise<Checklist | null> {
   return checklists[owner] ?? null;
 }
 
-/** One mutation at a time: the file is the lock (atomic write, last write
- *  wins — the checklist is a single agent's live scratchpad, not shared
- *  state). Returning null from the mutator deletes the checklist; a thrown
- *  mutator never corrupts the file. */
-export async function mutateChecklist(
+/** One mutation at a time, in-process (Sam's check, Oct 17): the shared
+ *  file plus a read-merge-write lost writes under parallel tool calls (10
+ *  of 10 in his trials — an agent's whole list could vanish). A promise
+ *  queue serializes the read-modify-write so every mutation lands; a
+ *  failure never blocks the chain. The file is still the truth: last write
+ *  wins across processes, and the checklist stays a single agent's live
+ *  scratchpad, not shared state. */
+let mutationQueue: Promise<unknown> = Promise.resolve();
+
+export function mutateChecklist(
+  owner: string,
+  mutate: (list: Checklist | null) => ChecklistInput | null,
+): Promise<Checklist | null> {
+  const run = mutationQueue.then(() => mutateNow(owner, mutate));
+  mutationQueue = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+async function mutateNow(
   owner: string,
   mutate: (list: Checklist | null) => ChecklistInput | null,
 ): Promise<Checklist | null> {
