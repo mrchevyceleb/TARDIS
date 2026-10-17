@@ -104,7 +104,7 @@ export function ChatDictation({chatId,onText,onActive,onComplete,onDiscard}:{cha
    ?<button type="button" className="dictation-mic" disabled aria-label="Dictation working"><LoaderCircle size={17} className="dictation-spin"/></button>
    :phase==='recover'||phase==='error'
     ?<button type="button" className="dictation-mic needs-attention" onClick={()=>void retry()} aria-label={phase==='recover'?'Recover and send saved dictation':sendIntent.current?'Retry dictation and send':'Retry dictation'} title={phase==='recover'?'Recover & send':sendIntent.current?'Retry & send':'Retry'}><RotateCcw size={16}/></button>
-    :<button type="button" className="dictation-mic" onClick={()=>void start()} aria-label="Dictate a message" title="Dictate — Stop sends it"><Mic size={18}/></button>;
+    :<button type="button" className="dictation-mic" onClick={()=>void start()} aria-label="Dictate a message" title="Dictate · Stop sends it"><Mic size={18}/></button>;
  const width=Math.min(320,window.innerWidth-24);
  const panelStyle=anchor?{left:Math.min(Math.max(anchor.right-width,12),window.innerWidth-12-width),bottom:window.innerHeight-anchor.top+10,width}:undefined;
  return <>

@@ -16,11 +16,17 @@ export async function capture(onSection:(audio:Blob)=>void,onInterrupted:()=>voi
   stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}});
   await context.audioWorklet.addModule(workletUrl);
   node=new AudioWorkletNode(context,'dictation-pcm');
+  const QUIET=393;
   const samples=new Int16Array(16000*60);let length=0,quiet=0;
-  const flush=()=>{if(length)onSection(wav(samples.slice(0,length),16000));length=0;quiet=0;};
+  //Silent audio never reaches the model (Sam's check, Oct 17): whisper invents
+  //a phrase for a silent section ("Thank you.") and a completed dictation
+  //auto-sends it. The trailing quiet of a section is trimmed before it is
+  //sent, so a section that never rose above the quiet level trims to nothing
+  //and is dropped whole — the "No speech heard" path stays reachable.
+  const flush=()=>{while(length>0&&Math.abs(samples[length-1])<QUIET)length--;if(length)onSection(wav(samples.slice(0,length),16000));length=0;quiet=0;};
   let stopped=()=>{};
   node.port.onmessage=({data})=>{
-   if(data.pcm){for(const sample of data.pcm as Int16Array){samples[length++]=sample;quiet=Math.abs(sample)<393?quiet+1:0;if(length===samples.length||(length>=16000*35&&quiet>16000*.4))flush();}node!.port.postMessage('ack');}
+   if(data.pcm){for(const sample of data.pcm as Int16Array){samples[length++]=sample;quiet=Math.abs(sample)<QUIET?quiet+1:0;if(length===samples.length||(length>=16000*35&&quiet>16000*.4))flush();}node!.port.postMessage('ack');}
    if(data.interrupted&&!stopping)onInterrupted();
    if(data.stopped)stopped();
   };

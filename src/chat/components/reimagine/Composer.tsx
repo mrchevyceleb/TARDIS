@@ -524,7 +524,7 @@ export function Composer(props: ComposerProps) {
     // the person removes or replaces the failed upload.
     if(uploads.some(u=>Boolean(u.error))){
       clearPendingDictation();
-      setSendNotice('Dictation not sent — clear the failed attachment, then send.');
+      setSendNotice('Dictation not sent · clear the failed attachment, then send.');
       return;
     }
     if(attachPending||imageIngestingRef.current>0)return;
