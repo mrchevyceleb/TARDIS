@@ -1385,7 +1385,12 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
     const baselineWords = safePrevious.trim() ? countWords(safePrevious) : 0;
     const tightenTarget = Math.floor(COMPACT_TARGET_CEILING_WORDS * 0.7);
     if (baselineWords > COMPACT_TARGET_CEILING_WORDS) {
-      userContent = `${userContent}\n\nThe previous document is ${baselineWords} words, over the hard ${COMPACT_TARGET_CEILING_WORDS}-word cap. Prune while merging: drop closed, finished or superseded work; replace reversed decisions with the current one; always keep open commitments, decisions in force, standing rules and stated preferences. The replacement must stay under ${COMPACT_TARGET_CEILING_WORDS} words — aim for about ${tightenTarget}.`;
+      // Step down (Sam's real-fold check, Oct 17): one fold cutting an 8k-word
+      // document to 4k drops keep-list items or overshoots; each fold cuts
+      // about 20% and the document converges under the cap over a few folds.
+      // The aim is the step target, never below the steady aim.
+      const stepTarget = Math.max(tightenTarget, Math.floor(baselineWords * 0.8));
+      userContent = `${userContent}\n\nThe previous document is ${baselineWords} words, over the hard ${COMPACT_TARGET_CEILING_WORDS}-word cap. Prune while merging: drop closed, finished or superseded work; replace reversed decisions with the current one. NEVER drop open commitments, decisions in force, standing rules or stated preferences to make a length target — cut further only where the aged turns show work is closed or superseded. This fold: aim for about ${stepTarget} words (the document converges under ${COMPACT_TARGET_CEILING_WORDS} over the next few folds).`;
     } else {
       userContent = `${userContent}\n\nThe replacement must stay under the hard ${COMPACT_TARGET_CEILING_WORDS}-word cap — aim for about ${tightenTarget} words.`;
     }
@@ -1444,7 +1449,19 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
   const words = countWords(compact);
   if (!words) throw new Error('compact generation came back empty — will retry');
   if (!opts?.rebuild && words > COMPACT_TARGET_CEILING_WORDS) {
-    throw new Error(`compact writer came back over the ${COMPACT_TARGET_CEILING_WORDS}-word hard cap (${words} words) — will retry`);
+    // Step down, not a cliff (Sam's real-fold check, Oct 17): live documents
+    // sit at 4-8.5k words, and demanding the full cut in one fold makes the
+    // writer overshoot, drop keep-list items (the checker rejects it) or
+    // give up — the fold fails and, with backoff, the lane stops updating.
+    // A fold over the cap is accepted when it is at least 15% smaller than
+    // the previous document: big documents converge under the cap over a
+    // few folds, the checker still guards every dropped rule, and a fold
+    // that neither fits nor shrinks fails as before. A first document (no
+    // previous) must fit the cap outright.
+    const prevWords = safePrevious.trim() ? countWords(safePrevious) : 0;
+    if (!prevWords || words > Math.floor(prevWords * 0.85)) {
+      throw new Error(`compact writer came back over the ${COMPACT_TARGET_CEILING_WORDS}-word hard cap (${words} words, previous ${prevWords}) — will retry`);
+    }
   }
   // Check pass (card-0a3653, the small version, Max Oct 17): a different
   // model — Gemini 4 Argon at high effort through the OpenRouter route the
