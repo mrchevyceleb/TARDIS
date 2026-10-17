@@ -51,9 +51,8 @@ import { listCommitments } from '../lib/commitmentStore.ts';
  *  ~1.5k-token durable-facts section; at 16k a full fold can hit the cap,
  *  which rolls the fold back and repeats every turn end. */
 const COMPACT_MAX_TOKENS = 32_000;
-/** The hard ceiling (Max's cap calls, Oct 17): the writer is told to stay
- *  under it. Above the ceiling a fold only has to be smaller than the last,
- *  never larger; under it a fold saves whenever the checker approves. The
+/** The hard ceiling (Max's cap calls, Oct 17): instruction-only — the
+ *  writer is told to stay under it, but no fold ever refuses on length. The
  *  6,000 call sat below the checker-approved documents (post-cut folds
  *  landed at 6,286-7,296), so the ceiling is 8,000, the writer still aiming
  *  at 5,000. */
@@ -1383,14 +1382,13 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
     userContent = `${userContent}\n\nThese turns are OLDER than the head document: they add history and never override it. Restore and keep the head's substance; fold them in without pruning.`;
   } else {
     // Ceiling instruction, never a refusal: a refused fold retries the same
-    // batch forever (the Oct 13-14 freeze). A baseline over the ceiling is
-    // told to cut under it. The guard below quietly accepts a fold that only
-    // steps down from an over-ceiling baseline, and that acceptance is
-    // deliberately never stated to the writer: across three shas of fold
-    // evidence (Oct 17) any stated acceptance made the writer stop cutting
-    // and grow the document, while the hard wording reliably cut. The aim
-    // sits under the ceiling (Max's cap call, Oct 17) because the earlier
-    // 2,800-word aim dropped keep-list items the checker then rejected.
+    // batch forever (the Oct 13-14 freeze), and no fold ever refuses on
+    // length (Max, Oct 17) — the writer grows a document 5-10% per fold
+    // whatever the aim, so a length refusal stalls the lane at the ceiling.
+    // A baseline over the ceiling is told to cut under it; the hard wording
+    // reliably cut across three shas of fold evidence (Oct 17), and the aim
+    // sits under the ceiling because the earlier 2,800-word aim dropped
+    // keep-list items the checker then rejected.
     const baselineWords = safePrevious.trim() ? countWords(safePrevious) : 0;
     if (baselineWords > COMPACT_TARGET_CEILING_WORDS) {
       userContent = `${userContent}\n\nThe previous document is ${baselineWords} words, over the hard ${COMPACT_TARGET_CEILING_WORDS}-word ceiling. Prune while merging: drop closed, finished or superseded work; replace reversed decisions with the current one. NEVER drop open commitments, decisions in force, standing rules or stated preferences to make a length target; cut further only where the aged turns show work is closed or superseded. The replacement must stay under ${COMPACT_TARGET_CEILING_WORDS} words — aim for about ${COMPACT_WRITER_AIM_WORDS}.`;
@@ -1451,23 +1449,12 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
   // keep).
   const words = countWords(compact);
   if (!words) throw new Error('compact generation came back empty — will retry');
-  if (!opts?.rebuild && words > COMPACT_TARGET_CEILING_WORDS) {
-    // Smaller while over the ceiling (Max's cap calls, Oct 17): the 6,000
-    // ceiling sat below the checker-approved documents (post-cut folds landed
-    // at 6,286-7,296), so the ceiling is 8,000. While the previous document
-    // sits over the ceiling, a fold is accepted only if it is smaller than
-    // the previous one, never larger; under the ceiling a fold saves whenever
-    // the checker approves. Big documents converge under the ceiling over a
-    // few folds, the checker still guards every dropped rule, and a fold that
-    // neither fits nor shrinks fails as before. A first document (no previous)
-    // must fit the ceiling outright, and a document already under the
-    // ceiling can never fold back over it.
-    const prevWords = safePrevious.trim() ? countWords(safePrevious) : 0;
-    const steppedDown = prevWords > COMPACT_TARGET_CEILING_WORDS && words < prevWords;
-    if (!prevWords || !steppedDown) {
-      throw new Error(`compact writer came back over the ${COMPACT_TARGET_CEILING_WORDS}-word ceiling (${words} words, previous ${prevWords}) without stepping down from it; will retry`);
-    }
-  }
+  // No refusal on length (Max, Oct 17): the writer grows a document 5-10%
+  // per fold whatever the aim, so a length refusal stalls the lane at the
+  // ceiling — every retry climbs back over it — while live's never-refuse
+  // bound still shrank the big lanes (8,705 to 7,892 with no enforcement).
+  // The ceiling is instruction-only: the hard wording cuts, and the check
+  // pass below guards content, never length.
   // Check pass (card-0a3653, the small version, Max Oct 17): a different
   // model — Gemini 4 Argon at high effort through the OpenRouter route the
   // openrouter lane already uses — can only APPROVE or REJECT: approve saves
