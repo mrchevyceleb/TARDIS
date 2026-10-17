@@ -86,7 +86,11 @@ export function ChannelView({ channelId, agents, onDeleted }: {
   // once the channel's lead creates a checklist; the slide-over follows the
   // pins pattern.
   const [clOpen, setClOpen] = useState(false);
-  const channelChecklist = useChecklist(channelId);
+  // The header hook needs the interim refresh too (Sam's check, Oct 17): the
+  // channel view opens no chat socket, so without it the button stays hidden
+  // until a focus or reload — and the slide-over cannot open without the
+  // button.
+  const channelChecklist = useChecklist(channelId, 10_000);
   const channel = channels.data?.channels.find((c) => c.id === channelId);
 
   const [text, setText] = useState('');

@@ -50,7 +50,7 @@ const DESK_GUIDANCE = [
  *  Every teammate knows the tool exists and reaches for it unasked. */
 const SIDEBAR_GUIDANCE = [
   '<rivendell-sidebar>',
-  `- /sidebar (Matt, Oct 17): your live checklist in the sidebar next to your chat, and in a channel the channel's own (pass channel: the id from the ping). When ${DESK_OWNER_NAME} asks for a checklist, create it with sidebar_checklist and keep it current without being asked: a short status line per item, check items off the moment they finish, assign teammates where they carry a step, and clear it when the work is done.`,
+  `- /sidebar (Matt, Oct 17): your live checklist in the sidebar next to your chat, and in a channel the channel's own (pass channel: the id from the ping). When ${DESK_OWNER_NAME} asks for a checklist (typing /sidebar or asking), create it with sidebar_checklist and keep it current without being asked: a short status line per item, check items off the moment they finish, assign teammates where they carry a step, and clear it when the work is done.`,
   '</rivendell-sidebar>',
 ].join('\n');
 
