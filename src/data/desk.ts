@@ -179,23 +179,28 @@ export const FIRST_OPEN_REF: DeskRef = { kind: 'todo', id: DESK_FIRST_OPEN };
 const DEEP_LINK_ID = /^(card|todo)-[a-z0-9][a-z0-9_-]{0,78}$/i;
 
 /** `?desk=<todoId>` or `?desk=open` (a phone push opens these). Anything that
- *  is not a Desk id just opens the Desk. */
+ *  is not a Desk id just opens the Desk. A landing link that also carries
+ *  ?board (e.g. ?desk=open&board) wants the Board tab, not a Needs-you
+ *  focus: no ref, so no focus event forces the Home tab over the Board the
+ *  Desk chose from the board param (the room itself still opens). */
 export function parseDeskDeepLink(url: URL): DeskRef | null {
   const raw = url.searchParams.get('desk');
   if (raw === null) return null;
+  if (url.searchParams.has('board')) return null;
   const value = raw.trim();
   if (!DEEP_LINK_ID.test(value)) return FIRST_OPEN_REF;
   return { kind: value.toLowerCase().startsWith('card-') ? 'card' : 'todo', id: value };
 }
 
-/** The page's own deep link, with the param stripped so a reload or a copied
+/** The page's own deep link, with the params stripped so a reload or a copied
  *  URL does not repeat it. */
 export function takeDeskDeepLink(): DeskRef | null {
   let url: URL;
   try { url = new URL(window.location.href); } catch { return null; }
+  if (url.searchParams.get('desk') === null) return null;
   const ref = parseDeskDeepLink(url);
-  if (!ref) return null;
   url.searchParams.delete('desk');
+  url.searchParams.delete('board');
   try { window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`); } catch { /* sandboxed */ }
   return ref;
 }

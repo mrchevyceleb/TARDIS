@@ -51,20 +51,33 @@ import {
 } from './deskParts';
 import { DeskBoard } from './DeskBoard';
 import { DeskCardDrawer } from './DeskCardDrawer';
+import { DeskTeamView } from './DeskTeamView';
 import './desk.css';
 
 type Tab = 'home' | 'board';
 const TAB_KEY = 'rivendell:desk-tab';
+/** The board tab's style: the team view is the default (Matt, Oct 17: one
+ *  glance per team), the column board stays one click away. */
+type BoardStyle = 'team' | 'columns';
+const BOARD_STYLE_KEY = 'rivendell:desk-board-style';
 
 export function Desk() {
   const desk = useDesk();
   const agents = useDeskAgents();
   // The shell's summary poll says whether this server takes answers yet.
   const answerable = useDeskSummary(false).data?.answerable === true;
-  const [tab, setTab] = useState<Tab>(() => (localStorage.getItem(TAB_KEY) === 'board' ? 'board' : 'home'));
+  const [tab, setTab] = useState<Tab>(() => {
+    // A desk deep link carrying ?board (e.g. ?desk=open&board) lands straight
+    // on the Board tab's team view, so a shared look URL opens where the
+    // reader expects instead of an unrelated chat.
+    if (new URLSearchParams(window.location.search).has('board')) return 'board';
+    return localStorage.getItem(TAB_KEY) === 'board' ? 'board' : 'home';
+  });
+  const [boardStyle, setBoardStyle] = useState<BoardStyle>(() => (localStorage.getItem(BOARD_STYLE_KEY) === 'columns' ? 'columns' : 'team'));
   const [openCardId, setOpenCardId] = useState<string | null>(null);
   const [flash, setFlash] = useState<{ id: string; at: number } | null>(null);
   useEffect(() => { localStorage.setItem(TAB_KEY, tab); }, [tab]);
+  useEffect(() => { localStorage.setItem(BOARD_STYLE_KEY, boardStyle); }, [boardStyle]);
 
   const data = desk.data;
 
@@ -73,6 +86,10 @@ export function Desk() {
   // A reference missing from a snapshot older than the click is re-fetched
   // before it is called gone (an agent may have just created it).
   const [focusReq, setFocusReq] = useState<{ ref: DeskRef; at: number } | null>(() => {
+    // A landing link carrying ?board (e.g. ?desk=open&board) wants the
+    // Board tab's team view, not the Needs-you focus: the room landing is
+    // all it asks for, and the focus resolution would force the Home tab.
+    if (new URLSearchParams(window.location.search).has('board')) return null;
     const ref = peekDeskFocus();
     return ref ? { ref, at: Date.now() } : null;
   });
@@ -171,7 +188,22 @@ export function Desk() {
               <PeopleRows desk={data} agents={agents} onOpenCard={setOpenCardId} />
             </>
           )
-          : <DeskBoard desk={data} agents={agents} onOpenCard={setOpenCardId} />
+          : boardStyle === 'team'
+            ? (
+              <>
+                <DeskTeamView desk={data} agents={agents} onOpenCard={setOpenCardId} onShowBoard={() => setBoardStyle('columns')} />
+              </>
+            )
+            : (
+              <>
+                <div className="desk-team head-row">
+                  <button type="button" className="desk-team-board" onClick={() => setBoardStyle('team')} title="Back to the team view">
+                    <LayoutGrid size={13} /> Team view
+                  </button>
+                </div>
+                <DeskBoard desk={data} agents={agents} onOpenCard={setOpenCardId} />
+              </>
+            )
       ) : null}
 
       {openCard && data ? (
