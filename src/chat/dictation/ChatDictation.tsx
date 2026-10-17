@@ -63,7 +63,7 @@ export function ChatDictation({chatId,onText,onActive,onComplete,onDiscard}:{cha
  const retry=async()=>{failure.current=false;setError('');if(!record.current){update('idle');return;}try{for(const section of unsaved.current)await saveSection({...record.current},section);unsaved.current=[];if(microphone.current)await pump();else await finish(sendIntent.current);}catch(e){report(e);}};
  const discard=async()=>{callbacks.current.onDiscard();failure.current=true;controller.current?.abort();await stopCapture();await saving.current;while(working.current)await new Promise(resolve=>setTimeout(resolve,100));if(record.current)await clearRecording(record.current);record.current=undefined;unsaved.current=[];setError('');setNotice('');update('idle');};
  const start=async()=>{
-  update('starting');setError('');setNotice('');setSeconds(0);setProcessed(0);processing.current=0;failure.current=false;stopping.current=false;inserted.current=false;stopped.current=Promise.resolve();
+  update('starting');setError('');setNotice('');setSeconds(0);setProcessed(0);processing.current=0;failure.current=false;stopping.current=false;inserted.current=false;stopped.current=Promise.resolve();sendIntent.current=true;setFinishingSend(true);
   let pendingMic:ReturnType<typeof capture>|undefined;
   try {
    const r={scope:scope.current,id:crypto.randomUUID(),next:0,updatedAt:Date.now()};record.current=r;

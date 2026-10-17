@@ -165,6 +165,13 @@ export function Composer(props: ComposerProps) {
   // and the send button all read this single derivation, so they can never
   // drift on what "an upload is still running" means (review 1 P1).
   const uploading = uploads.some((u) => !u.error);
+  // One attach gate (review 2, verify regression): everything that must wait
+  // for attachments — submit, the auto-send effect, the ready/steer/stop
+  // button states, the tray, the waiting chip — reads this single
+  // derivation, so the image-conversion state can never drift from the
+  // upload state again. The ref covers conversions begun this tick, before
+  // the state commits.
+  const attachPending = uploading || imageIngesting > 0;
   const [phIdx, setPhIdx] = useState(0);
   const [dictating,setDictating]=useState(false);
   const [dictationOutcomeVersion,setDictationOutcomeVersion]=useState(0);
@@ -180,6 +187,11 @@ export function Composer(props: ComposerProps) {
     const next=current.trim()?`${current.trimEnd()}\n\n${dictated}`:dictated;
     if ( latest.current.mentionMembers?.length ) setCaret(next.length);
     latest.current.onChange(next);
+    // Write the DOM value in the same tick as the append (review 2 P2): the
+    // completion snapshot reads the DOM, and if the controlled re-render has
+    // not committed yet, a snapshot taken before it would read the pre-
+    // dictation draft and silently cancel the auto-send as a mismatch.
+    if (taRef.current) taRef.current.value = next;
     taRef.current?.focus();
     // A new dictation supersedes any waiting auto-send: its text is already
     // in the draft, and its own completion re-arms the send.
@@ -400,20 +412,14 @@ export function Composer(props: ComposerProps) {
     const imgs = payload();
     const refs = (props.refCount ?? 0) > 0;
     const hasLiveContent = Boolean(v || imgs?.length || refs);
-    // A direct image is not part of the payload until fileToImage completes.
-    // Block both manual and automatic submission while that conversion is in
-    // flight so the image cannot arrive as a surprise second message.
-    if(imageIngesting>0||imageIngestingRef.current>0){
-      if(props.busy&&allowStop&&!hasLiveContent)props.onStop?.();
-      return false;
-    }
-    // A streaming upload is still writing its file; its path line is not in
-    // the draft yet, so sending or steering now would drop it. An explicit
-    // Stop tap on an empty draft still interrupts the running agent (it
-    // sends nothing), so an in-flight upload never locks the person out of
+    // A direct image is not part of the payload until fileToImage completes;
+    // a streaming upload is still writing its file. One gate covers both
+    // (attachPending above): neither can be sent past, and an explicit Stop
+    // tap on an empty draft still interrupts the running agent (it sends
+    // nothing), so an in-flight attachment never locks the person out of
     // Stop (review 1).
-    if (uploading) {
-      if (props.busy && allowStop && !hasLiveContent) props.onStop?.();
+    if(attachPending||imageIngestingRef.current>0){
+      if(props.busy&&allowStop&&!hasLiveContent)props.onStop?.();
       return false;
     }
     // While the backend still owns a turn, any text OR image is queued guidance.
@@ -494,8 +500,7 @@ export function Composer(props: ComposerProps) {
       setSendNotice('Dictation not sent — clear the failed attachment, then send.');
       return;
     }
-    if(imageIngesting>0||imageIngestingRef.current>0)return;
-    if(uploading)return;
+    if(attachPending||imageIngestingRef.current>0)return;
     // The waiting send fires only on the draft the person last saw complete:
     // uploads may append path lines, but any other change means they kept
     // typing, so the auto-send stands down and the text waits for an explicit
@@ -585,16 +590,16 @@ export function Composer(props: ComposerProps) {
   const trimmed = props.value.trim();
   const refCount = props.refCount ?? 0;
   const hasContent = trimmed.length > 0 || images.length > 0 || refCount > 0;
-  const ready = hasContent && !props.busy && !uploading;
+  const ready = hasContent && !props.busy && !attachPending;
   // Text and image-only drafts both queue safely. An attached image must never
   // leave the button in destructive Stop mode.
-  const canSteer = props.busy && hasContent && !uploading && Boolean(props.onSteer);
+  const canSteer = props.busy && hasContent && !attachPending && Boolean(props.onSteer);
   // Stop is shown exactly when a tap really stops: an empty-draft Stop still
   // interrupts while an upload streams, but with draft content the tap is
   // gated (the path line is not in the draft yet), so the button must not
   // promise Stop then. The upload chip carries that state instead. A busy
   // composer with no onStop handler renders Send, never a no-op Stop.
-  const stopLive = props.busy && Boolean(props.onStop) && !canSteer && !(uploading && hasContent);
+  const stopLive = props.busy && Boolean(props.onStop) && !canSteer && !(attachPending && hasContent);
 
   const sendBtn = (extraClass = '') => (
     <button
@@ -680,7 +685,7 @@ export function Composer(props: ComposerProps) {
   // A completed dictation waiting on uploads is visible and cancellable: it
   // sends itself the moment the last upload settles, so the send slot says
   // so until then (review 1 P0).
-  const pendingSendChip = pendingSendArmed && (uploading || imageIngesting > 0) ? (
+  const pendingSendChip = pendingSendArmed && attachPending ? (
     <button
       type="button"
       className="queue-chip on"
@@ -778,7 +783,7 @@ export function Composer(props: ComposerProps) {
       {props.chatId && props.robotControl !== false && <RobotControl />}
       {props.attachMenu}
       <div
-        className={`composer${images.length > 0 || refCount > 0 || uploads.length > 0 ? ' has-attach' : ''}${dictating ? ' dictating' : ''}`}
+        className={`composer${images.length > 0 || refCount > 0 || uploads.length > 0 || imageIngesting > 0 ? ' has-attach' : ''}${dictating ? ' dictating' : ''}`}
         onDragOver={(e) => {
           if (acceptImages && Array.from(e.dataTransfer.types).includes('Files')) {
             e.preventDefault();
@@ -808,7 +813,7 @@ export function Composer(props: ComposerProps) {
         {sendNotice ? (
           <small role="status" className="dictation-notice composer-send-note">{sendNotice}</small>
         ) : null}
-        {images.length > 0 || refCount > 0 || uploads.length > 0 ? (
+        {images.length > 0 || refCount > 0 || uploads.length > 0 || imageIngesting > 0 ? (
           <div className={`attach-tray${refCount > 0 ? ' has-refs' : ''}`}>
             {refCount > 0 ? props.refChips : null}
             {imageIngesting > 0 ? (
