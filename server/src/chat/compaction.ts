@@ -694,8 +694,9 @@ function takeOverflowBatch(overflow: VisibleTurn[]): VisibleTurn[] {
 const COMPACT_SYSTEM = `You are the memory keeper for a long-running AI-teammate conversation. You write the ONE rolling memory document that lets the thread continue FOREVER. Each time you run, you REPLACE the previous document entirely (never append a new primer).
 
 Rules for the document you produce:
-- LENGTH: keep the previous document's substance and fold in the new aged-out turns. Do not pad. Do not invent. Target 2500–4000 words only when the combined history actually supports that density; a short overflow should produce a modest update. Stay under the cap: the document plus the durable-facts section must fit in one output, so never run long.
-- Capture: every decision made (and why), every open task and its state, every fact about people/projects/systems mentioned, every commitment or promise, every preference expressed, every technical detail that mattered (paths, models, endpoints, prices, IDs), and the current state of play.
+- LENGTH: the document must never exceed 4000 words — a hard cap, not a target. Merge the new aged-out turns into the previous document, and PRUNE while merging: drop any item the aged turns show is closed, shipped, finished, cancelled or superseded, and drop detail whose only remaining value is historical (the transcript can bring it back when it matters). Do not pad. Do not invent. A short history should produce a short document.
+- Capture: the CURRENT standing state — every decision as it now stands (and why), every open task and its state, every fact about people/projects/systems mentioned, every commitment or promise, every preference expressed, every technical detail that mattered (paths, models, endpoints, prices, IDs), and the current state of play.
+- NEWER WINS: when the aged turns change or reverse an earlier decision, the newer statement REPLACES the old one. Never keep both a decision and its reversal; the document shows only the decision now in force, with its reason.
 - Organize with clear headings (## ...) so it can be indexed: Overview / People & Projects / Decisions / Open Work / Facts & References / Preferences & Style / Current State.
 - Write in third person, past tense, no fluff, no meta commentary. Never invent content that is not in the previous document or the aged-out turns.
 - PLAIN ENGLISH: complete sentences, normal spacing between words, no telegraphic fragments. No internal codes or hashes in the prose: no commit SHAs, card or ticket IDs, PR numbers, or jargon shorthand. Describe the work in words (what changed, where, who owns it) so any reader can follow it without the internal tracker. A genuinely load-bearing name (a file path, a machine name) may stay, but keep those rare. IDs a teammate needs to act on (card, PR or commitment IDs, a pinned commit) go only in the Facts & References section as a short list, never in the prose.
@@ -1141,6 +1142,70 @@ async function saveDurableFacts(
  *  keeps the defaults. */
 const COMPACT_GENERATION_AGENT = new Agent({ headersTimeout: 900_000, bodyTimeout: 900_000 });
 
+/** One undici agent for the compaction check call: a full check reads the new
+ *  document plus both sources, and can run as long as a generation. */
+const COMPACT_CHECK_AGENT = new Agent({ headersTimeout: 900_000, bodyTimeout: 900_000 });
+
+/** The check model (card-0a3653): a different model from the writer — Gemini
+ *  4 Argon at high effort — through the OpenRouter route the openrouter
+ *  engine lane already uses (runner.ts): same base URL and key precedence. */
+const COMPACT_CHECK_MODEL = process.env.RIVENDELL_COMPACT_CHECK_MODEL?.trim() || 'google/gemini-4-argon';
+
+/** The check prompt: strike unsupported or contradicted claims, keep
+ *  everything else verbatim, return the document only. */
+const COMPACT_CHECK_SYSTEM = `You are the fact checker for one agent's rolling memory document. You receive the new document, the previous document it replaces, and the aged turns it folded in. Strike (delete) any claim in the new document that the sources do not support, and any claim a newer turn contradicts. Keep everything else exactly as written: do not rewrite style, do not add anything, do not summarize, do not merge. Return the cleaned document text only, same structure. If every claim is supported, return the document unchanged.`;
+
+/** The check pass over a generated document. The cleaned document is
+ *  returned and saved; the caller lets the previous document stand only when
+ *  the check errors or returns garbage (empty or unusable text) — one bad
+ *  line never throws out the whole update (Max, Oct 17). */
+async function checkCompact(compact: string, previous: string, overflowText: string): Promise<string> {
+  const base = process.env.RIVENDELL_OPENROUTER_ANTHROPIC_BASE_URL?.trim() || 'https://openrouter.ai/api';
+  const key = process.env.RIVENDELL_OPENROUTER_API_KEY?.trim() || process.env.OPENROUTER_API_KEY?.trim() || '';
+  if (!key) throw new Error('compact check unavailable: no OpenRouter key (RIVENDELL_OPENROUTER_API_KEY / OPENROUTER_API_KEY) — will retry');
+  const user = [
+    'Previous rolling memory document (the new one replaces it):',
+    '',
+    previous.trim() || '(none — this is the first document)',
+    '',
+    '---',
+    '',
+    'Aged-out turns the new document folded in:',
+    '',
+    overflowText,
+    '',
+    '---',
+    '',
+    'New document to check:',
+    '',
+    compact,
+  ].join('\n');
+  const res = await undiciFetch(`${base.replace(/\/$/, '')}/v1/messages`, {
+    method: 'POST',
+    dispatcher: COMPACT_CHECK_AGENT,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${key}`,
+    },
+    // The same effort shape the claude binary sends the OpenRouter Anthropic
+    // skin (captured 2026-10-06): output_config.effort with adaptive
+    // thinking. OpenRouter maps it onto the model's own reasoning effort.
+    body: JSON.stringify({
+      model: COMPACT_CHECK_MODEL,
+      max_tokens: COMPACT_MAX_TOKENS,
+      system: COMPACT_CHECK_SYSTEM,
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high' },
+      messages: [{ role: 'user', content: user }],
+    }),
+  });
+  if (!res.ok) throw new Error(`compact check failed: ${res.status} ${(await res.text()).slice(0, 200)} — will retry`);
+  const body = (await res.json()) as { content?: Array<{ type?: string; text?: string }> };
+  const text = (body.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text ?? '').join('\n').trim();
+  if (!text) throw new Error('compact check returned no text — will retry');
+  return redactSecrets(text);
+}
+
 async function generateCompact(previous: string, overflow: VisibleTurn[], maxTokens = COMPACT_MAX_TOKENS): Promise<{ compact: string; words: number; facts: DurableFact[] }> {
   // Redact BEFORE sending the prompt to the compaction provider, then redact
   // the generated document again before it touches local disk or RAG.
@@ -1151,15 +1216,13 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
     ? `Previous rolling memory document (REPLACE this entirely with an updated version — do not stack primers):\n\n${safePrevious}\n\n---\n\nAged-out turns that just left the last-${WINDOW_TURNS} working window. Merge them in:\n\n${overflowText}`
     : `Turns older than the last-${WINDOW_TURNS} working window. Write the first rolling memory document:\n\n${overflowText}`;
 
-  // Soft size bound, never a refusal: a refused fold retries the same batch
-  // forever (the Oct 13-14 freeze). A baseline past the bound is told to stay
-  // under it, so the document can never grow toward the generation ceiling.
-  // The bound sits well above the thin guard's floor (85% of the 4000-word
-  // target), so a compliant tightened document is never read as thin.
-  const sizeBoundWords = COMPACT_TARGET_CEILING_WORDS + 500;
+  // Hard cap instruction, never a refusal: a refused fold retries the same
+  // batch forever (the Oct 13-14 freeze). A baseline over the hard cap is
+  // told to prune to it; the returned document is enforced against the same
+  // number below, so instruction and guard can never disagree.
   const baselineWords = safePrevious.trim() ? safePrevious.trim().split(/\s+/).length : 0;
-  if (baselineWords > sizeBoundWords) {
-    userContent = `${userContent}\n\nThe previous document is ${baselineWords} words, past the length target. Tighten while merging: the replacement must stay under ${sizeBoundWords} words. Compress older detail first; keep open commitments, decisions, and standing rules.`;
+  if (baselineWords > COMPACT_TARGET_CEILING_WORDS) {
+    userContent = `${userContent}\n\nThe previous document is ${baselineWords} words, over the hard ${COMPACT_TARGET_CEILING_WORDS}-word cap. Prune while merging: drop closed, finished or superseded work; replace reversed decisions with the current one; the replacement must not exceed ${COMPACT_TARGET_CEILING_WORDS} words.`;
   }
 
   // Unpredictable per-pass sentinel: hand the model the exact marker line to
@@ -1179,6 +1242,12 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
       model: 'grok-4.7',
       max_tokens: maxTokens,
       system: COMPACT_SYSTEM,
+      // Writer effort (card-0a3653, Matt, Oct 17): xhigh on the Anthropic-
+      // compatible endpoint — probed 2026-10-17, xAI accepts it for grok-4.7
+      // (HTTP 200 on the exact shape below; the claude binary's captured
+      // output_config + adaptive thinking).
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'xhigh' },
       messages: [{ role: 'user', content: userContent }],
     }),
   });
@@ -1198,14 +1267,33 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
   // split only happens for a valid terminal bare-JSON section: a marker that
   // survived from summarized user content stays literal document text.
   const { compact, facts } = splitDurableFacts(redactSecrets(generated), sentinel);
-  const words = compact ? compact.split(/\s+/).length : 0;
+  // Check pass (card-0a3653): a different model (Gemini 4 Argon at high
+  // effort through the OpenRouter route the openrouter lane already uses)
+  // compares the new document against the aged turns plus the previous
+  // document and strikes any claim they do not support or that a newer turn
+  // contradicts. The cleaned document is what lands; the previous document
+  // stands only when the check errors or returns garbage, so a lying line
+  // never throws out the whole update and a stale summary never sticks.
+  const checked = await checkCompact(compact, safePrevious, overflowText);
+  const words = checked ? checked.split(/\s+/).length : 0;
   const prevWords = safePrevious.trim() ? safePrevious.trim().split(/\s+/).length : 0;
   const overflowWordEst = Math.max(1, Math.floor(overflowChars(safeOverflow) / 5));
+  // The thin guard's floor: a tightening pass (the baseline was over the
+  // hard cap) legitimately prunes hard, so its floor sits at half the cap;
+  // otherwise the floor keeps a runaway shrink from replacing the document
+  // (85% of the smaller of the previous and the cap).
   const minWords = prevWords
-    ? Math.max(80, Math.floor(Math.min(prevWords, COMPACT_TARGET_CEILING_WORDS) * 0.85))
+    ? Math.max(80, Math.floor(
+        prevWords > COMPACT_TARGET_CEILING_WORDS
+          ? COMPACT_TARGET_CEILING_WORDS * 0.5
+          : Math.min(prevWords, COMPACT_TARGET_CEILING_WORDS) * 0.85,
+      ))
     : Math.max(80, Math.min(MIN_ACCEPT_WORDS, overflowWordEst));
+  if (words > COMPACT_TARGET_CEILING_WORDS) {
+    throw new Error(`compact came back over the ${COMPACT_TARGET_CEILING_WORDS}-word hard cap (${words} words) — will retry`);
+  }
   if (words < minWords) throw new Error(`compact came back thin (${words} words < ${minWords}) — will retry`);
-  return { compact, words, facts };
+  return { compact: checked, words, facts };
 }
 
 export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> {
