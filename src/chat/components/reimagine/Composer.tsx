@@ -161,11 +161,18 @@ export function Composer(props: ComposerProps) {
   const [uploads, setUploads] = useState<PendingUpload[]>([]);
   const [queueArmed, setQueueArmed] = useState(false);
   const uploadAborts = useRef(new Map<string, () => void>());
+  // One shared in-flight-upload gate: submit, the dictation auto-send effect
+  // and the send button all read this single derivation, so they can never
+  // drift on what "an upload is still running" means (review 1 P1).
+  const uploading = uploads.some((u) => !u.error);
   const [phIdx, setPhIdx] = useState(0);
   const [dictating,setDictating]=useState(false);
   const [dictationOutcomeVersion,setDictationOutcomeVersion]=useState(0);
-  const pendingDictation=useRef<{chatId:string;completed:boolean}|null>(null);
+  const [pendingSendArmed,setPendingSendArmed]=useState(false);
+  const [sendNotice,setSendNotice]=useState('');
+  const pendingDictation=useRef<{chatId:string;completed:boolean;text:string}|null>(null);
   const latest=useRef(props);latest.current=props;
+  const clearPendingDictation=()=>{pendingDictation.current=null;setPendingSendArmed(false);};
   const queueDictation=(text:string)=>{
     const dictated=text.trim();
     if(!dictated)return;
@@ -174,15 +181,27 @@ export function Composer(props: ComposerProps) {
     if ( latest.current.mentionMembers?.length ) setCaret(next.length);
     latest.current.onChange(next);
     taRef.current?.focus();
-    pendingDictation.current={chatId:latest.current.chatId??'',completed:false};
+    // A new dictation supersedes any waiting auto-send: its text is already
+    // in the draft, and its own completion re-arms the send.
+    setPendingSendArmed(false);
+    pendingDictation.current={chatId:latest.current.chatId??'',completed:false,text:next};
   };
   const completeDictation=()=>{
     if(pendingDictation.current){
       pendingDictation.current.completed=true;
+      // The waiting send is bound to the draft as the person last saw it
+      // complete. Uploads may append path lines to this snapshot; nothing
+      // else may (review 1 P0).
+      pendingDictation.current.text=taRef.current?.value??latest.current.value;
+      setPendingSendArmed(true);
       setDictationOutcomeVersion(v=>v+1);
     }
   };
-  const discardDictation=()=>{pendingDictation.current=null;};
+  // ChatDictation discards come from a session that never completed (no
+  // speech heard, mic disconnect, explicit abandon). A completed send that
+  // is waiting on uploads is cancelled only through its own chip, so a
+  // later no-speech session cannot kill an earlier waiting send.
+  const discardDictation=()=>{if(pendingDictation.current?.completed)return;clearPendingDictation();};
 
   // grok.com rotates the empty-composer placeholder every few seconds.
   const phrases = props.placeholders;
@@ -199,6 +218,11 @@ export function Composer(props: ComposerProps) {
     const iv = window.setInterval(() => setPhIdx((i) => (i + 1) % phrases.length), 6000);
     return () => window.clearInterval(iv);
   }, [phrases]);
+  useEffect(() => {
+    if (!sendNotice) return;
+    const t = window.setTimeout(() => setSendNotice(''), 6000);
+    return () => window.clearTimeout(t);
+  }, [sendNotice]);
 
   const matches = useMemo(() => {
     const m = /^\/([a-z]*)$/.exec(props.value);
@@ -276,6 +300,7 @@ export function Composer(props: ComposerProps) {
               next.push(img);
               inlineCount += 1;
               inlineBytes += f.size;
+              continue;
             }
           } catch (error) {
             setUploads((prev) => [...prev, {
@@ -285,8 +310,8 @@ export function Composer(props: ComposerProps) {
               progress:0,
               error:error instanceof Error?error.message:'Image could not be read',
             }]);
+            continue;
           }
-          continue;
         }
         void uploadFile(f);
       }
@@ -298,12 +323,15 @@ export function Composer(props: ComposerProps) {
       }
     }
   };
-  const removeImage = (id: string) =>
+  const removeImage = (id: string) => {
+    // Removing an attachment edits the message the waiting send would carry.
+    if (pendingDictation.current?.completed) clearPendingDictation();
     setImages((prev) => {
       const t = prev.find((i) => i.id === id);
       if (t) URL.revokeObjectURL(t.previewUrl);
       return prev.filter((i) => i.id !== id);
     });
+  };
   const uploadFile = (f: File) => {
     const id = `up${Math.random().toString(36).slice(2, 8)}`;
     setUploads((prev) => [...prev, { id, name: f.name, size: f.size, progress: 0 }]);
@@ -325,6 +353,9 @@ export function Composer(props: ComposerProps) {
         const next = cur ? `${cur.trimEnd()}\n${line}` : line;
         if (latest.current.mentionMembers?.length) setCaret(next.length);
         props.onChange(next);
+        // An upload finishing after dictation completion may extend the
+        // waiting send's snapshot with its path line — and nothing else.
+        if (pendingDictation.current?.completed) pendingDictation.current.text = next;
       },
       (error) => {
         uploadAborts.current.delete(id);
@@ -333,6 +364,9 @@ export function Composer(props: ComposerProps) {
     );
   };
   const removeUpload = (id: string) => {
+    // Dismissing an in-flight chip aborts the upload the waiting send was
+    // waiting for: the send stands down too.
+    if (pendingDictation.current?.completed) clearPendingDictation();
     uploadAborts.current.get(id)?.();
     uploadAborts.current.delete(id);
     setUploads((prev) => prev.filter((u) => u.id !== id));
@@ -356,8 +390,8 @@ export function Composer(props: ComposerProps) {
       return [];
     });
 
-  const submit = (allowStop = false) => {
-    if(dictating)return;
+  const submit = (allowStop = false): boolean => {
+    if(dictating)return false;
     // Read the DOM value, not only the controlled prop. Android keyboards can
     // fire Enter/pointer-up before React commits the final input event; the old
     // stale empty prop took the Stop branch and killed the warm agent even
@@ -371,16 +405,16 @@ export function Composer(props: ComposerProps) {
     // flight so the image cannot arrive as a surprise second message.
     if(imageIngesting>0||imageIngestingRef.current>0){
       if(props.busy&&allowStop&&!hasLiveContent)props.onStop?.();
-      return;
+      return false;
     }
     // A streaming upload is still writing its file; its path line is not in
     // the draft yet, so sending or steering now would drop it. An explicit
     // Stop tap on an empty draft still interrupts the running agent (it
     // sends nothing), so an in-flight upload never locks the person out of
     // Stop (review 1).
-    if (uploads.some((u) => !u.error)) {
+    if (uploading) {
       if (props.busy && allowStop && !hasLiveContent) props.onStop?.();
-      return;
+      return false;
     }
     // While the backend still owns a turn, any text OR image is queued guidance.
     // Only an explicit click/tap on an empty red Stop button may cancel.
@@ -392,24 +426,27 @@ export function Composer(props: ComposerProps) {
     }
     if (props.busy) {
       if (hasLiveContent && props.onSteer) {
-        pendingDictation.current=null;
+        clearPendingDictation();
         if (queueArmed && props.onSendQueued && (canSteer || props.queueAvailable === true)) {
           props.onSendQueued(v, imgs);
           props.onChange('');
+          if (taRef.current) taRef.current.value = '';
           clearImages();
           setQueueArmed(false);
         } else {
           props.onSteer(v, imgs);
           props.onChange('');
+          if (taRef.current) taRef.current.value = '';
           clearImages();
         }
+        return true;
       } else if (allowStop && !hasLiveContent) {
         props.onStop?.();
       }
-      return;
+      return false;
     }
-    if (!v && !imgs?.length && !refs) return;
-    pendingDictation.current=null;
+    if (!v && !imgs?.length && !refs) return false;
+    clearPendingDictation();
     // A queued send on a channel (never busy-blocked there): the chip arms
     // the next-turn choice even when the composer itself is not busy.
     const sendQueued = queueArmed && props.onSendQueued && (canSteer || props.queueAvailable === true);
@@ -417,6 +454,10 @@ export function Composer(props: ComposerProps) {
     const prevImages = images;
     const res = sendQueued ? props.onSendQueued!(v, imgs) : props.onSend(v, imgs);
     props.onChange('');
+    // Clear the DOM value in the same tick as the send: a manual Enter that
+    // lands before the controlled re-render commits must not re-read and
+    // re-send the same text (review 1 P2).
+    if (taRef.current) taRef.current.value = '';
     if (res && typeof (res as Promise<boolean | void>).then === 'function') {
       setImages([]);
       void (res as Promise<boolean | void>).then(
@@ -436,6 +477,7 @@ export function Composer(props: ComposerProps) {
     } else {
       clearImages();
     }
+    return true;
   };
 
   // Dictation finishes before ChatDictation reports itself inactive and before
@@ -448,19 +490,29 @@ export function Composer(props: ComposerProps) {
     // Keep the dictated text in the draft and require an explicit Send after
     // the person removes or replaces the failed upload.
     if(uploads.some(u=>Boolean(u.error))){
-      pendingDictation.current=null;
+      clearPendingDictation();
+      setSendNotice('Dictation not sent — clear the failed attachment, then send.');
       return;
     }
     if(imageIngesting>0||imageIngestingRef.current>0)return;
-    if(uploads.some(u=>!u.error))return;
-    pendingDictation.current=null;
-    submit(false);
-  },[dictating,dictationOutcomeVersion,imageIngesting,props.value,props.chatId,uploads]);
-  useEffect(()=>()=>{pendingDictation.current=null;},[props.chatId]);
+    if(uploading)return;
+    // The waiting send fires only on the draft the person last saw complete:
+    // uploads may append path lines, but any other change means they kept
+    // typing, so the auto-send stands down and the text waits for an explicit
+    // Send (review 1 P0).
+    const cur=taRef.current?.value??props.value;
+    if(cur!==pending.text){clearPendingDictation();return;}
+    // submit reports whether a message actually went out; a busy surface
+    // with no steer path keeps the send waiting for the idle boundary
+    // instead of silently dropping it (review 1 P1).
+    if(submit(false))clearPendingDictation();
+  },[dictating,dictationOutcomeVersion,imageIngesting,props.value,props.chatId,uploads,props.busy]);
+  useEffect(()=>()=>{clearPendingDictation();},[props.chatId]);
 
   const pick = (i: number) => {
     const c = matches[i];
     if (!c) return;
+    if (pendingDictation.current?.completed) clearPendingDictation();
     props.onChange(`/${c.name} `);
     taRef.current?.focus();
   };
@@ -477,6 +529,7 @@ export function Composer(props: ComposerProps) {
     const sep = hasLeadingSpace ? '' : ' ';
     const next = `${before}@${name}${sep}${after}`;
     const pos = (before + `@${name}`).length + 1;
+    if (pendingDictation.current?.completed) clearPendingDictation();
     setCaret(pos);
     props.onChange(next);
     taRef.current?.focus();
@@ -532,7 +585,6 @@ export function Composer(props: ComposerProps) {
   const trimmed = props.value.trim();
   const refCount = props.refCount ?? 0;
   const hasContent = trimmed.length > 0 || images.length > 0 || refCount > 0;
-  const uploading = uploads.some((u) => !u.error);
   const ready = hasContent && !props.busy && !uploading;
   // Text and image-only drafts both queue safely. An attached image must never
   // leave the button in destructive Stop mode.
@@ -549,8 +601,8 @@ export function Composer(props: ComposerProps) {
       ref={sendRef}
       type="button"
       className={`send${ready ? ' ready' : ''}${canSteer ? ' steer' : ''}${stopLive ? ' streaming' : ''} ${extraClass}`}
-      aria-label={canSteer ? 'Send after the current response' : stopLive ? 'Stop generating' : uploading ? 'Uploading a file' : 'Send'}
-      title={canSteer ? 'Send after the current response' : stopLive ? 'Stop generating' : uploading ? 'Uploading a file' : 'Send'}
+      aria-label={canSteer ? 'Send after the current response' : stopLive ? 'Stop generating' : uploading ? 'Uploading a file' : imageIngesting > 0 ? 'Attaching an image' : 'Send'}
+      title={canSteer ? 'Send after the current response' : stopLive ? 'Stop generating' : uploading ? 'Uploading a file' : imageIngesting > 0 ? 'Attaching an image' : 'Send'}
       onPointerDown={(e) => {
         if (e.pointerType !== 'touch') return;
         // iOS/Android blur the textarea first; the keyboard viewport resize can
@@ -624,6 +676,21 @@ export function Composer(props: ComposerProps) {
   useEffect(() => {
     if (!queueLive) setQueueArmed(false);
   }, [queueLive]);
+
+  // A completed dictation waiting on uploads is visible and cancellable: it
+  // sends itself the moment the last upload settles, so the send slot says
+  // so until then (review 1 P0).
+  const pendingSendChip = pendingSendArmed && (uploading || imageIngesting > 0) ? (
+    <button
+      type="button"
+      className="queue-chip on"
+      title="This dictated message sends itself when the upload finishes"
+      aria-label="Cancel the waiting auto-send"
+      onClick={clearPendingDictation}
+    >
+      Auto-send waiting · Cancel
+    </button>
+  ) : null;
 
   const popListId = props.chatId ? `composer-pop-${props.chatId}` : 'composer-pop';
   const popCount = slashOpen ? matches.length : (mention?.hits.length ?? 0);
@@ -738,9 +805,17 @@ export function Composer(props: ComposerProps) {
             <button type="button" className="reply-clear" aria-label="Clear reply" title="Clear reply" onClick={props.onClearReply}>✕</button>
           </div>
         ) : null}
+        {sendNotice ? (
+          <small role="status" className="dictation-notice composer-send-note">{sendNotice}</small>
+        ) : null}
         {images.length > 0 || refCount > 0 || uploads.length > 0 ? (
           <div className={`attach-tray${refCount > 0 ? ' has-refs' : ''}`}>
             {refCount > 0 ? props.refChips : null}
+            {imageIngesting > 0 ? (
+              <div className="up-chip" aria-busy="true">
+                <span className="up-txt">Converting image…</span>
+              </div>
+            ) : null}
             {uploads.map((u) => (
               <div key={u.id} className={`up-chip${u.error ? ' up-err' : ''}`}>
                 <div className="up-bar" style={{ width: `${Math.round((u.error ? 0 : u.progress) * 100)}%` }} />
@@ -777,6 +852,9 @@ export function Composer(props: ComposerProps) {
           aria-activedescendant={popOpen && popCount > 0 ? `${popListId}-opt-${activeOptIdx}` : undefined}
           onChange={(e) => {
             setPopDismissed(false);
+            // Any manual keystroke after dictation completion cancels the
+            // waiting auto-send: the person took the draft back (review 1 P0).
+            if (pendingDictation.current?.completed) clearPendingDictation();
             if (hasMentions) setCaret(e.target.selectionStart ?? e.target.value.length);
             props.onChange(e.target.value);
           }}
@@ -808,7 +886,10 @@ export function Composer(props: ComposerProps) {
                 title="Start a fresh thread"
                 aria-label="Start a fresh thread"
                 disabled={dictating}
-                onClick={props.onFresh}
+                onClick={() => {
+                  clearPendingDictation();
+                  props.onFresh?.();
+                }}
               >
                 <SquarePen />
                 fresh
@@ -826,6 +907,7 @@ export function Composer(props: ComposerProps) {
             )}
             {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={queueDictation} onActive={setDictating} onComplete={completeDictation} onDiscard={discardDictation} />}
             <div className="send-slot">
+              {pendingSendChip}
               {queueChip}
               {trailingBtn()}
             </div>
@@ -834,6 +916,7 @@ export function Composer(props: ComposerProps) {
           <>
             {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={queueDictation} onActive={setDictating} onComplete={completeDictation} onDiscard={discardDictation} />}
             <div className="send-slot">
+              {pendingSendChip}
               {queueChip}
               {trailingBtn()}
             </div>
