@@ -197,8 +197,12 @@ const queuedRetryTimers = new Map<string, { timer: ReturnType<typeof setTimeout>
 /** A queued lead's admission wait, abortable by a newer non-queued record for
  *  the same recipient (card-504beb, review 3 P0 2): a queued record never
  *  holds the recipient's single delivery line for its whole 30-minute wait
- *  while a person-sourced record waits behind it. */
-const queuedLeadAborters = new Map<string, AbortController>();
+ *  while a person-sourced record waits behind it. The nudge flag marks a
+ *  waiting under-ceiling nudge hold (card-b3468c): any ordinary record may
+ *  abort that wait — the nudge would have steered before that hold existed,
+ *  so no teammate message may sit behind it — while a queued (queue:true)
+ *  wait keeps its original person-sourced/priority-only abort rule. */
+const queuedLeadAborters = new Map<string, { controller: AbortController; nudge: boolean }>();
 
 function queueStoreOperation<T>(operation: () => Promise<T>): Promise<T> {
   const result = queueStoreTail.then(operation, operation);
@@ -965,7 +969,13 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
   // mid-turn. Past the ceiling the flag clears and a normal admission (a
   // steer) delivers it anyway: holding never means losing.
   const nudgeHold = nudgeHoldActive(delivery);
-  const deadline = Date.now() + RECIPIENT_IDLE_WAIT_MS;
+  // (Sam check note, Oct 18) A nudge hold's wait never runs past its own
+  // ceiling: the deadline is capped at the hold origin + LIVE_HOLD_CEILING_MS,
+  // so a hold that starts near the ceiling re-runs at the boundary and
+  // force-delivers there instead of up to 30 minutes late.
+  const deadline = nudgeHold && typeof delivery.nudgeHoldSince === 'number'
+    ? Math.min(Date.now() + RECIPIENT_IDLE_WAIT_MS, delivery.nudgeHoldSince + LIVE_HOLD_CEILING_MS)
+    : Date.now() + RECIPIENT_IDLE_WAIT_MS;
   // A channel Stop aborts the in-flight entry; a synchronous caller's own
   // stop signal is honoured alongside it.
   const signals = [delivery.signal, channelInFlight?.controller.signal].filter((s): s is AbortSignal => !!s);
@@ -1022,10 +1032,14 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
       // card-b3468c: an under-ceiling nudge's never-steer admission is a
       // queued-class wait too — a newer leading record (person-sourced or
       // priority) must be able to abort it, exactly like a queue:true lead.
+      // The stored nudge flag additionally lets any ordinary (non-nudge)
+      // record abort the wait (Sam check FAIL fix, Oct 18): the nudge would
+      // have steered before this hold existed, so no teammate message may
+      // sit behind its wait.
       if (delivery.queue === true || nudgeHold) {
         queuedWaitKey = queueKeyOf({ toId: to.id });
         const waitAbort = new AbortController();
-        queuedLeadAborters.set(queuedWaitKey, waitAbort);
+        queuedLeadAborters.set(queuedWaitKey, { controller: waitAbort, nudge: nudgeHold });
         if (signal) {
           const combined = new AbortController();
           const forward = () => combined.abort();
@@ -1908,8 +1922,15 @@ export async function deliverTeamMessage(input: {
     // (review 3 P0 2) A newer non-queued record that can lead (person-sourced
     // or priority) never waits behind a queued lead's admission wait: abort
     // it so the drain re-runs with this record leading; the queued record
-    // stays durable and delivers after it.
-    if (record.queue !== true && sortsAhead(record)) queuedLeadAborters.get(queueKeyOf(record))?.abort();
+    // stays durable and delivers after it. A waiting under-ceiling nudge hold
+    // is abortable by any ordinary record too (card-b3468c Sam check FAIL
+    // fix, Oct 18): the nudge would have steered before this PR, so no
+    // teammate message may sit behind its 30-minute wait — another
+    // under-ceiling nudge still joins the wait instead of aborting it.
+    if (record.queue !== true) {
+      const waitingLead = queuedLeadAborters.get(queueKeyOf(record));
+      if (waitingLead && (sortsAhead(record) || (waitingLead.nudge && !nudgeHoldActive(record)))) waitingLead.controller.abort();
+    }
     scheduleQueuedRecipient(queueKeyOf(record));
     return {
       delivered: true,
@@ -1934,7 +1955,14 @@ export async function deliverTeamMessage(input: {
   }
 
   if (queuedBehindAnotherTurn) {
-    if (record.queue !== true && sortsAhead(record)) queuedLeadAborters.get(queueKeyOf(record))?.abort();
+    // Same rule as the wait:false path above (card-b3468c Sam check FAIL
+    // fix, Oct 18): an ordinary record aborts a waiting under-ceiling
+    // nudge-hold lead so it leads instead of sitting behind the nudge's
+    // 30-minute never-steer wait; another under-ceiling nudge joins it.
+    if (record.queue !== true) {
+      const waitingLead = queuedLeadAborters.get(queueKeyOf(record));
+      if (waitingLead && (sortsAhead(record) || (waitingLead.nudge && !nudgeHoldActive(record)))) waitingLead.controller.abort();
+    }
     scheduleQueuedRecipient(queueKeyOf(record));
     return {
       delivered: true,
