@@ -9,7 +9,8 @@
 
 import { deliverTeamMessage } from '../chat/teamBus.ts';
 import { flushFlagDigests, queueFlagDigest } from './flagDigest.ts';
-import { listCommitments, markCommitmentRaised, noteCommitmentDueAt } from './commitmentStore.ts';
+import { listCommitments, markCommitmentRaised, noteCommitmentDueAt, ownerRaiseHeldByText } from './commitmentStore.ts';
+import { LIVE_HOLD_CEILING_MS, agentsWithLiveTurns } from './laneLiveness.ts';
 import { parseDue } from './promiseScan.ts';
 
 const TICK_MS = 60_000;
@@ -23,6 +24,12 @@ let busy = false;
 
 async function run(): Promise<void> {
   const now = new Date();
+  // Lane-liveness (Max, Oct 18 2026, card-b3468c): the Chief copy holds,
+  // unmarked, while the Chief's lane is mid-turn, bounded by the hold
+  // ceiling so a stuck lane still gets it. The owner raise rides the flag
+  // digest, which applies its own gate. Fail-open: an unreadable roster
+  // delivers instead of holding.
+  const liveLanes = await agentsWithLiveTurns();
   for (const commitment of listCommitments()) {
     if (!commitment.due) continue;
     let dueAt = commitment.dueAt;
@@ -41,16 +48,26 @@ async function run(): Promise<void> {
     // Owner raises go out as one digest per owner every 30 minutes instead
     // of one message per item (Matt, Oct 14, card-d7bf78 b). The raise is
     // marked only when the digest actually delivers it.
-    if (!commitment.raised?.owner) {
+    if (!commitment.raised?.owner && !ownerRaiseHeldByText(commitment.agentId, commitment.text)) {
       // The commitment id is the stable queue key: the every-minute sweep
       // re-queues an undelivered raise, and the shared owner digest upserts
-      // it instead of stacking duplicates.
-      queueFlagDigest(commitment.agentId, commitment.id, raise, () => markCommitmentRaised(commitment.id, 'owner'));
+      // it instead of stacking duplicates. The text mark above (Max, Oct
+      // 18 2026, card-b3468c) stops the re-track loop: an interrupted agent
+      // clears the entry and re-adds the same text under a NEW id, and an
+      // id-keyed mark alone would reset with it — re-raising into the very
+      // turn the digest just derailed, over and over.
+      queueFlagDigest(commitment.agentId, commitment.id, raise, () => markCommitmentRaised(commitment.id, 'owner', { agentId: commitment.agentId, text: commitment.text }));
     }
     // The Chief copy escalates only once the owner raise actually went out
     // (the digest flush sets the raised mark), so it never claims a delivery
     // that is still queued.
     if (commitment.agentId !== CHIEF_ID && commitment.raised?.owner && !commitment.raised?.chief) {
+      if (liveLanes.has(CHIEF_ID) && now.getTime() - dueAt < LIVE_HOLD_CEILING_MS) {
+        // held (card-b3468c): the Chief's lane is mid-turn; the copy is
+        // unmarked and retried next tick, bounded by the ceiling so a
+        // stuck Chief lane still gets it. Holding never means losing.
+        continue;
+      }
       // The copy's wording says what actually happened: it only runs once
       // the owner raise was delivered, so "it went to them" is always true
       // here; a queued-but-undelivered raise never escalates as done.

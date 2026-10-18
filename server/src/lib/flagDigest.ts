@@ -25,6 +25,7 @@ import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 import { inQuietHours, isMaxLane } from './quietHours.ts';
+import { LIVE_HOLD_CEILING_MS, agentsWithLiveTurns } from './laneLiveness.ts';
 
 const DIGEST_INTERVAL_MS = 30 * 60_000;
 /** Bounded batches: a huge backlog must never build a message the transport
@@ -34,7 +35,7 @@ const MAX_DIGEST_ENTRIES = 40;
 const MAX_DIGEST_CHARS = 20_000;
 const STATE_FILE = join(STATE_DIR, 'flag-digest.json');
 
-type Entry = { key: string; text: string; priority?: boolean; onDelivered?: () => void };
+type Entry = { key: string; text: string; priority?: boolean; firstQueuedAt?: number; onDelivered?: () => void };
 
 /** ownerId -> key -> entry. */
 const queues = new Map<string, Map<string, Entry>>();
@@ -44,7 +45,7 @@ let restored = false;
 
 type Persisted = {
   lastFlush?: Record<string, number>;
-  queues?: Record<string, { key: string; text: string; priority?: boolean }[]>;
+  queues?: Record<string, { key: string; text: string; priority?: boolean; firstQueuedAt?: number }[]>;
 };
 
 function persistNow(): void {
@@ -53,7 +54,7 @@ function persistNow(): void {
     queues: {},
   };
   for (const [ownerId, entries] of queues) {
-    if (entries.size) out.queues![ownerId] = [...entries.values()].map(({ key, text, priority }) => ({ key, text, priority }));
+    if (entries.size) out.queues![ownerId] = [...entries.values()].map(({ key, text, priority, firstQueuedAt }) => ({ key, text, priority, firstQueuedAt }));
   }
   const tmp = `${STATE_FILE}.${process.pid}.tmp`;
   try {
@@ -96,7 +97,13 @@ function restore(): void {
       if (!entry || typeof entry !== 'object' || typeof entry.key !== 'string' || typeof entry.text !== 'string') continue;
       // Restored entries carry no callbacks (they are not persisted with
       // them); the source's own state re-arms whatever still matters.
-      if (!map.has(entry.key)) map.set(entry.key, { key: entry.key, text: entry.text, priority: entry.priority === true });
+      if (!map.has(entry.key)) {
+        // Restored entries carry no callbacks; firstQueuedAt survives the
+        // restart so a held digest keeps its hold age (a missing value
+        // reads as just-queued, which holds and never false-forces).
+        const firstQueuedAt = typeof entry.firstQueuedAt === 'number' && Number.isFinite(entry.firstQueuedAt) && entry.firstQueuedAt > 0 ? entry.firstQueuedAt : undefined;
+        map.set(entry.key, { key: entry.key, text: entry.text, priority: entry.priority === true, firstQueuedAt });
+      }
     }
     queues.set(ownerId, map);
   }
@@ -108,7 +115,12 @@ function restore(): void {
 export function queueFlagDigest(ownerId: string, key: string, text: string, onDelivered?: () => void, priority = false): void {
   restore();
   const entries = queues.get(ownerId) ?? new Map<string, Entry>();
-  entries.set(key, { key, text, onDelivered, priority });
+  // The upsert preserves the entry's original firstQueuedAt (Max, Oct 18
+  // 2026, card-b3468c): a producer re-queuing an undelivered flag every
+  // minute must not refresh the hold age, or a busy lane would hold its
+  // digest without bound. Holding never means losing.
+  const existing = entries.get(key);
+  entries.set(key, { key, text, onDelivered, priority, firstQueuedAt: existing?.firstQueuedAt ?? Date.now() });
   queues.set(ownerId, entries);
   persistNow();
 }
@@ -117,8 +129,14 @@ export function queueFlagDigest(ownerId: string, key: string, text: string, onDe
  *  every pending flag from every source. Callers keep their own tick
  *  cadence; the shared clock decides. `now` defaults to the wall clock and
  *  is injectable so the quiet-hours gate is testable against a pinned time. */
-export async function flushFlagDigests(now: number = Date.now()): Promise<void> {
+export async function flushFlagDigests(now: number = Date.now(), liveLanes?: ReadonlySet<string>): Promise<void> {
   restore();
+  // Lane-liveness (Max, Oct 18 2026, card-b3468c): fetched once per flush,
+  // only when something is pending, from the ground-truth roster /api/team
+  // serves; fail-open (an unreadable roster delivers instead of holding).
+  let live = liveLanes;
+  if (!live && [...queues.values()].some((entries) => entries.size)) live = await agentsWithLiveTurns();
+  if (!live) live = new Set<string>();
   for (const [ownerId, entries] of queues) {
     if (!entries.size) continue;
     // Quiet hours (Matt, Oct 15 2026; Opus review 3, Oct 16): a held digest
@@ -130,6 +148,22 @@ export async function flushFlagDigests(now: number = Date.now()): Promise<void> 
     // delivery: the entries stay queued untouched and the first flush after
     // 05:00 delivers them once.
     if (inQuietHours(now) && !isMaxLane(ownerId)) continue;
+    // Lane-liveness hold (Max, Oct 18 2026, card-b3468c): a digest must
+    // never derail a live turn. Skip before any delivery, exactly like the
+    // quiet-hours gate above: entries stay queued untouched, nothing is
+    // marked, and the first flush after the turn ends delivers them. The
+    // hold is bounded by LIVE_HOLD_CEILING_MS from the OLDEST pending
+    // entry's first queue time (a re-queue never refreshes it), so a lane
+    // stuck in one long turn still gets its digest once the hold ages past
+    // the ceiling — holding never means losing. Max's lane is held too: a
+    // mid-turn digest derails it the same way.
+    if (live.has(ownerId)) {
+      let oldestQueuedAt = now;
+      for (const entry of entries.values()) {
+        if (typeof entry.firstQueuedAt === 'number' && entry.firstQueuedAt < oldestQueuedAt) oldestQueuedAt = entry.firstQueuedAt;
+      }
+      if (now - oldestQueuedAt < LIVE_HOLD_CEILING_MS) continue;
+    }
     const last = ownerLastFlush.get(ownerId);
     if (last !== undefined && now - last < DIGEST_INTERVAL_MS) continue;
     // Bounded batch (see MAX_DIGEST_ENTRIES / MAX_DIGEST_CHARS): the
