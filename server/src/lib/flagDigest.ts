@@ -28,6 +28,12 @@ import { inQuietHours, isMaxLane } from './quietHours.ts';
 import { LIVE_HOLD_CEILING_MS, agentsWithLiveTurns } from './laneLiveness.ts';
 
 const DIGEST_INTERVAL_MS = 30 * 60_000;
+/** (card-b3468c verify P1) A sent digest record admits within the liveness
+ *  ceiling (it waits for a real turn end, then steers past it). Older than
+ *  the ceiling plus a sweep interval, a still-pending entry means its record
+ *  died without admitting (dropped by a Stop, or its recipient left the
+ *  roster): re-send the line — holding never means losing. */
+const SENT_STALE_MS = LIVE_HOLD_CEILING_MS + 120_000;
 /** Bounded batches: a huge backlog must never build a message the transport
  *  cannot carry (a permanent delivery failure with an ever-growing queue).
  *  The delivered head clears now; the retained tail rides the next window. */
@@ -35,7 +41,21 @@ const MAX_DIGEST_ENTRIES = 40;
 const MAX_DIGEST_CHARS = 20_000;
 const STATE_FILE = join(STATE_DIR, 'flag-digest.json');
 
-type Entry = { key: string; text: string; priority?: boolean; firstQueuedAt?: number; onDelivered?: () => void };
+type Entry = {
+  key: string;
+  text: string;
+  priority?: boolean;
+  firstQueuedAt?: number;
+  onDelivered?: () => void;
+  /** (card-b3468c verify P1) In flight: the digest record's durable receipt
+   *  landed (sentDeliveryId is the record id) but the recipient has not seen
+   *  it yet. The entry waits for the admission ack (admittedDeliveryAck,
+   *  fired by the teamBus drain) to run its callback and clear it; a flush
+   *  never re-sends it, and a stale one (the record died without admitting)
+   *  re-sends after SENT_STALE_MS. */
+  sentAt?: number;
+  sentDeliveryId?: string;
+};
 
 /** ownerId -> key -> entry. */
 const queues = new Map<string, Map<string, Entry>>();
@@ -45,7 +65,7 @@ let restored = false;
 
 type Persisted = {
   lastFlush?: Record<string, number>;
-  queues?: Record<string, { key: string; text: string; priority?: boolean; firstQueuedAt?: number }[]>;
+  queues?: Record<string, { key: string; text: string; priority?: boolean; firstQueuedAt?: number; sentAt?: number; sentDeliveryId?: string }[]>;
 };
 
 function persistNow(): void {
@@ -54,7 +74,7 @@ function persistNow(): void {
     queues: {},
   };
   for (const [ownerId, entries] of queues) {
-    if (entries.size) out.queues![ownerId] = [...entries.values()].map(({ key, text, priority, firstQueuedAt }) => ({ key, text, priority, firstQueuedAt }));
+    if (entries.size) out.queues![ownerId] = [...entries.values()].map(({ key, text, priority, firstQueuedAt, sentAt, sentDeliveryId }) => ({ key, text, priority, firstQueuedAt, sentAt, sentDeliveryId }));
   }
   const tmp = `${STATE_FILE}.${process.pid}.tmp`;
   try {
@@ -107,7 +127,22 @@ function restore(): void {
         // never means losing. The migrated value persists below.
         const legacy = typeof entry.firstQueuedAt !== 'number' || !Number.isFinite(entry.firstQueuedAt) || entry.firstQueuedAt <= 0;
         if (legacy) migrated = true;
-        map.set(entry.key, { key: entry.key, text: entry.text, priority: entry.priority === true, firstQueuedAt: legacy ? Date.now() : entry.firstQueuedAt });
+        // (card-b3468c verify P1) In-flight markers survive the restart: the
+        // durable record survives too, so its admission ack post-restart
+        // must still find the entry. Restored entries carry no callbacks
+        // (the source's next cycle re-arms them); the ack of a callbackless
+        // entry deletes it and the sweep re-queues it, which re-sends that
+        // one line once — the stated restart limitation, not a new one.
+        const sentAt = typeof entry.sentAt === 'number' && Number.isFinite(entry.sentAt) && entry.sentAt > 0 ? entry.sentAt : undefined;
+        const sentDeliveryId = typeof entry.sentDeliveryId === 'string' && entry.sentDeliveryId ? entry.sentDeliveryId.slice(0, 120) : undefined;
+        map.set(entry.key, {
+          key: entry.key,
+          text: entry.text,
+          priority: entry.priority === true,
+          firstQueuedAt: legacy ? Date.now() : entry.firstQueuedAt,
+          ...(sentAt !== undefined ? { sentAt } : {}),
+          ...(sentDeliveryId !== undefined ? { sentDeliveryId } : {}),
+        });
       }
     }
     queues.set(ownerId, map);
@@ -128,7 +163,18 @@ export function queueFlagDigest(ownerId: string, key: string, text: string, onDe
   // minute must not refresh the hold age, or a busy lane would hold its
   // digest without bound. Holding never means losing.
   const existing = entries.get(key);
-  entries.set(key, { key, text, onDelivered, priority, firstQueuedAt: existing?.firstQueuedAt ?? Date.now() });
+  entries.set(key, {
+    key,
+    text,
+    onDelivered,
+    priority,
+    firstQueuedAt: existing?.firstQueuedAt ?? Date.now(),
+    // (card-b3468c verify P1) A re-queue while the previous send is still in
+    // flight must not reset its in-flight markers, or the next window would
+    // stack a second durable record for a line already waiting on admission.
+    sentAt: existing?.sentAt,
+    sentDeliveryId: existing?.sentDeliveryId,
+  });
   queues.set(ownerId, entries);
   persistNow();
 }
@@ -198,9 +244,19 @@ export async function flushFlagDigests(now: number = Date.now(), liveLanes?: Rea
     let chars = 0;
     for (const entry of entries.values()) {
       if (batch.length >= MAX_DIGEST_ENTRIES || chars + entry.text.length > MAX_DIGEST_CHARS) break;
+      // In flight (card-b3468c verify P1): this entry's digest record is
+      // already durable and waiting for its admission ack — never re-send
+      // it. Past SENT_STALE_MS the record died without admitting: reset the
+      // markers so this window re-sends the line.
+      if (entry.sentDeliveryId !== undefined) {
+        if (typeof entry.sentAt === 'number' && now - entry.sentAt < SENT_STALE_MS) continue;
+        entry.sentDeliveryId = undefined;
+        entry.sentAt = undefined;
+      }
       batch.push(entry);
       chars += entry.text.length;
     }
+    if (!batch.length) continue;
     const payload = ['[TARDIS] Flag digest (one message per 30 minutes; act on each line):', ...batch.map((entry) => entry.text)].join('\n');
     // The digest carries urgency when any of its entries does: a past-due
     // commitment raise is urgent; a digest of only hygiene nudges stays
@@ -209,43 +265,72 @@ export async function flushFlagDigests(now: number = Date.now(), liveLanes?: Rea
     // a snapshot; the drain-side admission enforces the hold atomically — a
     // lane that went busy before the record admits never gets steered under
     // the ceiling, it gets the digest at its next real turn end.
-    const ok = await deliverDigest(ownerId, payload, batch.some((entry) => entry.priority === true), oldestQueuedAt);
-    if (!ok) continue;
-    // Commit the delivery BEFORE the callbacks: a throwing mark must never
-    // resend an already-delivered digest. Only the delivered batch clears.
-    const delivered = batch;
-    for (const entry of delivered) entries.delete(entry.key);
-    ownerLastFlush.set(ownerId, now);
-    for (const entry of delivered) {
-      try {
-        entry.onDelivered?.();
-      } catch (error) {
-        // Re-queue exactly this entry (its mark did not land); the next
-        // window re-sends only it.
-        const q = queues.get(ownerId) ?? new Map<string, Entry>();
-        if (!q.has(entry.key)) q.set(entry.key, { key: entry.key, text: entry.text });
-        queues.set(ownerId, q);
-        console.warn(`[flag-digest] ${ownerId}: a delivered entry's callback failed (it re-queues for the next window): ${(error as Error).message}`);
-      }
+    const send = await deliverDigest(ownerId, payload, batch.some((entry) => entry.priority === true), oldestQueuedAt);
+    if (!send.ok) continue;
+    // (card-b3468c verify P1) The receipt above proves DURABILITY, not
+    // admission: an automation digest never steers a live turn, so the
+    // record admits at the recipient's next real turn end. Mark the batch
+    // sent (in flight: not re-delivered, callbacks not yet run) and let the
+    // record's admission ack (admittedDeliveryAck, fired by the drain)
+    // run the callbacks — so a producer's mark means the recipient actually
+    // saw the flag, never a claim on a delivery that is still queued. The
+    // pacing clock advances: the record did go out.
+    for (const entry of batch) {
+      entry.sentAt = now;
+      entry.sentDeliveryId = send.deliveryId;
     }
+    ownerLastFlush.set(ownerId, now);
     persistNow();
   }
 }
 
-async function deliverDigest(ownerId: string, text: string, priority: boolean, nudgeHoldSince?: number): Promise<boolean> {
+async function deliverDigest(ownerId: string, text: string, priority: boolean, nudgeHoldSince?: number): Promise<{ ok: boolean; deliveryId?: string }> {
   const { deliverTeamMessage } = await import('../chat/teamBus.ts');
   try {
     // The pseudo-sender TARDIS is not a roster agent, so the outgoing-promise
     // scan never re-processes a digest, and the digest lands as a system-ish
     // handoff for both flag sources alike.
-    const result = await deliverTeamMessage({ from: 'TARDIS', to: ownerId, text, wait: false, priority, nudgeHoldSince });
+    // admissionAck (card-b3468c verify P1): the record asks the drain to
+    // notify this queue at its actual admission, so the entries' callbacks
+    // run when the recipient sees the line, not when the receipt is durable.
+    const result = await deliverTeamMessage({ from: 'TARDIS', to: ownerId, text, wait: false, priority, nudgeHoldSince, admissionAck: 'flag-digest' });
     // Quiet hours (Opus verify, Oct 16): a held digest is durable but will
     // not land until after 05:00. Report it undelivered so the flush keeps
     // the entries queued and unmarked — the next window after 05:00 delivers
     // them and runs the marks then. Marking here would let the commitment
     // sweep claim "It went to them" about a held raise.
-    return result.delivered === true && result.held !== 'quiet-hours';
+    if (result.delivered !== true || result.held === 'quiet-hours') return { ok: false };
+    return { ok: true, deliveryId: result.deliveryId };
   } catch {
-    return false;
+    return { ok: false };
   }
+}
+
+/** The admission ack for one sent digest record (card-b3468c verify P1),
+ *  invoked by the teamBus drain at the record's actual admission — the
+ *  recipient saw the line. Run exactly the entries that record carried
+ *  (their callbacks mark their producers' state), clear them, and persist.
+ *  An isolated callback failure re-queues exactly its entry without the
+ *  in-flight markers, so the next window re-sends only that line. */
+export function admittedDeliveryAck(ownerId: string, deliveryId: string): void {
+  restore();
+  if (!deliveryId) return;
+  const entries = queues.get(ownerId);
+  if (!entries?.size) return;
+  const mine = [...entries.values()].filter((entry) => entry.sentDeliveryId === deliveryId);
+  if (!mine.length) return;
+  for (const entry of mine) {
+    entries.delete(entry.key);
+    try {
+      entry.onDelivered?.();
+    } catch (error) {
+      // Re-queue exactly this entry (its mark did not land); the next
+      // window re-sends only it.
+      const q = queues.get(ownerId) ?? new Map<string, Entry>();
+      if (!q.has(entry.key)) q.set(entry.key, { key: entry.key, text: entry.text });
+      queues.set(ownerId, q);
+      console.warn(`[flag-digest] ${ownerId}: an admitted entry's callback failed (it re-queues for the next window): ${(error as Error).message}`);
+    }
+  }
+  persistNow();
 }

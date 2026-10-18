@@ -158,6 +158,11 @@ type QueuedTeamDelivery = StoredRecord & {
    *  a lane stuck in one long turn still gets its nudge: holding never means
    *  losing. */
   nudgeHoldSince?: number;
+  /** card-b3468c (verify P1): 'flag-digest' asks the drain to notify the
+   *  flag-digest queue when this record actually admits (the recipient saw
+   *  the line), so the digest's entry callbacks run on admission, never on
+   *  the durable receipt. */
+  admissionAck?: 'flag-digest';
   chainId?: string;
   chainEdges?: string[];
   chainRoute?: string[];
@@ -847,6 +852,11 @@ export type TeamMessageResult = {
   loopClosed?: boolean;
   /** Accepted by the durable asynchronous path instead of making the caller retry. */
   queued?: boolean;
+  /** The durable record's id, on the fire-and-forget receipt: a producer
+   *  that needs to learn the record's actual admission (not its durable
+   *  receipt) keys its own state by this id (card-b3468c verify P1: the
+   *  flag-digest admission ack). */
+  deliveryId?: string;
   /** The durable queue accepted the record but quiet hours (22:00-05:00 ET)
    *  hold its delivery to a non-Max lane until 05:00. Callers that mark or
    *  receipt on landing must not treat this as "it went to them" (Opus
@@ -1391,6 +1401,29 @@ async function acknowledgeQueuedBatch(lead: QueuedTeamDelivery, session: Session
   }
 }
 
+/** (card-b3468c verify P1) A queued flag-digest record asks its source to
+ *  learn the ADMISSION, not the durable receipt: run the flag-digest
+ *  admission ack for every batch member that carries the marker, so the
+ *  digest's per-entry callbacks (the commitment marks) fire only when the
+ *  recipient actually saw the line. Lazy import: teamBus and flagDigest
+ *  share the delivery graph. */
+async function fireDigestAdmissionAcks(toId: string, members: QueuedTeamDelivery[]): Promise<void> {
+  const acks = members.filter((member) => member.admissionAck === 'flag-digest');
+  if (!acks.length) return;
+  try {
+    const { admittedDeliveryAck } = await import('../lib/flagDigest.ts');
+    for (const member of acks) {
+      try {
+        admittedDeliveryAck(toId, member.id);
+      } catch (error) {
+        console.warn(`[flag-digest] admission ack for record ${member.id} of ${toId} failed: ${(error as Error).message}`);
+      }
+    }
+  } catch (error) {
+    console.warn(`[flag-digest] admission ack import failed: ${(error as Error).message}`);
+  }
+}
+
 function retryDelay(): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ASYNC_RETRY_MS);
@@ -1512,6 +1545,18 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
             ? { ...item, batchLeadId: lead.id }
             : item))));
       }
+      // (card-b3468c verify P0) The batch's live-turn hold is the LATEST
+      // origin across the lead AND its siblings, recomputed at every drain
+      // attempt: a frozen batch whose lead aged past its ceiling while a
+      // newer sibling is still under-ceiling must keep waiting for a real
+      // turn end — an admission governed by the lead's origin alone would
+      // steer that sibling's live turn on the retry.
+      let batchHoldSince = lead.nudgeHoldSince;
+      for (const sibling of siblings) {
+        if (typeof sibling.nudgeHoldSince === 'number' && sibling.nudgeHoldSince > (batchHoldSince ?? 0)) {
+          batchHoldSince = sibling.nudgeHoldSince;
+        }
+      }
       const from = findAgent(lead.fromId) ?? {
         id: lead.fromId,
         name: lead.fromName,
@@ -1534,7 +1579,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         deliveryId: lead.id,
         personPosted: lead.personPosted === true,
         queue: lead.queue === true,
-        nudgeHoldSince: lead.nudgeHoldSince,
+        nudgeHoldSince: batchHoldSince,
         personSourced: batchIsPersonSourced,
         mixedSenders: siblings.some((sibling) => sibling.fromId !== lead.fromId),
         stillWanted: async () => {
@@ -1552,7 +1597,18 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         quietHoldCheck: batchIsPersonSourced
           ? undefined
           : () => isNonMax && inQuietHours(Date.now()),
-        onAdmitted: (session) => acknowledgeQueuedBatch(lead, session),
+        // (card-b3468c verify P1) The digest admission ack fires in the
+        // finally: the batch ack's own failure (a receipt that did not reach
+        // the event log) must not strand the digest's in-flight entries —
+        // the turn still carried the line, so the source's callbacks still
+        // owe their marks.
+        onAdmitted: async (session) => {
+          try {
+            await acknowledgeQueuedBatch(lead, session);
+          } finally {
+            await fireDigestAdmissionAcks(to.id, siblings);
+          }
+        },
       });
       if (result.held === 'quiet-hours') {
         // Park the whole drain, not just this record: person-sourced records
@@ -1693,6 +1749,10 @@ export async function deliverTeamMessage(input: {
    *  recipient's live turn and never joins a batch that would; past it,
    *  normal admission delivers anyway. */
   nudgeHoldSince?: number;
+  /** card-b3468c (verify P1): 'flag-digest' marks a flag-digest record so
+   *  its source queue learns the record's actual ADMISSION (the recipient
+   *  saw the line), not just its durable receipt. */
+  admissionAck?: 'flag-digest';
   signal?: AbortSignal;
   /** The sender's own lane (from its team MCP), for chain inheritance. */
   fromLane?: AgentLane;
@@ -1766,6 +1826,7 @@ export async function deliverTeamMessage(input: {
       queue: input.source === 'channel' && input.queue === true ? true : undefined,
       personSourced: input.personSourced === true ? true : undefined,
       nudgeHoldSince: typeof input.nudgeHoldSince === 'number' && Number.isFinite(input.nudgeHoldSince) && input.nudgeHoldSince > 0 ? input.nudgeHoldSince : undefined,
+      admissionAck: input.admissionAck === 'flag-digest' ? 'flag-digest' : undefined,
       chainId: chain.id,
       chainEdges: chain.edges,
       chainRoute: chain.route,
@@ -1825,6 +1886,7 @@ export async function deliverTeamMessage(input: {
       to: to.name,
       hop,
       queued: true,
+      deliveryId: record.id,
       // Quiet hours (Opus verify, Oct 16): a held handoff is accepted and
       // durable but will not land until after 05:00, so callers that mark or
       // receipt on landing can see the hold instead of "it went to them".
@@ -1876,7 +1938,16 @@ export async function deliverTeamMessage(input: {
     quietHoldCheck: isPersonSourced
       ? undefined
       : () => inQuietHours(Date.now()) && !isMaxLane(to.id),
-    onAdmitted: (session) => acknowledgeQueuedDelivery(record, session),
+    // (card-b3468c verify P1) The digest admission ack fires in the finally
+    // for the same reason as the batch path: an ack failure must not strand
+    // the digest's in-flight entries when the turn still carried the line.
+    onAdmitted: async (session) => {
+      try {
+        await acknowledgeQueuedDelivery(record, session);
+      } finally {
+        await fireDigestAdmissionAcks(to.id, [record]);
+      }
+    },
   }));
   if (!job) {
     scheduleQueuedRecipient(queueKeyOf(record));
