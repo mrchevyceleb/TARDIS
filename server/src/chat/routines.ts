@@ -16,6 +16,7 @@ import { STATE_DIR } from '../config.ts';
 import { listAgents, type Agent } from './agents.ts';
 import { sendToAgentHome } from './teamBus.ts';
 import { jevConfigured } from '../lib/jev.ts';
+import { inQuietHours, isMaxLane, msUntilQuietEnd, MAX_EMERGENCY_ROUTINE_ID } from '../lib/quietHours.ts';
 import { runRoutineGate, type RoutineGateConfig } from './routineGate.ts';
 
 export type Routine = {
@@ -26,6 +27,9 @@ export type Routine = {
   prompt: string;
   paused?: boolean;
   lastRunAt?: number;
+  /** Timestamp (epoch ms) recorded when quiet hours hold a scheduled run;
+   *  cleared by markRun on delivery or by updateRoutine on pause/reschedule. */
+  heldSlotAt?: number;
   createdAt: number;
   /** Declarative pre-check run BEFORE the agent turn (see routineGate.ts):
    *  what to fetch, what to drop, what Jev should judge, and what justifies
@@ -72,16 +76,23 @@ export function updateRoutine(id: string, patch: Partial<Pick<Routine, 'name' | 
   const routines = listRoutines();
   const idx = routines.findIndex((r) => r.id === id);
   if (idx < 0) return null;
+  const { heldSlotAt: prevHeld, ...rest } = routines[idx];
+  const clearHeld = patch.schedule !== undefined || patch.paused === true;
   const next: Routine = {
-    ...routines[idx],
+    ...rest,
+    ...(clearHeld || prevHeld === undefined ? {} : { heldSlotAt: prevHeld }),
     name: patch.name !== undefined ? (patch.name.trim().slice(0, 80) || routines[idx].name) : routines[idx].name,
-    schedule: patch.schedule !== undefined && parseSchedule(patch.schedule) ? patch.schedule.trim() : routines[idx].schedule,
+    schedule: patch.schedule !== undefined && parseSchedule(patch.schedule) ? inputScheduleTrim(patch.schedule) : routines[idx].schedule,
     prompt: patch.prompt !== undefined ? (patch.prompt.trim().slice(0, 8000) || routines[idx].prompt) : routines[idx].prompt,
     paused: patch.paused !== undefined ? patch.paused : routines[idx].paused,
   };
   routines[idx] = next;
   saveRoutines(routines);
   return next;
+}
+
+function inputScheduleTrim(s: string): string {
+  return s.trim();
 }
 
 /** Cascade: an agent's routines die with it (no ghost retry loops). */
@@ -116,6 +127,24 @@ export async function runRoutine(id: string, opts: { manual?: boolean } = {}): P
 
 async function runRoutineFor(routine: Routine, agent: Agent, opts: { manual?: boolean }): Promise<{ ran: boolean; reason?: string; gated?: string }> {
   const id = routine.id;
+  // Quiet hours (Matt, Oct 15 2026) come before the gate and before any
+  // spend: a scheduled fire to a non-Max lane inside 22:00-05:00 ET skips
+  // without consuming the slot, records heldSlotAt on the routine, and parks
+  // the retry at 05:00 ET so the first tick after 05:00 fires it unchanged.
+  // Exempt: Max's lanes (overnight outage duty), Max's overnight emergency
+  // check by id, and a manual press (someone explicitly asked for this run
+  // now, like a person message).
+  const nowEntry = Date.now();
+  if (!opts.manual && id !== MAX_EMERGENCY_ROUTINE_ID
+      && inQuietHours(nowEntry) && !isMaxLane(agent.id)) {
+    markHeld(id, nowEntry);
+    skipUntil.set(id, nowEntry + msUntilQuietEnd(nowEntry));
+    return { ran: false, reason: 'quiet hours (22:00-05:00 ET): held until 05:00' };
+  }
+  // A manual press or Max's emergency routine is an explicit ask for this
+  // run now; sendToAgentHome would otherwise refuse the automation prompt
+  // during the window and retry it every cooldown (Opus review, Oct 16).
+  const quietExempt = opts.manual === true || id === MAX_EMERGENCY_ROUTINE_ID;
   // Gate first. A quiet result consumes the slot exactly like a delivered
   // NO_UPDATE turn would, without the turn. Any gate failure falls OPEN to
   // the plain agent turn: the sweep must never silently stop because Jev or
@@ -150,6 +179,7 @@ async function runRoutineFor(routine: Routine, agent: Agent, opts: { manual?: bo
     // A manual press lands in the thread Matt is looking at; scheduled
     // fires keep their normal background lane.
     lane: opts.manual ? 'main' : undefined,
+    quietExempt,
   });
   if (result.delivered) {
     commitGate?.();
@@ -157,15 +187,36 @@ async function runRoutineFor(routine: Routine, agent: Agent, opts: { manual?: bo
     skipUntil.delete(id);
     return { ran: true };
   }
-  skipUntil.set(id, Date.now() + SKIP_COOLDOWN_MS);
+  const nowAfter = Date.now();
+  if ((result.reason ?? '').startsWith('quiet hours')) {
+    markHeld(id, nowAfter);
+    skipUntil.set(id, nowAfter + msUntilQuietEnd(nowAfter));
+    return { ran: false, reason: result.reason };
+  }
+  skipUntil.set(id, nowAfter + SKIP_COOLDOWN_MS);
   return { ran: false, reason: result.reason };
+}
+
+function markHeld(id: string, at: number): void {
+  const routines = listRoutines();
+  const idx = routines.findIndex((r) => r.id === id);
+  if (idx >= 0) {
+    const prev = routines[idx].heldSlotAt;
+    const last = routines[idx].lastRunAt ?? routines[idx].createdAt;
+    routines[idx] = {
+      ...routines[idx],
+      heldSlotAt: typeof prev === 'number' && prev > last ? prev : at,
+    };
+    saveRoutines(routines);
+  }
 }
 
 function markRun(id: string, at: number): void {
   const routines = listRoutines();
   const idx = routines.findIndex((r) => r.id === id);
   if (idx >= 0) {
-    routines[idx] = { ...routines[idx], lastRunAt: at };
+    const { heldSlotAt: _cleared, ...rest } = routines[idx];
+    routines[idx] = { ...rest, lastRunAt: at };
     saveRoutines(routines);
   }
 }
@@ -203,9 +254,11 @@ export function parseSchedule(raw: string): Schedule | null {
   return null;
 }
 
-/** Slot timestamp (ms) for today at the given minutes-of-day, local time. */
-function todaySlot(minutes: number): number {
-  const d = new Date();
+/** Slot timestamp (ms) for the day of `now` at the given minutes-of-day,
+ *  local time. `now` seeds the day so the daily legs are testable against a
+ *  pinned clock (Opus verify, Oct 16). */
+function todaySlot(minutes: number, now: number): number {
+  const d = new Date(now);
   d.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
   return d.getTime();
 }
@@ -259,9 +312,27 @@ export function routineIsDue(routine: Routine, now: number): boolean {
   }
   if (sched.kind === 'daily') {
     const d = new Date(now);
-    if (sched.weekdaysOnly && (d.getDay() === 0 || d.getDay() === 6)) return false;
-    const slot = todaySlot(sched.minutes);
-    return now >= slot && last < slot;
+    const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+    if (!sched.weekdaysOnly || !isWeekend) {
+      const slot = todaySlot(sched.minutes, now);
+      if (now >= slot && last < slot) return true;
+    }
+    // Catch up a slot that quiet hours actually held (persisted on the
+    // routine as heldSlotAt when the quiet-hours hold fired, either at
+    // entry or after admission slipped past 22:00 ET, and cleared in
+    // markRun). Recording the hold instead of guessing from yesterday's
+    // slot time means:
+    // - a Friday weekdays:22:30 slot held at 22:30 catches up after 05:00 ET
+    //   even across the weekend (Saturday's weekend guard only blocks a new
+    //   Saturday slot, not Friday's held run),
+    // - a daily:21:50 slot whose busy retry or admission wait slipped into
+    //   22:00+ ET catches up after 05:00 ET, and
+    // - a paused or freshly unpaused routine never fires a stale catch-up
+    //   for a slot that was never held (Opus review 3, Oct 16).
+    return typeof routine.heldSlotAt === 'number'
+      && last < routine.heldSlotAt
+      && !inQuietHours(now)
+      && !isMaxLane(routine.agentId);
   }
   // cron: due if the most recent matching slot has not been delivered yet.
   // A watched-thread skip must not burn that slot for the rest of the day.

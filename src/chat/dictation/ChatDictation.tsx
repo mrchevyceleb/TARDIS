@@ -8,8 +8,8 @@ import './dictation.css';
 
 type Phase='idle'|'starting'|'recording'|'finishing'|'recover'|'error';
 export function ChatDictation({chatId,onText,onActive,onComplete,onDiscard}:{chatId:string;onText:(text:string)=>void;onActive:(active:boolean)=>void;onComplete:()=>void;onDiscard:()=>void}) {
- const [phase,setPhase]=useState<Phase>('starting'),[error,setError]=useState(''),[seconds,setSeconds]=useState(0),[processed,setProcessed]=useState(0),[notice,setNotice]=useState('');
- const alive=useRef(true),record=useRef<Recording|undefined>(undefined),microphone=useRef<Awaited<ReturnType<typeof capture>>|undefined>(undefined),saving=useRef(Promise.resolve()),working=useRef(false),processing=useRef(0),failure=useRef(false),stopping=useRef(false),unsaved=useRef<Section[]>([]),controller=useRef<AbortController|undefined>(undefined),stopped=useRef(Promise.resolve()),inserted=useRef(false);
+ const [phase,setPhase]=useState<Phase>('starting'),[error,setError]=useState(''),[seconds,setSeconds]=useState(0),[processed,setProcessed]=useState(0),[notice,setNotice]=useState(''),[finishingSend,setFinishingSend]=useState(true);
+ const alive=useRef(true),record=useRef<Recording|undefined>(undefined),microphone=useRef<Awaited<ReturnType<typeof capture>>|undefined>(undefined),saving=useRef(Promise.resolve()),working=useRef(false),processing=useRef(0),failure=useRef(false),stopping=useRef(false),unsaved=useRef<Section[]>([]),controller=useRef<AbortController|undefined>(undefined),stopped=useRef(Promise.resolve()),inserted=useRef(false),sendIntent=useRef(true);
  const callbacks=useRef({onText,onActive,onComplete,onDiscard});callbacks.current={onText,onActive,onComplete,onDiscard};
  const scope=useRef('');
  const update=(next:Phase)=>{if(alive.current){setPhase(next);callbacks.current.onActive(next!=='idle'&&next!=='recover');}};
@@ -43,7 +43,7 @@ export function ChatDictation({chatId,onText,onActive,onComplete,onDiscard}:{cha
  };
  const stopCapture=()=>{const mic=microphone.current;microphone.current=undefined;if(mic)stopped.current=mic.stop();return stopped.current;};
  const finish=async(send=true)=>{
-  if(stopping.current)return;stopping.current=true;update('finishing');
+  if(stopping.current)return;stopping.current=true;sendIntent.current=send;setFinishingSend(send);update('finishing');
   await stopCapture();await saving.current;await pump();
   while(working.current&&alive.current)await new Promise(resolve=>setTimeout(resolve,100));
   if(!alive.current){stopping.current=false;return;}
@@ -60,10 +60,10 @@ export function ChatDictation({chatId,onText,onActive,onComplete,onDiscard}:{cha
    update('idle');
   } catch(e){report(e);}finally{stopping.current=false;}
  };
- const retry=async()=>{failure.current=false;setError('');if(!record.current){update('idle');return;}try{for(const section of unsaved.current)await saveSection({...record.current},section);unsaved.current=[];if(microphone.current)await pump();else await finish(true);}catch(e){report(e);}};
+ const retry=async()=>{failure.current=false;setError('');if(!record.current){update('idle');return;}try{for(const section of unsaved.current)await saveSection({...record.current},section);unsaved.current=[];if(microphone.current)await pump();else await finish(sendIntent.current);}catch(e){report(e);}};
  const discard=async()=>{callbacks.current.onDiscard();failure.current=true;controller.current?.abort();await stopCapture();await saving.current;while(working.current)await new Promise(resolve=>setTimeout(resolve,100));if(record.current)await clearRecording(record.current);record.current=undefined;unsaved.current=[];setError('');setNotice('');update('idle');};
  const start=async()=>{
-  update('starting');setError('');setNotice('');setSeconds(0);setProcessed(0);processing.current=0;failure.current=false;stopping.current=false;inserted.current=false;stopped.current=Promise.resolve();
+  update('starting');setError('');setNotice('');setSeconds(0);setProcessed(0);processing.current=0;failure.current=false;stopping.current=false;inserted.current=false;stopped.current=Promise.resolve();sendIntent.current=true;setFinishingSend(true);
   let pendingMic:ReturnType<typeof capture>|undefined;
   try {
    const r={scope:scope.current,id:crypto.randomUUID(),next:0,updatedAt:Date.now()};record.current=r;
@@ -103,16 +103,16 @@ export function ChatDictation({chatId,onText,onActive,onComplete,onDiscard}:{cha
   :busy
    ?<button type="button" className="dictation-mic" disabled aria-label="Dictation working"><LoaderCircle size={17} className="dictation-spin"/></button>
    :phase==='recover'||phase==='error'
-    ?<button type="button" className="dictation-mic needs-attention" onClick={()=>void retry()} aria-label={phase==='recover'?'Recover and send saved dictation':'Retry dictation and send'} title={phase==='recover'?'Recover & send':'Retry & send'}><RotateCcw size={16}/></button>
-    :<button type="button" className="dictation-mic" onClick={()=>void start()} aria-label="Dictate a message" title="Dictate into your message"><Mic size={18}/></button>;
+    ?<button type="button" className="dictation-mic needs-attention" onClick={()=>void retry()} aria-label={phase==='recover'?'Recover and send saved dictation':sendIntent.current?'Retry dictation and send':'Retry dictation'} title={phase==='recover'?'Recover & send':sendIntent.current?'Retry & send':'Retry'}><RotateCcw size={16}/></button>
+    :<button type="button" className="dictation-mic" onClick={()=>void start()} aria-label="Dictate a message" title="Dictate · Stop sends it"><Mic size={18}/></button>;
  const width=Math.min(320,window.innerWidth-24);
  const panelStyle=anchor?{left:Math.min(Math.max(anchor.right-width,12),window.innerWidth-12-width),bottom:window.innerHeight-anchor.top+10,width}:undefined;
  return <>
   <div ref={pillRef} className={`chat-dictation chat-dictation-inline${recording?' is-recording':''}`}>{trigger}</div>
   {panelOpen&&anchor&&createPortal(<div className={`dictation-panel dictation-float${recording?' is-recording':''}`} role="group" aria-label="Message dictation" style={panelStyle}>
-   <div className="dictation-status" role="status">{recording?<><span className="dictation-dot"/>Recording {Math.floor(seconds/60)}:{String(seconds%60).padStart(2,'0')}</>:busy?<><LoaderCircle size={16} className="dictation-spin"/>{phase==='starting'?'Opening microphone…':'Transcribing & sending…'}</>:phase==='recover'?'Unfinished dictation saved on this device.':'Dictation needs attention.'}{processed>0&&<small>{processed} section{processed===1?'':'s'} ready</small>}</div>
+   <div className="dictation-status" role="status">{recording?<><span className="dictation-dot"/>Recording {Math.floor(seconds/60)}:{String(seconds%60).padStart(2,'0')}</>:busy?<><LoaderCircle size={16} className="dictation-spin"/>{phase==='starting'?'Opening microphone…':finishingSend?'Transcribing & sending…':'Transcribing…'}</>:phase==='recover'?'Unfinished dictation saved on this device.':'Dictation needs attention.'}{processed>0&&<small>{processed} section{processed===1?'':'s'} ready</small>}</div>
    {recording&&<button type="button" className="dictation-button" onClick={()=>void finish()}><Square size={15}/>Stop & send</button>}
-   {(phase==='recover'||phase==='error')&&<button type="button" className="dictation-button" onClick={()=>void retry()}><RotateCcw size={15}/>{phase==='recover'?'Recover & send':'Retry & send'}</button>}
+   {(phase==='recover'||phase==='error')&&<button type="button" className="dictation-button" onClick={()=>void retry()}><RotateCcw size={15}/>{phase==='recover'?'Recover & send':sendIntent.current?'Retry & send':'Retry'}</button>}
    {!busy&&<button type="button" className="dictation-discard" onClick={()=>void discard()} aria-label="Discard dictation"><X size={16}/></button>}
    {error&&<p role="alert">{error}</p>}
    {notice&&<small role="status" className="dictation-notice">{notice}</small>}

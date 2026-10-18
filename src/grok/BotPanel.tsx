@@ -10,6 +10,7 @@ import { apiJson } from '../data/api';
 import { useCronJobs } from '../hooks/useRoomData';
 import { useProxyViewer } from '../hooks/useProxyViewer';
 import { scrollToPinnedMessage, useAgentMessagePins } from './messagePins';
+import { ChecklistSection } from './ChecklistSection';
 import { parsePinLinkTarget } from '../chat/utils/proxyLinks';
 import { statusLabel } from '../theme/voice';
 import { DeskPaneSwitch, useDeskPaneMode } from './DeskPaneSwitch';
@@ -407,6 +408,8 @@ export function BotPanel({ meta, onOpenForge, onOpenDesk, onClose, className = '
               <div className="bt-pane-empty">{agent ? `No automations for ${agent.name} yet — + to schedule one.` : 'No automations yet.'}</div>
             ) : null}
           </section>
+
+          {agent ? <ChecklistSection owner={agent.id} name={agent.name} /> : null}
 
           {agent ? (
             <section className="bt-pane-sec">

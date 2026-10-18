@@ -660,6 +660,12 @@ export class PiSession {
     this.emit({ type: 'event', event });
     return true;
   }
+  /** The active turn's start (ms) for the client's elapsed timer on reattach
+   *  (register.ts ready payload); null when no turn is open. */
+  activeTurnStartedAt(): number | null {
+    return this.turnStartedAt;
+  }
+
   isBusy(): boolean { return this.turnStartedAt !== null; }
   isAutomationTurn(): boolean { return this.turnStartedAt !== null && this.automationTurn; }
   /** Pi's `steer` is delivered at the next tool boundary — always safe. */
@@ -680,7 +686,7 @@ export class PiSession {
     for (const fn of this.listeners) fn(se);
   }
 
-  async send(text: string, images?: ChatImage[], opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; providerContinue?: ProviderContinueOpts } = {}): Promise<void> {
+  async send(text: string, images?: ChatImage[], opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; providerContinue?: ProviderContinueOpts; echoText?: string; replyTo?: { from: string; snippet: string } } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
     if (opts.signal?.aborted) return;
     if (!this.isAlive()) throw new Error('session has exited');
@@ -758,7 +764,7 @@ export class PiSession {
     } else {
       await flushEventLog(this.logKey);
       if (opts.signal?.aborted) { abandon(); return; }
-      this.emit({ type: 'event', event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ts: Date.now() } });
+      this.emit({ type: 'event', event: { type: '_user_echo', text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() } });
       noteUserTurn(this.logKey);
       noteAgentLane(this.chatId, this.cli);
       this.turnOrigin.human = true;

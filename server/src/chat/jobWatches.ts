@@ -21,6 +21,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { statSync, readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { JsonStore } from '../lib/jsonStore.ts';
+import { inQuietHours, isQuietExemptWork, lastQuietEndMs, msUntilQuietEnd } from '../lib/quietHours.ts';
 import { listAgents } from './agents.ts';
 import { sendToAgentHome } from './teamBus.ts';
 
@@ -436,11 +437,16 @@ async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
       `(${detail})`,
       'Background job wake from watch_job. If the result matters, check it now — this wake is the only notification.',
     ].join('\n');
+    const createdMs = typeof watch.createdAt === 'string' ? Date.parse(watch.createdAt) : NaN;
     const result = await sendToAgentHome(agent, text, {
       peerFrom: `⏱ ${watch.note}`,
       peerFromRole: 'automation',
       peerText: visibleWakeText(text),
       lane: watch.lane === 'main' ? 'main' : 'bg',
+      // Quiet hours (Opus review 3, Oct 16): a watch armed inside the current
+      // quiet window after an exempt wake belongs to legitimate overnight
+      // emergency work; pre-22:00 turns and prior-night watches still hold.
+      quietExempt: isQuietExemptWork(watch.agentId, createdMs, Date.now()),
     });
     if (result.delivered) {
       await serialize(() => store.delete(watch.id));
@@ -448,7 +454,19 @@ async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
       console.log(`[job-watches] ${watch.note} → woke ${agent.name}: ${outcome}`);
       return true;
     }
-    if (Date.now() > watch.deadline + UNDELIVERABLE_GRACE_MS) {
+    // A quiet-hours hold parks the retry at the window end instead of
+    // churning a warn line every minute all night; the first tick after
+    // 05:00 ET delivers the wake (Opus review, Oct 16).
+    if ((result.reason ?? '').startsWith('quiet hours')) {
+      retryUntil.set(watch.id, Date.now() + msUntilQuietEnd(Date.now()));
+      console.log(`[job-watches] ${watch.note}: held for quiet hours (22:00-05:00 ET); wakes after 05:00`);
+      return false;
+    }
+    // A quiet-hours hold never burns the undeliverable grace either: anchor
+    // the grace at the most recent 05:00 ET window end, so a wake held
+    // overnight keeps its full delivery window after the hold releases.
+    const graceAnchor = Math.max(watch.deadline, lastQuietEndMs(Date.now()));
+    if (!inQuietHours(Date.now()) && Date.now() > graceAnchor + UNDELIVERABLE_GRACE_MS) {
       console.warn(`[job-watches] ${watch.note}: wake undeliverable (${result.reason}); dropping`);
       await serialize(() => store.delete(watch.id));
       forgetWatch(watch.id);

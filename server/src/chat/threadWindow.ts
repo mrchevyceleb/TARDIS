@@ -22,6 +22,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { formatReplyQuote } from './reply-quote.ts';
 import {
   isAutomationPeerEvent,
   isExactNoUpdate,
@@ -200,13 +201,17 @@ function extractLaneTurns(events: Seqish[]): VisibleTurn[] {
     if (t === '_user_echo' && typeof inner.text === 'string') {
       flushAssistant();
       const message = inner.text.trim();
+      // (card-cbb4af, verify P1 8) history rebuilt from the log keeps the
+      // reply context: the quote is re-attached to the recovered turn so a
+      // short reply still points at what it answered.
+      const replyQuote = formatReplyQuote((inner as { replyTo?: unknown }).replyTo);
       const imageCount = typeof inner.imageCount === 'number' && inner.imageCount > 0
         ? Math.floor(inner.imageCount)
         : 0;
       const imageRecoveryNote = imageCount > 0
         ? `[${imageCount} image${imageCount === 1 ? ' was' : 's were'} attached to this message. ${imageCount === 1 ? 'Its' : 'Their'} visual contents are unavailable in recovered text history; do not infer them from earlier conversation.]`
         : '';
-      const text = [message, imageRecoveryNote].filter(Boolean).join('\n\n');
+      const text = [replyQuote ? replyQuote.trimEnd() : '', message, imageRecoveryNote].filter(Boolean).join('\n\n');
       if (!text) continue;
       if (isRoutinePromptText(message)) {
         afterAutomation = true;
@@ -357,6 +362,53 @@ export function overflowChars(turns: VisibleTurn[]): number {
 
 export function shouldCompactOverflow(overflow: VisibleTurn[]): boolean {
   return overflow.length >= COMPACT_BATCH_TURNS;
+}
+
+/** Uncovered peer deliveries that never became visible turns.
+ *
+ *  extractLaneTurns deliberately skips automation-classified peer messages
+ *  (job results, flag digests, routine fires) so they never flood the working
+ *  window. On a delivery-heavy lane they can pile up past the compact's
+ *  coverage boundary while the turn-count window never ages anything out,
+ *  freezing the rolling summary in time (Oct 14: a lane whose summary still
+ *  ended two days earlier folded off two admitted user turns while ~900 team
+ *  deliveries never counted as coverage). These are the uncovered ones —
+ *  past the compact's coverage boundary, deduped by delivery id — rendered as
+ *  foldable user turns so the overflow pipeline carries their content into
+ *  the rolling summary. They never enter the working window: the model never
+ *  saw them there, so the compact is the only place their content survives,
+ *  and folding them cannot duplicate what the window shows. Delivery ids
+ *  are recorded from every copy in the log — including ones at or below the
+ *  coverage boundary — so a retried delivery never re-folds as new. */
+export function uncoveredPeerTurns(events: Seqish[], lastSeq: number): VisibleTurn[] {
+  const seen = new Set<string>();
+  const turns: VisibleTurn[] = [];
+  for (const event of events) {
+    const seq = typeof event.seq === 'number' && event.seq > 0 ? event.seq : 0;
+    const inner = unwrapInner(event.ev);
+    if (!inner || inner.type !== 'peer_message') continue;
+    // Record every copy's delivery id, including copies at or below the
+    // coverage boundary, BEFORE the sequence filter: a delivery retried
+    // after the boundary (its original already folded) is a duplicate, not
+    // new coverage — skipping the old copy would re-fold the same content
+    // into a later summary and advance the boundary twice.
+    if (typeof inner.deliveryId === 'string' && inner.deliveryId) {
+      if (seen.has(inner.deliveryId)) continue;
+      seen.add(inner.deliveryId);
+    }
+    if (!(seq > lastSeq)) continue;
+    // Human/teammate peer messages already became visible turns in
+    // extractLaneTurns; folding them again here would duplicate them. Only
+    // the ones extractLaneTurns skipped join the overflow here.
+    const skippedAsNoise = isAutomationPeerEvent(event.ev)
+      || (typeof inner.text === 'string' && isRoutinePromptText(inner.text));
+    if (!skippedAsNoise) continue;
+    const text = typeof inner.text === 'string' ? inner.text.trim() : '';
+    if (!text) continue;
+    const from = typeof inner.from === 'string' && inner.from.trim() ? inner.from.trim() : 'automation';
+    turns.push({ role: 'user', text: clipTurn(`[${from}] ${text}`), seq });
+  }
+  return turns;
 }
 
 /** Aged-out turns for the compact slot (history − last 50). Never the tail. */

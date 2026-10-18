@@ -24,6 +24,7 @@
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
+import { inQuietHours, isMaxLane } from './quietHours.ts';
 
 const DIGEST_INTERVAL_MS = 30 * 60_000;
 /** Bounded batches: a huge backlog must never build a message the transport
@@ -114,12 +115,21 @@ export function queueFlagDigest(ownerId: string, key: string, text: string, onDe
 
 /** Deliver due owner digests. One owner, one window, one message carrying
  *  every pending flag from every source. Callers keep their own tick
- *  cadence; the shared clock decides. */
-export async function flushFlagDigests(): Promise<void> {
+ *  cadence; the shared clock decides. `now` defaults to the wall clock and
+ *  is injectable so the quiet-hours gate is testable against a pinned time. */
+export async function flushFlagDigests(now: number = Date.now()): Promise<void> {
   restore();
-  const now = Date.now();
   for (const [ownerId, entries] of queues) {
     if (!entries.size) continue;
+    // Quiet hours (Matt, Oct 15 2026; Opus review 3, Oct 16): a held digest
+    // must not even try overnight. Every sweep (commitmentSweep, deskHygiene)
+    // re-runs this flush every 60 seconds, and deliverTeamMessage writes a
+    // NEW durable queue record per call, so a "held" digest that still called
+    // delivery piled up ~840 duplicate records per owner per night and burned
+    // the global rate limit Matt's Desk answers need. Skip before any
+    // delivery: the entries stay queued untouched and the first flush after
+    // 05:00 delivers them once.
+    if (inQuietHours(now) && !isMaxLane(ownerId)) continue;
     const last = ownerLastFlush.get(ownerId);
     if (last !== undefined && now - last < DIGEST_INTERVAL_MS) continue;
     // Bounded batch (see MAX_DIGEST_ENTRIES / MAX_DIGEST_CHARS): the
@@ -165,7 +175,12 @@ async function deliverDigest(ownerId: string, text: string, priority: boolean): 
     // scan never re-processes a digest, and the digest lands as a system-ish
     // handoff for both flag sources alike.
     const result = await deliverTeamMessage({ from: 'TARDIS', to: ownerId, text, wait: false, priority });
-    return result.delivered === true;
+    // Quiet hours (Opus verify, Oct 16): a held digest is durable but will
+    // not land until after 05:00. Report it undelivered so the flush keeps
+    // the entries queued and unmarked — the next window after 05:00 delivers
+    // them and runs the marks then. Marking here would let the commitment
+    // sweep claim "It went to them" about a held raise.
+    return result.delivered === true && result.held !== 'quiet-hours';
   } catch {
     return false;
   }

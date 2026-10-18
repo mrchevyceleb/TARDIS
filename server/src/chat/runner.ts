@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { ASSISTANT_HUB_PATH } from './config.ts';
-import { localMcpServers } from './local-mcp.ts';
+import { localMcpServers, writeClaudeMcpConfigFile } from './local-mcp.ts';
 import { officeMcpServers } from './office-mcp.ts';
 import { computerGuidance, computerOwnerKey } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
@@ -44,6 +44,9 @@ import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { fireworksCapability, fireworksContextWindow, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
 import { openRouterCapability, openRouterContextWindow, openRouterMaxOutput, resolveOpenRouterEffort, resolveOpenRouterModel } from './openrouter-models.ts';
+import { plainEnglishWritingBlockFor } from './plain-english-guidance.ts';
+import { AgySession, AGY_READY_TIMEOUT_MS } from './agy-runner.ts';
+import { AGY_LANE_EFFORT, AGY_LANE_MODEL, resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
 import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { PiSession, usePiHarness } from './pi-runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, REPLY_NUDGE_NOTE_TOOL, replyNowText, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
@@ -109,7 +112,8 @@ export type CliKind =
   | 'zai'
   | 'xai'
   | 'fireworks'
-  | 'openrouter';
+  | 'openrouter'
+  | 'agy';
 
 export type StreamEvent = unknown;
 
@@ -154,6 +158,18 @@ export function wrapSlashArgs(text: string): string {
 // truth. Opus 4.7+ uses adaptive thinking and ignores MAX_THINKING_TOKENS; the
 // live lever is the `--effort` flag (low|medium|high|xhigh|max). "max" is top.
 const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', 'claude-opus-5-5', 'xhigh');
+
+// Usage-limit rollover (Matt, Oct 15 2026): a Claude-family lane on one of the
+// accounts named in RIVENDELL_USAGE_FALLBACK_ACCOUNTS reruns its turn on the
+// agy subscription lane instead of dead-ending on "switch brains". The
+// account names are deployment config, never repo identity: unset/empty
+// disables the rollover entirely. The lane keeps its own model, so the next
+// turn tries Claude again as soon as the limit resets.
+const USAGE_FALLBACK_ACCOUNTS = new Set(
+  (process.env.RIVENDELL_USAGE_FALLBACK_ACCOUNTS ?? '')
+    .split(',').map((name) => name.trim()).filter(Boolean),
+);
+const USAGE_FALLBACK = { cli: 'agy' as const, model: 'gemini-4-argon', effort: 'high' };
 
 // Z.ai coding plan — GLM models served over the Anthropic-compatible endpoint.
 // Runs through the same `claude` binary with the base URL + auth token
@@ -282,6 +298,16 @@ const REACTIVE_COMPACT_GAP = 40_000;
  *  and a seed needs twice that much room to grow or rotating cannot help. */
 const ROTATE_BEFORE_NATIVE = 10_000;
 /** Persistent `claude` binary lanes (Anthropic, Z.ai, xAI). Not Codex/Banana. */
+/** Persistent process lanes: the claude-binary family plus the agy
+ *  subscription lane. Callers that mean "a warm process whose model/effort
+ *  apply at spawn and whose idle sessions recycle on a changed pick" (hello
+ *  laziness, send-path reconciliation) use this, not the claude-binary
+ *  predicate: agy is its own binary and protocol but shares exactly those
+ *  lane semantics. */
+export function isPersistentProcessCli(cli: CliKind | null | undefined): boolean {
+  return isClaudeFamilyCli(cli) || cli === 'agy';
+}
+
 export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' | 'fireworks' | 'openrouter' {
   return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai' || cli === 'fireworks' || cli === 'openrouter';
 }
@@ -348,11 +374,24 @@ function openRouterEnv(model: string): NodeJS.ProcessEnv {
   // card-faf580): text-only OpenRouter models reject native image blocks the
   // same way. Mirrors the session's textOnlyLane.
   if (!openRouterCapability(model)?.imageInput) env.RIVENDELL_NO_VISION = '1';
+  // Long tool calls (file writes over SSH, long shell) died at the CLI's
+  // 2-minute Bash-tool default, retried twice, then ended the turn as
+  // error_during_execution mid tool call (Oct 15: 127 aborted_streaming
+  // results on Felix's lane; short calls always fine). No lane in the family
+  // sets these, so the defaults only bit where long tool calls are normal
+  // work. House allowance: 10-minute default per Bash call, 1-hour ceilings
+  // for Bash, MCP tools, and API requests (the agy lane passes
+  // --print-timeout 3600s for the same hour).
+  env.BASH_DEFAULT_TIMEOUT_MS = '600000';
+  env.BASH_MAX_TIMEOUT_MS = '3600000';
+  env.MCP_TOOL_TIMEOUT = '3600000';
+  env.API_TIMEOUT_MS = '3600000';
   env.SAMWISE_ACCOUNT = 'openrouter';
   return env;
 }
 
 const resolveClaudeModel = (cli: CliKind, m?: string): string => {
+  if (cli === 'agy') return resolveAgyModel(m, AGY_LANE_MODEL);
   if (cli === 'zai') return resolveZaiModel(m, ZAI_MODEL);
   if (cli === 'xai') return resolveXaiModel(m, XAI_MODEL);
   if (cli === 'fireworks') return resolveFireworksModel(m);
@@ -371,7 +410,8 @@ export function isClaudeUnrecognizedModelWarning(message: string): boolean {
 }
 
 const resolveClaudeEffort = (cli: CliKind, e?: string, model?: string): string =>
-  cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT)
+  cli === 'agy' ? resolveAgyEffort(model ?? '', e, AGY_LANE_EFFORT)
+  : cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT)
   : cli === 'xai' ? resolveXaiEffort(e, XAI_EFFORT)
   : cli === 'fireworks' ? resolveFireworksEffort(e, model)
   : cli === 'openrouter' ? resolveOpenRouterEffort(e, model)
@@ -456,8 +496,9 @@ function withTeamMcp(configJson: string, cwd: string, chatId: string): string {
       console.log('[chat] built-in team and computer MCPs enabled');
     }
     const cfg = JSON.parse(configJson) as { mcpServers: Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> };
-    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name, { replyNow: true, backgroundLane: isBackgroundChatId(chatId), owner: computerOwnerKey(cwd, chatId), agentId: agentForChatId(chatId)?.id }), officeMcpServers());
-    return JSON.stringify(cfg);
+    const owner = computerOwnerKey(cwd, chatId);
+    Object.assign(cfg.mcpServers, localMcpServers(agentForChatId(chatId)?.name, { replyNow: true, backgroundLane: isBackgroundChatId(chatId), owner, agentId: agentForChatId(chatId)?.id }), officeMcpServers());
+    return writeClaudeMcpConfigFile(owner, JSON.stringify(cfg));
   } catch {
     return configJson;
   }
@@ -604,6 +645,9 @@ class ClaudeSession {
   /** The context a seeded process started with. */
   private startTokens = 0;
   private providerAccount = '';
+  /** Named subscription account this child runs under (SAMWISE_ACCOUNT);
+   *  'default' when no account map is configured. */
+  private providerAccountName = 'default';
   /** Text-block seqs for the current Claude stream. A later synthetic marker
    * lets us surgically remove only its protocol prose from durable storage. */
   private streamTextBlocks = new Map<number, { text: string; seqs: number[] }>();
@@ -655,7 +699,7 @@ class ClaudeSession {
    *  every turn start and overwritten by the next; a steer never touches it,
    * and a native query adopted without send() leaves it null so that turn
    *  still reports for a human. */
-  private compactRerunPrompt: { text: string; images?: Array<{ mediaType: string; base64: string }>; rerun: boolean } | null = null;
+  private compactRerunPrompt: { text: string; images?: Array<{ mediaType: string; base64: string }>; rerun: boolean; echoText?: string; replyTo?: { from: string; snippet: string }; clientMsgId?: string } | null = null;
   /** Boot/rotation warmup uses Claude's read-only `mcp_status` control request:
    * no model turn, no tool call, and no transcript event. */
   private mcpPrewarmed = false;
@@ -844,6 +888,9 @@ class ClaudeSession {
     this.nativeCompactWindow = Number(spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW) || 0;
     const profileDir = spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
     this.providerAccount = existsSync(profileDir) ? realpathSync(profileDir) : profileDir;
+    this.providerAccountName = typeof spawnEnv.SAMWISE_ACCOUNT === 'string' && spawnEnv.SAMWISE_ACCOUNT.trim()
+      ? spawnEnv.SAMWISE_ACCOUNT.trim()
+      : 'default';
     this.child = spawn('claude', args, {
       cwd,
       env: spawnEnv,
@@ -962,6 +1009,12 @@ class ClaudeSession {
   /** Most recent turn start (ms) — used for telegram-ping duration. */
   private turnStartedAt: number | null = null;
 
+  /** The active turn's start (ms) for the client's elapsed timer on reattach
+   *  (register.ts ready payload); null when no turn is open. */
+  activeTurnStartedAt(): number | null {
+    return this.turnStartedAt;
+  }
+
   /** Initialize Claude plus every configured MCP without invoking the model or
    * exposing any tool. `mcp_status` is a read-only stream-json control request. */
   async prewarm(): Promise<void> {
@@ -1013,7 +1066,7 @@ class ClaudeSession {
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
-  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge; compactRerun?: boolean } = {}): Promise<void> {
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge; compactRerun?: boolean; echoText?: string; replyTo?: { from: string; snippet: string } } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
@@ -1079,7 +1132,7 @@ class ClaudeSession {
       this.syntheticApiErrorSeen = false;
       this.syntheticApiErrorReason = null;
       this.compactFailure = null;
-      this.compactRerunPrompt = { text, images, rerun: opts.compactRerun === true };
+      this.compactRerunPrompt = { text, images, rerun: opts.compactRerun === true, echoText: opts.echoText, replyTo: opts.replyTo, clientMsgId: opts.clientMsgId };
       this.streamTextBlocks.clear();
       this.preparingTurnAborter = preparationAborter;
       this.turnPromptSubmitted = false;
@@ -1252,11 +1305,12 @@ class ClaudeSession {
         type: 'event',
         event: {
           type: '_user_echo',
-          text,
+          text: opts.echoText ?? text,
           imageCount: images?.length ?? 0,
           attachments,
           clientMsgId: opts.clientMsgId,
           humanOrigin: opts.humanOrigin === true,
+          ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
           ts: Date.now(),
         },
       });
@@ -1325,7 +1379,18 @@ class ClaudeSession {
     const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
     // Matt's Priorities ride every turn (continues and steers too), read fresh.
     const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
-    const stdinText = `${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}`;
+    // Plain-English writing block (card-0d1015): the OpenRouter lane's
+    // Gemini models lose a writing rule buried at the top of this long
+    // message, so it rides at the very END instead. Voice turns keep their
+    // own spoken-style addendum, and automation, peer, reply-nudge and
+    // continuation traffic stays silent or exact (review 1 P0/P1).
+    const plainEnglishWriting = plainEnglishWritingBlockFor({
+      cli: this.cli,
+      model: this.spawnModel,
+      voiceMode: opts.voiceMode,
+      humanTurn: humanTurn && !continuing && !replyNudge,
+    });
+    const stdinText = `${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}${plainEnglishWriting ? `\n\n${plainEnglishWriting}` : ''}`;
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];
@@ -2515,6 +2580,14 @@ class ClaudeSession {
     if (terminal?.usageLimit) {
       noteProviderUsageLimit(this.providerAccount, agentForChatId(this.chatId)?.name ?? 'a lane', terminal);
     }
+    // The usage-limit rollover: same turn, backup engine. Only an account the
+    // deployment named may roll over, only with the turn's opening prompt in
+    // hand, and never stacked on the compact re-run below.
+    const usageFallbackDue = terminal?.usageLimit === true
+      && (this.cli === 'claude' || this.cli === 'assistant')
+      && USAGE_FALLBACK_ACCOUNTS.has(this.providerAccountName)
+      && this.compactRerunPrompt !== null
+      && (this.compactRerunPrompt.text.trim() !== '' || (this.compactRerunPrompt.images?.length ?? 0) > 0);
     // Z.ai meters the coding plan in fixed windows, so an exhausted window is
     // never a balance problem and topping up credits cannot clear it. Attribute
     // the failure to the provider THIS child is actually talking to: a 1308
@@ -2557,6 +2630,28 @@ class ClaudeSession {
         zaiCut ? this.zaiCutNoticeFields(zaiCut) : undefined,
       );
       zaiCutNoticeSeq = this.nextSeq - 1;
+      if (usageFallbackDue) {
+        this.emit({
+          type: 'event',
+          event: {
+            type: '_terminal_error',
+            message: `Claude's usage window is full, so this turn is rerunning automatically on the Gemini backup (${USAGE_FALLBACK.model}). The lane returns to Claude when the limit resets.`,
+            code: 'usage_fallback',
+            ts: Date.now(),
+          },
+        });
+        scheduleUsageFallback({
+          cwd: this.cwd,
+          chatId: this.chatId,
+          logKey: this.logKey,
+          text: this.compactRerunPrompt!.text,
+          images: this.compactRerunPrompt!.images,
+          echoText: this.compactRerunPrompt!.echoText,
+          replyTo: this.compactRerunPrompt!.replyTo,
+          clientMsgId: this.compactRerunPrompt!.clientMsgId,
+          retiring: this,
+        });
+      }
     } else {
       this.emit({ type: 'event', event: ev });
     }
@@ -2659,7 +2754,9 @@ class ClaudeSession {
         // The compact failure's one automatic re-run (the copy above already
         // promised it). lengthRejected stays manual: its oversized prompt may
         // still be oversized after the reseed, so a human decides there.
-        if (compactFailed && compactRerunPlanned) {
+        // The usage rollover above already reruns this turn on the backup
+        // engine; a second, same-engine replay here would double-answer.
+        if (compactFailed && compactRerunPlanned && !usageFallbackDue) {
           scheduleCompactRerun({
             cli: this.cli,
             cwd: this.cwd,
@@ -2669,6 +2766,9 @@ class ClaudeSession {
             effort: this.spawnEffort,
             text: this.compactRerunPrompt!.text,
             images: this.compactRerunPrompt!.images,
+            echoText: this.compactRerunPrompt!.echoText,
+            replyTo: this.compactRerunPrompt!.replyTo,
+            clientMsgId: this.compactRerunPrompt!.clientMsgId,
             retiring: this,
           });
         }
@@ -2820,9 +2920,10 @@ function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
 }
 
 // Returned by getOrCreateSession — common interface across all runners.
-export type AnySession = ClaudeSession | PiSession | CodexSession | BananaSession;
-/** The claude-family registry holds both harnesses for the zai/xai lanes. */
-export type LaneSession = ClaudeSession | PiSession;
+export type AnySession = ClaudeSession | PiSession | AgySession | CodexSession | BananaSession;
+/** The claude-family registry holds both harnesses for the zai/xai lanes, plus
+ *  the agy subscription lane (Google Antigravity CLI, agy-runner.ts). */
+export type LaneSession = ClaudeSession | PiSession | AgySession;
 
 export async function getOrCreateSession(opts: {
   cli: CliKind;
@@ -2987,7 +3088,8 @@ function retireOtherEnginesOnThread(cli: CliKind, repoPath: string, chatId: stri
   // session accessor, so their child lingers until idle timeout after a switch.
 }
 
-/** Live, already-spawned session for a Claude-family lane, or null.
+/** Live, already-spawned session for a persistent-process lane (claude
+ *  binary family or agy), or null.
  *  A passive `hello` uses this to attach to a warm lane WITHOUT spawning.
  *  Reconnects used to run getOrCreateSession, so a client holding N sockets on a
  *  lane started N CLI children; spawning a claude process (multi-KB argv) is
@@ -2999,7 +3101,7 @@ export function peekClaudeSession(opts: {
   repoPath: string;
   chatId?: string;
 }): AnySession | null {
-  if (!isClaudeFamilyCli(opts.cli)) return null;
+  if (!isPersistentProcessCli(opts.cli)) return null;
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, opts.chatId || 'main');
   const live = sessions.get(key);
@@ -3133,8 +3235,11 @@ async function spawnSession(
   }
   assertMemoryAvailableForSpawn(cli);
   // GLM and Grok run in the Pi harness by default: the persona is the whole
-  // system prompt there, and the providers are spoken to natively.
-  const session: LaneSession = usePiHarness(cli)
+  // system prompt there, and the providers are spoken to natively. The agy
+  // lane (Gemini on Matt's Google subscription) is its own runner.
+  const session: LaneSession = cli === 'agy'
+    ? new AgySession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort, model), seedFirst, switchedFrom)
+    : usePiHarness(cli)
     ? new PiSession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort), seedFirst, switchedFrom)
     : new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, seedFirst, switchedFrom);
   sessions.set(key, session);
@@ -3146,9 +3251,26 @@ async function spawnSession(
     }
   }, -1, false);
 
-  const ok = await session.ready;
+  // Agy bounds its own readiness (a live child that never emits init is
+  // retired so the lookup cannot wedge on it); the other lanes keep their own
+  // readiness shapes (claude warmups legitimately run long).
+  let ok: boolean;
+  let readyTimedOut = false;
+  if (session instanceof AgySession) {
+    const state = await session.waitForInitOrExit(AGY_READY_TIMEOUT_MS);
+    ok = state === 'initialized';
+    readyTimedOut = state === 'timeout';
+    if (state === 'timeout') session.shutdown('ready-timeout');
+  } else {
+    ok = await session.ready;
+  }
   if (!ok) {
-    if (session.isDisposed() || sessionsShuttingDown) {
+    // A ready-timeout is a startup FAILURE, not an intentional cancellation.
+    // Routed as intentional it bypassed the breaker and the stale-resume
+    // retry, so a hanging --conversation resume was retried forever with no
+    // cooldown. It flows into the normal failure path: one fresh retry
+    // without the resume id, then the breaker.
+    if (!readyTimedOut && (session.isDisposed() || sessionsShuttingDown)) {
       throw new Error('claude startup was intentionally cancelled');
     }
     const owner = sessions.get(key);
@@ -3199,6 +3321,12 @@ type CompactRerunJob = {
   effort: string;
   text: string;
   images?: Array<{ mediaType: string; base64: string }>;
+  /** The raw echo text and reply target of the original send (card-cbb4af,
+   *  verify P1 2), so the re-run's echo matches the first one and the client
+   *  dedupes by clientMsgId instead of adding a quoted duplicate bubble. */
+  echoText?: string;
+  replyTo?: { from: string; snippet: string };
+  clientMsgId?: string;
   retiring: ClaudeSession;
 };
 const compactRerunJobs = new Set<CompactRerunJob>();
@@ -3263,7 +3391,12 @@ function scheduleCompactRerun(job: CompactRerunJob): void {
         model: job.model,
         effort: job.effort,
       });
-      await session.send(job.text, job.images, { compactRerun: true });
+      await session.send(job.text, job.images, {
+        compactRerun: true,
+        ...(job.echoText !== undefined ? { echoText: job.echoText } : {}),
+        ...(job.replyTo ? { replyTo: job.replyTo } : {}),
+        ...(job.clientMsgId ? { clientMsgId: job.clientMsgId } : {}),
+      });
     } catch (err) {
       console.warn(`[chat ${job.cli}] automatic re-run after the failed compact did not land:`, (err as Error).message);
       // The re-run is finished and failed, so free the lane's dedupe key now:
@@ -3275,6 +3408,148 @@ function scheduleCompactRerun(job: CompactRerunJob): void {
       compactRerunJobs.delete(job);
     }
   })();
+}
+
+type UsageFallbackJob = {
+  cwd: string;
+  chatId: string;
+  logKey: string;
+  text: string;
+  images?: Array<{ mediaType: string; base64: string }>;
+  /** The raw echo text and reply target of the original send (card-cbb4af,
+   *  review 3 P1 2), so the backup replay's echo matches the first one and
+   *  the client dedupes by clientMsgId instead of adding a quoted
+   *  duplicate bubble. */
+  echoText?: string;
+  replyTo?: { from: string; snippet: string };
+  clientMsgId?: string;
+  retiring: ClaudeSession;
+};
+/** One FIFO queue per thread: replays run serially, oldest prompt first, so
+ *  two limited turns on one lane each get their answer in order. */
+const usageFallbackQueues = new Map<string, UsageFallbackJob[]>();
+const usageFallbackDraining = new Set<string>();
+
+/** Rerun one usage-limited turn on the backup engine (USAGE_FALLBACK). */
+function scheduleUsageFallback(job: UsageFallbackJob): void {
+  console.warn(`[chat] usage limit on ${job.logKey}; rerunning the turn on ${USAGE_FALLBACK.cli} ${USAGE_FALLBACK.model}`);
+  const queue = usageFallbackQueues.get(job.logKey) ?? [];
+  queue.push(job);
+  usageFallbackQueues.set(job.logKey, queue);
+  void drainUsageFallback(job.logKey);
+}
+
+function drainUsageFallback(logKey: string): Promise<void> {
+  if (usageFallbackDraining.has(logKey)) return Promise.resolve();
+  usageFallbackDraining.add(logKey);
+  return (async () => {
+    try {
+      for (;;) {
+        const job = usageFallbackQueues.get(logKey)?.shift();
+        if (!job) {
+          usageFallbackQueues.delete(logKey);
+          return;
+        }
+        await runUsageFallback(job);
+      }
+    } finally {
+      usageFallbackDraining.delete(logKey);
+    }
+  })();
+}
+
+async function runUsageFallback(job: UsageFallbackJob): Promise<void> {
+  const sleep = (ms: number) => new Promise<void>((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
+  const otherEngineBusy = () => {
+    for (const s of [...sessions.values()]) {
+      if (s.logKey === job.logKey && s.cli !== USAGE_FALLBACK.cli && s.isAlive()
+        && typeof s.isBusy === 'function' && s.isBusy()) return true;
+    }
+    return false;
+  };
+  try {
+    // Wait for the limited turn's boundary: the backup engine takes the
+    // thread by retiring this one, and retirement only lands on an idle
+    // session (retireOtherEnginesOnThread skips a busy child).
+    const limitedStart = Date.now();
+    while (job.retiring.isBusy() && Date.now() - limitedStart < 15_000) await sleep(250);
+    if (job.retiring.isBusy()) throw new Error('the limited turn never went idle');
+    // A newer turn on the lane's own engine owns the thread while it runs;
+    // wait it out (bounded) instead of discarding this replay.
+    const freeStart = Date.now();
+    while (otherEngineBusy() && Date.now() - freeStart < 60_000) await sleep(250);
+    if (otherEngineBusy()) throw new Error('a newer turn on the lane is still running');
+    let startupTimer: NodeJS.Timeout | undefined;
+    const startup = getOrCreateSession({
+      cli: USAGE_FALLBACK.cli,
+      repoPath: job.cwd,
+      chatId: job.chatId,
+      model: USAGE_FALLBACK.model,
+      effort: USAGE_FALLBACK.effort,
+    });
+    const startupTimeout = new Promise<never>((_, reject) => {
+      startupTimer = setTimeout(() => reject(new Error('the backup engine did not start within 120s')), 120_000);
+      startupTimer.unref?.();
+    });
+    let session: Awaited<typeof startup>;
+    try {
+      session = await Promise.race([startup, startupTimeout]);
+    } catch (err) {
+      // The startup itself keeps running. A late success must not leave a
+      // stray backup session holding the thread or retiring things under a
+      // newer turn: close it the moment it lands, unless a newer turn is
+      // already using it (a newer job's getOrCreate may have joined the same
+      // in-flight startup, which is fine).
+      void startup.then((late) => {
+        if (!late.isAlive() || (typeof late.isBusy === 'function' && late.isBusy())) return;
+        console.warn(`[chat] usage fallback on ${job.logKey}: closing a late backup session after the startup timeout`);
+        for (const [key, s] of [...sessions]) {
+          if (s === late) {
+            late.shutdown('usage-fallback-startup-timeout');
+            if (sessions.get(key) === late) sessions.delete(key);
+            break;
+          }
+        }
+      }).catch(() => { /* the startup failed too; the notice below already said so */ });
+      throw err;
+    } finally {
+      if (startupTimer) clearTimeout(startupTimer);
+    }
+    await session.send(job.text, job.images, {
+      ...(job.echoText !== undefined ? { echoText: job.echoText } : {}),
+      ...(job.replyTo ? { replyTo: job.replyTo } : {}),
+      ...(job.clientMsgId ? { clientMsgId: job.clientMsgId } : {}),
+    });
+  } catch (err) {
+    await postUsageFallbackFailureNotice(job, (err as Error).message);
+  }
+}
+
+async function postUsageFallbackFailureNotice(job: UsageFallbackJob, reason: string): Promise<void> {
+  try {
+    const event = {
+      type: '_terminal_error',
+      message: `Claude's usage window is full and the automatic rerun on the Gemini backup did not land (${reason}). Send the message again, or switch brains.`,
+      code: 'usage_fallback_failed',
+    };
+    const deadline = Date.now() + COMPACT_RERUN_NOTICE_IDLE_WAIT_MS;
+    for (;;) {
+      const live = liveLaneSession(job.logKey, job.chatId);
+      if (!live?.isBusy()) {
+        if (live?.postNotice(event)) return;
+        break;
+      }
+      if (Date.now() >= deadline) {
+        console.warn(`[chat] usage-fallback failure notice on ${job.logKey} dropped: the thread never went idle`);
+        return;
+      }
+      await new Promise((resolve) => { const t = setTimeout(resolve, 250); t.unref?.(); });
+    }
+    const persisted = { ...laneTagFor(job.chatId), seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event' as const, event }, eng: USAGE_FALLBACK.cli, mdl: USAGE_FALLBACK.model };
+    const saved = appendEventLogDurable(job.logKey, persisted);
+    publishExternalThreadEvent(job.logKey, persisted);
+    await saved;
+  } catch { /* best effort */ }
 }
 
 export function shutdownAllSessions(): void {
@@ -3295,6 +3570,10 @@ export type LiveSession = {
   sessionId: string | null;
   /** ms since epoch of the most recent event (or spawn time if no events yet). */
   lastActivityAt: number;
+  /** ms since epoch the CURRENT turn started, when the lane can report it
+   *  (Claude, Codex, banana); absent when idle or unknown. Per-turn, so a
+   *  chained sequence of short turns never looks like one long turn. */
+  busySince?: number;
   /** Background tasks running inside the process (Claude lanes only). A
    *  restart ends them, so deploys check this alongside busy turns. */
   backgroundTasks?: string[];
@@ -3310,6 +3589,7 @@ export function activeClaudeSessions(): LiveSession[] {
       busy: s.isBusy(),
       sessionId: s.sessionId(),
       lastActivityAt: s.lastActivityAt(),
+      busySince: s.activeTurnStartedAt() ?? undefined,
       ...(s instanceof ClaudeSession && s.hasBackgroundWork() ? { backgroundTasks: s.backgroundWork() } : {}),
     });
   }
@@ -3512,11 +3792,14 @@ export function subscribeExternalThreadEvents(fn: (logKey: string, se: SeqEvent)
 }
 
 /** Mirror a background-lane event to the home lane's viewers (warm sockets
- *  ride the home session; cold ones the external listeners). Only transcript
- *  frames cross: the background lane's turnStart/turnEnd/closed stay its own,
- *  so they never flip the home lane's busy state or end its waits. */
+ *  ride the home session; cold ones the external listeners). Transcript
+ *  frames cross, and so do the lane's turnStart/turnEnd (card-e2bd7a, Oct
+ *  15): they reach the viewer tagged with the bg lane, so a running bg turn
+ *  shows the same working indicator as a home turn without ever flipping the
+ *  home lane's own busy state or gating its sends (the client keeps bg busy
+ *  separately). Everything else (closed, errors) stays the bg lane's own. */
 export function shareBackgroundLaneEvent(source: { chatId: string; logKey: string }, se: SeqEvent): void {
-  if (se.lane !== 'bg' || se.ev.type !== 'event') return;
+  if (se.lane !== 'bg' || (se.ev.type !== 'event' && se.ev.type !== 'turnStart' && se.ev.type !== 'turnEnd')) return;
   for (const session of sessions.values()) {
     if (session !== source && session.logKey === source.logKey && !isBackgroundChatId(session.chatId)) session.ingestExternalEvent(se);
   }

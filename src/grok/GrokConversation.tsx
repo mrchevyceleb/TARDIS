@@ -157,6 +157,9 @@ export function GrokConversation(props: BotConversationProps) {
       onSend={dock ? (text, images) => s.send(dock.takeOutgoing(text), images) : s.send}
       onStop={s.stop}
       onSteer={dock ? (text, images) => s.steer(dock.takeOutgoing(text), images) : s.steer}
+      onSendQueued={dock ? (text, images) => s.sendQueued(dock.takeOutgoing(text), images) : s.sendQueued}
+      replyTo={s.reply ? { from: s.reply.from, snippet: s.reply.snippet } : null}
+      onClearReply={() => s.setReply(null)}
       busy={s.busy}
       commands={s.commands}
       placeholders={placeholders}
@@ -262,6 +265,7 @@ export function GrokConversation(props: BotConversationProps) {
               backgroundWork={s.backgroundWork}
               waitingOn={waitingOn}
               onReact={s.react}
+              onReply={s.setReply}
               onRetry={s.retry}
               agentName={agentName}
               pin={agent ? {

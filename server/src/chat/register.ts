@@ -1,4 +1,6 @@
 import { assertSubscriptionLane } from './subscription-policy.ts';
+import { normalizeReplyTo, withReplyQuote } from './reply-quote.ts';
+import { eventInner, eventType, isAutomationPeerEvent, isNoopToken } from './routineNoise.ts';
 import type express from 'express';
 import type { Server } from 'node:http';
 import { basename } from 'node:path';
@@ -8,12 +10,14 @@ import { readChronicle } from './chronicle.ts';
 import { readCommands } from './commands.ts';
 import { clearThreadSessionIds, ensureStateDir } from './sessions.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
+import { setLanePushAll } from './laneEvents.ts';
 import { stopComputersForOwner } from '../devices/bridge.ts';
 import { computerOwnerKey } from '../devices/context.ts';
 import { ASSISTANT_HUB_PATH } from './config.ts';
 import { codexCatalogPayload, startCodexCatalog } from './codex-models.ts';
 import { fireworksCatalogPayload, startFireworksCatalog } from './fireworks-models.ts';
 import { openRouterCatalogPayload, startOpenRouterCatalog } from './openrouter-models.ts';
+import { agyCatalogPayload } from './agy-models.ts';
 import {
   clampReplayWindow,
   REPLAY_CATCHUP_MAX_BYTES,
@@ -34,6 +38,7 @@ import {
   getOrCreateSession,
   interruptSession,
   isClaudeFamilyCli,
+  isPersistentProcessCli,
   isClaudeUnrecognizedModelWarning,
   laneLogKey,
   MemoryPressureSpawnError,
@@ -48,11 +53,13 @@ import { durableUserEchoClientMsgId, flushEventLog, loadEventLogCatchUp, loadEve
 import { isReactionEmoji, recordReaction } from './reactions.ts';
 import {
   activeCodexSessions,
+  peekCodexSession,
   pruneIdleCodexSessions,
   shutdownAllCodexSessions,
 } from './codex-runner.ts';
 import {
   activeBananaSessions,
+  peekBananaSession,
   pruneIdleBananaSessions,
   shutdownAllBananaSessions,
 } from './banana-runner.ts';
@@ -62,7 +69,7 @@ import { watchThread, unwatchThread, setWatchVisible } from './threadWatch.ts';
 import { agentForChatId, brainForAgent, cliForAgentEngine } from './agents.ts';
 import { loadThreadResetEpochs, persistThreadResetEpoch } from './threadResetStore.ts';
 import { setQueuedHumanProbe } from './providerSwitch.ts';
-import { bareChatId, isBackgroundChatId } from './threadKey.ts';
+import { bareChatId, isBackgroundChatId, backgroundChatId } from './threadKey.ts';
 
 type ClientSelection = {
   model?: string;
@@ -77,10 +84,10 @@ type ClientWatch = { type: 'watch'; visible?: boolean };
 // `model` / `effort` ride on send/steer. Banana and Codex apply them per turn.
 // Claude-family lanes (claude/assistant/zai/xai) apply them at spawn; a live
 // steer must reuse that spawn, not the Counsel picker's current id.
-type ClientSend = { type: 'send'; cli?: CliKind; repo?: string; chatId?: string; sinceSeq?: number; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string; voice?: boolean } & ClientSelection;
+type ClientSend = { type: 'send'; cli?: CliKind; repo?: string; chatId?: string; sinceSeq?: number; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string; voice?: boolean; replyTo?: { from: string; snippet: string } } & ClientSelection;
 type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string; chatId?: string } & ClientSelection;
 type ClientStop = { type: 'stop'; cli: CliKind; repo: string; chatId?: string };
-type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string; voice?: boolean } & ClientSelection;
+type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string; voice?: boolean; queue?: boolean; replyTo?: { from: string; snippet: string } } & ClientSelection;
 type ClientReact = { type: 'react'; cli?: CliKind; repo?: string; chatId?: string; targetSeq: number; emoji: string; removed?: boolean };
 type ClientMsg = ClientHello | ClientWatch | ClientSend | ClientFresh | ClientStop | ClientSteer | ClientReact;
 type ResumeWatchableSession = AnySession & {
@@ -111,6 +118,7 @@ function waitForSteerOrTurnEnd(
   signal: AbortSignal,
   timeoutMs = 30 * 60_000,
   allowNativeSteer = false,
+  requestInterrupt = true,
 ): Promise<SteerBoundary> {
   if (signal.aborted) return Promise.resolve('aborted');
   if (!sessionHasActiveBoundary(session)) return Promise.resolve('turn-complete');
@@ -118,7 +126,11 @@ function waitForSteerOrTurnEnd(
   // The message is waiting on a busy Claude-family session: have its turn end
   // at the next tool boundary so the message starts a real turn (see
   // ClaudeSession.canAcceptNativeHumanSteer). Codex takes turn/steer natively.
-  const releaseBoundary = (session as { requestBoundaryInterrupt?: (opts?: { human?: boolean }) => (() => void) | null }).requestBoundaryInterrupt?.({ human: true }) ?? null;
+  // A queued message (card-504beb, verify P0 1) never requests the interrupt:
+  // it waits for the natural turn end, on every engine.
+  const releaseBoundary = requestInterrupt
+    ? (session as { requestBoundaryInterrupt?: (opts?: { human?: boolean }) => (() => void) | null }).requestBoundaryInterrupt?.({ human: true }) ?? null
+    : null;
   return new Promise((resolve) => {
     let settled = false;
     let unsubscribe: () => void = () => {};
@@ -271,7 +283,208 @@ function isSuccessfulResult(se: DispatchSeqEvent): boolean {
   return event?.type === 'result' && event.is_error === false;
 }
 
-function filterReplayEvents(events: DispatchSeqEvent[]): DispatchSeqEvent[] {
+/** The frame's assistant text when it is a full assistant message carrying
+ *  non-empty text content, else null (tool-only and non-assistant frames). */
+function assistantFrameText(se: DispatchSeqEvent): string | null {
+  const inner = eventInner(se.ev);
+  if (!inner || inner.type !== 'assistant') return null;
+  const message = inner.message as { content?: unknown } | undefined;
+  if (!Array.isArray(message?.content)) return null;
+  const parts: string[] = [];
+  for (const block of message.content) {
+    const b = block as { type?: string; text?: unknown } | null;
+    if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) parts.push(b.text);
+  }
+  return parts.length ? parts.join('\n') : null;
+}
+
+/** Streamed text of a bg frame: a content_block_delta carrying text (the
+ *  streamed envelope every engine's background lane uses — agy, claude with
+ *  partial messages, grok), else null. Works on both the wrapped
+ *  stream_event form and a bare delta. */
+function streamedDeltaText(se: DispatchSeqEvent): string | null {
+  const inner = eventInner(se.ev);
+  if (!inner) return null;
+  const holder = inner.type === 'stream_event' && inner.event && typeof inner.event === 'object'
+    ? (inner.event as Record<string, unknown>)
+    : inner;
+  if (holder.type !== 'content_block_delta') return null;
+  const delta = (holder as { delta?: { type?: unknown; text?: unknown } }).delta;
+  if (delta && delta.type === 'text_delta' && typeof delta.text === 'string' && delta.text) return delta.text;
+  return null;
+}
+
+/** The terminal reply payload of a bg result frame, else null. Only a
+ *  successful result carries the turn's answer; an error result's payload is
+ *  transport output, never the reply. */
+function resultPayloadText(se: DispatchSeqEvent): string | null {
+  const inner = eventInner(se.ev);
+  if (!inner || inner.type !== 'result' || inner.is_error === true) return null;
+  return typeof inner.result === 'string' ? inner.result : null;
+}
+
+/** A copy of a result frame with its reply payload blanked. The frame still
+ *  closes the turn client-side (the reducer treats an empty final text as
+ *  "close, append nothing"), but the quiet token never re-enters the render. */
+function blankResultPayload(se: DispatchSeqEvent): DispatchSeqEvent {
+  const clone = structuredClone(se);
+  const inner = eventInner(clone.ev);
+  if (inner && typeof inner === 'object') (inner as { result?: unknown }).result = '';
+  return clone;
+}
+
+/** Matt, Oct 15 (card-f38410, streamed half): a background-lane automation
+ *  turn that ends in a no-op token is protocol quiet, but its streamed
+ *  between-tool notes and terminal summary render like spoken messages, and
+ *  the terminal result payload can recreate text the replay filter already
+ *  dropped. One span classifier now feeds BOTH the replay filter and the
+ *  live socket path, so what a viewer watches live is exactly what a
+ *  reconnect replays: a span collects bg-lane frames from an automation
+ *  delivery to the next delivery, turn end or lane gap; a span whose terminal
+ *  text is exactly a no-op token drops its text-bearing frames (assistant
+ *  text, streamed deltas) and blanks the result payload, while every other
+ *  frame (tools, boundaries, the trigger card) passes so the turn's shape
+ *  survives. A mid-turn steer or an unseen origin keeps everything visible.
+ *  Held frames of a running span are released only at the span boundary — a
+ *  live viewer watches an automation turn settle all at once, exactly as the
+ *  replay and the client's own fold already present it. */
+const QUIET_SPAN_HOLD_CAP = 4000;
+
+export class QuietAutomationSpans {
+  private span: DispatchSeqEvent[] = [];
+  private automation = false;
+  /** The chronologically latest COMPLETE text (assistant frame, closed delta
+   *  block, or result payload) — one ordered candidate, so a later streamed
+   *  block always supersedes an earlier full frame instead of being outranked
+   *  by it. */
+  private terminal: string | null = null;
+  private deltaAcc = '';
+  /** Cap-tripped: the rest of THIS span passes through unfiltered. Cleared
+   *  when the next span starts or on reset. */
+  private gaveUp = false;
+
+  /** Feed one sequenced event; returns the frames to emit now, in order. */
+  accept(se: DispatchSeqEvent): DispatchSeqEvent[] {
+    const t = eventType(se.ev);
+    if (this.span.length && (se.lane !== 'bg' || t === 'peer_message' || t === 'turnEnd')) {
+      const out = this.settle();
+      // The boundary frame may itself START the next span (an automation
+      // delivery arriving back to back): re-enter on the now-empty span so it
+      // gets the same treatment instead of bypassing classification.
+      out.push(...this.accept(se));
+      return out;
+    }
+    if (se.lane !== 'bg') return [se];
+    if (this.span.length === 0) {
+      this.automation = t === 'peer_message' && isAutomationPeerEvent(se.ev);
+      this.gaveUp = false;
+    }
+    this.observe(se, t);
+    if (!this.automation) return [se];
+    // Cap-tripped: the remainder of this turn shows itself, unfiltered.
+    if (this.gaveUp) return [se];
+    this.span.push(se);
+    // Safety valve: a runaway automation turn must not grow an unbounded
+    // hold buffer. Past the cap the span gives up hiding and shows itself:
+    // the whole buffer goes out UNFILTERED and the rest of the turn is
+    // pass-through. Never settle() here — a partial verdict that happens to
+    // be a no-op token would delete real text (review 3, P1).
+    if (this.span.length > QUIET_SPAN_HOLD_CAP) {
+      this.gaveUp = true;
+      const out = this.span;
+      this.span = [];
+      return out;
+    }
+    return [];
+  }
+
+  /** Flush any held tail (end of a replay batch). */
+  finish(): DispatchSeqEvent[] {
+    return this.settle();
+  }
+
+  private verdict(): string | null {
+    if (this.terminal !== null) return this.terminal;
+    return this.deltaAcc.trim() ? this.deltaAcc : null;
+  }
+
+  private settle(): DispatchSeqEvent[] {
+    if (!this.span.length) {
+      this.reset();
+      return [];
+    }
+    const verdict = this.verdict();
+    const quiet = this.automation && verdict !== null && isNoopToken(verdict);
+    const out: DispatchSeqEvent[] = [];
+    for (const held of this.span) {
+      if (!quiet) out.push(held);
+      else if (resultPayloadText(held) !== null) out.push(blankResultPayload(held));
+      else if (assistantFrameText(held) === null && streamedDeltaText(held) === null) out.push(held);
+    }
+    this.reset();
+    return out;
+  }
+
+  private observe(se: DispatchSeqEvent, t: string | undefined): void {
+    // The wrapped stream envelope types as `stream_event` at the inner level;
+    // the block boundary lives one level deeper (the same unwrap
+    // streamedDeltaText uses), so a multi-message turn resets its accumulation
+    // at each new text block and COMPLETES the candidate at each block stop,
+    // keeping the verdict chronologically ordered across mixed frame shapes.
+    const inner = eventInner(se.ev);
+    const holderType = inner && inner.type === 'stream_event' && inner.event && typeof inner.event === 'object'
+      ? (inner.event as Record<string, unknown>).type
+      : t;
+    const a = assistantFrameText(se);
+    if (a !== null) {
+      this.terminal = a;
+      this.deltaAcc = '';
+    }
+    if (holderType === 'content_block_start') this.deltaAcc = '';
+    const d = streamedDeltaText(se);
+    if (d !== null) this.deltaAcc += d;
+    if (holderType === 'content_block_stop' && this.deltaAcc.trim()) {
+      this.terminal = this.deltaAcc;
+      this.deltaAcc = '';
+    }
+    // An EMPTY result payload is absent for the verdict (review 3, P0): agy
+    // emits result:'' when streamed text already carried the response, and
+    // letting '' overwrite a valid streamed candidate (a streamed NO_UPDATE)
+    // would release the whole span unfiltered. The frame still matches by
+    // shape in settle() for payload blanking.
+    const r = resultPayloadText(se);
+    if (r !== null && r.trim() !== '') this.terminal = r;
+  }
+
+  private reset(): void {
+    this.span = [];
+    this.automation = false;
+    this.terminal = null;
+    this.deltaAcc = '';
+    this.gaveUp = false;
+  }
+
+  /** Discard any held span without emitting it: a socket re-binding onto
+   *  another thread (or replaying this one from scratch) must never receive
+   *  frames the previous binding was still holding. The replay re-establishes
+   *  state from the durable log. */
+  discard(): void {
+    this.reset();
+  }
+}
+
+export function filterReplayEvents(events: DispatchSeqEvent[], spans?: QuietAutomationSpans): DispatchSeqEvent[] {
+  // With a caller-owned tracker (the socket's live-path instance), classify
+  // through IT and leave an open tail HELD: the batch boundary is artificial,
+  // and the live continuation settles the span at its real boundary with the
+  // full verdict. Settling an open span on partial replay data can delete
+  // frames a completed non-quiet span needed (review 3, P0). Ownerless
+  // callers get a local tracker that settles at the end, as before.
+  const tracker = spans ?? new QuietAutomationSpans();
+  const classified: DispatchSeqEvent[] = [];
+  for (const se of events) classified.push(...tracker.accept(se));
+  if (!spans) classified.push(...tracker.finish());
+  events = classified;
   let lastSuccessSeq = -1;
   for (const se of events) {
     if (isSuccessfulResult(se)) lastSuccessSeq = se.seq;
@@ -288,6 +501,24 @@ function filterReplayEvents(events: DispatchSeqEvent[]): DispatchSeqEvent[] {
     if (!isBananaTaggedError(se)) return true;
     return se.seq === latestUnresolvedBananaErrorSeq;
   });
+}
+
+/** The thread's background-lane busy state for the ready frame (card-e2bd7a):
+ *  the bg lane's live session, when one exists, reports its own turn state.
+ *  A peek, never a spawn: a lane that never ran is not busy. Engine-neutral:
+ *  the persistent-process registry covers the claude family and agy, and the
+ *  codex and banana registries get their own read-only peeks, so no engine's
+ *  bg lane reports a hardcoded false. Only isBusy is read. */
+function bgLaneBusy(cli: CliKind, repoPath: string, chatId: string): boolean {
+  const bgId = backgroundChatId(chatId);
+  if (isPersistentProcessCli(cli)) {
+    const live = peekClaudeSession({ cli, repoPath, chatId: bgId });
+    return live ? live.isBusy() : false;
+  }
+  const codex = peekCodexSession({ repoPath, chatId: bgId, cli });
+  if (codex) return codex.isBusy();
+  const banana = peekBananaSession({ repoPath, chatId: bgId, cli });
+  return banana ? banana.isBusy() : false;
 }
 
 /** Set on service shutdown: new turns are rejected (existing sockets get a
@@ -329,6 +560,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
     res.json(openRouterCatalogPayload());
   });
 
+  // The agy (Gemini on Matt's Google subscription) catalog is hand-verified
+  // (no live poller in v1), so this route is a stable read of the same list.
+  app.get('/api/agy/models', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(agyCatalogPayload());
+  });
+
   app.get('/api/repos', async (_req, res) => {
     try {
       res.json({ repos: await discoverRepos() });
@@ -366,7 +604,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
       cli !== 'zai' &&
       cli !== 'xai' &&
       cli !== 'fireworks' &&
-      cli !== 'openrouter'
+      cli !== 'openrouter' &&
+      cli !== 'agy'
     ) {
       res.status(400).json({ error: 'invalid cli' });
       return;
@@ -525,6 +764,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
     model?: string;
     effort?: string;
     voice?: boolean;
+    /** The reply target captured when the steer was held, so the merged send
+     *  keeps its quote (card-cbb4af, review 1 P2 9). */
+    replyTo?: { from: string; snippet: string };
     selectionRevision?: number;
     /** Monotonic enqueue order across every lane, so a replay after Stop keeps
      *  the order the user typed even when steers sat on different engine lanes. */
@@ -661,6 +903,14 @@ export async function registerChat(app: express.Express, server: Server): Promis
       source.send(JSON.stringify({ ...payload, remote: false }));
     }
   };
+  // Routes push live payloads through this one hook (card-a77246): the
+  // checklist route broadcasts tool writes to every open lane socket without
+  // reaching into this closure. Cleared on teardown below.
+  setLanePushAll((payload) => {
+    for (const [client] of socketThreads) {
+      if (client.readyState === client.OPEN) client.send(JSON.stringify(payload));
+    }
+  });
   let wsCounter = 0;
   // Backstop for a client that leaks sockets: a long-lived tab whose orphaned
   // WebSockets keep their handlers attached and keep re-helloing. One browser
@@ -827,6 +1077,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
       busy = false;
       unsubscribe?.();
       unsubscribe = null;
+      // A held bg span belongs to the binding being detached, never to the
+      // next one; the re-bind's replay re-establishes state from the log.
+      bgQuiet.discard();
     };
 
     /** Highest seq this socket has been sent. A rebind resumes from here so
@@ -836,16 +1089,56 @@ export async function registerChat(app: express.Express, server: Server): Promis
      *  the lane's replacement process to exist. */
     let rebindPending = false;
 
-    const dispatch = (se: DispatchSeqEvent) => {
+    /** Live-side twin of the replay filter (card-f38410 streamed half): bg
+     *  frames pass through the same quiet-automation span classifier the
+     *  reconnect replay uses, so a viewer never watches text live that a
+     *  reload would hide. Held frames of a running automation span are
+     *  released at the span boundary with the verdict applied. */
+    const bgQuiet = new QuietAutomationSpans();
+    const sendBgFrame = (frame: DispatchSeqEvent) => {
+      const f = frame.ev;
+      if (f.type === 'event') safeSend({ type: 'stream', event: f.event, seq: frame.seq, at: frame.at, lane: 'bg' });
+      else if (f.type === 'turnStart') safeSend({ type: 'turnStart', seq: frame.seq, lane: 'bg' });
+      else if (f.type === 'turnEnd') safeSend({ type: 'turnEnd', sessionId: f.sessionId, seq: frame.seq, lane: 'bg' });
+    };
+
+    /** Settle any held background span and send what it releases: a home-lane
+     *  frame through dispatch is a lane gap, exactly as in the replay filter,
+     *  so the held span settles visibly before the home frame forwards. */
+    const flushBgQuiet = () => {
+      for (const frame of bgQuiet.finish()) sendBgFrame(frame);
+    };
+
+    const dispatch = (se: DispatchSeqEvent, alreadyClassified = false) => {
       const sev = se.ev;
       if (se.seq > lastDeliveredSeq) lastDeliveredSeq = se.seq;
       // The agent's background lane shares this thread's transcript, never its
       // busy state: only its transcript frames reach the viewer, tagged so the
       // client keeps a separate reply cursor for them.
       if (se.lane === 'bg') {
-        if (sev.type === 'event') safeSend({ type: 'stream', event: sev.event, seq: se.seq, at: se.at, lane: 'bg' });
+        // History frames were already classified by the replay feed through
+        // this same tracker: re-feeding them would fold released frames into
+        // an open tail. Send them straight out.
+        if (alreadyClassified) {
+          sendBgFrame(se);
+          return;
+        }
+        // Matt, Oct 15 (card-e2bd7a): the lane's working and turn-end state
+        // reaches the viewer too, tagged, so a teammate's running turn shows
+        // the same working indicator as a home-lane turn. The socket's own
+        // busy flag stays home-lane-only: a bg turn never gates sends.
+        // card-f38410 streamed half: frames route through the quiet-span
+        // classifier first; only what it releases reaches the viewer.
+        for (const frame of bgQuiet.accept(se)) sendBgFrame(frame);
         return;
       }
+      // A live home-lane frame is a span boundary exactly as in the replay
+      // filter: settle any held background span first so live ordering
+      // matches replay ordering and a held span can never linger past a lane
+      // gap. History frames skip this: the replay feed already settled spans
+      // at their own boundaries, and flushing here would settle an open tail
+      // on partial data (review 3, P0).
+      if (!alreadyClassified) flushBgQuiet();
       if (sev.type === 'event') {
         const admittedClientMsgId = userEchoClientMsgId(sev.event);
         if (admittedClientMsgId && cliKind && repoPath) {
@@ -1044,6 +1337,16 @@ export async function registerChat(app: express.Express, server: Server): Promis
             return true;
           });
         replaying = false;
+        // Atomic re-bind reset FIRST: the old subscription is detached above
+        // and the new binding's history starts now, so any span the previous
+        // binding was holding dies here (a deduped re-hello that skips this
+        // replay keeps the held span untouched). This replay then rebuilds
+        // span state from the log THROUGH THE SAME TRACKER the live path
+        // uses, so an open tail at the end of the batch stays held and the
+        // live continuation settles it at its real boundary with the full
+        // verdict — the artificial batch boundary never settles a span on
+        // partial data (review 3, P0).
+        bgQuiet.discard();
         // Bound the history half only. Live events buffered during the bind
         // are new to this socket and must all arrive.
         // Collapse streamed tool-argument noise and trim old tool output first,
@@ -1051,7 +1354,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         // redrawing old tool cards, and the byte budget measures what actually
         // goes out. Live frames above `latest` are new to this socket and are
         // neither rewritten nor dropped.
-        const full = collapseHistoricalToolArgs(filterReplayEvents(merged), latest)
+        const full = collapseHistoricalToolArgs(filterReplayEvents(merged, bgQuiet), latest)
           .map((se) => (se.seq <= latest ? historicalDelivery(se) : se))
           .filter((se): se is DispatchSeqEvent => se !== null);
         const history = clampReplayWindow(full, latest);
@@ -1062,7 +1365,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (replayLeavesHole(replaySince, catchUp.reachedSince, full.length, history.length)) {
           safeSend({ type: 'replayGap' });
         }
-        for (const se of history) dispatch(se);
+        // History frames were classified by the feed above: dispatch them as
+        // already-classified so released frames are not re-fed into the open
+        // tail and home history frames do not flush it early.
+        for (const se of history) dispatch(se, true);
       }
       return session;
     };
@@ -1104,14 +1410,22 @@ export async function registerChat(app: express.Express, server: Server): Promis
           .sort((a, b) => a.seq - b.seq)
           .filter((event, index, all) => index === 0 || event.seq !== all[index - 1].seq)
           .map((event) => ({ seq: event.seq, ev: event.ev as any, at: event.at, ...(event.lane ? { lane: event.lane } : {}) }));
-        const full = collapseHistoricalToolArgs(filterReplayEvents(pending), latest)
+        // Same atomic re-bind reset as bindSession, FIRST: the previous
+        // binding's held span dies, and this replay rebuilds span state from
+        // the log through the same tracker the live path uses, leaving an
+        // open tail held for the live continuation (review 3, P0: the batch
+        // boundary never settles a span on partial data).
+        bgQuiet.discard();
+        const full = collapseHistoricalToolArgs(filterReplayEvents(pending, bgQuiet), latest)
           .map((se) => historicalDelivery(se))
           .filter((se): se is DispatchSeqEvent => se !== null);
         const history = clampReplayWindow(full, latest);
         if (replayLeavesHole(replaySince, catchUp.reachedSince, full.length, history.length)) {
           safeSend({ type: 'replayGap' });
         }
-        for (const se of history) dispatch(se);
+        // History frames were classified by the feed above: dispatch them as
+        // already-classified (no re-feed, no early flush).
+        for (const se of history) dispatch(se, true);
       }
       return latest;
     };
@@ -1125,6 +1439,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
       effort?: string,
       clientMsgId?: string,
       voiceMode?: boolean,
+      echoText?: string,
+      replyTo?: { from: string; snippet: string },
     ): Promise<boolean> => {
       if (!cliKind || !repoPath || cliKind === 'codex') return false;
       const watchable = session as ResumeWatchableSession;
@@ -1144,7 +1460,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         // fire-and-forget, so guard the promise or a rejection escapes the outer
         // try/catch as an unhandled rejection.
         if ('send' in retrySession) {
-          void Promise.resolve((retrySession as any).send(text, images, { model, clientMsgId, voiceMode, skipAttachments: true, humanOrigin: true })).catch((e: Error) => {
+          void Promise.resolve((retrySession as any).send(text, images, { model, clientMsgId, voiceMode, skipAttachments: true, humanOrigin: true, echoText, replyTo })).catch((e: Error) => {
             // Don't just log: a rejected retry-send would otherwise strand the
             // client with busy=true and no turnEnd. Clean up the turn like the
             // synchronous catch below.
@@ -1244,6 +1560,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               effort: desiredBrain.effort,
               brainRevision: desiredBrain.revision,
               activeCli,
+              bgBusy: bgLaneBusy(activeCli, msg.repo, chatId),
               activeModel: activeSelection.model ?? desiredBrain.model,
               activeEffort: activeSelection.effort ?? desiredBrain.effort,
               brainPending: activeCli !== desiredBrain.cli
@@ -1285,7 +1602,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 chatId,
               })
             : peekClaudeSession({ cli: desiredBrain.cli, repoPath: msg.repo, chatId });
-          if (!warm && isClaudeFamilyCli(desiredBrain.cli)) {
+          if (!warm && isPersistentProcessCli(desiredBrain.cli)) {
             // Drop any session this socket was already bound to. Without it a
             // socket that re-helloes onto a different, cold lane keeps the old
             // lane's subscription - those events would stream into the new
@@ -1321,6 +1638,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               chatId,
               latestSeq: coldLatestSeq,
               busy: false,
+              bgBusy: bgLaneBusy(desiredBrain.cli, msg.repo, chatId),
               queuedClientMsgIds,
               deliveredClientMsgIds,
               resetAt,
@@ -1344,6 +1662,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const sessionBusy = (session as any).isBusy?.() === true
             || Boolean(pendingAdmissionForLogKey(requestedLogKey));
           busy = sessionBusy;
+          // The active turn's real start, so a reconnecting client seeds its
+          // elapsed timer from turnStart instead of the reattach clock (Oct 15).
+          const sessionTurnStartedAt = sessionBusy
+            && typeof (session as any).activeTurnStartedAt === 'function'
+            ? (session as any).activeTurnStartedAt() : undefined;
+          const readyTurnStartedAt = typeof sessionTurnStartedAt === 'number' && sessionTurnStartedAt > 0
+            ? sessionTurnStartedAt : undefined;
           console.log(`[chat ws#${wsId}] session ready key=${session.key} latestSeq=${session.latestSeq()} busy=${sessionBusy}`);
           const queuedClientMsgIds = pendingSteerIds(activeCli, msg.repo, chatId);
           refreshDeliveredClientMsgIds(activeCli, msg.repo, chatId);
@@ -1355,6 +1680,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             effort: desiredBrain.effort,
             brainRevision: desiredBrain.revision,
             activeCli,
+            bgBusy: bgLaneBusy(activeCli, msg.repo, chatId),
             activeModel: activeSelection.model ?? desiredBrain.model,
             activeEffort: activeSelection.effort ?? desiredBrain.effort,
             brainPending: activeCli !== desiredBrain.cli
@@ -1364,6 +1690,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             chatId,
             latestSeq: session.latestSeq(),
             busy: sessionBusy,
+            turnStartedAt: readyTurnStartedAt,
             queuedClientMsgIds,
             deliveredClientMsgIds,
             resetAt,
@@ -1586,6 +1913,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             model: msg.model,
             effort: msg.effort,
             voice: msg.voice,
+            replyTo: normalizeReplyTo(msg.replyTo) ?? undefined,
             selectionRevision: msg.selectionRevision,
           };
           const steerToken = `${msg.clientMsgId ?? 'anon'}\0${Date.now()}\0${Math.random()}`;
@@ -1643,7 +1971,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
             busy: true,
             activeCli: steerCli,
           });
-          enqueueThreadSteer(steerRepo, chatId, async () => {
+          // (card-504beb, verify P1 4) A queued message never joins the
+          // thread's steer chain: it waits for the natural turn end off the
+          // chain, so later normal steers are never held behind it.
+          const steerRun = async (): Promise<void> => {
           try {
           if (steerAborter.signal.aborted) { rejectSteer(); releaseSteer(); return; }
           let laneGen = peekLaneGen(steerCli, steerRepo, chatId);
@@ -1729,6 +2060,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
             session
             && !needsAuthoritativeBoundary
             && !hasSteerImages
+            // A queued send (card-504beb) never injects mid-turn: it waits
+            // for the natural turn end and rides the existing next-turn
+            // admission below, so the user can choose next-turn over steer.
+            && msg.queue !== true
             && supportsNativeTurnSteer(steerCli)
             && (session as { canAcceptNativeHumanSteer?: () => boolean })
               .canAcceptNativeHumanSteer?.() === true,
@@ -1738,11 +2073,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
               session,
               steerAborter.signal,
               30 * 60_000,
-              !hasSteerImages && !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli),
+              !hasSteerImages && !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli) && msg.queue !== true,
+              msg.queue !== true,
             );
             if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') { rejectSteer(); releaseSteer(); return; }
             if (boundary === 'steerable') {
-              if (hasSteerImages) continue;
+              if (hasSteerImages || msg.queue === true) continue;
               nativeActiveSteer = true;
               break;
             }
@@ -1946,7 +2282,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
               if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
               if (!nativeActiveSteer) safeSend({ type: 'turnStart', clientMsgId: msg.clientMsgId });
               try {
-                await (session as any).send(msg.text, msg.images, {
+                // Reply-to-message (card-cbb4af): only the engine prompt gets
+                // the quote (slash-safe placement); the stored echo carries the
+                // raw text plus replyTo as its own field, so every device
+                // renders the same chip (review 1, P1 2 and P1 3).
+                await (session as any).send(withReplyQuote(msg.text, msg.replyTo), msg.images, {
                   model: steerModel,
                   effort: steerEffort,
                   clientMsgId: msg.clientMsgId,
@@ -1955,6 +2295,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
                   voiceMode: msg.voice === true,
                   imagesAsFiles: nativeActiveSteer && steerImagesAsFiles,
                   signal: steerAborter.signal,
+                  echoText: msg.text,
+                  replyTo: normalizeReplyTo(msg.replyTo) ?? undefined,
                 });
                 break;
               } catch (error) {
@@ -1970,7 +2312,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
                     session,
                     steerAborter.signal,
                     30 * 60_000,
-                    !hasSteerImages && !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli),
+                    !hasSteerImages && !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli) && msg.queue !== true,
+                    msg.queue !== true,
                   );
                   if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') {
                     rejectSteer();
@@ -1978,6 +2321,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
                     return;
                   }
                   if (boundary === 'steerable') {
+                    // A queued message never turns a steerable boundary into a
+                    // mid-turn injection (verify P0 2): keep waiting for the
+                    // natural turn end instead.
+                    if (msg.queue === true) continue;
                     nativeActiveSteer = true;
                     break;
                   }
@@ -2035,7 +2382,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
             }
             releaseSteer();
           }
-          });
+          };
+          if (msg.queue === true) void steerRun().catch((e) => console.warn('[chat] queued steer run failed:', e));
+          else enqueueThreadSteer(steerRepo, chatId, steerRun);
           return;
         }
 
@@ -2136,11 +2485,20 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // this send, oldest first, so nothing the user said is ever lost.
           let outgoingText = msg.text;
           let outgoingImages = msg.images;
+          // Reply-to-message (card-cbb4af): only the engine prompt gets the
+          // quote (slash-safe placement); the stored echo carries the raw text
+          // plus replyTo as its own field, so every device renders the same
+          // chip (review 1, P1 2/P1 3/P2 8 — and a malformed replyTo can never
+          // throw here: normalizeReplyTo decides, before the lane is claimed).
+          const outgoingReplyTo = normalizeReplyTo(msg.replyTo) ?? undefined;
+          outgoingText = withReplyQuote(outgoingText, msg.replyTo);
+          let outgoingEchoText = msg.text;
           const heldRide = takeHeldSteers(sendRepo, chatId);
           if (heldRide.length > 0) {
-            const heldPrefix = heldRide.map((held) => held.text).join('\n\n');
+            const heldPrefix = heldRide.map((held) => withReplyQuote(held.text, held.replyTo)).join('\n\n');
             const heldImages = heldRide.flatMap((held) => held.images ?? []);
             outgoingText = `${heldPrefix}\n\n${outgoingText}`;
+            outgoingEchoText = `${heldRide.map((held) => held.text).join('\n\n')}\n\n${outgoingEchoText}`;
             if (heldImages.length > 0) outgoingImages = [...heldImages, ...(outgoingImages ?? [])];
             for (const held of heldRide) {
               if (held.clientMsgId) rememberDeliveredClientMsgId(held.clientMsgId);
@@ -2227,7 +2585,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // every idle send also resolves a replacement made by another socket;
           // recycleOnMismatch remains explicit, so stale device defaults cannot
           // cause replacement themselves.
-          if (!initiallyBusy && isClaudeFamilyCli(sendCli) && repoPath) {
+          if (!initiallyBusy && isPersistentProcessCli(sendCli) && repoPath) {
             // This can wait out a boundary rotation's compaction; keep the
             // keepalive going so the client's silence watchdog does not fire.
             holdKeepalive++;
@@ -2351,6 +2709,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
             humanOrigin: true,
             voiceMode: msg.voice === true,
             signal: sendAborter.signal,
+            echoText: outgoingEchoText,
+            replyTo: outgoingReplyTo,
           });
           if (sendCanceled()) return;
           if (selectionApplied) {
@@ -2374,6 +2734,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
             authoritativeAgent ? sendBrain.effort : msg.effort,
             msg.clientMsgId,
             msg.voice === true,
+            outgoingEchoText,
+            outgoingReplyTo,
           );
           } finally {
             releaseSend();
@@ -2457,6 +2819,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
     shutdownAllSessions();
     shutdownAllCodexSessions();
     shutdownAllBananaSessions();
+    setLanePushAll(null);
     wss.close();
   };
 }

@@ -159,6 +159,7 @@ export function ActionsRow({
   mine,
   onPinLink,
   onPinSelection,
+  onReply,
   mobile,
   blockId,
 }: {
@@ -169,6 +170,9 @@ export function ActionsRow({
   mine?: string[];
   onPinLink?: (url: string) => void | Promise<void | boolean | 'error'>;
   onPinSelection?: (text: string) => void | Promise<void | boolean | 'error'>;
+  /** Reply-to-message (card-cbb4af): arms the composer with this message as
+   *  context. Present wherever pin and react are. */
+  onReply?: () => void;
   /** Quick-access pin extras are desktop-only for now (phone lands in piece 2). */
   mobile?: boolean;
   blockId?: string;
@@ -198,6 +202,19 @@ export function ActionsRow({
       >
         {copied ? 'copied ✓' : 'copy'}
       </button>
+      {onReply ? (
+        <button
+          type="button"
+          className="act"
+          title="Reply with this message as context"
+          onClick={(e) => {
+            e.stopPropagation();
+            onReply();
+          }}
+        >
+          reply
+        </button>
+      ) : null}
       {onReact ? (
         <span className={`react-wrap${pickerOpen ? ' open' : ''}`}>
           <button
@@ -557,6 +574,7 @@ function PeerMessageBubble({
   collapseSteps,
   pin,
   onReact,
+  onReply,
 }: {
   block: Extract<ChatBlock, { kind: 'peer' }>;
   responseBlocks: AssistantBlock[];
@@ -566,12 +584,14 @@ function PeerMessageBubble({
   collapseSteps: boolean;
   pin?: ThreadPin;
   onReact?: (targetSeq: number, emoji: string) => void;
+  onReply?: (target: { id: string; snippet: string; from?: string }) => void;
 }) {
   const initial = (block.from || '?').trim().slice(0, 1).toUpperCase();
   const routineResult = block.fromRole === 'automation-result';
   // Quiet routines stay hidden. Deliverable ones (dashboards, briefs) are
-  // something Matt has to read, so they start open in the thread.
-  const [open, setOpen] = useState(routineResult);
+  // something Matt has to read, so they start open in the thread. Channel
+  // history marks member posts expanded: the post is the message.
+  const [open, setOpen] = useState(block.expanded ?? routineResult);
   const text = cleanPeerMessageText(block.text);
   const bodyId = `peer-message-${block.id}`;
   const hasResponse = responseBlocks.length > 0;
@@ -580,6 +600,10 @@ function PeerMessageBubble({
   const publicResponseBlocks = publicPeerResponse(responseBlocks, streaming);
   const responseToolCount = responseBlocks.filter((item) => item.kind === 'tool').length;
   const responseBusy = peerResponseBusy(responseBlocks, responseActive);
+  // Pin affordance for a teammate's own message (channels, card-1327b9, and
+  // one-on-one handoffs alike): the row toggles this bubble onto the thread
+  // agent's board through the same ThreadPin the assistant prose uses.
+  const peerPinned = pin ? pin.pinnedBlockIds.includes(block.id) : false;
   const role = routineResult
     ? 'routine update'
     : block.fromRole
@@ -589,7 +613,7 @@ function PeerMessageBubble({
 
   return (
     <>
-    <div className={`bt-peer${routineResult ? ' routine-result' : ''}${open ? ' open' : ''}`}>
+    <div className={`bt-peer${routineResult ? ' routine-result' : ''}${open ? ' open' : ''}${peerPinned ? ' pinned' : ''}`} data-pin-block={block.id} id={`msg-pin-${block.id}`}>
       <button
         type="button"
         className="bt-peer-toggle"
@@ -624,6 +648,24 @@ function PeerMessageBubble({
               ? <div className="bt-peer-turn-text prose"><Markdown>{text}</Markdown></div>
               : <div className="bt-peer-turn-text"><DeskRefText text={text} /></div>}
           </section>
+          {pin ? (
+            <div className="bt-peer-acts">
+              <ActionsRow
+                getText={() => text}
+                pinned={peerPinned}
+                blockId={block.id}
+                mobile={mobile}
+                onReply={onReply ? () => onReply({ id: block.id, snippet: text.slice(0, 400), from: block.from }) : undefined}
+                onTogglePin={() => pin.onToggle({ blockId: block.id, text, ts: block.ts })}
+                onPinLink={pin && !mobile ? (url) =>
+                  pin.onToggle({ blockId: `${block.id}::link-${shortHash(url)}`, text: url, ts: block.ts })
+                : undefined}
+                onPinSelection={pin && !mobile ? (sel) =>
+                  pin.onToggle({ blockId: `${block.id}::sel-${shortHash(sel)}`, text: sel, ts: block.ts })
+                : undefined}
+              />
+            </div>
+          ) : null}
           {hasResponse ? (
             <section className="bt-peer-turn bt-peer-response">
               <span className="bt-peer-turn-label">Reply</span>
@@ -634,6 +676,7 @@ function PeerMessageBubble({
                 collapseSteps={collapseSteps}
                 pin={pin}
                 onReact={onReact}
+                onReply={onReply}
               />
             </section>
           ) : null}
@@ -649,6 +692,7 @@ function PeerMessageBubble({
           collapseSteps={collapseSteps}
           pin={pin}
           onReact={onReact}
+          onReply={onReply}
         />
       </div>
     ) : null}
@@ -804,7 +848,7 @@ function BackgroundNote({ block }: { block: Extract<ChatBlock, { kind: 'backgrou
 }
 
 // ── user bubble ───────────────────────────────────────────────────────────
-function UserBubble({ block, agentName, onRetry }: { block: Extract<ChatBlock, { kind: 'user' }>; agentName?: string; onRetry?: (clientMsgId: string) => void }) {
+function UserBubble({ block, agentName, onRetry, onReply }: { block: Extract<ChatBlock, { kind: 'user' }>; agentName?: string; onRetry?: (clientMsgId: string) => void; onReply?: (target: { id: string; snippet: string; from: string }) => void }) {
   const images = block.images ?? [];
   const missing = Math.max(0, (block.imageCount ?? images.length) - images.length);
   // data: URLs can't be top-level navigated to in Chrome — clone via blob.
@@ -826,6 +870,12 @@ function UserBubble({ block, agentName, onRetry }: { block: Extract<ChatBlock, {
   };
   return (
     <div className="msg m-user">
+      {block.replyTo ? (
+        <div className="reply-quote" role="blockquote" aria-label={`Replying to ${block.replyTo.from}`}>
+          <span className="reply-from">{block.replyTo.from}</span>
+          <span className="reply-text">{block.replyTo.snippet}</span>
+        </div>
+      ) : null}
       {images.length ? (
         <div className="uimg-row">
           {images.map((img, i) => (
@@ -842,13 +892,22 @@ function UserBubble({ block, agentName, onRetry }: { block: Extract<ChatBlock, {
             : `${missing} image${missing === 1 ? '' : 's'} attached`}
         </span>
       ) : null}
-      <div className="bubble"><DeskRefText text={block.text} /></div>
+      {(block.text.trim() || (!images.length && !missing)) ? (
+        <div className="bubble"><DeskRefText text={block.text} /></div>
+      ) : null}
+      {onReply && block.text.trim() ? (
+        <div className="u-acts">
+          <button type="button" className="act" title="Reply with this message as context" aria-label="Reply to this message" onClick={() => onReply({ id: block.id, snippet: block.text.slice(0, 400), from: 'Matt' })}>reply</button>
+        </div>
+      ) : null}
       {block.deliveryState ? (
         <span className={`delivery-state ${block.deliveryState}`} role={block.deliveryState === 'failed' ? 'alert' : 'status'}>
           {block.deliveryState === 'sending'
             ? 'Sending…'
             : block.deliveryState === 'queued'
-              ? `Queued · ${agentName ? `${agentName} is` : 'the agent is'} mid-step, it will land at the next safe moment`
+              ? block.queue
+                ? 'Queued · runs after this turn'
+                : `Queued · ${agentName ? `${agentName} is` : 'the agent is'} mid-step, it will land at the next safe moment`
               : 'Not delivered'}
           {block.deliveryState === 'failed' && onRetry && block.clientMsgId && !block.noRetry && !block.imageCount && !images.length ? (
             <button type="button" className="delivery-retry" onClick={() => onRetry(block.clientMsgId!)}>Retry</button>
@@ -997,6 +1056,7 @@ function RoutineResultBubble({
   collapseSteps,
   pin,
   onReact,
+  onReply,
 }: {
   block: Extract<ChatBlock, { kind: 'peer' }>;
   streaming: boolean;
@@ -1004,6 +1064,7 @@ function RoutineResultBubble({
   collapseSteps: boolean;
   pin?: ThreadPin;
   onReact?: (targetSeq: number, emoji: string) => void;
+  onReply?: (target: { id: string; snippet: string; from?: string }) => void;
 }) {
   const text = cleanPeerMessageText(block.text);
   const asMessage: AssistantBlock[] = [{
@@ -1020,7 +1081,7 @@ function RoutineResultBubble({
       <div className="bt-peer-role" style={{ fontSize: 11, opacity: 0.65, margin: '0 0 4px 2px' }}>
         ⚙ {block.from} · routine update
       </div>
-      <ElrondGroup blocks={asMessage} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} />
+      <ElrondGroup blocks={asMessage} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply ? () => onReply({ id: block.id, snippet: text.slice(0, 400), from: block.from }) : undefined} />
     </div>
   );
 }
@@ -1033,6 +1094,7 @@ function ElrondGroup({
   collapseSteps = false,
   pin,
   onReact,
+  onReply,
 }: {
   blocks: AssistantBlock[];
   streaming: boolean;
@@ -1042,6 +1104,10 @@ function ElrondGroup({
   collapseSteps?: boolean;
   pin?: ThreadPin;
   onReact?: (targetSeq: number, emoji: string) => void;
+  /** Reply-to-message (card-cbb4af): report this group's id, a snippet,
+   *  and the group's own speaker when it has one (channel member posts);
+   *  the thread adds the agent name otherwise. */
+  onReply?: (target: { id: string; snippet: string; from?: string }) => void;
 }) {
   const [acted, setActed] = useState(false);
   const visible = visibleAssistantBlocks(blocks, collapseSteps);
@@ -1083,7 +1149,7 @@ function ElrondGroup({
       onClick={mobile ? () => setActed((a) => !a) : undefined}
     >
       <div className="who">
-        <span className="mini">✦</span> {BRAND} {'tsApprox' in first && first.tsApprox ? null : <span className="when">{timeLabel(first.ts)}</span>}
+        <span className="mini">✦</span> {'from' in first && first.from ? <span className="who-from">{first.from}</span> : BRAND} {'tsApprox' in first && first.tsApprox ? null : <span className="when">{timeLabel(first.ts)}</span>}
       </div>
       {visible.map((b) => {
         switch (b.kind) {
@@ -1132,6 +1198,7 @@ function ElrondGroup({
                 blockId={first.id}
                 mobile={mobile}
                 onReact={canReact ? (emoji) => onReact!(targetSeq!, emoji) : undefined}
+                onReply={onReply ? () => onReply({ id: first.id, snippet: copyText().slice(0, 400), ...('from' in first && first.from ? { from: first.from } : {}) }) : undefined}
                 onTogglePin={pin ? () => {
                   const src = textBlocks.filter(isAnswerProse);
                   const visible = src.length ? src : textBlocks.filter(hasVisibleProse);
@@ -1168,6 +1235,9 @@ export type ChatThreadProps = {
   pin?: ThreadPin;
   /** Persist an emoji reaction on a finished assistant bubble. */
   onReact?: (targetSeq: number, emoji: string) => void;
+  /** Reply-to-message (card-cbb4af): arms the caller's composer with the
+   *  targeted message (its id, the sender, and a snippet) as context. */
+  onReply?: (target: { id: string; from: string; snippet: string }) => void;
   /** Suppress the typing indicator entirely (silent automation turn running). */
   suppressTyping?: boolean;
   /** Wall-clock start of the active turn, used for visible proof-of-life time. */
@@ -1190,8 +1260,13 @@ export type ChatThreadProps = {
 // Renders the full feed: day marks on day changes, user bubbles, per-turn
 // assistant groups (tool cards + streaming prose), and the live-turn pill
 // while a turn is live but no content has landed yet.
-export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, suppressTyping = false, workingSince, backgroundWork = [], waitingOn = [], agentName, onRetry }: ChatThreadProps) {
+export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, onReply, suppressTyping = false, workingSince, backgroundWork = [], waitingOn = [], agentName, onRetry }: ChatThreadProps) {
   const streaming = status === 'streaming';
+  // Reply-to-message (card-cbb4af): groups report their id and a snippet
+  // (and their own speaker when they have one — channel member posts); the
+  // thread fills the agent name so the armed composer knows who is quoted.
+  const replyFrom = agentName?.trim() || BRAND;
+  const onReplyElrond = onReply ? (t: { id: string; snippet: string; from?: string }) => onReply({ id: t.id, snippet: t.snippet, from: t.from?.trim() || replyFrom }) : undefined;
   // The indicator lives until something VISIBLE lands in the CURRENT turn.
   // Looking across the whole transcript made any historical terminal-error or
   // stale open block suppress every future thinking indicator.
@@ -1249,7 +1324,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   for (const b of blocks) {
     // Hidden: the reply-case marker, and any legacy thought block. Thinking is
     // private reasoning and never renders; only real reply text does.
-    if (b.kind === 'replyask' || (b.kind === 'text' && (b.pending || b.thought))) continue;
+    if (b.kind === 'replyask' || (b.kind === 'text' && (b.pending || b.thought || (!b.open && !b.text.trim())))) continue;
     const day = dayLabel(b.ts);
     if (b.kind === 'compact') {
       groups.push({ type: 'compact', block: b, day: lastDay || day });
@@ -1313,8 +1388,10 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         ? last.blocks.findLast((block) => block.kind === 'text') : undefined;
       const phaseChanged = b.kind === 'text' && priorText?.kind === 'text'
         && b.presentation && priorText.presentation && b.presentation !== priorText.presentation;
+      const fromChanged = ((last?.type === 'elrond' ? (last.blocks[0] as { from?: string }).from : undefined) ?? '')
+        !== ((b as { from?: string }).from ?? '');
       const merge = last?.type === 'elrond' && turnId
-        && (last.blocks[0] as { turnId?: string }).turnId === turnId && !phaseChanged;
+        && (last.blocks[0] as { turnId?: string }).turnId === turnId && !phaseChanged && !fromChanged;
       if (merge) {
         last.blocks.push(b);
         last.day = day;
@@ -1397,7 +1474,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       lastDay = g.day;
     }
     if (g.type === 'user') {
-      nodes.push(<UserBubble key={g.block.id} block={g.block} agentName={agentName} onRetry={onRetry} />);
+      nodes.push(<UserBubble key={g.block.id} block={g.block} agentName={agentName} onRetry={onRetry} onReply={onReply} />);
     } else if (g.type === 'compact') {
       nodes.push(<CompactDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'restart') {
@@ -1421,6 +1498,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
           collapseSteps={collapseSteps}
           pin={pin}
           onReact={onReact}
+          onReply={onReplyElrond}
         />,
       );
     } else if (g.type === 'peer') {
@@ -1435,6 +1513,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
           collapseSteps={collapseSteps}
           pin={pin}
           onReact={onReact}
+          onReply={onReplyElrond}
         />
       );
       // Settled and silent: it was answered (so it is not waiting on anyone),
@@ -1453,7 +1532,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         ? { fold: true, key: g.block.id, from: g.block.from, ts: g.block.ts, tsApprox: g.block.tsApprox, node: bubble }
         : bubble);
     } else {
-      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} turnLive={streaming && g === lastElrondGroup} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} />);
+      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} turnLive={streaming && g === lastElrondGroup} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReplyElrond} />);
     }
   }
 

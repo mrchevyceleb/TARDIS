@@ -144,6 +144,7 @@ export function Mobile({ s, picker, repo, agent }: ShellViewProps) {
               value={s.value}
               onChange={s.setValue}
               onSend={s.send}
+              onSendQueued={s.sendQueued}
               onStop={s.stop}
               onSteer={s.steer}
               busy={s.busy}

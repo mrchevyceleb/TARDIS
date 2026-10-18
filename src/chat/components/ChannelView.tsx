@@ -2,34 +2,194 @@
 // channel's management (rename, members, delete) in the header menu.
 // Channel talk lives only here; it never lands in a teammate's one-on-one
 // thread.
+//
+// Channels work exactly like the main chat (Matt, Oct 16): the same Composer
+// (images, attachments, dictation, keys) and the same message rendering
+// through the block renderer — Matt's posts render as user bubbles with
+// image attachments from the shared attachment store, and members' posts
+// render with the sender's identity like any teammate message.
 
-import { useEffect, useRef, useState } from 'react';
-import { Check, Ellipsis, Hash, Pencil, Trash2, Users, X } from 'lucide-react';
-import { channelError, useChannelActions, useChannelMessages, useChannels } from '../hooks/useChannels';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, Ellipsis, Hash, ListChecks, Palette, Pencil, Pin, PinOff, Square, Trash2, Users, X } from 'lucide-react';
+import { CHAT_COLORS } from '../../grok/agents';
+import { channelColorOf, channelError, useChannelActions, useChannelLive, useChannelMessages, useChannels, type ChannelMessage } from '../hooks/useChannels';
 import type { Agent } from '../../grok/agents';
+import type { ChatBlock } from '../data/types';
+import { ChatThread, type ThreadPin } from './reimagine/blocks';
+import { AttachButton, Composer, type SendImage } from './reimagine/Composer';
+import { ChecklistSection } from '../../grok/ChecklistSection';
+import { useChecklist } from '../../grok/useChecklist';
+import { Plus } from './reimagine/icons';
+import { DRAFT_APPEND_EVENT, type DraftAppendDetail } from '../../native/shell';
+import { apiJson } from '../../data/api';
+import { MESSAGE_PINS_CHANGED, scrollToPinnedMessage } from '../../grok/messagePins';
+import { parsePinLinkTarget } from '../utils/proxyLinks';
+import { onPresenceChange, userPresent } from '../utils/userPresence';
+import { useMediaQuery } from '../hooks/useMediaQuery';
 import './channels.css';
 
 type EditMode = 'none' | 'rename' | 'members';
+
+/** One pin row from a member's own board (message pins and team_pin notes
+ *  alike — the store is the same). */
+type ChannelPin = { id: string; agentId: string; member: string; blockId: string; text: string; ts: number };
+
+/** Base message id of a pin target: link/selection pins use synthetic
+ *  `<msg>::link-…` / `<msg>::sel-…` ids on top of the real message id. */
+function pinBaseId(blockId: string): string {
+  return blockId.includes('::') ? blockId.split('::')[0] : blockId;
+}
+
+/** Channel history through the main chat's block model: Matt's posts are
+ *  user bubbles (markdown + image attachments served from the same
+ *  /api/chat/attachments files the main chat uses), and members' posts
+ *  render as assistant bubbles with the sender's name. */
+function messageBlocks(list: ChannelMessage[]): ChatBlock[] {
+  return list.map((m) => {
+    const parsed = m.createdAt ? Date.parse(m.createdAt) : NaN;
+    const ts = Number.isFinite(parsed) ? parsed : 0;
+    if (m.from === 'Matt') {
+      return {
+        kind: 'user' as const,
+        id: m.id,
+        text: m.text,
+        ts,
+        ...(m.replyTo ? { replyTo: m.replyTo } : {}),
+        ...(m.images?.length
+          ? { images: m.images.map((a) => ({ mediaType: a.mediaType, dataUrl: `/api/chat/attachments/${a.id}` })) }
+          : {}),
+      };
+    }
+    return {
+      kind: 'text' as const,
+      id: m.id,
+      from: m.from,
+      text: m.text,
+      ts,
+      presentation: 'answer' as const,
+      open: false,
+    };
+  });
+}
 
 export function ChannelView({ channelId, agents, onDeleted }: {
   channelId: string;
   agents: Agent[];
   onDeleted: () => void;
 }) {
+  const isMobile = useMediaQuery('(max-width: 760px), (pointer: coarse) and (max-width: 1180px)');
   const channels = useChannels();
   const messages = useChannelMessages(channelId);
   const actions = useChannelActions();
+  const live = useChannelLive(channelId);
+  // The channel's live checklist (card-a77246): the header button appears
+  // once the channel's lead creates a checklist; the slide-over follows the
+  // pins pattern.
+  const [clOpen, setClOpen] = useState(false);
+  // The header hook needs the interim refresh too (Sam's check, Oct 17): the
+  // channel view opens no chat socket, so without it the button stays hidden
+  // until a focus or reload — and the slide-over cannot open without the
+  // button.
+  const channelChecklist = useChecklist(channelId, 10_000);
   const channel = channels.data?.channels.find((c) => c.id === channelId);
 
   const [text, setText] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
+  const [colorOpen, setColorOpen] = useState(false);
   const [editing, setEditing] = useState<EditMode>('none');
   const [name, setName] = useState('');
   const [picked, setPicked] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState<Record<string, boolean>>({});
+  const [stoppedNote, setStoppedNote] = useState<string | null>(null);
+  const [pins, setPins] = useState<ChannelPin[]>([]);
+  const [pinsOpen, setPinsOpen] = useState(false);
+  const [reply, setReply] = useState<{ id: string; from: string; snippet: string } | null>(null);
+  const attachRef = useRef<() => void>(() => {});
   const listRef = useRef<HTMLDivElement>(null);
+  const noteTimer = useRef<number | null>(null);
+
+  // Files dropped onto the window announce their workspace path via DRAFT_APPEND_EVENT,
+  // mirroring GrokConversation so drag-and-drop works identically in channels.
+  useEffect(() => {
+    const onAppend = (event: Event) => {
+      const detail = (event as CustomEvent<DraftAppendDetail>).detail;
+      if (!detail?.text) return;
+      detail.handled = true;
+      setText((prev) => {
+        const current = prev.replace(/\s+$/, '');
+        return current ? `${current} ${detail.text} ` : `${detail.text} `;
+      });
+    };
+    window.addEventListener(DRAFT_APPEND_EVENT, onAppend);
+    return () => window.removeEventListener(DRAFT_APPEND_EVENT, onAppend);
+  }, []);
+
+  // Stop state belongs to one channel: switching channels must not carry a
+  // pending Stop, a note, or its timer into the next view, and the timer
+  // must never outlive this component (review 3, P2 9).
+  useEffect(() => {
+    setStopping({});
+    setStoppedNote(null);
+    if (noteTimer.current) { window.clearTimeout(noteTimer.current); noteTimer.current = null; }
+  }, [channelId]);
+  useEffect(() => () => { if (noteTimer.current) window.clearTimeout(noteTimer.current); }, []);
 
   const memberKey = channel?.members.join(',') ?? '';
+  // Roster ids for the channel's members: a member's pin board is keyed by
+  // its agent id, so a name without a live roster entry has no board here.
+  const memberAgents = useMemo(
+    () => (channel?.members ?? [])
+      .map((name) => ({ name, agent: agents.find((a) => a.name === name) }))
+      .filter((m): m is { name: string; agent: Agent } => Boolean(m.agent))
+      .map((m) => ({ name: m.name, id: m.agent.id })),
+    [memberKey, agents], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const memberAgentKey = memberAgents.map((m) => m.id).join(',');
+
+  // Every member's board in one list, refreshed on the same events the
+  // one-on-one pane uses (agents pin server-side, which raises no browser
+  // event — hence the poll) so the drawer and the message rows stay true.
+  // Per-agent failures keep that member's previous rows (a transient 5xx
+  // must never blank a board and turn the next pin click into an unpin),
+  // and a request sequence drops out-of-order responses.
+  const pullSeq = useRef(0);
+  useEffect(() => {
+    let alive = true;
+    const pull = async () => {
+      // Fresh sequence per pull: the newest request wins, so an older
+      // interval pull resolving last can never revert a fresh event pull.
+      const seq = ++pullSeq.current;
+      const ids = memberAgentKey ? memberAgentKey.split(',') : [];
+      const rows = await Promise.all(ids.map(async (agentId) => {
+        try {
+          const r = await apiJson<{ pins: Array<{ id: string; blockId: string; text: string; ts: number }> }>(`/api/message-pins?agentId=${encodeURIComponent(agentId)}`);
+          const member = memberAgents.find((m) => m.id === agentId)?.name ?? agentId;
+          return { ok: true as const, pins: (r.pins ?? []).map((p) => ({ ...p, agentId, member })) };
+        } catch {
+          return { ok: false as const, agentId, pins: [] as ChannelPin[] };
+        }
+      }));
+      if (!alive || seq !== pullSeq.current) return;
+      setPins((prev) => {
+        const next = rows.flatMap((r) => r.pins);
+        // Keep the previous rows for agents whose fetch failed: a transient
+        // 5xx must never blank a board and turn the next pin click into an unpin.
+        const failed = new Set(rows.filter((r) => !r.ok).map((r) => r.agentId));
+        const kept = prev.filter((p) => failed.has(p.agentId));
+        return [...kept, ...next];
+      });
+    };
+    void pull();
+    const onChange = () => { void pull(); };
+    window.addEventListener(MESSAGE_PINS_CHANGED, onChange);
+    const iv = window.setInterval(pull, 20_000);
+    return () => {
+      alive = false;
+      window.removeEventListener(MESSAGE_PINS_CHANGED, onChange);
+      window.clearInterval(iv);
+    };
+  }, [memberAgentKey]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     setName(channel?.name ?? '');
     setPicked(channel?.members ?? []);
@@ -37,20 +197,125 @@ export function ChannelView({ channelId, agents, onDeleted }: {
 
   const list = messages.data?.messages ?? [];
   const listKey = list.map((m) => m.id).join(',');
+  const working = live.isError ? [] : live.data?.working ?? [];
+  const blocks = useMemo(() => messageBlocks(list), [listKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  // New messages always pin the list to the bottom; working-chip changes
+  // only re-pin a reader who was already there, so chips arriving never
+  // yank someone who scrolled up to read (review finding 11).
   useEffect(() => {
     const node = listRef.current;
     if (node) node.scrollTop = node.scrollHeight;
   }, [listKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const closeMenu = () => { setMenuOpen(false); setError(null); };
+  // Unread badge hygiene: while someone is actually looking at this channel,
+  // keep the server's read marker at the last message RENDERED here — never
+  // the server's head — so a reply nobody saw keeps its badge until it is on
+  // screen. Fires when the rendered head changes or presence flips; the
+  // server skips the write entirely when the marker already sits there.
+  const renderedHeadId = list.length ? list[list.length - 1].id : '';
+  useEffect(() => {
+    if (!userPresent() || !renderedHeadId) return;
+    void actions.markRead.mutateAsync({ id: channelId, upTo: renderedHeadId }).catch(() => {});
+  }, [channelId, renderedHeadId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(
+    () => onPresenceChange((present) => {
+      if (present && renderedHeadId) void actions.markRead.mutateAsync({ id: channelId, upTo: renderedHeadId }).catch(() => {});
+    }),
+    [channelId, renderedHeadId], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const stoppingCount = Object.keys(stopping).length;
+  useEffect(() => {
+    const node = listRef.current;
+    if (!node) return;
+    const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+    if (nearBottom) node.scrollTop = node.scrollHeight;
+  }, [working.length, stoppingCount, stoppedNote !== null]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const send = async () => {
-    if (!text.trim() || actions.post.isPending) return;
+  const closeMenu = () => { setMenuOpen(false); setColorOpen(false); setError(null); };
+
+  // Pin a channel message to the sender's own board (card-1327b9: each
+  // member's pin board works in the channel too). The POST is a toggle
+  // server-side, exactly like the one-on-one pane, and the change event
+  // refreshes this view immediately — a stale list would turn the next
+  // click into an accidental unpin.
+  const togglePin = async (target: { blockId: string; text: string; ts: number }): Promise<boolean | 'error'> => {
+    const sender = list.find((m) => m.id === pinBaseId(target.blockId))?.from ?? '';
+    const agentId = memberAgents.find((m) => m.name === sender)?.id;
+    if (!agentId) {
+      setStoppedNote(`${sender || 'That sender'} has no board here.`);
+      if (noteTimer.current) window.clearTimeout(noteTimer.current);
+      noteTimer.current = window.setTimeout(() => setStoppedNote(null), 4000);
+      return 'error';
+    }
     try {
-      await actions.post.mutateAsync({ channelId, from: 'Matt', text });
+      const r = await apiJson<{ pinned: boolean }>('/api/message-pins', {
+        method: 'POST',
+        body: JSON.stringify({ agentId, ...target }),
+      });
+      return Boolean(r.pinned);
+    } catch {
+      return 'error';
+    } finally {
+      window.dispatchEvent(new Event(MESSAGE_PINS_CHANGED));
+    }
+  };
+
+  const unpin = async (id: string) => {
+    try {
+      await apiJson(`/api/message-pins/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    } catch {
+      /* the next poll restores the row if the delete missed */
+    }
+    window.dispatchEvent(new Event(MESSAGE_PINS_CHANGED));
+  };
+
+  const pin: ThreadPin = {
+    pinnedBlockIds: pins.map((p) => p.blockId),
+    onToggle: togglePin,
+  };
+
+  const send = async (sendText: string, images?: SendImage[], queue = false): Promise<boolean> => {
+    if ((!sendText.trim() && !images?.length) || actions.post.isPending) return false;
+    try {
+      const clean = images?.map(({ mediaType, base64 }) => ({ mediaType, base64 }));
+      const replyCtx = reply ? { from: reply.from, snippet: reply.snippet } : undefined;
+      const sentReplyId = reply?.id;
+      await actions.post.mutateAsync({
+        channelId,
+        from: 'Matt',
+        person: true,
+        text: sendText,
+        ...(queue ? { queue: true } : {}),
+        ...(replyCtx ? { replyTo: replyCtx } : {}),
+        ...(clean?.length ? { images: clean } : {}),
+      });
+      // Clear only the reply this send captured: a different reply armed
+      // while an upload was in flight must survive (review 1, P2 10).
+      setReply((current) => (current && sentReplyId && current.id === sentReplyId ? null : current));
       setText('');
+      return true;
     } catch (e) {
       setError(channelError(e));
+      return false;
+    }
+  };
+
+  const stopMember = async (member: string) => {
+    setStopping((s) => ({ ...s, [member]: true }));
+    try {
+      const { stopped, dropped } = await actions.stopMember.mutateAsync({ channelId, member });
+      if (!stopped.length) {
+        const note = dropped > 0
+          ? `Cleared ${dropped} queued ping${dropped === 1 ? '' : 's'} for ${member}.`
+          : `${member} had nothing from this channel running.`;
+        setStoppedNote(note);
+        if (noteTimer.current) window.clearTimeout(noteTimer.current);
+        noteTimer.current = window.setTimeout(() => setStoppedNote(null), 4000);
+      }
+    } catch (e) {
+      setError(channelError(e));
+    } finally {
+      setStopping((s) => { const next = { ...s }; delete next[member]; return next; });
     }
   };
 
@@ -74,6 +339,19 @@ export function ChannelView({ channelId, agents, onDeleted }: {
     try {
       await actions.patch.mutateAsync({ id: channelId, ...(addMembers.length ? { addMembers } : {}), ...(removeMembers.length ? { removeMembers } : {}) });
       setEditing('none');
+    } catch (e) {
+      setError(channelError(e));
+    }
+  };
+
+  const applyColor = async (color: string | null) => {
+    // Skip no-op clicks (they would still write and bump updatedAt) and
+    // clicks racing a pending change; the optimistic mutation moves the
+    // tint immediately and rolls back on failure.
+    if ((channelColorOf(channel?.color) ?? null) === color || actions.setColor.isPending) return;
+    setError(null);
+    try {
+      await actions.setColor.mutateAsync({ id: channelId, color });
     } catch (e) {
       setError(channelError(e));
     }
@@ -108,24 +386,118 @@ export function ChannelView({ channelId, agents, onDeleted }: {
   return (
     <div className="ch-view">
       <header className="ch-head">
-        <Hash size={15} aria-hidden="true" />
+        <span className="ch-head-hash" data-chat-color={channelColorOf(channel?.color)} aria-hidden="true">
+          <Hash size={15} />
+        </span>
         <span className="ch-head-name">{channel?.name ?? '…'}</span>
         <span className="ch-head-members" title={channel?.members.join(', ')}>{channel?.members.length ?? 0} members</span>
-        <button type="button" className="bt-iconbtn" onClick={() => setMenuOpen((o) => !o)} title="Channel menu" aria-label="Channel menu" aria-expanded={menuOpen}>
+        {channelChecklist.checklist?.items.length ? (
+          <button type="button" className="bt-iconbtn" onClick={() => { setClOpen((o) => !o); }}
+            title="Channel checklist" aria-label="Channel checklist" aria-expanded={clOpen}>
+            <ListChecks size={15} />
+          </button>
+        ) : null}
+        {clOpen && channelChecklist.checklist?.items.length ? (
+          <div className="ch-cl" role="dialog" aria-label="Channel checklist">
+            <ChecklistSection owner={channelId} name={channel?.name ?? 'the channel'} pollMs={10_000} />
+          </div>
+        ) : null}
+        <button type="button" className="bt-iconbtn" onClick={() => { setPinsOpen((o) => !o); }}
+          title="Pinned from members" aria-label="Pinned from members" aria-expanded={pinsOpen}>
+          <Pin size={15} />
+        </button>
+        <button type="button" className="bt-iconbtn" onClick={() => { if (menuOpen) closeMenu(); else setMenuOpen(true); }} title="Channel menu" aria-label="Channel menu" aria-expanded={menuOpen}>
           <Ellipsis size={15} />
         </button>
-      </header>
 
-      {menuOpen ? (
-        <>
-          <div className="ch-menu-scrim" onClick={closeMenu} />
+        {pinsOpen ? (
+          <div className="ch-pins" role="dialog" aria-label="Members' pin boards">
+            <div className="ch-pins-head">Members’ boards in #{channel?.name ?? 'channel'}</div>
+            {!pins.length ? (
+              <div className="ch-pins-empty">Nothing pinned yet. Hover or tap a teammate’s message and pin it to their board.</div>
+            ) : (() => {
+              const inChannel = new Set(list.map((m) => m.id));
+              const order = [...(channel?.members ?? []).filter((m) => pins.some((p) => p.member === m)),
+                ...[...new Set(pins.map((p) => p.member))].filter((m) => !(channel?.members ?? []).includes(m))];
+              return order.map((member) => (
+                <div key={member} className="ch-pins-sec">
+                  <div className="ch-pins-title">{`Pinned from ${member}`}</div>
+                  {pins.filter((p) => p.member === member).map((p) => {
+                    const target = parsePinLinkTarget(p.text);
+                    const note = (p.text ?? '').trim() || 'Empty note';
+                    const jumpable = !target && !p.blockId.startsWith('note-') && inChannel.has(pinBaseId(p.blockId));
+                    const body = target?.kind === 'web' ? (
+                      <button type="button" className="ch-pins-text" title={`Open ${target.url}`}
+                        onClick={() => window.open(target.url, '_blank', 'noopener,noreferrer')}>{note} ↗</button>
+                    ) : target ? (
+                      <span className="ch-pins-text" title="Workspace link — open it from the one-on-one pane">{note}</span>
+                    ) : p.blockId.startsWith('note-') ? (
+                      <span className="ch-pins-text" title="Pinned by the agent">{note}</span>
+                    ) : jumpable ? (
+                      <button type="button" className="ch-pins-text" title="Jump to this message"
+                        onClick={() => { setPinsOpen(false); scrollToPinnedMessage(p.blockId); }}>{note}</button>
+                    ) : (
+                      <span className="ch-pins-text" title="Pinned in another conversation">{note}</span>
+                    );
+                    return (
+                      <div key={p.id} className="ch-pins-row">
+                        {body}
+                        <button type="button" className="bt-iconbtn ch-pins-unpin" title={`Unpin from ${member}`}
+                          aria-label={`Unpin from ${member}`} onClick={() => { void unpin(p.id); }}>
+                          <PinOff size={12} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ));
+            })()}
+          </div>
+        ) : null}
+
+        {menuOpen ? (
           <div className="ch-menu" role="menu">
             <button type="button" className="ch-menu-row" onClick={() => { setEditing('rename'); closeMenu(); }}><Pencil size={13} /> Rename</button>
             <button type="button" className="ch-menu-row" onClick={() => { setEditing('members'); closeMenu(); }}><Users size={13} /> Members</button>
+            <button type="button" className="ch-menu-row" onClick={() => setColorOpen((o) => !o)} aria-expanded={colorOpen}><Palette size={13} /> Color</button>
+            {colorOpen ? (
+              <div className="ch-swatches" role="group" aria-label="Channel color">
+                {CHAT_COLORS.map((c) => (
+                  <button
+                    key={c.key}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={channelColorOf(channel?.color) === c.key}
+                    aria-label={c.label}
+                    title={c.label}
+                    className="bt-swatch"
+                    data-swatch=""
+                    data-chat-color={c.key}
+                    onClick={() => void applyColor(c.key)}
+                  >
+                    {channelColorOf(channel?.color) === c.key ? <Check size={13} strokeWidth={3} aria-hidden="true" /> : null}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={!channelColorOf(channel?.color)}
+                  aria-label="No color"
+                  title="No color"
+                  className="bt-swatch bt-swatch-none"
+                  data-swatch=""
+                  onClick={() => void applyColor(null)}
+                />
+                {error ? <div className="ch-swatch-error" role="alert">{error}</div> : null}
+              </div>
+            ) : null}
             <button type="button" className="ch-menu-row danger" onClick={() => { void remove(); closeMenu(); }}><Trash2 size={13} /> Delete channel</button>
           </div>
-        </>
-      ) : null}
+        ) : null}
+      </header>
+
+      {pinsOpen ? <div className="ch-menu-scrim" onClick={() => setPinsOpen(false)} /> : null}
+      {menuOpen ? <div className="ch-menu-scrim" onClick={closeMenu} /> : null}
 
       {editing === 'rename' ? (
         <div className="ch-edit-bar">
@@ -160,32 +532,78 @@ export function ChannelView({ channelId, agents, onDeleted }: {
         </div>
       ) : null}
 
-      <div className="ch-list" ref={listRef}>
-        {list.map((m) => (
-          <div key={m.id} className="ch-msg">
-            <span className="ch-msg-from">{m.from}</span>
-            <span className="ch-msg-text">{m.text}</span>
-            <span className="ch-msg-time">{m.createdAt ? new Date(m.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : ''}</span>
+      {(working.length || Object.keys(stopping).length || stoppedNote) ? (
+        <div className="ch-working">
+          {working.map((w) => (
+            <span key={w.member} className="ch-working-chip">
+              <span className="ch-working-dot" aria-hidden="true" />
+              {w.fromChannel
+                ? <>{w.member} working{w.lane === 'main' ? '' : ' (background)'}…</>
+                : <>{w.member} busy elsewhere…</>}
+              {w.fromChannel ? (
+                <button type="button" className="ch-working-stop" title={`Stop ${w.member}'s turn in this channel`}
+                  aria-label={`Stop ${w.member}'s turn in this channel`} disabled={stopping[w.member] === true}
+                  onClick={() => { void stopMember(w.member); }}>
+                  <Square size={9} aria-hidden="true" /> Stop
+                </button>
+              ) : null}
+            </span>
+          ))}
+          {Object.keys(stopping).filter((m) => !working.some((w) => w.member === m && w.fromChannel)).map((m) => (
+            <span key={`stopping-${m}`} className="ch-working-chip">Stopping {m}…</span>
+          ))}
+          {stoppedNote ? <span className="ch-working-chip">{stoppedNote}</span> : null}
+        </div>
+      ) : null}
+
+      <div className={`ch-body rc ${isMobile ? 'rc-mobile' : 'rc-desktop'}`}>
+        <div className="ch-list" ref={listRef}>
+          <div className="ch-thread">
+            <ChatThread mobile={isMobile} blocks={blocks} status="idle" suppressTyping pin={pin} onReply={setReply} />
           </div>
-        ))}
-        {messages.isError ? <div className="ch-empty">Could not load messages. <button type="button" className="ch-create-x" onClick={() => void messages.refetch()}>Retry</button></div> : null}
-        {!list.length && !messages.isError ? <div className="ch-empty">No messages yet. Say hello.</div> : null}
-      </div>
+          {messages.isError ? <div className="ch-empty">Could not load messages. <button type="button" className="ch-create-x" onClick={() => void messages.refetch()}>Retry</button></div> : null}
+          {!list.length && !messages.isError ? <div className="ch-empty">No messages yet. Say hello.</div> : null}
+        </div>
 
-      {error && !menuOpen ? <div className="ch-error" role="alert">{error}</div> : null}
+        {error && !menuOpen ? <div className="ch-error" role="alert">{error}</div> : null}
 
-      <div className="ch-composer">
-        <textarea
-          className="ch-input"
-          placeholder={`Message ${channel?.name ?? 'channel'}`}
-          value={text}
-          rows={2}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); }
-          }}
-        />
-        <button type="button" className="ch-send" disabled={!text.trim() || actions.post.isPending} onClick={() => void send()}>Send</button>
+        <div className="bt-dock">
+          <div className="bt-dock-inner">
+            <Composer
+              key={`channel:${channelId}`}
+              chatId={`channel:${channelId}`}
+              robotControl={false}
+              value={text}
+              onChange={setText}
+              onSend={(sendText, images) => send(sendText, images)}
+              onSendQueued={(sendText, images) => send(sendText, images, true)}
+              queueAvailable={(live.data?.working?.length ?? 0) > 0}
+              replyTo={reply ? { from: reply.from, snippet: reply.snippet } : null}
+              onClearReply={() => setReply(null)}
+              busy={actions.post.isPending}
+              placeholder={`Message ${channel?.name ?? 'channel'}`}
+              mentionMembers={memberAgents.map((a) => a.name)}
+              leadingSlot={
+                <button
+                  type="button"
+                  className="grok-attach"
+                  aria-label="Attach a file"
+                  title="Attach a file"
+                  onClick={() => attachRef.current()}
+                >
+                  <Plus />
+                </button>
+              }
+              attachButton={<AttachButton onClick={() => attachRef.current()} />}
+              openFileInputRef={attachRef}
+              hint={
+                <span className="hint">
+                  <b>@</b> mention · <b>shift+enter</b> new line
+                </span>
+              }
+            />
+          </div>
+        </div>
       </div>
     </div>
   );

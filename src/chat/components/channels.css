@@ -2,19 +2,25 @@
  * (name field, teammate picks, error line). Modest on purpose: no threads,
  * reactions, permissions or dashboards. */
 
-.ch-rail { margin-top: 10px; padding: 0 4px; max-height: 240px; overflow-y: auto; flex-shrink: 0; }
-.ch-rail-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px 2px; }
-.ch-rail-title { font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.55; }
-.ch-row {
-  display: flex; align-items: center; gap: 7px; width: 100%;
-  padding: 5px 8px; border: 0; border-radius: 8px; background: none;
-  color: inherit; font: inherit; font-size: 13px; cursor: pointer; text-align: left;
+.ch-rail { margin-top: 4px; }
+.ch-rail-add { color: var(--r-ink-mute); }
+@media (pointer: fine) {
+  .ch-rail-add { width: 28px; height: 28px; }
 }
-.ch-row:hover { background: color-mix(in srgb, currentColor 7%, transparent); }
-.ch-row.active { background: color-mix(in srgb, currentColor 12%, transparent); font-weight: 600; }
-.ch-row-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ch-row-count { font-size: 10.5px; opacity: 0.5; }
-.ch-empty { padding: 4px 8px 8px; font-size: 12px; opacity: 0.5; }
+.ch-row.active .bt-conv-title { font-weight: 600; }
+.ch-row-disc {
+  background: color-mix(in srgb, var(--r-tardis-lit, #2b6cb0) 16%, var(--r-bg-hover));
+  border-color: color-mix(in srgb, var(--r-tardis-lit, #2b6cb0) 35%, var(--r-line-strong));
+  color: var(--r-ink);
+}
+/* A color-coded channel rides the same system as agent rows: the label on
+ * the row drives --bt-chat (stripe, tint and selected ring come from
+ * grok.css), and the disc picks up the tuned shade through it. */
+.ch-row[data-chat-color] .ch-row-disc {
+  background: color-mix(in oklch, var(--bt-chat) 22%, var(--r-bg-hover));
+  border-color: color-mix(in oklch, var(--bt-chat) 50%, var(--r-line-strong));
+}
+.ch-row-count { flex: none; }
 
 .ch-create { padding: 6px 6px 8px; display: flex; flex-direction: column; gap: 7px; }
 .ch-create-name {
@@ -43,18 +49,22 @@
 .ch-create-x:hover { opacity: 1; }
 .ch-error { font-size: 12px; color: #e5484d; padding: 2px 8px; }
 
-.ch-view { display: flex; flex-direction: column; height: 100%; min-height: 0; position: relative; }
+.bt-room:has(> .bt-room-wrap > .ch-view) { overflow: hidden; display: flex; flex-direction: column; }
+.bt-room-wrap:has(> .ch-view) { flex: 1; width: 100%; height: 100%; min-height: 0; padding: 0; display: flex; flex-direction: column; }
+.ch-view { flex: 1; display: flex; flex-direction: column; height: 100%; min-height: 0; position: relative; }
 .ch-missing { padding: 24px; font-size: 13.5px; opacity: 0.8; }
 .ch-head {
   display: flex; align-items: center; gap: 8px; padding: 10px 14px;
   border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
-  position: sticky; top: 0; z-index: 2; backdrop-filter: blur(6px);
+  position: sticky; top: 0; z-index: 42; backdrop-filter: blur(6px);
+  /* 42 sits above the menu scrim (40): the menu and pin drawer hang off
+     this sticky header and must stay clickable wherever the reader scrolled. */
 }
 .ch-head-name { font-weight: 650; font-size: 14.5px; }
 .ch-head-members { font-size: 11.5px; opacity: 0.55; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ch-menu-scrim { position: fixed; inset: 0; z-index: 40; }
 .ch-menu {
-  position: absolute; top: 42px; right: 12px; z-index: 41; min-width: 168px;
+  position: absolute; top: 100%; right: 12px; z-index: 41; min-width: 168px;
   border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
   background: var(--bt-panel, #1e222b); border-radius: 10px; padding: 4px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
@@ -66,29 +76,129 @@
 }
 .ch-menu-row:hover { background: color-mix(in srgb, currentColor 9%, transparent); }
 .ch-menu-row.danger { color: #e5484d; }
+/* Channel color picker: the swatch buttons are the shared bt-swatch set
+ * (theme-tuned shades, check glyph, focus ring, coarse-pointer sizing);
+ * this is only the container, sized so opening Color never widens the
+ * menu, and the error line for failed picks. */
+.ch-swatches {
+  width: 200px;
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 8px 12px 10px;
+}
+.ch-swatch-error {
+  flex-basis: 100%; font-size: 11.5px; color: #e5484d; padding-top: 2px;
+}
+.ch-head-hash { display: inline-flex; }
+.ch-head-hash[data-chat-color] { color: var(--bt-chat); }
+
+/* Pin drawer (card-1327b9): every member's own board, reachable from the
+   channel header. Anchored to the sticky header (top: 100% of its box),
+   so it opens just below the header wherever the reader scrolled. */
+.ch-pins {
+  position: absolute; top: 100%; right: 44px; z-index: 41; width: min(340px, calc(100% - 24px));
+  max-height: min(420px, 60vh); overflow-y: auto;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  background: var(--bt-panel, #1e222b); border-radius: 10px; padding: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.ch-pins-head { font-size: 12.5px; font-weight: 650; opacity: 0.85; }
+.ch-pins-empty { font-size: 12px; opacity: 0.55; line-height: 1.45; }
+.ch-pins-sec { display: flex; flex-direction: column; gap: 4px; }
+.ch-pins-title {
+  font-size: 11px; font-weight: 650; opacity: 0.6;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  padding-bottom: 3px;
+}
+.ch-pins-row { display: flex; align-items: flex-start; gap: 6px; }
+.ch-pins-text {
+  flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.45; text-align: left;
+  overflow-wrap: anywhere; border: 0; background: none; color: inherit;
+  padding: 0; cursor: pointer;
+}
+span.ch-pins-text { cursor: default; }
+.ch-pins-unpin { flex: none; opacity: 0.6; }
+.ch-pins-unpin:hover { opacity: 1; }
 .ch-edit-bar {
   display: flex; align-items: center; gap: 8px; padding: 8px 14px; flex-wrap: wrap;
   border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
 }
 .ch-edit-members { align-items: flex-start; }
-.ch-list { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
-.ch-msg { display: flex; align-items: baseline; gap: 8px; font-size: 13.5px; line-height: 1.45; }
-.ch-msg-from { font-weight: 650; flex-shrink: 0; }
-.ch-msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
-.ch-msg-time { font-size: 10.5px; opacity: 0.45; flex-shrink: 0; margin-left: auto; }
-.ch-composer {
-  display: flex; align-items: flex-end; gap: 8px; padding: 10px 14px;
-  border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+.ch-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.ch-list { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.ch-body > .ch-error { padding-inline: 14px; }
+.ch-body > .bt-dock { padding-inline: 14px; z-index: 20; }
+/* Working state (card-1327b9): members woken or steered by a channel post
+   show as chips under the header, each with a Stop that ends that member's
+   live turn, mirroring the one-on-one chat's Stop. Colors derive from
+   currentColor like the rest of this file, so both themes read. */
+.ch-working {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  background: color-mix(in srgb, currentColor 5%, transparent);
 }
-.ch-input {
-  flex: 1; resize: none; padding: 8px 10px; border-radius: 10px; font: inherit; font-size: 13.5px;
-  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
-  background: color-mix(in srgb, currentColor 5%, transparent); color: inherit; max-height: 132px;
+
+.ch-working-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: color-mix(in srgb, currentColor 62%, transparent);
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 6%, transparent);
 }
-.ch-input:focus { outline: none; border-color: color-mix(in srgb, currentColor 40%, transparent); }
-.ch-send {
-  padding: 8px 14px; border-radius: 10px; font: inherit; font-size: 13px; cursor: pointer;
-  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
-  background: color-mix(in srgb, currentColor 14%, transparent); color: inherit;
+
+.ch-working-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #d97706;
+  animation: ch-working-pulse 1.6s ease-in-out infinite;
 }
-.ch-send:disabled { opacity: 0.45; cursor: default; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ch-working-dot { animation: none; }
+}
+
+@keyframes ch-working-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.ch-working-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: none;
+  background: transparent;
+  color: color-mix(in srgb, currentColor 55%, transparent);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 6px;
+}
+
+.ch-working-stop:hover:not(:disabled) {
+  color: #b91c1c;
+  background: rgba(185, 28, 28, 0.08);
+}
+
+.ch-working-stop:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* The channel's live checklist slide-over (card-a77246): the header-button
+   pattern from ch-pins; the animated list itself styles in grok.css. */
+.ch-cl {
+  position: absolute; top: 100%; right: 84px; z-index: 41; width: min(340px, calc(100% - 24px));
+  max-height: min(480px, 64vh); overflow-y: auto;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  background: var(--bt-panel, #1e222b); border-radius: 10px; padding: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}

@@ -4,9 +4,19 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiJson } from '../../data/api';
+import type { ChatColor } from '../../grok/agents';
+import { CHAT_COLORS } from '../../grok/agents';
 
-export type Channel = { id: string; name: string; members: string[]; createdAt?: string; updatedAt?: string };
-export type ChannelMessage = { id: string; channelId: string; from: string; text: string; createdAt?: string; updatedAt?: string };
+export type Channel = { id: string; name: string; members: string[]; unread?: number; createdAt?: string; updatedAt?: string; color?: ChatColor };
+
+/** The channel's color when it is a label the client knows how to paint
+ *  (the same set agents use); anything else renders as no color. */
+export function channelColorOf(color: string | undefined): ChatColor | undefined {
+  return CHAT_COLORS.find((c) => c.key === color)?.key;
+}
+/** Image attachments land as file refs (the same attachment store as the
+ *  main chat); the client renders them through /api/chat/attachments/<id>. */
+export type ChannelMessage = { id: string; channelId: string; from: string; text: string; createdAt?: string; updatedAt?: string; images?: Array<{ id: string; mediaType: string }>; replyTo?: { from: string; snippet: string } };
 
 async function channelRequest<T>(path: string, method: string, body?: unknown): Promise<T> {
   return apiJson<T>(`/api/channels${path}`, {
@@ -29,8 +39,8 @@ export function useChannels() {
   return useQuery({
     queryKey: ['channels'],
     queryFn: () => channelRequest<{ channels: Channel[] }>('', 'GET'),
-    staleTime: 10_000,
-    refetchInterval: 15_000,
+    staleTime: 2_000,
+    refetchInterval: 4_000,
   });
 }
 
@@ -46,6 +56,21 @@ export function useChannelMessages(channelId: string) {
   });
 }
 
+/** Which members have a live busy turn right now, for the channel view's
+ *  working state. react-query's refetchInterval handles the polling; the
+ *  refetchOnWindowFocus default covers the throttled-background-tab case
+ *  the same way useLive's visibility listener does. */
+export type MemberActivity = { member: string; lane: 'main' | 'bg'; lastActivityMs: number; fromChannel: boolean };
+
+export function useChannelLive(channelId: string) {
+  return useQuery({
+    queryKey: ['channel-live', channelId],
+    queryFn: () => channelRequest<{ working: MemberActivity[] }>(`/${encodeURIComponent(channelId)}/live`, 'GET'),
+    staleTime: 2_000,
+    refetchInterval: 4_000,
+  });
+}
+
 export function useChannelActions() {
   const queryClient = useQueryClient();
   const refreshList = () => { void queryClient.invalidateQueries({ queryKey: ['channels'] }); };
@@ -56,23 +81,86 @@ export function useChannelActions() {
     onSuccess: refreshList,
   });
   const patch = useMutation({
-    mutationFn: (input: { id: string; name?: string; addMembers?: string[]; removeMembers?: string[] }) =>
+    mutationFn: (input: { id: string; name?: string; addMembers?: string[]; removeMembers?: string[]; color?: string | null }) =>
       channelRequest<{ channel: Channel }>(`/${encodeURIComponent(input.id)}`, 'PATCH', {
         ...(input.name === undefined ? {} : { name: input.name }),
         ...(input.addMembers === undefined ? {} : { addMembers: input.addMembers }),
         ...(input.removeMembers === undefined ? {} : { removeMembers: input.removeMembers }),
+        ...(input.color === undefined ? {} : { color: input.color }),
       }),
     onSuccess: refreshList,
+  });
+  // Color changes get their own mutation so the tint moves optimistically
+  // (one round trip, no list refetch wait) and rolls back on failure.
+  const setColor = useMutation({
+    mutationFn: (input: { id: string; color: string | null }) =>
+      channelRequest<{ channel: Channel }>(`/${encodeURIComponent(input.id)}`, 'PATCH', { color: input.color }),
+    onMutate: async ({ id, color }) => {
+      await queryClient.cancelQueries({ queryKey: ['channels'] });
+      const prev = queryClient.getQueryData<{ channels: Channel[] }>(['channels']);
+      if (prev) {
+        queryClient.setQueryData(['channels'], {
+          ...prev,
+          channels: prev.channels.map((c) => (c.id === id ? { ...c, color: color || undefined } : c)),
+        });
+      }
+      return { prev };
+    },
+    onError: (_error, _input, context) => {
+      if (context?.prev) queryClient.setQueryData(['channels'], context.prev);
+    },
+    onSettled: () => { void queryClient.invalidateQueries({ queryKey: ['channels'] }); },
   });
   const remove = useMutation({
     mutationFn: (id: string) => channelRequest<{ deleted: boolean }>(`/${encodeURIComponent(id)}`, 'DELETE'),
     onSuccess: refreshList,
   });
   const post = useMutation({
-    mutationFn: (input: { channelId: string; from: string; text: string }) =>
-      channelRequest<{ message: ChannelMessage }>(`/${encodeURIComponent(input.channelId)}/messages`, 'POST', { from: input.from, text: input.text }),
-    onSuccess: () => { refreshList(); refreshMessages(); },
+    mutationFn: (input: { channelId: string; from: string; text: string; person?: boolean; queue?: boolean; replyTo?: { from: string; snippet: string }; images?: Array<{ mediaType: string; base64: string }> }) =>
+      channelRequest<{ message: ChannelMessage }>(`/${encodeURIComponent(input.channelId)}/messages`, 'POST', {
+        from: input.from,
+        text: input.text,
+        person: input.person === true,
+        ...(input.queue === true ? { queue: true } : {}),
+        ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+        ...(input.images?.length ? { images: input.images } : {}),
+      }),
+    onSuccess: () => {
+      refreshList();
+      refreshMessages();
+      // Working chips are polled on a short interval; invalidate so a fresh
+      // post's wake shows immediately instead of up to one poll later.
+      void queryClient.invalidateQueries({ queryKey: ['channel-live'] });
+    },
   });
 
-  return { create, patch, remove, post };
+  const stopMember = useMutation({
+    mutationFn: (input: { channelId: string; member: string }) =>
+      channelRequest<{ stopped: Array<'main' | 'bg'>; dropped: number }>(`/${encodeURIComponent(input.channelId)}/stop`, 'POST', {
+        member: input.member,
+      }),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['channel-live'] }); },
+  });
+
+  const markRead = useMutation({
+    mutationFn: (vars: { id: string; upTo?: string }) =>
+      channelRequest<{ ok: boolean; unread: number }>(
+        `/${encodeURIComponent(vars.id)}/read`,
+        'POST',
+        { upTo: vars.upTo },
+      ),
+    onMutate: async (vars) => {
+      // Cancel any in-flight list refetch first, or it can land after the
+      // optimistic clear and resurrect the badge for a poll cycle.
+      await queryClient.cancelQueries({ queryKey: ['channels'] }).catch(() => {});
+      queryClient.setQueryData<{ channels: Channel[] }>(['channels'], (prev) =>
+        prev && vars.upTo === undefined
+          ? { channels: prev.channels.map((c) => (c.id === vars.id ? { ...c, unread: 0 } : c)) }
+          : prev,
+      );
+    },
+    onSuccess: refreshList,
+  });
+
+  return { create, patch, setColor, remove, post, stopMember, markRead };
 }

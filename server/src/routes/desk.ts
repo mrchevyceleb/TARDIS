@@ -1,7 +1,9 @@
 // /api/desk: the owner's "Needs you" list and the board of agent work.
 // Backs the Desk room and the desk_* / board_* tools in the team MCP.
-// Callers identify an agent author with `agent` (name or id); no `agent`
-// means the owner is acting from the UI.
+// Callers identify an agent author with `agent` (name or id) or the
+// `author` alias; the owner is credited only for the Desk app's own
+// same-origin browser requests, and any other unidentified write is
+// refused — nothing silently defaults to the owner.
 
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { listAgents, type Agent } from '../chat/agents.ts';
@@ -32,6 +34,7 @@ import {
   type DeskTodo,
 } from '../lib/deskStore.ts';
 import { mirrorAll } from '../lib/deskMirror.ts';
+import { deskPrs } from '../lib/githubPrs.ts';
 
 export const deskRouter = Router();
 
@@ -69,6 +72,34 @@ function resolveAuthor(value: unknown): DeskActor {
   if (agent) return { kind: 'agent', id: agent.id, name: agent.name };
   if (OWNER_ALIASES.has(raw.toLowerCase())) return ownerActor();
   return { kind: 'agent', id: raw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'agent', name: raw };
+}
+
+/** Who wrote a desk WRITE. Every caller must name a teammate through agent
+ *  (the team MCP field) or the author alias (what lanes that curl this API
+ *  directly tend to send). The owner is credited only when the request is
+ *  a same-origin browser fetch from the Desk app: browsers set
+ *  Sec-Fetch-Site on every request and a page cannot forge it, while curl
+ *  does not send one, so a missing or spoofed identity can never silently
+ *  credit the owner (Oct 17 2026: raw curls posted teammate check-ins as
+ *  the owner, which also woke cards as fake owner comments). Anything else
+ *  is refused. */
+export function resolveWriteAuthor(input: Record<string, unknown>, fetchSite?: string): DeskActor {
+  const agentRaw = typeof input.agent === 'string' ? input.agent : '';
+  const authorRaw = typeof input.author === 'string' ? input.author : '';
+  const raw = agentRaw.trim() ? agentRaw : (authorRaw.trim() ? authorRaw : '');
+  if (raw) {
+    const author = resolveAuthor(raw);
+    if (author.kind === 'owner') {
+      throw new DeskError(400, 'Owner-attributed writes come from the Desk UI. Pass agent (or author): your own teammate name.');
+    }
+    return author;
+  }
+  if (fetchSite === 'same-origin') return ownerActor();
+  if (input.source === 'ui') {
+    // Claims to be the app but no browser-native same-origin signal.
+    throw new DeskError(400, 'The Desk app could not be verified on this request; reload the Desk and try again.');
+  }
+  throw new DeskError(400, 'Pass agent (or author): your teammate name, so the Desk can credit you.');
 }
 
 /** Who a card belongs to. Strict: a typo must not invent a ghost owner. */
@@ -114,10 +145,36 @@ function flag(value: unknown): boolean {
   return value === '1' || value === 'true' || value === true;
 }
 
+/** Browsers set Sec-Fetch-Site on every request and pages cannot forge it;
+ *  curl and other plain clients do not send it. */
+function fetchSite(req: Request): string | undefined {
+  const value = req.headers['sec-fetch-site'];
+  return typeof value === 'string' ? value : undefined;
+}
+
 deskRouter.get('/', route(async (req, res) => {
   const data = await readDesk();
   const cards = req.query.archived === '0' ? data.cards.filter((c) => !c.archived) : data.cards;
-  res.json({ rev: data.rev, owner: ownerActor(), columns: COLUMN_META, todos: data.todos, cards });
+  const prs = deskPrs();
+  // Disabled (no configured repos) serves no PR fields at all: exactly an
+  // older server's payload, so the client degrades by design.
+  const prsPayload = prs.disabled ? {} : {
+    prs: prs.prs,
+    ...(prs.stale ? { prsStale: true } : {}),
+    ...(prs.pending ? { prsPending: true } : {}),
+    ...(prs.unknown ? { prsUnknown: true } : {}),
+  };
+  res.json({ rev: data.rev, owner: ownerActor(), columns: COLUMN_META, todos: data.todos, cards, ...prsPayload });
+}));
+
+// The sidebar's light poll: the same cached snapshot as the room's read, so
+// an older server without the route simply 404s and the client keeps its
+// snippet lines.
+deskRouter.get('/prs', route(async (_req, res) => {
+  const prs = deskPrs();
+  // Not configured: an older server's 404, so the sidebar falls back.
+  if (prs.disabled) { res.status(404).json({ error: 'desk PRs not configured' }); return; }
+  res.json(prs);
 }));
 
 /** Cheap poll for the workspace badge and desktop alerts. */
@@ -154,7 +211,7 @@ deskRouter.get('/todos', route(async (req, res) => {
 
 deskRouter.post('/todos', route(async (req, res) => {
   const input = body(req);
-  const todo = await createTodo(input, resolveAuthor(input.agent));
+  const todo = await createTodo(input, resolveWriteAuthor(input, fetchSite(req)));
   notifyTodoTouched();
   res.status(201).json({ todo });
 }));
@@ -224,7 +281,7 @@ deskRouter.post('/mirror-sync', route(async (_req, res) => {
 
 deskRouter.post('/cards', route(async (req, res) => {
   const input = body(req);
-  const by = resolveAuthor(input.agent);
+  const by = resolveWriteAuthor(input, fetchSite(req));
   const owner = resolveOwner(input.owner, by)!;
   res.status(201).json({ card: await createCard(input, owner, by, { dedupe: input.dedupe === true }) });
 }));
@@ -396,12 +453,14 @@ export function answerTodoHandler(deliver: TeamMessenger = deliverTeamMessage) {
 
 deskRouter.post('/cards/:id/comments', route(async (req, res) => {
   const input = body(req);
-  // The Desk UI never names an author; the team MCP always does. Only a real
-  // owner comment wakes anyone, so agents answering on the card cannot loop.
-  const fromOwnerUi = input.agent === undefined || input.agent === null;
-  const author = resolveAuthor(input.agent);
+  // Only the Desk app's own same-origin browser requests credit the owner;
+  // every other caller names a teammate through agent or the author alias.
+  // A real owner comment wakes the card owner; an agent answering on the
+  // card cannot loop.
+  const author = resolveWriteAuthor(input, fetchSite(req));
+  const fromOwnerUi = author.kind === 'owner';
   const result = await commentCard(param(req, 'id'), input.text, author);
-  const notified = fromOwnerUi && author.kind === 'owner' ? await notifyCardOwner(result.card, result.comment) : undefined;
+  const notified = fromOwnerUi ? await notifyCardOwner(result.card, result.comment) : undefined;
   res.status(201).json(notified ? { ...result, notified } : result);
 }));
 

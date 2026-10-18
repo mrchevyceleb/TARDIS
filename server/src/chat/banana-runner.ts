@@ -71,6 +71,11 @@ type BananaSendOptions = {
   /** Reasoning effort (e.g. low|medium|high) for OpenRouter/openai-compatible models. */
   effort?: string;
   hidden?: boolean;
+  /** The raw text the stored echo should carry when the engine prompt got the
+   *  reply quote prepended (card-cbb4af). */
+  echoText?: string;
+  /** The reply target the echo carries as its own field. */
+  replyTo?: { from: string; snippet: string };
   /** Team-bus delivery: sender-tagged peer_message echo, no compaction tick. */
   peerFrom?: string;
   clientMsgId?: string;
@@ -2458,6 +2463,9 @@ export class BananaSession {
   private threadId: string | null = null;
   private threadServeGeneration: number | null = null;
   private busy = false;
+  /** When the active turn opened (ms), for the client's elapsed timer on
+   *  reattach (register.ts ready payload); meaningful only while busy. */
+  private busySince: number | null = null;
   private dead = false;
   private eventLog: SeqEvent[] = [];
   private nextSeq = 1;
@@ -2581,6 +2589,12 @@ export class BananaSession {
 
   isAlive(): boolean {
     return !this.dead;
+  }
+
+  /** The active turn's start (ms) for the client's elapsed timer on reattach
+   *  (register.ts ready payload); null when no turn is open. */
+  activeTurnStartedAt(): number | null {
+    return this.busy ? this.busySince : null;
   }
 
   isBusy(): boolean {
@@ -2735,12 +2749,13 @@ export class BananaSession {
       return;
     }
     this.busy = true;
+    this.busySince = Date.now();
     this.wipedThisTurn = false;
     if (opts.hidden) this.emit({ type: 'turnStart' });
     const recoverContextThisTurn = this.recoverContextOnNextTurn;
     const historyThroughSeq = this.latestSeq();
     const fallbackHistory = this.eventLog.slice();
-    const gmailApprovedDraft = opts.hidden ? null : this.approvedGmailDraftForText(text);
+    const gmailApprovedDraft = opts.hidden ? null : this.approvedGmailDraftForText(opts.echoText ?? text);
     // Echo for reconnect replay (banana's events don't re-emit the user prompt).
     // Internal auto-continues are intentionally hidden; they are just TARDIS
     // nudging Banana past an opencode compaction summary.
@@ -2777,7 +2792,7 @@ export class BananaSession {
       try {
         this.emit({
           type: 'event',
-          event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ts: Date.now() },
+          event: { type: '_user_echo', text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
         });
       } catch (error) {
         this.busy = false;
@@ -4024,6 +4039,14 @@ function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
 /** Manager keyed by cwd + chat id, matching the claude/codex session maps. */
 const bananaSessions = new Map<string, BananaSession>();
 
+/** Live banana session for a lane, read-only, never a spawn (register.ts
+ *  bg-lane busy: a lane that never ran is simply not busy). */
+export function peekBananaSession(opts: { repoPath: string; chatId?: string; cli?: CliKind }): BananaSession | null {
+  const key = keyOf(opts.cli ?? 'banana', opts.repoPath, opts.chatId || 'main');
+  const live = bananaSessions.get(key);
+  return live && live.isAlive() ? live : null;
+}
+
 export function publishBananaExternalEvent(logKey: string, se: SeqEvent): void {
   for (const session of bananaSessions.values()) {
     if (session.logKey === logKey) session.ingestExternalEvent(se);
@@ -4080,6 +4103,7 @@ export function activeBananaSessions(): {
     busy: s.isBusy(),
     sessionId: s.sessionId(),
     lastActivityAt: s.lastActivityAt(),
+    busySince: s.activeTurnStartedAt() ?? undefined,
   }));
 }
 

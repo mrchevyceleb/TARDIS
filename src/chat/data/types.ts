@@ -12,7 +12,8 @@ export type CompanionId =
   | 'zai'
   | 'xai'
   | 'fireworks'
-  | 'openrouter';
+  | 'openrouter'
+  | 'agy';
 
 // A live session reported by /api/live — used to mark "running now" entries
 // in the chronicle ribbon.
@@ -62,7 +63,7 @@ export type ChatImagePreview = {
 // `turnId` + `cbIndex` correlate a block back to claude's content_block_*
 // stream events so the reducer stays pure (no out-of-band Maps).
 export type ChatBlock =
-  | { kind: 'user'; id: string; text: string; ts: number; images?: ChatImagePreview[]; imageCount?: number; clientMsgId?: string; attachmentsLost?: boolean; deliveryState?: 'queued' | 'failed' | 'sending'; noRetry?: boolean }
+  | { kind: 'user'; id: string; text: string; ts: number; images?: ChatImagePreview[]; imageCount?: number; clientMsgId?: string; attachmentsLost?: boolean; deliveryState?: 'queued' | 'failed' | 'sending'; noRetry?: boolean; queue?: true; replyTo?: { from: string; snippet: string } }
   | {
       /** Agent-to-agent delivery (team bus): a teammate's message arriving in
        *  this thread — rendered with the SENDER's identity, not as a user turn. */
@@ -78,6 +79,9 @@ export type ChatBlock =
       tsApprox?: boolean;
       /** Delivered into the agent's background lane. */
       lane?: 'bg';
+      /** Render the bubble expanded on first paint (channel history: a
+       * member post IS the message, not a collapsed handoff card). */
+      expanded?: boolean;
     }
   | {
       /** Auto-compaction marker — the thread's model context rotated with a
@@ -138,6 +142,8 @@ export type ChatBlock =
       id: string;
       text: string;
       ts: number;
+      /** Sender name when rendered in a multi-agent channel. */
+      from?: string;
       /** Time unknown (history logged before events were time-stamped). */
       tsApprox?: boolean;
       folio?: string;
@@ -155,6 +161,12 @@ export type ChatBlock =
       /** Written by the agent's background lane, which streams alongside the home lane. */
       lane?: 'bg';
       cbIndex?: number;
+      /** Agy step identity (card-e2bd7a): the runner stamps the emitting
+       *  step's index and conversation on its message_start frames, so an
+       *  agy_thinking demotion marker targets this exact block, never a
+       *  same-shaped block from another lane or session. */
+      agyStep?: number;
+      agySession?: string;
       open?: boolean;
       /** Durable event-log seq for this block. Used to pin emoji reactions. */
       seq?: number;

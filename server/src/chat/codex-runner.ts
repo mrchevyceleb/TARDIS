@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CODEX_APP_TURN_SCRIPT } from '../config.ts';
-import { localMcpCodexArgs } from './local-mcp.ts';
+import { localMcpCodexArgs, localMcpSecretEnv } from './local-mcp.ts';
 import { officeMcpCodexArgs } from './office-mcp.ts';
 import { computerGuidance, computerOwnerKey } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
@@ -34,6 +34,9 @@ import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { THREAD_VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, replyNudgeEvent, ReplyWatch } from './replyNudge.ts';
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
+
+/** Delivery-path compaction probe rate — see probeCompactFromDeliveryPath. */
+const DELIVERY_COMPACT_PROBE_MS = 5 * 60_000;
 
 const CODEX_BIN = resolveCodexBin();
 console.log(`[chat codex] binary: ${CODEX_BIN}`);
@@ -155,6 +158,11 @@ type CodexSendOptions = {
   peerFromRole?: string;
   peerText?: string;
   peerDeliveryId?: string;
+  /** The raw text the stored echo should carry when the engine prompt got the
+   *  reply quote prepended (card-cbb4af). */
+  echoText?: string;
+  /** The reply target the echo carries as its own field. */
+  replyTo?: { from: string; snippet: string };
   /** App-server `turn/steer` admission was checked by teamBus/register. */
   allowNativePeerSteer?: boolean;
   allowNativeHumanSteer?: boolean;
@@ -291,12 +299,21 @@ export class CodexSession {
         cli: this.cli,
         chatId: this.chatId,
         events: this.eventLog,
-        isBusy: () => this.busy,
+        // busy || dead: the delivery-path probe can start a fold that outlives
+        // this session, and shutdown clears busy — a replaced instance must
+        // keep reading as busy or its rotate can fire after the fact.
+        isBusy: () => this.busy || this.dead,
         emit: (ev) => this.emit(ev as any),
         rotate: async () => {
+          // Same outlive risk: a dead instance must never mutate thread or
+          // persisted session state — the clear would wipe the id the
+          // replacement session now owns. Every supersede path (engine
+          // switch, idle prune, interrupt, shutdown-all) sets dead first.
+          if (this.dead) return false;
           this.seedWindowOnNextTurn = true;
           this.invalidateThreadId();
           await setSessionId(this.cli, this.cwd, '', this.chatId);
+          if (this.dead) return false;
           bankRotation(this.logKey);
           return false;
         },
@@ -305,7 +322,32 @@ export class CodexSession {
       console.warn(`[chat ${this.cli}] compaction check failed for ${this.logKey}:`, (err as Error).message);
     }
   }
+  /** A wedged marathon turn never exits cleanly, so the turn-end hook never
+   *  fires and the lane's rolling memory freezes (Oct 14: one live turn, zero
+   *  turn ends for five hours while every team delivery steered into it).
+   *  Each accepted delivery probes the compaction at most once per
+   *  DELIVERY_COMPACT_PROBE_MS. The probe runs the same maybeCompact the
+   *  turn-end hook runs, so every guard (busy lanes defer owed rotations,
+   *  the overflow gate, in-flight serialization) applies unchanged. */
+  private lastDeliveryCompactProbeMs = 0;
+  private probeCompactFromDeliveryPath(): void {
+    // Monotonic on purpose: a wall-clock correction must not stretch the
+    // window (recreating the starvation) or shrink it (probe storms).
+    const now = performance.now();
+    if (now - this.lastDeliveryCompactProbeMs < DELIVERY_COMPACT_PROBE_MS) return;
+    this.lastDeliveryCompactProbeMs = now;
+    // An accepted delivery is real input pressure on this lane even though it
+    // never becomes a user turn: note one pressure unit per probe window (the
+    // limiter above is the rate bound) so the compaction counter tracks
+    // delivery-heavy lanes instead of freezing for days (Oct 14: two days of
+    // team deliveries left userTurnsTotal unmoved while the lane worked).
+    noteUserTurn(this.logKey);
+    void this.maybeCompact();
+  }
   private busy = false;
+  /** When the active turn opened (ms), for the client's elapsed timer on
+   *  reattach (register.ts ready payload); meaningful only while busy. */
+  private busySince: number | null = null;
   private dead = false;
   private currentChild: ChildProcess | null = null;
   /** True after app-server announces turn/started and until turn/completed. */
@@ -428,6 +470,12 @@ export class CodexSession {
 
   isAlive(): boolean {
     return !this.dead;
+  }
+
+  /** The active turn's start (ms) for the client's elapsed timer on reattach
+   *  (register.ts ready payload); null when no turn is open. */
+  activeTurnStartedAt(): number | null {
+    return this.busy ? this.busySince : null;
   }
 
   isBusy(): boolean {
@@ -627,17 +675,19 @@ export class CodexSession {
             type: 'event',
             event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() },
           });
+          this.probeCompactFromDeliveryPath();
         }
       } else {
         this.emit({
           type: 'event',
           event: {
             type: '_user_echo',
-            text,
+            text: opts.echoText ?? text,
             imageCount: images?.length ?? 0,
             attachments: steerAttachments,
             clientMsgId: opts.clientMsgId,
             humanOrigin: opts.humanOrigin === true,
+            ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
             ts: Date.now(),
           },
         });
@@ -654,6 +704,7 @@ export class CodexSession {
     this.turnModel = codexModel;
     this.turnEffort = codexEffort;
     this.busy = true;
+    this.busySince = Date.now();
     this.cancellationEmitted = false;
     if (!opts.suppressEcho) this.replyWatch.reset();
     const recoverContextThisTurn = this.recoverContextOnNextTurn;
@@ -699,7 +750,7 @@ export class CodexSession {
       try {
         this.emit({
           type: 'event',
-          event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ts: Date.now() },
+          event: { type: '_user_echo', text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
         });
       } catch (error) {
         this.busy = false;
@@ -900,7 +951,7 @@ export class CodexSession {
     const child = spawn(process.execPath, [CODEX_APP_TURN_SCRIPT], {
       cwd: this.cwd,
       // The marker tells the installed long-call gate hook this is a TARDIS agent turn.
-      env: { ...codexSpawnEnv, ...longCallGateEnv(this.chatId) },
+      env: { ...codexSpawnEnv, ...localMcpSecretEnv(laneName ?? 'Teammate', { unnamedLane: !laneName }), ...longCallGateEnv(this.chatId) },
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -980,6 +1031,7 @@ export class CodexSession {
               event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() },
             });
             settlePeerAdmission(true);
+            this.probeCompactFromDeliveryPath();
           }
         }
         if (ev?.type === 'item.completed' && ev?.item?.type === 'agent_message') {
@@ -1494,6 +1546,14 @@ function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
 /** Manager keyed by cwd + chat id, matching the claude session map. */
 const codexSessions = new Map<string, CodexSession>();
 
+/** Live codex session for a lane, read-only, never a spawn (register.ts
+ *  bg-lane busy: a lane that never ran is simply not busy). */
+export function peekCodexSession(opts: { repoPath: string; chatId?: string; cli?: CliKind }): CodexSession | null {
+  const key = keyOf(opts.cli ?? 'codex', opts.repoPath, opts.chatId || 'main');
+  const live = codexSessions.get(key);
+  return live && live.isAlive() ? live : null;
+}
+
 export function publishCodexExternalEvent(logKey: string, se: SeqEvent): void {
   for (const session of codexSessions.values()) {
     if (session.logKey === logKey) session.ingestExternalEvent(se);
@@ -1535,6 +1595,7 @@ export function activeCodexSessions(): {
     busy: s.isBusy(),
     sessionId: s.sessionId(),
     lastActivityAt: s.lastActivityAt(),
+    busySince: s.activeTurnStartedAt() ?? undefined,
   }));
 }
 

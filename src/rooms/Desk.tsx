@@ -51,20 +51,33 @@ import {
 } from './deskParts';
 import { DeskBoard } from './DeskBoard';
 import { DeskCardDrawer } from './DeskCardDrawer';
+import { DeskTeamView } from './DeskTeamView';
 import './desk.css';
 
-type Tab = 'needs' | 'board';
+type Tab = 'home' | 'board';
 const TAB_KEY = 'rivendell:desk-tab';
+/** The board tab's style: the team view is the default (Matt, Oct 17: one
+ *  glance per team), the column board stays one click away. */
+type BoardStyle = 'team' | 'columns';
+const BOARD_STYLE_KEY = 'rivendell:desk-board-style';
 
 export function Desk() {
   const desk = useDesk();
   const agents = useDeskAgents();
   // The shell's summary poll says whether this server takes answers yet.
   const answerable = useDeskSummary(false).data?.answerable === true;
-  const [tab, setTab] = useState<Tab>(() => (localStorage.getItem(TAB_KEY) === 'board' ? 'board' : 'needs'));
+  const [tab, setTab] = useState<Tab>(() => {
+    // A desk deep link carrying ?board (e.g. ?desk=open&board) lands straight
+    // on the Board tab's team view, so a shared look URL opens where the
+    // reader expects instead of an unrelated chat.
+    if (new URLSearchParams(window.location.search).has('board')) return 'board';
+    return localStorage.getItem(TAB_KEY) === 'board' ? 'board' : 'home';
+  });
+  const [boardStyle, setBoardStyle] = useState<BoardStyle>(() => (localStorage.getItem(BOARD_STYLE_KEY) === 'columns' ? 'columns' : 'team'));
   const [openCardId, setOpenCardId] = useState<string | null>(null);
   const [flash, setFlash] = useState<{ id: string; at: number } | null>(null);
   useEffect(() => { localStorage.setItem(TAB_KEY, tab); }, [tab]);
+  useEffect(() => { localStorage.setItem(BOARD_STYLE_KEY, boardStyle); }, [boardStyle]);
 
   const data = desk.data;
 
@@ -73,6 +86,10 @@ export function Desk() {
   // A reference missing from a snapshot older than the click is re-fetched
   // before it is called gone (an agent may have just created it).
   const [focusReq, setFocusReq] = useState<{ ref: DeskRef; at: number } | null>(() => {
+    // A landing link carrying ?board (e.g. ?desk=open&board) wants the
+    // Board tab's team view, not the Needs-you focus: the room landing is
+    // all it asks for, and the focus resolution would force the Home tab.
+    if (new URLSearchParams(window.location.search).has('board')) return null;
     const ref = peekDeskFocus();
     return ref ? { ref, at: Date.now() } : null;
   });
@@ -119,7 +136,7 @@ export function Desk() {
       return;
     }
     setOpenCardId(null);
-    setTab('needs');
+    setTab('home');
     if (todoId && found) setFlash({ id: todoId, at: Date.now() });
   }, [focusReq, data, dataUpdatedAt, errorUpdatedAt, isFetching, refetch, openCardId]);
   const openTodos = useMemo(() => sortOpenTodos((data?.todos ?? []).filter((t) => t.status === 'open')), [data]);
@@ -140,8 +157,8 @@ export function Desk() {
     <div className="desk-room">
       <RoomHeader eyebrow={ROOM_NAMES.desk.eyebrow} title="Desk" subtitle={subtitle} actions={<DesktopAlertsButton />} />
       <div className="desk-tabs" role="tablist" aria-label="Desk view">
-        <button type="button" role="tab" aria-selected={tab === 'needs'} onClick={() => setTab('needs')}>
-          <Inbox size={15} aria-hidden="true" /> Needs you
+        <button type="button" role="tab" aria-selected={tab === 'home'} onClick={() => setTab('home')}>
+          <Inbox size={15} aria-hidden="true" /> Home
           {openTodos.length ? <span className="desk-count">{openTodos.length}</span> : null}
         </button>
         <button type="button" role="tab" aria-selected={tab === 'board'} onClick={() => setTab('board')}>
@@ -164,9 +181,29 @@ export function Desk() {
       ) : null}
 
       {data ? (
-        tab === 'needs'
-          ? <NeedsYou desk={data} agents={agents} onOpenCard={setOpenCardId} flash={flash} answerable={answerable} />
-          : <DeskBoard desk={data} agents={agents} onOpenCard={setOpenCardId} />
+        tab === 'home'
+          ? (
+            <>
+              <NeedsYou desk={data} agents={agents} onOpenCard={setOpenCardId} flash={flash} answerable={answerable} />
+              <PeopleRows desk={data} agents={agents} onOpenCard={setOpenCardId} />
+            </>
+          )
+          : boardStyle === 'team'
+            ? (
+              <>
+                <DeskTeamView desk={data} agents={agents} onOpenCard={setOpenCardId} onShowBoard={() => setBoardStyle('columns')} />
+              </>
+            )
+            : (
+              <>
+                <div className="desk-team head-row">
+                  <button type="button" className="desk-team-board" onClick={() => setBoardStyle('team')} title="Back to the team view">
+                    <LayoutGrid size={13} /> Team view
+                  </button>
+                </div>
+                <DeskBoard desk={data} agents={agents} onOpenCard={setOpenCardId} />
+              </>
+            )
       ) : null}
 
       {openCard && data ? (
@@ -612,3 +649,57 @@ function TodoRow({
   );
 }
 
+
+// ---- People ---------------------------------------------------------------------------
+
+const PR_STATE_LABEL: Record<string, string> = { draft: 'draft', ci: 'CI', merged: 'merged to staging', open: 'open' };
+
+/** One row per teammate: the open PRs they own, else their in-progress card
+ *  title, else idle. PRs arrive with the snapshot (an older server sends no
+ *  prs, so the rows degrade to the card/idle line until the server rides).
+ *  PR owners that match no teammate (an unmapped branch prefix renders under
+ *  its GitHub login) still get their own row, so real work never vanishes
+ *  behind a false idle. */
+function PeopleRows({ desk, agents, onOpenCard }: { desk: DeskSnapshot; agents: Agent[]; onOpenCard: (id: string) => void }) {
+  const prs = desk.prs ?? [];
+  const known = new Set(agents.map((a) => a.name));
+  const unmatchedOwners = [...new Set(prs.map((p) => p.owner).filter((owner) => !known.has(owner)))];
+  const renderPrs = (mine: typeof prs) => (
+    <ul className="desk-person-prs">
+      {mine.map((p) => (
+        <li key={`${p.repo}#${p.number}`}>
+          <a href={p.url} target="_blank" rel="noreferrer">{p.repo.split('/')[1]} #{p.number}</a>
+          <span className="desk-pr-state">{p.reviewer ? `with ${p.reviewer}` : (PR_STATE_LABEL[p.state] ?? p.state)}</span>
+          <span className="desk-pr-title">{p.title}</span>
+        </li>
+      ))}
+    </ul>
+  );
+  return (
+    <section className="desk-people" aria-label="What each teammate has open">
+      <h3 className="desk-people-title">What everyone has open{desk.prsStale ? <span className="desk-pr-stale"> · PR data stale</span> : null}</h3>
+      <ul className="desk-people-list">
+        {agents.map((a) => {
+          const mine = prs.filter((p) => p.owner === a.name);
+          const onCard = desk.cards.find((c) => c.column === 'in_progress' && !c.archived && c.owner.name === a.name);
+          return (
+            <li key={a.id} className="desk-person">
+              <span className="desk-person-name">{a.name}</span>
+              {mine.length ? renderPrs(mine)
+                : onCard ? <button type="button" className="desk-person-on" onClick={() => onOpenCard(onCard.id)}>{onCard.title}</button>
+                : desk.prsPending ? <span className="desk-person-on is-quiet">checking PRs…</span>
+                : desk.prsStale && desk.prsUnknown ? <span className="desk-person-on is-quiet">PR status unavailable</span>
+                : <span className="desk-person-on is-quiet">idle</span>}
+            </li>
+          );
+        })}
+        {unmatchedOwners.map((owner) => (
+          <li key={`owner:${owner}`} className="desk-person">
+            <span className="desk-person-name">{owner}</span>
+            {renderPrs(prs.filter((p) => p.owner === owner))}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}

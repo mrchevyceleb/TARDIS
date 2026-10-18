@@ -8,7 +8,7 @@ import { MCP_BASE_URL, MCP_BEARER_TOKEN } from '../config.ts';
  * Throws on missing config, non-2xx responses, or unparseable bodies —
  * callers should let the error propagate (no mock fallback).
  */
-export async function callMcp<T = unknown>(tool: string, payload: unknown): Promise<T> {
+export async function callMcp<T = unknown>(tool: string, payload: unknown, timeoutMs = 30_000): Promise<T> {
   if (!MCP_BASE_URL) {
     throw new Error('MCP_BASE_URL is not configured');
   }
@@ -16,8 +16,17 @@ export async function callMcp<T = unknown>(tool: string, payload: unknown): Prom
   const response = await fetch(`${MCP_BASE_URL.replace(/\/$/, '')}/tools/call`, {
     method: 'POST',
     // Fresh Thread and rolling compaction must never hold a lane forever when
-    // the optional remote memory mirror is unreachable.
-    signal: AbortSignal.timeout(30_000),
+    // the optional remote memory mirror is unreachable. Default 30s; a caller
+    // with its own pass deadline (the durable-fact drain) passes its remaining
+    // budget so no call can outlive the caller's deadline. Floor 1ms: a spent
+    // budget aborts immediately instead of hanging. The budget must be an
+    // integer first: AbortSignal.timeout demands an integer delay, and the
+    // drain's performance.now()-derived remaining time is a float (14999.93ms),
+    // which threw ERR_OUT_OF_RANGE on every durable-fact save from Oct 14-17
+    // and pinned the durable-fact outbox at its cap. Flooring (never rounding)
+    // keeps the deadline contract: a rounded-up budget could outlive the
+    // caller's deadline by up to 1ms; floored, no call ever can.
+    signal: AbortSignal.timeout(Math.max(Math.floor(timeoutMs), 1)),
     headers: {
       'Content-Type': 'application/json',
       ...(MCP_BEARER_TOKEN ? { Authorization: `Bearer ${MCP_BEARER_TOKEN}` } : {}),

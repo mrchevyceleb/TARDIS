@@ -70,14 +70,30 @@ export function useChatShell({ chat, picker }: ShellProps) {
     prevStatus.current = chat.status;
   }, [chat.status, noteUnread]);
 
+  // Reply-to-message (card-cbb4af): the armed reply context, set by the
+  // thread's reply action, attached to the next send/steer, then cleared.
+  const [reply, setReply] = useState<{ id: string; from: string; snippet: string } | null>(null);
+  const replyArmed = () => (reply ? { from: reply.from, snippet: reply.snippet } : undefined);
+  const clearReply = () => setReply(null);
+
   const send = (text: string, images?: SendImage[]) => {
-    chat.send(text, images);
+    const reply = replyArmed();
+    chat.send(text, images, false, reply);
+    clearReply();
     setRoom('hall');
     // §3.6: sending force-follows the feed.
     requestAnimationFrame(() => sticky.forcePin());
   };
   const steer = (text: string, images?: SendImage[]) => {
-    chat.steer(text, images);
+    const reply = replyArmed();
+    // (review 3 P2 12) steer's third parameter is the queue flag on the
+    // merged branch: replyTo rides fourth, never in queue's slot.
+    chat.steer(text, images, undefined, reply);
+    clearReply();
+    requestAnimationFrame(() => sticky.forcePin());
+  };
+  const sendQueued = (text: string, images?: SendImage[]) => {
+    chat.sendQueued(text, images);
     requestAnimationFrame(() => sticky.forcePin());
   };
   const stop = () => chat.stop();
@@ -97,8 +113,13 @@ export function useChatShell({ chat, picker }: ShellProps) {
     busy,
     workingSince: chat.turnStartedAt,
     backgroundWork: chat.backgroundWork,
-    send, steer, retry: chat.retry, react: chat.react, stop,
-    fresh: chat.freshStart,
+    send, steer, sendQueued, reply, setReply, retry: chat.retry, react: chat.react, stop,
+    // Fresh start wipes the thread, so a reply armed against a message that
+    // is no longer visible must not survive it (card-cbb4af, review 1 P2 11).
+    fresh: () => {
+      chat.freshStart();
+      setReply(null);
+    },
     pickChronicle,
     blocks: chat.blocks as ChatBlock[],
     hydrating: chat.hydrating,

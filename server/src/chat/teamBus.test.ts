@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
-import { agentLogKey, extendTeamChain, teamAvailability, teamMessageWaitRequested, waitForDeliveryBoundary, type TeamChain } from './teamBus.ts';
+import { abortInFlightChannelDeliveries, agentLogKey, batchJoinable, deliveryInterruptClass, deliveryLanePolicy, extendTeamChain, liveChannelTurnLanes, registerInFlightChannelDelivery, releaseInFlightChannelDelivery, teamAvailability, teamMessageWaitRequested, waitForDeliveryBoundary, type TeamChain } from './teamBus.ts';
+import { laneChatId } from './threadKey.ts';
 import type { Agent } from './agents.ts';
 
 test('raw API preserves its reply default while the MCP can request async delivery', () => {
@@ -140,4 +141,116 @@ test('team delivery uses the persisted agent brain instead of a stale live-lane 
     model: 'grok-4.5',
     effort: 'low',
   });
+});
+
+test('the person’s channel posts get person-class delivery, agent posts stay peer class', () => {
+  // Matt posting in a channel steers members’ live turns like a one-on-one
+  // message: human interrupt boundary, person lane policy (card-1327b9).
+  assert.equal(deliveryInterruptClass('channel', true), 'human');
+  assert.equal(deliveryLanePolicy('channel', true), 'person');
+  // An agent’s channel reply keeps the ordinary peer/background behavior.
+  assert.equal(deliveryInterruptClass('channel', false), 'peer');
+  assert.equal(deliveryInterruptClass('channel', undefined), 'peer');
+  assert.equal(deliveryLanePolicy('channel', false), 'bg');
+  assert.equal(deliveryLanePolicy('channel', undefined), 'bg');
+  // The existing person classes are unchanged, and automation stays
+  // non-interruptible for peers and channels alike.
+  assert.equal(deliveryInterruptClass('desk', undefined), 'human');
+  assert.equal(deliveryInterruptClass('voice', undefined), 'human');
+  assert.equal(deliveryLanePolicy('desk', undefined), 'person');
+  assert.equal(deliveryLanePolicy('voice', undefined), 'person');
+  assert.equal(deliveryInterruptClass('automation', true), false);
+  assert.equal(deliveryInterruptClass(undefined, true), 'peer');
+  assert.equal(deliveryLanePolicy(undefined, true), 'bg');
+});
+
+test('a queued delivery never requests any interrupt class, on any admission or retry', () => {
+  // card-504beb: queue keeps the person class and lane preference, but the
+  // delivery never interrupts the live turn — no human boundary request, no
+  // peer boundary request, not even on the member's own live channel turn or
+  // a drain retry. It waits for the turn to end like a peer message that
+  // cannot steer.
+  assert.equal(deliveryInterruptClass('channel', true, true), false);
+  assert.equal(deliveryInterruptClass('channel', false, true), false);
+  assert.equal(deliveryInterruptClass('channel', undefined, true), false);
+  assert.equal(deliveryInterruptClass('desk', undefined, true), false);
+  assert.equal(deliveryInterruptClass('voice', undefined, true), false);
+  assert.equal(deliveryInterruptClass(undefined, true, true), false);
+  // Without queue the person classes are exactly as before.
+  assert.equal(deliveryInterruptClass('channel', true, false), 'human');
+  assert.equal(deliveryInterruptClass('channel', true, undefined), 'human');
+  assert.equal(deliveryInterruptClass('desk', undefined, false), 'human');
+});
+
+test('a channel Stop aborts the in-flight delivery worker holding its batch', () => {
+  // Review finding 1: removing the outbox row alone leaves the drain worker
+  // waiting at a turn boundary with its batch already built. Stop must abort
+  // that worker, or the interrupt hands it exactly the idle session it was
+  // waiting for and the dropped post comes straight back.
+  const from = 'channel:stop-test';
+  const entry = registerInFlightChannelDelivery('stop-test-member', from);
+  try {
+    assert.equal(entry.controller.signal.aborted, false);
+    assert.equal(abortInFlightChannelDeliveries('stop-test-member', from), 1);
+    assert.equal(entry.controller.signal.aborted, true);
+    // Aborting again is a no-op, and a foreign member is untouched.
+    assert.equal(abortInFlightChannelDeliveries('stop-test-member', from), 1);
+    assert.equal(abortInFlightChannelDeliveries('stop-test-other', from), 0);
+  } finally {
+    releaseInFlightChannelDelivery('stop-test-member', from, entry);
+  }
+  assert.equal(abortInFlightChannelDeliveries('stop-test-member', from), 0);
+});
+
+test('a channel delivery reports its lane only while its turn is live', () => {
+  // Later person posts from the same channel steer the exact turn an earlier
+  // post started, so the lane must show while the session is busy and stop
+  // showing once the turn has been over for a while (review findings 2-4).
+  const from = 'channel:lanes-test';
+  const entry = registerInFlightChannelDelivery('lanes-test-member', from);
+  try {
+    // Before admission there is no lane to steer.
+    assert.deepEqual(liveChannelTurnLanes('lanes-test-member', from, [{ cli: 'codex', chatId: 'bot-x', busy: true }]), []);
+    entry.lane = 'main';
+    entry.cli = 'codex';
+    entry.chatKey = 'bot-x';
+    entry.admittedAt = Date.now() - 6000;
+    // Busy on the admitted (cli, chat id): the lane shows. A background
+    // sibling on the same member never matches, and neither does a session
+    // on a different engine (review 3, P0 1).
+    assert.deepEqual(liveChannelTurnLanes('lanes-test-member', from, [{ cli: 'codex', chatId: 'bot-x', busy: true }]), ['main']);
+    assert.deepEqual(liveChannelTurnLanes('lanes-test-member', from, [{ cli: 'codex', chatId: 'bot-x__bg', busy: true }]), []);
+    assert.deepEqual(liveChannelTurnLanes('lanes-test-member', from, [{ cli: 'claude', chatId: 'bot-x', busy: true }]), []);
+    // The turn ended over five seconds ago: pruned, never claimed again.
+    assert.deepEqual(liveChannelTurnLanes('lanes-test-member', from, [{ cli: 'codex', chatId: 'bot-x', busy: false }]), []);
+    assert.deepEqual(liveChannelTurnLanes('lanes-test-member', from, [{ cli: 'codex', chatId: 'bot-x', busy: true }]), []);
+  } finally {
+    releaseInFlightChannelDelivery('lanes-test-member', from, entry);
+  }
+});
+
+test('lane chat ids keep the background suffix while dropping the account pin', () => {
+  // Review 3 P0 1: main and background lanes must never compare equal, but
+  // an account-pinned main session must still match its lane.
+  assert.equal(laneChatId('bot-kate'), 'bot-kate');
+  assert.equal(laneChatId('bot-kate__bg'), 'bot-kate__bg');
+  assert.equal(laneChatId('bot-kate__acct__kim'), 'bot-kate');
+  // A pin can never follow the bg suffix in a real id; if one somehow did,
+  // laneChatId leaves it unmatched rather than collapsing lanes — fail safe.
+  assert.equal(laneChatId('bot-kate__acct__kim__bg'), 'bot-kate__acct__kim__bg');
+  assert.notEqual(laneChatId('bot-kate'), laneChatId('bot-kate__bg'));
+});
+
+test('the person’s channel posts never batch with agent replies from the same channel', () => {
+  // Review finding 5: a person post (human interrupt, steering lane policy)
+  // and an agent reply from the same channel must not share a batch, or the
+  // lead’s class would decide for both.
+  const base = { fromId: 'channel:b1', fromName: '#b1', toId: 'kate', text: 'hi', hop: 1 } as const;
+  const personLead = { id: 'l1', createdAt: '2026-10-16T00:00:00Z', fromRole: 'channel', personPosted: true, ...base };
+  const agentReply = { id: 'l2', createdAt: '2026-10-16T00:00:01Z', fromRole: 'channel', ...base };
+  const personToo = { id: 'l3', createdAt: '2026-10-16T00:00:02Z', fromRole: 'channel', personPosted: true, ...base };
+  const otherChannel = { id: 'l4', createdAt: '2026-10-16T00:00:03Z', fromRole: 'channel', personPosted: true, ...base, fromId: 'channel:b2' };
+  assert.equal(batchJoinable(personLead as never, agentReply as never), false);
+  assert.equal(batchJoinable(personLead as never, personToo as never), true);
+  assert.equal(batchJoinable(personLead as never, otherChannel as never), false);
 });

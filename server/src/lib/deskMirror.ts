@@ -4,7 +4,9 @@
 // instead of duplicating. Fire-and-forget: a failed push never blocks or
 // fails a Desk write. Only title/stage/links/project ever leave the Desk —
 // no owner names, no agent ids, no comments, no internal notes.
-// Dormant until DESK_MIRROR_URL and DESK_MIRROR_SECRET are both set.
+// Dormant until DESK_MIRROR_URL and DESK_MIRROR_SECRET are both set, and
+// never active in a side copy (RIVENDELL_SIDE_COPY=1): a check's Desk
+// writes must never reach the real Dev PR Tracker.
 //
 // Delivery contract (review-hardened):
 // - Every delivery — hook or full sync — goes through one per-card queue
@@ -63,7 +65,20 @@ function payloadFor(card: DeskCard, closing: boolean): string {
   });
 }
 
+// A side copy never mirrors (Samwise, Oct 17, found on the #242 check):
+// precheck side copies inherit DESK_MIRROR_URL, and an ungated mirror
+// would push a real Desk write from a check straight into the live Dev PR
+// Tracker. Same dormancy as an unset URL, with one warn so a checker knows.
+let sideCopyMirrorWarned = false;
+
 function configured(): { url: string; secret: string } | null {
+  if (process.env.RIVENDELL_SIDE_COPY === '1') {
+    if (!sideCopyMirrorWarned) {
+      sideCopyMirrorWarned = true;
+      console.warn('[desk-mirror] side copy (RIVENDELL_SIDE_COPY=1) — Desk mirror disabled');
+    }
+    return null;
+  }
   const url = process.env.DESK_MIRROR_URL?.trim();
   const secret = process.env.DESK_MIRROR_SECRET?.trim();
   return url && secret ? { url, secret } : null;
