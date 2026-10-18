@@ -12,6 +12,7 @@ import { DESK_FILE } from '../config.ts';
 import { closeMattAsksForAgent } from './mattAsks.ts';
 import { queueMirror } from './deskMirror.ts';
 import { inQuietHours, isMaxLane, lastQuietEndMs } from './quietHours.ts';
+import { LIVE_HOLD_CEILING_MS, agentsWithLiveTurns } from './laneLiveness.ts';
 
 // Matt's five stages (2026-10-09; order staging-first per the locked rally
 // release process, 2026-10-10). Old ids (pipeline, up_next, waiting, done)
@@ -1164,9 +1165,14 @@ export async function commentCard(id: string, text: unknown, author: DeskActor):
  *  restores its mark (restoreCardCheckMark) so it retries too. */
 const MAX_SWEEP_DELIVERIES = 8;
 
-export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promise<Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>> {
+export async function sweepCardChecks(options: { dryRun?: boolean; liveLanes?: ReadonlySet<string> } = {}): Promise<Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string; since: number }>> {
   const dryRun = options.dryRun === true;
-  const due: Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }> = [];
+  // Lane-liveness (Max, Oct 18 2026, card-b3468c): a nudge must never derail
+  // a live turn. Resolved once per sweep from the ground-truth roster (fail
+  // open when unreadable — a broken gate must never swallow a nudge);
+  // injectable for tests.
+  const liveLanes = options.liveLanes ?? await agentsWithLiveTurns();
+  const due: Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string; since: number }> = [];
   // Resolve the live roster once before the sweep: a stale agent id routes to
   // the Chief (a delivery to a dead id is a silent failure), and a human or
   // Desk actor owner routes to the Chief immediately.
@@ -1206,7 +1212,7 @@ export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promi
     // limiter rejects — exactly the mass-silence burst this feature exists
     // for. Only the deliverable head of the batch is marked; the rest stay
     // unmarked and eligible for the next tick.
-    const candidates: Array<{ setMark: () => void; nudge: { kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string } }> = [];
+    const candidates: Array<{ setMark: () => void; nudge: { kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string; since: number } }> = [];
     for (const card of data.cards) {
       if (card.archived) continue;
       if (card.column !== 'in_progress' && card.column !== 'in_qa') continue;
@@ -1223,6 +1229,14 @@ export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promi
         // lost. Chief escalation below targets Max's lane and always goes.
         if (inQuietHours(nowMs) && !isMaxLane(ownerAgent)) {
           // held: unmarked, retried by the next post-05:00 sweep
+        } else if (liveLanes.has(ownerAgent) && nowMs - next < LIVE_HOLD_CEILING_MS) {
+          // Lane-liveness hold (Max, Oct 18 2026, card-b3468c): the owner's
+          // lane is mid-turn; a quiet-check nudge must not derail it. Held
+          // unmarked exactly like the quiet-hours hold above — the next sweep
+          // after the turn ends nudges it — and bounded by the same ceiling
+          // measured from the check-in's own due instant: a lane stuck in
+          // one long turn still gets its nudge once the check-in has been
+          // due past the ceiling. Holding never means losing.
         } else {
           candidates.push({
             setMark: () => { card.nudgeAt = now; },
@@ -1230,6 +1244,12 @@ export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promi
               kind: 'owner',
               card,
               to: ownerAgent,
+              // The hold origin the sweep's liveness gate measured from
+              // (the check-in's own due instant): the delivery carries it so
+              // the drain-side admission holds by the same clock (review
+              // P0, Oct 18) instead of a snapshot that can go stale before
+              // the record admits.
+              since: next,
               text: ownerAgent === 'chief-of-staff'
                 ? `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since (you own this one). Comment on the card to set a new one.`
                 : `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since. Comment on the card to set a new one, or tell the Chief of Staff what is blocking it.`,
@@ -1250,13 +1270,22 @@ export async function sweepCardChecks(options: { dryRun?: boolean } = {}): Promi
         const escalateFrom = isMaxLane(ownerAgent)
           ? Date.parse(card.nudgeAt)
           : Math.max(Date.parse(card.nudgeAt), lastQuietEndMs(nowMs));
-        if (nowMs - escalateFrom >= CARD_CHECK_ESCALATE_MS && !(inQuietHours(nowMs) && !isMaxLane(ownerAgent))) {
+        if (
+          nowMs - escalateFrom >= CARD_CHECK_ESCALATE_MS
+          && !(inQuietHours(nowMs) && !isMaxLane(ownerAgent))
+          // Lane-liveness (card-b3468c): the escalation's recipient is the
+          // Chief; hold it unmarked while that lane is mid-turn, bounded by
+          // the same ceiling from the escalation's own due instant, so a
+          // stuck Chief lane still gets it. Holding never means losing.
+          && !(liveLanes.has('chief-of-staff') && nowMs - escalateFrom < CARD_CHECK_ESCALATE_MS + LIVE_HOLD_CEILING_MS)
+        ) {
           candidates.push({
             setMark: () => { card.escalatedAt = now; },
             nudge: {
               kind: 'chief',
               card,
               to: 'chief-of-staff',
+              since: escalateFrom,
               text: `Silence flag: ${ownerAgent}'s card [${card.id}] "${card.title}" (${card.column}) went quiet past its check-in time and stayed quiet 15 minutes after the nudge. It went to them; make sure they act on it.`,
             },
           });

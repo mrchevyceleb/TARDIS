@@ -35,6 +35,36 @@ test('a held digest does not even try overnight: entries stay queued, no marks, 
   // case above is the regression the review flagged.
 });
 
+test('a live lane holds its digest: nothing delivered or marked, and a re-queue keeps the original hold age', async () => {
+  // 14:20 ET, outside the quiet window: only the lane-liveness gate holds
+  // (card-b3468c). The live set is injected, so the flush never touches the
+  // real roster; the delivery path itself stays unexercised, like the
+  // quiet-hours test above.
+  let marked = false;
+  queueFlagDigest('naomi', 'live-key', 'live probe raise', () => { marked = true; });
+
+  await flushFlagDigests(et('2026-10-15T14:20'), new Set(['naomi']));
+
+  assert.equal(marked, false, 'a live lane must not run the onDelivered mark');
+  type PersistedQueue = { key: string; firstQueuedAt?: number };
+  const read = () => JSON.parse(readFileSync(join(stateDir, 'flag-digest.json'), 'utf8')) as { queues?: Record<string, PersistedQueue[]>; lastFlush?: Record<string, number> };
+  const state = read();
+  const entry = state.queues?.naomi?.find((e) => e.key === 'live-key');
+  assert.ok(entry, 'the entry stays queued untouched while held');
+  assert.ok(entry!.firstQueuedAt, 'a held entry records its first queue time');
+  assert.ok(!state.lastFlush?.naomi, 'the pacing clock must not advance while held');
+
+  // Holding never means losing: a producer's re-queue must NOT refresh the
+  // hold age, or a busy lane would hold its digest without bound.
+  queueFlagDigest('naomi', 'live-key', 'live probe raise (re-queued)');
+  const requeued = read();
+  assert.equal(
+    requeued.queues?.naomi?.find((e) => e.key === 'live-key')?.firstQueuedAt,
+    entry!.firstQueuedAt,
+    'a re-queue must keep the original firstQueuedAt',
+  );
+});
+
 // Clean up the throwaway state dir after the run.
 test('cleanup', () => {
   rmSync(stateDir, { recursive: true, force: true });

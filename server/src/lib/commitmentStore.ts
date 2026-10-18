@@ -39,6 +39,31 @@ const HAS_LINE_BREAK = /[\r\n\u2028\u2029]/;
 /** The list stays small enough to stitch into every seed: about ten lines. */
 const MAX_PER_AGENT = 12;
 
+/** A delivered owner raise also marks the commitment TEXT (Max, Oct 18
+ *  2026, card-b3468c): an interrupted agent re-tracks a past-due commitment
+ *  under a NEW id, and an id-keyed mark alone resets with it — re-raising
+ *  into the very turn the digest just derailed, over and over. The text
+ *  mark survives the id change, so a re-added commitment cannot reset its
+ *  own flag. It expires after a day, so a genuinely fresh same-text promise
+ *  that goes past due again still raises once. */
+const RAISE_TEXT_TTL_MS = 24 * 3_600_000;
+
+/** The normalized agent+text key a delivered owner raise also marks
+ *  (card-b3468c). Exported so the sweep can key its digest queue by the
+ *  same text: a re-tracked commitment upserts its own raise instead of
+ *  stacking a second line (review P1, Oct 18). */
+export function raiseTextKey(agentId: string, text: string): string {
+  return `${agentId.trim()}::${text.trim().toLowerCase().replace(/\s+/g, ' ')}`;
+}
+
+function pruneRaisedText(raisedText: Record<string, number>, now: number): Record<string, number> {
+  const pruned: Record<string, number> = {};
+  for (const [key, at] of Object.entries(raisedText)) {
+    if (typeof at === 'number' && Number.isFinite(at) && now - at < RAISE_TEXT_TTL_MS * 2) pruned[key] = at;
+  }
+  return pruned;
+}
+
 function asFiniteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
@@ -76,28 +101,112 @@ function normalizeCommitment(value: unknown): Commitment | null {
   };
 }
 
-function readAll(): Commitment[] {
+function readStore(): { list: unknown[]; raisedText: Record<string, number>; raisedChiefText: Record<string, number> } {
   let raw: string;
   try {
     raw = readFileSync(FILE, 'utf8');
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT') return [];
+    if (code === 'ENOENT') return { list: [], raisedText: {}, raisedChiefText: {} };
     throw err;
   }
-  const data = JSON.parse(raw) as { commitments?: unknown } | unknown;
+  const data = JSON.parse(raw) as { commitments?: unknown; raisedText?: unknown } | unknown;
   const list = Array.isArray(data)
     ? data
     : data && typeof data === 'object' && Array.isArray((data as { commitments?: unknown }).commitments)
       ? (data as { commitments: unknown[] }).commitments
       : [];
-  return list.map(normalizeCommitment).filter((c): c is Commitment => Boolean(c));
+  const raisedText: Record<string, number> = {};
+  const marks = data && typeof data === 'object' && !Array.isArray(data) ? (data as { raisedText?: unknown }).raisedText : undefined;
+  if (marks && typeof marks === 'object' && !Array.isArray(marks)) {
+    for (const [key, at] of Object.entries(marks as Record<string, unknown>)) {
+      if (key && typeof at === 'number' && Number.isFinite(at) && at > 0) raisedText[key.slice(0, 240)] = at;
+    }
+  }
+  // Chief-side text marks (card-b3468c verify P1): one Chief escalation per
+  // promise text inside the TTL, so concurrent same-text re-tracks never
+  // stack duplicate copies. Same shape, same TTL, own map.
+  const raisedChiefText: Record<string, number> = {};
+  const chiefMarks = data && typeof data === 'object' && !Array.isArray(data) ? (data as { raisedChiefText?: unknown }).raisedChiefText : undefined;
+  if (chiefMarks && typeof chiefMarks === 'object' && !Array.isArray(chiefMarks)) {
+    for (const [key, at] of Object.entries(chiefMarks as Record<string, unknown>)) {
+      if (key && typeof at === 'number' && Number.isFinite(at) && at > 0) raisedChiefText[key.slice(0, 240)] = at;
+    }
+  }
+  return { list, raisedText, raisedChiefText };
 }
 
-function save(commitments: Commitment[]): void {
+function readAll(): Commitment[] {
+  return readStore().list.map(normalizeCommitment).filter((c): c is Commitment => Boolean(c));
+}
+
+function readRaisedText(): Record<string, number> {
+  return readStore().raisedText;
+}
+
+function readRaisedChiefText(): Record<string, number> {
+  return readStore().raisedChiefText;
+}
+
+/** True when a same-text owner raise for this agent already delivered inside
+ *  the TTL: the sweep must not re-raise a re-tracked commitment. */
+export function ownerRaiseHeldByText(agentId: string, text: string, now = Date.now()): boolean {
+  const at = readRaisedText()[raiseTextKey(agentId, text)];
+  return typeof at === 'number' && now - at < RAISE_TEXT_TTL_MS;
+}
+
+/** True when a same-text Chief escalation already delivered inside the TTL
+ *  (card-b3468c verify P1): concurrent same-text re-tracks share ONE Chief
+ *  copy, exactly as they share one owner raise. */
+export function chiefRaiseHeldByText(agentId: string, text: string, now = Date.now()): boolean {
+  const at = readRaisedChiefText()[raiseTextKey(agentId, text)];
+  return typeof at === 'number' && now - at < RAISE_TEXT_TTL_MS;
+}
+
+/** Re-track lineage (card-b3468c verify P1): the admission instant a
+ *  re-tracked blown promise inherits, or undefined. Only a commitment that
+ *  was ALREADY past due when its agent added it (createdAt at or after its
+ *  own due) can inherit a same-text raise — that shape is a re-track of a
+ *  blown promise, not a fresh one. A commitment created before its own due
+ *  is a genuinely fresh promise: it always gets its own raise when it goes
+ *  past due, however many same-text promises were raised before it. A
+ *  legacy entry without a readable createdAt never inherits (fail open:
+ *  raise). */
+export function inheritedOwnerRaiseAt(c: { agentId: string; text: string; createdAt?: number; dueAt?: number }, now = Date.now()): number | undefined {
+  if (typeof c.dueAt !== 'number' || !(c.dueAt > 0)) return undefined;
+  if (typeof c.createdAt !== 'number' || !(c.createdAt >= c.dueAt)) return undefined;
+  const at = readRaisedText()[raiseTextKey(c.agentId, c.text)];
+  return typeof at === 'number' && at > 0 && now - at < RAISE_TEXT_TTL_MS ? at : undefined;
+}
+
+/** Stamp a re-tracked commitment with the raise it inherits (card-b3468c
+ *  verify P1): raised.owner at the ORIGINAL raise's admission instant, so
+ *  the Chief copy's hold stays bounded from the raise's true delivery. The
+ *  text mark itself is untouched — it already exists. */
+export function markCommitmentInheritedRaise(id: string, at: number): boolean {
+  const target = id.trim();
+  if (!target || !Number.isFinite(at) || at <= 0) return false;
+  const all = readAll();
+  let changed = false;
+  const next = all.map((c) => {
+    if (c.id === target && !c.raised?.owner) {
+      changed = true;
+      return { ...c, raised: { ...c.raised, owner: at } };
+    }
+    return c;
+  });
+  if (changed) save(next);
+  return changed;
+}
+
+function save(
+  commitments: Commitment[],
+  raisedText: Record<string, number> = pruneRaisedText(readRaisedText(), Date.now()),
+  raisedChiefText: Record<string, number> = pruneRaisedText(readRaisedChiefText(), Date.now()),
+): void {
   mkdirSync(STATE_DIR, { recursive: true });
   const tmp = `${FILE}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify({ commitments }, null, 2)}\n`);
+  writeFileSync(tmp, `${JSON.stringify({ commitments, raisedText, raisedChiefText }, null, 2)}\n`);
   // Atomic replace only. Never fall back to overwriting the live shared
   // store in place: a partial in-place write could corrupt every live
   // agent's commitments. A failed rename leaves the previous store fully
@@ -155,19 +264,42 @@ export function addCommitment(
 /** The past-due sweep records a raise per recipient, only after that
  *  recipient's delivery succeeded: a failed raise retries on the next tick,
  *  a succeeded one never repeats. A no-op never rewrites the file. */
-export function markCommitmentRaised(id: string, recipient: 'owner' | 'chief'): boolean {
+export function markCommitmentRaised(id: string, recipient: 'owner' | 'chief', textKey?: { agentId: string; text: string }): boolean {
   const target = id.trim();
   if (!target) return false;
+  const now = Date.now();
   const all = readAll();
   let changed = false;
   const next = all.map((c) => {
     if (c.id === target && !c.raised?.[recipient]) {
       changed = true;
-      return { ...c, raised: { ...c.raised, [recipient]: Date.now() } };
+      return { ...c, raised: { ...c.raised, [recipient]: now } };
     }
     return c;
   });
-  if (changed) save(next);
+  // The owner raise ALSO marks the text (see raiseTextKey, card-b3468c): set
+  // it even when the entry itself is already gone — a raise can deliver
+  // AFTER the interrupted agent cleared and re-tracked the entry under a new
+  // id, and the text mark is what keeps that new id from re-raising the same
+  // flag. The re-tracked entry itself inherits that raise in the sweep
+  // (inheritedOwnerRaiseAt / markCommitmentInheritedRaise, verify P1): only a
+  // commitment that was already past due at creation can inherit — a bulk
+  // stamp here would arm the Chief gate on future same-text commitments that
+  // were never raised at all.
+  const raisedText = pruneRaisedText(readRaisedText(), now);
+  if (recipient === 'owner' && textKey) {
+    raisedText[raiseTextKey(textKey.agentId, textKey.text)] = now;
+    changed = true;
+  }
+  // The Chief copy marks the text on its own side (verify P1): concurrent
+  // same-text re-tracks then share ONE escalation inside the TTL.
+  let raisedChiefText: Record<string, number> | undefined;
+  if (recipient === 'chief' && textKey) {
+    raisedChiefText = pruneRaisedText(readRaisedChiefText(), now);
+    raisedChiefText[raiseTextKey(textKey.agentId, textKey.text)] = now;
+    changed = true;
+  }
+  if (changed) save(next, raisedText, raisedChiefText);
   return changed;
 }
 

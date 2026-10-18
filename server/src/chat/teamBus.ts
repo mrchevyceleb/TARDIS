@@ -14,6 +14,7 @@ import { extractVisibleTurns } from './threadWindow.ts';
 import { JsonStore, type StoredRecord } from '../lib/jsonStore.ts';
 import { scanOutgoingPromise } from '../lib/promiseScan.ts';
 import { inQuietHours, isMaxLane, msUntilQuietEnd, recordQuietExemptWake } from '../lib/quietHours.ts';
+import { LIVE_HOLD_CEILING_MS } from '../lib/laneLiveness.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
 // both sides touch shared graph modules — keeping this lazy is cheap insurance).
@@ -148,6 +149,20 @@ type QueuedTeamDelivery = StoredRecord & {
    *  Matt's channel post including unmentioned members, or an overnight Matt
    *  ask nudge): exempt from the 22:00-05:00 ET quiet-hours hold. */
   personSourced?: true;
+  /** card-b3468c: an automation nudge (flag digest, Desk quiet-check,
+   *  past-due raise) with its live-turn hold origin in epoch ms. While
+   *  Date.now() - nudgeHoldSince is under the liveness ceiling the record's
+   *  admission NEVER steers the recipient's live turn — it waits for a real
+   *  turn end, exactly the card-504beb queue policy — and it never joins a
+   *  batch whose admission would steer. Past the ceiling the flag clears, so
+   *  a lane stuck in one long turn still gets its nudge: holding never means
+   *  losing. */
+  nudgeHoldSince?: number;
+  /** card-b3468c (verify P1): 'flag-digest' asks the drain to notify the
+   *  flag-digest queue when this record actually admits (the recipient saw
+   *  the line), so the digest's entry callbacks run on admission, never on
+   *  the durable receipt. */
+  admissionAck?: 'flag-digest';
   chainId?: string;
   chainEdges?: string[];
   chainRoute?: string[];
@@ -182,8 +197,12 @@ const queuedRetryTimers = new Map<string, { timer: ReturnType<typeof setTimeout>
 /** A queued lead's admission wait, abortable by a newer non-queued record for
  *  the same recipient (card-504beb, review 3 P0 2): a queued record never
  *  holds the recipient's single delivery line for its whole 30-minute wait
- *  while a person-sourced record waits behind it. */
-const queuedLeadAborters = new Map<string, AbortController>();
+ *  while a person-sourced record waits behind it. The nudge flag marks a
+ *  waiting under-ceiling nudge hold (card-b3468c): any ordinary record may
+ *  abort that wait — the nudge would have steered before that hold existed,
+ *  so no teammate message may sit behind it — while a queued (queue:true)
+ *  wait keeps its original person-sourced/priority-only abort rule. */
+const queuedLeadAborters = new Map<string, { controller: AbortController; nudge: boolean }>();
 
 function queueStoreOperation<T>(operation: () => Promise<T>): Promise<T> {
   const result = queueStoreTail.then(operation, operation);
@@ -492,6 +511,12 @@ function personSourced(record: { fromRole?: string; personPosted?: boolean; pers
 function sortsAhead(record: { fromRole?: string; priority?: boolean; personPosted?: boolean; personSourced?: boolean }): boolean {
   return personSourced(record) || record.priority === true
     || (record.fromRole === 'channel' && record.personPosted === true);
+}
+
+/** A nudge record's live-turn hold is still under its ceiling (card-b3468c):
+ *  its admission must wait for a real turn end and never steer. */
+function nudgeHoldActive(record: { nudgeHoldSince?: number }): boolean {
+  return record.nudgeHoldSince !== undefined && Date.now() - record.nudgeHoldSince < LIVE_HOLD_CEILING_MS;
 }
 
 /** Interrupt class for one delivery: person senders (voice, desk) and the
@@ -831,6 +856,11 @@ export type TeamMessageResult = {
   loopClosed?: boolean;
   /** Accepted by the durable asynchronous path instead of making the caller retry. */
   queued?: boolean;
+  /** The durable record's id, on the fire-and-forget receipt: a producer
+   *  that needs to learn the record's actual admission (not its durable
+   *  receipt) keys its own state by this id (card-b3468c verify P1: the
+   *  flag-digest admission ack). */
+  deliveryId?: string;
   /** The durable queue accepted the record but quiet hours (22:00-05:00 ET)
    *  hold its delivery to a non-Max lane until 05:00. Callers that mark or
    *  receipt on landing must not treat this as "it went to them" (Opus
@@ -874,6 +904,12 @@ type TeamDelivery = {
    *  batch built before 22:00 cannot slip past the boundary while it waits
    *  for a busy turn to end (Opus verify, Oct 16). */
   quietHoldCheck?: () => boolean;
+  /** card-b3468c: an automation nudge's live-turn hold origin (epoch ms).
+   *  Under the liveness ceiling the admission never steers the
+   *  recipient's live turn — only a real turn end admits — so a lane that
+   *  went busy after the producer's snapshot still never sees the nudge
+   *  mid-turn. Past the ceiling normal admission delivers it anyway. */
+  nudgeHoldSince?: number;
   onAdmitted?: (session: SessionLike) => Promise<void>;
 };
 
@@ -926,7 +962,20 @@ export async function liveChannelTurnLanesByName(memberName: string, channelId: 
 async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InFlightChannelDelivery | null): Promise<TeamMessageResult> {
   const { from, to, text, hop, chain, waitForReply, onAdmitted, deferIfBusy = false } = delivery;
   const deliveryId = delivery.deliveryId ?? randomUUID();
-  const deadline = Date.now() + RECIPIENT_IDLE_WAIT_MS;
+  // card-b3468c: an under-ceiling nudge never steers a live turn. The
+  // admission below takes the card-504beb never-steer policy (only a real
+  // turn end admits) and no boundary interrupt, so a lane that went busy
+  // after the producer's liveness snapshot still never sees the nudge
+  // mid-turn. Past the ceiling the flag clears and a normal admission (a
+  // steer) delivers it anyway: holding never means losing.
+  const nudgeHold = nudgeHoldActive(delivery);
+  // (Sam check note, Oct 18) A nudge hold's wait never runs past its own
+  // ceiling: the deadline is capped at the hold origin + LIVE_HOLD_CEILING_MS,
+  // so a hold that starts near the ceiling re-runs at the boundary and
+  // force-delivers there instead of up to 30 minutes late.
+  const deadline = nudgeHold && typeof delivery.nudgeHoldSince === 'number'
+    ? Math.min(Date.now() + RECIPIENT_IDLE_WAIT_MS, delivery.nudgeHoldSince + LIVE_HOLD_CEILING_MS)
+    : Date.now() + RECIPIENT_IDLE_WAIT_MS;
   // A channel Stop aborts the in-flight entry; a synchronous caller's own
   // stop signal is honoured alongside it.
   const signals = [delivery.signal, channelInFlight?.controller.signal].filter((s): s is AbortSignal => !!s);
@@ -980,10 +1029,17 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
       // send starts, the original signal governs alone.
       let admissionSignal = signal;
       let queuedWaitKey: string | null = null;
-      if (delivery.queue === true) {
+      // card-b3468c: an under-ceiling nudge's never-steer admission is a
+      // queued-class wait too — a newer leading record (person-sourced or
+      // priority) must be able to abort it, exactly like a queue:true lead.
+      // The stored nudge flag additionally lets any ordinary (non-nudge)
+      // record abort the wait (Sam check FAIL fix, Oct 18): the nudge would
+      // have steered before this hold existed, so no teammate message may
+      // sit behind its wait.
+      if (delivery.queue === true || nudgeHold) {
         queuedWaitKey = queueKeyOf({ toId: to.id });
         const waitAbort = new AbortController();
-        queuedLeadAborters.set(queuedWaitKey, waitAbort);
+        queuedLeadAborters.set(queuedWaitKey, { controller: waitAbort, nudge: nudgeHold });
         if (signal) {
           const combined = new AbortController();
           const forward = () => combined.abort();
@@ -998,9 +1054,9 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
       try {
         admission = await getRecipientSessionForDelivery(
           to, deadline, admissionSignal, deferIfBusy,
-          deliveryInterruptClass(from.role, personClass, delivery.queue === true),
+          deliveryInterruptClass(from.role, personClass, delivery.queue === true || nudgeHold),
           wantsPersonLane ? (liveChannelLanes[0] ?? await personLanePreference(to)) : 'bg',
-          delivery.queue === true,
+          delivery.queue === true || nudgeHold,
         );
       } finally {
         if (queuedWaitKey) queuedLeadAborters.delete(queuedWaitKey);
@@ -1304,6 +1360,12 @@ function batchRoleClass(record: { fromRole?: string }): 'desk' | 'voice' | 'auto
 /** Exported for tests. */
 export function batchJoinable(lead: QueuedTeamDelivery, record: QueuedTeamDelivery): boolean {
   if (batchRoleClass(lead) !== batchRoleClass(record)) return false;
+  // card-b3468c: an under-ceiling nudge batches only with other
+  // under-ceiling nudges. Its admission waits for a real turn end, so a
+  // record that could steer a live turn (or be steered by one) must never
+  // ride that batch — nor may a nudge ride a steering lead. Past the
+  // ceiling the flag clears and the record batches normally again.
+  if (nudgeHoldActive(lead) !== nudgeHoldActive(record)) return false;
   if (batchRoleClass(lead) === 'channel') {
     // Same channel, and the same person-hood: a person post (human interrupt
     // class, steering lane policy, or person-sourced quiet-hours wake) must
@@ -1353,6 +1415,29 @@ async function acknowledgeQueuedBatch(lead: QueuedTeamDelivery, session: Session
   }
 }
 
+/** (card-b3468c verify P1) A queued flag-digest record asks its source to
+ *  learn the ADMISSION, not the durable receipt: run the flag-digest
+ *  admission ack for every batch member that carries the marker, so the
+ *  digest's per-entry callbacks (the commitment marks) fire only when the
+ *  recipient actually saw the line. Lazy import: teamBus and flagDigest
+ *  share the delivery graph. */
+async function fireDigestAdmissionAcks(toId: string, members: QueuedTeamDelivery[]): Promise<void> {
+  const acks = members.filter((member) => member.admissionAck === 'flag-digest');
+  if (!acks.length) return;
+  try {
+    const { admittedDeliveryAck } = await import('../lib/flagDigest.ts');
+    for (const member of acks) {
+      try {
+        admittedDeliveryAck(toId, member.id);
+      } catch (error) {
+        console.warn(`[flag-digest] admission ack for record ${member.id} of ${toId} failed: ${(error as Error).message}`);
+      }
+    }
+  } catch (error) {
+    console.warn(`[flag-digest] admission ack import failed: ${(error as Error).message}`);
+  }
+}
+
 function retryDelay(): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ASYNC_RETRY_MS);
@@ -1398,6 +1483,18 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       const to = findAgent(record.toId);
       if (!to) {
         console.warn(`[team] queued delivery ${record.id} is waiting for missing teammate ${record.toId}`);
+        // (card-b3468c review P1, Oct 18) A flag-digest record for a
+        // teammate no longer on the roster can never admit, and its source
+        // entry would wait on the record forever. Drop it: the digest's
+        // next flush sees the record gone from the queue and re-queues the
+        // line, which fails cleanly at recipient resolution while the
+        // teammate stays missing (no record is created) and delivers fresh
+        // if they return. Teammate chatter keeps waiting: a person may
+        // re-add the teammate and those messages still matter.
+        if (record.admissionAck === 'flag-digest') {
+          await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
+          break;
+        }
         await retryDelay();
         continue;
       }
@@ -1433,7 +1530,10 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       // jumps ahead of the person's queued post either: the pick stays
       // inside the first record's tier, so person-first delivery holds.
       const firstTier = sortsAhead(candidates[0]);
-      const lead = candidates.find((item) => item.queue !== true && sortsAhead(item) === firstTier) ?? candidates[0];
+      // An under-ceiling nudge (card-b3468c) never leads over a non-nudge in
+      // its own tier either: its never-steer admission waits out a live turn
+      // with no interrupt, which would block the recipient's records behind it.
+      const lead = candidates.find((item) => item.queue !== true && !nudgeHoldActive(item) && sortsAhead(item) === firstTier) ?? candidates[0];
       let siblings: QueuedTeamDelivery[];
       if (lead.batchLeadId === lead.id) {
         // Frozen batch from a send attempt that already ran (the lead's
@@ -1471,6 +1571,18 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
             ? { ...item, batchLeadId: lead.id }
             : item))));
       }
+      // (card-b3468c verify P0) The batch's live-turn hold is the LATEST
+      // origin across the lead AND its siblings, recomputed at every drain
+      // attempt: a frozen batch whose lead aged past its ceiling while a
+      // newer sibling is still under-ceiling must keep waiting for a real
+      // turn end — an admission governed by the lead's origin alone would
+      // steer that sibling's live turn on the retry.
+      let batchHoldSince = lead.nudgeHoldSince;
+      for (const sibling of siblings) {
+        if (typeof sibling.nudgeHoldSince === 'number' && sibling.nudgeHoldSince > (batchHoldSince ?? 0)) {
+          batchHoldSince = sibling.nudgeHoldSince;
+        }
+      }
       const from = findAgent(lead.fromId) ?? {
         id: lead.fromId,
         name: lead.fromName,
@@ -1493,6 +1605,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         deliveryId: lead.id,
         personPosted: lead.personPosted === true,
         queue: lead.queue === true,
+        nudgeHoldSince: batchHoldSince,
         personSourced: batchIsPersonSourced,
         mixedSenders: siblings.some((sibling) => sibling.fromId !== lead.fromId),
         stillWanted: async () => {
@@ -1510,7 +1623,18 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         quietHoldCheck: batchIsPersonSourced
           ? undefined
           : () => isNonMax && inQuietHours(Date.now()),
-        onAdmitted: (session) => acknowledgeQueuedBatch(lead, session),
+        // (card-b3468c verify P1) The digest admission ack fires in the
+        // finally: the batch ack's own failure (a receipt that did not reach
+        // the event log) must not strand the digest's in-flight entries —
+        // the turn still carried the line, so the source's callbacks still
+        // owe their marks.
+        onAdmitted: async (session) => {
+          try {
+            await acknowledgeQueuedBatch(lead, session);
+          } finally {
+            await fireDigestAdmissionAcks(to.id, siblings);
+          }
+        },
       });
       if (result.held === 'quiet-hours') {
         // Park the whole drain, not just this record: person-sourced records
@@ -1529,10 +1653,10 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       // full retry interval after every channel Stop (review 3, P2 7).
       if (!result.delivered && !remains) continue;
       if (!result.delivered || remains) {
-        // (review 3 P0 2 / P1 7) A queued lead aborted by a newer non-queued
-        // record re-runs immediately: that record must not wait a retry
-        // interval behind the abort that let it lead.
-        const abortedQueuedWait = lead.queue === true && result.reason === 'sender stopped before delivery';
+        // (review 3 P0 2 / P1 7; card-b3468c) A queued or nudge-hold lead
+        // aborted by a newer leading record re-runs immediately: that record
+        // must not wait a retry interval behind the abort that let it lead.
+        const abortedQueuedWait = (lead.queue === true || nudgeHoldActive(lead)) && result.reason === 'sender stopped before delivery';
         if (!abortedQueuedWait) {
           console.warn(`[team] queued delivery ${lead.fromName} -> ${to.name} will retry: ${result.reason ?? 'durable acknowledgement pending'}`);
           await retryDelay();
@@ -1606,6 +1730,24 @@ export async function resumeQueuedTeamDeliveries(): Promise<number> {
   return records.length;
 }
 
+/** (card-b3468c review P1, Oct 18) Ground truth for whether a
+ *  fire-and-forget record is still alive: true while it sits in the durable
+ *  delivery queue (its admission can still happen — the wait can legally
+ *  span repeated 30-minute admission windows and then quiet hours, so
+ *  elapsed time proves nothing), false once it is gone from the queue
+ *  (admitted — the admission ack should have fired — or dropped), null when
+ *  the queue cannot be read (the caller re-checks rather than guess). */
+export async function teamDeliveryRecordPending(deliveryId: string): Promise<boolean | null> {
+  const id = deliveryId.trim().slice(0, 120);
+  if (!id) return false;
+  try {
+    const items = await queueStoreOperation(() => queuedDeliveryStore.list());
+    return items.some((item) => item.id === id);
+  } catch {
+    return null;
+  }
+}
+
 export function teamMessageWaitRequested(wait: boolean | undefined): boolean {
   // Preserve the original raw HTTP contract. team-mcp.mjs explicitly sends
   // false when its caller omits wait, giving agents async-by-default behavior
@@ -1645,6 +1787,16 @@ export async function deliverTeamMessage(input: {
    *  human channel post or an overnight Matt ask nudge). Person-sourced
    *  records deliver to non-Max lanes even during quiet hours. */
   personSourced?: boolean;
+  /** card-b3468c: present on automation nudges (flag digests, Desk
+   *  quiet-checks, past-due raises): the epoch ms the nudge's live-turn hold
+   *  started. Under the liveness ceiling the delivery never steers the
+   *  recipient's live turn and never joins a batch that would; past it,
+   *  normal admission delivers anyway. */
+  nudgeHoldSince?: number;
+  /** card-b3468c (verify P1): 'flag-digest' marks a flag-digest record so
+   *  its source queue learns the record's actual ADMISSION (the recipient
+   *  saw the line), not just its durable receipt. */
+  admissionAck?: 'flag-digest';
   signal?: AbortSignal;
   /** The sender's own lane (from its team MCP), for chain inheritance. */
   fromLane?: AgentLane;
@@ -1691,6 +1843,10 @@ export async function deliverTeamMessage(input: {
   });
   const quietHoldRecipient = !isPersonSourced && !isMaxLane(to.id) && inQuietHours(Date.now());
   const waitForReply = requestedWaitForReply && !closesReplyCycle && !quietHoldRecipient;
+  // card-b3468c: an under-ceiling nudge reports its idle-boundary delivery in
+  // the receipt (the drain-side admission never steers a live turn).
+  const nudgeHoldEntry = typeof input.nudgeHoldSince === 'number' && Number.isFinite(input.nudgeHoldSince) && input.nudgeHoldSince > 0
+    && Date.now() - input.nudgeHoldSince < LIVE_HOLD_CEILING_MS;
 
   const rl = rateOk(replyEdge(from.id, to.id));
   if (!rl.ok) return { delivered: false, reason: rl.reason };
@@ -1713,6 +1869,8 @@ export async function deliverTeamMessage(input: {
       personPosted: input.source === 'channel' && input.personPosted === true ? true : undefined,
       queue: input.source === 'channel' && input.queue === true ? true : undefined,
       personSourced: input.personSourced === true ? true : undefined,
+      nudgeHoldSince: typeof input.nudgeHoldSince === 'number' && Number.isFinite(input.nudgeHoldSince) && input.nudgeHoldSince > 0 ? input.nudgeHoldSince : undefined,
+      admissionAck: input.admissionAck === 'flag-digest' ? 'flag-digest' : undefined,
       chainId: chain.id,
       chainEdges: chain.edges,
       chainRoute: chain.route,
@@ -1764,20 +1922,30 @@ export async function deliverTeamMessage(input: {
     // (review 3 P0 2) A newer non-queued record that can lead (person-sourced
     // or priority) never waits behind a queued lead's admission wait: abort
     // it so the drain re-runs with this record leading; the queued record
-    // stays durable and delivers after it.
-    if (record.queue !== true && sortsAhead(record)) queuedLeadAborters.get(queueKeyOf(record))?.abort();
+    // stays durable and delivers after it. A waiting under-ceiling nudge hold
+    // is abortable by any ordinary record too (card-b3468c Sam check FAIL
+    // fix, Oct 18): the nudge would have steered before this PR, so no
+    // teammate message may sit behind its 30-minute wait — another
+    // under-ceiling nudge still joins the wait instead of aborting it.
+    if (record.queue !== true) {
+      const waitingLead = queuedLeadAborters.get(queueKeyOf(record));
+      if (waitingLead && (sortsAhead(record) || (waitingLead.nudge && !nudgeHoldActive(record)))) waitingLead.controller.abort();
+    }
     scheduleQueuedRecipient(queueKeyOf(record));
     return {
       delivered: true,
       to: to.name,
       hop,
       queued: true,
+      deliveryId: record.id,
       // Quiet hours (Opus verify, Oct 16): a held handoff is accepted and
       // durable but will not land until after 05:00, so callers that mark or
       // receipt on landing can see the hold instead of "it went to them".
       held: quietHoldRecipient ? 'quiet-hours' : undefined,
       reason: quietHoldRecipient
         ? 'stored durably for quiet hours (22:00-05:00 ET); delivery is automatic after 05:00'
+        : nudgeHoldEntry
+        ? 'stored durably; the live-turn hold (card-b3468c) delivers it at the recipient\'s next idle boundary'
         : closesReplyCycle
         ? 'stored durably to avoid a cross-agent reply cycle; delivery is automatic'
         : queuedBehindAnotherTurn
@@ -1787,7 +1955,14 @@ export async function deliverTeamMessage(input: {
   }
 
   if (queuedBehindAnotherTurn) {
-    if (record.queue !== true && sortsAhead(record)) queuedLeadAborters.get(queueKeyOf(record))?.abort();
+    // Same rule as the wait:false path above (card-b3468c Sam check FAIL
+    // fix, Oct 18): an ordinary record aborts a waiting under-ceiling
+    // nudge-hold lead so it leads instead of sitting behind the nudge's
+    // 30-minute never-steer wait; another under-ceiling nudge joins it.
+    if (record.queue !== true) {
+      const waitingLead = queuedLeadAborters.get(queueKeyOf(record));
+      if (waitingLead && (sortsAhead(record) || (waitingLead.nudge && !nudgeHoldActive(record)))) waitingLead.controller.abort();
+    }
     scheduleQueuedRecipient(queueKeyOf(record));
     return {
       delivered: true,
@@ -1821,7 +1996,16 @@ export async function deliverTeamMessage(input: {
     quietHoldCheck: isPersonSourced
       ? undefined
       : () => inQuietHours(Date.now()) && !isMaxLane(to.id),
-    onAdmitted: (session) => acknowledgeQueuedDelivery(record, session),
+    // (card-b3468c verify P1) The digest admission ack fires in the finally
+    // for the same reason as the batch path: an ack failure must not strand
+    // the digest's in-flight entries when the turn still carried the line.
+    onAdmitted: async (session) => {
+      try {
+        await acknowledgeQueuedDelivery(record, session);
+      } finally {
+        await fireDigestAdmissionAcks(to.id, [record]);
+      }
+    },
   }));
   if (!job) {
     scheduleQueuedRecipient(queueKeyOf(record));

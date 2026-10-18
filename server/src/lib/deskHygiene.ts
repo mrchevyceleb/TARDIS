@@ -805,7 +805,11 @@ export function startDeskHygieneScheduler(): boolean {
         // the later nudges of the same sweep (their marks are already
         // consumed, so a skipped nudge is a lost one).
         try {
-          const sent = await deliverTeamMessage({ from: 'Desk', to: nudge.to, text: nudge.text, wait: false });
+          // nudgeHoldSince (card-b3468c review P0, Oct 18): the sweep's
+          // liveness gate is a snapshot; this flag makes the drain-side
+          // admission enforce the hold atomically — a lane that went busy
+          // before the record admits never gets steered under the ceiling.
+          const sent = await deliverTeamMessage({ from: 'Desk', to: nudge.to, text: nudge.text, wait: false, nudgeHoldSince: nudge.since });
           if (!sent.delivered) {
             console.warn(`[desk-hygiene] quiet check to ${nudge.to} for ${nudge.card.id} not delivered: ${sent.reason}`);
             // A rate-limited delivery is transient: restore the mark so the
