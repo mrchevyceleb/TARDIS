@@ -48,7 +48,11 @@ const MAX_PER_AGENT = 12;
  *  that goes past due again still raises once. */
 const RAISE_TEXT_TTL_MS = 24 * 3_600_000;
 
-function raiseTextKey(agentId: string, text: string): string {
+/** The normalized agent+text key a delivered owner raise also marks
+ *  (card-b3468c). Exported so the sweep can key its digest queue by the
+ *  same text: a re-tracked commitment upserts its own raise instead of
+ *  stacking a second line (review P1, Oct 18). */
+export function raiseTextKey(agentId: string, text: string): string {
   return `${agentId.trim()}::${text.trim().toLowerCase().replace(/\s+/g, ' ')}`;
 }
 
@@ -218,8 +222,21 @@ export function markCommitmentRaised(id: string, recipient: 'owner' | 'chief', t
   // flag.
   const raisedText = pruneRaisedText(readRaisedText(), now);
   if (recipient === 'owner' && textKey) {
-    raisedText[raiseTextKey(textKey.agentId, textKey.text)] = now;
+    const key = raiseTextKey(textKey.agentId, textKey.text);
+    raisedText[key] = now;
     changed = true;
+    // ALSO stamp every currently-matching commitment (review P1, Oct 18):
+    // the raise can deliver AFTER the interrupted agent re-tracked the same
+    // text under a new id, and that new entry must carry raised.owner too —
+    // or the Chief escalation condition never sees a raise and the copy
+    // waits out the whole text-mark TTL.
+    for (let i = 0; i < next.length; i++) {
+      const c = next[i];
+      if (!c.raised?.owner && raiseTextKey(c.agentId, c.text) === key) {
+        changed = true;
+        next[i] = { ...c, raised: { ...c.raised, owner: now } };
+      }
+    }
   }
   if (changed) save(next, raisedText);
   return changed;

@@ -9,7 +9,7 @@
 
 import { deliverTeamMessage } from '../chat/teamBus.ts';
 import { flushFlagDigests, queueFlagDigest } from './flagDigest.ts';
-import { listCommitments, markCommitmentRaised, noteCommitmentDueAt, ownerRaiseHeldByText } from './commitmentStore.ts';
+import { listCommitments, markCommitmentRaised, noteCommitmentDueAt, ownerRaiseHeldByText, raiseTextKey } from './commitmentStore.ts';
 import { LIVE_HOLD_CEILING_MS, agentsWithLiveTurns } from './laneLiveness.ts';
 import { parseDue } from './promiseScan.ts';
 
@@ -49,20 +49,30 @@ async function run(): Promise<void> {
     // of one message per item (Matt, Oct 14, card-d7bf78 b). The raise is
     // marked only when the digest actually delivers it.
     if (!commitment.raised?.owner && !ownerRaiseHeldByText(commitment.agentId, commitment.text)) {
-      // The commitment id is the stable queue key: the every-minute sweep
-      // re-queues an undelivered raise, and the shared owner digest upserts
-      // it instead of stacking duplicates. The text mark above (Max, Oct
-      // 18 2026, card-b3468c) stops the re-track loop: an interrupted agent
-      // clears the entry and re-adds the same text under a NEW id, and an
-      // id-keyed mark alone would reset with it — re-raising into the very
-      // turn the digest just derailed, over and over.
-      queueFlagDigest(commitment.agentId, commitment.id, raise, () => markCommitmentRaised(commitment.id, 'owner', { agentId: commitment.agentId, text: commitment.text }));
+      // The queue key is the normalized agent+text (review P1, Oct 18),
+      // NOT the commitment id: an interrupted agent re-tracks a past-due
+      // commitment under a NEW id, and an id key would queue the
+      // re-tracked raise beside the still-queued original — two lines for
+      // one promise in one digest. The text-stable key makes the re-track
+      // UPSERT the original instead. The digest line itself names the
+      // current id. The text mark (Max, Oct 18 2026, card-b3468c) stops the
+      // re-track loop: an id-keyed mark alone would reset with the new id
+      // — re-raising into the very turn the digest just derailed, over
+      // and over.
+      queueFlagDigest(commitment.agentId, `commitment:${raiseTextKey(commitment.agentId, commitment.text)}`, raise, () => markCommitmentRaised(commitment.id, 'owner', { agentId: commitment.agentId, text: commitment.text }));
     }
     // The Chief copy escalates only once the owner raise actually went out
     // (the digest flush sets the raised mark), so it never claims a delivery
     // that is still queued.
     if (commitment.agentId !== CHIEF_ID && commitment.raised?.owner && !commitment.raised?.chief) {
-      if (liveLanes.has(CHIEF_ID) && now.getTime() - dueAt < LIVE_HOLD_CEILING_MS) {
+      // The hold is bounded from the OWNER raise's delivery instant
+      // (review P1, Oct 18), not the commitment's original due: the copy
+      // only becomes pending once the owner digest actually delivered,
+      // and quiet hours or a liveness hold can push that hours past the
+      // due — measuring from the due would let a freshly-eligible copy
+      // cut a live Chief turn immediately.
+      const ownerRaisedAt = commitment.raised?.owner;
+      if (typeof ownerRaisedAt === 'number' && liveLanes.has(CHIEF_ID) && now.getTime() - ownerRaisedAt < LIVE_HOLD_CEILING_MS) {
         // held (card-b3468c): the Chief's lane is mid-turn; the copy is
         // unmarked and retried next tick, bounded by the ceiling so a
         // stuck Chief lane still gets it. Holding never means losing.
@@ -79,6 +89,10 @@ async function run(): Promise<void> {
           text: `Past-due flag: ${commitment.agentId}'s commitment [${commitment.id}] "${commitment.text}" (due ${commitment.due}) is past due. ${outcome}`,
           wait: false,
           priority: true,
+          // card-b3468c review P0, Oct 18: the drain-side admission enforces
+          // the hold atomically — a Chief lane that went busy after this
+          // sweep's snapshot never gets steered under the ceiling.
+          nudgeHoldSince: typeof ownerRaisedAt === 'number' ? ownerRaisedAt : undefined,
         });
         if (copy.delivered) markCommitmentRaised(commitment.id, 'chief');
         else console.warn(`[commitments] past-due flag copy to the Chief not delivered (retried next tick): ${copy.reason}`);

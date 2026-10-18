@@ -68,6 +68,7 @@ function persistNow(): void {
 function restore(): void {
   if (restored) return;
   restored = true;
+  let migrated = false;
   let raw: string;
   try {
     raw = readFileSync(STATE_FILE, 'utf8');
@@ -99,14 +100,21 @@ function restore(): void {
       // them); the source's own state re-arms whatever still matters.
       if (!map.has(entry.key)) {
         // Restored entries carry no callbacks; firstQueuedAt survives the
-        // restart so a held digest keeps its hold age (a missing value
-        // reads as just-queued, which holds and never false-forces).
-        const firstQueuedAt = typeof entry.firstQueuedAt === 'number' && Number.isFinite(entry.firstQueuedAt) && entry.firstQueuedAt > 0 ? entry.firstQueuedAt : undefined;
-        map.set(entry.key, { key: entry.key, text: entry.text, priority: entry.priority === true, firstQueuedAt });
+        // restart so a held digest keeps its hold age. A legacy entry
+        // without one gets a CONCRETE migration instant now (review P1,
+        // Oct 18): an undefined age would read as just-queued on every
+        // flush, holding a live lane's digest without bound — holding
+        // never means losing. The migrated value persists below.
+        const legacy = typeof entry.firstQueuedAt !== 'number' || !Number.isFinite(entry.firstQueuedAt) || entry.firstQueuedAt <= 0;
+        if (legacy) migrated = true;
+        map.set(entry.key, { key: entry.key, text: entry.text, priority: entry.priority === true, firstQueuedAt: legacy ? Date.now() : entry.firstQueuedAt });
       }
     }
     queues.set(ownerId, map);
   }
+  // Persist the migration immediately: a legacy entry's concrete
+  // firstQueuedAt must survive a restart before any other write happens.
+  if (migrated) persistNow();
 }
 
 /** Queue one flag for the owner's next digest. Re-queuing the same key
@@ -157,12 +165,30 @@ export async function flushFlagDigests(now: number = Date.now(), liveLanes?: Rea
     // stuck in one long turn still gets its digest once the hold ages past
     // the ceiling — holding never means losing. Max's lane is held too: a
     // mid-turn digest derails it the same way.
-    if (live.has(ownerId)) {
-      let oldestQueuedAt = now;
-      for (const entry of entries.values()) {
-        if (typeof entry.firstQueuedAt === 'number' && entry.firstQueuedAt < oldestQueuedAt) oldestQueuedAt = entry.firstQueuedAt;
+    // The hold origin (review P1, Oct 18): the oldest pending entry's first
+    // queue time, from valid values only. A re-queue never refreshes it. An
+    // owner whose every entry lacks a readable first queue time cannot prove
+    // a fresh hold: fail open (deliver) rather than holding without bound —
+    // holding never means losing. It is also the origin the delivery itself
+    // carries below, so the drain-side admission holds by the same clock the
+    // flush held by.
+    let oldestQueuedAt: number | undefined;
+    for (const entry of entries.values()) {
+      if (typeof entry.firstQueuedAt === 'number' && Number.isFinite(entry.firstQueuedAt)
+        && (oldestQueuedAt === undefined || entry.firstQueuedAt < oldestQueuedAt)) {
+        oldestQueuedAt = entry.firstQueuedAt;
       }
-      if (now - oldestQueuedAt < LIVE_HOLD_CEILING_MS) continue;
+    }
+    if (live.has(ownerId) && oldestQueuedAt !== undefined && now - oldestQueuedAt < LIVE_HOLD_CEILING_MS) {
+      // Lane-liveness hold (Max, Oct 18 2026, card-b3468c): a digest must
+      // never derail a live turn. Skip before any delivery, exactly like the
+      // quiet-hours gate above: entries stay queued untouched, nothing is
+      // marked, and the first flush after the turn ends delivers them. The
+      // hold is bounded by LIVE_HOLD_CEILING_MS from this origin, so a lane
+      // stuck in one long turn still gets its digest once the hold ages past
+      // the ceiling — holding never means losing. Max's lane is held too: a
+      // mid-turn digest derails it the same way.
+      continue;
     }
     const last = ownerLastFlush.get(ownerId);
     if (last !== undefined && now - last < DIGEST_INTERVAL_MS) continue;
@@ -179,7 +205,11 @@ export async function flushFlagDigests(now: number = Date.now(), liveLanes?: Rea
     // The digest carries urgency when any of its entries does: a past-due
     // commitment raise is urgent; a digest of only hygiene nudges stays
     // unprioritized, so scheduled hygiene keeps yielding to live turns.
-    const ok = await deliverDigest(ownerId, payload, batch.some((entry) => entry.priority === true));
+    // nudgeHoldSince (review P0, Oct 18): the flush's own liveness gate is
+    // a snapshot; the drain-side admission enforces the hold atomically — a
+    // lane that went busy before the record admits never gets steered under
+    // the ceiling, it gets the digest at its next real turn end.
+    const ok = await deliverDigest(ownerId, payload, batch.some((entry) => entry.priority === true), oldestQueuedAt);
     if (!ok) continue;
     // Commit the delivery BEFORE the callbacks: a throwing mark must never
     // resend an already-delivered digest. Only the delivered batch clears.
@@ -202,13 +232,13 @@ export async function flushFlagDigests(now: number = Date.now(), liveLanes?: Rea
   }
 }
 
-async function deliverDigest(ownerId: string, text: string, priority: boolean): Promise<boolean> {
+async function deliverDigest(ownerId: string, text: string, priority: boolean, nudgeHoldSince?: number): Promise<boolean> {
   const { deliverTeamMessage } = await import('../chat/teamBus.ts');
   try {
     // The pseudo-sender TARDIS is not a roster agent, so the outgoing-promise
     // scan never re-processes a digest, and the digest lands as a system-ish
     // handoff for both flag sources alike.
-    const result = await deliverTeamMessage({ from: 'TARDIS', to: ownerId, text, wait: false, priority });
+    const result = await deliverTeamMessage({ from: 'TARDIS', to: ownerId, text, wait: false, priority, nudgeHoldSince });
     // Quiet hours (Opus verify, Oct 16): a held digest is durable but will
     // not land until after 05:00. Report it undelivered so the flush keeps
     // the entries queued and unmarked — the next window after 05:00 delivers

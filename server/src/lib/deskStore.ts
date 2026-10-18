@@ -1165,14 +1165,14 @@ export async function commentCard(id: string, text: unknown, author: DeskActor):
  *  restores its mark (restoreCardCheckMark) so it retries too. */
 const MAX_SWEEP_DELIVERIES = 8;
 
-export async function sweepCardChecks(options: { dryRun?: boolean; liveLanes?: ReadonlySet<string> } = {}): Promise<Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }>> {
+export async function sweepCardChecks(options: { dryRun?: boolean; liveLanes?: ReadonlySet<string> } = {}): Promise<Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string; since: number }>> {
   const dryRun = options.dryRun === true;
   // Lane-liveness (Max, Oct 18 2026, card-b3468c): a nudge must never derail
   // a live turn. Resolved once per sweep from the ground-truth roster (fail
   // open when unreadable — a broken gate must never swallow a nudge);
   // injectable for tests.
   const liveLanes = options.liveLanes ?? await agentsWithLiveTurns();
-  const due: Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string }> = [];
+  const due: Array<{ kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string; since: number }> = [];
   // Resolve the live roster once before the sweep: a stale agent id routes to
   // the Chief (a delivery to a dead id is a silent failure), and a human or
   // Desk actor owner routes to the Chief immediately.
@@ -1212,7 +1212,7 @@ export async function sweepCardChecks(options: { dryRun?: boolean; liveLanes?: R
     // limiter rejects — exactly the mass-silence burst this feature exists
     // for. Only the deliverable head of the batch is marked; the rest stay
     // unmarked and eligible for the next tick.
-    const candidates: Array<{ setMark: () => void; nudge: { kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string } }> = [];
+    const candidates: Array<{ setMark: () => void; nudge: { kind: 'owner' | 'chief'; card: DeskCard; to: string; text: string; since: number } }> = [];
     for (const card of data.cards) {
       if (card.archived) continue;
       if (card.column !== 'in_progress' && card.column !== 'in_qa') continue;
@@ -1244,6 +1244,12 @@ export async function sweepCardChecks(options: { dryRun?: boolean; liveLanes?: R
               kind: 'owner',
               card,
               to: ownerAgent,
+              // The hold origin the sweep's liveness gate measured from
+              // (the check-in's own due instant): the delivery carries it so
+              // the drain-side admission holds by the same clock (review
+              // P0, Oct 18) instead of a snapshot that can go stale before
+              // the record admits.
+              since: next,
               text: ownerAgent === 'chief-of-staff'
                 ? `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since (you own this one). Comment on the card to set a new one.`
                 : `Quiet check: [${card.id}] "${card.title}" (${card.column}) passed its check-in time with no touch since. Comment on the card to set a new one, or tell the Chief of Staff what is blocking it.`,
@@ -1279,6 +1285,7 @@ export async function sweepCardChecks(options: { dryRun?: boolean; liveLanes?: R
               kind: 'chief',
               card,
               to: 'chief-of-staff',
+              since: escalateFrom,
               text: `Silence flag: ${ownerAgent}'s card [${card.id}] "${card.title}" (${card.column}) went quiet past its check-in time and stayed quiet 15 minutes after the nudge. It went to them; make sure they act on it.`,
             },
           });
