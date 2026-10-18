@@ -1,35 +1,24 @@
 // The past-due commitment sweep (card-baadaf gap 1): commitments cannot
 // depend on memory alone, so a past-due entry is raised to its owner and to
 // the Chief of Staff automatically. Each recipient is marked raised only
-// after its delivery succeeds, so a failed raise retries on the next tick.
-// Legacy entries without a stored absolute instant get theirs persisted on
-// first read, so a relative display due ("10pm tomorrow") can no longer move
-// with every reparse. Same 60s cadence as the other hygiene loops; side
-// copies never run it.
+// when they actually SEE the raise — the flag digest's admission ack — so a
+// held, delayed, or failed raise retries on the next tick and never claims
+// an admission that did not happen. Legacy entries without a stored
+// absolute instant get theirs persisted on first read, so a relative
+// display due ("10pm tomorrow") can no longer move with every reparse.
+// Same 60s cadence as the other hygiene loops; side copies never run it.
 
-import { deliverTeamMessage } from '../chat/teamBus.ts';
 import { flushFlagDigests, queueFlagDigest } from './flagDigest.ts';
 import { listCommitments, markCommitmentRaised, markCommitmentInheritedRaise, noteCommitmentDueAt, chiefRaiseHeldByText, inheritedOwnerRaiseAt, raiseTextKey } from './commitmentStore.ts';
-import { LIVE_HOLD_CEILING_MS, agentsWithLiveTurns } from './laneLiveness.ts';
 import { parseDue } from './promiseScan.ts';
 
 const TICK_MS = 60_000;
 const CHIEF_ID = 'chief-of-staff';
-/** The pseudo-sender the raises arrive from: not a roster agent, so the
- *  outgoing-promise scan itself never re-processes a raise message. The
- *  owner digest delivers through the same pseudo-sender (flagDigest.ts). */
-const SWEEPER = 'TARDIS';
 
 let busy = false;
 
 async function run(): Promise<void> {
   const now = new Date();
-  // Lane-liveness (Max, Oct 18 2026, card-b3468c): the Chief copy holds,
-  // unmarked, while the Chief's lane is mid-turn, bounded by the hold
-  // ceiling so a stuck lane still gets it. The owner raise rides the flag
-  // digest, which applies its own gate. Fail-open: an unreadable roster
-  // delivers instead of holding.
-  const liveLanes = await agentsWithLiveTurns();
   for (const commitment of listCommitments()) {
     if (!commitment.due) continue;
     let dueAt = commitment.dueAt;
@@ -65,58 +54,39 @@ async function run(): Promise<void> {
         ownerRaisedAt = inheritedAt;
       } else {
         // The queue key is the normalized agent+text (review P1, Oct 18),
-        // NOT the commitment id: an interrupted agent re-tracks a past-due
-        // commitment under a NEW id, and an id key would queue the
-        // re-tracked raise beside the still-queued original — two lines for
-        // one promise in one digest. The text-stable key makes the re-track
-        // UPSERT the original instead. The digest line itself names the
-        // current id. The text mark (Max, Oct 18 2026, card-b3468c) stops the
-        // re-track loop: an id-keyed mark alone would reset with the new id
-        // — re-raising into the very turn the digest just derailed, over
-        // and over.
+        // NOT the commitment id: the key groups one promise text's lines
+        // into one family. A re-tracked blown promise never re-queues at
+        // all — it inherits above — and a genuinely fresh same-text promise
+        // (a different id, so a different line) gets its OWN successor slot
+        // in that family (flagDigest.ts, review P1, Oct 18) instead of
+        // hijacking any in-flight line's admission mark. The digest line
+        // itself names the current id.
         queueFlagDigest(commitment.agentId, `commitment:${raiseTextKey(commitment.agentId, commitment.text)}`, raise, () => markCommitmentRaised(commitment.id, 'owner', { agentId: commitment.agentId, text: commitment.text }));
       }
     }
     // The Chief copy escalates only once the owner raise actually went out
-    // (the digest's admission ack sets the raised mark, verify P1), so it
-    // never claims a delivery that is still queued — and only ONCE per
-    // promise text inside the TTL: concurrent same-text re-tracks share one
-    // escalation (chiefRaiseHeldByText).
+    // (the digest's admission ack sets the raised mark, verify P1), and it
+    // rides the CHIEF'S OWN flag digest (review P0, Oct 18): the direct
+    // wait:false receipt proved only that the copy was durably queued, so
+    // marking raised.chief on it claimed an admission that never happened —
+    // a held, delayed, or never-admitted copy falsely said the Chief saw it
+    // and suppressed its own retries. As a digest entry its mark runs at
+    // the record's actual admission, and it inherits the digest's own
+    // guarantees: the Chief's live turn is never steered under the ceiling,
+    // quiet hours hold, one message per window, and only ONCE per promise
+    // text inside the TTL (chiefRaiseHeldByText).
     if (commitment.agentId !== CHIEF_ID && typeof ownerRaisedAt === 'number' && !commitment.raised?.chief
       && !chiefRaiseHeldByText(commitment.agentId, commitment.text)) {
-      // The hold is bounded from the OWNER raise's delivery instant
-      // (review P1, Oct 18), not the commitment's original due: the copy
-      // only becomes pending once the owner digest actually delivered,
-      // and quiet hours or a liveness hold can push that hours past the
-      // due — measuring from the due would let a freshly-eligible copy
-      // cut a live Chief turn immediately.
-      if (liveLanes.has(CHIEF_ID) && now.getTime() - ownerRaisedAt < LIVE_HOLD_CEILING_MS) {
-        // held (card-b3468c): the Chief's lane is mid-turn; the copy is
-        // unmarked and retried next tick, bounded by the ceiling so a
-        // stuck Chief lane still gets it. Holding never means losing.
-        continue;
-      }
-      // The copy's wording says what actually happened: it only runs once
-      // the owner raise was delivered, so "it went to them" is always true
-      // here; a queued-but-undelivered raise never escalates as done.
-      const outcome = 'It went to them; make sure they act on it.';
-      try {
-        const copy = await deliverTeamMessage({
-          from: SWEEPER,
-          to: CHIEF_ID,
-          text: `Past-due flag: ${commitment.agentId}'s commitment [${commitment.id}] "${commitment.text}" (due ${commitment.due}) is past due. ${outcome}`,
-          wait: false,
-          priority: true,
-          // card-b3468c review P0, Oct 18: the drain-side admission enforces
-          // the hold atomically — a Chief lane that went busy after this
-          // sweep's snapshot never gets steered under the ceiling.
-          nudgeHoldSince: ownerRaisedAt,
-        });
-        if (copy.delivered) markCommitmentRaised(commitment.id, 'chief', { agentId: commitment.agentId, text: commitment.text });
-        else console.warn(`[commitments] past-due flag copy to the Chief not delivered (retried next tick): ${copy.reason}`);
-      } catch (error) {
-        console.warn(`[commitments] past-due flag copy to the Chief failed (retried next tick): ${(error as Error).message}`);
-      }
+      // The copy's wording says what actually happened: it only queues once
+      // the owner raise was admitted, so "it went to them" is always true
+      // by the time the Chief reads it.
+      queueFlagDigest(
+        CHIEF_ID,
+        `chief-escalation:${raiseTextKey(commitment.agentId, commitment.text)}`,
+        `Past-due flag: ${commitment.agentId}'s commitment [${commitment.id}] "${commitment.text}" (due ${commitment.due}) is past due. It went to them; make sure they act on it.`,
+        () => markCommitmentRaised(commitment.id, 'chief', { agentId: commitment.agentId, text: commitment.text }),
+        true,
+      );
     }
   }
   await flushFlagDigests();

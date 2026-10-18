@@ -1469,6 +1469,18 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       const to = findAgent(record.toId);
       if (!to) {
         console.warn(`[team] queued delivery ${record.id} is waiting for missing teammate ${record.toId}`);
+        // (card-b3468c review P1, Oct 18) A flag-digest record for a
+        // teammate no longer on the roster can never admit, and its source
+        // entry would wait on the record forever. Drop it: the digest's
+        // next flush sees the record gone from the queue and re-queues the
+        // line, which fails cleanly at recipient resolution while the
+        // teammate stays missing (no record is created) and delivers fresh
+        // if they return. Teammate chatter keeps waiting: a person may
+        // re-add the teammate and those messages still matter.
+        if (record.admissionAck === 'flag-digest') {
+          await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
+          break;
+        }
         await retryDelay();
         continue;
       }
@@ -1702,6 +1714,24 @@ export async function resumeQueuedTeamDeliveries(): Promise<number> {
   const records = await queueStoreOperation(() => queuedDeliveryStore.list());
   new Set(records.map(queueKeyOf)).forEach((queueKey) => scheduleQueuedRecipient(queueKey));
   return records.length;
+}
+
+/** (card-b3468c review P1, Oct 18) Ground truth for whether a
+ *  fire-and-forget record is still alive: true while it sits in the durable
+ *  delivery queue (its admission can still happen — the wait can legally
+ *  span repeated 30-minute admission windows and then quiet hours, so
+ *  elapsed time proves nothing), false once it is gone from the queue
+ *  (admitted — the admission ack should have fired — or dropped), null when
+ *  the queue cannot be read (the caller re-checks rather than guess). */
+export async function teamDeliveryRecordPending(deliveryId: string): Promise<boolean | null> {
+  const id = deliveryId.trim().slice(0, 120);
+  if (!id) return false;
+  try {
+    const items = await queueStoreOperation(() => queuedDeliveryStore.list());
+    return items.some((item) => item.id === id);
+  } catch {
+    return null;
+  }
 }
 
 export function teamMessageWaitRequested(wait: boolean | undefined): boolean {

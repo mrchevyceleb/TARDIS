@@ -5,15 +5,18 @@
 // 30-minute pacing clock, and a single delivery path (deliverTeamMessage
 // from the non-roster pseudo-sender TARDIS) — so no source can starve
 // another and the owner never gets two digests in one window. Entries queue
-// keyed by a stable id (a re-queued item upserts, never stacks), the queues
-// AND the per-owner pacing clock persist durably with best-effort atomic
-// writes (a restart inside a window re-delivers rather than silently
-// consuming a nudge whose pacing state marked it handled, and the clock
-// survives so a restart does not double-send inside a window). Only a
-// successful flush clears entries and advances pacing, and it does so
-// BEFORE running per-entry callbacks, which run isolated; a failed callback
-// (e.g. a store write) re-queues exactly its own entry for the next window
-// instead of resending the whole digest.
+// keyed by a stable id (a re-queued line upserts its slot, never stacks),
+// the queues AND the per-owner pacing clock persist durably with
+// best-effort atomic writes (a restart inside a window re-delivers rather
+// than silently consuming a nudge whose pacing state marked it handled, and
+// the clock survives so a restart does not double-send inside a window). A
+// successful flush advances pacing and marks its entries IN FLIGHT on the
+// record's durable receipt; their callbacks run only at the record's
+// actual ADMISSION — the recipient saw the line — via the ack the teamBus
+// drain fires, so a producer's mark always means a seen line and a held or
+// delayed record never claims one. An isolated callback failure at
+// admission re-queues exactly its own entry for the next window instead of
+// resending the whole digest.
 //
 // Accepted limitation, stated plainly: entries restored after a restart are
 // not revalidated against their source's current state — a flag whose
@@ -28,12 +31,13 @@ import { inQuietHours, isMaxLane } from './quietHours.ts';
 import { LIVE_HOLD_CEILING_MS, agentsWithLiveTurns } from './laneLiveness.ts';
 
 const DIGEST_INTERVAL_MS = 30 * 60_000;
-/** (card-b3468c verify P1) A sent digest record admits within the liveness
- *  ceiling (it waits for a real turn end, then steers past it). Older than
- *  the ceiling plus a sweep interval, a still-pending entry means its record
- *  died without admitting (dropped by a Stop, or its recipient left the
- *  roster): re-send the line — holding never means losing. */
-const SENT_STALE_MS = LIVE_HOLD_CEILING_MS + 120_000;
+/** (review P1, Oct 18) Successor slots per queue key: a key's slot can be
+ *  IN FLIGHT (immutable, bound to its durable record) while genuinely
+ *  distinct lines arrive for the same key — each gets its own slot. Eight
+ *  concurrent distinct lines on one key is pathological; past that the
+ *  re-queue is dropped with a warning and the producer's next tick retries
+ *  as records admit and slots free up. */
+const MAX_SLOTS_PER_KEY = 8;
 /** Bounded batches: a huge backlog must never build a message the transport
  *  cannot carry (a permanent delivery failure with an ever-growing queue).
  *  The delivered head clears now; the retained tail rides the next window. */
@@ -48,11 +52,15 @@ type Entry = {
   firstQueuedAt?: number;
   onDelivered?: () => void;
   /** (card-b3468c verify P1) In flight: the digest record's durable receipt
-   *  landed (sentDeliveryId is the record id) but the recipient has not seen
-   *  it yet. The entry waits for the admission ack (admittedDeliveryAck,
-   *  fired by the teamBus drain) to run its callback and clear it; a flush
-   *  never re-sends it, and a stale one (the record died without admitting)
-   *  re-sends after SENT_STALE_MS. */
+   *  landed (sentDeliveryId is the record id, shared by every entry that
+   *  rode it) but the recipient has not seen it yet. The entry waits for the
+   *  admission ack (admittedDeliveryAck, fired by the teamBus drain) to run
+   *  its callback and clear it; a flush never re-sends it while the record
+   *  still sits in the durable delivery queue. Gone from the queue without
+   *  its ack having cleared the entry (dropped by a Stop, or its recipient
+   *  left the roster — review P1, Oct 18), the next flush re-sends the line:
+   *  the record's presence in the queue is the only proof it died, never
+   *  elapsed time. */
   sentAt?: number;
   sentDeliveryId?: string;
 };
@@ -152,38 +160,84 @@ function restore(): void {
   if (migrated) persistNow();
 }
 
-/** Queue one flag for the owner's next digest. Re-queuing the same key
- *  upserts: the every-minute commitment sweep re-queues an undelivered raise,
- *  and it replaces its earlier entry instead of stacking duplicates. */
+/** Queue one flag for the owner's next digest. A key's family is the key
+ *  plus its successor slots (key~1, key~2, ...); one slot holds one
+ *  distinct line. Re-queuing a line that already has a slot upserts that
+ *  slot (the every-minute producers re-queue an undelivered raise, and it
+ *  replaces its earlier entry instead of stacking duplicates) — or is a
+ *  no-op when that slot is already in flight: the record carrying the
+ *  exact same line will run the mark at its admission. An IN FLIGHT slot
+ *  is immutable (review P1, Oct 18): its text and callback are bound to
+ *  the durable record already carrying its line, so a later queue can
+ *  never rebind them — a genuinely fresh same-key line (a fresh commitment
+ *  whose raise names a different id) gets its OWN successor slot and its
+ *  own line, instead of hijacking the in-flight record's admission mark. */
 export function queueFlagDigest(ownerId: string, key: string, text: string, onDelivered?: () => void, priority = false): void {
   restore();
   const entries = queues.get(ownerId) ?? new Map<string, Entry>();
-  // The upsert preserves the entry's original firstQueuedAt (Max, Oct 18
-  // 2026, card-b3468c): a producer re-queuing an undelivered flag every
-  // minute must not refresh the hold age, or a busy lane would hold its
-  // digest without bound. Holding never means losing.
-  const existing = entries.get(key);
-  entries.set(key, {
-    key,
-    text,
-    onDelivered,
-    priority,
-    firstQueuedAt: existing?.firstQueuedAt ?? Date.now(),
-    // (card-b3468c verify P1) A re-queue while the previous send is still in
-    // flight must not reset its in-flight markers, or the next window would
-    // stack a second durable record for a line already waiting on admission.
-    sentAt: existing?.sentAt,
-    sentDeliveryId: existing?.sentDeliveryId,
-  });
-  queues.set(ownerId, entries);
-  persistNow();
+  const slotNames: string[] = [key];
+  for (let i = 1; i <= MAX_SLOTS_PER_KEY; i++) slotNames.push(`${key}~${i}`);
+  // A repeat of a line already in the family never stacks a second copy of
+  // it: refresh the slot's callback and priority while it is still waiting
+  // for its window, and leave it entirely alone once it is in flight.
+  for (const slotKey of slotNames) {
+    const slot = entries.get(slotKey);
+    if (!slot || slot.text !== text) continue;
+    if (slot.sentDeliveryId === undefined) {
+      entries.set(slotKey, {
+        key: slotKey,
+        text,
+        onDelivered,
+        priority,
+        // The upsert preserves the slot's original firstQueuedAt (Max, Oct
+        // 18 2026, card-b3468c): a producer re-queuing an undelivered flag
+        // every minute must not refresh the hold age, or a busy lane would
+        // hold its digest without bound. Holding never means losing.
+        firstQueuedAt: slot.firstQueuedAt ?? Date.now(),
+      });
+      queues.set(ownerId, entries);
+      persistNow();
+    }
+    return;
+  }
+  // No slot holds this line: bind it to the first slot name in the family
+  // that does not exist yet. Existing slots are never displaced — a pending
+  // slot's line has not gone out, and an in-flight one is immutable — so a
+  // key with concurrent distinct lines carries one slot per line and each
+  // line keeps its own first queue time.
+  for (const slotKey of slotNames) {
+    if (entries.has(slotKey)) continue;
+    entries.set(slotKey, { key: slotKey, text, onDelivered, priority, firstQueuedAt: Date.now() });
+    queues.set(ownerId, entries);
+    persistNow();
+    return;
+  }
+  console.warn(`[flag-digest] ${ownerId}: every slot for key "${key.slice(0, 80)}" is in flight; dropping this re-queue (the producer's next tick retries as slots free)`);
+}
+
+/** The durable queue's ground truth for one sent record (review P1, Oct
+ *  18): true while the record still waits for admission, false once it is
+ *  gone from the queue (admitted — its ack should have fired — or dropped),
+ *  null when the queue cannot be read (the caller treats null as still
+ *  pending and re-checks next window). Injectable so the flush's staleness
+ *  path is testable without the whole chat graph. */
+async function defaultRecordStillPending(deliveryId: string): Promise<boolean | null> {
+  try {
+    const { teamDeliveryRecordPending } = await import('../chat/teamBus.ts');
+    return await teamDeliveryRecordPending(deliveryId);
+  } catch {
+    return null;
+  }
 }
 
 /** Deliver due owner digests. One owner, one window, one message carrying
  *  every pending flag from every source. Callers keep their own tick
  *  cadence; the shared clock decides. `now` defaults to the wall clock and
- *  is injectable so the quiet-hours gate is testable against a pinned time. */
-export async function flushFlagDigests(now: number = Date.now(), liveLanes?: ReadonlySet<string>): Promise<void> {
+ *  is injectable so the quiet-hours gate is testable against a pinned time;
+ *  `recordStillPending` (the durable queue's ground truth for one sent
+ *  record) is injectable the same way, so the in-flight staleness path is
+ *  testable without the chat graph. */
+export async function flushFlagDigests(now: number = Date.now(), liveLanes?: ReadonlySet<string>, recordStillPending: (deliveryId: string) => Promise<boolean | null> = defaultRecordStillPending): Promise<void> {
   restore();
   // Lane-liveness (Max, Oct 18 2026, card-b3468c): fetched once per flush,
   // only when something is pending, from the ground-truth roster /api/team
@@ -202,70 +256,83 @@ export async function flushFlagDigests(now: number = Date.now(), liveLanes?: Rea
     // delivery: the entries stay queued untouched and the first flush after
     // 05:00 delivers them once.
     if (inQuietHours(now) && !isMaxLane(ownerId)) continue;
-    // Lane-liveness hold (Max, Oct 18 2026, card-b3468c): a digest must
-    // never derail a live turn. Skip before any delivery, exactly like the
-    // quiet-hours gate above: entries stay queued untouched, nothing is
-    // marked, and the first flush after the turn ends delivers them. The
-    // hold is bounded by LIVE_HOLD_CEILING_MS from the OLDEST pending
-    // entry's first queue time (a re-queue never refreshes it), so a lane
-    // stuck in one long turn still gets its digest once the hold ages past
-    // the ceiling — holding never means losing. Max's lane is held too: a
-    // mid-turn digest derails it the same way.
-    // The hold origin (review P1, Oct 18): the oldest pending entry's first
-    // queue time, from valid values only. A re-queue never refreshes it. An
-    // owner whose every entry lacks a readable first queue time cannot prove
-    // a fresh hold: fail open (deliver) rather than holding without bound —
-    // holding never means losing. It is also the origin the delivery itself
-    // carries below, so the drain-side admission holds by the same clock the
-    // flush held by.
-    let oldestQueuedAt: number | undefined;
-    for (const entry of entries.values()) {
-      if (typeof entry.firstQueuedAt === 'number' && Number.isFinite(entry.firstQueuedAt)
-        && (oldestQueuedAt === undefined || entry.firstQueuedAt < oldestQueuedAt)) {
-        oldestQueuedAt = entry.firstQueuedAt;
-      }
-    }
-    if (live.has(ownerId) && oldestQueuedAt !== undefined && now - oldestQueuedAt < LIVE_HOLD_CEILING_MS) {
-      // Lane-liveness hold (Max, Oct 18 2026, card-b3468c): a digest must
-      // never derail a live turn. Skip before any delivery, exactly like the
-      // quiet-hours gate above: entries stay queued untouched, nothing is
-      // marked, and the first flush after the turn ends delivers them. The
-      // hold is bounded by LIVE_HOLD_CEILING_MS from this origin, so a lane
-      // stuck in one long turn still gets its digest once the hold ages past
-      // the ceiling — holding never means losing. Max's lane is held too: a
-      // mid-turn digest derails it the same way.
-      continue;
-    }
     const last = ownerLastFlush.get(ownerId);
     if (last !== undefined && now - last < DIGEST_INTERVAL_MS) continue;
     // Bounded batch (see MAX_DIGEST_ENTRIES / MAX_DIGEST_CHARS): the
     // delivered head clears now; a retained tail rides the next window.
+    // Lane-liveness partition (Max, Oct 18 2026, card-b3468c; review P0,
+    // Oct 18): a digest must never derail a live turn, and the whole
+    // payload rides ONE record, so the batch is selected such that a record
+    // which can admit into a live turn carries ONLY entries past their own
+    // ceilings. While the owner's lane is live, an under-ceiling entry
+    // never joins the batch — it stays queued, unmarked, untouched, exactly
+    // like the quiet-hours gate above, bounded by its OWN first queue time
+    // (a re-queue never refreshes it), so a lane stuck in one long turn
+    // still gets its digest once the entry ages past the ceiling — holding
+    // never means losing. An entry with no readable first queue time cannot
+    // prove a fresh hold: it joins (fail open) rather than hold without
+    // bound; queueFlagDigest and restore always stamp one, so this is
+    // corrupted-state territory. Max's lane is partitioned too: a mid-turn
+    // digest derails it the same way.
+    const laneLive = live.has(ownerId);
     const batch: Entry[] = [];
     let chars = 0;
+    let resetInFlight = false;
     for (const entry of entries.values()) {
       if (batch.length >= MAX_DIGEST_ENTRIES || chars + entry.text.length > MAX_DIGEST_CHARS) break;
       // In flight (card-b3468c verify P1): this entry's digest record is
       // already durable and waiting for its admission ack — never re-send
-      // it. Past SENT_STALE_MS the record died without admitting: reset the
-      // markers so this window re-sends the line.
+      // it while the record still lives. The record's presence in the
+      // durable delivery queue is the ONLY proof it died (review P1, Oct
+      // 18): a record can legitimately wait out repeated 30-minute
+      // admission windows and then quiet hours, so elapsed time proves
+      // nothing. Gone from the queue without its ack having cleared this
+      // entry — dropped by a Stop, or its recipient left the roster — the
+      // markers reset and this window re-sends the line: holding never
+      // means losing.
       if (entry.sentDeliveryId !== undefined) {
-        if (typeof entry.sentAt === 'number' && now - entry.sentAt < SENT_STALE_MS) continue;
+        const stillPending = await recordStillPending(entry.sentDeliveryId);
+        if (stillPending !== false) continue;
         entry.sentDeliveryId = undefined;
         entry.sentAt = undefined;
+        resetInFlight = true;
+      }
+      if (laneLive) {
+        const queuedAt = entry.firstQueuedAt;
+        if (typeof queuedAt === 'number' && Number.isFinite(queuedAt) && queuedAt > 0
+          && now - queuedAt < LIVE_HOLD_CEILING_MS) continue;
       }
       batch.push(entry);
       chars += entry.text.length;
     }
+    // A marker reset is a real state transition — the record is gone, so
+    // its line returns to the pending pool — and it persists the moment it
+    // happens, never riding on a later send's write: a restart between the
+    // reset and the next window must not resurrect the dead record's
+    // in-flight markers (which would only cost one extra queue check, but
+    // the durable state must not lie in the meantime).
+    if (resetInFlight) persistNow();
     if (!batch.length) continue;
+    // The record's hold origin (review P0, Oct 18): the NEWEST first-queue
+    // time among the entries actually included. The drain-side admission
+    // enforces the hold atomically from this one origin, so it must be the
+    // binding (newest) entry's — an oldest-origin record would let an
+    // hour-old flag deliver a fresh one into a live turn mid-ceiling. The
+    // partition above is the flush's snapshot; this origin is what the
+    // drain holds by when a lane goes busy before the record admits.
+    let holdOrigin: number | undefined;
+    for (const entry of batch) {
+      const queuedAt = entry.firstQueuedAt;
+      if (typeof queuedAt === 'number' && Number.isFinite(queuedAt) && queuedAt > 0
+        && (holdOrigin === undefined || queuedAt > holdOrigin)) {
+        holdOrigin = queuedAt;
+      }
+    }
     const payload = ['[TARDIS] Flag digest (one message per 30 minutes; act on each line):', ...batch.map((entry) => entry.text)].join('\n');
     // The digest carries urgency when any of its entries does: a past-due
     // commitment raise is urgent; a digest of only hygiene nudges stays
     // unprioritized, so scheduled hygiene keeps yielding to live turns.
-    // nudgeHoldSince (review P0, Oct 18): the flush's own liveness gate is
-    // a snapshot; the drain-side admission enforces the hold atomically — a
-    // lane that went busy before the record admits never gets steered under
-    // the ceiling, it gets the digest at its next real turn end.
-    const send = await deliverDigest(ownerId, payload, batch.some((entry) => entry.priority === true), oldestQueuedAt);
+    const send = await deliverDigest(ownerId, payload, batch.some((entry) => entry.priority === true), holdOrigin);
     if (!send.ok) continue;
     // (card-b3468c verify P1) The receipt above proves DURABILITY, not
     // admission: an automation digest never steers a live turn, so the
@@ -324,10 +391,10 @@ export function admittedDeliveryAck(ownerId: string, deliveryId: string): void {
     try {
       entry.onDelivered?.();
     } catch (error) {
-      // Re-queue exactly this entry (its mark did not land); the next
-      // window re-sends only it.
+      // Re-queue exactly this entry (its mark did not land), with its
+      // original hold age; the next window re-sends only it.
       const q = queues.get(ownerId) ?? new Map<string, Entry>();
-      if (!q.has(entry.key)) q.set(entry.key, { key: entry.key, text: entry.text });
+      if (!q.has(entry.key)) q.set(entry.key, { key: entry.key, text: entry.text, firstQueuedAt: entry.firstQueuedAt });
       queues.set(ownerId, q);
       console.warn(`[flag-digest] ${ownerId}: an admitted entry's callback failed (it re-queues for the next window): ${(error as Error).message}`);
     }
