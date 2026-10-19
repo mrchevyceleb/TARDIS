@@ -18,6 +18,7 @@ import type { ChatBlock } from '../data/types';
 import { ChatThread, type ThreadPin } from './reimagine/blocks';
 import { AttachButton, Composer, type SendImage } from './reimagine/Composer';
 import { ChecklistSection } from '../../grok/ChecklistSection';
+import { CopyButton } from './primitives/CopyButton';
 import { useChecklist } from '../../grok/useChecklist';
 import { Plus } from './reimagine/icons';
 import { DRAFT_APPEND_EVENT, type DraftAppendDetail } from '../../native/shell';
@@ -442,6 +443,7 @@ export function ChannelView({ channelId, agents, onDeleted }: {
                     return (
                       <div key={p.id} className="ch-pins-row">
                         {body}
+                        <CopyButton text={note} className="ch-pins-copy" size={12} title="Copy pin text" />
                         <button type="button" className="bt-iconbtn ch-pins-unpin" title={`Unpin from ${member}`}
                           aria-label={`Unpin from ${member}`} onClick={() => { void unpin(p.id); }}>
                           <PinOff size={12} />

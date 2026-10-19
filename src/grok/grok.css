@@ -1736,14 +1736,16 @@ body.bt-rail-resizing { cursor: col-resize; user-select: none; }
   font: inherit;
 }
 .bt-msgpin-text {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  /* No clamp (card-be68d0, Matt, Oct 19 2026): a pin cut to two lines you
+     cannot open is not useful. Full text; the panel scrolls. */
+  display: block;
+  overflow-wrap: anywhere;
   font-size: 13px;
   line-height: 1.4;
   color: var(--r-ink);
 }
+.bt-msgpin-copy { margin-top: 4px; opacity: 0.5; }
+.bt-msgpin-copy:hover { opacity: 1; }
 .bt-msgpin-unpin {
   margin-top: 4px;
   opacity: 0.5;

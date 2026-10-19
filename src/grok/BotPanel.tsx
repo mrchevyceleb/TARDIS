@@ -11,6 +11,7 @@ import { useCronJobs } from '../hooks/useRoomData';
 import { useProxyViewer } from '../hooks/useProxyViewer';
 import { scrollToPinnedMessage, useAgentMessagePins } from './messagePins';
 import { ChecklistSection } from './ChecklistSection';
+import { CopyButton } from '../chat/components/primitives/CopyButton';
 import { parsePinLinkTarget } from '../chat/utils/proxyLinks';
 import { statusLabel } from '../theme/voice';
 import { DeskPaneSwitch, useDeskPaneMode } from './DeskPaneSwitch';
@@ -467,6 +468,7 @@ export function BotPanel({ meta, onOpenForge, onOpenDesk, onClose, className = '
                       </button>
                     );
                   })()}
+                  <CopyButton text={(p.text ?? '').trim()} className="bt-msgpin-copy" size={13} title="Copy pin text" />
                   <button
                     type="button"
                     className="bt-iconbtn bt-msgpin-unpin"

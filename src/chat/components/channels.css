@@ -117,6 +117,8 @@
   padding: 0; cursor: pointer;
 }
 span.ch-pins-text { cursor: default; }
+.ch-pins-copy { flex: none; opacity: 0.6; }
+.ch-pins-copy:hover { opacity: 1; }
 .ch-pins-unpin { flex: none; opacity: 0.6; }
 .ch-pins-unpin:hover { opacity: 1; }
 .ch-edit-bar {
