@@ -7,6 +7,7 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { ChatBlock } from '../../data/types';
 import { REACTION_EMOJIS } from '../../data/reactions';
+import { groupHasLiveContent } from '../../data/liveGroup';
 import { Markdown } from '../primitives/Markdown';
 import { DeskRefText } from '../primitives/DeskRef';
 import { ArtifactCard } from '../blocks/ArtifactCard';
@@ -1114,9 +1115,11 @@ function ElrondGroup({
   const visible = visibleAssistantBlocks(blocks, collapseSteps);
   if (!visible.length) return null;
   // Actions belong to this group's settled text, not the thread's global
-  // status. A live sibling turn must not strip Copy/Pin/Reply from finished
-  // messages everywhere just because ChatThread happens to be streaming.
-  const groupLive = turnLive || visible.some((b) => (b.kind === 'text' && b.open) || (b.kind === 'tool' && b.running));
+  // status: a live sibling turn must not strip Copy/Pin/Reply from finished
+  // messages, and a settled response keeps them through the next turn's
+  // thinking interval (codex review, Oct 19 2026). Only the group's own open
+  // text or running tool makes it live.
+  const groupLive = groupHasLiveContent(visible);
   const first = visible[0];
   const textBlocks = visible.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text');
   const isActivity = collapseSteps && textBlocks.length === 0;
@@ -1429,7 +1432,6 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     coalescedGroups.push(g);
   }
 
-  const lastElrondGroup = [...coalescedGroups].reverse().find((g) => g.type === 'elrond');
   const nodes: Array<ReactNode | FoldItem> = [];
   let pendingAutomation = false;
   let hideThinking = false;
@@ -1537,7 +1539,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         ? { fold: true, key: g.block.id, from: g.block.from, ts: g.block.ts, tsApprox: g.block.tsApprox, node: bubble }
         : bubble);
     } else {
-      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} turnLive={streaming && g === lastElrondGroup} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReplyElrond} />);
+      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReplyElrond} />);
     }
   }
 

@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOOK="$ROOT/scripts/vision-read-guard.sh"
 test -x "$HOOK" || { echo "missing $HOOK" >&2; exit 1; }
 
-for dir in "$HOME/.claude-zai" "$HOME/.claude-fireworks" "$HOME/.claude-openrouter"; do
+for dir in "$HOME/.claude-zai" "$HOME/.claude-fireworks" "$HOME/.claude-openrouter" "$HOME/.claude-openrouter-personal"; do
   mkdir -p "$dir"
   settings="$dir/settings.json"
   if [ -f "$settings" ] && grep -q "vision-read-guard.sh" "$settings"; then
