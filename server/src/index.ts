@@ -41,6 +41,7 @@ import { startDeskHygieneScheduler } from './lib/deskHygiene.ts';
 import { startMattAsksScheduler } from './lib/mattAsks.ts';
 import { startCommitmentSweeper } from './lib/commitmentSweep.ts';
 import { startRestartWake } from './lib/restartWake.ts';
+import { sweepOrphanedLaneWorkers } from './lib/workerReap.ts';
 import { tasksRouter } from './routes/tasks.ts';
 import { calendarRouter } from './routes/calendar.ts';
 import { emailRouter } from './routes/email.ts';
@@ -192,6 +193,21 @@ app.use('/internal/content/v1', contentGatewayRouter);
 // lane. Computed FIRST so nothing above it runs either.
 const SIDE_COPY = process.env.RIVENDELL_SIDE_COPY === '1';
 if (SIDE_COPY) console.log('[side-copy] lanes and engines only: schedulers, delivery, crons, catalogs, Slack/Gmail sends and computer control are off');
+// Oct 19 2026 (card-16bc3e): lane workers that outlived the server that spawned
+// them keep running as parentless detached processes — 25 stuck trees (435
+// processes, 7 GB) helped OOM-kill TARDIS nine times in one night. Sweep every
+// previous server's orphaned workers at boot, before this boot spawns its own.
+// Runs in side copies too: selection matches only processes stamped with
+// a previous server's lane-worker token — one no live server holds in the
+// shared runtime instance registry — AND without a living parent, so a
+// live server's family is safe even when a lane's own background child is
+// disowned, and a manually launched CLI is never touched.
+try {
+  const reaped = sweepOrphanedLaneWorkers();
+  if (reaped.killed.length) console.log(`[boot-reap] killed ${reaped.killed.length} orphaned lane worker(s) from a previous server`);
+} catch (err) {
+  console.warn('[boot-reap] failed:', (err as Error).message);
+}
 // Start the xAI transform proxy before chat registers so its base URL is
 // resolved before any xAI chat session can spawn. Non-fatal: a failure logs
 // and xAI turns surface a clear error instead of crashing the server.

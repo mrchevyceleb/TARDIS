@@ -1,4 +1,5 @@
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, type ChildProcess, type ChildProcessByStdio } from 'node:child_process';
+import type { Readable, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -20,6 +21,7 @@ import { isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
+import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
@@ -948,13 +950,13 @@ export class CodexSession {
     // pin that cannot be honored already unwedged the session above.
     const codexSpawnEnv: NodeJS.ProcessEnv = childEnv;
     const turnStartedAtMs = Date.now();
-    const child = spawn(process.execPath, [CODEX_APP_TURN_SCRIPT], {
+    const child = spawnLaneWorker(process.execPath, [CODEX_APP_TURN_SCRIPT], {
       cwd: this.cwd,
       // The marker tells the installed long-call gate hook this is a TARDIS agent turn.
       env: { ...codexSpawnEnv, ...localMcpSecretEnv(laneName ?? 'Teammate', { unnamedLane: !laneName }), ...longCallGateEnv(this.chatId) },
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    }) as ChildProcessByStdio<Writable, Readable, Readable>;
     this.currentChild = child;
     // The adapter queues turn/steer requests received during app-server startup
     // and flushes them against the announced active turn id.

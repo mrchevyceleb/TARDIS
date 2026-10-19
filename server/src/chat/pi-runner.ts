@@ -19,7 +19,8 @@
  *    tool_execution_end            -> user {tool_result}
  *    agent_end / abort / error     -> result (+ terminal notice), turnEnd */
 
-import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import { type ChildProcessByStdio } from 'node:child_process';
+import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -222,7 +223,7 @@ export class PiSession {
       '--no-extensions',
       ...piExtensions().flatMap((e) => ['-e', e]),
     ];
-    this.child = spawn(piBinary(), args, { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessByStdio<Writable, Readable, Readable>;
+    this.child = spawnLaneWorker(piBinary(), args, { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessByStdio<Writable, Readable, Readable>;
     this.child.stdout.setEncoding('utf8');
     this.child.stdout.on('data', (chunk: string) => this.onStdout(chunk));
     this.child.stderr.setEncoding('utf8');
