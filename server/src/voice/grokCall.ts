@@ -30,6 +30,7 @@ import { deliverTeamMessage } from '../chat/teamBus.ts';
 import { VoiceWork, VOICE_WORK_TOOL } from './voiceWork.ts';
 import { publishExternalThreadEvent } from '../chat/runner.ts';
 import { callThreadContext, recordVoiceTranscript, VoiceTranscriptQueue } from './threadBridge.ts';
+import { liveDeskContext, deskStamp } from './liveContext.ts';
 import { personaScopeFor } from '../chat/personaPrompts.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 
@@ -46,6 +47,7 @@ const CALL_RULES =
   'Speak as I or me; never address yourself by your own name in the third person. Do not mention being an AI, Grok, or xAI unless asked. ' +
   'Keep spoken replies short and conversational — one or two sentences unless the user asks for depth. ' +
   'Voice and typing are one conversation. Use the shared thread context and continue the current topic naturally. ' +
+  'Never guess facts, flows, or names. If something is not in the LIVE DESK STATE, the shared thread, or the earlier summary, say you will check in the thread and use run_in_thread; do not invent it. Names can be misheard on voice: match what you heard against the Desk state and the thread before answering; if nothing matches, ask. ' +
   'For searches, files, or any other tool work the user requested or approved, call run_in_thread BEFORE claiming you are starting it. This is your real agent brain and tools, not a different person. Never just promise to look something up. ' +
   'After run_in_thread returns, do not invent a second spoken recap of work that already landed in the chat thread. One short spoken line is enough: working, queued, blocked, or the result. ' +
   'Work continues in the same chat after End Call. If a tool returns queued or still working, say that honestly; do not invent a result. Never repeat a task already admitted. External side effects remain draft/review-first.';
@@ -106,7 +108,7 @@ class GrokCall {
   private voice: string;
   private readonly transcripts: VoiceTranscriptQueue;
   private lastContextCheck = 0;
-  private contextSeq = -1;
+  private contextKey = '';
   private toolCallIds = new Set<string>();
   private toolResponsePending = false;
   private threadWorkActive = false;
@@ -264,13 +266,18 @@ class GrokCall {
     // almost never do. Re-sending session.update on the counter alone
     // reconfigured the realtime session about once a second for the life of
     // the call, so turn detection never settled and no response ever formed:
-    // mic chunks flowed for minutes with nothing coming back. Compare the
-    // instruction TEXT, which is what actually has to reach the provider.
+    // mic chunks flowed for minutes with nothing coming back.
+    //
+    // The gate is a combined key: the thread revision AND the Desk file
+    // identity. Desk mutations do not bump the event log, so the revision
+    // alone would leave a board change invisible for the rest of a quiet
+    // call. deskStamp() is a stat, so the once-a-second check stays cheap,
+    // and the instruction TEXT comparison still guards the actual send.
     if (Date.now() - this.lastContextCheck > 1000) {
       this.lastContextCheck = Date.now();
-      const seq = eventLogRevision();
-      if (seq !== this.contextSeq) {
-        this.contextSeq = seq;
+      const key = `${eventLogRevision()}|${deskStamp()}`;
+      if (key !== this.contextKey) {
+        this.contextKey = key;
         const next = this.contextInstructions();
         if (next !== this.instructions) {
           this.instructions = next;
@@ -461,7 +468,7 @@ export function registerVoiceCalls(server: HttpServer): void {
           const scope = agent ? personaScopeFor(agent.home) : '';
           const name = agent?.name ?? 'TARDIS';
           const logKey = logKeyFor(cliForAgentEngine(agent.engine), ASSISTANT_HUB_PATH, agent.home);
-          const contextInstructions = () => [CALL_RULES, scope || `You are ${name}, a companion aboard the TARDIS.`, callThreadContext(logKey)].filter(Boolean).join('\n\n');
+          const contextInstructions = () => [CALL_RULES, scope || `You are ${name}, a companion aboard the TARDIS.`, liveDeskContext(), callThreadContext(logKey)].filter(Boolean).join('\n\n');
           const instructions = contextInstructions();
           const greeting = callThreadContext(logKey) ? "I'm here — let's keep going." : `Hey — ${name} here. What's up?`;
           const work = new VoiceWork((text, opts) => deliverTeamMessage({
