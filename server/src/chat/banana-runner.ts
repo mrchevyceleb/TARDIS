@@ -20,6 +20,7 @@ import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
+import { markLaneWorkerKillable } from '../lib/workerReap.ts';
 import {
   ASSISTANT_HUB_PATH,
   BANANA_COMMANDS_DIR,
@@ -2168,6 +2169,7 @@ class BananaServer {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     this.child = child;
+    markLaneWorkerKillable(child.pid);
     console.log(`[banana serve] spawning ${bin} on 127.0.0.1:${port} pid=${child.pid ?? '-'}`);
 
     let resolveReady!: () => void;

@@ -20,6 +20,7 @@ import { isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
+import { markLaneWorkerKillable } from '../lib/workerReap.ts';
 import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
@@ -956,6 +957,7 @@ export class CodexSession {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.currentChild = child;
+    markLaneWorkerKillable(child.pid);
     // The adapter queues turn/steer requests received during app-server startup
     // and flushes them against the announced active turn id.
     this.nativeSteerReady = true;

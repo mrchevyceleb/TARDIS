@@ -6,6 +6,7 @@ import { emitScribe } from './scribe.ts';
 import { dispatchDryRun, type DispatcherResult } from './dispatchers.ts';
 import { accountEnv } from '../lib/accountResolver.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
+import { markLaneWorkerKillable } from '../lib/workerReap.ts';
 
 // Model + reasoning effort the headless worker spawns claude with. Opus 4.7+ uses
 // adaptive thinking and ignores MAX_THINKING_TOKENS; the live lever is the
@@ -35,6 +36,7 @@ export async function runJob(job: RivendellJob): Promise<DispatcherResult> {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    markLaneWorkerKillable(child.pid);
 
     let output = '';
     child.stdout.setEncoding('utf8');
