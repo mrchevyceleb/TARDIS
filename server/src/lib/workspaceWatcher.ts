@@ -19,6 +19,17 @@ const IGNORED_FILES = ['**/*.swp', '**/*.swx', '**/*~', '**/.DS_Store'];
 
 const IGNORED: Array<string | RegExp> = [PRUNE_RE, ...IGNORED_FILES];
 
+// Bounded recursion (Max, Oct 19 2026, card-16bc3e): a full recursive watch of
+// the Syncthing hub held ~428k inotify watches in the live server process
+// (460k files against a 524,288 box limit), which filled the limit and killed
+// Sam's build at 13:17 on Oct 19. Depth 3 keeps every surface work actually
+// happens on: top-level dirs and control files, scratch/<day>/<task> dirs and
+// their direct files, Shares/pages/<name>/index.html, inbox notes. Measured
+// live on Oct 19 2026: 79,442 watches at depth 3, and the probe still saw
+// scratch task-file events fire. Repo sources under projects/ are
+// intentionally out of scope; their builds and editors own those watches.
+const WATCH_DEPTH = 3;
+
 type WatcherOp = 'add' | 'change' | 'unlink' | 'addDir' | 'unlinkDir';
 
 let watcher: ReturnType<typeof chokidar.watch> | null = null;
@@ -74,6 +85,7 @@ export function startWorkspaceWatcher(): void {
     ignored: IGNORED,
     persistent: true,
     ignoreInitial: true,
+    depth: WATCH_DEPTH,
     // No awaitWriteFinish: it turned every pending write into a 50ms polling
     // loop, which multiplies into a stat storm on a large tree. Pure inotify +
     // the coalescer above handles multi-chunk writes without the polling cost.
