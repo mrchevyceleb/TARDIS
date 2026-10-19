@@ -44,7 +44,7 @@ import { compactFailureError, isContextLengthRejection, isSyntheticApiErrorEvent
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { fireworksCapability, fireworksContextWindow, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
-import { openRouterCapability, openRouterContextWindow, openRouterMaxOutput, resolveOpenRouterEffort, resolveOpenRouterModel } from './openrouter-models.ts';
+import { openRouterCapability, openRouterContextWindow, openRouterMaxOutput, resolveOpenRouter2Effort, resolveOpenRouter2Model, resolveOpenRouterEffort, resolveOpenRouterModel } from './openrouter-models.ts';
 import { plainEnglishWritingBlockFor } from './plain-english-guidance.ts';
 import { AgySession, AGY_READY_TIMEOUT_MS } from './agy-runner.ts';
 import { AGY_LANE_EFFORT, AGY_LANE_MODEL, resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
@@ -114,6 +114,7 @@ export type CliKind =
   | 'xai'
   | 'fireworks'
   | 'openrouter'
+  | 'openrouter2'
   | 'agy';
 
 export type StreamEvent = unknown;
@@ -309,8 +310,8 @@ export function isPersistentProcessCli(cli: CliKind | null | undefined): boolean
   return isClaudeFamilyCli(cli) || cli === 'agy';
 }
 
-export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' | 'fireworks' | 'openrouter' {
-  return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai' || cli === 'fireworks' || cli === 'openrouter';
+export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' | 'fireworks' | 'openrouter' | 'openrouter2' {
+  return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai' || cli === 'fireworks' || cli === 'openrouter' || cli === 'openrouter2';
 }
 
 // Fireworks provider lane — any serverless chat model from the Fireworks
@@ -352,13 +353,17 @@ function fireworksEnv(model: string): NodeJS.ProcessEnv {
 // A host wrapper that unsets the metered keys before exec can stash this one
 // as RIVENDELL_OPENROUTER_API_KEY first (the Fireworks fallback pattern).
 const OPENROUTER_CONFIG_DIR = join(homedir(), '.claude-openrouter');
-function openRouterEnv(model: string): NodeJS.ProcessEnv {
+const OPENROUTER2_CONFIG_DIR = join(homedir(), '.claude-openrouter-personal');
+function openRouterEnvFor(cli: 'openrouter' | 'openrouter2', model: string): NodeJS.ProcessEnv {
+  const personal = cli === 'openrouter2';
   const env = subscriptionEnvironment(process.env);
-  env.CLAUDE_CONFIG_DIR = OPENROUTER_CONFIG_DIR;
+  env.CLAUDE_CONFIG_DIR = personal ? OPENROUTER2_CONFIG_DIR : OPENROUTER_CONFIG_DIR;
   env.ANTHROPIC_BASE_URL =
     process.env.RIVENDELL_OPENROUTER_ANTHROPIC_BASE_URL?.trim() || 'https://openrouter.ai/api';
-  env.ANTHROPIC_AUTH_TOKEN =
-    process.env.RIVENDELL_OPENROUTER_API_KEY?.trim() || process.env.OPENROUTER_API_KEY?.trim() || '';
+  env.ANTHROPIC_AUTH_TOKEN = personal
+    ? process.env.RIVENDELL_PERSONAL_OPENROUTER_API_KEY?.trim()
+      || process.env.PERSONAL_OPENROUTER_API_KEY?.trim() || ''
+    : process.env.RIVENDELL_OPENROUTER_API_KEY?.trim() || process.env.OPENROUTER_API_KEY?.trim() || '';
   env.ANTHROPIC_API_KEY = '';
   // Every model role (subagents, background haiku calls) stays on the picked
   // OpenRouter model; an inherited Anthropic default id would route elsewhere.
@@ -387,8 +392,16 @@ function openRouterEnv(model: string): NodeJS.ProcessEnv {
   env.BASH_MAX_TIMEOUT_MS = '3600000';
   env.MCP_TOOL_TIMEOUT = '3600000';
   env.API_TIMEOUT_MS = '3600000';
-  env.SAMWISE_ACCOUNT = 'openrouter';
+  env.SAMWISE_ACCOUNT = personal ? 'openrouter-personal' : 'openrouter';
   return env;
+}
+
+function openRouterEnv(model: string): NodeJS.ProcessEnv {
+  return openRouterEnvFor('openrouter', model);
+}
+
+function openRouter2Env(model: string): NodeJS.ProcessEnv {
+  return openRouterEnvFor('openrouter2', model);
 }
 
 const resolveClaudeModel = (cli: CliKind, m?: string): string => {
@@ -397,6 +410,7 @@ const resolveClaudeModel = (cli: CliKind, m?: string): string => {
   if (cli === 'xai') return resolveXaiModel(m, XAI_MODEL);
   if (cli === 'fireworks') return resolveFireworksModel(m);
   if (cli === 'openrouter') return resolveOpenRouterModel(m);
+  if (cli === 'openrouter2') return resolveOpenRouter2Model(m);
   // Anthropic Claude Code only. A drifted Counsel picker can send grok-* / glm-*
   // here; those ids are valid xAI/Z.ai spawn args and must not become `--model`
   // on an Anthropic Claude process (which then prints unrecognized_model to stderr).
@@ -416,6 +430,7 @@ const resolveClaudeEffort = (cli: CliKind, e?: string, model?: string): string =
   : cli === 'xai' ? resolveXaiEffort(e, XAI_EFFORT)
   : cli === 'fireworks' ? resolveFireworksEffort(e, model)
   : cli === 'openrouter' ? resolveOpenRouterEffort(e, model)
+  : cli === 'openrouter2' ? resolveOpenRouter2Effort(e, model)
   : e && VALID_CLAUDE_EFFORTS.has(e) ? e : CLAUDE_EFFORT;
 
 /** Prime the SuperGrok OAuth token (refreshing now if it's near expiry) and
@@ -869,7 +884,7 @@ class ClaudeSession {
     // rivendell-team. --strict-mcp-config so a model switch cannot
     // silently pick up extra (or stale) servers from ~/.claude*.json. Keep
     // --mcp-config last: it is variadic and swallows any plain arg after it.
-    if (cli === 'assistant' || cli === 'xai' || cli === 'claude' || cli === 'zai' || cli === 'fireworks' || cli === 'openrouter') {
+    if (cli === 'assistant' || cli === 'xai' || cli === 'claude' || cli === 'zai' || cli === 'fireworks' || cli === 'openrouter' || cli === 'openrouter2') {
       args.push('--strict-mcp-config', '--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, this.cwd, chatId));
     }
 
@@ -881,8 +896,9 @@ class ClaudeSession {
       : cli === 'zai' ? zaiEnv(this.spawnModel, zaiCredential!)
       : cli === 'fireworks' ? fireworksEnv(this.spawnModel)
       : cli === 'openrouter' ? openRouterEnv(this.spawnModel)
+      : cli === 'openrouter2' ? openRouter2Env(this.spawnModel)
       : forcedAccount ? accountEnvForAccount(forcedAccount, cwd) : accountEnv(cwd);
-    if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks' && cli !== 'openrouter') assertClaudeSubscription(spawnEnv, cwd);
+    if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks' && cli !== 'openrouter' && cli !== 'openrouter2') assertClaudeSubscription(spawnEnv, cwd);
     if (cli === 'claude' || cli === 'assistant') spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
     // Provider lanes rotate at a budget sized to the model's own window.
     this.providerWindow = cli === 'claude' || cli === 'assistant' ? 0 : Number(spawnEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS) || 0;
@@ -1210,7 +1226,7 @@ class ClaudeSession {
     }
     const textOnlyLane = this.cli === 'zai'
       || (this.cli === 'fireworks' && !fireworksCapability(this.spawnModel)?.imageInput)
-      || (this.cli === 'openrouter' && !openRouterCapability(this.spawnModel)?.imageInput);
+      || ((this.cli === 'openrouter' || this.cli === 'openrouter2') && !openRouterCapability(this.spawnModel)?.imageInput);
     if (textOnlyLane && images && images.length) {
       const result = await adaptImagesForTextModel({ text, images, modelSupportsImages: false });
       if (result.adapted) {
@@ -2677,10 +2693,10 @@ class ClaudeSession {
       // carrying error:"authentication_failed" is a plan/permission problem a
       // respawn can't fix, so it must NOT be treated as fatal.
       const fatalAuth = ev.error_status === 401;
-      const tokenBacked = this.cli === 'zai' || this.cli === 'xai' || this.cli === 'fireworks' || this.cli === 'openrouter';
+      const tokenBacked = this.cli === 'zai' || this.cli === 'xai' || this.cli === 'fireworks' || this.cli === 'openrouter' || this.cli === 'openrouter2';
       if (fatalAuth) {
         const provider = tokenBacked
-          ? (this.cli === 'xai' ? 'xAI' : this.cli === 'openrouter' ? 'OpenRouter' : this.cli === 'fireworks' || this.zaiMode === 'fireworks' ? 'Fireworks' : 'Z.ai')
+          ? (this.cli === 'xai' ? 'xAI' : this.cli === 'openrouter' ? 'OpenRouter' : this.cli === 'openrouter2' ? 'OpenRouter Personal' : this.cli === 'fireworks' || this.zaiMode === 'fireworks' ? 'Fireworks' : 'Z.ai')
           : 'Claude';
         const authTerminal: TerminalProviderError = {
           message: `${provider} could not authenticate. Check its account or API key, then try again.`,

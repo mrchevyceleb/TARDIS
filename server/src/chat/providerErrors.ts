@@ -107,6 +107,7 @@ export function providerLabel(cli: string): string {
   if (cli === 'xai') return 'xAI';
   if (cli === 'fireworks') return 'Fireworks';
   if (cli === 'openrouter') return 'OpenRouter';
+  if (cli === 'openrouter2') return 'OpenRouter Personal';
   if (cli === 'assistant' || cli === 'claude') return 'Claude';
   if (cli === 'codex' || cli === 'codex-personal') return 'Codex';
   return 'The model provider';

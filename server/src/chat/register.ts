@@ -605,6 +605,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       cli !== 'xai' &&
       cli !== 'fireworks' &&
       cli !== 'openrouter' &&
+      cli !== 'openrouter2' &&
       cli !== 'agy'
     ) {
       res.status(400).json({ error: 'invalid cli' });

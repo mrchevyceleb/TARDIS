@@ -815,6 +815,7 @@ const ENGINE_LABEL: Record<string, string> = {
   'banana-fireworks': 'Fireworks',
   fireworks: 'Fireworks',
   openrouter: 'OpenRouter',
+  openrouter2: 'OpenRouter Personal',
 };
 
 function engineLabel(id: string): string {

@@ -66,7 +66,7 @@ function defaultWindowForCli(cli: CompanionId, model?: string): number {
   if (isCodexCli(cli)) return contextWindowForCodexModel(model);
   // Fireworks context windows vary per model (128K to 1M); the catalog entry carries the real one.
   if (cli === 'fireworks') return contextWindowForFireworksModel(model);
-  if (cli === 'openrouter') return contextWindowForOpenRouterModel(model);
+  if (cli === 'openrouter' || cli === 'openrouter2') return contextWindowForOpenRouterModel(model);
   if (cli === 'banana' || cli === 'banana-local' || cli === 'banana-fireworks') return BANANA_WINDOW_TOKENS;
   // xAI always runs Grok (500K). Pin before system/init arrives so the meter
   // never flashes the 200K non-claude default.

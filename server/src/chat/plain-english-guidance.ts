@@ -31,6 +31,6 @@ export const PLAIN_ENGLISH_WRITING_BLOCK = [
 export function plainEnglishWritingBlockFor(opts: { cli: string; model: string; voiceMode?: boolean; humanTurn?: boolean }): string {
   if (opts.voiceMode) return '';
   if (opts.humanTurn === false) return '';
-  const gemini = opts.cli === 'agy' || (opts.cli === 'openrouter' && /^~?google\/gemini/i.test(opts.model));
+  const gemini = opts.cli === 'agy' || ((opts.cli === 'openrouter' || opts.cli === 'openrouter2') && /^~?google\/gemini/i.test(opts.model));
   return gemini ? PLAIN_ENGLISH_WRITING_BLOCK : '';
 }

@@ -73,6 +73,15 @@ export const { model: OPENROUTER_LANE_MODEL, effort: OPENROUTER_LANE_EFFORT } = 
   'high',
 );
 
+/** The second OpenRouter account is the same engine family with a different
+ *  credential and Claude config dir. It shares the model/efforts resolution
+ *  so both accounts offer the identical OpenRouter model set. */
+export const { model: OPENROUTER2_LANE_MODEL, effort: OPENROUTER2_LANE_EFFORT } = engineDefault(
+  'openrouter2',
+  OPENROUTER_LANE_MODEL,
+  OPENROUTER_LANE_EFFORT,
+);
+
 function recordOf(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -188,4 +197,12 @@ export function resolveOpenRouterEffort(e: string | undefined, model?: string, f
 
 export function openRouterEffortsFor(model: string | undefined): string[] {
   return openRouterCapability(resolveOpenRouterModel(model))?.efforts ?? ALL_EFFORTS;
+}
+
+export function resolveOpenRouter2Model(m: string | undefined, fallback = OPENROUTER2_LANE_MODEL): string {
+  return resolveOpenRouterModel(m, fallback);
+}
+
+export function resolveOpenRouter2Effort(e: string | undefined, model?: string, fallback = OPENROUTER2_LANE_EFFORT): string {
+  return resolveOpenRouterEffort(e, model, fallback);
 }

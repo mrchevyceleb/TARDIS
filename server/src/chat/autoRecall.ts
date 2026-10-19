@@ -67,7 +67,7 @@ const TRANSCRIPT_MIN_TOKENS = 3;
 const TRANSCRIPT_HITS_TAKE = 2;
 
 /** Only Claude-family CLIs keep a project memory directory. */
-const CLAUDE_MEMORY_CLIS = new Set(['claude', 'assistant', 'zai', 'xai', 'fireworks', 'openrouter']);
+const CLAUDE_MEMORY_CLIS = new Set(['claude', 'assistant', 'zai', 'xai', 'fireworks', 'openrouter', 'openrouter2']);
 
 const STOPWORDS = new Set([
   'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'for', 'with', 'is', 'are', 'was', 'were', 'be',

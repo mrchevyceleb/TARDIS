@@ -157,3 +157,22 @@ export function readStoredOpenRouterEffort(model = readStoredOpenRouterModel()):
   if (raw !== effort && catalogLoaded) localStorage.setItem('rivendell:openrouter-effort', effort);
   return effort;
 }
+
+export function readStoredOpenRouter2Model(): string {
+  if (typeof window === 'undefined') return DEFAULT_OPENROUTER_MODEL;
+  const raw = localStorage.getItem('rivendell:openrouter2-model');
+  const model = normalizeOpenRouterModel(raw);
+  if (raw !== model) {
+    localStorage.setItem('rivendell:openrouter2-model', model);
+    localStorage.setItem('rivendell:openrouter2-effort', normalizeOpenRouterEffort(model, localStorage.getItem('rivendell:openrouter2-effort')));
+  }
+  return model;
+}
+
+export function readStoredOpenRouter2Effort(model = readStoredOpenRouter2Model()): string {
+  if (typeof window === 'undefined') return DEFAULT_OPENROUTER_EFFORT;
+  const raw = localStorage.getItem('rivendell:openrouter2-effort');
+  const effort = normalizeOpenRouterEffort(model, raw);
+  if (raw !== effort && catalogLoaded) localStorage.setItem('rivendell:openrouter2-effort', effort);
+  return effort;
+}

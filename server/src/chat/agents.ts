@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { SESSIONS_FILE, STATE_DIR } from './config.ts';
 import { codexCapability } from './codex-models.ts';
 import { FIREWORKS_LANE_EFFORT, FIREWORKS_LANE_MODEL, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
-import { OPENROUTER_LANE_EFFORT, OPENROUTER_LANE_MODEL, resolveOpenRouterEffort, resolveOpenRouterModel } from './openrouter-models.ts';
+import { OPENROUTER_LANE_EFFORT, OPENROUTER_LANE_MODEL, OPENROUTER2_LANE_EFFORT, OPENROUTER2_LANE_MODEL, resolveOpenRouter2Effort, resolveOpenRouter2Model, resolveOpenRouterEffort, resolveOpenRouterModel } from './openrouter-models.ts';
 import { AGY_LANE_EFFORT, AGY_LANE_MODEL, resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
 import { deleteRoutinesForAgent } from './routines.ts';
 import { deleteJobWatchesForAgent } from './jobWatches.ts';
@@ -89,6 +89,7 @@ export function cliForAgentEngine(engine: string): string {
   if (engine === 'xai') return 'xai';
   if (engine === 'fireworks') return 'fireworks';
   if (engine === 'openrouter') return 'openrouter';
+  if (engine === 'openrouter2') return 'openrouter2';
   if (engine === 'agy') return 'agy';
   return 'xai';
 }
@@ -100,6 +101,7 @@ export function defaultAgentBrain(engine: string): Omit<AgentBrain, 'revision' |
     case 'zai': return { engine: 'zai', model: 'glm-5.3[1m]', effort: 'high' };
     case 'fireworks': return { engine: 'fireworks', model: FIREWORKS_LANE_MODEL, effort: FIREWORKS_LANE_EFFORT };
     case 'openrouter': return { engine: 'openrouter', model: OPENROUTER_LANE_MODEL, effort: OPENROUTER_LANE_EFFORT };
+    case 'openrouter2': return { engine: 'openrouter2', model: OPENROUTER2_LANE_MODEL, effort: OPENROUTER2_LANE_EFFORT };
     case 'agy': return { engine: 'agy', model: AGY_LANE_MODEL, effort: AGY_LANE_EFFORT };
     case 'xai':
     default: return { engine: 'xai', model: 'grok-4.7', effort: 'xhigh' };
@@ -131,6 +133,7 @@ function normalizeBrainModel(engine: string, value: unknown, fallback?: string):
   // the lane default instead of migrating to glm-5p3.
   if (engine === 'fireworks') return resolveFireworksModel(model, fallback);
   if (engine === 'openrouter') return resolveOpenRouterModel(model, fallback);
+  if (engine === 'openrouter2') return resolveOpenRouter2Model(model, fallback);
   // The agy resolver migrates effort-suffixed pins to their base id and
   // honors the caller's fallback (the operator-configured lane default)
   // before its built-in default, same contract as the fireworks resolver.
@@ -155,6 +158,7 @@ function normalizeBrainEffort(engine: string, model: string | undefined, value: 
   // Fireworks steps to the model's nearest tier, the same pick the runner spawns with.
   if (engine === 'fireworks') return resolveFireworksEffort(effort, model, fallback);
   if (engine === 'openrouter') return resolveOpenRouterEffort(effort, model, fallback);
+  if (engine === 'openrouter2') return resolveOpenRouter2Effort(effort, model, fallback);
   if (engine === 'agy') return resolveAgyEffort(model ?? '', effort, fallback);
   if (engine === 'xai' && effort === 'max') effort = 'xhigh';
   const allowed = engine === 'codex' && model ? new Set(codexCapability(model)?.efforts)
