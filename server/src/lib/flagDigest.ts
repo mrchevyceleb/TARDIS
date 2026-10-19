@@ -27,7 +27,7 @@
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
-import { inQuietHours, isMaxLane } from './quietHours.ts';
+import { inQuietHours, isQuietExemptLane } from './quietHours.ts';
 import { LIVE_HOLD_CEILING_MS, agentsWithLiveTurns } from './laneLiveness.ts';
 
 const DIGEST_INTERVAL_MS = 30 * 60_000;
@@ -255,7 +255,7 @@ export async function flushFlagDigests(now: number = Date.now(), liveLanes?: Rea
     // the global rate limit Matt's Desk answers need. Skip before any
     // delivery: the entries stay queued untouched and the first flush after
     // 05:00 delivers them once.
-    if (inQuietHours(now) && !isMaxLane(ownerId)) continue;
+    if (inQuietHours(now) && !isQuietExemptLane(ownerId)) continue;
     const last = ownerLastFlush.get(ownerId);
     if (last !== undefined && now - last < DIGEST_INTERVAL_MS) continue;
     // Bounded batch (see MAX_DIGEST_ENTRIES / MAX_DIGEST_CHARS): the

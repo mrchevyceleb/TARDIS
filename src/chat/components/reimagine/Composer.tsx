@@ -178,7 +178,6 @@ export function Composer(props: ComposerProps) {
   const [imageIngesting,setImageIngesting]=useState(0);
   const imageIngestingRef=useRef(0);
   const [uploads, setUploads] = useState<PendingUpload[]>([]);
-  const [queueArmed, setQueueArmed] = useState(false);
   const uploadAborts = useRef(new Map<string, () => void>());
   // One shared in-flight-upload gate: submit, the dictation auto-send effect
   // and the send button all read this single derivation, so they can never
@@ -425,7 +424,7 @@ export function Composer(props: ComposerProps) {
       return [];
     });
 
-  const submit = (allowStop = false): boolean => {
+  const submit = (allowStop = false, queueIntent = false): boolean => {
     if(dictating)return false;
     // Read the DOM value, not only the controlled prop. Android keyboards can
     // fire Enter/pointer-up before React commits the final input event; the old
@@ -460,12 +459,11 @@ export function Composer(props: ComposerProps) {
     if (props.busy) {
       if (hasLiveContent && props.onSteer) {
         clearPendingDictation();
-        if (queueArmed && props.onSendQueued && (canSteer || props.queueAvailable === true)) {
+        if (queueIntent && props.onSendQueued && (canSteer || props.queueAvailable === true)) {
           props.onSendQueued(v, imgs);
           props.onChange('');
           if (taRef.current) taRef.current.value = '';
           clearImages();
-          setQueueArmed(false);
         } else {
           props.onSteer(v, imgs);
           props.onChange('');
@@ -480,10 +478,9 @@ export function Composer(props: ComposerProps) {
     }
     if (!v && !imgs?.length && !refs) return false;
     clearPendingDictation();
-    // A queued send on a channel (never busy-blocked there): the chip arms
-    // the next-turn choice even when the composer itself is not busy.
-    const sendQueued = queueArmed && props.onSendQueued && (canSteer || props.queueAvailable === true);
-    setQueueArmed(false);
+    // A queued send on a channel (never busy-blocked there): Ctrl+Enter
+    // arms the next-turn choice even when the composer itself is not busy.
+    const sendQueued = queueIntent && props.onSendQueued && (canSteer || props.queueAvailable === true);
     const prevImages = images;
     const res = sendQueued ? props.onSendQueued!(v, imgs) : props.onSend(v, imgs);
     props.onChange('');
@@ -604,7 +601,10 @@ export function Composer(props: ComposerProps) {
     if (e.key === 'Enter' && !e.shiftKey) {
       if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       e.preventDefault();
-      submit(false);
+      // Ctrl+Enter (Alt+Enter, Cmd+Enter) queues for the next turn instead
+      // of steering the live one (Matt, Oct 19 2026 — the Next turn chip is
+      // gone). Each queued message becomes its own turn, delivered in order.
+      submit(false, e.ctrlKey || e.altKey || e.metaKey);
     }
   };
 
@@ -685,38 +685,6 @@ export function Composer(props: ComposerProps) {
   const trailingBtn = (extraClass = '') =>
     dictating ? null : !ready && !props.busy && props.idleAction ? props.idleAction : sendBtn(extraClass);
 
-  // Next-turn chip (card-504beb): one-shot arm — the send after arming goes
-  // to the next turn instead of steering. Shown only when a queued send is
-  // meaningful (busy one-on-one lane, or working channel members).
-  // Eligibility is the delivery-mode choice, not attachment timing (review
-  // 3): a converting image or streaming upload must not disarm an armed
-  // chip — the person pastes a screenshot and the Next-turn choice they
-  // made survives it. The send itself still waits on attachPending either
-  // way.
-  const queueEligible = props.busy && Boolean(props.onSteer);
-  const queueChip = props.onSendQueued && hasContent && (queueEligible || props.queueAvailable === true) ? (
-    <button
-      type="button"
-      className={`queue-chip${queueArmed ? ' on' : ''}`}
-      aria-pressed={queueArmed}
-      title="Send as the next message after this turn, instead of steering it"
-      aria-label="Queue this message for the next turn"
-      onPointerDown={(e) => {
-        // Same as the send button: a touch tap must not blur the textarea
-        // first — the keyboard resize moves the chip and eats the tap.
-        if (e.pointerType === 'touch') e.preventDefault();
-      }}
-      onClick={() => setQueueArmed((a) => !a)}
-    >
-      Next turn
-    </button>
-  ) : null;
-  // The arm is strictly one-shot and strictly visible: it can never linger
-  // armed into a later busy period, a channel switch, or an idle send.
-  const queueLive = Boolean(queueChip);
-  useEffect(() => {
-    if (!queueLive) setQueueArmed(false);
-  }, [queueLive]);
 
   // A completed dictation waiting on uploads is visible and cancellable: it
   // sends itself the moment the last upload settles, so the send slot says
@@ -949,7 +917,6 @@ export function Composer(props: ComposerProps) {
             {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={queueDictation} onActive={setDictating} onComplete={completeDictation} onDiscard={discardDictation} />}
             <div className="send-slot">
               {pendingSendChip}
-              {queueChip}
               {trailingBtn()}
             </div>
           </div>
@@ -958,7 +925,6 @@ export function Composer(props: ComposerProps) {
             {props.chatId && <ChatDictation key={props.chatId} chatId={props.chatId} onText={queueDictation} onActive={setDictating} onComplete={completeDictation} onDiscard={discardDictation} />}
             <div className="send-slot">
               {pendingSendChip}
-              {queueChip}
               {trailingBtn()}
             </div>
           </>

@@ -13,7 +13,7 @@ import { backgroundChatId, backgroundLaneEnabled, bareChatId, isBackgroundChatId
 import { extractVisibleTurns } from './threadWindow.ts';
 import { JsonStore, type StoredRecord } from '../lib/jsonStore.ts';
 import { scanOutgoingPromise } from '../lib/promiseScan.ts';
-import { inQuietHours, isMaxLane, msUntilQuietEnd, recordQuietExemptWake } from '../lib/quietHours.ts';
+import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, recordQuietExemptWake } from '../lib/quietHours.ts';
 import { LIVE_HOLD_CEILING_MS } from '../lib/laneLiveness.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
@@ -776,7 +776,7 @@ export async function sendToAgentHome(
   // manual routine press or Max's emergency routine by id, both of which
   // are an explicit ask for this run now (Opus review, Oct 16).
   const isExemptWake = opts.quietExempt === true || personSourced({ fromRole: opts.peerFromRole });
-  const quietHold = !isExemptWake && !isMaxLane(agent.id);
+  const quietHold = !isExemptWake && !isQuietExemptLane(agent.id);
   const heldByQuietHours = (): { delivered: boolean; reason?: string } | null =>
     quietHold && inQuietHours(Date.now())
       ? { delivered: false, reason: 'quiet hours (22:00-05:00 ET): held until 05:00' }
@@ -1455,7 +1455,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
   // before 22:00 and keeps admitting (the admission wait can run 30 minutes)
   // re-checks the boundary on each pass without calling Intl.DateTimeFormat
   // per queued record (Opus review 3, Oct 16).
-  const isNonMax = !isMaxLane(queueKey);
+  const isNonMax = !isQuietExemptLane(queueKey);
   const holdInitial = isNonMax && inQuietHours(Date.now());
   // Snapshot this worker's batch. Handoffs accepted while it runs are scheduled
   // as the next batch, behind any synchronous delivery already waiting on the
@@ -1675,7 +1675,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
  *  the hour — the boss's messages never wait out the window. */
 function queuedRetryDelay(queueKey: string, remains: QueuedTeamDelivery[]): number {
   const now = Date.now();
-  if (!inQuietHours(now) || isMaxLane(queueKey)) return ASYNC_RETRY_MS;
+  if (!inQuietHours(now) || isQuietExemptLane(queueKey)) return ASYNC_RETRY_MS;
   return remains.some((item) => personSourced(item)) ? ASYNC_RETRY_MS : msUntilQuietEnd(now);
 }
 
@@ -1841,7 +1841,7 @@ export async function deliverTeamMessage(input: {
     personPosted: input.source === 'channel' && input.personPosted === true,
     personSourced: input.personSourced === true,
   });
-  const quietHoldRecipient = !isPersonSourced && !isMaxLane(to.id) && inQuietHours(Date.now());
+  const quietHoldRecipient = !isPersonSourced && !isQuietExemptLane(to.id) && inQuietHours(Date.now());
   const waitForReply = requestedWaitForReply && !closesReplyCycle && !quietHoldRecipient;
   // card-b3468c: an under-ceiling nudge reports its idle-boundary delivery in
   // the receipt (the drain-side admission never steers a live turn).
@@ -1995,7 +1995,7 @@ export async function deliverTeamMessage(input: {
     // already durable, so the caller's queued handling parks it for 05:00.
     quietHoldCheck: isPersonSourced
       ? undefined
-      : () => inQuietHours(Date.now()) && !isMaxLane(to.id),
+      : () => inQuietHours(Date.now()) && !isQuietExemptLane(to.id),
     // (card-b3468c verify P1) The digest admission ack fires in the finally
     // for the same reason as the batch path: an ack failure must not strand
     // the digest's in-flight entries when the turn still carried the line.
@@ -2032,7 +2032,7 @@ export async function deliverTeamMessage(input: {
     if (remains) scheduleQueuedRecipient(queueKeyOf(record));
     if (!result.delivered && remains) {
       const heldForQuietHours = result.held === 'quiet-hours'
-        || (!isPersonSourced && !isMaxLane(to.id) && inQuietHours(Date.now()));
+        || (!isPersonSourced && !isQuietExemptLane(to.id) && inQuietHours(Date.now()));
       return {
         delivered: true,
         to: to.name,

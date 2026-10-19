@@ -24,7 +24,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 import { JsonStore } from '../lib/jsonStore.ts';
-import { inQuietHours, isMaxLane, isQuietExemptWork } from '../lib/quietHours.ts';
+import { inQuietHours, isQuietExemptLane, isQuietExemptWork } from '../lib/quietHours.ts';
 import { listAgents } from './agents.ts';
 import { canLaunchInScope, pidMatches, pidStart, visibleWakeText } from './jobWatches.ts';
 import { sendToAgentHome } from './teamBus.ts';
@@ -116,7 +116,7 @@ const retryUntil = new Map<string, number>();
  *  jobs all night and a job from a previous night's window still holds. */
 function heldForQuietHours(job: Job, now: number): boolean {
   if (!inQuietHours(now)) return false;
-  if (isMaxLane(job.agentId)) return false;
+  if (isQuietExemptLane(job.agentId)) return false;
   return !isQuietExemptWork(job.agentId, job.startedAt, now);
 }
 
