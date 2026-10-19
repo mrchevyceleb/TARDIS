@@ -22,6 +22,7 @@ import { statSync, readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { JsonStore } from '../lib/jsonStore.ts';
 import { inQuietHours, isQuietExemptWork, lastQuietEndMs, msUntilQuietEnd } from '../lib/quietHours.ts';
+import { wellFormedText } from '../lib/wellFormed.ts';
 import { listAgents } from './agents.ts';
 import { sendToAgentHome } from './teamBus.ts';
 
@@ -432,17 +433,20 @@ async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
     const detail = watch.kind === 'command' && watch.command
       ? `command: ${watch.command.slice(0, 120)}`
       : watch.kind === 'file' && watch.file ? `file: ${watch.file}` : `pid: ${watch.pid}`;
-    const text = [
+    const text = wellFormedText([
       `[job: ${watch.note}] Your job "${watch.note}" ${outcome}`,
       `(${detail})`,
       'Background job wake from watch_job. If the result matters, check it now — this wake is the only notification.',
-    ].join('\n');
+    ].join('\n'));
     const createdMs = typeof watch.createdAt === 'string' ? Date.parse(watch.createdAt) : NaN;
     const result = await sendToAgentHome(agent, text, {
       peerFrom: `⏱ ${watch.note}`,
       peerFromRole: 'automation',
       peerText: visibleWakeText(text),
       lane: watch.lane === 'main' ? 'main' : 'bg',
+      // A wake never steers (card-c26bfa): the watch result starts its own
+      // turn at the next real turn end instead of landing inside a live one.
+      neverSteer: true,
       // Quiet hours (Opus review 3, Oct 16): a watch armed inside the current
       // quiet window after an exempt wake belongs to legitimate overnight
       // emergency work; pre-22:00 turns and prior-night watches still hold.

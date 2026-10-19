@@ -766,8 +766,10 @@ export async function sendToAgentHome(
   agent: Agent,
   text: string,
   /** `lane` defaults to the background lane; a job or watch started from the
-   *  home lane reports back there. */
-  opts: { peerFrom: string; peerFromRole?: string; peerText?: string; lane?: AgentLane; quietExempt?: boolean },
+   *  home lane reports back there. `neverSteer` (wakes, card-c26bfa): the
+   *  delivery must never join a live turn — it waits for a real turn end and
+   *  then starts its own, the same admission the queued deliveries use. */
+  opts: { peerFrom: string; peerFromRole?: string; peerText?: string; lane?: AgentLane; quietExempt?: boolean; neverSteer?: boolean },
 ): Promise<{ delivered: boolean; reason?: string }> {
   // Quiet hours (Matt, Oct 15 2026): automation prompts to a non-Max lane
   // hold until 05:00 ET. Every caller parks its record and retries on a
@@ -797,6 +799,10 @@ export async function sendToAgentHome(
       false,
       false,
       opts.lane ?? 'bg',
+      // A wake never steers (card-c26bfa): only a real turn end admits it,
+      // so the result starts its own turn instead of landing as guidance in
+      // the live one or racing a Codex steer against the turn end.
+      opts.neverSteer === true,
     );
     session = admission.session;
     model = admission.model;

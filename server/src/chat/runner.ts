@@ -19,6 +19,7 @@ import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn
 import { CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKEN_BUDGET, NATIVE_COMPACT_MARGIN, contextRotationDue, contextTokens, learnContextLimit, providerContextBudget, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { shouldSkipEngineResume } from './threadWindow.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
+import { wellFormedText } from '../lib/wellFormed.ts';
 import { backgroundChatId, isAgentThread, isBackgroundChatId, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
@@ -1298,6 +1299,10 @@ class ClaudeSession {
       if (isPersonMessage(opts)) this.watchReply().arm();
       if (startsNewTurn && opts.peerFromRole === 'automation') origin.automation = true;
       if (startsNewTurn) this.emit({ type: 'turnStart' });
+      // The echo stays ahead of the stdin write: it must be causally before
+      // any provider frame of the turn it opens (a steered turn's output can
+      // interleave with the write callback), and the write window here is
+      // synchronous — only a failed write could strand it.
       this.emit({
         type: 'event',
         event: {
@@ -1407,7 +1412,11 @@ class ClaudeSession {
       voiceMode: opts.voiceMode,
       humanTurn: humanTurn && !continuing && !replyNudge,
     });
-    const stdinText = `${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}${plainEnglishWriting ? `\n\n${plainEnglishWriting}` : ''}`;
+    // Well-formed at the transport boundary: a lone surrogate in the prompt
+    // is rejected downstream (Anthropic 400 — see reply-quote.ts; codex
+    // app-server rejects the JSONRPC outright), so replace unpaired units
+    // with U+FFFD here instead of wedging the lane.
+    const stdinText = wellFormedText(`${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}${plainEnglishWriting ? `\n\n${plainEnglishWriting}` : ''}`);
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];

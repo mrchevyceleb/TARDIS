@@ -22,6 +22,7 @@ import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
+import { wellFormedText } from '../lib/wellFormed.ts';
 import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
@@ -531,7 +532,10 @@ export class CodexSession {
     }
     return new Promise((resolve, reject) => {
       this.nativeSteerWaiters.set(requestId, { resolve, reject });
-      child.stdin!.write(`${JSON.stringify({ type: 'steer', requestId, text })}\n`, (error) => {
+      // Well-form the text at the transport boundary: app-server's JSONRPC
+      // deserializer rejects the whole message on a lone surrogate, which
+      // would fail this steer (and every retry) instead of delivering it.
+      child.stdin!.write(`${JSON.stringify({ type: 'steer', requestId, text: wellFormedText(text) })}\n`, (error) => {
         if (error) this.settleNativeSteer(requestId, error);
       });
     });
@@ -720,17 +724,9 @@ export class CodexSession {
     }
     if (opts.peerFrom && !opts.suppressEcho) {
       this.emit({ type: 'turnStart' });
-      this.emit({
-        type: 'event',
-        event: {
-          type: 'peer_message',
-          from: opts.peerFrom,
-          fromRole: opts.peerFromRole ?? '',
-          text: opts.peerText !== undefined ? opts.peerText : text,
-          ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}),
-          ts: Date.now(),
-        },
-      });
+      // The visible peer echo waits for turn.started (see the stdout handler):
+      // a turn that never starts (transport reject, spawn failure) must leave
+      // no phantom bubble for the next delivery attempt to duplicate.
       if (isPersonMessage(opts)) this.replyWatch.arm();
     } else if (!opts.suppressEcho) {
       let attachments: Array<{ id: string; mediaType: string }>;
@@ -979,6 +975,7 @@ export class CodexSession {
     let sawActionableItem = false;
     let sawTurnCompleted = false;
     let peerAdmissionSettled = false;
+    let peerEchoEmitted = false;
     let settlePeerAdmission: (accepted: boolean) => void = () => {};
     const peerAdmission = opts.peerDeliveryId
       ? new Promise<boolean>((resolve) => {
@@ -1027,6 +1024,23 @@ export class CodexSession {
         }
         if (ev?.type === 'turn.started') {
           this.nativeSteerReady = true;
+          // The visible peer echo lands only now that the turn really
+          // started, so a failed start leaves no phantom row behind (the
+          // sender's retry used to write one bubble per attempt).
+          if (opts.peerFrom && !opts.suppressEcho && !peerEchoEmitted) {
+            peerEchoEmitted = true;
+            this.emit({
+              type: 'event',
+              event: {
+                type: 'peer_message',
+                from: opts.peerFrom,
+                fromRole: opts.peerFromRole ?? '',
+                text: opts.peerText !== undefined ? opts.peerText : text,
+                ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}),
+                ts: Date.now(),
+              },
+            });
+          }
           if (opts.peerDeliveryId && !peerAdmissionSettled) {
             this.emit({
               type: 'event',
@@ -1173,7 +1187,12 @@ export class CodexSession {
           await this.send(text, images, {
             ...opts,
             emptyRetryDepth: (opts.emptyRetryDepth ?? 0) + 1,
-            suppressEcho: true,
+            // The retry keeps the delivery id. Suppress its echo only when the
+            // first attempt already echoed one: the echo is the sender's
+            // admission signal, so a retry that starts the turn after a
+            // pre-turn.started failure must still echo, or the wake would be
+            // reported undelivered while it actually ran (review 1).
+            suppressEcho: opts.suppressEcho === true || peerEchoEmitted,
             seedOverride: retrySeed,
             seedOverrideAvailable: retryAvailable,
             skipAttachments: true,
@@ -1291,7 +1310,10 @@ export class CodexSession {
       threadId: this.threadId,
       model: codexModel,
       effort: codexEffort,
-      prompt,
+      // Well-formed at the transport boundary: one lone surrogate anywhere
+      // in the prompt makes app-server reject the JSONRPC message and the
+      // turn never starts (Quinn's wake, Oct 19).
+      prompt: wellFormedText(prompt),
       imagePaths,
     })}\n`, (error) => {
       if (error) child.emit('error', error);

@@ -50,6 +50,7 @@ import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiModeFor, zaiTurnOutcome, type ZaiMode } from './zaiQuota.ts';
 import { emptyTurnOrigin, noteTurnPeer, notifyHandoffSenders, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { longCallGateEnv } from './longCallGate.ts';
+import { wellFormedText } from '../lib/wellFormed.ts';
 import { laneMcpServers, laneTagFor, shareBackgroundLaneEvent, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, replyNudgeEvent, ReplyWatch } from './replyNudge.ts';
 
@@ -798,7 +799,10 @@ export class PiSession {
     // messages of the same warm process get the brief form (fresh token + device + policy).
     const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
     const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
-    const message = `${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuation}`;
+    // Well-formed at the transport boundary: pi's JSONRPC parser (like
+    // codex's) rejects a lone surrogate, which would fail this prompt and
+    // every retry of it.
+    const message = wellFormedText(`${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuation}`);
     const piImages = outImages?.map((img) => ({ type: 'image', data: img.base64, mimeType: img.mediaType }));
 
     const command = startsNewTurn

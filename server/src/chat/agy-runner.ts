@@ -43,6 +43,7 @@ import { isVoiceChatId, isRobotVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STY
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { emptyTurnOrigin, noteTurnPeer, type TurnOrigin } from './providerSwitch.ts';
 import { longCallGateEnv } from './longCallGate.ts';
+import { wellFormedText } from '../lib/wellFormed.ts';
 import { laneTagFor, shareBackgroundLaneEvent, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
 import { plainEnglishWritingBlockFor } from './plain-english-guidance.ts';
 
@@ -338,7 +339,9 @@ export class AgySession {
 
   private writeUserLine(content: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      const line = JSON.stringify({ event: 'user', message: { role: 'user', content } }) + '\n';
+      // Well-formed at the transport boundary: agy's line parser rejects a
+      // lone surrogate the same way codex's does.
+      const line = JSON.stringify({ event: 'user', message: { role: 'user', content: wellFormedText(content) } }) + '\n';
       this.child.stdin.write(line, (err) => { if (err) reject(err); else resolve(); });
     });
   }
