@@ -1,5 +1,5 @@
 import { assertSubscriptionLane } from './subscription-policy.ts';
-import { spawn, execFile, type ChildProcess } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
@@ -20,7 +20,7 @@ import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
-import { markLaneWorkerKillable } from '../lib/workerReap.ts';
+import { spawnLaneWorker } from '../lib/workerReap.ts';
 import {
   ASSISTANT_HUB_PATH,
   BANANA_COMMANDS_DIR,
@@ -2161,7 +2161,7 @@ class BananaServer {
       // Prefer our generated file over any parent OPENCODE_CONFIG path.
       delete serveEnv.OPENCODE_CONFIG;
     }
-    const child = spawn(bin, args, {
+    const child = spawnLaneWorker(bin, args, {
       cwd: process.cwd(),
       // Never run unsecured: inject a random Basic-auth password.
       env: serveEnv,
@@ -2169,7 +2169,6 @@ class BananaServer {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     this.child = child;
-    markLaneWorkerKillable(child.pid);
     console.log(`[banana serve] spawning ${bin} on 127.0.0.1:${port} pid=${child.pid ?? '-'}`);
 
     let resolveReady!: () => void;

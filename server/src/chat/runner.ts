@@ -1,6 +1,6 @@
 import { assertClaudeSubscription } from './subscription-auth.ts';
 import { assertSubscriptionLane, subscriptionEnvironment } from './subscription-policy.ts';
-import { execFileSync, spawn, type ChildProcessByStdio } from 'node:child_process';
+import { execFileSync, type ChildProcessByStdio } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -18,7 +18,7 @@ import { appendEventLog, appendEventLogDurable, appendEventLogSync, clearEventLo
 import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
 import { CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKEN_BUDGET, NATIVE_COMPACT_MARGIN, contextRotationDue, contextTokens, learnContextLimit, providerContextBudget, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { shouldSkipEngineResume } from './threadWindow.ts';
-import { markLaneWorkerKillable } from '../lib/workerReap.ts';
+import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { backgroundChatId, isAgentThread, isBackgroundChatId, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
@@ -892,13 +892,12 @@ class ClaudeSession {
     this.providerAccountName = typeof spawnEnv.SAMWISE_ACCOUNT === 'string' && spawnEnv.SAMWISE_ACCOUNT.trim()
       ? spawnEnv.SAMWISE_ACCOUNT.trim()
       : 'default';
-    this.child = spawn('claude', args, {
+    this.child = spawnLaneWorker('claude', args, {
       cwd,
       env: spawnEnv,
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessByStdio<Writable, Readable, Readable>;
-    markLaneWorkerKillable(this.child.pid);
 
     this.child.stdout.setEncoding('utf8');
     this.child.stdout.on('data', (chunk: string) => this.onStdout(chunk));

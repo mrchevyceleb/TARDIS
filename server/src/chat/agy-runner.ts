@@ -17,10 +17,10 @@
  *  claude-shaped event vocabulary into the same durable thread log, so the
  *  transcript, the UI, compaction and engine switches are unchanged. */
 
-import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import { type ChildProcessByStdio } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { markLaneWorkerKillable } from '../lib/workerReap.ts';
+import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
@@ -262,8 +262,7 @@ export class AgySession {
       '--print-timeout', '3600s',
       ...(resumeId ? ['--conversation', resumeId] : []),
     ];
-    this.child = spawn(resolveAgyBin(), args, { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessByStdio<Writable, Readable, Readable>;
-    markLaneWorkerKillable(this.child.pid);
+    this.child = spawnLaneWorker(resolveAgyBin(), args, { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessByStdio<Writable, Readable, Readable>;
     this.child.stdout.setEncoding('utf8');
     this.child.stdout.on('data', (chunk: string) => this.onStdout(chunk));
     this.child.stderr.setEncoding('utf8');

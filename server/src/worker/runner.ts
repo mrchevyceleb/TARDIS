@@ -1,12 +1,13 @@
 import { assertClaudeSubscription } from '../chat/subscription-auth.ts';
-import { spawn } from 'node:child_process';
+import type { ChildProcessByStdio } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import type { RivendellJob } from '../data/mock.ts';
 import { WORKER_RUNNER } from '../config.ts';
 import { emitScribe } from './scribe.ts';
 import { dispatchDryRun, type DispatcherResult } from './dispatchers.ts';
 import { accountEnv } from '../lib/accountResolver.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
-import { markLaneWorkerKillable } from '../lib/workerReap.ts';
+import { spawnLaneWorker } from '../lib/workerReap.ts';
 
 // Model + reasoning effort the headless worker spawns claude with. Opus 4.7+ uses
 // adaptive thinking and ignores MAX_THINKING_TOKENS; the live lever is the
@@ -31,12 +32,11 @@ export async function runJob(job: RivendellJob): Promise<DispatcherResult> {
   const env = accountEnv(job.repo || process.cwd());
   assertClaudeSubscription(env, job.repo || process.cwd());
   return new Promise((resolve, reject) => {
-    const child = spawn('claude', ['-p', '--output-format', 'stream-json', '--dangerously-skip-permissions', '--model', CLAUDE_MODEL, '--effort', CLAUDE_EFFORT, prompt], {
+    const child = spawnLaneWorker('claude', ['-p', '--output-format', 'stream-json', '--dangerously-skip-permissions', '--model', CLAUDE_MODEL, '--effort', CLAUDE_EFFORT, prompt], {
       cwd: job.repo || process.cwd(),
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    markLaneWorkerKillable(child.pid);
+    }) as ChildProcessByStdio<null, Readable, Readable>;
 
     let output = '';
     child.stdout.setEncoding('utf8');

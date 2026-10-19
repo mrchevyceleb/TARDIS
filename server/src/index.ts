@@ -197,8 +197,10 @@ if (SIDE_COPY) console.log('[side-copy] lanes and engines only: schedulers, deli
 // them keep running as parentless detached processes — 25 stuck trees (435
 // processes, 7 GB) helped OOM-kill TARDIS nine times in one night. Sweep every
 // previous server's orphaned workers at boot, before this boot spawns its own.
-// Runs in side copies too: selection only ever matches parentless processes, so
-// a live server's workers (production, a precheck, another copy) are safe.
+// Runs in side copies too: selection matches only processes stamped with the
+// dedicated lane-worker marker AND without a living parent, so a live
+// server's workers (production, a precheck, another copy) are safe and a
+// manually launched CLI is never touched.
 try {
   const reaped = sweepOrphanedLaneWorkers();
   if (reaped.killed.length) console.log(`[boot-reap] killed ${reaped.killed.length} orphaned lane worker(s) from a previous server`);
