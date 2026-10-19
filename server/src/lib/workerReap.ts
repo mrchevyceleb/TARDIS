@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
-import { accessSync, constants, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -20,14 +20,20 @@ import { randomUUID } from 'node:crypto';
  *
  *  - Identity: every worker spawn goes through spawnLaneWorker, which stamps
  *    the child with a dedicated RIVENDELL_LANE_WORKER marker (this boot's
- *    instance token). The marker is the ONLY ownership proof the sweep
- *    trusts. A manually launched claude/codex that merely inherits other
- *    RIVENDELL_* keys is never selected, and nothing is inferred from argv
- *    shape (script CLIs appear as node/bun/env, MCP children as anything).
+ *    instance token), stamped only once the token is registered in the
+ *    shared runtime registry below. The marker's TOKEN is the ownership
+ *    proof the sweep trusts, not just its presence: the marker is
+ *    inherited by a worker's every descendant, so a live lane's disowned
+ *    background child (nohup, &, xvfb-run — Wren's slack daemon, the
+ *    shared Codex broker) carries it too, and only a live token separates
+ *    that from a dead server's leftover. A manually launched
+ *    claude/codex that merely inherits other RIVENDELL_* keys is never
+ *    selected, and nothing is inferred from argv shape (script CLIs
+ *    appear as node/bun/env, MCP children as anything).
  *
  *  - Reaping: at boot, before this boot spawns anything, every
- *    marker-carrying process with no living parent is a leftover from a
- *    previous server. SIGTERM it — its process group when it leads one
+ *    marker-carrying process with no living parent whose token no live
+ *    server holds is a leftover from a dead server. SIGTERM it — its process group when it leads one
  *    (detached workers do), its enumerated descendants when it does not
  *    (the headless worker keeps the dead server's group) — then SIGKILL the
  *    survivors after a 3s grace, the same shutdown idiom the session
@@ -36,8 +42,54 @@ import { randomUUID } from 'node:crypto';
  */
 
 const LANE_WORKER_ENV_KEY = 'RIVENDELL_LANE_WORKER';
-/** This server boot's token. Any previous boot's token is equally sweepable. */
+/** This server boot's token, registered in the shared runtime registry at
+ *  boot (and lazily at the first spawn). A previous boot's token is
+ *  sweepable exactly once no live server holds it. */
 const LANE_WORKER_INSTANCE = randomUUID();
+
+/** Shared live-server registry (this user's runtime dir): every copy of
+ *  this user — production, a precheck, any side-copy boot — registers its
+ *  instance token here with its pid and kernel start time, so any sweep
+ *  can tell a dead server's leftovers from a live lane's disowned
+ *  background children (Sam's Oct 19 FAIL: Wren's xvfb-run slack daemon
+ *  and the shared Codex app-server broker are marker-carrying, disowned,
+ *  re-parented under the user manager and inside an allowed unit, so the
+ *  marker alone made them look like dead-server orphans and every
+ *  side-copy boot would have reaped live lanes' work mid-flight). */
+export function defaultLaneInstanceDir(): string {
+  const runtime = process.env.XDG_RUNTIME_DIR
+    || `/run/user/${typeof process.getuid === 'function' ? process.getuid() : 0}`;
+  return `${runtime}/rivendell-lane-instances`;
+}
+
+const registeredDirs = new Set<string>();
+let registrationWarned = false;
+
+/** Write this boot's token (pid + start time) into the shared registry,
+ *  idempotently per dir. On a host that cannot host the registry this
+ *  fails (warned once) — and laneWorkerEnv then stamps nothing, so this
+ *  boot's children carry no marker and can never be selected by anyone. */
+export function registerLaneInstance(dir: string = defaultLaneInstanceDir()): boolean {
+  if (registeredDirs.has(dir)) return true;
+  if (!existsSync('/proc')) return false; // nothing to register where nothing can be swept
+  try {
+    const stat = readProcStat(process.pid);
+    if (!stat) return false;
+    mkdirSync(dir, { recursive: true });
+    // Temp + rename: no concurrent sweep ever reads a partial identity.
+    const tmp = `${dir}/.tmp-${LANE_WORKER_INSTANCE}`;
+    writeFileSync(tmp, `${JSON.stringify({ pid: process.pid, starttime: stat.starttime })}\n`);
+    renameSync(tmp, `${dir}/${LANE_WORKER_INSTANCE}`);
+    registeredDirs.add(dir);
+    return true;
+  } catch (err) {
+    if (!registrationWarned) {
+      registrationWarned = true;
+      console.warn(`[worker-reap] could not register this boot's lane instance token in ${dir}: ${(err as Error).message}`);
+    }
+    return false;
+  }
+}
 
 /** Deployed TARDIS unit names (Moria: rivendell.service, per
  *  docs/DEPLOYMENT.md; Kim's box: tardis.service, per scripts/setup-kim.sh).
@@ -64,9 +116,56 @@ export function hasLaneWorkerMarker(environ: string): boolean {
   return environ.split('\0').some((entry) => entry.startsWith(`${LANE_WORKER_ENV_KEY}=`));
 }
 
-/** Env stamp for a lane-worker spawn (identity + nothing else). */
-export function laneWorkerEnv(): Record<string, string> {
-  return { [LANE_WORKER_ENV_KEY]: LANE_WORKER_INSTANCE };
+/** The lane-worker token a process's environment carries, or null when it
+ *  carries none (or an empty one). */
+export function laneWorkerTokenOf(environ: string): string | null {
+  const entry = environ.split('\0').find((e) => e.startsWith(`${LANE_WORKER_ENV_KEY}=`));
+  const value = entry ? entry.slice(LANE_WORKER_ENV_KEY.length + 1) : '';
+  return value || null;
+}
+
+/** Tokens of every LIVE server boot in the shared registry: a file is
+ *  named by its boot's token and holds that server's pid + start time; the
+ *  token is live exactly while that pid still has that start time. Dead
+ *  files (a crashed server, an exited precheck, a pid the kernel reused)
+ *  are pruned, so the registry holds one file per live boot. An identity
+ *  we cannot parse or verify FAILS SAFE: its token counts as live and its
+ *  file stays, because an uncertain identity must never license a kill.
+ *  Returns null when the registry itself is unreadable — then no token can
+ *  be proven dead, and the caller must reap nothing. */
+export function liveLaneInstanceTokens(dir: string = defaultLaneInstanceDir()): Set<string> | null {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return null; // registry unreadable: nothing can be proven dead
+  }
+  const live = new Set<string>();
+  for (const name of names) {
+    if (!name || name.startsWith('.')) continue; // our temp writes, dotfiles
+    try {
+      const { pid, starttime } = JSON.parse(readFileSync(`${dir}/${name}`, 'utf8')) as { pid?: unknown, starttime?: unknown };
+      if (typeof pid !== 'number' || typeof starttime !== 'number' || pid <= 1 || starttime <= 0) {
+        live.add(name); // impossible identity: unverifiable, fail safe
+        continue;
+      }
+      const stat = readProcStat(pid);
+      if (stat && stat.starttime === starttime) live.add(name);
+      else try { unlinkSync(`${dir}/${name}`); } catch { /* raced another sweep */ }
+    } catch {
+      live.add(name); // unreadable file: fail safe, keep it
+    }
+  }
+  return live;
+}
+
+/** Env stamp for a lane-worker spawn (identity + nothing else). Stamped only
+ *  once this boot's token is registered in the shared registry: an
+ *  unregistered token is indistinguishable from a dead server's, so a
+ *  host that cannot register stamps nothing and its children are never
+ *  swept. */
+export function laneWorkerEnv(dir: string = defaultLaneInstanceDir()): Record<string, string> {
+  return registerLaneInstance(dir) ? { [LANE_WORKER_ENV_KEY]: LANE_WORKER_INSTANCE } : {};
 }
 
 /** The named .service unit one cgroup hierarchy line sits in, or null for
@@ -111,16 +210,22 @@ export function isOrphanedLaneWorker(
   proc: ProcSnapshot,
   userManagerPid: number,
   ownUnits: Set<string>,
+  liveTokens: ReadonlySet<string>,
 ): boolean {
   if (proc.pid === process.pid || proc.pid <= 1) return false;
-  // Parentless: the spawning server is gone (a re-parented child lands under
-  // init or the user manager). A worker of any LIVE server — production, a
-  // precheck copy, another side-copy boot — keeps a live parent and is never
-  // selected.
+  // Parentless: a re-parented child lands under init or the user manager.
+  // A worker still ATTACHED to any live server keeps a live parent; a live
+  // lane's DISOWNED background children (nohup, xvfb-run) do not — they
+  // have the marker-carrying parentless shape too, and only the token's
+  // liveness tells them from a dead server's leftovers.
   if (proc.ppid !== 1 && proc.ppid !== userManagerPid) return false;
-  // The dedicated marker is the only ownership proof: this key is set by
-  // spawnLaneWorker alone, and every worker's MCP children inherit it.
-  if (!hasLaneWorkerMarker(proc.environ)) return false;
+  // The dedicated marker AND a token no live server holds: the marker is
+  // set by spawnLaneWorker alone, but every worker's descendants inherit
+  // it, so presence alone is not ownership. A live token — this boot's or
+  // any other running copy's — is never selected; no token at all (an
+  // unregistrable host, a manual launch) is never selected either.
+  const token = laneWorkerTokenOf(proc.environ);
+  if (!token || liveTokens.has(token)) return false;
   // A named .service cgroup — on ANY hierarchy line — that is neither our
   // own unit nor a deployed TARDIS unit is another unit's process. Belt and
   // suspenders on top of the marker: the Oct 19 dry run caught the Grok
@@ -239,13 +344,24 @@ interface KillTarget { pid: number; starttime: number; groupLeader: boolean }
  *  dying group hits ESRCH and moves on. */
 export function sweepOrphanedLaneWorkers(
   list: () => ProcSnapshot[] = listProcSnapshots,
+  instanceDir: string = defaultLaneInstanceDir(),
 ): { killed: ReapedWorker[] } {
   if (!existsSync('/proc')) return { killed: [] }; // non-Linux host: nothing to sweep
+  // This boot's own family is live before anyone is judged.
+  registerLaneInstance(instanceDir);
+  const liveTokens = liveLaneInstanceTokens(instanceDir);
+  if (!liveTokens) {
+    // Registry unreadable: no token can be proven dead, so nothing can be
+    // proven sweepable. Failing safe here costs one skipped cleanup; the
+    // other direction would kill live lanes' background work.
+    console.warn(`[worker-reap] lane instance registry unreadable at ${instanceDir}: skipping the boot sweep`);
+    return { killed: [] };
+  }
   const um = userManagerPid();
   const ownUnits = ownUnitsOf(readSelfCgroup());
   const procs = list();
   const byPid = new Map(procs.map((p) => [p.pid, p] as const));
-  const victims = procs.filter((p) => isOrphanedLaneWorker(p, um, ownUnits));
+  const victims = procs.filter((p) => isOrphanedLaneWorker(p, um, ownUnits, liveTokens));
   const killed: ReapedWorker[] = [];
   const targets: KillTarget[] = [];
   for (const victim of victims) {
@@ -359,8 +475,9 @@ function commandResolves(command: string, options: SpawnOptions, env: NodeJS.Pro
  * own OOM score before exec'ing the real CLI (argv, cwd, detached, stdio
  * and the caller's env are all preserved; exec keeps the pid, so session
  * runners and watchers keep working unchanged). Every path — wrapped or
- * direct — stamps the child's env with this boot's lane-worker marker so
- * the boot sweep can prove ownership. Non-Linux hosts, unresolvable
+ * direct — stamps the child's env with this boot's registered lane-worker
+ * token so the boot sweep can prove ownership (and a live boot's family
+ * is never swept). Non-Linux hosts, unresolvable
  * commands and shell spawns go direct, keeping their exact prior behavior
  * and error semantics. Callers pass exactly the spawn options they passed
  * before.
