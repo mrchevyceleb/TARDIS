@@ -1113,6 +1113,10 @@ function ElrondGroup({
   const [acted, setActed] = useState(false);
   const visible = visibleAssistantBlocks(blocks, collapseSteps);
   if (!visible.length) return null;
+  // Actions belong to this group's settled text, not the thread's global
+  // status. A live sibling turn must not strip Copy/Pin/Reply from finished
+  // messages everywhere just because ChatThread happens to be streaming.
+  const groupLive = turnLive || visible.some((b) => (b.kind === 'text' && b.open) || (b.kind === 'tool' && b.running));
   const first = visible[0];
   const textBlocks = visible.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text');
   const isActivity = collapseSteps && textBlocks.length === 0;
@@ -1184,14 +1188,14 @@ function ElrondGroup({
         const targetSeq = answer?.seq;
         const reactions = textBlocks.flatMap((b) => b.reactions ?? []);
         const mine = reactions.filter((r) => r.from === 'Matt').map((r) => r.emoji);
-        const canReact = Boolean(onReact && targetSeq && !streaming);
+        const canReact = Boolean(onReact && targetSeq && !groupLive);
         return (
           <>
             <ReactionStrip
               reactions={reactions}
               onReact={canReact ? (emoji) => onReact!(targetSeq!, emoji) : undefined}
             />
-            {(textBlocks.some(isAnswerProse) || textBlocks.some(hasVisibleProse)) && !streaming ? (
+            {(textBlocks.some(isAnswerProse) || textBlocks.some(hasVisibleProse)) && !groupLive ? (
               <ActionsRow
                 getText={copyText}
                 pinned={isPinned}
