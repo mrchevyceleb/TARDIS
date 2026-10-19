@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 /**
@@ -46,6 +47,9 @@ const TARDIS_UNIT_NAMES = new Set(['rivendell.service', 'tardis.service']);
 export interface ProcSnapshot {
   pid: number;
   ppid: number;
+  /** Kernel start time (stat field 22): the pid's identity for revalidation
+   *  before every signal, so a pid the kernel has reused is never killed. */
+  starttime: number;
   /** NUL-joined environ, used only for marker matching, never logged. */
   environ: string;
   argv: string;
@@ -64,13 +68,17 @@ export function laneWorkerEnv(): Record<string, string> {
 }
 
 /** The named .service unit a cgroup path sits in, or null for scope/plain
- *  cgroups (jobs, session scopes, the bare user-manager cgroup). The user
- *  manager's own root cgroup (user@1000.service) is not an app unit: a
- *  leftover migrated there is still sweepable. */
+ *  cgroups (jobs, session scopes, the bare user-manager cgroup). Scans from
+ *  the tail so a unit's own sub-cgroups (unit/children/foo) still resolve
+ *  to that unit. The user manager's root cgroup (user@1000.service) is not
+ *  an app unit: a leftover migrated there is still sweepable. */
 export function serviceUnitOf(cgroup: string): string | null {
-  const seg = (cgroup.trim().split('\n').pop() ?? '').split('/').pop() ?? '';
-  if (/^user@\d+\.service$/.test(seg)) return null;
-  return /\.service$/.test(seg) ? seg : null;
+  const line = cgroup.trim().split('\n').pop() ?? '';
+  for (const seg of line.split('/').reverse()) {
+    if (/^user@\d+\.service$/.test(seg)) continue;
+    if (/\.service$/.test(seg)) return seg;
+  }
+  return null;
 }
 
 export function isOrphanedLaneWorker(
@@ -123,6 +131,8 @@ function snapshotProc(pid: number): ProcSnapshot | null {
   try {
     const argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean).join(' ');
     if (!argv) return null; // kernel threads have no cmdline
+    const stat = readProcStat(pid);
+    if (!stat) return null; // no identity to revalidate: never selectable
     const status = readFileSync(`/proc/${pid}/status`, 'utf8');
     const ppid = Number(/^PPid:\s+(\d+)/m.exec(status)?.[1] ?? 0);
     if (!ppid) return null;
@@ -130,7 +140,7 @@ function snapshotProc(pid: number): ProcSnapshot | null {
     // snapshot is skipped, so it can never be selected.
     const environ = readFileSync(`/proc/${pid}/environ`, 'utf8');
     const cgroup = readFileSync(`/proc/${pid}/cgroup`, 'utf8').trim().split('\n').pop() ?? '';
-    return { pid, ppid, environ, argv, cgroup };
+    return { pid, ppid, starttime: stat.starttime, environ, argv, cgroup };
   } catch {
     return null; // exited between readdir and read
   }
@@ -207,12 +217,17 @@ export function sweepOrphanedLaneWorkers(
   const um = userManagerPid();
   const ownUnit = serviceUnitOf(readSelfCgroup());
   const procs = list();
+  const byPid = new Map(procs.map((p) => [p.pid, p] as const));
   const victims = procs.filter((p) => isOrphanedLaneWorker(p, um, ownUnit));
   const killed: ReapedWorker[] = [];
   const targets: KillTarget[] = [];
   for (const victim of victims) {
     const stat = readProcStat(victim.pid);
-    if (!stat) continue; // exited between listing and kill
+    // Revalidate before every signal: the pid must still be the process the
+    // snapshot selected. A victim that exited and had its pid reused in the
+    // snapshot-to-kill window is never signalled — nor, if it led a group,
+    // is its (unrelated) new group.
+    if (!stat || stat.starttime !== victim.starttime) continue;
     const groupLeader = stat.pgrp === victim.pid;
     targets.push({ pid: victim.pid, starttime: stat.starttime, groupLeader });
     try {
@@ -224,10 +239,11 @@ export function sweepOrphanedLaneWorkers(
     } catch { /* gone */ }
     // Descendants outside the group (a child that setpgid'd or daemonized
     // into its own) are TERMed directly; in-group ones just get a second,
-    // harmless TERM.
+    // harmless TERM. Each is revalidated against the snapshot the same way.
     for (const pid of descendantsOf(victim.pid, procs)) {
+      const desc = byPid.get(pid);
       const childStat = readProcStat(pid);
-      if (!childStat) continue;
+      if (!desc || !childStat || childStat.starttime !== desc.starttime) continue;
       targets.push({ pid, starttime: childStat.starttime, groupLeader: false });
       try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ }
     }
@@ -279,28 +295,49 @@ export function markLaneWorkerKillable(pid: number | undefined): void {
 /** Raise the child's own oom_score_adj BEFORE exec'ing the CLI, so no
  *  descendant (an MCP server the CLI forks during startup) can race ahead
  *  of the write and inherit the protected server's -500. Quiet on failure:
- *  the post-spawn fallback in markLaneWorkerKillable observes and logs. */
+ *  the post-spawn fallback in markLaneWorkerKillable observes and logs.
+ *  Linux-only: the score file lives in /proc, which the sweep already
+ *  treats as optional on other hosts. */
 const LANE_WORKER_WRAPPER = 'echo 200 > /proc/self/oom_score_adj 2>/dev/null; exec "$@"';
 
+const IS_LINUX = process.platform === 'linux';
+
+/** Would a direct spawn of this command find an executable (the same
+ *  resolution a shell or the OS would do)? An unresolvable command skips
+ *  the wrapper so the direct spawn keeps its legacy failure semantics
+ *  (the ENOENT/EACCES 'error' event) instead of a wrapper exit 126/127. */
+function commandResolves(command: string): boolean {
+  if (command.includes('/')) {
+    try { accessSync(command, constants.X_OK); return true; } catch { return false; }
+  }
+  for (const dir of (process.env.PATH ?? '').split(':')) {
+    if (!dir) continue;
+    try { accessSync(join(dir, command), constants.X_OK); return true; } catch { /* keep scanning */ }
+  }
+  return false;
+}
+
 /**
- * Spawn a lane worker. The child runs through a bash wrapper that raises its
- * own OOM score before exec'ing the real CLI (argv, cwd, detached, stdio and
- * the caller's env are all preserved; exec keeps the pid, so session runners
- * and watchers keep working unchanged), and its env is stamped with this
- * boot's lane-worker marker so the boot sweep can prove ownership. Callers
- * pass exactly the spawn options they passed before.
+ * Spawn a lane worker. On Linux, with a resolvable command, the child runs
+ * through a bash wrapper that raises its own OOM score before exec'ing the
+ * real CLI (argv, cwd, detached, stdio and the caller's env are all
+ * preserved; exec keeps the pid, so session runners and watchers keep
+ * working unchanged). Every path — wrapped or direct — stamps the child's
+ * env with this boot's lane-worker marker so the boot sweep can prove
+ * ownership. Non-Linux hosts and unresolvable commands spawn directly.
+ * Callers pass exactly the spawn options they passed before.
  */
 export function spawnLaneWorker(
   command: string,
   args: readonly string[],
   options: SpawnOptions,
 ): ChildProcess {
-  const child = spawn('/bin/bash', ['-c', LANE_WORKER_WRAPPER, 'lane-worker', command, ...args], {
-    ...options,
-    env: options.env
-      ? { ...options.env, ...laneWorkerEnv() }
-      : { ...process.env, ...laneWorkerEnv() },
-  });
+  const env = options.env
+    ? { ...options.env, ...laneWorkerEnv() }
+    : { ...process.env, ...laneWorkerEnv() };
+  const child = IS_LINUX && commandResolves(command)
+    ? spawn('/bin/bash', ['-c', LANE_WORKER_WRAPPER, 'lane-worker', command, ...args], { ...options, env })
+    : spawn(command, args, { ...options, env });
   markLaneWorkerKillable(child.pid);
   return child;
 }

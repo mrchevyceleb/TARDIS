@@ -22,6 +22,7 @@ function snap(partial: Partial<ProcSnapshot>): ProcSnapshot {
   return {
     pid: 123,
     ppid: 1,
+    starttime: 999888,
     environ: MARKED,
     argv: 'claude --dangerously-skip-permissions',
     cgroup: SCOPE_CGROUP,
@@ -76,6 +77,9 @@ test('argv shape never gates selection: script-shaped CLIs carry the marker too'
 
 test('a foreign .service cgroup is untouchable even with the marker', () => {
   assert.ok(!isOrphanedLaneWorker(snap({ cgroup: UNIT_CGROUP('tellmax-relay.service') }), UM, OWN_UNIT));
+  // A unit's own sub-cgroups (systemd sub-directories) still resolve to
+  // that unit — the tail segment alone must not decide.
+  assert.ok(!isOrphanedLaneWorker(snap({ cgroup: `${UNIT_CGROUP('tellmax-relay.service')}/workers/foo` }), UM, OWN_UNIT));
   // A side copy (own unit null) must not touch a foreign unit either.
   assert.ok(!isOrphanedLaneWorker(snap({ cgroup: UNIT_CGROUP('tellmax-relay.service') }), UM, null));
 });
@@ -100,6 +104,8 @@ test('self and init are never selected', () => {
 test('serviceUnitOf parses the trailing named unit only', () => {
   assert.equal(serviceUnitOf(UNIT_CGROUP('rivendell.service')), 'rivendell.service');
   assert.equal(serviceUnitOf(UNIT_CGROUP('tardis.service')), 'tardis.service');
+  assert.equal(serviceUnitOf(`${UNIT_CGROUP('tellmax-relay.service')}/workers/foo`), 'tellmax-relay.service');
+  assert.equal(serviceUnitOf(`${UNIT_CGROUP('rivendell.service')}/children/bar`), 'rivendell.service');
   assert.equal(serviceUnitOf(SCOPE_CGROUP), null);
   assert.equal(serviceUnitOf('0::/user.slice/user-1000.slice/user@1000.service'), null);
   assert.equal(serviceUnitOf(''), null);
