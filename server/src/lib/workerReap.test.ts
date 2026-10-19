@@ -9,7 +9,7 @@ import {
 } from './workerReap.ts';
 
 const UM = 1000;
-const OWN_UNIT = 'rivendell.service';
+const OWN_UNITS = new Set(['rivendell.service']);
 /** A worker from a previous server boot: the dedicated marker, any token. */
 const MARKED = 'RIVENDELL_LANE_WORKER=previous-boot\0PATH=/usr/bin\0HOME=/home/x\0';
 /** A manual claude that merely inherited the usual TARDIS env keys: no marker. */
@@ -17,6 +17,10 @@ const UNMARKED_TARDIS_ENV = 'RIVENDELL_SIDE_COPY=0\0ELROND_WORKSPACE_PATH=/x\0PA
 const SCOPE_CGROUP = '0::/user.slice/user-1000.slice/user@1000.service/app.slice/session-7.scope';
 const UNIT_CGROUP = (unit: string) =>
   `0::/user.slice/user-1000.slice/user@1000.service/app.slice/${unit}`;
+/** A hybrid v1/v2 cgroup text where the systemd hierarchy is NOT the last line. */
+const HYBRID = (unit: string, tail = 'scope') =>
+  `1:name=systemd:/user.slice/user-1000.slice/user@1000.service/app.slice/${unit}\n`
+  + `0::/user.slice/user-1000.slice/user@1000.service/app.slice/session-9.${tail}`;
 
 function snap(partial: Partial<ProcSnapshot>): ProcSnapshot {
   return {
@@ -42,12 +46,12 @@ test('laneWorkerEnv stamps the dedicated marker; hasLaneWorkerMarker matches it'
 });
 
 test('marker + no living parent + no foreign unit = selected', () => {
-  assert.ok(isOrphanedLaneWorker(snap({}), UM, OWN_UNIT));
-  assert.ok(isOrphanedLaneWorker(snap({ ppid: UM }), UM, OWN_UNIT));
+  assert.ok(isOrphanedLaneWorker(snap({}), UM, OWN_UNITS));
+  assert.ok(isOrphanedLaneWorker(snap({ ppid: UM }), UM, OWN_UNITS));
 });
 
 test('a live parent is never selected (any live server keeps its workers)', () => {
-  assert.ok(!isOrphanedLaneWorker(snap({ ppid: 4242 }), UM, OWN_UNIT));
+  assert.ok(!isOrphanedLaneWorker(snap({ ppid: 4242 }), UM, OWN_UNITS));
 });
 
 test('the dedicated marker is the only ownership proof: a manual claude with ordinary TARDIS env is never selected', () => {
@@ -55,13 +59,13 @@ test('the dedicated marker is the only ownership proof: a manual claude with ord
     !isOrphanedLaneWorker(
       snap({ environ: UNMARKED_TARDIS_ENV, argv: 'claude --dangerously-skip-permissions' }),
       UM,
-      OWN_UNIT,
+      OWN_UNITS,
     ),
   );
   // Even the shapes the old argv heuristic keyed on are nothing without the
   // marker (the Grok Tell-Max relay class: parentless-shaped user service
   // with an mcp-bearing argv).
-  assert.ok(!isOrphanedLaneWorker(snap({ environ: UNMARKED_TARDIS_ENV, argv: 'node mcp-server-x' }), UM, OWN_UNIT));
+  assert.ok(!isOrphanedLaneWorker(snap({ environ: UNMARKED_TARDIS_ENV, argv: 'node mcp-server-x' }), UM, OWN_UNITS));
 });
 
 test('argv shape never gates selection: script-shaped CLIs carry the marker too', () => {
@@ -71,37 +75,41 @@ test('argv shape never gates selection: script-shaped CLIs carry the marker too'
     'env CLAUDE=1 claude --p',
     'bash -c echo',
   ]) {
-    assert.ok(isOrphanedLaneWorker(snap({ argv }), UM, OWN_UNIT), argv);
+    assert.ok(isOrphanedLaneWorker(snap({ argv }), UM, OWN_UNITS), argv);
   }
 });
 
-test('a foreign .service cgroup is untouchable even with the marker', () => {
-  assert.ok(!isOrphanedLaneWorker(snap({ cgroup: UNIT_CGROUP('tellmax-relay.service') }), UM, OWN_UNIT));
+test('a foreign .service cgroup is untouchable even with the marker, on any hierarchy line', () => {
+  assert.ok(!isOrphanedLaneWorker(snap({ cgroup: UNIT_CGROUP('tellmax-relay.service') }), UM, OWN_UNITS));
   // A unit's own sub-cgroups (systemd sub-directories) still resolve to
   // that unit — the tail segment alone must not decide.
-  assert.ok(!isOrphanedLaneWorker(snap({ cgroup: `${UNIT_CGROUP('tellmax-relay.service')}/workers/foo` }), UM, OWN_UNIT));
-  // A side copy (own unit null) must not touch a foreign unit either.
-  assert.ok(!isOrphanedLaneWorker(snap({ cgroup: UNIT_CGROUP('tellmax-relay.service') }), UM, null));
+  assert.ok(!isOrphanedLaneWorker(snap({ cgroup: `${UNIT_CGROUP('tellmax-relay.service')}/workers/foo` }), UM, OWN_UNITS));
+  // Hybrid v1/v2 text where the systemd hierarchy is NOT the last line.
+  assert.ok(!isOrphanedLaneWorker(snap({ cgroup: HYBRID('tellmax-relay.service') }), UM, OWN_UNITS));
+  // A side copy (no units of its own) must not touch a foreign unit either.
+  assert.ok(!isOrphanedLaneWorker(snap({ cgroup: UNIT_CGROUP('tellmax-relay.service') }), UM, new Set()));
 });
 
-test('own unit and every deployed TARDIS unit are sweepable, from any TARDIS boot', () => {
-  assert.ok(isOrphanedLaneWorker(snap({ cgroup: UNIT_CGROUP('rivendell.service') }), UM, OWN_UNIT));
+test('own units and every deployed TARDIS unit are sweepable, from any TARDIS boot', () => {
+  assert.ok(isOrphanedLaneWorker(snap({ cgroup: UNIT_CGROUP('rivendell.service') }), UM, OWN_UNITS));
   // Kim's box deploys tardis.service (scripts/setup-kim.sh): its leftovers
   // must not be categorically excluded.
-  assert.ok(isOrphanedLaneWorker(snap({ cgroup: UNIT_CGROUP('tardis.service') }), UM, OWN_UNIT));
-  assert.ok(isOrphanedLaneWorker(snap({ cgroup: UNIT_CGROUP('tardis.service') }), UM, 'tardis.service'));
-  // A side copy (scope, own unit null) may reap leftovers inside any TARDIS unit.
-  assert.ok(isOrphanedLaneWorker(snap({ cgroup: UNIT_CGROUP('rivendell.service') }), UM, null));
+  assert.ok(isOrphanedLaneWorker(snap({ cgroup: UNIT_CGROUP('tardis.service') }), UM, OWN_UNITS));
+  assert.ok(isOrphanedLaneWorker(snap({ cgroup: UNIT_CGROUP('tardis.service') }), UM, new Set(['tardis.service'])));
+  // A side copy (scope, no units of its own) may reap leftovers inside any TARDIS unit.
+  assert.ok(isOrphanedLaneWorker(snap({ cgroup: UNIT_CGROUP('rivendell.service') }), UM, new Set()));
+  // Our own unit on a non-last hierarchy line is still ours.
+  assert.ok(isOrphanedLaneWorker(snap({ cgroup: HYBRID('rivendell.service') }), UM, OWN_UNITS));
   // Scope cgroups (jobs, finished session scopes) are where real orphans sit.
-  assert.ok(isOrphanedLaneWorker(snap({ cgroup: SCOPE_CGROUP }), UM, null));
+  assert.ok(isOrphanedLaneWorker(snap({ cgroup: SCOPE_CGROUP }), UM, new Set()));
 });
 
 test('self and init are never selected', () => {
-  assert.ok(!isOrphanedLaneWorker(snap({ pid: process.pid }), UM, OWN_UNIT));
-  assert.ok(!isOrphanedLaneWorker(snap({ pid: 1 }), UM, OWN_UNIT));
+  assert.ok(!isOrphanedLaneWorker(snap({ pid: process.pid }), UM, OWN_UNITS));
+  assert.ok(!isOrphanedLaneWorker(snap({ pid: 1 }), UM, OWN_UNITS));
 });
 
-test('serviceUnitOf parses the trailing named unit only', () => {
+test('serviceUnitOf parses one hierarchy line, tail-first', () => {
   assert.equal(serviceUnitOf(UNIT_CGROUP('rivendell.service')), 'rivendell.service');
   assert.equal(serviceUnitOf(UNIT_CGROUP('tardis.service')), 'tardis.service');
   assert.equal(serviceUnitOf(`${UNIT_CGROUP('tellmax-relay.service')}/workers/foo`), 'tellmax-relay.service');

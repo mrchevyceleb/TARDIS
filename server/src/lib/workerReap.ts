@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { accessSync, constants, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
 /**
@@ -53,7 +54,8 @@ export interface ProcSnapshot {
   /** NUL-joined environ, used only for marker matching, never logged. */
   environ: string;
   argv: string;
-  /** Cgroup path (cgroup v2 line, e.g. "0::/user.slice/.../rivendell.service"). */
+  /** Raw /proc/<pid>/cgroup text — every hierarchy line, because a hybrid
+   *  box has one line per hierarchy and the systemd one is not always last. */
   cgroup: string;
 }
 
@@ -67,24 +69,48 @@ export function laneWorkerEnv(): Record<string, string> {
   return { [LANE_WORKER_ENV_KEY]: LANE_WORKER_INSTANCE };
 }
 
-/** The named .service unit a cgroup path sits in, or null for scope/plain
- *  cgroups (jobs, session scopes, the bare user-manager cgroup). Scans from
- *  the tail so a unit's own sub-cgroups (unit/children/foo) still resolve
- *  to that unit. The user manager's root cgroup (user@1000.service) is not
- *  an app unit: a leftover migrated there is still sweepable. */
-export function serviceUnitOf(cgroup: string): string | null {
-  const line = cgroup.trim().split('\n').pop() ?? '';
-  for (const seg of line.split('/').reverse()) {
+/** The named .service unit one cgroup hierarchy line sits in, or null for
+ *  scope/plain cgroups (jobs, session scopes, the bare user-manager
+ *  cgroup). Scans from the tail so a unit's own sub-cgroups
+ *  (unit/children/foo) still resolve to that unit. The user manager's root
+ *  cgroup (user@1000.service) is not an app unit: a leftover migrated
+ *  there is still sweepable. */
+export function serviceUnitOf(cgroupLine: string): string | null {
+  for (const seg of cgroupLine.trim().split('/').reverse()) {
     if (/^user@\d+\.service$/.test(seg)) continue;
     if (/\.service$/.test(seg)) return seg;
   }
   return null;
 }
 
+/** Every unit name our own cgroup text places THIS server in, across all
+ *  hierarchy lines. */
+function ownUnitsOf(cgroupText: string): Set<string> {
+  const units = new Set<string>();
+  for (const line of cgroupText.split('\n')) {
+    const unit = serviceUnitOf(line);
+    if (unit) units.add(unit);
+  }
+  return units;
+}
+
+/** True when ANY hierarchy line places the process inside a .service unit
+ *  that is neither ours nor a deployed TARDIS unit. Multi-line matters:
+ *  on a cgroup v1/hybrid box the systemd hierarchy can be a line other than
+ *  the last, and reading only one line would classify a foreign service's
+ *  process as unitless. */
+function inForeignServiceUnit(cgroupText: string, ownUnits: Set<string>): boolean {
+  for (const line of cgroupText.split('\n')) {
+    const unit = serviceUnitOf(line);
+    if (unit && !ownUnits.has(unit) && !TARDIS_UNIT_NAMES.has(unit)) return true;
+  }
+  return false;
+}
+
 export function isOrphanedLaneWorker(
   proc: ProcSnapshot,
   userManagerPid: number,
-  ownUnit: string | null,
+  ownUnits: Set<string>,
 ): boolean {
   if (proc.pid === process.pid || proc.pid <= 1) return false;
   // Parentless: the spawning server is gone (a re-parented child lands under
@@ -95,15 +121,14 @@ export function isOrphanedLaneWorker(
   // The dedicated marker is the only ownership proof: this key is set by
   // spawnLaneWorker alone, and every worker's MCP children inherit it.
   if (!hasLaneWorkerMarker(proc.environ)) return false;
-  // A named .service cgroup that is neither our own unit nor a deployed
-  // TARDIS unit is another unit's process. Belt and suspenders on top of the
-  // marker: the Oct 19 dry run caught the Grok Tell-Max relay — a running
-  // user service whose environment and "mcp"-bearing argv overlap ours —
-  // and a stamp must never license touching another unit. Scope cgroups
-  // (jobs, finished session scopes) stay sweepable, which is where real
-  // orphans sit.
-  const unit = serviceUnitOf(proc.cgroup);
-  if (unit && unit !== ownUnit && !TARDIS_UNIT_NAMES.has(unit)) return false;
+  // A named .service cgroup — on ANY hierarchy line — that is neither our
+  // own unit nor a deployed TARDIS unit is another unit's process. Belt and
+  // suspenders on top of the marker: the Oct 19 dry run caught the Grok
+  // Tell-Max relay — a running user service whose environment and
+  // "mcp"-bearing argv overlap ours — and a stamp must never license
+  // touching another unit. Scope cgroups (jobs, finished session scopes)
+  // stay sweepable, which is where real orphans sit.
+  if (inForeignServiceUnit(proc.cgroup, ownUnits)) return false;
   return true;
 }
 
@@ -139,7 +164,7 @@ function snapshotProc(pid: number): ProcSnapshot | null {
     // An unreadable environ (another user's process) fails closed: the
     // snapshot is skipped, so it can never be selected.
     const environ = readFileSync(`/proc/${pid}/environ`, 'utf8');
-    const cgroup = readFileSync(`/proc/${pid}/cgroup`, 'utf8').trim().split('\n').pop() ?? '';
+    const cgroup = readFileSync(`/proc/${pid}/cgroup`, 'utf8').trim();
     return { pid, ppid, starttime: stat.starttime, environ, argv, cgroup };
   } catch {
     return null; // exited between readdir and read
@@ -204,21 +229,23 @@ interface KillTarget { pid: number; starttime: number; groupLeader: boolean }
  *  process group when the victim leads one, the victim plus its enumerated
  *  descendants when it does not), then SIGKILL the still-living targets
  *  after a 3s grace — the same shutdown idiom the session runners use.
- *  Every delayed kill is revalidated against the start time recorded when
- *  the target was first signalled, so a pid the kernel has reused in the
- *  grace window is never signalled. A descendant forked inside the grace
- *  window and not enumerated at TERM time survives to the next boot's
- *  sweep (it still carries the marker). Idempotent across concurrent boots:
- *  a second sweep of a dying group hits ESRCH and moves on. */
+ *  Every signal is revalidated against the start time recorded in the
+ *  snapshot, so a pid the kernel reused across the real windows — the
+ *  listing pass, the 3s grace — is never signalled. The residual window is
+ *  the microseconds between the revalidation read and the adjacent signal,
+ *  which is inherent to signal-based reaping: an absolute identity
+ *  guarantee needs pidfds, which Node has no binding for (native code,
+ *  card-16bc3e). Idempotent across concurrent boots: a second sweep of a
+ *  dying group hits ESRCH and moves on. */
 export function sweepOrphanedLaneWorkers(
   list: () => ProcSnapshot[] = listProcSnapshots,
 ): { killed: ReapedWorker[] } {
   if (!existsSync('/proc')) return { killed: [] }; // non-Linux host: nothing to sweep
   const um = userManagerPid();
-  const ownUnit = serviceUnitOf(readSelfCgroup());
+  const ownUnits = ownUnitsOf(readSelfCgroup());
   const procs = list();
   const byPid = new Map(procs.map((p) => [p.pid, p] as const));
-  const victims = procs.filter((p) => isOrphanedLaneWorker(p, um, ownUnit));
+  const victims = procs.filter((p) => isOrphanedLaneWorker(p, um, ownUnits));
   const killed: ReapedWorker[] = [];
   const targets: KillTarget[] = [];
   for (const victim of victims) {
@@ -296,36 +323,47 @@ export function markLaneWorkerKillable(pid: number | undefined): void {
  *  descendant (an MCP server the CLI forks during startup) can race ahead
  *  of the write and inherit the protected server's -500. Quiet on failure:
  *  the post-spawn fallback in markLaneWorkerKillable observes and logs.
- *  Linux-only: the score file lives in /proc, which the sweep already
- *  treats as optional on other hosts. */
+ *  POSIX sh, run by /bin/sh: guaranteed where /proc is, unlike bash on
+ *  bash-less distributions. Linux-only: the score file lives in /proc,
+ *  which the sweep already treats as optional on other hosts. */
 const LANE_WORKER_WRAPPER = 'echo 200 > /proc/self/oom_score_adj 2>/dev/null; exec "$@"';
 
 const IS_LINUX = process.platform === 'linux';
 
-/** Would a direct spawn of this command find an executable (the same
- *  resolution a shell or the OS would do)? An unresolvable command skips
- *  the wrapper so the direct spawn keeps its legacy failure semantics
- *  (the ENOENT/EACCES 'error' event) instead of a wrapper exit 126/127. */
-function commandResolves(command: string): boolean {
+/** Would a direct spawn of this command find an executable, modeled on
+ *  the child's actual environment: the caller-supplied env's PATH (empty
+ *  components mean the cwd, POSIX-style; a child with no PATH cannot
+ *  resolve a bare name, exactly like the legacy direct spawn), relative
+ *  slash-commands resolved against the caller-supplied cwd. An unresolvable
+ *  command skips the wrapper so the direct spawn keeps its legacy failure
+ *  semantics (the ENOENT/EACCES 'error' event) instead of a wrapper exit
+ *  126/127. */
+function commandResolves(command: string, options: SpawnOptions, env: NodeJS.ProcessEnv): boolean {
+  const cwd = typeof options.cwd === 'string' ? options.cwd : options.cwd ? fileURLToPath(options.cwd) : process.cwd();
   if (command.includes('/')) {
-    try { accessSync(command, constants.X_OK); return true; } catch { return false; }
+    try { accessSync(resolve(cwd, command), constants.X_OK); return true; } catch { return false; }
   }
-  for (const dir of (process.env.PATH ?? '').split(':')) {
-    if (!dir) continue;
-    try { accessSync(join(dir, command), constants.X_OK); return true; } catch { /* keep scanning */ }
+  const path = env.PATH ?? '';
+  if (!path) return false; // the child could not resolve a bare name either
+  for (const dir of path.split(':')) {
+    const base = dir === '' ? cwd : dir; // POSIX: an empty PATH component means the cwd
+    if (!base) continue;
+    try { accessSync(resolve(base, command), constants.X_OK); return true; } catch { /* keep scanning */ }
   }
   return false;
 }
 
 /**
- * Spawn a lane worker. On Linux, with a resolvable command, the child runs
- * through a bash wrapper that raises its own OOM score before exec'ing the
- * real CLI (argv, cwd, detached, stdio and the caller's env are all
- * preserved; exec keeps the pid, so session runners and watchers keep
- * working unchanged). Every path — wrapped or direct — stamps the child's
- * env with this boot's lane-worker marker so the boot sweep can prove
- * ownership. Non-Linux hosts and unresolvable commands spawn directly.
- * Callers pass exactly the spawn options they passed before.
+ * Spawn a lane worker. On Linux, with a resolvable command and no
+ * options.shell, the child runs through an /bin/sh wrapper that raises its
+ * own OOM score before exec'ing the real CLI (argv, cwd, detached, stdio
+ * and the caller's env are all preserved; exec keeps the pid, so session
+ * runners and watchers keep working unchanged). Every path — wrapped or
+ * direct — stamps the child's env with this boot's lane-worker marker so
+ * the boot sweep can prove ownership. Non-Linux hosts, unresolvable
+ * commands and shell spawns go direct, keeping their exact prior behavior
+ * and error semantics. Callers pass exactly the spawn options they passed
+ * before.
  */
 export function spawnLaneWorker(
   command: string,
@@ -335,8 +373,12 @@ export function spawnLaneWorker(
   const env = options.env
     ? { ...options.env, ...laneWorkerEnv() }
     : { ...process.env, ...laneWorkerEnv() };
-  const child = IS_LINUX && commandResolves(command)
-    ? spawn('/bin/bash', ['-c', LANE_WORKER_WRAPPER, 'lane-worker', command, ...args], { ...options, env })
+  // options.shell keeps its caller contract: the wrapper only wraps plain
+  // spawns, so a caller's own shell parsing is never nested inside ours.
+  // /bin/sh (not bash): the wrapper is POSIX sh and /bin/sh is guaranteed
+  // where /proc is.
+  const child = IS_LINUX && !options.shell && commandResolves(command, options, env)
+    ? spawn('/bin/sh', ['-c', LANE_WORKER_WRAPPER, 'lane-worker', command, ...args], { ...options, env })
     : spawn(command, args, { ...options, env });
   markLaneWorkerKillable(child.pid);
   return child;
