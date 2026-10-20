@@ -435,7 +435,14 @@ export function spawnContained(command: string, args: readonly string[], options
       // A launch that never registered a scope never ran a command: systemd-run
       // itself refused it (unsupported property, unit clash, manager trouble).
       // Say so plainly — a silent refusal must never look like a healthy host.
-      if (!result && !existsSync(`${userCgroup}/tardis.slice/${SLICE}/${unit}.scope`)) {
+      // But a worker that ran and exited non-zero leaves no cgroup once
+      // --collect removes it, so the cgroup's absence alone proves nothing:
+      // ask the journal whether the unit ever started (identity fields only,
+      // never MESSAGE or command output).
+      if (!result
+        && !existsSync(`${userCgroup}/tardis.slice/${SLICE}/${unit}.scope`)
+        && !(await unitEverStarted(unit)))
+      {
         recordResourceIncident(owner, `The contained launch was refused before its scope registered (exit ${code ?? signal}). TARDIS did not run it uncontained.`);
         return;
       }
@@ -448,6 +455,17 @@ export function spawnContained(command: string, args: readonly string[], options
     });
   });
   return child;
+}
+
+/// Did this scope ever actually start? A launch systemd-run refuses never
+/// creates the unit, so the journal has no record for it. A scope that ran and
+/// exited non-zero leaves a bounded unit record behind even after --collect
+/// removes its cgroup. Only identity/comm fields are requested — never MESSAGE
+/// or command output.
+async function unitEverStarted(unit: string): Promise<boolean> {
+  if (!/^tardis-(?:worker|job|watch)-[a-f0-9-]+$/.test(unit)) return false;
+  const out = await commandOutput('journalctl', ['--user', `--unit=${unit}.scope`, '--no-pager', '-n', '1', '-o', 'json', '--output-fields=UNIT,_COMM']).catch(() => '');
+  return out.trim().length > 0;
 }
 
 export async function scopeOutcome(unit: string): Promise<string> {
