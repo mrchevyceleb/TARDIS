@@ -19,8 +19,9 @@ import { clearThreadSessionIds } from './sessions.ts';
 import { backgroundChatId, isAgentThread, threadLogKey } from './threadKey.ts';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
 
-/** Leads allowed to fresh a lane: Matt (UI + this path), Kip, Max, Riley. */
-const FRESH_CALLERS = new Set(['matt', 'kip', 'chief-of-staff', 'riley']);
+/** Leads allowed to fresh a lane, by roster id or display name (the MCP
+ *  forwards whichever identity the runner stamped: id or name). */
+const FRESH_CALLERS = new Set(['matt', 'kip', 'chief-of-staff', 'chief of staff', 'max', 'riley']);
 
 /** True when the caller may fresh another lane's chat. */
 export function canFreshChat(callerId: string): boolean {
@@ -59,9 +60,8 @@ export async function freshChatForAgent(agent: Agent, callerId: string): Promise
 
   const runner = await import('./runner.ts');
   const sessions = runner.activeChatSessions();
-  const busy = sessions.some(
-    (s) => s.chatId === chatId || s.chatId === backgroundChatId(chatId),
-  ) && sessions.some((s) => (s.chatId === chatId || s.chatId === backgroundChatId(chatId)) && s.busy);
+  const laneSessions = sessions.filter((s) => s.chatId === chatId || s.chatId === backgroundChatId(chatId));
+  const busy = laneSessions.some((s) => s.busy);
   if (busy) {
     return { ok: false, reason: `${agent.name} has a live turn — wait for it to end, then fresh` };
   }
@@ -73,7 +73,7 @@ export async function freshChatForAgent(agent: Agent, callerId: string): Promise
     await persistThreadResetEpoch(logKey, resetAt);
     // Retire every live engine (idle ones too) and erase native resume ids,
     // so switching back to an old engine cannot resurrect the thread.
-    for (const s of sessions.filter((x) => x.chatId === chatId || x.chatId === backgroundChatId(chatId))) {
+    for (const s of laneSessions) {
       await runner.interruptSession({ cli: s.cli, repoPath: s.cwd, chatId: s.chatId });
       runner.dropSession(s.cli, s.cwd, s.chatId);
     }
