@@ -1,16 +1,10 @@
 /** Usage from one model call, never a turn's accumulated billing totals. */
-export const CONTEXT_TOKEN_BUDGET = 200_000;
-/** Claude Code compacts natively at (window - 20k summary reserve - 13k buffer),
- *  so a 200k window would fire its lossy compact near 167k and starve our
- *  boundary rotation. Pad the window so the native compact only backstops a
- *  single long turn that runs past the budget. The pad leaves about 27k tokens
- *  between the budget and the native compact: a 7k gap let the first turn
- *  after the budget cross the line and compact natively before a rotation ran. */
-export const NATIVE_COMPACT_PAD = 60_000;
-export const CLAUDE_NATIVE_COMPACT_WINDOW = CONTEXT_TOKEN_BUDGET + NATIVE_COMPACT_PAD;
-/** Claude Code's own compact fires this far below the window it is given
- *  (20k summary reserve + 13k buffer). */
+export const CONTEXT_TOKEN_BUDGET = 300_000;
+/** Native Claude Code reserves 20k output tokens plus a 13k compact buffer.
+ * A 333k window makes its actual automatic trigger 300k. TARDIS never rotates. */
 export const NATIVE_COMPACT_MARGIN = 33_000;
+export const NATIVE_COMPACT_PAD = NATIVE_COMPACT_MARGIN;
+export const CLAUDE_NATIVE_COMPACT_WINDOW = CONTEXT_TOKEN_BUDGET + NATIVE_COMPACT_MARGIN;
 /** Budgets learned this process from a provider refusing a context below its
  *  catalog window, keyed by model id. Never persisted: a restart retries the
  *  catalog number, and the first refusal teaches it again. */
@@ -26,8 +20,8 @@ export function providerContextBudget(model: string, window: number): number {
   return Math.min(base, learnedBudgets.get(model) ?? Infinity);
 }
 /** The native compact only backstops the lane's own rotation budget. */
-export function providerNativeCompactWindow(model: string, window: number): number {
-  return Math.min(window, providerContextBudget(model, window) + NATIVE_COMPACT_PAD);
+export function providerNativeCompactWindow(_model: string, window: number): number {
+  return Math.min(window, CLAUDE_NATIVE_COMPACT_WINDOW);
 }
 /** A provider refused (or Claude Code compacted reactively at) `tokens`; rotate
  *  this model 15% below that for the rest of the process. Returns the budget. */

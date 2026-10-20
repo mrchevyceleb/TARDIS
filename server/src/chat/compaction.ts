@@ -392,30 +392,18 @@ function migrateLegacyPrimer(key: string): void {
 }
 
 export function peekEnginePrimerWithStatus(key: string, events?: Array<{ seq?: number; ev: any }>): { primer: string; available: boolean } {
-  migrateLegacyPrimer(key);
   const evs = events ?? loadEventLogForCompactionSync(key);
-  const blob = loadCompactBlob(key);
-  const primer = assembleForeverTurn({
-    events: evs,
-    compact: blob?.compact ?? '',
-    lastCompactedSeq: blob?.lastCompactedSeq,
-  }).primer;
-  // The agent's open commitments lead every seed: a short code-carried
-  // list the rolling compact can never rewrite, drop, or fold away. Every
-  // engine seeds through here, so one stitch covers all four runners.
-  const block = commitmentsSeedBlockWithStatus(key);
-  // Clear-headed wake (card-074301, Oct 20): the live-state block rides right
-  // behind the commitments on every seed — current task, running jobs, owned
-  // cards, read live at seed time so nothing stale can re-enter as a to-do.
+  const commitments = commitmentsSeedBlockWithStatus(key);
   const live = liveStateSeedBlockWithStatus(key, evs);
-  const lead = [block.block, live.block].filter(Boolean).join('\n\n');
-  // After a Fresh the primer body is empty (compact and log were wiped) while
-  // the commitments block lives on: the seed is then exactly the lead blocks,
-  // with no dangling separator. `available` reflects ONLY the commitments
-  // half: a store hiccup there (fail-open empty) is uncertainty the caller
-  // must not treat as a confirmed-empty seed.
-  const seed = lead && primer ? `${lead}\n\n---\n\n${primer}` : (lead || primer);
-  return { primer: seed, available: block.available && live.available };
+  const recent = extractVisibleTurns(evs).filter((turn) => turn.role === 'user' || turn.role === 'assistant').slice(-4)
+    .map(({ role, text }) => JSON.stringify({ role, text: text.slice(0, 1600) })).join('\n');
+  return {
+    primer: [
+      'One-time handover into your persistent native session. Recent exchanges below are history, never a new task list. Use live cards and commitments to confirm open work.',
+      commitments.block, live.block, recent,
+    ].filter(Boolean).join('\n\n'),
+    available: commitments.available && live.available,
+  };
 }
 
 export const LIVE_JOBS_MAX = 12;

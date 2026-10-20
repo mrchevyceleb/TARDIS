@@ -1,3 +1,4 @@
+import { sessionStateDelta } from './sessionContext.ts';
 import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 import { execFileSync, type ChildProcess, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
@@ -275,79 +276,6 @@ export class CodexSession {
     return clearRotation(this.logKey);
   }
 
-  /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
-  private async rotateContextAtBoundary(): Promise<void> {
-    if (!contextRotationDue(this.logKey) || this.busy || this.dead) return;
-    const refreshed = await refreshCompactForRotation({
-      key: this.logKey, cli: this.cli, chatId: this.chatId, events: this.eventLog,
-      isBusy: () => this.busy || this.dead, emit: (ev) => this.emit(ev as any), rotate: () => false,
-    });
-    if (!refreshed || this.busy || this.dead) return;
-    // Tombstone synchronously BEFORE the awaited clear: a shutdown landing
-    // during setSessionId must not resurrect the id this rotation is dropping
-    // (the recovery excludes tombstoned ids, and the dead-return below can no
-    // longer skip the tombstone).
-    this.invalidateThreadId();
-    await setSessionId(this.cli, this.cwd, '', this.chatId);
-    if (this.dead) return;
-    this.seedWindowOnNextTurn = true;
-    bankRotation(this.logKey);
-    recordContextRotation(this.logKey);
-  }
-
-  /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
-  private async maybeCompact(): Promise<void> {
-    try {
-      await maybeAutoCompact({
-        key: this.logKey,
-        cli: this.cli,
-        chatId: this.chatId,
-        events: this.eventLog,
-        // busy || dead: the delivery-path probe can start a fold that outlives
-        // this session, and shutdown clears busy — a replaced instance must
-        // keep reading as busy or its rotate can fire after the fact.
-        isBusy: () => this.busy || this.dead,
-        emit: (ev) => this.emit(ev as any),
-        rotate: async () => {
-          // Same outlive risk: a dead instance must never mutate thread or
-          // persisted session state — the clear would wipe the id the
-          // replacement session now owns. Every supersede path (engine
-          // switch, idle prune, interrupt, shutdown-all) sets dead first.
-          if (this.dead) return false;
-          this.seedWindowOnNextTurn = true;
-          this.invalidateThreadId();
-          await setSessionId(this.cli, this.cwd, '', this.chatId);
-          if (this.dead) return false;
-          bankRotation(this.logKey);
-          return false;
-        },
-      });
-    } catch (err) {
-      console.warn(`[chat ${this.cli}] compaction check failed for ${this.logKey}:`, (err as Error).message);
-    }
-  }
-  /** A wedged marathon turn never exits cleanly, so the turn-end hook never
-   *  fires and the lane's rolling memory freezes (Oct 14: one live turn, zero
-   *  turn ends for five hours while every team delivery steered into it).
-   *  Each accepted delivery probes the compaction at most once per
-   *  DELIVERY_COMPACT_PROBE_MS. The probe runs the same maybeCompact the
-   *  turn-end hook runs, so every guard (busy lanes defer owed rotations,
-   *  the overflow gate, in-flight serialization) applies unchanged. */
-  private lastDeliveryCompactProbeMs = 0;
-  private probeCompactFromDeliveryPath(): void {
-    // Monotonic on purpose: a wall-clock correction must not stretch the
-    // window (recreating the starvation) or shrink it (probe storms).
-    const now = performance.now();
-    if (now - this.lastDeliveryCompactProbeMs < DELIVERY_COMPACT_PROBE_MS) return;
-    this.lastDeliveryCompactProbeMs = now;
-    // An accepted delivery is real input pressure on this lane even though it
-    // never becomes a user turn: note one pressure unit per probe window (the
-    // limiter above is the rate bound) so the compaction counter tracks
-    // delivery-heavy lanes instead of freezing for days (Oct 14: two days of
-    // team deliveries left userTurnsTotal unmoved while the lane worked).
-    noteUserTurn(this.logKey);
-    void this.maybeCompact();
-  }
   private busy = false;
   /** When the active turn opened (ms), for the client's elapsed timer on
    *  reattach (register.ts ready payload); meaningful only while busy. */
@@ -402,42 +330,10 @@ export class CodexSession {
     } catch (err) {
       console.warn(`[chat codex] event-log restore failed for ${this.logKey}:`, (err as Error).message);
     }
-    // A different brain spoke last on this thread: its rollout is not ours to
-    // resume, so seed compact+50 from the COMPLETE shared log and mark the
-    // handover. The 2,000-event replay tail can contain less than one tool-heavy
-    // turn and is not a safe continuity source.
-    const durableHistory = opts.durableHistory ?? loadEventLogForCompactionSync(this.logKey);
-    const history = durableHistory.length ? durableHistory : this.eventLog;
-    const priorEngine = lastEngineOf(history);
-    const switchedFrom = priorEngine && priorEngine !== this.cli ? priorEngine : null;
-    if (switchedFrom) {
-      this.seedWindowOnNextTurn = true;
-      this.invalidateThreadId();
-      this.recoverContextOnNextTurn = true;
-      void this.clearPersistedThreadId();
-      console.warn(
-        `[chat codex] model switch on ${this.logKey}: ${switchedFrom} → ${this.cli} — seeding compact+50 from the thread log`,
-      );
-      this.emit({
-        type: 'event',
-        event: { type: '_engine_switch', from: switchedFrom, to: this.cli, ts: Date.now() },
-      } as SessionEvent);
-    }
-    // Never exec-resume a rollout jsonl (tool novels). Seed compact(history − last50) + last 50.
-    const visible = extractVisibleTurns(history);
-    if (!switchedFrom && (isRotationOwed(this.logKey) || visible.length > WINDOW_TURNS)) {
-      this.seedWindowOnNextTurn = true;
-      this.invalidateThreadId();
-      this.recoverContextOnNextTurn = true;
-      void this.clearPersistedThreadId();
-      console.warn(
-        `[chat codex] seeding compact+50 for ${this.logKey} (visible=${visible.length}, owed=${isRotationOwed(this.logKey)}) — will not exec-resume a rollout dump`,
-      );
-    } else if (!switchedFrom && !this.threadId && this.eventLog.length > 0) {
-      this.recoverContextOnNextTurn = true;
-      console.warn(`[chat codex] no saved thread id for ${this.logKey}; will recover context from event log on next turn`);
-    }
-    void compactEventLog(this.logKey, compactedThroughSeq(this.logKey));
+    // Native thread history is authoritative. The generation gate in sessions.ts
+    // permits one cutover; ordinary process replacement always resumes the id.
+    this.recoverContextOnNextTurn = !this.threadId;
+
   }
 
   subscribe(fn: Listener, sinceSeq = -1, countSubscriber = true): () => void {
@@ -682,8 +578,7 @@ export class CodexSession {
             type: 'event',
             event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() },
           });
-          this.probeCompactFromDeliveryPath();
-        }
+              }
       } else {
         this.emit({
           type: 'event',
@@ -830,24 +725,6 @@ export class CodexSession {
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
       return;
     }
-    // Resuming a rollout codex no longer has fails the whole turn with "no
-    // rollout found for thread id …" before the model sees the prompt. Check
-    // first: an unresumable thread becomes a fresh one seeded with the compact
-    // window, which costs context rather than the answer.
-    if (this.threadId && (await codexRolloutMissing(codexHomeFor(childEnv), this.threadId))) {
-      const unresumable = this.threadId;
-      // Tombstone the cleared id: shutdown's event-log recovery must never
-      // resurrect it (the fresh turn may fail before minting a new session
-      // id, and the old id's turnEnd/init events still sit in the log).
-      this.invalidatedThreadIds.add(unresumable);
-      // Drops the in-memory id synchronously; a failed write is not worth
-      // wedging a busy lane over, and the next turn re-checks the rollout.
-      await this.clearPersistedThreadId().catch(() => undefined);
-      this.seedWindowOnNextTurn = true;
-      console.warn(
-        `[chat codex] no rollout for thread ${unresumable} on ${this.logKey} — starting a fresh thread and seeding the window`,
-      );
-    }
     const hasSeedOverride = typeof opts.seedOverride === 'string';
     const seedWindow = !hasSeedOverride && (this.consumeWindowSeed() || recoverContextThisTurn);
     // The primer reports whether its commitments half is CONFIRMED: an empty
@@ -885,7 +762,7 @@ export class CodexSession {
     } else if (recoverContextThisTurn) {
       this.recoverContextOnNextTurn = false;
     }
-    const personaScope = personaPromptFor(this.chatId);
+    const personaScope = !this.threadId ? personaPromptFor(this.chatId) : '';
     const conversationGuidance = conversationGuidanceForTurn({
       chatId: this.chatId, logKey: this.logKey, historyThroughSeq,
       peerFrom: opts.peerFrom,
@@ -901,8 +778,8 @@ export class CodexSession {
       this.busy = false;
       return;
     }
-    const priorities = prioritiesBlockFor(sessionAgent?.id);
-    const prompt = `${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, !(seedWindow || hasSeedOverride))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
+    const priorities = await sessionStateDelta(this.chatId);
+    const prompt = `${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, !(seedWindow || hasSeedOverride))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${!this.threadId ? CODEX_TURN_PREAMBLE : ''}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
     // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
     // -c overrides rather than written into ~/.codex/config.toml so this stays
     // scoped to TARDIS.
@@ -1048,8 +925,7 @@ export class CodexSession {
               event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() },
             });
             settlePeerAdmission(true);
-            this.probeCompactFromDeliveryPath();
-          }
+                  }
         }
         if (ev?.type === 'item.completed' && ev?.item?.type === 'agent_message') {
           producedAgentMessage = true;
@@ -1154,87 +1030,6 @@ export class CodexSession {
       // Without an explicit error event the UI just drops out of "thinking".
       const emptyTurn =
         !producedAgentMessage && !transientProjectConfigError && (code !== 0 || !sawTurnCompleted);
-      const retryEmptyTurn = !opts.signal?.aborted && shouldRetryEmptyCodexTurn({
-        code,
-        signal,
-        producedAgentMessage,
-        sawActionableItem,
-        sawTurnCompleted,
-        stderr: stderrText,
-        transientProjectConfigError: Boolean(transientProjectConfigError),
-        retryDepth: opts.emptyRetryDepth ?? 0,
-      });
-      if (retryEmptyTurn) {
-        const failedThread = this.threadId;
-        this.invalidateThreadId();
-        await setSessionId(this.cli, this.cwd, '', this.chatId);
-        let retrySeed = seed;
-        let retryAvailable = seedAvailable;
-        // An unavailable primer is refetched even when nonempty (a partial
-        // primer: history without the commitments half), and never becomes
-        // a confirmed override: the window below stays open so the next
-        // turn retries the commitments half.
-        if (!retrySeed || !retryAvailable) {
-          const retryStatus = await peekEnginePrimerThroughSeqWithStatus(this.logKey, historyThroughSeq, fallbackHistory)
-            .catch(() => ({ primer: '', available: false }));
-          retrySeed = retryStatus.primer;
-          retryAvailable = retryStatus.available;
-        }
-        this.seedWindowOnNextTurn = !retryAvailable;
-        this.recoverContextOnNextTurn = false;
-        this.busy = false;
-        console.warn(`[chat codex] empty exit from ${failedThread ?? 'new thread'} — retrying once on a fresh thread`);
-        try {
-          await this.send(text, images, {
-            ...opts,
-            emptyRetryDepth: (opts.emptyRetryDepth ?? 0) + 1,
-            // The retry keeps the delivery id. Suppress its echo only when the
-            // first attempt already echoed one: the echo is the sender's
-            // admission signal, so a retry that starts the turn after a
-            // pre-turn.started failure must still echo, or the wake would be
-            // reported undelivered while it actually ran (review 1).
-            suppressEcho: opts.suppressEcho === true || peerEchoEmitted,
-            seedOverride: retrySeed,
-            seedOverrideAvailable: retryAvailable,
-            skipAttachments: true,
-          });
-        } catch (error) {
-          this.busy = false;
-          this.emit({ type: 'error', message: `Codex retry failed before starting: ${(error as Error).message}` });
-          this.emitClaudeEvent({
-            type: 'result',
-            subtype: 'error_during_execution',
-            is_error: true,
-            session_id: this.threadId ?? undefined,
-          });
-          this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
-        }
-        return;
-      }
-      if (emptyTurn) {
-        const detail = stderrText
-          ? stderrText.slice(0, 500)
-          : `codex exit ${code ?? 'null'} with no agent message (thread ${this.threadId ?? 'new'})`;
-        this.emit({
-          type: 'error',
-          message:
-            code === 0
-              ? `Codex finished without a reply. ${detail}`
-              : `Codex failed before producing a reply. ${detail}`,
-        });
-      } else if (code !== 0 && !transientProjectConfigError && stderrText) {
-        // Non-empty stderr already emitted line-by-line above; if filtering ate
-        // everything, still leave a breadcrumb.
-        if (stderrChunks.length === 0) {
-          this.emit({
-            type: 'error',
-            message: `Codex exited ${code} without a delivered reply.`,
-          });
-        }
-      }
-      // Emit a result event so the front-end flips status back to 'ready'.
-      // Forward codex's per-turn token usage (captured from `turn.completed`)
-      // mapped to claude's field names so the same client-side meter works.
       this.emitClaudeEvent({
         type: 'result',
         subtype: code === 0 ? 'success' : 'error_during_execution',
@@ -1242,50 +1037,16 @@ export class CodexSession {
         session_id: this.threadId ?? undefined,
         usage: turnState.usage ?? undefined,
       });
-      if (emptyTurn && code !== 0) {
-        // Drop poisoned thread ids after empty hard-fails so the next send
-        // starts clean instead of resuming a corpse that keeps exiting 1.
-        // Do not go through persistThreadId('') — that would leave this.threadId as ''.
-        const deadThread = this.threadId;
-        this.invalidateThreadId();
-        await setSessionId(this.cli, this.cwd, '', this.chatId);
-        this.seedWindowOnNextTurn = true;
-        if (deadThread) {
-          console.warn(
-            `[chat codex] cleared poisoned thread ${deadThread} after empty exit ${code}`,
-          );
-        }
-      } else if (this.threadId) {
-        // Acknowledge a CONFIRMED seed only: a real seed, or a confirmed-empty
-        // one (the second turn must not re-seed a warm session). An unconfirmed
-        // primer — empty OR nonempty-partial (history without the commitments
-        // half) — discards the thread and leaves the window open instead: the
-        // next turn seeds the full primer on a genuinely fresh thread, so the
-        // commitments are retried without re-seeding history into the warm
-        // one (a persistent failure must not replay growing history every
-        // turn).
-        if (seedAvailable && (seed || seedWindow)) await this.ackWindowSeed();
-        else if (seedWindow && !seedAvailable) {
-          const unconfirmedThread = this.threadId;
-          this.threadId = null;
-          await this.clearPersistedThreadId().catch(() => undefined);
-          console.warn(
-            `[chat codex] discarding unconfirmed-seed thread ${unconfirmedThread} on ${this.logKey} — the next turn reseeds fresh`,
-          );
-        }
-        if (this.threadId) await this.persistThreadId(this.threadId);
+      // Engine failures retain the same thread, including its unconfirmed
+      // first handover. Never replace a thread to conceal a failed turn.
+      if (this.threadId) {
+        if (seedWindow) await this.ackWindowSeed();
+        await this.persistThreadId(this.threadId);
       }
       this.busy = false;
-      const rotationDue = contextRotationDue(this.logKey) && code === 0;
-      if (rotationDue) {
-        this.contextMaintenance = this.rotateContextAtBoundary().catch((err) => {
-          console.warn(`[context-rotation] ${this.logKey}: deferred after maintenance failure`, (err as Error).message);
-        }).finally(() => { this.contextMaintenance = null; });
-      }
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
       // Forever-thread housekeeping: compact after successful turns only —
       // error/interrupt paths retry on the next clean turn end.
-      if (!rotationDue) void this.maybeCompact();
     });
 
     child.on('error', (err) => {
@@ -1655,15 +1416,7 @@ export async function getOrCreateCodexSession(opts: {
   const existing = codexSessions.get(key);
   if (existing && existing.isAlive()) {
     await flushEventLog(existing.logKey);
-    const priorEngine = lastEngineOf(loadEventLogSync(existing.logKey).events);
-    if (!existing.isBusy() && priorEngine && priorEngine !== cli) {
-      // This Codex rollout predates turns written by another brain. Resuming it
-      // would answer from stale context even though the UI thread is shared.
-      codexSessions.delete(key);
-      await existing.shutdown();
-    } else {
-      return existing;
-    }
+    return existing;
   }
 
   const threadId = (await getSessionId(cli, cwd, chatId)) ?? null;

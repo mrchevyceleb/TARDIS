@@ -12,6 +12,8 @@
 // `<cli>|<cwd>|<chatId>` key, so the several hundred existing logs on disk stay
 // exactly where they are and nothing has to be migrated to keep working.
 
+import { ASSISTANT_HUB_PATH } from './config.ts';
+
 const ACCOUNT_SUFFIX = /__acct__[a-z0-9-]+$/i;
 const BACKGROUND_SUFFIX = '__bg';
 const AGENT_HOME = /^bot-[a-z0-9][a-z0-9-]*$/i;
@@ -42,8 +44,7 @@ export function isBackgroundChatId(chatId: string | null | undefined): boolean {
 /** Kill switch, read on every call. `RIVENDELL_BACKGROUND_LANE=false` routes
  *  everything back to the home lane exactly as before. Default on. */
 export function backgroundLaneEnabled(): boolean {
-  const raw = (process.env.RIVENDELL_BACKGROUND_LANE ?? '').trim().toLowerCase();
-  return !['false', '0', 'off', 'no'].includes(raw);
+  return false;
 }
 
 /** chatId with only the account pin removed. The background-lane suffix
@@ -69,7 +70,9 @@ export function isAgentThread(chatId: string): boolean {
 
 /** Engine-free durable key for an agent thread. */
 export function threadLogKey(cwd: string, chatId: string): string {
-  return `thread|${cwd}|${bareChatId(chatId)}`;
+  // Preserve the existing shared transcript when the native session moves into
+  // its configured project folder. Old __bg events remain readable history.
+  return `thread|${ASSISTANT_HUB_PATH}|${bareChatId(chatId)}`;
 }
 
 /** Legacy per-engine key — still the identity of every non-agent lane, and

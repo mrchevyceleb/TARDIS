@@ -1,8 +1,9 @@
+import { sessionStateDelta } from './sessionContext.ts';
 import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 import { assertClaudeSubscription } from './subscription-auth.ts';
 import { assertSubscriptionLane, subscriptionEnvironment } from './subscription-policy.ts';
 import { execFileSync, type ChildProcessByStdio } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -18,7 +19,8 @@ import { BananaSession, getOrCreateBananaSession, activeBananaSessions, publishB
 import { appendEventLog, appendEventLogDurable, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
 import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
 import { CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKEN_BUDGET, NATIVE_COMPACT_MARGIN, contextRotationDue, contextTokens, learnContextLimit, providerContextBudget, recordContextUsage, recordContextRotation } from './contextBudget.ts';
-import { shouldSkipEngineResume } from './threadWindow.ts';
+import { bareChatId } from './threadKey.ts';
+import { sessionDirectory, changedContext, nativeClaudeSettings } from './sessionPolicy.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { backgroundChatId, isAgentThread, isBackgroundChatId, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
@@ -42,6 +44,7 @@ import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
 import { applyProviderLimits } from './providerEnv.ts';
+import { ensureNativeCompactProxy, nativeCompactBaseUrl } from './nativeCompactProxy.ts';
 import { compactFailureError, isContextLengthRejection, isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
@@ -663,6 +666,7 @@ class ClaudeSession {
   /** This process reported usage of its own; until then the lane's recorded
    *  context may belong to a previous model and must not teach a budget. */
   private usageSeen = false;
+  private statusContext?: Map<string, string>;
   /** Claude Code compacted the seeded start before any usage came back: the
    *  seed alone filled the window. */
   private seedOverflowed = false;
@@ -890,7 +894,7 @@ class ClaudeSession {
     // Long foreground shell calls are blocked/nudged toward job_start so an
     // agent stays reachable (see longCallGate.ts). Before --mcp-config, which is variadic.
     const gateSettings = longCallGateSettings(chatId);
-    if (gateSettings) args.push('--settings', gateSettings);
+    args.push('--settings', JSON.stringify({ ...nativeClaudeSettings(chatId), ...(gateSettings ? JSON.parse(gateSettings) : {}) }));
 
     // Same toolbox on every Claude-family engine: optional external MCPs plus
     // rivendell-team. --strict-mcp-config so a model switch cannot
@@ -912,6 +916,15 @@ class ClaudeSession {
       : forcedAccount ? accountEnvForAccount(forcedAccount, cwd) : accountEnv(cwd);
     if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks' && cli !== 'openrouter' && cli !== 'openrouter2') assertClaudeSubscription(spawnEnv, cwd);
     if (cli === 'claude' || cli === 'assistant') spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
+    delete spawnEnv.DISABLE_AUTO_COMPACT;
+    delete spawnEnv.DISABLE_COMPACT;
+    spawnEnv.ENABLE_TOOL_SEARCH = 'true';
+    spawnEnv.SLASH_COMMAND_TOOL_CHAR_BUDGET = '3500';
+    if (cli === 'openrouter' || cli === 'openrouter2') {
+      const cacheSession = createHash('sha256').update(`${cli}|${this.logKey}`).digest('hex');
+      spawnEnv.ANTHROPIC_CUSTOM_HEADERS = [spawnEnv.ANTHROPIC_CUSTOM_HEADERS, `x-session-id: ${cacheSession}`].filter(Boolean).join('\n');
+    }
+    if (spawnEnv.ANTHROPIC_BASE_URL) spawnEnv.ANTHROPIC_BASE_URL = nativeCompactBaseUrl(spawnEnv.ANTHROPIC_BASE_URL);
     // Provider lanes rotate at a budget sized to the model's own window.
     this.providerWindow = cli === 'claude' || cli === 'assistant' ? 0 : Number(spawnEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS) || 0;
     this.nativeCompactWindow = Number(spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW) || 0;
@@ -948,7 +961,7 @@ class ClaudeSession {
       );
       if (!this.initSeen) {
         this.exitedBeforeInit = true;
-        if (this.pendingResumeId) void setSessionId(this.cli, this.cwd, '', this.chatId);
+        // A failed resume never discards the native session id.
         this.resolveReady(false);
         this.resolveStartupWaiters('closed');
       }
@@ -1370,13 +1383,13 @@ class ClaudeSession {
     // Max run `date`, reload session context, and narrate "I'm on it" on every
     // ordinary follow-up. Supply the runtime fact inline so agent-home turns
     // continue immediately instead of acting like cold starts.
-    const conversationGuidance = conversationGuidanceForTurn({
+    const conversationGuidance = wantSeed ? conversationGuidanceForTurn({
       chatId: this.chatId, logKey: this.logKey, historyThroughSeq,
       peerFrom: opts.peerFrom,
       peerFromRole: continuing?.origin.automation ? 'automation' : opts.peerFromRole,
       // A continue keeps the voice of the turn it finishes.
       hidden: Boolean(continuing && !continuing.origin.human),
-    });
+    }) : '';
     const laneContext = startsNewTurn
       ? laneContextForTurn({ chatId: this.chatId, logKey: this.logKey, sinceSeq: this.laneSyncSeq ?? null, throughSeq: historyThroughSeq, seeded: Boolean(seed) })
       : '';
@@ -1394,13 +1407,9 @@ class ClaudeSession {
     }
     const continuationText = isAgentThread(this.chatId)
       ? [
-          '<rivendell-continuation>',
-          `This is a warm continuation of the existing conversation, not a new user-visible session. Host time: ${new Date().toString()}.`,
-          'Do not repeat session-start rituals for this turn: do not run `date`, do not call session_start_context, and do not open with empty boilerplate such as “I’m on it” or “checking now.” TARDIS already renders basic liveness.',
-          '</rivendell-continuation>',
           ...(conversationGuidance ? ['', conversationGuidance] : []),
           ...(laneContext ? ['', laneContext] : []),
-          ...(recall ? ['', recall] : []),
+          ...(recall && changedContext(this.statusContext ??= new Map(), 'recall', recall) ? ['', recall] : []),
           ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []),
           '',
           commandText,
@@ -1409,9 +1418,9 @@ class ClaudeSession {
     const humanTurn = continuing ? continuing.origin.human : !opts.peerFrom && opts.peerFromRole !== 'automation';
     // Full computer rules only on the message that seeds a fresh window; every later
     // message of the same warm process carries the brief form (fresh token + device + policy).
-    const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
+    const computerContext = wantSeed ? computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed) : '';
     // Matt's Priorities ride every turn (continues and steers too), read fresh.
-    const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
+    const priorities = await sessionStateDelta(this.chatId);
     // Plain-English writing block (card-0d1015): the OpenRouter lane's
     // Gemini models lose a writing rule buried at the top of this long
     // message, so it rides at the very END instead. Voice turns keep their
@@ -2282,84 +2291,7 @@ class ClaudeSession {
     return this.startTokens + 2 * ROTATE_BEFORE_NATIVE >= this.nativeCompactWindow - NATIVE_COMPACT_MARGIN;
   }
 
-  private rotationWanted(): boolean {
-    return this.rotateAfterNativeCompact || contextRotationDue(this.contextKey, this.contextBudget());
-  }
-
-  private async rotateContextAtBoundary(): Promise<boolean> {
-    if (!this.rotationWanted() || this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) return false;
-    const refreshed = await refreshCompactForRotation({
-      key: this.logKey, cli: this.cli, chatId: this.chatId, events: this.eventLog,
-      isBusy: () => this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork(),
-      emit: (ev) => this.emit(ev as SessionEvent), rotate: () => false,
-    });
-    if (!refreshed || this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) return true;
-    await setSessionId(this.cli, this.cwd, '', this.chatId);
-    if (this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) {
-      if (!this.disposed && this.currentSessionId) await setSessionId(this.cli, this.cwd, this.currentSessionId, this.chatId);
-      return true;
-    }
-    bankRotation(this.logKey);
-    recordContextRotation(this.contextKey);
-    this.rotateAfterNativeCompact = false;
-    this.contextRotated = true;
-    this.shutdown('context-budget');
-    return true;
-  }
-
-  /** Every later turn on a session whose compaction failed hits the same
-   *  limit again. Drop it at the turn boundary so the next send spawns fresh
-   *  from compact+50, the same way a context rotation does. */
-  /** All in one tick, so no turn can be admitted onto this child in between;
-   *  the banked rotation alone already forces a seed if the id write fails. */
-  private reseedAfterCompactFailure(lengthRejected: boolean): void {
-    if (this.turnStartedAt !== null || this.disposed) return;
-    bankRotation(this.logKey);
-    // A length-rejected session can never serve another turn: any new
-    // prompt, including a background task's completion wake, hits the same
-    // oversized context. Work on that child is already undeliverable, so it
-    // is retired now (the ended note names what went with it) and the next
-    // send spawns fresh from the banked rotation. Oct 13: deferring the
-    // reseed behind background work held Maria's fireworks lane dead through
-    // 14 straight failed turns. A failed compact is different: that child
-    // can still serve turns, so its reseed keeps deferring behind live work.
-    if (this.hasBackgroundWork() && !lengthRejected) return;
-    setSessionId(this.cli, this.cwd, '', this.chatId).catch((err) => {
-      console.warn(`[chat ${this.cli}] could not clear the session after a failed compaction:`, (err as Error).message);
-    });
-    // A send waiting on the reseed barrier follows to the fresh process.
-    this.contextRotated = true;
-    this.shutdown(lengthRejected ? 'length-rejected-reseed' : 'compact-failed');
-  }
-
   awaitContextMaintenance(): Promise<void> { return this.contextMaintenance ?? Promise.resolve(); }
-
-  /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
-  private async maybeCompact(): Promise<void> {
-    try {
-      await maybeAutoCompact({
-        key: this.logKey,
-        cli: this.cli,
-        chatId: this.chatId,
-        events: this.eventLog,
-        isBusy: () => this.turnStartedAt !== null,
-        emit: (ev) => this.emit(ev as SessionEvent),
-        rotate: () => this.keepWarmAfterCompact(),
-      });
-    } catch (err) {
-      console.warn(`[chat ${this.cli}] compaction check failed for ${this.key}:`, (err as Error).message);
-    }
-  }
-
-  /** The durable compact is for recovery, not a reason to kill a healthy
-   * persistent process. Claude/xAI retain their live context and native
-   * auto-compaction; the next genuine process start receives compact+window.
-   * Returning true clears obsolete rotation debt without a handoff gap. */
-  private keepWarmAfterCompact(): boolean {
-    if (sessions.get(this.key) !== this || !this.isAlive()) return false;
-    console.warn(`[chat ${this.cli}] compact saved; keeping warm session ${this.key}`);
-    return true;
-  }
 
   private resolveStartupWaiters(state: 'initialized' | 'closed'): void {
     const waiters = Array.from(this.startupWaiters);
@@ -2569,19 +2501,17 @@ class ClaudeSession {
       this.resolveStartupWaiters('initialized');
       if (pending && pending !== ev.session_id) {
         this.resumeFailed = true;
-        this.emit({
-          type: 'error',
-          message: `Resume failed (session ${pending.slice(0, 8)}… not found). Started a fresh thread.`,
-        });
+        this.currentSessionId = pending;
+        this.emit({ type: 'error', code: 'NATIVE_RESUME_MISMATCH', fatal: true,
+          message: 'The engine did not resume its saved session. The saved session was retained.' });
+        this.shutdown('native resume mismatch');
+        return;
       }
       this.currentSessionId = ev.session_id;
       void setSessionId(this.cli, this.cwd, ev.session_id, this.chatId);
     }
-
-    // Track session_id from any event that carries it (some events carry it
-    // as well as init; persisting on every change keeps us safe across forks).
-    if (!this.disposed && ev && typeof ev === 'object' && typeof ev.session_id === 'string'
-        && ev.session_id !== this.currentSessionId) {
+    // Child/helper events cannot silently replace the main native session.
+    if (!this.disposed && !sidechain && ev && typeof ev.session_id === 'string' && !this.currentSessionId) {
       this.currentSessionId = ev.session_id;
       void setSessionId(this.cli, this.cwd, ev.session_id, this.chatId);
     }
@@ -2604,18 +2534,7 @@ class ClaudeSession {
     // refused Qwen 3.8 Max near 140K of 262K), and Claude Code answers with a
     // reactive compact. Below the native threshold that is the only sign of
     // it: learn a lower budget for this model and rotate at the boundary.
-    if (!sidechain && this.providerWindow && ev?.type === 'system' && ev.subtype === 'status' && ev.status === 'compacting') {
-      // The native compact already shrank an oversized seed; rotating would
-      // reload the same seed and compact again.
-      if (this.pendingSeedAck && !this.usageSeen) this.seedOverflowed = true;
-      if (!this.seedFillsWindow()) this.rotateAfterNativeCompact = true;
-      const accepted = this.usageSeen ? contextTokens(this.contextKey) : 0;
-      // A gap this wide below the native threshold is more than one turn adds,
-      // so a plain backstop compact after a big tool result does not count.
-      if (accepted > 0 && accepted < this.nativeCompactWindow - NATIVE_COMPACT_MARGIN - REACTIVE_COMPACT_GAP) {
-        learnContextLimit(this.spawnModel, accepted, this.providerWindow);
-      }
-    }
+    
     const syntheticApiError = isSyntheticApiErrorEvent(ev);
     if (syntheticApiError) {
       this.syntheticApiErrorSeen = true;
@@ -2832,58 +2751,9 @@ class ClaudeSession {
       const resultFailed = ev.is_error === true || typeof ev.api_error_status === 'number';
       const failed = seeded && resultFailed;
       if (seeded) this.pendingSeedAck = false;
-      if (failed) this.seedWindowOnNextTurn = true;
+      // An accepted handover is never replayed after an API failure.
       if (!resultFailed) this.persistAppliedSelection();
-      // A dead native session reseeds instead. A native compact rotates even
-      // when the turn then failed, so no later turn runs on its lossy summary.
-      const reseed = (compactFailed || lengthRejected) && !authFailPending && !zaiStale && !zaiCut;
-      const rotationDue = !reseed && isClaudeFamilyCli(this.cli)
-        && (this.rotateAfterNativeCompact || (!resultFailed && this.rotationWanted()));
-      const rotateIfDue = async (): Promise<boolean> => {
-        if (seeded && !failed) await clearRotation(this.logKey);
-        return rotationDue && await this.rotateContextAtBoundary();
-      };
-      const housekeeping = async () => {
-        if (!(await rotateIfDue())) await this.maybeCompact();
-      };
-      // Installed before turnEnd, so a send admitted by a turnEnd subscriber
-      // waits for the reseed instead of landing on the oversized session.
-      if (reseed) {
-        this.contextMaintenance = Promise.resolve().then(() => this.reseedAfterCompactFailure(lengthRejected))
-          .finally(() => { this.contextMaintenance = null; });
-        // The compact failure's one automatic re-run (the copy above already
-        // promised it). lengthRejected stays manual: its oversized prompt may
-        // still be oversized after the reseed, so a human decides there.
-        // The usage rollover above already reruns this turn on the backup
-        // engine; a second, same-engine replay here would double-answer.
-        if (compactFailed && compactRerunPlanned && !usageFallbackDue) {
-          scheduleCompactRerun({
-            cli: this.cli,
-            cwd: this.cwd,
-            chatId: this.chatId,
-            logKey: this.logKey,
-            model: this.spawnModel,
-            effort: this.spawnEffort,
-            text: this.compactRerunPrompt!.text,
-            images: this.compactRerunPrompt!.images,
-            echoText: this.compactRerunPrompt!.echoText,
-            replyTo: this.compactRerunPrompt!.replyTo,
-            clientMsgId: this.compactRerunPrompt!.clientMsgId,
-            retiring: this,
-          });
-        }
-      }
-      if (rotationDue) {
-        // Only the rotation holds sends. When it can't rotate (background
-        // work), the durable compact is a slow model call that keeps the warm
-        // session, so it runs unbarriered: Oct 12 2026 it held Riley's lane
-        // (every hello and send) for four minutes and Matt's messages looked lost.
-        this.contextMaintenance = Promise.resolve().then(rotateIfDue).then((rotated) => {
-          if (!rotated) void this.maybeCompact();
-        }).catch((err) => {
-          console.warn(`[context-rotation] ${this.logKey}: deferred after maintenance failure`, (err as Error).message);
-        }).finally(() => { this.contextMaintenance = null; });
-      }
+      // Native compaction keeps the session id and the complete tool history.
       this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
       // Only now, with the turn boundary already delivered, retire a child
       // whose provider moved. shutdown() flips `disposed`, after which emit()
@@ -2894,7 +2764,6 @@ class ClaudeSession {
       if (authFailPending) this.failAuth();
       else if (zaiStale && !this.hasBackgroundWork()) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
       if (zaiCut) this.afterZaiCut(zaiCut, zaiCutNoticeSeq);
-      if (!rotationDue && !reseed) void housekeeping();
     }
   }
 }
@@ -3032,7 +2901,8 @@ function holdsBackgroundWork(session: AnySession): boolean {
 }
 
 function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
-  const normalized = chatId || 'main';
+  const normalized = isAgentThread(chatId) ? bareChatId(chatId) : chatId || 'main';
+  cwd = sessionDirectory(normalized, cwd);
   return normalized === 'main' ? `${cli}|${cwd}` : `${cli}|${cwd}|${normalized}`;
 }
 
@@ -3058,7 +2928,8 @@ export async function getOrCreateSession(opts: {
 }): Promise<AnySession> {
   assertSubscriptionLane(opts.cli);
   if (sessionsShuttingDown) throw new Error('TARDIS is shutting down');
-  const chatId = opts.chatId || 'main';
+  const chatId = isAgentThread(opts.chatId || '') ? bareChatId(opts.chatId!) : opts.chatId || 'main';
+  opts = { ...opts, chatId, repoPath: sessionDirectory(chatId, opts.repoPath) };
   if (isThreadResetting({ cli: opts.cli, repoPath: opts.repoPath, chatId })) {
     throw new Error('This thread is being reset — retry in a moment.');
   }
@@ -3146,7 +3017,7 @@ export async function getOrCreateSession(opts: {
     sessions.delete(key);
   }
 
-  if (opts.cli === 'xai' && !usePiHarness('xai')) {
+  if (opts.cli === 'xai') {
     // The xAI engine runs through a localhost transform proxy; never spawn
     // without it (an empty ANTHROPIC_BASE_URL would fall back to Anthropic and
     // leak the Grok credential to the wrong provider). Throws if the proxy
@@ -3269,50 +3140,9 @@ async function spawnSessionOnce(
   if (inFlight) return inFlight;
   const spawnPromise = (async () => {
     const logKey = logKeyFor(cli, cwd, chatId);
-    let resumeId = (await getSessionId(cli, cwd, chatId)) ?? null;
-    let seedFirst = !resumeId;
-    await flushEventLog(logKey);
-    const restored = loadEventLogSync(logKey);
-    const durable = loadEventLogForCompactionSync(logKey);
-    const history = durable.length ? durable : restored.events;
-    // Who spoke last on this thread. On a model switch that is a DIFFERENT
-    // engine, and this engine's own native session id (if it kept one from an
-    // earlier stint) is stale by exactly the turns the other brain produced.
-    // Resuming it would silently drop them, so seed compact+50 from the shared
-    // thread log instead. Cross-engine resume is never attempted: that is what
-    // produced `No conversation found with session ID: <uuid>`.
-    const priorEngine = lastEngineOf(history);
-    const switchedFrom = priorEngine && priorEngine !== cli ? priorEngine : null;
-    const skipResume = shouldSkipEngineResume({
-      events: history,
-      cli,
-      cwd,
-      sessionId: resumeId,
-    });
-    // Right after a provider cut, only the native session still holds the cut
-    // turn's tool calls; reseeding from visible text would make the agent
-    // redo finished work. Same context the retired child had a moment ago.
-    const resumeAfterCut = Boolean(resumeId) && preferResumeAfterProviderCut(restored.events.filter((event) => (event.lane === 'bg') === isBackgroundChatId(chatId)));
-    if (switchedFrom) {
-      console.warn(
-        `[chat ${cli}] model switch on ${logKey}: ${switchedFrom} → ${cli} — seeding compact+50 from the thread log, not resuming`,
-      );
-      if (resumeId) await setSessionId(cli, cwd, '', chatId);
-      resumeId = null;
-      seedFirst = true;
-    } else if (resumeId && resumeAfterCut && (isRotationOwed(logKey) || skipResume)) {
-      console.warn(
-        `[chat ${cli}] provider cut on ${logKey}: resuming ${resumeId.slice(0, 8)} so the cut turn's tool history survives`,
-      );
-    } else if (resumeId && (isRotationOwed(logKey) || skipResume)) {
-      const why = isRotationOwed(logKey) ? 'overflow-compact owed' : 'seed compact+50 (do not replay jsonl/tool dump)';
-      console.warn(
-        `[chat ${cli}] ${why} — skipping resume ${resumeId.slice(0, 8)}… for ${logKey}`,
-      );
-      await setSessionId(cli, cwd, '', chatId);
-      resumeId = null;
-      seedFirst = true;
-    }
+    const resumeId = (await getSessionId(cli, cwd, chatId)) ?? null;
+    const seedFirst = !resumeId;
+    const switchedFrom = null;
     if (sessionsShuttingDown) throw new Error('TARDIS is shutting down');
     return spawnSession(cli, cwd, chatId, resumeId, key, 0, model, effort, seedFirst, switchedFrom);
   })();
@@ -3351,13 +3181,10 @@ async function spawnSession(
     );
   }
   assertMemoryAvailableForSpawn(cli);
-  // GLM and Grok run in the Pi harness by default: the persona is the whole
-  // system prompt there, and the providers are spoken to natively. The agy
-  // lane (Gemini on Matt's Google subscription) is its own runner.
+  await ensureNativeCompactProxy();
+  // Metered providers share Claude Code. Subscription engines retain their native runner.
   const session: LaneSession = cli === 'agy'
     ? new AgySession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort, model), seedFirst, switchedFrom)
-    : usePiHarness(cli)
-    ? new PiSession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort), seedFirst, switchedFrom)
     : new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, seedFirst, switchedFrom);
   sessions.set(key, session);
   notifySessionCreated(session.logKey, session);
@@ -3400,17 +3227,7 @@ async function spawnSession(
     // session before ready resolves. An empty slot is still ours to recover;
     // it is not evidence that another spawn superseded us.
     if (owner === session) sessions.delete(key);
-    // Recover from a stale persisted session id: drop it and retry without
-    // --resume. Only one retry — if even a fresh spawn dies before init,
-    // something else is wrong.
-    if (resumeId && attempt === 0) {
-      await setSessionId(cli, cwd, '', chatId); // clear the bad id
-      const replacement = sessions.get(key);
-      if (replacement) return replacement;
-      return spawnSession(
-        cli, cwd, chatId, null, key, attempt + 1, model, effort, true,
-      );
-    }
+    // A missing native session is surfaced; its saved id is never silently discarded.
     const priorFailure = spawnFailures.get(key);
     spawnFailures.set(key, {
       count: (priorFailure?.count ?? 0) + 1,

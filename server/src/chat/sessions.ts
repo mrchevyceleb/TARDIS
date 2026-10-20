@@ -1,6 +1,8 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { SESSIONS_FILE, STATE_DIR } from './config.ts';
+import { bareChatId, isAgentThread } from './threadKey.ts';
+import { NATIVE_SESSION_GENERATION } from './sessionPolicy.ts';
 
 // One mapping per native lane → session id plus last proven model/effort.
 // Persists across server restarts so chats resume or prewarm with the same brain.
@@ -10,6 +12,7 @@ type Key = string; // `${cli}|${repoPath}` or `${cli}|${repoPath}|${chatId}`
 
 type StoredSession = {
   sessionId?: string;
+  generation?: number;
   updatedAt: number;
   /** Last model/effort actually applied to this native process. Kept even when
    * rotation clears sessionId so boot prewarm uses the same brain settings. */
@@ -25,7 +28,7 @@ let loadPromise: Promise<Stored> | null = null;
 let writeQueue: Promise<void> = Promise.resolve();
 
 const key = (cli: Cli, repoPath: string, chatId = 'main'): Key => {
-  const normalized = chatId || 'main';
+  const normalized = isAgentThread(chatId) ? bareChatId(chatId) : chatId || 'main';
   return normalized === 'main' ? `${cli}|${repoPath}` : `${cli}|${repoPath}|${normalized}`;
 };
 
@@ -56,7 +59,9 @@ async function flush() {
 
 export async function getSessionId(cli: Cli, repoPath: string, chatId = 'main'): Promise<string | undefined> {
   const all = await load();
-  return all[key(cli, repoPath, chatId)]?.sessionId;
+  const record = all[key(cli, repoPath, chatId)];
+  if (isAgentThread(chatId) && record?.generation !== NATIVE_SESSION_GENERATION) return undefined;
+  return record?.sessionId;
 }
 
 export async function setSessionId(cli: Cli, repoPath: string, sessionId: string, chatId = 'main'): Promise<void> {
@@ -64,7 +69,7 @@ export async function setSessionId(cli: Cli, repoPath: string, sessionId: string
   const storageKey = key(cli, repoPath, chatId);
   const existing = all[storageKey];
   if (sessionId) {
-    all[storageKey] = { ...existing, sessionId, updatedAt: Date.now() };
+    all[storageKey] = { ...existing, sessionId, generation: NATIVE_SESSION_GENERATION, updatedAt: Date.now() };
   } else if (existing?.model || existing?.effort) {
     const { sessionId: _discard, ...selection } = existing;
     all[storageKey] = { ...selection, updatedAt: Date.now() };

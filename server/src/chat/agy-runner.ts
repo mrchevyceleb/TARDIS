@@ -1,3 +1,4 @@
+import { sessionStateDelta } from './sessionContext.ts';
 /** Agy engine lane — Google's Antigravity CLI (`agy`) on Matt's subscription.
  *
  *  Protocol (probed 2026-10-14, headless): one persistent
@@ -758,59 +759,6 @@ export class AgySession {
     this.turnFailed = null;
     this.resultUsage = null;
     this.emit({ type: 'turnEnd', sessionId: this.agyConversationId ?? undefined });
-    // Keep the rolling memory current on the agy lane too: past the budget the
-    // lane rotates at this boundary, exactly like the Pi lanes. Skip on a
-    // retiring/paused session so it never wipes the conversation id under the
-    // replacement session that is about to resume it.
-    if (!failed && !this.retiring && !this.pausedForMessage) {
-      const rotationDue = contextRotationDue(this.contextKey);
-      const housekeeping = async () => {
-        if (rotationDue && (await this.rotateContextAtBoundary())) return;
-        await this.maybeCompact();
-      };
-      void housekeeping().catch((err) => console.warn(`[context-rotation] ${this.logKey}: deferred after maintenance failure`, (err as Error).message));
-    }
-  }
-
-  /** Turn-boundary context rotation, same policy as the other lanes: past the
-   *  budget, refresh the durable compact, drop the agy conversation id and
-   *  shut the warm process down; the next prompt respawns seeded with compact
-   *  plus the last 50 turns. */
-  private async rotateContextAtBoundary(): Promise<boolean> {
-    if (!contextRotationDue(this.contextKey) || this.turnStartedAt !== null || this.disposed || this.retiring) return false;
-    const refreshed = await refreshCompactForRotation({
-      key: this.logKey, cli: this.cli, chatId: this.chatId, events: this.eventLog,
-      isBusy: () => this.turnStartedAt !== null || this.disposed || this.retiring,
-      emit: (ev) => this.emit(ev as SessionEvent), rotate: () => false,
-    });
-    if (!refreshed || this.turnStartedAt !== null || this.disposed || this.retiring) return true;
-    await setSessionId(this.cli, this.cwd, '', this.chatId);
-    if (this.turnStartedAt !== null || this.disposed || this.retiring) {
-      if (!this.disposed && !this.retiring) await setSessionId(this.cli, this.cwd, this.agyConversationId ?? '', this.chatId);
-      return true;
-    }
-    bankRotation(this.logKey);
-    recordContextRotation(this.contextKey);
-    this.shutdown('context-budget');
-    return true;
-  }
-
-  /** Forever-thread compaction check, see compaction.ts. */
-  private async maybeCompact(): Promise<void> {
-    if (this.disposed || this.retiring) return;
-    try {
-      await maybeAutoCompact({
-        key: this.logKey,
-        cli: this.cli,
-        chatId: this.chatId,
-        events: this.eventLog,
-        isBusy: () => this.turnStartedAt !== null || this.disposed || this.retiring,
-        emit: (ev) => this.emit(ev as SessionEvent),
-        rotate: () => !this.disposed && this.isAlive(),
-      });
-    } catch (err) {
-      console.warn(`[chat ${this.cli}/agy] compaction check failed for ${this.logKey}:`, (err as Error).message);
-    }
   }
 
   private onExit(code: number | null, signal: NodeJS.Signals | null): void {
@@ -830,7 +778,7 @@ export class AgySession {
       // instead of silently starting a fresh one.
       if (this.startedResumeId && !intentional) {
         this.resumeFailed = true;
-        void setSessionId(this.cli, this.cwd, '', this.chatId);
+        // Retain the native conversation after a failed resume.
       }
     }
     if (!intentional && this.turnStartedAt !== null) {
@@ -1082,8 +1030,8 @@ export class AgySession {
       const humanTurn = !opts.peerFrom && opts.peerFromRole !== 'automation';
       // Full computer rules ride the seed message that starts a fresh agy window;
       // later messages of the same warm process get the brief form.
-      const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
-      const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
+      const computerContext = wantSeed ? computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed) : '';
+      const priorities = await sessionStateDelta(this.chatId);
       // Plain-English writing block (card-0d1015): agy is Gemini, whose
       // buried instructions lost to the long context, so the block rides at
       // the very END of the turn. Voice turns keep their own spoken-style
@@ -1091,7 +1039,7 @@ export class AgySession {
       // (review 1 P0/P1: a last-position writing rule would push Gemini to
       // chatter instead of NO_UPDATE, or to speak backticks on a call).
       const plainEnglish = plainEnglishWritingBlockFor({ cli: this.cli, model: '', voiceMode: opts.voiceMode, humanTurn });
-      message = `${this.systemPromptBlock()}\n\n${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${continuation}${plainEnglish ? `\n\n${plainEnglish}` : ''}`;
+      message = `${wantSeed ? this.systemPromptBlock() : ''}\n\n${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${continuation}${plainEnglish ? `\n\n${plainEnglish}` : ''}`;
 
       try {
         await this.writeUserLine(message);
