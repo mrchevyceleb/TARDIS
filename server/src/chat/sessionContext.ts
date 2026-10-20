@@ -7,9 +7,14 @@ import { listCommitments } from '../lib/commitmentStore.ts';
 import { readDesk } from '../lib/deskStore.ts';
 import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 
+const generations = new Map<string, number>();
+
 export function resetSessionStateDelta(chatId: string): void {
   const agent = agentForChatId(chatId);
-  if (agent) rmSync(join(STATE_DIR, 'native-session-context', `${agent.id}.json`), { force: true });
+  if (agent) {
+    generations.set(agent.id, (generations.get(agent.id) ?? 0) + 1);
+    rmSync(join(STATE_DIR, 'native-session-context', `${agent.id}.json`), { force: true });
+  }
 }
 
 /** Status belongs at the end of new input, never above the cached prefix.
@@ -17,6 +22,7 @@ export function resetSessionStateDelta(chatId: string): void {
 export async function prepareSessionStateDelta(chatId: string): Promise<{ text: string; accept(): void }> {
   const agent = agentForChatId(chatId);
   if (!agent) return { text: '', accept() {} };
+  const generation = generations.get(agent.id) ?? 0;
   const directory = join(STATE_DIR, 'native-session-context');
   const file = join(directory, `${agent.id}.json`);
   let before: Record<string, string> = {};
@@ -28,7 +34,7 @@ export async function prepareSessionStateDelta(chatId: string): Promise<{ text: 
     if (before[name] !== hash) { next[name] = hash; lines.push(line); }
   };
   const priorities = prioritiesBlockFor(agent.id);
-  changed('priorities', priorities, `Priorities changed: ${priorities.replace(/\s+/g, ' ').slice(0, 220) || 'none'}. Use the priorities tool for details.`);
+  changed('priorities', priorities, 'Priorities changed. Use the priorities tool for current state.');
   try {
     const commitments = listCommitments(agent.id);
     changed('commitments', JSON.stringify(commitments), `Open commitments changed: ${commitments.length}. Read commitments before making or resuming a promise.`);
@@ -39,8 +45,9 @@ export async function prepareSessionStateDelta(chatId: string): Promise<{ text: 
     changed('cards', JSON.stringify(cards.map(card => [card.id, card.title, card.column])), `Owned cards changed: ${cards.length}; ${cards.filter(card => card.column === 'in_progress').length} in progress. Read the Desk for current state.`);
   } catch { /* leave the previous fingerprint intact */ }
   return { text: lines.join('\n'), accept() {
-    if (!lines.length) return;
-    // Called only after the engine's input pipe accepted the message.
+    if (!lines.length || (generations.get(agent.id) ?? 0) !== generation) return;
+    // Called only after the engine accepted the turn. A native compaction
+    // invalidates preparations from before that boundary.
     // A canceled preparation must never consume an undelivered change.
     try {
       mkdirSync(directory, { recursive: true });

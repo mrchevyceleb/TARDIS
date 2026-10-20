@@ -17,7 +17,15 @@ const directory = join(STATE_DIR, 'native-session-metrics');
 const alerted = new Set<string>();
 const sessions = new Map<string, string>();
 const nextCall = new Set<string>();
-const afterCompact = new Set<string>();
+const pendingFile = join(directory, 'pending-compacts.json');
+function pendingCompacts(): string[] {
+  try { const values = JSON.parse(readFileSync(pendingFile, 'utf8')); return Array.isArray(values) ? values.filter(value => typeof value === 'string') : []; } catch { return []; }
+}
+const afterCompact = new Set<string>(pendingCompacts());
+function savePendingCompacts(): void {
+  try { mkdirSync(directory, { recursive: true }); const tmp = `${pendingFile}.tmp`; writeFileSync(tmp, JSON.stringify([...afterCompact]), { mode: 0o600 }); renameSync(tmp, pendingFile); }
+  catch { console.warn('[native-session] pending compact measurement could not be saved'); }
+}
 const day = (at = Date.now()) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(at);
 function append(record: Metric): void {
   try {
@@ -46,6 +54,7 @@ export function recordNativeCall(call: NativeCall): void {
   append({ ...call, at: call.at ?? Date.now(), cached, event: first ? 'start' : 'call', cachedShare });
   const ceiling = sessionPolicy(call.lane).startTokenCeiling ?? 33_000;
   if (afterCompact.delete(sessionKey)) {
+    savePendingCompacts();
     append({ ...call, at: call.at ?? Date.now(), cached, event: 'after-compact', cachedShare });
     if (call.input > ceiling) alert(call.lane, `first call after compact ${call.input} exceeds ${ceiling} tokens`);
   }
@@ -66,6 +75,7 @@ export function recordNativeCompact(lane: string, engine: string, sessionId: str
   const after = Number(metadata?.post_tokens ?? metadata?.after ?? 0);
   append({ at: Date.now(), event: 'compact', lane, engine, model: '', sessionId: sessionId ?? undefined, input: 0, cached: 0, output: 0, before, after, trigger: String(metadata?.trigger ?? 'native') });
   afterCompact.add(`${bareChatId(lane)}|${engine}|${sessionId || ''}`);
+  savePendingCompacts();
   // Native metadata can exclude the fixed prompt. Measure the next real call.
 }
 export function recordNativeFailure(lane: string, engine: string, reason: string): void {
@@ -100,8 +110,16 @@ export function nativeSessionReport(date = day()): { date: string; rows: any[] }
 export function nativeSessionReportHtml(date = day()): string {
   const report = nativeSessionReport(date);
   const escape = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
-  const rows = report.rows.map(row => `<tr><td>${escape(row.lane)}</td><td>${escape(row.engine)}</td><td>${escape(row.starts.join(', ') || 'No new start')}</td><td>${escape(row.compacts.map((x: any) => `${x.before} → ${x.after}`).join(', ') || 'None')}</td><td>${row.replacements}</td><td>${row.cachedShare === null ? 'Unmeasured' : `<meter min="0" max="1" value="${row.cachedShare}"></meter> ${(row.cachedShare * 100).toFixed(1)}%`}</td><td>${row.maxHarnessChars} chars</td></tr>`).join('');
-  return `<!doctype html><meta charset="utf-8"><title>Native session health ${escape(date)}</title><style>body{font:16px system-ui;background:#101321;color:#eff2ff;padding:32px}table{width:100%;border-collapse:collapse}td,th{padding:14px;text-align:left;border-bottom:1px solid #394058}meter{accent-color:#96f5c5}p{color:#bbc5da}</style><h1>Session health · ${escape(date)}</h1><p>Measured native calls and compactions. Harness size is recorded in characters; it is not a token estimate. No measurement is a pass by default.</p><table><thead><tr><th>Agent</th><th>Engine</th><th>Start tokens</th><th>Native compaction</th><th>Unexpected resets</th><th>Input cached</th><th>Largest harness addition</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const number = (n: number) => n.toLocaleString('en-US');
+  const sizes = (values: number[]) => values.length ? values.map(number).join(' · ') : 'Not measured';
+  const cards = report.rows.map(row => {
+    const cached = row.cachedShare === null ? 'Not measured' : `${(row.cachedShare * 100).toFixed(1)}%`;
+    const details = row.compacts.map((x: any) => `<li>${escape(x.trigger)} · ${number(x.before)} before · ${number(x.after)} in native metadata</li>`).join('');
+    return `<article><div class="identity"><h2>${escape(row.lane)}</h2><span>${escape(row.engine)}</span></div><div class="cache"><strong>${cached}</strong><span>input from cache</span></div><meter aria-label="Input from cache for ${escape(row.lane)}" min="0" max="1" value="${row.cachedShare ?? 0}"></meter><dl><div><dt>New session</dt><dd>${sizes(row.starts)}</dd></div><div><dt>First call after compact</dt><dd>${sizes(row.afterCompacts)}</dd></div><div><dt>Unexpected resets</dt><dd>${row.replacements}</dd></div><div><dt>Calls measured</dt><dd>${number(row.calls)}</dd></div></dl><details><summary>See session detail <span>↗</span></summary><p>${row.maxHarnessChars} characters added by the harness at most · ${row.fixedPrefixes} observed prompt fingerprints.</p><ul>${details || '<li>No native compaction measured yet.</li>'}</ul>${row.failures.length ? `<p class="attention">Needs a look</p><ul>${row.failures.map((reason: string) => `<li>${escape(reason)}</li>`).join('')}</ul>` : '<p>No session failures recorded.</p>'}</details></article>`;
+  }).join('');
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Session health · ${escape(date)}</title><style>
+  *{box-sizing:border-box}body{margin:0;background:#0b1014;color:#edf7f4;font:15px system-ui,sans-serif;padding:clamp(20px,5vw,64px)}main{max-width:1320px;margin:auto}header{margin:0 0 30px}header small{color:#9ce7c5;text-transform:uppercase;letter-spacing:.16em}h1{font-size:clamp(32px,5vw,56px);letter-spacing:-.05em;margin:12px 0}header p{max-width:700px;line-height:1.6;color:#a3b9b0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:18px}article{background:linear-gradient(145deg,#182821,#121c1c);border:1px solid #2c4338;border-radius:24px;padding:24px;transition:transform .2s,border-color .2s}article:hover{transform:translateY(-3px);border-color:#7daa90}.identity{display:flex;justify-content:space-between;align-items:center;gap:14px}.identity h2{font-size:22px;margin:0;text-transform:capitalize}.identity span{color:#c4d8cd;border:1px solid #3d5547;padding:5px 9px;border-radius:99px;font-size:12px}.cache{display:flex;align-items:baseline;gap:10px;margin-top:24px}.cache strong{font-size:42px;letter-spacing:-.05em}.cache span,dt{color:#9eb8ab;font-size:13px}meter{display:block;width:100%;height:10px;margin:10px 0 24px;accent-color:#a0e8be}dl{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:0}dd{margin:5px 0 0;font-size:18px;font-variant-numeric:tabular-nums}details{border-top:1px solid #2d4538;margin-top:24px;padding-top:18px;font-size:13px;line-height:1.6}summary{cursor:pointer;list-style:none;color:#b8f6d4;border-radius:8px;transition:color .2s,transform .2s}summary:hover{color:white;transform:translateX(3px)}summary:focus-visible{outline:2px solid #b8f6d4;outline-offset:5px}summary span{float:right}details[open] summary span{transform:rotate(90deg)}details p,details li{color:#b4c5be}ul{padding-left:18px}.attention{color:#ffcba0!important}.empty{border:1px dashed #456050;border-radius:24px;padding:32px;color:#b4c5be}@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+  </style></head><body><main><header><small>TARDIS · ${escape(date)} · ET</small><h1>Room to think.</h1><p>Real input, real cache hits, and the first call after each native compact. Token counts include the fixed prompt. Native metadata is shown separately; a missing measurement still needs proof.</p></header><section class="grid" aria-label="Agent session measurements">${cards || '<p class="empty">No calls measured for this date yet. The first real agent call will appear here.</p>'}</section></main></body></html>`;
 }
 export function startSessionMetricsReport(): void {
   let last = '';

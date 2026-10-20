@@ -1,7 +1,7 @@
 // OpenRouter model catalog: the list behind the `openrouter` engine lane
 // (runner.ts), the /api/openrouter/models picker payload, and agent-brain
 // validation. Limits come only from the live public catalog. A missing or
-// expired catalog holds the launch with its selected model intact.
+// never substitutes invented limits or another selected model.
 //
 // Only models that support `tools` are offered (the claude binary is agentic),
 // minus `:batch` variants and anything that outputs more than text.
@@ -18,6 +18,7 @@
 // budget-based (OpenRouter turns the effort into a share of max_tokens), so it
 // gets low/medium/high/max. A non-reasoning model accepts the thinking fields
 // and ignores them (HTTP 200, no thinking), so it gets one tier.
+import { queueFlagDigest } from '../lib/flagDigest.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 import { ALL_EFFORTS, nearestEffort } from './fireworks-models.ts';
 
@@ -108,6 +109,8 @@ let catalog: OpenRouterModelInfo[] = [];
 let fetchedAt = 0;
 let refreshTimer: NodeJS.Timeout | null = null;
 let inFlight: Promise<void> | null = null;
+let refreshFailedAt = 0;
+let warnedAt = 0;
 
 function catalogFresh(): boolean { return fetchedAt > 0 && Date.now() - fetchedAt < REFRESH_MS; }
 
@@ -125,7 +128,7 @@ async function refreshCatalog(): Promise<void> {
     catalog = sortCatalog(next);
     fetchedAt = Date.now();
   })();
-  try { await inFlight; } finally { inFlight = null; }
+  try { await inFlight; refreshFailedAt = 0; } catch (error) { refreshFailedAt = Date.now(); throw error; } finally { inFlight = null; }
 }
 
 /** Boot refresh retries without inventing limits. Spawn validation below is
@@ -141,14 +144,22 @@ export async function startOpenRouterCatalog(): Promise<void> {
 }
 
 export async function requireOpenRouterModel(model: string): Promise<OpenRouterModelInfo> {
-  if (!catalogFresh() || !catalog.some(info => info.id === model)) await refreshCatalog();
+  if ((!catalogFresh() || !catalog.some(info => info.id === model)) && Date.now() - refreshFailedAt > BOOT_RETRY_MS) {
+    try { await refreshCatalog(); }
+    catch {
+      if (catalog.some(info => info.id === model) && Date.now() - warnedAt > REFRESH_MS) {
+        warnedAt = Date.now();
+        queueFlagDigest('chief-of-staff', 'openrouter-catalog-refresh', 'OpenRouter catalog refresh failed. Existing model IDs keep their last verified limits; new IDs wait for a successful catalog read.', undefined, true);
+      }
+    }
+  }
   const info = openRouterCapability(model);
   if (!info) throw new Error(`OpenRouter has no current context/output limits for ${model}; the selected session and queued messages are retained.`);
   return info;
 }
 
 export function openRouterModelList(): OpenRouterModelInfo[] {
-  return catalogFresh() ? catalog : [];
+  return catalog;
 }
 
 export function openRouterCapability(model: string): OpenRouterModelInfo | undefined {
@@ -168,7 +179,7 @@ export function openRouterMaxOutput(model: string): number {
 }
 
 export function openRouterCatalogPayload(): { models: OpenRouterModelInfo[]; source: 'catalog' | 'unavailable' } {
-  return { models: openRouterModelList(), source: catalogFresh() ? 'catalog' : 'unavailable' };
+  return { models: openRouterModelList(), source: catalog.length ? 'catalog' : 'unavailable' };
 }
 
 /** Preserve the operator's selected ID. Live validation runs before spawn,

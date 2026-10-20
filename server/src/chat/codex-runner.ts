@@ -27,7 +27,6 @@ import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
-import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
@@ -557,13 +556,14 @@ export class CodexSession {
           : `${text}\n\n[Matt attached ${images.length === 1 ? 'a screenshot' : 'screenshots'} that could not be saved. Ask him to resend if it matters.]`;
       }
 
-      // Matt's Priorities ride steers too, read fresh.
-      const steerPriorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
-      if (steerPriorities) steerText = `${steerPriorities}\n\n${steerText}`;
+      const steerState = await prepareSessionStateDelta(this.chatId);
+      const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', true, true);
+      steerText += `\n\n${computerContext}${steerState.text ? `\n\n${steerState.text}` : ''}`;
       await this.sendNativeSteer(
         steerText,
         opts.peerDeliveryId ?? opts.clientMsgId ?? randomUUID(),
       );
+      steerState.accept();
       // Echo only after app-server accepted turn/steer. This is the same durable
       // admission contract used for a brand-new turn, without a fake turnStart.
       if (opts.peerFrom) {
@@ -786,7 +786,7 @@ export class CodexSession {
     }
     const stateDelta = await prepareSessionStateDelta(this.chatId);
     const priorities = stateDelta.text;
-    const prompt = `${priorities ? `${priorities}\n\n` : ''}${!this.threadId ? computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, false) : ''}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${!this.threadId ? CODEX_TURN_PREAMBLE : ''}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
+    const prompt = `${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, Boolean(this.threadId))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${!this.threadId ? CODEX_TURN_PREAMBLE : ''}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
     this.harnessChars = Math.max(0, prompt.length - text.length);
     // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
     // -c overrides rather than written into ~/.codex/config.toml so this stays

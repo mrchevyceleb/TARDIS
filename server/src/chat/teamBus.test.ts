@@ -237,7 +237,7 @@ test('all legacy lane and account suffixes resolve to the one agent session', ()
   assert.equal(laneChatId('bot-kate__acct__kim'), 'bot-kate');
   // A pin can never follow the bg suffix in a real id; if one somehow did,
   // laneChatId leaves it unmatched rather than collapsing lanes — fail safe.
-  assert.equal(laneChatId('bot-kate__acct__kim__bg'), 'bot-kate');
+  assert.equal(laneChatId('bot-kate__acct__kim__bg'), 'bot-kate__acct__kim__bg');
   assert.equal(laneChatId('bot-kate'), laneChatId('bot-kate__bg'));
 });
 
