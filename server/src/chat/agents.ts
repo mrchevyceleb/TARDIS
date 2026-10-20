@@ -66,7 +66,23 @@ export type Agent = {
   muted?: boolean;
   /** Sidebar color label (a key from AGENT_COLORS). Absent means no color. */
   color?: AgentColor;
+  /** card-57def8 (Matt via Max): start every new task in a clean chat.
+   *  Absent means the roster default below. Never on for leadership. */
+  freshChatPerTask?: boolean;
 };
+
+/** card-57def8: the per-task fresh switch is on by default for the coder
+ *  roster Matt named and is never on for leadership, whose continuity runs
+ *  the team. Matt can flip any other agent. */
+const FRESH_CHAT_DEFAULT_ON_IDS = new Set(['christina', 'maria', 'adam', 'leo', 'nora']);
+export const FRESH_CHAT_NEVER_IDS = new Set(['chief-of-staff', 'kip', 'riley', 'samwise']);
+
+/** Resolve the switch for one agent: the stored choice wins for everyone the
+ *  fence allows; leadership always reads off. */
+export function agentFreshChatPerTask(agent: Agent): boolean {
+  if (FRESH_CHAT_NEVER_IDS.has(agent.id)) return false;
+  return agent.freshChatPerTask ?? FRESH_CHAT_DEFAULT_ON_IDS.has(agent.id);
+}
 
 /** Sidebar color labels. Keys only; the client owns the actual shades so
  *  each theme can tune them. Mirrored in src/grok/agents.ts. */
@@ -339,7 +355,7 @@ export function ensureAgents(): void {
   }
 }
 
-export type AgentInput = { name: string; role?: string; engine?: string; model?: string; effort?: string; voice?: string; pinned?: boolean; muted?: boolean; color?: AgentColor | null; scope?: string };
+export type AgentInput = { name: string; role?: string; engine?: string; model?: string; effort?: string; voice?: string; pinned?: boolean; muted?: boolean; color?: AgentColor | null; scope?: string; freshChatPerTask?: boolean };
 
 /** Fail-closed: only a never-written ledger (ENOENT) reads as empty. An
  * unreadable or corrupt ledger THROWS - id allocation and retirement both
@@ -479,6 +495,15 @@ export function updateAgent(
   if (patch.muted !== undefined) {
     if (patch.muted) next.muted = true;
     else delete next.muted;
+  }
+  // card-57def8: the per-task fresh switch. Leadership is fenced off for
+  // good, so no route or UI path can turn it on there.
+  if (patch.freshChatPerTask !== undefined) {
+    if (patch.freshChatPerTask && FRESH_CHAT_NEVER_IDS.has(id)) {
+      throw new Error(`${cur.name} is leadership: the per-task fresh switch stays off there`);
+    }
+    if (patch.freshChatPerTask) next.freshChatPerTask = true;
+    else delete next.freshChatPerTask;
   }
   // null clears the label; anything unknown is refused by the route first.
   if (patch.color !== undefined) {

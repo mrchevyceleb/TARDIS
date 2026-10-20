@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { canFreshChat, resolveFreshTarget, sessionsForFreshThread, type FreshCaller } from './freshChat.ts';
+import { agentFreshChatPerTask, canFreshChat, resolveFreshTarget, sessionsForFreshThread, shouldFreshForTask, type FreshCaller } from './freshChat.ts';
 import { threadLogKey } from './threadKey.ts';
 import type { Agent } from './agents.ts';
 
@@ -57,4 +57,36 @@ test('sessionsForFreshThread matches the durable thread key, cwd included', () =
     'bot-naomi@/home/mrchevyceleb/ASSISTANT-HUB',
     'bot-naomi__acct__kim@/home/mrchevyceleb/ASSISTANT-HUB',
   ]);
+});
+
+test('agentFreshChatPerTask: on for the coder roster, never leadership', () => {
+  for (const id of ['christina', 'maria', 'adam', 'leo', 'nora']) {
+    assert.equal(agentFreshChatPerTask(agent(id, id)), true, `${id} defaults on`);
+  }
+  for (const id of ['jessica', 'quinn', 'wren', 'kate', 'naomi']) {
+    assert.equal(agentFreshChatPerTask(agent(id, id)), false, `${id} defaults off`);
+  }
+  // Leadership always reads off, even with the field stored true.
+  for (const id of ['chief-of-staff', 'kip', 'riley', 'samwise']) {
+    assert.equal(agentFreshChatPerTask({ ...agent(id, id), freshChatPerTask: true }), false, `${id} is fenced`);
+  }
+  // A stored choice wins for everyone else, in both directions.
+  assert.equal(agentFreshChatPerTask({ ...agent('jessica', 'Jessica'), freshChatPerTask: true }), true);
+  assert.equal(agentFreshChatPerTask({ ...agent('christina', 'Christina'), freshChatPerTask: false }), false);
+});
+
+test('shouldFreshForTask: a new-task brief on an idle switched-on coder lane only', () => {
+  const lead = 'chief-of-staff';
+  const coderAgent = agent('christina', 'Christina');
+  // The happy path: a lead's brief to a switched-on idle coder.
+  assert.equal(shouldFreshForTask({ senderId: lead, recipientId: 'christina', recipientBusy: false, agent: coderAgent }), true);
+  // Never mid-task: a busy lane steers instead, so no reset.
+  assert.equal(shouldFreshForTask({ senderId: lead, recipientId: 'christina', recipientBusy: true, agent: coderAgent }), false);
+  // The switch decides: off means no reset even for a coder brief.
+  assert.equal(shouldFreshForTask({ senderId: lead, recipientId: 'christina', recipientBusy: false, agent: { ...coderAgent, freshChatPerTask: false } }), false);
+  // Not a coder brief: a teammate-to-teammate note or a coder's own reply never resets.
+  assert.equal(shouldFreshForTask({ senderId: 'jessica', recipientId: 'christina', recipientBusy: false, agent: coderAgent }), false);
+  assert.equal(shouldFreshForTask({ senderId: 'christina', recipientId: 'maria', recipientBusy: false, agent: agent('maria', 'Maria') }), false);
+  // Leadership is fenced at the decision too.
+  assert.equal(shouldFreshForTask({ senderId: lead, recipientId: 'kip', recipientBusy: false, agent: agent('kip', 'Kip') }), false);
 });

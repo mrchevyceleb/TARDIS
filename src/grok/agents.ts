@@ -30,6 +30,8 @@ export type Agent = {
   pinned?: boolean;
   /** Hide unread badges — companions that work with the crew, not the user. */
   muted?: boolean;
+  /** card-57def8: start every new task in a clean chat (never leadership). */
+  freshChatPerTask?: boolean;
   /** Sidebar color label, synced through the server so every device agrees. */
   color?: ChatColor;
 };
@@ -132,7 +134,7 @@ export class AgentUpdateConflictError extends Error {
   }
 }
 
-export async function updateAgentReq(id: string, patch: { name?: string; role?: string; engine?: string; model?: string; effort?: string; brainRevision?: number; voice?: string; pinned?: boolean; muted?: boolean; color?: ChatColor | null; scope?: string }): Promise<Agent> {
+export async function updateAgentReq(id: string, patch: { name?: string; role?: string; engine?: string; model?: string; effort?: string; brainRevision?: number; voice?: string; pinned?: boolean; muted?: boolean; freshChatPerTask?: boolean; color?: ChatColor | null; scope?: string }): Promise<Agent> {
   const response = await fetch(`/api/agents/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },

@@ -16,6 +16,7 @@ import { scanOutgoingPromise } from '../lib/promiseScan.ts';
 import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, recordQuietExemptWake } from '../lib/quietHours.ts';
 import { LIVE_HOLD_CEILING_MS } from '../lib/laneLiveness.ts';
 import { briefEnvelopeForHandoff, isCoderBrief } from './briefEnvelope.ts';
+import { freshThreadForAgent, shouldFreshForTask } from './freshChat.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
 // both sides touch shared graph modules — keeping this lazy is cheap insurance).
@@ -1078,6 +1079,25 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
     '',
     replyInstruction,
   ].join('\n');
+
+  // card-57def8 (Matt via Max): a coder brief that starts a new task lands in
+  // a clean chat when the agent's fresh switch is on. The lane is idle here
+  // (a busy lane steers instead), so the reset lands at the task boundary and
+  // never mid-task. A fresh failure never blocks the delivery.
+  try {
+    const batchWantsFresh = delivery.batchRecords?.some((record) =>
+      shouldFreshForTask({ senderId: record.fromId, recipientId: to.id, recipientBusy, agent: to }),
+    );
+    const wantsFresh = batchWantsFresh
+      ?? shouldFreshForTask({ senderId: from.id, recipientId: to.id, recipientBusy, agent: to });
+    if (wantsFresh) {
+      const freshened = await freshThreadForAgent(to);
+      if (freshened.ok) console.log(`[fresh] ${to.name} starts this task in a clean chat`);
+      else console.warn(`[fresh] auto fresh for ${to.name} skipped: ${freshened.reason}`);
+    }
+  } catch (err) {
+    console.warn('[fresh] auto fresh failed open:', (err as Error).message);
+  }
 
   while (Date.now() < deadline) {
     let session: SessionLike;

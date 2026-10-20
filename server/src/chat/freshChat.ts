@@ -17,7 +17,8 @@
 // that was just discarded. The committed epoch notifies the WS layer, which
 // broadcasts freshStarted so connected clients drop the old transcript.
 
-import { brainForAgent, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
+import { agentFreshChatPerTask, brainForAgent, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
+import { isCoderBrief } from './briefEnvelope.ts';
 import type { CliKind } from './runner.ts';
 import { clearEventLog } from './event-log-store.ts';
 import { clearThreadMemory } from './compaction.ts';
@@ -111,6 +112,34 @@ export async function freshChatForAgent(agent: Agent, caller: FreshCaller): Prom
   if (!canFreshChat(caller)) {
     return { ok: false, reason: 'only Matt, Kip, Max and Riley can fresh a chat' };
   }
+  return freshThreadForAgent(agent);
+}
+
+/**
+ * card-57def8: should a delivery that starts a new task land in a clean chat?
+ * Pure decision so both the delivery path and its tests read the same rule:
+ * the agent's switch must be on, the delivery must be a coder brief (the
+ * same "new task" shape the brief envelope recognises), and the lane must be
+ * idle — a busy lane's delivery steers a live turn, and a fresh must never
+ * cut one.
+ */
+export function shouldFreshForTask(opts: {
+  senderId: string;
+  recipientId: string;
+  recipientBusy: boolean;
+  agent: Agent;
+}): boolean {
+  if (opts.recipientBusy) return false;
+  if (!agentFreshChatPerTask(opts.agent)) return false;
+  return isCoderBrief(opts.senderId, opts.recipientId);
+}
+
+/**
+ * The reset itself, with no caller gating: the tool gates its caller above,
+ * and the automatic per-task fresh is gated by the agent's own switch.
+ * Refuses while any engine session for the lane is busy. Never throws.
+ */
+export async function freshThreadForAgent(agent: Agent): Promise<FreshChatResult> {
   const chatId = agent.home;
   if (!isAgentThread(chatId)) return { ok: false, reason: `${agent.name} has no home chat to fresh` };
   const brain = brainForAgent(agent);

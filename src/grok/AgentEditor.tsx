@@ -98,6 +98,10 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
   const voiceTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [pinned, setPinned] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [freshChat, setFreshChat] = useState(false);
+  // Mirrors the server's fence in chat/agents.ts: leadership never gets the
+  // per-task fresh switch, and the API refuses it there too.
+  const FRESH_CHAT_LEADERSHIP = new Set(['chief-of-staff', 'kip', 'riley', 'samwise']);
   const [scope, setScope] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -133,6 +137,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     setVoice(agent?.voice ?? 'ara');
     setPinned(Boolean(agent?.pinned));
     setMuted(Boolean(agent?.muted));
+    setFreshChat(Boolean(agent?.freshChatPerTask));
     setScope('');
     setErr(null);
     setAvatarVersion(undefined);
@@ -303,7 +308,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     try {
       const brain = { engine, model: model || undefined, effort };
       const saved = agent
-        ? await updateAgentReq(agent.id, { name, role, ...brain, brainRevision, voice, pinned, muted, scope: scope.trim() || undefined })
+        ? await updateAgentReq(agent.id, { name, role, ...brain, brainRevision, voice, pinned, muted, freshChatPerTask: freshChat, scope: scope.trim() || undefined })
         : await createAgent({ name, role, ...brain, voice, scope: scope.trim() || undefined });
       onSaved(saved);
       onClose();
@@ -447,6 +452,27 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
               <span>
                 Mute notifications
                 <small>Hide unread badges — for companions that talk to other agents, not you</small>
+              </span>
+            </label>
+            <label
+              className="bt-agent-checkrow"
+              title={FRESH_CHAT_LEADERSHIP.has(agent.id)
+                ? 'Leadership keeps one continuous chat: the per-task fresh switch stays off there'
+                : 'Every new task brief starts this agent in a clean, empty chat'}
+            >
+              <input
+                type="checkbox"
+                checked={freshChat && !FRESH_CHAT_LEADERSHIP.has(agent.id)}
+                disabled={FRESH_CHAT_LEADERSHIP.has(agent.id)}
+                onChange={(e) => setFreshChat(e.target.checked)}
+              />
+              <span>
+                Fresh chat for every new task
+                <small>
+                  {FRESH_CHAT_LEADERSHIP.has(agent.id)
+                    ? 'Never on for leadership — the chat carries their continuity'
+                    : 'The brief lands in a clean chat; the chat history is archived, never mid-task'}
+                </small>
               </span>
             </label>
           </>
