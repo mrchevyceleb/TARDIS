@@ -404,13 +404,112 @@ export function peekEnginePrimerWithStatus(key: string, events?: Array<{ seq?: n
   // list the rolling compact can never rewrite, drop, or fold away. Every
   // engine seeds through here, so one stitch covers all four runners.
   const block = commitmentsSeedBlockWithStatus(key);
+  // Clear-headed wake (card-074301, Oct 20): the live-state block rides right
+  // behind the commitments on every seed — current task, running jobs, owned
+  // cards, read live at seed time so nothing stale can re-enter as a to-do.
+  const live = liveStateSeedBlockWithStatus(key);
+  const lead = [block.block, live.block].filter(Boolean).join('\n\n');
   // After a Fresh the primer body is empty (compact and log were wiped) while
-  // the commitments block lives on: the seed is then exactly the block, with
-  // no dangling separator. `available` reflects ONLY the commitments half: a
-  // store hiccup there (fail-open empty) is uncertainty the caller must not
-  // treat as a confirmed-empty seed.
-  const seed = block.block && primer ? `${block.block}\n\n---\n\n${primer}` : (block.block || primer);
+  // the commitments block lives on: the seed is then exactly the lead blocks,
+  // with no dangling separator. `available` reflects ONLY the commitments
+  // half: a store hiccup there (fail-open empty) is uncertainty the caller
+  // must not treat as a confirmed-empty seed.
+  const seed = lead && primer ? `${lead}\n\n---\n\n${primer}` : (lead || primer);
   return { primer: seed, available: block.available };
+}
+
+/** The live-state block for this thread's agent (card-074301): current task
+ *  read from the last visible turn, plus the lane's open commitments (first),
+ *  its running background jobs, and the Desk cards it owns In progress —
+ *  every line read live from its store at seed time, never from the compact,
+ *  so a job that already ended cannot come back as a to-do. Fail-open: a
+ *  store hiccup contributes an empty block, never blocks a seed. */
+export function liveStateSeedBlockWithStatus(key: string, events?: Array<{ seq?: number; ev: any }>): { block: string; available: boolean } {
+  try {
+    if (!isThreadLogKey(key)) return { block: '', available: true };
+    const agents = listAgentsOrThrow();
+    const bare = bareChatId(key.slice(key.lastIndexOf('|') + 1));
+    const agent = agents.find((a) => a.home === bare);
+    if (!agent) return { block: '', available: true };
+    const evs = events ?? loadEventLogForCompactionSync(key);
+    const task = currentTaskLine(evs);
+    const commitments = listCommitments(agent.id);
+    const jobs = readRunningJobs(agent.id);
+    const cards = readOwnedCards(agent.id);
+    const lines: string[] = [
+      'Where you stand right now (read live at this moment, never from memory):',
+    ];
+    if (task) lines.push(`Current task: ${task}`);
+    if (commitments.length) {
+      lines.push(`Open commitments (in the block above, first) — ${commitments.length} open.`);
+    } else {
+      lines.push('Open commitments: none right now (block above).');
+    }
+    if (jobs.length) {
+      lines.push('Background jobs still running (from the live job store):');
+      for (const j of jobs) lines.push(`- job ${j.id}: ${j.name}`);
+    }
+    if (cards.length) {
+      lines.push('Desk cards you own In progress (live board):');
+      for (const c of cards) lines.push(`- [desk:${c.id}] ${c.title}`);
+    }
+    if (!jobs.length && !cards.length && !task) lines.push('Nothing else is in flight.');
+    lines.push(
+      'Everything else you remember (the rolling memory and working window below) is history to verify, never a to-do list to resume. ' +
+      'If a job, card or promise is not in the live stores above, treat it as already done, handed off, or stale — say so rather than redoing it.',
+    );
+    lines.push(
+      'When a message arrives, answer that message. Never open with "continuing the last task" or resume a job that is not listed as running above.',
+    );
+    return { block: lines.join('\n'), available: true };
+  } catch {
+    return { block: '', available: false };
+  }
+}
+
+/** The current task, from the last visible user turn in the event log. */
+export function currentTaskLine(events: Array<{ seq?: number; ev: any }>): string | null {
+  const turns = extractVisibleTurns(events);
+  const last = [...turns].reverse().find((t) => t.role === 'user');
+  if (!last) return null;
+  const text = last.text.replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  return text.length > 220 ? `${text.slice(0, 220)}…` : text;
+}
+
+type LiveJob = { id: string; name: string };
+/** Running jobs for one agent, read synchronously from the jobs store. */
+export function readRunningJobs(agentId: string): LiveJob[] {
+  try {
+    const raw = readFileSync(join(STATE_DIR, 'jobs.json'), 'utf8');
+    const parsed = JSON.parse(raw) as Array<{ id?: unknown; name?: unknown; agentId?: unknown; state?: unknown }>;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((j) => j?.agentId === agentId && j?.state === 'running')
+      .map((j) => ({ id: String(j.id ?? ''), name: String(j.name ?? '').trim() }))
+      .filter((j) => j.id && j.name)
+      .slice(0, 8);
+  } catch {
+    return [];
+  }
+}
+
+type LiveCard = { id: string; title: string };
+/** Desk cards this agent owns In progress, read from the Desk file. */
+export function readOwnedCards(agentId: string): LiveCard[] {
+  try {
+    const file = process.env.RIVENDELL_DESK_FILE?.trim() || join(STATE_DIR, 'desk.json');
+    const raw = readFileSync(file, 'utf8');
+    const parsed = JSON.parse(raw) as { cards?: Array<{ id?: unknown; title?: unknown; column?: unknown; archived?: unknown; owner?: { id?: unknown } }> };
+    const cards = Array.isArray(parsed.cards) ? parsed.cards : [];
+    return cards
+      .filter((c) => c?.owner?.id === agentId && c?.column === 'in_progress' && c?.archived !== true)
+      .map((c) => ({ id: String(c.id ?? ''), title: String(c.title ?? '').replace(/\s+/g, ' ').trim() }))
+      .filter((c) => c.id.startsWith('card-') && c.title)
+      .slice(0, 6);
+  } catch {
+    return [];
+  }
 }
 
 export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev: any }>): string {
@@ -721,6 +820,7 @@ Rules for the document you produce:
 - LENGTH: the document must never exceed ${COMPACT_TARGET_CEILING_WORDS} words — a hard ceiling, not a target. Merge the new aged-out turns into the previous document, and PRUNE while merging: drop any item the aged turns show is closed, shipped, finished, cancelled or superseded, and drop detail whose only remaining value is historical (the transcript can bring it back when it matters). Always keep open commitments, decisions in force, standing rules and stated preferences — pruning never touches those. Do not pad. Do not invent. A short history should produce a short document.
 - Capture: the CURRENT standing state — every decision as it now stands (and why), every open task and its state, every fact about people/projects/systems mentioned, every commitment or promise, every preference expressed, every technical detail that mattered (paths, models, endpoints, prices, IDs), and the current state of play.
 - NEWER WINS: when the aged turns change or reverse an earlier decision, the newer statement REPLACES the old one. Never keep both a decision and its reversal; the document shows only the decision now in force, with its reason.
+- CURRENT TASK ONLY: state the one task the agent is on right now, and only open work. Never write "continue the last task", "next, do X", or any instruction to resume work — an agent waking from this document reads the live state its seed carries and answers whatever message arrives. A pending list is a frozen lie after the work moves on: keep only items the newest turns show are still open, each with its live check (who owns it, what state it is in), in words.
 - Organize with clear headings (## ...) so it can be indexed: Overview / People & Projects / Decisions / Open Work / Facts & References / Preferences & Style / Current State.
 - Write in third person, past tense, no fluff, no meta commentary. Never invent content that is not in the previous document or the aged-out turns.
 - PLAIN ENGLISH: complete sentences, normal spacing between words, no telegraphic fragments. No internal codes or hashes in the prose: no commit SHAs, card or ticket IDs, PR numbers, or jargon shorthand. Describe the work in words (what changed, where, who owns it) so any reader can follow it without the internal tracker. A genuinely load-bearing name (a file path, a machine name) may stay, but keep those rare. IDs a teammate needs to act on (card, PR or commitment IDs, a pinned commit) go only in the Facts & References section as a short list, never in the prose.

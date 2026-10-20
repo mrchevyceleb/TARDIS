@@ -15,6 +15,7 @@ import { JsonStore, type StoredRecord } from '../lib/jsonStore.ts';
 import { scanOutgoingPromise } from '../lib/promiseScan.ts';
 import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, recordQuietExemptWake } from '../lib/quietHours.ts';
 import { LIVE_HOLD_CEILING_MS } from '../lib/laneLiveness.ts';
+import { briefEnvelopeForHandoff } from './briefEnvelope.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
 // both sides touch shared graph modules — keeping this lazy is cheap insurance).
@@ -1006,12 +1007,29 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
     : delivery.mixedSenders
     ? '(Reply inline for the thread. This turn carries messages from several senders, so the sender of the first block is not the only one waiting. If any sender above needs the result, use team_message(to: "<that sender>", text: ..., wait: false) with that sender\'s own name; busy teammates are queued automatically.)'
     : `(Reply inline for the thread. If ${from.name} needs the result, use team_message(to: "${from.name}", text: ..., wait: false); busy teammates are queued automatically.)`;
+  // Brief envelope (card-e9b846): a lead's handoff to a coder arrives as one
+  // goal sentence plus its card link, built here so no sender can skip it.
+  // The durable record keeps the lead's raw text; only this turn's prompt
+  // carries the envelope, with the raw brief below as detail. Fail-open.
+  let promptText = text;
+  try {
+    const envelope = await briefEnvelopeForHandoff({
+      senderId: from.id,
+      recipientId: to.id,
+      recipientName: to.name,
+      text,
+      wait: waitForReply === true,
+    });
+    if (envelope) promptText = envelope;
+  } catch (err) {
+    console.warn('[brief] envelope failed open:', (err as Error).message);
+  }
   const prompt = [
     from.role === 'voice' ? '[continuation of the user’s voice request in your own thread]'
       : from.role === 'desk' ? `[comment from ${from.name} on the Desk]`
       : from.role === 'slack' ? '[Slack message from a real person — reply in that Slack thread]'
       : `[message from teammate ${from.name}${from.role ? ` (${from.role})` : ''} — handoff ${hop}]`,
-    text,
+    promptText,
     '',
     replyInstruction,
   ].join('\n');

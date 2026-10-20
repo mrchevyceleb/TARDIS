@@ -108,6 +108,22 @@ const TOOLS = [
     },
   },
   {
+    name: 'team_fresh_chat',
+    description:
+      'Give a teammate a clean, empty chat before a task (Matt, Kip, Max and Riley only, by roster identity). ' +
+      'The lane keeps its persona, memory files, commitments and Desk cards; only the chat history goes. ' +
+      'Refuses while the lane has a live turn, so it never cuts work mid-flight. Use it right before handing over a brief.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agent: { type: 'string', description: "Teammate name or id to fresh, e.g. 'Christina'" },
+        from: { type: 'string', description: 'Your own teammate name. Only needed if TARDIS has not already identified you.' },
+      },
+      required: ['agent'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'team_message',
     description:
       'Send a durable message or correction to a teammate by name. Delivery is asynchronous by default ' +
@@ -891,6 +907,16 @@ async function callTool(name, args, signal) {
       const { card } = await api(`/api/desk/cards/${encodeURIComponent(args.id)}`, { method: 'PATCH', body: JSON.stringify(patch) }, signal);
       return `Updated:\n${describeCard(card)}`;
     }
+  }
+  if (name === 'team_fresh_chat') {
+    const caller = process.env.RIVENDELL_AGENT_ID || process.env.RIVENDELL_AGENT_NAME || (typeof args.from === 'string' ? args.from.trim() : '');
+    if (!caller) throw new Error('Only a named teammate can fresh a chat.');
+    const result = await api('/api/team/fresh', {
+      method: 'POST',
+      body: JSON.stringify({ agent: args.agent, caller }),
+    }, signal);
+    if (result.error) throw new Error(result.error);
+    return `Freshened ${result.agent}'s chat. Their persona, memory, commitments and cards are untouched; the next message starts clean.`;
   }
   if (name === 'team_message') {
     const result = await api('/api/team/message', {

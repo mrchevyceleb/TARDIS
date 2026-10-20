@@ -78,3 +78,25 @@ teamRouter.delete('/watch/:id', asyncHandler(async (req, res) => {
   const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   res.json({ deleted: await deleteJobWatch(id) });
 }));
+
+// /fresh — give an agent a clean, empty chat before a task (card-8d427d).
+// Matt, Kip, Max and Riley only; the lane keeps its persona, memory,
+// commitments and cards. Refuses while the lane has a live turn.
+teamRouter.post('/fresh', asyncHandler(async (req, res) => {
+  const { agent, caller } = req.body ?? {};
+  if (typeof agent !== 'string' || !agent.trim()) {
+    res.status(400).json({ error: 'agent is required' });
+    return;
+  }
+  if (typeof caller !== 'string' || !caller.trim()) {
+    res.status(400).json({ error: 'caller is required' });
+    return;
+  }
+  const { freshChatByName } = await import('../chat/freshChat.ts');
+  const result = await freshChatByName(agent, caller);
+  if (!result.ok) {
+    res.status(422).json({ error: result.reason });
+    return;
+  }
+  res.json({ ok: true, agent: result.agent, agentId: result.agentId });
+}));
