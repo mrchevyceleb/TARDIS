@@ -199,7 +199,7 @@ function outcomeText(job: Job): string {
       if (job.resourceCause === 'storage') return `was stopped by storage protection after ${took} because it exceeded its disk-write budget or kept writing while storage was low. It did NOT finish. Work saved in the workspace remains available.`;
       const code = job.exitCode ?? -1;
       // Above 128 a shell often means "killed by a signal", but exit 200 is also valid: say only what is known.
-      return `failed: exit ${code} in ${took}${code > 128 ? ` (exit codes above 128 often mean the process was killed by a signal)` : ''}`;
+      return `failed: exit ${code} in ${took}${code === 153 ? ' (exit 153 is the 1 GiB per-file size limit)' : code > 128 ? ` (exit codes above 128 often mean the process was killed by a signal)` : ''}`;
     }
     case 'stopped': return `was stopped${job.stoppedBy === 'user' ? ' from the UI' : ''} after ${took}. It did NOT finish.`;
     case 'timed-out': return `timed out after ${job.timeoutMin}m and was stopped. It did NOT finish.`;
@@ -220,7 +220,7 @@ function resultText(job: Job): string {
     `[job: ${job.name}] Job "${job.name}" ${outcomeText(job)}`,
     tail ? `Last output:\n${tail}` : 'No output was captured.',
     `Full log: ${logPath(job.id)}`,
-    ...(job.contained ? ['This job ran with limits of 8 GiB RAM, 256 MiB swap, 512 tasks and 2 CPUs. Private scratch and leftover child processes are released when its worker exits. A nonzero exit alone does not prove an OOM kill.'] : []),
+    ...(job.contained ? ['This job ran with limits of 8 GiB RAM, 256 MiB swap, 512 tasks, 2 CPUs, a 1 GiB per-file size limit and 4 GiB of private scratch. Private scratch and leftover child processes are released when its worker exits. A nonzero exit alone does not prove an OOM kill.'] : []),
     'Background job result from job_start. This is not a message from a person.',
   ].join('\n'));
 }

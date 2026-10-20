@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { existsSync, readFileSync, readlinkSync, statfsSync } from 'node:fs';
-import { mkdir, open, rm, writeFile } from 'node:fs/promises';
+import { mkdir, open, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { totalmem } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -86,23 +86,25 @@ export async function initializeResourceGuard(): Promise<void> {
     const quota = values.CPUQuotaPerSecUSec?.match(/^([\d.]+)(us|ms|s)$/);
     const units: Record<string, number> = { us: 1, ms: 1000, s: 1_000_000 };
     const quotaMicros = quota ? Number(quota[1]) * (units[quota[2]] ?? Infinity) : Infinity;
-    // systemd does not expose MemoryOOMGroup for slice units (the property is
-    // unknown to `systemctl show`/`set-property` on slices), so the kernel's
-    // own memory.oom.group file is the ground truth that this slice is not one
-    // OOM group — sacrificing every lane for one offender is forbidden. A slice
-    // whose cgroup has not been created yet has no OOM group to sacrifice.
-    const oomGroup = existsSync(`${userCgroup}/tardis.slice/${SLICE}/memory.oom.group`)
-      ? readFileSync(`${userCgroup}/tardis.slice/${SLICE}/memory.oom.group`, 'utf8').trim()
-      : '0';
+    // A slice-level memory.oom.group can only ever read 0 (systemd never sets
+    // it on slices); the check that matters is per-scope and runs below, on
+    // the real launch path.
     if (values.LoadState !== 'loaded' || !bounded('MemoryHigh', 28 * GiB) || !bounded('MemoryMax', 32 * GiB)
       || !Number.isFinite(Number(values.MemorySwapMax)) || Number(values.MemorySwapMax) > GiB
-      || oomGroup !== '0' || !bounded('TasksMax', 4096) || !(quotaMicros > 0 && quotaMicros <= 12_000_000)) {
+      || !bounded('TasksMax', 4096) || !(quotaMicros > 0 && quotaMicros <= 12_000_000)) {
       throw new Error('Install the bounded tardis-workers.slice policy from docs/RESOURCE-GUARD.md.');
     }
     aggregateTaskLimit = Number(values.TasksMax);
-    // Real capability check: missing user namespaces/AppArmor permission must
-    // refuse work clearly, never silently bypass scratch/process containment.
-    await commandOutput('/usr/bin/bwrap', [...sandboxArgs(), '--', '/usr/bin/prlimit', '--core=0:0', '--fsize=1073741824:1073741824', '--', '/bin/sh', '-c', 'test -c /dev/null && : >/dev/null && dd if=/dev/urandom of=/dev/null bs=1 count=1 status=none && test -d /dev/shm/tardis']);
+    // Real capability check on the REAL launch path. A bare bwrap probe proves
+    // nothing about what every worker actually runs, and a refused
+    // `systemd-run` (unsupported property, manager trouble) used to leave
+    // readiness green while every launch died silently. Run a transient scope
+    // in both shapes (a lane turn and a job/watch) and have the probe read its
+    // own kernel limits from inside the scope — including memory.oom.group=1,
+    // which OOMPolicy=kill sets, so one worker's OOM kill takes its whole
+    // cgroup and never sacrifices another lane.
+    await probeContainedLaunch(false);
+    await probeContainedLaunch(true);
     recent = (await incidents.list()).slice(0, 50);
     await reapOwnedConfigs();
     ready = true;
@@ -196,7 +198,10 @@ async function monitorWrites(): Promise<void> {
         }
         if (Date.now() - entry.missingAt > 10_000 && Date.now() - entry.alertedAt > 60_000) {
           entry.alertedAt = Date.now();
-          recordResourceIncident(entry.owner, 'Worker disk accounting is unavailable. TARDIS is holding new work until the host policy is checked.');
+          // This is a hold reason (new work is refused while readings are
+          // unavailable), so it carries the hold kind: the Desk keeps it, and
+          // the toast path stays quiet instead of re-announcing it every minute.
+          recordResourceIncident(entry.owner, 'Worker disk accounting is unavailable. TARDIS is holding new work until the host policy is checked.', { kind: 'hold' });
           accountingFaults.add(unit);
         }
         continue;
@@ -233,6 +238,10 @@ async function monitorWrites(): Promise<void> {
         } catch {
           const identity = scopeIdentities.get(unit);
           if (identity) identity.expectedExit = false;
+          // A scope that is already gone finished between the accounting read
+          // and the kill. That is a completed job, not a host that cannot stop
+          // a worker; only a scope that is still there is an alarm.
+          if (!existsSync(`${userCgroup}/tardis.slice/${SLICE}/${unit}.scope`)) { unwatchContainedScope(unit); return undefined; }
           watchedScopes.set(unit, entry);
           if (Date.now() - entry.alertedAt > 60_000) {
             entry.alertedAt = Date.now();
@@ -307,7 +316,19 @@ export function resourcePressure(): string | null {
   return null;
 }
 
-export function assertResourcesForSpawn(owner: string, cwd?: string): void {
+export function assertResourcesForSpawn(owner: string, cwd?: string, opts: { conversationTurn?: boolean } = {}): void {
+  // A hold is a valve on new load, never a mute button on a person. A turn in
+  // a conversation always runs while containment itself is verified: it is one
+  // worker under its own kernel caps and the shared slice budget, and the
+  // office freezing is worse than the load it adds. Pressure is logged here
+  // instead of blocking the person; new machine work (jobs, command watches)
+  // still holds. When containment is NOT verified the normal path below runs,
+  // because required mode never launches anything uncontained.
+  if (opts.conversationTurn && resourceGuardRequired() && ready) {
+    const reason = accountingFaults.size ? 'Worker disk accounting is unavailable; TARDIS is holding new work until readings recover.' : resourcePressure();
+    if (reason) console.warn(`[resource-guard] Admitted a conversation turn while holding new work: ${reason}`);
+    return;
+  }
   assertMemoryAvailableForSpawn(owner);
   if (!resourceGuardRequired()) return;
   let reason = accountingFaults.size ? 'Worker disk accounting is unavailable; TARDIS is holding new work until readings recover.' : ready ? resourcePressure() : readiness;
@@ -328,32 +349,54 @@ export function resourceGuardStatus() {
     pressure: resourceGuardRequired() ? resourcePressure() : null, limits: WORKER_LIMITS, incidents: recent };
 }
 
-/** systemd 255 does not accept MemoryOOMGroup= on scopes or slices, so the
- * kernel file is written once the scope registers: when the kernel must kill
- * inside this worker's cgroup it takes the whole group (the job and its tree)
- * at once, never one process at a time. Best-effort: the memory limits
- * themselves never depend on this write. */
-async function markScopeOomGroup(unit: string): Promise<void> {
-  const file = `${userCgroup}/tardis.slice/${SLICE}/${unit}.scope/memory.oom.group`;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try { await writeFile(file, '1'); return; } catch { await new Promise((resolve) => setTimeout(resolve, 200)); }
-  }
-  console.warn(`[resource-guard] Could not mark ${unit} as one OOM group; its memory limits still apply.`);
+/** The one argv every contained launch uses, so the readiness probe and the
+ * real spawns can never drift apart. `durable` marks machine work (jobs and
+ * command watches): it is collected on exit and survives its launcher. Lane
+ * turns keep --die-with-parent inside bwrap instead. OOMPolicy=kill is the
+ * scope property that makes the kernel take a worker's whole cgroup at once on
+ * an OOM kill (systemd sets the scope's memory.oom.group for it), so no kernel
+ * file write is needed and a daemon-reload cannot silently undo it. */
+function containedLaunchArgs(unit: string, command: string, args: readonly string[], durable: boolean, runtimeSeconds?: number): string[] {
+  return ['--user', '--scope', '--quiet', '--collect', '--expand-environment=no',
+    `--slice=${SLICE}`, `--unit=${unit}`, '-p', `MemoryHigh=${WORKER_LIMITS.memoryHigh}`, '-p', `MemoryMax=${WORKER_LIMITS.memoryMax}`,
+    '-p', `MemorySwapMax=${WORKER_LIMITS.swapMax}`, '-p', `TasksMax=${WORKER_LIMITS.tasks}`,
+    '-p', 'IOAccounting=yes', '-p', `CPUQuota=${WORKER_LIMITS.cpuPercent}%`, '-p', 'OOMPolicy=kill',
+    ...(runtimeSeconds ? ['-p', `RuntimeMaxSec=${runtimeSeconds}`] : []),
+    '/usr/bin/bwrap', ...sandboxArgs(durable), '--', '/usr/bin/prlimit', '--core=0:0', '--fsize=1073741824:1073741824', '--', command, ...args];
+}
+
+const PROBE_SCRIPT = `set -e
+cg=$(sed -n 's/^0:://p' /proc/self/cgroup)
+[ -n "$cg" ]
+[ "$(cat /sys/fs/cgroup$cg/memory.max)" = "${WORKER_LIMITS.memoryMax}" ]
+[ "$(cat /sys/fs/cgroup$cg/memory.high)" = "${WORKER_LIMITS.memoryHigh}" ]
+[ "$(cat /sys/fs/cgroup$cg/memory.swap.max)" = "${WORKER_LIMITS.swapMax}" ]
+[ "$(cat /sys/fs/cgroup$cg/pids.max)" = "${WORKER_LIMITS.tasks}" ]
+[ "$(cat /sys/fs/cgroup$cg/memory.oom.group)" = "1" ]
+[ -d /dev/shm/tardis ]
+test -c /dev/null && : >/dev/null && dd if=/dev/urandom of=/dev/null bs=1 count=1 status=none`;
+
+/** Run one real contained launch — the same argv every worker uses — and fail
+ * with a readable reason when systemd refuses it or the kernel limits are not
+ * in force. `durable` picks the job/watch shape. */
+async function probeContainedLaunch(durable: boolean): Promise<void> {
+  const unit = `tardis-${durable ? 'job' : 'worker'}-${randomUUID()}`;
+  await new Promise<void>((resolve, reject) => {
+    execFile('systemd-run', containedLaunchArgs(unit, '/bin/sh', ['-c', PROBE_SCRIPT], durable, durable ? 60 : undefined), { timeout: 30_000 }, (err, _stdout, stderr) => {
+      if (err) reject(new Error(`The real contained launch failed in its ${durable ? 'job' : 'lane'} shape: ${String(stderr || err.message).trim().slice(0, 300)}`));
+      else resolve();
+    });
+  });
 }
 
 /** All agent execution surfaces share this path, including background jobs,
  * watch commands and content generation. Arguments never include secrets. */
 export function spawnContained(command: string, args: readonly string[], options: SpawnOptions, owner: string, unit = `tardis-worker-${randomUUID()}`, runtimeSeconds?: number, durable = false): ChildProcess {
-  assertResourcesForSpawn(owner, typeof options.cwd === 'string' ? options.cwd : undefined);
+  assertResourcesForSpawn(owner, typeof options.cwd === 'string' ? options.cwd : undefined, { conversationTurn: !durable });
   if (!resourceGuardRequired()) return spawn(command, args, options);
   if (options.shell) throw new Error('Contained launches require an explicit shell command.');
   if (!/^tardis-(?:worker|job|watch)-[a-f0-9-]+$/.test(unit)) throw new Error('Invalid worker scope identity.');
-  const child = spawn('systemd-run', ['--user', '--scope', '--quiet', ...(durable ? ['--collect'] : []), '--expand-environment=no',
-    `--slice=${SLICE}`, `--unit=${unit}`, '-p', `MemoryHigh=${WORKER_LIMITS.memoryHigh}`, '-p', `MemoryMax=${WORKER_LIMITS.memoryMax}`,
-    '-p', `MemorySwapMax=${WORKER_LIMITS.swapMax}`, '-p', `TasksMax=${WORKER_LIMITS.tasks}`,
-    '-p', 'IOAccounting=yes', '-p', `CPUQuota=${WORKER_LIMITS.cpuPercent}%`,
-    ...(runtimeSeconds ? ['-p', `RuntimeMaxSec=${runtimeSeconds}`] : []),
-    '/usr/bin/bwrap', ...sandboxArgs(durable), '--', '/usr/bin/prlimit', '--core=0:0', '--fsize=1073741824:1073741824', '--', command, ...args], options);
+  const child = spawn('systemd-run', containedLaunchArgs(unit, command, args, durable, runtimeSeconds), options);
   const identity = { unit, expectedExit: false };
   startingScopes.set(unit, Date.now() + 10_000);
   containedChildren.set(child, identity);
@@ -363,7 +406,6 @@ export function spawnContained(command: string, args: readonly string[], options
   const arm = setTimeout(() => {
     if (child.exitCode === null && child.signalCode === null) {
       watchContainedScope(unit, owner, typeof options.cwd === 'string' ? options.cwd : process.cwd());
-      void markScopeOomGroup(unit);
     }
   }, 1000);
   arm.unref();
@@ -390,6 +432,13 @@ export function spawnContained(command: string, args: readonly string[], options
     // from systemd's result instead of guessing from exit 137. Then release
     // only this launch's randomly named failure record, never another unit.
     void scopeOutcome(unit).then(async (result) => {
+      // A launch that never registered a scope never ran a command: systemd-run
+      // itself refused it (unsupported property, unit clash, manager trouble).
+      // Say so plainly — a silent refusal must never look like a healthy host.
+      if (!result && !existsSync(`${userCgroup}/tardis.slice/${SLICE}/${unit}.scope`)) {
+        recordResourceIncident(owner, `The contained launch was refused before its scope registered (exit ${code ?? signal}). TARDIS did not run it uncontained.`);
+        return;
+      }
       if (result === 'oom-kill') recordResourceIncident(owner,
         MEMORY_FAILURE_NOTICE
         );

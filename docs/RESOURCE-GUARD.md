@@ -14,8 +14,12 @@ memory consumption and unconstrained background scopes completed the failure.
 
 `RIVENDELL_RESOURCE_GUARD=required` enables strict Linux containment. Missing
 policy, unsupported cgroups, denied user namespaces, or a failed launch means
-work is held with a plain, retryable reason. Startup capability checks retry
+work is held with a plain, retryable reason. Startup capability checks run the
+real launch path — a transient scope in both shapes, a lane turn and a
+job/watch, reading its own kernel limits from inside the scope — and retry
 every 30 seconds so a transient failure does not require a service restart.
+A refused `systemd-run` is recorded as an incident instead of leaving
+readiness green while every launch dies.
 There is no uncontained retry. Unset or `off`
 retains portable launching; `/api/health.resourceGuard` explicitly says off.
 Every screen surfaces new worker failures in one coalesced toast and an accessible
@@ -91,8 +95,11 @@ memory/I/O PSI, holding new work at 10% sustained full stalls. The memory
 reserve is the greater of 2 GiB and 10% of host RAM; finite cgroup headroom is
 checked separately against its own capacity, including all ancestors. Available
 headroom discounts reclaimable inactive file cache, so cached model weights
-and workspace reads cannot permanently hold launches. Existing
-healthy conversations are not interrupted by admission holds. Background jobs
+and workspace reads cannot permanently hold launches. A hold gates **new
+machine work** (background jobs and command watches). It never refuses a turn
+in a conversation: a lane always answers while the host is recovering, because
+one bounded worker under its own kernel caps is not what chokes a machine, and
+an office that cannot reply is worse than the load it adds. Background jobs
 and watch commands have scope runtime backstops two minutes after their
 requested timeout; the scheduler remains the primary timeout reporter.
 Command-watch timeout wakes explicitly warn that this hard stop is pending.
@@ -181,11 +188,12 @@ IOAccounting=yes
 IOWeight=25
 ```
 
-`MemoryOOMGroup=` is not supported by systemd 255 on slices or on scopes, so
-it is deliberately not listed anywhere. Strict mode reads the kernel's own
-`memory.oom.group` for the worker slice instead and refuses work unless it is
-`0` (not an OOM group); each worker scope gets its own `memory.oom.group`
-written by the guard once the scope registers.
+`OOMPolicy=kill` is set on every worker scope (systemd supports it on scopes
+from 253), so the kernel takes a worker's whole cgroup on an OOM kill: one
+worker and its descendants die together and no other lane is sacrificed. No
+kernel file is written by hand, so a `systemctl --user daemon-reload` cannot
+silently undo it, and strict-mode readiness proves the property inside a real
+scope before any work is admitted.
 
 Create `~/.config/systemd/user/tardis-models.slice`:
 

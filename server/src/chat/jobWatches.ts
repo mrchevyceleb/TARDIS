@@ -25,7 +25,7 @@ import { inQuietHours, isQuietExemptWork, lastQuietEndMs, msUntilQuietEnd } from
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { listAgents } from './agents.ts';
 import { sendToAgentHome } from './teamBus.ts';
-import { assertResourcesForSpawn, resourceGuardRequired, spawnContained, containedScopeOf, releaseContainedScope, signalContainedWorker, watchContainedScope, scopeOutcome, scopeStorageFailure, recordResourceIncident, MEMORY_FAILURE_NOTICE } from '../lib/resourceGuard.ts';
+import { assertResourcesForSpawn, resourceGuardRequired, spawnContained, containedScopeOf, releaseContainedScope, signalContainedWorker, watchContainedScope, scopeOutcome, scopeStorageFailure, recordResourceIncident, MEMORY_FAILURE_NOTICE, expectContainedScopeExit } from '../lib/resourceGuard.ts';
 
 export type JobWatchKind = 'pid' | 'file' | 'command';
 
@@ -378,6 +378,10 @@ export async function deleteJobWatch(id: string): Promise<boolean> {
  *  waiting. A resolvedText already on the record skips this entirely. */
 function checkWatch(watch: JobWatch, now: number): string | null {
   if (now >= watch.deadline) {
+    // This watch is done: its scope keeps running only until the hard
+    // RuntimeMaxSec backstop stops it, and that stop is expected, not a
+    // second incident the agent should be told about.
+    if (watch.unit) expectContainedScopeExit(watch.unit);
     if (watch.unit) return `timed out after ${watch.timeoutMin}m without reporting completion. Its worker has a hard time limit and will be stopped within two minutes. Work saved in the workspace remains available; check the job before continuing. No further watch result will arrive.`;
     return `timed out after ${watch.timeoutMin}m. The watch gave up — check the job yourself; nothing further will arrive.`;
   }
