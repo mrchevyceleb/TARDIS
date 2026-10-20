@@ -311,6 +311,7 @@ export class AgySession {
     // belonging to a dead process.
     if (this.disposed || this.retiring) return;
     if (this.startedResumeId && conversationId !== this.startedResumeId) {
+      this.resumeFailed = true;
       this.emit({ type: 'error', message: 'Antigravity did not resume its saved conversation. The saved ID and queued messages were retained.', fatal: true });
       this.resolveReady(false);
       this.shutdown('native resume mismatch');
@@ -1049,7 +1050,7 @@ export class AgySession {
       const humanTurn = !opts.peerFrom && opts.peerFromRole !== 'automation';
       // Full computer rules ride the seed message that starts a fresh agy window;
       // later messages of the same warm process get the brief form.
-      const computerContext = wantSeed ? computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed) : '';
+      const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
       const stateDelta = await prepareSessionStateDelta(this.chatId);
       const priorities = stateDelta.text;
       // Plain-English writing block (card-0d1015): agy is Gemini, whose

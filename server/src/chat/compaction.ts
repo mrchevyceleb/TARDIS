@@ -396,7 +396,7 @@ export function peekEnginePrimerWithStatus(key: string, events?: Array<{ seq?: n
     // The cutover is announced once, without copying memories, card text or
     // transcript excerpts. Current stores and the greppable transcript remain
     // available through the same tools after the cutover.
-    primer: 'This is the one-time cutover into your persistent native session. Check your live commitments and owned Desk cards before resuming work. Look up older details with memory search or your greppable transcript; no older task is a new instruction. This session continues across turns and restarts, with only native engine compaction.',
+    primer: 'This is your persistent native session. Check your live commitments and owned Desk cards before resuming work. Look up older details with memory search or your greppable transcript; no older task is a new instruction. This session continues across turns and restarts, with only native engine compaction.',
     available: true,
   };
 }

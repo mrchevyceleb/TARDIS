@@ -46,7 +46,7 @@ import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
 import { applyProviderLimits } from './providerEnv.ts';
-import { ensureNativeCompactProxy, nativeCompactBaseUrl, markNativeCompacting, releaseNativeCompactRoute } from './nativeCompactProxy.ts';
+import { ensureNativeCompactProxy, nativeCompactBaseUrl, markNativeCompacting, markNativeHandoverRecovery, releaseNativeCompactRoute } from './nativeCompactProxy.ts';
 import { compactFailureError, isContextLengthRejection, isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
@@ -1152,6 +1152,16 @@ class ClaudeSession {
     } finally { this.nativeCompactCommand = false; }
   }
 
+  nativeProviderUnavailable(): boolean {
+    return /(?:HTTP[ :]+(?:401|403|404|429|5\d\d)|usage limit|RESOURCE_EXHAUSTED)/i.test([this.syntheticApiErrorReason, this.compactFailure].filter(Boolean).join(' '));
+  }
+
+  async compactAfterProviderRecovery(): Promise<void> {
+    markNativeHandoverRecovery(this.nativeBaseUrl, true);
+    try { await this.compactNative(); }
+    finally { markNativeHandoverRecovery(this.nativeBaseUrl, false); }
+  }
+
   private async compactNativeOnce(): Promise<void> {
     this.compactFailure = null;
     this.syntheticApiErrorReason = null;
@@ -1168,6 +1178,12 @@ class ClaudeSession {
         const event = ev.type === 'event' ? ev.event : null;
         if (event?.type === 'system' && event.subtype === 'compact_boundary') compacted = true;
         if (event?.type === '_terminal_error') failure = new Error('Native compaction failed; the existing session is retained.');
+        if (event?.type === 'result' && !compacted && typeof event.result === 'string') {
+          // Claude Code sometimes returns a /compact API refusal as a
+          // successful command result. Keep only the status, never its body.
+          const status = /API Error:\s*(401|403|404|429|5\d\d)\b/.exec(event.result);
+          if (status) this.syntheticApiErrorReason = `HTTP ${status[1]}`;
+        }
         if (ev.type === 'turnEnd') done(compacted ? undefined : failure ?? new Error('The engine did not produce a native compaction boundary.'));
         if (ev.type === 'closed') done(new Error('The engine exited during native compaction; its saved session is retained.'));
       }, -1, false);
@@ -1183,7 +1199,33 @@ class ClaudeSession {
     assertSubscriptionLane(this.cli);
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
-    if (this.nativeHandoverPending) throw new Error('This session is handing over. The message remains queued for the replacement.');
+    if (this.nativeHandoverPending) {
+      const lookup = nativeLookups.get(bareChatId(this.chatId));
+      if (lookup) await lookup;
+      if (opts.signal?.aborted) return;
+      const replacement = peekThreadSession({ cli: this.cli, repoPath: this.cwd, chatId: this.chatId });
+      if (replacement && replacement !== this) {
+        // Peer callers must re-acquire the replacement so their receipt
+        // listener follows the actual worker. Their durable outbox keeps it.
+        if (opts.peerFrom) throw new Error('The handover finished; re-acquire the replacement before admitting this delivery.');
+        while (replacement.isBusy()) {
+          await new Promise<void>((resolve, reject) => {
+            let unsubscribe = () => {};
+            const onAbort = () => done();
+            const done = (error?: Error) => { clearTimeout(timer); unsubscribe(); opts.signal?.removeEventListener('abort', onAbort); error ? reject(error) : resolve(); };
+            const timer = setTimeout(() => done(new Error('The replacement is still working; the message has not been admitted.')), 30 * 60_000);
+            timer.unref?.();
+            unsubscribe = replacement.subscribe(() => { if (!replacement.isBusy() || !replacement.isAlive()) done(); }, replacement.latestSeq(), false);
+            opts.signal?.addEventListener('abort', onAbort, { once: true });
+            if (opts.signal?.aborted || !replacement.isBusy()) done();
+          });
+          if (opts.signal?.aborted) return;
+          if (!replacement.isAlive()) throw new Error('The replacement stopped before message admission. The saved session is retained.');
+        }
+        return replacement.send(text, images, opts);
+      }
+      if (this.nativeHandoverPending || !this.isAlive()) throw new Error('The provider handover has not completed. The saved session is retained.');
+    }
     if (this.contextRotated) {
       const next = await getOrCreateSession({ cli: this.cli, repoPath: this.cwd, chatId: this.chatId, model: this.spawnModel, effort: this.spawnEffort });
       return next.send(text, images, opts);
@@ -1455,7 +1497,7 @@ class ClaudeSession {
     // Max run `date`, reload session context, and narrate "I'm on it" on every
     // ordinary follow-up. Supply the runtime fact inline so agent-home turns
     // continue immediately instead of acting like cold starts.
-    const conversationGuidance = wantSeed ? conversationGuidanceForTurn({
+    const conversationGuidance = wantSeed || opts.peerFromRole === 'voice' ? conversationGuidanceForTurn({
       chatId: this.chatId, logKey: this.logKey, historyThroughSeq,
       peerFrom: opts.peerFrom,
       peerFromRole: continuing?.origin.automation ? 'automation' : opts.peerFromRole,
@@ -1740,7 +1782,7 @@ class ClaudeSession {
 
   setNativeHandoverPending(pending: boolean): void {
     this.nativeHandoverPending = pending;
-    if (!pending && this.isAlive() && this.turnStartedAt === null) this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
+    if (!pending && this.isAlive() && this.turnStartedAt === null) this.emit({ type: 'event', event: { type: 'native_handover_released' } });
   }
 
   /** Plain descriptions of the background work still running in this process. */
@@ -2697,6 +2739,7 @@ class ClaudeSession {
     // deployment named may roll over, only with the turn's opening prompt in
     // hand, and never stacked on the compact re-run below.
     const usageFallbackDue = terminal?.usageLimit === true
+      && !isAgentThread(this.chatId)
       && (this.cli === 'claude' || this.cli === 'assistant')
       && USAGE_FALLBACK_ACCOUNTS.has(this.providerAccountName)
       && this.compactRerunPrompt !== null
@@ -3083,7 +3126,12 @@ async function getOrCreateSessionUnlocked(opts: {
         recordNativeFailure(chatId, requestedCodex ? 'codex' : 'claude-code', 'Cross-engine switch involving Codex is held for Matt’s pending handover choice. Existing sessions and queued work are retained.');
       }
       const previous = await nativeSessionProvenance(requestedCodex ? 'claude' : 'codex', opts.repoPath, chatId);
-      const source = await getOrCreateSessionUnlocked({ ...opts, cli: previous?.cli ?? (requestedCodex ? 'claude' : 'codex'),
+      const live = peekThreadSession(opts);
+      const savedCli = previous?.cli ?? live?.cli;
+      if (!savedCli) {
+        throw new Error('The engine switch is held because the saved session has no proven account selection. Its ID and queued messages are retained; Max can repair the saved CLI without clearing the chat.');
+      }
+      const source = live?.cli === savedCli ? live : await getOrCreateSessionUnlocked({ ...opts, cli: savedCli,
         model: previous?.model, effort: previous?.effort, recycleOnMismatch: false, servingHeldSwitch: true });
       if (source instanceof CodexSession) source.holdSelection(previous ?? {});
       return source;
@@ -3222,6 +3270,40 @@ async function getOrCreateSessionUnlocked(opts: {
     return await spawnSessionOnce(opts.cli, cwd, chatId, key, wantModel, wantEffort);
   }
   return spawned;
+  } catch (error) {
+    // The old provider may be out of quota or no longer serve the saved
+    // model. The selected provider can compact the exact same native Claude
+    // transcript; this is neither a new ID nor a TARDIS-written summary.
+    const previous = isAgentThread(chatId) && isClaudeFamilyCli(opts.cli)
+      ? await nativeSessionProvenance(opts.cli, opts.repoPath, chatId) : undefined;
+    const unavailable = [...handedSources].some(source => source.nativeProviderUnavailable())
+      || (previous?.cli && ['openrouter', 'openrouter2'].includes(previous.cli)
+        && /OpenRouter has no current context\/output limits|not (?:in|present in|available in).*catalog|catalog.*(?:missing|not found)/i.test(String((error as Error).message)));
+    const wanted = resolveClaudeModel(opts.cli, opts.model);
+    if (!unavailable || isThreadResetting(opts) || !previous?.sessionId || !previous.cli || !isClaudeFamilyCli(previous.cli)
+        || (previous.cli === opts.cli && previous.model === wanted)) throw error;
+    if (opts.cli === 'openrouter' || opts.cli === 'openrouter2') await requireOpenRouterModel(wanted);
+    for (const [sourceKey, source] of [...sessions]) {
+      if (source.logKey !== logKeyFor(opts.cli, opts.repoPath, chatId) || !(source instanceof ClaudeSession)) continue;
+      source.shutdown('unavailable provider handover', 'model');
+      await waitForChildExit(source, 5_000);
+      if (!source.processExited()) throw error;
+      if (sessions.get(sourceKey) === source) sessions.delete(sourceKey);
+    }
+    recordNativeFailure(chatId, 'claude-code', 'The old provider is unavailable; the selected provider is running native compaction on the same saved session.');
+    const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
+    const recovery = await spawnSessionOnce(opts.cli, cwd, chatId, keyOf(opts.cli, cwd, chatId), wanted, resolveClaudeEffort(opts.cli, opts.effort, wanted));
+    if (!(recovery instanceof ClaudeSession)) throw error;
+    markHandover(recovery);
+    try { await recovery.compactAfterProviderRecovery(); }
+    catch (recoveryError) {
+      recovery.shutdown('native provider recovery did not complete', 'model');
+      await waitForChildExit(recovery, 5_000);
+      await setSessionSelection(previous.cli, opts.repoPath, { model: previous.model, effort: previous.effort }, chatId);
+      throw recoveryError;
+    }
+    if (isThreadResetting(opts)) throw new Error('The handover was canceled; the native session is retained.');
+    return recovery;
   } finally {
     for (const source of handedSources) {
       const sources = nativeHandovers.get(source.logKey);

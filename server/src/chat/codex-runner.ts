@@ -773,7 +773,7 @@ export class CodexSession {
       this.recoverContextOnNextTurn = false;
     }
     const personaScope = !this.threadId ? personaPromptFor(this.chatId) : '';
-    const conversationGuidance = !this.threadId ? conversationGuidanceForTurn({
+    const conversationGuidance = !this.threadId || opts.peerFromRole === 'voice' ? conversationGuidanceForTurn({
       chatId: this.chatId, logKey: this.logKey, historyThroughSeq,
       peerFrom: opts.peerFrom,
       peerFromRole: opts.peerFromRole,

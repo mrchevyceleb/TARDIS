@@ -42,6 +42,30 @@ type SessionLike = {
   chatId?: string;
 };
 
+
+/** A stdin write is not a provider receipt. Keep listening through startup
+ * so callers do not retry an admitted wake or accept an empty reply. */
+async function sendWithAdmission(session: SessionLike, deliveryId: string, send: () => Promise<void>): Promise<void> {
+  let echoed = false;
+  let finish = () => {};
+  const admitted = new Promise<void>(resolve => { finish = resolve; });
+  const timer = setTimeout(finish, 4 * 60_000);
+  timer.unref?.();
+  const unsubscribe = session.subscribe(event => {
+    const inner = event.ev?.type === 'event' ? event.ev.event : undefined;
+    if (inner?.type === 'peer_message' && inner.deliveryId === deliveryId) echoed = true;
+    if ((inner?.type === 'peer_delivery_accepted' && inner.deliveryId === deliveryId)
+        || event.ev?.type === 'turnEnd' || event.ev?.type === 'closed' || event.ev?.type === 'error') finish();
+  }, session.latestSeq(), false);
+  try {
+    await send();
+    if (echoed) await admitted;
+  } finally {
+    clearTimeout(timer);
+    unsubscribe();
+  }
+}
+
 async function getRunner() {
   const mod = await import('./runner.ts');
   return mod as unknown as {
@@ -391,7 +415,7 @@ export function waitForDeliveryBoundary(
     }
     try {
       const stop = session.subscribe((event) => {
-        if (event.ev?.type === 'turnEnd') done('idle');
+        if (event.ev?.type === 'turnEnd' || session.isBusy?.() !== true) done('idle');
         else if (event.ev?.type === 'closed') done('closed');
         else if (acceptSteer() && session.canAcceptNativeHumanSteer?.() === true) done('steerable');
       }, sinceSeq, false);
@@ -832,7 +856,7 @@ export async function sendToAgentHome(
       if (inner?.type === 'peer_message' && inner.deliveryId === deliveryId) echoed = true;
       if (inner?.type === 'peer_delivery_accepted' && inner.deliveryId === deliveryId) providerAccepted = true;
     }, session.latestSeq(), false);
-    await session.send(text, undefined, {
+    await sendWithAdmission(session, deliveryId, () => session.send(text, undefined, {
       peerFrom: opts.peerFrom,
       peerFromRole: opts.peerFromRole,
       peerText: opts.peerText,
@@ -840,7 +864,7 @@ export async function sendToAgentHome(
       allowNativePeerSteer: nativeSteer,
       model,
       effort,
-    });
+    }));
   } catch (e) {
     return { delivered: false, reason: `delivery failed: ${(e as Error).message}` };
   } finally {
@@ -1252,7 +1276,7 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
         unsubscribe?.();
         return { delivered: false, to: to.name, hop, queued: waited || undefined, reason: 'dropped while waiting for a turn boundary' };
       }
-      await session.send(prompt, undefined, {
+      await sendWithAdmission(session, deliveryId, () => session.send(prompt, undefined, {
         peerFrom: from.name,
         peerFromRole: from.role,
         // The control envelope belongs to the model, not the visible feed.
@@ -1262,7 +1286,7 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
         model,
         effort,
         signal,
-      });
+      }));
     } catch (error) {
       unsubscribe?.();
       return { delivered: false, to: to.name, hop, queued: waited || undefined, reason: `delivery failed: ${(error as Error).message}` };

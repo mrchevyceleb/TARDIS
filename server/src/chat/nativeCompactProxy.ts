@@ -11,7 +11,7 @@ const SUMMARY_LIMIT = 4096;
 const MAX_BODY = 32 * 1024 * 1024;
 type Route = {
   upstream: string; lane: string; provider: string; resumed: boolean;
-  sessionId(): string | null; harnessChars(): number; compacting: boolean;
+  sessionId(): string | null; harnessChars(): number; compacting: boolean; recovering?: boolean;
 };
 let server: Server | null = null;
 let ready: Promise<void> | null = null;
@@ -56,6 +56,12 @@ export function boundNativeCompact(body: string, engineCompacting = false, catal
   request.system = typeof request.system === 'string' ? request.system + instruction
     : [...(request.system || []), { type: 'text', text: instruction }];
   return JSON.stringify(request);
+}
+
+export function markNativeHandoverRecovery(baseUrl: string | undefined, recovering: boolean): void {
+  if (!baseUrl) return;
+  const route = routes.get(new URL(baseUrl).pathname.slice(1));
+  if (route) route.recovering = recovering;
 }
 
 export function markNativeCompacting(baseUrl: string | undefined, compacting: boolean): void {
@@ -136,9 +142,19 @@ export function ensureNativeCompactProxy(): Promise<void> {
         if (nativeSummary && route.compacting && !summaryRequest(request)) recordNativeFailure(route.lane, 'claude-code', 'Native compact template changed; fallback bound applied.');
         // Anthropic already uses its model's native thinking mode. Provider
         // compatibility bounds must not rewrite subscription compactions.
+        // During an unavailable-provider handover, let the selected model run
+        // Claude Code's own compact over the unchanged saved transcript. Signed
+        // hidden thinking belongs to the old provider and is not transferable.
+        let compatible = original;
+        if (nativeSummary && route.recovering && request.messages) {
+          for (const message of request.messages) {
+            if (Array.isArray(message.content)) message.content = message.content.filter((block: any) => !['thinking', 'redacted_thinking'].includes(block?.type));
+          }
+          compatible = JSON.stringify(request);
+        }
         const body = nativeSummary && !['claude', 'assistant'].includes(route.provider)
-          ? boundNativeCompact(original, true, ['openrouter', 'openrouter2'].includes(route.provider) ? openRouterCapability(request.model)
-            : fireworksCapability(request.model)?.thinkingOnly ? { maxOutput: Number(request.max_tokens) || SUMMARY_LIMIT, reasoningMandatory: true } : undefined) : original;
+          ? boundNativeCompact(compatible, true, ['openrouter', 'openrouter2'].includes(route.provider) ? openRouterCapability(request.model)
+            : fireworksCapability(request.model)?.thinkingOnly ? { maxOutput: Number(request.max_tokens) || SUMMARY_LIMIT, reasoningMandatory: true } : undefined) : compatible;
         const headers = new Headers();
         for (const [name, value] of Object.entries(req.headers)) {
           if (!value || ['host', 'content-length', 'connection', 'transfer-encoding', 'accept-encoding'].includes(name)) continue;

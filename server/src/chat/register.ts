@@ -155,7 +155,7 @@ function waitForSteerOrTurnEnd(
         subscribe: (fn: (se: { ev?: { type?: string } }) => void, since?: number, count?: boolean) => () => void;
         latestSeq?: () => number;
       }).subscribe((se) => {
-        if (se.ev?.type === 'turnEnd') done('turn-complete');
+        if (se.ev?.type === 'turnEnd' || !sessionHasActiveBoundary(session)) done('turn-complete');
         else if (se.ev?.type === 'closed') done('closed');
         else if (allowNativeSteer && sessionCanAcceptNativeSteer(session)) done('steerable');
       }, session.latestSeq?.() ?? -1, false);

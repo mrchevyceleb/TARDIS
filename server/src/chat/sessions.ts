@@ -163,5 +163,17 @@ export async function ensureStateDir(): Promise<void> {
 
 /** Last accepted engine/provider, independent of the working directory. */
 export async function nativeSessionProvenance(cli: Cli, repoPath: string, chatId: string): Promise<StoredSession | undefined> {
-  return (await load())[nativeKey(cli, repoPath, chatId)];
+  const all = await load();
+  const record = all[nativeKey(cli, repoPath, chatId)];
+  if (!record || record.cli) return record;
+  // Older records may have no explicit CLI. Recover only from a key that
+  // proves the exact same native ID, never from a default subscription.
+  const variants = new Set<Cli>();
+  const known = new Set<Cli>(['claude', 'assistant', 'codex', 'codex-personal', 'banana', 'banana-local', 'banana-fireworks', 'zai', 'xai', 'fireworks', 'openrouter', 'openrouter2', 'agy']);
+  for (const [storageKey, candidate] of Object.entries(all)) {
+    if (!record.sessionId || candidate.sessionId !== record.sessionId) continue;
+    const variant = candidate.cli ?? storageKey.split('|')[0] as Cli;
+    if (known.has(variant)) variants.add(variant);
+  }
+  return variants.size === 1 ? { ...record, cli: [...variants][0] } : record;
 }
