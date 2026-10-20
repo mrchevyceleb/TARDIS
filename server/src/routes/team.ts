@@ -33,8 +33,11 @@ teamRouter.post('/message', asyncHandler(async (req, res) => {
   try {
     result = await deliverTeamMessage({ from, to, text, hop, wait, source, priority,
       fromLane: lane === 'bg' ? 'bg' : 'main',
-      // A voice recovery outbox item must survive the HTTP caller leaving too.
-      signal: source === 'voice' ? undefined : aborter.signal,
+      // A voice recovery outbox item and a Slack bridge post must both survive
+      // the HTTP caller leaving: the durable record is the delivery, and the
+      // bridge's connection can drop mid-wait (review 2026-10-20). Without
+      // this, an aborted request deletes the queued Slack message.
+      signal: source === 'voice' || source === 'slack' ? undefined : aborter.signal,
     });
   } finally {
     req.off('aborted', abortWait);
