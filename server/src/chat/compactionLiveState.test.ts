@@ -13,13 +13,13 @@ test('currentTaskLine reads the last visible user turn only', () => {
 });
 
 test('readRunningJobs filters to this agent and running only', () => {
-  const prior = process.env.RIVENDELL_STATE_DIR;
-  process.env.RIVENDELL_STATE_DIR = '/tmp/naomi-state-that-does-not-exist';
+  const prior = process.env.RIVENDELL_JOBS_FILE;
+  process.env.RIVENDELL_JOBS_FILE = '/tmp/naomi-jobs-that-does-not-exist.json';
   try {
     assert.deepEqual(readRunningJobs('naomi'), []);
   } finally {
-    if (prior === undefined) delete process.env.RIVENDELL_STATE_DIR;
-    else process.env.RIVENDELL_STATE_DIR = prior;
+    if (prior === undefined) delete process.env.RIVENDELL_JOBS_FILE;
+    else process.env.RIVENDELL_JOBS_FILE = prior;
   }
 });
 
