@@ -173,7 +173,6 @@ MemoryAccounting=yes
 MemoryHigh=28G
 MemoryMax=32G
 MemorySwapMax=1G
-MemoryOOMGroup=no
 TasksAccounting=yes
 TasksMax=4096
 CPUAccounting=yes
@@ -181,6 +180,12 @@ CPUQuota=1200%
 IOAccounting=yes
 IOWeight=25
 ```
+
+`MemoryOOMGroup=` is not supported by systemd 255 on slices or on scopes, so
+it is deliberately not listed anywhere. Strict mode reads the kernel's own
+`memory.oom.group` for the worker slice instead and refuses work unless it is
+`0` (not an OOM group); each worker scope gets its own `memory.oom.group`
+written by the guard once the scope registers.
 
 Create `~/.config/systemd/user/tardis-models.slice`:
 
@@ -193,7 +198,6 @@ MemoryAccounting=yes
 MemoryHigh=56G
 MemoryMax=64G
 MemorySwapMax=0
-MemoryOOMGroup=yes
 TasksAccounting=yes
 TasksMax=256
 CPUAccounting=yes
@@ -253,7 +257,6 @@ MemoryAccounting=yes
 MemoryHigh=104G
 MemoryMax=112G
 MemorySwapMax=2G
-MemoryOOMGroup=no
 TasksAccounting=yes
 TasksMax=8192
 CPUAccounting=yes

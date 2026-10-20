@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { existsSync, readFileSync, readlinkSync, statfsSync } from 'node:fs';
-import { mkdir, open, rm } from 'node:fs/promises';
+import { mkdir, open, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { totalmem } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -80,15 +80,23 @@ export async function initializeResourceGuard(): Promise<void> {
     if (!['cpu', 'memory', 'pids', 'io'].every((controller) => delegated.includes(controller))) {
       throw new Error('Delegate cpu, memory, pids and io to the user manager; see docs/RESOURCE-GUARD.md.');
     }
-    const properties = await commandOutput('systemctl', ['--user', 'show', SLICE, '-p', 'LoadState', '-p', 'MemoryHigh', '-p', 'MemoryMax', '-p', 'MemorySwapMax', '-p', 'MemoryOOMGroup', '-p', 'TasksMax', '-p', 'CPUQuotaPerSecUSec']);
+    const properties = await commandOutput('systemctl', ['--user', 'show', SLICE, '-p', 'LoadState', '-p', 'MemoryHigh', '-p', 'MemoryMax', '-p', 'MemorySwapMax', '-p', 'TasksMax', '-p', 'CPUQuotaPerSecUSec']);
     const values: Record<string, string> = Object.fromEntries(properties.split('\n').map((line) => line.split('=')));
     const bounded = (key: string, ceiling: number) => Number(values[key]) > 0 && Number(values[key]) <= ceiling;
     const quota = values.CPUQuotaPerSecUSec?.match(/^([\d.]+)(us|ms|s)$/);
     const units: Record<string, number> = { us: 1, ms: 1000, s: 1_000_000 };
     const quotaMicros = quota ? Number(quota[1]) * (units[quota[2]] ?? Infinity) : Infinity;
+    // systemd does not expose MemoryOOMGroup for slice units (the property is
+    // unknown to `systemctl show`/`set-property` on slices), so the kernel's
+    // own memory.oom.group file is the ground truth that this slice is not one
+    // OOM group — sacrificing every lane for one offender is forbidden. A slice
+    // whose cgroup has not been created yet has no OOM group to sacrifice.
+    const oomGroup = existsSync(`${userCgroup}/tardis.slice/${SLICE}/memory.oom.group`)
+      ? readFileSync(`${userCgroup}/tardis.slice/${SLICE}/memory.oom.group`, 'utf8').trim()
+      : '0';
     if (values.LoadState !== 'loaded' || !bounded('MemoryHigh', 28 * GiB) || !bounded('MemoryMax', 32 * GiB)
       || !Number.isFinite(Number(values.MemorySwapMax)) || Number(values.MemorySwapMax) > GiB
-      || values.MemoryOOMGroup !== 'no' || !bounded('TasksMax', 4096) || !(quotaMicros > 0 && quotaMicros <= 12_000_000)) {
+      || oomGroup !== '0' || !bounded('TasksMax', 4096) || !(quotaMicros > 0 && quotaMicros <= 12_000_000)) {
       throw new Error('Install the bounded tardis-workers.slice policy from docs/RESOURCE-GUARD.md.');
     }
     aggregateTaskLimit = Number(values.TasksMax);
@@ -320,6 +328,19 @@ export function resourceGuardStatus() {
     pressure: resourceGuardRequired() ? resourcePressure() : null, limits: WORKER_LIMITS, incidents: recent };
 }
 
+/** systemd 255 does not accept MemoryOOMGroup= on scopes or slices, so the
+ * kernel file is written once the scope registers: when the kernel must kill
+ * inside this worker's cgroup it takes the whole group (the job and its tree)
+ * at once, never one process at a time. Best-effort: the memory limits
+ * themselves never depend on this write. */
+async function markScopeOomGroup(unit: string): Promise<void> {
+  const file = `${userCgroup}/tardis.slice/${SLICE}/${unit}.scope/memory.oom.group`;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try { await writeFile(file, '1'); return; } catch { await new Promise((resolve) => setTimeout(resolve, 200)); }
+  }
+  console.warn(`[resource-guard] Could not mark ${unit} as one OOM group; its memory limits still apply.`);
+}
+
 /** All agent execution surfaces share this path, including background jobs,
  * watch commands and content generation. Arguments never include secrets. */
 export function spawnContained(command: string, args: readonly string[], options: SpawnOptions, owner: string, unit = `tardis-worker-${randomUUID()}`, runtimeSeconds?: number, durable = false): ChildProcess {
@@ -329,7 +350,7 @@ export function spawnContained(command: string, args: readonly string[], options
   if (!/^tardis-(?:worker|job|watch)-[a-f0-9-]+$/.test(unit)) throw new Error('Invalid worker scope identity.');
   const child = spawn('systemd-run', ['--user', '--scope', '--quiet', ...(durable ? ['--collect'] : []), '--expand-environment=no',
     `--slice=${SLICE}`, `--unit=${unit}`, '-p', `MemoryHigh=${WORKER_LIMITS.memoryHigh}`, '-p', `MemoryMax=${WORKER_LIMITS.memoryMax}`,
-    '-p', `MemorySwapMax=${WORKER_LIMITS.swapMax}`, '-p', 'MemoryOOMGroup=yes', '-p', `TasksMax=${WORKER_LIMITS.tasks}`,
+    '-p', `MemorySwapMax=${WORKER_LIMITS.swapMax}`, '-p', `TasksMax=${WORKER_LIMITS.tasks}`,
     '-p', 'IOAccounting=yes', '-p', `CPUQuota=${WORKER_LIMITS.cpuPercent}%`,
     ...(runtimeSeconds ? ['-p', `RuntimeMaxSec=${runtimeSeconds}`] : []),
     '/usr/bin/bwrap', ...sandboxArgs(durable), '--', '/usr/bin/prlimit', '--core=0:0', '--fsize=1073741824:1073741824', '--', command, ...args], options);
@@ -340,7 +361,10 @@ export function spawnContained(command: string, args: readonly string[], options
   // Scope registration is asynchronous. Wait for the first sample rather
   // than mistaking a not-yet-created cgroup for a completed job.
   const arm = setTimeout(() => {
-    if (child.exitCode === null && child.signalCode === null) watchContainedScope(unit, owner, typeof options.cwd === 'string' ? options.cwd : process.cwd());
+    if (child.exitCode === null && child.signalCode === null) {
+      watchContainedScope(unit, owner, typeof options.cwd === 'string' ? options.cwd : process.cwd());
+      void markScopeOomGroup(unit);
+    }
   }, 1000);
   arm.unref();
   const registration = setTimeout(() => {
