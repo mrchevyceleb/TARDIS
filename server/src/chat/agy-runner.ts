@@ -193,6 +193,7 @@ export class AgySession {
    *  API call, so summing them double-counts). */
   private resultUsage: { input: number; output: number; cacheRead: number } | null = null;
   private turnFailed: { message: string; code?: string } | null = null;
+  private pendingStateAccepts: Array<() => void> = [];
   /** Buffered step frames by step_index, emitted strictly in step order (see
    *  pumpSteps): text accumulates until its message opens; a tool step buffers
    *  its card fields until it opens. DONE frames carry only deltas, never the
@@ -755,6 +756,8 @@ export class AgySession {
     }
     this.finalizeOpenStep();
     const failed = this.turnFailed;
+    if (!failed) for (const accept of this.pendingStateAccepts) accept();
+    this.pendingStateAccepts = [];
     if (failed && !this.terminalNoticeEmitted) {
       this.terminalNoticeEmitted = true;
       const detail = failed.message;
@@ -956,6 +959,7 @@ export class AgySession {
     const automationRequest = opts.peerFromRole === 'automation';
     if (startsNewTurn) {
       this.turnStartedAt = Date.now();
+      this.pendingStateAccepts = [];
       this.turnSeq++;
       this.automationTurn = automationRequest;
       this.clearBoundaryRequest();
@@ -1059,7 +1063,7 @@ export class AgySession {
 
       try {
         await this.writeUserLine(message);
-        stateDelta.accept();
+        this.pendingStateAccepts.push(stateDelta.accept);
       } catch (error) {
         // A failed stdin write is an indeterminate protocol boundary: the old
         // request or a partial line may already be executing, so a later send

@@ -14,7 +14,7 @@ import { officeMcpServers } from './office-mcp.ts';
 import { computerGuidance, computerOwnerKey } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import { getSessionId, setSessionId, setSessionSelection, nativeSessionProvenance } from './sessions.ts';
-import { CodexSession, getOrCreateCodexSession, activeCodexSessions, publishCodexExternalEvent } from './codex-runner.ts';
+import { CodexSession, getOrCreateCodexSession, peekCodexSession, activeCodexSessions, publishCodexExternalEvent } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions, publishBananaExternalEvent } from './banana-runner.ts';
 import { appendEventLog, appendEventLogDurable, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
 import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
@@ -740,6 +740,8 @@ class ClaudeSession {
    *  still reports for a human. */
   private nativeCompactRecovering = false;
   private nativeCompactCommand = false;
+  private nativeStopGeneration = 0;
+  private nativeHandoverPending = false;
   private compactRerunPrompt: { text: string; images?: Array<{ mediaType: string; base64: string }>; rerun: boolean; echoText?: string; replyTo?: { from: string; snippet: string }; clientMsgId?: string } | null = null;
   /** Boot/rotation warmup uses Claude's read-only `mcp_status` control request:
    * no model turn, no tool call, and no transcript event. */
@@ -1133,12 +1135,17 @@ class ClaudeSession {
    * consume one another's signed thinking blocks. */
   async compactNative(): Promise<void> {
     if (this.nativeCompactCommand) throw new Error('Native compaction is already running.');
+    const generation = this.nativeStopGeneration;
     this.nativeCompactCommand = true;
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
-        try { await this.compactNativeOnce(); return; }
+        try {
+          await this.compactNativeOnce();
+          if (generation !== this.nativeStopGeneration) throw new Error('Native handover canceled by Stop; the current session is retained.');
+          return;
+        }
         catch (error) {
-          if (attempt || !this.isAlive() || this.isBusy()) throw error;
+          if (generation !== this.nativeStopGeneration || attempt || !this.isAlive() || this.turnStartedAt !== null) throw error;
           recordNativeFailure(this.chatId, 'claude-code', 'Native compact attempt failed; retrying once in the same session.');
         }
       }
@@ -1148,7 +1155,7 @@ class ClaudeSession {
   private async compactNativeOnce(): Promise<void> {
     this.compactFailure = null;
     this.syntheticApiErrorReason = null;
-    if (!this.isAlive() || this.isBusy()) throw new Error('Native compaction requires this lane to reach its turn boundary.');
+    if (!this.isAlive() || this.turnStartedAt !== null) throw new Error('Native compaction requires this lane to reach its turn boundary.');
     if (!this.currentSessionId) return;
     await new Promise<void>((resolve, reject) => {
       let compacted = false;
@@ -1176,6 +1183,7 @@ class ClaudeSession {
     assertSubscriptionLane(this.cli);
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
+    if (this.nativeHandoverPending) throw new Error('This session is handing over. The message remains queued for the replacement.');
     if (this.contextRotated) {
       const next = await getOrCreateSession({ cli: this.cli, repoPath: this.cwd, chatId: this.chatId, model: this.spawnModel, effort: this.spawnEffort });
       return next.send(text, images, opts);
@@ -1582,6 +1590,7 @@ class ClaudeSession {
    * and then accepts the next user message in the same process. Fall back to a
    * process kill only if the control channel itself fails or never settles. */
   interrupt(reason = 'interrupt'): Promise<boolean> {
+    if (reason === 'interruptSession') this.nativeStopGeneration++;
     if (this.interruptInFlight) {
       if (this.nudgeInterrupt && reason !== 'reply-nudge') this.nudgeInterrupt.cancelled = true;
       return this.interruptInFlight;
@@ -1726,7 +1735,12 @@ class ClaudeSession {
 
   /** True while this session is actively processing a turn (between user send and result event). */
   isBusy(): boolean {
-    return this.turnStartedAt !== null;
+    return this.turnStartedAt !== null || this.nativeHandoverPending === true;
+  }
+
+  setNativeHandoverPending(pending: boolean): void {
+    this.nativeHandoverPending = pending;
+    if (!pending && this.isAlive() && this.turnStartedAt === null) this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
   }
 
   /** Plain descriptions of the background work still running in this process. */
@@ -1894,6 +1908,7 @@ class ClaudeSession {
    *  turn still gets to report. Returns a release function, or null when
    *  there is no turn to end. */
   requestBoundaryInterrupt(opts: { human?: boolean } = {}): (() => void) | null {
+    if (this.nativeHandoverPending) return null;
     const human = opts.human === true;
     if (this.turnStartedAt === null || this.disposed || this.child.exitCode !== null) return null;
     this.boundaryInterruptWanted = true;
@@ -2559,9 +2574,6 @@ class ClaudeSession {
     if (!this.disposed && ev?.type === 'system' && ev.subtype === 'init' && typeof ev.session_id === 'string') {
       const pending = this.pendingResumeId;
       this.pendingResumeId = null;
-      this.initSeen = true;
-      this.resolveReady(true);
-      this.resolveStartupWaiters('initialized');
       if (pending && pending !== ev.session_id) {
         this.resumeFailed = true;
         recordNativeFailure(this.chatId, 'claude-code', 'Native resume failed. The saved ID and queued messages are retained. Matt’s Fresh thread or native transcript repair is required.');
@@ -2571,6 +2583,9 @@ class ClaudeSession {
         this.shutdown('native resume mismatch');
         return;
       }
+      this.initSeen = true;
+      this.resolveReady(true);
+      this.resolveStartupWaiters('initialized');
       recordNativeSession(this.chatId, 'claude-code', ev.session_id, this.startedResumeId);
       this.nativeStorageAccept(ev.session_id);
       this.currentSessionId = ev.session_id;
@@ -2842,7 +2857,8 @@ class ClaudeSession {
           try {
             await this.compactNative();
             this.contextMaintenance = null;
-            await this.send('Continue the pending task from before the native compaction failure. Check its last actual result and carry on in this same session.', undefined, { compactRerun: true });
+            await this.send('Continue the pending task from before the native compaction failure. Check its last actual result and carry on in this same session.', undefined,
+              { compactRerun: true, peerFrom: 'TARDIS', peerFromRole: 'automation', echoText: 'Native compaction recovered. Continuing the pending task.' });
           } catch {
             recordNativeFailure(this.chatId, 'claude-code', 'Native compaction retry failed; the original transcript and undelivered handoffs remain available for repair.');
           } finally {
@@ -2918,6 +2934,12 @@ const sessions = new Map<string, LaneSession>();
 let sessionsShuttingDown = false;
 const resettingThreadLogs = new Set<string>();
 const inFlightSessionLookups = new Map<string, Set<Promise<void>>>();
+const nativeHandovers = new Map<string, Set<ClaudeSession>>();
+const heldEngineSwitches = new Map<string, string>();
+
+function cancelNativeHandover(logKey: string): void {
+  for (const source of nativeHandovers.get(logKey) ?? []) void source.interrupt('interruptSession');
+}
 
 function trackedThreadLogKey(opts: { cli: CliKind; repoPath: string; chatId?: string }): string {
   const chatId = opts.chatId || 'main';
@@ -2958,6 +2980,7 @@ export function beginThreadReset(opts: { cli: CliKind; repoPath: string; chatId?
   if (resettingThreadLogs.has(logKey)) return null;
   resettingThreadLogs.add(logKey);
   cancelProviderContinue(logKey);
+  cancelNativeHandover(logKey);
   return () => { resettingThreadLogs.delete(logKey); };
 }
 
@@ -2967,6 +2990,7 @@ export function beginThreadResetForLogKey(logKey: string): (() => void) | null {
   if (resettingThreadLogs.has(logKey)) return null;
   resettingThreadLogs.add(logKey);
   cancelProviderContinue(logKey);
+  cancelNativeHandover(logKey);
   return () => { resettingThreadLogs.delete(logKey); };
 }
 
@@ -3024,6 +3048,8 @@ async function getOrCreateSessionUnlocked(opts: {
    *  that would SIGTERM the warm session each time. With 30-70s MCP startup the
    *  replacement never reaches init → the "asleep"/"no session" storm. */
   recycleOnMismatch?: boolean;
+  /** Internal recursion: serve the saved engine while Matt's switch is held. */
+  servingHeldSwitch?: boolean;
 }): Promise<AnySession> {
   assertSubscriptionLane(opts.cli);
   if (sessionsShuttingDown) throw new Error('TARDIS is shutting down');
@@ -3033,26 +3059,49 @@ async function getOrCreateSessionUnlocked(opts: {
     throw new Error('This thread is being reset — retry in a moment.');
   }
   const finishLookup = beginSessionLookup(trackedThreadLogKey({ ...opts, chatId }));
+  const handedSources = new Set<ClaudeSession>();
+  const markHandover = (source: ClaudeSession) => {
+    source.setNativeHandoverPending(true);
+    handedSources.add(source);
+    const sources = nativeHandovers.get(source.logKey) ?? new Set<ClaudeSession>();
+    sources.add(source);
+    nativeHandovers.set(source.logKey, sources);
+  };
+  const compactForHandover = async (source: ClaudeSession) => {
+    markHandover(source);
+    await source.compactNative();
+    if (isThreadResetting(opts)) throw new Error('Native handover canceled by Matt’s Fresh thread.');
+  };
   try {
   if (isAgentThread(chatId)) {
     const requestedCodex = opts.cli === 'codex' || opts.cli === 'codex-personal';
     const otherEngineId = await getSessionId(requestedCodex ? 'claude' : 'codex', opts.repoPath, chatId);
-    if (otherEngineId) {
-      recordNativeFailure(chatId, requestedCodex ? 'codex' : 'claude-code', 'Cross-engine switch involving Codex is held for Matt’s pending handover choice. Existing sessions and queued work are retained.');
-      throw new Error('Cross-engine switch held for Matt’s handover choice; existing session and queued work are retained.');
+    if (otherEngineId && !opts.servingHeldSwitch) {
+      const switchKey = `${opts.cli}|${opts.model || ''}|${otherEngineId}`;
+      if (heldEngineSwitches.get(chatId) !== switchKey) {
+        heldEngineSwitches.set(chatId, switchKey);
+        recordNativeFailure(chatId, requestedCodex ? 'codex' : 'claude-code', 'Cross-engine switch involving Codex is held for Matt’s pending handover choice. Existing sessions and queued work are retained.');
+      }
+      const previous = await nativeSessionProvenance(requestedCodex ? 'claude' : 'codex', opts.repoPath, chatId);
+      const source = await getOrCreateSessionUnlocked({ ...opts, cli: previous?.cli ?? (requestedCodex ? 'claude' : 'codex'),
+        model: previous?.model, effort: previous?.effort, recycleOnMismatch: false, servingHeldSwitch: true });
+      if (source instanceof CodexSession) source.holdSelection(previous ?? {});
+      return source;
     }
+    if (!opts.servingHeldSwitch) heldEngineSwitches.delete(chatId);
     if (isClaudeFamilyCli(opts.cli)) {
       const logKey = logKeyFor(opts.cli, opts.repoPath, chatId);
       let handedOver = false;
       for (const [sourceKey, source] of [...sessions]) {
         if (source.cli === opts.cli || source.logKey !== logKey || !source.isAlive()) continue;
-        if (!(source instanceof ClaudeSession)) throw new Error('The current engine must finish its native handover before switching.');
+        if (!(source instanceof ClaudeSession)) return source;
         // The running turn remains the one place Matt can steer. A changed
         // provider applies at its boundary, never as a second process.
         if (source.isBusy()) return source;
-        await source.compactNative();
+        await compactForHandover(source);
         source.shutdown('native provider switch', 'model');
         await waitForChildExit(source, 5_000);
+        if (!source.processExited()) throw new Error('The previous provider is still stopping; its native session is retained.');
         if (sessions.get(sourceKey) === source) sessions.delete(sourceKey);
         handedOver = true;
       }
@@ -3066,9 +3115,10 @@ async function getOrCreateSessionUnlocked(opts: {
         // This also covers a model switch immediately after a service restart.
         const source = await getOrCreateSessionUnlocked({ ...opts, cli: previous.cli, model: previous.model, effort: previous.effort, recycleOnMismatch: false });
         if (!(source instanceof ClaudeSession) || source.isBusy()) return source;
-        await source.compactNative();
+        await compactForHandover(source);
         source.shutdown('native model handover', 'model');
         await waitForChildExit(source, 5_000);
+        if (!source.processExited()) throw new Error('The previous model is still stopping; its native session is retained.');
         if (sessions.get(sourceKey) === source) sessions.delete(sourceKey);
         // Mark the intended provider only after the old engine has compacted.
         await setSessionSelection(opts.cli, opts.repoPath, { model: wanted, effort: opts.effort }, chatId);
@@ -3077,11 +3127,13 @@ async function getOrCreateSessionUnlocked(opts: {
   }
   retireOtherEnginesOnThread(opts.cli, opts.repoPath, chatId);
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
-    return await getOrCreateCodexSession({
+    const session = await getOrCreateCodexSession({
       repoPath: opts.repoPath,
       chatId,
       cli: opts.cli,
     });
+    if (!opts.servingHeldSwitch) session.holdSelection(null);
+    return session;
   }
   if (opts.cli === 'banana' || opts.cli === 'banana-local' || opts.cli === 'banana-fireworks') {
     return await getOrCreateBananaSession({ repoPath: opts.repoPath, chatId, cli: opts.cli });
@@ -3137,9 +3189,11 @@ async function getOrCreateSessionUnlocked(opts: {
         return existing;
       }
       if (!recyclable) return existing;
-      if (existing instanceof ClaudeSession && existing.spawnModel !== wantModel && !['claude', 'assistant'].includes(opts.cli)) await existing.compactNative();
+      if (existing instanceof ClaudeSession && existing.spawnModel !== wantModel && !['claude', 'assistant'].includes(opts.cli)) await compactForHandover(existing);
       if (existing instanceof ClaudeSession) existing.shutdown('model/effort change', 'model');
       else existing.shutdown('model/effort change');
+      await waitForChildExit(existing, 5_000);
+      if (!existing.processExited()) throw new Error('The previous native worker is still stopping. Its saved session is retained.');
       sessions.delete(key);
       // The replacement reads the log from disk: land the kill note first.
       await flushEventLog(existing.logKey);
@@ -3169,6 +3223,12 @@ async function getOrCreateSessionUnlocked(opts: {
   }
   return spawned;
   } finally {
+    for (const source of handedSources) {
+      const sources = nativeHandovers.get(source.logKey);
+      sources?.delete(source);
+      if (!sources?.size) nativeHandovers.delete(source.logKey);
+      source.setNativeHandoverPending(false);
+    }
     finishLookup();
   }
 }
@@ -3239,6 +3299,17 @@ export function peekClaudeSession(opts: {
   const live = sessions.get(key);
   if (!live || !live.isAlive()) return null;
   return live;
+}
+
+/** Control paths attach directly and never wait for a native handover lock. */
+export function peekThreadSession(opts: { cli: CliKind; repoPath: string; chatId?: string }): AnySession | null {
+  const logKey = trackedThreadLogKey(opts);
+  for (const session of sessions.values()) if (session.logKey === logKey && session.isAlive()) return session;
+  for (const cli of ['codex', 'codex-personal'] as const) {
+    const session = peekCodexSession({ ...opts, cli });
+    if (session?.isAlive()) return session;
+  }
+  return null;
 }
 
 /** Durable event-log key for a lane - the same key its session would use, so a
@@ -3351,8 +3422,14 @@ async function spawnSession(
     // retry, so a hanging --conversation resume was retried forever with no
     // cooldown. It flows into the normal failure path: one fresh retry
     // without the resume id, then the breaker.
-    if (!readyTimedOut && (session.isDisposed() || sessionsShuttingDown)) {
+    if (!readyTimedOut && (session.isDisposed() || sessionsShuttingDown) && !session.hasResumeFailed()) {
       throw new Error('claude startup was intentionally cancelled');
+    }
+    if (resumeId && attempt === 0 && !sessionsShuttingDown && !resettingThreadLogs.has(logKeyFor(cli, cwd, chatId))) {
+      await waitForChildExit(session, 5_000);
+      if (!session.processExited()) throw new Error('The old native worker is still stopping. Its saved ID is retained.');
+      recordNativeFailure(chatId, cli, 'Native resume failed before admission; retrying once with the same saved session ID.');
+      return spawnSession(cli, cwd, chatId, resumeId, key, attempt + 1, model, effort, seedFirst, switchedFrom);
     }
     const owner = sessions.get(key);
     if (owner && owner !== session) {
@@ -3376,110 +3453,7 @@ async function spawnSession(
   return session;
 }
 
-/** One automatic re-run after a failed native compact killed a live turn
- *  (card-bfdad5). The reseed already dropped the oversized native session and
- *  banked the rotation, so this waits for the dying child, then replays the
- *  turn's opening prompt on the fresh session exactly once: nobody has to
- *  send the message again. A re-run that fails again reports for a human
- *  instead of looping (the re-send carries the rerun marker, which cancels
- *  the next plan). */
-type CompactRerunJob = {
-  cli: CliKind;
-  cwd: string;
-  chatId: string;
-  logKey: string;
-  model: string;
-  effort: string;
-  text: string;
-  images?: Array<{ mediaType: string; base64: string }>;
-  /** The raw echo text and reply target of the original send (card-cbb4af,
-   *  verify P1 2), so the re-run's echo matches the first one and the client
-   *  dedupes by clientMsgId instead of adding a quoted duplicate bubble. */
-  echoText?: string;
-  replyTo?: { from: string; snippet: string };
-  clientMsgId?: string;
-  retiring: ClaudeSession;
-};
-const compactRerunJobs = new Set<CompactRerunJob>();
-/** How long the re-run failure notice waits for the lane to go idle before it
- *  is dropped. providerSwitch's NOTICE_IDLE_WAIT_MS (6h) is the precedent. */
 const COMPACT_RERUN_NOTICE_IDLE_WAIT_MS = 6 * 60 * 60_000;
-
-/** Post the re-run failure notice the way every other out-of-band terminal
- *  notice lands (providerSwitch.postProviderCutNotice is the precedent):
- *  through the live lane session once it is idle — it owns the seq allocator
- *  and its connected viewers — waiting for a running turn to end so the
- *  notice is never read as that turn failing, and otherwise durably to the
- *  log plus the external listeners for cold viewers. */
-async function postCompactRerunFailureNotice(job: CompactRerunJob, reason: string): Promise<void> {
-  try {
-    const event = {
-      type: '_terminal_error',
-      message: `TARDIS re-seeded this thread after the failed history shrink but could not re-run the message automatically (${reason}). Send it again.`,
-      code: 'compact_rerun_failed',
-    };
-    const deadline = Date.now() + COMPACT_RERUN_NOTICE_IDLE_WAIT_MS;
-    for (;;) {
-      const live = liveLaneSession(job.logKey, job.chatId);
-      if (!live?.isBusy()) {
-        if (live?.postNotice(event)) return;
-        break;
-      }
-      if (Date.now() >= deadline) {
-        console.warn(`[chat ${job.cli}] compact re-run failure notice on ${job.logKey} dropped: the thread never went idle`);
-        return;
-      }
-      await new Promise((resolve) => { const t = setTimeout(resolve, 250); t.unref?.(); });
-    }
-    const persisted = { ...laneTagFor(job.chatId), seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event' as const, event }, eng: job.cli, mdl: job.model };
-    const saved = appendEventLogDurable(job.logKey, persisted);
-    publishExternalThreadEvent(job.logKey, persisted);
-    await saved;
-  } catch { /* best effort */ }
-}
-
-function scheduleCompactRerun(job: CompactRerunJob): void {
-  // One per lane: a second failure while a re-run is still landing waits for
-  // that one instead of stacking a second replay of the same prompt.
-  for (const pending of compactRerunJobs) {
-    if (pending.logKey === job.logKey && pending.chatId === job.chatId) return;
-  }
-  compactRerunJobs.add(job);
-  console.warn(`[chat ${job.cli}] native compact failed on ${job.logKey}; re-seeding and re-running the message automatically`);
-  void (async () => {
-    try {
-      // Wait for the reseeded child to die (its shutdown already SIGKILLs after
-      // its grace), so two processes never hold the same thread.
-      const started = Date.now();
-      while (!job.retiring.processExited() && Date.now() - started < 15_000) {
-        await new Promise((resolve) => { const t = setTimeout(resolve, 250); t.unref?.(); });
-      }
-      if (!job.retiring.processExited()) throw new Error('the old engine had not exited after the reseed');
-      const session = await getOrCreateSession({
-        cli: job.cli,
-        repoPath: job.cwd,
-        chatId: job.chatId,
-        model: job.model,
-        effort: job.effort,
-      });
-      await session.send(job.text, job.images, {
-        compactRerun: true,
-        ...(job.echoText !== undefined ? { echoText: job.echoText } : {}),
-        ...(job.replyTo ? { replyTo: job.replyTo } : {}),
-        ...(job.clientMsgId ? { clientMsgId: job.clientMsgId } : {}),
-      });
-    } catch (err) {
-      console.warn(`[chat ${job.cli}] automatic re-run after the failed compact did not land:`, (err as Error).message);
-      // The re-run is finished and failed, so free the lane's dedupe key now:
-      // a new compact failure while the notice below waits must still get its
-      // own re-run instead of folding into this dead one.
-      compactRerunJobs.delete(job);
-      await postCompactRerunFailureNotice(job, (err as Error).message);
-    } finally {
-      compactRerunJobs.delete(job);
-    }
-  })();
-}
 
 type UsageFallbackJob = {
   cwd: string;
@@ -3791,6 +3765,14 @@ export async function interruptSession(opts: { cli: CliKind; repoPath: string; c
     const keptWarm = await s.interrupt('interruptSession');
     if (!keptWarm && sessions.get(laneKey) === s) sessions.delete(laneKey);
   };
+  if (isAgentThread(chatId)) {
+    const { interruptCodex } = await import('./codex-runner.ts');
+    await Promise.all([
+      ...[...sessions].filter(([, s]) => s.logKey === logKey).map(stopLane),
+      ...(['codex', 'codex-personal'] as const).map(cli => interruptCodex({ repoPath: sessionDirectory(chatId, opts.repoPath), chatId, cli })),
+    ]);
+    return;
+  }
   // Stop on a thread stops both of its lanes, whatever engine the home lane runs.
   const stopBackground = Promise.all(backgroundSiblings(logKey, chatId).map(stopLane));
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {

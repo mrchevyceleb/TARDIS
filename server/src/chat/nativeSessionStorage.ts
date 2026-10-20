@@ -21,12 +21,18 @@ export function prepareClaudeNativeStorage(lane: string, profile: string, resume
   const previous = locations()[agent];
   if (resumeId) {
     let source: string | undefined;
-    if (previous?.id === resumeId) source = join(previous.profile, 'projects', previous.project);
+    if (previous?.id === resumeId) {
+      const recorded = join(previous.profile, 'projects', previous.project);
+      if (existsSync(join(recorded, `${resumeId}.jsonl`))) source = recorded;
+    }
     if (!source) {
       // One-time adoption of a session created before the location registry.
       // Inspect only immediate native project directories for this exact ID.
-      const root = join(profile, 'projects');
-      try { source = readdirSync(root).map(name => join(root, name)).find(dir => existsSync(join(dir, `${resumeId}.jsonl`))); } catch {}
+      for (const candidate of new Set([previous?.profile, profile].filter((value): value is string => Boolean(value)))) {
+        const root = join(candidate, 'projects');
+        try { source = readdirSync(root).map(name => join(root, name)).find(dir => existsSync(join(dir, `${resumeId}.jsonl`))); } catch {}
+        if (source) break;
+      }
     }
     if (!source || !existsSync(join(source, `${resumeId}.jsonl`))) {
       recordNativeFailure(lane, 'claude-code', 'Saved native transcript is missing. Queued messages are retained; native recovery or Matt’s Fresh thread is required.');

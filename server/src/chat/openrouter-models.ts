@@ -19,6 +19,9 @@
 // gets low/medium/high/max. A non-reasoning model accepts the thinking fields
 // and ignores them (HTTP 200, no thinking), so it gets one tier.
 import { queueFlagDigest } from '../lib/flagDigest.ts';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { STATE_DIR } from './config.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 import { ALL_EFFORTS, nearestEffort } from './fireworks-models.ts';
 
@@ -111,6 +114,17 @@ let refreshTimer: NodeJS.Timeout | null = null;
 let inFlight: Promise<void> | null = null;
 let refreshFailedAt = 0;
 let warnedAt = 0;
+const verifiedCatalogFile = join(STATE_DIR, 'openrouter-verified-catalog.json');
+try {
+  const saved = JSON.parse(readFileSync(verifiedCatalogFile, 'utf8'));
+  if (saved?.source === CATALOG_URL && Number.isFinite(saved.fetchedAt) && Array.isArray(saved.models)) {
+    catalog = saved.models.filter((info: OpenRouterModelInfo) => OPENROUTER_MODEL_ID.test(info?.id)
+      && Number.isSafeInteger(info.contextWindow) && info.contextWindow > 0
+      && Number.isSafeInteger(info.maxOutput) && info.maxOutput > 0
+      && Array.isArray(info.efforts) && info.efforts.every(effort => typeof effort === 'string'));
+    fetchedAt = saved.fetchedAt;
+  }
+} catch { /* A new installation must fetch verified limits before spawning. */ }
 
 function catalogFresh(): boolean { return fetchedAt > 0 && Date.now() - fetchedAt < REFRESH_MS; }
 
@@ -127,6 +141,12 @@ async function refreshCatalog(): Promise<void> {
     if (!next.length) throw new Error('OpenRouter catalog has no tool models with valid context and output limits');
     catalog = sortCatalog(next);
     fetchedAt = Date.now();
+    try {
+      mkdirSync(STATE_DIR, { recursive: true });
+      const temporary = `${verifiedCatalogFile}.${process.pid}.tmp`;
+      writeFileSync(temporary, JSON.stringify({ source: CATALOG_URL, fetchedAt, models: catalog }), { mode: 0o600 });
+      renameSync(temporary, verifiedCatalogFile);
+    } catch { console.warn('[openrouter] verified catalog could not be persisted'); }
   })();
   try { await inFlight; refreshFailedAt = 0; } catch (error) { refreshFailedAt = Date.now(); throw error; } finally { inFlight = null; }
 }
@@ -144,6 +164,7 @@ export async function startOpenRouterCatalog(): Promise<void> {
 }
 
 export async function requireOpenRouterModel(model: string): Promise<OpenRouterModelInfo> {
+  if (!OPENROUTER_MODEL_ID.test(model)) throw new Error('Invalid OpenRouter model ID. Correct the selected model; the session and queued messages are retained.');
   if ((!catalogFresh() || !catalog.some(info => info.id === model)) && Date.now() - refreshFailedAt > BOOT_RETRY_MS) {
     try { await refreshCatalog(); }
     catch {
@@ -186,7 +207,8 @@ export function openRouterCatalogPayload(): { models: OpenRouterModelInfo[]; sou
  * never falling back to another model because a catalog request failed. */
 export function resolveOpenRouterModel(m: string | undefined, fallback = OPENROUTER_LANE_MODEL): string {
   const model = m?.trim() || fallback;
-  if (!OPENROUTER_MODEL_ID.test(model)) throw new Error('Invalid OpenRouter model ID');
+  // Preserve stored selections in status/UI. Spawn validation holds this one
+  // lane with a useful error instead of crashing every brain/status reader.
   return model;
 }
 

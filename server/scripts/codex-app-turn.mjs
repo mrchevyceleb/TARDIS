@@ -295,15 +295,24 @@ async function start(config) {
 
   let thread;
   if (config.threadId) {
-    const resumed = await request('thread/resume', {
-      threadId: config.threadId,
-      cwd: config.cwd,
-      model: config.model,
-      approvalPolicy: 'never',
-      sandbox: 'danger-full-access',
-      excludeTurns: true,
-    });
-    thread = resumed.thread;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const resumed = await request('thread/resume', {
+          threadId: config.threadId,
+          cwd: config.cwd,
+          model: config.model,
+          approvalPolicy: 'never',
+          sandbox: 'danger-full-access',
+          excludeTurns: true,
+        });
+        if (resumed.thread?.id !== config.threadId) throw new Error('Codex did not resume the saved thread ID');
+        thread = resumed.thread;
+        break;
+      } catch (error) {
+        if (attempt || appExited || completed) throw error;
+        writeEvent({ type: 'rivendell.native_resume_retry' });
+      }
+    }
   } else {
     const started = await request('thread/start', {
       cwd: config.cwd,

@@ -264,6 +264,10 @@ export class CodexSession {
    *  must never resurrect one — shutdown passes this set. */
   private readonly invalidatedThreadIds = new Set<string>();
   private contextMaintenance: Promise<void> | null = null;
+  private heldSelection: { model?: string; effort?: string } | null = null;
+
+  /** A pending cross-engine choice must not apply the other engine's model. */
+  holdSelection(selection: { model?: string; effort?: string } | null): void { this.heldSelection = selection; }
 
   private consumeWindowSeed(): boolean {
     return this.seedWindowOnNextTurn;
@@ -606,8 +610,8 @@ export class CodexSession {
       return;
     }
     const { model: codexModel, effort: codexEffort } = resolveCodexSelection(
-      opts.model,
-      opts.effort,
+      this.heldSelection ? this.heldSelection.model : opts.model,
+      this.heldSelection ? this.heldSelection.effort : opts.effort,
     );
     this.turnModel = codexModel;
     this.turnEffort = codexEffort;
@@ -1039,10 +1043,21 @@ export class CodexSession {
       // Without an explicit error event the UI just drops out of "thinking".
       const emptyTurn =
         !producedAgentMessage && !transientProjectConfigError && (code !== 0 || !sawTurnCompleted);
+      const failedTurn = code !== 0 || emptyTurn;
+      const failureMessage = transientProjectConfigError || stderrText || (emptyTurn
+        ? 'Codex ended before returning an answer. The saved thread and queued messages were retained.'
+        : `Codex turn failed (${signal || code}). The saved thread was retained.`);
+      if (failedTurn) {
+        recordNativeFailure(this.chatId, 'codex', emptyTurn
+          ? 'Codex ended without an answer. Its saved thread and queued messages were retained.'
+          : 'Codex returned a failed turn. Its saved thread was retained; the turn error has the details.');
+        this.emit({ type: 'error', message: failureMessage });
+      }
       this.emitClaudeEvent({
         type: 'result',
-        subtype: code === 0 ? 'success' : 'error_during_execution',
-        is_error: code !== 0,
+        subtype: failedTurn ? 'error_during_execution' : 'success',
+        is_error: failedTurn,
+        ...(failedTurn ? { result: failureMessage } : {}),
         session_id: this.threadId ?? undefined,
         usage: turnState.usage ?? undefined,
       });
@@ -1069,6 +1084,7 @@ export class CodexSession {
       this.rejectNativeSteers(err);
       cleanupImages();
       this.closeDanglingToolBlocks(turnState, null, err.message);
+      recordNativeFailure(this.chatId, 'codex', 'Codex could not start. Its saved thread and queued messages were retained; the turn error has the details.');
       this.emit({ type: 'error', message: `codex spawn failed: ${err.message}` });
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
     });
@@ -1163,6 +1179,10 @@ export class CodexSession {
     ev: any,
     state: CodexTurnState,
   ): void {
+    if (ev?.type === 'rivendell.native_resume_retry') {
+      recordNativeFailure(this.chatId, 'codex', 'Native resume failed before admission; retrying once with the same saved thread ID.');
+      return;
+    }
     if (ev?.type === 'rivendell.native_compact') {
       resetSessionStateDelta(this.chatId);
       recordNativeCompact(this.chatId, 'codex', this.threadId, { ...ev.metadata, before: this.lastNativeInput });

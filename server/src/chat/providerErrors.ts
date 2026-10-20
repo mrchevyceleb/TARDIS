@@ -226,7 +226,7 @@ export function compactFailureError(cli: string, detail: string, rerun = false):
   const reason = detail.split('\n')[0].replace(/^\s*API Error:\s*/i, '').replace(/\s*To configure this behavior.*$/i, '').trim().replace(/\.$/, '').slice(0, 240);
   return {
     message: `${providerLabel(cli)} could not shrink this chat's history${reason ? ` (${reason})` : ''}. ${rerun
-      ? 'TARDIS is starting fresh from the saved summary and re-running the message automatically.'
+      ? 'TARDIS is retrying native compaction and continuing the task in this same session.'
       : 'Your session is preserved. Retry native compaction, or use Fresh thread to start over.'}`,
     code: 'compact_failed',
     retryable: true,

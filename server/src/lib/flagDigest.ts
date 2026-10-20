@@ -45,6 +45,12 @@ const MAX_SLOTS_PER_KEY = 8;
 const MAX_DIGEST_ENTRIES = 40;
 const MAX_DIGEST_CHARS = 20_000;
 const STATE_FILE = join(STATE_DIR, 'flag-digest.json');
+const SESSION_LEADS = new Set(['chief-of-staff', 'max-voice', 'kip', 'riley', 'samwise']);
+
+function digestOwner(ownerId: string): string {
+  const policy = sessionPolicy(`bot-${ownerId}`);
+  return policy.lead || SESSION_LEADS.has(ownerId) ? ownerId : policy.reportsTo || 'chief-of-staff';
+}
 
 type Entry = {
   key: string;
@@ -157,9 +163,8 @@ function restore(): void {
     queues.set(ownerId, map);
   }
   for (const [owner, entries] of [...queues]) {
-    const policy = sessionPolicy(`bot-${owner}`);
-    const lead = policy.reportsTo || 'chief-of-staff';
-    if (policy.lead || lead === owner) continue;
+    const lead = digestOwner(owner);
+    if (lead === owner) continue;
     for (const [key, entry] of [...entries]) {
       if (entry.sentDeliveryId) continue;
       entries.delete(key);
@@ -188,9 +193,8 @@ function restore(): void {
  *  whose raise names a different id) gets its OWN successor slot and its
  *  own line, instead of hijacking the in-flight record's admission mark. */
 export function queueFlagDigest(ownerId: string, key: string, text: string, onDelivered?: () => void, priority = false): void {
-  const policy = sessionPolicy(`bot-${ownerId}`);
-  const lead = policy.reportsTo || 'chief-of-staff';
-  if (!policy.lead && lead !== ownerId) {
+  const lead = digestOwner(ownerId);
+  if (lead !== ownerId) {
     text = `For ${ownerId}: ${text}`;
     key = `${ownerId}:${key}`;
     ownerId = lead;

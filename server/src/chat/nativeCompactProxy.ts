@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { Transform, Readable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { openRouterCapability } from './openrouter-models.ts';
+import { fireworksCapability } from './fireworks-models.ts';
 import { fixedPrefix, recordNativeCall, recordNativeFailure } from './sessionMetrics.ts';
 
 const SUMMARY_SYSTEM = 'You are a helpful AI assistant tasked with summarizing conversations.';
@@ -20,9 +21,20 @@ const routes = new Map<string, Route>();
 function summaryRequest(request: any): boolean {
   const blocks = typeof request.system === 'string' ? [request.system]
     : Array.isArray(request.system) ? request.system.map((block: any) => block?.text) : [];
-  return blocks.some((text: unknown) => typeof text === 'string'
-    && (text.trim() === SUMMARY_SYSTEM || (/summari[sz]|compact/i.test(text) && /conversations?/i.test(text) && /assistant|tasked/i.test(text))))
-    && !request.tools?.length;
+  const last = request.messages?.at(-1);
+  const content = last?.role === 'user' ? last.content : undefined;
+  const texts = typeof content === 'string' ? [content]
+    : Array.isArray(content) ? content.filter((block: any) => block?.type === 'text').map((block: any) => block.text) : [];
+  // Current Claude Code keeps its tools and puts the native summary request
+  // in the final user message. Older releases used a separate system prompt.
+  return blocks.some((value: unknown) => typeof value === 'string'
+    && value.trim() === SUMMARY_SYSTEM)
+    || texts.some((text: string) => {
+      const prompt = text.trim();
+      const nativeInstruction = /(?:^|\n)Your task is to create a detailed summary of (?:the conversation so far|this conversation)\b/i;
+      return nativeInstruction.test(prompt) && (/^Your task is to create a detailed summary/i.test(prompt)
+        || /^CRITICAL: Respond with TEXT ONLY\. Do NOT call any tools\./.test(prompt));
+    });
 }
 
 /** Only the engine's auxiliary compact request gets this bound. Claude Code
@@ -119,12 +131,14 @@ export function ensureNativeCompactProxy(): Promise<void> {
         const original = Buffer.concat(chunks).toString('utf8');
         const isMessage = original && /\/messages$/.test(parsed.pathname);
         const request = isMessage ? JSON.parse(original) : null;
-        const auxiliary = request && (summaryRequest(request) || (route.compacting && !request.tools?.length));
-        if (auxiliary && route.compacting && !summaryRequest(request)) recordNativeFailure(route.lane, 'claude-code', 'Native compact template changed; fallback bound applied.');
+        const nativeSummary = request && (summaryRequest(request) || (route.compacting && !request.tools?.length));
+        const auxiliary = request && (nativeSummary || !request.tools?.length);
+        if (nativeSummary && route.compacting && !summaryRequest(request)) recordNativeFailure(route.lane, 'claude-code', 'Native compact template changed; fallback bound applied.');
         // Anthropic already uses its model's native thinking mode. Provider
         // compatibility bounds must not rewrite subscription compactions.
-        const body = auxiliary && !['claude', 'assistant'].includes(route.provider)
-          ? boundNativeCompact(original, true, ['openrouter', 'openrouter2'].includes(route.provider) ? openRouterCapability(request.model) : undefined) : original;
+        const body = nativeSummary && !['claude', 'assistant'].includes(route.provider)
+          ? boundNativeCompact(original, true, ['openrouter', 'openrouter2'].includes(route.provider) ? openRouterCapability(request.model)
+            : fireworksCapability(request.model)?.thinkingOnly ? { maxOutput: Number(request.max_tokens) || SUMMARY_LIMIT, reasoningMandatory: true } : undefined) : original;
         const headers = new Headers();
         for (const [name, value] of Object.entries(req.headers)) {
           if (!value || ['host', 'content-length', 'connection', 'transfer-encoding', 'accept-encoding'].includes(name)) continue;

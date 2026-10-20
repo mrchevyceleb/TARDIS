@@ -44,6 +44,7 @@ import {
   laneLogKey,
   MemoryPressureSpawnError,
   peekClaudeSession,
+  peekThreadSession,
   pruneIdleClaudeSessions,
   settleThreadSessionLookups,
   shutdownAllSessions,
@@ -1635,13 +1636,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const activeThreadOwner = activeSessionForLogKey(requestedLogKey);
           const pendingThreadOwner = pendingAdmissionForLogKey(requestedLogKey);
           const threadOwner = activeThreadOwner ?? pendingThreadOwner;
-          const warm = threadOwner
+          const warm = peekThreadSession({ cli: desiredBrain.cli, repoPath: msg.repo, chatId }) ?? (threadOwner
             ? await getOrCreateSession({
                 cli: threadOwner.cli,
                 repoPath: 'repo' in threadOwner ? threadOwner.repo : threadOwner.cwd,
                 chatId,
               })
-            : peekClaudeSession({ cli: desiredBrain.cli, repoPath: msg.repo, chatId });
+            : peekClaudeSession({ cli: desiredBrain.cli, repoPath: msg.repo, chatId }));
           if (!warm && isPersistentProcessCli(desiredBrain.cli)) {
             // Drop any session this socket was already bound to. Without it a
             // socket that re-helloes onto a different, cold lane keeps the old
@@ -1995,7 +1996,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
           let steerRepo = repoPath ?? msg.repo;
           let steerModel = authoritativeAgent ? desiredSteerBrain.model : msg.model;
           let steerEffort = authoritativeAgent ? desiredSteerBrain.effort : msg.effort;
-          const bound = sessionPromise;
+          const liveControlSession = peekThreadSession({ cli: steerCli, repoPath: steerRepo, chatId });
+          const bound = liveControlSession ? Promise.resolve(liveControlSession) : sessionPromise;
           // Register ownership before the FIFO wait so reconnects still see
           // this id as queued. Stop/Fresh can abort it even while it waits.
           waitKey = laneGenKey(steerCli, steerRepo, chatId);

@@ -68,6 +68,7 @@ export function changedContext(previous: Map<string, string>, name: string, text
 /** Native skill overrides retain every callable skill while keeping only the
  * role's descriptions in the fixed prompt. No account/profile files change. */
 export function nativeClaudeSettings(chatId: string): Record<string, unknown> {
+  if (!isAgentThread(chatId)) return { autoCompactEnabled: true };
   const policy = sessionPolicy(chatId);
   const descriptions = new Set(policy.skills ?? ['codex-fix', 'opus-fix', 'no-crap-allowed']);
   const skillOverrides: Record<string, string> = {};

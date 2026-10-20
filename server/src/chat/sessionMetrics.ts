@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { STATE_DIR } from './config.ts';
@@ -12,7 +12,8 @@ export type NativeCall = {
   input: number; cached: number; output: number; prefix?: string;
   auxiliary?: boolean; harnessChars?: number; provider?: string; resumed?: boolean;
 };
-type Metric = NativeCall & { at: number; event: string; cachedShare?: number; before?: number; after?: number; trigger?: string; reason?: string };
+type WorkingContext = { files: number; fileCharacters: number; summaryCharacters: number };
+type Metric = NativeCall & { workingContext?: WorkingContext; at: number; event: string; cachedShare?: number; before?: number; after?: number; trigger?: string; reason?: string };
 const directory = join(STATE_DIR, 'native-session-metrics');
 const alerted = new Set<string>();
 const sessions = new Map<string, string>();
@@ -33,11 +34,35 @@ function append(record: Metric): void {
     appendFileSync(join(directory, `${day(record.at)}.jsonl`), `${JSON.stringify(record)}\n`, { mode: 0o600 });
   } catch { console.warn('[native-session] metric could not be saved'); }
 }
-function alert(lane: string, reason: string): void {
-  const key = `${day()}|${lane}|${reason}`;
+function alert(lane: string, reason: string, category = reason): void {
+  const key = `${day()}|${lane}|${category}`;
   if (alerted.has(key)) return;
   alerted.add(key);
-  queueFlagDigest('chief-of-staff', `native-session:${lane}:${reason}`, `Session health ${bareChatId(lane).replace(/^bot-/, '')}: ${reason}. Read the native session report before a restart.`, undefined, true);
+  queueFlagDigest('chief-of-staff', `native-session:${lane}:${category}`, `Session health ${bareChatId(lane).replace(/^bot-/, '')}: ${reason}. Read the native session report before a restart.`, undefined, true);
+}
+/** Read only a bounded native-log tail. Content and paths never enter metrics. */
+function nativeWorkingContext(lane: string, sessionId?: string): WorkingContext | undefined {
+  let fd: number | undefined;
+  try {
+    const location = JSON.parse(readFileSync(join(STATE_DIR, 'native-claude-locations.json'), 'utf8'))[bareChatId(lane)];
+    if (!location || location.id !== sessionId) return;
+    fd = openSync(join(location.profile, 'projects', location.project, `${sessionId}.jsonl`), 'r');
+    const size = fstatSync(fd).size, start = Math.max(0, size - 2 * 1024 * 1024);
+    const buffer = Buffer.alloc(size - start); readSync(fd, buffer, 0, buffer.length, start);
+    const lines = buffer.toString('utf8').split('\n'); if (start) lines.shift();
+    const rows = lines.flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
+    const boundary = rows.findLastIndex(row => row.type === 'system' && row.subtype === 'compact_boundary');
+    if (boundary < 0) return;
+    const context = { files: 0, fileCharacters: 0, summaryCharacters: 0 };
+    for (const row of rows.slice(boundary + 1)) {
+      if (row.isCompactSummary) context.summaryCharacters += JSON.stringify(row.message?.content ?? '').length;
+      if (row.type === 'attachment' && row.attachment?.type === 'file') {
+        context.files++; context.fileCharacters += JSON.stringify(row.attachment.content ?? '').length;
+      }
+      if (row.type === 'assistant') break;
+    }
+    return context;
+  } catch { return; } finally { if (fd !== undefined) closeSync(fd); }
 }
 export function recordNativeCall(call: NativeCall): void {
   if (!isAgentThread(call.lane) || !Number.isFinite(call.input) || call.input <= 0) return;
@@ -53,13 +78,16 @@ export function recordNativeCall(call: NativeCall): void {
   nextCall.add(sessionKey);
   append({ ...call, at: call.at ?? Date.now(), cached, event: first ? 'start' : 'call', cachedShare });
   const ceiling = sessionPolicy(call.lane).startTokenCeiling ?? 33_000;
-  if (afterCompact.delete(sessionKey)) {
+  const justCompacted = afterCompact.delete(sessionKey);
+  if (justCompacted) {
     savePendingCompacts();
-    append({ ...call, at: call.at ?? Date.now(), cached, event: 'after-compact', cachedShare });
-    if (call.input > ceiling) alert(call.lane, `first call after compact ${call.input} exceeds ${ceiling} tokens`);
+    append({ ...call, at: call.at ?? Date.now(), cached, event: 'after-compact', cachedShare,
+      ...(call.engine === 'claude-code' ? { workingContext: nativeWorkingContext(call.lane, call.sessionId) } : {}) });
+    // This total includes native re-attached working files. The fixed-start
+    // ceiling is checked on the actual start, not on restored working context.
   }
-  if (first && call.input > ceiling) alert(call.lane, `start ${call.input} exceeds ${ceiling} tokens`);
-  if (warm && cachedShare < 0.8) alert(call.lane, `cached share ${(100 * cachedShare).toFixed(1)}% is below 80%`);
+  if (first && call.input > ceiling) alert(call.lane, `start ${call.input} exceeds ${ceiling} tokens`, 'start-ceiling');
+  if (warm && !justCompacted && cachedShare < 0.8) alert(call.lane, `cached share ${(100 * cachedShare).toFixed(1)}% is below 80%`, 'cache-share');
 }
 export function recordNativeSession(lane: string, engine: string, sessionId: string, expected?: string | null): void {
   const key = `${bareChatId(lane)}|${engine}`;
@@ -94,12 +122,12 @@ export function nativeSessionReport(date = day()): { date: string; rows: any[] }
   for (const event of records) {
     if (event.auxiliary) continue;
     const key = `${bareChatId(event.lane)}|${event.engine}`;
-    const row = lanes.get(key) ?? { lane: bareChatId(event.lane).replace(/^bot-/, ''), engine: event.engine, calls: 0, input: 0, cached: 0, starts: [], compacts: [], afterCompacts: [], failures: [], replacements: 0, maxHarnessChars: 0, prefixes: new Set<string>() };
+    const row = lanes.get(key) ?? { lane: bareChatId(event.lane).replace(/^bot-/, ''), engine: event.engine, calls: 0, input: 0, cached: 0, starts: [], compacts: [], afterCompacts: [], workingContexts: [], failures: [], replacements: 0, maxHarnessChars: 0, prefixes: new Set<string>() };
     if (event.event === 'replacement') row.replacements++;
     if (event.event === 'compact') row.compacts.push({ before: event.before, after: event.after, trigger: event.trigger });
     if (event.event === 'start') row.starts.push(event.input);
     if (event.event === 'failure') row.failures.push(event.reason);
-    if (event.event === 'after-compact') row.afterCompacts.push(event.input);
+    if (event.event === 'after-compact') { row.afterCompacts.push(event.input); if (event.workingContext) row.workingContexts.push(event.workingContext); }
     if (event.input && event.event !== 'after-compact') { row.calls++; row.input += event.input; row.cached += event.cached; }
     row.maxHarnessChars = Math.max(row.maxHarnessChars, event.harnessChars ?? 0);
     if (event.prefix) row.prefixes.add(event.prefix);
@@ -114,12 +142,13 @@ export function nativeSessionReportHtml(date = day()): string {
   const sizes = (values: number[]) => values.length ? values.map(number).join(' · ') : 'Not measured';
   const cards = report.rows.map(row => {
     const cached = row.cachedShare === null ? 'Not measured' : `${(row.cachedShare * 100).toFixed(1)}%`;
+    const working = row.workingContexts.map((x: WorkingContext) => `<li>Native summary: ${number(x.summaryCharacters)} characters. Re-attached working files: ${number(x.files)} files · ${number(x.fileCharacters)} characters.</li>`).join('');
     const details = row.compacts.map((x: any) => `<li>${escape(x.trigger)} · ${number(x.before)} before · ${number(x.after)} in native metadata</li>`).join('');
-    return `<article><div class="identity"><h2>${escape(row.lane)}</h2><span>${escape(row.engine)}</span></div><div class="cache"><strong>${cached}</strong><span>input from cache</span></div><meter aria-label="Input from cache for ${escape(row.lane)}" min="0" max="1" value="${row.cachedShare ?? 0}"></meter><dl><div><dt>New session</dt><dd>${sizes(row.starts)}</dd></div><div><dt>First call after compact</dt><dd>${sizes(row.afterCompacts)}</dd></div><div><dt>Unexpected resets</dt><dd>${row.replacements}</dd></div><div><dt>Calls measured</dt><dd>${number(row.calls)}</dd></div></dl><details><summary>See session detail <span>↗</span></summary><p>${row.maxHarnessChars} characters added by the harness at most · ${row.fixedPrefixes} observed prompt fingerprints.</p><ul>${details || '<li>No native compaction measured yet.</li>'}</ul>${row.failures.length ? `<p class="attention">Needs a look</p><ul>${row.failures.map((reason: string) => `<li>${escape(reason)}</li>`).join('')}</ul>` : '<p>No session failures recorded.</p>'}</details></article>`;
+    return `<article><div class="identity"><h2>${escape(row.lane)}</h2><span>${escape(row.engine)}</span></div><div class="cache"><strong>${cached}</strong><span>input from cache</span></div><meter aria-label="Input from cache for ${escape(row.lane)}" min="0" max="1" value="${row.cachedShare ?? 0}"></meter><dl><div><dt>New session</dt><dd>${sizes(row.starts)}</dd></div><div><dt>First call after compact, including working files</dt><dd>${sizes(row.afterCompacts)}</dd></div><div><dt>Unexpected resets</dt><dd>${row.replacements}</dd></div><div><dt>Calls measured</dt><dd>${number(row.calls)}</dd></div></dl><details><summary>See session detail <span>↗</span></summary><p>${row.maxHarnessChars} characters added by the harness at most · ${row.fixedPrefixes} observed prompt fingerprints.</p><ul>${details || '<li>No native compaction measured yet.</li>'}${working}</ul>${row.failures.length ? `<p class="attention">Needs a look</p><ul>${row.failures.map((reason: string) => `<li>${escape(reason)}</li>`).join('')}</ul>` : '<p>No session failures recorded.</p>'}</details></article>`;
   }).join('');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Session health · ${escape(date)}</title><style>
   *{box-sizing:border-box}body{margin:0;background:#0b1014;color:#edf7f4;font:15px system-ui,sans-serif;padding:clamp(20px,5vw,64px)}main{max-width:1320px;margin:auto}header{margin:0 0 30px}header small{color:#9ce7c5;text-transform:uppercase;letter-spacing:.16em}h1{font-size:clamp(32px,5vw,56px);letter-spacing:-.05em;margin:12px 0}header p{max-width:700px;line-height:1.6;color:#a3b9b0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:18px}article{background:linear-gradient(145deg,#182821,#121c1c);border:1px solid #2c4338;border-radius:24px;padding:24px;transition:transform .2s,border-color .2s}article:hover{transform:translateY(-3px);border-color:#7daa90}.identity{display:flex;justify-content:space-between;align-items:center;gap:14px}.identity h2{font-size:22px;margin:0;text-transform:capitalize}.identity span{color:#c4d8cd;border:1px solid #3d5547;padding:5px 9px;border-radius:99px;font-size:12px}.cache{display:flex;align-items:baseline;gap:10px;margin-top:24px}.cache strong{font-size:42px;letter-spacing:-.05em}.cache span,dt{color:#9eb8ab;font-size:13px}meter{display:block;width:100%;height:10px;margin:10px 0 24px;accent-color:#a0e8be}dl{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:0}dd{margin:5px 0 0;font-size:18px;font-variant-numeric:tabular-nums}details{border-top:1px solid #2d4538;margin-top:24px;padding-top:18px;font-size:13px;line-height:1.6}summary{cursor:pointer;list-style:none;color:#b8f6d4;border-radius:8px;transition:color .2s,transform .2s}summary:hover{color:white;transform:translateX(3px)}summary:focus-visible{outline:2px solid #b8f6d4;outline-offset:5px}summary span{float:right}details[open] summary span{transform:rotate(90deg)}details p,details li{color:#b4c5be}ul{padding-left:18px}.attention{color:#ffcba0!important}.empty{border:1px dashed #456050;border-radius:24px;padding:32px;color:#b4c5be}@media(prefers-reduced-motion:reduce){*{transition:none!important}}
-  </style></head><body><main><header><small>TARDIS · ${escape(date)} · ET</small><h1>Room to think.</h1><p>Real input, real cache hits, and the first call after each native compact. Token counts include the fixed prompt. Native metadata is shown separately; a missing measurement still needs proof.</p></header><section class="grid" aria-label="Agent session measurements">${cards || '<p class="empty">No calls measured for this date yet. The first real agent call will appear here.</p>'}</section></main></body></html>`;
+  </style></head><body><main><header><small>TARDIS · ${escape(date)} · ET</small><h1>Room to think.</h1><p>Real input, real cache hits, and the first call after each native compact. Token counts include the fixed prompt and native working context. Re-attached files and the summary are listed separately below. Native metadata is shown separately; a missing measurement still needs proof.</p></header><section class="grid" aria-label="Agent session measurements">${cards || '<p class="empty">No calls measured for this date yet. The first real agent call will appear here.</p>'}</section></main></body></html>`;
 }
 export function startSessionMetricsReport(): void {
   let last = '';
