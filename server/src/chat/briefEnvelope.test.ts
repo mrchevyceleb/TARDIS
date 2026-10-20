@@ -28,6 +28,8 @@ test('cardRefsIn reads the brief’s own cards, never invents', () => {
   assert.deepEqual(cardRefsIn('no card here'), []);
   assert.deepEqual(cardRefsIn('[desk:card-abc123] then [desk:card-def456] then [desk:card-abc123]'), ['card-abc123', 'card-def456']);
   assert.deepEqual(cardRefsIn('work on [card-e9b846] and card-8D427d_now'), ['card-e9b846', 'card-8D427d_now']);
+  assert.deepEqual(cardRefsIn('the card-link and a card-first step'), []);
+  assert.deepEqual(cardRefsIn('[desk:card-abc] but card-123 alone'), ['card-123']);
 });
 
 test('readsAsGoalSentence: one line, full stop, under cap', () => {

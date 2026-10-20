@@ -103,12 +103,15 @@ export function ownGoalSentence(text: string): string | null {
 }
 
 /** Every card the brief names, in the form the recipient should see. */
+/** A card ref is only a real card when it carries at least one digit:
+ *  the server mints ids like card-e9b846, so prose like "card-first" or
+ *  "card-link" in a brief never reads as a card. */
 export function cardRefsIn(text: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const m of text.matchAll(CARD_RE)) {
     const id = m[1] ?? m[2];
-    if (id && !seen.has(id)) {
+    if (id && /\d/.test(id) && !seen.has(id)) {
       seen.add(id);
       out.push(id);
     }
