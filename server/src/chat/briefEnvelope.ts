@@ -14,6 +14,7 @@
 // failure anywhere falls open to the raw brief exactly as today.
 
 import { Agent, fetch as undiciFetch } from 'undici';
+import { redactSecrets } from './secretRedaction.ts';
 
 /** Coders whose briefs always carry the envelope. Roster ids. */
 const CODER_IDS = new Set([
@@ -29,9 +30,26 @@ export function isCoderBrief(senderId: string, recipientId: string): boolean {
   return LEAD_IDS.has(senderId) && CODER_IDS.has(recipientId);
 }
 
-const CARD_RE = /\[desk:(card-[a-z0-9]+)\]/g;
+const CARD_RE = /\[desk:(card-[A-Za-z0-9_-]+)\]|(?<!desk:)(card-[A-Za-z0-9_-]*[A-Za-z0-9_])/g;
 /** Terminal punctuation of a real sentence (never a step number). */
 const SENTENCE_PUNCT = /[.!?。！？]/;
+
+/** Crude technical/command shape: file paths, version strings, code or CLI
+ *  fragments. Such an opening is an instruction, never a goal sentence. */
+const TECHNICAL_FRAGMENT = /(?:[A-Za-z]:\\|[\w./-]+\.[a-z]{1,5}\b|\bv?\d+\.\d+(?:\.\d+)?\b|`[^`]+`|\b(?:npm|node|git|systemctl|curl|ssh|python\d?|cd|rm|mv|cp|ls|cat|sed|awk|grep|rg)\b)/i;
+
+/** True when the opening word is an imperative verb aimed at the recipient
+ *  ("Edit foo.ts", "Fix the login", "Ship it tonight."). A goal sentence
+ *  describes how a person should feel or what they should get, not a command
+ *  to the coder. */
+const IMPERATIVE_STARTERS = new Set([
+  'add', 'apply', 'build', 'bump', 'change', 'check', 'clean', 'commit', 'configure', 'copy', 'create', 'delete', 'deploy', 'disable', 'edit', 'enable', 'ensure', 'extend', 'fix', 'implement', 'install', 'make', 'merge', 'migrate', 'move', 'patch', 'push', 'read', 'rebuild', 'refactor', 'remove', 'rename', 'replace', 'restart', 'revert', 'review', 'run', 'send', 'set', 'ship', 'stop', 'test', 'update', 'use', 'verify', 'wire', 'write',
+]);
+
+function startsAsInstruction(t: string): boolean {
+  const first = /^[A-Za-z]+/.exec(t)?.[0]?.toLowerCase() ?? '';
+  return IMPERATIVE_STARTERS.has(first) || TECHNICAL_FRAGMENT.test(t);
+}
 
 /** Split text into sentences at real sentence boundaries: terminal
  *  punctuation preceded by a letter (so a step number "1." or a version
@@ -65,6 +83,7 @@ export function readsAsGoalSentence(text: string): boolean {
   if (/\n/.test(t)) return false;
   if (/^(?:[-*•]|\d+[.)])\s/.test(t)) return false;
   if (/^step\s+\d+\b/i.test(t)) return false;
+  if (startsAsInstruction(t)) return false;
   if (splitSentences(t).length !== 1) return false;
   return SENTENCE_PUNCT.test(t);
 }
@@ -88,9 +107,10 @@ export function cardRefsIn(text: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const m of text.matchAll(CARD_RE)) {
-    if (!seen.has(m[1])) {
-      seen.add(m[1]);
-      out.push(m[1]);
+    const id = m[1] ?? m[2];
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      out.push(id);
     }
   }
   return out;
@@ -129,12 +149,15 @@ export async function distillGoalSentence(brief: string, _agentName: string): Pr
     }
     return null;
   }
-  const body = brief.slice(0, DISTILL_MAX_CHARS);
-  let res: Awaited<ReturnType<typeof undiciFetch>>;
+  const body = redactSecrets(brief).slice(0, DISTILL_MAX_CHARS);
+  const deadline = new AbortController();
+  const deadlineTimer = setTimeout(() => deadline.abort(), DISTILL_TIMEOUT_MS);
+  deadlineTimer.unref?.();
   try {
-    res = await undiciFetch(`${cfg.base.replace(/\/$/, '')}/v1/messages`, {
+    const res = await undiciFetch(`${cfg.base.replace(/\/$/, '')}/v1/messages`, {
       method: 'POST',
       dispatcher: DISTILL_AGENT,
+      signal: deadline.signal,
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${cfg.key}`,
@@ -148,16 +171,12 @@ export async function distillGoalSentence(brief: string, _agentName: string): Pr
         messages: [{ role: 'user', content: body }],
       }),
     });
-  } catch {
-    return null;
-  }
-  if (!res.ok) return null;
-  try {
+    if (!res.ok || deadline.signal.aborted) return null;
     const parsed = (await res.json()) as {
       content?: Array<{ type?: string; text?: string }>;
       stop_reason?: string;
     };
-    if (parsed.stop_reason === 'max_tokens') return null;
+    if (deadline.signal.aborted || parsed.stop_reason === 'max_tokens') return null;
     const text = (parsed.content ?? [])
       .filter((b) => b?.type === 'text')
       .map((b) => b.text ?? '')
@@ -166,6 +185,8 @@ export async function distillGoalSentence(brief: string, _agentName: string): Pr
     return readsAsGoalSentence(text) ? text : null;
   } catch {
     return null;
+  } finally {
+    clearTimeout(deadlineTimer);
   }
 }
 
@@ -180,8 +201,11 @@ export async function briefEnvelopeForHandoff(opts: {
   recipientName: string;
   text: string;
   wait: boolean;
+  /** True when this delivery may steer a live turn. A model call must never
+   *  delay that path; only an already-written goal sentence may ride it. */
+  maySteer?: boolean;
 }): Promise<string | null> {
-  if (opts.wait) return null;
+  if (opts.wait || opts.maySteer) return null;
   if (!isCoderBrief(opts.senderId, opts.recipientId)) return null;
   const text = opts.text.trim();
   if (!text) return null;

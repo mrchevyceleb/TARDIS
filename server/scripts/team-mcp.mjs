@@ -909,11 +909,14 @@ async function callTool(name, args, signal) {
     }
   }
   if (name === 'team_fresh_chat') {
-    const caller = process.env.RIVENDELL_AGENT_ID || process.env.RIVENDELL_AGENT_NAME || (typeof args.from === 'string' ? args.from.trim() : '');
-    if (!caller) throw new Error('Only a named teammate can fresh a chat.');
+    // Identity is server-stamped into this MCP process (RIVENDELL_AGENT_ID);
+    // a caller-supplied `from` is never an identity, so it is not forwarded.
+    const callerId = process.env.RIVENDELL_AGENT_ID || '';
+    if (!callerId) throw new Error('Only a named teammate can fresh a chat.');
     const result = await api('/api/team/fresh', {
       method: 'POST',
-      body: JSON.stringify({ agent: args.agent, caller }),
+      headers: { 'x-rivendell-agent-id': callerId },
+      body: JSON.stringify({ agent: args.agent }),
     }, signal);
     if (result.error) throw new Error(result.error);
     return `Freshened ${result.agent}'s chat. Their persona, memory, commitments and cards are untouched; the next message starts clean.`;

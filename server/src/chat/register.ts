@@ -67,7 +67,7 @@ import { emitScribe } from '../worker/scribe.ts';
 import { listChatHistory } from './history.ts';
 import { watchThread, unwatchThread, setWatchVisible } from './threadWatch.ts';
 import { agentForChatId, brainForAgent, cliForAgentEngine } from './agents.ts';
-import { loadThreadResetEpochs, persistThreadResetEpoch } from './threadResetStore.ts';
+import { loadThreadResetEpochs, noteThreadResetEpoch, noteThreadResetEpochs, persistThreadResetEpoch, subscribeThreadResetEpochs } from './threadResetStore.ts';
 import { setQueuedHumanProbe } from './providerSwitch.ts';
 import { bareChatId, isBackgroundChatId, backgroundChatId } from './threadKey.ts';
 
@@ -894,6 +894,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
   type SocketThread = { cli: CliKind; repo: string; chatId: string };
   const socketThreads = new Map<import('ws').WebSocket, SocketThread>();
   const threadResetAt = await loadThreadResetEpochs();
+  noteThreadResetEpochs(threadResetAt);
   const broadcastThreadReset = (
     logKey: string,
     source: import('ws').WebSocket,
@@ -910,6 +911,19 @@ export async function registerChat(app: express.Express, server: Server): Promis
       source.send(JSON.stringify({ ...payload, remote: false }));
     }
   };
+  // A programmatic Fresh (POST /api/team/fresh) commits its reset epoch
+  // through the same store; broadcast it as freshStarted so connected
+  // clients drop the wiped transcript instead of keeping a stale view.
+  subscribeThreadResetEpochs((logKey, resetAt) => {
+    threadResetAt.set(logKey, resetAt);
+    for (const [client, lane] of socketThreads) {
+      if (client.readyState !== client.OPEN) continue;
+      if (laneLogKey(lane.cli, lane.repo, lane.chatId) !== logKey) continue;
+      try {
+        client.send(JSON.stringify({ type: 'freshStarted', repo: lane.repo, chatId: lane.chatId, latestSeq: 0, resetAt, remote: true }));
+      } catch { /* a dead socket never blocks a reset */ }
+    }
+  });
   // Routes push live payloads through this one hook (card-a77246): the
   // checklist route broadcasts tool writes to every open lane socket without
   // reaching into this closure. Cleared on teardown below.
@@ -1726,7 +1740,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             // or process teardown fails, clients still perform a full replay
             // of the coherent old log instead of trusting a stale high cursor.
             await persistThreadResetEpoch(targetLogKey, resetAt);
-            threadResetAt.set(targetLogKey, resetAt);
+            threadResetAt.set(targetLogKey, noteThreadResetEpoch(targetLogKey, resetAt));
             const priorSessions = sessionsForLogKey(targetLogKey);
             for (const prior of priorSessions) bumpLaneGen(prior.cli, msg.repo, chatId);
             bumpLaneGen(brain.cli, msg.repo, chatId);

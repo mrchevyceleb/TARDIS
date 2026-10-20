@@ -2983,6 +2983,23 @@ export function beginThreadReset(opts: { cli: CliKind; repoPath: string; chatId?
   return () => { resettingThreadLogs.delete(logKey); };
 }
 
+/** Claim the Fresh barrier for an already-computed thread log key (the
+ *  programmatic path resolves the key from the agent home, not one engine). */
+export function beginThreadResetForLogKey(logKey: string): (() => void) | null {
+  if (resettingThreadLogs.has(logKey)) return null;
+  resettingThreadLogs.add(logKey);
+  cancelProviderContinue(logKey);
+  return () => { resettingThreadLogs.delete(logKey); };
+}
+
+/** Live sessions (main lane only) belonging to one durable thread log key,
+ *  across every engine registry. The WS freshStart uses the same shape so a
+ *  reset retires all of them, including account-pinned siblings. */
+export function liveSessionsForLogKey(logKey: string): LiveSession[] {
+  return activeChatSessions().filter((session) => !isBackgroundChatId(session.chatId)
+    && trackedThreadLogKey({ cli: session.cli as CliKind, repoPath: session.cwd, chatId: session.chatId }) === logKey);
+}
+
 export function isThreadResetting(opts: { cli: CliKind; repoPath: string; chatId?: string }): boolean {
   return resettingThreadLogs.has(trackedThreadLogKey(opts));
 }

@@ -81,18 +81,23 @@ teamRouter.delete('/watch/:id', asyncHandler(async (req, res) => {
 
 // /fresh — give an agent a clean, empty chat before a task (card-8d427d).
 // Matt, Kip, Max and Riley only; the lane keeps its persona, memory,
-// commitments and cards. Refuses while the lane has a live turn.
+// commitments and cards. Refuses while the lane has a live turn. Caller
+// identity comes only from the server-stamped MCP header
+// (x-rivendell-agent-id, set from RIVENDELL_AGENT_ID); a caller/caller-id
+// in the body is ignored, never an identity.
 teamRouter.post('/fresh', asyncHandler(async (req, res) => {
-  const { agent, caller } = req.body ?? {};
+  const { agent } = req.body ?? {};
   if (typeof agent !== 'string' || !agent.trim()) {
     res.status(400).json({ error: 'agent is required' });
     return;
   }
-  if (typeof caller !== 'string' || !caller.trim()) {
-    res.status(400).json({ error: 'caller is required' });
+  const stamped = req.get('x-rivendell-agent-id')?.trim() ?? '';
+  const { freshCallerFromAgentId, freshChatByName } = await import('../chat/freshChat.ts');
+  const caller = stamped ? freshCallerFromAgentId(stamped) : null;
+  if (!caller) {
+    res.status(403).json({ error: 'only Matt, Kip, Max and Riley can fresh a chat' });
     return;
   }
-  const { freshChatByName } = await import('../chat/freshChat.ts');
   const result = await freshChatByName(agent, caller);
   if (!result.ok) {
     res.status(422).json({ error: result.reason });

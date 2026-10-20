@@ -407,7 +407,7 @@ export function peekEnginePrimerWithStatus(key: string, events?: Array<{ seq?: n
   // Clear-headed wake (card-074301, Oct 20): the live-state block rides right
   // behind the commitments on every seed — current task, running jobs, owned
   // cards, read live at seed time so nothing stale can re-enter as a to-do.
-  const live = liveStateSeedBlockWithStatus(key);
+  const live = liveStateSeedBlockWithStatus(key, evs);
   const lead = [block.block, live.block].filter(Boolean).join('\n\n');
   // After a Fresh the primer body is empty (compact and log were wiped) while
   // the commitments block lives on: the seed is then exactly the lead blocks,
@@ -415,15 +415,31 @@ export function peekEnginePrimerWithStatus(key: string, events?: Array<{ seq?: n
   // half: a store hiccup there (fail-open empty) is uncertainty the caller
   // must not treat as a confirmed-empty seed.
   const seed = lead && primer ? `${lead}\n\n---\n\n${primer}` : (lead || primer);
-  return { primer: seed, available: block.available };
+  return { primer: seed, available: block.available && live.available };
 }
 
-/** The live-state block for this thread's agent (card-074301): current task
- *  read from the last visible turn, plus the lane's open commitments (first),
- *  its running background jobs, and the Desk cards it owns In progress —
- *  every line read live from its store at seed time, never from the compact,
- *  so a job that already ended cannot come back as a to-do. Fail-open: a
- *  store hiccup contributes an empty block, never blocks a seed. */
+export const LIVE_JOBS_MAX = 12;
+export const LIVE_CARDS_MAX = 12;
+
+type LiveRead<T> =
+  | { ok: true; items: T[]; total: number }
+  | { ok: false; items: T[]; total: 0; error: string };
+
+function clipLiveLabel(text: string): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  return normalized.length > 220 ? `${normalized.slice(0, 220)}…` : normalized;
+}
+
+/** The live-state block for this thread's agent (card-074301): the current
+ *  task only when the newest visible turn is still an unanswered user ask,
+ *  plus the lane's open commitments (first), its running background jobs,
+ *  and the Desk cards it owns In progress — every line read live from its
+ *  store at seed time, never from the compact, so a job that already ended
+ *  cannot come back as a to-do. A store read that fails is reported as
+ *  unavailable; the block never calls work finished just because a reader
+ *  failed or because a display cap hid the tail. The caller-supplied event
+ *  snapshot wins over a fresh log read, so the live block and the primer
+ *  body always describe the same history. */
 export function liveStateSeedBlockWithStatus(key: string, events?: Array<{ seq?: number; ev: any }>): { block: string; available: boolean } {
   try {
     if (!isThreadLogKey(key)) return { block: '', available: true };
@@ -436,6 +452,7 @@ export function liveStateSeedBlockWithStatus(key: string, events?: Array<{ seq?:
     const commitments = listCommitments(agent.id);
     const jobs = readRunningJobs(agent.id);
     const cards = readOwnedCards(agent.id);
+    const available = jobs.ok && cards.ok;
     const lines: string[] = [
       'Where you stand right now (read live at this moment, never from memory):',
     ];
@@ -445,71 +462,78 @@ export function liveStateSeedBlockWithStatus(key: string, events?: Array<{ seq?:
     } else {
       lines.push('Open commitments: none right now (block above).');
     }
-    if (jobs.length) {
-      lines.push('Background jobs still running (from the live job store):');
-      for (const j of jobs) lines.push(`- job ${j.id}: ${j.name}`);
+    if (jobs.ok && jobs.items.length) {
+      lines.push(`Background jobs still running (from the live job store${jobs.total > jobs.items.length ? `, first ${jobs.items.length} of ${jobs.total}` : ''}):`);
+      for (const j of jobs.items) lines.push(`- job ${j.id}: ${j.name}`);
+    } else if (!jobs.ok) {
+      lines.push('Background jobs: unavailable right now (store read failed) — do not assume none are running.');
     }
-    if (cards.length) {
-      lines.push('Desk cards you own In progress (live board):');
-      for (const c of cards) lines.push(`- [desk:${c.id}] ${c.title}`);
+    if (cards.ok && cards.items.length) {
+      lines.push(`Desk cards you own In progress (live board${cards.total > cards.items.length ? `, first ${cards.items.length} of ${cards.total}` : ''}):`);
+      for (const c of cards.items) lines.push(`- [desk:${c.id}] ${c.title}`);
+    } else if (!cards.ok) {
+      lines.push('Desk cards you own In progress: unavailable right now (board read failed) — do not assume none are open.');
     }
-    if (!jobs.length && !cards.length && !task) lines.push('Nothing else is in flight.');
+    if (jobs.ok && cards.ok && !jobs.items.length && !cards.items.length && !task) lines.push('Nothing else is in flight.');
     lines.push(
       'Everything else you remember (the rolling memory and working window below) is history to verify, never a to-do list to resume. ' +
-      'If a job, card or promise is not in the live stores above, treat it as already done, handed off, or stale — say so rather than redoing it.',
+      'If a job, card or promise is confirmed absent from the live stores above, treat it as already done, handed off, or stale — say so rather than redoing it. If a store is unavailable above, verify before assuming.',
     );
     lines.push(
       'When a message arrives, answer that message. Never open with "continuing the last task" or resume a job that is not listed as running above.',
     );
-    return { block: lines.join('\n'), available: true };
+    return { block: lines.join('\n'), available };
   } catch {
     return { block: '', available: false };
   }
 }
 
-/** The current task, from the last visible user turn in the event log. */
+/** The current task only when the newest visible turn is still an unanswered
+ *  user ask: a later assistant turn means that ask was already handled, so
+ *  it must never be re-issued as the standing task. */
 export function currentTaskLine(events: Array<{ seq?: number; ev: any }>): string | null {
   const turns = extractVisibleTurns(events);
-  const last = [...turns].reverse().find((t) => t.role === 'user');
-  if (!last) return null;
-  const text = last.text.replace(/\s+/g, ' ').trim();
-  if (!text) return null;
-  return text.length > 220 ? `${text.slice(0, 220)}…` : text;
+  const last = turns[turns.length - 1];
+  if (!last || last.role !== 'user') return null;
+  const text = clipLiveLabel(last.text);
+  return text || null;
 }
 
 type LiveJob = { id: string; name: string };
-/** Running jobs for one agent, read synchronously from the jobs store. */
-export function readRunningJobs(agentId: string): LiveJob[] {
+/** Running jobs for one agent, read synchronously from the jobs store.
+ *  A failed read is reported (ok:false), never flattened to an empty list. */
+export function readRunningJobs(agentId: string): LiveRead<LiveJob> {
   try {
     const file = process.env.RIVENDELL_JOBS_FILE?.trim() || join(STATE_DIR, 'jobs.json');
     const raw = readFileSync(file, 'utf8');
     const parsed = JSON.parse(raw) as Array<{ id?: unknown; name?: unknown; agentId?: unknown; state?: unknown }>;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
+    if (!Array.isArray(parsed)) return { ok: false, items: [], total: 0, error: 'jobs store is not an array' };
+    const all = parsed
       .filter((j) => j?.agentId === agentId && j?.state === 'running')
       .map((j) => ({ id: String(j.id ?? ''), name: String(j.name ?? '').trim() }))
-      .filter((j) => j.id && j.name)
-      .slice(0, 8);
-  } catch {
-    return [];
+      .filter((j) => j.id && j.name);
+    return { ok: true, items: all.slice(0, LIVE_JOBS_MAX), total: all.length };
+  } catch (err) {
+    return { ok: false, items: [], total: 0, error: (err as Error).message };
   }
 }
 
 type LiveCard = { id: string; title: string };
-/** Desk cards this agent owns In progress, read from the Desk file. */
-export function readOwnedCards(agentId: string): LiveCard[] {
+/** Desk cards this agent owns In progress, read from the Desk file.
+ *  A failed read is reported (ok:false), never flattened to an empty list. */
+export function readOwnedCards(agentId: string): LiveRead<LiveCard> {
   try {
     const file = process.env.RIVENDELL_DESK_FILE?.trim() || join(STATE_DIR, 'desk.json');
     const raw = readFileSync(file, 'utf8');
     const parsed = JSON.parse(raw) as { cards?: Array<{ id?: unknown; title?: unknown; column?: unknown; archived?: unknown; owner?: { id?: unknown } }> };
-    const cards = Array.isArray(parsed.cards) ? parsed.cards : [];
-    return cards
+    if (!parsed || !Array.isArray(parsed.cards)) return { ok: false, items: [], total: 0, error: 'desk store has no cards array' };
+    const all = parsed.cards
       .filter((c) => c?.owner?.id === agentId && c?.column === 'in_progress' && c?.archived !== true)
-      .map((c) => ({ id: String(c.id ?? ''), title: String(c.title ?? '').replace(/\s+/g, ' ').trim() }))
-      .filter((c) => c.id.startsWith('card-') && c.title)
-      .slice(0, 6);
-  } catch {
-    return [];
+      .map((c) => ({ id: String(c.id ?? ''), title: clipLiveLabel(String(c.title ?? '')) }))
+      .filter((c) => c.id.startsWith('card-') && c.title);
+    return { ok: true, items: all.slice(0, LIVE_CARDS_MAX), total: all.length };
+  } catch (err) {
+    return { ok: false, items: [], total: 0, error: (err as Error).message };
   }
 }
 

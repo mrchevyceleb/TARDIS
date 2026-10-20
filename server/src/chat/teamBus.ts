@@ -896,6 +896,10 @@ type TeamDelivery = {
   /** True when a joined batch carries messages from several senders, so the
    *  closing reply instruction must not name only the lead's sender. */
   mixedSenders?: boolean;
+  /** Per-record batch members (lead first) for the brief envelope: each
+   *  coder brief in the batch gets its own envelope instead of inheriting
+   *  the lead's. Absent on a direct (non-batched) delivery. */
+  batchRecords?: Array<{ fromId: string; fromName: string; fromRole?: string; hop: number; text: string }>;
   /** The person authored this channel post: person-class admission. */
   personPosted?: boolean;
   /** The person chose to queue this post for the member's NEXT turn
@@ -1011,16 +1015,57 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
   // goal sentence plus its card link, built here so no sender can skip it.
   // The durable record keeps the lead's raw text; only this turn's prompt
   // carries the envelope, with the raw brief below as detail. Fail-open.
+  // A busy recipient lane counts as may-steer here: distillation is skipped
+  // there (an already-written goal sentence still rides), so the envelope
+  // never stalls an attempt to join a live turn.
+  let recipientBusy = false;
+  try {
+    const runner = await getRunner();
+    recipientBusy = runner.activeChatSessions().some((s) => s.busy && bareChatId(s.chatId) === to.home);
+  } catch { /* a busy-check hiccup never blocks delivery */ }
   let promptText = text;
   try {
-    const envelope = await briefEnvelopeForHandoff({
-      senderId: from.id,
-      recipientId: to.id,
-      recipientName: to.name,
-      text,
-      wait: waitForReply === true,
-    });
-    if (envelope) promptText = envelope;
+    if (delivery.batchRecords?.length) {
+      // Per-record envelopes: every coder brief in the batch gets its own
+      // goal + card, and unrelated records stay plain blocks. The outer
+      // header below is the lead record's own header, so the lead member is
+      // rendered as its envelope text (or raw text) without a second header.
+      const blocks: string[] = [];
+      for (let i = 0; i < delivery.batchRecords.length; i++) {
+        const member = delivery.batchRecords[i];
+        const memberEnvelope = await briefEnvelopeForHandoff({
+          senderId: member.fromId,
+          recipientId: to.id,
+          recipientName: to.name,
+          text: member.text,
+          wait: false,
+          maySteer: recipientBusy,
+        });
+        const memberText = memberEnvelope ?? member.text;
+        if (i === 0) blocks.push(memberText);
+        else {
+          const header = member.fromRole === 'desk'
+            ? `[comment from ${member.fromName} on the Desk]`
+            : member.fromRole === 'voice'
+            ? '[continuation of the user’s voice request in your own thread]'
+            : member.fromRole === 'channel'
+            ? `[group-channel post in ${member.fromName} — handoff ${member.hop}]`
+            : `[message from teammate ${member.fromName}${member.fromRole ? ` (${member.fromRole})` : ''} — handoff ${member.hop}]`;
+          blocks.push(`${header}\n${memberText}`);
+        }
+      }
+      promptText = blocks.join('\n\n');
+    } else {
+      const envelope = await briefEnvelopeForHandoff({
+        senderId: from.id,
+        recipientId: to.id,
+        recipientName: to.name,
+        text,
+        wait: waitForReply === true,
+        maySteer: recipientBusy,
+      });
+      if (envelope) promptText = envelope;
+    }
   } catch (err) {
     console.warn('[brief] envelope failed open:', (err as Error).message);
   }
@@ -1354,6 +1399,18 @@ function batchDeliveryBlock(record: QueuedTeamDelivery): string {
   return `${header}\n${record.text}`;
 }
 
+type BatchMember = { fromId: string; fromName: string; fromRole?: string; hop: number; text: string };
+
+function batchRecordForEnvelope(record: QueuedTeamDelivery): BatchMember {
+  return {
+    fromId: record.fromId,
+    fromName: record.fromName,
+    fromRole: record.fromRole,
+    hop: record.hop,
+    text: record.text,
+  };
+}
+
 // Bounds for one admitted batch turn. Unbounded, a 34-message backlog (each
 // record can carry 8,000 characters) would hand the recipient a prompt
 // hundreds of KB long — past admission and provider context limits — and
@@ -1644,6 +1701,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         nudgeHoldSince: batchHoldSince,
         personSourced: batchIsPersonSourced,
         mixedSenders: siblings.some((sibling) => sibling.fromId !== lead.fromId),
+        batchRecords: siblings.map(batchRecordForEnvelope),
         stillWanted: async () => {
           // Every record that rides this batch must still be queued when the
           // prompt finally goes out: a Stop that dropped any of them must

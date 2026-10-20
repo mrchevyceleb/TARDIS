@@ -27,6 +27,7 @@ test('cardRefsIn reads the brief’s own cards, never invents', () => {
   assert.deepEqual(cardRefsIn('Brief for [desk:card-abc123] please.'), ['card-abc123']);
   assert.deepEqual(cardRefsIn('no card here'), []);
   assert.deepEqual(cardRefsIn('[desk:card-abc123] then [desk:card-def456] then [desk:card-abc123]'), ['card-abc123', 'card-def456']);
+  assert.deepEqual(cardRefsIn('work on [card-e9b846] and card-8D427d_now'), ['card-e9b846', 'card-8D427d_now']);
 });
 
 test('readsAsGoalSentence: one line, full stop, under cap', () => {
@@ -35,6 +36,9 @@ test('readsAsGoalSentence: one line, full stop, under cap', () => {
   assert.equal(readsAsGoalSentence('Line one.\nLine two.'), false);
   assert.equal(readsAsGoalSentence('- Fix the thing.'), false);
   assert.equal(readsAsGoalSentence('1. Fix the thing.'), false);
+  assert.equal(readsAsGoalSentence('Edit foo.ts.'), false);
+  assert.equal(readsAsGoalSentence('Fix v1.2.'), false);
+  assert.equal(readsAsGoalSentence('Ship the change tonight.'), false);
 });
 
 test('ownGoalSentence: whole-text goal and goal-then-steps', () => {
