@@ -481,7 +481,8 @@ type LiveJob = { id: string; name: string };
 /** Running jobs for one agent, read synchronously from the jobs store. */
 export function readRunningJobs(agentId: string): LiveJob[] {
   try {
-    const raw = readFileSync(join(STATE_DIR, 'jobs.json'), 'utf8');
+    const file = process.env.RIVENDELL_JOBS_FILE?.trim() || join(STATE_DIR, 'jobs.json');
+    const raw = readFileSync(file, 'utf8');
     const parsed = JSON.parse(raw) as Array<{ id?: unknown; name?: unknown; agentId?: unknown; state?: unknown }>;
     if (!Array.isArray(parsed)) return [];
     return parsed
