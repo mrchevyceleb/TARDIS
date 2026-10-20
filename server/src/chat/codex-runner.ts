@@ -1,4 +1,5 @@
-import { sessionStateDelta } from './sessionContext.ts';
+import { recordNativeCall, recordNativeSession, recordNativeCompact, recordNativeFailure } from './sessionMetrics.ts';
+import { prepareSessionStateDelta, resetSessionStateDelta } from './sessionContext.ts';
 import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 import { execFileSync, type ChildProcess, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
@@ -19,7 +20,8 @@ import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './
 import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeqWithStatus, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
-import { isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
+import { isAgentThread, bareChatId, isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
+import { sessionDirectory } from './sessionPolicy.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
@@ -284,6 +286,9 @@ export class CodexSession {
   private currentChild: ChildProcess | null = null;
   /** True after app-server announces turn/started and until turn/completed. */
   private nativeSteerReady = false;
+  private harnessChars = 0;
+  private resumedNative = false;
+  private lastNativeInput = 0;
   private nativeSteerWaiters = new Map<string, NativeSteerWaiter>();
   /** Has the person's message got visible text yet; see replyNudge.ts. */
   private readonly replyWatch: ReplyWatch;
@@ -307,6 +312,7 @@ export class CodexSession {
   constructor(cwd: string, chatId: string, threadId: string | null, opts: CodexSessionOptions = {}) {
     this.cwd = cwd;
     this.chatId = chatId;
+    this.resumedNative = Boolean(threadId);
     this.cli = opts.cli ?? 'codex';
     this.key = keyOf(this.cli, cwd, chatId);
     this.logKey = logKeyFor(this.cli, cwd, chatId);
@@ -763,11 +769,11 @@ export class CodexSession {
       this.recoverContextOnNextTurn = false;
     }
     const personaScope = !this.threadId ? personaPromptFor(this.chatId) : '';
-    const conversationGuidance = conversationGuidanceForTurn({
+    const conversationGuidance = !this.threadId ? conversationGuidanceForTurn({
       chatId: this.chatId, logKey: this.logKey, historyThroughSeq,
       peerFrom: opts.peerFrom,
       peerFromRole: opts.peerFromRole,
-    });
+    }) : '';
     // Auto-recall: recorded knowledge in front of every new human or teammate
     // turn; automation deliveries never spend the search (the reply nudge
     // rides the steer path and never reaches here).
@@ -778,8 +784,10 @@ export class CodexSession {
       this.busy = false;
       return;
     }
-    const priorities = await sessionStateDelta(this.chatId);
-    const prompt = `${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, !(seedWindow || hasSeedOverride))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${!this.threadId ? CODEX_TURN_PREAMBLE : ''}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
+    const stateDelta = await prepareSessionStateDelta(this.chatId);
+    const priorities = stateDelta.text;
+    const prompt = `${priorities ? `${priorities}\n\n` : ''}${!this.threadId ? computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, false) : ''}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${!this.threadId ? CODEX_TURN_PREAMBLE : ''}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
+    this.harnessChars = Math.max(0, prompt.length - text.length);
     // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
     // -c overrides rather than written into ~/.codex/config.toml so this stays
     // scoped to TARDIS.
@@ -938,6 +946,7 @@ export class CodexSession {
           sawActionableItem = true;
         }
         if (ev?.type === 'turn.completed') {
+          if (!ev.error) stateDelta.accept();
           sawTurnCompleted = true;
           this.nativeSteerReady = false;
         }
@@ -1154,7 +1163,18 @@ export class CodexSession {
     ev: any,
     state: CodexTurnState,
   ): void {
+    if (ev?.type === 'rivendell.native_compact') {
+      resetSessionStateDelta(this.chatId);
+      recordNativeCompact(this.chatId, 'codex', this.threadId, { ...ev.metadata, before: this.lastNativeInput });
+      return;
+    }
     if (ev?.type === 'rivendell.context_usage') {
+      const u = ev.usage ?? {};
+      const input = Number(u.input_tokens || 0);
+      this.lastNativeInput = input;
+      recordNativeCall({ lane: this.chatId, engine: 'codex', model: this.turnModel || '', sessionId: this.threadId || undefined,
+        input, cached: Number(u.cached_input_tokens || 0), output: Number(u.output_tokens || 0), harnessChars: this.harnessChars, resumed: this.resumedNative });
+      this.resumedNative = true;
       recordContextUsage(this.logKey, 'codex', ev.usage);
       return;
     }
@@ -1162,6 +1182,13 @@ export class CodexSession {
 
     // Capture the thread id for resume on later turns.
     if (ev.type === 'thread.started' && typeof ev.thread_id === 'string') {
+      recordNativeSession(this.chatId, 'codex', ev.thread_id, this.threadId);
+      if (this.threadId && this.threadId !== ev.thread_id) {
+        recordNativeFailure(this.chatId, 'codex', 'Codex did not resume its saved thread. Messages remain queued; native recovery or Matt’s Fresh thread is required.');
+        this.emit({ type: 'error', code: 'NATIVE_RESUME_MISMATCH', fatal: true, message: 'Codex did not resume the saved thread. Its ID was retained.' });
+        void this.shutdown();
+        return;
+      }
       void this.persistThreadId(ev.thread_id);
       this.emitClaudeEvent({
         type: 'system',
@@ -1273,13 +1300,11 @@ export class CodexSession {
       const input = Number(u.input_tokens ?? 0);
       const cached = Number(u.cached_input_tokens ?? 0);
       const output = Number(u.output_tokens ?? 0);
-      const effectiveInput = cached > 0 && cached < input ? input - cached : input;
       state.usage = {
-        // Codex reports huge cumulative cache-read counts. For the context
-        // meter, show the effective fresh input instead of reconstructing the
-        // full cache history and producing impossible multi-million totals.
-        input_tokens: Math.max(0, effectiveInput),
-        cache_read_input_tokens: 0,
+        // The app-server adapter selects tokenUsage.last (one call), never
+        // its cumulative total. Preserve actual context and cached share.
+        input_tokens: Math.max(0, input - Math.min(input, cached)),
+        cache_read_input_tokens: Math.max(0, Math.min(input, cached)),
         cache_creation_input_tokens: 0,
         output_tokens: output,
       };
@@ -1325,7 +1350,8 @@ export class CodexSession {
 }
 
 function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
-  const normalized = chatId || 'main';
+  const normalized = isAgentThread(chatId) ? bareChatId(chatId) : chatId || 'main';
+  cwd = sessionDirectory(normalized, cwd);
   return normalized === 'main' ? `${cli}|${cwd}` : `${cli}|${cwd}|${normalized}`;
 }
 

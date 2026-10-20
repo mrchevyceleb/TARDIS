@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { STATE_DIR } from './config.ts';
@@ -9,21 +9,42 @@ export type AgentSessionPolicy = {
   directory?: string;
   skills?: string[];
   lead?: boolean;
+  reportsTo?: string;
   memoryIndex?: boolean;
   excludeInstructions?: string[];
   startTokenCeiling?: number;
 };
 type Policy = { agents?: Record<string, AgentSessionPolicy>; defaults?: AgentSessionPolicy };
+const lastGoodPolicies = new Map<string, { mtime: number; data: Policy }>();
+function validPolicy(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const p = value as Record<string, unknown>;
+  return Object.entries(p).every(([key, v]) => {
+    if (key === 'directory' || key === 'reportsTo') return typeof v === 'string' && v.length > 0;
+    if (key === 'skills' || key === 'excludeInstructions') return Array.isArray(v) && v.every(x => typeof x === 'string');
+    if (key === 'lead' || key === 'memoryIndex') return typeof v === 'boolean';
+    if (key === 'startTokenCeiling') return typeof v === 'number' && Number.isInteger(v) && v > 0;
+    return false;
+  });
+}
 
 export function sessionPolicy(chatId: string): AgentSessionPolicy {
   if (!isAgentThread(chatId)) return {};
   const file = process.env.RIVENDELL_SESSION_POLICY_FILE || join(STATE_DIR, 'agent-session-policy.json');
   try {
+    const mtime = statSync(file).mtimeMs;
+    const previous = lastGoodPolicies.get(file);
+    if (previous?.mtime === mtime) return { ...previous.data.defaults, ...previous.data.agents?.[bareChatId(chatId).slice(4)] };
     const data = JSON.parse(readFileSync(file, 'utf8')) as Policy;
+    if (!data || typeof data !== 'object' || Array.isArray(data)
+      || (data.defaults !== undefined && !validPolicy(data.defaults))
+      || (data.agents !== undefined && (!data.agents || typeof data.agents !== 'object' || Array.isArray(data.agents) || !Object.values(data.agents).every(validPolicy)))) throw new Error('Invalid native session policy');
+    lastGoodPolicies.set(file, { mtime, data });
     return { ...data.defaults, ...data.agents?.[bareChatId(chatId).slice(4)] };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    return {};
+    const previous = lastGoodPolicies.get(file)?.data;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.warn('[native-session] invalid policy edit; retaining the last valid mapping');
+    return { ...previous?.defaults, ...previous?.agents?.[bareChatId(chatId).slice(4)] };
   }
 }
 
@@ -58,6 +79,7 @@ export function nativeClaudeSettings(chatId: string): Record<string, unknown> {
     } catch { /* an installation may not have this profile */ }
   }
   return {
+    autoCompactEnabled: true,
     skillOverrides,
     autoMemoryEnabled: policy.memoryIndex === true,
     ...(policy.excludeInstructions?.length ? { claudeMdExcludes: policy.excludeInstructions } : {}),

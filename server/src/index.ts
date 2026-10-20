@@ -1,3 +1,5 @@
+import { sessionHealthRouter } from './routes/sessionHealth.ts';
+import { startSessionMetricsReport } from './chat/sessionMetrics.ts';
 import express from 'express';
 import compression from 'compression';
 import { createServer } from 'node:http';
@@ -126,6 +128,7 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+app.use('/api/session-health', sessionHealthRouter);
 app.use('/api/summary', summaryRouter);
 app.use('/api/tasks', tasksRouter);
 app.use('/api/calendar', calendarRouter);
@@ -234,6 +237,7 @@ try {
 const stopChat = await registerChat(app, server);
 registerVoiceCalls(server);
 if (!SIDE_COPY) registerDeviceBridge(server);
+if (!SIDE_COPY) startSessionMetricsReport();
 if (!SIDE_COPY) startRoutineScheduler(); // agent-scoped routine scheduler (30s tick)
 if (!SIDE_COPY) startJobWatchScheduler(); // background job watches (10s tick): pid/file/command → agent wake
 if (!SIDE_COPY) startJobScheduler(); // job_start jobs (5s tick): exit records → agent job-result

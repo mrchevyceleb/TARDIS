@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import { agentForChatId } from './agents.ts';
@@ -7,11 +7,16 @@ import { listCommitments } from '../lib/commitmentStore.ts';
 import { readDesk } from '../lib/deskStore.ts';
 import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 
+export function resetSessionStateDelta(chatId: string): void {
+  const agent = agentForChatId(chatId);
+  if (agent) rmSync(join(STATE_DIR, 'native-session-context', `${agent.id}.json`), { force: true });
+}
+
 /** Status belongs at the end of new input, never above the cached prefix.
  * Persist fingerprints so a process restart does not repeat the same status. */
-export async function sessionStateDelta(chatId: string): Promise<string> {
+export async function prepareSessionStateDelta(chatId: string): Promise<{ text: string; accept(): void }> {
   const agent = agentForChatId(chatId);
-  if (!agent) return '';
+  if (!agent) return { text: '', accept() {} };
   const directory = join(STATE_DIR, 'native-session-context');
   const file = join(directory, `${agent.id}.json`);
   let before: Record<string, string> = {};
@@ -31,13 +36,17 @@ export async function sessionStateDelta(chatId: string): Promise<string> {
   try {
     const desk = await readDesk();
     const cards = desk.cards.filter(card => card.owner.kind === 'agent' && card.owner.id === agent.id && card.column !== 'in_production');
-    changed('cards', JSON.stringify(cards.map(card => [card.id, card.title, card.column])), `Owned cards changed: ${cards.length}. ${cards.filter(card => card.column === 'in_progress').slice(0, 2).map(card => `${card.id}: ${card.title.slice(0, 95)}`).join('; ')} Read the Desk for current state.`);
+    changed('cards', JSON.stringify(cards.map(card => [card.id, card.title, card.column])), `Owned cards changed: ${cards.length}; ${cards.filter(card => card.column === 'in_progress').length} in progress. Read the Desk for current state.`);
   } catch { /* leave the previous fingerprint intact */ }
-  if (lines.length) {
-    mkdirSync(directory, { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(next), { mode: 0o600 });
-    renameSync(tmp, file);
-  }
-  return lines.join('\n');
+  return { text: lines.join('\n'), accept() {
+    if (!lines.length) return;
+    // Called only after the engine's input pipe accepted the message.
+    // A canceled preparation must never consume an undelivered change.
+    try {
+      mkdirSync(directory, { recursive: true });
+      const tmp = `${file}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify(next), { mode: 0o600 });
+      renameSync(tmp, file);
+    } catch { console.warn('[native-session] status acknowledgement could not be saved; changes will be delivered again'); }
+  } };
 }

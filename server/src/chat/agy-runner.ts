@@ -1,4 +1,4 @@
-import { sessionStateDelta } from './sessionContext.ts';
+import { prepareSessionStateDelta } from './sessionContext.ts';
 /** Agy engine lane — Google's Antigravity CLI (`agy`) on Matt's subscription.
  *
  *  Protocol (probed 2026-10-14, headless): one persistent
@@ -309,6 +309,12 @@ export class AgySession {
     // resolve readiness: the next spawn would resume a conversation
     // belonging to a dead process.
     if (this.disposed || this.retiring) return;
+    if (this.startedResumeId && conversationId !== this.startedResumeId) {
+      this.emit({ type: 'error', message: 'Antigravity did not resume its saved conversation. The saved ID and queued messages were retained.', fatal: true });
+      this.resolveReady(false);
+      this.shutdown('native resume mismatch');
+      return;
+    }
     this.initSeen = true;
     this.agyConversationId = conversationId;
     console.log(`[chat ${this.cli}/agy] ready ${model} conversation=${conversationId.slice(0, 8)}`);
@@ -410,6 +416,12 @@ export class AgySession {
       case 'step_update': {
         const step = ev.step_update;
         if (!step) return;
+        if (step.step_type === 'error_message') {
+          const detail = step.error_message ?? step.error ?? step.text ?? step.text_delta ?? 'agy reported an upstream error';
+          const message = typeof detail === 'string' ? detail : String(detail?.message ?? JSON.stringify(detail));
+          this.turnFailed = { message, code: /429|RESOURCE_EXHAUSTED|quota/i.test(message) ? 'usage_limit' : 'error' };
+          return;
+        }
         if (step.step_type !== 'tool' && step.step_type !== 'agent_response') return;
         const sid = this.agyConversationId ?? '';
         const stream = (event: Record<string, unknown>) => this.emit({ type: 'event', event: { type: 'stream_event', event, session_id: sid } });
@@ -477,9 +489,12 @@ export class AgySession {
         // missing, renamed, malformed or unknown statuses are failures (except
         // when retiring for a message-boundary pause, where SIGINT ends the
         // turn cleanly at the completed tool boundary).
-        if (result.status !== 'SUCCESS') {
+        const resultCounts = result.usage ?? {};
+        const emptySuccess = result.status === 'SUCCESS' && !String(result.response ?? this.lastAssistantText).trim()
+          && this.stepBuffers.size === 0 && !Number(resultCounts.input_tokens) && !Number(resultCounts.output_tokens);
+        if (result.status !== 'SUCCESS' || result.error || emptySuccess) {
           if (!this.pausedForMessage) {
-            this.turnFailed = { message: String(result.error ?? `agy returned status ${String(result.status ?? 'missing')}`), code: 'error' };
+            this.turnFailed ??= { message: String(result.error ?? (emptySuccess ? 'agy returned an empty success with no model usage' : `agy returned status ${String(result.status ?? 'missing')}`)), code: 'error' };
           }
         } else {
           const response = typeof result.response === 'string' ? result.response : '';
@@ -747,7 +762,7 @@ export class AgySession {
       this.emit({ type: 'event', event: { type: '_terminal_error', message: plain, code: failed.code ?? 'error', retryable: true, ts: Date.now() } });
     }
     const usage = this.resultUsage ?? { input: this.turnUsage.input, output: this.turnUsage.output, cacheRead: this.turnUsage.cacheRead };
-    this.emit({ type: 'event', event: { type: 'result', subtype: failed ? 'error' : 'success', is_error: Boolean(failed), ...(failed ? {} : { result: this.suppressResultText ? '' : this.lastAssistantText }), session_id: this.agyConversationId ?? '', usage: { input_tokens: usage.input, output_tokens: usage.output, cache_read_input_tokens: usage.cacheRead } } });
+    this.emit({ type: 'event', event: { type: 'result', subtype: failed ? 'error' : 'success', is_error: Boolean(failed), ...(failed ? { result: failed.message, errors: [failed.message] } : { result: this.suppressResultText ? '' : this.lastAssistantText }), session_id: this.agyConversationId ?? '', usage: { input_tokens: usage.input, output_tokens: usage.output, cache_read_input_tokens: usage.cacheRead } } });
     this.suppressResultText = false;
     // The turn's context accounting, once, at the boundary: the terminal
     // result's usage when it carried one, else the sanitized step accumulation.
@@ -1031,7 +1046,8 @@ export class AgySession {
       // Full computer rules ride the seed message that starts a fresh agy window;
       // later messages of the same warm process get the brief form.
       const computerContext = wantSeed ? computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed) : '';
-      const priorities = await sessionStateDelta(this.chatId);
+      const stateDelta = await prepareSessionStateDelta(this.chatId);
+      const priorities = stateDelta.text;
       // Plain-English writing block (card-0d1015): agy is Gemini, whose
       // buried instructions lost to the long context, so the block rides at
       // the very END of the turn. Voice turns keep their own spoken-style
@@ -1043,6 +1059,7 @@ export class AgySession {
 
       try {
         await this.writeUserLine(message);
+        stateDelta.accept();
       } catch (error) {
         // A failed stdin write is an indeterminate protocol boundary: the old
         // request or a partial line may already be executing, so a later send

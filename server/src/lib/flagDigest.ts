@@ -1,3 +1,4 @@
+import { sessionPolicy } from '../chat/sessionPolicy.ts';
 // One shared owner flag digest (Matt, Oct 14, card-d7bf78 b): past-due
 // commitment raises and Desk silence nudges go to their owner as ONE digest
 // message every 30 minutes instead of one message per item. There is ONE
@@ -155,6 +156,20 @@ function restore(): void {
     }
     queues.set(ownerId, map);
   }
+  for (const [owner, entries] of [...queues]) {
+    const policy = sessionPolicy(`bot-${owner}`);
+    const lead = policy.reportsTo || 'chief-of-staff';
+    if (policy.lead || lead === owner) continue;
+    for (const [key, entry] of [...entries]) {
+      if (entry.sentDeliveryId) continue;
+      entries.delete(key);
+      const destination = queues.get(lead) ?? new Map<string, Entry>();
+      const movedKey = `${owner}:${key}`;
+      if (!destination.has(movedKey)) destination.set(movedKey, { ...entry, key: movedKey, text: `For ${owner}: ${entry.text}` });
+      queues.set(lead, destination);
+      migrated = true;
+    }
+  }
   // Persist the migration immediately: a legacy entry's concrete
   // firstQueuedAt must survive a restart before any other write happens.
   if (migrated) persistNow();
@@ -173,6 +188,13 @@ function restore(): void {
  *  whose raise names a different id) gets its OWN successor slot and its
  *  own line, instead of hijacking the in-flight record's admission mark. */
 export function queueFlagDigest(ownerId: string, key: string, text: string, onDelivered?: () => void, priority = false): void {
+  const policy = sessionPolicy(`bot-${ownerId}`);
+  const lead = policy.reportsTo || 'chief-of-staff';
+  if (!policy.lead && lead !== ownerId) {
+    text = `For ${ownerId}: ${text}`;
+    key = `${ownerId}:${key}`;
+    ownerId = lead;
+  }
   restore();
   const entries = queues.get(ownerId) ?? new Map<string, Entry>();
   const slotNames: string[] = [key];

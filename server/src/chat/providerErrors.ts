@@ -227,7 +227,7 @@ export function compactFailureError(cli: string, detail: string, rerun = false):
   return {
     message: `${providerLabel(cli)} could not shrink this chat's history${reason ? ` (${reason})` : ''}. ${rerun
       ? 'TARDIS is starting fresh from the saved summary and re-running the message automatically.'
-      : 'The next message starts fresh from the saved summary; send it again.'}`,
+      : 'Your session is preserved. Retry native compaction, or use Fresh thread to start over.'}`,
     code: 'compact_failed',
     retryable: true,
   };

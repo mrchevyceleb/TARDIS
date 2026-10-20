@@ -108,23 +108,6 @@ const TOOLS = [
     },
   },
   {
-    name: 'team_fresh_chat',
-    description:
-      'Give a teammate a clean, empty chat before a task (Matt, Kip, Max and Riley only, by roster identity). ' +
-      'The lane keeps its persona, memory files, commitments and Desk cards; only the chat history goes. ' +
-      'Refuses while the lane has a live turn, so it never cuts work mid-flight. Use it right before handing over a brief.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        agent: { type: 'string', description: "Teammate name or id to fresh, e.g. 'Christina'" },
-        from: { type: 'string', description: 'Your own teammate name. Only needed if TARDIS has not already identified you.' },
-        context: { type: 'string', description: 'The "computer_start context for this turn" line at the top of your own prompt. Required on engines whose tool server carries no identity (Banana); the server verifies it, so it must be your own turn\'s, never one pasted from another lane.' },
-      },
-      required: ['agent'],
-      additionalProperties: false,
-    },
-  },
-  {
     name: 'team_message',
     description:
       'Send a durable message or correction to a teammate by name. Delivery is asynchronous by default ' +
@@ -908,29 +891,6 @@ async function callTool(name, args, signal) {
       const { card } = await api(`/api/desk/cards/${encodeURIComponent(args.id)}`, { method: 'PATCH', body: JSON.stringify(patch) }, signal);
       return `Updated:\n${describeCard(card)}`;
     }
-  }
-  if (name === 'team_fresh_chat') {
-    // Identity is server-stamped into this MCP process (RIVENDELL_AGENT_ID);
-    // a caller-supplied `from` is never an identity, so it is not forwarded.
-    // Engines whose tool server is shared across lanes (Banana's single serve
-    // process) carry no stamp, so there the lane's signed per-turn context is
-    // the identity — the same token computer_start takes, verified server-side
-    // (review P1 5).
-    const callerId = process.env.RIVENDELL_AGENT_ID || '';
-    const turnContext = typeof args.context === 'string' ? args.context.trim() : '';
-    if (!callerId && !turnContext) {
-      throw new Error('Only a named teammate can fresh a chat. On this engine, pass context: the "computer_start context for this turn" line at the top of your own prompt.');
-    }
-    const result = await api('/api/team/fresh', {
-      method: 'POST',
-      headers: {
-        ...(callerId ? { 'x-rivendell-agent-id': callerId } : {}),
-        ...(turnContext ? { 'x-rivendell-turn-context': turnContext } : {}),
-      },
-      body: JSON.stringify({ agent: args.agent }),
-    }, signal);
-    if (result.error) throw new Error(result.error);
-    return `Freshened ${result.agent}'s chat. Their persona, memory, commitments and cards are untouched; the next message starts clean.`;
   }
   if (name === 'team_message') {
     const result = await api('/api/team/message', {

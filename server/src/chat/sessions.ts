@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import { SESSIONS_FILE, STATE_DIR } from './config.ts';
 import { bareChatId, isAgentThread } from './threadKey.ts';
@@ -11,6 +12,7 @@ type Cli = 'claude' | 'codex' | 'assistant' | 'banana' | 'codex-personal' | 'ban
 type Key = string; // `${cli}|${repoPath}` or `${cli}|${repoPath}|${chatId}`
 
 type StoredSession = {
+  cli?: Cli;
   sessionId?: string;
   generation?: number;
   updatedAt: number;
@@ -31,6 +33,12 @@ const key = (cli: Cli, repoPath: string, chatId = 'main'): Key => {
   const normalized = isAgentThread(chatId) ? bareChatId(chatId) : chatId || 'main';
   return normalized === 'main' ? `${cli}|${repoPath}` : `${cli}|${repoPath}|${normalized}`;
 };
+const nativeKey = (cli: Cli, repoPath: string, chatId: string): Key => {
+  if (!isAgentThread(chatId)) return key(cli, repoPath, chatId);
+  const engine = ['claude', 'assistant', 'zai', 'xai', 'fireworks', 'openrouter', 'openrouter2'].includes(cli) ? 'claude-code'
+    : cli === 'codex-personal' ? 'codex' : cli;
+  return `${engine}|${bareChatId(chatId)}`;
+};
 
 async function load(): Promise<Stored> {
   if (cache) return cache;
@@ -39,7 +47,9 @@ async function load(): Promise<Stored> {
     try {
       const raw = await readFile(SESSIONS_FILE, 'utf8');
       cache = JSON.parse(raw) as Stored;
-    } catch {
+      if (!cache || typeof cache !== 'object' || Array.isArray(cache)) throw new Error('Invalid native session store');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       cache = {};
     }
     return cache;
@@ -54,22 +64,24 @@ async function load(): Promise<Stored> {
 async function flush() {
   if (!cache) return;
   await mkdir(dirname(SESSIONS_FILE), { recursive: true });
-  await writeFile(SESSIONS_FILE, JSON.stringify(cache, null, 2));
+  const temporary = `${SESSIONS_FILE}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temporary, JSON.stringify(cache, null, 2), { mode: 0o600, flush: true });
+  await rename(temporary, SESSIONS_FILE);
 }
 
 export async function getSessionId(cli: Cli, repoPath: string, chatId = 'main'): Promise<string | undefined> {
   const all = await load();
-  const record = all[key(cli, repoPath, chatId)];
+  const record = all[nativeKey(cli, repoPath, chatId)] ?? all[key(cli, repoPath, chatId)];
   if (isAgentThread(chatId) && record?.generation !== NATIVE_SESSION_GENERATION) return undefined;
   return record?.sessionId;
 }
 
 export async function setSessionId(cli: Cli, repoPath: string, sessionId: string, chatId = 'main'): Promise<void> {
   const all = await load();
-  const storageKey = key(cli, repoPath, chatId);
+  const storageKey = nativeKey(cli, repoPath, chatId);
   const existing = all[storageKey];
   if (sessionId) {
-    all[storageKey] = { ...existing, sessionId, generation: NATIVE_SESSION_GENERATION, updatedAt: Date.now() };
+    all[storageKey] = { ...existing, cli, sessionId, generation: NATIVE_SESSION_GENERATION, updatedAt: Date.now() };
   } else if (existing?.model || existing?.effort) {
     const { sessionId: _discard, ...selection } = existing;
     all[storageKey] = { ...selection, updatedAt: Date.now() };
@@ -87,7 +99,7 @@ export async function getSessionSelection(
   chatId = 'main',
 ): Promise<SessionSelection | null> {
   const all = await load();
-  const storageKey = key(cli, repoPath, chatId);
+  const storageKey = nativeKey(cli, repoPath, chatId);
   const stored = all[storageKey] ?? Object.entries(all)
     .filter(([candidate]) => candidate.startsWith(`${storageKey}__acct__`))
     .sort(([, a], [, b]) => b.updatedAt - a.updatedAt)[0]?.[1];
@@ -107,11 +119,11 @@ export async function setSessionSelection(
   chatId = 'main',
 ): Promise<void> {
   const all = await load();
-  const storageKey = key(cli, repoPath, chatId);
+  const storageKey = nativeKey(cli, repoPath, chatId);
   const existing = all[storageKey];
   const model = typeof selection.model === 'string' && selection.model ? selection.model : undefined;
   const effort = typeof selection.effort === 'string' && selection.effort ? selection.effort : undefined;
-  all[storageKey] = { ...existing, model, effort, updatedAt: Date.now() };
+  all[storageKey] = { ...existing, cli, model, effort, updatedAt: Date.now() };
   writeQueue = writeQueue.then(flush, flush);
   await writeQueue;
 }
@@ -147,4 +159,9 @@ export async function clearThreadSessionIds(repoPath: string, chatId = 'main', c
 
 export async function ensureStateDir(): Promise<void> {
   await mkdir(STATE_DIR, { recursive: true });
+}
+
+/** Last accepted engine/provider, independent of the working directory. */
+export async function nativeSessionProvenance(cli: Cli, repoPath: string, chatId: string): Promise<StoredSession | undefined> {
+  return (await load())[nativeKey(cli, repoPath, chatId)];
 }

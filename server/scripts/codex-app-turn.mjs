@@ -43,6 +43,7 @@ let threadId = null;
 let completed = false;
 let targetExitCode = 1;
 let lastUsage = null;
+let compactNotified = false;
 const pending = new Map();
 const pendingSteers = [];
 const steerAttempts = new Map();
@@ -154,12 +155,24 @@ function handleNotification(message) {
     return;
   }
   if (method === 'item/completed') {
+    if (params.item?.type === 'contextCompaction') {
+      if (!compactNotified) writeEvent({ type: 'rivendell.native_compact', metadata: { trigger: 'native' } });
+      compactNotified = true;
+    }
     writeEvent({ type: 'item.completed', item: normalizeItem(params.item) });
+    return;
+  }
+  if (method === 'thread/compacted') {
+    if (!compactNotified) writeEvent({ type: 'rivendell.native_compact', metadata: { trigger: 'native' } });
+    compactNotified = true;
     return;
   }
   if (method === 'thread/tokenUsage/updated') {
     lastUsage = normalizeUsage(params.tokenUsage) ?? lastUsage;
     if (lastUsage) writeEvent({ type: 'rivendell.context_usage', usage: lastUsage });
+    // Both native compact notifications describe one boundary. A later model
+    // call can be followed by another boundary, including within this turn.
+    compactNotified = false;
     return;
   }
   if (method === 'error') {
@@ -169,7 +182,7 @@ function handleNotification(message) {
   }
   if (method === 'turn/completed') {
     const status = params.turn?.status;
-    writeEvent({ type: 'turn.completed', ...(lastUsage ? { usage: lastUsage } : {}) });
+    writeEvent({ type: 'turn.completed', status, ...(status !== 'completed' ? { error: params.turn?.error || { message: `Codex turn ${status || 'failed'}` } } : {}), ...(lastUsage ? { usage: lastUsage } : {}) });
     finish(status === 'completed' ? 0 : 1);
   }
 }

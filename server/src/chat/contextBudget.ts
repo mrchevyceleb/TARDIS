@@ -21,7 +21,8 @@ export function providerContextBudget(model: string, window: number): number {
 }
 /** The native compact only backstops the lane's own rotation budget. */
 export function providerNativeCompactWindow(_model: string, window: number): number {
-  return Math.min(window, CLAUDE_NATIVE_COMPACT_WINDOW);
+  const learned = learnedBudgets.get(_model);
+  return Math.min(window, CLAUDE_NATIVE_COMPACT_WINDOW, learned === undefined ? Infinity : learned + NATIVE_COMPACT_MARGIN);
 }
 /** A provider refused (or Claude Code compacted reactively at) `tokens`; rotate
  *  this model 15% below that for the rest of the process. Returns the budget. */
@@ -51,8 +52,7 @@ export function recordContextUsage(key: string, engine: 'claude' | 'codex' | 'pi
   if (!usage || typeof usage !== 'object') return;
   // Codex reports cache tokens differently; Claude and the Pi harness (GLM/Grok)
   // report Anthropic-shaped usage where cache reads still occupy the context window.
-  const input = count(usage.input_tokens) + (engine === 'codex'
-    ? 0 : count(usage.cache_read_input_tokens) + count(usage.cache_creation_input_tokens));
+  const input = count(usage.input_tokens) + count(usage.cache_read_input_tokens) + count(usage.cache_creation_input_tokens);
   if (!input) return;
   const tokens = input + count(usage.output_tokens);
   contexts.set(key, tokens);

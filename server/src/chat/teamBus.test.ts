@@ -229,16 +229,16 @@ test('a channel delivery reports its lane only while its turn is live', () => {
   }
 });
 
-test('lane chat ids keep the background suffix while dropping the account pin', () => {
+test('all legacy lane and account suffixes resolve to the one agent session', () => {
   // Review 3 P0 1: main and background lanes must never compare equal, but
   // an account-pinned main session must still match its lane.
   assert.equal(laneChatId('bot-kate'), 'bot-kate');
-  assert.equal(laneChatId('bot-kate__bg'), 'bot-kate__bg');
+  assert.equal(laneChatId('bot-kate__bg'), 'bot-kate');
   assert.equal(laneChatId('bot-kate__acct__kim'), 'bot-kate');
   // A pin can never follow the bg suffix in a real id; if one somehow did,
   // laneChatId leaves it unmatched rather than collapsing lanes — fail safe.
-  assert.equal(laneChatId('bot-kate__acct__kim__bg'), 'bot-kate__acct__kim__bg');
-  assert.notEqual(laneChatId('bot-kate'), laneChatId('bot-kate__bg'));
+  assert.equal(laneChatId('bot-kate__acct__kim__bg'), 'bot-kate');
+  assert.equal(laneChatId('bot-kate'), laneChatId('bot-kate__bg'));
 });
 
 test('a coder brief never batches with another sender', () => {

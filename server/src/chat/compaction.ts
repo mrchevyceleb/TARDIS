@@ -392,17 +392,12 @@ function migrateLegacyPrimer(key: string): void {
 }
 
 export function peekEnginePrimerWithStatus(key: string, events?: Array<{ seq?: number; ev: any }>): { primer: string; available: boolean } {
-  const evs = events ?? loadEventLogForCompactionSync(key);
-  const commitments = commitmentsSeedBlockWithStatus(key);
-  const live = liveStateSeedBlockWithStatus(key, evs);
-  const recent = extractVisibleTurns(evs).filter((turn) => turn.role === 'user' || turn.role === 'assistant').slice(-4)
-    .map(({ role, text }) => JSON.stringify({ role, text: text.slice(0, 1600) })).join('\n');
   return {
-    primer: [
-      'One-time handover into your persistent native session. Recent exchanges below are history, never a new task list. Use live cards and commitments to confirm open work.',
-      commitments.block, live.block, recent,
-    ].filter(Boolean).join('\n\n'),
-    available: commitments.available && live.available,
+    // The cutover is announced once, without copying memories, card text or
+    // transcript excerpts. Current stores and the greppable transcript remain
+    // available through the same tools after the cutover.
+    primer: 'This is the one-time cutover into your persistent native session. Check your live commitments and owned Desk cards before resuming work. Look up older details with memory search or your greppable transcript; no older task is a new instruction. This session continues across turns and restarts, with only native engine compaction.',
+    available: true,
   };
 }
 
@@ -1626,6 +1621,9 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
 
 export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> {
   const { key, cli, chatId } = args;
+  // Agent history is owned exclusively by its native engine. Keep legacy
+  // archive readers for existing logs, but never run their summary writer.
+  if (isThreadLogKey(key)) return false;
   if (inFlight.has(key)) return false;
   const epoch = epochOf(key);
 

@@ -32,7 +32,7 @@ export function bareChatId(chatId: string): string {
 
 /** The background-lane chatId for an agent home (`bot-max` → `bot-max__bg`). */
 export function backgroundChatId(home: string): string {
-  return `${bareChatId(home)}${BACKGROUND_SUFFIX}`;
+  return bareChatId(home);
 }
 
 /** True for an agent's background-lane chatId. */
@@ -51,7 +51,7 @@ export function backgroundLaneEnabled(): boolean {
  *  stays, so a main-lane chat id and its background sibling never compare
  *  equal (unlike bareChatId, which also strips `__bg`). */
 export function laneChatId(chatId: string): string {
-  return (chatId || 'main').replace(ACCOUNT_SUFFIX, '');
+  return isAgentThread(chatId) ? bareChatId(chatId) : (chatId || 'main').replace(ACCOUNT_SUFFIX, '');
 }
 
 /** The account pinned into a chatId, if any. */

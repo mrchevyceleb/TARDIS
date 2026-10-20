@@ -12,6 +12,7 @@ import { join } from 'node:path';
  *  no test ever touches the roster, the chat graph, or a real delivery. */
 const stateDir = mkdtempSync(join(tmpdir(), 'flagdigest-inflight-test-'));
 process.env.RIVENDELL_STATE_DIR = stateDir;
+writeFileSync(join(stateDir, 'agent-session-policy.json'), JSON.stringify({ agents: { naomi: { lead: true } } }));
 const et = (wall: string): number => Date.parse(`${wall}:00Z`) + 4 * 3_600_000;
 writeFileSync(join(stateDir, 'flag-digest.json'), JSON.stringify({
   queues: {
