@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
-import { abortInFlightChannelDeliveries, agentLogKey, batchJoinable, deliveryInterruptClass, deliveryLanePolicy, extendTeamChain, liveChannelTurnLanes, registerInFlightChannelDelivery, releaseInFlightChannelDelivery, teamAvailability, teamMessageWaitRequested, waitForDeliveryBoundary, type TeamChain } from './teamBus.ts';
+import { abortInFlightChannelDeliveries, agentLogKey, batchJoinable, deliveryInterruptClass, deliveryLanePolicy, extendTeamChain, frozenBatchMembers, liveChannelTurnLanes, registerInFlightChannelDelivery, releaseInFlightChannelDelivery, teamAvailability, teamMessageWaitRequested, waitForDeliveryBoundary, type TeamChain } from './teamBus.ts';
 import { laneChatId } from './threadKey.ts';
 import type { Agent } from './agents.ts';
 
@@ -256,6 +256,26 @@ test('a coder brief never batches with another sender', () => {
   assert.equal(batchJoinable(brief as never, otherSender as never), false);
   assert.equal(batchJoinable(otherSender as never, brief as never), false);
   assert.equal(batchJoinable(peerChatter as never, peerChatterToo as never), true);
+});
+
+test('a frozen batch drops members the join rules now refuse', () => {
+  // Review P1 (Oct 20): a stamp written by an earlier build predates the
+  // coder-brief same-sender rule. The frozen batch is re-checked so the
+  // refused member is un-stamped and takes its own admission, instead of
+  // riding the frozen batch verbatim.
+  const base = { fromName: 'Kip', text: 'hi', hop: 1 } as const;
+  const brief = { id: 'f1', createdAt: '2026-10-20T00:00:00Z', fromId: 'kip', toId: 'christina', batchLeadId: 'f1', ...base };
+  const sameSender = { id: 'f2', createdAt: '2026-10-20T00:00:01Z', fromId: 'kip', toId: 'christina', batchLeadId: 'f1', ...base };
+  const otherSender = { id: 'f3', createdAt: '2026-10-20T00:00:02Z', fromId: 'samwise', toId: 'christina', batchLeadId: 'f1', ...base };
+  const split = frozenBatchMembers(brief as never, [sameSender as never, otherSender as never]);
+  assert.deepEqual(split.ride.map((item) => item.id), ['f2']);
+  assert.deepEqual(split.drop.map((item) => item.id), ['f3']);
+  // A frozen batch that still satisfies the rules is reused whole.
+  const chatterLead = { id: 'c1', createdAt: '2026-10-20T00:00:03Z', fromId: 'naomi', toId: 'kate', batchLeadId: 'c1', ...base };
+  const chatterMember = { id: 'c2', createdAt: '2026-10-20T00:00:04Z', fromId: 'maria', toId: 'kate', batchLeadId: 'c1', ...base };
+  const intact = frozenBatchMembers(chatterLead as never, [chatterMember as never]);
+  assert.deepEqual(intact.ride.map((item) => item.id), ['c2']);
+  assert.deepEqual(intact.drop, []);
 });
 
 test('the person’s channel posts never batch with agent replies from the same channel', () => {

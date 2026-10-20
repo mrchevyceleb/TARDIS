@@ -208,9 +208,15 @@ export function terminalProviderError(cli: string, raw: unknown, syntheticReason
  *  fit and dies on every message (Oct 20: OpenRouter's "exceeds the model's
  *  context window" killed a lane for 1.5 hours). Cover every family's
  *  phrasing: Anthropic, OpenAI-compatible gateways, OpenRouter's upstream
- *  text, Gemini, Groq, Mistral, xAI, Codex CLI. */
+ *  text, Gemini, Groq, Mistral, xAI, Codex CLI. (review P2, Oct 20) Both
+ *  directions matter: "context limit exceeded" and "input tokens exceed the
+ *  configured limit" must match, while prose that merely mentions the window
+ *  ("full of useful details") and output-subject wording ("Requested output
+ *  exceeds the model context window") must not — so the window branches
+ *  demand a rejection verb (full only as a terminal state, never "full of"),
+ *  and the exceed-verb branches refuse an output subject. */
 export function isContextLengthRejection(detail: string): boolean {
-  return /prompt is too long|input (?:is )?too long|too (?:many|much) (?:input )?tokens|maximum context length|context_length_exceeded|reduce the length of (?:the )?(?:messages|conversation|input)|maximum (?:prompt|input) length|input token count[^.;\n]{0,40}exceed|(?:prompt|input|message)s? length[^.;\n]{0,40}(?:exceed|limit|maximum|max\b|too)|context[ _-]?(?:length|window|size)[^.;\n]{0,40}(?:exceed|limit|maximum|max\b|too (?:long|large)|full|overflow|ran out)|(?:exceed|exceeds|exceeding|beyond|over|longer than|too large for|out of room|ran out of room)[^.;\n]{0,40}context[ _-]?(?:length|window|size)/i.test(detail);
+  return /prompt is too long|input (?:is )?too long|too (?:many|much) (?:input )?tokens|maximum context length|context_length_exceeded|reduce the length of (?:the )?(?:messages|conversation|input)|maximum (?:prompt|input) length|input token(?: count)?s?[^.;\n]{0,40}exceed|context[ _-]?limit[^.;\n]{0,40}exceed|(?:prompt|input|message)s? length[^.;\n]{0,40}(?:exceed|limit|maximum|max\b|too)|context[ _-]?(?:length|window|size)[^.;\n]{0,40}(?:exceed|limit|maximum|max\b|too (?:long|large)|full(?!\s+of\b)|overflow|ran out)|(?<!\boutput\s)(?<!\boutputs\s)(?:exceed|exceeds|exceeding|beyond|over|longer than|too large for|out of room|ran out of room)[^.;\n]{0,40}context[ _-]?(?:length|window|size)/i.test(detail);
 }
 
 /** A turn that died because Claude Code could not compact its history. The

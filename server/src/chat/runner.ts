@@ -2667,6 +2667,16 @@ class ClaudeSession {
             [...this.streamTextBlocks.values()].map((block) => block.text).join('\n'),
           )
         : null);
+    // (review P1, Oct 20) terminalExecutionError classifies the streamed turn
+    // text too, so a context rejection that only reached the stream is caught
+    // there, not by the detail-only check above. Without folding its flag in,
+    // the reseed decision at turn end never fires and the oversized session
+    // stays resumable on every message.
+    if (!lengthRejected && terminal?.contextLength === true) {
+      lengthRejected = true;
+      const accepted = this.usageSeen ? contextTokens(this.contextKey) : 0;
+      if (accepted > 0 && this.providerWindow) learnContextLimit(this.spawnModel, accepted, this.providerWindow);
+    }
     if (terminal?.usageLimit) {
       noteProviderUsageLimit(this.providerAccount, agentForChatId(this.chatId)?.name ?? 'a lane', terminal);
     }

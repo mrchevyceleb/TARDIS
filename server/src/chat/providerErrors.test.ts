@@ -17,12 +17,19 @@ test('every provider family\'s context-length wording is caught, output caps are
     'context_length_exceeded',
     'Input too long',
     'too many input tokens',
+    // Review P2 (Oct 20): these two wordings slipped the list entirely.
+    'context limit exceeded',
+    'input tokens exceed the configured limit',
   ]) {
     assert.equal(isContextLengthRejection(detail), true, detail);
   }
   // An output-cap error is a different recovery and must not reseed.
   assert.equal(isContextLengthRejection('exceeded the 32000 output token maximum'), false);
   assert.equal(isContextLengthRejection('the model produced invalid JSON twice'), false);
+  // Review P2 (Oct 20): prose that merely mentions the window, and
+  // output-subject wording, must not match.
+  assert.equal(isContextLengthRejection('The context window is full of useful details'), false);
+  assert.equal(isContextLengthRejection('Requested output exceeds the model context window.'), false);
 });
 
 test('xAI capacity errors are not mislabeled as account rate limits', () => {

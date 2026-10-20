@@ -1481,6 +1481,22 @@ export function batchJoinable(lead: QueuedTeamDelivery, record: QueuedTeamDelive
   return true;
 }
 
+/** (review P1, Oct 20) Split a frozen batch's stamped members against the
+ *  current join rules. A stamp written by an earlier build predates later
+ *  guards (the coder-brief same-sender rule), so reusing it verbatim would
+ *  let a mixed-sender batch ride and defeat the guard. Members that no
+ *  longer join are returned for un-stamping so they stay queued and take
+ *  their own admission. Exported for tests. */
+export function frozenBatchMembers(
+  lead: QueuedTeamDelivery,
+  stamped: QueuedTeamDelivery[],
+): { ride: QueuedTeamDelivery[]; drop: QueuedTeamDelivery[] } {
+  const ride: QueuedTeamDelivery[] = [];
+  const drop: QueuedTeamDelivery[] = [];
+  for (const member of stamped) (batchJoinable(lead, member) ? ride : drop).push(member);
+  return { ride, drop };
+}
+
 /** Ack a joined batch: the lead record's durable receipt proves the whole
  *  joined prompt was accepted (one send, one peer echo), so persist a
  *  per-record receipt for every stamped member before deleting them; a
@@ -1639,12 +1655,31 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       let siblings: QueuedTeamDelivery[];
       if (lead.batchLeadId === lead.id) {
         // Frozen batch from a send attempt that already ran (the lead's
-        // self-stamp persists). Reuse the stamped members verbatim instead
-        // of rebuilding: if that attempt actually admitted, this pass is only
+        // self-stamp persists). Reuse the stamped members instead of
+        // rebuilding: if that attempt actually admitted, this pass is only
         // retrying the ack, and a rebuilt batch would fold in records that
         // queued later and were never seen. The lead is self-stamped, so it
         // also matches the filter and is excluded to keep it out twice.
-        siblings = [lead, ...candidates.filter((item) => item.id !== lead.id && item.batchLeadId === lead.id)];
+        //
+        // (review P1, Oct 20) A stamp written by an earlier build predates
+        // the coder-brief join rule, so a mixed-sender frozen batch would
+        // otherwise ride verbatim and defeat the guard. Every stamped member
+        // is re-checked against batchJoinable; one that no longer joins is
+        // un-stamped so it stays queued and takes its own admission.
+        // Un-stamping is safe in both retry cases: an admitted batch already
+        // delivered that member's text (this retry re-sends the rest anyway),
+        // and a batch that never went simply delivers it separately. Left
+        // stamped, the ack would delete a record that never rode the resend.
+        const { ride, drop } = frozenBatchMembers(lead, candidates.filter((item) => item.id !== lead.id && item.batchLeadId === lead.id));
+        if (drop.length > 0) {
+          const droppedIds = new Set(drop.map((item) => item.id));
+          await queueStoreOperation(() => queuedDeliveryStore.modify((items) => items.map((item) => {
+            if (!droppedIds.has(item.id)) return item;
+            const { batchLeadId: _stamp, ...rest } = item;
+            return rest;
+          })));
+        }
+        siblings = [lead, ...ride];
       } else {
         siblings = [lead];
         let batchChars = lead.text.length;
