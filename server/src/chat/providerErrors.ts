@@ -202,9 +202,15 @@ export function terminalProviderError(cli: string, raw: unknown, syntheticReason
 }
 
 /** The provider refused the prompt as too long for the model's context. Output
- *  cap errors ("exceeded the 32000 output token maximum") are not this. */
+ *  cap errors ("exceeded the 32000 output token maximum") are not this. Every
+ *  provider words it differently, and a miss does not just mislabel the turn:
+ *  the runner never reseeds, so the lane keeps resuming a session that cannot
+ *  fit and dies on every message (Oct 20: OpenRouter's "exceeds the model's
+ *  context window" killed a lane for 1.5 hours). Cover every family's
+ *  phrasing: Anthropic, OpenAI-compatible gateways, OpenRouter's upstream
+ *  text, Gemini, Groq, Mistral, xAI, Codex CLI. */
 export function isContextLengthRejection(detail: string): boolean {
-  return /prompt is too long|context[ _-]?(?:length|window)[ _-](?:exceeded|limit)|maximum context length|input (?:is )?too long|too many input tokens/i.test(detail);
+  return /prompt is too long|input (?:is )?too long|too (?:many|much) (?:input )?tokens|maximum context length|context_length_exceeded|reduce the length of (?:the )?(?:messages|conversation|input)|maximum (?:prompt|input) length|input token count[^.;\n]{0,40}exceed|(?:prompt|input|message)s? length[^.;\n]{0,40}(?:exceed|limit|maximum|max\b|too)|context[ _-]?(?:length|window|size)[^.;\n]{0,40}(?:exceed|limit|maximum|max\b|too (?:long|large)|full|overflow|ran out)|(?:exceed|exceeds|exceeding|beyond|over|longer than|too large for|out of room|ran out of room)[^.;\n]{0,40}context[ _-]?(?:length|window|size)/i.test(detail);
 }
 
 /** A turn that died because Claude Code could not compact its history. The

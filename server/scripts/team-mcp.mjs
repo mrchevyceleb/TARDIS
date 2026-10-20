@@ -118,6 +118,7 @@ const TOOLS = [
       properties: {
         agent: { type: 'string', description: "Teammate name or id to fresh, e.g. 'Christina'" },
         from: { type: 'string', description: 'Your own teammate name. Only needed if TARDIS has not already identified you.' },
+        context: { type: 'string', description: 'The "computer_start context for this turn" line at the top of your own prompt. Required on engines whose tool server carries no identity (Banana); the server verifies it, so it must be your own turn\'s, never one pasted from another lane.' },
       },
       required: ['agent'],
       additionalProperties: false,
@@ -911,11 +912,21 @@ async function callTool(name, args, signal) {
   if (name === 'team_fresh_chat') {
     // Identity is server-stamped into this MCP process (RIVENDELL_AGENT_ID);
     // a caller-supplied `from` is never an identity, so it is not forwarded.
+    // Engines whose tool server is shared across lanes (Banana's single serve
+    // process) carry no stamp, so there the lane's signed per-turn context is
+    // the identity — the same token computer_start takes, verified server-side
+    // (review P1 5).
     const callerId = process.env.RIVENDELL_AGENT_ID || '';
-    if (!callerId) throw new Error('Only a named teammate can fresh a chat.');
+    const turnContext = typeof args.context === 'string' ? args.context.trim() : '';
+    if (!callerId && !turnContext) {
+      throw new Error('Only a named teammate can fresh a chat. On this engine, pass context: the "computer_start context for this turn" line at the top of your own prompt.');
+    }
     const result = await api('/api/team/fresh', {
       method: 'POST',
-      headers: { 'x-rivendell-agent-id': callerId },
+      headers: {
+        ...(callerId ? { 'x-rivendell-agent-id': callerId } : {}),
+        ...(turnContext ? { 'x-rivendell-turn-context': turnContext } : {}),
+      },
       body: JSON.stringify({ agent: args.agent }),
     }, signal);
     if (result.error) throw new Error(result.error);

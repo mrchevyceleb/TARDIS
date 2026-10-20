@@ -15,7 +15,7 @@ import { JsonStore, type StoredRecord } from '../lib/jsonStore.ts';
 import { scanOutgoingPromise } from '../lib/promiseScan.ts';
 import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, recordQuietExemptWake } from '../lib/quietHours.ts';
 import { LIVE_HOLD_CEILING_MS } from '../lib/laneLiveness.ts';
-import { briefEnvelopeForHandoff } from './briefEnvelope.ts';
+import { briefEnvelopeForHandoff, isCoderBrief } from './briefEnvelope.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
 // both sides touch shared graph modules — keeping this lazy is cheap insurance).
@@ -1468,6 +1468,15 @@ export function batchJoinable(lead: QueuedTeamDelivery, record: QueuedTeamDelive
       && (lead.personPosted === true) === (record.personPosted === true)
       && (lead.queue === true) === (record.queue === true)
       && (lead.personSourced === true) === (record.personSourced === true);
+  }
+  // A coder brief (card-e9b846) is a delivery contract, not just text: its
+  // goal sentence must be the first thing the coder reads, and one named
+  // sender is waiting on the result. A mixed-sender batch decides the
+  // framing and the reply instruction from the lead, so a brief never rides
+  // with — or leads over — another sender's record; briefs from the same
+  // sender still batch (review P1, Oct 20).
+  if (isCoderBrief(lead.fromId, lead.toId) || isCoderBrief(record.fromId, record.toId)) {
+    return lead.fromId === record.fromId;
   }
   return true;
 }

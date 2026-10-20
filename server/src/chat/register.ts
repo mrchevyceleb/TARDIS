@@ -11,6 +11,7 @@ import { readCommands } from './commands.ts';
 import { clearThreadSessionIds, ensureStateDir } from './sessions.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { setLanePushAll } from './laneEvents.ts';
+import { setFreshLifecycle } from './freshLifecycle.ts';
 import { stopComputersForOwner } from '../devices/bridge.ts';
 import { computerOwnerKey } from '../devices/context.ts';
 import { ASSISTANT_HUB_PATH } from './config.ts';
@@ -912,17 +913,35 @@ export async function registerChat(app: express.Express, server: Server): Promis
     }
   };
   // A programmatic Fresh (POST /api/team/fresh) commits its reset epoch
-  // through the same store; broadcast it as freshStarted so connected
-  // clients drop the wiped transcript instead of keeping a stale view.
+  // through the same store; keep this closure's epoch map current here, but
+  // never broadcast freshStarted from the commit: the wipe has not run yet,
+  // and a client that dropped its transcript for a reset that then failed
+  // would pull the old thread straight back (review P1 3). The broadcast
+  // rides the completed hook below, after the log is actually gone.
   subscribeThreadResetEpochs((logKey, resetAt) => {
     threadResetAt.set(logKey, resetAt);
-    for (const [client, lane] of socketThreads) {
-      if (client.readyState !== client.OPEN) continue;
-      if (laneLogKey(lane.cli, lane.repo, lane.chatId) !== logKey) continue;
-      try {
-        client.send(JSON.stringify({ type: 'freshStarted', repo: lane.repo, chatId: lane.chatId, latestSeq: 0, resetAt, remote: true }));
-      } catch { /* a dead socket never blocks a reset */ }
-    }
+  });
+  // Programmatic Fresh runs outside this closure, so it drives the same
+  // socket-side lifecycle the UI path runs inline: lane generations bump and
+  // held steers die the moment the epoch commits (started), and freshStarted
+  // goes out only after the wipe succeeded (completed). freshChat.ts calls
+  // these; a hook failure never fails the reset.
+  setFreshLifecycle({
+    started: ({ logKey, repo, chatId, cli }) => {
+      for (const prior of sessionsForLogKey(logKey)) bumpLaneGen(prior.cli, repo, chatId);
+      bumpLaneGen(cli as CliKind, repo, chatId);
+      // Fresh wipes the thread: held steers die with it.
+      purgeHeldSteers(repo, chatId);
+    },
+    completed: ({ logKey, resetAt }) => {
+      for (const [client, lane] of socketThreads) {
+        if (client.readyState !== client.OPEN) continue;
+        if (laneLogKey(lane.cli, lane.repo, lane.chatId) !== logKey) continue;
+        try {
+          client.send(JSON.stringify({ type: 'freshStarted', repo: lane.repo, chatId: lane.chatId, latestSeq: 0, resetAt, remote: true }));
+        } catch { /* a dead socket never blocks a reset */ }
+      }
+    },
   });
   // Routes push live payloads through this one hook (card-a77246): the
   // checklist route broadcasts tool writes to every open lane socket without
@@ -2841,6 +2860,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
     shutdownAllCodexSessions();
     shutdownAllBananaSessions();
     setLanePushAll(null);
+    setFreshLifecycle(null);
     wss.close();
   };
 }

@@ -22,6 +22,8 @@ import type { CliKind } from './runner.ts';
 import { clearEventLog } from './event-log-store.ts';
 import { clearThreadMemory } from './compaction.ts';
 import { persistThreadResetEpoch, threadResetEpoch } from './threadResetStore.ts';
+import { freshLifecycleCompleted, freshLifecycleStarted } from './freshLifecycle.ts';
+import { readComputerContext } from '../devices/context.ts';
 import { clearThreadSessionIds } from './sessions.ts';
 import { backgroundChatId, bareChatId, isAgentThread, threadLogKey } from './threadKey.ts';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
@@ -36,6 +38,24 @@ export function freshCallerFromAgentId(agentId: string): FreshCaller | null {
   if (!normalized) return null;
   if (normalized === 'matt') return { id: 'matt', name: 'Matt' };
   return listAgents().find((a) => a.id.toLowerCase() === normalized) ?? null;
+}
+
+/** Resolve a caller from the lane's signed per-turn context. Engines whose
+ *  tool server is shared across lanes (Banana's single serve process) carry
+ *  no stamped RIVENDELL_AGENT_ID, so the same signed context computer_start
+ *  takes is the identity there (review P1 5). The store rejects a context
+ *  issued to another lane's turn (nonce check), so a pasted token cannot
+ *  impersonate a lane that is not running it. */
+export function freshCallerFromContextToken(token: string): FreshCaller | { error: string } {
+  try {
+    const ctx = readComputerContext(token);
+    const bare = bareChatId(ctx.chatId);
+    const agent = listAgents().find((a) => a.home === bare);
+    if (!agent) return { error: 'that context belongs to no teammate lane' };
+    return { id: agent.id, name: agent.name };
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
 }
 
 const FRESH_CALLER_IDS = new Set(['matt', 'kip', 'chief-of-staff', 'riley']);
@@ -112,9 +132,16 @@ export async function freshChatForAgent(agent: Agent, caller: FreshCaller): Prom
     }
 
     // Commit the reset generation before clearing anything (same order as
-    // the UI freshStart): clients then replay the coherent new log, and the
-    // committed epoch notifies the WS layer to broadcast freshStarted.
-    await persistThreadResetEpoch(logKey, Math.max(Date.now(), threadResetEpoch(logKey) + 1));
+    // the UI freshStart): a client reconnecting mid-reset replays the
+    // coherent log instead of trusting a stale cursor, and the WS layer
+    // updates its epoch from the commit. freshStarted goes out only after
+    // the wipe succeeds (review P1 3).
+    const resetAt = await persistThreadResetEpoch(logKey, Math.max(Date.now(), threadResetEpoch(logKey) + 1));
+    // The same live-socket cleanup the UI Fresh runs once the epoch commits
+    // (review P1 2): every lane generation for this thread bumps, so a stale
+    // waiter cannot write after the reset, and held steers die with the
+    // thread. The broadcast waits for success below.
+    freshLifecycleStarted({ logKey, repo: ELROND_WORKSPACE_PATH, chatId, cli });
     // Retire every live engine (idle ones too), main and background lanes,
     // and erase native resume ids, so switching back to an old engine cannot
     // resurrect the thread. interruptSession already covers the background
@@ -137,6 +164,9 @@ export async function freshChatForAgent(agent: Agent, caller: FreshCaller): Prom
     await clearThreadMemory(logKey, chatId);
     const cleared = await clearEventLog(logKey);
     if (!cleared) return { ok: false, reason: 'fresh failed: the durable chat log could not be cleared' };
+    // Only now, with the wipe durable, may connected clients drop their
+    // cached transcript and replay the empty log (review P1 3).
+    freshLifecycleCompleted({ logKey, repo: ELROND_WORKSPACE_PATH, chatId, cli, resetAt });
     return { ok: true, agent: agent.name, agentId: agent.id };
   } catch (err) {
     return { ok: false, reason: `fresh failed: ${(err as Error).message}` };

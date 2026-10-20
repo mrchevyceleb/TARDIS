@@ -475,12 +475,17 @@ export function liveStateSeedBlockWithStatus(key: string, events?: Array<{ seq?:
       lines.push('Desk cards you own In progress: unavailable right now (board read failed) — do not assume none are open.');
     }
     if (jobs.ok && cards.ok && !jobs.items.length && !cards.items.length && !task) lines.push('Nothing else is in flight.');
+    const jobsCapped = jobs.ok && jobs.total > jobs.items.length;
+    const cardsCapped = cards.ok && cards.total > cards.items.length;
+    const listsComplete = jobs.ok && cards.ok && !jobsCapped && !cardsCapped;
     lines.push(
       'Everything else you remember (the rolling memory and working window below) is history to verify, never a to-do list to resume. ' +
-      'If a job, card or promise is confirmed absent from the live stores above, treat it as already done, handed off, or stale — say so rather than redoing it. If a store is unavailable above, verify before assuming.',
+      'If a job, card or promise is confirmed absent from the live stores above, treat it as already done, handed off, or stale — say so rather than redoing it. If a store is unavailable or a list was capped above, verify before assuming.',
     );
     lines.push(
-      'When a message arrives, answer that message. Never open with "continuing the last task" or resume a job that is not listed as running above.',
+      listsComplete
+        ? 'When a message arrives, answer that message. Never open with "continuing the last task" or resume a job that is not listed as running above: the lists above are complete.'
+        : 'When a message arrives, answer that message. Never open with "continuing the last task". A job or card missing above is NOT proof it is finished: a store read failed or a cap hid the tail, so verify the live store before resuming or redoing anything.',
     );
     return { block: lines.join('\n'), available };
   } catch {

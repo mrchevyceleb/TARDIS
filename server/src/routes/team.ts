@@ -83,8 +83,11 @@ teamRouter.delete('/watch/:id', asyncHandler(async (req, res) => {
 // Matt, Kip, Max and Riley only; the lane keeps its persona, memory,
 // commitments and cards. Refuses while the lane has a live turn. Caller
 // identity comes only from the server-stamped MCP header
-// (x-rivendell-agent-id, set from RIVENDELL_AGENT_ID); a caller/caller-id
-// in the body is ignored, never an identity.
+// (x-rivendell-agent-id, set from RIVENDELL_AGENT_ID) or, on engines whose
+// MCP server is shared across lanes and carries no stamp (Banana), from the
+// lane's signed per-turn context (x-rivendell-turn-context, verified by the
+// same store computer_start uses). A caller/caller-id in the body is
+// ignored, never an identity.
 teamRouter.post('/fresh', asyncHandler(async (req, res) => {
   const { agent } = req.body ?? {};
   if (typeof agent !== 'string' || !agent.trim()) {
@@ -92,10 +95,17 @@ teamRouter.post('/fresh', asyncHandler(async (req, res) => {
     return;
   }
   const stamped = req.get('x-rivendell-agent-id')?.trim() ?? '';
-  const { freshCallerFromAgentId, freshChatByName } = await import('../chat/freshChat.ts');
-  const caller = stamped ? freshCallerFromAgentId(stamped) : null;
+  const turnContext = req.get('x-rivendell-turn-context')?.trim() ?? '';
+  const { freshCallerFromAgentId, freshCallerFromContextToken, freshChatByName } = await import('../chat/freshChat.ts');
+  let caller = stamped ? freshCallerFromAgentId(stamped) : null;
+  let contextError = '';
+  if (!caller && turnContext) {
+    const resolved = freshCallerFromContextToken(turnContext);
+    if ('error' in resolved) contextError = resolved.error;
+    else caller = resolved;
+  }
   if (!caller) {
-    res.status(403).json({ error: 'only Matt, Kip, Max and Riley can fresh a chat' });
+    res.status(403).json({ error: contextError || 'only Matt, Kip, Max and Riley can fresh a chat' });
     return;
   }
   const result = await freshChatByName(agent, caller);

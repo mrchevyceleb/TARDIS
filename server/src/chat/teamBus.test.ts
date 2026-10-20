@@ -241,6 +241,23 @@ test('lane chat ids keep the background suffix while dropping the account pin', 
   assert.notEqual(laneChatId('bot-kate'), laneChatId('bot-kate__bg'));
 });
 
+test('a coder brief never batches with another sender', () => {
+  // Review P1 (Oct 20): a lead-to-coder brief promises the coder a goal
+  // sentence first and one named sender waiting on the result, so it must
+  // never share a turn with another sender's record. Same-sender briefs and
+  // plain peer chatter still batch.
+  const base = { fromName: 'Kip', text: 'hi', hop: 1 } as const;
+  const brief = { id: 'b1', createdAt: '2026-10-20T00:00:00Z', fromId: 'kip', toId: 'christina', ...base };
+  const sameLead = { id: 'b2', createdAt: '2026-10-20T00:00:01Z', fromId: 'kip', toId: 'christina', ...base };
+  const otherSender = { id: 'b3', createdAt: '2026-10-20T00:00:02Z', fromId: 'samwise', toId: 'christina', ...base };
+  const peerChatter = { id: 'b4', createdAt: '2026-10-20T00:00:03Z', fromId: 'christina', toId: 'naomi', ...base };
+  const peerChatterToo = { id: 'b5', createdAt: '2026-10-20T00:00:04Z', fromId: 'maria', toId: 'naomi', ...base };
+  assert.equal(batchJoinable(brief as never, sameLead as never), true);
+  assert.equal(batchJoinable(brief as never, otherSender as never), false);
+  assert.equal(batchJoinable(otherSender as never, brief as never), false);
+  assert.equal(batchJoinable(peerChatter as never, peerChatterToo as never), true);
+});
+
 test('the person’s channel posts never batch with agent replies from the same channel', () => {
   // Review finding 5: a person post (human interrupt, steering lane policy)
   // and an agent reply from the same channel must not share a batch, or the

@@ -107,6 +107,23 @@ export function redactSecrets(text: string): string {
       /([?&#](?:x-amz-(?:signature|credential|security-token)|x-goog-(?:signature|credential)|awsaccesskeyid|signature|sig|token|access_token|auth|api_key|apikey|key|secret|password|code)=)[^&#\s]*/gi,
       `$1${REDACTED}`,
     )
+    // Studio recorder links and handoff claim links (card-281af4): the secret
+    // rides a named query parameter (?readyToken=, ?appId=, ?roomKey=) that
+    // the exact-name rule above does not cover, or a path segment
+    // (/handoff/claim/<value>, /warm-handoff-claims/<value>). The named
+    // parameters also match bare in prose ("appId=..." quoted out of its
+    // URL), never inside a longer word. The value runs to the URL's own hard
+    // delimiter — &, #, whitespace, quote, backtick, angle bracket — so
+    // nothing past the token is eaten, and the whole token is masked, never a
+    // prefix of it.
+    .replace(
+      /((?:[?&#]|(?<![\w-]))(?:readyToken|appId|roomKey|recorderToken)=)[^&#\s"'`<>]+/gi,
+      `$1${REDACTED}`,
+    )
+    .replace(
+      /(\/(?:handoff\/claim|warm-handoff-claims)\/)[^\s/?#"'`<>]+/gi,
+      `$1${REDACTED}`,
+    )
     .replace(/\b(Bearer|Basic)(\s+)[A-Za-z0-9._~+/=-]{8,}/gi, (_all, scheme: string, gap: string) => `${scheme}${gap}${REDACTED}`)
     .replace(
       /(\b(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)*\s*=\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/gi,
