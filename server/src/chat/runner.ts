@@ -1,3 +1,4 @@
+import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 import { assertClaudeSubscription } from './subscription-auth.ts';
 import { assertSubscriptionLane, subscriptionEnvironment } from './subscription-policy.ts';
 import { execFileSync, type ChildProcessByStdio } from 'node:child_process';
@@ -3663,12 +3664,13 @@ export type LiveSession = {
    *  (Claude, Codex, banana); absent when idle or unknown. Per-turn, so a
    *  chained sequence of short turns never looks like one long turn. */
   busySince?: number;
+  activity?: LiveActivity;
   /** Background tasks running inside the process (Claude lanes only). A
    *  restart ends them, so deploys check this alongside busy turns. */
   backgroundTasks?: string[];
 };
 
-export function activeClaudeSessions(): LiveSession[] {
+export function activeClaudeSessions(includeActivity = false): LiveSession[] {
   const out: LiveSession[] = [];
   for (const s of sessions.values()) {
     out.push({
@@ -3679,6 +3681,7 @@ export function activeClaudeSessions(): LiveSession[] {
       sessionId: s.sessionId(),
       lastActivityAt: s.lastActivityAt(),
       busySince: s.activeTurnStartedAt() ?? undefined,
+      activity: includeActivity ? sessionLiveActivity(s) : undefined,
       ...(s instanceof ClaudeSession && s.hasBackgroundWork() ? { backgroundTasks: s.backgroundWork() } : {}),
     });
   }

@@ -26,6 +26,10 @@ export type LiveSession = {
   busy: boolean;
   sessionId: string | null;
   lastActivityAt: number;
+  backgroundTasks?: string[];
+  busySince?: number;
+  agentId?: string;
+  activity?: { text: string; source: 'update' | 'task' | 'tool'; at: number; detail?: string };
 };
 
 export type Repo = {

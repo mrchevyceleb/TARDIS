@@ -179,10 +179,12 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [overlayPane, mobilePaneOpen]);
   useEffect(() => { localStorage.setItem('rivendell:rail-collapsed', String(railCollapsed)); }, [railCollapsed]);
-  // Esc also collapses the desktop rail (quick focus-the-chat shortcut).
+  const isDeskView = view.kind === 'room' && view.key === 'desk';
+  // The Desk keeps the company roster visible when Escape dismisses a detail.
+  // Other views retain the desktop rail's focus shortcut.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !editorOpen && !callAgent) {
+      if (e.key === 'Escape' && !isDeskView && !editorOpen && !callAgent) {
         // The drawer's own Escape handler owns mobile navigation. Letting this
         // desktop shortcut run too persists railCollapsed=true underneath it.
         if (isMobile || drawerOpen) return;
@@ -193,7 +195,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [editorOpen, callAgent, isMobile, drawerOpen]);
+  }, [editorOpen, callAgent, isMobile, drawerOpen, isDeskView]);
   useEffect(() => { if (!isMobile) setDrawerOpen(false); }, [isMobile]);
 
   // Easter eggs — presentation only. Konami regenerates every disc for a

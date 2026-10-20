@@ -575,8 +575,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
     }
   });
 
-  app.get('/api/live', (_req, res) => {
-    const sessions = [...activeClaudeSessions(), ...activeCodexSessions(), ...activeBananaSessions()];
+  app.get('/api/live', (req, res) => {
+    const includeActivity = req.query.activity === '1';
+    res.setHeader('Cache-Control', 'no-store');
+    const sessions = [...activeClaudeSessions(includeActivity), ...activeCodexSessions(includeActivity), ...activeBananaSessions(includeActivity)];
     res.json({
       sessions: sessions.map((session) => ({
         cli: session.cli,
@@ -586,6 +588,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
         chatId: session.chatId,
         sessionId: session.sessionId,
         lastActivityAt: session.lastActivityAt,
+        busySince: session.busySince,
+        agentId: agentForChatId(session.chatId)?.id,
+        activity: session.activity,
+        backgroundTasks: 'backgroundTasks' in session ? session.backgroundTasks : undefined,
       })),
     });
   });

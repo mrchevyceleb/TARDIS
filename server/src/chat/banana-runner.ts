@@ -1,3 +1,4 @@
+import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 import { assertSubscriptionLane } from './subscription-policy.ts';
 import { execFile, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
@@ -4089,13 +4090,15 @@ function anyBananaTurnBusyExcept(except?: BananaSession): boolean {
   return false;
 }
 
-export function activeBananaSessions(): {
+export function activeBananaSessions(includeActivity = false): {
   cli: CliKind;
   cwd: string;
   chatId: string;
   busy: boolean;
   sessionId: string | null;
   lastActivityAt: number;
+  busySince?: number;
+  activity?: LiveActivity;
 }[] {
   return Array.from(bananaSessions.values()).map((s) => ({
     cli: s.cli,
@@ -4105,6 +4108,7 @@ export function activeBananaSessions(): {
     sessionId: s.sessionId(),
     lastActivityAt: s.lastActivityAt(),
     busySince: s.activeTurnStartedAt() ?? undefined,
+    activity: includeActivity ? sessionLiveActivity(s) : undefined,
   }));
 }
 

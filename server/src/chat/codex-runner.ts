@@ -1,3 +1,4 @@
+import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 import { execFileSync, type ChildProcess, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
@@ -1604,13 +1605,15 @@ export function markBusyCodexLanesRestarting(signal: string): number {
   return marked;
 }
 
-export function activeCodexSessions(): {
+export function activeCodexSessions(includeActivity = false): {
   cli: CliKind;
   cwd: string;
   chatId: string;
   busy: boolean;
   sessionId: string | null;
   lastActivityAt: number;
+  busySince?: number;
+  activity?: LiveActivity;
 }[] {
   return Array.from(codexSessions.values()).map((s) => ({
     cli: s.cli,
@@ -1620,6 +1623,7 @@ export function activeCodexSessions(): {
     sessionId: s.sessionId(),
     lastActivityAt: s.lastActivityAt(),
     busySince: s.activeTurnStartedAt() ?? undefined,
+    activity: includeActivity ? sessionLiveActivity(s) : undefined,
   }));
 }
 

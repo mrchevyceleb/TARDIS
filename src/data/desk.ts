@@ -199,6 +199,8 @@ export function takeDeskDeepLink(): DeskRef | null {
   try { url = new URL(window.location.href); } catch { return null; }
   if (url.searchParams.get('desk') === null) return null;
   const ref = parseDeskDeepLink(url);
+  // Board links describe a view, rather than a one-shot item to focus.
+  if (url.searchParams.has('board')) return ref;
   url.searchParams.delete('desk');
   url.searchParams.delete('board');
   try { window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`); } catch { /* sandboxed */ }
