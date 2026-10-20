@@ -1926,7 +1926,14 @@ class ClaudeSession {
     setImmediate(() => {
       try {
         if (this.turnStartedAt === null || this.turnStartedAt !== turn || this.disposed) return;
-        if (this.boundaryHumanWaiters === 0) { this.hazardOverrideActive = false; return; }
+        if (this.boundaryHumanWaiters === 0) {
+          // A human released before this ran and only peer waiters remain:
+          // re-arm for the normal tool-boundary path (the same stand-down the
+          // immediate-human path uses) instead of interrupting for a peer.
+          this.hazardOverrideActive = false;
+          this.boundaryInterruptWanted = true;
+          return;
+        }
         if (this.activeToolIds.size > 0) { this.boundaryInterruptWanted = true; return; }
         this.lastBoundaryInterruptAt = Date.now();
         this.pausedForMessage = true;

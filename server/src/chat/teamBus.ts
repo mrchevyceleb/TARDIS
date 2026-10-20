@@ -1349,11 +1349,15 @@ const MAX_BATCH_TEXT_CHARS = 24_000;
  *  can share it (Desk answers answer on the card, voice continuations
  *  continue the call, automation stays automation, channel posts keep their
  *  channel reply rules, teammates reply inline). */
-function batchRoleClass(record: { fromRole?: string }): 'desk' | 'voice' | 'automation' | 'channel' | 'teammate' {
+function batchRoleClass(record: { fromRole?: string }): 'desk' | 'voice' | 'automation' | 'channel' | 'slack' | 'teammate' {
   if (record.fromRole === 'desk') return 'desk';
   if (record.fromRole === 'voice') return 'voice';
   if (record.fromRole === 'automation') return 'automation';
   if (record.fromRole === 'channel') return 'channel';
+  // Slack carries its own reply instruction and person-class admission: it
+  // must never ride a teammate-led batch, which would deliver it peer-class
+  // and lose the idle-lane and human-interrupt behavior (review 2026-10-20).
+  if (record.fromRole === 'slack') return 'slack';
   return 'teammate';
 }
 
