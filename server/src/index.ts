@@ -1,4 +1,5 @@
 import express from 'express';
+import { initializeResourceGuard, resourceGuardStatus } from './lib/resourceGuard.ts';
 import compression from 'compression';
 import { createServer } from 'node:http';
 import { contentRouter } from './routes/content.ts';
@@ -109,6 +110,7 @@ app.get('/api/health', (_req, res) => {
     /** In-flight turns right now. A restart kills them mid-flight — deploys
      *  MUST check this is 0 (or accept the tombstone) before bouncing. */
     busyTurns,
+    resourceGuard: resourceGuardStatus(),
     /** Background shells/subagents running inside Claude lanes. A restart ends
      *  them too (each lane gets a note naming what ended), so check this with
      *  busyTurns before bouncing. */
@@ -192,6 +194,7 @@ app.use('/internal/content/v1', contentGatewayRouter);
 // anyone, touch another system, or spend agent turns beyond its own probe
 // lane. Computed FIRST so nothing above it runs either.
 const SIDE_COPY = process.env.RIVENDELL_SIDE_COPY === '1';
+await initializeResourceGuard();
 if (SIDE_COPY) console.log('[side-copy] lanes and engines only: schedulers, delivery, crons, catalogs, Slack/Gmail sends and computer control are off');
 // Oct 19 2026 (card-16bc3e): lane workers that outlived the server that spawned
 // them keep running as parentless detached processes — 25 stuck trees (435

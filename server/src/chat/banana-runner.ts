@@ -1,4 +1,6 @@
 import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
+
+import { signalContainedWorker } from '../lib/resourceGuard.ts';
 import { assertSubscriptionLane } from './subscription-policy.ts';
 import { execFile, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
@@ -22,6 +24,7 @@ import { personaPromptFor } from './personaPrompts.ts';
 import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
+import { createOwnedWorkerConfig, releaseOwnedWorkerConfig, resourceGuardRequired } from '../lib/resourceGuard.ts';
 import {
   ASSISTANT_HUB_PATH,
   BANANA_COMMANDS_DIR,
@@ -618,7 +621,7 @@ function configuredServePort(): number | null {
 }
 
 function pickServePort(previous?: number): number {
-  if (CONFIGURED_SERVE_PORT) return CONFIGURED_SERVE_PORT;
+  if (CONFIGURED_SERVE_PORT && !resourceGuardRequired()) return CONFIGURED_SERVE_PORT;
   let next: number;
   do {
     next = 41000 + Math.floor(Math.random() * 4000);
@@ -627,6 +630,7 @@ function pickServePort(previous?: number): number {
 }
 
 function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (signalContainedWorker(child, signal)) return;
   // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
   if (!child.pid || child.pid <= 1) return;
   try { child.kill(signal); } catch {}
@@ -1374,12 +1378,16 @@ function canonicalConfigSignature(configContent: string | null): string {
  *  for BANANA_CONFIG_CONTENT (spawn E2BIG); BANANA_CONFIG points at this file. */
 const BANANA_SERVE_CONFIG_PATH = join(homedir(), '.rivendell', 'banana-serve-config.json');
 
-async function writeBananaServeConfig(configContent: string): Promise<string> {
-  await mkdir(dirname(BANANA_SERVE_CONFIG_PATH), { recursive: true });
-  const tmpPath = `${BANANA_SERVE_CONFIG_PATH}.${process.pid}.${Date.now()}.tmp`;
+async function writeBananaServeConfig(configContent: string): Promise<{ path: string; id?: string }> {
+  // Isolated lanes may start different provider configs concurrently. Each
+  // generation owns a file; one lane must never overwrite another's config.
+  if (resourceGuardRequired()) return createOwnedWorkerConfig(configContent);
+  const path = BANANA_SERVE_CONFIG_PATH;
+  await mkdir(dirname(path), { recursive: true });
+  const tmpPath = `${path}.${process.pid}.${Date.now()}.tmp`;
   await writeFile(tmpPath, configContent, { encoding: 'utf8', mode: 0o600 });
-  await rename(tmpPath, BANANA_SERVE_CONFIG_PATH);
-  return BANANA_SERVE_CONFIG_PATH;
+  await rename(tmpPath, path);
+  return { path };
 }
 
 function canonicalJson(value: unknown): string {
@@ -1610,6 +1618,7 @@ export async function localFullCatalog(): Promise<{
  *  background paths prefer reloadBananaServeWhenIdle() so an in-flight turn isn't
  *  stranded. */
 export function reloadBananaServe(): void {
+  for (const server of isolatedBananaServers) server.shutdown();
   bananaServer.shutdown();
 }
 
@@ -1621,7 +1630,7 @@ async function reloadBananaServeWhenIdle(): Promise<void> {
   // — the next serve respawn (idle prune / next session) re-registers the model.
   for (let i = 0; i < 120; i++) {
     if (!activeBananaSessions().some((s) => s.busy)) {
-      bananaServer.shutdown();
+      reloadBananaServe();
       return;
     }
     await new Promise((r) => setTimeout(r, 5000));
@@ -1956,6 +1965,7 @@ function reconcileTextSnapshot(snapshot: string, observed: string): string {
 // the stream is fanned out to the owning session by sessionID.
 
 class BananaServer {
+  constructor(private readonly owner = 'shared Banana engine', private readonly isolated = false) {}
   private child: ChildProcess | null = null;
   private password = '';
   private servePort = pickServePort();
@@ -2002,7 +2012,7 @@ class BananaServer {
         // chat's live turn — keep the running serve and let the new config take
         // effect on the next idle (re)start. The per-turn model rides on the
         // prompt, so the caller's turn still runs correctly on the old serve.
-        if (anyBananaTurnBusyExcept(caller)) {
+        if (!this.isolated && anyBananaTurnBusyExcept(caller)) {
           console.warn('[banana serve] config changed but a sibling chat turn is live; deferring serve restart to avoid killing its work');
           return this.readyPromise;
         }
@@ -2105,7 +2115,7 @@ class BananaServer {
     // must avoid. The caller already failed its own turn; skip the restart. If
     // the serve really is dead, the sibling's stall watchdog ends its turn and
     // the next ensure() validates the session and restarts cleanly.
-    if (anyBananaTurnBusyExcept()) {
+    if (!this.isolated && anyBananaTurnBusyExcept()) {
       console.warn(`[banana serve] prompt transport failure but a sibling chat turn is live; NOT restarting serve to preserve its work: ${reason}`);
       return;
     }
@@ -2156,19 +2166,33 @@ class BananaServer {
     // (and so a stale env blob cannot reintroduce the E2BIG path).
     delete serveEnv.BANANA_CONFIG_CONTENT;
     delete serveEnv.OPENCODE_CONFIG_CONTENT;
+    let ownedConfigId: string | undefined;
     if (configContent) {
-      const configPath = await writeBananaServeConfig(configContent);
-      serveEnv.BANANA_CONFIG = configPath;
+      const config = await writeBananaServeConfig(configContent);
+      ownedConfigId = config.id;
+      serveEnv.BANANA_CONFIG = config.path;
       // Prefer our generated file over any parent OPENCODE_CONFIG path.
       delete serveEnv.OPENCODE_CONFIG;
     }
-    const child = spawnLaneWorker(bin, args, {
+    let child: ChildProcess;
+    try {
+      child = spawnLaneWorker(bin, args, {
       cwd: process.cwd(),
       // Never run unsecured: inject a random Basic-auth password.
       env: serveEnv,
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-    });
+      }, this.owner);
+    } catch (err) {
+      if (ownedConfigId) await releaseOwnedWorkerConfig(ownedConfigId).catch(() => {});
+      throw err;
+    }
+    if (ownedConfigId) {
+      const id = ownedConfigId;
+      const cleanup = () => { void releaseOwnedWorkerConfig(id).catch(() => {}); };
+      child.once('exit', cleanup);
+      child.once('error', cleanup);
+    }
     this.child = child;
     console.log(`[banana serve] spawning ${bin} on 127.0.0.1:${port} pid=${child.pid ?? '-'}`);
 
@@ -2387,10 +2411,12 @@ function extractSessionId(event: Event): string | null {
 
 /** The single shared server instance for this app process. */
 const bananaServer = new BananaServer();
+const isolatedBananaServers = new Set<BananaServer>();
 
 // ── BananaSession ────────────────────────────────────────────────────────
 
 export class BananaSession {
+  private readonly server: BananaServer;
   readonly key: string;
   /** Durable-history key — engine-free for agent home threads (threadKey.ts). */
   readonly logKey: string;
@@ -2499,6 +2525,8 @@ export class BananaSession {
   readonly ready: Promise<boolean> = Promise.resolve(true);
 
   constructor(cwd: string, chatId: string, threadId: string | null, opts: BananaSessionOptions = {}) {
+    this.server = resourceGuardRequired() ? new BananaServer(agentForChatId(chatId)?.name ?? chatId, true) : bananaServer;
+    if (this.server !== bananaServer) isolatedBananaServers.add(this.server);
     this.cwd = cwd;
     this.chatId = chatId;
     this.cli = opts.cli ?? 'banana';
@@ -2554,7 +2582,7 @@ export class BananaSession {
 
     // If we already know our banana sessionID, register the route up front so
     // a turn started elsewhere (or events that arrive before send) still land.
-    if (this.threadId) bananaServer.registerRoute(this.threadId, this);
+    if (this.threadId) this.server.registerRoute(this.threadId, this);
   }
 
   subscribe(fn: Listener, sinceSeq = -1, countSubscriber = true): () => void {
@@ -2635,7 +2663,8 @@ export class BananaSession {
     // server to abort it too. Without this the prompt keeps running server
     // side and its late events could leak into a future turn of this session.
     if (this.busy && this.threadId) this.abortServerTurn();
-    if (this.threadId) bananaServer.unregisterRoute(this.threadId);
+    if (this.threadId) this.server.unregisterRoute(this.threadId);
+    if (this.server !== bananaServer) { this.server.shutdown(); isolatedBananaServers.delete(this.server); }
   }
 
   /** Fire-and-forget abort of the in-flight server-side prompt for this
@@ -2645,7 +2674,7 @@ export class BananaSession {
     if (!sessionID) return;
     void (async () => {
       try {
-        const client = bananaServer.clientFor(this.cwd);
+        const client = this.server.clientFor(this.cwd);
         await client.session.abort({ sessionID });
       } catch (err) {
         console.warn(`[chat banana] session.abort failed: ${(err as Error).message}`);
@@ -2657,7 +2686,7 @@ export class BananaSession {
     const old = this.threadId;
     if (!old) return;
     console.warn(`[chat banana] clearing stale session ${old}: ${reason}`);
-    bananaServer.unregisterRoute(old);
+    this.server.unregisterRoute(old);
     this.threadId = null;
     this.threadServeGeneration = null;
     this.wipedThisTurn = true;
@@ -2668,7 +2697,7 @@ export class BananaSession {
     const old = this.threadId;
     if (!old) return;
     console.warn(`[chat banana] quarantining session ${old}: ${reason}`);
-    bananaServer.unregisterRoute(old);
+    this.server.unregisterRoute(old);
     this.threadId = null;
     this.threadServeGeneration = null;
     this.recoverContextOnNextTurn = true;
@@ -2887,7 +2916,7 @@ export class BananaSession {
 
     // 1. Make sure the shared serve process is up.
     try {
-      await bananaServer.ensure(this.cwd, this);
+      await this.server.ensure(this.cwd, this);
     } catch (err) {
       this.failTurn(`banana serve unavailable: ${(err as Error).message}`);
       return;
@@ -2899,8 +2928,8 @@ export class BananaSession {
       return;
     }
 
-    const client = bananaServer.clientFor(this.cwd);
-    const serveGeneration = bananaServer.currentGeneration();
+    const client = this.server.clientFor(this.cwd);
+    const serveGeneration = this.server.currentGeneration();
 
     // 2. Reuse the saved sessionID only while this exact `banana serve`
     //    generation owns it. `session.get()` can report old ids after a restart
@@ -2947,7 +2976,7 @@ export class BananaSession {
     }
 
     // 4. Register the route so the shared event loop fans events to us.
-    bananaServer.registerRoute(this.threadId, this);
+    this.server.registerRoute(this.threadId, this);
 
     // 5. Open per-turn streaming state and arm the stall watchdog. The image
     //    cleanup moves onto the turn object now, so only this turn's own end
@@ -3093,7 +3122,7 @@ export class BananaSession {
             ? `banana ${promptKind} failed: local Banana server connection failed, restarting for the next turn (${message})`
             : `banana ${promptKind} failed: ${message}`);
           if (isPromptTransportFailure(message)) {
-            bananaServer.notePromptTransportFailure(message);
+            this.server.notePromptTransportFailure(message);
           }
         }
       }
@@ -3122,7 +3151,7 @@ export class BananaSession {
           ? `banana ${promptKind} failed: local Banana server connection failed, restarting for the next turn (${message})`
           : `banana ${promptKind} failed: ${message}`);
         if (isPromptTransportFailure(message)) {
-          bananaServer.notePromptTransportFailure(message);
+          this.server.notePromptTransportFailure(message);
         }
       }
     }
@@ -3689,7 +3718,7 @@ export class BananaSession {
     const rejectMessage = gmailMessage;
     if (rejectMessage) console.warn(`[chat banana] ${rejectMessage}`);
     try {
-      const client = bananaServer.clientFor(this.cwd);
+      const client = this.server.clientFor(this.cwd);
       await client.permission.reply({
         requestID: request.id,
         reply: planMode || rejectMessage ? 'reject' : 'once',

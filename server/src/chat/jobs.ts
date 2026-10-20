@@ -29,6 +29,7 @@ import { wellFormedText } from '../lib/wellFormed.ts';
 import { listAgents } from './agents.ts';
 import { canLaunchInScope, pidMatches, pidStart, visibleWakeText } from './jobWatches.ts';
 import { sendToAgentHome } from './teamBus.ts';
+import { assertResourcesForSpawn, resourceGuardRequired, spawnContained, watchContainedScope, unwatchContainedScope, expectContainedScopeExit, releaseContainedScope, scopeOutcome, scopeStorageFailure, recordResourceIncident, MEMORY_FAILURE_NOTICE } from '../lib/resourceGuard.ts';
 
 export type JobState = 'running' | 'finished' | 'failed' | 'stopped' | 'timed-out' | 'lost';
 export type JobStopper = 'agent' | 'user' | 'timeout';
@@ -62,6 +63,9 @@ export type Job = {
   wakeText?: string;
   /** Lane that started the job; the result returns there. Absent → background. */
   lane?: 'main' | 'bg';
+  /** This job owns an ephemeral scratch mount and a bounded process tree. */
+  contained?: boolean;
+  resourceCause?: 'out-of-memory' | 'storage';
 };
 
 const store = new JsonStore<Job>('jobs.json', []);
@@ -191,6 +195,8 @@ function outcomeText(job: Job): string {
   switch (job.state) {
     case 'finished': return `finished: exit 0 in ${took}`;
     case 'failed': {
+      if (job.resourceCause === 'out-of-memory') return `was stopped by an out-of-memory event after ${took}. It did NOT finish. Work saved in the workspace remains available.`;
+      if (job.resourceCause === 'storage') return `was stopped by storage protection after ${took} because it exceeded its disk-write budget or kept writing while storage was low. It did NOT finish. Work saved in the workspace remains available.`;
       const code = job.exitCode ?? -1;
       // Above 128 a shell often means "killed by a signal", but exit 200 is also valid: say only what is known.
       return `failed: exit ${code} in ${took}${code > 128 ? ` (exit codes above 128 often mean the process was killed by a signal)` : ''}`;
@@ -214,6 +220,7 @@ function resultText(job: Job): string {
     `[job: ${job.name}] Job "${job.name}" ${outcomeText(job)}`,
     tail ? `Last output:\n${tail}` : 'No output was captured.',
     `Full log: ${logPath(job.id)}`,
+    ...(job.contained ? ['This job ran with limits of 8 GiB RAM, 256 MiB swap, 512 tasks and 2 CPUs. Private scratch and leftover child processes are released when its worker exits. A nonzero exit alone does not prove an OOM kill.'] : []),
     'Background job result from job_start. This is not a message from a person.',
   ].join('\n'));
 }
@@ -230,7 +237,8 @@ export type CreateJobInput = {
 /** Start a job. Throws Error with a plain reason on bad input (the route maps
  *  it to 4xx). */
 export async function createJob(input: CreateJobInput): Promise<Job> {
-  if (!listAgents().some((a) => a.id === input.agentId)) throw new Error('unknown agentId');
+  const agent = listAgents().find((a) => a.id === input.agentId);
+  if (!agent) throw new Error('unknown agentId');
   if (typeof input.command !== 'string' || !input.command.trim()) throw new Error('command is required (a shell command)');
   const command = input.command.trim();
   if (command.length > 16_000) throw new Error('command is too long; put it in a script file and run that');
@@ -252,8 +260,10 @@ export async function createJob(input: CreateJobInput): Promise<Job> {
 
   const id = randomUUID();
   const short = id.slice(0, 8);
-  const scoped = await canLaunchInScope();
-  const unit = scoped ? `tardis-job-${short}` : undefined;
+  assertResourcesForSpawn(`${agent.name} / ${name}`, cwd);
+  const contained = resourceGuardRequired();
+  const scoped = contained || await canLaunchInScope();
+  const unit = scoped ? `tardis-job-${contained ? id : short}` : undefined;
   mkdirSync(JOBS_DIR, { recursive: true, mode: 0o700 });
   writeFileSync(cmdPath(id), `#!/bin/bash\n${command}\n`, { mode: 0o700 });
   writeFileSync(logPath(id), '', { mode: 0o600 });
@@ -284,7 +294,7 @@ export async function createJob(input: CreateJobInput): Promise<Job> {
       return store.create({
         id, agentId: input.agentId, name, command, cwd, state: 'running' as const,
         startedAt: now, timeoutMin, deadline: now + timeoutMin * 60_000,
-        unit, bootId: BOOT_ID || undefined,
+        unit, bootId: BOOT_ID || undefined, contained,
         lane: input.lane === 'main' ? 'main' as const : 'bg' as const,
       });
     });
@@ -293,9 +303,21 @@ export async function createJob(input: CreateJobInput): Promise<Job> {
     throw err;
   }
 
-  const child = scoped
+  let child: ReturnType<typeof spawn>;
+  try {
+    // Check again after the serialized reservation: another launch may have
+    // consumed headroom while we waited. Failed admission rolls back the job.
+    assertResourcesForSpawn(`${agent.name} / ${name}`, cwd);
+    child = contained
+    ? spawnContained('/bin/bash', [runPath(id)], { cwd, detached: true, stdio: 'ignore' }, `${agent.name} / ${name}`, unit!, timeoutMin * 60 + 120, true)
+    : scoped
     ? spawn('systemd-run', ['--user', '--scope', '--quiet', '--collect', '--expand-environment=no', '--unit', unit!, '/bin/bash', runPath(id)], { detached: true, stdio: 'ignore' })
     : spawn('/bin/bash', [runPath(id)], { detached: true, stdio: 'ignore' });
+  } catch (err) {
+    await serialize(() => store.delete(id));
+    cleanupFiles(id);
+    throw err;
+  }
   child.unref();
   // Launch handshake: a spawn error, or a process that dies at once without an
   // exit record (systemd-run refusing the scope), never started. Do not claim
@@ -457,6 +479,7 @@ async function releaseUnit(unit: string): Promise<void> {
   // Already inactive (empty value), or task accounting is off so emptiness can
   // never be established ("[not set]"). Either way there is nothing to retry.
   if (tasks === '' || tasks === '[not set]') {
+    await releaseContainedScope(unit);
     pendingRelease.delete(unit);
     return;
   }
@@ -464,6 +487,7 @@ async function releaseUnit(unit: string): Promise<void> {
   // finishes the job. A transiently wedged user manager would otherwise drop
   // the retry and permanently leak the very scope this exists to clean up.
   if (tasks === '0' && await runQuiet('systemctl', ['--user', 'stop', `${unit}.scope`]) === 0) {
+    await releaseContainedScope(unit);
     pendingRelease.delete(unit);
     return;
   }
@@ -489,6 +513,7 @@ async function pollDead(isAlive: () => Promise<boolean> | boolean, ms: number): 
 async function terminateJob(job: Job): Promise<boolean> {
   if (job.bootId && job.bootId !== BOOT_ID) return true;
   if (job.unit) {
+    expectContainedScopeExit(job.unit);
     const kill = (sig: 'SIGTERM' | 'SIGKILL') => runQuiet('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${sig}`, `${job.unit}.scope`]);
     await kill('SIGTERM');
     let dead = await pollDead(() => jobAlive(job), STOP_GRACE_MS);
@@ -598,6 +623,7 @@ async function runTick(): Promise<void> {
   }
   const now = Date.now();
   for (const job of jobs) {
+    if (job.contained && job.unit && job.state !== 'running') unwatchContainedScope(job.unit);
     if (delivering.has(job.id)) continue;
     if (job.state === 'running') {
       if (stopping.has(job.id)) continue;
@@ -605,6 +631,16 @@ async function runTick(): Promise<void> {
       // Wrapper gone but the scope still has processes: not lost, still running
       // (the deadline or a Stop will end it).
       if (patch?.state === 'lost' && job.unit && await jobAlive(job)) patch = null;
+      if (patch?.state === 'lost' && job.contained && job.unit) {
+        const storageFailure = await scopeStorageFailure(job.unit);
+        const cause = await scopeOutcome(job.unit);
+        if (storageFailure) patch = { ...patch, state: 'failed', resourceCause: 'storage' };
+        else if (cause === 'oom-kill') {
+          patch = { ...patch, state: 'failed', resourceCause: 'out-of-memory' };
+          const owner = listAgents().find((agent) => agent.id === job.agentId)?.name ?? job.agentId;
+          recordResourceIncident(`${owner} / ${job.name}`, MEMORY_FAILURE_NOTICE);
+        } else if (cause === 'timeout') patch = { ...patch, state: 'timed-out', stoppedBy: 'timeout' };
+      }
       if (patch) {
         const ended = { ...job, ...patch } as Job;
         await serialize(async () => {
@@ -619,6 +655,8 @@ async function runTick(): Promise<void> {
         } catch (err) {
           console.warn(`[jobs] "${job.name}": timeout stop failed:`, (err as Error).message);
         }
+      } else if (job.contained && job.unit && (!job.bootId || job.bootId === BOOT_ID)) {
+        watchContainedScope(job.unit, `${listAgents().find((agent) => agent.id === job.agentId)?.name ?? job.agentId} / ${job.name}`, job.cwd);
       }
       continue;
     }

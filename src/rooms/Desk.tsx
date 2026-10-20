@@ -5,6 +5,8 @@
 import { Check, ChevronDown, ChevronRight, ClipboardList, ExternalLink, Inbox, LayoutGrid, MessageSquare, Pencil, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, MouseEvent } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { getResourceGuardHealth } from '../data/api';
 import { DesktopAlertsButton } from '../components/NeedsYouBadge';
 import { Button, Chip } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
@@ -156,6 +158,7 @@ export function Desk() {
   return (
     <div className="desk-room">
       <RoomHeader eyebrow={ROOM_NAMES.desk.eyebrow} title="Desk" subtitle={subtitle} actions={<DesktopAlertsButton />} />
+      <MachineSafety />
       <div className="desk-tabs" role="tablist" aria-label="Desk view">
         <button type="button" role="tab" aria-selected={tab === 'home'} onClick={() => setTab('home')}>
           <Inbox size={15} aria-hidden="true" /> Home
@@ -217,6 +220,23 @@ export function Desk() {
         />
       ) : null}
     </div>
+  );
+}
+
+function MachineSafety() {
+  const health = useQuery({ queryKey: ['resource-guard'], queryFn: getResourceGuardHealth, retry: false });
+  const guard = health.data;
+  if (guard?.mode === 'off' || (!guard && !health.isError)) return null;
+  if (!guard) return <div className="desk-safety is-held" role="status">Safety status unavailable. Reconnecting…</div>;
+  const held = !guard.ready || !!guard.pressure || health.isError;
+  return (
+    <details className={`desk-safety${held ? ' is-held' : ''}`}>
+      <summary><span className="desk-safety-dot" aria-hidden="true" /><strong role="status">{health.isError ? 'Safety status unavailable' : !guard.ready ? 'Safety guard needs attention — work is held' : held ? 'Giving the machine room to breathe' : 'Keeping the machine comfortable'}</strong><span>{guard.incidents.length ? `${guard.incidents.length} recent notices` : 'Safety guard on'}</span></summary>
+      <div className="desk-safety-body">
+        <p>{health.isError ? 'The last safety check could not be refreshed. Reconnecting…' : !guard.ready ? guard.message : guard.pressure ?? guard.message}</p>
+        {guard.incidents.slice(0, 5).map((item) => <p key={item.id}><strong>{item.owner}</strong> · <time dateTime={new Date(item.at).toISOString()}>{agoText(new Date(item.at).toISOString())}</time><br />{item.message}</p>)}
+      </div>
+    </details>
   );
 }
 

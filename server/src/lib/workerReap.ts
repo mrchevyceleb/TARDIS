@@ -1,8 +1,9 @@
-import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { spawnContained } from './resourceGuard.ts';
 
 /**
  * TARDIS spawns every lane worker (claude, codex, agy, pi, banana, the
@@ -486,6 +487,7 @@ export function spawnLaneWorker(
   command: string,
   args: readonly string[],
   options: SpawnOptions,
+  owner = command,
 ): ChildProcess {
   const env = options.env
     ? { ...options.env, ...laneWorkerEnv() }
@@ -495,8 +497,8 @@ export function spawnLaneWorker(
   // /bin/sh (not bash): the wrapper is POSIX sh and /bin/sh is guaranteed
   // where /proc is.
   const child = IS_LINUX && !options.shell && commandResolves(command, options, env)
-    ? spawn('/bin/sh', ['-c', LANE_WORKER_WRAPPER, 'lane-worker', command, ...args], { ...options, env })
-    : spawn(command, args, { ...options, env });
+    ? spawnContained('/bin/sh', ['-c', LANE_WORKER_WRAPPER, 'lane-worker', command, ...args], { ...options, env }, owner)
+    : spawnContained(command, args, { ...options, env }, owner);
   markLaneWorkerKillable(child.pid);
   return child;
 }

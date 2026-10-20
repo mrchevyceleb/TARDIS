@@ -90,6 +90,16 @@ export function robotCommand<T = Record<string, unknown>>(robot: string, command
   return apiJson<T & { robot: string; robotName: string }>(`/api/robots/${command}`, { method: 'POST', body: JSON.stringify({ robot, ...params }), signal });
 }
 
+export type ResourceGuardHealth = {
+  mode: 'required' | 'off'; ready: boolean; message: string; pressure: string | null;
+  limits: { memoryHigh: number; memoryMax: number; swapMax: number; tasks: number; cpuPercent: number; scratch: number };
+  incidents: { id: string; at: number; owner: string; message: string; kind?: 'hold' }[];
+};
+
+export async function getResourceGuardHealth(): Promise<ResourceGuardHealth | null> {
+  return (await apiJson<{ resourceGuard?: ResourceGuardHealth }>('/api/health')).resourceGuard ?? null;
+}
+
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
