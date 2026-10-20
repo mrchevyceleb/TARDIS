@@ -499,6 +499,7 @@ async function personLanePreference(agent: Agent): Promise<AgentLane> {
 function personSourced(record: { fromRole?: string; personPosted?: boolean; personSourced?: boolean }): boolean {
   return record.fromRole === 'desk'
     || record.fromRole === 'voice'
+    || record.fromRole === 'slack'
     || (record.fromRole === 'channel' && record.personPosted === true)
     || record.personSourced === true;
 }
@@ -531,6 +532,10 @@ export function deliveryInterruptClass(fromRole: string | undefined, personPoste
   // a peer message that cannot steer.
   if (queue === true) return false;
   if (fromRole === 'desk' || fromRole === 'voice') return 'human';
+  // Slack: a real person is waiting, so the delivery interrupts like the
+  // person's own message — instant when no tool is in flight, and bounded by
+  // the runner's hazard override so a background helper cannot hold it.
+  if (fromRole === 'slack') return 'human';
   if (fromRole === 'channel' && personPosted === true) return 'human';
   return 'peer';
 }
@@ -540,7 +545,7 @@ export function deliveryInterruptClass(fromRole: string | undefined, personPoste
  *  is the only one running), everything else runs in the background lane.
  *  Exported for tests. */
 export function deliveryLanePolicy(fromRole: string | undefined, personPosted?: boolean): 'person' | 'bg' {
-  return fromRole === 'desk' || fromRole === 'voice' || (fromRole === 'channel' && personPosted === true)
+  return fromRole === 'desk' || fromRole === 'voice' || fromRole === 'slack' || (fromRole === 'channel' && personPosted === true)
     ? 'person'
     : 'bg';
 }
@@ -992,6 +997,8 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
     ? '(This is the user continuing your own voice conversation. Reply in this thread. Do not team_message Voice. Ending the audio call does not cancel this work. External side effects remain draft/review-first. The call already has a spoken line. Do not write a second, different Hall answer unless the caller needs a result, blocker, or question they cannot hear.)'
     : from.role === 'desk'
     ? `(${from.name} is the human owner, not a teammate, and reads the answer on the Desk card. Reply there with board_card_comment. Do not team_message ${from.name}.)`
+    : from.role === 'slack'
+    ? '(This is a Slack message from a real person. Reply in that Slack thread with the say command the message names. Do not team_message the Slack relay.)'
     : from.role === 'channel'
     ? '(This ping is a group-channel post. Reply in that channel with the channel_post tool exactly as the ping\'s rules describe, passing the hop number through unchanged. Do not team_message the channel and never move this into a one-on-one thread.)'
     : waitForReply
@@ -1002,6 +1009,7 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
   const prompt = [
     from.role === 'voice' ? '[continuation of the user’s voice request in your own thread]'
       : from.role === 'desk' ? `[comment from ${from.name} on the Desk]`
+      : from.role === 'slack' ? '[Slack message from a real person — reply in that Slack thread]'
       : `[message from teammate ${from.name}${from.role ? ` (${from.role})` : ''} — handoff ${hop}]`,
     text,
     '',
@@ -1768,8 +1776,10 @@ export async function deliverTeamMessage(input: {
   /** voice: the user's own call continuing in the thread. desk: the human
    *  owner commenting on a Desk card (`from` is their display name). channel:
    *  a group-channel post fanned out to a member (the channel identity rides
-   *  in `channel`; the poster's name rides inside the text). */
-  source?: 'voice' | 'desk' | 'channel';
+   *  in `channel`; the poster's name rides inside the text). slack: the Slack
+   *  bridge relaying a real person's message — person-class so it jumps the
+   *  queue, takes an idle lane, and interrupts a busy turn. */
+  source?: 'voice' | 'desk' | 'channel' | 'slack';
   /** Group-channel identity for source 'channel' records (id + display name). */
   channel?: { id: string; name: string };
   /** Internal admission notification; fires only after the outbox is durable. */
@@ -1822,6 +1832,12 @@ export async function deliverTeamMessage(input: {
     // Same colon trick: the pseudo-sender is the channel itself, never an
     // agent, and the poster's own name rides inside the delivered text.
     ? { id: `channel:${input.channel?.id ?? 'unknown'}`, name: input.channel?.name?.trim() ? input.channel.name : '#channel', role: 'channel', engine: '', home: '', createdAt: 0 }
+    : input.source === 'slack'
+    // A real person is waiting on the other end of the Slack thread: the
+    // record is person-class (queue priority, human interrupt class, idle
+    // lane preference) so it can never sit behind teammate chatter or a
+    // busy turn (card-c26bfa follow-up, Oct 20).
+    ? { id: 'slack:inbound', name: input.from.trim() || 'Slack', role: 'slack', engine: '', home: '', createdAt: 0 }
     : findAgent(input.from) ?? { id: 'unknown', name: input.from || 'Unknown', role: '', engine: '', home: '', createdAt: 0 };
   if (to.id === from.id && input.from.trim().toLowerCase() === to.name.trim().toLowerCase()) {
     return { delivered: false, reason: 'that is you — no need to message yourself' };

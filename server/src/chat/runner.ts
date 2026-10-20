@@ -572,6 +572,12 @@ const PEER_BOUNDARY_INTERRUPT_GAP_MS = 60_000;
  *  time because automation turns were never interruptible for peers; the
  *  grace only protects a just-started turn's chance to report. */
 const PEER_AUTOMATION_TURN_GRACE_MS = 60_000;
+/** A person-class delivery (Desk, voice, Slack) waiting behind a busy turn is
+ *  bounded by this: after this long with the interrupt request armed, the turn
+ *  ends at the nearest safe point even with a background subagent running, so
+ *  a helper can never hold a person's message past the one-minute bar. A tool
+ *  in flight is still never cancelled (card-c26bfa follow-up, Oct 20). */
+const HUMAN_HAZARD_OVERRIDE_MS = 35_000;
 
 /** Prepended to the turn that follows a boundary interrupt. */
 const PAUSED_FOR_MESSAGE_NOTE = '<rivendell-steer>Your previous turn was paused right after a tool call finished, so the message below reaches you as a normal message. Answer it first. Then, unless it changes the plan, carry on with what you were doing; the transcript above shows where you stopped.</rivendell-steer>';
@@ -687,6 +693,10 @@ class ClaudeSession {
   /** Bumped whenever the waiter counts are reset, so a release handed out before
    *  the reset cannot decrement waiters that registered after it. */
   private boundaryGeneration = 0;
+  /** A person-class request past its hazard override: the interrupt no longer
+   *  stands down for a running background subagent (card-c26bfa follow-up). */
+  private hazardOverrideActive = false;
+  private humanHazardTimer?: ReturnType<typeof setTimeout>;
   private lastBoundaryInterruptAt = 0;
   /** Last shared-log seq this process was told about by the lane recap. */
   private laneSyncSeq?: number;
@@ -1859,6 +1869,19 @@ class ClaudeSession {
         } catch {}
       });
     }
+    // (card-c26bfa follow-up) A person's message is bounded even when
+    // background work would hold the interrupt: HUMAN_HAZARD_OVERRIDE_MS
+    // after the request arms, the turn ends at the nearest safe point
+    // regardless of a running subagent. The rule lives here, not in a lane's
+    // persona.
+    if (human && this.humanHazardTimer === undefined) {
+      const timer = setTimeout(() => {
+        this.humanHazardTimer = undefined;
+        this.armHumanHazardOverride();
+      }, HUMAN_HAZARD_OVERRIDE_MS);
+      timer.unref?.();
+      this.humanHazardTimer = timer;
+    }
     const generation = this.boundaryGeneration;
     let released = false;
     // The caller releases when its message no longer needs the turn ended
@@ -1871,6 +1894,10 @@ class ClaudeSession {
       this.boundaryWaiters = Math.max(0, this.boundaryWaiters - 1);
       if (human) this.boundaryHumanWaiters = Math.max(0, this.boundaryHumanWaiters - 1);
       if (this.boundaryWaiters === 0) this.boundaryInterruptWanted = false;
+      if (this.boundaryHumanWaiters === 0) {
+        this.hazardOverrideActive = false;
+        if (this.humanHazardTimer) { clearTimeout(this.humanHazardTimer); this.humanHazardTimer = undefined; }
+      }
     };
   }
 
@@ -1879,6 +1906,35 @@ class ClaudeSession {
     this.boundaryWaiters = 0;
     this.boundaryHumanWaiters = 0;
     this.boundaryGeneration += 1;
+    this.hazardOverrideActive = false;
+    if (this.humanHazardTimer) { clearTimeout(this.humanHazardTimer); this.humanHazardTimer = undefined; }
+  }
+
+  /** The bounded override for a waiting person (card-c26bfa follow-up): at the
+   *  deadline the turn ends at the nearest safe point even with a background
+   *  subagent running. A tool in flight is never cancelled — the request then
+   *  waits for that tool's boundary, where the hazard no longer stands the
+   *  interrupt down. */
+  private armHumanHazardOverride(): void {
+    if (this.boundaryHumanWaiters === 0 || this.turnStartedAt === null || this.disposed) return;
+    this.hazardOverrideActive = true;
+    if (this.activeToolIds.size > 0) {
+      this.boundaryInterruptWanted = true;
+      return;
+    }
+    const turn = this.turnStartedAt;
+    setImmediate(() => {
+      try {
+        if (this.turnStartedAt === null || this.turnStartedAt !== turn || this.disposed) return;
+        if (this.boundaryHumanWaiters === 0) { this.hazardOverrideActive = false; return; }
+        if (this.activeToolIds.size > 0) { this.boundaryInterruptWanted = true; return; }
+        this.lastBoundaryInterruptAt = Date.now();
+        this.pausedForMessage = true;
+        void this.interrupt('message-boundary').then((kept) => {
+          if (!kept) this.pausedForMessage = false;
+        });
+      } catch {}
+    });
   }
 
   private watchReply(): ReplyWatch {
@@ -2437,7 +2493,7 @@ class ClaudeSession {
           // before. Background commands and monitors are unaffected by the
           // interrupt (they keep running and still report), so they do not
           // hold a message back.
-          if (this.hasInterruptHazard()) {
+          if (this.hasInterruptHazard() && !this.hazardOverrideActive) {
             this.boundaryInterruptWanted = false;
           } else if (
             (this.boundaryHumanWaiters > 0 || now - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS)
@@ -2462,7 +2518,7 @@ class ClaudeSession {
               // A background subagent can also have started between the outer
               // check and this deferred fire. Same stand-down as that check:
               // the turn is left to finish and the message starts the next one.
-              if (this.hasInterruptHazard()) { this.boundaryInterruptWanted = false; return; }
+              if (this.hasInterruptHazard() && !this.hazardOverrideActive) { this.boundaryInterruptWanted = false; return; }
               this.lastBoundaryInterruptAt = Date.now();
               this.pausedForMessage = true;
               void this.interrupt('message-boundary').then((kept) => {

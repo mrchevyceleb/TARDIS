@@ -17,7 +17,7 @@ teamRouter.post('/message', asyncHandler(async (req, res) => {
     res.status(400).json({ error: 'from, to and text are required' });
     return;
   }
-  if (source !== undefined && source !== 'voice') {
+  if (source !== undefined && source !== 'voice' && source !== 'slack') {
     res.status(400).json({ error: 'unknown message source' });
     return;
   }
