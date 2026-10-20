@@ -47,25 +47,24 @@ Each launch enters its own systemd user scope in `tardis-workers.slice`:
 | Tasks, including threads | 512 | 4096 |
 | CPU time | 2 cores | 12 cores |
 | Private scratch | 4 GiB | Included in worker memory accounting |
-| File size / core dumps | 1 GiB / disabled | — |
+| File size / core dumps | No per-file cap / disabled | — |
 
 The worker's memory OOM group includes its descendants. The shared slice must
 **not** be one OOM group: sacrificing every lane for one offender is forbidden.
-Bubblewrap creates PID/IPC/mount namespaces, reaps orphaned grandchildren,
-and discards private `/dev/shm` when its command ends, even after a crash.
-TMPDIR, TMP and TEMP point into that private scratch. XDG_CACHE_HOME is
-unchanged so installed Playwright browsers, uv environments and model caches
-remain discoverable; those persistent caches are not treated as scratch. Host
-`/tmp` stays visible so images and other server-provided inputs keep working.
-Durable background jobs and watches omit parent-death termination so they
-survive a server restart; lane workers terminate with their server. The PID
-namespace cleans descendants when the job itself ends in both cases. Graceful
-Stop signals target the inner CLI, allowing its state to flush before cleanup.
-PID watches are rejected in strict mode because namespace PIDs are not host
-PIDs. Use job_start, a command watch, or a workspace file watch instead. Private
-scratch cannot be watched or used as another job’s source path; put shared inputs
-and deliverables in the workspace. Neither legacy scratch names nor unrelated
-processes are selected for cleanup.
+Each worker runs as a transient systemd service with KillMode=control-group.
+The manager cleans up detached descendants when the main command exits, including
+while TARDIS is down. Bubblewrap isolates only the mount/user namespace: host
+PID/IPC identities, the user bus, /dev/shm, and existing /tmp inputs stay visible.
+Shared /dev/shm handoffs persist across turns. Only TMPDIR, TMP and TEMP point to
+a disposable 4 GiB mount at /tmp/tardis-private. Save shared work outside that
+private mount. The guard never shrinks or modifies a Codex database.
+Lane services bind to their server's owning service; durable jobs and watches
+omit that dependency and survive its restart. Existing persisted scope jobs
+remain readable and manageable; new records carry the full .service name.
+Core dumps are disabled. There is no per-file size cap, including for jobs
+that invoke Codex: existing databases can be larger than 1 GiB. The aggregate
+memory/task/write budgets still bound the worker. PID and shared-file watches
+retain their normal host behavior.
 Commands that deliberately write outside scratch still write to the workspace.
 User-namespace isolation prevents privileged local sudo/setuid operations; use
 the host owner’s maintenance path for those changes. The session bus remains
@@ -74,7 +73,7 @@ isolation, not a security boundary against a fully privileged agent: Docker,
 SSH and externally dispatched user services require their own resource budgets.
 Treat scratch as disposable; save deliverables in the workspace.
 
-Core dumps are disabled and each file has a kernel 1 GiB maximum. A two-second
+A two-second
 non-overlapping monitor also reads each owned scope's kernel disk-write counter.
 It stops a background job/watch if it writes over 16 GiB during its lifetime,
 or a background job/watch that keeps writing with less than 32 GiB free
@@ -89,7 +88,7 @@ dispatched to services outside the scope require their own host policies.
 
 All launches check memory. Strict mode also holds launches when the shared
 worker slice has fewer than 512 free task/thread slots, reserving capacity
-for simultaneous cold starts during their first ten seconds; the aggregate task
+for simultaneous cold starts during their first minute; the aggregate task
 budget includes normal browser and verifier stacks, not only Node processes. Strict mode also checks disk space/inodes and Linux
 memory/I/O PSI, holding new work at 10% sustained full stalls. The memory
 reserve is the greater of 2 GiB and 10% of host RAM; finite cgroup headroom is
@@ -106,14 +105,12 @@ Command-watch timeout wakes explicitly warn that this hard stop is pending.
 Storage stops retain their scope identity in durable incident receipts so
 job and command-watch result wakes explain storage protection after a restart.
 
-Unsubscribed idle Claude/Codex/Pi/Agy sessions retire after ten minutes in strict
-mode; busy work, open viewers and tracked background work retain their existing
-protections, including the fixed 72-hour tracked-background-work grace. Banana
-retains its existing 24-hour TTL while comfortable, avoiding repeated native
-context loss; when pressure holds new work, unused private serves retire after
-ten idle minutes and recover from durable history on their next start. Retirement preserves durable history; a retired
-Banana serve recovers from durable history rather than its former native
-process context. A finished
+Containment does not set a session lifetime or shorten the existing idle
+policy. The session-design work owns native-session retention and compaction.
+A delayed manager registration is never killed by a ten-second sampling timer;
+the manager bounds real service startup. Teammate handoffs stay durably queued
+until the engine acknowledges their delivery, and failed admissions retry.
+A finished
 job's namespace releases its children/scratch; its small job record/log retains
 the existing 72-hour policy. Inspect systemd's `Result=oom-kill` before clearing
 an owned failed lane scope; exit 137 alone is never called a confirmed OOM.
@@ -150,8 +147,7 @@ checks the available controllers and refuses work if disk accounting is missing.
 Bubblewrap must be allowed by the host's user-namespace/AppArmor policy; do not
 globally disable AppArmor. Required-mode startup performs a harmless real
 namespace capability check, including real /dev/null and random-device I/O,
-and otherwise holds work. Device mounts are preserved with --dev-bind before
-replacing /dev/shm with the private scratch mount.
+and otherwise holds work. Device mounts are preserved with --dev-bind while leaving /dev/shm shared.
 
 For durable cause attribution, retain user-manager journal records. If the
 host does not already do this, create

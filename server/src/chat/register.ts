@@ -1,4 +1,4 @@
-import { resourceGuardRequired, resourcePressure, ResourceHoldError } from '../lib/resourceGuard.ts';
+import { ResourceHoldError } from '../lib/resourceGuard.ts';
 import { assertSubscriptionLane } from './subscription-policy.ts';
 import { normalizeReplyTo, withReplyQuote } from './reply-quote.ts';
 import { eventInner, eventType, isAutomationPeerEvent, isNoopToken } from './routineNoise.ts';
@@ -169,10 +169,9 @@ function waitForSteerOrTurnEnd(
   });
 }
 
-// Contained workers release their process tree and scratch after ten idle
-// minutes instead of pinning a CLI + MCP/browser stack all day. Busy turns,
-// attached viewers and tracked background work keep their existing guards.
-const IDLE_SESSION_TTL_MS = resourceGuardRequired() ? 10 * 60_000 : 24 * 60 * 60 * 1000;
+// Resource containment does not change native-session retention.
+// Session lifetime and compaction belong to the session policy.
+const IDLE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const IDLE_REAPER_INTERVAL_MS = 60 * 1000;
 const RESUME_STARTUP_WATCH_MS = 8000;
 const DEFAULT_CHAT_ID = 'main';
@@ -2846,12 +2845,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
 
   const idleReaper = setInterval(() => {
     const now = Date.now();
-    // Preserve Banana's native warm context while comfortable, but reclaim
-    // unused private serves automatically when pressure holds new work.
-    const bananaTtl = resourceGuardRequired() && resourcePressure() ? IDLE_SESSION_TTL_MS : 24 * 60 * 60 * 1000;
     const pruned = pruneIdleClaudeSessions(IDLE_SESSION_TTL_MS, now)
       + pruneIdleCodexSessions(IDLE_SESSION_TTL_MS, now)
-      + pruneIdleBananaSessions(bananaTtl, now);
+      + pruneIdleBananaSessions(IDLE_SESSION_TTL_MS, now);
     if (pruned > 0) console.log(`[chat idle-reaper] pruned ${pruned} idle session(s)`);
   }, IDLE_REAPER_INTERVAL_MS);
   idleReaper.unref();

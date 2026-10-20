@@ -1,6 +1,6 @@
 import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 
-import { resourceGuardRequired, signalContainedWorker } from '../lib/resourceGuard.ts';
+import { signalContainedWorker } from '../lib/resourceGuard.ts';
 import { assertClaudeSubscription } from './subscription-auth.ts';
 import { assertSubscriptionLane, subscriptionEnvironment } from './subscription-policy.ts';
 import { execFileSync, type ChildProcessByStdio } from 'node:child_process';
@@ -3740,7 +3740,7 @@ export function pruneIdleClaudeSessions(ttlMs: number, now = Date.now()): number
     if (session.listenerCount() > 0 && !isBackgroundChatId(session.chatId)) continue;
     const idleMs = now - session.lastActivityAt();
     if (idleMs < ttlMs) continue;
-    const backgroundTtl = resourceGuardRequired() ? 72 * 60 * 60_000 : ttlMs * BACKGROUND_IDLE_TTL_MULTIPLE;
+    const backgroundTtl = ttlMs * BACKGROUND_IDLE_TTL_MULTIPLE;
     if (holdsBackgroundWork(session) && idleMs < backgroundTtl) continue;
     if (session instanceof ClaudeSession) session.shutdown('idle-prune', 'idle');
     else session.shutdown('idle-prune');

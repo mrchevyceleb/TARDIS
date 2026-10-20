@@ -202,7 +202,7 @@ function ownUnitsOf(cgroupText: string): Set<string> {
 function inForeignServiceUnit(cgroupText: string, ownUnits: Set<string>): boolean {
   for (const line of cgroupText.split('\n')) {
     const unit = serviceUnitOf(line);
-    if (unit && !ownUnits.has(unit) && !TARDIS_UNIT_NAMES.has(unit)) return true;
+    if (unit && !ownUnits.has(unit) && !TARDIS_UNIT_NAMES.has(unit) && !/^tardis-worker-[a-f0-9-]+\.service$/.test(unit)) return true;
   }
   return false;
 }

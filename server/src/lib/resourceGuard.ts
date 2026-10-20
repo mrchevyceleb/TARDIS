@@ -2,6 +2,7 @@ import { execFile, spawn, type ChildProcess, type SpawnOptions } from 'node:chil
 import { existsSync, readFileSync, readlinkSync, statfsSync } from 'node:fs';
 import { mkdir, open, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { totalmem } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { assertMemoryAvailableForSpawn } from '../chat/memory.ts';
@@ -11,6 +12,12 @@ import { STATE_DIR } from '../config.ts';
 const GiB = 1024 ** 3;
 export const WORKER_LIMITS = { memoryHigh: 6 * GiB, memoryMax: 8 * GiB, swapMax: 256 * 1024 ** 2, tasks: 512, cpuPercent: 200, scratch: 4 * GiB };
 const SLICE = 'tardis-workers.slice';
+const OWNED_UNIT = /^tardis-(?:worker|job|watch)-[a-f0-9-]+(?:\.(?:scope|service))?$/;
+/** New launches store their full service name; bare persisted names are legacy scopes. */
+export function containedUnitName(unit: string): string {
+  if (!OWNED_UNIT.test(unit)) throw new Error('Invalid worker unit identity.');
+  return /\.(?:scope|service)$/.test(unit) ? unit : `${unit}.scope`;
+}
 export type ResourceIncident = { id: string; at: number; owner: string; message: string; unit?: string; kind?: 'hold' };
 export class ResourceHoldError extends Error {
   readonly code = 'RESOURCE_PRESSURE';
@@ -52,15 +59,13 @@ function commandOutput(command: string, args: string[]): Promise<string> {
 }
 
 function sandboxArgs(durable = false): string[] {
-  // The workspace and existing /tmp inputs remain visible. All *new* standard
-  // temporary output goes into this private, size-limited mount. PID 1
-  // reaps children; closing the worker also ends setsid/nohup descendants.
-  // No host scratch directory is scanned or deleted, even after a crash.
-  return ['--unshare-user', '--unshare-pid', '--unshare-ipc', ...(!durable ? ['--die-with-parent'] : []), '--cap-drop', 'ALL',
-    '--bind', '/', '/', '--dev-bind', '/dev', '/dev', '--proc', '/proc', '--size', String(WORKER_LIMITS.scratch), '--tmpfs', '/dev/shm',
+  // Host PID/IPC identities and /dev/shm are part of the teammate contract.
+  // A PID namespace makes sd-bus reject clients even with the correct UID.
+  // systemd now owns descendant cleanup; only TMPDIR is private/disposable.
+  return ['--unshare-user', ...(!durable ? ['--die-with-parent'] : []), '--cap-drop', 'ALL',
+    '--bind', '/', '/', '--dev-bind', '/dev', '/dev', '--proc', '/proc', '--size', String(WORKER_LIMITS.scratch), '--tmpfs', '/tmp/tardis-private',
     '--ro-bind', '/sys/fs/cgroup', '/sys/fs/cgroup',
-    '--dir', '/dev/shm/tardis',
-    '--setenv', 'TMPDIR', '/dev/shm/tardis', '--setenv', 'TMP', '/dev/shm/tardis', '--setenv', 'TEMP', '/dev/shm/tardis'];
+    '--setenv', 'TMPDIR', '/tmp/tardis-private', '--setenv', 'TMP', '/tmp/tardis-private', '--setenv', 'TEMP', '/tmp/tardis-private'];
 }
 
 export async function initializeResourceGuard(): Promise<void> {
@@ -171,7 +176,7 @@ async function reapOwnedConfigs(): Promise<void> {
 /** Re-adopt durable job scopes after a server restart. Only UUID scopes from
  * our own job records qualify; never enumerate another application's units. */
 export function watchContainedScope(unit: string, owner: string, cwd: string): void {
-  if (!ready || !/^tardis-(?:worker|job|watch)-[a-f0-9-]+$/.test(unit) || watchedScopes.has(unit)) return;
+  if (!ready || !OWNED_UNIT.test(unit) || watchedScopes.has(unit)) return;
   watchedScopes.set(unit, { owner, cwd, written: null, missingAt: Date.now(), alertedAt: 0 });
 }
 
@@ -188,11 +193,11 @@ async function monitorWrites(): Promise<void> {
     // Bounded probes, no recursive filesystem walks or /proc-wide scans.
     for (const [unit, entry] of [...watchedScopes].slice(0, 256)) {
       let io: string;
-      try { io = readFileSync(`${userCgroup}/tardis.slice/${SLICE}/${unit}.scope/io.stat`, 'utf8'); }
+      try { io = readFileSync(`${userCgroup}/tardis.slice/${SLICE}/${containedUnitName(unit)}/io.stat`, 'utf8'); }
       catch {
         // A completed scope can disappear before the coarse jobs tick records
         // its result. That is normal cleanup, not loss of controller support.
-        if (!existsSync(`${userCgroup}/tardis.slice/${SLICE}/${unit}.scope`)) {
+        if (!existsSync(`${userCgroup}/tardis.slice/${SLICE}/${containedUnitName(unit)}`)) {
           if (Date.now() - entry.missingAt > 10_000) unwatchContainedScope(unit);
           continue;
         }
@@ -231,7 +236,7 @@ async function monitorWrites(): Promise<void> {
       const stopping = (async (): Promise<string | undefined> => {
         try {
           expectContainedScopeExit(unit);
-          await commandOutput('systemctl', ['--user', 'kill', '--signal=SIGKILL', `${unit}.scope`]);
+          await commandOutput('systemctl', ['--user', 'kill', '--signal=SIGKILL', containedUnitName(unit)]);
           const message = `TARDIS stopped this worker because it ${reason}. Work saved in the workspace remains available; this job did not finish.`;
           recordResourceIncident(entry.owner, message, { unit });
           return message;
@@ -241,7 +246,7 @@ async function monitorWrites(): Promise<void> {
           // A scope that is already gone finished between the accounting read
           // and the kill. That is a completed job, not a host that cannot stop
           // a worker; only a scope that is still there is an alarm.
-          if (!existsSync(`${userCgroup}/tardis.slice/${SLICE}/${unit}.scope`)) { unwatchContainedScope(unit); return undefined; }
+          if (!existsSync(`${userCgroup}/tardis.slice/${SLICE}/${containedUnitName(unit)}`)) { unwatchContainedScope(unit); return undefined; }
           watchedScopes.set(unit, entry);
           if (Date.now() - entry.alertedAt > 60_000) {
             entry.alertedAt = Date.now();
@@ -307,7 +312,7 @@ export function resourcePressure(): string | null {
       for (const [unit, until] of startingScopes) {
         if (until <= Date.now()) { startingScopes.delete(unit); continue; }
         let counted = 0;
-        try { counted = Number(readFileSync(`${slice}/${unit}.scope/pids.current`, 'utf8').trim()); } catch { /* registration in flight */ }
+        try { counted = Number(readFileSync(`${slice}/${containedUnitName(unit)}/pids.current`, 'utf8').trim()); } catch { /* registration in flight */ }
         reserved += Math.max(0, WORKER_LIMITS.tasks - (Number.isFinite(counted) ? counted : 0));
       }
       if (!Number.isFinite(taskMax) || !Number.isFinite(tasks) || taskMax - tasks - reserved < WORKER_LIMITS.tasks) return 'The shared worker process budget is full; TARDIS held new work until another job releases its threads.';
@@ -349,20 +354,30 @@ export function resourceGuardStatus() {
     pressure: resourceGuardRequired() ? resourcePressure() : null, limits: WORKER_LIMITS, incidents: recent };
 }
 
-/** The one argv every contained launch uses, so the readiness probe and the
- * real spawns can never drift apart. `durable` marks machine work (jobs and
- * command watches): it is collected on exit and survives its launcher. Lane
- * turns keep --die-with-parent inside bwrap instead. OOMPolicy=kill is the
- * scope property that makes the kernel take a worker's whole cgroup at once on
- * an OOM kill (systemd sets the scope's memory.oom.group for it), so no kernel
- * file write is needed and a daemon-reload cannot silently undo it. */
-function containedLaunchArgs(unit: string, command: string, args: readonly string[], durable: boolean, runtimeSeconds?: number): string[] {
-  return ['--user', '--scope', '--quiet', '--collect', '--expand-environment=no',
-    `--slice=${SLICE}`, `--unit=${unit}`, '-p', `MemoryHigh=${WORKER_LIMITS.memoryHigh}`, '-p', `MemoryMax=${WORKER_LIMITS.memoryMax}`,
+/** The manager owns the whole worker tree, including detached descendants.
+ * A transient service can reap them when its main command exits without a
+ * PID namespace, so host bus credentials and cross-lane handoffs keep working. */
+function containedLaunchArgs(unit: string, command: string, args: readonly string[], durable: boolean, runtimeSeconds?: number, options: SpawnOptions = {}): string[] {
+  const environment = options.env ?? process.env;
+  const envNames = Object.keys(environment).filter((key) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
+  const cwd = options.cwd instanceof URL ? fileURLToPath(options.cwd) : options.cwd ?? process.cwd();
+  // A lane cannot outlive the service/job that owns its server. Durable jobs
+  // deliberately omit this dependency and survive a TARDIS restart.
+  const parentUnit = !durable ? readFileSync('/proc/self/cgroup', 'utf8').trim().split('/').reverse()
+    .find((part) => part.endsWith('.service') && !/^user@\d+\.service$/.test(part)) : undefined;
+  return ['--user', '--pipe', '--wait', '--quiet', '--collect', '--service-type=exec', '--expand-environment=no',
+    `--slice=${SLICE}`, `--unit=${unit}`, `--working-directory=${cwd}`,
+    // Names only: systemd-run reads values from its inherited environment and
+    // passes them over D-Bus. Secrets never enter argv or unit descriptions.
+    ...envNames.filter((key) => environment[key] !== undefined).map((key) => `--setenv=${key}`),
+    ...envNames.filter((key) => environment[key] === undefined).flatMap((key) => ['-p', `UnsetEnvironment=${key}`]),
+    '-p', `MemoryHigh=${WORKER_LIMITS.memoryHigh}`, '-p', `MemoryMax=${WORKER_LIMITS.memoryMax}`,
     '-p', `MemorySwapMax=${WORKER_LIMITS.swapMax}`, '-p', `TasksMax=${WORKER_LIMITS.tasks}`,
     '-p', 'IOAccounting=yes', '-p', `CPUQuota=${WORKER_LIMITS.cpuPercent}%`, '-p', 'OOMPolicy=kill',
+    '-p', 'KillMode=control-group', '-p', 'TimeoutStopSec=3s', '-p', 'TimeoutStartSec=60s', '-p', 'LimitFSIZE=infinity',
+    ...(parentUnit ? ['-p', `BindsTo=${parentUnit}`] : []),
     ...(runtimeSeconds ? ['-p', `RuntimeMaxSec=${runtimeSeconds}`] : []),
-    '/usr/bin/bwrap', ...sandboxArgs(durable), '--', '/usr/bin/prlimit', '--core=0:0', '--fsize=1073741824:1073741824', '--', command, ...args];
+    '/usr/bin/bwrap', ...sandboxArgs(durable), '--', '/usr/bin/prlimit', '--core=0:0', '--', command, ...args];
 }
 
 const PROBE_SCRIPT = `set -e
@@ -373,14 +388,17 @@ cg=$(sed -n 's/^0:://p' /proc/self/cgroup)
 [ "$(cat /sys/fs/cgroup$cg/memory.swap.max)" = "${WORKER_LIMITS.swapMax}" ]
 [ "$(cat /sys/fs/cgroup$cg/pids.max)" = "${WORKER_LIMITS.tasks}" ]
 [ "$(cat /sys/fs/cgroup$cg/memory.oom.group)" = "1" ]
-[ -d /dev/shm/tardis ]
+[ -d /tmp/tardis-private ]
+[ -d /dev/shm ]
+[ "$(ulimit -f)" = "unlimited" ]
+systemctl --user show tardis-workers.slice -p LoadState --value >/dev/null
 test -c /dev/null && : >/dev/null && dd if=/dev/urandom of=/dev/null bs=1 count=1 status=none`;
 
 /** Run one real contained launch — the same argv every worker uses — and fail
  * with a readable reason when systemd refuses it or the kernel limits are not
  * in force. `durable` picks the job/watch shape. */
 async function probeContainedLaunch(durable: boolean): Promise<void> {
-  const unit = `tardis-${durable ? 'job' : 'worker'}-${randomUUID()}`;
+  const unit = `tardis-${durable ? 'job' : 'worker'}-${randomUUID()}.service`;
   await new Promise<void>((resolve, reject) => {
     execFile('systemd-run', containedLaunchArgs(unit, '/bin/sh', ['-c', PROBE_SCRIPT], durable, durable ? 60 : undefined), { timeout: 30_000 }, (err, _stdout, stderr) => {
       if (err) reject(new Error(`The real contained launch failed in its ${durable ? 'job' : 'lane'} shape: ${String(stderr || err.message).trim().slice(0, 300)}`));
@@ -395,10 +413,12 @@ export function spawnContained(command: string, args: readonly string[], options
   assertResourcesForSpawn(owner, typeof options.cwd === 'string' ? options.cwd : undefined, { conversationTurn: !durable });
   if (!resourceGuardRequired()) return spawn(command, args, options);
   if (options.shell) throw new Error('Contained launches require an explicit shell command.');
-  if (!/^tardis-(?:worker|job|watch)-[a-f0-9-]+$/.test(unit)) throw new Error('Invalid worker scope identity.');
-  const child = spawn('systemd-run', containedLaunchArgs(unit, command, args, durable, runtimeSeconds), options);
+  if (!OWNED_UNIT.test(unit)) throw new Error('Invalid worker scope identity.');
+  unit = unit.endsWith('.service') ? unit : `${unit}.service`;
+  if (!OWNED_UNIT.test(unit)) throw new Error('Invalid worker service identity.');
+  const child = spawn('systemd-run', containedLaunchArgs(unit, command, args, durable, runtimeSeconds, options), options);
   const identity = { unit, expectedExit: false };
-  startingScopes.set(unit, Date.now() + 10_000);
+  startingScopes.set(unit, Date.now() + 60_000);
   containedChildren.set(child, identity);
   scopeIdentities.set(unit, identity);
   // Scope registration is asynchronous. Wait for the first sample rather
@@ -409,21 +429,14 @@ export function spawnContained(command: string, args: readonly string[], options
     }
   }, 1000);
   arm.unref();
-  const registration = setTimeout(() => {
-    if (child.exitCode === null && child.signalCode === null && !existsSync(`${userCgroup}/tardis.slice/${SLICE}/${unit}.scope`)) {
-      identity.expectedExit = true;
-      try { child.kill('SIGKILL'); } catch { /* launcher gone */ }
-      recordResourceIncident(owner, 'The worker scope did not register within ten seconds. TARDIS stopped its launcher; no uncontained retry was started.');
-    }
-  }, 10_000);
-  registration.unref();
+  // The manager bounds startup. Never kill a launcher merely because a
+  // sampled cgroup has not appeared: resume bursts can take longer than 10s.
   // No process-name matching, pid reuse races or broad cleanup signals:
-  // bubblewrap owns the PID namespace and kernel destroys its private tmpfs.
+  // systemd owns descendant cleanup and the private mount disappears on exit.
   child.once('error', () => recordResourceIncident(owner, 'The contained worker could not start. No uncontained fallback was launched.'));
-  child.once('error', () => { clearTimeout(arm); clearTimeout(registration); startingScopes.delete(unit); scopeIdentities.delete(unit); unwatchContainedScope(unit); });
+  child.once('error', () => { clearTimeout(arm); startingScopes.delete(unit); scopeIdentities.delete(unit); unwatchContainedScope(unit); });
   child.once('exit', (code, signal) => {
     clearTimeout(arm);
-    clearTimeout(registration);
     startingScopes.delete(unit);
     scopeIdentities.delete(unit);
     unwatchContainedScope(unit);
@@ -440,7 +453,7 @@ export function spawnContained(command: string, args: readonly string[], options
       // ask the journal whether the unit ever started (identity fields only,
       // never MESSAGE or command output).
       if (!result
-        && !existsSync(`${userCgroup}/tardis.slice/${SLICE}/${unit}.scope`)
+        && !existsSync(`${userCgroup}/tardis.slice/${SLICE}/${containedUnitName(unit)}`)
         && !(await unitEverStarted(unit)))
       {
         recordResourceIncident(owner, `The contained launch was refused before its scope registered (exit ${code ?? signal}). TARDIS did not run it uncontained.`);
@@ -451,7 +464,7 @@ export function spawnContained(command: string, args: readonly string[], options
         );
       else if (result === 'timeout') recordResourceIncident(owner, 'This worker reached its time limit and was stopped. Its private scratch and child processes were released; the job did not finish.');
       else if (signal) recordResourceIncident(owner, `The worker ended unexpectedly (${signal}). Its private scratch and child processes were released. The cause was not confirmed as out of memory.`);
-      if (result && result !== 'success') await commandOutput('systemctl', ['--user', 'reset-failed', `${unit}.scope`]).catch(() => '');
+      if (result && result !== 'success') await commandOutput('systemctl', ['--user', 'reset-failed', containedUnitName(unit)]).catch(() => '');
     });
   });
   return child;
@@ -463,15 +476,15 @@ export function spawnContained(command: string, args: readonly string[], options
 /// removes its cgroup. Only identity/comm fields are requested — never MESSAGE
 /// or command output.
 async function unitEverStarted(unit: string): Promise<boolean> {
-  if (!/^tardis-(?:worker|job|watch)-[a-f0-9-]+$/.test(unit)) return false;
-  const out = await commandOutput('journalctl', ['--user', `--unit=${unit}.scope`, '--no-pager', '-n', '1', '-o', 'json', '--output-fields=UNIT,_COMM']).catch(() => '');
+  if (!OWNED_UNIT.test(unit)) return false;
+  const out = await commandOutput('journalctl', ['--user', `--unit=${containedUnitName(unit)}`, '--no-pager', '-n', '1', '-o', 'json', '--output-fields=UNIT,_COMM']).catch(() => '');
   return out.trim().length > 0;
 }
 
 export async function scopeOutcome(unit: string): Promise<string> {
-  if (!/^tardis-(?:worker|job|watch)-[a-f0-9-]+$/.test(unit)) return '';
+  if (!OWNED_UNIT.test(unit)) return '';
   for (let attempt = 0; attempt < 3; attempt++) {
-    const out = await commandOutput('systemctl', ['--user', 'show', `${unit}.scope`, '-p', 'Result', '-p', 'ActiveState']).catch(() => '');
+    const out = await commandOutput('systemctl', ['--user', 'show', containedUnitName(unit), '-p', 'Result', '-p', 'ActiveState']).catch(() => '');
     const values = Object.fromEntries(out.split('\n').map((line) => line.split('=')));
     if (!out) break;
     if (!['active', 'deactivating'].includes(values.ActiveState)) {
@@ -483,41 +496,27 @@ export async function scopeOutcome(unit: string): Promise<string> {
   // Collected scopes still have a structured manager failure record. Request
   // ONLY result/identity fields, never MESSAGE, command lines or job output.
   // systemd unit_log_failure emits UNIT_RESULT (src/core/unit.c).
-  const journal = await commandOutput('journalctl', ['--user', `--unit=${unit}.scope`, '--no-pager', '-n', '5', '-o', 'json',
+  const journal = await commandOutput('journalctl', ['--user', `--unit=${containedUnitName(unit)}`, '--no-pager', '-n', '5', '-o', 'json',
     '--output-fields=UNIT_RESULT,USER_UNIT,UNIT,_COMM', 'UNIT_RESULT=oom-kill', 'UNIT_RESULT=timeout']).catch(() => '');
   for (const line of journal.split('\n')) {
     try {
       const entry = JSON.parse(line) as Record<string, unknown>;
-      if (entry._COMM !== 'systemd' || (entry.USER_UNIT !== `${unit}.scope` && entry.UNIT !== `${unit}.scope`)) continue;
+      if (entry._COMM !== 'systemd' || (entry.USER_UNIT !== containedUnitName(unit) && entry.UNIT !== containedUnitName(unit))) continue;
       if (entry.UNIT_RESULT === 'oom-kill' || entry.UNIT_RESULT === 'timeout') return entry.UNIT_RESULT;
     } catch { /* incomplete/unavailable journal: never infer a cause */ }
   }
   return '';
 }
 
-/** Signal the inner CLI, letting it flush its conversation before PID 1 tears
- * down the namespace. Do not kill bwrap alongside a graceful SIGTERM. */
+/** Signal this manager-owned worker tree; the manager handles PID identity,
+ * graceful shutdown and the final cgroup cleanup, including detached children. */
 export function signalContainedWorker(child: ChildProcess, signal: NodeJS.Signals): boolean {
   const identity = containedChildren.get(child);
   if (!identity) return false;
   if (signal === 'SIGTERM' || signal === 'SIGKILL') identity.expectedExit = true;
   if (child.exitCode !== null || child.signalCode !== null) return true;
-  try {
-    const pids = readFileSync(`${userCgroup}/tardis.slice/${SLICE}/${identity.unit}.scope/cgroup.procs`, 'utf8').trim().split(/\s+/).slice(0, WORKER_LIMITS.tasks);
-    for (const raw of pids) {
-      const pid = Number(raw);
-      if (!(pid > 1)) continue;
-      try {
-        const ns = readFileSync(`/proc/${pid}/status`, 'utf8').match(/^NSpid:\s+(.+)$/m)?.[1].trim().split(/\s+/);
-        if (ns?.length !== 2 || ns[1] !== '2') continue;
-        if (!readFileSync(`/proc/${pid}/cgroup`, 'utf8').trim().endsWith(`/${identity.unit}.scope`)) continue;
-        process.kill(pid, signal);
-        return true;
-      } catch { /* exited during lookup */ }
-    }
-  } catch { /* launch not yet registered */ }
-  // Before the CLI exists, ending the launcher cannot lose a turn's state.
-  try { child.kill(signal); } catch { /* already gone */ }
+  void commandOutput('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${signal}`, containedUnitName(identity.unit)])
+    .catch(() => { try { child.kill(signal); } catch { /* launcher already gone */ } });
   return true;
 }
 
@@ -526,7 +525,7 @@ export function containedScopeOf(child: ChildProcess): string | undefined { retu
 /** Failed durable scopes may outlive the server that launched them. Reaping
  * their terminal metadata must not depend on that server's exit listener. */
 export async function releaseContainedScope(unit: string): Promise<void> {
-  if (!/^tardis-(?:worker|job|watch)-[a-f0-9]{8}-[a-f0-9-]{27}$/.test(unit)) return;
+  if (!OWNED_UNIT.test(unit)) return;
   const result = await scopeOutcome(unit);
-  if (result && result !== 'success') await commandOutput('systemctl', ['--user', 'reset-failed', `${unit}.scope`]).catch(() => '');
+  if (result && result !== 'success') await commandOutput('systemctl', ['--user', 'reset-failed', containedUnitName(unit)]).catch(() => '');
 }

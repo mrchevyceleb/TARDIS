@@ -764,7 +764,7 @@ export class CodexSession {
     }
 
     try {
-      assertResourcesForSpawn(agentForChatId(this.chatId)?.name ?? 'Codex', this.cwd);
+      assertResourcesForSpawn(agentForChatId(this.chatId)?.name ?? 'Codex', this.cwd, { conversationTurn: true });
     } catch (error) {
       this.busy = false;
       this.emit({

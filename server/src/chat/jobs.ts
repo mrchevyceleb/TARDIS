@@ -29,7 +29,7 @@ import { wellFormedText } from '../lib/wellFormed.ts';
 import { listAgents } from './agents.ts';
 import { canLaunchInScope, pidMatches, pidStart, visibleWakeText } from './jobWatches.ts';
 import { sendToAgentHome } from './teamBus.ts';
-import { assertResourcesForSpawn, resourceGuardRequired, spawnContained, watchContainedScope, unwatchContainedScope, expectContainedScopeExit, releaseContainedScope, scopeOutcome, scopeStorageFailure, recordResourceIncident, MEMORY_FAILURE_NOTICE } from '../lib/resourceGuard.ts';
+import { containedUnitName, assertResourcesForSpawn, resourceGuardRequired, spawnContained, watchContainedScope, unwatchContainedScope, expectContainedScopeExit, releaseContainedScope, scopeOutcome, scopeStorageFailure, recordResourceIncident, MEMORY_FAILURE_NOTICE } from '../lib/resourceGuard.ts';
 
 export type JobState = 'running' | 'finished' | 'failed' | 'stopped' | 'timed-out' | 'lost';
 export type JobStopper = 'agent' | 'user' | 'timeout';
@@ -199,7 +199,7 @@ function outcomeText(job: Job): string {
       if (job.resourceCause === 'storage') return `was stopped by storage protection after ${took} because it exceeded its disk-write budget or kept writing while storage was low. It did NOT finish. Work saved in the workspace remains available.`;
       const code = job.exitCode ?? -1;
       // Above 128 a shell often means "killed by a signal", but exit 200 is also valid: say only what is known.
-      return `failed: exit ${code} in ${took}${code === 153 ? ' (exit 153 is the 1 GiB per-file size limit)' : code > 128 ? ` (exit codes above 128 often mean the process was killed by a signal)` : ''}`;
+      return `failed: exit ${code} in ${took}${code > 128 ? ` (exit codes above 128 often mean the process was killed by a signal)` : ''}`;
     }
     case 'stopped': return `was stopped${job.stoppedBy === 'user' ? ' from the UI' : ''} after ${took}. It did NOT finish.`;
     case 'timed-out': return `timed out after ${job.timeoutMin}m and was stopped. It did NOT finish.`;
@@ -220,7 +220,7 @@ function resultText(job: Job): string {
     `[job: ${job.name}] Job "${job.name}" ${outcomeText(job)}`,
     tail ? `Last output:\n${tail}` : 'No output was captured.',
     `Full log: ${logPath(job.id)}`,
-    ...(job.contained ? ['This job ran with limits of 8 GiB RAM, 256 MiB swap, 512 tasks, 2 CPUs, a 1 GiB per-file size limit and 4 GiB of private scratch. Private scratch and leftover child processes are released when its worker exits. A nonzero exit alone does not prove an OOM kill.'] : []),
+    ...(job.contained ? ['This job ran with limits of 8 GiB RAM, 256 MiB swap, 512 tasks, 2 CPUs and 4 GiB of private scratch; no per-file size cap. Private scratch and leftover child processes are released when its worker exits. A nonzero exit alone does not prove an OOM kill.'] : []),
     'Background job result from job_start. This is not a message from a person.',
   ].join('\n'));
 }
@@ -263,7 +263,7 @@ export async function createJob(input: CreateJobInput): Promise<Job> {
   assertResourcesForSpawn(`${agent.name} / ${name}`, cwd);
   const contained = resourceGuardRequired();
   const scoped = contained || await canLaunchInScope();
-  const unit = scoped ? `tardis-job-${contained ? id : short}` : undefined;
+  const unit = scoped ? `tardis-job-${contained ? `${id}.service` : short}` : undefined;
   mkdirSync(JOBS_DIR, { recursive: true, mode: 0o700 });
   writeFileSync(cmdPath(id), `#!/bin/bash\n${command}\n`, { mode: 0o700 });
   writeFileSync(logPath(id), '', { mode: 0o600 });
@@ -425,7 +425,7 @@ function wrapperAlive(job: Job): boolean {
 async function jobAlive(job: Job): Promise<boolean> {
   if (job.bootId && job.bootId !== BOOT_ID) return false;
   if (job.unit) {
-    const active = await runQuiet('systemctl', ['--user', 'is-active', '--quiet', `${job.unit}.scope`]);
+    const active = await runQuiet('systemctl', ['--user', 'is-active', '--quiet', containedUnitName(job.unit!)]);
     // Unanswered is not evidence of death: a wedged user manager must leave the
     // job alive rather than let the reaper report a running job as gone.
     if (active === RUN_TIMED_OUT) return true;
@@ -441,7 +441,7 @@ async function jobAlive(job: Job): Promise<boolean> {
       // Only an explicit "0" counts as gone: with task accounting off the
       // property reads "[not set]", and an unknown must stay alive rather
       // than report a running job as finished.
-      const tasks = await runCaptured('systemctl', ['--user', 'show', `${job.unit}.scope`, '-p', 'TasksCurrent', '--value']);
+      const tasks = await runCaptured('systemctl', ['--user', 'show', containedUnitName(job.unit), '-p', 'TasksCurrent', '--value']);
       return tasks !== '0';
     }
   }
@@ -475,7 +475,7 @@ const RELEASE_ATTEMPTS = 60;
 const RELEASE_PER_TICK = 4;
 
 async function releaseUnit(unit: string): Promise<void> {
-  const tasks = await runCaptured('systemctl', ['--user', 'show', `${unit}.scope`, '-p', 'TasksCurrent', '--value']);
+  const tasks = await runCaptured('systemctl', ['--user', 'show', containedUnitName(unit), '-p', 'TasksCurrent', '--value']);
   // Already inactive (empty value), or task accounting is off so emptiness can
   // never be established ("[not set]"). Either way there is nothing to retry.
   if (tasks === '' || tasks === '[not set]') {
@@ -486,7 +486,7 @@ async function releaseUnit(unit: string): Promise<void> {
   // Empty, so it is ours to release — but only a stop that actually SUCCEEDED
   // finishes the job. A transiently wedged user manager would otherwise drop
   // the retry and permanently leak the very scope this exists to clean up.
-  if (tasks === '0' && await runQuiet('systemctl', ['--user', 'stop', `${unit}.scope`]) === 0) {
+  if (tasks === '0' && await runQuiet('systemctl', ['--user', 'stop', containedUnitName(unit)]) === 0) {
     await releaseContainedScope(unit);
     pendingRelease.delete(unit);
     return;
@@ -514,7 +514,7 @@ async function terminateJob(job: Job): Promise<boolean> {
   if (job.bootId && job.bootId !== BOOT_ID) return true;
   if (job.unit) {
     expectContainedScopeExit(job.unit);
-    const kill = (sig: 'SIGTERM' | 'SIGKILL') => runQuiet('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${sig}`, `${job.unit}.scope`]);
+    const kill = (sig: 'SIGTERM' | 'SIGKILL') => runQuiet('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${sig}`, containedUnitName(job.unit!)]);
     await kill('SIGTERM');
     let dead = await pollDead(() => jobAlive(job), STOP_GRACE_MS);
     if (!dead) {

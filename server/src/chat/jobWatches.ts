@@ -219,7 +219,6 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
   const deadline = Date.now() + timeoutMin * 60_000;
 
   if (target === 'pid') {
-    if (resourceGuardRequired()) throw new Error('PIDs inside an isolated lane belong to that job, not the host. Use job_start, a command watch, or a workspace file watch instead.');
     if (typeof input.pid !== 'number' || !Number.isSafeInteger(input.pid) || input.pid <= 0) throw new Error('pid must be a positive integer');
     const pid = input.pid;
     if (!pidAlive(pid)) throw new Error(`process ${pid} has already exited — there is nothing left to watch`);
@@ -231,7 +230,6 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
   if (target === 'file') {
     if (typeof input.file !== 'string' || !input.file.trim()) throw new Error('file must be an absolute path on this host');
     const file = input.file.trim();
-    if (resourceGuardRequired() && (file === '/dev/shm' || file.startsWith('/dev/shm/'))) throw new Error('Private scratch is visible only inside its job. Watch a workspace file instead.');
     if (!isAbsolute(file)) throw new Error('file must be an absolute path on this host');
     let baselineSize: number | null;
     try {
