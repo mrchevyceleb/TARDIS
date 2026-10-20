@@ -1,3 +1,4 @@
+import { resourceGuardRequired, resourcePressure, ResourceHoldError } from '../lib/resourceGuard.ts';
 import { assertSubscriptionLane } from './subscription-policy.ts';
 import { normalizeReplyTo, withReplyQuote } from './reply-quote.ts';
 import { eventInner, eventType, isAutomationPeerEvent, isNoopToken } from './routineNoise.ts';
@@ -167,11 +168,10 @@ function waitForSteerOrTurnEnd(
   });
 }
 
-// Personas stay warm all day: measured cost is ~0.5GB per warm session
-// (claude CLI + MCP stack) on a 128GB box, so the 30-minute prune was pure
-// cold-start tax. 24h still self-heals stale processes overnight (old CLI
-// builds, dead OAuth) — and sessions with an open tab are never pruned.
-const IDLE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+// Contained workers release their process tree and scratch after ten idle
+// minutes instead of pinning a CLI + MCP/browser stack all day. Busy turns,
+// attached viewers and tracked background work keep their existing guards.
+const IDLE_SESSION_TTL_MS = resourceGuardRequired() ? 10 * 60_000 : 24 * 60 * 60 * 1000;
 const IDLE_REAPER_INTERVAL_MS = 60 * 1000;
 const RESUME_STARTUP_WATCH_MS = 8000;
 const DEFAULT_CHAT_ID = 'main';
@@ -2743,7 +2743,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         }
       } catch (error) {
         busy = false;
-        if (error instanceof MemoryPressureSpawnError) {
+        if (error instanceof MemoryPressureSpawnError || error instanceof ResourceHoldError) {
           console.warn(`[chat ws#${wsId}] memory-pressure spawn refused: ${error.message}`);
           safeSend({
             type: 'error',
@@ -2806,9 +2806,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
 
   const idleReaper = setInterval(() => {
     const now = Date.now();
+    // Preserve Banana's native warm context while comfortable, but reclaim
+    // unused private serves automatically when pressure holds new work.
+    const bananaTtl = resourceGuardRequired() && resourcePressure() ? IDLE_SESSION_TTL_MS : 24 * 60 * 60 * 1000;
     const pruned = pruneIdleClaudeSessions(IDLE_SESSION_TTL_MS, now)
       + pruneIdleCodexSessions(IDLE_SESSION_TTL_MS, now)
-      + pruneIdleBananaSessions(IDLE_SESSION_TTL_MS, now);
+      + pruneIdleBananaSessions(bananaTtl, now);
     if (pruned > 0) console.log(`[chat idle-reaper] pruned ${pruned} idle session(s)`);
   }, IDLE_REAPER_INTERVAL_MS);
   idleReaper.unref();

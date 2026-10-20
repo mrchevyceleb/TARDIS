@@ -1,4 +1,6 @@
+import { signalContainedWorker } from '../lib/resourceGuard.ts';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -71,6 +73,7 @@ function completionOutputSchema(request: CompletionRequest) {
 }
 
 function killChild(child: ChildProcess): void {
+  if (signalContainedWorker(child, 'SIGKILL')) return;
   // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
   if (!child.pid || child.pid <= 1) return;
   if (process.platform === 'win32') {
@@ -84,7 +87,7 @@ function killChild(child: ChildProcess): void {
 async function runCli(binary: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, prompt: string, signal: AbortSignal): Promise<string> {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { cwd, env, detached: process.platform !== 'win32', windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawnLaneWorker(binary, args, { cwd, env, detached: process.platform !== 'win32', windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }, 'content generation') as ChildProcess & { stdout: NodeJS.ReadableStream; stderr: NodeJS.ReadableStream; stdin: NodeJS.WritableStream };
     let output = ''; let error = ''; let failure: Error | undefined;
     const abort = () => { failure = new Error('Content generation cancelled or timed out.'); killChild(child); };
     signal.addEventListener('abort', abort, { once: true });

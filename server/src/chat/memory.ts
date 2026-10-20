@@ -1,16 +1,25 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { freemem, platform, totalmem } from 'node:os';
+import { dirname, join } from 'node:path';
 
 // When available system memory drops below this, spawning another agent child
 // is likely to make macOS kill the new process. On macOS, raw "free" pages are
 // often tiny even when memory pressure is healthy, so include reclaimable page
 // classes instead of gating on Pages free alone.
-const MIN_AVAILABLE_MEMORY_BYTES = 750 * 1024 * 1024; // 750 MB
-const MIN_AVAILABLE_MEMORY_RATIO = 0.05;
+function memoryReserve(capacity = totalmem()): number {
+  const strict = !!process.env.RIVENDELL_RESOURCE_GUARD && process.env.RIVENDELL_RESOURCE_GUARD !== 'off';
+  const floor = strict ? 2 * 1024 ** 3 : 750 * 1024 ** 2;
+  return Math.max(floor, capacity * (strict ? 0.10 : 0.05));
+}
+
+function cgroupReserve(capacity: number): number {
+  const strict = !!process.env.RIVENDELL_RESOURCE_GUARD && process.env.RIVENDELL_RESOURCE_GUARD !== 'off';
+  return Math.min(memoryReserve(), Math.max(128 * 1024 ** 2, capacity * (strict ? 0.10 : 0.05)));
+}
 
 type MemorySource = 'memory_pressure' | 'vm_stat' | 'meminfo' | 'os';
-type MemorySnapshot = { availableBytes: number; source: MemorySource };
+type MemorySnapshot = { availableBytes: number; source: MemorySource; capacityBytes?: number };
 type MemoryGuardResult =
   | { ok: true }
   | { ok: false; availableMb: number; totalMb: number; source: MemorySource };
@@ -22,7 +31,7 @@ export class MemoryPressureSpawnError extends Error {
     super(
       `system memory pressure too high to spawn ${cli} ` +
       `(${result.availableMb} MB available via ${result.source} of ${result.totalMb} MB total). ` +
-      'Close some apps or wait for the load to drop, then try again.',
+      'TARDIS held this launch to keep the machine responsive. Existing work stays running; try again after pressure eases.',
     );
     this.name = 'MemoryPressureSpawnError';
   }
@@ -43,12 +52,14 @@ function checkMemoryGuard(): MemoryGuardResult {
     readMacMemoryPressure() ??
     readLinuxMemAvailable() ??
     { availableBytes: freemem(), source: 'os' as const };
-  const minimumBytes = Math.max(MIN_AVAILABLE_MEMORY_BYTES, totalmem() * MIN_AVAILABLE_MEMORY_RATIO);
+  const hostMinimum = memoryReserve();
+  const minimumBytes = snapshot.capacityBytes === undefined ? hostMinimum
+    : cgroupReserve(snapshot.capacityBytes);
   if (snapshot.availableBytes >= minimumBytes) return { ok: true };
   return {
     ok: false,
     availableMb: Math.round(snapshot.availableBytes / (1024 * 1024)),
-    totalMb: Math.round(totalmem() / (1024 * 1024)),
+    totalMb: Math.round((snapshot.capacityBytes ?? totalmem()) / (1024 * 1024)),
     source: snapshot.source,
   };
 }
@@ -87,18 +98,37 @@ function readProcMemAvailable(): number | null {
 // MemoryMax), the host MemAvailable can look healthy while this process's own
 // cgroup is near OOM. Return the cgroup's available bytes (limit - current)
 // when a finite limit is set, else null. cgroup v2 first, then v1.
-function readCgroupAvailableBytes(): number | null {
-  const v2Max = readCgroupInt('/sys/fs/cgroup/memory.max');
-  if (v2Max !== null) {
-    const v2Cur = readCgroupInt('/sys/fs/cgroup/memory.current') ?? 0;
-    return Math.max(0, v2Max - v2Cur);
+function readCgroupAvailableBytes(): { bytes: number; capacity: number } | null {
+  // Limits live at the process's membership path, and any ancestor may be
+  // tighter. Reading only the mount root silently ignored systemd limits.
+  let membership: string;
+  try { membership = readFileSync('/proc/self/cgroup', 'utf8'); } catch { return null; }
+  let available: { bytes: number; capacity: number } | null = null;
+  for (const line of membership.trim().split('\n')) {
+    const [hierarchy, controllers, ...parts] = line.split(':');
+    const v2 = hierarchy === '0' && controllers === '';
+    if (!v2 && !controllers?.split(',').includes('memory')) continue;
+    const root = v2 ? '/sys/fs/cgroup' : '/sys/fs/cgroup/memory';
+    let dir = join(root, parts.join(':'));
+    for (;;) {
+      const max = readCgroupInt(join(dir, v2 ? 'memory.max' : 'memory.limit_in_bytes'));
+      const used = readCgroupInt(join(dir, v2 ? 'memory.current' : 'memory.usage_in_bytes'));
+      if (max !== null && used !== null) {
+        // Inactive file cache can be reclaimed by the kernel. Counting it as
+        // committed RAM can hold every launch even with healthy host memory.
+        let reclaimable = 0;
+        try {
+          const stats = readFileSync(join(dir, 'memory.stat'), 'utf8');
+          reclaimable = Number(stats.match(v2 ? /^inactive_file (\d+)$/m : /^total_inactive_file (\d+)$/m)?.[1] ?? 0);
+        } catch { /* conservative headroom when cache accounting is absent */ }
+        const bytes = Math.max(0, max - used + Math.min(used, reclaimable));
+        if (available === null || bytes / cgroupReserve(max) < available.bytes / cgroupReserve(available.capacity)) available = { bytes, capacity: max };
+      }
+      if (dir === root || !dir.startsWith(`${root}/`)) break;
+      dir = dirname(dir);
+    }
   }
-  const v1Max = readCgroupInt('/sys/fs/cgroup/memory/memory.limit_in_bytes');
-  if (v1Max !== null) {
-    const v1Cur = readCgroupInt('/sys/fs/cgroup/memory/memory.usage_in_bytes') ?? 0;
-    return Math.max(0, v1Max - v1Cur);
-  }
-  return null;
+  return available;
 }
 
 // Linux equivalent of the macOS readers above. Take the tighter of host
@@ -108,9 +138,13 @@ function readLinuxMemAvailable(): MemorySnapshot | null {
   if (platform() !== 'linux') return null;
   const host = readProcMemAvailable();
   if (host === null) return null;
+  // Host pressure and service headroom are separate checks: a small server
+  // cgroup must not be required to hold 10% of the entire host's RAM free.
+  if (host < memoryReserve()) return { availableBytes: host, source: 'meminfo' };
   const cgroup = readCgroupAvailableBytes();
-  const availableBytes = cgroup === null ? host : Math.min(host, cgroup);
-  return { availableBytes, source: 'meminfo' };
+  return cgroup !== null && cgroup.bytes < host
+    ? { availableBytes: cgroup.bytes, capacityBytes: cgroup.capacity, source: 'meminfo' }
+    : { availableBytes: host, source: 'meminfo' };
 }
 
 function readMacMemoryPressure(): MemorySnapshot | null {

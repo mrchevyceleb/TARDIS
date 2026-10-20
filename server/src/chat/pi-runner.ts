@@ -1,3 +1,4 @@
+import { signalContainedWorker } from '../lib/resourceGuard.ts';
 /** Pi harness for the GLM and Grok lanes.
  *
  *  Why not the claude binary: Claude Code puts thousands of tokens of its own
@@ -223,7 +224,7 @@ export class PiSession {
       '--no-extensions',
       ...piExtensions().flatMap((e) => ['-e', e]),
     ];
-    this.child = spawnLaneWorker(piBinary(), args, { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessByStdio<Writable, Readable, Readable>;
+    this.child = spawnLaneWorker(piBinary(), args, { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }, agentForChatId(chatId)?.name ?? chatId) as ChildProcessByStdio<Writable, Readable, Readable>;
     this.child.stdout.setEncoding('utf8');
     this.child.stdout.on('data', (chunk: string) => this.onStdout(chunk));
     this.child.stderr.setEncoding('utf8');
@@ -853,6 +854,10 @@ export class PiSession {
     // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
     const pid = this.child.pid;
     if (!pid || pid <= 1) return;
+    if (signalContainedWorker(this.child, 'SIGTERM')) {
+      setTimeout(() => signalContainedWorker(this.child, 'SIGKILL'), 3000).unref();
+      return;
+    }
     try { process.kill(-pid, 'SIGTERM'); } catch { try { this.child.kill('SIGTERM'); } catch { /* gone */ } }
     setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } }, 3000).unref();
   }
