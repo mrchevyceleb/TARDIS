@@ -468,6 +468,16 @@ function StreamText({ text, open }: { text: string; open: boolean }) {
 }
 
 // ── tool card (collapsible working card) — §3.5 ───────────────────────────
+function toolTitle(tool: string): string {
+  const name = tool.replace(/^mcp__.*?__/, '');
+  const labels: Record<string, string> = {
+    team_message: 'Message teammate', team_status: 'Check teammates',
+    team_recent: 'Read teammate updates', reply_now: 'Post reply',
+    ToolSearch: 'Find a tool', Bash: 'Run command', Read: 'Read file',
+  };
+  return labels[name] ?? name.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+}
+
 function toolLines(b: Extract<ChatBlock, { kind: 'tool' }>): { html: string; count: number } {
   const lines: string[] = [];
   if (b.args) {
@@ -517,7 +527,7 @@ export function ToolCard({ block }: { block: Extract<ChatBlock, { kind: 'tool' }
     <div className={`tool ${block.running ? 'running' : 'done'}${open ? ' open' : ''}`}>
       <button type="button" className="tool-head" onClick={() => setOpen((o) => !o)}>
         {block.running ? <span className="vortex tstar" aria-hidden="true" /> : <StarSigil className="tstar" />}
-        <span className="tool-title">{block.tool}</span>
+        <span className="tool-title">{toolTitle(block.tool)}</span>
         <span className="tool-meta">{meta}</span>
         <ChevronDown className="tool-chev" />
       </button>
@@ -625,6 +635,7 @@ function PeerMessageBubble({
   const hasPeerAnswer = peerAddressed && proseResponse.length > 0;
   const responseBusy = peerResponseBusy(responseBlocks, responseActive);
   const failed = responseErrors.some((item) => !item.continuing);
+  const unanswered = peerAddressed && block.interrupted && !hasPeerAnswer;
   // Pin affordance for a teammate's own message (channels, card-1327b9, and
   // one-on-one handoffs alike): the row toggles this bubble onto the thread
   // agent's board through the same ThreadPin the assistant prose uses.
@@ -648,11 +659,12 @@ function PeerMessageBubble({
           <span className="bt-peer-name">{block.from}</span>
           <span className="bt-peer-role">{role}</span>
           {!block.tsApprox && timeLabel(block.ts) ? <span className="bt-peer-when">{timeLabel(block.ts)}</span> : null}
-          {hasResponse || responseBusy || failed ? (
+          {hasResponse || responseBusy || failed || unanswered ? (
             <span className={`bt-peer-status${responseBusy ? ' working' : failed ? ' failed' : ''}`} role="status" aria-live="polite">
               <i aria-hidden="true" /> {responseBusy
                 ? 'working'
-                : failed ? (hasPeerAnswer ? 'partial reply saved' : 'turn not finished') : hasPeerAnswer ? 'answer saved'
+                : unanswered ? 'no reply recorded'
+                  : failed ? (hasPeerAnswer ? 'partial reply here' : 'turn not finished') : hasPeerAnswer ? 'reply here'
                   : responseToolCount > 0 ? `work saved · ${responseToolCount} tool${responseToolCount === 1 ? '' : 's'}` : 'work saved'}
             </span>
           ) : null}
@@ -974,8 +986,8 @@ function ToolsCard({ blocks, turnLive = false }: { blocks: ToolBlock[]; turnLive
   const running = blocks.some((b) => b.running);
   const counts = new Map<string, number>();
   for (const b of blocks) counts.set(b.tool, (counts.get(b.tool) ?? 0) + 1);
-  const summary = [...counts.entries()].map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(' · ');
-  const sameName = counts.size === 1 ? blocks[0].tool : null;
+  const summary = [...counts.entries()].map(([n, c]) => (c > 1 ? `${toolTitle(n)} ×${c}` : toolTitle(n))).join(' · ');
+  const sameName = counts.size === 1 ? toolTitle(blocks[0].tool) : null;
   const title = sameName ?? `${blocks.length} tool calls`;
   const oldestRunning = blocks.find((b) => b.running);
   // While the turn is still going, "done" reads as the whole turn: it only means this batch of calls.
@@ -1071,6 +1083,7 @@ function ReactionStrip({
 
 function RoutineResultBubble({
   block,
+  speaker,
   streaming,
   mobile,
   collapseSteps,
@@ -1079,6 +1092,7 @@ function RoutineResultBubble({
   onReply,
 }: {
   block: Extract<ChatBlock, { kind: 'peer' }>;
+  speaker: string;
   streaming: boolean;
   mobile: boolean;
   collapseSteps: boolean;
@@ -1087,7 +1101,6 @@ function RoutineResultBubble({
   onReply?: (target: { id: string; snippet: string; from?: string }) => void;
 }) {
   const text = cleanPeerMessageText(block.text);
-  const speaker = block.from.replace(/^\s*⚙[\uFE0E\uFE0F]?\s*/u, '');
   const asMessage: AssistantBlock[] = [{
     kind: 'text',
     id: `${block.id}-routine`,
@@ -1102,9 +1115,22 @@ function RoutineResultBubble({
       <div className="bt-peer-role" style={{ fontSize: 11, opacity: 0.65, margin: '0 0 4px 2px' }}>
         ⚙ Routine update
       </div>
-      <ElrondGroup blocks={asMessage} speaker={speaker} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply ? () => onReply({ id: block.id, snippet: text.slice(0, 400), from: block.from }) : undefined} />
+      <ElrondGroup blocks={asMessage} speaker={speaker} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply ? () => onReply({ id: block.id, snippet: text.slice(0, 400), from: speaker }) : undefined} />
     </div>
   );
+}
+
+/** Remove only a word-for-word opening already published in this conversation.
+ * Reworded details and every new fact remain visible; saved text is untouched. */
+export function followupText(text: string, published: string): string {
+  let common = 0;
+  while (common < text.length && common < published.length && text[common] === published[common]) common++;
+  const lastSentence = [...text.matchAll(/[.!?](?=\s|$)/g)].findLast((match) => {
+    const end = match.index + 1;
+    return end <= common && (end === published.length || /\s/.test(published[end]));
+  });
+  if (!lastSentence || text.slice(0, lastSentence.index + 1).trim().split(/\s+/).length < 4) return text;
+  return text.slice(lastSentence.index + 1).trimStart();
 }
 
 function ElrondGroup({
@@ -1137,9 +1163,7 @@ function ElrondGroup({
   const [acted, setActed] = useState(false);
   const visible = visibleAssistantBlocks(blocks, collapseSteps).filter((b) => !(b.kind === 'text' && !b.open && isProtocolNoopText(b.text)));
   if (!visible.length) return null;
-  if (publishedBefore && visible.every((b) => b.kind === 'text' && !b.open && b.text.trim() === publishedBefore.trim())) return null;
-  // Only an exact duplicate can be omitted. A fuller or reworded final reply
-  // may contain new facts, so all of its words remain visible immediately.
+  if (publishedBefore && visible.every((b) => b.kind === 'text' && !b.replyNow && !b.open && b.text.trim() === publishedBefore.trim())) return null;
   // Actions belong to this group's settled text, not the thread's global
   // status: a live sibling turn must not strip Copy/Pin/Reply from finished
   // messages, and a settled response keeps them through the next turn's
@@ -1195,7 +1219,8 @@ function ElrondGroup({
           }
           case 'text': {
             const open = showTextCaret(b, streaming);
-            const display = isProtocolNoopText(b.text) ? '' : b.text;
+            const display = isProtocolNoopText(b.text) ? ''
+              : !open && !b.replyNow && publishedBefore ? followupText(b.text, publishedBefore) : b.text;
             if (!open && !display) return null;
             // Legacy cached thought blocks never render: thinking stays hidden.
             if (b.thought) return null;
@@ -1355,10 +1380,12 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   > = [];
   type PeerGroup = Extract<(typeof groups)[number], { type: 'peer' }>;
   const peerGroupsById = new Map<string, PeerGroup>();
+  let admittedPeer: PeerGroup | undefined;
   let publishedOwnerReply: string | undefined;
   let lastDay = '';
   for (const b of blocks) {
-    if (b.kind === 'user' || b.kind === 'peer' || b.kind === 'restart') publishedOwnerReply = undefined;
+    if (b.kind === 'user' || b.kind === 'restart' || (b.kind === 'peer'
+      && (b.startsTurn === true || isAutomationPeer(b.from, b.fromRole, b.text)))) publishedOwnerReply = undefined;
     // Hidden: the reply-case marker, and any legacy thought block. Thinking is
     // private reasoning and never renders; only real reply text does.
     if (b.kind === 'replyask' || (b.kind === 'text' && (b.pending || b.thought || (!b.open && !b.text.trim())))) continue;
@@ -1389,11 +1416,19 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       continue;
     }
     if (b.kind === 'user') {
+      // An admitted owner steer supersedes the peer exchange. If it had no
+      // reply, say so rather than quietly making the question look completed.
+      if (b.startsTurn === false && admittedPeer?.block.replyAudience === 'peer'
+        && publicPeerResponse(admittedPeer.responseBlocks, false).length === 0) {
+        admittedPeer.block = { ...admittedPeer.block, interrupted: true };
+      }
+      admittedPeer = undefined;
       groups.push({ type: 'user', block: b, day });
     } else if (b.kind === 'peer') {
       const peerGroup: PeerGroup = { type: 'peer', block: b, responseBlocks: [], responseErrors: [], day };
       groups.push(peerGroup);
       peerGroupsById.set(b.id, peerGroup);
+      if (b.startsTurn === true) admittedPeer = peerGroup;
     } else if (b.kind === 'text' || b.kind === 'tool' || b.kind === 'doc-link' || b.kind === 'folder-link' || b.kind === 'artifact') {
       const last = groups[groups.length - 1];
       // Reducer-stamped peerId is the authoritative association. Native
@@ -1419,8 +1454,9 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         && b.presentation && priorText.presentation && b.presentation !== priorText.presentation;
       const fromChanged = ((last?.type === 'elrond' ? (last.blocks[0] as { from?: string }).from : undefined) ?? '')
         !== ((b as { from?: string }).from ?? '');
+      const toolBoundary = (b.kind === 'tool') !== (last?.type === 'elrond' && last.blocks.at(-1)?.kind === 'tool');
       const merge = last?.type === 'elrond' && turnId
-        && (last.blocks[0] as { turnId?: string }).turnId === turnId && !phaseChanged && !fromChanged;
+        && (last.blocks[0] as { turnId?: string }).turnId === turnId && !phaseChanged && !fromChanged && !toolBoundary;
       if (merge) {
         last.blocks.push(b);
         last.publishedBefore ??= publishedBefore;
@@ -1537,6 +1573,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         <RoutineResultBubble
           key={g.block.id}
           block={g.block}
+          speaker={replyFrom}
           streaming={streaming}
           mobile={mobile}
           collapseSteps={collapseSteps}
