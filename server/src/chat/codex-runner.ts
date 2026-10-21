@@ -21,7 +21,7 @@ import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { isAgentThread, bareChatId, isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
-import { sessionDirectory } from './sessionPolicy.ts';
+import { sessionDirectory, sessionPolicy } from './sessionPolicy.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
@@ -808,7 +808,9 @@ export class CodexSession {
     } else if (recoverContextThisTurn) {
       this.recoverContextOnNextTurn = false;
     }
-    const personaScope = !this.threadId ? personaPromptFor(this.chatId) : '';
+    // Stable native developer instructions survive automatic compaction.
+    // They belong to the native session, rather than its first user message.
+    const personaScope = [personaPromptFor(this.chatId), CODEX_TURN_PREAMBLE].filter(Boolean).join('\n\n');
     const conversationGuidance = !this.threadId || opts.peerFromRole === 'voice' ? conversationGuidanceForTurn({
       chatId: this.chatId, logKey: this.logKey, historyThroughSeq,
       peerFrom: opts.peerFrom,
@@ -826,7 +828,15 @@ export class CodexSession {
     }
     const stateDelta = await prepareSessionStateDelta(this.chatId);
     const priorities = stateDelta.text;
-    const prompt = `${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, Boolean(this.threadId))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${!this.threadId ? CODEX_TURN_PREAMBLE : ''}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
+    const prompt = [
+      priorities,
+      computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, Boolean(this.threadId)),
+      seed,
+      conversationGuidance,
+      recall,
+      opts.voiceMode ? THREAD_VOICE_STYLE_ADDENDUM : '',
+      text,
+    ].filter(Boolean).join('\n\n');
     this.harnessChars = Math.max(0, prompt.length - text.length);
     this.harnessPhase = this.threadId ? 'turn' : 'startup';
     // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
@@ -1139,6 +1149,8 @@ export class CodexSession {
       // in the prompt makes app-server reject the JSONRPC message and the
       // turn never starts (Quinn's wake, Oct 19).
       prompt: wellFormedText(prompt),
+      persona: wellFormedText(personaScope),
+      roleSkills: sessionPolicy(this.chatId).skills ?? ['codex-fix', 'opus-fix', 'no-crap-allowed'],
       imagePaths,
     })}\n`, (error) => {
       if (error) child.emit('error', error);
