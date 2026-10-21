@@ -42,6 +42,7 @@ import {
   answerRecipient,
   canAnswer,
   errorText,
+  focusTodoAnswer,
   linkLabel,
   linkifyText,
   priorityClass,
@@ -303,7 +304,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
     const now = new Date().toISOString();
     try {
       await write(
-        () => (status === 'done' ? deskApi.completeTodo(todo.id) : deskApi.reopenTodo(todo.id)),
+        () => (status === 'done' ? deskApi.completeTodo(todo.id, todo.from.kind === 'owner' ? 'Completed on the Desk' : undefined) : deskApi.reopenTodo(todo.id)),
         (d) => ({
           ...d,
           todos: d.todos.map((t) => (t.id === todo.id
@@ -523,7 +524,7 @@ function TodoRow({
   ) : todo.answer ? (
     <AnsweredNote answer={todo.answer} phase={todo.answer.delivery === 'failed' ? 'failed' : undefined} to={recipient()} />
   ) : todo.resolution ? (
-    <p className="desk-answered">Resolved by {todo.resolution.by.name}: {todo.resolution.note}</p>
+    <p className="desk-answered"><Check size={13} aria-hidden="true" /> Resolved by {todo.resolution.by.name}: <strong>{todo.resolution.note}</strong></p>
   ) : answerable && canAnswer(todo) ? (
     <AnswerBar todo={todo} answers={answers} />
   ) : null;
@@ -564,16 +565,17 @@ function TodoRow({
     <li data-todo-id={todo.id} className={`desk-todo ${priorityClass(todo.priority)}${isDone ? ' is-done' : ''}${pending ? ` is-answered is-${pending.phase}` : ''}${popping ? ' is-popping' : ''}${lit ? ' is-lit' : ''}${hasDetail ? ' has-detail' : ''}${open ? ' is-open' : ''}`}>
       <button
         type="button"
-        className="desk-check"
+        className={`desk-check${canAnswer(todo) ? ' is-question' : ''}`}
         onClick={(event) => {
           if (isDone) onStatus(todo, 'open');
-          else event.currentTarget.closest('li')?.querySelector<HTMLButtonElement>('.desk-answer-choice')?.focus();
+          else if (canAnswer(todo)) focusTodoAnswer(event.currentTarget);
+          else onStatus(todo, 'done');
         }}
-        disabled={Boolean(pending) || (!isDone && !answerable)}
-        aria-label={pending ? `${todo.title} is answered` : isDone ? `Reopen ${todo.title}` : `Answer ${todo.title}`}
-        title={pending ? 'Answered' : isDone ? 'Reopen' : 'Choose an answer'}
+        disabled={Boolean(pending) || (!isDone && canAnswer(todo) && !answerable)}
+        aria-label={pending ? `${todo.title} is answered` : isDone ? `Reopen ${todo.title}` : canAnswer(todo) ? `Answer ${todo.title}` : `Mark ${todo.title} done`}
+        title={pending ? 'Answered' : isDone ? 'Reopen' : canAnswer(todo) ? 'Choose an answer' : 'Done'}
       >
-        <Check size={14} aria-hidden="true" />
+        {canAnswer(todo) ? <MessageSquare size={14} aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}
       </button>
       <div className="desk-todo-body" onClick={onBodyClick}>
         <div className="desk-todo-title">

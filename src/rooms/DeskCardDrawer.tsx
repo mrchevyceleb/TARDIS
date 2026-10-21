@@ -23,7 +23,7 @@ import {
 } from '../data/desk';
 import { showToast } from '../native/shell';
 import type { Agent } from '../grok/agents';
-import { ActorChip, DiscussButton, errorText, linkLabel, priorityClass, useDeskChatOpen } from './deskParts';
+import { ActorChip, DiscussButton, canAnswer, errorText, linkLabel, priorityClass, useDeskChatOpen } from './deskParts';
 import { columnTitle, ownerKey, ownerOptions, projectOptions, useCardMover } from './DeskBoard';
 
 type Draft = { title: string; description: string; owner: string; project: string; priority: DeskPriority; links: string[] };
@@ -282,7 +282,7 @@ export function DeskCardDrawer({
     const now = new Date().toISOString();
     try {
       await write(
-        () => (done ? deskApi.completeTodo(id) : deskApi.reopenTodo(id)),
+        () => (done ? deskApi.completeTodo(id, 'Completed on the Desk') : deskApi.reopenTodo(id)),
         (d) => ({ ...d, todos: d.todos.map((t) => (t.id === id ? { ...t, status: done ? 'done' : 'open', completedAt: done ? now : undefined } : t)) }),
       );
     } catch (error) {
@@ -411,14 +411,14 @@ export function DeskCardDrawer({
                     <li key={todo.id} className={`${priorityClass(todo.priority)}${todo.status === 'done' ? ' is-done' : ''}`}>
                       <button
                         type="button"
-                        className="desk-check"
+                        className={`desk-check${canAnswer(todo) ? ' is-question' : ''}`}
                         onClick={() => {
-                          if (todo.status === 'open') { onClose(); focusDeskRef({ kind: 'todo', id: todo.id }); }
-                          else void toggleTodo(todo.id, false);
+                          if (canAnswer(todo)) { onClose(); focusDeskRef({ kind: 'todo', id: todo.id }); }
+                          else void toggleTodo(todo.id, todo.status === 'open');
                         }}
-                        aria-label={todo.status === 'open' ? `Answer ${todo.title}` : `Reopen ${todo.title}`}
+                        aria-label={canAnswer(todo) ? `Answer ${todo.title}` : todo.status === 'open' ? `Mark ${todo.title} done` : `Reopen ${todo.title}`}
                       >
-                        <Check size={13} aria-hidden="true" />
+                        {canAnswer(todo) ? <MessageSquare size={13} aria-hidden="true" /> : <Check size={13} aria-hidden="true" />}
                       </button>
                       <span className="desk-mini-todo-text">{todo.title}</span>
                       {due ? <span className={`desk-due is-${due.tone}`}>{due.text}</span> : null}

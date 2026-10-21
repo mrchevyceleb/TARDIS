@@ -753,3 +753,7 @@ span.desk-todo-text { cursor: default; }
 .desk-split:has(> .desk-chat-launcher) { flex-direction: column; }
 .desk-chat-launcher { flex: none; display: flex; justify-content: flex-end; padding: 12px max(16px, env(safe-area-inset-right, 0px)) max(12px, env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--r-line); background: var(--r-bg); }
 .desk-chat-launcher .desk-chat-fab { position: static; }
+
+/* Open questions invite an answer; completed reminders keep the checkmark. */
+.desk-check.is-question:hover, .md-check.is-question:hover:not(:disabled) { color: var(--r-gold); border-color: var(--r-gold); background: color-mix(in srgb, var(--r-gold) 12%, transparent); }
+.desk-answer.is-invited { outline: 2px solid var(--r-gold); outline-offset: 4px; border-radius: 10px; background: color-mix(in srgb, var(--r-gold) 8%, transparent); }

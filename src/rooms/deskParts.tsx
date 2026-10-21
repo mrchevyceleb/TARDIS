@@ -162,7 +162,17 @@ export function answerChoices(todo: Pick<DeskTodo, 'choices'>): string[] {
 /** Every open Needs-you item takes an answer (the server decides who hears it;
  *  the owner's own items may have nobody to tell). */
 export function canAnswer(todo: DeskTodo): boolean {
-  return todo.status === 'open';
+  return todo.status === 'open' && (todo.from.kind !== 'owner' || Boolean(todo.choices?.length));
+}
+
+/** Invite an answer visibly on pointer taps as well as keyboard focus. */
+export function focusTodoAnswer(button: HTMLButtonElement): boolean {
+  const bar = button.closest('li')?.querySelector<HTMLElement>('.desk-answer');
+  if (!bar) return false;
+  bar.classList.add('is-invited');
+  bar.querySelector<HTMLButtonElement>('.desk-answer-choice')?.focus();
+  window.setTimeout(() => bar.classList.remove('is-invited'), 1800);
+  return true;
 }
 
 /** Who hears the answer: the agent who asked, else the card's agent owner, else

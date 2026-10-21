@@ -102,6 +102,13 @@ export function resolveWriteAuthor(input: Record<string, unknown>, fetchSite?: s
   throw new DeskError(400, 'Pass agent (or author): your teammate name, so the Desk can credit you.');
 }
 
+/** Resolving a question requires a real current teammate (or the owner UI). */
+function resolveCloser(input: Record<string, unknown>, site?: string): DeskActor {
+  const by = resolveWriteAuthor(input, site);
+  if (by.kind === 'agent' && !findAgent(by.id)) throw new DeskError(400, 'Pass your current teammate name to resolve this question. Nothing was closed.');
+  return by;
+}
+
 /** Who a card belongs to. Strict: a typo must not invent a ghost owner. */
 function resolveOwner(value: unknown, fallback?: DeskActor): DeskActor | undefined {
   if (value === undefined || value === null || value === '') return fallback;
@@ -218,7 +225,7 @@ deskRouter.post('/todos', route(async (req, res) => {
 
 deskRouter.patch('/todos/:id', route(async (req, res) => {
   const input = body(req);
-  const todo = await updateTodo(param(req, 'id'), input, input.status === 'done' && input.note ? resolveWriteAuthor(input, fetchSite(req)) : undefined);
+  const todo = await updateTodo(param(req, 'id'), input, input.status === 'done' && input.note ? resolveCloser(input, fetchSite(req)) : undefined);
   if (input.priority !== undefined) notifyTodoTouched();
   res.json({ todo });
 }));
@@ -227,7 +234,7 @@ deskRouter.post('/todos/:id/answer', answerTodoHandler());
 
 deskRouter.post('/todos/:id/complete', route(async (req, res) => {
   const input = body(req);
-  res.json({ todo: await setTodoStatus(param(req, 'id'), 'done', { note: input.note, by: input.note ? resolveWriteAuthor(input, fetchSite(req)) : undefined }) });
+  res.json({ todo: await setTodoStatus(param(req, 'id'), 'done', { note: input.note, by: input.note ? resolveCloser(input, fetchSite(req)) : undefined }) });
 }));
 
 deskRouter.post('/todos/:id/reopen', route(async (req, res) => {

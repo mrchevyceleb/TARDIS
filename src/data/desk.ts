@@ -399,7 +399,7 @@ export const deskApi = {
   // itself rides on the browser's same-origin fetch, which curl can't send.
   addTodo: (input: TodoPatch & { title: string }) => apiJson<{ todo: DeskTodo }>('/api/desk/todos', json('POST', { ...input, source: 'ui' })),
   updateTodo: (id: string, patch: TodoPatch) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}`, json('PATCH', patch)),
-  completeTodo: (id: string) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/complete`, json('POST', {})),
+  completeTodo: (id: string, note?: string) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/complete`, json('POST', note ? { note } : {})),
   reopenTodo: (id: string) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/reopen`, json('POST', {})),
   deleteTodo: (id: string) => apiJson<void>(`/api/desk/todos/${enc(id)}`, json('DELETE')),
   answerTodo: (id: string, input: TodoAnswerInput) => apiJson<TodoAnswerResult>(`/api/desk/todos/${enc(id)}/answer`, json('POST', { ...input, source: 'ui' })),
