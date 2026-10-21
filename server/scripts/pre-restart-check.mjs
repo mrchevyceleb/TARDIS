@@ -49,6 +49,12 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { copyTree, stateFilter } from './lib/state-copy.mjs';
 
+// The state the side copy must boot with: required in the copy, checked in
+// the source for desk.json, and always-copied however large, so a required
+// file that outgrows the byte cap is taken whole instead of failing every
+// copy attempt.
+const REQUIRED_STATE = ['desk.json', 'personas/agents.json'];
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
 const LIVE_STATE = process.env.RIVENDELL_STATE_DIR || path.join(homedir(), '.rivendell');
@@ -154,26 +160,30 @@ try {
   for (let attempt = 1; !stateCopy; attempt += 1) {
     try {
       stateCopy = copyTree(LIVE_STATE, stateDir, {
-        filter: stateFilter(LIVE_STATE, { big, always: ['desk.json'] }),
-        required: ['desk.json', 'personas/agents.json'],
+        filter: stateFilter(LIVE_STATE, { big, always: REQUIRED_STATE }),
+        required: REQUIRED_STATE,
         mustExist: ['desk.json'],
+        // Unreadable-but-present files are not writer races: permissions
+        // persist, and a side copy that silently boots without them proves
+        // less than this check claims. fs.cpSync failed here; so do we.
+        failOnUnreadable: true,
       });
     } catch (err) {
       if (err.code === 'ESTATEREQUIRED' && attempt < 3) {
         // A clean slate per retry: mixing snapshots from two attempts could
         // both resurrect vanished files and wedge on file-turned-directory.
-        try { fs.rmSync(stateDir, { recursive: true, force: true }); } catch {}
+        // A reset that itself fails is fatal — the next attempt would copy
+        // into exactly the mixed snapshot this exists to prevent.
+        try {
+          fs.rmSync(stateDir, { recursive: true, force: true });
+        } catch (cleanErr) {
+          fail(`could not reset the side-copy state dir between attempts: ${cleanErr.message}`);
+        }
         step(`state copy attempt ${attempt}: ${err.message}; retrying`);
         continue;
       }
       throw err;
     }
-  }
-  // Unreadable-but-present files are not writer races: permissions and odd
-  // file kinds persist, and a side copy that silently boots without them
-  // proves less than this check claims. fs.cpSync failed here; so do we.
-  if (stateCopy.unreadable.length) {
-    fail(`the state copy skipped unreadable files: ${stateCopy.unreadable.slice(0, 10).join(', ')}${stateCopy.unreadable.length > 10 ? ` (+${stateCopy.unreadable.length - 10} more)` : ''}`);
   }
   const deskCopy = path.join(stateDir, 'desk.json');
   let deskNote = '';
@@ -182,9 +192,11 @@ try {
   } catch {
     deskNote = ', desk.json not copied';
   }
+  const names = (list) => list.slice(0, 5).join(', ') + (list.length > 5 ? ` (+${list.length - 5} more)` : '');
   step(`state copied to ${stateDir} (${mb(stateDir)} MB${deskNote})`
-    + (stateCopy.vanished ? `, ${stateCopy.vanished} path(s) vanished mid-copy (live writers, skipped)` : '')
-    + (stateCopy.unreadable.length ? `, unreadable and skipped: ${stateCopy.unreadable.slice(0, 5).join(', ')}${stateCopy.unreadable.length > 5 ? ` (+${stateCopy.unreadable.length - 5} more)` : ''}` : ''));
+    + (stateCopy.healed ? `, ${stateCopy.healed} path(s) lost to a mid-copy race and healed back in` : '')
+    + (stateCopy.vanished ? `, ${stateCopy.vanished} path(s) vanished mid-copy (live writers, skipped: ${names(stateCopy.vanishedPaths)})` : '')
+    + (stateCopy.skipped.length ? `, skipped special/out-of-tree: ${names(stateCopy.skipped)}` : ''));
 
   // 4. A synthetic probe workspace: the probe engine's cwd is never a live
   //    repo, so no unproven code or unexpected agent behavior can touch real
