@@ -251,6 +251,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // A historical turn ended (replay keeps the boundary; live turns reset via
   // the turnEnd control message). The next block starts a fresh turn.
   if (ev.type === '_turn_boundary') {
+    turnIdRef.legacyReplies = undefined;
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
     turnIdRef.ownerPrompt = false;
@@ -264,6 +265,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // its open/running blocks too — otherwise a dead tool card ticks "working"
   // forever after replay.
   if ((ev.type === 'assistant' && ev._serviceRestart) || ev.type === '_service_restart') {
+    turnIdRef.legacyReplies = undefined;
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
     turnIdRef.ownerPrompt = false;
@@ -473,6 +475,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
 
   // Turn over (result) or killed (interrupted): nothing stays open/running.
   if (ev.type === 'result' || ev.type === '_interrupted') {
+    turnIdRef.legacyReplies = undefined;
     const resultSeq = typeof ev.seq === 'number' ? ev.seq : undefined;
     const finalTurnId = turnIdRef.current || `t${nextId++}`;
     const finalPeerId = turnIdRef.peerId;
@@ -687,7 +690,9 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
         );
         const legacy = turnIdRef.legacyReplies?.[c.tool_use_id];
         if (legacy) {
-          delete turnIdRef.legacyReplies![c.tool_use_id];
+          // Keep it until the turn boundary. React may evaluate this updater
+          // twice from the same input; consuming the entry would lose the
+          // recovered message on that second evaluation.
           // Old reply_now was an owner-only publisher. A successful recorded
           // acknowledgement is evidence of the exact text promised, not an
           // audience guess. Recover only missing publications, without writes
