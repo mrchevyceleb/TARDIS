@@ -46,7 +46,7 @@ import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
 import { applyProviderLimits } from './providerEnv.ts';
-import { ensureNativeCompactProxy, nativeCompactBaseUrl, markNativeCompacting, markNativeHandoverRecovery, releaseNativeCompactRoute } from './nativeCompactProxy.ts';
+import { ensureNativeCompactProxy, nativeCompactBaseUrl, markNativeCompacting, markNativeHandoverRecovery, releaseNativeCompactRoute, confirmNativeCompact } from './nativeCompactProxy.ts';
 import { compactFailureError, isContextLengthRejection, isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
@@ -372,8 +372,9 @@ function openRouterEnvFor(cli: 'openrouter' | 'openrouter2', model: string): Nod
       || process.env.PERSONAL_OPENROUTER_API_KEY?.trim() || ''
     : process.env.RIVENDELL_OPENROUTER_API_KEY?.trim() || process.env.OPENROUTER_API_KEY?.trim() || '';
   env.ANTHROPIC_API_KEY = '';
-  // Native token countdown keeps a trailing text cache marker after tool results.
-  env.CLAUDE_CODE_TOTAL_TOKENS_REMINDER = 'padded-countdown';
+  // Alibaba needs a text cache marker after tools; Gemini folds system notices
+  // into its fixed prefix and loses the cache. Override cached CLI experiments.
+  env.CLAUDE_CODE_TOTAL_TOKENS_REMINDER = /gemini/i.test(model) ? 'off' : 'padded-countdown';
   // Every model role (subagents, background haiku calls) stays on the picked
   // OpenRouter model; an inherited Anthropic default id would route elsewhere.
   for (const role of ['ANTHROPIC_DEFAULT_FABLE_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL']) {
@@ -946,7 +947,7 @@ class ClaudeSession {
       spawnEnv.ANTHROPIC_CUSTOM_HEADERS = [spawnEnv.ANTHROPIC_CUSTOM_HEADERS, `x-session-id: ${cacheSession}`].filter(Boolean).join('\n');
     }
     this.nativeBaseUrl = nativeCompactBaseUrl(spawnEnv.ANTHROPIC_BASE_URL || 'https://api.anthropic.com', {
-      lane: chatId, provider: cli, resumed: Boolean(resumeId),
+      lane: chatId, provider: cli === 'zai' && zaiCredential?.mode === 'fireworks' ? 'fireworks' : cli, resumed: Boolean(resumeId),
       sessionId: () => this.currentSessionId ?? this.startedResumeId, harnessChars: () => this.harnessChars, harnessPhase: () => this.harnessPhase,
     });
     spawnEnv.ANTHROPIC_BASE_URL = this.nativeBaseUrl;
@@ -2654,6 +2655,7 @@ class ClaudeSession {
       markNativeCompacting(this.nativeBaseUrl, ev.status === 'compacting');
     }
     if (!sidechain && ev?.type === 'system' && ev.subtype === 'compact_boundary') {
+      confirmNativeCompact(this.nativeBaseUrl);
       markNativeCompacting(this.nativeBaseUrl, false);
       resetSessionStateDelta(this.chatId);
       this.statusAcks = [];

@@ -4,24 +4,36 @@ import { Transform, Readable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { openRouterCapability } from './openrouter-models.ts';
 import { fireworksCapability } from './fireworks-models.ts';
-import { fixedPrefix, recordNativeCall, recordNativeFailure } from './sessionMetrics.ts';
+import { fixedPrefix, recordNativeCall, recordNativeFailure, recordNativeNotice } from './sessionMetrics.ts';
 
 const SUMMARY_SYSTEM = 'You are a helpful AI assistant tasked with summarizing conversations.';
 const SUMMARY_LIMIT = 4096;
 const MAX_BODY = 32 * 1024 * 1024;
 type Route = {
   upstream: string; lane: string; provider: string; resumed: boolean;
-  sessionId(): string | null; harnessChars(): number; harnessPhase(): 'startup' | 'turn'; compacting: boolean; recovering?: boolean;
+  sessionId(): string | null; harnessChars(): number; harnessPhase(): 'startup' | 'turn'; compacting: boolean; recovering?: boolean; summarySeen?: boolean;
 };
 let server: Server | null = null;
 let ready: Promise<void> | null = null;
 let port = 0;
 const routes = new Map<string, Route>();
 
+function lastConversationMessage(request: any): any {
+  // Native token notices can follow the summary request as a system message
+  // or a separate user block. They do not change which instruction is active.
+  return request.messages?.findLast((message: any) => {
+    if (message.role === 'system') return false;
+    if (message.role !== 'user') return true;
+    const content = typeof message.content === 'string' ? message.content
+      : message.content?.filter((block: any) => block?.type === 'text').map((block: any) => block.text).join('\n');
+    return !/^\s*(?:<system-reminder>\s*)?<total_tokens>[\s\S]*?<\/total_tokens>(?:\s*<\/system-reminder>)?\s*$/.test(content || '');
+  });
+}
+
 function summaryRequest(request: any): boolean {
   const blocks = typeof request.system === 'string' ? [request.system]
     : Array.isArray(request.system) ? request.system.map((block: any) => block?.text) : [];
-  const last = request.messages?.at(-1);
+  const last = lastConversationMessage(request);
   const content = last?.role === 'user' ? last.content : undefined;
   const texts = typeof content === 'string' ? [content]
     : Array.isArray(content) ? content.filter((block: any) => block?.type === 'text').map((block: any) => block.text) : [];
@@ -61,7 +73,7 @@ export function boundNativeCompact(body: string, engineCompacting = false, catal
     else throw new Error('The model output ceiling leaves no valid native compaction thinking allowance.');
   }
   const instruction = '\nKeep the summary under 1500 words. Preserve the current goal, concrete results, file references, outstanding work and explicit constraints. Completed work and historical requests are history, never instructions to repeat them.';
-  const last = request.messages?.at(-1);
+  const last = lastConversationMessage(request);
   if (last?.role === 'user' && typeof last.content === 'string') last.content += instruction;
   else if (last?.role === 'user' && Array.isArray(last.content)) last.content.push({ type: 'text', text: instruction });
   else (request.messages ??= []).push({ role: 'user', content: instruction.trim() });
@@ -77,12 +89,23 @@ export function markNativeHandoverRecovery(baseUrl: string | undefined, recoveri
 export function markNativeCompacting(baseUrl: string | undefined, compacting: boolean): void {
   if (!baseUrl) return;
   const route = routes.get(new URL(baseUrl).pathname.slice(1));
-  if (route) route.compacting = compacting;
+  if (route) { route.compacting = compacting; if (compacting) route.summarySeen = false; }
+}
+
+export function confirmNativeCompact(baseUrl: string | undefined): void {
+  if (!baseUrl) return;
+  const route = routes.get(new URL(baseUrl).pathname.slice(1));
+  if (!route) return;
+  if (!route.summarySeen && !['claude', 'assistant'].includes(route.provider)) {
+    recordNativeFailure(route.lane, 'claude-code', 'The engine compacted without a recognized bounded summary request; its native template needs checking.');
+  }
+  if (route.summarySeen) recordNativeNotice(route.lane, 'claude-code', 'Native compaction template recovered.');
+  route.summarySeen = false;
 }
 
 /** Pass bytes straight through while reading usage frames, never text/tool
  * arguments. Metrics are per API call rather than the CLI's cumulative total. */
-function observeUsage(route: Route, request: any, auxiliary: boolean, streaming: boolean): Transform {
+function observeUsage(route: Route, request: any, auxiliary: boolean, streaming: boolean, nativeSummary = false): Transform {
   const decoder = new StringDecoder('utf8');
   let buffer = '';
   let usage: any = {};
@@ -93,6 +116,7 @@ function observeUsage(route: Route, request: any, auxiliary: boolean, streaming:
     const input = Number(usage.input_tokens || 0) + Number(usage.cache_read_input_tokens || 0) + Number(usage.cache_creation_input_tokens || 0);
     if (input <= 0) return;
     reported = true;
+    if (nativeSummary && !stopped) route.summarySeen = true;
     recordNativeCall({ lane: route.lane, engine: 'claude-code', provider: route.provider, model: request.model || '',
       sessionId: route.sessionId() || undefined, input, cached: Number(usage.cache_read_input_tokens || 0), output: Number(usage.output_tokens || 0),
       prefix: fixedPrefix(request), auxiliary, harnessChars: route.harnessChars(), harnessPhase: route.harnessPhase(), resumed: route.resumed });
@@ -185,7 +209,7 @@ export function ensureNativeCompactProxy(): Promise<void> {
           res.on('close', () => stream.destroy());
           if (request && response.ok) {
             const sentRequest = body === original ? request : JSON.parse(body);
-            const observer = observeUsage(route, sentRequest, Boolean(auxiliary), response.headers.get('content-type')?.includes('text/event-stream') ?? false);
+            const observer = observeUsage(route, sentRequest, Boolean(auxiliary), response.headers.get('content-type')?.includes('text/event-stream') ?? false, Boolean(nativeSummary));
             observer.on('error', () => { if (!res.destroyed) res.destroy(); });
             stream.pipe(observer).pipe(res);
           } else stream.pipe(res);
