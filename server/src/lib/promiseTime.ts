@@ -214,18 +214,25 @@ export function parseDue(due: string, now: Date = new Date()): number | null {
   if (Number.isFinite(absolute)) return absolute;
   const relative = relativeDue(due, now.getTime());
   if (relative !== null) return relative;
-  const match = due.match(/(?<!\d)(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*(am|pm)(?!\d)/i);
-  if (!match || match.index === undefined) return null;
-  const word = due.match(DAY)?.[1];
-  return resolveClock(due, word, match[0], now);
+  const clean = due.replace(/\bnoon\b/gi, '12pm').replace(/\bmidnight\b/gi, '12am');
+  const match = clean.match(/(?<!\d)((?:1[0-2]|0?[1-9])(?::[0-5]\d)?\s*(?:am|pm)|(?:[01]?\d|2[0-3]):[0-5]\d)(?![\d:])/i);
+  if (!match) return null;
+  let clock = match[1];
+  if (!/(?:am|pm)/i.test(clock)) {
+    const [hour, minute] = clock.split(':').map(Number);
+    clock = `${hour % 12 || 12}:${String(minute).padStart(2, '0')}${hour >= 12 ? 'pm' : 'am'}`;
+  }
+  // A stored due is explicit. A clock earlier today stays overdue rather
+  // than silently becoming tomorrow's promise.
+  return resolveClock(clean, clean.match(DAY)?.[1] ?? 'today', clock, now);
 }
 
 
 /** Work gets a near checkpoint, even when the whole job takes longer. */
 export const WORK_CHECKPOINT_MS = 30 * 60_000;
-const FUTURE_INTENT = /\b(?:I|we)(?:'ll| will| shall| plan to| aim to| expect to)\b|\b(?:will|shall|should|ETA|next (?:update|check[ -]?in|checkpoint)|first look|first proof|new time|back to you)\b/i;
+const FUTURE_INTENT = /\b(?:I|we)(?:'ll| will| shall| plan to| aim to| expect to)\b|\b(?:will|shall|should|going to|gonna|aim(?:ing)? to|hop(?:e|ing) to|target(?:ing)?|on track(?: for| to)?|landing|following up|need (?:until|till)|give me (?:until|till)|ETA|next (?:update|check[ -]?in|checkpoint)|first look|first proof|new time|back to you)\b/i;
 const WORK_LEAD = /^\s*(?:(?:please|then)\s+)?(?:(?:full|first|next|final)\s+)?(?:send|ship|finish|fix|deliver|complete|update|report|results?|proof|rewrite|checkpoint|check[ -]?in|delivering|finishing|sending|shipping|expect|back|give me)\b|^\s*(?:ready|done)\s+(?:by|at|in|within)\b|^\s*(?:by|before|due)\s+(?:\d|noon|midnight|tomorrow|tonight|[a-z]+day)\b|^\s*first thing in the morning\b/i;
-const PAST_CONTEXT = /\b(?:was|were|had|already|since|yesterday|previous|last check[ -]?in|last checkpoint)\b|^\s*done\s+(?:today|tonight|yesterday)\s*:|^\s*before today\b/i;
+const PAST_CONTEXT = /\b(?:was|were|had|already|since|yesterday|previous|last check[ -]?in|last checkpoint|sent|posted|completed|finished|shipped|delivered|taken|confirmed|timed out|restarted|started|accepted|deployed|resolved|landed)\b|^\s*done\s+(?:today|tonight|yesterday)\s*:|^\s*before today\b/i;
 const CALENDAR_DURATION = /\b(?:meeting|webinar|maintenance|event|appointment|flight|cache|token|timeout|retention|CI|cron|schedule)\b/i;
 const NUMBER_WORDS = '(?:a couple of|couple(?: of)?|a few|few|several|half(?: an?)?|quarter(?: of an?)?|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|hundred)';
 const RELATIVE_WORK = new RegExp(`\\b(?:in|within|ETA\\s*:?|checkpoint|takes?|give me)\\s+(?:(?:about|the next)\\s+|~\\s*)?(\\d+(?:\\.\\d+)?|${NUMBER_WORDS})\\s*(minutes?|mins?|m|hours?|hrs?|h|days?|weeks?)\\b`, 'gi');
@@ -298,18 +305,20 @@ function promisesWork(clause:string, now:Date):boolean {
     }
   }
   if (CALENDAR_DURATION.test(clause) && !/\b(?:finish|ship|fix|deliver|complete|results?|update|proof|checkpoint)\b/i.test(clause)) return false;
-  return explicitFuture || WORK_LEAD.test(clause);
+  const workPlan = /\b(?:send|ship|finish|fix|deliver|complete|report|results?|proof|rewrite|checkpoint|check[ -]?in)\b[^.!?]{0,100}\b(?:by|before|at|in|within|tomorrow|tonight|next week)\b|\b(?:PR|fix|proof|report|result|update|delivery|deck|release|build)\b[^.!?]{0,60}\b(?:up|due|ready|on track)\b/i.test(clause);
+  return explicitFuture || WORK_LEAD.test(clause) || workPlan;
 }
 
 function workInstants(clause:string, now:Date):number[] {
   const nowMs=now.getTime(), instants:number[]=[];
   for(const match of clause.matchAll(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})\b/gi)) { const at=Date.parse(match[0]);if(Number.isFinite(at))instants.push(at); }
   for(const match of clause.matchAll(RELATIVE_WORK)) instants.push(nowMs+relativeMs(match[1],match[2]));
+  for(const match of clause.matchAll(/\b(?:within|in)\s+(?:(?:the next|the coming|the)\s+)?(hour|day|week)\b/gi)) instants.push(nowMs+relativeMs('one',match[1]));
   for(const match of clause.matchAll(/\b(?:in|within|ETA\s*:?)\s+(\d+)\s*h(?:ours?)?\s*(\d+)\s*m(?:in(?:ute)?s?)?\b/gi)) instants.push(nowMs+Number(match[1])*3_600_000+Number(match[2])*60_000);
   const bare=/^\s*(?:back|back to you)\s+in\s+(\d+)\s*$/i.exec(clause.replace(/[.!]$/,''));
   if(bare) instants.push(nowMs+Number(bare[1])*60_000);
   if(/\bat the top of the hour\b/i.test(clause)) { const w=wallInZone(now);instants.push(nowMs+((60-w.min)*60_000)-(nowMs%60_000)); }
-  const pairs=/\b(?:by|before|due|at|around|ETA|checkpoint|first look|next update|check[ -]?in|ready|finish|deliver|ship)\b\s*(?:(?:by|at|about|around)\s*|:\s*)?(noon|midnight|(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:am|pm)?)(?![\d:]|\.\d)\b/gi;
+  const pairs=/\b(?:by|before|due|at|around|until|till|on track for|ETA|checkpoint|first look|next update|check[ -]?in|ready|finish|deliver|ship)\b\s*(?:(?:by|at|about|around)\s*|:\s*)?(noon|midnight|(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:am|pm)?)(?![\d:]|\.\d)\b/gi;
   for(const match of clause.matchAll(pairs)) {
     if(!/(?:am|pm)|:|noon|midnight/i.test(match[1]) && /^(?:finish|deliver|ship|ready)\b/i.test(match[0]))continue;
     if(!/(?:am|pm)|:|noon|midnight/i.test(match[1]) && !/^(?:(?:ET|EDT|EST)\b|today\b|tomorrow\b|tonight\b|[.,!?]|$)/i.test(clause.slice((match.index??0)+match[0].length).trim())) continue;
@@ -335,7 +344,10 @@ export function workTimingError(text:string,due?:string,dueAt?:number,nowMs=Date
     instants.push(parsed);
   }
   if(typeof dueAt==='number'&&Number.isFinite(dueAt))instants.push(dueAt);
-  const clauses=workClauses(text);
+  // A date naming the event inside an object is not the delivery time:
+  // 'Deliver the Oct 30 launch checklist' may still be worked on now.
+  const namedEventDate = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\s+(?=(?:launch|webinar|meeting|event|conference|workshop|release|appointment)\b)/gi;
+  const clauses=workClauses(text).map(c=>c.replace(namedEventDate, 'scheduled '));
   const nearCheckpoint=clauses.some(c=>/\b(?:next update|first (?:look|proof)|check[ -]?in|checkpoint)\b/i.test(c) && workInstants(c,now).some(t=>t>=nowMs&&t<=nowMs+WORK_CHECKPOINT_MS));
   for(const clause of clauses) {
     if(!promisesWork(clause,now))continue;
