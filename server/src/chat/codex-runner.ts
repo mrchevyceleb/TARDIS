@@ -255,6 +255,9 @@ export class CodexSession {
   readonly cli: CliKind;
   readonly cwd: string;
   readonly chatId: string;
+  // A timed-out receipt is ambiguous, not permission to submit the same input twice.
+  // Keep the guard across worker replacement using the durable submission event.
+  private submittedPeerDeliveries = new Set<string>();
   private listeners = new Set<Listener>();
   private subscriberCount = 0;
   private threadId: string | null = null;
@@ -338,6 +341,10 @@ export class CodexSession {
       }
     } catch (err) {
       console.warn(`[chat codex] event-log restore failed for ${this.logKey}:`, (err as Error).message);
+    }
+    for (const row of loadEventLogForCompactionSync(this.logKey)) {
+      const event = row.ev.type === 'event' ? row.ev.event : null;
+      if (event?.type === 'peer_delivery_submitted' && typeof event.deliveryId === 'string') this.submittedPeerDeliveries.add(event.deliveryId);
     }
     // Native thread history is authoritative. The generation gate in sessions.ts
     // permits one cutover; ordinary process replacement always resumes the id.
@@ -519,9 +526,17 @@ export class CodexSession {
     this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
   }
 
+  private submitPeerDelivery(deliveryId: string): boolean {
+    if (this.submittedPeerDeliveries.has(deliveryId)) return false;
+    this.emit({ type: 'event', event: { type: 'peer_delivery_submitted', deliveryId, ts: Date.now() } });
+    this.submittedPeerDeliveries.add(deliveryId);
+    return true;
+  }
+
   async send(text: string, images?: ChatImage[], opts: CodexSendOptions = {}): Promise<void> {
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
+    if (opts.peerDeliveryId && this.submittedPeerDeliveries.has(opts.peerDeliveryId)) return;
     if (this.busy) {
       const nativeSteerAllowed = opts.peerFrom
         ? opts.allowNativePeerSteer === true
@@ -536,7 +551,7 @@ export class CodexSession {
           // so the caller rejects the steer honestly.
           throw new Error('Codex is still answering. Queue guidance or wait for the current turn.');
         }
-        return;
+        throw new Error('Codex is still answering; this handoff remains queued for its next turn.');
       }
       if (!this.canAcceptNativeHumanSteer()) {
         throw new Error('the active Codex steer channel closed before delivery');
@@ -563,6 +578,7 @@ export class CodexSession {
       const steerState = await prepareSessionStateDelta(this.chatId);
       const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', true, true);
       steerText += `\n\n${computerContext}${steerState.text ? `\n\n${steerState.text}` : ''}`;
+      if (opts.peerDeliveryId && !this.submitPeerDelivery(opts.peerDeliveryId)) return;
       await this.sendNativeSteer(
         steerText,
         opts.peerDeliveryId ?? opts.clientMsgId ?? randomUUID(),
@@ -1089,6 +1105,7 @@ export class CodexSession {
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
     });
 
+    if (opts.peerDeliveryId && !this.submitPeerDelivery(opts.peerDeliveryId)) return;
     child.stdin!.write(`${JSON.stringify({
       type: 'start',
       codexBin: CODEX_BIN,
@@ -1128,7 +1145,7 @@ export class CodexSession {
     // spread below re-stamps the same value, harmlessly).
     const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now(), eng: this.cli, ...(isBackgroundChatId(this.chatId) ? { lane: 'bg' as const } : {}) };
     const persisted = { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) };
-    const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
+    const durableUserEcho = msg.type === 'event' && ['_user_echo', 'peer_delivery_submitted'].includes(msg.event?.type);
     if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) {
       throw new Error('could not durably accept the user message');
     }

@@ -1026,6 +1026,7 @@ export function BotRail(props: BotRailProps) {
             <NativeOpenHelper />
           </div>
         ) : null}
+        <a className="bt-foot-row" href="/api/session-health/report" target="_blank" rel="noreferrer"><Activity size={17} /> Session health</a>
         <button className="bt-foot-row" onClick={() => { setAppearanceOpen(false); setPluginsOpen((o) => !o); }} aria-haspopup="menu" aria-expanded={pluginsOpen}>
           <Plug size={17} /> Plugins
         </button>

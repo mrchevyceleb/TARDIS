@@ -2459,6 +2459,9 @@ export class BananaSession {
       console.warn(`[chat banana] compaction check failed for ${this.logKey}:`, (err as Error).message);
     }
   }
+  // A timed-out receipt is ambiguous, not permission to submit the same input twice.
+  // Keep the guard across worker replacement using the durable submission event.
+  private submittedPeerDeliveries = new Set<string>();
   private listeners = new Set<Listener>();
   private subscriberCount = 0;
   /** banana sessionID, captured on create, persisted for resume. */
@@ -2521,6 +2524,10 @@ export class BananaSession {
       }
     } catch (err) {
       console.warn(`[chat banana] event-log restore failed for ${this.logKey}:`, (err as Error).message);
+    }
+    for (const row of loadEventLogForCompactionSync(this.logKey)) {
+      const event = row.ev.type === 'event' ? row.ev.event : null;
+      if (event?.type === 'peer_delivery_submitted' && typeof event.deliveryId === 'string') this.submittedPeerDeliveries.add(event.deliveryId);
     }
     void compactEventLog(this.logKey, compactedThroughSeq(this.logKey));
     // A different brain spoke last on this thread — mark the handover. Use the
@@ -2736,9 +2743,17 @@ export class BananaSession {
     return extractEmailDraft(latestAssistant);
   }
 
+  private submitPeerDelivery(deliveryId: string): boolean {
+    if (this.submittedPeerDeliveries.has(deliveryId)) return false;
+    this.emit({ type: 'event', event: { type: 'peer_delivery_submitted', deliveryId, ts: Date.now() } });
+    this.submittedPeerDeliveries.add(deliveryId);
+    return true;
+  }
+
   async send(text: string, images?: ChatImage[], opts: BananaSendOptions = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
     if (opts.signal?.aborted) return;
+    if (opts.peerDeliveryId && this.submittedPeerDeliveries.has(opts.peerDeliveryId)) return;
     if (this.busy) {
       // Internal team delivery retries at the natural boundary. Do not leak a
       // transient admission race into the human transcript as a provider error.
@@ -2748,6 +2763,7 @@ export class BananaSession {
           message: 'banana is still answering — wait for the current turn to finish',
         });
       }
+      if (opts.peerFrom) throw new Error('Banana is still answering; this handoff remains queued for its next turn.');
       return;
     }
     this.busy = true;
@@ -3068,6 +3084,7 @@ export class BananaSession {
     const thisTurn = this.turn;
     const promptKind = slashCommand ? 'command' : 'prompt';
     try {
+      if (opts.peerDeliveryId && !this.submitPeerDelivery(opts.peerDeliveryId)) return;
       const res = await client.session.prompt({
         sessionID: this.threadId,
         ...(model ? { model } : {}),
@@ -3985,7 +4002,7 @@ export class BananaSession {
     // runner.ts import each other's worlds; the type-only import stays).
     const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now(), ...(isBackgroundChatId(this.chatId) ? { lane: 'bg' as const } : {}) };
     const persisted = { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) };
-    const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
+    const durableUserEcho = msg.type === 'event' && ['_user_echo', 'peer_delivery_submitted'].includes(msg.event?.type);
     if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) {
       throw new Error('could not durably accept the user message');
     }

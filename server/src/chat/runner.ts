@@ -22,7 +22,7 @@ import { CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKEN_BUDGET, NATIVE_COMPACT_MARG
 import { bareChatId } from './threadKey.ts';
 import { sessionDirectory, nativeClaudeSettings } from './sessionPolicy.ts';
 import { prepareClaudeNativeStorage } from './nativeSessionStorage.ts';
-import { recordNativeSession, recordNativeCompact, recordNativeFailure } from './sessionMetrics.ts';
+import { recordNativeSession, recordNativeCompact, recordNativeFailure, recordNativeNotice } from './sessionMetrics.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { backgroundChatId, isAgentThread, isBackgroundChatId, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
@@ -1146,8 +1146,9 @@ class ClaudeSession {
           return;
         }
         catch (error) {
-          if (generation !== this.nativeStopGeneration || attempt || !this.isAlive() || this.turnStartedAt !== null) throw error;
-          recordNativeFailure(this.chatId, 'claude-code', 'Native compact attempt failed; retrying once in the same session.');
+          if (generation !== this.nativeStopGeneration) throw new Error('Handover stopped. The current session and queued messages are retained.');
+          if (attempt || !this.isAlive() || this.turnStartedAt !== null) throw error;
+          recordNativeNotice(this.chatId, 'claude-code', 'Native compact attempt failed; retrying once in the same session.');
         }
       }
     } finally { this.nativeCompactCommand = false; }
@@ -3150,7 +3151,7 @@ async function getOrCreateSessionUnlocked(opts: {
       const switchKey = `${opts.cli}|${opts.model || ''}|${otherEngineId}`;
       if (heldEngineSwitches.get(chatId) !== switchKey) {
         heldEngineSwitches.set(chatId, switchKey);
-        recordNativeFailure(chatId, requestedCodex ? 'codex' : 'claude-code', 'Cross-engine switch involving Codex is held for Matt’s pending handover choice. Existing sessions and queued work are retained.');
+        recordNativeNotice(chatId, requestedCodex ? 'codex' : 'claude-code', 'Cross-engine switch involving Codex is held for Matt’s pending handover choice. Existing sessions and queued work are retained.');
       }
       const previous = await nativeSessionProvenance(requestedCodex ? 'claude' : 'codex', opts.repoPath, chatId);
       const live = peekThreadSession(opts);
@@ -3318,7 +3319,7 @@ async function getOrCreateSessionUnlocked(opts: {
       if (!source.processExited()) throw error;
       if (sessions.get(sourceKey) === source) sessions.delete(sourceKey);
     }
-    recordNativeFailure(chatId, 'claude-code', 'The old provider is unavailable; the selected provider is running native compaction on the same saved session.');
+    recordNativeNotice(chatId, 'claude-code', 'The old provider is unavailable; the selected provider is running native compaction on the same saved session.');
     const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
     const recovery = await spawnSessionOnce(opts.cli, cwd, chatId, keyOf(opts.cli, cwd, chatId), wanted, resolveClaudeEffort(opts.cli, opts.effort, wanted));
     if (!(recovery instanceof ClaudeSession)) throw error;
