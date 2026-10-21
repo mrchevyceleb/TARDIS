@@ -81,6 +81,36 @@ function collectKnownSecretValues(): string[] {
   return out;
 }
 
+/** Classify an identifier once; never let a regex try every possible prefix
+ * before each TOKEN/KEY word in a long snake-case tool result. */
+function secretIdentifier(name: string): boolean {
+  const upper = name.toUpperCase();
+  for (const match of upper.matchAll(/(?:^|_)(?:KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?=$|_)/g)) {
+    const suffix = upper.length - (match.index! + match[0].length);
+    // Preserve the original single-trailing-underscore non-match.
+    if (suffix === 0 || suffix >= 2) return true;
+  }
+  return false;
+}
+
+/** Scan prefixes independently of values. A non-secret assignment must not
+ * consume a later secret assignment on the same line. */
+function redactNamedValues(text: string, structured: boolean): string {
+  const names = structured ? /\b([A-Z][A-Z0-9_]*)(["']?\s*:\s*)/g : /\b([A-Z][A-Z0-9_]*)(\s*=\s*)/gi;
+  const value = /^(?:`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/;
+  const parts: string[] = [];
+  let cursor = 0;
+  for (let match; (match = names.exec(text));) {
+    if (!secretIdentifier(match[1]) || NON_SECRET_NAME.test(match[0])) continue;
+    const found = value.exec(text.slice(names.lastIndex));
+    if (!found) continue;
+    parts.push(text.slice(cursor, match.index), match[0], preserveFence(found[0]));
+    cursor = names.lastIndex + found[0].length;
+    names.lastIndex = cursor;
+  }
+  return parts.length ? parts.join('') + text.slice(cursor) : text;
+}
+
 /** Redact common credentials in prose, Markdown, env assignments, JSON/YAML,
  * command lines, URLs, and pasted key material. Idempotent by design. */
 export function redactSecrets(text: string): string {
@@ -140,10 +170,8 @@ export function redactSecrets(text: string): string {
       },
     )
     .replace(/\b(Bearer|Basic)(\s+)[A-Za-z0-9._~+/=-]{8,}/gi, (_all, scheme: string, gap: string) => `${scheme}${gap}${REDACTED}`)
-    .replace(
-      /(\b(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)*\s*=\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/gi,
-      (_all, prefix: string, value: string) => (NON_SECRET_NAME.test(prefix) ? _all : `${prefix}${preserveFence(value)}`),
-    )
+    // Scan once; classifying names must not backtrack over snake-case words.
+    .replace(/[\s\S]+/, value => redactNamedValues(value, false))
     // A value under a secret-shaped UPPERCASE name in JSON/YAML/JS object
     // form: quotes and a colon instead of "=". The env rule above needs "=",
     // so `"VERCEL_API_KEY": "abc"` slipped, and the value is masked by its
@@ -154,10 +182,7 @@ export function redactSecrets(text: string): string {
     // header rule: a secret-named YAML scalar can be a multi-word passphrase
     // ("PASSWORD: correct horse battery staple") and token-shape matching
     // would leak most of it.
-    .replace(
-      /(\b(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)*["']?\s*:\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/g,
-      (_all, prefix: string, value: string) => (NON_SECRET_NAME.test(prefix) ? _all : `${prefix}${preserveFence(value)}`),
-    )
+    .replace(/[\s\S]+/, value => redactNamedValues(value, true))
     .replace(
       /(\b(?:password|passcode|passwd|pwd|api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|bearer token|client[_ -]?secret|refresh[_ -]?token|private[_ -]?key|credential|cookie|session token|otp|one[- ]time (?:password|code)|verification code|recovery code)\b[^:\r\n=]{0,80}(?::|=)\s*)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/gi,
       (_all, prefix: string, value: string) => `${prefix}${preserveFence(value)}`,
