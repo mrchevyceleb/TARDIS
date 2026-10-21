@@ -294,6 +294,30 @@ async function start(config) {
   });
   notify('initialized');
 
+  // Remote plugin discovery otherwise races thread context construction. A
+  // cold app-server can render host-only skills, then append the entire skills
+  // and world-state prefix once its installed-plugin catalog finishes loading.
+  // Resolve the native catalog before either start or resume. This preserves
+  // plugin identities, native skill reads, and MCP tools; it does not replace
+  // the catalog with a hand-written prompt or change the user's profile.
+  const catalogDeadline = Date.now() + 15_000;
+  const catalogRequest = (method, params) => request(
+    method, params, Math.max(1, catalogDeadline - Date.now()),
+  );
+  try {
+    await catalogRequest('account/read', { refreshToken: false });
+    await catalogRequest('plugin/installed', { cwds: [config.cwd] });
+    const skills = await catalogRequest('skills/list', { cwds: [config.cwd], forceReload: true });
+    writeEvent({
+      type: 'rivendell.native_catalog_ready',
+      skills: (skills?.data ?? []).reduce((count, entry) => count + (entry.skills?.length ?? 0), 0),
+    });
+  } catch (error) {
+    // Discovery is an optimization, never a new prerequisite for answering.
+    // Keep the native cached catalog and tools on older/offline installations.
+    writeEvent({ type: 'rivendell.native_catalog_degraded', message: error.message });
+  }
+
   let thread;
   if (config.threadId) {
     for (let attempt = 0; attempt < 2; attempt++) {
