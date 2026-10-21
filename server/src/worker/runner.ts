@@ -2,10 +2,10 @@ import { assertClaudeSubscription } from '../chat/subscription-auth.ts';
 import type { ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import type { RivendellJob } from '../data/mock.ts';
-import { WORKER_RUNNER } from '../config.ts';
+import { ELROND_WORKSPACE_PATH, WORKER_RUNNER } from '../config.ts';
 import { emitScribe } from './scribe.ts';
 import { dispatchDryRun, type DispatcherResult } from './dispatchers.ts';
-import { accountEnv } from '../lib/accountResolver.ts';
+import { backgroundAccountEnv } from '../lib/accountResolver.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
 
@@ -29,7 +29,9 @@ export async function runJob(job: RivendellJob): Promise<DispatcherResult> {
 
   await emitScribe({ job_id: job.id, level: 'system', text: `spawning claude worker for ${job.skill}` });
 
-  const env = accountEnv(job.repo || process.cwd());
+  // Queue jobs have no teammate identity; use the home workspace's default
+  // subscription, never the repository's profile or inherited Claude auth.
+  const env = backgroundAccountEnv(ELROND_WORKSPACE_PATH);
   assertClaudeSubscription(env, job.repo || process.cwd());
   return new Promise((resolve, reject) => {
     const child = spawnLaneWorker('claude', ['-p', '--output-format', 'stream-json', '--dangerously-skip-permissions', '--model', CLAUDE_MODEL, '--effort', CLAUDE_EFFORT, prompt], {

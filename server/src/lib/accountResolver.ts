@@ -170,8 +170,13 @@ export function accountForAgent(agentName: string | null | undefined): string | 
  * Keep unrelated integration credentials: these shells also run ordinary tools.
  * Claude auth overrides must not bypass the selected subscription profile. */
 export function backgroundAccountEnv(cwd: string, agentName?: string): NodeJS.ProcessEnv {
-  const pinned = accountForAgent(agentName);
-  const selected = pinned ? accountEnvForAccount(pinned, cwd) : accountEnv(cwd);
+  let selected: NodeJS.ProcessEnv;
+  try {
+    const pinned = accountForAgent(agentName);
+    selected = pinned ? accountEnvForAccount(pinned, cwd) : accountEnv(cwd);
+  } catch (cause) {
+    throw new Error('The account for this background work is not available. Check the TARDIS account settings before retrying.', { cause });
+  }
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'SAMWISE_ACCOUNT']) {
     if (selected[key] === undefined) delete env[key];
