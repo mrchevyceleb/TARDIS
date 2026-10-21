@@ -166,6 +166,23 @@ export function accountForAgent(agentName: string | null | undefined): string | 
   return match;
 }
 
+/** Detached commands use the same subscription selection as their lane.
+ * Keep unrelated integration credentials: these shells also run ordinary tools.
+ * Claude auth overrides must not bypass the selected subscription profile. */
+export function backgroundAccountEnv(cwd: string, agentName?: string): NodeJS.ProcessEnv {
+  const pinned = accountForAgent(agentName);
+  const selected = pinned ? accountEnvForAccount(pinned, cwd) : accountEnv(cwd);
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'SAMWISE_ACCOUNT']) {
+    if (selected[key] === undefined) delete env[key];
+    else env[key] = selected[key];
+  }
+  for (const key of Object.keys(env)) {
+    if (/^(?:ANTHROPIC_(?:API_KEY|AUTH_TOKEN|BASE_URL|CUSTOM_HEADERS)|CLAUDE_CODE_OAUTH_TOKEN(?:_FILE)?|CLAUDE_CODE_USE_(?:BEDROCK|VERTEX|FOUNDRY)|CLAUDECODE)$/i.test(key)) delete env[key];
+  }
+  return env;
+}
+
 // Legacy/custom account-pinned chat lanes carry the chosen profile inside the
 // chatId as a `__acct__<account>` suffix. Here we pull it back out at spawn time so the
 // CLI launches under that exact account regardless of the repo path. The client
