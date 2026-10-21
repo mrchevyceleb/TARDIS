@@ -372,6 +372,8 @@ function openRouterEnvFor(cli: 'openrouter' | 'openrouter2', model: string): Nod
       || process.env.PERSONAL_OPENROUTER_API_KEY?.trim() || ''
     : process.env.RIVENDELL_OPENROUTER_API_KEY?.trim() || process.env.OPENROUTER_API_KEY?.trim() || '';
   env.ANTHROPIC_API_KEY = '';
+  // Native token countdown keeps a trailing text cache marker after tool results.
+  env.CLAUDE_CODE_TOTAL_TOKENS_REMINDER = 'padded-countdown';
   // Every model role (subagents, background haiku calls) stays on the picked
   // OpenRouter model; an inherited Anthropic default id would route elsewhere.
   for (const role of ['ANTHROPIC_DEFAULT_FABLE_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL']) {
