@@ -133,7 +133,7 @@ export function nativeSessionReport(date = day()): { date: string; rows: any[] }
   for (const event of records) {
     if (event.auxiliary || event.event === 'notice' || /Cross-engine switch involving Codex is held/.test(event.reason || '')) continue;
     const key = `${bareChatId(event.lane)}|${event.engine}`;
-    const row = lanes.get(key) ?? { lane: bareChatId(event.lane).replace(/^bot-/, ''), engine: event.engine, calls: 0, input: 0, cached: 0, starts: [], compacts: [], afterCompacts: [], postCompactChecks: [], workingContexts: [], failures: [], recovered: [], models: new Set<string>(), providers: new Set<string>(), replacements: 0, maxHarnessChars: null, startupHarnessChars: null, unclassifiedHarnessChars: null, prefixes: new Set<string>() };
+    const row = lanes.get(key) ?? { lane: bareChatId(event.lane).replace(/^bot-/, ''), engine: event.engine, calls: 0, input: 0, cached: 0, starts: [], compacts: [], afterCompacts: [], postCompactChecks: [], workingContexts: [], failures: [], recovered: [], models: new Set<string>(), providers: new Set<string>(), replacements: 0, minHarnessChars: null, maxHarnessChars: null, startupHarnessChars: null, unclassifiedHarnessChars: null, prefixes: new Set<string>() };
     if (event.model) row.models.add(event.model);
     if (event.provider) row.providers.add(event.provider);
     if (event.event === 'compact' || (event.input > 0 && event.event !== 'after-compact')) {
@@ -156,6 +156,7 @@ export function nativeSessionReport(date = day()): { date: string; rows: any[] }
       const field = event.harnessPhase === 'startup' ? 'startupHarnessChars'
         : event.harnessPhase === 'turn' ? 'maxHarnessChars' : 'unclassifiedHarnessChars';
       row[field] = Math.max(row[field] ?? 0, event.harnessChars);
+      if (event.harnessPhase === 'turn') row.minHarnessChars = Math.min(row.minHarnessChars ?? event.harnessChars, event.harnessChars);
     }
     if (event.prefix) row.prefixes.add(event.prefix);
     lanes.set(key, row);
@@ -199,7 +200,7 @@ export function nativeSessionReportHtml(date = day()): string {
       : `<p>${row.recovered.length ? `${number(row.recovered.length)} earlier ${row.recovered.length === 1 ? 'issue recovered' : 'issues recovered'} automatically. ` : ''}No unresolved delivery or session errors recorded.</p>`;
     const startCheck = oversized.length ? `<p class="attention">${number(oversized.length)} measured ${oversized.length === 1 ? 'start exceeds' : 'starts exceed'} the ${number(ceiling)}-token ceiling.</p>`
       : `<p>${row.starts.length ? `Measured starts fit the ${number(ceiling)}-token ceiling.` : 'A new-session start has not been measured today.'} After compaction, restored working files are shown separately when recorded.</p>`;
-    const overhead = `${row.startupHarnessChars !== null ? `One-time startup text: ${number(row.startupHarnessChars)} characters. ` : ''}${row.maxHarnessChars !== null ? `Recurring turn text: at most ${number(row.maxHarnessChars)} characters beyond the message and its work.` : 'Recurring turn overhead has not been measured separately yet.'}${row.unclassifiedHarnessChars !== null ? ' Earlier measurements combine startup and recurring text and are excluded from that comparison.' : ''}`;
+    const overhead = `${row.startupHarnessChars !== null ? `One-time startup text: ${number(row.startupHarnessChars)} characters. ` : ''}${row.maxHarnessChars !== null ? `Added text per turn: ${number(row.minHarnessChars)} to ${number(row.maxHarnessChars)} characters. Changed priorities, cards and commitments add a short notice once; unchanged status stays out.` : 'Recurring turn overhead has not been measured separately yet.'}${row.unclassifiedHarnessChars !== null ? ' Earlier measurements combine startup and recurring text and are excluded from that comparison.' : ''}`;
     const automatic = row.compacts.filter((compact: { trigger?: string }) => /auto/i.test(compact.trigger || ''));
     const autoStatus = automatic.length
       ? `<p>${number(automatic.length)} automatic ${automatic.length === 1 ? 'compaction' : 'compactions'} recorded. Latest: ${automatic.at(-1).before > 0 ? number(automatic.at(-1).before) + ' tokens' : 'size not recorded'}.</p>`
