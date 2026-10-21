@@ -2527,7 +2527,9 @@ export class BananaSession {
     }
     for (const row of loadEventLogForCompactionSync(this.logKey)) {
       const event = row.ev.type === 'event' ? row.ev.event : null;
-      if (event?.type === 'peer_delivery_submitted' && typeof event.deliveryId === 'string') this.submittedPeerDeliveries.add(event.deliveryId);
+      if (typeof event?.deliveryId !== 'string') continue;
+      if (event.type === 'peer_delivery_submitted') this.submittedPeerDeliveries.add(event.deliveryId);
+      if (event.type === 'peer_delivery_released') this.submittedPeerDeliveries.delete(event.deliveryId);
     }
     void compactEventLog(this.logKey, compactedThroughSeq(this.logKey));
     // A different brain spoke last on this thread — mark the handover. Use the
@@ -2744,16 +2746,29 @@ export class BananaSession {
   }
 
   private submitPeerDelivery(deliveryId: string): boolean {
-    if (this.submittedPeerDeliveries.has(deliveryId)) return false;
+    if (this.submittedPeerDeliveries.has(deliveryId)) {
+      this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, terminal: true, message: 'The earlier submission has no definite receipt. Automatic replay stopped to prevent a duplicate; the original handoff is retained in the failure notice.', ts: Date.now() } });
+      return false;
+    }
     this.emit({ type: 'event', event: { type: 'peer_delivery_submitted', deliveryId, ts: Date.now() } });
     this.submittedPeerDeliveries.add(deliveryId);
     return true;
   }
 
+  private releasePeerDelivery(deliveryId: string, message: string): void {
+    // The durable release must precede making this ID eligible for another write.
+    this.emit({ type: 'event', event: { type: 'peer_delivery_released', deliveryId, message, ts: Date.now() } });
+    this.submittedPeerDeliveries.delete(deliveryId);
+    this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, message, ts: Date.now() } });
+  }
+
   async send(text: string, images?: ChatImage[], opts: BananaSendOptions = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
     if (opts.signal?.aborted) return;
-    if (opts.peerDeliveryId && this.submittedPeerDeliveries.has(opts.peerDeliveryId)) return;
+    if (opts.peerDeliveryId && this.submittedPeerDeliveries.has(opts.peerDeliveryId)) {
+      this.submitPeerDelivery(opts.peerDeliveryId);
+      return;
+    }
     if (this.busy) {
       // Internal team delivery retries at the natural boundary. Do not leak a
       // transient admission race into the human transcript as a provider error.
@@ -3106,6 +3121,9 @@ export class BananaSession {
             );
             return;
           }
+          if (opts.peerDeliveryId && !isPromptTransportFailure(message) && !this.turnHasServerActivity(thisTurn)) {
+            this.releasePeerDelivery(opts.peerDeliveryId, message);
+          }
           this.failTurn(isPromptTransportFailure(message)
             ? `banana ${promptKind} failed: local Banana server connection failed, restarting for the next turn (${message})`
             : `banana ${promptKind} failed: ${message}`);
@@ -3134,6 +3152,10 @@ export class BananaSession {
             `[chat banana] ${promptKind} transport ended after stream activity; keeping turn alive (${message})`,
           );
           return;
+        }
+        const status = Number((err as { status?: number; statusCode?: number })?.status ?? (err as { statusCode?: number })?.statusCode);
+        if (opts.peerDeliveryId && status >= 400 && status < 500 && !this.turnHasServerActivity(thisTurn)) {
+          this.releasePeerDelivery(opts.peerDeliveryId, message);
         }
         this.failTurn(isPromptTransportFailure(message)
           ? `banana ${promptKind} failed: local Banana server connection failed, restarting for the next turn (${message})`
@@ -4002,7 +4024,7 @@ export class BananaSession {
     // runner.ts import each other's worlds; the type-only import stays).
     const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now(), ...(isBackgroundChatId(this.chatId) ? { lane: 'bg' as const } : {}) };
     const persisted = { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) };
-    const durableUserEcho = msg.type === 'event' && ['_user_echo', 'peer_delivery_submitted'].includes(msg.event?.type);
+    const durableUserEcho = msg.type === 'event' && ['_user_echo', 'peer_delivery_submitted', 'peer_delivery_released'].includes(msg.event?.type);
     if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) {
       throw new Error('could not durably accept the user message');
     }

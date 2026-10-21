@@ -56,12 +56,12 @@ function rejectPending(error) {
   pending.clear();
   while (pendingSteers.length) {
     const steer = pendingSteers.shift();
-    writeEvent({ type: 'rivendell.steer.rejected', request_id: steer.requestId, message: error.message });
+    writeEvent({ type: 'rivendell.steer.rejected', request_id: steer.requestId, message: error.message, notAdmitted: true });
   }
 }
 
 function request(method, params, timeoutMs = 120_000) {
-  if (!app?.stdin.writable) return Promise.reject(new Error('Codex app-server is not writable'));
+  if (!app?.stdin.writable) return Promise.reject(Object.assign(new Error('Codex app-server is not writable'), { notAdmitted: true }));
   const id = nextRequestId++;
   return new Promise((resolve, reject) => {
     const timer = timeoutMs == null ? null : setTimeout(() => {
@@ -200,7 +200,7 @@ function handleAppLine(raw) {
     if (!waiter) return;
     pending.delete(message.id);
     if (waiter.timer) clearTimeout(waiter.timer);
-    if (message.error) waiter.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
+    if (message.error) waiter.reject(Object.assign(new Error(message.error.message ?? JSON.stringify(message.error)), { notAdmitted: true }));
     else waiter.resolve(message.result);
     return;
   }
@@ -227,14 +227,15 @@ async function sendSteer(requestId, text) {
       input: [{ type: 'text', text }],
     }, null).then(
       () => ({ ok: true }),
-      (error) => ({ ok: false, message: error.message }),
+      (error) => ({ ok: false, message: error.message, notAdmitted: error.notAdmitted === true }),
     );
     steerAttempts.set(requestId, attempt);
   }
   const outcome = await attempt;
+  if (!outcome.ok && outcome.notAdmitted) steerAttempts.delete(requestId);
   writeEvent(outcome.ok
     ? { type: 'rivendell.steer.accepted', request_id: requestId }
-    : { type: 'rivendell.steer.rejected', request_id: requestId, message: outcome.message });
+    : { type: 'rivendell.steer.rejected', request_id: requestId, message: outcome.message, notAdmitted: outcome.notAdmitted });
 }
 
 async function flushPendingSteers() {

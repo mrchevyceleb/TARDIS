@@ -344,7 +344,9 @@ export class CodexSession {
     }
     for (const row of loadEventLogForCompactionSync(this.logKey)) {
       const event = row.ev.type === 'event' ? row.ev.event : null;
-      if (event?.type === 'peer_delivery_submitted' && typeof event.deliveryId === 'string') this.submittedPeerDeliveries.add(event.deliveryId);
+      if (typeof event?.deliveryId !== 'string') continue;
+      if (event.type === 'peer_delivery_submitted') this.submittedPeerDeliveries.add(event.deliveryId);
+      if (event.type === 'peer_delivery_released') this.submittedPeerDeliveries.delete(event.deliveryId);
     }
     // Native thread history is authoritative. The generation gate in sessions.ts
     // permits one cutover; ordinary process replacement always resumes the id.
@@ -432,7 +434,7 @@ export class CodexSession {
   private sendNativeSteer(text: string, requestId: string): Promise<void> {
     const child = this.currentChild;
     if (!this.canAcceptNativeHumanSteer() || !child?.stdin) {
-      return Promise.reject(new Error('the active Codex turn closed before steering'));
+      return Promise.reject(Object.assign(new Error('the active Codex turn closed before steering'), { notAdmitted: true }));
     }
     const existing = this.nativeSteerWaiters.get(requestId);
     if (existing) {
@@ -527,16 +529,29 @@ export class CodexSession {
   }
 
   private submitPeerDelivery(deliveryId: string): boolean {
-    if (this.submittedPeerDeliveries.has(deliveryId)) return false;
+    if (this.submittedPeerDeliveries.has(deliveryId)) {
+      this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, terminal: true, message: 'The earlier submission has no definite receipt. Automatic replay stopped to prevent a duplicate; the original handoff is retained in the failure notice.', ts: Date.now() } });
+      return false;
+    }
     this.emit({ type: 'event', event: { type: 'peer_delivery_submitted', deliveryId, ts: Date.now() } });
     this.submittedPeerDeliveries.add(deliveryId);
     return true;
   }
 
+  private releasePeerDelivery(deliveryId: string, message: string): void {
+    // The durable release must precede making this ID eligible for another write.
+    this.emit({ type: 'event', event: { type: 'peer_delivery_released', deliveryId, message, ts: Date.now() } });
+    this.submittedPeerDeliveries.delete(deliveryId);
+    this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, message, ts: Date.now() } });
+  }
+
   async send(text: string, images?: ChatImage[], opts: CodexSendOptions = {}): Promise<void> {
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
-    if (opts.peerDeliveryId && this.submittedPeerDeliveries.has(opts.peerDeliveryId)) return;
+    if (opts.peerDeliveryId && this.submittedPeerDeliveries.has(opts.peerDeliveryId)) {
+      this.submitPeerDelivery(opts.peerDeliveryId);
+      return;
+    }
     if (this.busy) {
       const nativeSteerAllowed = opts.peerFrom
         ? opts.allowNativePeerSteer === true
@@ -579,10 +594,14 @@ export class CodexSession {
       const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', true, true);
       steerText += `\n\n${computerContext}${steerState.text ? `\n\n${steerState.text}` : ''}`;
       if (opts.peerDeliveryId && !this.submitPeerDelivery(opts.peerDeliveryId)) return;
-      await this.sendNativeSteer(
-        steerText,
-        opts.peerDeliveryId ?? opts.clientMsgId ?? randomUUID(),
-      );
+      try {
+        await this.sendNativeSteer(steerText, opts.peerDeliveryId ?? opts.clientMsgId ?? randomUUID());
+      } catch (error) {
+        if (opts.peerDeliveryId && (error as Error & { notAdmitted?: boolean }).notAdmitted === true) {
+          this.releasePeerDelivery(opts.peerDeliveryId, (error as Error).message);
+        }
+        throw error;
+      }
       steerState.accept();
       // Echo only after app-server accepted turn/steer. This is the same durable
       // admission contract used for a brand-new turn, without a fake turnStart.
@@ -924,7 +943,7 @@ export class CodexSession {
         if (ev?.type === 'rivendell.steer.rejected' && typeof ev.request_id === 'string') {
           this.settleNativeSteer(
             ev.request_id,
-            new Error(typeof ev.message === 'string' ? ev.message : 'Codex rejected same-turn steering'),
+            Object.assign(new Error(typeof ev.message === 'string' ? ev.message : 'Codex rejected same-turn steering'), { notAdmitted: ev.notAdmitted === true }),
           );
           return;
         }
@@ -1145,7 +1164,7 @@ export class CodexSession {
     // spread below re-stamps the same value, harmlessly).
     const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now(), eng: this.cli, ...(isBackgroundChatId(this.chatId) ? { lane: 'bg' as const } : {}) };
     const persisted = { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) };
-    const durableUserEcho = msg.type === 'event' && ['_user_echo', 'peer_delivery_submitted'].includes(msg.event?.type);
+    const durableUserEcho = msg.type === 'event' && ['_user_echo', 'peer_delivery_submitted', 'peer_delivery_released'].includes(msg.event?.type);
     if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) {
       throw new Error('could not durably accept the user message');
     }

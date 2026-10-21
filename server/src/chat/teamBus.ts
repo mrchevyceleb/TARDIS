@@ -33,7 +33,7 @@ type SessionLike = {
     fn: (event: {
       seq?: number;
       lane?: string;
-      ev?: { type?: string; event?: { type?: string; deliveryId?: string; continuing?: boolean; unread?: boolean; message?: string } };
+      ev?: { type?: string; event?: { type?: string; deliveryId?: string; continuing?: boolean; unread?: boolean; message?: string; terminal?: boolean } };
     }) => void,
     sinceSeq?: number,
     countSubscriber?: boolean,
@@ -47,13 +47,13 @@ type SessionLike = {
 /** A stdin write is not a provider receipt. Keep listening through startup
  * so callers do not retry an admitted wake or accept an empty reply. */
 async function sendWithAdmission(session: SessionLike, deliveryId: string, send: () => Promise<void>): Promise<void> {
-  let finish = (_outcome: 'accepted' | 'rejected' | 'closed' | 'timeout') => {};
-  const admitted = new Promise<'accepted' | 'rejected' | 'closed' | 'timeout'>(resolve => { finish = resolve; });
+  let finish = (_outcome: 'accepted' | 'rejected' | 'terminal' | 'closed' | 'timeout') => {};
+  const admitted = new Promise<'accepted' | 'rejected' | 'terminal' | 'closed' | 'timeout'>(resolve => { finish = resolve; });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const unsubscribe = session.subscribe(event => {
     const inner = event.ev?.type === 'event' ? event.ev.event : undefined;
     if (inner?.type === 'peer_delivery_accepted' && inner.deliveryId === deliveryId) finish('accepted');
-    if (inner?.type === 'peer_delivery_rejected' && inner.deliveryId === deliveryId) finish('rejected');
+    if (inner?.type === 'peer_delivery_rejected' && inner.deliveryId === deliveryId) finish(inner.terminal ? 'terminal' : 'rejected');
     if (event.ev?.type === 'closed') finish('closed');
   }, session.latestSeq(), false);
   try {
@@ -66,7 +66,9 @@ async function sendWithAdmission(session: SessionLike, deliveryId: string, send:
     if (outcome !== 'accepted') {
       if (outcome === 'timeout') recordNativeFailure(session.chatId ?? session.logKey, 'native',
         'A delivery received no provider acceptance within four minutes. It remains pending; it was not marked delivered.');
-      throw new Error(`provider admission ${outcome}; the delivery remains pending`);
+      throw Object.assign(new Error(outcome === 'terminal'
+        ? 'The prior submission is ambiguous. Automatic replay stopped; the handoff is retained in a failure notice for review.'
+        : `provider admission ${outcome}; the delivery remains pending`), { terminalDelivery: outcome === 'terminal' });
     }
   } finally {
     clearTimeout(timer);
@@ -1297,6 +1299,9 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
       }));
     } catch (error) {
       unsubscribe?.();
+      if ((error as Error & { terminalDelivery?: boolean }).terminalDelivery) {
+        await retainFailedQueuedDelivery(session, deliveryId, (error as Error).message);
+      }
       return { delivered: false, to: to.name, hop, queued: waited || undefined, reason: `delivery failed: ${(error as Error).message}` };
     }
 
@@ -1406,6 +1411,26 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
     queued: waited || undefined,
     reason: `${to.name} did not accept the queued delivery within ${Math.round(RECIPIENT_IDLE_WAIT_MS / 60_000)} minutes`,
   };
+}
+
+/** Preserve every frozen batch member before closing an ambiguous delivery.
+ * A missing receipt is neither success nor permission to repeat a native write. */
+async function retainFailedQueuedDelivery(session: SessionLike, deliveryId: string, reason: string): Promise<void> {
+  const members = (await queueStoreOperation(() => queuedDeliveryStore.list()))
+    .filter(item => item.id === deliveryId || item.batchLeadId === deliveryId);
+  for (const member of members) {
+    await appendEventLogDurable(session.logKey, {
+      seq: reserveEventLogSeq(session.logKey),
+      ev: { type: 'event', event: { type: 'peer_delivery_failed', deliveryId: member.id,
+        from: member.fromName, text: member.text, message: reason, ts: Date.now() } } as PersistedEvent['ev'],
+    });
+  }
+  await appendEventLogDurable(session.logKey, {
+    seq: reserveEventLogSeq(session.logKey), ev: { type: 'error', message: reason },
+  });
+  recordNativeFailure(session.chatId ?? session.logKey, 'native', `${reason} Delivery: ${deliveryId}`);
+  const ids = new Set(members.map(member => member.id));
+  await queueStoreOperation(() => queuedDeliveryStore.modify(items => items.filter(item => !ids.has(item.id))));
 }
 
 async function acknowledgeQueuedDelivery(record: QueuedTeamDelivery, session: SessionLike): Promise<void> {
