@@ -78,9 +78,9 @@ function resolveAuthor(value: unknown): DeskActor {
  *  (the team MCP field) or the author alias (what lanes that curl this API
  *  directly tend to send). The owner is credited only when the request is
  *  a same-origin browser fetch from the Desk app: browsers set
- *  Sec-Fetch-Site on every request and a page cannot forge it, while curl
- *  does not send one, so a missing or spoofed identity can never silently
- *  credit the owner (Oct 17 2026: raw curls posted teammate check-ins as
+ *  Sec-Fetch-Site on every request and a page cannot forge it. This is a
+ *  cross-site request guard, not authentication against local tools.
+ *  Callers without the browser signal must name a teammate (Oct 17 2026: raw curls posted teammate check-ins as
  *  the owner, which also woke cards as fake owner comments). Anything else
  *  is refused. */
 export function resolveWriteAuthor(input: Record<string, unknown>, fetchSite?: string): DeskActor {
@@ -152,8 +152,7 @@ function flag(value: unknown): boolean {
   return value === '1' || value === 'true' || value === true;
 }
 
-/** Browsers set Sec-Fetch-Site on every request and pages cannot forge it;
- *  curl and other plain clients do not send it. */
+/** Browser cross-site request hint. It is not a local-client identity proof. */
 function fetchSite(req: Request): string | undefined {
   const value = req.headers['sec-fetch-site'];
   return typeof value === 'string' ? value : undefined;

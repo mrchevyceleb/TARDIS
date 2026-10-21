@@ -2,7 +2,7 @@
 // is working on (the Board). Agents write here through the team MCP; the room
 // polls so their updates land without a refresh.
 
-import { Check, ChevronDown, ChevronRight, ClipboardList, ExternalLink, Inbox, LayoutGrid, MessageSquare, Pencil, Plus, RotateCcw, Trash2, X } from 'lucide-react';
+import { AlertTriangle, Check, ChevronDown, ChevronRight, ClipboardList, ExternalLink, Inbox, LayoutGrid, MessageSquare, Pencil, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, MouseEvent } from 'react';
 import { DesktopAlertsButton } from '../components/NeedsYouBadge';
@@ -505,6 +505,7 @@ function TodoRow({
   answerable: boolean;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmReopen, setConfirmReopen] = useState(false);
   const timer = useRef(0);
   useEffect(() => () => window.clearTimeout(timer.current), []);
   // Just answered here: shown as answered in place until it leaves the list.
@@ -519,7 +520,8 @@ function TodoRow({
       answer={pending}
       phase={pending.phase}
       to={pending.to ?? recipient()}
-      onDismiss={pending.phase === 'undelivered' || pending.phase === 'conflict' ? () => answers.dismiss(todo.id) : undefined}
+      error={pending.error}
+      onDismiss={pending.phase === 'undelivered' || pending.phase === 'conflict' || pending.phase === 'rejected' ? () => answers.dismiss(todo.id) : undefined}
     />
   ) : todo.answer ? (
     <AnsweredNote answer={todo.answer} phase={todo.answer.delivery === 'failed' ? 'failed' : undefined} to={recipient()} />
@@ -567,17 +569,24 @@ function TodoRow({
         type="button"
         className={`desk-check${canAnswer(todo) ? ' is-question' : ''}`}
         onClick={(event) => {
-          if (isDone) onStatus(todo, 'open');
+          if (isDone) {
+            if (!confirmReopen) {
+              setConfirmReopen(true);
+              window.clearTimeout(timer.current);
+              timer.current = window.setTimeout(() => setConfirmReopen(false), 4000);
+            } else { setConfirmReopen(false); onStatus(todo, 'open'); }
+          }
           else if (canAnswer(todo)) focusTodoAnswer(event.currentTarget);
           else onStatus(todo, 'done');
         }}
         disabled={Boolean(pending) || (!isDone && canAnswer(todo) && !answerable)}
-        aria-label={pending ? `${todo.title} is answered` : isDone ? `Reopen ${todo.title}` : canAnswer(todo) ? `Answer ${todo.title}` : `Mark ${todo.title} done`}
-        title={pending ? 'Answered' : isDone ? 'Reopen' : canAnswer(todo) ? 'Choose an answer' : 'Done'}
+        aria-label={pending ? `${todo.title} ${pending.phase === 'rejected' ? 'answer was not saved' : 'is answered'}` : isDone ? `${confirmReopen ? 'Confirm reopen' : 'Reopen'} ${todo.title}` : canAnswer(todo) ? `Answer ${todo.title}` : `Mark ${todo.title} done`}
+        title={pending ? (pending.phase === 'rejected' ? 'Answer was not saved' : 'Answered') : isDone ? (confirmReopen ? 'Tap again to clear the saved answer and reopen' : 'Reopen') : canAnswer(todo) ? 'Choose an answer' : 'Done'}
       >
-        {canAnswer(todo) ? <MessageSquare size={14} aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}
+        {pending?.phase === 'rejected' ? <AlertTriangle size={14} aria-hidden="true" /> : canAnswer(todo) ? <MessageSquare size={14} aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}
       </button>
       <div className="desk-todo-body" onClick={onBodyClick}>
+        {confirmReopen ? <p className="desk-answer-error" role="status">Clear this saved answer and ask again? Tap the check once more.</p> : null}
         <div className="desk-todo-title">
           <span className="priority-dot" title={`${PRIORITY_LABEL[todo.priority]} priority`} />
           {hasDetail ? (

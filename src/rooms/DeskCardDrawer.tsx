@@ -88,6 +88,12 @@ export function DeskCardDrawer({
   const [todoTitle, setTodoTitle] = useState('');
   const [busy, setBusy] = useState<'save' | 'comment' | 'todo' | null>(null);
   const [copied, setCopied] = useState(false);
+  const [reopenId, setReopenId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!reopenId) return;
+    const timer = window.setTimeout(() => setReopenId(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [reopenId]);
   const closeRef = useRef<HTMLButtonElement>(null);
   const threadRef = useRef<HTMLOListElement>(null);
   const dirty = !sameDraft(draft, base);
@@ -414,13 +420,14 @@ export function DeskCardDrawer({
                         className={`desk-check${canAnswer(todo) ? ' is-question' : ''}`}
                         onClick={() => {
                           if (canAnswer(todo)) { onClose(); focusDeskRef({ kind: 'todo', id: todo.id }); }
-                          else void toggleTodo(todo.id, todo.status === 'open');
+                          else if (todo.status === 'done' && reopenId !== todo.id) setReopenId(todo.id);
+                          else { setReopenId(null); void toggleTodo(todo.id, todo.status === 'open'); }
                         }}
-                        aria-label={canAnswer(todo) ? `Answer ${todo.title}` : todo.status === 'open' ? `Mark ${todo.title} done` : `Reopen ${todo.title}`}
+                        aria-label={canAnswer(todo) ? `Answer ${todo.title}` : todo.status === 'open' ? `Mark ${todo.title} done` : `${reopenId === todo.id ? 'Confirm reopen' : 'Reopen'} ${todo.title}`}
                       >
                         {canAnswer(todo) ? <MessageSquare size={13} aria-hidden="true" /> : <Check size={13} aria-hidden="true" />}
                       </button>
-                      <span className="desk-mini-todo-text">{todo.title}</span>
+                      <span className="desk-mini-todo-text">{todo.title}{reopenId === todo.id ? <span className="desk-answer-error" role="status"> Clear the saved answer and ask again? Tap the check once more.</span> : null}</span>
                       {due ? <span className={`desk-due is-${due.tone}`}>{due.text}</span> : null}
                     </li>
                   );
