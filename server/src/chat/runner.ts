@@ -52,11 +52,11 @@ import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { fireworksCapability, fireworksContextWindow, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
 import { openRouterCapability, openRouterContextWindow, openRouterMaxOutput, resolveOpenRouter2Effort, resolveOpenRouter2Model, resolveOpenRouterEffort, resolveOpenRouterModel, requireOpenRouterModel } from './openrouter-models.ts';
-import { plainEnglishWritingBlockFor } from './plain-english-guidance.ts';
+import { plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
 import { AgySession, AGY_READY_TIMEOUT_MS } from './agy-runner.ts';
 import { AGY_LANE_EFFORT, AGY_LANE_MODEL, resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
 import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
-import { PiSession, usePiHarness } from './pi-runner.ts';
+import type { PiSession } from './pi-runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, REPLY_NUDGE_NOTE_TOOL, replyNowText, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
@@ -894,13 +894,14 @@ class ClaudeSession {
     // home thread's chatId — survives rebrains (any engine) and compaction
     // rotations (fresh spawns re-read the file).
     const personaScope = personaPromptFor(chatId);
+    const writingScope = plainEnglishWritingSystemBlockFor({ cli, model: this.spawnModel });
     if (cli === 'assistant') {
       args.push(
         '--append-system-prompt',
-        [ASSISTANT_AGENT_PROMPT, voiceAddendum, personaScope, isAgentThread(chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n'),
+        [ASSISTANT_AGENT_PROMPT, voiceAddendum, personaScope, writingScope, isAgentThread(chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n'),
       );
     } else {
-      const sys = [voiceAddendum, personaScope, isAgentThread(chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n');
+      const sys = [voiceAddendum, personaScope, writingScope, isAgentThread(chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n');
       if (sys) args.push('--append-system-prompt', sys);
     }
 
@@ -1533,22 +1534,11 @@ class ClaudeSession {
     // Matt's Priorities ride every turn (continues and steers too), read fresh.
     const stateDelta = await prepareSessionStateDelta(this.chatId);
     const priorities = stateDelta.text;
-    // Plain-English writing block (card-0d1015): the OpenRouter lane's
-    // Gemini models lose a writing rule buried at the top of this long
-    // message, so it rides at the very END instead. Voice turns keep their
-    // own spoken-style addendum, and automation, peer, reply-nudge and
-    // continuation traffic stays silent or exact (review 1 P0/P1).
-    const plainEnglishWriting = plainEnglishWritingBlockFor({
-      cli: this.cli,
-      model: this.spawnModel,
-      voiceMode: opts.voiceMode,
-      humanTurn: humanTurn && !continuing && !replyNudge,
-    });
     // Well-formed at the transport boundary: a lone surrogate in the prompt
     // is rejected downstream (Anthropic 400 — see reply-quote.ts; codex
     // app-server rejects the JSONRPC outright), so replace unpaired units
     // with U+FFFD here instead of wedging the lane.
-    const stdinText = wellFormedText(`${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}${plainEnglishWriting ? `\n\n${plainEnglishWriting}` : ''}`);
+    const stdinText = wellFormedText(`${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}`);
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];

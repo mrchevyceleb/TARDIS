@@ -42,19 +42,29 @@ function summaryRequest(request: any): boolean {
 export function boundNativeCompact(body: string, engineCompacting = false, catalogLimits?: { maxOutput: number; reasoningMandatory?: boolean }): string {
   const request = JSON.parse(body);
   if (!engineCompacting && !summaryRequest(request)) return body;
-  // Gemini requires reasoning even for its native compact summary. Give that
-  // reasoning a separate, bounded allowance instead of asking it to disable
-  // an obligatory mode or share an unbounded budget with the summary.
-  const cap = Math.min(Number(request.max_tokens) || SUMMARY_LIMIT, SUMMARY_LIMIT, catalogLimits?.maxOutput ?? Infinity);
-  request.thinking = (catalogLimits ? catalogLimits.reasoningMandatory : /gemini/i.test(request.model || ''))
-    ? { type: 'enabled', budget_tokens: Math.min(1024, Math.floor(cap / 2)) } : { type: 'disabled' };
-  delete request.reasoning;
-  delete request.reasoning_effort;
-  if (request.output_config) { request.output_config = { ...request.output_config }; delete request.output_config.effort; }
-  request.max_tokens = cap;
+  // System, tools and thinking are part of the provider's cached prefix.
+  // Changing them here makes a 300k summary pay for the entire history again.
+  // Keep the engine's chosen reasoning mode and allowance, with enough room
+  // for the text summary, inside the model's verified output ceiling.
+  const budget = Math.max(0, Number(request.thinking?.budget_tokens) || 0);
+  const reasoning = request.thinking?.type !== 'disabled' && Boolean(request.thinking)
+    || Boolean(request.reasoning || request.reasoning_effort || request.output_config?.effort || catalogLimits?.reasoningMandatory)
+    || (!catalogLimits && /gemini/i.test(request.model || ''));
+  const wanted = reasoning ? Math.max(Number(request.max_tokens) || SUMMARY_LIMIT, budget + SUMMARY_LIMIT) : SUMMARY_LIMIT;
+  request.max_tokens = Math.min(wanted, catalogLimits?.maxOutput ?? (Number(request.max_tokens) || wanted));
+  // A smaller verified model ceiling can make the native thinking allowance
+  // invalid. Only that case sacrifices the cache mode to keep compaction valid.
+  if (budget > 0 && request.max_tokens - budget < SUMMARY_LIMIT) {
+    const boundedBudget = Math.min(request.max_tokens - 1, Math.max(1024, request.max_tokens - SUMMARY_LIMIT));
+    if (boundedBudget >= 1024) request.thinking = { ...request.thinking, budget_tokens: boundedBudget };
+    else if (!catalogLimits?.reasoningMandatory) request.thinking = { type: 'disabled' };
+    else throw new Error('The model output ceiling leaves no valid native compaction thinking allowance.');
+  }
   const instruction = '\nKeep the summary under 1500 words. Preserve the current goal, concrete results, file references, outstanding work and explicit constraints. Completed work and historical requests are history, never instructions to repeat them.';
-  request.system = typeof request.system === 'string' ? request.system + instruction
-    : [...(request.system || []), { type: 'text', text: instruction }];
+  const last = request.messages?.at(-1);
+  if (last?.role === 'user' && typeof last.content === 'string') last.content += instruction;
+  else if (last?.role === 'user' && Array.isArray(last.content)) last.content.push({ type: 'text', text: instruction });
+  else (request.messages ??= []).push({ role: 'user', content: instruction.trim() });
   return JSON.stringify(request);
 }
 

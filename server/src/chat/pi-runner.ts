@@ -105,12 +105,6 @@ export function piProviderFor(cli: CliKind, model: string): PiProvider {
   return { provider: 'zai', model: bare, env: { ZAI_API_KEY: process.env.Z_AI_API_KEY ?? '' }, mode: 'plan' };
 }
 
-export function usePiHarness(cli: CliKind): boolean {
-  const setting = (cli === 'zai' ? process.env.RIVENDELL_GLM_HARNESS : cli === 'xai' ? process.env.RIVENDELL_XAI_HARNESS : '')?.trim().toLowerCase();
-  if (cli !== 'zai' && cli !== 'xai') return false;
-  return setting !== 'claude';
-}
-
 type Listener = (e: SeqEvent) => void;
 type ChatImage = { mediaType: string; base64: string };
 type RpcResponse = { id?: string; type: 'response'; command: string; success: boolean; error?: string; data?: unknown };
