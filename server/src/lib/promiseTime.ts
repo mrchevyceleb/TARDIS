@@ -224,7 +224,7 @@ export function parseDue(due: string, now: Date = new Date()): number | null {
 /** Work gets a near checkpoint, even when the whole job takes longer. */
 export const WORK_CHECKPOINT_MS = 30 * 60_000;
 const FUTURE_WORK = /\b(?:will|shall|should|expect|ETA|next|new|plan|promise|aim|ready)\b|\b(?:I|we)'ll\b/i;
-const PAST_WORK = /\b(?:took|finished|completed|shipped|delivered|resolved|deployed|merged|fixed|landed|pushed|used to|last check-in|previous checkpoint|was due|were due)\b/i;
+const PAST_WORK = /\b(?:took|finished|completed|shipped|delivered|resolved|deployed|merged|fixed|landed|pushed|started|passed|ran|went|asked|noticed|saw|got|used to|last check-in|previous checkpoint|was due|were due)\b/i;
 const CALENDAR_DURATION = /\b(?:meeting|webinar|maintenance|event|appointment|flight|cache|token|timeout|retention|CI)\b/i;
 const RELATIVE_WORK = /\b(?:in|within|ETA|checkpoint|takes?)\s+(?:(?:about|the next)\s+|~\s*)?(\d+(?:\.\d+)?|an?|one|two|three|four|five|ten|fifteen|thirty|forty-five)\s*(minutes?|mins?|m|hours?|hrs?|h)\b/gi;
 const NUMBERS: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, ten: 10, fifteen: 15, thirty: 30, 'forty-five': 45 };
@@ -260,6 +260,7 @@ export function workTimingError(text: string, due?: string, dueAt?: number, nowM
     }
     const clockPairs = /\b(?:by|before|due|at|ETA|checkpoint|first look|next update|check[ -]?in|ready|finish|deliver|ship)\b\s*(?:(?:by|at|about|around)\s*|:\s*)?(noon|midnight|(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:am|pm)?)(?![\d:])\b/gi;
     for (const match of clause.matchAll(clockPairs)) {
+      if (!/(?:am|pm)|:|noon|midnight/i.test(match[1]) && /^(?:finish|deliver|ship|ready)\b/i.test(match[0])) continue;
       if (!/(?:am|pm)|:|noon|midnight/i.test(match[1]) && !/^(?:(?:ET|EDT|EST)\b|today\b|tomorrow\b|tonight\b|[.,!?]|$)/i.test(clause.slice((match.index ?? 0) + match[0].length).trim())) continue;
       let clock = match[1].trim().toLowerCase().replace(/\s+/g, '');
       if (clock === 'noon') clock = '12pm';
@@ -268,9 +269,8 @@ export function workTimingError(text: string, due?: string, dueAt?: number, nowM
         const [h, m = '0'] = clock.split(':').map(Number);
         if (h > 12 || h === 0) clock = `${h % 12 || 12}:${String(m).padStart(2, '0')}${h >= 12 ? 'pm' : 'am'}`;
         else {
-          const wall = wallInZone(now);
-          const mer = wall.h >= 12 ? 'pm' : 'am';
-          clock = `${h}:${String(m).padStart(2, '0')}${mer}`;
+          const forms = ['am','pm'].map(mer => `${h}:${String(m).padStart(2, '0')}${mer}`);
+          clock = forms.sort((a,b)=>(resolveClock('',undefined,a,now) ?? Infinity)-(resolveClock('',undefined,b,now) ?? Infinity))[0];
         }
       }
       const days = [...clause.matchAll(DAY_ALL)].filter(d => {
