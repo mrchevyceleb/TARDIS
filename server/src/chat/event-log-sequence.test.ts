@@ -55,6 +55,9 @@ test('event redaction finishes on long underscore names and retains masking', ()
   }
   assert.ok(!redactSecrets('plain=value API_KEY=example-value-42').includes('example-value-42'));
   assert.ok(!redactSecrets('plain: value \"API_KEY\": \"example-value-42\"').includes('example-value-42'));
+  for (const name of ['my_secret_key', 'grafana_token', 'token_count', 'MiXeD_ApI_KeY']) {
+    assert.ok(!redactSecrets(`"${name}": "example-value-42"`).includes('example-value-42'));
+  }
   assert.equal(redactSecrets('MAX_TOKEN_=40'), 'MAX_TOKEN_=40');
   assert.equal(redactSecrets('snake_key_=foo bar baz'), 'snake_key_=foo bar baz');
   assert.equal(redactSecrets('TOKEN_COUNT=5'), 'TOKEN_COUNT=5');

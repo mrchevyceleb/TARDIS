@@ -96,7 +96,7 @@ function secretIdentifier(name: string): boolean {
 /** Scan prefixes independently of values. A non-secret assignment must not
  * consume a later secret assignment on the same line. */
 function redactNamedValues(text: string, structured: boolean): string {
-  const names = structured ? /\b([A-Z][A-Z0-9_]*)(["']?\s*:\s*)/g : /\b([A-Z][A-Z0-9_]*)(\s*=\s*)/gi;
+  const names = structured ? /\b([A-Z][A-Z0-9_]*)(["']?\s*:\s*)/gi : /\b([A-Z][A-Z0-9_]*)(\s*=\s*)/gi;
   const value = /^(?:`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/;
   const parts: string[] = [];
   let cursor = 0;
