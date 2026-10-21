@@ -218,7 +218,7 @@ deskRouter.post('/todos', route(async (req, res) => {
 
 deskRouter.patch('/todos/:id', route(async (req, res) => {
   const input = body(req);
-  const todo = await updateTodo(param(req, 'id'), input);
+  const todo = await updateTodo(param(req, 'id'), input, input.status === 'done' && input.note ? resolveWriteAuthor(input, fetchSite(req)) : undefined);
   if (input.priority !== undefined) notifyTodoTouched();
   res.json({ todo });
 }));
@@ -226,7 +226,8 @@ deskRouter.patch('/todos/:id', route(async (req, res) => {
 deskRouter.post('/todos/:id/answer', answerTodoHandler());
 
 deskRouter.post('/todos/:id/complete', route(async (req, res) => {
-  res.json({ todo: await setTodoStatus(param(req, 'id'), 'done') });
+  const input = body(req);
+  res.json({ todo: await setTodoStatus(param(req, 'id'), 'done', { note: input.note, by: input.note ? resolveWriteAuthor(input, fetchSite(req)) : undefined }) });
 }));
 
 deskRouter.post('/todos/:id/reopen', route(async (req, res) => {

@@ -12,6 +12,7 @@ import {
   deskApi,
   discussOnDesk,
   dueLabel,
+  focusDeskRef,
   openAgentThread,
   useDeskWrite,
   type CardPatch,
@@ -411,8 +412,11 @@ export function DeskCardDrawer({
                       <button
                         type="button"
                         className="desk-check"
-                        onClick={() => void toggleTodo(todo.id, todo.status === 'open')}
-                        aria-label={todo.status === 'open' ? `Mark ${todo.title} done` : `Reopen ${todo.title}`}
+                        onClick={() => {
+                          if (todo.status === 'open') { onClose(); focusDeskRef({ kind: 'todo', id: todo.id }); }
+                          else void toggleTodo(todo.id, false);
+                        }}
+                        aria-label={todo.status === 'open' ? `Answer ${todo.title}` : `Reopen ${todo.title}`}
                       >
                         <Check size={13} aria-hidden="true" />
                       </button>

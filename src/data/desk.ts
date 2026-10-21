@@ -29,6 +29,7 @@ export type DeskTodo = {
   /** Up to four one-tap answers the agent offered (Yes / No when absent). */
   choices?: string[];
   answer?: DeskAnswer;
+  resolution?: { note: string; at: string; by: DeskActor };
 };
 
 export type DeskComment = { id: string; author: DeskActor; text: string; at: string };

@@ -83,6 +83,7 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
   // write needs nothing from this component, and closing the pane a beat after a
   // check must still save it.
   const complete = (todo: DeskTodo, index: number) => {
+    if (!todo.answer) { focusDeskRef({ kind: 'todo', id: todo.id }); return; }
     if (leaving.has(todo.id)) return;
     setLeaving((prev) => new Set(prev).add(todo.id));
     refocus.current = { id: todo.id, index };
@@ -159,8 +160,8 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
                         className="md-check"
                         onClick={() => complete(todo, index)}
                         disabled={going || Boolean(pending)}
-                        aria-label={pending ? `${todo.title} is answered` : `Mark ${todo.title} done`}
-                        title={pending ? 'Answered' : 'Done'}
+                        aria-label={pending ? `${todo.title} is answered` : `Answer ${todo.title}`}
+                        title={pending ? 'Answered' : 'Choose an answer'}
                       >
                         <Check size={13} aria-hidden="true" />
                       </button>

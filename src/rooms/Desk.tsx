@@ -522,6 +522,8 @@ function TodoRow({
     />
   ) : todo.answer ? (
     <AnsweredNote answer={todo.answer} phase={todo.answer.delivery === 'failed' ? 'failed' : undefined} to={recipient()} />
+  ) : todo.resolution ? (
+    <p className="desk-answered">Resolved by {todo.resolution.by.name}: {todo.resolution.note}</p>
   ) : answerable && canAnswer(todo) ? (
     <AnswerBar todo={todo} answers={answers} />
   ) : null;
@@ -563,10 +565,13 @@ function TodoRow({
       <button
         type="button"
         className="desk-check"
-        onClick={() => onStatus(todo, isDone ? 'open' : 'done')}
-        disabled={Boolean(pending)}
-        aria-label={pending ? `${todo.title} is answered` : isDone ? `Reopen ${todo.title}` : `Mark ${todo.title} done`}
-        title={pending ? 'Answered' : isDone ? 'Reopen' : 'Done'}
+        onClick={(event) => {
+          if (isDone) onStatus(todo, 'open');
+          else event.currentTarget.closest('li')?.querySelector<HTMLButtonElement>('.desk-answer-choice')?.focus();
+        }}
+        disabled={Boolean(pending) || (!isDone && !answerable)}
+        aria-label={pending ? `${todo.title} is answered` : isDone ? `Reopen ${todo.title}` : `Answer ${todo.title}`}
+        title={pending ? 'Answered' : isDone ? 'Reopen' : 'Choose an answer'}
       >
         <Check size={14} aria-hidden="true" />
       </button>

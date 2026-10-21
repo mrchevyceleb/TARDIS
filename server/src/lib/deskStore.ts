@@ -57,6 +57,7 @@ export type DeskTodo = {
   /** Pick-one options for a one-tap answer (the Desk offers Yes / No when absent). */
   choices?: string[];
   answer?: DeskAnswer;
+  resolution?: { note: string; at: string; by: DeskActor };
 };
 
 export type DeskComment = { id: string; author: DeskActor; text: string; at: string };
@@ -451,6 +452,10 @@ function normalizeTodo(value: unknown, now: string): DeskTodo | null {
   if (choices.length) todo.choices = choices;
   const answer = normalizeAnswer(raw.answer, todo.updatedAt);
   if (answer) todo.answer = answer;
+  const resolution = raw.resolution as Record<string, unknown> | undefined;
+  const by = normalizeActor(resolution?.by);
+  const note = clip(resolution?.note, DESK_LIMITS.answerText);
+  if (by && note) todo.resolution = { by, note, at: isoOr(resolution?.at, todo.updatedAt) };
   return todo;
 }
 
@@ -839,7 +844,7 @@ function placeCard(data: DeskData, card: DeskCard, index: number | undefined): v
 // ---- todos --------------------------------------------------------------------
 
 export type TodoInput = {
-  title?: unknown; detail?: unknown; due?: unknown; priority?: unknown; link?: unknown; cardId?: unknown; status?: unknown; choices?: unknown;
+  title?: unknown; detail?: unknown; due?: unknown; priority?: unknown; link?: unknown; cardId?: unknown; status?: unknown; choices?: unknown; note?: unknown;
 };
 
 export function createTodo(input: TodoInput, from: DeskActor): Promise<DeskTodo> {
@@ -869,9 +874,10 @@ export function createTodo(input: TodoInput, from: DeskActor): Promise<DeskTodo>
   });
 }
 
-export function updateTodo(id: string, input: TodoInput): Promise<DeskTodo> {
+export function updateTodo(id: string, input: TodoInput, by?: DeskActor): Promise<DeskTodo> {
   return mutate((data, now) => {
     const todo = findTodo(data, id);
+    if (input.note !== undefined && input.status !== 'done') throw new DeskError(400, 'A resolution note needs status done. Nothing was changed.');
     if (input.title !== undefined) todo.title = requireTitle(input.title);
     if (input.detail !== undefined) {
       const detail = requireClip(input.detail, DESK_LIMITS.detail, 'detail');
@@ -896,21 +902,29 @@ export function updateTodo(id: string, input: TodoInput): Promise<DeskTodo> {
     }
     if (input.status !== undefined) {
       if (input.status !== 'open' && input.status !== 'done') throw new DeskError(400, 'status must be open or done');
-      applyTodoStatus(todo, input.status, now);
+      applyTodoStatus(todo, input.status, now, { note: input.note, by });
     }
     todo.updatedAt = now;
     return todo;
   });
 }
 
-function applyTodoStatus(todo: DeskTodo, status: 'open' | 'done', now: string): void {
+function applyTodoStatus(todo: DeskTodo, status: 'open' | 'done', now: string, resolution?: { note?: unknown; by?: DeskActor }): void {
   if (status === todo.status) return;
+  // Every completion path shares this check, including PATCH and older clients.
+  // An answerless close must explain who resolved this exact question and why.
+  if (status === 'done' && !todo.answer) {
+    const note = requireClip(resolution?.note, DESK_LIMITS.answerText, 'note');
+    if (!note || !resolution?.by) throw new DeskError(409, 'This question needs an answer. Choose an answer on the Desk, or pass your name and a note explaining how this exact item was resolved. Nothing was closed.');
+    todo.resolution = { note, by: resolution.by, at: now };
+  }
   todo.status = status;
   if (status === 'done') todo.completedAt = now;
   else {
     delete todo.completedAt;
     // Reopened means "ask me again": a stale answer would block the next one.
     delete todo.answer;
+    delete todo.resolution;
   }
 }
 
@@ -985,10 +999,10 @@ export function setAnswerDelivery(id: string, delivery: 'sent' | 'failed', claim
   });
 }
 
-export function setTodoStatus(id: string, status: 'open' | 'done'): Promise<DeskTodo> {
+export function setTodoStatus(id: string, status: 'open' | 'done', resolution?: { note?: unknown; by?: DeskActor }): Promise<DeskTodo> {
   return mutate((data, now) => {
     const todo = findTodo(data, id);
-    applyTodoStatus(todo, status, now);
+    applyTodoStatus(todo, status, now, resolution);
     todo.updatedAt = now;
     return todo;
   });
