@@ -630,6 +630,7 @@ class ClaudeSession {
   private nativeBaseUrl?: string;
   private nativeStorageAccept: (id: string) => void = () => {};
   private harnessChars = 0;
+  private harnessPhase: 'startup' | 'turn' = 'startup';
   private statusAcks: Array<() => void> = [];
   private pendingPeerAccepts = new Set<string>();
   private pendingPeerSteerAccepts = new Set<string>();
@@ -943,7 +944,7 @@ class ClaudeSession {
     }
     this.nativeBaseUrl = nativeCompactBaseUrl(spawnEnv.ANTHROPIC_BASE_URL || 'https://api.anthropic.com', {
       lane: chatId, provider: cli, resumed: Boolean(resumeId),
-      sessionId: () => this.currentSessionId ?? this.startedResumeId, harnessChars: () => this.harnessChars,
+      sessionId: () => this.currentSessionId ?? this.startedResumeId, harnessChars: () => this.harnessChars, harnessPhase: () => this.harnessPhase,
     });
     spawnEnv.ANTHROPIC_BASE_URL = this.nativeBaseUrl;
     // Provider lanes rotate at a budget sized to the model's own window.
@@ -1561,6 +1562,7 @@ class ClaudeSession {
     }
     if (stdinText) content.push({ type: 'text', text: stdinText });
     this.harnessChars = Math.max(0, stdinText.length - commandText.length);
+    this.harnessPhase = wantSeed ? 'startup' : 'turn';
     const payload = JSON.stringify({
       type: 'user',
       message: {

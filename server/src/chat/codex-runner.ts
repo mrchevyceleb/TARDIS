@@ -293,6 +293,7 @@ export class CodexSession {
   /** True after app-server announces turn/started and until turn/completed. */
   private nativeSteerReady = false;
   private harnessChars = 0;
+  private harnessPhase: 'startup' | 'turn' = 'startup';
   private resumedNative = false;
   private lastNativeInput = 0;
   private nativeSteerWaiters = new Map<string, NativeSteerWaiter>();
@@ -827,6 +828,7 @@ export class CodexSession {
     const priorities = stateDelta.text;
     const prompt = `${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, Boolean(this.threadId))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${!this.threadId ? CODEX_TURN_PREAMBLE : ''}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
     this.harnessChars = Math.max(0, prompt.length - text.length);
+    this.harnessPhase = this.threadId ? 'turn' : 'startup';
     // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
     // -c overrides rather than written into ~/.codex/config.toml so this stays
     // scoped to TARDIS.
@@ -1229,7 +1231,7 @@ export class CodexSession {
       const input = Number(u.input_tokens || 0);
       if (input > 0) this.lastNativeInput = input;
       recordNativeCall({ lane: this.chatId, engine: 'codex', model: this.turnModel || '', sessionId: this.threadId || undefined,
-        input, cached: Number(u.cached_input_tokens || 0), output: Number(u.output_tokens || 0), harnessChars: this.harnessChars, resumed: this.resumedNative });
+        input, cached: Number(u.cached_input_tokens || 0), output: Number(u.output_tokens || 0), harnessChars: this.harnessChars, harnessPhase: this.harnessPhase, resumed: this.resumedNative });
       this.resumedNative = true;
       recordContextUsage(this.logKey, 'codex', ev.usage);
       return;

@@ -11,7 +11,7 @@ const SUMMARY_LIMIT = 4096;
 const MAX_BODY = 32 * 1024 * 1024;
 type Route = {
   upstream: string; lane: string; provider: string; resumed: boolean;
-  sessionId(): string | null; harnessChars(): number; compacting: boolean; recovering?: boolean;
+  sessionId(): string | null; harnessChars(): number; harnessPhase(): 'startup' | 'turn'; compacting: boolean; recovering?: boolean;
 };
 let server: Server | null = null;
 let ready: Promise<void> | null = null;
@@ -85,7 +85,7 @@ function observeUsage(route: Route, request: any, auxiliary: boolean, streaming:
     reported = true;
     recordNativeCall({ lane: route.lane, engine: 'claude-code', provider: route.provider, model: request.model || '',
       sessionId: route.sessionId() || undefined, input, cached: Number(usage.cache_read_input_tokens || 0), output: Number(usage.output_tokens || 0),
-      prefix: fixedPrefix(request), auxiliary, harnessChars: route.harnessChars(), resumed: route.resumed });
+      prefix: fixedPrefix(request), auxiliary, harnessChars: route.harnessChars(), harnessPhase: route.harnessPhase(), resumed: route.resumed });
     if (!auxiliary) route.resumed = true;
     if (auxiliary && stopped) recordNativeFailure(route.lane, 'claude-code', 'Native compaction hit its output limit; engine recovery is required before this lane is proven.');
   };
