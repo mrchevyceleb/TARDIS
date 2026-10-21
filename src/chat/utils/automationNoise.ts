@@ -147,6 +147,12 @@ export function filterAutomationNoise(blocks: ChatBlock[]): ChatBlock[] {
       const k = blocks[j].kind;
       if (k === 'user' || k === 'peer' || k === 'switch' || k === 'compact' || k === 'restart' || k === 'terminal-error' || k === 'background') break;
       if (blockLane(blocks[j]) !== triggerLane) { passthrough.push(blocks[j]); j += 1; continue; }
+      // An acknowledged publication is already a message for the owner.
+      // Routine silence, a later final answer, and an in-flight tool must
+      // never filter or replace it.
+      if (blocks[j].kind === 'text' && (blocks[j] as Extract<ChatBlock, { kind: 'text' }>).replyNow) {
+        passthrough.push(blocks[j]); j += 1; continue;
+      }
       turn.push(blocks[j]);
       j += 1;
     }
@@ -172,23 +178,25 @@ export function filterAutomationNoise(blocks: ChatBlock[]): ChatBlock[] {
       // Never bury a failure reported mid-turn behind a quiet sign-off.
       deliverable = [...nonEmpty].slice(0, -1).reverse().find((t) => hasFailureSignal(t.text));
     }
-    if (deliverable && (!inFlight || hasFailureSignal(deliverable.text))) {
+    const settledDeliverable = deliverable && (!inFlight || hasFailureSignal(deliverable.text)) ? deliverable : undefined;
+    const passthroughIds = new Set(passthrough.map((block) => block.id));
+    for (const visible of blocks.slice(i + 1, j)) {
+      if (passthroughIds.has(visible.id)) { out.push(visible); continue; }
+      if (visible.id !== settledDeliverable?.id) continue;
       // Preserve provenance as a peer boundary instead of returning bare text.
       // Otherwise ChatThread merges this later routine result into the previous
       // human turn and promotes it over that turn's actual answer.
       out.push({
         kind: 'peer',
-        id: deliverable.id,
+        id: settledDeliverable.id,
         from: b.from,
         fromRole: 'automation-result',
-        text: deliverable.text,
-        ts: deliverable.ts,
-        ...(deliverable.tsApprox ? { tsApprox: true } : {}),
+        text: settledDeliverable.text,
+        ts: settledDeliverable.ts,
+        ...(settledDeliverable.tsApprox ? { tsApprox: true } : {}),
       });
     }
-    // Opposite-lane blocks collected during the gather render in their
-    // original relative order, untouched by the automation filtering.
-    out.push(...passthrough);
+    // Publications and opposite-lane messages keep their original position.
     i = j;
   }
   return out;

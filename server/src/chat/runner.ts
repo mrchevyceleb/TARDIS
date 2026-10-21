@@ -612,8 +612,18 @@ const PAUSED_FOR_MESSAGE_NOTE = '<rivendell-steer>Your previous turn was paused 
  *  message in a thinking summary and goes straight to tools unless the reply has a tool to ride. */
 const PAUSED_FOR_MESSAGE_NOTE_TOOL = PAUSED_FOR_MESSAGE_NOTE.replace(
   'Answer it first.',
-  'Answer it first: if you will use tools before you finish, call reply_now with your answer as your first action.',
+  'Answer it first: if you will use tools before you finish, call reply_now with audience: "owner" and your answer as your first action.',
 );
+const PAUSED_FOR_PEER_NOTE = PAUSED_FOR_MESSAGE_NOTE.replace(
+  'Answer it first.',
+  'Use team_message for a teammate result unless this message explicitly says your final answer is returned automatically. Inline text is not otherwise delivered to teammates. Use reply_now with audience: "owner" for anything separately meant for the owner, then continue the work.',
+);
+
+export function pausedMessageNote(opts: { peerFrom?: string; peerFromRole?: string }, replyTool: boolean): string {
+  const ownerMessage = isPersonMessage(opts) || opts.peerFromRole === 'voice';
+  if (!ownerMessage) return PAUSED_FOR_PEER_NOTE;
+  return replyTool ? PAUSED_FOR_MESSAGE_NOTE_TOOL : PAUSED_FOR_MESSAGE_NOTE;
+}
 class ClaudeSession {
   readonly key: string;
   /** Durable-history key. Equals `key` for ordinary lanes; for an agent home
@@ -778,6 +788,10 @@ class ClaudeSession {
   private warmupPromise: Promise<void> | null = null;
   private finishWarmupWait: ((error?: Error) => void) | null = null;
   private warmupTimer: NodeJS.Timeout | null = null;
+  private mcpRecoveryTimer?: NodeJS.Timeout;
+  private mcpRecoveryRequest?: { id: string; kind: 'status' | 'reconnect'; timer: NodeJS.Timeout };
+  private mcpRecoveryAttempts = 0;
+  private mcpRecoveryEnabled = false;
   private selectionPersisted = false;
   private initSeen = false;
   private exitedBeforeInit = false;
@@ -1004,6 +1018,7 @@ class ClaudeSession {
     this.child.stderr.on('close', () => this.flushStderr());
 
     this.child.on('exit', (code, signal) => {
+      this.clearMcpRecovery();
       releaseNativeCompactRoute(this.nativeBaseUrl);
       this.flushStderr();
       if (this.warmupPromise) {
@@ -1153,6 +1168,66 @@ class ClaudeSession {
       this.warmupRequestId = null;
       this.warmupPromise = null;
     }
+  }
+
+  private clearMcpRecovery(): void {
+    if (this.mcpRecoveryTimer) clearTimeout(this.mcpRecoveryTimer);
+    if (this.mcpRecoveryRequest) clearTimeout(this.mcpRecoveryRequest.timer);
+    this.mcpRecoveryTimer = undefined;
+    this.mcpRecoveryRequest = undefined;
+  }
+
+  private scheduleMcpCheck(delay = 30_000): void {
+    if (OPTIONAL_MCP_DISABLED || !this.mcpRecoveryEnabled || this.disposed || this.child.exitCode !== null
+      || this.mcpRecoveryTimer || this.mcpRecoveryRequest) return;
+    this.mcpRecoveryTimer = setTimeout(() => {
+      this.mcpRecoveryTimer = undefined;
+      this.requestMcpRecovery('status');
+    }, delay);
+    this.mcpRecoveryTimer.unref();
+  }
+
+  private requestMcpRecovery(kind: 'status' | 'reconnect'): void {
+    if (this.disposed || this.child.exitCode !== null || this.mcpRecoveryRequest) return;
+    const id = `mcp-recovery-${randomUUID()}`;
+    const retryDelay = () => Math.min(15_000 * 2 ** Math.min(this.mcpRecoveryAttempts, 3), 120_000);
+    const timer = setTimeout(() => {
+      if (this.mcpRecoveryRequest?.id !== id) return;
+      this.mcpRecoveryRequest = undefined;
+      this.scheduleMcpCheck(retryDelay());
+    }, kind === 'reconnect' ? 120_000 : 15_000);
+    timer.unref();
+    this.mcpRecoveryRequest = { id, kind, timer };
+    if (kind === 'reconnect') this.mcpRecoveryAttempts++;
+    try {
+      this.child.stdin.write(JSON.stringify({ type: 'control_request', request_id: id,
+        request: kind === 'status' ? { subtype: 'mcp_status' }
+          : { subtype: 'mcp_reconnect', serverName: 'assistant-mcp' } }) + '\n');
+    } catch {
+      clearTimeout(timer);
+      this.mcpRecoveryRequest = undefined;
+      this.scheduleMcpCheck(retryDelay());
+    }
+  }
+
+  /** Native control messages refresh tools inside the same process and saved
+   * session. They never send a model prompt, interrupt a turn or replay work. */
+  private handleMcpRecovery(ev: any): boolean {
+    const request = this.mcpRecoveryRequest;
+    if (ev?.type !== 'control_response' || !request || ev.response?.request_id !== request.id) return false;
+    clearTimeout(request.timer);
+    this.mcpRecoveryRequest = undefined;
+    const servers = ev.response?.response?.mcpServers;
+    const status = Array.isArray(servers) ? servers.find((item: any) => item?.name === 'assistant-mcp')?.status : undefined;
+    if (request.kind === 'status' && ev.response?.subtype === 'success' && status === 'connected') {
+      this.mcpRecoveryAttempts = 0;
+      this.scheduleMcpCheck(60_000);
+    } else if (request.kind === 'status' && ['failed', 'disconnected', 'needs-auth'].includes(status)) {
+      this.requestMcpRecovery('reconnect');
+    } else {
+      this.scheduleMcpCheck(Math.min(15_000 * 2 ** Math.min(this.mcpRecoveryAttempts, 3), 120_000));
+    }
+    return true;
   }
 
   isPrewarming(): boolean {
@@ -1353,7 +1428,7 @@ class ClaudeSession {
     const providerCut = startsNewTurn && !continuing && !replyNudge ? providerCutGuidance(fallbackHistory) : '';
     // The turn before this one was ended at a tool boundary to make room for
     // this message. Say so, so the model answers first and then carries on.
-    const pausedNote = startsNewTurn && !continuing && !replyNudge && !automationRequest && this.pausedForMessage ? (agentForChatId(this.chatId) ? PAUSED_FOR_MESSAGE_NOTE_TOOL : PAUSED_FOR_MESSAGE_NOTE) : '';
+    const pausedNote = startsNewTurn && !continuing && !replyNudge && !automationRequest && this.pausedForMessage ? pausedMessageNote(opts, !!agentForChatId(this.chatId)) : '';
     if (sendAborted()) {
       abandonUnsentTurn();
       return;
@@ -1477,6 +1552,7 @@ class ClaudeSession {
         type: 'event',
         event: {
           type: 'peer_message',
+          startsTurn: startsNewTurn,
           from: opts.peerFrom,
           fromRole: opts.peerFromRole ?? '',
           text: opts.peerText !== undefined ? opts.peerText : text,
@@ -1496,7 +1572,7 @@ class ClaudeSession {
       this.emit({
         type: 'event',
         event: {
-          type: '_user_echo',
+          type: '_user_echo', startsTurn: startsNewTurn,
           text: opts.echoText ?? text,
           imageCount: images?.length ?? 0,
           attachments,
@@ -1645,6 +1721,7 @@ class ClaudeSession {
       this.endBackgroundWork(ended);
     }
     this.disposed = true;
+    this.clearMcpRecovery();
     const idleMs = Date.now() - this.lastActivityAtMs;
     console.warn(
       `[chat ${this.cli}] shutdown key=${this.key} pid=${this.child.pid ?? '-'} initSeen=${this.initSeen} listeners=${this.subscriberCount} idleMs=${idleMs} reason=${reason}`,
@@ -2108,9 +2185,9 @@ class ClaudeSession {
   /** reply_now calls waiting to be posted right after the event that carried them. */
   private replyNowQueue: Array<{ id: string; text: string; model?: string }> = [];
 
-  /** Note a reply_now call. A routine or job wake never speaks into the thread. */
+  /** An explicit owner publication is visible regardless of what woke the turn. */
   private queueReplyNow(toolId: string, text: string, model?: string): void {
-    if (this.automationTurn || this.replyNowPosted?.has(toolId)) return;
+    if (this.replyNowPosted?.has(toolId)) return;
     this.replyNowPosted.add(toolId);
     this.replyNowQueue.push({ id: toolId, text, model });
   }
@@ -2129,6 +2206,7 @@ class ClaudeSession {
         event: {
           type: 'assistant',
           _replyNow: true,
+          _replyNowForOwner: true,
           message: { id: `reply_now_${id}`, role: 'assistant', model, content: [{ type: 'text', text }], stop_reason: 'tool_use' },
         },
       });
@@ -2146,7 +2224,8 @@ class ClaudeSession {
   private nudgeForReply(): void {
     try {
       const watch = this.watchReply();
-      const blocked = () => this.boundaryWaiters > 0 || Boolean(this.interruptInFlight) || this.hasInterruptHazard() || this.activeToolIds.size > 0;
+      // Peer waiters are held for this reply; they cannot also block its nudge.
+      const blocked = () => this.boundaryHumanWaiters > 0 || Boolean(this.interruptInFlight) || this.hasInterruptHazard() || this.activeToolIds.size > 0;
       if (!watch.due() || blocked()) return;
       const turn = this.turnStartedAt;
       // After this event has been emitted, so the tool_result reaches the
@@ -2535,6 +2614,7 @@ class ClaudeSession {
   }
 
   private handleEvent(ev: any): void {
+    if (this.handleMcpRecovery(ev)) return;
     if (ev?.type === 'autocompact_state') {
       console.log(`[native-compact-state] lane=${this.chatId} provider=${this.cli} ${JSON.stringify(ev.value)}`);
     }
@@ -2606,7 +2686,9 @@ class ClaudeSession {
               // A reply_now call is the agent speaking: it counts as visible text
               // for the reply watch, and becomes a real message in the thread.
               this.watchReply().noteText();
-              this.queueReplyNow(block.id, posted, ev.message?.model);
+              // Named agents' tool server posts durably on all engines. Only
+              // anonymous legacy Claude lanes still need runner conversion.
+              if (!agentForChatId(this.chatId)) this.queueReplyNow(block.id, posted, ev.message?.model);
             } else {
               this.watchReply().noteTool(block.id);
             }
@@ -2615,13 +2697,18 @@ class ClaudeSession {
           }
         }
       } else if (ev?.type === 'user' && Array.isArray(ev.message?.content)) {
+        let completedTool = false;
         for (const block of ev.message.content) {
           if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-            this.activeToolIds.delete(block.tool_use_id);
+            completedTool = this.activeToolIds.delete(block.tool_use_id) || completedTool;
           }
         }
-        if (this.activeToolIds.size === 0) this.nudgeForReply();
-        if (this.boundaryInterruptWanted && this.activeToolIds.size === 0) {
+        // CLI recovery nudges are user-shaped envelopes, not completed tools.
+        // A queued handoff must not reset that recovery loop or take away the
+        // person's still-unanswered turn. An actual new human message can steer.
+        if (completedTool && this.activeToolIds.size === 0) this.nudgeForReply();
+        if (completedTool && this.boundaryInterruptWanted && this.activeToolIds.size === 0
+          && (this.boundaryHumanWaiters > 0 || !this.watchReply().waiting())) {
           const now = Date.now();
           // Claude's interrupt stops background subagents, and a person who
           // never asked for that should not lose one to a chat message. With
@@ -2724,6 +2811,11 @@ class ClaudeSession {
         return;
       }
       this.initSeen = true;
+      if (!OPTIONAL_MCP_DISABLED && Array.isArray(ev.mcp_servers)) {
+        const shared = ev.mcp_servers.find((server: any) => server?.name === 'assistant-mcp');
+        this.mcpRecoveryEnabled = Boolean(shared);
+        this.scheduleMcpCheck(shared?.status === 'connected' ? 60_000 : 1000);
+      }
       this.resolveReady(true);
       this.resolveStartupWaiters('initialized');
       recordNativeSession(this.chatId, 'claude-code', ev.session_id, this.startedResumeId);

@@ -2,10 +2,20 @@
 
 import { Router } from 'express';
 import { asyncHandler } from './helpers.ts';
-import { deliverTeamMessage, teamRoster, teamRecent } from '../chat/teamBus.ts';
+import { deliverTeamMessage, teamRoster, teamRecent, publishOwnerReply } from '../chat/teamBus.ts';
 import { createJobWatch, deleteJobWatch, jobWatchesWithAgents } from '../chat/jobWatches.ts';
 
 export const teamRouter = Router();
+
+teamRouter.post('/reply', asyncHandler(async (req, res) => {
+  const { from, text, audience, lane } = req.body ?? {};
+  if (typeof from !== 'string' || !from.trim() || typeof text !== 'string' || !text.trim()
+    || text.length > 2000 || audience !== 'owner' || (lane !== undefined && lane !== 'main' && lane !== 'bg')) {
+    res.status(400).json({ error: 'An owner reply needs your identity, audience: owner, and 1 to 2000 characters of text.' });
+    return;
+  }
+  res.json({ posted: true, seq: await publishOwnerReply(from, text, lane) });
+}));
 
 teamRouter.get('/', asyncHandler(async (_req, res) => {
   res.json({ agents: await teamRoster() });

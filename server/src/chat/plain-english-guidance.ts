@@ -40,6 +40,7 @@ export function plainEnglishWritingBlockFor(opts: { cli: string; model: string; 
 export function plainEnglishWritingSystemBlockFor(opts: { cli: string; model: string }): string {
   if (!plainEnglishWritingBlockFor(opts)) return '';
   return [
+    'Keep each Write, Edit or shell-command payload below about 15 KB. Build large files with several bounded writes or edits, checking each result before continuing. Keep the whole job and its full scope; only the individual tool payloads are smaller.',
     'For ordinary human replies, use the writing rules below. A request for a specific format, an exact token or silence takes priority. For voice replies, follow the spoken style. Teammate messages, automation and continuation events follow their own reply instructions.',
     ...PLAIN_ENGLISH_WRITING_BLOCK.split('\n').slice(1),
   ].join('\n');

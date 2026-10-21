@@ -852,8 +852,9 @@ export function Composer(props: ComposerProps) {
         <textarea
           ref={taRef}
           rows={1}
+          wrap={props.value ? 'soft' : 'off'}
           value={props.value}
-          placeholder={dictating ? 'Listening…' : props.busy ? 'Reply — it will send next…' : props.placeholder ?? phrases?.[phIdx] ?? 'Where to, Doctor?'}
+          placeholder={dictating ? 'Listening…' : phoneSurface ? (props.busy ? 'Reply…' : 'Message…') : props.busy ? 'Reply — it will send next…' : props.placeholder ?? phrases?.[phIdx] ?? 'Where to, Doctor?'}
           aria-label="Message"
           aria-autocomplete={hasMentions || (props.commands?.length ?? 0) > 0 ? 'list' : undefined}
           aria-expanded={popOpen ? true : undefined}

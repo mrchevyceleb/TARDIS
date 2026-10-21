@@ -68,7 +68,7 @@ export type ChatImagePreview = {
 // `turnId` + `cbIndex` correlate a block back to claude's content_block_*
 // stream events so the reducer stays pure (no out-of-band Maps).
 export type ChatBlock =
-  | { kind: 'user'; id: string; text: string; ts: number; images?: ChatImagePreview[]; imageCount?: number; clientMsgId?: string; attachmentsLost?: boolean; deliveryState?: 'queued' | 'failed' | 'sending'; noRetry?: boolean; queue?: true; replyTo?: { from: string; snippet: string } }
+  | { kind: 'user'; startsTurn?: boolean; id: string; text: string; ts: number; images?: ChatImagePreview[]; imageCount?: number; clientMsgId?: string; attachmentsLost?: boolean; deliveryState?: 'queued' | 'failed' | 'sending'; noRetry?: boolean; queue?: true; replyTo?: { from: string; snippet: string } }
   | {
       /** Agent-to-agent delivery (team bus): a teammate's message arriving in
        *  this thread — rendered with the SENDER's identity, not as a user turn. */
@@ -76,6 +76,9 @@ export type ChatBlock =
       id: string;
       from: string;
       fromRole?: string;
+      /** Audience established by the runner at the native turn admission. */
+      startsTurn?: boolean;
+      replyAudience?: 'peer' | 'owner';
       /** Stable durable delivery id; retries reuse it and render only once. */
       deliveryId?: string;
       text: string;
@@ -87,6 +90,7 @@ export type ChatBlock =
       /** Render the bubble expanded on first paint (channel history: a
        * member post IS the message, not a collapsed handoff card). */
       expanded?: boolean;
+      interrupted?: boolean;
     }
   | {
       /** Auto-compaction marker — the thread's model context rotated with a
@@ -119,6 +123,10 @@ export type ChatBlock =
       /** The model provider switched mid-turn and the agent is continuing on
        * its own; a notice, not a failure the user has to act on. */
       continuing?: boolean;
+      peerId?: string;
+      background?: boolean;
+      turnId?: string;
+      lane?: 'bg';
       ts: number;
     }
   | {
@@ -160,9 +168,11 @@ export type ChatBlock =
        * person. It renders as normal reply text, never dimmed or folded.
        * Unset for Claude and reply_now text. */
       commentary?: boolean;
+      /** A published reply_now is its own durable message, independent of later provider frames. */
+      replyNow?: boolean;
       turnId?: string;
-      /** Teammate message this response belongs to, when applicable. */
-      peerId?: string;
+      /** Teammate message this response belongs to; null explicitly addresses the owner. */
+      peerId?: string | null;
       /** Written by the agent's background lane, which streams alongside the home lane. */
       lane?: 'bg';
       cbIndex?: number;

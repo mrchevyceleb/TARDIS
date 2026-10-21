@@ -302,9 +302,19 @@ export function MarkdownLink({ href, children }: { href?: string; children?: Rea
   );
 }
 
+/** Prefer meaningful separators in long IDs/paths before splitting a word.
+ *  wbr adds no copied characters and leaves the original message untouched. */
+function wrapLongTokens(children: ReactNode): ReactNode {
+  if (Array.isArray(children)) return children.map(wrapLongTokens);
+  if (typeof children !== 'string') return children;
+  return children.split(/(\S{40,})/g).flatMap((part, index) => part.length >= 40 && /[_/-]/.test(part)
+    ? part.split(/(?<=[_/-])/).flatMap((piece, at) => [piece, <wbr key={`${index}-${at}`} />])
+    : [part]);
+}
+
 const MD_COMPONENTS: Components = {
   p: ({ children }) => (
-    <p style={{ margin: '0 0 8px', lineHeight: 1.6 }}>{children}</p>
+    <p style={{ margin: '0 0 8px', lineHeight: 1.6 }}>{wrapLongTokens(children)}</p>
   ),
   strong: ({ children }) => (
     <strong style={{ fontWeight: 600, color: 'var(--r-gold)' }}>{children}</strong>
@@ -324,7 +334,7 @@ const MD_COMPONENTS: Components = {
     </ol>
   ),
   li: ({ children }) => (
-    <li style={{ margin: '2px 0', lineHeight: 1.55 }}>{children}</li>
+    <li style={{ margin: '2px 0', lineHeight: 1.55 }}>{wrapLongTokens(children)}</li>
   ),
   h1: ({ children }) => (
     <h3 style={{

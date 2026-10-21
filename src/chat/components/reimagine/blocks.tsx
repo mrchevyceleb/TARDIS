@@ -468,6 +468,16 @@ function StreamText({ text, open }: { text: string; open: boolean }) {
 }
 
 // ── tool card (collapsible working card) — §3.5 ───────────────────────────
+function toolTitle(tool: string): string {
+  const name = tool.replace(/^mcp__.*?__/, '');
+  const labels: Record<string, string> = {
+    team_message: 'Message teammate', team_status: 'Check teammates',
+    team_recent: 'Read teammate updates', reply_now: 'Post reply',
+    ToolSearch: 'Find a tool', Bash: 'Run command', Read: 'Read file',
+  };
+  return labels[name] ?? name.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+}
+
 function toolLines(b: Extract<ChatBlock, { kind: 'tool' }>): { html: string; count: number } {
   const lines: string[] = [];
   if (b.args) {
@@ -517,7 +527,7 @@ export function ToolCard({ block }: { block: Extract<ChatBlock, { kind: 'tool' }
     <div className={`tool ${block.running ? 'running' : 'done'}${open ? ' open' : ''}`}>
       <button type="button" className="tool-head" onClick={() => setOpen((o) => !o)}>
         {block.running ? <span className="vortex tstar" aria-hidden="true" /> : <StarSigil className="tstar" />}
-        <span className="tool-title">{block.tool}</span>
+        <span className="tool-title">{toolTitle(block.tool)}</span>
         <span className="tool-meta">{meta}</span>
         <ChevronDown className="tool-chev" />
       </button>
@@ -557,6 +567,16 @@ function publicPeerResponse(responseBlocks: AssistantBlock[], streaming: boolean
   ));
 }
 
+type PeerFailure = Extract<ChatBlock, { kind: 'terminal-error' }> & {
+  attempts?: Array<Extract<ChatBlock, { kind: 'terminal-error' }>>;
+};
+
+function peerFailureKey(error: PeerFailure): string {
+  // One provider can return different status codes during the same troubled
+  // stretch. Keep its complete attempt list together, not one card per code.
+  return `${Boolean(error.continuing)}|${error.message.split(/\s/, 1)[0]}`;
+}
+
 /** The peer boundary, not individual content-block open flags, owns progress.
  *  Providers can briefly close one block before opening the next; the exchange
  *  must not flicker to "done" while its turn is still running. */
@@ -569,7 +589,9 @@ function peerResponseBusy(responseBlocks: AssistantBlock[], responseActive: bool
 function PeerMessageBubble({
   block,
   responseBlocks,
+  responseErrors = [],
   responseActive,
+  recipient,
   streaming,
   mobile,
   collapseSteps,
@@ -579,7 +601,9 @@ function PeerMessageBubble({
 }: {
   block: Extract<ChatBlock, { kind: 'peer' }>;
   responseBlocks: AssistantBlock[];
+  responseErrors?: PeerFailure[];
   responseActive: boolean;
+  recipient: string;
   streaming: boolean;
   mobile: boolean;
   collapseSteps: boolean;
@@ -595,21 +619,29 @@ function PeerMessageBubble({
   const [open, setOpen] = useState(block.expanded ?? routineResult);
   const text = cleanPeerMessageText(block.text);
   const bodyId = `peer-message-${block.id}`;
-  const hasResponse = responseBlocks.length > 0;
+  const ownerOrigin = block.fromRole === 'desk' || block.fromRole === 'voice';
+  const proseResponse = publicPeerResponse(responseBlocks, streaming);
+  // Only a recorded native turn starter proves the intended addressee.
+  // Older history stays plain. Never infer its audience from names or timing.
+  const peerAddressed = !ownerOrigin && block.replyAudience === 'peer';
+  // Every ordinary word follows that turn. Explicit owner publications have
+  // no peer association and stay public at their original position.
+  const ownerResponse = peerAddressed ? [] : proseResponse;
+  const peerResponse = peerAddressed ? responseBlocks : [];
   // A settled NO_UPDATE / empty reply renders nothing, so it must not leave an
   // empty timestamped bubble under the peer card.
-  const publicResponseBlocks = publicPeerResponse(responseBlocks, streaming);
   const responseToolCount = responseBlocks.filter((item) => item.kind === 'tool').length;
+  const hasResponse = proseResponse.length > 0 || responseToolCount > 0;
+  const hasPeerAnswer = peerAddressed && proseResponse.length > 0;
   const responseBusy = peerResponseBusy(responseBlocks, responseActive);
+  const failed = responseErrors.some((item) => !item.continuing);
+  const unanswered = peerAddressed && block.interrupted && !hasPeerAnswer;
   // Pin affordance for a teammate's own message (channels, card-1327b9, and
   // one-on-one handoffs alike): the row toggles this bubble onto the thread
   // agent's board through the same ThreadPin the assistant prose uses.
   const peerPinned = pin ? pin.pinnedBlockIds.includes(block.id) : false;
-  const role = routineResult
-    ? 'routine update'
-    : block.fromRole
-      ? `${block.fromRole} · to you`
-      : 'to you';
+  // Keep the addressee readable on a phone, ahead of optional job titles.
+  const role = routineResult ? 'routine update' : `to ${recipient}`;
   const subject = hasResponse ? 'exchange' : 'message';
 
   return (
@@ -627,13 +659,13 @@ function PeerMessageBubble({
           <span className="bt-peer-name">{block.from}</span>
           <span className="bt-peer-role">{role}</span>
           {!block.tsApprox && timeLabel(block.ts) ? <span className="bt-peer-when">{timeLabel(block.ts)}</span> : null}
-          {hasResponse || responseBusy ? (
-            <span className={`bt-peer-status${responseBusy ? ' working' : ''}`} role="status" aria-live="polite">
+          {hasResponse || responseBusy || failed || unanswered ? (
+            <span className={`bt-peer-status${responseBusy ? ' working' : failed ? ' failed' : ''}`} role="status" aria-live="polite">
               <i aria-hidden="true" /> {responseBusy
                 ? 'working'
-                : responseToolCount > 0
-                  ? `done · ${responseToolCount} tool${responseToolCount === 1 ? '' : 's'}`
-                  : 'done'}
+                : unanswered ? 'no reply recorded'
+                  : failed ? (hasPeerAnswer ? 'partial reply here' : 'turn not finished') : hasPeerAnswer ? 'reply here'
+                  : responseToolCount > 0 ? `work saved · ${responseToolCount} tool${responseToolCount === 1 ? '' : 's'}` : 'work saved'}
             </span>
           ) : null}
           <span className="bt-peer-action">{open ? 'hide' : 'show'} {subject}</span>
@@ -667,11 +699,12 @@ function PeerMessageBubble({
               />
             </div>
           ) : null}
-          {hasResponse ? (
+          {(peerAddressed && peerResponse.some((item) => item.kind === 'text' && hasVisibleProse(item))) || responseToolCount > 0 ? (
             <section className="bt-peer-turn bt-peer-response">
-              <span className="bt-peer-turn-label">Reply</span>
+              <span className="bt-peer-turn-label">{peerAddressed && proseResponse.length > 0 ? `Answer for ${block.from}` : 'Work in this exchange'}</span>
               <ElrondGroup
-                blocks={responseBlocks}
+                blocks={peerAddressed ? peerResponse : responseBlocks.filter((item) => item.kind === 'tool')}
+                speaker={recipient}
                 streaming={streaming}
                 mobile={mobile}
                 collapseSteps={collapseSteps}
@@ -684,19 +717,19 @@ function PeerMessageBubble({
         </div>
       ) : null}
     </div>
-    {!open && publicResponseBlocks.length > 0 ? (
-      <div className="bt-peer-public-response" aria-label="Agent response to teammate message">
-        <ElrondGroup
-          blocks={publicResponseBlocks}
-          streaming={streaming}
-          mobile={mobile}
-          collapseSteps={collapseSteps}
-          pin={pin}
-          onReact={onReact}
-          onReply={onReply}
-        />
+    {ownerResponse.length ? (
+      <div className="bt-peer-public-response">
+        <ElrondGroup blocks={ownerResponse} speaker={recipient} streaming={streaming} mobile={mobile}
+          collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply} />
       </div>
     ) : null}
+    {responseErrors.map((error) => (
+      <details key={error.id} className={`bt-peer-recovery${error.continuing ? '' : ' failed'}`}>
+        <summary>{error.continuing ? `${recipient} is trying another provider` : `${recipient}’s provider couldn’t finish`}{(error.attempts?.length ?? 0) > 1 ? ` · ${error.attempts!.length} attempts` : ''}</summary>
+        <p>The conversation and work so far are saved.</p>
+        {(error.attempts ?? [error]).map((attempt) => <p key={attempt.id}>{timeLabel(attempt.ts)} · {attempt.message.replace(/\s*Try again(?: shortly)? or switch brains\.?/gi, '')}</p>)}
+      </details>
+    ))}
     </>
   );
 }
@@ -782,26 +815,23 @@ function CompactDivider({ block }: { block: Extract<ChatBlock, { kind: 'compact'
 
 function RestartDivider({ block }: { block: Extract<ChatBlock, { kind: 'restart' }> }) {
   return (
-    <div className="compact-mark regen-mark restart-mark" title={`${BRAND} restarted while a turn was running — the in-flight tool call's output was lost with the process. Ask the companion to re-check the work.`}>
+    <div className="compact-mark regen-mark restart-mark" title={`${BRAND} restarted during this turn. Saved messages stay here; unfinished work is checked when the conversation resumes.`}>
       <span className="compact-line" />
       <span className="compact-label">
-        Regeneration · service restarted mid-turn
-        <em className="regen-quote">“{regenQuote(block.ts)}”</em>
+        Service restarted · saved messages kept
       </span>
       <span className="compact-line" />
     </div>
   );
 }
 
-function TerminalErrorCard({ block }: { block: Extract<ChatBlock, { kind: 'terminal-error' }> }) {
+function TerminalErrorCard({ block }: { block: PeerFailure }) {
   return (
-    <div className="terminal-error" role={block.continuing ? 'status' : 'alert'}>
-      <span className="terminal-error-mark" aria-hidden="true">!</span>
-      <span>
-        <strong>{block.continuing ? 'Switched model provider' : 'Couldn’t answer this turn'}</strong>
-        <span className="terminal-error-copy">{block.message}</span>
-      </span>
-    </div>
+    <details className={`bt-peer-recovery${block.background ? ' background-recovery' : ''}${block.continuing ? '' : ' failed'}`}>
+      <summary>{block.continuing ? 'Trying another provider' : 'The provider couldn’t finish this turn'}{(block.attempts?.length ?? 0) > 1 ? ` · ${block.attempts!.length} attempts` : ''}</summary>
+      <p>The conversation and work so far are saved.</p>
+      {(block.attempts ?? [block]).map((attempt) => <p key={attempt.id}>{timeLabel(attempt.ts)} · {attempt.message.replace(/\s*Try again(?: shortly)? or switch brains\.?/gi, '')}</p>)}
+    </details>
   );
 }
 
@@ -956,8 +986,8 @@ function ToolsCard({ blocks, turnLive = false }: { blocks: ToolBlock[]; turnLive
   const running = blocks.some((b) => b.running);
   const counts = new Map<string, number>();
   for (const b of blocks) counts.set(b.tool, (counts.get(b.tool) ?? 0) + 1);
-  const summary = [...counts.entries()].map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(' · ');
-  const sameName = counts.size === 1 ? blocks[0].tool : null;
+  const summary = [...counts.entries()].map(([n, c]) => (c > 1 ? `${toolTitle(n)} ×${c}` : toolTitle(n))).join(' · ');
+  const sameName = counts.size === 1 ? toolTitle(blocks[0].tool) : null;
   const title = sameName ?? `${blocks.length} tool calls`;
   const oldestRunning = blocks.find((b) => b.running);
   // While the turn is still going, "done" reads as the whole turn: it only means this batch of calls.
@@ -1053,6 +1083,7 @@ function ReactionStrip({
 
 function RoutineResultBubble({
   block,
+  speaker,
   streaming,
   mobile,
   collapseSteps,
@@ -1061,6 +1092,7 @@ function RoutineResultBubble({
   onReply,
 }: {
   block: Extract<ChatBlock, { kind: 'peer' }>;
+  speaker: string;
   streaming: boolean;
   mobile: boolean;
   collapseSteps: boolean;
@@ -1081,11 +1113,24 @@ function RoutineResultBubble({
   return (
     <div className="routine-result-message">
       <div className="bt-peer-role" style={{ fontSize: 11, opacity: 0.65, margin: '0 0 4px 2px' }}>
-        ⚙ {block.from} · routine update
+        ⚙ Routine update
       </div>
-      <ElrondGroup blocks={asMessage} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply ? () => onReply({ id: block.id, snippet: text.slice(0, 400), from: block.from }) : undefined} />
+      <ElrondGroup blocks={asMessage} speaker={speaker} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply ? () => onReply({ id: block.id, snippet: text.slice(0, 400), from: speaker }) : undefined} />
     </div>
   );
+}
+
+/** Remove only a word-for-word opening already published in this conversation.
+ * Reworded details and every new fact remain visible; saved text is untouched. */
+export function followupText(text: string, published: string): string {
+  let common = 0;
+  while (common < text.length && common < published.length && text[common] === published[common]) common++;
+  const lastSentence = [...text.matchAll(/[.!?](?=\s|$)/g)].findLast((match) => {
+    const end = match.index + 1;
+    return end <= common && (end === published.length || /\s/.test(published[end]));
+  });
+  if (!lastSentence || text.slice(0, lastSentence.index + 1).trim().split(/\s+/).length < 4) return text;
+  return text.slice(lastSentence.index + 1).trimStart();
 }
 
 function ElrondGroup({
@@ -1097,6 +1142,8 @@ function ElrondGroup({
   pin,
   onReact,
   onReply,
+  publishedBefore,
+  speaker,
 }: {
   blocks: AssistantBlock[];
   streaming: boolean;
@@ -1110,10 +1157,13 @@ function ElrondGroup({
    *  and the group's own speaker when it has one (channel member posts);
    *  the thread adds the agent name otherwise. */
   onReply?: (target: { id: string; snippet: string; from?: string }) => void;
+  publishedBefore?: string;
+  speaker?: string;
 }) {
   const [acted, setActed] = useState(false);
-  const visible = visibleAssistantBlocks(blocks, collapseSteps);
+  const visible = visibleAssistantBlocks(blocks, collapseSteps).filter((b) => !(b.kind === 'text' && !b.open && isProtocolNoopText(b.text)));
   if (!visible.length) return null;
+  if (publishedBefore && visible.every((b) => b.kind === 'text' && !b.replyNow && !b.open && b.text.trim() === publishedBefore.trim())) return null;
   // Actions belong to this group's settled text, not the thread's global
   // status: a live sibling turn must not strip Copy/Pin/Reply from finished
   // messages, and a settled response keeps them through the next turn's
@@ -1157,7 +1207,7 @@ function ElrondGroup({
       onClick={mobile ? () => setActed((a) => !a) : undefined}
     >
       <div className="who">
-        <span className="mini">✦</span> {'from' in first && first.from ? <span className="who-from">{first.from}</span> : BRAND} {'tsApprox' in first && first.tsApprox ? null : <span className="when">{timeLabel(first.ts)}</span>}
+        <span className="mini">✦</span> <span className="who-from">{'from' in first && first.from ? first.from : speaker || BRAND}</span> {'tsApprox' in first && first.tsApprox ? null : <span className="when">{timeLabel(first.ts)}</span>}
       </div>
       {visible.map((b) => {
         switch (b.kind) {
@@ -1169,7 +1219,8 @@ function ElrondGroup({
           }
           case 'text': {
             const open = showTextCaret(b, streaming);
-            const display = isProtocolNoopText(b.text) ? '' : b.text;
+            const display = isProtocolNoopText(b.text) ? ''
+              : !open && !b.replyNow && publishedBefore ? followupText(b.text, publishedBefore) : b.text;
             if (!open && !display) return null;
             // Legacy cached thought blocks never render: thinking stays hidden.
             if (b.thought) return null;
@@ -1280,7 +1331,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   // stale open block suppress every future thinking indicator.
   let currentTurnStart = 0;
   for (let i = blocks.length - 1; i >= 0; i -= 1) {
-    if (blocks[i].kind === 'user' || blocks[i].kind === 'peer') {
+    const boundary = blocks[i];
+    if (boundary.kind === 'user' || (boundary.kind === 'peer' && boundary.startsTurn !== false)) {
       currentTurnStart = i + 1;
       break;
     }
@@ -1295,7 +1347,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     ? blocks.filter((b) => 'turnId' in b && b.turnId === activeTurnId)
     : blocks.slice(currentTurnStart);
   const currentBoundary = currentTurnStart > 0 ? blocks[currentTurnStart - 1] : undefined;
-  const activePeerId = streaming && currentBoundary?.kind === 'peer' ? currentBoundary.id : null;
+  const activePeerId = streaming && currentBoundary?.kind === 'peer' && currentBoundary.replyAudience === 'peer' ? currentBoundary.id : null;
   // A provider-switch notice with the agent continuing is not a failure: the
   // continued turn still needs its liveness row and its completion marker.
   const hasCurrentTerminalFailure = currentBlocks.some((block) => block.kind === 'terminal-error' && !block.continuing);
@@ -1318,18 +1370,22 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   // Group consecutive assistant blocks (same turnId) and user blocks.
   const groups: Array<
     | { type: 'user'; block: Extract<ChatBlock, { kind: 'user' }>; day: string }
-    | { type: 'elrond'; blocks: Array<Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' } | { kind: 'doc-link' } | { kind: 'folder-link' } | { kind: 'artifact' }>>; day: string }
+    | { type: 'elrond'; blocks: Array<Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' } | { kind: 'doc-link' } | { kind: 'folder-link' } | { kind: 'artifact' }>>; publishedBefore?: string; day: string }
     | { type: 'compact'; block: Extract<ChatBlock, { kind: 'compact' }>; day: string }
     | { type: 'restart'; block: Extract<ChatBlock, { kind: 'restart' }>; day: string }
     | { type: 'terminal-error'; block: Extract<ChatBlock, { kind: 'terminal-error' }>; day: string }
     | { type: 'switch'; block: Extract<ChatBlock, { kind: 'switch' }>; day: string }
     | { type: 'background'; block: Extract<ChatBlock, { kind: 'background' }>; day: string }
-    | { type: 'peer'; block: Extract<ChatBlock, { kind: 'peer' }>; responseBlocks: AssistantBlock[]; responseTurnId?: string | null; day: string }
+    | { type: 'peer'; block: Extract<ChatBlock, { kind: 'peer' }>; responseBlocks: AssistantBlock[]; responseErrors: PeerFailure[]; responseTurnId?: string | null; day: string }
   > = [];
   type PeerGroup = Extract<(typeof groups)[number], { type: 'peer' }>;
   const peerGroupsById = new Map<string, PeerGroup>();
+  let admittedPeer: PeerGroup | undefined;
+  let publishedOwnerReply: string | undefined;
   let lastDay = '';
   for (const b of blocks) {
+    if (b.kind === 'user' || b.kind === 'restart' || (b.kind === 'peer'
+      && (b.startsTurn === true || isAutomationPeer(b.from, b.fromRole, b.text)))) publishedOwnerReply = undefined;
     // Hidden: the reply-case marker, and any legacy thought block. Thinking is
     // private reasoning and never renders; only real reply text does.
     if (b.kind === 'replyask' || (b.kind === 'text' && (b.pending || b.thought || (!b.open && !b.text.trim())))) continue;
@@ -1343,6 +1399,11 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       continue;
     }
     if (b.kind === 'terminal-error') {
+      const peerGroup = b.peerId ? peerGroupsById.get(b.peerId) : undefined;
+      if (peerGroup && peerGroup.block.fromRole !== 'desk' && peerGroup.block.fromRole !== 'voice') {
+        peerGroup.responseErrors.push(b);
+        continue;
+      }
       groups.push({ type: 'terminal-error', block: b, day: lastDay || day });
       continue;
     }
@@ -1355,11 +1416,19 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       continue;
     }
     if (b.kind === 'user') {
+      // An admitted owner steer supersedes the peer exchange. If it had no
+      // reply, say so rather than quietly making the question look completed.
+      if (b.startsTurn === false && admittedPeer?.block.replyAudience === 'peer'
+        && publicPeerResponse(admittedPeer.responseBlocks, false).length === 0) {
+        admittedPeer.block = { ...admittedPeer.block, interrupted: true };
+      }
+      admittedPeer = undefined;
       groups.push({ type: 'user', block: b, day });
     } else if (b.kind === 'peer') {
-      const peerGroup: PeerGroup = { type: 'peer', block: b, responseBlocks: [], day };
+      const peerGroup: PeerGroup = { type: 'peer', block: b, responseBlocks: [], responseErrors: [], day };
       groups.push(peerGroup);
       peerGroupsById.set(b.id, peerGroup);
+      if (b.startsTurn === true) admittedPeer = peerGroup;
     } else if (b.kind === 'text' || b.kind === 'tool' || b.kind === 'doc-link' || b.kind === 'folder-link' || b.kind === 'artifact') {
       const last = groups[groups.length - 1];
       // Reducer-stamped peerId is the authoritative association. Native
@@ -1372,23 +1441,10 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         peerGroup.day = day;
         continue;
       }
-      // Legacy cached blocks predate peerId. Keep the conservative adjacent,
-      // same-turn fallback so old exchanges do not suddenly expand the feed.
+      const publishedBefore = b.kind === 'text' && !b.replyNow ? publishedOwnerReply : undefined;
+      if (b.kind === 'text' && b.replyNow && b.peerId === null) publishedOwnerReply = b.text;
+      // Adjacency does not prove an addressee, especially in old history.
       const turnId = (b as { turnId?: string }).turnId;
-      if (
-        peerId === undefined
-        && last?.type === 'peer'
-        // Never across lanes: the home lane's reply is not the background
-        // teammate exchange that happens to sit just above it.
-        && ((b as { lane?: string }).lane === 'bg') === (last.block.lane === 'bg')
-        && !isAutomationPeer(last.block.from, last.block.fromRole, last.block.text)
-        && (last.responseTurnId === undefined || last.responseTurnId === (turnId ?? null))
-      ) {
-        last.responseTurnId = turnId ?? null;
-        last.responseBlocks.push(b);
-        last.day = day;
-        continue;
-      }
       // Keep actual provider messages separate. Flattening every tool round
       // into one answer bubble made activity narration look like the reply.
       // Codex can tag multiple messages within one turnId: split on phase too.
@@ -1398,13 +1454,15 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         && b.presentation && priorText.presentation && b.presentation !== priorText.presentation;
       const fromChanged = ((last?.type === 'elrond' ? (last.blocks[0] as { from?: string }).from : undefined) ?? '')
         !== ((b as { from?: string }).from ?? '');
+      const toolBoundary = (b.kind === 'tool') !== (last?.type === 'elrond' && last.blocks.at(-1)?.kind === 'tool');
       const merge = last?.type === 'elrond' && turnId
-        && (last.blocks[0] as { turnId?: string }).turnId === turnId && !phaseChanged && !fromChanged;
+        && (last.blocks[0] as { turnId?: string }).turnId === turnId && !phaseChanged && !fromChanged && !toolBoundary;
       if (merge) {
         last.blocks.push(b);
+        last.publishedBefore ??= publishedBefore;
         last.day = day;
       } else {
-        groups.push({ type: 'elrond', blocks: [b], day });
+        groups.push({ type: 'elrond', blocks: [b], publishedBefore, day });
       }
     }
   }
@@ -1432,6 +1490,18 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     coalescedGroups.push(g);
   }
 
+  // Repeated attempts at the same outage get one notice. All timestamps and
+  // original details remain available inside it, rather than five red cards.
+  const failureAttempts = new Map<string, PeerFailure[]>();
+  for (const group of coalescedGroups) {
+    const errors = group.type === 'peer' ? group.responseErrors : group.type === 'terminal-error' ? [group.block] : [];
+    for (const error of errors) {
+      const key = peerFailureKey(error);
+      const attempts = failureAttempts.get(key) ?? [];
+      attempts.push(error);
+      failureAttempts.set(key, attempts);
+    }
+  }
   const nodes: Array<ReactNode | FoldItem> = [];
   let pendingAutomation = false;
   let hideThinking = false;
@@ -1472,6 +1542,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       // turns — automation hide is the pendingAutomation branch above.
       const hasNonText = g.blocks.some((b) => b.kind !== 'text');
       const hasRealProse = texts.some((t) => t.trim() && !isProtocolNoopText(t));
+      // Tool discovery with no answer or subsequent work is empty chrome.
+      if (!hasRunningTool && !isLive && !hasRealProse && g.blocks.every((b) => b.kind === 'tool' && /(?:^|__)ToolSearch$/i.test(b.tool))) continue;
       if (!hasRunningTool && !isLive && !hasNonText && !hasRealProse && texts.some((t) => t.trim())) {
         continue;
       }
@@ -1487,7 +1559,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     } else if (g.type === 'restart') {
       nodes.push(<RestartDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'terminal-error') {
-      nodes.push(<TerminalErrorCard key={g.block.id} block={g.block} />);
+      const attempts = failureAttempts.get(peerFailureKey(g.block))!;
+      if (attempts.at(-1)?.id === g.block.id) nodes.push(<TerminalErrorCard key={g.block.id} block={{ ...g.block, attempts }} />);
     } else if (g.type === 'switch') {
       nodes.push(<SwitchDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'background') {
@@ -1500,6 +1573,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         <RoutineResultBubble
           key={g.block.id}
           block={g.block}
+          speaker={replyFrom}
           streaming={streaming}
           mobile={mobile}
           collapseSteps={collapseSteps}
@@ -1514,6 +1588,11 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
           key={g.block.id}
           block={g.block}
           responseBlocks={g.responseBlocks}
+          responseErrors={g.responseErrors.flatMap((error) => {
+            const attempts = failureAttempts.get(peerFailureKey(error))!;
+            return attempts.at(-1)?.id === error.id ? [{ ...error, attempts }] : [];
+          })}
+          recipient={replyFrom}
           responseActive={activePeerId === g.block.id}
           streaming={streaming}
           mobile={mobile}
@@ -1529,6 +1608,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       // Matt's own Desk answers and voice asks are his messages, so they always
       // show as their own line, whatever the agent replied.
       const foldable = !jobResult
+        && g.responseErrors.length === 0
+        && !g.block.interrupted
         && g.block.fromRole !== 'automation-result'
         && g.block.fromRole !== 'desk'
         && g.block.fromRole !== 'voice'
@@ -1539,7 +1620,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         ? { fold: true, key: g.block.id, from: g.block.from, ts: g.block.ts, tsApprox: g.block.tsApprox, node: bubble }
         : bubble);
     } else {
-      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReplyElrond} />);
+      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} speaker={replyFrom} publishedBefore={g.publishedBefore} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReplyElrond} />);
     }
   }
 
