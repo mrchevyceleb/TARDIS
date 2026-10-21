@@ -1173,7 +1173,7 @@ class ClaudeSession {
     this.compactFailure = null;
     this.syntheticApiErrorReason = null;
     if (!this.isAlive() || this.turnStartedAt !== null) throw new Error('Native compaction requires this lane to reach its turn boundary.');
-    if (!this.currentSessionId) return;
+    if (!this.sessionId()) return;
     await new Promise<void>((resolve, reject) => {
       let compacted = false;
       let failure: Error | undefined;
@@ -2625,7 +2625,7 @@ class ClaudeSession {
     }
 
     // Detect init + silent-resume-failure.
-    if (!this.disposed && ev?.type === 'system' && ev.subtype === 'init' && typeof ev.session_id === 'string') {
+    if (!this.disposed && !sidechain && ev?.type === 'system' && ev.subtype === 'init' && typeof ev.session_id === 'string') {
       const pending = this.pendingResumeId;
       this.pendingResumeId = null;
       if (pending && pending !== ev.session_id) {
@@ -2645,11 +2645,9 @@ class ClaudeSession {
       this.currentSessionId = ev.session_id;
       void setSessionId(this.cli, this.cwd, ev.session_id, this.chatId);
     }
-    // Child/helper events cannot silently replace the main native session.
-    if (!this.disposed && !sidechain && ev && typeof ev.session_id === 'string' && !this.currentSessionId) {
-      this.currentSessionId = ev.session_id;
-      void setSessionId(this.cli, this.cwd, ev.session_id, this.chatId);
-    }
+    // Only the root init above establishes a resumable session. Startup hook
+    // events already carry an ID before Claude creates a native transcript.
+    // Saving that provisional ID makes the next boot try to resume no history.
 
     if (!sidechain && ev?.type === 'system' && ev.subtype === 'status') {
       markNativeCompacting(this.nativeBaseUrl, ev.status === 'compacting');
