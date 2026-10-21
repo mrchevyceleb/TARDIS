@@ -146,6 +146,11 @@ function finish(code) {
 function handleNotification(message) {
   const method = message.method;
   const params = message.params ?? {};
+  // App-server also publishes notifications from native child tasks. Only
+  // this adapter's thread may speak, change its usage, or end its turn.
+  if (!threadId || params.threadId !== threadId) return;
+  const notificationTurnId = params.turnId ?? params.turn?.id;
+  if (activeTurnId && notificationTurnId && notificationTurnId !== activeTurnId) return;
   if (method === 'turn/started') {
     activeTurnId = params.turn?.id ?? activeTurnId;
     writeEvent({ type: 'turn.started' });
@@ -182,6 +187,7 @@ function handleNotification(message) {
     return;
   }
   if (method === 'turn/completed') {
+    if (!activeTurnId || params.turn?.id !== activeTurnId) return;
     const status = params.turn?.status;
     writeEvent({ type: 'turn.completed', status, ...(status !== 'completed' ? { error: params.turn?.error || { message: `Codex turn ${status || 'failed'}` } } : {}), ...(lastUsage ? { usage: lastUsage } : {}) });
     finish(status === 'completed' ? 0 : 1);
