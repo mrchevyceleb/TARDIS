@@ -2185,9 +2185,9 @@ class ClaudeSession {
   /** reply_now calls waiting to be posted right after the event that carried them. */
   private replyNowQueue: Array<{ id: string; text: string; model?: string }> = [];
 
-  /** Note a reply_now call. A routine or job wake never speaks into the thread. */
+  /** An explicit owner publication is visible regardless of what woke the turn. */
   private queueReplyNow(toolId: string, text: string, model?: string): void {
-    if (this.automationTurn || this.replyNowPosted?.has(toolId)) return;
+    if (this.replyNowPosted?.has(toolId)) return;
     this.replyNowPosted.add(toolId);
     this.replyNowQueue.push({ id: toolId, text, model });
   }

@@ -622,6 +622,7 @@ function PeerMessageBubble({
   // empty timestamped bubble under the peer card.
   const responseToolCount = responseBlocks.filter((item) => item.kind === 'tool').length;
   const hasResponse = proseResponse.length > 0 || responseToolCount > 0;
+  const hasPeerAnswer = peerAddressed && proseResponse.length > 0;
   const responseBusy = peerResponseBusy(responseBlocks, responseActive);
   const failed = responseErrors.some((item) => !item.continuing);
   // Pin affordance for a teammate's own message (channels, card-1327b9, and
@@ -651,7 +652,7 @@ function PeerMessageBubble({
             <span className={`bt-peer-status${responseBusy ? ' working' : failed ? ' failed' : ''}`} role="status" aria-live="polite">
               <i aria-hidden="true" /> {responseBusy
                 ? 'working'
-                : failed ? (proseResponse.length > 0 ? 'partial reply saved' : 'turn not finished') : proseResponse.length > 0 ? 'answer saved'
+                : failed ? (hasPeerAnswer ? 'partial reply saved' : 'turn not finished') : hasPeerAnswer ? 'answer saved'
                   : responseToolCount > 0 ? `work saved · ${responseToolCount} tool${responseToolCount === 1 ? '' : 's'}` : 'work saved'}
             </span>
           ) : null}
@@ -812,21 +813,13 @@ function RestartDivider({ block }: { block: Extract<ChatBlock, { kind: 'restart'
   );
 }
 
-function TerminalErrorCard({ block }: { block: Extract<ChatBlock, { kind: 'terminal-error' }> }) {
-  if (block.background) return (
-    <details className="bt-peer-recovery background-recovery">
-      <summary>{block.continuing ? 'Background work is trying another provider' : 'A background turn paused'}</summary>
-      <p>{block.message}</p>
-    </details>
-  );
+function TerminalErrorCard({ block }: { block: PeerFailure }) {
   return (
-    <div className="terminal-error" role={block.continuing ? 'status' : 'alert'}>
-      <span className="terminal-error-mark" aria-hidden="true">!</span>
-      <span>
-        <strong>{block.continuing ? 'Switched model provider' : 'Couldn’t answer this turn'}</strong>
-        <span className="terminal-error-copy">{block.message}</span>
-      </span>
-    </div>
+    <details className={`bt-peer-recovery${block.background ? ' background-recovery' : ''}${block.continuing ? '' : ' failed'}`}>
+      <summary>{block.continuing ? 'Trying another provider' : 'The provider couldn’t finish this turn'}{(block.attempts?.length ?? 0) > 1 ? ` · ${block.attempts!.length} attempts` : ''}</summary>
+      <p>The conversation and work so far are saved.</p>
+      {(block.attempts ?? [block]).map((attempt) => <p key={attempt.id}>{timeLabel(attempt.ts)} · {attempt.message.replace(/\s*Try again(?: shortly)? or switch brains\.?/gi, '')}</p>)}
+    </details>
   );
 }
 
@@ -1094,6 +1087,7 @@ function RoutineResultBubble({
   onReply?: (target: { id: string; snippet: string; from?: string }) => void;
 }) {
   const text = cleanPeerMessageText(block.text);
+  const speaker = block.from.replace(/^\s*⚙[\uFE0E\uFE0F]?\s*/u, '');
   const asMessage: AssistantBlock[] = [{
     kind: 'text',
     id: `${block.id}-routine`,
@@ -1106,9 +1100,9 @@ function RoutineResultBubble({
   return (
     <div className="routine-result-message">
       <div className="bt-peer-role" style={{ fontSize: 11, opacity: 0.65, margin: '0 0 4px 2px' }}>
-        ⚙ {block.from} · routine update
+        ⚙ Routine update
       </div>
-      <ElrondGroup blocks={asMessage} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply ? () => onReply({ id: block.id, snippet: text.slice(0, 400), from: block.from }) : undefined} />
+      <ElrondGroup blocks={asMessage} speaker={speaker} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply ? () => onReply({ id: block.id, snippet: text.slice(0, 400), from: block.from }) : undefined} />
     </div>
   );
 }
@@ -1144,16 +1138,8 @@ function ElrondGroup({
   const visible = visibleAssistantBlocks(blocks, collapseSteps).filter((b) => !(b.kind === 'text' && !b.open && isProtocolNoopText(b.text)));
   if (!visible.length) return null;
   if (publishedBefore && visible.every((b) => b.kind === 'text' && !b.open && b.text.trim() === publishedBefore.trim())) return null;
-  // A final response often restates an early published answer. Keep that
-  // published message untouched and offer the complete final detail on demand,
-  // rather than guessing which reworded sentences repeat facts.
-  if (publishedBefore) return (
-    <details className="bt-reply-detail">
-      <summary>More detail{speaker ? ` from ${speaker}` : ''}</summary>
-      <ElrondGroup blocks={blocks} streaming={streaming} turnLive={turnLive} mobile={mobile}
-        collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply} speaker={speaker} />
-    </details>
-  );
+  // Only an exact duplicate can be omitted. A fuller or reworded final reply
+  // may contain new facts, so all of its words remain visible immediately.
   // Actions belong to this group's settled text, not the thread's global
   // status: a live sibling turn must not strip Copy/Pin/Reply from finished
   // messages, and a settled response keeps them through the next turn's
@@ -1321,7 +1307,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   let currentTurnStart = 0;
   for (let i = blocks.length - 1; i >= 0; i -= 1) {
     const boundary = blocks[i];
-    if ((boundary.kind === 'user' || boundary.kind === 'peer') && boundary.startsTurn !== false) {
+    if (boundary.kind === 'user' || (boundary.kind === 'peer' && boundary.startsTurn !== false)) {
       currentTurnStart = i + 1;
       break;
     }
@@ -1422,23 +1408,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       }
       const publishedBefore = b.kind === 'text' && !b.replyNow ? publishedOwnerReply : undefined;
       if (b.kind === 'text' && b.replyNow && b.peerId === null) publishedOwnerReply = b.text;
-      // Legacy cached blocks predate peerId. Keep the conservative adjacent,
-      // same-turn fallback so old exchanges do not suddenly expand the feed.
+      // Adjacency does not prove an addressee, especially in old history.
       const turnId = (b as { turnId?: string }).turnId;
-      if (
-        peerId === undefined
-        && last?.type === 'peer'
-        // Never across lanes: the home lane's reply is not the background
-        // teammate exchange that happens to sit just above it.
-        && ((b as { lane?: string }).lane === 'bg') === (last.block.lane === 'bg')
-        && !isAutomationPeer(last.block.from, last.block.fromRole, last.block.text)
-        && (last.responseTurnId === undefined || last.responseTurnId === (turnId ?? null))
-      ) {
-        last.responseTurnId = turnId ?? null;
-        last.responseBlocks.push(b);
-        last.day = day;
-        continue;
-      }
       // Keep actual provider messages separate. Flattening every tool round
       // into one answer bubble made activity narration look like the reply.
       // Codex can tag multiple messages within one turnId: split on phase too.
@@ -1487,8 +1458,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   // original details remain available inside it, rather than five red cards.
   const failureAttempts = new Map<string, PeerFailure[]>();
   for (const group of coalescedGroups) {
-    if (group.type !== 'peer') continue;
-    for (const error of group.responseErrors) {
+    const errors = group.type === 'peer' ? group.responseErrors : group.type === 'terminal-error' ? [group.block] : [];
+    for (const error of errors) {
       const key = peerFailureKey(error);
       const attempts = failureAttempts.get(key) ?? [];
       attempts.push(error);
@@ -1552,7 +1523,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     } else if (g.type === 'restart') {
       nodes.push(<RestartDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'terminal-error') {
-      nodes.push(<TerminalErrorCard key={g.block.id} block={g.block} />);
+      const attempts = failureAttempts.get(peerFailureKey(g.block))!;
+      if (attempts.at(-1)?.id === g.block.id) nodes.push(<TerminalErrorCard key={g.block.id} block={{ ...g.block, attempts }} />);
     } else if (g.type === 'switch') {
       nodes.push(<SwitchDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'background') {

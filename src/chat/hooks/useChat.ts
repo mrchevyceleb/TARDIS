@@ -135,7 +135,7 @@ function isSyntheticApiErrorEvent(ev: any): boolean {
 // Pure reducer — all per-turn state lives on the blocks themselves
 // (turnId + cbIndex). This keeps it safe under React Strict Mode, which
 // invokes reducers twice for purity-checking.
-type ReducerCursor = { current: string; peerId?: string; promptPeerId?: string; ownerPrompt?: boolean; originKnown?: boolean; automation?: boolean; lane?: 'bg'; bg?: ReducerCursor; agyStep?: number; agySession?: string };
+type ReducerCursor = { current: string; peerId?: string; promptPeerId?: string; ownerPrompt?: boolean; originKnown?: boolean; automation?: boolean; lane?: 'bg'; bg?: ReducerCursor; agyStep?: number; agySession?: string; legacyReplies?: Record<string, { text: string; turnId: string }> };
 
 /** Blocks this cursor's lane owns. The agent's background lane streams into
  *  the same thread as the home lane, so closing one lane's turn must never
@@ -331,7 +331,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // Voice handoffs are control envelopes for an already-visible spoken user
   // request, not a second teammate conversation. Replies belong in main chat.
   if (ev.type === 'peer_message' && ev.fromRole === 'voice') {
-    if (ev.startsTurn === false) return blocks;
+    // A newly admitted owner request takes priority even inside a peer turn.
     turnIdRef.ownerPrompt = true;
     turnIdRef.peerId = undefined;
     turnIdRef.promptPeerId = undefined;
@@ -364,18 +364,17 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // Only the runner knows whether this input opened the native turn or
     // joined one already running. A steer never changes its original audience.
     // Missing provenance in old history stays plain instead of being guessed.
-    if (ev.startsTurn === true) {
+    if (ev.startsTurn === true || fromRole === 'desk') {
       turnIdRef.originKnown = true;
       turnIdRef.automation = automation;
       turnIdRef.ownerPrompt = publicOrigin;
       turnIdRef.peerId = publicOrigin ? undefined : blockId;
       turnIdRef.promptPeerId = turnIdRef.peerId;
     } else if (ev.startsTurn === undefined && !turnIdRef.originKnown && !turnIdRef.ownerPrompt) {
-      // Legacy timing can group tools and failures for a quieter history. It
-      // never establishes an audience, so every word still renders plainly.
+      // With no admission provenance even the tool association is unknown.
       turnIdRef.automation = automation;
-      turnIdRef.peerId = publicOrigin ? undefined : blockId;
-      turnIdRef.promptPeerId = turnIdRef.peerId;
+      turnIdRef.peerId = undefined;
+      turnIdRef.promptPeerId = undefined;
     }
     if (existing?.kind === 'peer') return blocks;
     return [...blocks, {
@@ -395,13 +394,13 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // Server-injected echo of the user's prompt — keeps the user's message in
   // the visible thread when a client reconnects and replays the buffer.
   if (ev.type === '_user_echo' && typeof ev.text === 'string') {
-    if (ev.startsTurn !== false) {
-      turnIdRef.originKnown = ev.startsTurn === true;
-      turnIdRef.peerId = undefined;
-      turnIdRef.promptPeerId = undefined;
-      turnIdRef.automation = false;
-      turnIdRef.ownerPrompt = true;
-    }
+    // The owner's admitted question is authoritative, including a native
+    // steer. Subsequent words answer the owner; later peers cannot capture it.
+    turnIdRef.originKnown = true;
+    turnIdRef.peerId = undefined;
+    turnIdRef.promptPeerId = undefined;
+    turnIdRef.automation = false;
+    turnIdRef.ownerPrompt = true;
     const attachments: Array<{ id: string; mediaType: string }> = Array.isArray(ev.attachments) ? ev.attachments : [];
     const echoImages = attachments.length
       ? attachments.map((a) => ({ mediaType: a.mediaType, dataUrl: `/api/chat/attachments/${a.id}` }))
@@ -686,6 +685,22 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
             ? { ...b, result: summary, running: false }
             : b,
         );
+        const legacy = turnIdRef.legacyReplies?.[c.tool_use_id];
+        if (legacy) {
+          delete turnIdRef.legacyReplies![c.tool_use_id];
+          // Old reply_now was an owner-only publisher. A successful recorded
+          // acknowledgement is evidence of the exact text promised, not an
+          // audience guess. Recover only missing publications, without writes
+          // to history or another copy of an already published message.
+          if (!c.is_error && summary.trim() === 'Posted to the thread.'
+            && !next.some((b) => b.kind === 'text' && b.replyNow
+              && b.turnId === legacy.turnId && b.text === legacy.text)) {
+            next = [...next, { kind: 'text', id: `legacy-reply-${c.tool_use_id}`, text: legacy.text,
+              ...eventTime(ev), turnId: legacy.turnId, peerId: null, ...laneStamp(turnIdRef),
+              cbIndex: -1, open: false, presentation: 'update', replyNow: true,
+              seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
+          }
+        }
       }
     }
     return next;
@@ -722,6 +737,13 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
     if (!turnIdRef.current) turnIdRef.current = `t${nextId++}`;
     const turnId = turnIdRef.current;
+    for (const call of ev.message.content) {
+      if (call?.type === 'tool_use' && typeof call.id === 'string'
+        && /^(mcp__.+__)?reply_now$/.test(call.name ?? '')
+        && call.input?.audience === undefined && typeof call.input?.text === 'string' && call.input.text.trim()) {
+        (turnIdRef.legacyReplies ??= {})[call.id] = { text: call.input.text, turnId };
+      }
+    }
     const presentation = ev.message.stop_reason === 'tool_use' ? 'update'
       : ev.message.stop_reason === 'end_turn' ? 'answer' : undefined;
     const annotated: ChatBlock[] = blocks.map((b): ChatBlock => {
@@ -916,7 +938,7 @@ function pendingSteersFor(key: string): PendingSteer[] {
 // latestSeq assertion as coverage (deduped hello, no replay) saved head
 // cursors over holed blocks. The writer is fixed below; bump once to purge
 // every copy poisoned before the fix (a desktop client, Oct 9 2026).
-const CHAT_CACHE_VERSION = 'v12';
+const CHAT_CACHE_VERSION = 'v13';
 
 function blocksStorageKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
   // Browser snapshots are disposable; transcript history remains on the server.
