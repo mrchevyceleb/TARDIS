@@ -1,3 +1,4 @@
+import { workTimingError } from './promiseTime.ts';
 // The Desk: "Needs you" todos for the owner plus a board of agent work.
 // Store: ~/.rivendell/desk.json (RIVENDELL_DESK_FILE overrides the path).
 //
@@ -79,7 +80,7 @@ export type DeskCard = {
   /** Silence is an event (card-baadaf A): every In progress / In QA card
    *  carries a check-in deadline set by the owner's last touch (create,
    *  move, or comment: 30 minutes out by default, or a written check-in
-   *  time in the comment honored up to 12 hours out). The hygiene tick
+   *  time in the comment honored within the same 30-minute window). The hygiene tick
    *  nudges the owner when it passes; 15 quiet minutes later it nudges the
    *  Chief. Only a new touch (a fresh nextCheckAt) clears the nudges. */
   nextCheckAt?: string;
@@ -99,9 +100,8 @@ export type DeskCard = {
  *  deadline this far out, and no such touch can push it further. */
 export const CARD_NEXT_CHECK_MS = 30 * 60_000;
 /** A written next check-in time in a comment is honored up to this far out:
- *  long enough for an overnight quiet-hours park, never long enough to
- *  suppress checks on a live card indefinitely. */
-export const CARD_NEXT_CHECK_WRITTEN_MAX_MS = 12 * 60 * 60_000;
+ *  the same 30-minute maximum as any other promised work time. */
+export const CARD_NEXT_CHECK_WRITTEN_MAX_MS = CARD_NEXT_CHECK_MS;
 /** Quiet time after the owner nudge before the Chief copy. */
 export const CARD_CHECK_ESCALATE_MS = 15 * 60_000;
 
@@ -237,13 +237,27 @@ export function parseWrittenNextCheck(text: string, nowMs: number): number | nul
   return found;
 }
 
+/** Validate every written check-in, not only the last one used for the clock. */
+function requireCardTiming(text: string, nowMs = Date.now()): void {
+  const error = workTimingError(text, undefined, undefined, nowMs);
+  if (error) throw new DeskError(422, error);
+  const phrases = [...text.matchAll(WRITTEN_CHECK_PHRASE)];
+  for (let i = 0; i < phrases.length; i += 1) {
+    const start = phrases[i].index ?? 0;
+    if (/\blast\s*$/i.test(text.slice(0, start))) continue;
+    const at = parseWrittenNextCheck(text.slice(start, phrases[i + 1]?.index), nowMs);
+    const writtenError = workTimingError('', undefined, at ?? undefined, nowMs);
+    if (writtenError) throw new DeskError(422, writtenError);
+  }
+}
+
 function touchCardNextCheck(card: DeskCard, nowIso: string, writtenNextCheckMs?: number | null): void {
   // Archived cards carry no check state even in a live column: a PATCH or
   // comment on an archived card must not re-create a deadline.
   if (!card.archived && (card.column === 'in_progress' || card.column === 'in_qa')) {
     const nowMs = Date.parse(nowIso);
     if (typeof writtenNextCheckMs === 'number' && Number.isFinite(writtenNextCheckMs) && writtenNextCheckMs > nowMs) {
-      // A written check-in time in the comment is honored, capped at the
+      // A written check-in time in the comment is honored within the
       // written maximum so no comment can park a live card indefinitely:
       // parking until a stated time actually silences the card until then.
       card.nextCheckAt = new Date(Math.min(writtenNextCheckMs, nowMs + CARD_NEXT_CHECK_WRITTEN_MAX_MS)).toISOString();
@@ -1033,6 +1047,8 @@ function mirrorAfter(p: Promise<DeskCard>): Promise<DeskCard> {
 }
 
 export function createCard(input: CardInput, owner: DeskActor, by: DeskActor, opts: { dedupe?: boolean } = {}): Promise<DeskCard> {
+  try { if (by.kind !== 'owner') requireCardTiming([input.title, input.description].filter(v => typeof v === 'string').join('\n')); }
+  catch (error) { return Promise.reject(error); }
   return mirrorAfter(mutate((data, now) => {
     if (opts.dedupe) {
       const wanted = normalizeTitleKey(requireTitle(input.title));
@@ -1063,9 +1079,10 @@ export function createCard(input: CardInput, owner: DeskActor, by: DeskActor, op
   }));
 }
 
-export function updateCard(id: string, input: CardInput, owner?: DeskActor): Promise<DeskCard> {
+export function updateCard(id: string, input: CardInput, owner?: DeskActor, by?: DeskActor): Promise<DeskCard> {
   return mirrorAfter(mutate((data, now) => {
     const card = findCard(data, id);
+    if (by?.kind !== 'owner') requireCardTiming([input.title !== card.title ? input.title : undefined, input.description !== card.description ? input.description : undefined].filter(v => typeof v === 'string').join('\n'));
     if (input.title !== undefined) card.title = requireTitle(input.title);
     if (input.description !== undefined) {
       const description = requireClip(input.description, DESK_LIMITS.description, 'description');
@@ -1129,6 +1146,7 @@ export async function commentCard(id: string, text: unknown, author: DeskActor):
     const card = findCard(data, id);
     const body = requireClip(text, DESK_LIMITS.comment, 'text');
     if (!body) throw new DeskError(400, 'text is required');
+    if (author.kind !== 'owner') requireCardTiming(body, Date.parse(now));
     if (card.comments.length >= DESK_LIMITS.commentsPerCard) {
       throw new DeskError(409, 'This card has too many comments; start a fresh card for the next phase.');
     }

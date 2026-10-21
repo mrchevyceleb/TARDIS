@@ -67,10 +67,8 @@ commitmentsRouter.post('/add', asyncHandler(async (req, res) => {
   const r = agentIdForMutation(agent);
   if ('error' in r) { res.status(r.status).json({ error: r.error }); return; }
   const dueText = typeof due === 'string' && due.trim() ? due : undefined;
-  // The parsed instant is stored once, at add time: a relative display due
-  // never drifts with later reparsing. An unparseable due is never silent:
-  // the commitment is stored (it still shows in the seed), but the response
-  // says the sweeper cannot raise it, so the caller can restate the time.
+  // Store the instant once; the shared write guard refuses unclear or distant
+  // work times before any commitment is saved.
   const parsedAt = dueText ? parseDue(dueText) : undefined;
   const dueAt = parsedAt ?? undefined;
   const result = addCommitment(r.id, typeof text === 'string' ? text : '', dueText, { dueAt });

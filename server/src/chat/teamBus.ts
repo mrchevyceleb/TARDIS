@@ -2107,7 +2107,7 @@ export async function deliverTeamMessage(input: {
         }
         if (scan.addError) {
           const promised = scan.promise
-            ? `You promised "${scan.promise.clause.replace(/\s+/g, ' ').slice(0, 120)}" (due ${scan.promise.due}) with no matching commitment, and the auto-add failed: ${scan.addError}. Add it with the commitments tool now.`
+            ? `You promised "${scan.promise.clause.replace(/\s+/g, ' ').slice(0, 120)}" (due ${scan.promise.due}) with no matching commitment, and the auto-add failed: ${scan.addError}. Restate the next concrete result with the commitments tool, using a checkpoint within 30 minutes.`
             : `The outgoing-promise scan failed (${scan.addError}). Check your open commitments and add anything you promised with the commitments tool now.`;
           void deliverTeamMessage({
             from: 'TARDIS',
