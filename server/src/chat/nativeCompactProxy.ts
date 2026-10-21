@@ -184,7 +184,8 @@ export function ensureNativeCompactProxy(): Promise<void> {
           stream.on('error', () => { if (!res.destroyed) res.destroy(); });
           res.on('close', () => stream.destroy());
           if (request && response.ok) {
-            const observer = observeUsage(route, request, Boolean(auxiliary), response.headers.get('content-type')?.includes('text/event-stream') ?? false);
+            const sentRequest = body === original ? request : JSON.parse(body);
+            const observer = observeUsage(route, sentRequest, Boolean(auxiliary), response.headers.get('content-type')?.includes('text/event-stream') ?? false);
             observer.on('error', () => { if (!res.destroyed) res.destroy(); });
             stream.pipe(observer).pipe(res);
           } else stream.pipe(res);
