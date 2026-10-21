@@ -21,7 +21,7 @@ import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { isAgentThread, bareChatId, isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
-import { sessionDirectory, sessionPolicy } from './sessionPolicy.ts';
+import { sessionDirectory, sessionPolicy, sessionMemory } from './sessionPolicy.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
@@ -268,6 +268,7 @@ export class CodexSession {
   private readonly invalidatedThreadIds = new Set<string>();
   private contextMaintenance: Promise<void> | null = null;
   private heldSelection: { model?: string; effort?: string } | null = null;
+  private startMemory: string | undefined;
 
   /** A pending cross-engine choice must not apply the other engine's model. */
   holdSelection(selection: { model?: string; effort?: string } | null): void { this.heldSelection = selection; }
@@ -507,6 +508,7 @@ export class CodexSession {
   private invalidateThreadId(): void {
     if (this.threadId) this.invalidatedThreadIds.add(this.threadId);
     this.threadId = null;
+    this.startMemory = undefined;
   }
 
   private clearPersistedThreadId(): Promise<void> {
@@ -645,6 +647,11 @@ export class CodexSession {
       }
       return;
     }
+    // Required operator briefs must resolve before claiming or echoing a turn.
+    // The native developer instructions are rebuilt on start/resume and compact.
+    const memory = this.startMemory ?? sessionMemory(this.chatId);
+    const personaScope = [personaPromptFor(this.chatId, memory), CODEX_TURN_PREAMBLE].filter(Boolean).join('\n\n');
+    this.startMemory = memory;
     const { model: codexModel, effort: codexEffort } = resolveCodexSelection(
       this.heldSelection ? this.heldSelection.model : opts.model,
       this.heldSelection ? this.heldSelection.effort : opts.effort,
@@ -808,9 +815,6 @@ export class CodexSession {
     } else if (recoverContextThisTurn) {
       this.recoverContextOnNextTurn = false;
     }
-    // Stable native developer instructions survive automatic compaction.
-    // They belong to the native session, rather than its first user message.
-    const personaScope = [personaPromptFor(this.chatId), CODEX_TURN_PREAMBLE].filter(Boolean).join('\n\n');
     const conversationGuidance = !this.threadId || opts.peerFromRole === 'voice' ? conversationGuidanceForTurn({
       chatId: this.chatId, logKey: this.logKey, historyThroughSeq,
       peerFrom: opts.peerFrom,

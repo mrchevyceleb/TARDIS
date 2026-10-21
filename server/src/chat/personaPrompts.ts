@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import { agentForChatId } from './agents.ts';
 import { DESK_OWNER_NAME, DESK_ROOM_ENABLED } from '../config.ts';
+import { sessionBriefs, sessionMemory } from './sessionPolicy.ts';
 
 export const PERSONAS_DIR = join(STATE_DIR, 'personas');
 
@@ -69,11 +70,11 @@ function readScopeFile(file: string): string {
 }
 
 /** The agent's scope for a home-thread chatId ('' when no agent owns it). */
-export function personaPromptFor(chatId: string): string {
+export function personaPromptFor(chatId: string, memory = sessionMemory(chatId)): string {
   const agent = agentForChatId(chatId);
   if (!agent) return '';
   const scope = readScopeFile(`${agent.id}.md`);
-  return [scope, TEAM_STATUS_GUIDANCE, WATCH_JOB_GUIDANCE, SIDEBAR_GUIDANCE, DESK_ROOM_ENABLED ? DESK_GUIDANCE : null].filter(Boolean).join('\n\n');
+  return [scope, memory, sessionBriefs(chatId), TEAM_STATUS_GUIDANCE, WATCH_JOB_GUIDANCE, SIDEBAR_GUIDANCE, DESK_ROOM_ENABLED ? DESK_GUIDANCE : null].filter(Boolean).join('\n\n');
 }
 
 /** Scope text for an agent record's home (REST use). */

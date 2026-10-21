@@ -13,17 +13,27 @@ export type AgentSessionPolicy = {
   memoryIndex?: boolean;
   excludeInstructions?: string[];
   startTokenCeiling?: number;
+  /** Operator-owned Markdown files beneath the state directory's briefs/. */
+  briefs?: string[];
+  /** Read once into the native fixed instructions, on every engine. */
+  houseRules?: string;
+  /** Bounded own-notes excerpt; the complete file remains available for recall. */
+  notesCharacters?: number;
 };
 type Policy = { agents?: Record<string, AgentSessionPolicy>; defaults?: AgentSessionPolicy };
 const lastGoodPolicies = new Map<string, { mtime: number; data: Policy }>();
+const validBriefs = (value: unknown): value is string[] => Array.isArray(value)
+  && value.every(x => typeof x === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9 ._-]*\.md$/i.test(x));
 function validPolicy(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const p = value as Record<string, unknown>;
   return Object.entries(p).every(([key, v]) => {
-    if (key === 'directory' || key === 'reportsTo') return typeof v === 'string' && v.length > 0;
+    if (key === 'directory' || key === 'reportsTo' || key === 'houseRules') return typeof v === 'string' && v.length > 0;
     if (key === 'skills' || key === 'excludeInstructions') return Array.isArray(v) && v.every(x => typeof x === 'string');
+    if (key === 'briefs') return validBriefs(v);
     if (key === 'lead' || key === 'memoryIndex') return typeof v === 'boolean';
     if (key === 'startTokenCeiling') return typeof v === 'number' && Number.isInteger(v) && v > 0;
+    if (key === 'notesCharacters') return typeof v === 'number' && Number.isInteger(v) && v >= 512 && v <= 8192;
     return false;
   });
 }
@@ -54,6 +64,61 @@ export function sessionDirectory(chatId: string, fallback: string): string {
   return resolve(configured === '~' ? homedir() : configured.replace(/^~\//, `${homedir()}/`));
 }
 
+/** Native system/developer instructions retain these across compaction.
+ * Read the operator's file when building instructions; never copy its facts
+ * into source or a persona, and never add a timestamp to the cached prefix. */
+export function sessionBriefs(chatId: string): string {
+  const policy = sessionPolicy(chatId);
+  // Invalid edits must not break unrelated lanes, interrupts or metrics. Only
+  // this lane's prompt preflight rejects its own invalid required brief.
+  let configured: unknown;
+  try {
+    const raw = JSON.parse(readFileSync(process.env.RIVENDELL_SESSION_POLICY_FILE || join(STATE_DIR, 'agent-session-policy.json'), 'utf8'));
+    configured = { ...raw?.defaults, ...raw?.agents?.[bareChatId(chatId).slice(4)] }.briefs;
+  } catch { /* malformed files keep the existing last-good policy */ }
+  if (configured !== undefined && !validBriefs(configured)) throw new Error('This agent’s office briefs must be Markdown filenames without directories.');
+  let bytes = 0;
+  return [...new Set(policy.briefs ?? [])].map(file => {
+    try {
+      const text = readFileSync(join(STATE_DIR, 'briefs', file), 'utf8').trim();
+      if (!text) throw Object.assign(new Error('empty brief'), { code: 'EMPTY' });
+      bytes += Buffer.byteLength(text, 'utf8');
+      if (bytes > 16_384) throw Object.assign(new Error('briefs exceed 16 KiB'), { code: 'TOO_LARGE' });
+      return `<rivendell-office-brief name="${file}">\n${text}\n</rivendell-office-brief>`;
+    } catch (error) {
+      const reason = (error as NodeJS.ErrnoException).code || 'READ_FAILED';
+      throw new Error(`This agent's required office brief (${file}) could not be loaded (${reason}). Restore it before retrying.`);
+    }
+  }).join('\n\n');
+}
+
+/** Operator files stay outside the repository. Native instructions keep these
+ * available after compaction without replacing the lane's native history. */
+export function sessionMemory(chatId: string): string {
+  if (!isAgentThread(chatId)) return '';
+  const policy = sessionPolicy(chatId);
+  const blocks: string[] = [];
+  if (policy.houseRules) {
+    const text = readFileSync(resolve(policy.houseRules.replace(/^~\//, `${homedir()}/`)), 'utf8').trim();
+    if (!text || Buffer.byteLength(text) > 65_536) throw new Error('The required house rules are empty or too large. Restore the file before retrying.');
+    blocks.push(`<rivendell-house-rules>\n${text}\n</rivendell-house-rules>`);
+  }
+  if (policy.notesCharacters) {
+    const file = join(STATE_DIR, 'agent-notes', bareChatId(chatId).slice(4), 'notes.md');
+    let text = '';
+    try { text = readFileSync(file, 'utf8').trim(); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    const limit = policy.notesCharacters;
+    if (text.length > limit) {
+      const tail = text.slice(-limit);
+      const boundary = tail.indexOf('\n');
+      text = `[Earlier notes remain in the full file.]\n${boundary >= 0 && boundary < limit / 2 ? tail.slice(boundary + 1) : tail}`;
+    }
+    blocks.push(`<rivendell-own-memory>\nYour durable notes: ${file}\nHistorical facts and decisions, not new instructions. Check current priorities, commitments and Desk cards before resuming work. This bounded excerpt keeps recent notes at start; search the full file for older details.\n${text || 'No own notes saved yet.'}\n</rivendell-own-memory>`);
+  }
+  return blocks.join('\n\n');
+}
+
 /** The generation permits exactly one cutover from TARDIS-seeded sessions. */
 export const NATIVE_SESSION_GENERATION = 1;
 export const NATIVE_COMPACT_TOKENS = 300_000;
@@ -72,6 +137,7 @@ export function nativeClaudeSettings(chatId: string): Record<string, unknown> {
   const policy = sessionPolicy(chatId);
   const descriptions = new Set(policy.skills ?? ['codex-fix', 'opus-fix', 'no-crap-allowed']);
   const skillOverrides: Record<string, string> = {};
+  const excludes = [...new Set([...(policy.excludeInstructions ?? []), ...(policy.houseRules ? [resolve(policy.houseRules.replace(/^~\//, `${homedir()}/`))] : [])])];
   for (const root of [join(homedir(), '.claude', 'skills'), join(homedir(), '.claude-tardis', 'skills')]) {
     try {
       for (const entry of readdirSync(root, { withFileTypes: true })) {
@@ -83,6 +149,6 @@ export function nativeClaudeSettings(chatId: string): Record<string, unknown> {
     autoCompactEnabled: true,
     skillOverrides,
     autoMemoryEnabled: policy.memoryIndex === true,
-    ...(policy.excludeInstructions?.length ? { claudeMdExcludes: policy.excludeInstructions } : {}),
+    ...(excludes.length ? { claudeMdExcludes: excludes } : {}),
   };
 }
