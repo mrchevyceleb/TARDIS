@@ -122,7 +122,12 @@ export function recordNativeFailure(lane: string, engine: string, reason: string
 }
 export function fixedPrefix(request: any): string {
   // Hash only. Request text, credentials and tool arguments never enter metrics.
-  return createHash('sha256').update(JSON.stringify({ system: request.system, tools: request.tools })).digest('hex');
+  return createHash('sha256').update(JSON.stringify({
+    system: request.system, tools: request.tools,
+    thinking: request.thinking, reasoning: request.reasoning,
+    reasoning_effort: request.reasoning_effort, effort: request.effort,
+    output_config: request.output_config,
+  })).digest('hex');
 }
 export function nativeSessionReport(date = day()): { date: string; rows: any[] } {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('Invalid report date');
@@ -132,10 +137,13 @@ export function nativeSessionReport(date = day()): { date: string; rows: any[] }
   const lanes = new Map<string, any>();
   const compactsBySession = new Map<string, any>();
   const lastInputs = new Map<string, number>();
+  const cacheChecks = new Map<string, { input: number; misses: number }>();
+  const compactResets = new Set<string>();
   for (const event of records) {
     if (event.event === 'notice' || /Cross-engine switch involving Codex is held/.test(event.reason || '')) continue;
     const key = `${bareChatId(event.lane)}|${event.engine}`;
-    const row = lanes.get(key) ?? { lane: bareChatId(event.lane).replace(/^bot-/, ''), engine: event.engine, calls: 0, input: 0, cached: 0, auxiliaryCalls: 0, auxiliaryInput: 0, auxiliaryCached: 0, starts: [], compacts: [], afterCompacts: [], postCompactChecks: [], workingContexts: [], failures: [], recovered: [], models: new Set<string>(), providers: new Set<string>(), replacements: 0, minHarnessChars: null, maxHarnessChars: null, startupHarnessChars: null, unclassifiedHarnessChars: null, prefixes: new Set<string>() };
+    const row = lanes.get(key) ?? { lane: bareChatId(event.lane).replace(/^bot-/, ''), engine: event.engine, calls: 0, input: 0, cached: 0, firstAt: event.at, lastAt: event.at, latestStartAt: 0, peakInput: 0, cacheChecks: 0, cacheMissCalls: 0, cacheRecoveryChecks: 0, maxCacheMissStreak: 0, latestCacheMissStreak: 0, firstStartupHarnessChars: null, auxiliaryCalls: 0, auxiliaryInput: 0, auxiliaryCached: 0, starts: [], compacts: [], afterCompacts: [], postCompactChecks: [], workingContexts: [], failures: [], recovered: [], models: new Set<string>(), providers: new Set<string>(), replacements: 0, minHarnessChars: null, maxHarnessChars: null, startupHarnessChars: null, unclassifiedHarnessChars: null, prefixes: new Set<string>() };
+    row.lastAt = Math.max(row.lastAt, event.at);
     if (event.auxiliary || event.event === 'auxiliary') {
       row.auxiliaryCalls++; row.auxiliaryInput += event.input; row.auxiliaryCached += event.cached;
       lanes.set(key, row);
@@ -155,20 +163,38 @@ export function nativeSessionReport(date = day()): { date: string; rows: any[] }
       const trigger = event.trigger?.toLowerCase() ?? '';
       const kind = /manual|user/.test(trigger) ? 'manual' : /^(auto|automatic)(?:[-_ ]|$)/.test(trigger) ? 'automatic' : 'native';
       const compact = { at: event.at, sessionId: event.sessionId, before: event.before || lastInputs.get(sessionKey), after: event.after, trigger: event.trigger, kind };
-      row.compacts.push(compact); compactsBySession.set(sessionKey, compact);
+      row.compacts.push(compact); compactsBySession.set(sessionKey, compact); compactResets.add(sessionKey); row.cacheRecoveryChecks = 0;
     }
     if (event.input > 0) lastInputs.set(sessionKey, event.input);
-    if (event.event === 'start') row.starts.push(event.input);
+    if (event.event === 'start') { row.starts.push(event.input); row.latestStartAt = event.at; row.cacheRecoveryChecks = 0; }
     if (event.event === 'failure') row.failures.push(event.reason);
     if (event.event === 'after-compact') {
       const compact = compactsBySession.get(sessionKey);
-      if (compact) compact.measuredAfter = event.input;
+      if (compact && event.input > 0 && compact.measuredAfter === undefined) { compact.measuredAfter = event.input; compact.measuredAt = event.at; compact.workingContext = event.workingContext; }
+      if (event.input > 0) { compactResets.delete(sessionKey); cacheChecks.set(sessionKey, { input: event.input, misses: 0 }); }
       row.afterCompacts.push(event.input); row.postCompactChecks.push({ at: event.at, sessionId: event.sessionId, input: event.input, workingContext: event.workingContext }); if (event.workingContext) row.workingContexts.push(event.workingContext); }
-    if (event.input && event.event !== 'after-compact') { row.calls++; row.input += event.input; row.cached += event.cached; }
+    if (event.input > 0 && !['after-compact', 'compact'].includes(event.event)) {
+      row.calls++; row.input += event.input; row.cached += event.cached;
+      row.peakInput = Math.max(row.peakInput, event.input);
+      const previous = cacheChecks.get(sessionKey);
+      const justCompacted = compactResets.delete(sessionKey);
+      const eligible = previous && !justCompacted && event.input >= previous.input;
+      const missed = eligible && event.cached < previous.input * 0.8;
+      const misses = missed ? previous.misses + 1 : 0;
+      if (eligible) row.cacheChecks++;
+      if (missed) { row.cacheMissCalls++; row.cacheRecoveryChecks = 0; }
+      else if (eligible) row.cacheRecoveryChecks++;
+      row.maxCacheMissStreak = Math.max(row.maxCacheMissStreak, misses);
+      row.latestCacheMissStreak = misses;
+      cacheChecks.set(sessionKey, { input: event.input, misses });
+    }
     if (event.harnessChars !== undefined && event.event !== 'after-compact') {
       const field = event.harnessPhase === 'startup' ? 'startupHarnessChars'
         : event.harnessPhase === 'turn' ? 'maxHarnessChars' : 'unclassifiedHarnessChars';
-      row[field] = Math.max(row[field] ?? 0, event.harnessChars);
+      if (event.harnessPhase === 'startup') {
+        row.firstStartupHarnessChars ??= event.harnessChars;
+        row.startupHarnessChars = event.harnessChars;
+      } else row[field] = Math.max(row[field] ?? 0, event.harnessChars);
       if (event.harnessPhase === 'turn') row.minHarnessChars = Math.min(row.minHarnessChars ?? event.harnessChars, event.harnessChars);
     }
     if (event.prefix) row.prefixes.add(event.prefix);
@@ -180,11 +206,9 @@ export function nativeSessionReportHtml(date = day()): string {
   const report = nativeSessionReport(date);
   const escape = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
   const number = (n: number) => n.toLocaleString('en-US');
-  const sizes = (values: number[]) => values.length ? values.map(number).join(' · ') : 'Not measured';
   const agentName = (name: string) => name === 'chief-of-staff' ? 'Max' : name.split('-').map(word => word[0]?.toUpperCase() + word.slice(1)).join(' ');
   const engineName = (engine: string) => engine === 'claude-code' ? 'Claude Code' : engine === 'codex' ? 'Codex' : engine;
   const connectionName = (provider: string) => (({ claude: 'Claude subscription', zai: 'Z.ai', xai: 'xAI', fireworks: 'Fireworks', openrouter: 'OpenRouter', openrouter2: 'OpenRouter Personal', codex: 'ChatGPT subscription' } as Record<string, string>)[provider] ?? provider);
-  const compactName = (kind: string) => kind === 'automatic' ? 'Automatic' : kind === 'manual' ? 'Manual' : 'Native · trigger not supplied';
   const modelName = (model: string) => {
     const id = model.replace(/^accounts\/fireworks\/models\//, '').replace(/^[^/]+\//, '').replace(/\[1m\]$/, '');
     const known: Record<string, string> = {
@@ -196,44 +220,51 @@ export function nativeSessionReportHtml(date = day()): string {
     };
     return known[id] ?? id;
   };
-  const cards = report.rows.map(row => {
+  const time = (at: number) => new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(at);
+  const needsCheck = (row: any) => row.failures.length > 0 || row.replacements > 0 || (row.maxCacheMissStreak >= 2 && row.cacheRecoveryChecks < 2) || row.starts.at(-1) > (sessionPolicy(`bot-${row.lane}`).startTokenCeiling ?? 33_000);
+  const attentionCount = report.rows.filter(needsCheck).length;
+  const firstAt = Math.min(...report.rows.map(row => row.firstAt));
+  const lastAt = Math.max(...report.rows.map(row => row.lastAt));
+  const cards = report.rows.sort((a, b) => Number(needsCheck(b)) - Number(needsCheck(a)) || b.latestCacheMissStreak - a.latestCacheMissStreak).map(row => {
     const cached = row.cachedShare === null ? 'Not measured' : `${(row.cachedShare * 100).toFixed(1)}%`;
     const ceiling = sessionPolicy(`bot-${row.lane}`).startTokenCeiling ?? 33_000;
     const oversized = row.starts.filter((n: number) => n > ceiling);
-    const working = row.postCompactChecks.map((x: { input: number; workingContext?: WorkingContext }) => {
-      const context = x.workingContext;
-      const bound = x.input <= ceiling
-        ? `<strong>The full measured input fits ${number(ceiling)} tokens, so instructions and summary also fit.</strong>`
-        : `<strong class="attention">The full input exceeds ${number(ceiling)} tokens. The instructions-and-summary bound is unproven; this total also includes the current work.</strong>`;
-      const breakdown = context
-        ? `Native summary record: ${number(context.summaryCharacters)} characters. Restored working-file records: ${number(context.files)} ${context.files === 1 ? 'file' : 'files'}, ${number(context.fileCharacters)} characters. These character counts are not token measurements.`
-        : 'The native record has no separate file or summary character counts.';
-      return `<li>${number(x.input)} measured total tokens after compaction.<br>${bound}<br>${breakdown}</li>`;
-    }).join('');
-    const details = row.compacts.map((x: any) => `<li>${compactName(x.kind)} · ${x.before > 0 ? number(x.before) : 'Not measured'} before · ${x.measuredAfter > 0 ? `${number(x.measuredAfter)} measured total after compaction` : 'Awaiting measured call after compaction'}${x.after > 0 ? ` · ${number(x.after)} native-reported after size` : ''}</li>`).join('');
-    const health = row.failures.length
-      ? `<p class="attention">Delivery or session errors need a look</p><ul>${row.failures.map((reason: string) => `<li>${escape(reason)}</li>`).join('')}</ul>`
-      : `<p>${row.recovered.length ? `${number(row.recovered.length)} earlier ${row.recovered.length === 1 ? 'issue recovered' : 'issues recovered'} automatically. ` : ''}No unresolved delivery or session errors recorded.</p>`;
-    const startCheck = oversized.length ? `<p class="attention">${number(oversized.length)} measured ${oversized.length === 1 ? 'start exceeds' : 'starts exceed'} the ${number(ceiling)}-token ceiling.</p>`
-      : `<p>${row.starts.length ? `Measured starts fit the ${number(ceiling)}-token ceiling.` : 'A new-session start has not been measured today.'} Post-compaction totals are checked separately below; a start-size pass does not prove a post-compaction bound.</p>`;
-    const overhead = `${row.startupHarnessChars !== null ? `One-time startup text: ${number(row.startupHarnessChars)} characters. ` : ''}${row.maxHarnessChars !== null ? `Added text per turn: ${number(row.minHarnessChars)} to ${number(row.maxHarnessChars)} characters. Changed priorities, cards and commitments add a short notice once; unchanged status stays out.` : 'Recurring turn overhead has not been measured separately yet.'}${row.unclassifiedHarnessChars !== null ? ' Earlier measurements combine startup and recurring text and are excluded from that comparison.' : ''}`;
-    const automatic = row.compacts.filter((compact: { kind: string }) => compact.kind === 'automatic');
-    const native = row.compacts.filter((compact: { kind: string }) => compact.kind === 'native');
-    const nearThreshold = native.filter((compact: { before: number }) => compact.before >= NATIVE_COMPACT_TOKENS * 0.95 && compact.before <= NATIVE_COMPACT_TOKENS * 1.1);
-    const autoStatus = automatic.length
-      ? `<p>${number(automatic.length)} automatic ${automatic.length === 1 ? 'compaction' : 'compactions'} recorded. Latest: ${automatic.at(-1).before > 0 ? number(automatic.at(-1).before) + ' tokens' : 'size not recorded'}.</p>`
-      : native.length
-        ? `<p>${number(native.length)} native ${native.length === 1 ? 'compaction' : 'compactions'} recorded${nearThreshold.length ? `, including ${number(nearThreshold.length)} near ${number(NATIVE_COMPACT_TOKENS)} tokens` : ''}. The engine notification does not identify automatic versus manual; no automatic trigger is claimed.</p>`
-        : '<p class="attention">No automatic compaction has been recorded today.</p>';
+    const latestAfter = row.postCompactChecks.at(-1)?.at >= row.latestStartAt ? row.afterCompacts.at(-1) : undefined;
+    const currentStartTooLarge = row.starts.at(-1) > ceiling;
+    const cacheWarning = row.maxCacheMissStreak >= 2 && row.cacheRecoveryChecks < 2;
+    const cacheStatus = cacheWarning ? `Cache needs a look · ${row.latestCacheMissStreak >= 2 ? `${number(row.latestCacheMissStreak)} misses in a row` : 'repeat misses recorded; recovery not proven'}`
+      : row.cacheChecks >= 2 && row.cacheMissCalls === 0 ? `History reused on all ${number(row.cacheChecks)} comparable calls`
+      : row.maxCacheMissStreak >= 2 ? `Earlier cache misses recovered · ${number(row.cacheRecoveryChecks)} successful checks since`
+      : row.cacheChecks >= 2 ? `${number(row.cacheChecks - row.cacheMissCalls)} of ${number(row.cacheChecks)} checks reused history; no repeated misses`
+      : 'History reuse needs more evidence';
+    const headroom = currentStartTooLarge ? `Latest start exceeds ${number(ceiling)}`
+      : latestAfter > ceiling ? 'Headroom after compaction not yet proven'
+      : latestAfter > 0 ? `After compaction · full input fits ${number(ceiling)}`
+      : row.starts.length ? `Starts fit ${number(ceiling)} · compaction not yet measured` : 'Headroom not measured yet';
+    const contexts = (context?: WorkingContext) => context
+      ? ` Saved summary: ${number(context.summaryCharacters)} characters; working files: ${number(context.files)}, ${number(context.fileCharacters)} characters. Characters are not token counts.` : '';
+    const details = row.compacts.map((x: any) => `<li><strong>${x.kind === 'automatic' ? 'Automatic' : x.kind === 'manual' ? 'Manual' : 'Engine compacted; cause not supplied'}</strong> · ${time(x.at)}<br>${x.before > 0 ? `${number(x.before)} before` : 'Before size not recorded'} → ${x.measuredAfter > 0 ? `${number(x.measuredAfter)} measured total after` : 'Next total not measured'}${x.after > 0 ? ` (${number(x.after)} engine-reported after size)` : ''}.${contexts(x.workingContext)}</li>`).join('');
+    const unpaired = row.postCompactChecks.filter((x: any) => !row.compacts.some((c: any) => c.sessionId === x.sessionId && c.measuredAt === x.at)).map((x: any) => `<li>${time(x.at)} · ${number(x.input)} measured total after compaction.${contexts(x.workingContext)}</li>`).join('');
+    const bound = latestAfter > ceiling
+      ? `<p class="attention">The latest full request is above ${number(ceiling)} tokens. It may include working files and a new message, so this does not prove the saved instructions and summary are too large. Their separate size is not measured.</p>`
+      : latestAfter > 0 ? `<p>The latest full request fits ${number(ceiling)} tokens, including instructions, summary and current work.</p>` : '';
+    const health = row.failures.length ? `<p class="attention">Session errors need a look</p><ul>${row.failures.map((reason: string) => `<li>${escape(reason)}</li>`).join('')}</ul>`
+      : row.recovered.length ? `<p>${number(row.recovered.length)} earlier session ${row.recovered.length === 1 ? 'issue recovered' : 'issues recovered'}. No unresolved errors recorded.</p>` : '<p>No unresolved session errors recorded.</p>';
+    const startCheck = row.starts.length ? `Latest start: ${number(row.starts.at(-1))} tokens${row.starts[0] !== row.starts.at(-1) ? ` (first measured: ${number(row.starts[0])})` : ''}. ${oversized.length ? `${number(oversized.length)} ${oversized.length === 1 ? 'start exceeded' : 'starts exceeded'} ${number(ceiling)}.` : `All measured starts fit ${number(ceiling)}.`}` : 'No fresh start measured in this window.';
+    const overhead = `${row.startupHarnessChars !== null ? `Latest startup text: ${number(row.startupHarnessChars)} characters${row.firstStartupHarnessChars !== row.startupHarnessChars ? ` (first measured: ${number(row.firstStartupHarnessChars)})` : ''}. ` : ''}${row.maxHarnessChars !== null ? `Added per turn: ${row.minHarnessChars === row.maxHarnessChars ? number(row.minHarnessChars) : `${number(row.minHarnessChars)}–${number(row.maxHarnessChars)}`} characters. Changed status adds one notice.` : 'Added text per turn has not been measured separately.'}${row.unclassifiedHarnessChars !== null ? ' Earlier combined measurements are excluded from the per-turn comparison.' : ''}`;
+    const automatic = row.compacts.filter((c: any) => c.kind === 'automatic').length;
+    const manual = row.compacts.filter((c: any) => c.kind === 'manual').length;
+    const native = row.compacts.length - automatic - manual;
+    const peak = Math.max(row.peakInput, ...row.compacts.map((c: any) => c.before || 0));
+    const autoStatus = row.compacts.length ? `${automatic ? `${automatic} automatic. ` : ''}${manual ? `${manual} manual. ` : ''}${native ? `${native} engine compactions; automatic or manual cause was not supplied. ` : ''}`
+      : row.calls === 0 ? 'No conversation call measured yet.' : peak < NATIVE_COMPACT_TOKENS ? `No compaction due yet: largest call ${number(peak)}; target ${number(NATIVE_COMPACT_TOKENS)}.` : 'Context reached the compaction target; no compaction record is available yet.';
     const providers = row.providers.length ? row.providers.map(connectionName).join(' · ') : row.engine === 'codex' ? 'ChatGPT subscription' : 'Not recorded';
-    const auxiliary = row.auxiliaryCalls
-      ? `<p>Auxiliary calls, including compaction summaries and other tool-less engine calls: ${number(row.auxiliaryCalls)} measured; ${number(row.auxiliaryInput)} input tokens, ${number(row.auxiliaryCached)} from cache${row.auxiliaryInput > 0 ? ` (${(row.auxiliaryCached / row.auxiliaryInput * 100).toFixed(1)}%)` : ''}. Kept separate from the conversation-call cache share above.</p>`
-      : '<p>Auxiliary-call cache usage has not been recorded separately.</p>';
-    return `<article><div class="identity"><h2>${escape(agentName(row.lane))}</h2><span>${escape(engineName(row.engine))}</span></div><p class="models">${row.models.map(modelName).map(escape).join(' · ') || 'No model call yet'}</p><div class="cache"><strong>${cached}</strong><span>input from cache<br>across ${number(row.calls)} measured calls</span><i aria-hidden="true"></i></div><meter aria-label="Input from cache for ${escape(row.lane)}" min="0" max="1" value="${row.cachedShare ?? 0}"></meter><dl><div><dt>New session · tokens</dt><dd>${sizes(row.starts)}</dd></div><div><dt>After compact · total tokens</dt><dd>${sizes(row.afterCompacts)}</dd></div><div><dt>Unexpected session changes</dt><dd>${row.replacements}</dd></div><div><dt>Calls measured</dt><dd>${number(row.calls)}</dd></div></dl><details><summary>Explore ${escape(agentName(row.lane))}'s session <span aria-hidden="true">↗</span></summary>${autoStatus}<p>${escape(overhead)}</p>${startCheck}<ul>${details || '<li>No native compaction measured today.</li>'}${working}</ul>${auxiliary}${health}<p>Connection: ${escape(providers)}.<br>Model IDs: ${row.models.map(escape).join(' · ') || 'Not recorded'}.<br>${row.fixedPrefixes ? `${number(row.fixedPrefixes)} instruction and tool-list versions observed, including tool discovery.` : 'The native engine manages its instruction catalog; no comparable instruction fingerprint was recorded.'}</p></details></article>`;
+    const auxiliary = row.auxiliaryCalls ? `<p>Separate engine calls, including summaries: ${number(row.auxiliaryCalls)} calls; ${number(row.auxiliaryInput)} input tokens, ${number(row.auxiliaryCached)} from cache${row.auxiliaryInput > 0 ? ` (${(row.auxiliaryCached / row.auxiliaryInput * 100).toFixed(1)}%)` : ''}. These are excluded from the conversation share above.</p>` : '<p>Separate engine-call cache usage has not been recorded.</p>';
+    return `<article class="${cacheWarning ? 'cache-warning' : ''}"><div class="identity"><h2>${escape(agentName(row.lane))}</h2><span>${escape(engineName(row.engine))}</span></div><p class="models">${row.models.map(modelName).map(escape).join(' · ') || 'No model call yet'} · ${escape(providers)}</p><p class="freshness">Last record ${time(row.lastAt)} ET</p><div class="cache"><strong>${cached}</strong><span>input from cache<br>${number(row.calls)} conversation calls</span><i aria-hidden="true"></i></div>${row.cachedShare !== null ? `<meter aria-label="Input from cache for ${escape(agentName(row.lane))}" min="0" max="1" value="${row.cachedShare}"></meter>` : '<p>Cache share not measured.</p>'}<p class="verdict ${cacheWarning ? 'attention' : ''}">${cacheStatus}</p><p class="verdict ${currentStartTooLarge ? 'attention' : ''}">${headroom}</p><dl><div><dt>Latest start · tokens</dt><dd>${row.starts.length ? number(row.starts.at(-1)) : 'Not measured'}</dd></div><div><dt>Largest call · tokens</dt><dd>${row.calls ? number(row.peakInput) : 'Not measured'}</dd></div><div><dt>Unexpected session changes</dt><dd>${row.replacements}</dd></div><div><dt>Latest compact · total tokens</dt><dd>${latestAfter > 0 ? number(latestAfter) : 'Not measured'}</dd></div></dl><details><summary>Explore ${escape(agentName(row.lane))}'s session <span aria-hidden="true">⌄</span></summary><p>${autoStatus}</p><p>${escape(startCheck)}</p><p>${escape(overhead)}</p>${bound}<ul>${details}${unpaired}</ul><p>Cache checks compare each growing request with the previous request in the same session, skipping the first call after compaction. ${number(row.cacheMissCalls)} of ${number(row.cacheChecks)} checks reused less than 80% of that previous context${cacheWarning ? `; the longest run was ${number(row.maxCacheMissStreak)} misses` : ''}. Latest run: ${number(row.latestCacheMissStreak)} misses. ${number(row.cacheRecoveryChecks)} comparable calls have reused history since the last miss or compaction; recovery requires two.</p>${auxiliary}${health}<p>Connection: ${escape(providers)}. ${row.fixedPrefixes ? `${number(row.fixedPrefixes)} different instruction/tool ${row.fixedPrefixes === 1 ? 'catalog was' : 'catalogs were'} seen; discovery can change them, so this alone is not a cache failure.` : 'The engine did not supply an instruction/tool catalog fingerprint.'}<br>Model IDs: ${row.models.map(escape).join(' · ') || 'Not recorded'}.</p></details></article>`;
   }).join('');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Session health · ${escape(date)}</title><style>
-  *{box-sizing:border-box}body{margin:0;background:#0b1014;color:#edf7f4;font:15px system-ui,sans-serif;padding:clamp(20px,5vw,64px)}body:before{content:"";position:fixed;inset:-30%;pointer-events:none;background:radial-gradient(ellipse at 20% 15%,#244c3928,transparent 45%),radial-gradient(ellipse at 80% 70%,#34586720,transparent 45%);animation:drift 18s ease-in-out infinite alternate;z-index:-1}main{max-width:1320px;margin:auto}header{margin:0 0 30px}header small{color:#9ce7c5;text-transform:uppercase;letter-spacing:.16em}h1{font-size:clamp(32px,5vw,56px);letter-spacing:-.05em;margin:12px 0}header p{max-width:740px;line-height:1.6;color:#a3b9b0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:18px;align-items:start}article{background:linear-gradient(145deg,#182821,#121c1c);border:1px solid #2c4338;border-radius:24px;padding:24px;transition:transform .22s cubic-bezier(.2,.8,.2,1),border-color .2s,box-shadow .2s}article:hover{transform:translateY(-6px) rotate(-.4deg) scale(1.01);border-color:#9ce7c5;box-shadow:0 18px 40px #0005}article:focus-within{border-color:#b8f6d4;box-shadow:0 0 0 3px #9ce7c533}.identity{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:14px}.identity h2{font-size:22px;margin:0;overflow-wrap:anywhere}.models{color:#b4c5be;font-size:13px;line-height:1.5;overflow-wrap:anywhere;margin:12px 0 0}.identity span{white-space:nowrap;color:#c4d8cd;border:1px solid #3d5547;padding:5px 9px;border-radius:99px;font-size:12px}.cache{display:flex;align-items:baseline;gap:10px;margin-top:24px}.cache strong{font-size:42px;letter-spacing:-.05em}.cache i{align-self:center;width:8px;height:8px;border-radius:100%;background:#9ce7c5;box-shadow:0 0 14px #9ce7c577;animation:breathe 3s ease-in-out infinite}.cache span,dt{color:#9eb8ab;font-size:13px}meter{display:block;width:100%;height:10px;margin:10px 0 24px;accent-color:#a0e8be}dl{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:0}dd{margin:5px 0 0;font-size:18px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}details{border-top:1px solid #2d4538;margin-top:24px;padding-top:12px;font-size:13px;line-height:1.6}summary{display:flex;align-items:center;justify-content:space-between;min-height:48px;padding:12px;gap:12px;cursor:pointer;list-style:none;color:#b8f6d4;border-radius:12px;background:#9ce7c509;transition:background .2s,transform .2s}summary::-webkit-details-marker{display:none}summary:hover{color:white;background:#9ce7c51c;transform:translateY(-2px)}summary:focus-visible{outline:3px solid #b8f6d4;outline-offset:4px}summary span{font-size:20px;transition:transform .25s cubic-bezier(.2,1.6,.4,1)}details[open] summary{background:#254335}details[open] summary span{transform:rotate(90deg)}summary:active{transform:scale(.97)}details p,details li{color:#b4c5be;overflow-wrap:anywhere}details[open]>p,details[open]>ul{animation:unfold .25s ease-out}ul{padding-left:18px}li+li{margin-top:12px}.attention{color:#ffcba0!important}.empty{border:1px dashed #456050;border-radius:24px;padding:32px;color:#b4c5be}@keyframes breathe{50%{opacity:.4;transform:scale(.7)}}@keyframes drift{to{transform:translate(4%,3%) rotate(4deg)}}@keyframes unfold{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:none}}@media(prefers-reduced-motion:reduce){*,:before{animation:none!important;transition:none!important}}
-  </style></head><body><main><header><small>TARDIS · ${escape(date)} · ET</small><h1>Room to think.</h1><p>Follow each agent's session, native compaction and cached input. Conversation cache shares include new sessions and calls immediately after compaction; auxiliary calls, including summaries, are shown separately. Totals after compaction include the working files the engine restores. Explore a card for the breakdown, measured limits and any errors.</p></header><section class="grid" aria-label="Agent session measurements">${cards || '<p class="empty">No calls measured for this date yet. The first real agent call will appear here.</p>'}</section></main></body></html>`;
+  *{box-sizing:border-box}body{margin:0;background:#0b1014;color:#edf7f4;font:15px system-ui,sans-serif;padding:clamp(20px,5vw,64px)}body:before{content:"";position:fixed;inset:-30%;pointer-events:none;background:radial-gradient(ellipse at 20% 15%,#244c3928,transparent 45%),radial-gradient(ellipse at 80% 70%,#34586720,transparent 45%);animation:drift 18s ease-in-out infinite alternate;z-index:-1}main{max-width:1320px;margin:auto}header{margin:0 0 30px}header small{color:#9ce7c5;text-transform:uppercase;letter-spacing:.16em}h1{font-size:clamp(32px,5vw,56px);letter-spacing:-.05em;margin:12px 0}header p{max-width:740px;line-height:1.6;color:#a3b9b0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:18px;align-items:start}article{background:linear-gradient(145deg,#182821,#121c1c);border:1px solid #2c4338;border-radius:24px;padding:24px;transition:transform .22s cubic-bezier(.2,.8,.2,1),border-color .2s,box-shadow .2s}article:not(:has(details[open])):hover{transform:translateY(-6px) rotate(-.4deg) scale(1.01);border-color:#9ce7c5;box-shadow:0 18px 40px #0005}article:focus-within{border-color:#b8f6d4;box-shadow:0 0 0 3px #9ce7c533}.identity{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:14px}.identity h2{font-size:22px;margin:0;overflow-wrap:anywhere}.models{color:#b4c5be;font-size:13px;line-height:1.5;overflow-wrap:anywhere;margin:12px 0 0}.identity span{white-space:nowrap;color:#c4d8cd;border:1px solid #3d5547;padding:5px 9px;border-radius:99px;font-size:12px}.cache{display:flex;align-items:baseline;gap:10px;margin-top:24px}.cache strong{font-size:42px;letter-spacing:-.05em}.cache i{align-self:center;width:8px;height:8px;border-radius:100%;background:#9ce7c5;box-shadow:0 0 14px #9ce7c577;animation:breathe 3s ease-in-out infinite}.cache span,dt{color:#9eb8ab;font-size:13px}meter{display:block;width:100%;height:10px;margin:10px 0 24px;accent-color:#a0e8be}dl{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:0}dd{margin:5px 0 0;font-size:18px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}details{border-top:1px solid #2d4538;margin-top:24px;padding-top:12px;font-size:13px;line-height:1.6}summary{display:flex;align-items:center;justify-content:space-between;min-height:48px;padding:12px;gap:12px;cursor:pointer;list-style:none;color:#b8f6d4;border-radius:12px;background:#9ce7c509;transition:background .2s,transform .2s}summary::-webkit-details-marker{display:none}summary:hover{color:white;background:#9ce7c51c;transform:translateY(-2px)}summary:focus-visible{outline:3px solid #b8f6d4;outline-offset:4px}summary span{font-size:20px;transition:transform .25s cubic-bezier(.2,1.6,.4,1)}details[open] summary{background:#254335}details[open] summary span{transform:rotate(180deg)}summary:active{transform:scale(.97)}details p,details li{color:#b4c5be;overflow-wrap:anywhere}details[open]>p,details[open]>ul{animation:unfold .25s ease-out}ul{padding-left:18px}li+li{margin-top:12px}.attention{color:#ffcba0!important}.cache-warning{border-color:#986b3c}.cache-warning .cache i{background:#ffcba0;box-shadow:0 0 14px #ffcba077}.cache-warning meter{accent-color:#ffcba0}meter::-webkit-meter-optimum-value{background:#9ce7c5}.cache-warning meter::-webkit-meter-optimum-value{background:#ffcba0}.cache-warning meter::-moz-meter-bar{background:#ffcba0}.verdict{font-size:13px;line-height:1.5;margin:10px 0}.freshness{font-size:12px;color:#a3b9b0}.overview{display:flex;flex-wrap:wrap;gap:12px;margin:20px 0}.overview span{border:1px solid #456050;border-radius:14px;padding:10px 14px;background:#182821}.empty{border:1px dashed #456050;border-radius:24px;padding:32px;color:#b4c5be}@keyframes breathe{50%{opacity:.4;transform:scale(.7)}}@keyframes drift{to{transform:translate(4%,3%) rotate(4deg)}}@keyframes unfold{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:none}}@media(prefers-reduced-motion:reduce){*,:before{animation:none!important;transition:none!important}}
+  </style></head><body><main><header><small>TARDIS · ${escape(date)} · ET</small><h1>Room to think.</h1><p>See where memory and caching need a look. Open any card for the real measurements, including what we cannot prove yet.</p>${report.rows.length ? `<p>Measured ${time(firstAt)}–${time(lastAt)} ET. Cache shares include cold starts and the first call after compaction.</p><div class="overview"><span>${attentionCount} ${attentionCount === 1 ? 'lane needs' : 'lanes need'} a look</span><span>${report.rows.length} lanes measured</span></div>` : ''}</header><section class="grid" aria-label="Agent session measurements, current issues first">${cards || '<p class="empty">No calls measured for this date yet. The first real agent call will appear here.</p>'}</section></main></body></html>`;
 }
 export function startSessionMetricsReport(): void {
   let last = '';
