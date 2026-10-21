@@ -612,7 +612,7 @@ const PAUSED_FOR_MESSAGE_NOTE = '<rivendell-steer>Your previous turn was paused 
  *  message in a thinking summary and goes straight to tools unless the reply has a tool to ride. */
 const PAUSED_FOR_MESSAGE_NOTE_TOOL = PAUSED_FOR_MESSAGE_NOTE.replace(
   'Answer it first.',
-  'Answer it first: if you will use tools before you finish, call reply_now with your answer as your first action.',
+  'Answer it first: if you will use tools before you finish, call reply_now with audience: "owner" and your answer as your first action.',
 );
 class ClaudeSession {
   readonly key: string;
@@ -1542,6 +1542,7 @@ class ClaudeSession {
         type: 'event',
         event: {
           type: 'peer_message',
+          replyAudience: 'peer',
           from: opts.peerFrom,
           fromRole: opts.peerFromRole ?? '',
           text: opts.peerText !== undefined ? opts.peerText : text,

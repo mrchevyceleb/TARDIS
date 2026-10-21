@@ -50,7 +50,7 @@ const TOOLS = [
     description: 'Post one or two sentences to the human owner right now, even during a teammate turn. Use team_message or an inline reply for a teammate. This publishes immediately and stays visible: do not repeat or reword it later. Continue with only new information; if there is nothing new, finish with NO_UPDATE. Your thinking is never shown.',
     // Always in the tool list, so using it never costs a ToolSearch first.
     _meta: { 'anthropic/alwaysLoad': true },
-    inputSchema: { type: 'object', properties: { text: { type: 'string', description: 'One or two sentences for the person.' } }, required: ['text'], additionalProperties: false },
+    inputSchema: { type: 'object', properties: { text: { type: 'string', description: 'One or two sentences for the person.' }, audience: { type: 'string', enum: ['owner'], description: `Explicitly addresses ${OWNER}. Teammate replies use team_message or an inline reply.` } }, required: ['text', 'audience'], additionalProperties: false },
   },
   {
     name: 'content_ideas',
@@ -657,6 +657,7 @@ function deniesGhWorkflowDisable(command) {
 async function callTool(name, args, signal) {
   // The runner turns this call into a visible message in the thread; the tool itself only acknowledges.
   if (name === 'reply_now' && REPLY_NOW_ENABLED) {
+    if (args.audience !== 'owner') throw new Error(`Choose audience: "owner" only for ${OWNER}. Reply to teammates inline or with team_message.`);
     const text = typeof args.text === 'string' ? args.text.trim() : '';
     if (!text) throw new Error('reply_now needs one or two sentences of text.');
     if (text.length > 2000) throw new Error('reply_now is for one or two sentences; keep it short and call it again.');

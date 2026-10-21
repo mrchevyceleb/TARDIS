@@ -613,6 +613,7 @@ export class CodexSession {
           type: 'event',
           event: {
             type: 'peer_message',
+            replyAudience: 'peer',
             from: opts.peerFrom,
             fromRole: opts.peerFromRole ?? '',
             text: opts.peerText !== undefined ? opts.peerText : text,
@@ -974,6 +975,7 @@ export class CodexSession {
               type: 'event',
               event: {
                 type: 'peer_message',
+                replyAudience: 'peer',
                 from: opts.peerFrom,
                 fromRole: opts.peerFromRole ?? '',
                 text: opts.peerText !== undefined ? opts.peerText : text,

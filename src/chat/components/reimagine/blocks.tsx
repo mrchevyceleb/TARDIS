@@ -557,6 +557,17 @@ function publicPeerResponse(responseBlocks: AssistantBlock[], streaming: boolean
   ));
 }
 
+/** Old logs recorded the triggering sender, not the intended audience. Only
+ * an explicit addressee proves that old prose belongs inside that exchange. */
+function recordedPeerReply(block: Extract<ChatBlock, { kind: 'peer' }>, response: AssistantBlock[]): boolean {
+  if (block.replyAudience === 'peer') return true;
+  if (block.replyAudience === 'owner') return false;
+  const first = response.find((item) => item.kind === 'text' && !isProtocolNoopText(item.text));
+  if (first?.kind !== 'text') return false;
+  const name = block.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^(?:${name}[,:]|(?:hi|hey|thanks|thank you|understood|got it|yes|no)[,!\\s]+${name}(?:[,.!:\\s]|$))`, 'i').test(first.text.trim());
+}
+
 /** The peer boundary, not individual content-block open flags, owns progress.
  *  Providers can briefly close one block before opening the next; the exchange
  *  must not flicker to "done" while its turn is still running. */
@@ -599,14 +610,17 @@ function PeerMessageBubble({
   const [open, setOpen] = useState(block.expanded ?? routineResult);
   const text = cleanPeerMessageText(block.text);
   const bodyId = `peer-message-${block.id}`;
-  const hasResponse = responseBlocks.length > 0;
   const ownerOrigin = block.fromRole === 'desk' || block.fromRole === 'voice';
-  const ownerResponse = ownerOrigin ? publicPeerResponse(responseBlocks, streaming) : [];
+  const proseResponse = publicPeerResponse(responseBlocks, streaming);
+  const peerAddressed = !ownerOrigin && recordedPeerReply(block, proseResponse);
+  const ownerResponse = !peerAddressed ? proseResponse : [];
   // A settled NO_UPDATE / empty reply renders nothing, so it must not leave an
   // empty timestamped bubble under the peer card.
   const responseToolCount = responseBlocks.filter((item) => item.kind === 'tool').length;
+  const hasResponse = proseResponse.length > 0 || responseToolCount > 0;
   const responseBusy = peerResponseBusy(responseBlocks, responseActive);
-  const paused = block.interrupted || responseErrors.some((item) => !item.continuing);
+  const failed = responseErrors.some((item) => !item.continuing);
+  const interrupted = block.interrupted && proseResponse.length === 0;
   // Pin affordance for a teammate's own message (channels, card-1327b9, and
   // one-on-one handoffs alike): the row toggles this bubble onto the thread
   // agent's board through the same ThreadPin the assistant prose uses.
@@ -630,13 +644,12 @@ function PeerMessageBubble({
           <span className="bt-peer-name">{block.from}</span>
           <span className="bt-peer-role">{role}</span>
           {!block.tsApprox && timeLabel(block.ts) ? <span className="bt-peer-when">{timeLabel(block.ts)}</span> : null}
-          {hasResponse || responseBusy || paused ? (
-            <span className={`bt-peer-status${responseBusy ? ' working' : ''}`} role="status" aria-live="polite">
+          {hasResponse || responseBusy || failed || interrupted ? (
+            <span className={`bt-peer-status${responseBusy ? ' working' : failed ? ' failed' : interrupted ? ' interrupted' : ''}`} role="status" aria-live="polite">
               <i aria-hidden="true" /> {responseBusy
                 ? 'working'
-                : paused ? 'paused' : responseToolCount > 0
-                  ? `done · ${responseToolCount} tool${responseToolCount === 1 ? '' : 's'}`
-                  : 'done'}
+                : failed ? 'couldn’t finish' : proseResponse.length > 0 ? 'replied' : interrupted ? 'interrupted'
+                  : responseToolCount > 0 ? `finished · ${responseToolCount} tool${responseToolCount === 1 ? '' : 's'}` : 'finished'}
             </span>
           ) : null}
           <span className="bt-peer-action">{open ? 'hide' : 'show'} {subject}</span>
@@ -670,11 +683,12 @@ function PeerMessageBubble({
               />
             </div>
           ) : null}
-          {hasResponse && (!ownerOrigin || responseToolCount > 0) ? (
+          {(peerAddressed && proseResponse.length > 0) || responseToolCount > 0 ? (
             <section className="bt-peer-turn bt-peer-response">
-              <span className="bt-peer-turn-label">{ownerOrigin ? 'Work behind this reply' : `${recipient} replying to ${block.from}`}</span>
+              <span className="bt-peer-turn-label">{peerAddressed && proseResponse.length > 0 ? `${recipient} replying to ${block.from}` : 'Work in this exchange'}</span>
               <ElrondGroup
-                blocks={ownerOrigin ? responseBlocks.filter((item) => item.kind === 'tool') : responseBlocks}
+                blocks={peerAddressed ? responseBlocks : responseBlocks.filter((item) => item.kind === 'tool')}
+                speaker={recipient}
                 streaming={streaming}
                 mobile={mobile}
                 collapseSteps={collapseSteps}
@@ -684,18 +698,21 @@ function PeerMessageBubble({
               />
             </section>
           ) : null}
-          {responseErrors.map((error) => (
-            <details key={error.id} className="bt-peer-recovery">
-              <summary>{error.continuing ? 'Trying another provider' : 'This teammate reply paused'}</summary>
-              <p>{error.message}</p>
-            </details>
-          ))}
         </div>
       ) : null}
     </div>
+    {responseErrors.map((error) => (
+      <details key={error.id} className={`bt-peer-recovery${error.continuing ? '' : ' failed'}`}>
+        <summary>{error.continuing ? `${recipient} is trying another provider` : `${recipient} couldn’t finish this teammate reply`}</summary>
+        <p>{error.message}</p>
+      </details>
+    ))}
     {ownerResponse.length ? (
-      <ElrondGroup blocks={ownerResponse} streaming={streaming} mobile={mobile}
-        collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply} />
+      <div className="bt-peer-public-response">
+        {!ownerOrigin ? <div className="bt-peer-context">{recipient} · update after {block.from}</div> : null}
+        <ElrondGroup blocks={ownerResponse} speaker={recipient} streaming={streaming} mobile={mobile}
+          collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply} />
+      </div>
     ) : null}
     </>
   );
@@ -1093,21 +1110,6 @@ function RoutineResultBubble({
   );
 }
 
-/** Remove only a verbatim, complete opening already published in this prompt.
- * The stored block and Copy keep the full original; unmatched facts always show. */
-export function continuedReplyText(text: string, published: string): string {
-  let common = 0;
-  while (common < text.length && common < published.length && text[common] === published[common]) common++;
-  if (common === text.length && text.trim() === published.trim()) return '';
-  let end = 0;
-  for (const match of text.matchAll(/[.!?](?:\s+|$)/g)) {
-    const boundary = match.index! + match[0].length;
-    if (boundary > common) break;
-    end = boundary;
-  }
-  return end >= 20 ? text.slice(end).trimStart() : text;
-}
-
 function ElrondGroup({
   blocks,
   streaming,
@@ -1118,6 +1120,7 @@ function ElrondGroup({
   onReact,
   onReply,
   publishedBefore,
+  speaker,
 }: {
   blocks: AssistantBlock[];
   streaming: boolean;
@@ -1132,11 +1135,22 @@ function ElrondGroup({
    *  the thread adds the agent name otherwise. */
   onReply?: (target: { id: string; snippet: string; from?: string }) => void;
   publishedBefore?: string;
+  speaker?: string;
 }) {
   const [acted, setActed] = useState(false);
-  const visible = visibleAssistantBlocks(blocks, collapseSteps);
+  const visible = visibleAssistantBlocks(blocks, collapseSteps).filter((b) => !(b.kind === 'text' && !b.open && isProtocolNoopText(b.text)));
   if (!visible.length) return null;
-  if (publishedBefore && visible.every((b) => b.kind === 'text' && !b.open && !continuedReplyText(b.text, publishedBefore).trim())) return null;
+  if (publishedBefore && visible.every((b) => b.kind === 'text' && !b.open && b.text.trim() === publishedBefore.trim())) return null;
+  // A final response often restates an early published answer. Keep that
+  // published message untouched and offer the complete final detail on demand,
+  // rather than guessing which reworded sentences repeat facts.
+  if (publishedBefore) return (
+    <details className="bt-reply-detail">
+      <summary>More detail{speaker ? ` from ${speaker}` : ''}</summary>
+      <ElrondGroup blocks={blocks} streaming={streaming} turnLive={turnLive} mobile={mobile}
+        collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply} speaker={speaker} />
+    </details>
+  );
   // Actions belong to this group's settled text, not the thread's global
   // status: a live sibling turn must not strip Copy/Pin/Reply from finished
   // messages, and a settled response keeps them through the next turn's
@@ -1180,8 +1194,7 @@ function ElrondGroup({
       onClick={mobile ? () => setActed((a) => !a) : undefined}
     >
       <div className="who">
-        <span className="mini">✦</span> {'from' in first && first.from ? <span className="who-from">{first.from}</span> : BRAND} {'tsApprox' in first && first.tsApprox ? null : <span className="when">{timeLabel(first.ts)}</span>}
-        {publishedBefore ? <span className="when">follow-up</span> : null}
+        <span className="mini">✦</span> <span className="who-from">{'from' in first && first.from ? first.from : speaker || BRAND}</span> {'tsApprox' in first && first.tsApprox ? null : <span className="when">{timeLabel(first.ts)}</span>}
       </div>
       {visible.map((b) => {
         switch (b.kind) {
@@ -1193,7 +1206,7 @@ function ElrondGroup({
           }
           case 'text': {
             const open = showTextCaret(b, streaming);
-            const display = isProtocolNoopText(b.text) ? '' : publishedBefore ? continuedReplyText(b.text, publishedBefore) : b.text;
+            const display = isProtocolNoopText(b.text) ? '' : b.text;
             if (!open && !display) return null;
             // Legacy cached thought blocks never render: thinking stays hidden.
             if (b.thought) return null;
@@ -1319,7 +1332,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     ? blocks.filter((b) => 'turnId' in b && b.turnId === activeTurnId)
     : blocks.slice(currentTurnStart);
   const currentBoundary = currentTurnStart > 0 ? blocks[currentTurnStart - 1] : undefined;
-  const activePeerId = streaming && currentBoundary?.kind === 'peer' ? currentBoundary.id : null;
+  const activePeerId = streaming && currentBoundary?.kind === 'peer' && currentBoundary.replyAudience !== 'owner' ? currentBoundary.id : null;
   // A provider-switch notice with the agent continuing is not a failure: the
   // continued turn still needs its liveness row and its completion marker.
   const hasCurrentTerminalFailure = currentBlocks.some((block) => block.kind === 'terminal-error' && !block.continuing);
@@ -1565,6 +1578,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       // Matt's own Desk answers and voice asks are his messages, so they always
       // show as their own line, whatever the agent replied.
       const foldable = !jobResult
+        && g.responseErrors.length === 0
+        && !g.block.interrupted
         && g.block.fromRole !== 'automation-result'
         && g.block.fromRole !== 'desk'
         && g.block.fromRole !== 'voice'
@@ -1575,7 +1590,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         ? { fold: true, key: g.block.id, from: g.block.from, ts: g.block.ts, tsApprox: g.block.tsApprox, node: bubble }
         : bubble);
     } else {
-      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} publishedBefore={g.publishedBefore} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReplyElrond} />);
+      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} speaker={replyFrom} publishedBefore={g.publishedBefore} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReplyElrond} />);
     }
   }
 

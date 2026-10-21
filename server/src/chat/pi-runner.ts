@@ -756,7 +756,7 @@ export class PiSession {
       if (isPersonMessage(opts)) this.replyWatch.arm();
       if (startsNewTurn && automationRequest) this.turnOrigin.automation = true;
       if (startsNewTurn) this.emit({ type: 'turnStart' });
-      this.emit({ type: 'event', event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}), ts: Date.now() } });
+      this.emit({ type: 'event', event: { type: 'peer_message', replyAudience: 'peer', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}), ts: Date.now() } });
     } else {
       await flushEventLog(this.logKey);
       if (opts.signal?.aborted) { abandon(); return; }

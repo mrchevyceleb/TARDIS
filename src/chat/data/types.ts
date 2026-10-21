@@ -76,6 +76,8 @@ export type ChatBlock =
       id: string;
       from: string;
       fromRole?: string;
+      /** Present only on deliveries whose reply audience was recorded by the server. */
+      replyAudience?: 'peer' | 'owner';
       /** Stable durable delivery id; retries reuse it and render only once. */
       deliveryId?: string;
       text: string;

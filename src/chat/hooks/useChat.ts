@@ -135,7 +135,7 @@ function isSyntheticApiErrorEvent(ev: any): boolean {
 // Pure reducer — all per-turn state lives on the blocks themselves
 // (turnId + cbIndex). This keeps it safe under React Strict Mode, which
 // invokes reducers twice for purity-checking.
-type ReducerCursor = { current: string; peerId?: string; promptPeerId?: string; automation?: boolean; lane?: 'bg'; bg?: ReducerCursor; agyStep?: number; agySession?: string };
+type ReducerCursor = { current: string; peerId?: string; promptPeerId?: string; ownerPrompt?: boolean; automation?: boolean; lane?: 'bg'; bg?: ReducerCursor; agyStep?: number; agySession?: string };
 
 /** Blocks this cursor's lane owns. The agent's background lane streams into
  *  the same thread as the home lane, so closing one lane's turn must never
@@ -253,6 +253,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   if (ev.type === '_turn_boundary') {
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
+    turnIdRef.ownerPrompt = false;
     if (!blocks.some((b) => b.kind === 'text' && b.open && ownsBlock(turnIdRef, b))) return blocks;
     return blocks.map((b) => (b.kind === 'text' && b.open && ownsBlock(turnIdRef, b) ? { ...b, open: false } : b));
   }
@@ -264,6 +265,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   if ((ev.type === 'assistant' && ev._serviceRestart) || ev.type === '_service_restart') {
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
+    turnIdRef.ownerPrompt = false;
     const ts = typeof ev.ts === 'number' ? ev.ts : Date.now();
     const reason = typeof ev.reason === 'string' ? ev.reason : undefined;
     const closed = blocks.map((b) => {
@@ -327,6 +329,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // Voice handoffs are control envelopes for an already-visible spoken user
   // request, not a second teammate conversation. Replies belong in main chat.
   if (ev.type === 'peer_message' && ev.fromRole === 'voice') {
+    turnIdRef.ownerPrompt = true;
     turnIdRef.peerId = undefined;
     turnIdRef.promptPeerId = undefined;
     turnIdRef.automation = false;
@@ -353,18 +356,19 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       ? blocks.find((block) => block.kind === 'peer' && block.deliveryId === deliveryId)
       : undefined;
     if (existing?.kind === 'peer') {
-      turnIdRef.peerId = isAutomationPeer(from, fromRole, ev.text) ? undefined : existing.id;
+      turnIdRef.peerId = turnIdRef.ownerPrompt || isAutomationPeer(from, fromRole, ev.text) ? undefined : existing.id;
       turnIdRef.promptPeerId = turnIdRef.peerId;
       return blocks;
     }
     const blockId = id();
-    turnIdRef.peerId = isAutomationPeer(from, fromRole, ev.text) ? undefined : blockId;
+    turnIdRef.peerId = turnIdRef.ownerPrompt || isAutomationPeer(from, fromRole, ev.text) ? undefined : blockId;
     turnIdRef.promptPeerId = turnIdRef.peerId;
     return [...blocks, {
       kind: 'peer',
       id: blockId,
       from,
       fromRole,
+      ...(turnIdRef.ownerPrompt ? { replyAudience: 'owner' as const } : ev.replyAudience === 'peer' ? { replyAudience: 'peer' as const } : {}),
       deliveryId,
       text: ev.text,
       ts: typeof ev.ts === 'number' ? ev.ts : Date.now(),
@@ -378,6 +382,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     turnIdRef.peerId = undefined;
     turnIdRef.promptPeerId = undefined;
     turnIdRef.automation = false;
+    turnIdRef.ownerPrompt = true;
     const attachments: Array<{ id: string; mediaType: string }> = Array.isArray(ev.attachments) ? ev.attachments : [];
     const echoImages = attachments.length
       ? attachments.map((a) => ({ mediaType: a.mediaType, dataUrl: `/api/chat/attachments/${a.id}` }))
@@ -453,6 +458,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const finalPeerId = turnIdRef.peerId;
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
+    turnIdRef.ownerPrompt = false;
     turnIdRef.agyStep = undefined;
     turnIdRef.agySession = undefined;
     const closed = blocks.map((b) => {
@@ -1667,6 +1673,7 @@ export function useChat(opts: {
     pendingSendRef.current = queuedSteerRef.current.size > 0;
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
+    turnIdRef.ownerPrompt = false;
     turnIdRef.bg = undefined;
     clearTurnStarted();
     reconnectAttemptRef.current = 0;
