@@ -21,7 +21,7 @@ import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { isAgentThread, bareChatId, isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
-import { sessionDirectory, sessionPolicy, sessionMemory } from './sessionPolicy.ts';
+import { sessionDirectory, sessionPolicy, sessionSkills, sessionMemory } from './sessionPolicy.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
@@ -1154,7 +1154,7 @@ export class CodexSession {
       // turn never starts (Quinn's wake, Oct 19).
       prompt: wellFormedText(prompt),
       persona: wellFormedText(personaScope),
-      roleSkills: sessionPolicy(this.chatId).skills ?? ['codex-fix', 'opus-fix', 'no-crap-allowed'],
+      roleSkills: sessionSkills(this.chatId),
       imagePaths,
     })}\n`, (error) => {
       if (error) child.emit('error', error);
