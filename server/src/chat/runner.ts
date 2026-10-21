@@ -614,6 +614,16 @@ const PAUSED_FOR_MESSAGE_NOTE_TOOL = PAUSED_FOR_MESSAGE_NOTE.replace(
   'Answer it first.',
   'Answer it first: if you will use tools before you finish, call reply_now with audience: "owner" and your answer as your first action.',
 );
+const PAUSED_FOR_PEER_NOTE = PAUSED_FOR_MESSAGE_NOTE.replace(
+  'Answer it first.',
+  'Answer the teammate first, inline or with team_message. reply_now is only for a separate update explicitly addressed to the owner.',
+);
+
+export function pausedMessageNote(opts: { peerFrom?: string; peerFromRole?: string }, replyTool: boolean): string {
+  const ownerMessage = isPersonMessage(opts) || opts.peerFromRole === 'voice';
+  if (!ownerMessage) return PAUSED_FOR_PEER_NOTE;
+  return replyTool ? PAUSED_FOR_MESSAGE_NOTE_TOOL : PAUSED_FOR_MESSAGE_NOTE;
+}
 class ClaudeSession {
   readonly key: string;
   /** Durable-history key. Equals `key` for ordinary lanes; for an agent home
@@ -1418,7 +1428,7 @@ class ClaudeSession {
     const providerCut = startsNewTurn && !continuing && !replyNudge ? providerCutGuidance(fallbackHistory) : '';
     // The turn before this one was ended at a tool boundary to make room for
     // this message. Say so, so the model answers first and then carries on.
-    const pausedNote = startsNewTurn && !continuing && !replyNudge && !automationRequest && this.pausedForMessage ? (agentForChatId(this.chatId) ? PAUSED_FOR_MESSAGE_NOTE_TOOL : PAUSED_FOR_MESSAGE_NOTE) : '';
+    const pausedNote = startsNewTurn && !continuing && !replyNudge && !automationRequest && this.pausedForMessage ? pausedMessageNote(opts, !!agentForChatId(this.chatId)) : '';
     if (sendAborted()) {
       abandonUnsentTurn();
       return;
