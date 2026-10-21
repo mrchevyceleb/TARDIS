@@ -756,4 +756,5 @@ span.desk-todo-text { cursor: default; }
 
 /* Open questions invite an answer; completed reminders keep the checkmark. */
 .desk-check.is-question:hover, .md-check.is-question:hover:not(:disabled) { color: var(--r-gold); border-color: var(--r-gold); background: color-mix(in srgb, var(--r-gold) 12%, transparent); }
+.desk-check.is-question svg, .md-check.is-question svg { opacity: 0.7; }
 .desk-answer.is-invited { outline: 2px solid var(--r-gold); outline-offset: 4px; border-radius: 10px; background: color-mix(in srgb, var(--r-gold) 8%, transparent); }

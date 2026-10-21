@@ -519,12 +519,12 @@ function TodoRow({
       answer={pending}
       phase={pending.phase}
       to={pending.to ?? recipient()}
-      onDismiss={pending.phase === 'undelivered' ? () => answers.dismiss(todo.id) : undefined}
+      onDismiss={pending.phase === 'undelivered' || pending.phase === 'conflict' ? () => answers.dismiss(todo.id) : undefined}
     />
   ) : todo.answer ? (
     <AnsweredNote answer={todo.answer} phase={todo.answer.delivery === 'failed' ? 'failed' : undefined} to={recipient()} />
-  ) : todo.resolution ? (
-    <p className="desk-answered"><Check size={13} aria-hidden="true" /> Resolved by {todo.resolution.by.name}: <strong>{todo.resolution.note}</strong></p>
+  ) : todo.resolution && (todo.from.kind !== 'owner' || Boolean(todo.choices?.length)) ? (
+    <div className="desk-answered"><p className="desk-answered-line"><Check size={13} className="desk-answered-icon" aria-hidden="true" /><span className="desk-answered-text">Resolved by {todo.resolution.by.name}: <strong>{todo.resolution.note}</strong></span></p></div>
   ) : answerable && canAnswer(todo) ? (
     <AnswerBar todo={todo} answers={answers} />
   ) : null;

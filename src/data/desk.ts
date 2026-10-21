@@ -390,7 +390,7 @@ export type CommentNotice = { delivered: boolean; to?: string; reason?: string }
 
 export type TodoPatch = Partial<{ title: string; detail: string; due: string; priority: DeskPriority; link: string; cardId: string; status: 'open' | 'done' }>;
 export type TodoAnswerInput = { choice?: string; text?: string };
-export type TodoAnswerResult = { todo: DeskTodo; notified?: CommentNotice; duplicate?: boolean };
+export type TodoAnswerResult = { todo: DeskTodo; notified?: CommentNotice; duplicate?: boolean; conflict?: boolean };
 export type CardPatch = Partial<{ title: string; description: string; owner: string; project: string; priority: DeskPriority; links: string[]; column: DeskColumn }>;
 
 export const deskApi = {

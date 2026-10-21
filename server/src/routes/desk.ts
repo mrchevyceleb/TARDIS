@@ -444,10 +444,17 @@ export async function deliverDeskAnswer(todoId: string, deliver: TeamMessenger =
  *  messenger instead of waking a real agent. */
 export function answerTodoHandler(deliver: TeamMessenger = deliverTeamMessage) {
   return route(async (req, res) => {
-    const { todo, duplicate } = await answerTodo(param(req, 'id'), body(req));
+    const input = body(req);
+    if (fetchSite(req) !== 'same-origin' || input.agent || input.author) {
+      throw new DeskError(403, 'Only you can answer this question from the Desk. Nothing was saved.');
+    }
+    const { todo, duplicate } = await answerTodo(param(req, 'id'), input);
     // Double tap: the first call already saved and delivered.
     if (duplicate) {
-      res.json({ todo, duplicate: true });
+      const choice = typeof input.choice === 'string' ? input.choice.replace(/\s+/g, ' ').trim().toLowerCase() : '';
+      const text = typeof input.text === 'string' ? input.text.replace(/\r\n?/g, '\n').trim() : '';
+      const conflict = choice !== (todo.answer?.choice ?? '').toLowerCase() || text !== (todo.answer?.text ?? '');
+      res.json({ todo, duplicate: true, conflict });
       return;
     }
     if (todo.answer?.delivery !== 'failed') {

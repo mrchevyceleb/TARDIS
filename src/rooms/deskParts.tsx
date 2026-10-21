@@ -170,7 +170,7 @@ export function focusTodoAnswer(button: HTMLButtonElement): boolean {
   const bar = button.closest('li')?.querySelector<HTMLElement>('.desk-answer');
   if (!bar) return false;
   bar.classList.add('is-invited');
-  bar.querySelector<HTMLButtonElement>('.desk-answer-choice')?.focus();
+  bar.focus();
   window.setTimeout(() => bar.classList.remove('is-invited'), 1800);
   return true;
 }
@@ -183,7 +183,7 @@ export function answerRecipient(todo: DeskTodo, card: DeskCard | undefined, agen
   return agents.find((a) => a.id === 'chief-of-staff')?.name ?? 'your Chief of Staff';
 }
 
-export type PendingAnswer = TodoAnswerInput & { phase: 'sending' | 'sent' | 'undelivered'; to?: string };
+export type PendingAnswer = TodoAnswerInput & { phase: 'sending' | 'sent' | 'undelivered' | 'conflict'; to?: string };
 
 /** How long an answered row stays in the open list before it leaves. */
 const ANSWER_LINGER_MS = 1100;
@@ -254,7 +254,9 @@ export function useTodoAnswers(todos: DeskTodo[] | undefined) {
       const delivery = saved?.delivery ?? (result?.notified && !result.notified.delivered ? 'failed' : 'sent');
       const shown = saved ? { choice: saved.choice, text: saved.text } : { choice, text };
       setDrafts((prev) => withEntry(prev, todo.id, undefined));
-      if (delivery === 'failed') {
+      if (result?.conflict) {
+        setPending((prev) => withEntry(prev, todo.id, { ...shown, phase: 'conflict' }));
+      } else if (delivery === 'failed') {
         setPending((prev) => withEntry(prev, todo.id, { ...shown, phase: 'undelivered', to: result?.notified?.to }));
       } else {
         setPending((prev) => withEntry(prev, todo.id, { ...shown, phase: 'sent' }));
@@ -289,7 +291,7 @@ export function AnswerBar({ todo, answers, compact }: { todo: DeskTodo; answers:
     if (text) void answers.answer(todo, { text });
   };
   return (
-    <div className={`desk-answer${compact ? ' is-compact' : ''}`} role="group" aria-label={`Answer ${todo.title}`}>
+    <div className={`desk-answer${compact ? ' is-compact' : ''}`} role="group" tabIndex={-1} aria-label={`Answer ${todo.title}`}>
       <div className="desk-answer-choices">
         {answerChoices(todo).map((choice) => (
           <button
@@ -331,7 +333,7 @@ export function AnsweredNote({ answer, phase, to, onDismiss }: {
   to: string;
   onDismiss?: () => void;
 }) {
-  const warn = phase === 'undelivered' || phase === 'failed';
+  const warn = phase === 'undelivered' || phase === 'failed' || phase === 'conflict';
   return (
     <div className={`desk-answered${phase ? ` is-${phase}` : ''}`} role={phase && phase !== 'failed' ? 'status' : undefined}>
       <p className="desk-answered-line">
@@ -346,7 +348,7 @@ export function AnsweredNote({ answer, phase, to, onDismiss }: {
       {warn ? (
         <p className="desk-answered-warn">
           <AlertTriangle size={13} aria-hidden="true" />
-          <span>Saved, but {to} was not told.</span>
+          <span>{phase === 'conflict' ? 'This was already answered. Your new answer was not saved. Reopen it to change the answer.' : `Saved, but ${to} was not told.`}</span>
           {onDismiss ? (
             <button type="button" className="desk-answered-ok" onClick={onDismiss} aria-label="Dismiss" title="Dismiss">
               <X size={13} aria-hidden="true" />
