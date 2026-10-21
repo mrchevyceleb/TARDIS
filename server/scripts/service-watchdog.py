@@ -51,9 +51,48 @@ def checked_release(config):
                for name, digest in config['files'].items())
 
 
-def tick(config, state, now):
+def adopt_checked_release(config, info, config_path):
+    """A healthy new process can inherit only the independent exact-head gate."""
+    if not config_path or not config.get('allow_checked_handover'):
+        return False
+    receipt = load(Path(config['delivery_state_dir']) / 'restart-check-approved.json')
+    repo = config['repo']
+    current = command('git', '-C', repo, 'rev-parse', 'HEAD')
+    if receipt.get('schema') != 1 or receipt.get('message') is not True or receipt.get('head') != current:
+        return False
+    entered = int(info.get('ActiveEnterTimestampMonotonic', '0')) / 1_000_000
+    entered_wall = time.time() - time.monotonic() + entered
+    checkout = Path(command('git', '-C', repo, 'rev-parse', '--path-format=absolute', '--git-path', 'logs/HEAD')).stat().st_mtime
+    if not entered or not 0 < receipt.get('at', 0) / 1000 <= entered_wall or checkout > entered_wall:
+        return False
+    files = receipt.get('files')
+    names = command('git', '-C', repo, 'ls-files', 'server/src', 'server/scripts').splitlines()
+    expected = {name for name in names if (Path(repo) / name).is_file()}
+    if not isinstance(files, dict) or set(files) != expected:
+        return False
+    # Restoring a dirty working tree after start does not prove which code the
+    # running process loaded, even when HEAD itself has not moved.
+    if any((Path(repo) / name).stat().st_mtime > entered_wall for name in expected):
+        return False
+    candidate = {**config, 'head': current, 'files': files}
+    if not checked_release(candidate):
+        return False
+    atomic(config_path, candidate)
+    config.update(candidate)
+    print(json.dumps({'event': 'WATCHDOG_CHECKED_RELEASE_ADOPTED', 'head': current}), flush=True)
+    return True
+
+
+def block_unapproved(config, state, now, pid):
+    state['unapproved_source'] = True
+    if state.get('unapproved_notice_pid') != pid and (not state.get('notice') or state['notice'].get('kind') == 'approval'):
+        state['notice'] = {'id': f'approval-{pid}', 'at': now, 'kind': 'approval'}
+        state['unapproved_notice_pid'] = pid
+
+
+def tick(config, state, now, config_path=None):
     unit = config['unit']
-    values = command('systemctl', '--user', 'show', unit, '--property=ActiveState,SubState,MainPID').splitlines()
+    values = command('systemctl', '--user', 'show', unit, '--property=ActiveState,SubState,MainPID,ActiveEnterTimestampMonotonic').splitlines()
     info = dict(line.split('=', 1) for line in values if '=' in line)
     pid = info.get('MainPID', '0')
     if info.get('ActiveState') != 'active' or info.get('SubState') != 'running' or pid == '0':
@@ -61,7 +100,8 @@ def tick(config, state, now):
         state.pop('first_bad', None)
         state.pop('pid', None)
         return
-    if state.get('pid') != pid:
+    new_process = state.get('pid') != pid
+    if new_process:
         state['pid'] = pid
         state.pop('first_bad', None)
     try:
@@ -70,6 +110,22 @@ def tick(config, state, now):
         healthy = False
     if healthy:
         state.pop('first_bad', None)
+        if new_process:
+            try:
+                approved = checked_release(config) or adopt_checked_release(config, info, config_path)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                approved = False
+            if approved:
+                state.pop('unapproved_source', None)
+                state.pop('unapproved_notice_pid', None)
+                if state.get('notice', {}).get('kind') == 'approval':
+                    del state['notice']
+            else:
+                block_unapproved(config, state, now, pid)
+        elif state.get('unapproved_source'):
+            # A blocked running process must be restarted after approval; a
+            # late file restore never certifies the process already in memory.
+            block_unapproved(config, state, now, pid)
         pending = state.get('notice')
         if pending and now >= pending.get('next_attempt', 0):
             # A timed-out durable handoff may already be queued or visible.
@@ -88,10 +144,13 @@ def tick(config, state, now):
             pending['next_attempt'] = now + min(60 * 2 ** min(attempts, 4), 600)
             atomic(Path(config['state_file']), state)
             duration = round(now - pending['at'])
+            message = ("TARDIS is responding, but its new source has no matching passed restart check. Automatic recovery is paused until that exact build is checked; saved chats and queued messages are retained."
+                       if pending.get('kind') == 'approval' else
+                       f"TARDIS stopped responding, so its watchdog restarted the same checked build. It is responding again ({duration}s after recovery began). Saved chats and queued messages were kept.")
             try:
                 reply = get_json(config['base'] + '/api/team/message', {
                     'from': 'TARDIS', 'to': 'Max', 'wait': False, 'priority': True,
-                    'text': f"TARDIS stopped responding, so its watchdog restarted the same checked build. It is responding again ({duration}s after recovery began). Saved chats and queued messages were kept. {marker}",
+                    'text': f'{message} {marker}',
                 }, timeout=20)
                 if reply.get('delivered'):
                     del state['notice']
@@ -104,7 +163,7 @@ def tick(config, state, now):
         return
     if not checked_release(config):
         # A checkout being changed is a deployment, not permission to run it.
-        state['unapproved_source'] = True
+        block_unapproved(config, state, now, pid)
         return
     state.pop('unapproved_source', None)
     state['notice'] = {'id': f"{pid}-{int(time.time())}", 'at': now}
@@ -133,7 +192,7 @@ def main():
                     notice['at'] = time.monotonic()
                     notice.pop('next_attempt', None)
                     state['notice'] = notice
-            tick(config, state, time.monotonic())
+            tick(config, state, time.monotonic(), config_path)
             atomic(state_path, state)
         except Exception as error:
             # No response bodies or command output: those can hold secrets.

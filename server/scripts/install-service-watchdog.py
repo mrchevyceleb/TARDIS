@@ -48,7 +48,7 @@ def main():
         'files': {name: hashlib.sha256((repo / name).read_bytes()).hexdigest() for name in files if (repo / name).is_file()},
         'unit': 'rivendell.service', 'base': 'http://127.0.0.1:8091',
         'state_file': str(Path.home() / '.rivendell/service-watchdog.json'),
-        'failure_seconds': 60, 'delivery_state_dir': str(Path.home() / '.rivendell'),
+        'failure_seconds': 60, 'allow_checked_handover': True, 'delivery_state_dir': str(Path.home() / '.rivendell'),
     }
     temporary = target / 'config.tmp'
     temporary.write_text(json.dumps(config))

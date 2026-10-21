@@ -42,6 +42,7 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,6 +79,7 @@ let pass = false;
 let interrupted = false; // set SYNCHRONOUSLY on a signal, before any await
 let targetSha = '';
 let liveHead = '';
+let checkedManifest = null;
 
 // Signals tear the side copy down too: `finally` alone never runs on a
 // default SIGINT/SIGTERM death, and a leaked child/worktree is exactly the
@@ -250,13 +252,31 @@ try {
     step(`team round trip ok (reply: ${JSON.stringify(String(team.reply).slice(0, 40))})`);
   }
 
+  if (MESSAGE) {
+    const names = execFileSync('git', ['ls-files', 'server/src', 'server/scripts'], { cwd: srcDir, encoding: 'utf8' }).trim().split('\n');
+    checkedManifest = Object.fromEntries(names.filter((name) => fs.statSync(path.join(srcDir, name)).isFile())
+      .map((name) => [name, createHash('sha256').update(fs.readFileSync(path.join(srcDir, name))).digest('hex')]));
+  }
   pass = true;
 } catch (err) {
   if (!failedMsg) fail(String(err.message || err));
 } finally {
   await teardown();
   const elapsed = Math.round((Date.now() - T0) / 1000);
-  const ok = pass && !interrupted;
+  let ok = pass && !interrupted;
+  // The independent exact-head gate also gives the already-installed watchdog
+  // a durable handover for future releases. Never publish a partial/failed gate.
+  if (ok && MESSAGE) {
+    try {
+      const receipt = path.join(LIVE_STATE, 'restart-check-approved.json');
+      const temporary = `${receipt}.${process.pid}.tmp`;
+      fs.writeFileSync(temporary, JSON.stringify({ schema: 1, head: targetSha, message: true, at: Date.now(), files: checkedManifest }), { mode: 0o600 });
+      fs.renameSync(temporary, receipt);
+    } catch (error) {
+      ok = false;
+      console.error('[check] Could not retain the watchdog handover:', error.code || error.name);
+    }
+  }
   console.log(ok
     ? `\nPASS — ${targetSha.slice(0, 10)} boots clean${MESSAGE ? ' and answers the probe lane above a 5000-seq watermark, replays it once with the same seqs, and completes a probe-to-probe team round trip' : ''} in ${elapsed}s.`
       + `\nRollback point if the live restart fails: ${liveHead.slice(0, 10)}.`

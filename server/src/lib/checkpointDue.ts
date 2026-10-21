@@ -2,7 +2,7 @@
 import { inQuietHours } from './quietHours.ts';
 export const CHECKPOINT_WINDOW_MS = 30 * 60_000;
 const clock = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hourCycle: 'h23', hour: '2-digit', minute: '2-digit' });
-export const CHECKPOINT_REFUSAL = 'Set a checkpoint within 30 minutes on the whole job. Keep its full scope with one owner; do not shrink or split it.';
+export const CHECKPOINT_REFUSAL = 'Set a checkpoint within 30 minutes on the whole job. Keep its full scope with one owner; do not shrink or split it. Keep any owner-set job deadline in the work description; this time is your next progress check.';
 export function checkpointCeiling(now: number): number {
   let cap = now + CHECKPOINT_WINDOW_MS;
   if (inQuietHours(cap)) {
