@@ -15,6 +15,7 @@
 
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { dirname, relative } from 'node:path';
 
 let pendingOutputWrites = 0;
 let exitRequested = false;
@@ -300,6 +301,8 @@ async function start(config) {
   // Resolve the native catalog before either start or resume. This preserves
   // plugin identities, native skill reads, and MCP tools; it does not replace
   // the catalog with a hand-written prompt or change the user's profile.
+  let roleCatalog = '';
+  let catalogSkills = [];
   const catalogDeadline = Date.now() + 15_000;
   const catalogRequest = (method, params) => request(
     method, params, Math.max(1, catalogDeadline - Date.now()),
@@ -308,9 +311,34 @@ async function start(config) {
     await catalogRequest('account/read', { refreshToken: false });
     await catalogRequest('plugin/installed', { cwds: [config.cwd] });
     const skills = await catalogRequest('skills/list', { cwds: [config.cwd], forceReload: true });
+    // Keep every enabled skill discoverable and readable. Only descriptions
+    // are role-scoped; no skills/config/write or tool overrides are applied.
+    if (Array.isArray(config.roleSkills) && config.roleSkills.every((name) => typeof name === 'string')) {
+      const entries = skills?.data ?? [];
+      const available = entries.flatMap((entry) => entry.skills ?? []).filter((skill) => skill.enabled !== false);
+      catalogSkills = available;
+      if (entries.length && entries.every((entry) => !entry.errors?.length)
+        && available.length && available.every((skill) => typeof skill.name === 'string' && typeof skill.path === 'string')) {
+        const descriptions = new Set(config.roleSkills);
+        const byPath = new Map(available.map((skill) => [skill.path, skill]));
+        const roots = [...new Set([...byPath.keys()].map((path) => dirname(dirname(path))))].sort();
+        roleCatalog = [
+          '## Skills',
+          'All listed skills remain available. Read the matching SKILL.md when requested or relevant; follow its instructions and resolve references beside that file. Only role skills include descriptions here. Other skills can be discovered by name/path and read with the shell. Read only relevant files. Tell the user when applying a skill.',
+          'Expand each rN/ path using these absolute skill roots before reading:',
+          ...roots.map((root, index) => `r${index}=${root}`),
+          ...[...byPath.values()].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0).map((skill) => {
+            const root = dirname(dirname(skill.path));
+            return `- ${skill.name}${descriptions.has(skill.name) && typeof skill.description === 'string' ? `: ${skill.description.replace(/\s+/g, ' ').trim()}` : ''} (file: r${roots.indexOf(root)}/${relative(root, skill.path)})`;
+          }),
+        ].join('\n');
+      }
+    }
     writeEvent({
       type: 'rivendell.native_catalog_ready',
       skills: (skills?.data ?? []).reduce((count, entry) => count + (entry.skills?.length ?? 0), 0),
+      leanSkills: Boolean(roleCatalog),
+      unmatchedRoleSkills: (config.roleSkills ?? []).filter((name) => !catalogSkills.some((skill) => skill.name === name)),
     });
   } catch (error) {
     // Discovery is an optimization, never a new prerequisite for answering.
@@ -318,6 +346,21 @@ async function start(config) {
     writeEvent({ type: 'rivendell.native_catalog_degraded', message: error.message });
   }
 
+  // The runner supplies the same trusted persona on every cold resume. Native
+  // developer instructions are reconstructed after compaction, rather than
+  // relying on the first user message surviving an encrypted summary forever.
+  const persona = typeof config.persona === 'string' ? config.persona.trim() : '';
+  const developerInstructions = [
+    'Do not use Codex native collaboration agents for TARDIS companion handoffs. TARDIS supplies its own team_message MCP.',
+    persona,
+    roleCatalog,
+  ].filter(Boolean).join('\n\n');
+  const nativeContext = {
+    developerInstructions,
+    // Per-thread override only, after complete discovery. On errors the full
+    // native skill instructions remain enabled, preserving the fallback.
+    ...(Array.isArray(config.roleSkills) ? { config: { 'skills.include_instructions': !roleCatalog } } : {}),
+  };
   let thread;
   if (config.threadId) {
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -329,6 +372,7 @@ async function start(config) {
           approvalPolicy: 'never',
           sandbox: 'danger-full-access',
           excludeTurns: true,
+          ...nativeContext,
         });
         if (resumed.thread?.id !== config.threadId) throw new Error('Codex did not resume the saved thread ID');
         thread = resumed.thread;
@@ -346,7 +390,7 @@ async function start(config) {
       sandbox: 'danger-full-access',
       historyMode: 'legacy',
       ephemeral: false,
-      developerInstructions: 'Do not use Codex native collaboration agents for TARDIS companion handoffs. TARDIS supplies its own team_message MCP.',
+      ...nativeContext,
     });
     thread = started.thread;
   }
