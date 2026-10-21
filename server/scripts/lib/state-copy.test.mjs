@@ -142,6 +142,30 @@ test('a required file that the copy lost fails with ESTATEREQUIRED', () => {
   copyTree(src, dest2, { filter: onlyOther, required: ['absent-in-source.json'] });
 });
 
+test('a must-exist file missing from the source fails with ESTATEREQUIRED', () => {
+  const src = tmpDir();
+  const dest = tmpDir();
+  fs.writeFileSync(path.join(src, 'other.json'), '{}');
+  assert.throws(
+    () => copyTree(src, dest, { mustExist: ['desk.json'] }),
+    (err) => err.code === 'ESTATEREQUIRED' && /missing from the source/.test(err.message),
+  );
+  // Without mustExist, the same absence stays the caller's business.
+  copyTree(src, dest);
+});
+
+test('an unreadable state root fails the copy', { skip: asRoot && 'permission bits are meaningless as root' }, () => {
+  const src = tmpDir();
+  const dest = tmpDir();
+  fs.writeFileSync(path.join(src, 'a.json'), 'a');
+  fs.chmodSync(src, 0o000);
+  try {
+    assert.throws(() => copyTree(src, dest), (err) => err.code === 'EACCES');
+  } finally {
+    fs.chmodSync(src, 0o700);
+  }
+});
+
 test('a required file that copied torn fails with ESTATEREQUIRED', () => {
   const src = tmpDir();
   const dest = tmpDir();
@@ -152,13 +176,13 @@ test('a required file that copied torn fails with ESTATEREQUIRED', () => {
   );
 });
 
-test('a fifo is skipped and reported, never opened (it would hang)', () => {
+test('a fifo is skipped and reported, never opened (it would hang)', (t) => {
   const src = tmpDir();
   const dest = tmpDir();
   fs.writeFileSync(path.join(src, 'a.json'), 'a');
   const fifo = path.join(src, 'api.sock');
   const made = spawnSync('mkfifo', [fifo]);
-  if (made.status !== 0) return; // mkfifo not available on this platform: nothing to prove here
+  if (made.status !== 0) return t.skip('mkfifo not available on this platform');
   const result = copyTree(src, dest);
   assert.equal(fs.readFileSync(path.join(dest, 'a.json'), 'utf8'), 'a');
   assert.ok(result.unreadable.includes('api.sock'), 'the fifo is reported, not copied');
@@ -172,8 +196,11 @@ test('a symlink that stays inside the tree is recreated; one pointing out is ski
   fs.symlinkSync('real.json', path.join(src, 'in-tree.link'));
   fs.symlinkSync(path.resolve(src, 'real.json'), path.join(src, 'absolute.link'));
   fs.symlinkSync('..', path.join(src, 'escape.link'));
+  fs.mkdirSync(path.join(src, 'sub'));
+  fs.symlinkSync('../real.json', path.join(src, 'sub', 'up-in-tree.link'));
   const result = copyTree(src, dest);
   assert.equal(fs.readFileSync(path.join(dest, 'in-tree.link'), 'utf8'), 'r', 'in-tree link recreated and resolves in the copy');
+  assert.equal(fs.readFileSync(path.join(dest, 'sub', 'up-in-tree.link'), 'utf8'), 'r', 'an in-tree ../ link resolves inside the copy, not out of it');
   assert.equal(fs.existsSync(path.join(dest, 'absolute.link')), false);
   assert.equal(fs.existsSync(path.join(dest, 'escape.link')), false);
   assert.ok(result.unreadable.includes('absolute.link') && result.unreadable.includes('escape.link'));

@@ -50,12 +50,13 @@ const UNREADABLE = new Set(['EACCES', 'EPERM', 'ELOOP', 'ENAMETOOLONG', 'EOVERFL
 export function copyTree(src, dest, opts = {}) {
   const filter = opts.filter ?? (() => true);
   const required = opts.required ?? [];
+  const mustExist = opts.mustExist ?? [];
   const result = { files: 0, bytes: 0, vanished: 0, unreadable: [] };
   walk(src, dest, true);
   enforceRequired();
   return result;
 
-  function walk(from, to, isRoot = false) {
+  function walk(from, to, isRoot = false, retried = false) {
     let entries;
     try {
       entries = fs.readdirSync(from, { withFileTypes: true });
@@ -64,6 +65,9 @@ export function copyTree(src, dest, opts = {}) {
       // RIVENDELL_STATE_DIR must fail the check, not silently produce an
       // empty side copy that exercises nothing it claims to prove.
       if (isRoot) throw err;
+      // A delete-then-recreate writer: the directory exists again, so look
+      // once more before giving up on its contents.
+      if (err.code === 'ENOENT' && !retried && fs.existsSync(from)) return walk(from, to, false, true);
       if (err.code === 'ENOTDIR') return copyFile(from, to); // a directory turned into a file mid-walk
       classify(err, from);
       return;
@@ -108,43 +112,59 @@ export function copyTree(src, dest, opts = {}) {
 
   function copyFile(fp, tp) {
     // Prove the source is readable BEFORE blaming a failure on a live
-    // writer: after a good open, an error is a destination or system
-    // problem unless the source itself stopped being that same file.
-    try {
-      const fd = fs.openSync(fp, 'r');
-      fs.closeSync(fd);
-    } catch (err) {
-      classify(err, fp);
-      return;
-    }
-    try {
-      fs.copyFileSync(fp, tp);
-      result.files += 1;
-    } catch (err) {
-      if (!VANISHED.has(err.code)) throw err;
-      // A recreating writer (delete + rewrite, rename dance) can make the
-      // copy fail on a source that exists again a moment later: one retry
-      // converges on the new content instead of failing the check.
-      if (stillAFile(fp)) {
-        try {
-          fs.copyFileSync(fp, tp);
-          result.files += 1;
-          return;
-        } catch (err2) {
-          if (!VANISHED.has(err2.code)) throw err2;
+    // writer. A delete-then-recreate writer that exists again a moment
+    // later gets one more look instead of being dropped for good.
+    let probed = false;
+    for (;;) {
+      try {
+        const fd = fs.openSync(fp, 'r');
+        fs.closeSync(fd);
+        break;
+      } catch (err) {
+        if (VANISHED.has(err.code) && !probed) {
+          probed = true;
+          if (stillAFile(fp)) continue; // it is back: probe once more
         }
+        classify(err, fp);
+        return;
       }
-      // The source never came back as a file: a live writer's vanish.
-      // Anything else (the destination's parent vanished, the dest is a
-      // directory) fails the check rather than quietly shrinking the copy.
-      if (!stillAFile(fp)) { result.vanished += 1; return; }
-      throw err;
     }
-    try {
-      result.bytes += fs.statSync(tp).size;
-    } catch {
-      // Counted, not required.
+    let last = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        fs.copyFileSync(fp, tp);
+        result.files += 1;
+        try {
+          result.bytes += fs.statSync(tp).size;
+        } catch {
+          // Counted, not required.
+        }
+        return;
+      } catch (err) {
+        if (err.code === 'EISDIR') {
+          // Either the source became a directory mid-copy (walk its
+          // contents) or the destination is one (fatal): the source itself
+          // tells them apart.
+          let st = null;
+          try { st = fs.statSync(fp); } catch {}
+          if (st && st.isDirectory()) { walk(fp, tp); return; }
+          throw err;
+        }
+        if (!VANISHED.has(err.code)) throw err;
+        last = err;
+        // A recreating writer (delete + rewrite, rename dance) can make the
+        // copy fail on a source that exists again a moment later: one retry
+        // converges on the new content instead of dropping the file.
+        if (!stillAFile(fp)) break; // the source is really gone
+      }
     }
+    // Two attempts lost a hot source race, or the source never came back.
+    // With the destination's parent intact this was the source churning:
+    // count a vanish and move on (a required file would be caught after the
+    // walk and the whole copy retried). A missing destination parent is a
+    // destination failure and stays fatal.
+    if (!fs.existsSync(path.dirname(tp))) throw last;
+    result.vanished += 1;
   }
 
   function copyLink(fp, tp) {
@@ -159,8 +179,15 @@ export function copyTree(src, dest, opts = {}) {
       classify(err, fp);
       return;
     }
-    const norm = path.normalize(target);
-    if (path.isAbsolute(norm) || norm === '..' || norm.startsWith(`..${path.sep}`)) {
+    // An absolute target is skipped even when it points inside the tree:
+    // recreated verbatim it still points at the LIVE path, so following it
+    // at runtime would read from or write into live state, not the copy.
+    if (path.isAbsolute(target)) {
+      result.unreadable.push(rel(fp));
+      return;
+    }
+    const resolved = path.resolve(path.dirname(fp), target);
+    if (resolved !== src && !resolved.startsWith(src + path.sep)) {
       result.unreadable.push(rel(fp));
       return;
     }
@@ -194,6 +221,12 @@ export function copyTree(src, dest, opts = {}) {
 
   function enforceRequired() {
     const missing = [];
+    for (const relPath of mustExist) {
+      const from = path.join(src, relPath);
+      let srcHas = false;
+      try { srcHas = fs.statSync(from).isFile(); } catch {}
+      if (!srcHas) missing.push(`${relPath} (missing from the source)`);
+    }
     for (const relPath of required) {
       const from = path.join(src, relPath);
       const to = path.join(dest, relPath);

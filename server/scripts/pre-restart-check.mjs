@@ -155,15 +155,25 @@ try {
     try {
       stateCopy = copyTree(LIVE_STATE, stateDir, {
         filter: stateFilter(LIVE_STATE, { big, always: ['desk.json'] }),
-        required: ['desk.json'],
+        required: ['desk.json', 'personas/agents.json'],
+        mustExist: ['desk.json'],
       });
     } catch (err) {
       if (err.code === 'ESTATEREQUIRED' && attempt < 3) {
+        // A clean slate per retry: mixing snapshots from two attempts could
+        // both resurrect vanished files and wedge on file-turned-directory.
+        try { fs.rmSync(stateDir, { recursive: true, force: true }); } catch {}
         step(`state copy attempt ${attempt}: ${err.message}; retrying`);
         continue;
       }
       throw err;
     }
+  }
+  // Unreadable-but-present files are not writer races: permissions and odd
+  // file kinds persist, and a side copy that silently boots without them
+  // proves less than this check claims. fs.cpSync failed here; so do we.
+  if (stateCopy.unreadable.length) {
+    fail(`the state copy skipped unreadable files: ${stateCopy.unreadable.slice(0, 10).join(', ')}${stateCopy.unreadable.length > 10 ? ` (+${stateCopy.unreadable.length - 10} more)` : ''}`);
   }
   const deskCopy = path.join(stateDir, 'desk.json');
   let deskNote = '';
