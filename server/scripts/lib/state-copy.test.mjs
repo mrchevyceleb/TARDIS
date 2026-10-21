@@ -1,19 +1,27 @@
 /** Oct 21 (card-c960fa): the pre-restart state copy must survive live
  *  writers. A jobs.json tmp file that vanishes between the directory list
  *  and the copy open failed the gate's first try on a busy TARDIS; the copy
- *  must skip it, keep copying, and still fail honestly on real destination
- *  or system errors. */
+ *  must skip it, keep copying, and still fail honestly on real destination,
+ *  root, or required-state errors. */
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { copyTree, stateFilter } from './state-copy.mjs';
 
+const tmps = [];
 function tmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'state-copy-test-'));
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'state-copy-test-'));
+  tmps.push(d);
+  return d;
 }
+test.after(() => {
+  for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
+});
+const asRoot = process.getuid?.() === 0;
 
 test('a file that vanishes between list and copy is skipped, not fatal', () => {
   const src = tmpDir();
@@ -63,23 +71,46 @@ test('a directory that vanishes mid-walk is skipped, not fatal', () => {
   assert.ok(result.vanished >= 1, 'the vanished directory is counted');
 });
 
-test('an unreadable source is skipped and reported, never fatal', () => {
+test('a directory that turns into a file mid-walk is copied as that file', () => {
+  const src = tmpDir();
+  const dest = tmpDir();
+  fs.mkdirSync(path.join(src, 'sub'));
+  fs.writeFileSync(path.join(src, 'sub', 'x.json'), 'x');
+  fs.writeFileSync(path.join(src, 'top.json'), 't');
+  let armed = true;
+  const result = copyTree(src, dest, {
+    filter: (s) => {
+      if (armed) {
+        armed = false;
+        fs.rmSync(path.join(src, 'sub'), { recursive: true });
+        fs.writeFileSync(path.join(src, 'sub'), 'now a file');
+      }
+      return true;
+    },
+  });
+  assert.equal(fs.readFileSync(path.join(dest, 'sub'), 'utf8'), 'now a file');
+  assert.equal(fs.readFileSync(path.join(dest, 'top.json'), 'utf8'), 't');
+  assert.equal(result.vanished, 0);
+});
+
+test('an unreadable source is skipped and reported, never fatal', { skip: asRoot && 'permission bits are meaningless as root' }, () => {
   const src = tmpDir();
   const dest = tmpDir();
   fs.writeFileSync(path.join(src, 'ok.json'), 'ok');
-  fs.writeFileSync(path.join(src, 'secret'), 's');
-  fs.chmodSync(path.join(src, 'secret'), 0o000);
+  fs.mkdirSync(path.join(src, 'subdir'));
+  fs.writeFileSync(path.join(src, 'subdir', 'secret'), 's');
+  fs.chmodSync(path.join(src, 'subdir', 'secret'), 0o000);
   try {
     const result = copyTree(src, dest);
     assert.equal(fs.readFileSync(path.join(dest, 'ok.json'), 'utf8'), 'ok');
-    assert.deepEqual(result.unreadable, ['secret']);
+    assert.deepEqual(result.unreadable, [path.join('subdir', 'secret')], 'reported by its path relative to the root');
     assert.equal(result.vanished, 0);
   } finally {
-    fs.chmodSync(path.join(src, 'secret'), 0o600);
+    fs.chmodSync(path.join(src, 'subdir', 'secret'), 0o600);
   }
 });
 
-test('a failure writing the destination still fails the check', () => {
+test('a failure writing the destination still fails the check', { skip: asRoot && 'permission bits are meaningless as root' }, () => {
   const src = tmpDir();
   const dest = tmpDir();
   fs.writeFileSync(path.join(src, 'a.json'), 'a');
@@ -89,6 +120,63 @@ test('a failure writing the destination still fails the check', () => {
   } finally {
     fs.chmodSync(dest, 0o700);
   }
+});
+
+test('a missing state root fails the copy instead of producing an empty side copy', () => {
+  const dest = tmpDir();
+  assert.throws(() => copyTree(path.join(dest, 'does-not-exist'), path.join(dest, 'out')), (err) => err.code === 'ENOENT');
+});
+
+test('a required file that the copy lost fails with ESTATEREQUIRED', () => {
+  const src = tmpDir();
+  const dest = tmpDir();
+  fs.writeFileSync(path.join(src, 'desk.json'), '{"desk":true}');
+  fs.writeFileSync(path.join(src, 'other.json'), '{}');
+  const onlyOther = (s) => path.basename(s) !== 'desk.json';
+  assert.throws(
+    () => copyTree(src, dest, { filter: onlyOther, required: ['desk.json'] }),
+    (err) => err.code === 'ESTATEREQUIRED' && /desk\.json/.test(err.message),
+  );
+  // A required file absent from the source is the caller's business, not a copy failure.
+  const dest2 = tmpDir();
+  copyTree(src, dest2, { filter: onlyOther, required: ['absent-in-source.json'] });
+});
+
+test('a required file that copied torn fails with ESTATEREQUIRED', () => {
+  const src = tmpDir();
+  const dest = tmpDir();
+  fs.writeFileSync(path.join(src, 'desk.json'), '{"torn":'); // invalid JSON in the source
+  assert.throws(
+    () => copyTree(src, dest, { required: ['desk.json'] }),
+    (err) => err.code === 'ESTATEREQUIRED',
+  );
+});
+
+test('a fifo is skipped and reported, never opened (it would hang)', () => {
+  const src = tmpDir();
+  const dest = tmpDir();
+  fs.writeFileSync(path.join(src, 'a.json'), 'a');
+  const fifo = path.join(src, 'api.sock');
+  const made = spawnSync('mkfifo', [fifo]);
+  if (made.status !== 0) return; // mkfifo not available on this platform: nothing to prove here
+  const result = copyTree(src, dest);
+  assert.equal(fs.readFileSync(path.join(dest, 'a.json'), 'utf8'), 'a');
+  assert.ok(result.unreadable.includes('api.sock'), 'the fifo is reported, not copied');
+  assert.equal(result.vanished, 0);
+});
+
+test('a symlink that stays inside the tree is recreated; one pointing out is skipped and reported', () => {
+  const src = tmpDir();
+  const dest = tmpDir();
+  fs.writeFileSync(path.join(src, 'real.json'), 'r');
+  fs.symlinkSync('real.json', path.join(src, 'in-tree.link'));
+  fs.symlinkSync(path.resolve(src, 'real.json'), path.join(src, 'absolute.link'));
+  fs.symlinkSync('..', path.join(src, 'escape.link'));
+  const result = copyTree(src, dest);
+  assert.equal(fs.readFileSync(path.join(dest, 'in-tree.link'), 'utf8'), 'r', 'in-tree link recreated and resolves in the copy');
+  assert.equal(fs.existsSync(path.join(dest, 'absolute.link')), false);
+  assert.equal(fs.existsSync(path.join(dest, 'escape.link')), false);
+  assert.ok(result.unreadable.includes('absolute.link') && result.unreadable.includes('escape.link'));
 });
 
 test('the state filter keeps the fs.cpSync-era selection', () => {

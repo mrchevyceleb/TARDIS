@@ -146,8 +146,25 @@ try {
   //    it (jobs.json saves land as a tmp file that is renamed into place),
   //    so a path that disappears between list and open is skipped, not a
   //    FAIL — the first try must pass or fail on the build, never on how
-  //    busy TARDIS happens to be.
-  const stateCopy = copyTree(LIVE_STATE, stateDir, { filter: stateFilter(LIVE_STATE, { big, always: ['desk.json'] }) });
+  //    busy TARDIS happens to be. desk.json is REQUIRED: a side copy without
+  //    the real Desk exercises none of the Desk routes the check claims to
+  //    prove, so losing it fails the copy; one lost to a writer race is
+  //    retried a couple of times before it does.
+  let stateCopy = null;
+  for (let attempt = 1; !stateCopy; attempt += 1) {
+    try {
+      stateCopy = copyTree(LIVE_STATE, stateDir, {
+        filter: stateFilter(LIVE_STATE, { big, always: ['desk.json'] }),
+        required: ['desk.json'],
+      });
+    } catch (err) {
+      if (err.code === 'ESTATEREQUIRED' && attempt < 3) {
+        step(`state copy attempt ${attempt}: ${err.message}; retrying`);
+        continue;
+      }
+      throw err;
+    }
+  }
   const deskCopy = path.join(stateDir, 'desk.json');
   let deskNote = '';
   try {

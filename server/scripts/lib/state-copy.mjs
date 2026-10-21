@@ -16,10 +16,15 @@
  *    the side copy boots from.
  *  - A source that exists but cannot be read is skipped and reported: the
  *    side copy boots on the rest, and the boot/probe legs — not the copy —
- *    decide the verdict, so no skip can turn a broken build into a PASS.
- *  - A failure writing the DESTINATION, or running out of a system resource,
- *    stays fatal: then the check genuinely cannot prepare a side copy and an
- *    honest FAIL with the real error is the right answer.
+ *    decide the verdict.
+ *  - The state ROOT and every REQUIRED file (below) are load-bearing: an
+ *    unreadable root or a required file that did not survive the copy fails
+ *    the copy (code ESTATEREQUIRED for the latter), because a side copy
+ *    without them silently exercises far less of the real system than the
+ *    check claims to prove.
+ *  - A failure writing the DESTINATION, a failing device (EIO), or running
+ *    out of a system resource stays fatal: then the check genuinely cannot
+ *    prepare a side copy and an honest FAIL with the real error is right.
  */
 
 import fs from 'node:fs';
@@ -29,28 +34,39 @@ import path from 'node:path';
  *  writer renamed, rotated or deleted it mid-walk. */
 const VANISHED = new Set(['ENOENT', 'ENOTDIR', 'EISDIR']);
 /** Exists but cannot be opened for reading from this process: permissions,
- *  a symlink loop, an over-long or over-deep name, or a failing device. */
-const UNREADABLE = new Set(['EACCES', 'EPERM', 'ELOOP', 'ENAMETOOLONG', 'EOVERFLOW', 'EIO']);
+ *  a symlink loop, an over-long or over-deep name. EIO is deliberately NOT
+ *  here: a failing device is a system failure and must fail the check. */
+const UNREADABLE = new Set(['EACCES', 'EPERM', 'ELOOP', 'ENAMETOOLONG', 'EOVERFLOW']);
 
 /** Copy a tree from `src` to `dest`, tolerating live writers. `filter` is
  *  called with each SOURCE path (files, directories and symlinks) and keeps
- *  the fs.cpSync-era contract: true means copy. Returns
+ *  the fs.cpSync-era contract: true means copy. `required` lists paths
+ *  relative to `src` that must exist in the copy whenever they exist in the
+ *  source and must be valid JSON (the check's always-copy set, e.g.
+ *  desk.json); a required file that is missing or torn throws an error with
+ *  code ESTATEREQUIRED so the caller can retry the whole copy. Returns
  *  { files, bytes, vanished, unreadable } so the caller can report what it
  *  skipped instead of hiding it. */
 export function copyTree(src, dest, opts = {}) {
   const filter = opts.filter ?? (() => true);
+  const required = opts.required ?? [];
   const result = { files: 0, bytes: 0, vanished: 0, unreadable: [] };
-  walk(src, dest);
+  walk(src, dest, true);
+  enforceRequired();
   return result;
 
-  function walk(from, to) {
+  function walk(from, to, isRoot = false) {
     let entries;
     try {
       entries = fs.readdirSync(from, { withFileTypes: true });
     } catch (err) {
-      if (VANISHED.has(err.code)) { result.vanished += 1; return; }
-      if (UNREADABLE.has(err.code)) { result.unreadable.push(path.basename(from)); return; }
-      throw err;
+      // The state root is load-bearing: an unreadable, missing or wrong
+      // RIVENDELL_STATE_DIR must fail the check, not silently produce an
+      // empty side copy that exercises nothing it claims to prove.
+      if (isRoot) throw err;
+      if (err.code === 'ENOTDIR') return copyFile(from, to); // a directory turned into a file mid-walk
+      classify(err, from);
+      return;
     }
     // A failure creating the destination directory is always ours, never a
     // live writer's: fail loudly instead of silently shrinking the copy.
@@ -67,30 +83,61 @@ export function copyTree(src, dest, opts = {}) {
       if (!wanted) continue;
       const tp = path.join(to, entry.name);
       if (entry.isDirectory()) walk(fp, tp);
-      else if (entry.isSymbolicLink()) copyLink(fp, tp, entry.name);
-      else copyFile(fp, tp, entry.name);
+      else if (entry.isSymbolicLink()) copyLink(fp, tp);
+      else if (entry.isFile()) copyFile(fp, tp);
+      else classifyEntry(fp, tp); // DT_UNKNOWN, fifo, socket, device: never open blindly
     }
   }
 
-  function copyFile(fp, tp, name) {
+  /** Classify by lstat, never by opening: a fifo with no writer would hang
+   *  an open forever, and a socket open errors oddly. Present-but-uncopyable
+   *  kinds are skipped and reported. */
+  function classifyEntry(fp, tp) {
+    let st = null;
+    try {
+      st = fs.lstatSync(fp);
+    } catch (err) {
+      classify(err, fp);
+      return;
+    }
+    if (st.isFile()) copyFile(fp, tp);
+    else if (st.isDirectory()) walk(fp, tp);
+    else if (st.isSymbolicLink()) copyLink(fp, tp);
+    else result.unreadable.push(rel(fp)); // fifo, socket, block/char device
+  }
+
+  function copyFile(fp, tp) {
     // Prove the source is readable BEFORE blaming a failure on a live
-    // writer: after a successful open, anything but a fresh vanish is a
-    // destination or system problem and must fail the check, not quietly
-    // drop state the side copy would have booted with.
+    // writer: after a good open, an error is a destination or system
+    // problem unless the source itself stopped being that same file.
     try {
       const fd = fs.openSync(fp, 'r');
       fs.closeSync(fd);
     } catch (err) {
-      if (VANISHED.has(err.code)) { result.vanished += 1; return; }
-      if (UNREADABLE.has(err.code)) { result.unreadable.push(name); return; }
-      throw err;
+      classify(err, fp);
+      return;
     }
     try {
       fs.copyFileSync(fp, tp);
       result.files += 1;
     } catch (err) {
-      // Renamed away between our open and the copy: still just a vanish.
-      if (err.code === 'ENOENT') { result.vanished += 1; return; }
+      if (!VANISHED.has(err.code)) throw err;
+      // A recreating writer (delete + rewrite, rename dance) can make the
+      // copy fail on a source that exists again a moment later: one retry
+      // converges on the new content instead of failing the check.
+      if (stillAFile(fp)) {
+        try {
+          fs.copyFileSync(fp, tp);
+          result.files += 1;
+          return;
+        } catch (err2) {
+          if (!VANISHED.has(err2.code)) throw err2;
+        }
+      }
+      // The source never came back as a file: a live writer's vanish.
+      // Anything else (the destination's parent vanished, the dest is a
+      // directory) fails the check rather than quietly shrinking the copy.
+      if (!stillAFile(fp)) { result.vanished += 1; return; }
       throw err;
     }
     try {
@@ -100,25 +147,78 @@ export function copyTree(src, dest, opts = {}) {
     }
   }
 
-  function copyLink(fp, tp, name) {
-    // Recreated verbatim (the link's own target string), never followed: a
-    // link is not state to dereference into an unbounded copy.
+  function copyLink(fp, tp) {
+    // A link is recreated only when it stays inside the copied tree: an
+    // absolute or parent-escaping link would point the side copy back at
+    // live state or somewhere else entirely, so those are skipped and
+    // reported. Links are never followed into the copy.
     let target;
     try {
       target = fs.readlinkSync(fp);
     } catch (err) {
-      if (VANISHED.has(err.code)) { result.vanished += 1; return; }
-      if (UNREADABLE.has(err.code)) { result.unreadable.push(name); return; }
-      throw err;
+      classify(err, fp);
+      return;
+    }
+    const norm = path.normalize(target);
+    if (path.isAbsolute(norm) || norm === '..' || norm.startsWith(`..${path.sep}`)) {
+      result.unreadable.push(rel(fp));
+      return;
     }
     try {
       fs.rmSync(tp, { force: true });
       fs.symlinkSync(target, tp);
       result.files += 1;
     } catch (err) {
-      if (err.code === 'ENOENT') { result.vanished += 1; return; }
+      if (VANISHED.has(err.code) && !fs.existsSync(fp)) { result.vanished += 1; return; }
       throw err;
     }
+  }
+
+  function classify(err, fp) {
+    if (VANISHED.has(err.code)) { result.vanished += 1; return; }
+    if (UNREADABLE.has(err.code)) { result.unreadable.push(rel(fp)); return; }
+    throw err;
+  }
+
+  function stillAFile(fp) {
+    try {
+      return fs.statSync(fp).isFile();
+    } catch {
+      return false;
+    }
+  }
+
+  function rel(fp) {
+    return path.relative(src, fp) || path.basename(fp);
+  }
+
+  function enforceRequired() {
+    const missing = [];
+    for (const relPath of required) {
+      const from = path.join(src, relPath);
+      const to = path.join(dest, relPath);
+      let srcHas = false;
+      try { srcHas = fs.statSync(from).isFile(); } catch { /* absent in the source: not the copy's problem */ }
+      if (!srcHas) continue;
+      let ok = false;
+      try { ok = fs.statSync(to).isFile() && !isTornJson(to); } catch { /* missing or unreadable */ }
+      if (!ok) missing.push(relPath);
+    }
+    if (missing.length) {
+      throw Object.assign(
+        new Error(`required state file(s) missing or unreadable after the copy: ${missing.join(', ')}`),
+        { code: 'ESTATEREQUIRED' },
+      );
+    }
+  }
+}
+
+function isTornJson(p) {
+  try {
+    JSON.parse(fs.readFileSync(p, 'utf8'));
+    return false;
+  } catch {
+    return true;
   }
 }
 
