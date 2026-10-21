@@ -1227,7 +1227,7 @@ export class CodexSession {
     if (ev?.type === 'rivendell.context_usage') {
       const u = ev.usage ?? {};
       const input = Number(u.input_tokens || 0);
-      this.lastNativeInput = input;
+      if (input > 0) this.lastNativeInput = input;
       recordNativeCall({ lane: this.chatId, engine: 'codex', model: this.turnModel || '', sessionId: this.threadId || undefined,
         input, cached: Number(u.cached_input_tokens || 0), output: Number(u.output_tokens || 0), harnessChars: this.harnessChars, resumed: this.resumedNative });
       this.resumedNative = true;
