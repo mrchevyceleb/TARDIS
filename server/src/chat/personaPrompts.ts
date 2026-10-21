@@ -74,7 +74,7 @@ export function personaPromptFor(chatId: string, memory = sessionMemory(chatId))
   const agent = agentForChatId(chatId);
   if (!agent) return '';
   const scope = readScopeFile(`${agent.id}.md`);
-  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(), TEAM_STATUS_GUIDANCE, WATCH_JOB_GUIDANCE, SIDEBAR_GUIDANCE, DESK_ROOM_ENABLED ? DESK_GUIDANCE : null].filter(Boolean).join('\n\n');
+  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId), TEAM_STATUS_GUIDANCE, WATCH_JOB_GUIDANCE, SIDEBAR_GUIDANCE, DESK_ROOM_ENABLED ? DESK_GUIDANCE : null].filter(Boolean).join('\n\n');
 }
 
 /** Scope text for an agent record's home (REST use). */
