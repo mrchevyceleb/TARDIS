@@ -47,6 +47,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
+import { copyTree, stateFilter } from './lib/state-copy.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -140,24 +141,23 @@ try {
   // 3. Copy state (selective: the copy must be fast; everything the check
   //    exercises — desk, roster, personas, compaction state, lane config —
   //    is small; the excluded bulk is logs and media no gated-off subsystem
-  //    ever reads). The probe lane's own log is seeded below.
-  fs.cpSync(LIVE_STATE, stateDir, {
-    recursive: true,
-    filter: (s) => {
-      const rel = path.relative(LIVE_STATE, s);
-      if (!rel) return true;
-      // desk.json is core check state (named above) and it outgrew the bulk
-      // cap (15.8MB, Oct 17): always copied, whatever its size, so the side
-      // copy always boots the real Desk — a Deskless side copy exercises
-      // none of the Desk routes it is supposed to prove.
-      if (rel === 'desk.json') return true;
-      const top = rel.split(path.sep)[0];
-      if (big.includes(top)) return false;
-      try { return fs.statSync(s).size <= 8 * 1024 * 1024; } catch { return true; }
-    },
-  });
+  //    ever reads). The probe lane's own log is seeded below. The copy is
+  //    vanish-tolerant: the live state dir is being written while we copy
+  //    it (jobs.json saves land as a tmp file that is renamed into place),
+  //    so a path that disappears between list and open is skipped, not a
+  //    FAIL — the first try must pass or fail on the build, never on how
+  //    busy TARDIS happens to be.
+  const stateCopy = copyTree(LIVE_STATE, stateDir, { filter: stateFilter(LIVE_STATE, { big, always: ['desk.json'] }) });
   const deskCopy = path.join(stateDir, 'desk.json');
-  step(`state copied to ${stateDir} (${mb(stateDir)} MB${fs.existsSync(deskCopy) ? `, desk.json ${Math.round(fs.statSync(deskCopy).size / 1024 / 1024)} MB` : ''})`);
+  let deskNote = '';
+  try {
+    deskNote = `, desk.json ${Math.round(fs.statSync(deskCopy).size / 1024 / 1024)} MB`;
+  } catch {
+    deskNote = ', desk.json not copied';
+  }
+  step(`state copied to ${stateDir} (${mb(stateDir)} MB${deskNote})`
+    + (stateCopy.vanished ? `, ${stateCopy.vanished} path(s) vanished mid-copy (live writers, skipped)` : '')
+    + (stateCopy.unreadable.length ? `, unreadable and skipped: ${stateCopy.unreadable.slice(0, 5).join(', ')}${stateCopy.unreadable.length > 5 ? ` (+${stateCopy.unreadable.length - 5} more)` : ''}` : ''));
 
   // 4. A synthetic probe workspace: the probe engine's cwd is never a live
   //    repo, so no unproven code or unexpected agent behavior can touch real
