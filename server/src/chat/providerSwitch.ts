@@ -231,6 +231,14 @@ const NOTICE_IDLE_WAIT_MS = 6 * 60 * 60_000;
 /** The continue waits this long behind queued or competing turns. */
 const COMPETING_WAIT_MS = 30 * 60_000;
 
+/** How long a sent continue waits for its correlated receipt (the model's
+ *  first real response) before the job re-judges the thread. send() resolves
+ *  on the stdin write, which proves nothing about the provider; slow lanes
+ *  take 30-90s just to the first frame, so minutes, not seconds. */
+const CONTINUE_ACCEPT_WAIT_MS = 5 * 60_000;
+
+type ContinueOutcome = 'accepted' | 'rejected' | 'ended' | 'timeout';
+
 function waitForTurnEnd(session: ContinuableSession, timeoutMs: number): Promise<void> {
   return new Promise((resolve) => {
     let unsubscribe: () => void = () => {};
@@ -256,8 +264,10 @@ function laneJobKey(job: { logKey: string; chatId: string }): string {
 
 /** At most this many OpenRouter-family continues per lane per window, so a
  *  hard-down provider stops with the unread notice instead of retrying in a
- *  loop. Only a continue that will actually run spends budget: a cut that
- *  folds into a still-waiting job does not. */
+ *  loop. Budget is spent only on a continue that actually reached the model
+ *  (runJob, on acceptance): a cut that folds into a still-waiting job, a send
+ *  that never opened, or a job cancelled before it ran costs nothing, so dead
+ *  attempts never lock a healthy lane out of its recoveries. */
 const OPENROUTER_CONTINUE_CAP = 4;
 const OPENROUTER_CONTINUE_WINDOW_MS = 20 * 60_000;
 const openRouterContinues = new Map<string, number[]>();
@@ -274,8 +284,8 @@ export function openRouterContinueBudget(lane: { logKey: string; chatId: string 
   return stamps.length < OPENROUTER_CONTINUE_CAP;
 }
 
-/** Record one engine-cut continue that will actually run. Spent only when a
- *  job is created, never when a cut folds into a still-waiting job. */
+/** Record one engine-cut continue that actually reached the model. Spent on
+ *  acceptance in runJob, never at schedule time. */
 export function spendOpenRouterContinue(lane: { logKey: string; chatId: string }, now = Date.now()): void {
   openRouterContinues.set(laneJobKey(lane), [...(openRouterContinues.get(laneJobKey(lane)) ?? []), now]);
 }
@@ -299,7 +309,6 @@ export function scheduleProviderContinue(request: ProviderContinueRequest): void
   const job: Job = { ...request, origin, cancelled: false, started: false };
   jobs.set(laneJobKey(request), job);
   runningJobs.add(job);
-  if ('engine' in job.cut) spendOpenRouterContinue(job);
   console.warn(`[chat ${request.cli}] provider ${'engine' in request.cut
     ? `cut this turn on ${request.logKey} (${request.cut.engine})`
     : `switched mid-turn on ${request.logKey} (${request.cut.from} -> ${request.cut.to})`}; continuing automatically`);
@@ -496,30 +505,56 @@ async function runJob(job: Job): Promise<void> {
         continue;
       }
       const id = randomUUID();
-      let echoed = false;
-      let accepted = false;
       const target: ContinuableSession = session;
+      // The prompt's real receipt arrives with the model's first response
+      // (peer_delivery_accepted), 30-90s after the stdin write on slow lanes,
+      // and a refusal or a turn end can arrive just as late. Judge the send by
+      // its correlated outcome, never at write time: send() resolves on the
+      // write callback, which proves nothing about the provider.
+      let settleOutcome!: (value: ContinueOutcome) => void;
+      const outcome = new Promise<ContinueOutcome>((resolve) => { settleOutcome = resolve; });
+      const outcomeTimer = setTimeout(() => settleOutcome('timeout'), CONTINUE_ACCEPT_WAIT_MS);
+      outcomeTimer.unref?.();
+      let finished = false;
+      const finishOutcome = (value: ContinueOutcome) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(outcomeTimer);
+        unsubscribe();
+        settleOutcome(value);
+      };
       const unsubscribe = target.subscribe((se) => {
         const outer = se.ev as { type?: string; event?: { type?: string; id?: string; deliveryId?: string } };
+        if (outer?.type === 'turnEnd' || outer?.type === 'closed') { finishOutcome('ended'); return; }
         if (outer?.type !== 'event') return;
-        if (outer.event?.type === PROVIDER_CONTINUE_EVENT && outer.event.id === id) echoed = true;
         // Both runners emit this only once the prompt really reached the
-        // provider (stdin write / RPC accepted), same as a teammate delivery.
-        if (outer.event?.type === 'peer_delivery_accepted' && outer.event.deliveryId === id) accepted = true;
+        // provider (the model's first real response / RPC accepted), same as
+        // a teammate delivery. Never at write time.
+        if (outer.event?.type === 'peer_delivery_accepted' && outer.event.deliveryId === id) finishOutcome('accepted');
+        if (outer.event?.type === 'peer_delivery_rejected' && outer.event.deliveryId === id) finishOutcome('rejected');
       }, target.latestSeq(), false);
       try {
         await target.send(providerContinuePrompt(job.cut), undefined, {
           providerContinue: { id, origin: job.origin, cut: job.cut },
           peerDeliveryId: id,
         });
-      } finally {
-        unsubscribe();
+      } catch (err) {
+        finishOutcome('rejected');
+        throw err;
       }
-      if (accepted || job.cancelled) return;
-      // Never opened: another turn won the lane between the check and the
-      // write. Watch that one instead (bounded, so a runner that keeps
+      const result = await outcome;
+      if (job.cancelled) return;
+      if (result === 'accepted') {
+        // The continuation turn owns the cut work from here. Budget is spent
+        // only now: a continue that never reached the model costs nothing.
+        if ('engine' in job.cut) spendOpenRouterContinue(job);
+        return;
+      }
+      // Rejected at the CLI, the turn ended before this continue's own
+      // acceptance, or nothing correlated arrived in time. Let cutState judge
+      // what actually happened on the thread (bounded, so a runner that keeps
       // declining without going busy cannot spin this loop).
-      if (!echoed && ++writes < 3) continue;
+      if (++writes < 4) continue;
       await stopJob(job, `${who} could not continue${onWhere}. Send again to continue.`, `${who} could not continue${onWhere} after ${cutAfterWhat(job.cut)}`);
       return;
     }
@@ -534,6 +569,10 @@ async function runJob(job: Job): Promise<void> {
 async function stopJob(job: Job, message: string, reason: string): Promise<void> {
   if (job.cancelled) return;
   await postProviderCutNotice(job, message);
+  // A Stop or Fresh can land while the notice waited for an idle lane (hours
+  // are allowed); never publish a failure, or tell handoff senders, for a job
+  // that was cancelled in the meantime.
+  if (job.cancelled) return;
   await notifyHandoffSenders(job.chatId, job.origin, reason);
 }
 
@@ -549,6 +588,7 @@ async function postProviderCutNotice(job: Job, message: string): Promise<void> {
     // UI and the team bus would read it as that turn failing. The idle check
     // and the post share one synchronous slice, so no turn can start between.
     for (;;) {
+      if (job.cancelled) return;
       const live = runner.liveLaneSession(job.logKey, job.chatId);
       if (!live?.isBusy()) {
         if (live?.postNotice(event)) return;

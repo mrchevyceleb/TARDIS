@@ -39,8 +39,18 @@ test('a queued peer message stands down at a tool boundary on an OpenRouter lane
   const { session, interrupts } = boundaryHarness('openrouter');
   session.handleEvent(toolResultEvent);
   assert.equal(session.boundaryInterruptWanted, false);
+  assert.ok(session.peerBoundaryStanddownSince !== null, 'the ceiling clock armed');
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(interrupts, []);
+});
+
+test('the peer stand-down is bounded: past its ceiling the boundary interrupt fires', async () => {
+  const { session, interrupts } = boundaryHarness('openrouter');
+  session.peerBoundaryStanddownSince = Date.now() - 11 * 60_000;
+  session.handleEvent(toolResultEvent);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(interrupts, ['message-boundary']);
+  assert.equal(session.peerBoundaryStanddownSince, null, 'the ceiling re-armed');
 });
 
 test('the stand-down also catches a human waiter that released before the deferred fire', async () => {

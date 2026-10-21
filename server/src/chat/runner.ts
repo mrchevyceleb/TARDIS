@@ -587,6 +587,12 @@ const PEER_BOUNDARY_INTERRUPT_GAP_MS = 60_000;
  *  person waits for no tool boundary anywhere. */
 const ONE_PIECE_TOOL_CALL_CLIS: ReadonlySet<CliKind> = new Set(['openrouter', 'openrouter2']);
 
+/** How long a queued peer message waits out the one-piece stand-down before
+ *  the boundary interrupt fires anyway. Healthy responses on these lanes land
+ *  within 2-3 minutes, so a turn that still holds a message past this is
+ *  stuck, and the message is worth more than the in-flight generation. */
+const ONE_PIECE_PEER_STANDDOWN_CEILING_MS = 10 * 60_000;
+
 /** How long a scheduled, wake- or job-result-started (automation) turn runs
  *  before a teammate's handoff may end it at a tool boundary. Tim's
  *  job-started turns ran 40+ minutes with Riley's handoffs queued the whole
@@ -715,6 +721,11 @@ class ClaudeSession {
    *  ended by a warm interrupt the moment every tool call in flight has returned,
    *  so the message can start a fresh turn instead of riding inside a tool result. */
   private boundaryInterruptWanted = false;
+
+  /** When the one-piece-tool-call peer stand-down began (see
+   *  ONE_PIECE_PEER_STANDDOWN_CEILING_MS); null while it holds nothing back.
+   *  Reset with the rest of the boundary state. */
+  private peerBoundaryStanddownSince: number | null = null;
   /** Live waiters that asked for the interrupt; it is dropped when the last one gives up. */
   private boundaryWaiters = 0;
   /** How many of those waiters are a person (Matt, the Desk) rather than a teammate. */
@@ -2050,6 +2061,7 @@ class ClaudeSession {
     this.boundaryHumanWaiters = 0;
     this.boundaryGeneration += 1;
     this.hazardOverrideActive = false;
+    this.peerBoundaryStanddownSince = null;
     if (this.humanHazardTimer) { clearTimeout(this.humanHazardTimer); this.humanHazardTimer = undefined; }
   }
 
@@ -2618,13 +2630,18 @@ class ClaudeSession {
           // before. Background commands and monitors are unaffected by the
           // interrupt (they keep running and still report), so they do not
           // hold a message back.
+          // One-piece-tool-call lanes: a queued peer message stands down at a
+          // tool boundary (the CLI has already begun the next response; see
+          // ONE_PIECE_TOOL_CALL_CLIS), but only within
+          // ONE_PIECE_PEER_STANDDOWN_CEILING_MS of the stand-down beginning,
+          // so a stuck turn cannot hold a message forever. A person's message
+          // never waits.
+          if (this.boundaryHumanWaiters === 0 && ONE_PIECE_TOOL_CALL_CLIS.has(this.cli) && this.peerBoundaryStanddownSince === null) this.peerBoundaryStanddownSince = now;
+          const peerStoodDown = this.boundaryHumanWaiters === 0 && ONE_PIECE_TOOL_CALL_CLIS.has(this.cli)
+            && now - (this.peerBoundaryStanddownSince ?? now) < ONE_PIECE_PEER_STANDDOWN_CEILING_MS;
           if (this.hasInterruptHazard() && !this.hazardOverrideActive) {
             this.boundaryInterruptWanted = false;
-          } else if (this.boundaryHumanWaiters === 0 && ONE_PIECE_TOOL_CALL_CLIS.has(this.cli)) {
-            // Same stand-down for one-piece-tool-call lanes (see
-            // ONE_PIECE_TOOL_CALL_CLIS): the CLI has already begun the next
-            // response at this boundary, so the queued peer message takes the
-            // next turn at turn end instead of discarding it.
+          } else if (peerStoodDown) {
             this.boundaryInterruptWanted = false;
           } else if (
             (this.boundaryHumanWaiters > 0 || now - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS)
@@ -2645,9 +2662,14 @@ class ClaudeSession {
               if (this.turnStartedAt === null || this.turnStartedAt !== turn || this.disposed) return;
               if (this.boundaryWaiters === 0) return;
               // The human waiter released before this ran and only peers
-              // remain on a one-piece-tool-call lane: same stand-down as the
-              // outer check, so the in-flight generation is not discarded.
-              if (this.boundaryHumanWaiters === 0 && ONE_PIECE_TOOL_CALL_CLIS.has(this.cli)) { this.boundaryInterruptWanted = false; return; }
+              // remain on a one-piece-tool-call lane: same stand-down (and
+              // the same ceiling) as the outer check, so the in-flight
+              // generation is not discarded.
+              if (this.boundaryHumanWaiters === 0 && ONE_PIECE_TOOL_CALL_CLIS.has(this.cli)) {
+                this.peerBoundaryStanddownSince ??= Date.now();
+                if (Date.now() - this.peerBoundaryStanddownSince < ONE_PIECE_PEER_STANDDOWN_CEILING_MS) { this.boundaryInterruptWanted = false; return; }
+                this.peerBoundaryStanddownSince = null;
+              }
               // Another tool started before this ran: the request still stands.
               if (this.activeToolIds.size > 0) { this.boundaryInterruptWanted = true; return; }
               // A background subagent can also have started between the outer
@@ -2655,6 +2677,7 @@ class ClaudeSession {
               // the turn is left to finish and the message starts the next one.
               if (this.hasInterruptHazard() && !this.hazardOverrideActive) { this.boundaryInterruptWanted = false; return; }
               this.lastBoundaryInterruptAt = Date.now();
+              this.peerBoundaryStanddownSince = null;
               this.pausedForMessage = true;
               void this.interrupt('message-boundary').then((kept) => {
                 if (!kept) this.pausedForMessage = false;
@@ -2851,9 +2874,15 @@ class ClaudeSession {
     // turn's origin snapshotted) before turnEnd, whose subscribers may admit
     // the next turn synchronously.
     const zaiCut = terminal && this.turnStartedAt !== null ? this.zaiCutOutcome(zaiStale && this.hasBackgroundWork()) : null;
-    // A failed compaction has its own recovery (recoverNative below), so it
-    // never rides the provider-cut continue.
-    const orProviderCut = !zaiCut && !compactFailed && terminal && this.turnStartedAt !== null ? this.openRouterCutOutcome('provider', terminal) : null;
+    // Only a terminal with explicit provider provenance (an API status on the
+    // result) is a provider cut. The merged terminal also classifies step
+    // limits, budget caps, malformed tool calls and dead local runners, which
+    // have their own handling and must not be continued as provider drops. A
+    // failed compaction recovers itself (recoverNative below), and a
+    // context-length rejection in any shape (flag or raw detail) never
+    // continues: that session must reseed, not retry the same oversized turn.
+    const orProviderCut = !zaiCut && !compactFailed && !lengthRejected && providerTerminal !== null && this.turnStartedAt !== null
+      ? this.openRouterCutOutcome('provider', providerTerminal) : null;
     // The sneaky cut: a normal-looking result whose response stream the
     // provider aborted mid-generation. On these lanes the tool call arrives
     // in one piece at the END of a response, so the cut lands nothing on disk
