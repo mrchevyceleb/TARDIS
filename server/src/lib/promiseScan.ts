@@ -1,6 +1,6 @@
 // Record outgoing promises through the same validated commitment store.
 import { addCommitment, listCommitments } from './commitmentStore.ts';
-import { findPromisedTimes, type PromisedTime } from './promiseTime.ts';
+import { findPromisedTimes, workTimingError, type PromisedTime } from './promiseTime.ts';
 export { findPromisedTimes, parseDue, type PromisedTime } from './promiseTime.ts';
 
 /** One outgoing agent message: every promise clause that has no matching
@@ -16,6 +16,8 @@ export function scanOutgoingPromise(
   sourceId?: string,
   now: Date = new Date(),
 ): { added: Array<{ id: string; due: string }>; addError?: string; promise?: PromisedTime } {
+  const timingError = workTimingError(text, undefined, undefined, now.getTime());
+  if (timingError) return { added: [], addError: timingError };
   const promises = findPromisedTimes(text, now);
   if (!promises.length) return { added: [] };
   // Per-promise source ids (message id capped, then # ordinal, always under

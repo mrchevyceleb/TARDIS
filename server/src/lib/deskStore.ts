@@ -1,4 +1,4 @@
-import { workTimingError } from './promiseTime.ts';
+import { relativeCheckpointTime, workTimingError } from './promiseTime.ts';
 // The Desk: "Needs you" todos for the owner plus a board of agent work.
 // Store: ~/.rivendell/desk.json (RIVENDELL_DESK_FILE overrides the path).
 //
@@ -109,7 +109,7 @@ function validIso(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '' && Number.isFinite(Date.parse(value));
 }
 
-const WRITTEN_CHECK_PHRASE = /\bcheck[\s-]?in\b/gi;
+const WRITTEN_CHECK_PHRASE = /\b(?:check[\s-]?in|next update|first look|checkpoint)\b/gi;
 // A time may state its zone: ET/Eastern is the team convention and honored;
 // any other recognized zone is rejected rather than silently rescheduled as
 // Eastern (a PT time would otherwise fire three hours early). The list is
@@ -178,7 +178,7 @@ export function parseWrittenNextCheck(text: string, nowMs: number): number | nul
   let found: number | null = null;
   for (const phrase of text.matchAll(WRITTEN_CHECK_PHRASE)) {
     const start = phrase.index ?? 0;
-    if (/\blast\s*$/i.test(text.slice(0, start))) continue;
+    if (/\b(?:last|previous)\s*$/i.test(text.slice(0, start))) continue;
     // The statement lives between the phrase and the next sentence break; a
     // month abbreviation's period is part of the date, not a break.
     const rest = text
@@ -186,6 +186,8 @@ export function parseWrittenNextCheck(text: string, nowMs: number): number | nul
       .replace(WRITTEN_CHECK_MONTH_ABBR_PERIOD, '$1');
     const cut = rest.search(/[.;\n]/);
     const window = (cut === -1 ? rest : rest.slice(0, cut)).slice(0, 80);
+    const relative = relativeCheckpointTime(window, nowMs);
+    if (relative !== null) { if (relative > nowMs) found = relative; continue; }
     const time = WRITTEN_CHECK_TIME.exec(window);
     if (!time) continue;
     const zone = (time[6] ?? '').toLowerCase();
@@ -244,7 +246,7 @@ function requireCardTiming(text: string, nowMs = Date.now()): void {
   const phrases = [...text.matchAll(WRITTEN_CHECK_PHRASE)];
   for (let i = 0; i < phrases.length; i += 1) {
     const start = phrases[i].index ?? 0;
-    if (/\blast\s*$/i.test(text.slice(0, start))) continue;
+    if (/\b(?:last|previous)\s*$/i.test(text.slice(0, start))) continue;
     const at = parseWrittenNextCheck(text.slice(start, phrases[i + 1]?.index), nowMs);
     const writtenError = workTimingError('', undefined, at ?? undefined, nowMs);
     if (writtenError) throw new DeskError(422, writtenError);

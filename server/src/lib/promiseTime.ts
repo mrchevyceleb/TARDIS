@@ -212,8 +212,8 @@ export function findPromisedTimes(text: string, now: Date = new Date()): Promise
 export function parseDue(due: string, now: Date = new Date()): number | null {
   const absolute = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i.test(due.trim()) ? Date.parse(due) : NaN;
   if (Number.isFinite(absolute)) return absolute;
-  const relative = new RegExp(`^(?:${RELATIVE_WORK.source})$`, 'i').exec(due.trim());
-  if (relative) return now.getTime() + relativeMs(relative[1], relative[2]);
+  const relative = relativeDue(due, now.getTime());
+  if (relative !== null) return relative;
   const match = due.match(/(?<!\d)(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*(am|pm)(?!\d)/i);
   if (!match || match.index === undefined) return null;
   const word = due.match(DAY)?.[1];
@@ -223,13 +223,35 @@ export function parseDue(due: string, now: Date = new Date()): number | null {
 
 /** Work gets a near checkpoint, even when the whole job takes longer. */
 export const WORK_CHECKPOINT_MS = 30 * 60_000;
-const FUTURE_WORK = /\b(?:will|shall|should|expect|ETA|next|new|plan|promise|aim|ready)\b|\b(?:I|we)'ll\b/i;
-const PAST_WORK = /\b(?:took|finished|completed|shipped|delivered|resolved|deployed|merged|fixed|landed|pushed|started|passed|ran|went|asked|noticed|saw|got|used to|last check-in|previous checkpoint|was due|were due)\b/i;
+// Enforce promised work, not every clock in an agent's progress report.
+const FUTURE_INTENT = /\b(?:I|we)(?:'ll| will| shall| plan to| aim to| expect to)\b|\b(?:will|shall|should|ETA|next (?:update|check[ -]?in|checkpoint)|first look|new time|back to you)\b/i;
+const WORK_LEAD = /^\s*(?:(?:please|then)\s+)?(?:send|ship|finish|fix|deliver|complete|update|report|result|proof|checkpoint|check[ -]?in|deliver(?:ing)|finish(?:ing)|send(?:ing)|ship(?:ping))\b|^\s*(?:ready|done)\s+(?:by|at|in|within)\b|^\s*(?:by|before|due)\s+(?:\d|noon|midnight|tomorrow|tonight|[a-z]+day)\b/i;
+const PAST_CONTEXT = /\b(?:was|were|had|already|since|yesterday|previous|last check[ -]?in|last checkpoint)\b|^\s*done\s+(?:today|tonight|yesterday)\s*:/i;
 const CALENDAR_DURATION = /\b(?:meeting|webinar|maintenance|event|appointment|flight|cache|token|timeout|retention|CI)\b/i;
-const RELATIVE_WORK = /\b(?:in|within|ETA|checkpoint|takes?)\s+(?:(?:about|the next)\s+|~\s*)?(\d+(?:\.\d+)?|an?|one|two|three|four|five|ten|fifteen|thirty|forty-five)\s*(minutes?|mins?|m|hours?|hrs?|h)\b/gi;
-const NUMBERS: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, ten: 10, fifteen: 15, thirty: 30, 'forty-five': 45 };
+const NUMBER_WORDS = '(?:a couple of|couple(?: of)?|a few|few|several|half(?: an?)?|quarter(?: of an?)?|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|hundred)';
+const RELATIVE_WORK = new RegExp(`\\b(?:in|within|ETA|checkpoint|takes?)\\s+(?:(?:about|the next)\\s+|~\\s*)?(\\d+(?:\\.\\d+)?|${NUMBER_WORDS})\\s*(minutes?|mins?|m|hours?|hrs?|h|days?|weeks?)\\b`, 'gi');
+const NUMBER_VALUES: Record<string, number> = {a:1,an:1,one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10,eleven:11,twelve:12,thirteen:13,fourteen:14,fifteen:15,sixteen:16,seventeen:17,eighteen:18,nineteen:19,twenty:20,thirty:30,forty:40,fifty:50,sixty:60,seventy:70,eighty:80,ninety:90,hundred:100};
 function relativeMs(value: string, unit: string): number {
-  return (NUMBERS[value.toLowerCase()] ?? Number(value)) * (/^h/i.test(unit) ? 3_600_000 : 60_000);
+  const word=value.toLowerCase();
+  const n=/couple/.test(word)?2:/few|several/.test(word)?3:/half/.test(word)?.5:/quarter/.test(word)?.25:NUMBER_VALUES[word] ?? (/^\d/.test(word)?Number(word):word.split(/[- ]/).reduce((sum,w)=>sum+(NUMBER_VALUES[w]??0),0));
+  return n * (/^w/i.test(unit)?604_800_000:/^d/i.test(unit)?86_400_000:/^h/i.test(unit)?3_600_000:60_000);
+}
+function relativeDue(due:string, nowMs:number):number|null {
+  const re=new RegExp(`^(?:${RELATIVE_WORK.source})$`,'i');
+  const m=re.exec(due.trim()) ?? re.exec('in '+due.trim());
+  return m?nowMs+relativeMs(m[1],m[2]):null;
+}
+export function relativeCheckpointTime(text: string, nowMs: number): number | null {
+  const clean = text.trim().replace(/^(?:is\b|:)\s*/i, '');
+  const match = new RegExp(RELATIVE_WORK.source, 'i').exec(clean);
+  return match?.index === 0 ? nowMs + relativeMs(match[1], match[2]) : null;
+}
+function promisesWork(clause:string):boolean {
+  const explicitFuture=FUTURE_INTENT.test(clause);
+  if (!explicitFuture && PAST_CONTEXT.test(clause)) return false;
+  if (/^\s*(?:Matt|Kim)(?:'s)?\b/i.test(clause) && !/\b(?:I|we)(?:'ll| will| shall)\b/i.test(clause)) return false;
+  if (CALENDAR_DURATION.test(clause) && !/\b(?:finish|ship|fix|deliver|complete|result|update|proof|checkpoint)\b/i.test(clause)) return false;
+  return explicitFuture || WORK_LEAD.test(clause);
 }
 
 export function workTimingError(text: string, due?: string, dueAt?: number, nowMs = Date.now()): string | undefined {
@@ -237,8 +259,7 @@ export function workTimingError(text: string, due?: string, dueAt?: number, nowM
   const instants: number[] = [];
   const explicit = due?.trim();
   if (explicit) {
-    const relative = new RegExp(`^(?:${RELATIVE_WORK.source})$`, 'i').exec(explicit);
-    const parsed = relative ? nowMs + relativeMs(relative[1], relative[2]) : parseDue(explicit, now);
+    const parsed = parseDue(explicit, now);
     if (parsed === null) return 'Nothing saved. Give a clear checkpoint within 30 minutes, such as "in 15 minutes" or an Eastern clock time.';
     instants.push(parsed);
   }
@@ -247,18 +268,13 @@ export function workTimingError(text: string, due?: string, dueAt?: number, nowM
   // high-precision third-person/negation filters: "This will..." and "Don't
   // worry, I'll..." are still commitments. Each clause has its own tense.
   for (const clause of text.replace(/[’‘]/g, "'").split(/[.!?;]\s+|\n+|,\s+(?=(?:I\b|we\b|next\b|rest\b|done\b|then\b))/i)) {
-    const historical = PAST_WORK.test(clause) && !FUTURE_WORK.test(clause);
-    const calendar = CALENDAR_DURATION.test(clause) && !/\b(?:finish|ship|fix|deliver|complete|result|update|proof|checkpoint)\b/i.test(clause);
-    const reportedOwnerFact = /^\s*(?:Matt|Kim)(?:'s)?\b/i.test(clause) && !/\b(?:I(?:'ll| will)|we(?:'ll| will))\b/i.test(clause);
-    if (calendar || historical || reportedOwnerFact) continue;
+    if (!promisesWork(clause)) continue;
     for (const match of clause.matchAll(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})\b/gi)) {
       const at = Date.parse(match[0]);
       if (Number.isFinite(at)) instants.push(at);
     }
-    if (!historical && !calendar) {
-      for (const match of clause.matchAll(RELATIVE_WORK)) instants.push(nowMs + relativeMs(match[1], match[2]));
-    }
-    const clockPairs = /\b(?:by|before|due|at|ETA|checkpoint|first look|next update|check[ -]?in|ready|finish|deliver|ship)\b\s*(?:(?:by|at|about|around)\s*|:\s*)?(noon|midnight|(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:am|pm)?)(?![\d:])\b/gi;
+    for (const match of clause.matchAll(RELATIVE_WORK)) instants.push(nowMs + relativeMs(match[1], match[2]));
+    const clockPairs = /\b(?:by|before|due|at|ETA|checkpoint|first look|next update|check[ -]?in|ready|finish|deliver|ship)\b\s*(?:(?:by|at|about|around)\s*|:\s*)?(noon|midnight|(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:am|pm)?)(?![\d:]|\.\d)\b/gi;
     for (const match of clause.matchAll(clockPairs)) {
       if (!/(?:am|pm)|:|noon|midnight/i.test(match[1]) && /^(?:finish|deliver|ship|ready)\b/i.test(match[0])) continue;
       if (!/(?:am|pm)|:|noon|midnight/i.test(match[1]) && !/^(?:(?:ET|EDT|EST)\b|today\b|tomorrow\b|tonight\b|[.,!?]|$)/i.test(clause.slice((match.index ?? 0) + match[0].length).trim())) continue;
@@ -280,12 +296,10 @@ export function workTimingError(text: string, due?: string, dueAt?: number, nowM
       });
       days.sort((a,b)=>Math.abs((a.index ?? 0)-(match.index ?? 0))-Math.abs((b.index ?? 0)-(match.index ?? 0)));
       const day = days[0]?.[1];
-      // Past-tense facts use today's clock, rather than rolling into tomorrow.
-      const at = resolveClock(clause, day ?? (historical ? 'today' : undefined), clock, now);
+      const at = resolveClock(clause, day, clock, now);
       if (at !== null) instants.push(at);
     }
-    if (!historical && !calendar && /\b(?:tomorrow|tonight|EOD|later today|end of (?:the )?day|next (?:week|month)|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i.test(clause)
-        && /\b(?:send|ship|finish|fix|deliver|result|update|checkpoint|check[ -]?in|ready|done|complete|proof)\b/i.test(clause)
+    if (/\b(?:tomorrow|tonight|EOD|this (?:afternoon|evening)|later today|end of (?:the )?(?:day|week|month)|next (?:week|month)|sunday|monday|tuesday|wednesday|thursday|friday|saturday|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2})\b/i.test(clause)
         && !clockPairs.test(clause)) {
       return 'Nothing saved. Give the next concrete result a clear time within 30 minutes, rather than a later day or an open-ended deadline.';
     }
