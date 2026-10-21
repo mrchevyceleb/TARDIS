@@ -1210,7 +1210,9 @@ export class CodexSession {
         if (ev.type === 'item.completed' && typeof item.text === 'string' && item.text.trim()) this.replyWatch.noteText();
         return;
       }
-      if (item.type === 'reasoning' || item.type === 'error') return;
+      // Native housekeeping and the user message are not tool calls. A slow
+      // compaction must never inject a second request for the pending answer.
+      if (!['command_execution', 'mcp_tool_call', 'file_change', 'webSearch', 'web_search'].includes(item.type)) return;
       if (ev.type === 'item.started') {
         this.replyWatch.noteTool(String(item.id));
         return;
