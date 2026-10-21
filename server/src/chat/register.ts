@@ -1533,6 +1533,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
         return;
       }
 
+      // A handover is internal maintenance, not a user turn. A plain send
+      // that races it follows the existing retained next-turn guidance path
+      // instead of being rejected as if another human owned the lane.
+      if (msg.type === 'send' && repoPath && cliKind) {
+        const target = normalizeChatId(msg.chatId ?? chatId);
+        const owner = agentForChatId(target) ? peekThreadSession({ cli: cliKind, repoPath, chatId: target }) : null;
+        if ((owner as { isHandingOver?: () => boolean } | null)?.isHandingOver?.()) {
+          msg = { ...msg, type: 'steer', cli: cliKind, repo: repoPath, chatId: target, queue: true };
+        }
+      }
+
       let finishHello: (() => void) | null = null;
       let reservedSendAdmission: { key: string; clientMsgId: string } | null = null;
       let unsubscribeSendAdmission: (() => void) | null = null;

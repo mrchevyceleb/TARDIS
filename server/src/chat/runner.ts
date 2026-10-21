@@ -632,6 +632,7 @@ class ClaudeSession {
   private harnessChars = 0;
   private statusAcks: Array<() => void> = [];
   private pendingPeerAccepts = new Set<string>();
+  private pendingPeerSteerAccepts = new Set<string>();
   private spawnError: string | null = null;
   /** Set once we detect a fatal 401. Guards failAuth() so a retry storm only
    *  tears the child down once, and flips isAlive() false so the next
@@ -1197,6 +1198,9 @@ class ClaudeSession {
    *  peer_message instead of _user_echo and don't tick compaction. */
   async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge; compactRerun?: boolean; echoText?: string; replyTo?: { from: string; snippet: string } } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
+    // A receipt timeout must not write a second copy of an input that the
+    // native CLI already holds. A retry listens for that same delivery ID.
+    if (opts.peerDeliveryId && this.pendingPeerAccepts.has(opts.peerDeliveryId)) return;
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
     if (this.nativeHandoverPending) {
@@ -1252,12 +1256,12 @@ class ClaudeSession {
     // the check/write race that previously acknowledged guidance after provider
     // inference had already begun.
     if (!startsNewTurn) {
-      if (opts.peerFrom && !opts.allowNativePeerSteer) return;
+      if (opts.peerFrom && !opts.allowNativePeerSteer) throw new Error('The lane became busy before peer admission; the delivery remains queued.');
       if (!opts.peerFrom && !opts.allowNativeHumanSteer) {
         throw new Error('the current turn must reach a safe boundary before guidance is delivered');
       }
       if (this.activeToolIds.size === 0) {
-        if (opts.peerFrom) return;
+        if (opts.peerFrom) throw new Error('The native peer steering window closed before admission; the delivery remains queued.');
         throw new Error('the native steering window closed before delivery');
       }
     }
@@ -1578,7 +1582,10 @@ class ClaudeSession {
         this.turnPromptSubmitted = true;
         if (pausedNote) this.pausedForMessage = false;
       }
-      if (opts.peerDeliveryId) this.pendingPeerAccepts.add(opts.peerDeliveryId);
+      if (opts.peerDeliveryId) {
+        this.pendingPeerAccepts.add(opts.peerDeliveryId);
+        if (!startsNewTurn) this.pendingPeerSteerAccepts.add(opts.peerDeliveryId);
+      }
       await new Promise<void>((resolve, reject) => {
         this.child.stdin.write(payload + '\n', (error) => {
           if (error) reject(error);
@@ -1593,7 +1600,11 @@ class ClaudeSession {
         if (seed) this.pendingSeedAck = true;
       }
     } catch (e) {
-      if (opts.peerDeliveryId) this.pendingPeerAccepts.delete(opts.peerDeliveryId);
+      if (opts.peerDeliveryId) {
+        this.pendingPeerAccepts.delete(opts.peerDeliveryId);
+        this.pendingPeerSteerAccepts.delete(opts.peerDeliveryId);
+        this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId: opts.peerDeliveryId, ts: Date.now() } });
+      }
       if (wantSeed) this.seedWindowOnNextTurn = true;
       if (startsNewTurn && this.turnStartedAt !== null) {
         this.turnStartedAt = null;
@@ -1779,6 +1790,10 @@ class ClaudeSession {
   isBusy(): boolean {
     return this.turnStartedAt !== null || this.nativeHandoverPending === true;
   }
+
+  isHandingOver(): boolean { return this.nativeHandoverPending === true; }
+
+  nativeHandoverRevision(): number { return this.nativeStopGeneration; }
 
   setNativeHandoverPending(pending: boolean): void {
     this.nativeHandoverPending = pending;
@@ -2467,6 +2482,7 @@ class ClaudeSession {
     if (ev?.type === 'assistant' && !ev.parent_tool_use_id && !isSyntheticApiErrorEvent(ev)) {
       for (const deliveryId of this.pendingPeerAccepts) this.emit({ type: 'event', event: { type: 'peer_delivery_accepted', deliveryId, ts: Date.now() } });
       this.pendingPeerAccepts.clear();
+      this.pendingPeerSteerAccepts.clear();
     }
     // Monitor/background-task notifications can start a query inside the warm
     // CLI without send(). Adopt that query before forwarding its first event,
@@ -2886,7 +2902,16 @@ class ClaudeSession {
       this.userInterruptPending = false;
       const seeded = this.pendingSeedAck;
       const resultFailed = ev.is_error === true || typeof ev.api_error_status === 'number';
-      if (resultFailed) this.pendingPeerAccepts.clear();
+      if (resultFailed) {
+        for (const deliveryId of this.pendingPeerAccepts) {
+          // Stdin guidance can belong to the native CLI's next query. A
+          // failure of the query already running does not reject that input.
+          if (this.pendingPeerSteerAccepts.has(deliveryId)) continue;
+          this.pendingPeerAccepts.delete(deliveryId);
+          this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, ts: Date.now() } });
+        }
+      }
+      this.pendingPeerSteerAccepts.clear();
       const failed = seeded && resultFailed;
       if (seeded) this.pendingSeedAck = false;
       // An accepted handover is never replayed after an API failure.
@@ -3103,7 +3128,9 @@ async function getOrCreateSessionUnlocked(opts: {
   }
   const finishLookup = beginSessionLookup(trackedThreadLogKey({ ...opts, chatId }));
   const handedSources = new Set<ClaudeSession>();
+  const handoverRevisions = new Map<ClaudeSession, number>();
   const markHandover = (source: ClaudeSession) => {
+    if (!handoverRevisions.has(source)) handoverRevisions.set(source, source.nativeHandoverRevision());
     source.setNativeHandoverPending(true);
     handedSources.add(source);
     const sources = nativeHandovers.get(source.logKey) ?? new Set<ClaudeSession>();
@@ -3271,6 +3298,7 @@ async function getOrCreateSessionUnlocked(opts: {
   }
   return spawned;
   } catch (error) {
+    if ([...handoverRevisions].some(([source, revision]) => source.nativeHandoverRevision() !== revision)) throw error;
     // The old provider may be out of quota or no longer serve the saved
     // model. The selected provider can compact the exact same native Claude
     // transcript; this is neither a new ID nor a TARDIS-written summary.

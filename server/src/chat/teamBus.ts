@@ -16,6 +16,7 @@ import { scanOutgoingPromise } from '../lib/promiseScan.ts';
 import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, recordQuietExemptWake } from '../lib/quietHours.ts';
 import { LIVE_HOLD_CEILING_MS } from '../lib/laneLiveness.ts';
 import { briefEnvelopeForHandoff, isCoderBrief } from './briefEnvelope.ts';
+import { recordNativeFailure } from './sessionMetrics.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
 // both sides touch shared graph modules — keeping this lazy is cheap insurance).
@@ -46,20 +47,27 @@ type SessionLike = {
 /** A stdin write is not a provider receipt. Keep listening through startup
  * so callers do not retry an admitted wake or accept an empty reply. */
 async function sendWithAdmission(session: SessionLike, deliveryId: string, send: () => Promise<void>): Promise<void> {
-  let echoed = false;
-  let finish = () => {};
-  const admitted = new Promise<void>(resolve => { finish = resolve; });
-  const timer = setTimeout(finish, 4 * 60_000);
-  timer.unref?.();
+  let finish = (_outcome: 'accepted' | 'rejected' | 'closed' | 'timeout') => {};
+  const admitted = new Promise<'accepted' | 'rejected' | 'closed' | 'timeout'>(resolve => { finish = resolve; });
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const unsubscribe = session.subscribe(event => {
     const inner = event.ev?.type === 'event' ? event.ev.event : undefined;
-    if (inner?.type === 'peer_message' && inner.deliveryId === deliveryId) echoed = true;
-    if ((inner?.type === 'peer_delivery_accepted' && inner.deliveryId === deliveryId)
-        || event.ev?.type === 'turnEnd' || event.ev?.type === 'closed' || event.ev?.type === 'error') finish();
+    if (inner?.type === 'peer_delivery_accepted' && inner.deliveryId === deliveryId) finish('accepted');
+    if (inner?.type === 'peer_delivery_rejected' && inner.deliveryId === deliveryId) finish('rejected');
+    if (event.ev?.type === 'closed') finish('closed');
   }, session.latestSeq(), false);
   try {
     await send();
-    if (echoed) await admitted;
+    // Maintenance can take several minutes before stdin is written. Neither
+    // its turn end nor its elapsed time is a receipt for this delivery.
+    timer = setTimeout(() => finish('timeout'), 4 * 60_000);
+    timer.unref?.();
+    const outcome = await admitted;
+    if (outcome !== 'accepted') {
+      if (outcome === 'timeout') recordNativeFailure(session.chatId ?? session.logKey, 'native',
+        'A delivery received no provider acceptance within four minutes. It remains pending; it was not marked delivered.');
+      throw new Error(`provider admission ${outcome}; the delivery remains pending`);
+    }
   } finally {
     clearTimeout(timer);
     unsubscribe();
@@ -386,7 +394,7 @@ export function waitForDeliveryBoundary(
   interruptAtBoundary: false | 'human' | 'peer' = false,
 ): Promise<DeliveryBoundary> {
   if (signal?.aborted) return Promise.resolve('aborted');
-  if (session.isBusy?.() !== true) return Promise.resolve('idle');
+  if (session.isBusy?.() === false) return Promise.resolve('idle');
   if (acceptSteer() && session.canAcceptNativeHumanSteer?.() === true) return Promise.resolve('steerable');
   // A teammate or the Desk is waiting on this busy session: end its turn at the
   // next tool boundary so the handoff arrives as a real turn, not as text
@@ -415,8 +423,8 @@ export function waitForDeliveryBoundary(
     }
     try {
       const stop = session.subscribe((event) => {
-        if (event.ev?.type === 'turnEnd' || session.isBusy?.() !== true) done('idle');
-        else if (event.ev?.type === 'closed') done('closed');
+        if (event.ev?.type === 'closed') done('closed');
+        else if (event.ev?.type === 'turnEnd' || session.isBusy?.() === false) done('idle');
         else if (acceptSteer() && session.canAcceptNativeHumanSteer?.() === true) done('steerable');
       }, sinceSeq, false);
       unsubscribe = stop;
@@ -427,7 +435,7 @@ export function waitForDeliveryBoundary(
     }
     // Close both check/subscribe races: the turn can finish, or a tool can
     // begin, between the initial snapshots and listener registration.
-    if (session.isBusy?.() !== true) done('idle');
+    if (session.isBusy?.() === false) done('idle');
     else if (acceptSteer() && session.canAcceptNativeHumanSteer?.() === true) done('steerable');
   });
 }

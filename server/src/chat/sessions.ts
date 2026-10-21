@@ -172,6 +172,10 @@ export async function nativeSessionProvenance(cli: Cli, repoPath: string, chatId
   const known = new Set<Cli>(['claude', 'assistant', 'codex', 'codex-personal', 'banana', 'banana-local', 'banana-fireworks', 'zai', 'xai', 'fireworks', 'openrouter', 'openrouter2', 'agy']);
   for (const [storageKey, candidate] of Object.entries(all)) {
     if (!record.sessionId || candidate.sessionId !== record.sessionId) continue;
+    // A CLI name alone cannot reproduce a directory-specific subscription.
+    // Leave this legacy account selection held for repair instead of billing
+    // whichever account happens to be the current directory default.
+    if (storageKey.includes('__acct__')) return record;
     const variant = candidate.cli ?? storageKey.split('|')[0] as Cli;
     if (known.has(variant)) variants.add(variant);
   }
