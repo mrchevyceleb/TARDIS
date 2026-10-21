@@ -557,15 +557,14 @@ function publicPeerResponse(responseBlocks: AssistantBlock[], streaming: boolean
   ));
 }
 
-/** Old logs recorded the triggering sender, not the intended audience. Only
- * an explicit addressee proves that old prose belongs inside that exchange. */
-function recordedPeerReply(block: Extract<ChatBlock, { kind: 'peer' }>, response: AssistantBlock[]): boolean {
-  if (block.replyAudience === 'peer') return true;
-  if (block.replyAudience === 'owner') return false;
-  const first = response.find((item) => item.kind === 'text' && !isProtocolNoopText(item.text));
-  if (first?.kind !== 'text') return false;
-  const name = block.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`^(?:${name}[,:]|(?:hi|hey|thanks|thank you|understood|got it|yes|no)[,!\\s]+${name}(?:[,.!:\\s]|$))`, 'i').test(first.text.trim());
+type PeerFailure = Extract<ChatBlock, { kind: 'terminal-error' }> & {
+  attempts?: Array<Extract<ChatBlock, { kind: 'terminal-error' }>>;
+};
+
+function peerFailureKey(error: PeerFailure): string {
+  // One provider can return different status codes during the same troubled
+  // stretch. Keep its complete attempt list together, not one card per code.
+  return `${Boolean(error.continuing)}|${error.message.split(/\s/, 1)[0]}`;
 }
 
 /** The peer boundary, not individual content-block open flags, owns progress.
@@ -592,7 +591,7 @@ function PeerMessageBubble({
 }: {
   block: Extract<ChatBlock, { kind: 'peer' }>;
   responseBlocks: AssistantBlock[];
-  responseErrors?: Array<Extract<ChatBlock, { kind: 'terminal-error' }>>;
+  responseErrors?: PeerFailure[];
   responseActive: boolean;
   recipient: string;
   streaming: boolean;
@@ -612,15 +611,19 @@ function PeerMessageBubble({
   const bodyId = `peer-message-${block.id}`;
   const ownerOrigin = block.fromRole === 'desk' || block.fromRole === 'voice';
   const proseResponse = publicPeerResponse(responseBlocks, streaming);
-  const peerAddressed = !ownerOrigin && recordedPeerReply(block, proseResponse);
-  const ownerResponse = !peerAddressed ? proseResponse : [];
+  // Only a recorded native turn starter proves the intended addressee.
+  // Older history stays plain. Never infer its audience from names or timing.
+  const peerAddressed = !ownerOrigin && block.replyAudience === 'peer';
+  // Every ordinary word follows that turn. Explicit owner publications have
+  // no peer association and stay public at their original position.
+  const ownerResponse = peerAddressed ? [] : proseResponse;
+  const peerResponse = peerAddressed ? responseBlocks : [];
   // A settled NO_UPDATE / empty reply renders nothing, so it must not leave an
   // empty timestamped bubble under the peer card.
   const responseToolCount = responseBlocks.filter((item) => item.kind === 'tool').length;
   const hasResponse = proseResponse.length > 0 || responseToolCount > 0;
   const responseBusy = peerResponseBusy(responseBlocks, responseActive);
   const failed = responseErrors.some((item) => !item.continuing);
-  const interrupted = block.interrupted && proseResponse.length === 0;
   // Pin affordance for a teammate's own message (channels, card-1327b9, and
   // one-on-one handoffs alike): the row toggles this bubble onto the thread
   // agent's board through the same ThreadPin the assistant prose uses.
@@ -644,12 +647,12 @@ function PeerMessageBubble({
           <span className="bt-peer-name">{block.from}</span>
           <span className="bt-peer-role">{role}</span>
           {!block.tsApprox && timeLabel(block.ts) ? <span className="bt-peer-when">{timeLabel(block.ts)}</span> : null}
-          {hasResponse || responseBusy || failed || interrupted ? (
-            <span className={`bt-peer-status${responseBusy ? ' working' : failed ? ' failed' : interrupted ? ' interrupted' : ''}`} role="status" aria-live="polite">
+          {hasResponse || responseBusy || failed ? (
+            <span className={`bt-peer-status${responseBusy ? ' working' : failed ? ' failed' : ''}`} role="status" aria-live="polite">
               <i aria-hidden="true" /> {responseBusy
                 ? 'working'
-                : failed ? 'couldn’t finish' : proseResponse.length > 0 ? 'replied' : interrupted ? 'interrupted'
-                  : responseToolCount > 0 ? `finished · ${responseToolCount} tool${responseToolCount === 1 ? '' : 's'}` : 'finished'}
+                : failed ? (proseResponse.length > 0 ? 'partial reply saved' : 'turn not finished') : proseResponse.length > 0 ? 'answer saved'
+                  : responseToolCount > 0 ? `work saved · ${responseToolCount} tool${responseToolCount === 1 ? '' : 's'}` : 'work saved'}
             </span>
           ) : null}
           <span className="bt-peer-action">{open ? 'hide' : 'show'} {subject}</span>
@@ -683,11 +686,11 @@ function PeerMessageBubble({
               />
             </div>
           ) : null}
-          {(peerAddressed && proseResponse.length > 0) || responseToolCount > 0 ? (
+          {(peerAddressed && peerResponse.some((item) => item.kind === 'text' && hasVisibleProse(item))) || responseToolCount > 0 ? (
             <section className="bt-peer-turn bt-peer-response">
-              <span className="bt-peer-turn-label">{peerAddressed && proseResponse.length > 0 ? `${recipient} replying to ${block.from}` : 'Work in this exchange'}</span>
+              <span className="bt-peer-turn-label">{peerAddressed && proseResponse.length > 0 ? `Answer for ${block.from}` : 'Work in this exchange'}</span>
               <ElrondGroup
-                blocks={peerAddressed ? responseBlocks : responseBlocks.filter((item) => item.kind === 'tool')}
+                blocks={peerAddressed ? peerResponse : responseBlocks.filter((item) => item.kind === 'tool')}
                 speaker={recipient}
                 streaming={streaming}
                 mobile={mobile}
@@ -701,19 +704,19 @@ function PeerMessageBubble({
         </div>
       ) : null}
     </div>
-    {responseErrors.map((error) => (
-      <details key={error.id} className={`bt-peer-recovery${error.continuing ? '' : ' failed'}`}>
-        <summary>{error.continuing ? `${recipient} is trying another provider` : `${recipient} couldn’t finish this teammate reply`}</summary>
-        <p>{error.message}</p>
-      </details>
-    ))}
     {ownerResponse.length ? (
       <div className="bt-peer-public-response">
-        {!ownerOrigin ? <div className="bt-peer-context">{recipient} · update after {block.from}</div> : null}
         <ElrondGroup blocks={ownerResponse} speaker={recipient} streaming={streaming} mobile={mobile}
           collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply} />
       </div>
     ) : null}
+    {responseErrors.map((error) => (
+      <details key={error.id} className={`bt-peer-recovery${error.continuing ? '' : ' failed'}`}>
+        <summary>{error.continuing ? `${recipient} is trying another provider` : `${recipient}’s provider couldn’t finish`}{(error.attempts?.length ?? 0) > 1 ? ` · ${error.attempts!.length} attempts` : ''}</summary>
+        <p>The conversation and work so far are saved.</p>
+        {(error.attempts ?? [error]).map((attempt) => <p key={attempt.id}>{timeLabel(attempt.ts)} · {attempt.message.replace(/\s*Try again(?: shortly)? or switch brains\.?/gi, '')}</p>)}
+      </details>
+    ))}
     </>
   );
 }
@@ -1317,7 +1320,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   // stale open block suppress every future thinking indicator.
   let currentTurnStart = 0;
   for (let i = blocks.length - 1; i >= 0; i -= 1) {
-    if (blocks[i].kind === 'user' || blocks[i].kind === 'peer') {
+    const boundary = blocks[i];
+    if ((boundary.kind === 'user' || boundary.kind === 'peer') && boundary.startsTurn !== false) {
       currentTurnStart = i + 1;
       break;
     }
@@ -1332,7 +1336,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     ? blocks.filter((b) => 'turnId' in b && b.turnId === activeTurnId)
     : blocks.slice(currentTurnStart);
   const currentBoundary = currentTurnStart > 0 ? blocks[currentTurnStart - 1] : undefined;
-  const activePeerId = streaming && currentBoundary?.kind === 'peer' && currentBoundary.replyAudience !== 'owner' ? currentBoundary.id : null;
+  const activePeerId = streaming && currentBoundary?.kind === 'peer' && currentBoundary.replyAudience === 'peer' ? currentBoundary.id : null;
   // A provider-switch notice with the agent continuing is not a failure: the
   // continued turn still needs its liveness row and its completion marker.
   const hasCurrentTerminalFailure = currentBlocks.some((block) => block.kind === 'terminal-error' && !block.continuing);
@@ -1361,7 +1365,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     | { type: 'terminal-error'; block: Extract<ChatBlock, { kind: 'terminal-error' }>; day: string }
     | { type: 'switch'; block: Extract<ChatBlock, { kind: 'switch' }>; day: string }
     | { type: 'background'; block: Extract<ChatBlock, { kind: 'background' }>; day: string }
-    | { type: 'peer'; block: Extract<ChatBlock, { kind: 'peer' }>; responseBlocks: AssistantBlock[]; responseErrors: Array<Extract<ChatBlock, { kind: 'terminal-error' }>>; responseTurnId?: string | null; day: string }
+    | { type: 'peer'; block: Extract<ChatBlock, { kind: 'peer' }>; responseBlocks: AssistantBlock[]; responseErrors: PeerFailure[]; responseTurnId?: string | null; day: string }
   > = [];
   type PeerGroup = Extract<(typeof groups)[number], { type: 'peer' }>;
   const peerGroupsById = new Map<string, PeerGroup>();
@@ -1479,6 +1483,18 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     coalescedGroups.push(g);
   }
 
+  // Repeated attempts at the same outage get one notice. All timestamps and
+  // original details remain available inside it, rather than five red cards.
+  const failureAttempts = new Map<string, PeerFailure[]>();
+  for (const group of coalescedGroups) {
+    if (group.type !== 'peer') continue;
+    for (const error of group.responseErrors) {
+      const key = peerFailureKey(error);
+      const attempts = failureAttempts.get(key) ?? [];
+      attempts.push(error);
+      failureAttempts.set(key, attempts);
+    }
+  }
   const nodes: Array<ReactNode | FoldItem> = [];
   let pendingAutomation = false;
   let hideThinking = false;
@@ -1519,6 +1535,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       // turns — automation hide is the pendingAutomation branch above.
       const hasNonText = g.blocks.some((b) => b.kind !== 'text');
       const hasRealProse = texts.some((t) => t.trim() && !isProtocolNoopText(t));
+      // Tool discovery with no answer or subsequent work is empty chrome.
+      if (!hasRunningTool && !isLive && !hasRealProse && g.blocks.every((b) => b.kind === 'tool' && /(?:^|__)ToolSearch$/i.test(b.tool))) continue;
       if (!hasRunningTool && !isLive && !hasNonText && !hasRealProse && texts.some((t) => t.trim())) {
         continue;
       }
@@ -1561,7 +1579,10 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
           key={g.block.id}
           block={g.block}
           responseBlocks={g.responseBlocks}
-          responseErrors={g.responseErrors}
+          responseErrors={g.responseErrors.flatMap((error) => {
+            const attempts = failureAttempts.get(peerFailureKey(error))!;
+            return attempts.at(-1)?.id === error.id ? [{ ...error, attempts }] : [];
+          })}
           recipient={replyFrom}
           responseActive={activePeerId === g.block.id}
           streaming={streaming}

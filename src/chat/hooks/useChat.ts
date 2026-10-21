@@ -135,7 +135,7 @@ function isSyntheticApiErrorEvent(ev: any): boolean {
 // Pure reducer — all per-turn state lives on the blocks themselves
 // (turnId + cbIndex). This keeps it safe under React Strict Mode, which
 // invokes reducers twice for purity-checking.
-type ReducerCursor = { current: string; peerId?: string; promptPeerId?: string; ownerPrompt?: boolean; automation?: boolean; lane?: 'bg'; bg?: ReducerCursor; agyStep?: number; agySession?: string };
+type ReducerCursor = { current: string; peerId?: string; promptPeerId?: string; ownerPrompt?: boolean; originKnown?: boolean; automation?: boolean; lane?: 'bg'; bg?: ReducerCursor; agyStep?: number; agySession?: string };
 
 /** Blocks this cursor's lane owns. The agent's background lane streams into
  *  the same thread as the home lane, so closing one lane's turn must never
@@ -254,6 +254,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
     turnIdRef.ownerPrompt = false;
+    turnIdRef.originKnown = false;
     if (!blocks.some((b) => b.kind === 'text' && b.open && ownsBlock(turnIdRef, b))) return blocks;
     return blocks.map((b) => (b.kind === 'text' && b.open && ownsBlock(turnIdRef, b) ? { ...b, open: false } : b));
   }
@@ -266,6 +267,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
     turnIdRef.ownerPrompt = false;
+    turnIdRef.originKnown = false;
     const ts = typeof ev.ts === 'number' ? ev.ts : Date.now();
     const reason = typeof ev.reason === 'string' ? ev.reason : undefined;
     const closed = blocks.map((b) => {
@@ -329,6 +331,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // Voice handoffs are control envelopes for an already-visible spoken user
   // request, not a second teammate conversation. Replies belong in main chat.
   if (ev.type === 'peer_message' && ev.fromRole === 'voice') {
+    if (ev.startsTurn === false) return blocks;
     turnIdRef.ownerPrompt = true;
     turnIdRef.peerId = undefined;
     turnIdRef.promptPeerId = undefined;
@@ -340,6 +343,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // thread. Display-only here: the delivered record still reaches the agent's
   // own turn on the server side.
   if (ev.type === 'peer_message' && ev.fromRole === 'channel') {
+    if (ev.startsTurn === false) return blocks;
     turnIdRef.peerId = undefined;
     turnIdRef.promptPeerId = undefined;
     turnIdRef.automation = false;
@@ -351,24 +355,36 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const from = typeof ev.from === 'string' ? ev.from : 'Companion';
     const fromRole = typeof ev.fromRole === 'string' ? ev.fromRole : undefined;
     const deliveryId = typeof ev.deliveryId === 'string' ? ev.deliveryId : undefined;
-    turnIdRef.automation = isAutomationPeer(from, fromRole, ev.text);
+    const automation = isAutomationPeer(from, fromRole, ev.text);
     const existing = deliveryId
       ? blocks.find((block) => block.kind === 'peer' && block.deliveryId === deliveryId)
       : undefined;
-    if (existing?.kind === 'peer') {
-      turnIdRef.peerId = turnIdRef.ownerPrompt || isAutomationPeer(from, fromRole, ev.text) ? undefined : existing.id;
+    const blockId = existing?.id ?? id();
+    const publicOrigin = automation || fromRole === 'desk';
+    // Only the runner knows whether this input opened the native turn or
+    // joined one already running. A steer never changes its original audience.
+    // Missing provenance in old history stays plain instead of being guessed.
+    if (ev.startsTurn === true) {
+      turnIdRef.originKnown = true;
+      turnIdRef.automation = automation;
+      turnIdRef.ownerPrompt = publicOrigin;
+      turnIdRef.peerId = publicOrigin ? undefined : blockId;
       turnIdRef.promptPeerId = turnIdRef.peerId;
-      return blocks;
+    } else if (ev.startsTurn === undefined && !turnIdRef.originKnown && !turnIdRef.ownerPrompt) {
+      // Legacy timing can group tools and failures for a quieter history. It
+      // never establishes an audience, so every word still renders plainly.
+      turnIdRef.automation = automation;
+      turnIdRef.peerId = publicOrigin ? undefined : blockId;
+      turnIdRef.promptPeerId = turnIdRef.peerId;
     }
-    const blockId = id();
-    turnIdRef.peerId = turnIdRef.ownerPrompt || isAutomationPeer(from, fromRole, ev.text) ? undefined : blockId;
-    turnIdRef.promptPeerId = turnIdRef.peerId;
+    if (existing?.kind === 'peer') return blocks;
     return [...blocks, {
       kind: 'peer',
       id: blockId,
       from,
       fromRole,
-      ...(turnIdRef.ownerPrompt ? { replyAudience: 'owner' as const } : ev.replyAudience === 'peer' ? { replyAudience: 'peer' as const } : {}),
+      ...(ev.startsTurn === true ? { replyAudience: publicOrigin ? 'owner' as const : 'peer' as const } : {}),
+      ...(typeof ev.startsTurn === 'boolean' ? { startsTurn: ev.startsTurn } : {}),
       deliveryId,
       text: ev.text,
       ts: typeof ev.ts === 'number' ? ev.ts : Date.now(),
@@ -379,10 +395,13 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // Server-injected echo of the user's prompt — keeps the user's message in
   // the visible thread when a client reconnects and replays the buffer.
   if (ev.type === '_user_echo' && typeof ev.text === 'string') {
-    turnIdRef.peerId = undefined;
-    turnIdRef.promptPeerId = undefined;
-    turnIdRef.automation = false;
-    turnIdRef.ownerPrompt = true;
+    if (ev.startsTurn !== false) {
+      turnIdRef.originKnown = ev.startsTurn === true;
+      turnIdRef.peerId = undefined;
+      turnIdRef.promptPeerId = undefined;
+      turnIdRef.automation = false;
+      turnIdRef.ownerPrompt = true;
+    }
     const attachments: Array<{ id: string; mediaType: string }> = Array.isArray(ev.attachments) ? ev.attachments : [];
     const echoImages = attachments.length
       ? attachments.map((a) => ({ mediaType: a.mediaType, dataUrl: `/api/chat/attachments/${a.id}` }))
@@ -408,6 +427,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       // bubble instead of adding a duplicate.
       const nextMatch: Extract<ChatBlock, { kind: 'user' }> = {
         ...match,
+        ...(typeof ev.startsTurn === 'boolean' ? { startsTurn: ev.startsTurn } : {}),
         deliveryState: undefined,
         ...(match.replyTo ? {} : echoReplyTo ? { replyTo: echoReplyTo } : {}),
         ...(echoImages && !match.images?.some((i) => i.dataUrl.startsWith('/')) ? { images: echoImages } : {}),
@@ -417,6 +437,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       };
       if (
         match.deliveryState === undefined
+        && nextMatch.startsTurn === match.startsTurn
         && nextMatch.images === match.images
         && nextMatch.attachmentsLost === match.attachmentsLost
         && nextMatch.replyTo === match.replyTo
@@ -428,7 +449,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // Feature-present echo with zero kept attachments: every image failed to
     // persist — say "not kept", not "attached".
     const attachmentsLost = Boolean(imageCount && Array.isArray(ev.attachments) && ev.attachments.length === 0) || undefined;
-    return [...blocks, { kind: 'user', id: id(), text: ev.text, imageCount, images: echoImages, clientMsgId: cmid ?? undefined, attachmentsLost, ...(echoReplyTo ? { replyTo: echoReplyTo } : {}), ts }];
+    return [...blocks, { kind: 'user', ...(typeof ev.startsTurn === 'boolean' ? { startsTurn: ev.startsTurn } : {}), id: id(), text: ev.text, imageCount, images: echoImages, clientMsgId: cmid ?? undefined, attachmentsLost, ...(echoReplyTo ? { replyTo: echoReplyTo } : {}), ts }];
   }
 
   if (ev.type === 'message_start') {
@@ -459,6 +480,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
     turnIdRef.ownerPrompt = false;
+    turnIdRef.originKnown = false;
     turnIdRef.agyStep = undefined;
     turnIdRef.agySession = undefined;
     const closed = blocks.map((b) => {
@@ -1674,6 +1696,7 @@ export function useChat(opts: {
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
     turnIdRef.ownerPrompt = false;
+    turnIdRef.originKnown = false;
     turnIdRef.bg = undefined;
     clearTurnStarted();
     reconnectAttemptRef.current = 0;

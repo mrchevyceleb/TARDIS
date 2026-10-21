@@ -37,8 +37,10 @@ const DESK_COLUMNS = ['not_started', 'in_progress', 'on_staging', 'in_qa', 'in_p
 const DESK_COLUMN_ENUM = [...DESK_COLUMNS, 'pipeline', 'up_next', 'waiting', 'done'];
 const DESK_COLUMN_TITLES = { not_started: 'Not started', in_progress: 'In progress', in_qa: 'In QA (Sud)', on_staging: 'Merged to staging', in_production: 'Live in production' };
 const DESK_PRIORITIES = ['low', 'normal', 'high'];
-// Only lanes whose runner turns the call into a message (Claude) are told about reply_now.
+// Named agents publish through the host on every engine. Anonymous legacy
+// Claude conversations keep their runner conversion.
 const REPLY_NOW_ENABLED = process.env.RIVENDELL_REPLY_NOW === '1';
+const REPLY_NOW_HOST = process.env.RIVENDELL_REPLY_NOW_HOST === '1';
 // Which of the agent's two lanes this tool server belongs to. Jobs and watches
 // report back to the lane that started them; handoffs keep chains per lane.
 const LANE = process.env.RIVENDELL_AGENT_LANE === 'bg' ? 'bg' : 'main';
@@ -47,10 +49,10 @@ const FROM_PROP = { type: 'string', description: 'Your own teammate name. Only n
 const TOOLS = [
   {
     name: 'reply_now',
-    description: 'Post one or two sentences to the human owner right now, even during a teammate turn. Use team_message or an inline reply for a teammate. This publishes immediately and stays visible: do not repeat or reword it later. Continue with only new information; if there is nothing new, finish with NO_UPDATE. Your thinking is never shown.',
+    description: 'Post one or two sentences to the human owner right now, even during a teammate turn. Use team_message for a teammate; inline text is returned only when the handoff explicitly says so. This publishes immediately and stays visible: do not repeat or reword it later. Continue with only new information; if there is nothing new, finish with NO_UPDATE. Your thinking is never shown.',
     // Always in the tool list, so using it never costs a ToolSearch first.
     _meta: { 'anthropic/alwaysLoad': true },
-    inputSchema: { type: 'object', properties: { text: { type: 'string', description: 'One or two sentences for the person.' }, audience: { type: 'string', enum: ['owner'], description: `Explicitly addresses ${OWNER}. Teammate replies use team_message or an inline reply.` } }, required: ['text', 'audience'], additionalProperties: false },
+    inputSchema: { type: 'object', properties: { from: FROM_PROP, text: { type: 'string', description: 'One or two sentences for the person.' }, audience: { type: 'string', enum: ['owner'], description: `Explicitly addresses ${OWNER}. Teammate replies use team_message, or the explicitly promised inline return.` } }, required: ['text', 'audience'], additionalProperties: false },
   },
   {
     name: 'content_ideas',
@@ -657,10 +659,17 @@ function deniesGhWorkflowDisable(command) {
 async function callTool(name, args, signal) {
   // The runner turns this call into a visible message in the thread; the tool itself only acknowledges.
   if (name === 'reply_now' && REPLY_NOW_ENABLED) {
-    if (args.audience !== 'owner') throw new Error(`Choose audience: "owner" only for ${OWNER}. Reply to teammates inline or with team_message.`);
+    if (args.audience !== 'owner') throw new Error(`Choose audience: "owner" only for ${OWNER}. Use team_message for a teammate unless the handoff explicitly promises an inline return.`);
     const text = typeof args.text === 'string' ? args.text.trim() : '';
     if (!text) throw new Error('reply_now needs one or two sentences of text.');
     if (text.length > 2000) throw new Error('reply_now is for one or two sentences; keep it short and call it again.');
+    if (REPLY_NOW_HOST) {
+      const result = await api('/api/team/reply', { method: 'POST', body: JSON.stringify({
+        from: process.env.RIVENDELL_AGENT_ID || process.env.RIVENDELL_AGENT_NAME || args.from,
+        text, audience: 'owner', lane: LANE,
+      }) }, signal);
+      return `Posted to the thread (${result.seq}).`;
+    }
     return 'Posted to the thread.';
   }
   if (name === 'content_ideas') {

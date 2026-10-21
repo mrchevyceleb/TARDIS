@@ -613,7 +613,7 @@ export class CodexSession {
           type: 'event',
           event: {
             type: 'peer_message',
-            replyAudience: 'peer',
+            startsTurn: false,
             from: opts.peerFrom,
             fromRole: opts.peerFromRole ?? '',
             text: opts.peerText !== undefined ? opts.peerText : text,
@@ -632,7 +632,7 @@ export class CodexSession {
         this.emit({
           type: 'event',
           event: {
-            type: '_user_echo',
+            type: '_user_echo', startsTurn: false,
             text: opts.echoText ?? text,
             imageCount: images?.length ?? 0,
             attachments: steerAttachments,
@@ -698,7 +698,7 @@ export class CodexSession {
       try {
         this.emit({
           type: 'event',
-          event: { type: '_user_echo', text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
+          event: { type: '_user_echo', startsTurn: true, text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
         });
       } catch (error) {
         this.busy = false;
@@ -975,7 +975,7 @@ export class CodexSession {
               type: 'event',
               event: {
                 type: 'peer_message',
-                replyAudience: 'peer',
+                startsTurn: true,
                 from: opts.peerFrom,
                 fromRole: opts.peerFromRole ?? '',
                 text: opts.peerText !== undefined ? opts.peerText : text,

@@ -616,7 +616,7 @@ const PAUSED_FOR_MESSAGE_NOTE_TOOL = PAUSED_FOR_MESSAGE_NOTE.replace(
 );
 const PAUSED_FOR_PEER_NOTE = PAUSED_FOR_MESSAGE_NOTE.replace(
   'Answer it first.',
-  'Answer the teammate first, inline or with team_message. reply_now is only for a separate update explicitly addressed to the owner.',
+  'Use team_message for a teammate result unless this message explicitly says your final answer is returned automatically. Inline text is not otherwise delivered to teammates. Use reply_now with audience: "owner" for anything separately meant for the owner, then continue the work.',
 );
 
 export function pausedMessageNote(opts: { peerFrom?: string; peerFromRole?: string }, replyTool: boolean): string {
@@ -1552,7 +1552,7 @@ class ClaudeSession {
         type: 'event',
         event: {
           type: 'peer_message',
-          replyAudience: 'peer',
+          startsTurn: startsNewTurn,
           from: opts.peerFrom,
           fromRole: opts.peerFromRole ?? '',
           text: opts.peerText !== undefined ? opts.peerText : text,
@@ -1572,7 +1572,7 @@ class ClaudeSession {
       this.emit({
         type: 'event',
         event: {
-          type: '_user_echo',
+          type: '_user_echo', startsTurn: startsNewTurn,
           text: opts.echoText ?? text,
           imageCount: images?.length ?? 0,
           attachments,
@@ -2686,7 +2686,9 @@ class ClaudeSession {
               // A reply_now call is the agent speaking: it counts as visible text
               // for the reply watch, and becomes a real message in the thread.
               this.watchReply().noteText();
-              this.queueReplyNow(block.id, posted, ev.message?.model);
+              // Named agents' tool server posts durably on all engines. Only
+              // anonymous legacy Claude lanes still need runner conversion.
+              if (!agentForChatId(this.chatId)) this.queueReplyNow(block.id, posted, ev.message?.model);
             } else {
               this.watchReply().noteTool(block.id);
             }

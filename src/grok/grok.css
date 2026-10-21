@@ -1993,8 +1993,6 @@ body.bt-rail-resizing { cursor: col-resize; user-select: none; }
 @keyframes bt-cl-pop{0%{transform:scale(.4)}70%{transform:scale(1.25)}100%{transform:scale(1)}}
 @media (prefers-reduced-motion: reduce){.bt-cl-item,.bt-cl-item.done .bt-cl-check{animation:none}.bt-checklist .bt-cl-progress-fill{transition:none}}
 
-/* Conversation provenance stays visible without guessing an old reply's addressee. */
-.bt-peer-context { font-size: 11px; color: var(--r-ink-soft); margin: 4px 0 6px 4px; }
 .bt-peer-public-response { min-width: 0; }
 .bt-peer-status.failed { color: var(--r-rose, #d99490); }
 .bt-peer-status.failed i { background: var(--r-rose, #d99490); }
@@ -2008,5 +2006,3 @@ body.bt-rail-resizing { cursor: col-resize; user-select: none; }
 .bot-app .rc .pin-extras .act { max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
 .bot-app .rc .prose li > p { margin-block: 0; }
 .bot-app .rc .prose li + li { margin-block-start: 4px; }
-
-.bot-app .rc .bt-peer-public-response .m-elrond { background: transparent; border-inline-start: 2px solid var(--r-line); border-radius: 0; margin-inline-start: 4px; padding-inline: 12px; }

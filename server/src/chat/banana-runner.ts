@@ -2797,7 +2797,7 @@ export class BananaSession {
       this.emit({
         type: 'event',
         event: {
-          type: 'peer_message',
+          type: 'peer_message', startsTurn: true,
           from: opts.peerFrom,
           fromRole: opts.peerFromRole ?? '',
           text: opts.peerText !== undefined ? opts.peerText : text,
@@ -2825,7 +2825,7 @@ export class BananaSession {
       try {
         this.emit({
           type: 'event',
-          event: { type: '_user_echo', text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
+          event: { type: '_user_echo', startsTurn: true, text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
         });
       } catch (error) {
         this.busy = false;

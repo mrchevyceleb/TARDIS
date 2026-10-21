@@ -68,7 +68,7 @@ export type ChatImagePreview = {
 // `turnId` + `cbIndex` correlate a block back to claude's content_block_*
 // stream events so the reducer stays pure (no out-of-band Maps).
 export type ChatBlock =
-  | { kind: 'user'; id: string; text: string; ts: number; images?: ChatImagePreview[]; imageCount?: number; clientMsgId?: string; attachmentsLost?: boolean; deliveryState?: 'queued' | 'failed' | 'sending'; noRetry?: boolean; queue?: true; replyTo?: { from: string; snippet: string } }
+  | { kind: 'user'; startsTurn?: boolean; id: string; text: string; ts: number; images?: ChatImagePreview[]; imageCount?: number; clientMsgId?: string; attachmentsLost?: boolean; deliveryState?: 'queued' | 'failed' | 'sending'; noRetry?: boolean; queue?: true; replyTo?: { from: string; snippet: string } }
   | {
       /** Agent-to-agent delivery (team bus): a teammate's message arriving in
        *  this thread — rendered with the SENDER's identity, not as a user turn. */
@@ -76,7 +76,8 @@ export type ChatBlock =
       id: string;
       from: string;
       fromRole?: string;
-      /** Present only on deliveries whose reply audience was recorded by the server. */
+      /** Audience established by the runner at the native turn admission. */
+      startsTurn?: boolean;
       replyAudience?: 'peer' | 'owner';
       /** Stable durable delivery id; retries reuse it and render only once. */
       deliveryId?: string;

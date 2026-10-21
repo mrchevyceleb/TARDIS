@@ -7,7 +7,7 @@
 // stay open without allowing a tight runaway loop or losing busy handoffs.
 
 import { randomUUID } from 'node:crypto';
-import { ELROND_WORKSPACE_PATH } from '../config.ts';
+import { DESK_OWNER_NAME, ELROND_WORKSPACE_PATH } from '../config.ts';
 import { brainForAgent, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
 import { backgroundChatId, backgroundLaneEnabled, bareChatId, isBackgroundChatId, logKeyFor } from './threadKey.ts';
 import { extractVisibleTurns } from './threadWindow.ts';
@@ -1041,10 +1041,10 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
     : from.role === 'channel'
     ? '(This ping is a group-channel post. Reply in that channel with the channel_post tool exactly as the ping\'s rules describe, passing the hop number through unchanged. Do not team_message the channel and never move this into a one-on-one thread.)'
     : waitForReply
-    ? `(Reply inline in this turn. Your final answer is returned automatically to ${from.name}; no second team_message call is needed.)`
+    ? `(Your final inline answer is returned automatically to ${from.name}; no second team_message call is needed. Anything separately meant for ${DESK_OWNER_NAME} goes in reply_now with audience: "owner", never in this teammate answer.)`
     : delivery.mixedSenders
-    ? '(Reply inline for the thread. This turn carries messages from several senders, so the sender of the first block is not the only one waiting. If any sender above needs the result, use team_message(to: "<that sender>", text: ..., wait: false) with that sender\'s own name; busy teammates are queued automatically.)'
-    : `(Reply inline for the thread. If ${from.name} needs the result, use team_message(to: "${from.name}", text: ..., wait: false); busy teammates are queued automatically.)`;
+    ? `(Reply to each teammate who needs a result with team_message(to: "<that sender>", text: ..., wait: false). Inline replies fold under the teammate who started this turn and are not delivered automatically. A teammate arriving during another turn does not change that turn's audience. Anything meant for ${DESK_OWNER_NAME} goes in reply_now with audience: "owner". Finish with NO_UPDATE when there is nothing else for ${DESK_OWNER_NAME}. Busy teammates are queued automatically.)`
+    : `(Reply to ${from.name} with team_message(to: "${from.name}", text: ..., wait: false) if they need the result. Inline replies fold under the teammate who started this turn and are not delivered automatically. A teammate arriving during another turn does not change that turn's audience. Anything meant for ${DESK_OWNER_NAME} goes in reply_now with audience: "owner". Finish with NO_UPDATE when there is nothing else for ${DESK_OWNER_NAME}. Busy teammates are queued automatically.)`;
   // Brief envelope (card-e9b846): a lead's handoff to a coder arrives as one
   // goal sentence plus its card link, built here so no sender can skip it.
   // The durable record keeps the lead's raw text; only this turn's prompt
@@ -2268,14 +2268,38 @@ export async function deliverTeamMessage(input: {
 
 // ---- reply extraction ---------------------------------------------------------
 
-import { appendEventLogDurable, flushEventLog, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
+import { appendEventLogDurable, appendEventLogSync, flushEventLog, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
+import { redactEventSecrets } from './secretRedaction.ts';
+
+/** Explicit owner publication uses the same durable thread and live fanout on
+ * every engine. Posting is a tool result, never an inference from reply prose. */
+export async function publishOwnerReply(from: string, text: string, lane: AgentLane = 'main'): Promise<number> {
+  const agent = findAgent(from);
+  if (!agent) throw new Error('Choose your own teammate identity before publishing an owner reply.');
+  const { cli, chatKey } = agentLogKey(agent, lane);
+  const logKey = logKeyFor(cli, ELROND_WORKSPACE_PATH, chatKey);
+  const { publishExternalThreadEvent } = await import('./runner.ts');
+  await flushEventLog(logKey);
+  // Reserve, save and broadcast in one synchronous slice after older writes
+  // finish. A later native frame must not overtake this published message.
+  const event = { seq: reserveEventLogSeq(logKey), at: Date.now(), ...(lane === 'bg' ? { lane: 'bg' as const } : {}),
+    ev: { type: 'event' as const, event: redactEventSecrets({ type: 'assistant', _replyNow: true, _replyNowForOwner: true,
+      message: { id: `reply_now_${randomUUID()}`, role: 'assistant', content: [{ type: 'text', text }], stop_reason: 'tool_use' } }) } };
+  if (!appendEventLogSync(logKey, event)) throw new Error('The owner reply could not be saved. It was not published.');
+  publishExternalThreadEvent(logKey, event);
+  return event.seq;
+}
 
 /** Read the recipient's authoritative shared-thread tail for this exact turn. */
 async function readLastReply(logKey: string, minSeq = 0, maxSeq = Number.POSITIVE_INFINITY, lane: AgentLane = 'main'): Promise<string | undefined> {
   try { await flushEventLog(logKey); } catch { /* best-effort */ }
   const { events } = loadEventLogSync(logKey);
   // The other lane may have spoken in the same seq range; the reply is this lane's.
-  const bounded = events.filter((event) => event.seq >= minSeq && event.seq <= maxSeq && !foreignLaneEvent(event, lane));
+  const bounded = events.filter((event) => {
+    const inner = event.ev?.type === 'event' ? event.ev.event : event.ev;
+    return event.seq >= minSeq && event.seq <= maxSeq && !foreignLaneEvent(event, lane)
+      && inner?._replyNowForOwner !== true;
+  });
   // One shared transcript extractor handles Claude's full assistant messages
   // plus Codex/Banana stream-only content blocks, while excluding tool results.
   const reply = [...extractVisibleTurns(bounded)].reverse().find((turn) => turn.role === 'assistant');

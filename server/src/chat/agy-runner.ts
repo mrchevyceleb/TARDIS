@@ -1010,11 +1010,11 @@ export class AgySession {
         noteTurnPeer(this.turnOrigin, opts.peerFrom, opts.peerFromRole, opts.peerText ?? text);
         if (isPersonMessageOrigin(opts)) this.turnOrigin.human = true;
         if (startsNewTurn && automationRequest) this.turnOrigin.automation = true;
-        this.emit({ type: 'event', event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}), ts: Date.now() } });
+        this.emit({ type: 'event', event: { type: 'peer_message', startsTurn: startsNewTurn, from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}), ts: Date.now() } });
       } else {
         await flushEventLog(this.logKey);
         if (opts.signal?.aborted) { abandon(); return; }
-        this.emit({ type: 'event', event: { type: '_user_echo', text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() } });
+        this.emit({ type: 'event', event: { type: '_user_echo', startsTurn: startsNewTurn, text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() } });
         noteUserTurn(this.logKey);
         noteAgentLane(this.chatId, this.cli);
         this.turnOrigin.human = true;
