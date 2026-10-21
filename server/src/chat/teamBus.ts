@@ -2296,9 +2296,10 @@ export function teamAvailability(
   sessions: readonly TeamAvailabilitySession[],
   queued: readonly Pick<QueuedTeamDelivery, 'toId'>[],
 ): { status: 'working' | 'queued' | 'idle'; busy: boolean; queuedMessages: number; activeCli?: string; background?: boolean } {
+  // Agent home IDs are canonical across engines and working directories.
+  // A directory edit must not hide the turn still running in the old one.
   const busyLanes = sessions.filter((session) => (
-    session.cwd === ELROND_WORKSPACE_PATH
-    && bareChatId(session.chatId) === bareChatId(agent.home)
+    bareChatId(session.chatId) === bareChatId(agent.home)
     && session.busy
   ));
   const active = busyLanes.find((session) => !isBackgroundChatId(session.chatId)) ?? busyLanes[0];
