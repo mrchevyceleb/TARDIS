@@ -87,6 +87,7 @@ export type ChatBlock =
       /** Render the bubble expanded on first paint (channel history: a
        * member post IS the message, not a collapsed handoff card). */
       expanded?: boolean;
+      interrupted?: boolean;
     }
   | {
       /** Auto-compaction marker — the thread's model context rotated with a
@@ -119,6 +120,10 @@ export type ChatBlock =
       /** The model provider switched mid-turn and the agent is continuing on
        * its own; a notice, not a failure the user has to act on. */
       continuing?: boolean;
+      peerId?: string;
+      background?: boolean;
+      turnId?: string;
+      lane?: 'bg';
       ts: number;
     }
   | {

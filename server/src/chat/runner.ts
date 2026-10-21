@@ -2195,6 +2195,7 @@ class ClaudeSession {
         event: {
           type: 'assistant',
           _replyNow: true,
+          _replyNowForOwner: true,
           message: { id: `reply_now_${id}`, role: 'assistant', model, content: [{ type: 'text', text }], stop_reason: 'tool_use' },
         },
       });

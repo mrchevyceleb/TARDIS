@@ -135,7 +135,7 @@ function isSyntheticApiErrorEvent(ev: any): boolean {
 // Pure reducer — all per-turn state lives on the blocks themselves
 // (turnId + cbIndex). This keeps it safe under React Strict Mode, which
 // invokes reducers twice for purity-checking.
-type ReducerCursor = { current: string; peerId?: string; lane?: 'bg'; bg?: ReducerCursor; agyStep?: number; agySession?: string };
+type ReducerCursor = { current: string; peerId?: string; promptPeerId?: string; automation?: boolean; lane?: 'bg'; bg?: ReducerCursor; agyStep?: number; agySession?: string };
 
 /** Blocks this cursor's lane owns. The agent's background lane streams into
  *  the same thread as the home lane, so closing one lane's turn must never
@@ -218,6 +218,10 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       code: typeof ev.code === 'string' ? ev.code : undefined,
       retryable: ev.retryable === true || undefined,
       continuing: ev.continuing === true || undefined,
+      peerId: turnIdRef.peerId ?? turnIdRef.promptPeerId,
+      background: turnIdRef.automation || undefined,
+      turnId: currentTurnId,
+      ...laneStamp(turnIdRef),
       ts,
     }];
   }
@@ -324,6 +328,8 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // request, not a second teammate conversation. Replies belong in main chat.
   if (ev.type === 'peer_message' && ev.fromRole === 'voice') {
     turnIdRef.peerId = undefined;
+    turnIdRef.promptPeerId = undefined;
+    turnIdRef.automation = false;
     return blocks;
   }
 
@@ -332,6 +338,8 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // own turn on the server side.
   if (ev.type === 'peer_message' && ev.fromRole === 'channel') {
     turnIdRef.peerId = undefined;
+    turnIdRef.promptPeerId = undefined;
+    turnIdRef.automation = false;
     return blocks;
   }
 
@@ -340,15 +348,18 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const from = typeof ev.from === 'string' ? ev.from : 'Companion';
     const fromRole = typeof ev.fromRole === 'string' ? ev.fromRole : undefined;
     const deliveryId = typeof ev.deliveryId === 'string' ? ev.deliveryId : undefined;
+    turnIdRef.automation = isAutomationPeer(from, fromRole, ev.text);
     const existing = deliveryId
       ? blocks.find((block) => block.kind === 'peer' && block.deliveryId === deliveryId)
       : undefined;
     if (existing?.kind === 'peer') {
       turnIdRef.peerId = isAutomationPeer(from, fromRole, ev.text) ? undefined : existing.id;
+      turnIdRef.promptPeerId = turnIdRef.peerId;
       return blocks;
     }
     const blockId = id();
     turnIdRef.peerId = isAutomationPeer(from, fromRole, ev.text) ? undefined : blockId;
+    turnIdRef.promptPeerId = turnIdRef.peerId;
     return [...blocks, {
       kind: 'peer',
       id: blockId,
@@ -365,6 +376,8 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // the visible thread when a client reconnects and replays the buffer.
   if (ev.type === '_user_echo' && typeof ev.text === 'string') {
     turnIdRef.peerId = undefined;
+    turnIdRef.promptPeerId = undefined;
+    turnIdRef.automation = false;
     const attachments: Array<{ id: string; mediaType: string }> = Array.isArray(ev.attachments) ? ev.attachments : [];
     const echoImages = attachments.length
       ? attachments.map((a) => ({ mediaType: a.mediaType, dataUrl: `/api/chat/attachments/${a.id}` }))
@@ -443,6 +456,9 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     turnIdRef.agyStep = undefined;
     turnIdRef.agySession = undefined;
     const closed = blocks.map((b) => {
+      if (b.kind === 'peer' && b.id === finalPeerId) {
+        return { ...b, interrupted: ev.type === '_interrupted' || ev.is_error === true || undefined };
+      }
       if (b.kind === 'text' && b.turnId === finalTurnId) {
         return { ...b, open: false, seq: b.seq ?? resultSeq };
       }
@@ -669,7 +685,8 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const turnId = turnIdRef.current;
     return [...blocks, {
       kind: 'text', id: id(), text, ...eventTime(ev),
-      turnId, peerId: null, ...laneStamp(turnIdRef), cbIndex: -1, open: false, presentation: 'update', replyNow: true,
+      turnId, peerId: ev._replyNowForOwner === true ? null : turnIdRef.peerId ?? null,
+      ...laneStamp(turnIdRef), cbIndex: -1, open: false, presentation: 'update', replyNow: true,
       seq: typeof ev.seq === 'number' ? ev.seq : undefined,
     }];
   }

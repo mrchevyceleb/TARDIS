@@ -529,8 +529,10 @@
   color: var(--r-gold);
 }
 .restart-mark .compact-label {
-  color: var(--r-rose);
+  color: var(--r-ink-mute);
   font-weight: 500;
+  white-space: normal;
+  text-align: center;
 }
 /* Background work a Stop/restart ended (or a model switch is waiting on).
    Task names are the point, so let the line wrap instead of ellipsizing. */
@@ -555,7 +557,11 @@
 @keyframes regen-sweep { from { background-position: -40% 0; } to { background-position: 140% 0; } }
 .compact-mark.regen-mark .compact-label { color: var(--r-elf-blue); }
 .compact-mark .regen-quote { margin-left: 8px; font-style: italic; font-weight: 400; color: var(--r-ink-faint); }
-.compact-mark.restart-mark .compact-label { color: var(--r-rose); }
+.compact-mark.restart-mark .compact-label { color: var(--r-ink-mute); }
+.bt-peer-recovery { margin: 8px 0; color: var(--r-ink-mute); font-size: 12px; }
+.bt-peer-recovery summary { cursor: pointer; }
+.bt-peer-recovery p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.background-recovery { padding: 4px 12px; }
 @media (prefers-reduced-motion: reduce) {
   .compact-mark.regen-mark .compact-line::after { animation: none; opacity: 0.5; background-position: 50% 0; }
 }

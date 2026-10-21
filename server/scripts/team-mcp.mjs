@@ -47,7 +47,7 @@ const FROM_PROP = { type: 'string', description: 'Your own teammate name. Only n
 const TOOLS = [
   {
     name: 'reply_now',
-    description: 'Post a short visible message to the person in the thread right now. Use it when you owe them a reply and still have work to do: one or two plain sentences. Your thinking is never shown to them; this is.',
+    description: 'Post one or two sentences to the human owner right now, even during a teammate turn. Use team_message or an inline reply for a teammate. This publishes immediately and stays visible: do not repeat or reword it later. Continue with only new information; if there is nothing new, finish with NO_UPDATE. Your thinking is never shown.',
     // Always in the tool list, so using it never costs a ToolSearch first.
     _meta: { 'anthropic/alwaysLoad': true },
     inputSchema: { type: 'object', properties: { text: { type: 'string', description: 'One or two sentences for the person.' } }, required: ['text'], additionalProperties: false },
