@@ -778,6 +778,10 @@ class ClaudeSession {
   private warmupPromise: Promise<void> | null = null;
   private finishWarmupWait: ((error?: Error) => void) | null = null;
   private warmupTimer: NodeJS.Timeout | null = null;
+  private mcpRecoveryTimer?: NodeJS.Timeout;
+  private mcpRecoveryRequest?: { id: string; kind: 'status' | 'reconnect'; timer: NodeJS.Timeout };
+  private mcpRecoveryAttempts = 0;
+  private mcpRecoveryEnabled = false;
   private selectionPersisted = false;
   private initSeen = false;
   private exitedBeforeInit = false;
@@ -1004,6 +1008,7 @@ class ClaudeSession {
     this.child.stderr.on('close', () => this.flushStderr());
 
     this.child.on('exit', (code, signal) => {
+      this.clearMcpRecovery();
       releaseNativeCompactRoute(this.nativeBaseUrl);
       this.flushStderr();
       if (this.warmupPromise) {
@@ -1153,6 +1158,66 @@ class ClaudeSession {
       this.warmupRequestId = null;
       this.warmupPromise = null;
     }
+  }
+
+  private clearMcpRecovery(): void {
+    if (this.mcpRecoveryTimer) clearTimeout(this.mcpRecoveryTimer);
+    if (this.mcpRecoveryRequest) clearTimeout(this.mcpRecoveryRequest.timer);
+    this.mcpRecoveryTimer = undefined;
+    this.mcpRecoveryRequest = undefined;
+  }
+
+  private scheduleMcpCheck(delay = 30_000): void {
+    if (OPTIONAL_MCP_DISABLED || !this.mcpRecoveryEnabled || this.disposed || this.child.exitCode !== null
+      || this.mcpRecoveryTimer || this.mcpRecoveryRequest) return;
+    this.mcpRecoveryTimer = setTimeout(() => {
+      this.mcpRecoveryTimer = undefined;
+      this.requestMcpRecovery('status');
+    }, delay);
+    this.mcpRecoveryTimer.unref();
+  }
+
+  private requestMcpRecovery(kind: 'status' | 'reconnect'): void {
+    if (this.disposed || this.child.exitCode !== null || this.mcpRecoveryRequest) return;
+    const id = `mcp-recovery-${randomUUID()}`;
+    const retryDelay = () => Math.min(15_000 * 2 ** Math.min(this.mcpRecoveryAttempts, 3), 120_000);
+    const timer = setTimeout(() => {
+      if (this.mcpRecoveryRequest?.id !== id) return;
+      this.mcpRecoveryRequest = undefined;
+      this.scheduleMcpCheck(retryDelay());
+    }, kind === 'reconnect' ? 120_000 : 15_000);
+    timer.unref();
+    this.mcpRecoveryRequest = { id, kind, timer };
+    if (kind === 'reconnect') this.mcpRecoveryAttempts++;
+    try {
+      this.child.stdin.write(JSON.stringify({ type: 'control_request', request_id: id,
+        request: kind === 'status' ? { subtype: 'mcp_status' }
+          : { subtype: 'mcp_reconnect', serverName: 'assistant-mcp' } }) + '\n');
+    } catch {
+      clearTimeout(timer);
+      this.mcpRecoveryRequest = undefined;
+      this.scheduleMcpCheck(retryDelay());
+    }
+  }
+
+  /** Native control messages refresh tools inside the same process and saved
+   * session. They never send a model prompt, interrupt a turn or replay work. */
+  private handleMcpRecovery(ev: any): boolean {
+    const request = this.mcpRecoveryRequest;
+    if (ev?.type !== 'control_response' || !request || ev.response?.request_id !== request.id) return false;
+    clearTimeout(request.timer);
+    this.mcpRecoveryRequest = undefined;
+    const servers = ev.response?.response?.mcpServers;
+    const status = Array.isArray(servers) ? servers.find((item: any) => item?.name === 'assistant-mcp')?.status : undefined;
+    if (request.kind === 'status' && ev.response?.subtype === 'success' && status === 'connected') {
+      this.mcpRecoveryAttempts = 0;
+      this.scheduleMcpCheck(60_000);
+    } else if (request.kind === 'status' && ['failed', 'disconnected', 'needs-auth'].includes(status)) {
+      this.requestMcpRecovery('reconnect');
+    } else {
+      this.scheduleMcpCheck(Math.min(15_000 * 2 ** Math.min(this.mcpRecoveryAttempts, 3), 120_000));
+    }
+    return true;
   }
 
   isPrewarming(): boolean {
@@ -1645,6 +1710,7 @@ class ClaudeSession {
       this.endBackgroundWork(ended);
     }
     this.disposed = true;
+    this.clearMcpRecovery();
     const idleMs = Date.now() - this.lastActivityAtMs;
     console.warn(
       `[chat ${this.cli}] shutdown key=${this.key} pid=${this.child.pid ?? '-'} initSeen=${this.initSeen} listeners=${this.subscriberCount} idleMs=${idleMs} reason=${reason}`,
@@ -2146,7 +2212,8 @@ class ClaudeSession {
   private nudgeForReply(): void {
     try {
       const watch = this.watchReply();
-      const blocked = () => this.boundaryWaiters > 0 || Boolean(this.interruptInFlight) || this.hasInterruptHazard() || this.activeToolIds.size > 0;
+      // Peer waiters are held for this reply; they cannot also block its nudge.
+      const blocked = () => this.boundaryHumanWaiters > 0 || Boolean(this.interruptInFlight) || this.hasInterruptHazard() || this.activeToolIds.size > 0;
       if (!watch.due() || blocked()) return;
       const turn = this.turnStartedAt;
       // After this event has been emitted, so the tool_result reaches the
@@ -2535,6 +2602,7 @@ class ClaudeSession {
   }
 
   private handleEvent(ev: any): void {
+    if (this.handleMcpRecovery(ev)) return;
     if (ev?.type === 'autocompact_state') {
       console.log(`[native-compact-state] lane=${this.chatId} provider=${this.cli} ${JSON.stringify(ev.value)}`);
     }
@@ -2615,13 +2683,18 @@ class ClaudeSession {
           }
         }
       } else if (ev?.type === 'user' && Array.isArray(ev.message?.content)) {
+        let completedTool = false;
         for (const block of ev.message.content) {
           if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-            this.activeToolIds.delete(block.tool_use_id);
+            completedTool = this.activeToolIds.delete(block.tool_use_id) || completedTool;
           }
         }
-        if (this.activeToolIds.size === 0) this.nudgeForReply();
-        if (this.boundaryInterruptWanted && this.activeToolIds.size === 0) {
+        // CLI recovery nudges are user-shaped envelopes, not completed tools.
+        // A queued handoff must not reset that recovery loop or take away the
+        // person's still-unanswered turn. An actual new human message can steer.
+        if (completedTool && this.activeToolIds.size === 0) this.nudgeForReply();
+        if (completedTool && this.boundaryInterruptWanted && this.activeToolIds.size === 0
+          && (this.boundaryHumanWaiters > 0 || !this.watchReply().waiting())) {
           const now = Date.now();
           // Claude's interrupt stops background subagents, and a person who
           // never asked for that should not lose one to a chat message. With
@@ -2724,6 +2797,11 @@ class ClaudeSession {
         return;
       }
       this.initSeen = true;
+      if (!OPTIONAL_MCP_DISABLED && Array.isArray(ev.mcp_servers)) {
+        const shared = ev.mcp_servers.find((server: any) => server?.name === 'assistant-mcp');
+        this.mcpRecoveryEnabled = Boolean(shared);
+        this.scheduleMcpCheck(shared?.status === 'connected' ? 60_000 : 1000);
+      }
       this.resolveReady(true);
       this.resolveStartupWaiters('initialized');
       recordNativeSession(this.chatId, 'claude-code', ev.session_id, this.startedResumeId);

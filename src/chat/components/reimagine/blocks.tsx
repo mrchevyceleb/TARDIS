@@ -570,6 +570,7 @@ function PeerMessageBubble({
   block,
   responseBlocks,
   responseActive,
+  recipient,
   streaming,
   mobile,
   collapseSteps,
@@ -580,6 +581,7 @@ function PeerMessageBubble({
   block: Extract<ChatBlock, { kind: 'peer' }>;
   responseBlocks: AssistantBlock[];
   responseActive: boolean;
+  recipient: string;
   streaming: boolean;
   mobile: boolean;
   collapseSteps: boolean;
@@ -596,20 +598,18 @@ function PeerMessageBubble({
   const text = cleanPeerMessageText(block.text);
   const bodyId = `peer-message-${block.id}`;
   const hasResponse = responseBlocks.length > 0;
+  const ownerOrigin = block.fromRole === 'desk' || block.fromRole === 'voice';
+  const ownerResponse = ownerOrigin ? publicPeerResponse(responseBlocks, streaming) : [];
   // A settled NO_UPDATE / empty reply renders nothing, so it must not leave an
   // empty timestamped bubble under the peer card.
-  const publicResponseBlocks = publicPeerResponse(responseBlocks, streaming);
   const responseToolCount = responseBlocks.filter((item) => item.kind === 'tool').length;
   const responseBusy = peerResponseBusy(responseBlocks, responseActive);
   // Pin affordance for a teammate's own message (channels, card-1327b9, and
   // one-on-one handoffs alike): the row toggles this bubble onto the thread
   // agent's board through the same ThreadPin the assistant prose uses.
   const peerPinned = pin ? pin.pinnedBlockIds.includes(block.id) : false;
-  const role = routineResult
-    ? 'routine update'
-    : block.fromRole
-      ? `${block.fromRole} · to you`
-      : 'to you';
+  // Keep the addressee readable on a phone, ahead of optional job titles.
+  const role = routineResult ? 'routine update' : `to ${recipient}`;
   const subject = hasResponse ? 'exchange' : 'message';
 
   return (
@@ -667,11 +667,11 @@ function PeerMessageBubble({
               />
             </div>
           ) : null}
-          {hasResponse ? (
+          {hasResponse && (!ownerOrigin || responseToolCount > 0) ? (
             <section className="bt-peer-turn bt-peer-response">
-              <span className="bt-peer-turn-label">Reply</span>
+              <span className="bt-peer-turn-label">{ownerOrigin ? 'Work behind this reply' : `${recipient} replying to ${block.from}`}</span>
               <ElrondGroup
-                blocks={responseBlocks}
+                blocks={ownerOrigin ? responseBlocks.filter((item) => item.kind === 'tool') : responseBlocks}
                 streaming={streaming}
                 mobile={mobile}
                 collapseSteps={collapseSteps}
@@ -684,18 +684,9 @@ function PeerMessageBubble({
         </div>
       ) : null}
     </div>
-    {!open && publicResponseBlocks.length > 0 ? (
-      <div className="bt-peer-public-response" aria-label="Agent response to teammate message">
-        <ElrondGroup
-          blocks={publicResponseBlocks}
-          streaming={streaming}
-          mobile={mobile}
-          collapseSteps={collapseSteps}
-          pin={pin}
-          onReact={onReact}
-          onReply={onReply}
-        />
-      </div>
+    {ownerResponse.length ? (
+      <ElrondGroup blocks={ownerResponse} streaming={streaming} mobile={mobile}
+        collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReply} />
     ) : null}
     </>
   );
@@ -1514,6 +1505,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
           key={g.block.id}
           block={g.block}
           responseBlocks={g.responseBlocks}
+          recipient={replyFrom}
           responseActive={activePeerId === g.block.id}
           streaming={streaming}
           mobile={mobile}

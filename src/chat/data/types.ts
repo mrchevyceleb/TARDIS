@@ -160,9 +160,11 @@ export type ChatBlock =
        * person. It renders as normal reply text, never dimmed or folded.
        * Unset for Claude and reply_now text. */
       commentary?: boolean;
+      /** A published reply_now is its own durable message, independent of later provider frames. */
+      replyNow?: boolean;
       turnId?: string;
-      /** Teammate message this response belongs to, when applicable. */
-      peerId?: string;
+      /** Teammate message this response belongs to; null explicitly addresses the owner. */
+      peerId?: string | null;
       /** Written by the agent's background lane, which streams alongside the home lane. */
       lane?: 'bg';
       cbIndex?: number;

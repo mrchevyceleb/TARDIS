@@ -470,7 +470,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // Legacy thought blocks never count, and an empty streamed block is not
     // a delivered answer: only non-empty parts reconcile.
     const finalTextBlocks = closed
-      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && !b.thought && b.text.trim().length > 0 && (!finalTurnId || b.turnId === finalTurnId));
+      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && !b.thought && !b.replyNow && b.text.trim().length > 0 && (!finalTurnId || b.turnId === finalTurnId));
     if (!finalText) return closed;
     const appendResult = (): ChatBlock[] => [...closed, {
       kind: 'text',
@@ -484,8 +484,13 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       open: false,
       seq: typeof ev.seq === 'number' ? ev.seq : undefined,
     }];
-    if (finalTextBlocks.length === 0) return appendResult();
     const squash = (s: string) => s.replace(/\s+/g, '');
+    if (finalTextBlocks.length === 0) {
+      // A published reply-now is its own durable message. A later result may
+      // repeat it, but must never replace or re-key it as another reply.
+      return closed.some((b) => b.kind === 'text' && b.replyNow && b.turnId === finalTurnId
+        && squash(b.text) === squash(finalText)) ? closed : appendResult();
+    }
     const streamedSq = squash(finalTextBlocks.map((b) => b.text).join(''));
     const finalSq = squash(finalText);
     if (streamedSq.length > 0 && finalSq.endsWith(streamedSq) && finalSq.length > streamedSq.length) {
@@ -557,7 +562,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const reason = ev.delta?.stop_reason;
     const presentation = reason === 'tool_use' ? 'update' : reason === 'end_turn' ? 'answer' : undefined;
     if (!presentation) return blocks;
-    return blocks.map((b) => b.kind === 'text' && b.turnId === turnIdRef.current
+    return blocks.map((b) => b.kind === 'text' && !b.replyNow && b.turnId === turnIdRef.current
       ? { ...b, presentation } : b);
   }
 
@@ -664,7 +669,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const turnId = turnIdRef.current;
     return [...blocks, {
       kind: 'text', id: id(), text, ...eventTime(ev),
-      turnId, peerId: turnIdRef.peerId, ...laneStamp(turnIdRef), cbIndex: -1, open: false, presentation: 'update',
+      turnId, peerId: null, ...laneStamp(turnIdRef), cbIndex: -1, open: false, presentation: 'update', replyNow: true,
       seq: typeof ev.seq === 'number' ? ev.seq : undefined,
     }];
   }
@@ -675,7 +680,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const presentation = ev.message.stop_reason === 'tool_use' ? 'update'
       : ev.message.stop_reason === 'end_turn' ? 'answer' : undefined;
     const annotated: ChatBlock[] = blocks.map((b): ChatBlock => {
-      if (b.kind !== 'text' || b.turnId !== turnId) return b;
+      if (b.kind !== 'text' || b.replyNow || b.turnId !== turnId) return b;
       return {
         ...b,
         ...(presentation ? { presentation } : {}),
