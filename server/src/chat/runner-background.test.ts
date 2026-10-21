@@ -7,7 +7,7 @@ function harness() {
   const events: Array<{ type: string }> = [];
   const session = Object.assign(Object.create(ClaudeSession.prototype), {
     cli: 'xai', disposed: false, turnStartedAt: null,
-    activeToolIds: new Set(), streamTextBlocks: new Map(),
+    activeToolIds: new Set(), streamTextBlocks: new Map(), pendingPeerAccepts: new Set(), pendingPeerSteerAccepts: new Set(), statusAcks: [],
     emit: (event: { type: string }) => events.push(event),
     trackStreamText: () => {}, persistAppliedSelection: () => {},
     maybeCompact: async () => {},

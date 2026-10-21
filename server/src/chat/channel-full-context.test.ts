@@ -18,7 +18,7 @@ const HOME = 'bot-example';
 const BG = backgroundChatId(HOME);
 
 test('a member lane resolves to the home thread identity, not a separate chat', () => {
-  assert.equal(BG, 'bot-example__bg');
+  assert.equal(BG, HOME);
   // bareChatId is what agentForChatId (persona), recall lanes and durable
   // memory key on — the background lane must fold to the same bare id.
   assert.equal(bareChatId(BG), HOME);
@@ -41,12 +41,12 @@ test('the member lane shares the home thread durable log, so one compact serves 
   );
 });
 
-test('a channel wake in a member lane is recall-eligible, unlike automation', () => {
+test('channel and automation wakes never paste recall into the native session', () => {
   // Channel posts deliver with fromRole 'channel' (person or agent poster
   // alike): a full-context turn, so recall must fire exactly as it does for
   // a one-on-one teammate message.
-  assert.equal(recallEligibleTurn(BG, { peerFromRole: 'channel' }), true);
-  assert.equal(recallEligibleTurn(HOME, { peerFromRole: 'channel' }), true);
+  assert.equal(recallEligibleTurn(BG, { peerFromRole: 'channel' }), false);
+  assert.equal(recallEligibleTurn(HOME, { peerFromRole: 'channel' }), false);
   // The classes that genuinely strip context stay excluded.
   assert.equal(recallEligibleTurn(BG, { peerFromRole: 'automation' }), false);
   assert.equal(recallEligibleTurn(BG, { peerFromRole: 'voice' }), false);

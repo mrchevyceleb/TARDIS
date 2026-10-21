@@ -392,25 +392,137 @@ function migrateLegacyPrimer(key: string): void {
 }
 
 export function peekEnginePrimerWithStatus(key: string, events?: Array<{ seq?: number; ev: any }>): { primer: string; available: boolean } {
-  migrateLegacyPrimer(key);
-  const evs = events ?? loadEventLogForCompactionSync(key);
-  const blob = loadCompactBlob(key);
-  const primer = assembleForeverTurn({
-    events: evs,
-    compact: blob?.compact ?? '',
-    lastCompactedSeq: blob?.lastCompactedSeq,
-  }).primer;
-  // The agent's open commitments lead every seed: a short code-carried
-  // list the rolling compact can never rewrite, drop, or fold away. Every
-  // engine seeds through here, so one stitch covers all four runners.
-  const block = commitmentsSeedBlockWithStatus(key);
-  // After a Fresh the primer body is empty (compact and log were wiped) while
-  // the commitments block lives on: the seed is then exactly the block, with
-  // no dangling separator. `available` reflects ONLY the commitments half: a
-  // store hiccup there (fail-open empty) is uncertainty the caller must not
-  // treat as a confirmed-empty seed.
-  const seed = block.block && primer ? `${block.block}\n\n---\n\n${primer}` : (block.block || primer);
-  return { primer: seed, available: block.available };
+  return {
+    // The cutover is announced once, without copying memories, card text or
+    // transcript excerpts. Current stores and the greppable transcript remain
+    // available through the same tools after the cutover.
+    primer: 'This is your persistent native session. Check your live commitments and owned Desk cards before resuming work. Look up older details with memory search or your greppable transcript; no older task is a new instruction. This session continues across turns and restarts, with only native engine compaction.',
+    available: true,
+  };
+}
+
+export const LIVE_JOBS_MAX = 12;
+export const LIVE_CARDS_MAX = 12;
+
+type LiveRead<T> =
+  | { ok: true; items: T[]; total: number }
+  | { ok: false; items: T[]; total: 0; error: string };
+
+function clipLiveLabel(text: string): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  return normalized.length > 220 ? `${normalized.slice(0, 220)}…` : normalized;
+}
+
+/** The live-state block for this thread's agent (card-074301): the current
+ *  task only when the newest visible turn is still an unanswered user ask,
+ *  plus the lane's open commitments (first), its running background jobs,
+ *  and the Desk cards it owns In progress — every line read live from its
+ *  store at seed time, never from the compact, so a job that already ended
+ *  cannot come back as a to-do. A store read that fails is reported as
+ *  unavailable; the block never calls work finished just because a reader
+ *  failed or because a display cap hid the tail. The caller-supplied event
+ *  snapshot wins over a fresh log read, so the live block and the primer
+ *  body always describe the same history. */
+export function liveStateSeedBlockWithStatus(key: string, events?: Array<{ seq?: number; ev: any }>): { block: string; available: boolean } {
+  try {
+    if (!isThreadLogKey(key)) return { block: '', available: true };
+    const agents = listAgentsOrThrow();
+    const bare = bareChatId(key.slice(key.lastIndexOf('|') + 1));
+    const agent = agents.find((a) => a.home === bare);
+    if (!agent) return { block: '', available: true };
+    const evs = events ?? loadEventLogForCompactionSync(key);
+    const task = currentTaskLine(evs);
+    const commitments = listCommitments(agent.id);
+    const jobs = readRunningJobs(agent.id);
+    const cards = readOwnedCards(agent.id);
+    const available = jobs.ok && cards.ok;
+    const lines: string[] = [
+      'Where you stand right now (read live at this moment, never from memory):',
+    ];
+    if (task) lines.push(`Current task: ${task}`);
+    if (commitments.length) {
+      lines.push(`Open commitments (in the block above, first) — ${commitments.length} open.`);
+    } else {
+      lines.push('Open commitments: none right now (block above).');
+    }
+    if (jobs.ok && jobs.items.length) {
+      lines.push(`Background jobs still running (from the live job store${jobs.total > jobs.items.length ? `, first ${jobs.items.length} of ${jobs.total}` : ''}):`);
+      for (const j of jobs.items) lines.push(`- job ${j.id}: ${j.name}`);
+    } else if (!jobs.ok) {
+      lines.push('Background jobs: unavailable right now (store read failed) — do not assume none are running.');
+    }
+    if (cards.ok && cards.items.length) {
+      lines.push(`Desk cards you own In progress (live board${cards.total > cards.items.length ? `, first ${cards.items.length} of ${cards.total}` : ''}):`);
+      for (const c of cards.items) lines.push(`- [desk:${c.id}] ${c.title}`);
+    } else if (!cards.ok) {
+      lines.push('Desk cards you own In progress: unavailable right now (board read failed) — do not assume none are open.');
+    }
+    if (jobs.ok && cards.ok && !jobs.items.length && !cards.items.length && !task) lines.push('Nothing else is in flight.');
+    const jobsCapped = jobs.ok && jobs.total > jobs.items.length;
+    const cardsCapped = cards.ok && cards.total > cards.items.length;
+    const listsComplete = jobs.ok && cards.ok && !jobsCapped && !cardsCapped;
+    lines.push(
+      'Everything else you remember (the rolling memory and working window below) is history to verify, never a to-do list to resume. ' +
+      'If a job, card or promise is confirmed absent from the live stores above, treat it as already done, handed off, or stale — say so rather than redoing it. If a store is unavailable or a list was capped above, verify before assuming.',
+    );
+    lines.push(
+      listsComplete
+        ? 'When a message arrives, answer that message. Never open with "continuing the last task" or resume a job that is not listed as running above: the lists above are complete.'
+        : 'When a message arrives, answer that message. Never open with "continuing the last task". A job or card missing above is NOT proof it is finished: a store read failed or a cap hid the tail, so verify the live store before resuming or redoing anything.',
+    );
+    return { block: lines.join('\n'), available };
+  } catch {
+    return { block: '', available: false };
+  }
+}
+
+/** The current task only when the newest visible turn is still an unanswered
+ *  user ask: a later assistant turn means that ask was already handled, so
+ *  it must never be re-issued as the standing task. */
+export function currentTaskLine(events: Array<{ seq?: number; ev: any }>): string | null {
+  const turns = extractVisibleTurns(events);
+  const last = turns[turns.length - 1];
+  if (!last || last.role !== 'user') return null;
+  const text = clipLiveLabel(last.text);
+  return text || null;
+}
+
+type LiveJob = { id: string; name: string };
+/** Running jobs for one agent, read synchronously from the jobs store.
+ *  A failed read is reported (ok:false), never flattened to an empty list. */
+export function readRunningJobs(agentId: string): LiveRead<LiveJob> {
+  try {
+    const file = process.env.RIVENDELL_JOBS_FILE?.trim() || join(STATE_DIR, 'jobs.json');
+    const raw = readFileSync(file, 'utf8');
+    const parsed = JSON.parse(raw) as Array<{ id?: unknown; name?: unknown; agentId?: unknown; state?: unknown }>;
+    if (!Array.isArray(parsed)) return { ok: false, items: [], total: 0, error: 'jobs store is not an array' };
+    const all = parsed
+      .filter((j) => j?.agentId === agentId && j?.state === 'running')
+      .map((j) => ({ id: String(j.id ?? ''), name: String(j.name ?? '').trim() }))
+      .filter((j) => j.id && j.name);
+    return { ok: true, items: all.slice(0, LIVE_JOBS_MAX), total: all.length };
+  } catch (err) {
+    return { ok: false, items: [], total: 0, error: (err as Error).message };
+  }
+}
+
+type LiveCard = { id: string; title: string };
+/** Desk cards this agent owns In progress, read from the Desk file.
+ *  A failed read is reported (ok:false), never flattened to an empty list. */
+export function readOwnedCards(agentId: string): LiveRead<LiveCard> {
+  try {
+    const file = process.env.RIVENDELL_DESK_FILE?.trim() || join(STATE_DIR, 'desk.json');
+    const raw = readFileSync(file, 'utf8');
+    const parsed = JSON.parse(raw) as { cards?: Array<{ id?: unknown; title?: unknown; column?: unknown; archived?: unknown; owner?: { id?: unknown } }> };
+    if (!parsed || !Array.isArray(parsed.cards)) return { ok: false, items: [], total: 0, error: 'desk store has no cards array' };
+    const all = parsed.cards
+      .filter((c) => c?.owner?.id === agentId && c?.column === 'in_progress' && c?.archived !== true)
+      .map((c) => ({ id: String(c.id ?? ''), title: clipLiveLabel(String(c.title ?? '')) }))
+      .filter((c) => c.id.startsWith('card-') && c.title);
+    return { ok: true, items: all.slice(0, LIVE_CARDS_MAX), total: all.length };
+  } catch (err) {
+    return { ok: false, items: [], total: 0, error: (err as Error).message };
+  }
 }
 
 export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev: any }>): string {
@@ -721,6 +833,7 @@ Rules for the document you produce:
 - LENGTH: the document must never exceed ${COMPACT_TARGET_CEILING_WORDS} words — a hard ceiling, not a target. Merge the new aged-out turns into the previous document, and PRUNE while merging: drop any item the aged turns show is closed, shipped, finished, cancelled or superseded, and drop detail whose only remaining value is historical (the transcript can bring it back when it matters). Always keep open commitments, decisions in force, standing rules and stated preferences — pruning never touches those. Do not pad. Do not invent. A short history should produce a short document.
 - Capture: the CURRENT standing state — every decision as it now stands (and why), every open task and its state, every fact about people/projects/systems mentioned, every commitment or promise, every preference expressed, every technical detail that mattered (paths, models, endpoints, prices, IDs), and the current state of play.
 - NEWER WINS: when the aged turns change or reverse an earlier decision, the newer statement REPLACES the old one. Never keep both a decision and its reversal; the document shows only the decision now in force, with its reason.
+- CURRENT TASK ONLY: state the one task the agent is on right now, and only open work. Never write "continue the last task", "next, do X", or any instruction to resume work — an agent waking from this document reads the live state its seed carries and answers whatever message arrives. A pending list is a frozen lie after the work moves on: keep only items the newest turns show are still open, each with its live check (who owns it, what state it is in), in words.
 - Organize with clear headings (## ...) so it can be indexed: Overview / People & Projects / Decisions / Open Work / Facts & References / Preferences & Style / Current State.
 - Write in third person, past tense, no fluff, no meta commentary. Never invent content that is not in the previous document or the aged-out turns.
 - PLAIN ENGLISH: complete sentences, normal spacing between words, no telegraphic fragments. No internal codes or hashes in the prose: no commit SHAs, card or ticket IDs, PR numbers, or jargon shorthand. Describe the work in words (what changed, where, who owns it) so any reader can follow it without the internal tracker. A genuinely load-bearing name (a file path, a machine name) may stay, but keep those rare. IDs a teammate needs to act on (card, PR or commitment IDs, a pinned commit) go only in the Facts & References section as a short list, never in the prose.
@@ -1508,6 +1621,9 @@ async function generateCompact(previous: string, overflow: VisibleTurn[], maxTok
 
 export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> {
   const { key, cli, chatId } = args;
+  // Agent history is owned exclusively by its native engine. Keep legacy
+  // archive readers for existing logs, but never run their summary writer.
+  if (isThreadLogKey(key)) return false;
   if (inFlight.has(key)) return false;
   const epoch = epochOf(key);
 

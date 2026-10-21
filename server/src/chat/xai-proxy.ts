@@ -111,6 +111,19 @@ export function transformRequest(body: string): string {
       if (msg && msg.role === 'system') {
         for (const block of toSystemBlocks(msg.content)) systemBlocks.push(block);
       } else {
+        // Claude Code resolves a deferred tool locally, then includes a
+        // tool_reference in that ToolSearch result. xAI's Messages endpoint
+        // accepts text results but rejects that Anthropic-only block. The
+        // resolved tool's full schema is already in this request's tools.
+        if (Array.isArray(msg?.content)) {
+          for (const block of msg.content) {
+            if (block?.type === 'tool_result' && Array.isArray(block.content)) {
+              block.content = block.content.map((part: any) => part?.type === 'tool_reference'
+                ? { type: 'text', text: `Tool available: ${part.tool_name ?? part.name ?? 'requested tool'}` }
+                : part);
+            }
+          }
+        }
         kept.push(msg);
       }
     }

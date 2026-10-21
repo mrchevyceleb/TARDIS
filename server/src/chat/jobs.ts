@@ -24,7 +24,8 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 import { JsonStore } from '../lib/jsonStore.ts';
-import { inQuietHours, isMaxLane, isQuietExemptWork } from '../lib/quietHours.ts';
+import { inQuietHours, isQuietExemptLane, isQuietExemptWork } from '../lib/quietHours.ts';
+import { wellFormedText } from '../lib/wellFormed.ts';
 import { listAgents } from './agents.ts';
 import { canLaunchInScope, pidMatches, pidStart, visibleWakeText } from './jobWatches.ts';
 import { sendToAgentHome } from './teamBus.ts';
@@ -116,7 +117,7 @@ const retryUntil = new Map<string, number>();
  *  jobs all night and a job from a previous night's window still holds. */
 function heldForQuietHours(job: Job, now: number): boolean {
   if (!inQuietHours(now)) return false;
-  if (isMaxLane(job.agentId)) return false;
+  if (isQuietExemptLane(job.agentId)) return false;
   return !isQuietExemptWork(job.agentId, job.startedAt, now);
 }
 
@@ -165,7 +166,9 @@ function lastLines(file: string, count: number): string {
 }
 
 export function jobLastLine(job: Job): string {
-  return lastLines(logPath(job.id), 1).slice(0, 200);
+  // Code-point slicing so the cut can never split a surrogate pair, then
+  // well-form whatever the captured log itself contained.
+  return wellFormedText(Array.from(lastLines(logPath(job.id), 1)).slice(0, 200).join(''));
 }
 
 export function jobLogTail(id: string, lines: number): string {
@@ -200,13 +203,19 @@ function outcomeText(job: Job): string {
 }
 
 function resultText(job: Job): string {
-  const tail = lastLines(logPath(job.id), TAIL_LINES).slice(-TAIL_CHARS);
-  return [
+  // Slice the tail by code points so the cut can never split a surrogate
+  // pair: a lone surrogate here poisoned every delivery of this wake (codex
+  // app-server rejects the whole JSONRPC message, so each retry failed
+  // identically — Quinn, Oct 19). The assembled text is then well-formed as
+  // a whole, so a legacy name or captured output that already carried one
+  // can never reach an engine either. The stored wakeText is safe for all.
+  const tail = Array.from(lastLines(logPath(job.id), TAIL_LINES)).slice(-TAIL_CHARS).join('');
+  return wellFormedText([
     `[job: ${job.name}] Job "${job.name}" ${outcomeText(job)}`,
     tail ? `Last output:\n${tail}` : 'No output was captured.',
     `Full log: ${logPath(job.id)}`,
     'Background job result from job_start. This is not a message from a person.',
-  ].join('\n');
+  ].join('\n'));
 }
 
 export type CreateJobInput = {
@@ -226,7 +235,7 @@ export async function createJob(input: CreateJobInput): Promise<Job> {
   const command = input.command.trim();
   if (command.length > 16_000) throw new Error('command is too long; put it in a script file and run that');
   const fallbackName = command.split(/\s+/)[0]?.split('/').pop() || 'job';
-  const name = (typeof input.name === 'string' ? input.name : fallbackName).trim().replace(/\s+/g, ' ').slice(0, 80) || fallbackName;
+  const name = wellFormedText(Array.from((typeof input.name === 'string' ? input.name : fallbackName).trim().replace(/\s+/g, ' ')).slice(0, 80).join('')) || fallbackName;
   let cwd = homedir();
   if (input.cwd !== undefined) {
     if (typeof input.cwd !== 'string' || !isAbsolute(input.cwd.trim())) throw new Error('cwd must be an absolute path on this host');
@@ -681,6 +690,12 @@ async function deliverBundle(agentId: string, jobs: Job[]): Promise<void> {
       peerFromRole: 'automation',
       peerText: visibleWakeText(text),
       lane: jobs[0].lane === 'main' ? 'main' : 'bg',
+      // A wake is never guidance inside somebody's live turn (card-c26bfa):
+      // a steered wake read as no notification at all (Jill's job landed in
+      // her turn 5.6s after it ended, never as its own), and on Codex the
+      // steer races the turn end and rejects. Wakes wait for a real turn end
+      // and then start their own turn — the queued-delivery semantics.
+      neverSteer: true,
       // Quiet hours (Opus review 3, Oct 16): every job in this bundle must
       // qualify as exempt work in the current quiet window (started after an
       // exempt wake in this window, or on a Max lane) so a bundle formed at

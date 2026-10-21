@@ -10,13 +10,13 @@ import { MarkdownLink } from '../chat/components/primitives/Markdown';
 import { scanWorkspaceMentionSpans } from '../chat/utils/proxyLinks';
 
 /** Agents for owner pickers and name lookups. The sidebar already polls the
- *  roster; a minute of staleness is fine for a picker. */
+ *  roster; keep Desk team membership current too. */
 export function useDeskAgents(): Agent[] {
   const query = useQuery({
     queryKey: ['desk-agents'],
     queryFn: () => apiJson<{ agents: Agent[] }>('/api/agents'),
-    staleTime: 60_000,
-    refetchInterval: 60_000,
+    staleTime: 4_000,
+    refetchInterval: 4_000,
     retry: 1,
   });
   return query.data?.agents ?? [];

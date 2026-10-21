@@ -1,4 +1,4 @@
-import { appendFile, mkdir, open as openFile, rm } from 'node:fs/promises';
+import { appendFile, mkdir, open as openFile, rename, rm } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
@@ -1348,28 +1348,73 @@ export function removeEventLogEvents(key: string, sequences: Iterable<number>): 
 // (sinceSeq=0). Chained through the per-key write queue so any in-flight append
 // from the prior session lands first and can't re-create the file afterward,
 // then the chain is cleared so the next session starts from an empty log.
-export async function clearEventLog(key: string): Promise<void> {
+//
+// (review P2, Oct 20) The clear must be all-or-nothing from a reader's point
+// of view. Deleting the hot log before the archive failed left clients
+// replaying an already-empty durable log (a clear that looked complete) while
+// the caller withheld its broadcast and reported failure. Stage both files
+// aside by rename first — the archive before the reader-visible hot log — so
+// the clear only becomes visible when both moves succeeded; a failure
+// restores what moved and leaves the old transcript intact for a retry.
+// The archive goes too, as before: a fresh start resets the whole thread,
+// and a surviving archive would let the next trim splice pre-reset turns
+// back in. Staged names end in `.clear-<pid>`, which neither history scan
+// matches.
+export async function clearEventLog(key: string): Promise<boolean> {
   const path = logPath(key);
   const prior = writeChains.get(key) ?? Promise.resolve();
+  let cleared = true;
   const next = prior
     .then(async () => {
+      const hotStaged = `${path}.clear-${process.pid}`;
+      const archiveStaged = `${archivePath(key)}.clear-${process.pid}`;
+      let archiveMoved = false;
       try {
-        await rm(path, { force: true });
-        // A fresh start resets the whole thread, so the overflow archive goes
-        // too — otherwise the next trim would splice pre-reset turns back in.
-        await rm(archivePath(key), { force: true });
-        nextSeqByLogKey.delete(key);
-        bumpEventLogRevision();
+        try {
+          await rename(archivePath(key), archiveStaged);
+          archiveMoved = true;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        }
+        try {
+          await rename(path, hotStaged);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        }
       } catch (err) {
+        // The hot log never moved on this path (its rename is last and
+        // ENOENT-tolerant), so restoring the archive is enough to leave the
+        // old thread fully in place.
+        if (archiveMoved) {
+          try {
+            await rename(archiveStaged, archivePath(key));
+          } catch (restoreErr) {
+            console.warn('[event-log-store] clear restore failed (archive)', key, (restoreErr as Error).message);
+          }
+        }
+        cleared = false;
         console.warn('[event-log-store] clear failed', key, (err as Error).message);
+        return;
       }
+      // Both staged: the clear has happened and readers already see it. A
+      // failed unlink below leaves an inert orphan beside the log, never a
+      // visible transcript.
+      await rm(hotStaged, { force: true }).catch((err) => {
+        console.warn('[event-log-store] staged log unlink failed', key, (err as Error).message);
+      });
+      await rm(archiveStaged, { force: true }).catch((err) => {
+        console.warn('[event-log-store] staged archive unlink failed', key, (err as Error).message);
+      });
+      nextSeqByLogKey.delete(key);
+      bumpEventLogRevision();
     })
-    .catch(() => {});
+    .catch(() => { cleared = false; });
   writeChains.set(key, next);
   await next;
   // Drop the chain entry if no newer write superseded ours, so the file we
   // just removed isn't pinned by a stale resolved promise.
   if (writeChains.get(key) === next) writeChains.delete(key);
+  return cleared;
 }
 
 // Rewrite the file to drop everything but the most recent MAX_EVENTS_PER_LOG

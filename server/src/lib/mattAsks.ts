@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 import { agentForChatId, type Agent } from '../chat/agents.ts';
 import { isAgentThread, bareChatId } from '../chat/threadKey.ts';
-import { inQuietHours, isMaxLane, lastQuietEndMs, recordQuietExemptWake } from './quietHours.ts';
+import { inQuietHours, isQuietExemptLane, lastQuietEndMs, recordQuietExemptWake } from './quietHours.ts';
 
 const ASK_FILE = join(STATE_DIR, 'matt-asks.json');
 const NUDGE_AFTER_MS = 15 * 60_000;
@@ -210,7 +210,7 @@ export function sweepMattAsks(now: number = Date.now()): Array<{ askId: string; 
         // inside quiet hours is an explicit overnight wake: nudge immediately
         // with personSourced so the 15m nudge and 30m Chief escalation both
         // work overnight (review 3, P1 #3).
-        if (inQuietHours(now) && !isMaxLane(ask.agentId) && !overnightAsk) continue;
+        if (inQuietHours(now) && !isQuietExemptLane(ask.agentId) && !overnightAsk) continue;
         ask.nudgedAt = now;
         dirty = true;
         const ageMin = Math.max(15, Math.round((now - ask.askedAt) / 60000));
@@ -222,10 +222,10 @@ export function sweepMattAsks(now: number = Date.now()): Array<{ askId: string; 
           ...(overnightAsk ? { personSourced: true } : {}),
         });
       } else if (ask.nudgedAt && !ask.escalatedAt) {
-        const escalateFrom = isMaxLane(ask.agentId) || overnightAsk
+        const escalateFrom = isQuietExemptLane(ask.agentId) || overnightAsk
           ? ask.nudgedAt
           : Math.max(ask.nudgedAt, lastQuietEndMs(now));
-        const holdEscalation = inQuietHours(now) && !isMaxLane(ask.agentId) && !overnightAsk;
+        const holdEscalation = inQuietHours(now) && !isQuietExemptLane(ask.agentId) && !overnightAsk;
         if (now - escalateFrom >= ESCALATE_AFTER_MS && !holdEscalation) {
           ask.escalatedAt = now;
           dirty = true;

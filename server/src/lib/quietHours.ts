@@ -1,13 +1,14 @@
 /** Quiet hours (Matt, Oct 15 2026): nobody on the team works 22:00-05:00 ET.
  *
- *  Every overnight automation delivery to a non-Max lane holds until 05:00 ET:
- *  teammate messages, routine fires, job results, watch wakes, and Desk
+ *  Every overnight automation delivery to a non-exempt lane holds until 05:00
+ *  ET: teammate messages, routine fires, job results, watch wakes, and Desk
  *  check-in nudges. Exempt: Matt's own messages (Desk answers, voice
  *  continuations, and human channel posts — the boss may always speak),
- *  Max's lanes (the Chief of Staff is on overnight outage duty), and Max's
- *  overnight emergency check by routine id. Held never means lost: every
- *  gated path parks its record durably and the next tick after 05:00 ET
- *  delivers it unchanged.
+ *  Max's lanes (the Chief of Staff is on overnight outage duty), Samwise's
+ *  lane (Matt, Oct 19 2026: he and his comms routines keep working through
+ *  the window, and only him), and Max's overnight emergency check by routine
+ *  id. Held never means lost: every gated path parks its record durably and
+ *  the next tick after 05:00 ET delivers it unchanged.
  *
  *  This module owns the shared clock and lane facts so the call sites can
  *  never drift apart on the window, the roster ids, or the exemptions. The
@@ -35,6 +36,11 @@ export const QUIET_END_ET = 5;
 /** Max's lanes: overnight holds never apply (outage duty + the boss's voice). */
 export const MAX_LANE_AGENT_IDS: ReadonlySet<string> = new Set(['chief-of-staff', 'max-voice']);
 
+/** Samwise's lane: the one teammate exception (Matt, Oct 19 2026). He and his
+ *  comms routines keep working through 22:00-05:00 ET, so deliveries to him,
+ *  his jobs, and his routines never hold — and only him. */
+export const SAMWISE_LANE_AGENT_IDS: ReadonlySet<string> = new Set(['samwise']);
+
 /** Max's overnight emergency check: exempt by id even if its owner moves. */
 export const MAX_EMERGENCY_ROUTINE_ID = 'rt-mv09wwrd-s5u8';
 
@@ -60,6 +66,18 @@ export function inQuietHours(ms: number): boolean {
 /** True when agentId is one of Max's lanes. */
 export function isMaxLane(agentId: string | undefined | null): boolean {
   return typeof agentId === 'string' && MAX_LANE_AGENT_IDS.has(agentId);
+}
+
+/** True when agentId is Samwise's lane. */
+export function isSamwiseLane(agentId: string | undefined | null): boolean {
+  return typeof agentId === 'string' && SAMWISE_LANE_AGENT_IDS.has(agentId);
+}
+
+/** True when the overnight holds never apply to agentId: Max's lanes and
+ *  Samwise's lane. Every quiet-hours gate reads this, so the exemption set
+ *  can never drift between call sites. */
+export function isQuietExemptLane(agentId: string | undefined | null): boolean {
+  return isMaxLane(agentId) || isSamwiseLane(agentId);
 }
 
 /** Epoch ms of the most recent 22:00 ET quiet start at or before `ms`. Inside
@@ -99,10 +117,11 @@ export function recordQuietExemptWake(agentId: string, atMs: number = Date.now()
  *  deliver its result inside quiet hours at `nowMs`: `nowMs` is in quiet
  *  hours, `startedAtMs` is inside the CURRENT quiet window (on or after
  *  `lastQuietStartMs(nowMs)`), and the agent received an exempt wake in
- *  this window at or before `startedAtMs`. Max lanes are always exempt. */
+ *  this window at or before `startedAtMs`. Max lanes and Samwise's lane are
+ *  always exempt. */
 export function isQuietExemptWork(agentId: string, startedAtMs: number, nowMs: number = Date.now()): boolean {
   if (!Number.isFinite(startedAtMs) || !inQuietHours(nowMs)) return false;
-  if (isMaxLane(agentId)) return true;
+  if (isQuietExemptLane(agentId)) return true;
   const windowStart = lastQuietStartMs(nowMs);
   if (startedAtMs < windowStart || startedAtMs > nowMs) return false;
   const wakeAt = exemptWakeAtByAgent.get(agentId);

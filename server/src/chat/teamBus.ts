@@ -13,8 +13,10 @@ import { backgroundChatId, backgroundLaneEnabled, bareChatId, isBackgroundChatId
 import { extractVisibleTurns } from './threadWindow.ts';
 import { JsonStore, type StoredRecord } from '../lib/jsonStore.ts';
 import { scanOutgoingPromise } from '../lib/promiseScan.ts';
-import { inQuietHours, isMaxLane, msUntilQuietEnd, recordQuietExemptWake } from '../lib/quietHours.ts';
+import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, recordQuietExemptWake } from '../lib/quietHours.ts';
 import { LIVE_HOLD_CEILING_MS } from '../lib/laneLiveness.ts';
+import { briefEnvelopeForHandoff, isCoderBrief } from './briefEnvelope.ts';
+import { recordNativeFailure } from './sessionMetrics.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
 // both sides touch shared graph modules — keeping this lazy is cheap insurance).
@@ -31,7 +33,7 @@ type SessionLike = {
     fn: (event: {
       seq?: number;
       lane?: string;
-      ev?: { type?: string; event?: { type?: string; deliveryId?: string; continuing?: boolean; unread?: boolean; message?: string } };
+      ev?: { type?: string; event?: { type?: string; deliveryId?: string; continuing?: boolean; unread?: boolean; message?: string; terminal?: boolean } };
     }) => void,
     sinceSeq?: number,
     countSubscriber?: boolean,
@@ -40,6 +42,39 @@ type SessionLike = {
   logKey: string;
   chatId?: string;
 };
+
+
+/** A stdin write is not a provider receipt. Keep listening through startup
+ * so callers do not retry an admitted wake or accept an empty reply. */
+async function sendWithAdmission(session: SessionLike, deliveryId: string, send: () => Promise<void>): Promise<void> {
+  let finish = (_outcome: 'accepted' | 'rejected' | 'terminal' | 'closed' | 'timeout') => {};
+  const admitted = new Promise<'accepted' | 'rejected' | 'terminal' | 'closed' | 'timeout'>(resolve => { finish = resolve; });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const unsubscribe = session.subscribe(event => {
+    const inner = event.ev?.type === 'event' ? event.ev.event : undefined;
+    if (inner?.type === 'peer_delivery_accepted' && inner.deliveryId === deliveryId) finish('accepted');
+    if (inner?.type === 'peer_delivery_rejected' && inner.deliveryId === deliveryId) finish(inner.terminal ? 'terminal' : 'rejected');
+    if (event.ev?.type === 'closed') finish('closed');
+  }, session.latestSeq(), false);
+  try {
+    await send();
+    // Maintenance can take several minutes before stdin is written. Neither
+    // its turn end nor its elapsed time is a receipt for this delivery.
+    timer = setTimeout(() => finish('timeout'), 4 * 60_000);
+    timer.unref?.();
+    const outcome = await admitted;
+    if (outcome !== 'accepted') {
+      if (outcome === 'timeout') recordNativeFailure(session.chatId ?? session.logKey, 'native',
+        'A delivery received no provider acceptance within four minutes. It remains pending; it was not marked delivered.');
+      throw Object.assign(new Error(outcome === 'terminal'
+        ? 'The prior submission is ambiguous. Automatic replay stopped; the handoff is retained in a failure notice for review.'
+        : `provider admission ${outcome}; the delivery remains pending`), { terminalDelivery: outcome === 'terminal' });
+    }
+  } finally {
+    clearTimeout(timer);
+    unsubscribe();
+  }
+}
 
 async function getRunner() {
   const mod = await import('./runner.ts');
@@ -361,7 +396,7 @@ export function waitForDeliveryBoundary(
   interruptAtBoundary: false | 'human' | 'peer' = false,
 ): Promise<DeliveryBoundary> {
   if (signal?.aborted) return Promise.resolve('aborted');
-  if (session.isBusy?.() !== true) return Promise.resolve('idle');
+  if (session.isBusy?.() === false) return Promise.resolve('idle');
   if (acceptSteer() && session.canAcceptNativeHumanSteer?.() === true) return Promise.resolve('steerable');
   // A teammate or the Desk is waiting on this busy session: end its turn at the
   // next tool boundary so the handoff arrives as a real turn, not as text
@@ -390,8 +425,8 @@ export function waitForDeliveryBoundary(
     }
     try {
       const stop = session.subscribe((event) => {
-        if (event.ev?.type === 'turnEnd') done('idle');
-        else if (event.ev?.type === 'closed') done('closed');
+        if (event.ev?.type === 'closed') done('closed');
+        else if (event.ev?.type === 'turnEnd' || session.isBusy?.() === false) done('idle');
         else if (acceptSteer() && session.canAcceptNativeHumanSteer?.() === true) done('steerable');
       }, sinceSeq, false);
       unsubscribe = stop;
@@ -402,7 +437,7 @@ export function waitForDeliveryBoundary(
     }
     // Close both check/subscribe races: the turn can finish, or a tool can
     // begin, between the initial snapshots and listener registration.
-    if (session.isBusy?.() !== true) done('idle');
+    if (session.isBusy?.() === false) done('idle');
     else if (acceptSteer() && session.canAcceptNativeHumanSteer?.() === true) done('steerable');
   });
 }
@@ -499,6 +534,7 @@ async function personLanePreference(agent: Agent): Promise<AgentLane> {
 function personSourced(record: { fromRole?: string; personPosted?: boolean; personSourced?: boolean }): boolean {
   return record.fromRole === 'desk'
     || record.fromRole === 'voice'
+    || record.fromRole === 'slack'
     || (record.fromRole === 'channel' && record.personPosted === true)
     || record.personSourced === true;
 }
@@ -531,6 +567,10 @@ export function deliveryInterruptClass(fromRole: string | undefined, personPoste
   // a peer message that cannot steer.
   if (queue === true) return false;
   if (fromRole === 'desk' || fromRole === 'voice') return 'human';
+  // Slack: a real person is waiting, so the delivery interrupts like the
+  // person's own message — instant when no tool is in flight, and bounded by
+  // the runner's hazard override so a background helper cannot hold it.
+  if (fromRole === 'slack') return 'human';
   if (fromRole === 'channel' && personPosted === true) return 'human';
   return 'peer';
 }
@@ -540,7 +580,7 @@ export function deliveryInterruptClass(fromRole: string | undefined, personPoste
  *  is the only one running), everything else runs in the background lane.
  *  Exported for tests. */
 export function deliveryLanePolicy(fromRole: string | undefined, personPosted?: boolean): 'person' | 'bg' {
-  return fromRole === 'desk' || fromRole === 'voice' || (fromRole === 'channel' && personPosted === true)
+  return fromRole === 'desk' || fromRole === 'voice' || fromRole === 'slack' || (fromRole === 'channel' && personPosted === true)
     ? 'person'
     : 'bg';
 }
@@ -766,8 +806,10 @@ export async function sendToAgentHome(
   agent: Agent,
   text: string,
   /** `lane` defaults to the background lane; a job or watch started from the
-   *  home lane reports back there. */
-  opts: { peerFrom: string; peerFromRole?: string; peerText?: string; lane?: AgentLane; quietExempt?: boolean },
+   *  home lane reports back there. `neverSteer` (wakes, card-c26bfa): the
+   *  delivery must never join a live turn — it waits for a real turn end and
+   *  then starts its own, the same admission the queued deliveries use. */
+  opts: { peerFrom: string; peerFromRole?: string; peerText?: string; lane?: AgentLane; quietExempt?: boolean; neverSteer?: boolean },
 ): Promise<{ delivered: boolean; reason?: string }> {
   // Quiet hours (Matt, Oct 15 2026): automation prompts to a non-Max lane
   // hold until 05:00 ET. Every caller parks its record and retries on a
@@ -776,7 +818,7 @@ export async function sendToAgentHome(
   // manual routine press or Max's emergency routine by id, both of which
   // are an explicit ask for this run now (Opus review, Oct 16).
   const isExemptWake = opts.quietExempt === true || personSourced({ fromRole: opts.peerFromRole });
-  const quietHold = !isExemptWake && !isMaxLane(agent.id);
+  const quietHold = !isExemptWake && !isQuietExemptLane(agent.id);
   const heldByQuietHours = (): { delivered: boolean; reason?: string } | null =>
     quietHold && inQuietHours(Date.now())
       ? { delivered: false, reason: 'quiet hours (22:00-05:00 ET): held until 05:00' }
@@ -797,6 +839,10 @@ export async function sendToAgentHome(
       false,
       false,
       opts.lane ?? 'bg',
+      // A wake never steers (card-c26bfa): only a real turn end admits it,
+      // so the result starts its own turn instead of landing as guidance in
+      // the live one or racing a Codex steer against the turn end.
+      opts.neverSteer === true,
     );
     session = admission.session;
     model = admission.model;
@@ -820,7 +866,7 @@ export async function sendToAgentHome(
       if (inner?.type === 'peer_message' && inner.deliveryId === deliveryId) echoed = true;
       if (inner?.type === 'peer_delivery_accepted' && inner.deliveryId === deliveryId) providerAccepted = true;
     }, session.latestSeq(), false);
-    await session.send(text, undefined, {
+    await sendWithAdmission(session, deliveryId, () => session.send(text, undefined, {
       peerFrom: opts.peerFrom,
       peerFromRole: opts.peerFromRole,
       peerText: opts.peerText,
@@ -828,7 +874,7 @@ export async function sendToAgentHome(
       allowNativePeerSteer: nativeSteer,
       model,
       effort,
-    });
+    }));
   } catch (e) {
     return { delivered: false, reason: `delivery failed: ${(e as Error).message}` };
   } finally {
@@ -884,6 +930,10 @@ type TeamDelivery = {
   /** True when a joined batch carries messages from several senders, so the
    *  closing reply instruction must not name only the lead's sender. */
   mixedSenders?: boolean;
+  /** Per-record batch members (lead first) for the brief envelope: each
+   *  coder brief in the batch gets its own envelope instead of inheriting
+   *  the lead's. Absent on a direct (non-batched) delivery. */
+  batchRecords?: Array<{ fromId: string; fromName: string; fromRole?: string; hop: number; text: string }>;
   /** The person authored this channel post: person-class admission. */
   personPosted?: boolean;
   /** The person chose to queue this post for the member's NEXT turn
@@ -986,6 +1036,8 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
     ? '(This is the user continuing your own voice conversation. Reply in this thread. Do not team_message Voice. Ending the audio call does not cancel this work. External side effects remain draft/review-first. The call already has a spoken line. Do not write a second, different Hall answer unless the caller needs a result, blocker, or question they cannot hear.)'
     : from.role === 'desk'
     ? `(${from.name} is the human owner, not a teammate, and reads the answer on the Desk card. Reply there with board_card_comment. Do not team_message ${from.name}.)`
+    : from.role === 'slack'
+    ? '(This is a Slack message from a real person. Reply in that Slack thread with the say command the message names. Do not team_message the Slack relay.)'
     : from.role === 'channel'
     ? '(This ping is a group-channel post. Reply in that channel with the channel_post tool exactly as the ping\'s rules describe, passing the hop number through unchanged. Do not team_message the channel and never move this into a one-on-one thread.)'
     : waitForReply
@@ -993,11 +1045,70 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
     : delivery.mixedSenders
     ? '(Reply inline for the thread. This turn carries messages from several senders, so the sender of the first block is not the only one waiting. If any sender above needs the result, use team_message(to: "<that sender>", text: ..., wait: false) with that sender\'s own name; busy teammates are queued automatically.)'
     : `(Reply inline for the thread. If ${from.name} needs the result, use team_message(to: "${from.name}", text: ..., wait: false); busy teammates are queued automatically.)`;
+  // Brief envelope (card-e9b846): a lead's handoff to a coder arrives as one
+  // goal sentence plus its card link, built here so no sender can skip it.
+  // The durable record keeps the lead's raw text; only this turn's prompt
+  // carries the envelope, with the raw brief below as detail. Fail-open.
+  // A busy recipient lane counts as may-steer here: distillation is skipped
+  // there (an already-written goal sentence still rides), so the envelope
+  // never stalls an attempt to join a live turn.
+  let recipientBusy = false;
+  try {
+    const runner = await getRunner();
+    recipientBusy = runner.activeChatSessions().some((s) => s.busy && bareChatId(s.chatId) === to.home);
+  } catch { /* a busy-check hiccup never blocks delivery */ }
+  let promptText = text;
+  try {
+    if (delivery.batchRecords?.length) {
+      // Per-record envelopes: every coder brief in the batch gets its own
+      // goal + card, and unrelated records stay plain blocks. The outer
+      // header below is the lead record's own header, so the lead member is
+      // rendered as its envelope text (or raw text) without a second header.
+      const blocks: string[] = [];
+      for (let i = 0; i < delivery.batchRecords.length; i++) {
+        const member = delivery.batchRecords[i];
+        const memberEnvelope = await briefEnvelopeForHandoff({
+          senderId: member.fromId,
+          recipientId: to.id,
+          recipientName: to.name,
+          text: member.text,
+          wait: false,
+          maySteer: recipientBusy,
+        });
+        const memberText = memberEnvelope ?? member.text;
+        if (i === 0) blocks.push(memberText);
+        else {
+          const header = member.fromRole === 'desk'
+            ? `[comment from ${member.fromName} on the Desk]`
+            : member.fromRole === 'voice'
+            ? '[continuation of the user’s voice request in your own thread]'
+            : member.fromRole === 'channel'
+            ? `[group-channel post in ${member.fromName} — handoff ${member.hop}]`
+            : `[message from teammate ${member.fromName}${member.fromRole ? ` (${member.fromRole})` : ''} — handoff ${member.hop}]`;
+          blocks.push(`${header}\n${memberText}`);
+        }
+      }
+      promptText = blocks.join('\n\n');
+    } else {
+      const envelope = await briefEnvelopeForHandoff({
+        senderId: from.id,
+        recipientId: to.id,
+        recipientName: to.name,
+        text,
+        wait: waitForReply === true,
+        maySteer: recipientBusy,
+      });
+      if (envelope) promptText = envelope;
+    }
+  } catch (err) {
+    console.warn('[brief] envelope failed open:', (err as Error).message);
+  }
   const prompt = [
     from.role === 'voice' ? '[continuation of the user’s voice request in your own thread]'
       : from.role === 'desk' ? `[comment from ${from.name} on the Desk]`
+      : from.role === 'slack' ? '[Slack message from a real person — reply in that Slack thread]'
       : `[message from teammate ${from.name}${from.role ? ` (${from.role})` : ''} — handoff ${hop}]`,
-    text,
+    promptText,
     '',
     replyInstruction,
   ].join('\n');
@@ -1175,7 +1286,7 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
         unsubscribe?.();
         return { delivered: false, to: to.name, hop, queued: waited || undefined, reason: 'dropped while waiting for a turn boundary' };
       }
-      await session.send(prompt, undefined, {
+      await sendWithAdmission(session, deliveryId, () => session.send(prompt, undefined, {
         peerFrom: from.name,
         peerFromRole: from.role,
         // The control envelope belongs to the model, not the visible feed.
@@ -1185,9 +1296,12 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
         model,
         effort,
         signal,
-      });
+      }));
     } catch (error) {
       unsubscribe?.();
+      if ((error as Error & { terminalDelivery?: boolean }).terminalDelivery) {
+        await retainFailedQueuedDelivery(session, deliveryId, (error as Error).message);
+      }
       return { delivered: false, to: to.name, hop, queued: waited || undefined, reason: `delivery failed: ${(error as Error).message}` };
     }
 
@@ -1299,6 +1413,26 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
   };
 }
 
+/** Preserve every frozen batch member before closing an ambiguous delivery.
+ * A missing receipt is neither success nor permission to repeat a native write. */
+async function retainFailedQueuedDelivery(session: SessionLike, deliveryId: string, reason: string): Promise<void> {
+  const members = (await queueStoreOperation(() => queuedDeliveryStore.list()))
+    .filter(item => item.id === deliveryId || item.batchLeadId === deliveryId);
+  for (const member of members) {
+    await appendEventLogDurable(session.logKey, {
+      seq: reserveEventLogSeq(session.logKey),
+      ev: { type: 'event', event: { type: 'peer_delivery_failed', deliveryId: member.id,
+        from: member.fromName, text: member.text, message: reason, ts: Date.now() } } as PersistedEvent['ev'],
+    });
+  }
+  await appendEventLogDurable(session.logKey, {
+    seq: reserveEventLogSeq(session.logKey), ev: { type: 'error', message: reason },
+  });
+  recordNativeFailure(session.chatId ?? session.logKey, 'native', `${reason} Delivery: ${deliveryId}`);
+  const ids = new Set(members.map(member => member.id));
+  await queueStoreOperation(() => queuedDeliveryStore.modify(items => items.filter(item => !ids.has(item.id))));
+}
+
 async function acknowledgeQueuedDelivery(record: QueuedTeamDelivery, session: SessionLike): Promise<void> {
   // Persist and verify the provider-accepted receipt before deleting the outbox
   // row. A swallowed event-log write can never lose the message.
@@ -1322,6 +1456,18 @@ function batchDeliveryBlock(record: QueuedTeamDelivery): string {
   return `${header}\n${record.text}`;
 }
 
+type BatchMember = { fromId: string; fromName: string; fromRole?: string; hop: number; text: string };
+
+function batchRecordForEnvelope(record: QueuedTeamDelivery): BatchMember {
+  return {
+    fromId: record.fromId,
+    fromName: record.fromName,
+    fromRole: record.fromRole,
+    hop: record.hop,
+    text: record.text,
+  };
+}
+
 // Bounds for one admitted batch turn. Unbounded, a 34-message backlog (each
 // record can carry 8,000 characters) would hand the recipient a prompt
 // hundreds of KB long — past admission and provider context limits — and
@@ -1335,11 +1481,15 @@ const MAX_BATCH_TEXT_CHARS = 24_000;
  *  can share it (Desk answers answer on the card, voice continuations
  *  continue the call, automation stays automation, channel posts keep their
  *  channel reply rules, teammates reply inline). */
-function batchRoleClass(record: { fromRole?: string }): 'desk' | 'voice' | 'automation' | 'channel' | 'teammate' {
+function batchRoleClass(record: { fromRole?: string }): 'desk' | 'voice' | 'automation' | 'channel' | 'slack' | 'teammate' {
   if (record.fromRole === 'desk') return 'desk';
   if (record.fromRole === 'voice') return 'voice';
   if (record.fromRole === 'automation') return 'automation';
   if (record.fromRole === 'channel') return 'channel';
+  // Slack carries its own reply instruction and person-class admission: it
+  // must never ride a teammate-led batch, which would deliver it peer-class
+  // and lose the idle-lane and human-interrupt behavior (review 2026-10-20).
+  if (record.fromRole === 'slack') return 'slack';
   return 'teammate';
 }
 
@@ -1376,7 +1526,32 @@ export function batchJoinable(lead: QueuedTeamDelivery, record: QueuedTeamDelive
       && (lead.queue === true) === (record.queue === true)
       && (lead.personSourced === true) === (record.personSourced === true);
   }
+  // A coder brief (card-e9b846) is a delivery contract, not just text: its
+  // goal sentence must be the first thing the coder reads, and one named
+  // sender is waiting on the result. A mixed-sender batch decides the
+  // framing and the reply instruction from the lead, so a brief never rides
+  // with — or leads over — another sender's record; briefs from the same
+  // sender still batch (review P1, Oct 20).
+  if (isCoderBrief(lead.fromId, lead.toId) || isCoderBrief(record.fromId, record.toId)) {
+    return lead.fromId === record.fromId;
+  }
   return true;
+}
+
+/** (review P1, Oct 20) Split a frozen batch's stamped members against the
+ *  current join rules. A stamp written by an earlier build predates later
+ *  guards (the coder-brief same-sender rule), so reusing it verbatim would
+ *  let a mixed-sender batch ride and defeat the guard. Members that no
+ *  longer join are returned for un-stamping so they stay queued and take
+ *  their own admission. Exported for tests. */
+export function frozenBatchMembers(
+  lead: QueuedTeamDelivery,
+  stamped: QueuedTeamDelivery[],
+): { ride: QueuedTeamDelivery[]; drop: QueuedTeamDelivery[] } {
+  const ride: QueuedTeamDelivery[] = [];
+  const drop: QueuedTeamDelivery[] = [];
+  for (const member of stamped) (batchJoinable(lead, member) ? ride : drop).push(member);
+  return { ride, drop };
 }
 
 /** Ack a joined batch: the lead record's durable receipt proves the whole
@@ -1455,7 +1630,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
   // before 22:00 and keeps admitting (the admission wait can run 30 minutes)
   // re-checks the boundary on each pass without calling Intl.DateTimeFormat
   // per queued record (Opus review 3, Oct 16).
-  const isNonMax = !isMaxLane(queueKey);
+  const isNonMax = !isQuietExemptLane(queueKey);
   const holdInitial = isNonMax && inQuietHours(Date.now());
   // Snapshot this worker's batch. Handoffs accepted while it runs are scheduled
   // as the next batch, behind any synchronous delivery already waiting on the
@@ -1537,12 +1712,31 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       let siblings: QueuedTeamDelivery[];
       if (lead.batchLeadId === lead.id) {
         // Frozen batch from a send attempt that already ran (the lead's
-        // self-stamp persists). Reuse the stamped members verbatim instead
-        // of rebuilding: if that attempt actually admitted, this pass is only
+        // self-stamp persists). Reuse the stamped members instead of
+        // rebuilding: if that attempt actually admitted, this pass is only
         // retrying the ack, and a rebuilt batch would fold in records that
         // queued later and were never seen. The lead is self-stamped, so it
         // also matches the filter and is excluded to keep it out twice.
-        siblings = [lead, ...candidates.filter((item) => item.id !== lead.id && item.batchLeadId === lead.id)];
+        //
+        // (review P1, Oct 20) A stamp written by an earlier build predates
+        // the coder-brief join rule, so a mixed-sender frozen batch would
+        // otherwise ride verbatim and defeat the guard. Every stamped member
+        // is re-checked against batchJoinable; one that no longer joins is
+        // un-stamped so it stays queued and takes its own admission.
+        // Un-stamping is safe in both retry cases: an admitted batch already
+        // delivered that member's text (this retry re-sends the rest anyway),
+        // and a batch that never went simply delivers it separately. Left
+        // stamped, the ack would delete a record that never rode the resend.
+        const { ride, drop } = frozenBatchMembers(lead, candidates.filter((item) => item.id !== lead.id && item.batchLeadId === lead.id));
+        if (drop.length > 0) {
+          const droppedIds = new Set(drop.map((item) => item.id));
+          await queueStoreOperation(() => queuedDeliveryStore.modify((items) => items.map((item) => {
+            if (!droppedIds.has(item.id)) return item;
+            const { batchLeadId: _stamp, ...rest } = item;
+            return rest;
+          })));
+        }
+        siblings = [lead, ...ride];
       } else {
         siblings = [lead];
         let batchChars = lead.text.length;
@@ -1608,6 +1802,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         nudgeHoldSince: batchHoldSince,
         personSourced: batchIsPersonSourced,
         mixedSenders: siblings.some((sibling) => sibling.fromId !== lead.fromId),
+        batchRecords: siblings.map(batchRecordForEnvelope),
         stillWanted: async () => {
           // Every record that rides this batch must still be queued when the
           // prompt finally goes out: a Stop that dropped any of them must
@@ -1675,7 +1870,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
  *  the hour — the boss's messages never wait out the window. */
 function queuedRetryDelay(queueKey: string, remains: QueuedTeamDelivery[]): number {
   const now = Date.now();
-  if (!inQuietHours(now) || isMaxLane(queueKey)) return ASYNC_RETRY_MS;
+  if (!inQuietHours(now) || isQuietExemptLane(queueKey)) return ASYNC_RETRY_MS;
   return remains.some((item) => personSourced(item)) ? ASYNC_RETRY_MS : msUntilQuietEnd(now);
 }
 
@@ -1762,8 +1957,10 @@ export async function deliverTeamMessage(input: {
   /** voice: the user's own call continuing in the thread. desk: the human
    *  owner commenting on a Desk card (`from` is their display name). channel:
    *  a group-channel post fanned out to a member (the channel identity rides
-   *  in `channel`; the poster's name rides inside the text). */
-  source?: 'voice' | 'desk' | 'channel';
+   *  in `channel`; the poster's name rides inside the text). slack: the Slack
+   *  bridge relaying a real person's message — person-class so it jumps the
+   *  queue, takes an idle lane, and interrupts a busy turn. */
+  source?: 'voice' | 'desk' | 'channel' | 'slack';
   /** Group-channel identity for source 'channel' records (id + display name). */
   channel?: { id: string; name: string };
   /** Internal admission notification; fires only after the outbox is durable. */
@@ -1816,6 +2013,12 @@ export async function deliverTeamMessage(input: {
     // Same colon trick: the pseudo-sender is the channel itself, never an
     // agent, and the poster's own name rides inside the delivered text.
     ? { id: `channel:${input.channel?.id ?? 'unknown'}`, name: input.channel?.name?.trim() ? input.channel.name : '#channel', role: 'channel', engine: '', home: '', createdAt: 0 }
+    : input.source === 'slack'
+    // A real person is waiting on the other end of the Slack thread: the
+    // record is person-class (queue priority, human interrupt class, idle
+    // lane preference) so it can never sit behind teammate chatter or a
+    // busy turn (card-c26bfa follow-up, Oct 20).
+    ? { id: 'slack:inbound', name: input.from.trim() || 'Slack', role: 'slack', engine: '', home: '', createdAt: 0 }
     : findAgent(input.from) ?? { id: 'unknown', name: input.from || 'Unknown', role: '', engine: '', home: '', createdAt: 0 };
   if (to.id === from.id && input.from.trim().toLowerCase() === to.name.trim().toLowerCase()) {
     return { delivered: false, reason: 'that is you — no need to message yourself' };
@@ -1841,7 +2044,7 @@ export async function deliverTeamMessage(input: {
     personPosted: input.source === 'channel' && input.personPosted === true,
     personSourced: input.personSourced === true,
   });
-  const quietHoldRecipient = !isPersonSourced && !isMaxLane(to.id) && inQuietHours(Date.now());
+  const quietHoldRecipient = !isPersonSourced && !isQuietExemptLane(to.id) && inQuietHours(Date.now());
   const waitForReply = requestedWaitForReply && !closesReplyCycle && !quietHoldRecipient;
   // card-b3468c: an under-ceiling nudge reports its idle-boundary delivery in
   // the receipt (the drain-side admission never steers a live turn).
@@ -1995,7 +2198,7 @@ export async function deliverTeamMessage(input: {
     // already durable, so the caller's queued handling parks it for 05:00.
     quietHoldCheck: isPersonSourced
       ? undefined
-      : () => inQuietHours(Date.now()) && !isMaxLane(to.id),
+      : () => inQuietHours(Date.now()) && !isQuietExemptLane(to.id),
     // (card-b3468c verify P1) The digest admission ack fires in the finally
     // for the same reason as the batch path: an ack failure must not strand
     // the digest's in-flight entries when the turn still carried the line.
@@ -2032,7 +2235,7 @@ export async function deliverTeamMessage(input: {
     if (remains) scheduleQueuedRecipient(queueKeyOf(record));
     if (!result.delivered && remains) {
       const heldForQuietHours = result.held === 'quiet-hours'
-        || (!isPersonSourced && !isMaxLane(to.id) && inQuietHours(Date.now()));
+        || (!isPersonSourced && !isQuietExemptLane(to.id) && inQuietHours(Date.now()));
       return {
         delivered: true,
         to: to.name,

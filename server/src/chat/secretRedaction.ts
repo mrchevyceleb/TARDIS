@@ -107,6 +107,38 @@ export function redactSecrets(text: string): string {
       /([?&#](?:x-amz-(?:signature|credential|security-token)|x-goog-(?:signature|credential)|awsaccesskeyid|signature|sig|token|access_token|auth|api_key|apikey|key|secret|password|code)=)[^&#\s]*/gi,
       `$1${REDACTED}`,
     )
+    // Studio recorder links and handoff claim links (card-281af4): the secret
+    // rides a named query parameter (?readyToken=, ?appId=, ?roomKey=) that
+    // the exact-name rule above does not cover, or a path segment
+    // (/handoff/claim/<value>, /warm-handoff-claims/<value>). The named
+    // parameters also match bare in prose ("appId=..." quoted out of its
+    // URL), never inside a longer word. The value runs to the URL's own hard
+    // delimiter — &, #, whitespace, quote, backtick, angle bracket — so
+    // nothing past the token is eaten, and the whole token is masked, never a
+    // prefix of it. (review P1, Oct 20) The name decides regardless of
+    // spelling style, because a short shapeless value has no shape rule to
+    // fall back on: quoted (readyToken="…", appId='…'), spaced (roomKey = …),
+    // and structured ("recorderToken":"…") forms all mask, so the separator
+    // may be = or : with surrounding space and the name or value may carry
+    // quotes; an unterminated quote still starts the value (a truncated
+    // stream must not leak its tail). Trailing sentence punctuation belongs
+    // to the prose, not the token (review P2): "appId=demo-client, then"
+    // keeps its comma.
+    .replace(
+      /((?:[?&#]|(?<![\w-]))(?:"|')?(?:readyToken|appId|roomKey|recorderToken)(?:"|')?\s*[=:]\s*)("(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|`(?:\\.|[^`\\\r\n])*`|["'`][^&#\s"'`<>]*|[^&#\s"'`<>]+)/gi,
+      (_all, prefix: string, value: string) => {
+        if (/^["'`]/.test(value)) return `${prefix}${preserveFence(value)}`;
+        const trimmed = value.replace(/[.,;:!?)\]}]+$/, '');
+        return `${prefix}${trimmed ? REDACTED : ''}${value.slice(trimmed.length)}`;
+      },
+    )
+    .replace(
+      /(\/(?:handoff\/claim|warm-handoff-claims)\/)([^\s/?#"'`<>]+)/gi,
+      (_all, prefix: string, value: string) => {
+        const trimmed = value.replace(/[.,;:!?)\]}]+$/, '');
+        return `${prefix}${trimmed ? REDACTED : ''}${value.slice(trimmed.length)}`;
+      },
+    )
     .replace(/\b(Bearer|Basic)(\s+)[A-Za-z0-9._~+/=-]{8,}/gi, (_all, scheme: string, gap: string) => `${scheme}${gap}${REDACTED}`)
     .replace(
       /(\b(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)*\s*=\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/gi,

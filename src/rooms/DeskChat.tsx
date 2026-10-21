@@ -114,18 +114,20 @@ export function DeskChatDock(props: DockProps) {
 
   if (!state.open) {
     return (
-      <button
-        ref={openerRef}
-        type="button"
-        className="desk-chat-fab"
-        onClick={state.openChat}
-        aria-label={`Chat with ${agent.name} here`}
-        title={`Chat with ${agent.name} without leaving the Desk`}
-      >
-        <MessageCircle size={17} aria-hidden="true" />
-        <span>Ask {agent.name}</span>
-        {state.chips.length ? <span className="desk-chat-fab-count" aria-hidden="true">{state.chips.length}</span> : null}
-      </button>
+      <div className="desk-chat-launcher">
+        <button
+          ref={openerRef}
+          type="button"
+          className="desk-chat-fab"
+          onClick={state.openChat}
+          aria-label={`Chat with ${agent.name} here`}
+          title={`Chat with ${agent.name} without leaving the Desk`}
+        >
+          <MessageCircle size={17} aria-hidden="true" />
+          <span>Ask {agent.name}</span>
+          {state.chips.length ? <span className="desk-chat-fab-count" aria-hidden="true">{state.chips.length}</span> : null}
+        </button>
+      </div>
     );
   }
 

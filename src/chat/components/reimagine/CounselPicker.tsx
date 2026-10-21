@@ -31,6 +31,7 @@ const LANE_META: Record<string, LaneMeta> = {
   zai: { ring: 'Z', short: 'Z.ai coding plan', word: 'effort' },
   fireworks: { ring: 'F', short: 'Fireworks API models', word: 'thinking' },
   openrouter: { ring: 'O', short: 'OpenRouter API models', word: 'thinking' },
+  openrouter2: { ring: 'P', short: 'Personal OpenRouter API models', word: 'thinking' },
   // 'G' is taken by Grok; Gemini takes the M of GeMini.
   agy: { ring: 'M', short: 'Google AI subscription', word: 'thinking' },
 };
@@ -50,6 +51,7 @@ export function counselChipInfo(picker: CompanionPicker) {
   else if (picker.isXai) name = labelFor(picker.xaiModel, XAI_MODELS);
   else if (picker.isZai) name = labelFor(picker.zaiModel, ZAI_MODELS);
   else if (picker.isFireworks) name = labelFor(picker.fireworksModel, FIREWORKS_MODELS);
+  else if (picker.isOpenRouter2) name = labelFor(picker.openRouter2Model, OPENROUTER_MODELS);
   else if (picker.isOpenRouter) name = labelFor(picker.openRouterModel, OPENROUTER_MODELS);
   else if (picker.isAgy) name = labelFor(picker.agyModel, AGY_MODELS);
   const lane = WORKSPACE_COMPANIONS.find((c) => c.id === picker.companion);
@@ -373,22 +375,22 @@ function LaneControls({ picker }: { picker: CompanionPicker }) {
           />
         </>
       )}
-      {picker.isOpenRouter && (
+      {(picker.isOpenRouter || picker.isOpenRouter2) && (
         <>
           <span className="ctl-lab">model</span>
           {/* Hundreds of models: a searchable in-page list, grouped by vendor. */}
           <ModelList
-            label="OpenRouter model"
+            label={picker.isOpenRouter2 ? 'Personal model' : 'OpenRouter model'}
             groups={openRouterVendorGroups(OPENROUTER_MODELS)}
-            current={picker.openRouterModel}
-            onPick={picker.setOpenRouterModel}
+            current={picker.isOpenRouter2 ? picker.openRouter2Model : picker.openRouterModel}
+            onPick={picker.isOpenRouter2 ? picker.setOpenRouter2Model : picker.setOpenRouterModel}
             searchable
           />
           <span className="ctl-lab">thinking</span>
           <EffortPills
-            options={openRouterEffortsForModel(picker.openRouterModel)}
-            current={picker.openRouterEffort}
-            onPick={picker.setOpenRouterEffort}
+            options={openRouterEffortsForModel(picker.isOpenRouter2 ? picker.openRouter2Model : picker.openRouterModel)}
+            current={picker.isOpenRouter2 ? picker.openRouter2Effort : picker.openRouterEffort}
+            onPick={picker.isOpenRouter2 ? picker.setOpenRouter2Effort : picker.setOpenRouterEffort}
           />
         </>
       )}

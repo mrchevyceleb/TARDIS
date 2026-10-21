@@ -66,7 +66,7 @@ test('spoken turns persist, publish, and reach a warm native text continuation w
     ['user', 'Fix the calendar'], ['user', 'Also move it to Friday'], ['assistant', 'Friday, understood'],
   ]);
   assert.match(callThreadContext(key), /Friday, understood/);
-  assert.match(conversationGuidanceForTurn({ chatId: 'bot-test', logKey: key, historyThroughSeq: 3 }), /Also move it to Friday/);
+  assert.doesNotMatch(conversationGuidanceForTurn({ chatId: 'bot-test', logKey: key, historyThroughSeq: 3 }), /Also move it to Friday/);
   assert.doesNotMatch(conversationGuidanceForTurn({ chatId: 'bot-test', logKey: key, historyThroughSeq: 1 }), /Friday/);
 });
 

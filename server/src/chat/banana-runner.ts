@@ -1,3 +1,4 @@
+import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 import { assertSubscriptionLane } from './subscription-policy.ts';
 import { execFile, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
@@ -2458,6 +2459,9 @@ export class BananaSession {
       console.warn(`[chat banana] compaction check failed for ${this.logKey}:`, (err as Error).message);
     }
   }
+  // A timed-out receipt is ambiguous, not permission to submit the same input twice.
+  // Keep the guard across worker replacement using the durable submission event.
+  private submittedPeerDeliveries = new Set<string>();
   private listeners = new Set<Listener>();
   private subscriberCount = 0;
   /** banana sessionID, captured on create, persisted for resume. */
@@ -2520,6 +2524,12 @@ export class BananaSession {
       }
     } catch (err) {
       console.warn(`[chat banana] event-log restore failed for ${this.logKey}:`, (err as Error).message);
+    }
+    for (const row of loadEventLogForCompactionSync(this.logKey)) {
+      const event = row.ev.type === 'event' ? row.ev.event : null;
+      if (typeof event?.deliveryId !== 'string') continue;
+      if (event.type === 'peer_delivery_submitted') this.submittedPeerDeliveries.add(event.deliveryId);
+      if (event.type === 'peer_delivery_released') this.submittedPeerDeliveries.delete(event.deliveryId);
     }
     void compactEventLog(this.logKey, compactedThroughSeq(this.logKey));
     // A different brain spoke last on this thread — mark the handover. Use the
@@ -2735,9 +2745,30 @@ export class BananaSession {
     return extractEmailDraft(latestAssistant);
   }
 
+  private submitPeerDelivery(deliveryId: string): boolean {
+    if (this.submittedPeerDeliveries.has(deliveryId)) {
+      this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, terminal: true, message: 'The earlier submission has no definite receipt. Automatic replay stopped to prevent a duplicate; the original handoff is retained in the failure notice.', ts: Date.now() } });
+      return false;
+    }
+    this.emit({ type: 'event', event: { type: 'peer_delivery_submitted', deliveryId, ts: Date.now() } });
+    this.submittedPeerDeliveries.add(deliveryId);
+    return true;
+  }
+
+  private releasePeerDelivery(deliveryId: string, message: string): void {
+    // The durable release must precede making this ID eligible for another write.
+    this.emit({ type: 'event', event: { type: 'peer_delivery_released', deliveryId, message, ts: Date.now() } });
+    this.submittedPeerDeliveries.delete(deliveryId);
+    this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, message, ts: Date.now() } });
+  }
+
   async send(text: string, images?: ChatImage[], opts: BananaSendOptions = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
     if (opts.signal?.aborted) return;
+    if (opts.peerDeliveryId && this.submittedPeerDeliveries.has(opts.peerDeliveryId)) {
+      this.submitPeerDelivery(opts.peerDeliveryId);
+      return;
+    }
     if (this.busy) {
       // Internal team delivery retries at the natural boundary. Do not leak a
       // transient admission race into the human transcript as a provider error.
@@ -2747,6 +2778,7 @@ export class BananaSession {
           message: 'banana is still answering — wait for the current turn to finish',
         });
       }
+      if (opts.peerFrom) throw new Error('Banana is still answering; this handoff remains queued for its next turn.');
       return;
     }
     this.busy = true;
@@ -3067,6 +3099,7 @@ export class BananaSession {
     const thisTurn = this.turn;
     const promptKind = slashCommand ? 'command' : 'prompt';
     try {
+      if (opts.peerDeliveryId && !this.submitPeerDelivery(opts.peerDeliveryId)) return;
       const res = await client.session.prompt({
         sessionID: this.threadId,
         ...(model ? { model } : {}),
@@ -3087,6 +3120,9 @@ export class BananaSession {
               `[chat banana] ${promptKind} transport returned error after stream activity; keeping turn alive (${message})`,
             );
             return;
+          }
+          if (opts.peerDeliveryId && !isPromptTransportFailure(message) && !this.turnHasServerActivity(thisTurn)) {
+            this.releasePeerDelivery(opts.peerDeliveryId, message);
           }
           this.failTurn(isPromptTransportFailure(message)
             ? `banana ${promptKind} failed: local Banana server connection failed, restarting for the next turn (${message})`
@@ -3116,6 +3152,10 @@ export class BananaSession {
             `[chat banana] ${promptKind} transport ended after stream activity; keeping turn alive (${message})`,
           );
           return;
+        }
+        const status = Number((err as { status?: number; statusCode?: number })?.status ?? (err as { statusCode?: number })?.statusCode);
+        if (opts.peerDeliveryId && status >= 400 && status < 500 && !this.turnHasServerActivity(thisTurn)) {
+          this.releasePeerDelivery(opts.peerDeliveryId, message);
         }
         this.failTurn(isPromptTransportFailure(message)
           ? `banana ${promptKind} failed: local Banana server connection failed, restarting for the next turn (${message})`
@@ -3984,7 +4024,7 @@ export class BananaSession {
     // runner.ts import each other's worlds; the type-only import stays).
     const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now(), ...(isBackgroundChatId(this.chatId) ? { lane: 'bg' as const } : {}) };
     const persisted = { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) };
-    const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
+    const durableUserEcho = msg.type === 'event' && ['_user_echo', 'peer_delivery_submitted', 'peer_delivery_released'].includes(msg.event?.type);
     if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) {
       throw new Error('could not durably accept the user message');
     }
@@ -4089,13 +4129,15 @@ function anyBananaTurnBusyExcept(except?: BananaSession): boolean {
   return false;
 }
 
-export function activeBananaSessions(): {
+export function activeBananaSessions(includeActivity = false): {
   cli: CliKind;
   cwd: string;
   chatId: string;
   busy: boolean;
   sessionId: string | null;
   lastActivityAt: number;
+  busySince?: number;
+  activity?: LiveActivity;
 }[] {
   return Array.from(bananaSessions.values()).map((s) => ({
     cli: s.cli,
@@ -4105,6 +4147,7 @@ export function activeBananaSessions(): {
     sessionId: s.sessionId(),
     lastActivityAt: s.lastActivityAt(),
     busySince: s.activeTurnStartedAt() ?? undefined,
+    activity: includeActivity ? sessionLiveActivity(s) : undefined,
   }));
 }
 

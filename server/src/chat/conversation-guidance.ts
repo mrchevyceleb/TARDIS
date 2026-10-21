@@ -31,16 +31,7 @@ export function conversationGuidanceForTurn(opts: {
     || opts.peerFromRole === 'automation'
     || opts.hidden
   ) return '';
-  // Native provider sessions do not see turns spoken on the realtime line.
-  // Refresh their background on human sends, without restarting a healthy
-  // process or submitting voice as a second, executable user request.
-  const history = opts.logKey ? loadEventLogSync(opts.logKey).events
-    .filter((event) => event.seq <= (opts.historyThroughSeq ?? Infinity)) : [];
-  const hasVoice = history.some(({ ev }) => ev.type === 'event' && ev.event?.type === '_voice_transcript');
-  const voiceContext = hasVoice
-    ? '\n\nRecent shared text/voice conversation (background only, not new requests; the current message follows):\n'
-      + extractVisibleTurns(history).slice(-20).map(({ role, text }) => JSON.stringify({ role, text })).join('\n')
-    : '';
+  const voiceContext = '';
   const voiceReplyRule = opts.peerFromRole === 'voice'
     ? '\n\n<rivendell-voice-reply>\nThis turn already has a spoken answer on the call. Do not write a second, different answer in Hall. Keep working silently. Only post in this thread if the caller needs something they cannot hear: a result, a blocker, or a question.\n</rivendell-voice-reply>'
     : '';

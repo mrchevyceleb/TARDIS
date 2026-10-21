@@ -7,6 +7,7 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { ChatBlock } from '../../data/types';
 import { REACTION_EMOJIS } from '../../data/reactions';
+import { groupHasLiveContent } from '../../data/liveGroup';
 import { Markdown } from '../primitives/Markdown';
 import { DeskRefText } from '../primitives/DeskRef';
 import { ArtifactCard } from '../blocks/ArtifactCard';
@@ -815,6 +816,7 @@ const ENGINE_LABEL: Record<string, string> = {
   'banana-fireworks': 'Fireworks',
   fireworks: 'Fireworks',
   openrouter: 'OpenRouter',
+  openrouter2: 'OpenRouter Personal',
 };
 
 function engineLabel(id: string): string {
@@ -1112,6 +1114,12 @@ function ElrondGroup({
   const [acted, setActed] = useState(false);
   const visible = visibleAssistantBlocks(blocks, collapseSteps);
   if (!visible.length) return null;
+  // Actions belong to this group's settled text, not the thread's global
+  // status: a live sibling turn must not strip Copy/Pin/Reply from finished
+  // messages, and a settled response keeps them through the next turn's
+  // thinking interval (codex review, Oct 19 2026). Only the group's own open
+  // text or running tool makes it live.
+  const groupLive = groupHasLiveContent(visible);
   const first = visible[0];
   const textBlocks = visible.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text');
   const isActivity = collapseSteps && textBlocks.length === 0;
@@ -1183,14 +1191,14 @@ function ElrondGroup({
         const targetSeq = answer?.seq;
         const reactions = textBlocks.flatMap((b) => b.reactions ?? []);
         const mine = reactions.filter((r) => r.from === 'Matt').map((r) => r.emoji);
-        const canReact = Boolean(onReact && targetSeq && !streaming);
+        const canReact = Boolean(onReact && targetSeq && !groupLive);
         return (
           <>
             <ReactionStrip
               reactions={reactions}
               onReact={canReact ? (emoji) => onReact!(targetSeq!, emoji) : undefined}
             />
-            {(textBlocks.some(isAnswerProse) || textBlocks.some(hasVisibleProse)) && !streaming ? (
+            {(textBlocks.some(isAnswerProse) || textBlocks.some(hasVisibleProse)) && !groupLive ? (
               <ActionsRow
                 getText={copyText}
                 pinned={isPinned}
@@ -1424,7 +1432,6 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     coalescedGroups.push(g);
   }
 
-  const lastElrondGroup = [...coalescedGroups].reverse().find((g) => g.type === 'elrond');
   const nodes: Array<ReactNode | FoldItem> = [];
   let pendingAutomation = false;
   let hideThinking = false;
@@ -1532,7 +1539,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         ? { fold: true, key: g.block.id, from: g.block.from, ts: g.block.ts, tsApprox: g.block.tsApprox, node: bubble }
         : bubble);
     } else {
-      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} turnLive={streaming && g === lastElrondGroup} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReplyElrond} />);
+      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} onReact={onReact} onReply={onReplyElrond} />);
     }
   }
 

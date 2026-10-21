@@ -107,6 +107,7 @@ export function providerLabel(cli: string): string {
   if (cli === 'xai') return 'xAI';
   if (cli === 'fireworks') return 'Fireworks';
   if (cli === 'openrouter') return 'OpenRouter';
+  if (cli === 'openrouter2') return 'OpenRouter Personal';
   if (cli === 'assistant' || cli === 'claude') return 'Claude';
   if (cli === 'codex' || cli === 'codex-personal') return 'Codex';
   return 'The model provider';
@@ -201,9 +202,21 @@ export function terminalProviderError(cli: string, raw: unknown, syntheticReason
 }
 
 /** The provider refused the prompt as too long for the model's context. Output
- *  cap errors ("exceeded the 32000 output token maximum") are not this. */
+ *  cap errors ("exceeded the 32000 output token maximum") are not this. Every
+ *  provider words it differently, and a miss does not just mislabel the turn:
+ *  the runner never reseeds, so the lane keeps resuming a session that cannot
+ *  fit and dies on every message (Oct 20: OpenRouter's "exceeds the model's
+ *  context window" killed a lane for 1.5 hours). Cover every family's
+ *  phrasing: Anthropic, OpenAI-compatible gateways, OpenRouter's upstream
+ *  text, Gemini, Groq, Mistral, xAI, Codex CLI. (review P2, Oct 20) Both
+ *  directions matter: "context limit exceeded" and "input tokens exceed the
+ *  configured limit" must match, while prose that merely mentions the window
+ *  ("full of useful details") and output-subject wording ("Requested output
+ *  exceeds the model context window") must not — so the window branches
+ *  demand a rejection verb (full only as a terminal state, never "full of"),
+ *  and the exceed-verb branches refuse an output subject. */
 export function isContextLengthRejection(detail: string): boolean {
-  return /prompt is too long|context[ _-]?(?:length|window)[ _-](?:exceeded|limit)|maximum context length|input (?:is )?too long|too many input tokens/i.test(detail);
+  return /prompt is too long|input (?:is )?too long|too (?:many|much) (?:input )?tokens|maximum context length|context_length_exceeded|reduce the length of (?:the )?(?:messages|conversation|input)|maximum (?:prompt|input) length|input token(?: count)?s?[^.;\n]{0,40}exceed|context[ _-]?limit[^.;\n]{0,40}exceed|(?:prompt|input|message)s? length[^.;\n]{0,40}(?:exceed|limit|maximum|max\b|too)|context[ _-]?(?:length|window|size)[^.;\n]{0,40}(?:exceed|limit|maximum|max\b|too (?:long|large)|full(?!\s+of\b)|overflow|ran out)|(?<!\boutput\s)(?<!\boutputs\s)(?:exceed|exceeds|exceeding|beyond|over|longer than|too large for|out of room|ran out of room)[^.;\n]{0,40}context[ _-]?(?:length|window|size)/i.test(detail);
 }
 
 /** A turn that died because Claude Code could not compact its history. The
@@ -213,8 +226,8 @@ export function compactFailureError(cli: string, detail: string, rerun = false):
   const reason = detail.split('\n')[0].replace(/^\s*API Error:\s*/i, '').replace(/\s*To configure this behavior.*$/i, '').trim().replace(/\.$/, '').slice(0, 240);
   return {
     message: `${providerLabel(cli)} could not shrink this chat's history${reason ? ` (${reason})` : ''}. ${rerun
-      ? 'TARDIS is starting fresh from the saved summary and re-running the message automatically.'
-      : 'The next message starts fresh from the saved summary; send it again.'}`,
+      ? 'TARDIS is retrying native compaction and continuing the task in this same session.'
+      : 'Your session is preserved. Retry native compaction, or use Fresh thread to start over.'}`,
     code: 'compact_failed',
     retryable: true,
   };

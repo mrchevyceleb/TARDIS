@@ -11,6 +11,7 @@ import { readCommands } from './commands.ts';
 import { clearThreadSessionIds, ensureStateDir } from './sessions.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { setLanePushAll } from './laneEvents.ts';
+import { setFreshLifecycle } from './freshLifecycle.ts';
 import { stopComputersForOwner } from '../devices/bridge.ts';
 import { computerOwnerKey } from '../devices/context.ts';
 import { ASSISTANT_HUB_PATH } from './config.ts';
@@ -43,6 +44,7 @@ import {
   laneLogKey,
   MemoryPressureSpawnError,
   peekClaudeSession,
+  peekThreadSession,
   pruneIdleClaudeSessions,
   settleThreadSessionLookups,
   shutdownAllSessions,
@@ -67,7 +69,7 @@ import { emitScribe } from '../worker/scribe.ts';
 import { listChatHistory } from './history.ts';
 import { watchThread, unwatchThread, setWatchVisible } from './threadWatch.ts';
 import { agentForChatId, brainForAgent, cliForAgentEngine } from './agents.ts';
-import { loadThreadResetEpochs, persistThreadResetEpoch } from './threadResetStore.ts';
+import { loadThreadResetEpochs, noteThreadResetEpoch, noteThreadResetEpochs, persistThreadResetEpoch, subscribeThreadResetEpochs } from './threadResetStore.ts';
 import { setQueuedHumanProbe } from './providerSwitch.ts';
 import { bareChatId, isBackgroundChatId, backgroundChatId } from './threadKey.ts';
 
@@ -153,7 +155,7 @@ function waitForSteerOrTurnEnd(
         subscribe: (fn: (se: { ev?: { type?: string } }) => void, since?: number, count?: boolean) => () => void;
         latestSeq?: () => number;
       }).subscribe((se) => {
-        if (se.ev?.type === 'turnEnd') done('turn-complete');
+        if (se.ev?.type === 'turnEnd' || !sessionHasActiveBoundary(session)) done('turn-complete');
         else if (se.ev?.type === 'closed') done('closed');
         else if (allowNativeSteer && sessionCanAcceptNativeSteer(session)) done('steerable');
       }, session.latestSeq?.() ?? -1, false);
@@ -575,8 +577,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
     }
   });
 
-  app.get('/api/live', (_req, res) => {
-    const sessions = [...activeClaudeSessions(), ...activeCodexSessions(), ...activeBananaSessions()];
+  app.get('/api/live', (req, res) => {
+    const includeActivity = req.query.activity === '1';
+    res.setHeader('Cache-Control', 'no-store');
+    const sessions = [...activeClaudeSessions(includeActivity), ...activeCodexSessions(includeActivity), ...activeBananaSessions(includeActivity)];
     res.json({
       sessions: sessions.map((session) => ({
         cli: session.cli,
@@ -586,6 +590,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
         chatId: session.chatId,
         sessionId: session.sessionId,
         lastActivityAt: session.lastActivityAt,
+        busySince: session.busySince,
+        agentId: agentForChatId(session.chatId)?.id,
+        activity: session.activity,
+        backgroundTasks: 'backgroundTasks' in session ? session.backgroundTasks : undefined,
       })),
     });
   });
@@ -605,6 +613,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       cli !== 'xai' &&
       cli !== 'fireworks' &&
       cli !== 'openrouter' &&
+      cli !== 'openrouter2' &&
       cli !== 'agy'
     ) {
       res.status(400).json({ error: 'invalid cli' });
@@ -887,6 +896,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
   type SocketThread = { cli: CliKind; repo: string; chatId: string };
   const socketThreads = new Map<import('ws').WebSocket, SocketThread>();
   const threadResetAt = await loadThreadResetEpochs();
+  noteThreadResetEpochs(threadResetAt);
   const broadcastThreadReset = (
     logKey: string,
     source: import('ws').WebSocket,
@@ -903,6 +913,37 @@ export async function registerChat(app: express.Express, server: Server): Promis
       source.send(JSON.stringify({ ...payload, remote: false }));
     }
   };
+  // A programmatic Fresh (POST /api/team/fresh) commits its reset epoch
+  // through the same store; keep this closure's epoch map current here, but
+  // never broadcast freshStarted from the commit: the wipe has not run yet,
+  // and a client that dropped its transcript for a reset that then failed
+  // would pull the old thread straight back (review P1 3). The broadcast
+  // rides the completed hook below, after the log is actually gone.
+  subscribeThreadResetEpochs((logKey, resetAt) => {
+    threadResetAt.set(logKey, resetAt);
+  });
+  // Programmatic Fresh runs outside this closure, so it drives the same
+  // socket-side lifecycle the UI path runs inline: lane generations bump and
+  // held steers die the moment the epoch commits (started), and freshStarted
+  // goes out only after the wipe succeeded (completed). freshChat.ts calls
+  // these; a hook failure never fails the reset.
+  setFreshLifecycle({
+    started: ({ logKey, repo, chatId, cli }) => {
+      for (const prior of sessionsForLogKey(logKey)) bumpLaneGen(prior.cli, repo, chatId);
+      bumpLaneGen(cli as CliKind, repo, chatId);
+      // Fresh wipes the thread: held steers die with it.
+      purgeHeldSteers(repo, chatId);
+    },
+    completed: ({ logKey, resetAt }) => {
+      for (const [client, lane] of socketThreads) {
+        if (client.readyState !== client.OPEN) continue;
+        if (laneLogKey(lane.cli, lane.repo, lane.chatId) !== logKey) continue;
+        try {
+          client.send(JSON.stringify({ type: 'freshStarted', repo: lane.repo, chatId: lane.chatId, latestSeq: 0, resetAt, remote: true }));
+        } catch { /* a dead socket never blocks a reset */ }
+      }
+    },
+  });
   // Routes push live payloads through this one hook (card-a77246): the
   // checklist route broadcasts tool writes to every open lane socket without
   // reaching into this closure. Cleared on teardown below.
@@ -1492,6 +1533,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
         return;
       }
 
+      // A handover is internal maintenance, not a user turn. A plain send
+      // that races it follows the existing retained next-turn guidance path
+      // instead of being rejected as if another human owned the lane.
+      if (msg.type === 'send' && repoPath && cliKind) {
+        const target = normalizeChatId(msg.chatId ?? chatId);
+        const owner = agentForChatId(target) ? peekThreadSession({ cli: cliKind, repoPath, chatId: target }) : null;
+        if ((owner as { isHandingOver?: () => boolean } | null)?.isHandingOver?.()) {
+          msg = { ...msg, type: 'steer', cli: cliKind, repo: repoPath, chatId: target, queue: true };
+        }
+      }
+
       let finishHello: (() => void) | null = null;
       let reservedSendAdmission: { key: string; clientMsgId: string } | null = null;
       let unsubscribeSendAdmission: (() => void) | null = null;
@@ -1595,13 +1647,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const activeThreadOwner = activeSessionForLogKey(requestedLogKey);
           const pendingThreadOwner = pendingAdmissionForLogKey(requestedLogKey);
           const threadOwner = activeThreadOwner ?? pendingThreadOwner;
-          const warm = threadOwner
+          const warm = peekThreadSession({ cli: desiredBrain.cli, repoPath: msg.repo, chatId }) ?? (threadOwner
             ? await getOrCreateSession({
                 cli: threadOwner.cli,
                 repoPath: 'repo' in threadOwner ? threadOwner.repo : threadOwner.cwd,
                 chatId,
               })
-            : peekClaudeSession({ cli: desiredBrain.cli, repoPath: msg.repo, chatId });
+            : peekClaudeSession({ cli: desiredBrain.cli, repoPath: msg.repo, chatId }));
           if (!warm && isPersistentProcessCli(desiredBrain.cli)) {
             // Drop any session this socket was already bound to. Without it a
             // socket that re-helloes onto a different, cold lane keeps the old
@@ -1719,7 +1771,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             // or process teardown fails, clients still perform a full replay
             // of the coherent old log instead of trusting a stale high cursor.
             await persistThreadResetEpoch(targetLogKey, resetAt);
-            threadResetAt.set(targetLogKey, resetAt);
+            threadResetAt.set(targetLogKey, noteThreadResetEpoch(targetLogKey, resetAt));
             const priorSessions = sessionsForLogKey(targetLogKey);
             for (const prior of priorSessions) bumpLaneGen(prior.cli, msg.repo, chatId);
             bumpLaneGen(brain.cli, msg.repo, chatId);
@@ -1955,7 +2007,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
           let steerRepo = repoPath ?? msg.repo;
           let steerModel = authoritativeAgent ? desiredSteerBrain.model : msg.model;
           let steerEffort = authoritativeAgent ? desiredSteerBrain.effort : msg.effort;
-          const bound = sessionPromise;
+          const liveControlSession = peekThreadSession({ cli: steerCli, repoPath: steerRepo, chatId });
+          const bound = liveControlSession ? Promise.resolve(liveControlSession) : sessionPromise;
           // Register ownership before the FIFO wait so reconnects still see
           // this id as queued. Stop/Fresh can abort it even while it waits.
           waitKey = laneGenKey(steerCli, steerRepo, chatId);
@@ -2820,6 +2873,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
     shutdownAllCodexSessions();
     shutdownAllBananaSessions();
     setLanePushAll(null);
+    setFreshLifecycle(null);
     wss.close();
   };
 }

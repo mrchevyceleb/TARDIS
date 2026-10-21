@@ -748,3 +748,8 @@ span.desk-todo-text { cursor: default; }
 .desk-person-on:hover { text-decoration: underline; }
 .desk-person-on.is-quiet { cursor: default; opacity: 0.55; }
 .desk-pr-stale { font-weight: 400; opacity: 0.6; font-size: 12px; }
+
+/* The launcher has its own row outside the scroll area. */
+.desk-split:has(> .desk-chat-launcher) { flex-direction: column; }
+.desk-chat-launcher { flex: none; display: flex; justify-content: flex-end; padding: 12px max(16px, env(safe-area-inset-right, 0px)) max(12px, env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--r-line); background: var(--r-bg); }
+.desk-chat-launcher .desk-chat-fab { position: static; }
