@@ -1,3 +1,4 @@
+import { checkpointCeiling, checkpointDueError } from './checkpointDue.ts';
 // The Desk: "Needs you" todos for the owner plus a board of agent work.
 // Store: ~/.rivendell/desk.json (RIVENDELL_DESK_FILE overrides the path).
 //
@@ -79,7 +80,7 @@ export type DeskCard = {
   /** Silence is an event (card-baadaf A): every In progress / In QA card
    *  carries a check-in deadline set by the owner's last touch (create,
    *  move, or comment: 30 minutes out by default, or a written check-in
-   *  time in the comment honored up to 12 hours out). The hygiene tick
+   *  time within 30 minutes, or the quiet-hours morning checkpoint). The hygiene tick
    *  nudges the owner when it passes; 15 quiet minutes later it nudges the
    *  Chief. Only a new touch (a fresh nextCheckAt) clears the nudges. */
   nextCheckAt?: string;
@@ -89,6 +90,7 @@ export type DeskCard = {
    *  legitimate park (an overnight quiet-hours park) survives reloads while
    *  no deadline can suppress checks indefinitely. */
   nextCheckWritten?: boolean;
+  nextCheckWrittenByOwner?: boolean;
   nudgeAt?: string;
   escalatedAt?: string;
   createdBy?: DeskActor;
@@ -98,10 +100,8 @@ export type DeskCard = {
 /** The check-in window: every owner touch without a written time sets a
  *  deadline this far out, and no such touch can push it further. */
 export const CARD_NEXT_CHECK_MS = 30 * 60_000;
-/** A written next check-in time in a comment is honored up to this far out:
- *  long enough for an overnight quiet-hours park, never long enough to
- *  suppress checks on a live card indefinitely. */
-export const CARD_NEXT_CHECK_WRITTEN_MAX_MS = 12 * 60 * 60_000;
+/** Compatibility export; agent due times now use the shared 30-minute rule. */
+export const CARD_NEXT_CHECK_WRITTEN_MAX_MS = CARD_NEXT_CHECK_MS;
 /** Quiet time after the owner nudge before the Chief copy. */
 export const CARD_CHECK_ESCALATE_MS = 15 * 60_000;
 
@@ -237,7 +237,7 @@ export function parseWrittenNextCheck(text: string, nowMs: number): number | nul
   return found;
 }
 
-function touchCardNextCheck(card: DeskCard, nowIso: string, writtenNextCheckMs?: number | null): void {
+function touchCardNextCheck(card: DeskCard, nowIso: string, writtenNextCheckMs?: number | null, by?: DeskActor): void {
   // Archived cards carry no check state even in a live column: a PATCH or
   // comment on an archived card must not re-create a deadline.
   if (!card.archived && (card.column === 'in_progress' || card.column === 'in_qa')) {
@@ -246,17 +246,22 @@ function touchCardNextCheck(card: DeskCard, nowIso: string, writtenNextCheckMs?:
       // A written check-in time in the comment is honored, capped at the
       // written maximum so no comment can park a live card indefinitely:
       // parking until a stated time actually silences the card until then.
-      card.nextCheckAt = new Date(Math.min(writtenNextCheckMs, nowMs + CARD_NEXT_CHECK_WRITTEN_MAX_MS)).toISOString();
+      const error = by?.kind === 'owner' ? undefined : checkpointDueError(writtenNextCheckMs, nowMs);
+      if (error) throw new DeskError(409, error);
+      card.nextCheckAt = new Date(writtenNextCheckMs).toISOString();
+      if (by?.kind === 'owner') card.nextCheckWrittenByOwner = true; else delete card.nextCheckWrittenByOwner;
       card.nextCheckWritten = true;
     } else {
       card.nextCheckAt = new Date(nowMs + CARD_NEXT_CHECK_MS).toISOString();
       delete card.nextCheckWritten;
+      delete card.nextCheckWrittenByOwner;
     }
     delete card.nudgeAt;
     delete card.escalatedAt;
   } else {
     delete card.nextCheckAt;
     delete card.nextCheckWritten;
+    delete card.nextCheckWrittenByOwner;
     delete card.nudgeAt;
     delete card.escalatedAt;
   }
@@ -494,6 +499,7 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     columnSince: isoOr(raw.columnSince, updatedAt),
     ...(validIso(raw.nextCheckAt) ? { nextCheckAt: raw.nextCheckAt as string } : {}),
     ...(raw.nextCheckWritten === true ? { nextCheckWritten: true } : {}),
+    ...(raw.nextCheckWrittenByOwner === true ? { nextCheckWrittenByOwner: true } : {}),
     ...(validIso(raw.nudgeAt) ? { nudgeAt: raw.nudgeAt as string } : {}),
     ...(validIso(raw.escalatedAt) ? { escalatedAt: raw.escalatedAt as string } : {}),
   };
@@ -508,6 +514,7 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     // raw.archived, not card.archived: the copy onto card happens below.
     delete card.nextCheckAt;
     delete card.nextCheckWritten;
+    delete card.nextCheckWrittenByOwner;
     delete card.nudgeAt;
     delete card.escalatedAt;
   } else {
@@ -519,7 +526,9 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     // marker without a deadline is incoherent and drops. A missing deadline is
     // seeded; an existing one is capped.
     if (card.nextCheckWritten && !card.nextCheckAt) delete card.nextCheckWritten;
-    const cap = Date.parse(now) + (card.nextCheckWritten ? CARD_NEXT_CHECK_WRITTEN_MAX_MS : CARD_NEXT_CHECK_MS);
+    const lastComment = card.comments.at(-1);
+    if (card.nextCheckWritten && lastComment?.at === card.updatedAt && lastComment.author.kind === 'owner') card.nextCheckWrittenByOwner = true;
+    const cap = card.nextCheckWrittenByOwner ? Infinity : checkpointCeiling(Date.parse(now));
     if (!card.nextCheckAt) {
       const base = Math.min(Date.parse(updatedAt || now), Date.parse(now));
       card.nextCheckAt = new Date(base + CARD_NEXT_CHECK_MS).toISOString();
@@ -1146,7 +1155,7 @@ export async function commentCard(id: string, text: unknown, author: DeskActor):
     // quiet-hours park with a stated time stays silent until that time. It
     // also closes the commenter's open Matt asks (card-baadaf B: the card
     // touch is the close), best effort.
-    touchCardNextCheck(card, now, parseWrittenNextCheck(body, Date.parse(now)));
+    touchCardNextCheck(card, now, parseWrittenNextCheck(body, Date.parse(now)), author);
     return { card, comment };
   });
   // Only a live roster agent's card comment closes their asks, and only after
@@ -1359,6 +1368,7 @@ export function archiveCard(id: string, archived: boolean): Promise<DeskCard> {
       // nudge/escalation mark must not survive into an unarchive.
       delete card.nextCheckAt;
       delete card.nextCheckWritten;
+      delete card.nextCheckWrittenByOwner;
       delete card.nudgeAt;
       delete card.escalatedAt;
     } else {
