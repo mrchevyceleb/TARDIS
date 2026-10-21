@@ -428,6 +428,7 @@ const TOOLS = [
         cardId: { type: 'string' },
         choices: { type: 'array', items: { type: 'string', maxLength: 40 }, maxItems: 4, description: 'Pick-one options (1 to 4, each 40 characters max); an empty list goes back to Yes / No' },
         status: { type: 'string', enum: ['open', 'done'] },
+        note: { type: 'string', description: 'Required to close an unanswered item: how this exact item was resolved' },
       },
       required: ['id'],
       additionalProperties: false,
@@ -435,7 +436,7 @@ const TOOLS = [
   },
   {
     name: 'desk_todo_complete',
-    description: `Mark a Needs-you item done once it is resolved (${OWNER} answered, the login worked, it no longer matters). An optional note is added as a comment on the linked card.`,
+    description: `Mark a Needs-you item done once it is resolved (${OWNER} answered, the login worked, it no longer matters). If it has no saved answer, your name and a note explaining how this exact item was resolved are required and saved with it.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -621,6 +622,7 @@ function describeTodo(t) {
   const extra = [
     t.detail ? clipLine(t.detail, 200) : null,
     !t.answer && t.choices?.length ? `choices: ${t.choices.join(' / ')}` : null,
+    t.resolution ? `resolved by ${t.resolution.by.name}: ${t.resolution.note}` : null,
     t.answer ? `answered: ${[t.answer.choice ? `"${t.answer.choice}"` : null, t.answer.text ? clipLine(t.answer.text, 300) : null].filter(Boolean).join(' ')}` : null,
   ].filter(Boolean);
   return `- [${t.id}] (${t.priority}) ${t.title} · ${bits.join(' · ')}${extra.map((line) => `\n  ${line}`).join('')}`;
@@ -789,13 +791,14 @@ async function callTool(name, args, signal) {
     }
     if (name === 'desk_todo_update') {
       const patch = {};
-      for (const key of ['title', 'detail', 'due', 'priority', 'link', 'cardId', 'choices', 'status']) if (args[key] !== undefined) patch[key] = args[key];
+      for (const key of ['title', 'detail', 'due', 'priority', 'link', 'cardId', 'choices', 'status', 'note']) if (args[key] !== undefined) patch[key] = args[key];
       if (!Object.keys(patch).length) throw new Error('Nothing to change.');
+      if (args.status === 'done') patch.agent = self;
       const { todo } = await api(`/api/desk/todos/${encodeURIComponent(args.id)}`, { method: 'PATCH', body: JSON.stringify(patch) }, signal);
       return `Updated:\n${describeTodo(todo)}`;
     }
     if (name === 'desk_todo_complete') {
-      const { todo } = await post(`/api/desk/todos/${encodeURIComponent(args.id)}/complete`, {});
+      const { todo } = await post(`/api/desk/todos/${encodeURIComponent(args.id)}/complete`, { agent: self, note: args.note });
       let extra = '';
       if (args.note && todo.cardId) {
         try {

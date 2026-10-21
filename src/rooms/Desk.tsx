@@ -2,7 +2,7 @@
 // is working on (the Board). Agents write here through the team MCP; the room
 // polls so their updates land without a refresh.
 
-import { Check, ChevronDown, ChevronRight, ClipboardList, ExternalLink, Inbox, LayoutGrid, MessageSquare, Pencil, Plus, RotateCcw, Trash2, X } from 'lucide-react';
+import { AlertTriangle, Check, ChevronDown, ChevronRight, ClipboardList, ExternalLink, Inbox, LayoutGrid, MessageSquare, Pencil, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, MouseEvent } from 'react';
 import { DesktopAlertsButton } from '../components/NeedsYouBadge';
@@ -42,6 +42,7 @@ import {
   answerRecipient,
   canAnswer,
   errorText,
+  focusTodoAnswer,
   linkLabel,
   linkifyText,
   priorityClass,
@@ -303,7 +304,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
     const now = new Date().toISOString();
     try {
       await write(
-        () => (status === 'done' ? deskApi.completeTodo(todo.id) : deskApi.reopenTodo(todo.id)),
+        () => (status === 'done' ? deskApi.completeTodo(todo.id, todo.from.kind === 'owner' ? 'Completed on the Desk' : undefined) : deskApi.reopenTodo(todo.id)),
         (d) => ({
           ...d,
           todos: d.todos.map((t) => (t.id === todo.id
@@ -504,6 +505,7 @@ function TodoRow({
   answerable: boolean;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmReopen, setConfirmReopen] = useState(false);
   const timer = useRef(0);
   useEffect(() => () => window.clearTimeout(timer.current), []);
   // Just answered here: shown as answered in place until it leaves the list.
@@ -518,10 +520,13 @@ function TodoRow({
       answer={pending}
       phase={pending.phase}
       to={pending.to ?? recipient()}
-      onDismiss={pending.phase === 'undelivered' ? () => answers.dismiss(todo.id) : undefined}
+      error={pending.error}
+      onDismiss={pending.phase === 'undelivered' || pending.phase === 'conflict' || pending.phase === 'rejected' ? () => answers.dismiss(todo.id) : undefined}
     />
   ) : todo.answer ? (
     <AnsweredNote answer={todo.answer} phase={todo.answer.delivery === 'failed' ? 'failed' : undefined} to={recipient()} />
+  ) : todo.resolution && (todo.from.kind !== 'owner' || Boolean(todo.choices?.length)) ? (
+    <div className="desk-answered"><p className="desk-answered-line"><Check size={13} className="desk-answered-icon" aria-hidden="true" /><span className="desk-answered-text">Resolved by {todo.resolution.by.name}: <strong>{todo.resolution.note}</strong></span></p></div>
   ) : answerable && canAnswer(todo) ? (
     <AnswerBar todo={todo} answers={answers} />
   ) : null;
@@ -562,15 +567,26 @@ function TodoRow({
     <li data-todo-id={todo.id} className={`desk-todo ${priorityClass(todo.priority)}${isDone ? ' is-done' : ''}${pending ? ` is-answered is-${pending.phase}` : ''}${popping ? ' is-popping' : ''}${lit ? ' is-lit' : ''}${hasDetail ? ' has-detail' : ''}${open ? ' is-open' : ''}`}>
       <button
         type="button"
-        className="desk-check"
-        onClick={() => onStatus(todo, isDone ? 'open' : 'done')}
-        disabled={Boolean(pending)}
-        aria-label={pending ? `${todo.title} is answered` : isDone ? `Reopen ${todo.title}` : `Mark ${todo.title} done`}
-        title={pending ? 'Answered' : isDone ? 'Reopen' : 'Done'}
+        className={`desk-check${canAnswer(todo) ? ' is-question' : ''}`}
+        onClick={(event) => {
+          if (isDone) {
+            if (!confirmReopen) {
+              setConfirmReopen(true);
+              window.clearTimeout(timer.current);
+              timer.current = window.setTimeout(() => setConfirmReopen(false), 4000);
+            } else { setConfirmReopen(false); onStatus(todo, 'open'); }
+          }
+          else if (canAnswer(todo)) focusTodoAnswer(event.currentTarget);
+          else onStatus(todo, 'done');
+        }}
+        disabled={Boolean(pending) || (!isDone && canAnswer(todo) && !answerable)}
+        aria-label={pending ? `${todo.title} ${pending.phase === 'rejected' ? 'answer was not saved' : 'is answered'}` : isDone ? `${confirmReopen ? 'Confirm reopen' : 'Reopen'} ${todo.title}` : canAnswer(todo) ? `Answer ${todo.title}` : `Mark ${todo.title} done`}
+        title={pending ? (pending.phase === 'rejected' ? 'Answer was not saved' : 'Answered') : isDone ? (confirmReopen ? 'Tap again to clear the saved answer and reopen' : 'Reopen') : canAnswer(todo) ? 'Choose an answer' : 'Done'}
       >
-        <Check size={14} aria-hidden="true" />
+        {pending?.phase === 'rejected' ? <AlertTriangle size={14} aria-hidden="true" /> : canAnswer(todo) ? <MessageSquare size={14} aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}
       </button>
       <div className="desk-todo-body" onClick={onBodyClick}>
+        {confirmReopen ? <p className="desk-answer-error" role="status">Clear this saved answer and ask again? Tap the check once more.</p> : null}
         <div className="desk-todo-title">
           <span className="priority-dot" title={`${PRIORITY_LABEL[todo.priority]} priority`} />
           {hasDetail ? (

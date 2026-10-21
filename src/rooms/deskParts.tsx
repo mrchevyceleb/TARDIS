@@ -162,7 +162,17 @@ export function answerChoices(todo: Pick<DeskTodo, 'choices'>): string[] {
 /** Every open Needs-you item takes an answer (the server decides who hears it;
  *  the owner's own items may have nobody to tell). */
 export function canAnswer(todo: DeskTodo): boolean {
-  return todo.status === 'open';
+  return todo.status === 'open' && (todo.from.kind !== 'owner' || Boolean(todo.choices?.length));
+}
+
+/** Invite an answer visibly on pointer taps as well as keyboard focus. */
+export function focusTodoAnswer(button: HTMLButtonElement): boolean {
+  const bar = button.closest('li')?.querySelector<HTMLElement>('.desk-answer');
+  if (!bar) return false;
+  bar.classList.add('is-invited');
+  bar.focus();
+  window.setTimeout(() => bar.classList.remove('is-invited'), 1800);
+  return true;
 }
 
 /** Who hears the answer: the agent who asked, else the card's agent owner, else
@@ -173,7 +183,7 @@ export function answerRecipient(todo: DeskTodo, card: DeskCard | undefined, agen
   return agents.find((a) => a.id === 'chief-of-staff')?.name ?? 'your Chief of Staff';
 }
 
-export type PendingAnswer = TodoAnswerInput & { phase: 'sending' | 'sent' | 'undelivered'; to?: string };
+export type PendingAnswer = TodoAnswerInput & { phase: 'sending' | 'sent' | 'undelivered' | 'conflict' | 'rejected'; to?: string; error?: string };
 
 /** How long an answered row stays in the open list before it leaves. */
 const ANSWER_LINGER_MS = 1100;
@@ -219,7 +229,10 @@ export function useTodoAnswers(todos: DeskTodo[] | undefined) {
   }, [todos]);
 
   const setDraft = useCallback((id: string, text: string) => setDrafts((prev) => withEntry(prev, id, text || undefined)), []);
-  const dismiss = useCallback((id: string) => setPending((prev) => withEntry(prev, id, undefined)), []);
+  const dismiss = useCallback((id: string) => {
+    setPending((prev) => withEntry(prev, id, undefined));
+    setErrors((prev) => withEntry(prev, id, undefined));
+  }, []);
 
   const answer = useCallback(async (todo: DeskTodo, input: TodoAnswerInput) => {
     const choice = input.choice?.trim() || undefined;
@@ -243,8 +256,10 @@ export function useTodoAnswers(todos: DeskTodo[] | undefined) {
       const saved = result?.todo?.answer;
       const delivery = saved?.delivery ?? (result?.notified && !result.notified.delivered ? 'failed' : 'sent');
       const shown = saved ? { choice: saved.choice, text: saved.text } : { choice, text };
-      setDrafts((prev) => withEntry(prev, todo.id, undefined));
-      if (delivery === 'failed') {
+      if (!result?.conflict) setDrafts((prev) => withEntry(prev, todo.id, undefined));
+      if (result?.conflict) {
+        setPending((prev) => withEntry(prev, todo.id, { ...shown, phase: 'conflict' }));
+      } else if (delivery === 'failed') {
         setPending((prev) => withEntry(prev, todo.id, { ...shown, phase: 'undelivered', to: result?.notified?.to }));
       } else {
         setPending((prev) => withEntry(prev, todo.id, { ...shown, phase: 'sent' }));
@@ -254,8 +269,11 @@ export function useTodoAnswers(todos: DeskTodo[] | undefined) {
         }, ANSWER_LINGER_MS));
       }
     } catch (error) {
-      setPending((prev) => withEntry(prev, todo.id, undefined));
-      setErrors((prev) => withEntry(prev, todo.id, `Could not send it: ${errorText(error)}`));
+      const message = `Your answer was not saved: ${errorText(error)}`;
+      // Keep this attempted answer visible even if polling has already moved
+      // the question to Done. An error inside AnswerBar would disappear.
+      setPending((prev) => withEntry(prev, todo.id, { choice, text, phase: 'rejected', error: message }));
+      setErrors((prev) => withEntry(prev, todo.id, message));
     } finally {
       inflight.current.delete(todo.id);
     }
@@ -279,7 +297,7 @@ export function AnswerBar({ todo, answers, compact }: { todo: DeskTodo; answers:
     if (text) void answers.answer(todo, { text });
   };
   return (
-    <div className={`desk-answer${compact ? ' is-compact' : ''}`} role="group" aria-label={`Answer ${todo.title}`}>
+    <div className={`desk-answer${compact ? ' is-compact' : ''}`} role="group" tabIndex={-1} aria-label={`Answer ${todo.title}`}>
       <div className="desk-answer-choices">
         {answerChoices(todo).map((choice) => (
           <button
@@ -315,19 +333,20 @@ export function AnswerBar({ todo, answers, compact }: { todo: DeskTodo; answers:
 }
 
 /** What was answered, on a row that is leaving or in the Done list. */
-export function AnsweredNote({ answer, phase, to, onDismiss }: {
+export function AnsweredNote({ answer, phase, to, error, onDismiss }: {
   answer: TodoAnswerInput;
   phase?: PendingAnswer['phase'] | 'failed';
   to: string;
+  error?: string;
   onDismiss?: () => void;
 }) {
-  const warn = phase === 'undelivered' || phase === 'failed';
+  const warn = phase === 'undelivered' || phase === 'failed' || phase === 'conflict' || phase === 'rejected';
   return (
-    <div className={`desk-answered${phase ? ` is-${phase}` : ''}`} role={phase && phase !== 'failed' ? 'status' : undefined}>
+    <div className={`desk-answered${phase ? ` is-${phase}` : ''}`} role={phase === 'rejected' ? 'alert' : phase && phase !== 'failed' ? 'status' : undefined}>
       <p className="desk-answered-line">
-        <Check size={13} aria-hidden="true" className="desk-answered-icon" />
+        {phase === 'rejected' ? <AlertTriangle size={13} aria-hidden="true" /> : <Check size={13} aria-hidden="true" className="desk-answered-icon" />}
         <span className="desk-answered-text">
-          Answered: {answer.choice ? <strong>{answer.choice}</strong> : null}
+          {phase === 'rejected' ? 'Your answer: ' : 'Answered: '}{answer.choice ? <strong>{answer.choice}</strong> : null}
           {answer.choice && answer.text ? <span aria-hidden="true"> · </span> : null}
           {answer.text ? <q>{answer.text}</q> : null}
         </span>
@@ -336,7 +355,7 @@ export function AnsweredNote({ answer, phase, to, onDismiss }: {
       {warn ? (
         <p className="desk-answered-warn">
           <AlertTriangle size={13} aria-hidden="true" />
-          <span>Saved, but {to} was not told.</span>
+          <span>{phase === 'rejected' ? error ?? 'Your answer was not saved. Dismiss this notice to try again.' : phase === 'conflict' ? 'This was already answered. Your new answer was not saved. Reopen it to change the answer.' : `Saved, but ${to} was not told.`}</span>
           {onDismiss ? (
             <button type="button" className="desk-answered-ok" onClick={onDismiss} aria-label="Dismiss" title="Dismiss">
               <X size={13} aria-hidden="true" />

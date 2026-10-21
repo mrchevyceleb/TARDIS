@@ -29,6 +29,7 @@ export type DeskTodo = {
   /** Up to four one-tap answers the agent offered (Yes / No when absent). */
   choices?: string[];
   answer?: DeskAnswer;
+  resolution?: { note: string; at: string; by: DeskActor };
 };
 
 export type DeskComment = { id: string; author: DeskActor; text: string; at: string };
@@ -389,7 +390,7 @@ export type CommentNotice = { delivered: boolean; to?: string; reason?: string }
 
 export type TodoPatch = Partial<{ title: string; detail: string; due: string; priority: DeskPriority; link: string; cardId: string; status: 'open' | 'done' }>;
 export type TodoAnswerInput = { choice?: string; text?: string };
-export type TodoAnswerResult = { todo: DeskTodo; notified?: CommentNotice; duplicate?: boolean };
+export type TodoAnswerResult = { todo: DeskTodo; notified?: CommentNotice; duplicate?: boolean; conflict?: boolean };
 export type CardPatch = Partial<{ title: string; description: string; owner: string; project: string; priority: DeskPriority; links: string[]; column: DeskColumn }>;
 
 export const deskApi = {
@@ -398,7 +399,7 @@ export const deskApi = {
   // itself rides on the browser's same-origin fetch, which curl can't send.
   addTodo: (input: TodoPatch & { title: string }) => apiJson<{ todo: DeskTodo }>('/api/desk/todos', json('POST', { ...input, source: 'ui' })),
   updateTodo: (id: string, patch: TodoPatch) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}`, json('PATCH', patch)),
-  completeTodo: (id: string) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/complete`, json('POST', {})),
+  completeTodo: (id: string, note?: string) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/complete`, json('POST', note ? { note } : {})),
   reopenTodo: (id: string) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/reopen`, json('POST', {})),
   deleteTodo: (id: string) => apiJson<void>(`/api/desk/todos/${enc(id)}`, json('DELETE')),
   answerTodo: (id: string, input: TodoAnswerInput) => apiJson<TodoAnswerResult>(`/api/desk/todos/${enc(id)}/answer`, json('POST', { ...input, source: 'ui' })),
