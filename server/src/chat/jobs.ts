@@ -22,8 +22,9 @@ import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { STATE_DIR } from '../config.ts';
+import { ELROND_WORKSPACE_PATH, STATE_DIR } from '../config.ts';
 import { JsonStore } from '../lib/jsonStore.ts';
+import { backgroundAccountEnv } from '../lib/accountResolver.ts';
 import { inQuietHours, isQuietExemptLane, isQuietExemptWork } from '../lib/quietHours.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { listAgents } from './agents.ts';
@@ -230,7 +231,8 @@ export type CreateJobInput = {
 /** Start a job. Throws Error with a plain reason on bad input (the route maps
  *  it to 4xx). */
 export async function createJob(input: CreateJobInput): Promise<Job> {
-  if (!listAgents().some((a) => a.id === input.agentId)) throw new Error('unknown agentId');
+  const agent = listAgents().find((a) => a.id === input.agentId);
+  if (!agent) throw new Error('unknown agentId');
   if (typeof input.command !== 'string' || !input.command.trim()) throw new Error('command is required (a shell command)');
   const command = input.command.trim();
   if (command.length > 16_000) throw new Error('command is too long; put it in a script file and run that');
@@ -250,6 +252,7 @@ export async function createJob(input: CreateJobInput): Promise<Job> {
   }
   const timeoutMin = typeof input.timeoutMin === 'number' ? input.timeoutMin : DEFAULT_TIMEOUT_MIN;
 
+  const env = backgroundAccountEnv(ELROND_WORKSPACE_PATH, agent.name);
   const id = randomUUID();
   const short = id.slice(0, 8);
   const scoped = await canLaunchInScope();
@@ -294,8 +297,8 @@ export async function createJob(input: CreateJobInput): Promise<Job> {
   }
 
   const child = scoped
-    ? spawn('systemd-run', ['--user', '--scope', '--quiet', '--collect', '--expand-environment=no', '--unit', unit!, '/bin/bash', runPath(id)], { detached: true, stdio: 'ignore' })
-    : spawn('/bin/bash', [runPath(id)], { detached: true, stdio: 'ignore' });
+    ? spawn('systemd-run', ['--user', '--scope', '--quiet', '--collect', '--expand-environment=no', '--unit', unit!, '/bin/bash', runPath(id)], { detached: true, stdio: 'ignore', env })
+    : spawn('/bin/bash', [runPath(id)], { detached: true, stdio: 'ignore', env });
   child.unref();
   // Launch handshake: a spawn error, or a process that dies at once without an
   // exit record (systemd-run refusing the scope), never started. Do not claim
