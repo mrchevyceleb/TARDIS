@@ -68,20 +68,14 @@ commitmentsRouter.post('/add', asyncHandler(async (req, res) => {
   if ('error' in r) { res.status(r.status).json({ error: r.error }); return; }
   const dueText = typeof due === 'string' && due.trim() ? due : undefined;
   // The parsed instant is stored once, at add time: a relative display due
-  // never drifts with later reparsing. An unparseable due is never silent:
-  // the commitment is stored (it still shows in the seed), but the response
-  // says the sweeper cannot raise it, so the caller can restate the time.
+  // never drifts with later reparsing. Refuse an unparseable explicit due
+  // before saving, so an unmonitored time cannot bypass the checkpoint.
   const parsedAt = dueText ? parseDue(dueText) : undefined;
+  if (dueText && parsedAt == null) { res.status(409).json({ error: 'Use a clock time with a date for the checkpoint; nothing was saved.' }); return; }
   const dueAt = parsedAt ?? undefined;
   const result = addCommitment(r.id, typeof text === 'string' ? text : '', dueText, { dueAt });
   if (result.error) { res.status(409).json({ error: result.error }); return; }
-  res.json({
-    commitment: result.commitment,
-    ...(dueText && parsedAt === undefined ? {
-      monitorable: false,
-      note: 'The due text could not be parsed to a time, so the past-due sweep cannot raise it. Restate as a clock form like "6:40pm ET today" or "Wed Oct 14 10:00am ET", or clear and re-add it.',
-    } : {}),
-  });
+  res.json({ commitment: result.commitment });
 }));
 
 commitmentsRouter.post('/clear', asyncHandler(async (req, res) => {

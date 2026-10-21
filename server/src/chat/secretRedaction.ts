@@ -7,7 +7,19 @@ const REDACTED = '[redacted secret]';
  *  credential: INPUT_TOKEN_COUNT, MAX_TOKEN_LIMIT, RATE_LIMIT_SECRET_PATH.
  *  Matched against the prefix tail so these lines are never masked (the
  *  unquoted rule would otherwise erase the whole remainder of the line). */
-const NON_SECRET_NAME = /(?:COUNT|LIMIT|SIZE|WIDTH|HEIGHT|LENGTH|URL|URI|ORIGIN|HOST|PORT|NAME|TITLE|PATH|DIR|PREFIX|SUFFIX|TTL|TIMEOUT|ID|IDS|VERSION|TYPE|MODE|FORMAT|LABEL|TAG|FLAG|DEBUG|RETRIES?|NUM|CAP|BUDGET|WINDOW|EXPIRY|EXPIRES|AT|ON|IN|OF)[A-Z0-9_]*["']?\s*[:=]\s*$/;
+const DIMENSION_WORD = /COUNT|LIMIT|SIZE|WIDTH|HEIGHT|LENGTH|URL|URI|ORIGIN|HOST|PORT|NAME|TITLE|PATH|DIR|PREFIX|SUFFIX|TTL|TIMEOUT|ID|IDS|VERSION|TYPE|MODE|FORMAT|LABEL|TAG|FLAG|DEBUG|RETRIES?|NUM|CAP|BUDGET|WINDOW|EXPIRY|EXPIRES|AT|ON|IN|OF/;
+
+/** The dimension word must sit in the name's trailing all-caps run, which is
+ *  what the old end-anchored `DIMENSION[A-Z0-9_]*["']?\s*[:=]\s*$` test
+ *  meant. Scanned from the end: that regex retried every start position,
+ *  quadratic on a long hostile name. */
+function isNonSecretName(prefix: string): boolean {
+  let end = prefix.length;
+  while (end > 0 && /\W/.test(prefix[end - 1])) end--;
+  let start = end;
+  while (start > 0 && /[A-Z0-9_]/.test(prefix[start - 1])) start--;
+  return DIMENSION_WORD.test(prefix.slice(start, end));
+}
 const REDACTED_SENTINEL = 'RIVENDELL_REDACTED_SECRET_VALUE';
 
 function preserveFence(value: string): string {
@@ -81,36 +93,6 @@ function collectKnownSecretValues(): string[] {
   return out;
 }
 
-/** Classify an identifier once; never let a regex try every possible prefix
- * before each TOKEN/KEY word in a long snake-case tool result. */
-function secretIdentifier(name: string): boolean {
-  const upper = name.toUpperCase();
-  for (const match of upper.matchAll(/(?:^|_)(?:KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?=$|_)/g)) {
-    const suffix = upper.length - (match.index! + match[0].length);
-    // Preserve the original single-trailing-underscore non-match.
-    if (suffix === 0 || suffix >= 2) return true;
-  }
-  return false;
-}
-
-/** Scan prefixes independently of values. A non-secret assignment must not
- * consume a later secret assignment on the same line. */
-function redactNamedValues(text: string, structured: boolean): string {
-  const names = structured ? /\b([A-Z][A-Z0-9_]*)(["']?\s*:\s*)/gi : /\b([A-Z][A-Z0-9_]*)(\s*=\s*)/gi;
-  const value = /^(?:`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/;
-  const parts: string[] = [];
-  let cursor = 0;
-  for (let match; (match = names.exec(text));) {
-    if (!secretIdentifier(match[1]) || NON_SECRET_NAME.test(match[0])) continue;
-    const found = value.exec(text.slice(names.lastIndex));
-    if (!found) continue;
-    parts.push(text.slice(cursor, match.index), match[0], preserveFence(found[0]));
-    cursor = names.lastIndex + found[0].length;
-    names.lastIndex = cursor;
-  }
-  return parts.length ? parts.join('') + text.slice(cursor) : text;
-}
-
 /** Redact common credentials in prose, Markdown, env assignments, JSON/YAML,
  * command lines, URLs, and pasted key material. Idempotent by design. */
 export function redactSecrets(text: string): string {
@@ -170,8 +152,16 @@ export function redactSecrets(text: string): string {
       },
     )
     .replace(/\b(Bearer|Basic)(\s+)[A-Za-z0-9._~+/=-]{8,}/gi, (_all, scheme: string, gap: string) => `${scheme}${gap}${REDACTED}`)
-    // Scan once; classifying names must not backtrack over snake-case words.
-    .replace(/[\s\S]+/, value => redactNamedValues(value, false))
+    // Linear on hostile names (Oct 21: one 358-underscore tool line froze the
+    // event loop for good). The lookahead rejects a word with no "=" and value
+    // after it before any name parsing, so a miss costs one scan instead of
+    // one per keyword in the word, and the suffix is one optional `_…` run:
+    // the old repeated `(?:_[A-Z0-9_]+)*` could split an underscore run 2^n
+    // ways. Same matches as before.
+    .replace(
+      /(\b(?=[A-Z0-9_]+\s*=\s*[^\r\n])(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)?\s*=\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/gi,
+      (_all, prefix: string, value: string) => (isNonSecretName(prefix) ? _all : `${prefix}${preserveFence(value)}`),
+    )
     // A value under a secret-shaped UPPERCASE name in JSON/YAML/JS object
     // form: quotes and a colon instead of "=". The env rule above needs "=",
     // so `"VERCEL_API_KEY": "abc"` slipped, and the value is masked by its
@@ -181,8 +171,12 @@ export function redactSecrets(text: string): string {
     // The unquoted form masks the whole remainder of the line, like the
     // header rule: a secret-named YAML scalar can be a multi-word passphrase
     // ("PASSWORD: correct horse battery staple") and token-shape matching
-    // would leak most of it.
-    .replace(/[\s\S]+/, value => redactNamedValues(value, true))
+    // would leak most of it. Same lookahead and one-run suffix as the rule
+    // above.
+    .replace(
+      /(\b(?=[A-Z0-9_]+["']?\s*:\s*[^\r\n])(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)?["']?\s*:\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/g,
+      (_all, prefix: string, value: string) => (isNonSecretName(prefix) ? _all : `${prefix}${preserveFence(value)}`),
+    )
     .replace(
       /(\b(?:password|passcode|passwd|pwd|api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|bearer token|client[_ -]?secret|refresh[_ -]?token|private[_ -]?key|credential|cookie|session token|otp|one[- ]time (?:password|code)|verification code|recovery code)\b[^:\r\n=]{0,80}(?::|=)\s*)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/gi,
       (_all, prefix: string, value: string) => `${prefix}${preserveFence(value)}`,
