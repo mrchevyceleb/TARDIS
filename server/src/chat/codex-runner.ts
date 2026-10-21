@@ -1,4 +1,5 @@
-import { recordNativeCall, recordNativeSession, recordNativeCompact, recordNativeFailure } from './sessionMetrics.ts';
+import { recordNativeSession, recordNativeCompact, recordNativeFailure, recordNativeInterruption } from './sessionMetrics.ts';
+import { codexContextProxy } from './codexContextProxy.ts';
 import { prepareSessionStateDelta, resetSessionStateDelta } from './sessionContext.ts';
 import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 import { execFileSync, type ChildProcess, type ChildProcessByStdio } from 'node:child_process';
@@ -477,6 +478,7 @@ export class CodexSession {
     if (this.dead) return;
     const shouldEmitCancellation = this.busy;
     this.dead = true;
+    this.intentionalKill = true;
     this.nativeSteerReady = false;
     this.rejectNativeSteers(new Error('Codex session stopped'));
     const latestThreadId = this.threadId ?? latestThreadIdFromEvents(this.eventLog, this.cli, this.invalidatedThreadIds);
@@ -490,6 +492,11 @@ export class CodexSession {
     }
     await this.threadIdWrite.catch(() => undefined);
     if (shouldEmitCancellation) this.emitCancellationTurnEnd();
+  }
+
+  markServiceRestarting(signal: string): void {
+    this.intentionalKill = true;
+    recordNativeInterruption(this.chatId, 'codex', `TARDIS restart (${signal})`);
   }
 
   private persistThreadId(threadId: string): Promise<void> {
@@ -880,6 +887,21 @@ export class CodexSession {
       return;
     }
 
+    let contextProxy: Awaited<ReturnType<typeof codexContextProxy>>;
+    try {
+      contextProxy = await codexContextProxy({ lane: this.chatId, sessionId: () => this.threadId,
+        model: codexModel, resumed: this.resumedNative, harnessChars: this.harnessChars, harnessPhase: this.harnessPhase });
+    } catch {
+      cleanupImages(); this.busy = false;
+      this.emit({ type: 'error', message: 'The native Codex connection could not start. Try again.' });
+      this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
+      return;
+    }
+    if (this.dead) {
+      contextProxy.close(); cleanupImages(); this.emitCancellationTurnEnd(); return;
+    }
+    appServerArgs.push('-c', `openai_base_url=${JSON.stringify(contextProxy.baseUrl)}`);
+
     // The spawn reuses the account environment the guarded rollout-check
     // resolution above already captured: resolving again here could race an
     // account-config change between the check and the spawn (the check
@@ -1049,6 +1071,7 @@ export class CodexSession {
 
     let childTerminalHandled = false;
     child.on('close', async (code, signal) => {
+      contextProxy.close();
       if (childTerminalHandled) return;
       childTerminalHandled = true;
       flushStdout();
@@ -1127,6 +1150,7 @@ export class CodexSession {
     });
 
     child.on('error', (err) => {
+      contextProxy.close();
       if (childTerminalHandled) return;
       childTerminalHandled = true;
       flushStdout();
@@ -1250,8 +1274,8 @@ export class CodexSession {
       const u = ev.usage ?? {};
       const input = Number(u.input_tokens || 0);
       if (input > 0) this.lastNativeInput = input;
-      recordNativeCall({ lane: this.chatId, engine: 'codex', model: this.turnModel || '', sessionId: this.threadId || undefined,
-        input, cached: Number(u.cached_input_tokens || 0), output: Number(u.output_tokens || 0), harnessChars: this.harnessChars, harnessPhase: this.harnessPhase, resumed: this.resumedNative });
+      // The provider observer records each request with its start timestamp.
+      // These native notifications can arrive after compact for an older call.
       this.resumedNative = true;
       recordContextUsage(this.logKey, 'codex', ev.usage);
       return;
@@ -1455,6 +1479,7 @@ export function markBusyCodexLanesRestarting(signal: string): number {
   let marked = 0;
   for (const s of codexSessions.values()) {
     if (!s.isBusy()) continue;
+    s.markServiceRestarting(signal);
     try {
       const session = s as unknown as { logKey: string; reserveSeq(): number; cli: string };
       if (appendEventLogSync(session.logKey, {
