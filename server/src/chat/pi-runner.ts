@@ -48,7 +48,7 @@ import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiModeFor, zaiTurnOutcome, type ZaiMode } from './zaiQuota.ts';
-import { emptyTurnOrigin, noteTurnPeer, notifyHandoffSenders, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
+import { emptyTurnOrigin, noteTurnPeer, notifyHandoffSenders, PROVIDER_CONTINUE_EVENT, providerCutEventFields, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { longCallGateEnv } from './longCallGate.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { laneMcpServers, laneTagFor, shareBackgroundLaneEvent, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
@@ -750,7 +750,7 @@ export class PiSession {
 
     if (continuing) {
       this.emit({ type: 'turnStart' });
-      this.emit({ type: 'event', event: { type: PROVIDER_CONTINUE_EVENT, id: continuing.id, from: continuing.cut.from, to: continuing.cut.to, ...(continuing.origin.automation ? { automation: true } : {}), ts: Date.now() } });
+      this.emit({ type: 'event', event: { type: PROVIDER_CONTINUE_EVENT, id: continuing.id, ...providerCutEventFields(continuing.cut), ...(continuing.origin.automation ? { automation: true } : {}), ts: Date.now() } });
     } else if (opts.peerFrom) {
       noteTurnPeer(this.turnOrigin, opts.peerFrom, opts.peerFromRole, opts.peerText ?? text);
       if (isPersonMessage(opts)) this.replyWatch.arm();

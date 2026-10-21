@@ -1,20 +1,25 @@
-/** Automatic continue after GLM's model provider switches mid-turn.
+/** Automatic continue after a model provider cuts a running turn.
  *
- *  A GLM child freezes its provider (Z.ai coding plan or Fireworks) into its
- *  environment, so when the plan window closes under a running turn the turn
- *  fails and the child has to be replaced. The replacement used to wait for
- *  the NEXT send, so a teammate handoff or a routine that hit the wall just
- *  stopped, and nobody was told.
+ *  Two causes share one machine. A GLM child freezes its provider (Z.ai
+ *  coding plan or Fireworks) into its environment, so when the plan window
+ *  closes under a running turn the turn fails and the child has to be
+ *  replaced. An OpenRouter-family lane can be cut mid-response by the
+ *  provider itself: a retryable HTTP failure ends the turn as a failed
+ *  result, and an aborted response stream ends it as a normal-looking result
+ *  whose work never landed (on those lanes the tool call arrives in one
+ *  piece at the END of a response). Measured Oct 21 on Felix's lane: each
+ *  cut left it dark 12-31 minutes until a person noticed.
  *
- *  Now the runner that saw the cut schedules one automatic continue: once the
- *  old child has exited, the lane respawns on the new provider (resuming the
- *  same native session, see preferResumeAfterProviderCut) and gets a short
- *  "continue where you left off" prompt instead of a replay of the original
- *  message, so finished side effects are not redone. A human message already
- *  queued for the lane, or any other message that reaches it first, takes the
- *  turn instead and carries the same context (providerCutGuidance). A cut that
- *  cannot be continued leaves an unread notice and tells the teammate whose
- *  handoff did not run. */
+ *  The runner that saw the cut schedules one automatic continue: once the old
+ *  child has exited (an OpenRouter cut never lost it), the lane respawns on
+ *  the new provider if it must (resuming the same native session, see
+ *  preferResumeAfterProviderCut) and gets a short "continue where you left
+ *  off" prompt instead of a replay of the original message, so finished side
+ *  effects are not redone. A human message already queued for the lane, or
+ *  any other message that reaches it first, takes the turn instead and
+ *  carries the same context (providerCutGuidance). A cut that cannot be
+ *  continued leaves an unread notice and tells the teammate whose handoff
+ *  did not run. */
 
 import { randomUUID } from 'node:crypto';
 import type { CliKind, SeqEvent } from './runner.ts';
@@ -27,7 +32,10 @@ import { isBackgroundChatId } from './threadKey.ts';
  *  `_terminal_error` notice before it already says what happened. */
 export const PROVIDER_CONTINUE_EVENT = '_provider_continue';
 
-export type ProviderCut = { from: ZaiMode; to: ZaiMode };
+/** A GLM provider switch (`from`/`to`), or an OpenRouter-family engine whose
+ *  provider dropped the turn (`engine`). The marker rides the cut notice so
+ *  the next ordinary message carries the cut guidance (pendingProviderCut). */
+export type ProviderCut = { from: ZaiMode; to: ZaiMode } | { engine: 'openrouter' | 'openrouter2' };
 
 /** Who a turn was for, so a cut turn can be continued in the same role and a
  *  teammate whose handoff did not run can be told. */
@@ -64,11 +72,55 @@ export const PROVIDER_CONTINUE_PROMPT = [
   'Continue exactly where you left off. Work that already finished stays done: check your history and do not repeat tool calls or side effects that already happened.',
 ].join(' ');
 
+/** The continue prompt for the cut cause. An OpenRouter-family cut adds the
+ *  write-size rule, because that is what keeps the next attempt from dying
+ *  the same way: one oversized tool call outlasts the provider's response
+ *  cutoff (measured Oct 21 on Felix's lane: every 62 KB single Write since
+ *  1:18pm was cut at about 120s with nothing on disk; under 15 KB lands). */
+export function providerContinuePrompt(cut: ProviderCut): string {
+  if (!('engine' in cut)) return PROVIDER_CONTINUE_PROMPT;
+  return [
+    'The model provider dropped your last turn mid-response, so it ended before it finished.',
+    'Continue exactly where you left off. Work that already finished stays done: check your history and do not repeat tool calls or side effects that already happened.',
+    'Keep each Write or Edit under about 15 KB: build big files in pieces, or with a script run through job_start. One oversized tool call can outlast the provider\'s response cutoff and get cut off the same way again.',
+  ].join(' ');
+}
+
 const PROVIDER_CUT_GUIDANCE = [
   '<rivendell-provider-cut>',
   'Your previous turn was cut off by a model provider failure before it finished. Work that already finished stays done, so do not repeat tool calls or side effects that already happened. If that earlier work is unfinished, finish it along with this message.',
   '</rivendell-provider-cut>',
 ].join('\n');
+
+const OPENROUTER_CUT_GUIDANCE = [
+  '<rivendell-provider-cut>',
+  'Your previous turn was cut off by a model provider failure before it finished. Work that already finished stays done, so do not repeat tool calls or side effects that already happened. If that earlier work is unfinished, finish it along with this message.',
+  'Keep each Write or Edit under about 15 KB (build big files in pieces, or with a script run through job_start), so a single tool call cannot outlast the provider\'s response cutoff again.',
+  '</rivendell-provider-cut>',
+].join('\n');
+
+/** Who a cut belongs to, for the shared continue copy. A GLM cut is GLM moving
+ *  providers; an engine cut is that provider dropping the turn. */
+function cutWho(cut: ProviderCut): string {
+  return 'engine' in cut ? (cut.engine === 'openrouter' ? 'OpenRouter' : 'OpenRouter Personal') : 'GLM';
+}
+
+/** " on <provider>" for a GLM cut; empty for an engine cut (the provider is
+ *  already the who, so naming it twice reads wrong). */
+function cutOnWhere(cut: ProviderCut): string {
+  return 'engine' in cut ? '' : ` on ${cut.to === 'fireworks' ? 'Fireworks' : 'the Z.ai coding plan'}`;
+}
+
+/** "the switch" for a GLM cut; "the cut" for an engine cut. */
+function cutAfterWhat(cut: ProviderCut): string {
+  return 'engine' in cut ? 'the cut' : 'the switch';
+}
+
+/** The cut's identity for a PROVIDER_CONTINUE_EVENT: from/to for a GLM
+ *  provider switch, engine for an OpenRouter-family cut. */
+export function providerCutEventFields(cut: ProviderCut): { from: string; to: string } | { engine: string } {
+  return 'engine' in cut ? { engine: cut.engine } : { from: cut.from, to: cut.to };
+}
 
 type Seqish = { ev?: any } | null | undefined;
 
@@ -87,8 +139,9 @@ export function pendingProviderCut(events: ReadonlyArray<Seqish>): ProviderCut |
     if (type === 'assistant' || type === 'stream_event' || type === 'peer_delivery_accepted' || type === '_interrupted') return null;
     if (type === 'result' && inner.is_error !== true) return null;
     if (type === '_terminal_error' && inner.providerCut && typeof inner.providerCut === 'object') {
-      const { from, to } = inner.providerCut as { from?: unknown; to?: unknown };
+      const { from, to, engine } = inner.providerCut as { from?: unknown; to?: unknown; engine?: unknown };
       if ((from === 'plan' || from === 'fireworks') && (to === 'plan' || to === 'fireworks')) return { from, to };
+      if (engine === 'openrouter' || engine === 'openrouter2') return { engine };
       return null;
     }
   }
@@ -96,9 +149,12 @@ export function pendingProviderCut(events: ReadonlyArray<Seqish>): ProviderCut |
 }
 
 /** Context for the first ordinary message after a cut, so a human or teammate
- *  message that beats the automatic continue still finishes the cut work. */
+ *  message that beats the automatic continue still finishes the cut work. An
+ *  engine cut also carries the write-size rule (see providerContinuePrompt). */
 export function providerCutGuidance(events: ReadonlyArray<Seqish>): string {
-  return pendingProviderCut(events) ? PROVIDER_CUT_GUIDANCE : '';
+  const cut = pendingProviderCut(events);
+  if (!cut) return '';
+  return 'engine' in cut ? OPENROUTER_CUT_GUIDANCE : PROVIDER_CUT_GUIDANCE;
 }
 
 /** A respawn right after a cut resumes the native session even where the
@@ -196,6 +252,34 @@ function laneJobKey(job: { logKey: string; chatId: string }): string {
   return `${job.logKey}\0${job.chatId}`;
 }
 
+// ---- engine-cut budget --------------------------------------------------------
+
+/** At most this many OpenRouter-family continues per lane per window, so a
+ *  hard-down provider stops with the unread notice instead of retrying in a
+ *  loop. Only a continue that will actually run spends budget: a cut that
+ *  folds into a still-waiting job does not. */
+const OPENROUTER_CONTINUE_CAP = 4;
+const OPENROUTER_CONTINUE_WINDOW_MS = 20 * 60_000;
+const openRouterContinues = new Map<string, number[]>();
+
+/** Tests only. */
+export function resetProviderSwitchState(): void {
+  openRouterContinues.clear();
+}
+
+/** True when this lane may have another automatic continue right now. */
+export function openRouterContinueBudget(lane: { logKey: string; chatId: string }, now = Date.now()): boolean {
+  const stamps = (openRouterContinues.get(laneJobKey(lane)) ?? []).filter((t) => now - t < OPENROUTER_CONTINUE_WINDOW_MS);
+  openRouterContinues.set(laneJobKey(lane), stamps);
+  return stamps.length < OPENROUTER_CONTINUE_CAP;
+}
+
+/** Record one engine-cut continue that will actually run. Spent only when a
+ *  job is created, never when a cut folds into a still-waiting job. */
+export function spendOpenRouterContinue(lane: { logKey: string; chatId: string }, now = Date.now()): void {
+  openRouterContinues.set(laneJobKey(lane), [...(openRouterContinues.get(laneJobKey(lane)) ?? []), now]);
+}
+
 export function scheduleProviderContinue(request: ProviderContinueRequest): void {
   const existing = jobs.get(laneJobKey(request));
   // A job still waiting for its old child absorbs the new cut. One already
@@ -215,7 +299,10 @@ export function scheduleProviderContinue(request: ProviderContinueRequest): void
   const job: Job = { ...request, origin, cancelled: false, started: false };
   jobs.set(laneJobKey(request), job);
   runningJobs.add(job);
-  console.warn(`[chat ${request.cli}] provider switched mid-turn on ${request.logKey} (${request.cut.from} -> ${request.cut.to}); continuing automatically`);
+  if ('engine' in job.cut) spendOpenRouterContinue(job);
+  console.warn(`[chat ${request.cli}] provider ${'engine' in request.cut
+    ? `cut this turn on ${request.logKey} (${request.cut.engine})`
+    : `switched mid-turn on ${request.logKey} (${request.cut.from} -> ${request.cut.to})`}; continuing automatically`);
   void runJob(job).finally(() => {
     runningJobs.delete(job);
     if (jobs.get(laneJobKey(job)) === job) jobs.delete(laneJobKey(job));
@@ -234,8 +321,7 @@ export function markPendingProviderContinuesInterrupted(): number {
     jobs.delete(laneJobKey(job));
     if (noted.has(job.logKey)) continue;
     noted.add(job.logKey);
-    const label = job.cut.to === 'fireworks' ? 'Fireworks' : 'the Z.ai coding plan';
-    const event = providerCutNoticeEvent(`TARDIS restarted before GLM could continue on ${label}. Send again to continue.`, job.cut, { unread: true });
+    const event = providerCutNoticeEvent(`TARDIS restarted before ${cutWho(job.cut)} could continue${cutOnWhere(job.cut)}. Send again to continue.`, job.cut, { unread: true });
     try {
       const written = appendEventLogSync(job.logKey, { seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event', event }, eng: job.cli, mdl: job.model });
       if (written) marked += 1;
@@ -345,13 +431,14 @@ function waitForBoundaryOrDelay(session: ContinuableSession | null, timeoutMs: n
 }
 
 async function runJob(job: Job): Promise<void> {
-  const label = job.cut.to === 'fireworks' ? 'Fireworks' : 'the Z.ai coding plan';
+  const who = cutWho(job.cut);
+  const onWhere = cutOnWhere(job.cut);
   try {
     const retired = await waitForRetirement(job);
     if (job.cancelled) return;
     job.started = true;
     if (!retired) {
-      await stopJob(job, `Background work kept the old GLM session busy too long to continue on ${label}. Send again to continue.`, 'GLM could not switch providers while background work held its old session');
+      await stopJob(job, `Background work kept the old session busy too long for ${who} to continue${onWhere}. Send again to continue.`, `${who} could not continue${onWhere} while background work held its old session`);
       return;
     }
     const runner = await import('./runner.ts');
@@ -368,7 +455,7 @@ async function runJob(job: Job): Promise<void> {
       if (state === 'stopped') {
         // The turn that took the lane was cut too and nothing will finish it;
         // its notice is already on the thread. Tell this cut's teammates.
-        await notifyHandoffSenders(job.chatId, job.origin, 'GLM\'s model provider failed again before the work could continue');
+        await notifyHandoffSenders(job.chatId, job.origin, `${who}'s model provider failed again before the work could continue`);
         return;
       }
       if (state !== 'pending') {
@@ -378,7 +465,7 @@ async function runJob(job: Job): Promise<void> {
       const live = (session?.isAlive() ? session : null) ?? (runner.liveLaneSession(job.logKey, job.chatId) as unknown as ContinuableSession | null);
       if (humanQueued(job.logKey) || live?.isBusy()) {
         if (Date.now() >= deadline) {
-          await stopJob(job, `GLM could not continue on ${label}: the thread stayed busy too long. Send again to continue.`, `GLM could not continue on ${label} while the thread stayed busy`);
+          await stopJob(job, `${who} could not continue${onWhere}: the thread stayed busy too long. Send again to continue.`, `${who} could not continue${onWhere} while the thread stayed busy`);
           return;
         }
         await waitForBoundaryOrDelay(live, 2_000);
@@ -392,7 +479,7 @@ async function runJob(job: Job): Promise<void> {
           // exited wins over the continue; the next message goes to the new brain.
           const brain = brainForAgent(agent);
           if (cliForAgentEngine(brain.engine) !== job.cli) {
-            await stopJob(job, `This thread switched brains before GLM could continue on ${label}. Send again to continue.`, 'the agent switched brains before GLM could continue');
+            await stopJob(job, `This thread switched brains before ${who} could continue${onWhere}. Send again to continue.`, `the agent switched brains before ${who} could continue`);
             return;
           }
           model = brain.model ?? model;
@@ -421,7 +508,7 @@ async function runJob(job: Job): Promise<void> {
         if (outer.event?.type === 'peer_delivery_accepted' && outer.event.deliveryId === id) accepted = true;
       }, target.latestSeq(), false);
       try {
-        await target.send(PROVIDER_CONTINUE_PROMPT, undefined, {
+        await target.send(providerContinuePrompt(job.cut), undefined, {
           providerContinue: { id, origin: job.origin, cut: job.cut },
           peerDeliveryId: id,
         });
@@ -433,14 +520,14 @@ async function runJob(job: Job): Promise<void> {
       // write. Watch that one instead (bounded, so a runner that keeps
       // declining without going busy cannot spin this loop).
       if (!echoed && ++writes < 3) continue;
-      await stopJob(job, `GLM could not continue on ${label}. Send again to continue.`, `GLM could not continue on ${label} after the switch`);
+      await stopJob(job, `${who} could not continue${onWhere}. Send again to continue.`, `${who} could not continue${onWhere} after ${cutAfterWhat(job.cut)}`);
       return;
     }
   } catch (err) {
     if (job.cancelled) return;
     const message = (err as Error)?.message ?? String(err);
     console.warn(`[chat ${job.cli}] automatic continue on ${job.logKey} failed: ${message}`);
-    await stopJob(job, `GLM could not restart on ${label} to continue (${message.slice(0, 160)}). Send again to continue.`, `GLM could not restart on ${label} to continue`);
+    await stopJob(job, `${who} could not restart${onWhere} to continue (${message.slice(0, 160)}). Send again to continue.`, `${who} could not restart${onWhere} to continue`);
   }
 }
 

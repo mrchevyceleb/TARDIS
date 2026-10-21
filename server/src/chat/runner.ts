@@ -55,7 +55,7 @@ import { openRouterCapability, openRouterContextWindow, openRouterMaxOutput, res
 import { plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
 import { AgySession, AGY_READY_TIMEOUT_MS } from './agy-runner.ts';
 import { AGY_LANE_EFFORT, AGY_LANE_MODEL, resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
-import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
+import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, openRouterContinueBudget, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutEventFields, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import type { PiSession } from './pi-runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, REPLY_NUDGE_NOTE_TOOL, replyNowText, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
 
@@ -568,12 +568,24 @@ export function laneTagFor(chatId: string): { lane?: 'bg' } {
   return isBackgroundChatId(chatId) ? { lane: 'bg' } : {};
 }
 
-type ZaiCutDecision = { outcome: ZaiTurnOutcome; cut: ProviderCut; origin: TurnOrigin };
+/** What a cut turn does next, with the turn's origin snapshotted. Shared by
+ *  the GLM provider-switch decision and the OpenRouter-family cut decision. */
+type LaneCutDecision = { outcome: ZaiTurnOutcome; cut: ProviderCut; origin: TurnOrigin };
 
 /** A teammate's handoff may pause a working turn at most this often, so a burst
  *  of handoffs cannot starve the agent of any uninterrupted work. A person's
  *  message is never held off. */
 const PEER_BOUNDARY_INTERRUPT_GAP_MS = 60_000;
+
+/** Lanes whose tool calls arrive in one piece at the END of a response, so a
+ *  tool boundary is never a safe interrupt point for a queued peer message:
+ *  the CLI has already begun the next response (30-90s to its first frame),
+ *  and the boundary interrupt discards that in-flight generation, minutes of
+ *  work per message, with nothing ever landing (measured Oct 21 on Felix's
+ *  lane: every turn cut at a boundary re-attempted the same doomed write). A
+ *  person's message still interrupts on these lanes: person-first, and a
+ *  person waits for no tool boundary anywhere. */
+const ONE_PIECE_TOOL_CALL_CLIS: ReadonlySet<CliKind> = new Set(['openrouter', 'openrouter2']);
 
 /** How long a scheduled, wake- or job-result-started (automation) turn runs
  *  before a teammate's handoff may end it at a tool boundary. Tim's
@@ -1432,8 +1444,7 @@ class ClaudeSession {
         event: {
           type: PROVIDER_CONTINUE_EVENT,
           id: continuing.id,
-          from: continuing.cut.from,
-          to: continuing.cut.to,
+          ...providerCutEventFields(continuing.cut),
           ...(continuing.origin.automation ? { automation: true } : {}),
           ts: Date.now(),
         },
@@ -2282,7 +2293,7 @@ class ClaudeSession {
 
   /** GLM only: what a failed turn does next, with the turn's origin
    *  snapshotted, or null when the provider had nothing to do with it. */
-  private zaiCutOutcome(heldForBackground: boolean): ZaiCutDecision | null {
+  private zaiCutOutcome(heldForBackground: boolean): LaneCutDecision | null {
     if (this.cli !== 'zai') return null;
     const cut: ProviderCut = { from: this.zaiMode, to: zaiModeFor(this.spawnModel) };
     const outcome = zaiTurnOutcome(this.spawnModel, {
@@ -2295,17 +2306,59 @@ class ClaudeSession {
     return { outcome, cut, origin: { peers: [...origin.peers], human: origin.human, automation: origin.automation } };
   }
 
-  private zaiCutTerminal(terminal: TerminalProviderError, decision: ZaiCutDecision): TerminalProviderError {
-    const message = decision.outcome.message ?? terminal.message;
+  /** OpenRouter-family lanes only: what a provider-cut turn does next. Two
+   *  cuts reach here. 'provider': a retryable provider failure ended the
+   *  turn as a failed result. 'aborted': the provider dropped the response
+   *  stream itself and the CLI closed the turn as a normal-looking result
+   *  whose work never landed (on these lanes the tool call arrives in one
+   *  piece at the END of a response, so a mid-stream cut lands nothing on
+   *  disk). Same continue machinery as a GLM provider switch, bounded per
+   *  lane, so the teammate keeps working instead of going dark until someone
+   *  notices (Oct 21: 12-31 minutes per cut on Felix's lane). Null when the
+   *  failure has its own handling (usage limit, context length, auth) or is
+   *  not retryable. */
+  private openRouterCutOutcome(cause: 'provider' | 'aborted', terminal: TerminalProviderError | null): LaneCutDecision | null {
+    const cli = this.cli;
+    if (cli !== 'openrouter' && cli !== 'openrouter2') return null;
+    if (cause === 'provider' && (terminal?.retryable !== true || terminal.usageLimit || terminal.contextLength === true)) return null;
+    const origin = this.turnOrigin ?? emptyTurnOrigin();
+    const snapshot = { peers: [...origin.peers], human: origin.human, automation: origin.automation };
+    if (!openRouterContinueBudget({ logKey: this.logKey, chatId: this.chatId })) {
+      return {
+        outcome: {
+          kind: 'stopped',
+          message: 'OpenRouter kept cutting this lane\'s turns, so the automatic continue stopped instead of retrying in a loop. Send again in a few minutes or switch brains.',
+          reason: 'OpenRouter cut this lane\'s turns too many times in a row',
+        },
+        cut: { engine: cli },
+        origin: snapshot,
+      };
+    }
+    return {
+      outcome: {
+        kind: 'continue',
+        message: cause === 'aborted'
+          ? 'OpenRouter cut this turn\'s response mid-generation (its tool call never landed), so TARDIS is continuing it automatically.'
+          : 'OpenRouter dropped this turn mid-generation, so TARDIS is continuing it automatically.',
+      },
+      cut: { engine: cli },
+      origin: snapshot,
+    };
+  }
+
+  private laneCutTerminal(terminal: TerminalProviderError | null, decision: LaneCutDecision, fallbackCode: string): TerminalProviderError {
+    const message = decision.outcome.message ?? terminal?.message ?? '';
     return decision.outcome.kind === 'continue'
-      ? { message, code: 'provider_switch' }
-      : { ...terminal, message, retryable: true };
+      ? { message, code: fallbackCode }
+      : terminal
+        ? { ...terminal, message, retryable: true }
+        : { message, code: fallbackCode, retryable: true };
   }
 
   /** `continuing` renders the notice as a switch; `unread` badges a cut that
    *  nothing will finish on its own. `providerCut` lets the next turn (and
    *  its respawn) know the cut is still open. */
-  private zaiCutNoticeFields(decision: ZaiCutDecision): Record<string, unknown> {
+  private laneCutNoticeFields(decision: LaneCutDecision): Record<string, unknown> {
     return decision.outcome.kind === 'continue'
       ? { providerCut: decision.cut, continuing: true }
       : { providerCut: decision.cut, unread: true };
@@ -2313,7 +2366,7 @@ class ClaudeSession {
 
   /** After the cut turn's boundary: queue its one automatic continue, or tell
    *  the teammate whose handoff it was that it did not run. */
-  private afterZaiCut(decision: ZaiCutDecision, noticeSeq: number): void {
+  private afterProviderCut(decision: LaneCutDecision, noticeSeq: number): void {
     if (decision.outcome.kind === 'continue') {
       scheduleProviderContinue({
         cli: this.cli,
@@ -2567,6 +2620,12 @@ class ClaudeSession {
           // hold a message back.
           if (this.hasInterruptHazard() && !this.hazardOverrideActive) {
             this.boundaryInterruptWanted = false;
+          } else if (this.boundaryHumanWaiters === 0 && ONE_PIECE_TOOL_CALL_CLIS.has(this.cli)) {
+            // Same stand-down for one-piece-tool-call lanes (see
+            // ONE_PIECE_TOOL_CALL_CLIS): the CLI has already begun the next
+            // response at this boundary, so the queued peer message takes the
+            // next turn at turn end instead of discarding it.
+            this.boundaryInterruptWanted = false;
           } else if (
             (this.boundaryHumanWaiters > 0 || now - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS)
             // A teammate's handoff may end an automation (scheduled, wake- or
@@ -2585,6 +2644,10 @@ class ClaudeSession {
             setImmediate(() => {
               if (this.turnStartedAt === null || this.turnStartedAt !== turn || this.disposed) return;
               if (this.boundaryWaiters === 0) return;
+              // The human waiter released before this ran and only peers
+              // remain on a one-piece-tool-call lane: same stand-down as the
+              // outer check, so the in-flight generation is not discarded.
+              if (this.boundaryHumanWaiters === 0 && ONE_PIECE_TOOL_CALL_CLIS.has(this.cli)) { this.boundaryInterruptWanted = false; return; }
               // Another tool started before this ran: the request still stands.
               if (this.activeToolIds.size > 0) { this.boundaryInterruptWanted = true; return; }
               // A background subagent can also have started between the outer
@@ -2782,21 +2845,37 @@ class ClaudeSession {
     const zaiStale = this.cli === 'zai' && ev?.type === 'result'
       && zaiModeFor(this.spawnModel) !== this.zaiMode;
     // A failed GLM turn the provider cut: continue it automatically on the new
-    // provider, or say plainly that nothing will. Decided (and the turn's
-    // origin snapshotted) before turnEnd, whose subscribers may admit the next
-    // turn synchronously.
+    // provider, or say plainly that nothing will. An OpenRouter-family lane
+    // gets the same decision for its own cut (a retryable provider failure);
+    // the aborted-stream cut below is decided after this. Decided (and the
+    // turn's origin snapshotted) before turnEnd, whose subscribers may admit
+    // the next turn synchronously.
     const zaiCut = terminal && this.turnStartedAt !== null ? this.zaiCutOutcome(zaiStale && this.hasBackgroundWork()) : null;
-    let zaiCutNoticeSeq = 0;
+    // A failed compaction has its own recovery (recoverNative below), so it
+    // never rides the provider-cut continue.
+    const orProviderCut = !zaiCut && !compactFailed && terminal && this.turnStartedAt !== null ? this.openRouterCutOutcome('provider', terminal) : null;
+    // The sneaky cut: a normal-looking result whose response stream the
+    // provider aborted mid-generation. On these lanes the tool call arrives
+    // in one piece at the END of a response, so the cut lands nothing on disk
+    // and the turn ends as if it succeeded (Oct 21: every oversized single
+    // Write on Felix's lane died this way and the lane went dark).
+    const orAbortedCut = !orProviderCut && terminal === null && this.turnStartedAt !== null
+      && ev?.type === 'result' && !expectedUserInterrupt && ev.terminal_reason === 'aborted_streaming'
+      ? this.openRouterCutOutcome('aborted', null) : null;
+    const orCut = orProviderCut ?? orAbortedCut;
+    let cutNoticeSeq = 0;
     if (terminal) {
       // Never persist the raw failed result: provider payloads can include
       // request metadata or echoed prompt fragments. The normalized notice is
       // the durable transcript record; turnEnd below remains the boundary.
       this.emitTerminalNotice(
-        zaiCut ? this.zaiCutTerminal(terminal, zaiCut) : terminal,
+        zaiCut ? this.laneCutTerminal(terminal, zaiCut, 'provider_switch')
+          : orProviderCut ? this.laneCutTerminal(terminal, orProviderCut, 'openrouter_cut')
+          : terminal,
         this.syntheticApiErrorSeen,
-        zaiCut ? this.zaiCutNoticeFields(zaiCut) : undefined,
+        (zaiCut ?? orProviderCut) ? this.laneCutNoticeFields(zaiCut ?? orProviderCut!) : undefined,
       );
-      zaiCutNoticeSeq = this.nextSeq - 1;
+      cutNoticeSeq = this.nextSeq - 1;
       if (usageFallbackDue) {
         this.emit({
           type: 'event',
@@ -2821,6 +2900,17 @@ class ClaudeSession {
       }
     } else {
       this.emit({ type: 'event', event: ev });
+      // The aborted-stream cut has no failed result to hang its notice on:
+      // post it right after the normal result event, marked as a cut the
+      // continue machinery owns (an unread one badges it if it gave up).
+      if (orAbortedCut) {
+        this.emitTerminalNotice(
+          this.laneCutTerminal(null, orAbortedCut, 'aborted_streaming'),
+          false,
+          this.laneCutNoticeFields(orAbortedCut),
+        );
+        cutNoticeSeq = this.nextSeq - 1;
+      }
     }
     this.flushReplyNow();
     if ((ev?.type === 'assistant' && !syntheticApiError) || ev?.type === 'result') {
@@ -2858,9 +2948,9 @@ class ClaudeSession {
           ? this.zaiCutOutcome(zaiModeFor(this.spawnModel) !== this.zaiMode && this.hasBackgroundWork())
           : null;
         this.emitTerminalNotice(
-          authCut ? this.zaiCutTerminal(authTerminal, authCut) : authTerminal,
+          authCut ? this.laneCutTerminal(authTerminal, authCut, 'provider_switch') : authTerminal,
           true,
-          authCut ? this.zaiCutNoticeFields(authCut) : undefined,
+          authCut ? this.laneCutNoticeFields(authCut) : undefined,
         );
         const authCutNoticeSeq = this.nextSeq - 1;
         // This one dies mid-turn, so no `result` is coming to close it out.
@@ -2877,7 +2967,7 @@ class ClaudeSession {
           this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
         }
         this.failAuth();
-        if (authCut) this.afterZaiCut(authCut, authCutNoticeSeq);
+        if (authCut) this.afterProviderCut(authCut, authCutNoticeSeq);
       } else {
         const attempt = ev.attempt ? ` (attempt ${ev.attempt}/${ev.max_retries ?? '?'})` : '';
         this.emit({ type: 'error', message: `API ${ev.error} ${ev.error_status}${attempt} — retrying…`, code: String(ev.error_status), retryable: true });
@@ -2941,7 +3031,8 @@ class ClaudeSession {
       // its completion wakes a turn here, and that turn's result retires it.
       if (authFailPending) this.failAuth();
       else if (zaiStale && !this.hasBackgroundWork()) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
-      if (zaiCut) this.afterZaiCut(zaiCut, zaiCutNoticeSeq);
+      if (zaiCut) this.afterProviderCut(zaiCut, cutNoticeSeq);
+      if (orCut) this.afterProviderCut(orCut, cutNoticeSeq);
     }
   }
 }
