@@ -223,13 +223,12 @@ export function parseDue(due: string, now: Date = new Date()): number | null {
 
 /** Work gets a near checkpoint, even when the whole job takes longer. */
 export const WORK_CHECKPOINT_MS = 30 * 60_000;
-// Enforce promised work, not every clock in an agent's progress report.
-const FUTURE_INTENT = /\b(?:I|we)(?:'ll| will| shall| plan to| aim to| expect to)\b|\b(?:will|shall|should|ETA|next (?:update|check[ -]?in|checkpoint)|first look|new time|back to you)\b/i;
-const WORK_LEAD = /^\s*(?:(?:please|then)\s+)?(?:send|ship|finish|fix|deliver|complete|update|report|result|proof|checkpoint|check[ -]?in|deliver(?:ing)|finish(?:ing)|send(?:ing)|ship(?:ping))\b|^\s*(?:ready|done)\s+(?:by|at|in|within)\b|^\s*(?:by|before|due)\s+(?:\d|noon|midnight|tomorrow|tonight|[a-z]+day)\b/i;
-const PAST_CONTEXT = /\b(?:was|were|had|already|since|yesterday|previous|last check[ -]?in|last checkpoint)\b|^\s*done\s+(?:today|tonight|yesterday)\s*:/i;
-const CALENDAR_DURATION = /\b(?:meeting|webinar|maintenance|event|appointment|flight|cache|token|timeout|retention|CI)\b/i;
+const FUTURE_INTENT = /\b(?:I|we)(?:'ll| will| shall| plan to| aim to| expect to)\b|\b(?:will|shall|should|ETA|next (?:update|check[ -]?in|checkpoint)|first look|first proof|new time|back to you)\b/i;
+const WORK_LEAD = /^\s*(?:(?:please|then)\s+)?(?:(?:full|first|next|final)\s+)?(?:send|ship|finish|fix|deliver|complete|update|report|results?|proof|rewrite|checkpoint|check[ -]?in|delivering|finishing|sending|shipping|expect|back|give me)\b|^\s*(?:ready|done)\s+(?:by|at|in|within)\b|^\s*(?:by|before|due)\s+(?:\d|noon|midnight|tomorrow|tonight|[a-z]+day)\b|^\s*first thing in the morning\b/i;
+const PAST_CONTEXT = /\b(?:was|were|had|already|since|yesterday|previous|last check[ -]?in|last checkpoint)\b|^\s*done\s+(?:today|tonight|yesterday)\s*:|^\s*before today\b/i;
+const CALENDAR_DURATION = /\b(?:meeting|webinar|maintenance|event|appointment|flight|cache|token|timeout|retention|CI|cron|schedule)\b/i;
 const NUMBER_WORDS = '(?:a couple of|couple(?: of)?|a few|few|several|half(?: an?)?|quarter(?: of an?)?|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|hundred)';
-const RELATIVE_WORK = new RegExp(`\\b(?:in|within|ETA|checkpoint|takes?)\\s+(?:(?:about|the next)\\s+|~\\s*)?(\\d+(?:\\.\\d+)?|${NUMBER_WORDS})\\s*(minutes?|mins?|m|hours?|hrs?|h|days?|weeks?)\\b`, 'gi');
+const RELATIVE_WORK = new RegExp(`\\b(?:in|within|ETA\\s*:?|checkpoint|takes?|give me)\\s+(?:(?:about|the next)\\s+|~\\s*)?(\\d+(?:\\.\\d+)?|${NUMBER_WORDS})\\s*(minutes?|mins?|m|hours?|hrs?|h|days?|weeks?)\\b`, 'gi');
 const NUMBER_VALUES: Record<string, number> = {a:1,an:1,one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10,eleven:11,twelve:12,thirteen:13,fourteen:14,fifteen:15,sixteen:16,seventeen:17,eighteen:18,nineteen:19,twenty:20,thirty:30,forty:40,fifty:50,sixty:60,seventy:70,eighty:80,ninety:90,hundred:100};
 function relativeMs(value: string, unit: string): number {
   const word=value.toLowerCase();
@@ -237,75 +236,123 @@ function relativeMs(value: string, unit: string): number {
   return n * (/^w/i.test(unit)?604_800_000:/^d/i.test(unit)?86_400_000:/^h/i.test(unit)?3_600_000:60_000);
 }
 function relativeDue(due:string, nowMs:number):number|null {
+  const clean=due.trim();
+  const compound=/^(?:in\s+)?(\d+)\s*h(?:ours?)?\s*(\d+)\s*m(?:in(?:ute)?s?)?$/i.exec(clean);
+  if(compound) return nowMs+Number(compound[1])*3_600_000+Number(compound[2])*60_000;
   const re=new RegExp(`^(?:${RELATIVE_WORK.source})$`,'i');
-  const m=re.exec(due.trim()) ?? re.exec('in '+due.trim());
+  const m=re.exec(clean) ?? re.exec('in '+clean);
   return m?nowMs+relativeMs(m[1],m[2]):null;
 }
 export function relativeCheckpointTime(text: string, nowMs: number): number | null {
   const clean = text.trim().replace(/^(?:is\b|:)\s*/i, '');
+  const compound=/^(?:in|within)\s+(\d+\s*h\s*\d+\s*m)\b/i.exec(clean);
+  if(compound) return relativeDue(compound[1],nowMs);
   const match = new RegExp(RELATIVE_WORK.source, 'i').exec(clean);
   return match?.index === 0 ? nowMs + relativeMs(match[1], match[2]) : null;
 }
-function promisesWork(clause:string):boolean {
+
+/** A real overnight park resumes at the next 5am. Only the end-of-day
+ * park window qualifies; saying "quiet hours" at midday cannot extend work. */
+export function quietParkResume(text: string, nowMs: number): number | null {
+  const wall=wallInZone(new Date(nowMs));
+  if ((wall.h >= 5 && wall.h < 21) || !/\bquiet[ -]hours\b/i.test(text) || !/\b(?:park(?:ed|ing)?|stop(?:ped|ping)?|resum(?:e|ing))\b/i.test(text)) return null;
+  const nextDay=new Date(Date.UTC(wall.y,wall.m0,wall.d+(wall.h>=21?1:0)));
+  return instantInZone(nextDay.getUTCFullYear(),nextDay.getUTCMonth(),nextDay.getUTCDate(),5,0);
+}
+
+const CLAUSE_BREAK = /[.!?;]\s+|\n+|,\s+(?=(?:I\b|we\b|next\b|rest\b|done\b|then\b))/i;
+function workClauses(text:string):string[] { return text.replace(/[’‘]/g,"'").split(CLAUSE_BREAK).map(s=>s.trim()).filter(Boolean); }
+
+/** Validate only newly written clauses on an edit. Unchanged owner deadlines
+ * and historical notes must survive an agent appending its own checkpoint. */
+export function addedWorkText(before:string|undefined, after:unknown):string {
+  if(typeof after!=='string' || after===before) return '';
+  const old=workClauses(before??'');
+  const norm=(s:string)=>s.replace(/\s+/g,' ').trim().replace(/[.!?;]+$/,'');
+  return workClauses(after).flatMap(clause=>{
+    const previous=old.find(s=>norm(s)===norm(clause));
+    if(previous!==undefined) return [];
+    // Appending a note on the same line leaves the existing text intact too.
+    const prefix=old.find(s=>clause.startsWith(s) && /^\s|^[,;:]/.test(clause.slice(s.length)));
+    if (!prefix) return [clause];
+    const added=clause.slice(prefix.length).trim();
+    // A qualifier such as 'tomorrow' changes the existing promise. Keep its
+    // subject and verb instead of treating the new date as an isolated fact.
+    const changesTime=/\b(?:tomorrow|tonight|morning|afternoon|evening|week|month|by|before|at|in|within|\d{1,2}(?::\d{2})?\s*(?:am|pm))\b/i.test(added);
+    return [changesTime && !FUTURE_INTENT.test(added) && !WORK_LEAD.test(added) ? clause : added];
+  }).join('\n');
+}
+
+function promisesWork(clause:string, now:Date):boolean {
+  const ownFuture=/\b(?:I|we)(?:'ll| will| shall| plan to| aim to| expect to)\b/i.test(clause);
   const explicitFuture=FUTURE_INTENT.test(clause);
-  if (!explicitFuture && PAST_CONTEXT.test(clause)) return false;
-  if (/^\s*(?:Matt|Kim)(?:'s)?\b/i.test(clause) && !/\b(?:I|we)(?:'ll| will| shall)\b/i.test(clause)) return false;
-  if (CALENDAR_DURATION.test(clause) && !/\b(?:finish|ship|fix|deliver|complete|result|update|proof|checkpoint)\b/i.test(clause)) return false;
+  if (/^\s*(?:I|we)\s+(?:will not|won't|cannot|can't)\b/i.test(clause)) return false;
+  if (!ownFuture && (/^\s*(?:Matt|Kim)(?:'s)?\b|\b(?:Matt|Kim)'s deadline\b/i.test(clause) || /^\s*waiting on\b|^\s*(?!This\b|It\b)[A-Z][a-z]+(?:'s)?\s+(?:will|plans to|needs to)\b/i.test(clause))) return false;
+  if (!explicitFuture && (PAST_CONTEXT.test(clause) || /^\s*(?:ship|release|deploy)\s+note\s*:/i.test(clause) || /\b(?:passed|merged|went fine|went well)\b/i.test(clause))) return false;
+  if (!explicitFuture && /^\s*(?:done|ready)\s+at\s+/i.test(clause)) {
+    const clock=clause.match(/\b(?:at)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i)?.[1];
+    if(clock) {
+      const forms=/(am|pm)/i.test(clock)?[clock]:[clock+'am',clock+'pm'];
+      const past=forms.some(c=>{const t=resolveClock('', 'today', c, now);return t!==null && t<=now.getTime();});
+      if(past) return false;
+    }
+  }
+  if (CALENDAR_DURATION.test(clause) && !/\b(?:finish|ship|fix|deliver|complete|results?|update|proof|checkpoint)\b/i.test(clause)) return false;
   return explicitFuture || WORK_LEAD.test(clause);
 }
 
-export function workTimingError(text: string, due?: string, dueAt?: number, nowMs = Date.now()): string | undefined {
-  const now = new Date(nowMs);
-  const instants: number[] = [];
-  const explicit = due?.trim();
-  if (explicit) {
-    const parsed = parseDue(explicit, now);
-    if (parsed === null) return 'Nothing saved. Give a clear checkpoint within 30 minutes, such as "in 15 minutes" or an Eastern clock time.';
+function workInstants(clause:string, now:Date):number[] {
+  const nowMs=now.getTime(), instants:number[]=[];
+  for(const match of clause.matchAll(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})\b/gi)) { const at=Date.parse(match[0]);if(Number.isFinite(at))instants.push(at); }
+  for(const match of clause.matchAll(RELATIVE_WORK)) instants.push(nowMs+relativeMs(match[1],match[2]));
+  for(const match of clause.matchAll(/\b(?:in|within|ETA\s*:?)\s+(\d+)\s*h(?:ours?)?\s*(\d+)\s*m(?:in(?:ute)?s?)?\b/gi)) instants.push(nowMs+Number(match[1])*3_600_000+Number(match[2])*60_000);
+  const bare=/^\s*(?:back|back to you)\s+in\s+(\d+)\s*$/i.exec(clause.replace(/[.!]$/,''));
+  if(bare) instants.push(nowMs+Number(bare[1])*60_000);
+  if(/\bat the top of the hour\b/i.test(clause)) { const w=wallInZone(now);instants.push(nowMs+((60-w.min)*60_000)-(nowMs%60_000)); }
+  const pairs=/\b(?:by|before|due|at|around|ETA|checkpoint|first look|next update|check[ -]?in|ready|finish|deliver|ship)\b\s*(?:(?:by|at|about|around)\s*|:\s*)?(noon|midnight|(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:am|pm)?)(?![\d:]|\.\d)\b/gi;
+  for(const match of clause.matchAll(pairs)) {
+    if(!/(?:am|pm)|:|noon|midnight/i.test(match[1]) && /^(?:finish|deliver|ship|ready)\b/i.test(match[0]))continue;
+    if(!/(?:am|pm)|:|noon|midnight/i.test(match[1]) && !/^(?:(?:ET|EDT|EST)\b|today\b|tomorrow\b|tonight\b|[.,!?]|$)/i.test(clause.slice((match.index??0)+match[0].length).trim())) continue;
+    let clock=match[1].trim().toLowerCase().replace(/\s+/g,'');
+    if(clock==='noon')clock='12pm';if(clock==='midnight')clock='12am';
+    if(!/(?:am|pm)$/.test(clock)) {
+      const [h,m=0]=clock.split(':').map(Number);
+      if(h>12||h===0)clock=`${h%12||12}:${String(m).padStart(2,'0')}${h>=12?'pm':'am'}`;
+      else clock=['am','pm'].map(mer=>`${h}:${String(m).padStart(2,'0')}${mer}`).sort((a,b)=>(resolveClock('',undefined,a,now)??Infinity)-(resolveClock('',undefined,b,now)??Infinity))[0];
+    }
+    const days=[...clause.matchAll(DAY_ALL)].filter(d=>!/^'s\b/.test(clause.slice((d.index??0)+d[0].length)) && (!MONTHS.includes(d[1].toLowerCase().slice(0,3)) || /^\s+\d{1,2}\b/.test(clause.slice((d.index??0)+d[0].length))));
+    days.sort((a,b)=>Math.abs((a.index??0)-(match.index??0))-Math.abs((b.index??0)-(match.index??0)));
+    const at=resolveClock(clause,days[0]?.[1],clock,now);if(at!==null)instants.push(at);
+  }
+  return instants;
+}
+
+export function workTimingError(text:string,due?:string,dueAt?:number,nowMs=Date.now()):string|undefined {
+  const now=new Date(nowMs),instants:number[]=[];
+  if(due?.trim()) {
+    const parsed=parseDue(due,now);
+    if(parsed===null)return 'Nothing saved. Give a clear checkpoint within 30 minutes, such as "in 15 minutes" or an Eastern clock time.';
     instants.push(parsed);
   }
-  if (typeof dueAt === 'number' && Number.isFinite(dueAt)) instants.push(dueAt);
-  // Promise detection for enforcement intentionally does not use the scanner's
-  // high-precision third-person/negation filters: "This will..." and "Don't
-  // worry, I'll..." are still commitments. Each clause has its own tense.
-  for (const clause of text.replace(/[’‘]/g, "'").split(/[.!?;]\s+|\n+|,\s+(?=(?:I\b|we\b|next\b|rest\b|done\b|then\b))/i)) {
-    if (!promisesWork(clause)) continue;
-    for (const match of clause.matchAll(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})\b/gi)) {
-      const at = Date.parse(match[0]);
-      if (Number.isFinite(at)) instants.push(at);
-    }
-    for (const match of clause.matchAll(RELATIVE_WORK)) instants.push(nowMs + relativeMs(match[1], match[2]));
-    const clockPairs = /\b(?:by|before|due|at|ETA|checkpoint|first look|next update|check[ -]?in|ready|finish|deliver|ship)\b\s*(?:(?:by|at|about|around)\s*|:\s*)?(noon|midnight|(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:am|pm)?)(?![\d:]|\.\d)\b/gi;
-    for (const match of clause.matchAll(clockPairs)) {
-      if (!/(?:am|pm)|:|noon|midnight/i.test(match[1]) && /^(?:finish|deliver|ship|ready)\b/i.test(match[0])) continue;
-      if (!/(?:am|pm)|:|noon|midnight/i.test(match[1]) && !/^(?:(?:ET|EDT|EST)\b|today\b|tomorrow\b|tonight\b|[.,!?]|$)/i.test(clause.slice((match.index ?? 0) + match[0].length).trim())) continue;
-      let clock = match[1].trim().toLowerCase().replace(/\s+/g, '');
-      if (clock === 'noon') clock = '12pm';
-      if (clock === 'midnight') clock = '12am';
-      if (!/(?:am|pm)$/.test(clock)) {
-        const [h, m = '0'] = clock.split(':').map(Number);
-        if (h > 12 || h === 0) clock = `${h % 12 || 12}:${String(m).padStart(2, '0')}${h >= 12 ? 'pm' : 'am'}`;
-        else {
-          const forms = ['am','pm'].map(mer => `${h}:${String(m).padStart(2, '0')}${mer}`);
-          clock = forms.sort((a,b)=>(resolveClock('',undefined,a,now) ?? Infinity)-(resolveClock('',undefined,b,now) ?? Infinity))[0];
-        }
-      }
-      const days = [...clause.matchAll(DAY_ALL)].filter(d => {
-        const after = clause.slice((d.index ?? 0) + d[0].length);
-        if (/^'s\b/.test(after)) return false;
-        return !MONTHS.includes(d[1].toLowerCase().slice(0, 3)) || /^\s+\d{1,2}\b/.test(after);
-      });
-      days.sort((a,b)=>Math.abs((a.index ?? 0)-(match.index ?? 0))-Math.abs((b.index ?? 0)-(match.index ?? 0)));
-      const day = days[0]?.[1];
-      const at = resolveClock(clause, day, clock, now);
-      if (at !== null) instants.push(at);
-    }
-    if (/\b(?:tomorrow|tonight|EOD|this (?:afternoon|evening)|later today|end of (?:the )?(?:day|week|month)|next (?:week|month)|sunday|monday|tuesday|wednesday|thursday|friday|saturday|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2})\b/i.test(clause)
-        && !clockPairs.test(clause)) {
-      return 'Nothing saved. Give the next concrete result a clear time within 30 minutes, rather than a later day or an open-ended deadline.';
-    }
+  if(typeof dueAt==='number'&&Number.isFinite(dueAt))instants.push(dueAt);
+  const clauses=workClauses(text);
+  const nearCheckpoint=clauses.some(c=>/\b(?:next update|first (?:look|proof)|check[ -]?in|checkpoint)\b/i.test(c) && workInstants(c,now).some(t=>t>=nowMs&&t<=nowMs+WORK_CHECKPOINT_MS));
+  for(const clause of clauses) {
+    if(!promisesWork(clause,now))continue;
+    if(nearCheckpoint && /\b(?:will|should) take\b|\b(?:build|render|job|migration) (?:takes|needs)\b/i.test(clause) && !/\b(?:finish|deliver|ship|complete)\b/i.test(clause))continue;
+    const times=workInstants(clause,now);instants.push(...times);
+    if(!times.length && /\b(?:tomorrow|tonight|EOD|COB|this (?:afternoon|evening|week)|later today|after lunch|(?:the |this )?weekend|(?:first thing )?in the morning|end of (?:the )?(?:day|week|month)|next (?:week|month)|on the \d{1,2}(?:st|nd|rd|th)|sunday|monday|tuesday|wednesday|thursday|friday|saturday|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2})\b/i.test(clause)) return 'Nothing saved. Give the next concrete result a clear time within 30 minutes, rather than a later day or an open-ended deadline.';
   }
-  if (instants.some(at => at - nowMs > WORK_CHECKPOINT_MS)) {
-    const latest = new Intl.DateTimeFormat('en-US', {timeZone:'America/New_York', hour:'numeric', minute:'2-digit'}).format(new Date(nowMs + WORK_CHECKPOINT_MS));
+  const resume=quietParkResume(text,nowMs);
+  if(resume!==null && instants.length) {
+    if(instants.some(at=>at<resume||at>resume+WORK_CHECKPOINT_MS)) return 'Nothing saved. For a quiet-hours park, set the first checkpoint between 5:00 and 5:30am ET, after work resumes.';
+    return undefined;
+  }
+  if(instants.some(at=>at-nowMs>WORK_CHECKPOINT_MS)) {
+    const wall=wallInZone(now);
+    const stop=instantInZone(wall.y,wall.m0,wall.d,22,0);
+    const limit=wall.h<22&&wall.h>=5?Math.min(nowMs+WORK_CHECKPOINT_MS,stop):nowMs+WORK_CHECKPOINT_MS;
+    const latest=new Intl.DateTimeFormat('en-US',{timeZone:ZONE,hour:'numeric',minute:'2-digit'}).format(new Date(limit));
     return `Nothing saved. That time is more than 30 minutes away. Give the next concrete result by ${latest} ET or sooner, then continue the larger job.`;
   }
   return undefined;

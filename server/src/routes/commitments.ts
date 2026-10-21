@@ -77,7 +77,7 @@ commitmentsRouter.post('/add', asyncHandler(async (req, res) => {
     commitment: result.commitment,
     ...(dueText && parsedAt === undefined ? {
       monitorable: false,
-      note: 'The due text could not be parsed to a time, so the past-due sweep cannot raise it. Restate as a clock form like "6:40pm ET today" or "Wed Oct 14 10:00am ET", or clear and re-add it.',
+      note: 'The due text could not be parsed to a time, so the past-due sweep cannot raise it. Restate as "in 15 minutes" or an Eastern clock within 30 minutes, or clear and re-add it.',
     } : {}),
   });
 }));

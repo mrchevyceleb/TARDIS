@@ -212,8 +212,8 @@ const TOOLS = [
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['add', 'clear', 'list'], description: 'add a commitment, clear one by id, or list yours' },
-        text: { type: 'string', description: 'One line, plain text, e.g. "Reply owed to Paula on the 3am tags" or "Restart TARDIS 4:00pm ET, prove with a round-trip"' },
-        due: { type: 'string', description: 'Optional short time, e.g. "4:00pm ET today"' },
+        text: { type: 'string', description: 'One line, plain text, e.g. "Reply owed to Paula on the 3am tags" or "Show the checked result in 15 minutes"' },
+        due: { type: 'string', description: 'Optional checkpoint within 30 minutes, e.g. "in 15 minutes"' },
         id: { type: 'string', description: 'The commitment id to clear (from your list)' },
         from: { type: 'string', description: 'Your own teammate identity: your roster id for add/clear (run list first, it shows your id), or your exact name for list. Only needed on engines whose tool server carries no identity (banana); TARDIS has already identified you everywhere else.' },
       },
