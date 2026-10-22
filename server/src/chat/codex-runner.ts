@@ -17,7 +17,7 @@ import { computerGuidance, computerOwnerKey } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
-import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
+import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, durableUserEchoClientMsgId, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './crashTombstone.ts';
 import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeqWithStatus, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
@@ -637,21 +637,23 @@ export class CodexSession {
           });
               }
       } else {
-        this.emit({
-          type: 'event',
-          event: {
-            type: '_user_echo', startsTurn: false,
-            text: opts.echoText ?? text,
-            imageCount: images?.length ?? 0,
-            attachments: steerAttachments,
-            clientMsgId: opts.clientMsgId,
-            humanOrigin: opts.humanOrigin === true,
-            ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
-            ts: Date.now(),
-          },
-        });
-        noteUserTurn(this.logKey);
-        noteAgentLane(this.chatId, this.cli);
+        if (!opts.clientMsgId || !durableUserEchoClientMsgId(this.logKey, opts.clientMsgId)) {
+          this.emit({
+            type: 'event',
+            event: {
+              type: '_user_echo', startsTurn: false,
+              text: opts.echoText ?? text,
+              imageCount: images?.length ?? 0,
+              attachments: steerAttachments,
+              clientMsgId: opts.clientMsgId,
+              humanOrigin: opts.humanOrigin === true,
+              ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+              ts: Date.now(),
+            },
+          });
+          noteUserTurn(this.logKey);
+          noteAgentLane(this.chatId, this.cli);
+        }
         this.replyWatch.arm();
       }
       return;
@@ -687,21 +689,29 @@ export class CodexSession {
       await flushEventLog(this.logKey);
       if (opts.signal?.aborted) { this.busy = false; return; }
     }
+    let echoed = false;
     const echoInput = () => {
+      if (echoed) return;
+      echoed = true;
       if (opts.peerFrom && !opts.suppressEcho) {
         this.emit({ type: 'turnStart' });
         // The peer echo waits for actual provider acceptance below.
         if (isPersonMessage(opts)) this.replyWatch.arm();
       } else if (!opts.suppressEcho) {
-        this.emit({
-          type: 'event',
-          event: { type: '_user_echo', startsTurn: true, text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
-        });
-        noteUserTurn(this.logKey);
-        noteAgentLane(this.chatId, this.cli);
+        if (!opts.clientMsgId || !durableUserEchoClientMsgId(this.logKey, opts.clientMsgId)) {
+          this.emit({
+            type: 'event',
+            event: { type: '_user_echo', startsTurn: true, text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
+          });
+          noteUserTurn(this.logKey);
+          noteAgentLane(this.chatId, this.cli);
+        }
         this.replyWatch.arm();
       }
     };
+    // Human input belongs to the durable conversation before slow preparation
+    // or an early startup failure. A selection retry reuses this one echo.
+    if (!opts.peerFrom) echoInput();
 
     try {
       assertMemoryAvailableForSpawn('codex');

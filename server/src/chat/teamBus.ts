@@ -160,7 +160,7 @@ type ActiveInboundChain = TeamChain & { deliveryId: string; at: number };
 // inherit that collaboration's route automatically. Repeating a directed edge
 // closes a real loop; merely having a long route never blocks legitimate work.
 const activeInboundChains = new Map<string, ActiveInboundChain>();
-const requestRoots = new JsonStore<{ id: string; chainId: string; admittedSeq: number }>('message-request-roots.json', []);
+const requestRoots = new JsonStore<{ id: string; chainId: string; admittedSeq: number; deliveryId?: string }>('message-request-roots.json', []);
 const requestRootWrites = new Map<string, Promise<unknown>>();
 
 type QueuedTeamDelivery = StoredRecord & {
@@ -311,7 +311,7 @@ function activateInboundChain(
   const key = chainKey(recipientId, lane);
   const active: ActiveInboundChain = { ...chain, deliveryId, at: Date.now() };
   activeInboundChains.set(key, active);
-  const write = requestRoots.modify(items => [...items.filter(item => item.id !== key), { id: key, chainId: chain.id, admittedSeq }]);
+  const write = requestRoots.modify(items => [...items.filter(item => item.id !== key), { id: key, chainId: chain.id, admittedSeq, deliveryId }]);
   requestRootWrites.set(key, write);
   void write.catch(() => console.warn('[messages] request identity will retry'));
   let unsubscribe: (() => void) | null = null;
@@ -2320,7 +2320,7 @@ async function outboundRequest(agent: Pick<Agent, 'id'>, lane: AgentLane): Promi
   const events = (await loadEventLogTail(key)).events.filter(event => !foreignLaneEvent(event, lane));
   for (const event of events.reverse()) {
     const inner = event.ev?.type === 'event' ? event.ev.event : undefined;
-    if (inner?.type === 'peer_delivery_accepted' && inner.deliveryId) return root && root.admittedSeq <= event.seq ? root.chainId : identity(`${key}|peer:${inner.deliveryId}`);
+    if (inner?.type === 'peer_delivery_accepted' && inner.deliveryId) return root && root.deliveryId === inner.deliveryId ? root.chainId : identity(`${key}|peer:${inner.deliveryId}`);
     if (inner?.type === '_user_echo') return identity(`${key}|user:${inner.clientMsgId ?? `${event.at ?? 0}:${event.seq}`}`);
   }
   return identity(`${key}|no-input`);

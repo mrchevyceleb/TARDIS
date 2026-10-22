@@ -18,7 +18,7 @@ import { redactComputerImages } from '../devices/transcript.ts';
 import { getSessionId, setSessionId, setSessionSelection, nativeSessionProvenance } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession, peekCodexSession, activeCodexSessions, publishCodexExternalEvent } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions, publishBananaExternalEvent } from './banana-runner.ts';
-import { appendEventLog, appendEventLogDurable, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
+import { appendEventLog, appendEventLogDurable, appendEventLogSync, clearEventLog, compactEventLog, durableUserEchoClientMsgId, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
 import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
 import { CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKEN_BUDGET, NATIVE_COMPACT_MARGIN, contextRotationDue, contextTokens, learnContextLimit, providerContextBudget, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { bareChatId } from './threadKey.ts';
@@ -1580,35 +1580,27 @@ class ClaudeSession {
           },
         });
       } else {
-        if (!startsNewTurn && this.activeToolIds.size === 0) {
-          throw new Error('the native steering window closed before delivery');
+        if (!opts.clientMsgId || !durableUserEchoClientMsgId(this.logKey, opts.clientMsgId)) {
+          this.emit({
+            type: 'event',
+            event: {
+              type: '_user_echo', startsTurn: startsNewTurn,
+              text: opts.echoText ?? text,
+              imageCount: images?.length ?? 0,
+              attachments,
+              clientMsgId: opts.clientMsgId,
+              humanOrigin: opts.humanOrigin === true,
+              ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+              ts: Date.now(),
+            },
+          });
+          noteUserTurn(this.logKey); // forever-thread compaction cadence (monotonic)
+          noteAgentLane(this.chatId, this.cli); // historical lane diagnostics
         }
-        this.emit({
-          type: 'event',
-          event: {
-            type: '_user_echo', startsTurn: startsNewTurn,
-            text: opts.echoText ?? text,
-            imageCount: images?.length ?? 0,
-            attachments,
-            clientMsgId: opts.clientMsgId,
-            humanOrigin: opts.humanOrigin === true,
-            ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
-            ts: Date.now(),
-          },
-        });
-        noteUserTurn(this.logKey); // forever-thread compaction cadence (monotonic)
-        noteAgentLane(this.chatId, this.cli); // historical lane diagnostics
         (this.turnOrigin ??= emptyTurnOrigin()).human = true;
         this.watchReply().arm();
       }
     };
-    if (visionNote) {
-      console.log(`[chat ${this.cli}] vision adapter: ${visionNote}`);
-      this.emit({
-        type: 'event',
-        event: { type: '_vision_adapter', images: images!.length, note: visionNote, ts: Date.now() },
-      });
-    }
     // The model occasionally drops the body when a user message is
     // `/<skill> <body>` and invokes the Skill tool with empty args. Wrap any
     // body in `<command-args>` so the args are structurally obvious before the
@@ -1687,7 +1679,14 @@ class ClaudeSession {
         return;
       }
       assertSelectedEngine(this.chatId, this.cli);
+      if (!startsNewTurn && this.activeToolIds.size === 0) {
+        throw Object.assign(new Error('the native steering window closed before delivery'), { notAdmitted: true });
+      }
       echoInput();
+      if (visionNote) {
+        console.log(`[chat ${this.cli}] vision adapter: ${visionNote}`);
+        this.emit({ type: 'event', event: { type: '_vision_adapter', images: images!.length, note: visionNote, ts: Date.now() } });
+      }
       if (startsNewTurn) {
         this.preparingTurnAborter = null;
         this.turnPromptSubmitted = true;
@@ -1711,7 +1710,7 @@ class ClaudeSession {
         if (seed) this.pendingSeedAck = true;
       }
     } catch (e) {
-      if (isSelectedEngineChanged(e)) {
+      if (isSelectedEngineChanged(e) || (e as { notAdmitted?: boolean }).notAdmitted) {
         abandonUnsentTurn();
         throw e;
       }
@@ -1727,7 +1726,7 @@ class ClaudeSession {
         this.turnPromptSubmitted = false;
         this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
       }
-      this.emit({ type: 'error', message: `stdin write failed: ${(e as Error).message}` });
+      this.emit({ type: 'error', message: 'Your message could not reach the model. Your saved conversation is safe; please try again.' });
     }
   }
 
@@ -1908,6 +1907,8 @@ class ClaudeSession {
   }
 
   isHandingOver(): boolean { return this.nativeHandoverPending === true; }
+
+  nativeTurnActive(): boolean { return this.turnStartedAt !== null; }
 
   nativeHandoverRevision(): number { return this.nativeStopGeneration; }
 
@@ -3386,12 +3387,21 @@ async function getOrCreateSessionUnlocked(opts: {
       const sourceEngine = previous?.cli && nativeEngine(previous.cli);
       const targetEngine = nativeEngine(opts.cli);
       if (previous?.sessionId && previous.cli && sourceEngine !== targetEngine) {
-        const live = sourceEngine === 'codex'
+        let live = sourceEngine === 'codex'
           ? peekCodexSession({ repoPath: opts.repoPath, chatId, cli: previous.cli })
           : peekClaudeSession({ cli: previous.cli, repoPath: opts.repoPath, chatId });
         if (live?.isBusy()) throw new Error('The current turn is finishing. Your next turn will use the model you selected.');
+        if (live instanceof ClaudeSession) markHandover(live);
+        const assertHandoverSafe = () => {
+          const active = live instanceof ClaudeSession ? live.nativeTurnActive() : live?.isBusy();
+          if (active || isThreadResetting(opts) || [...handoverRevisions].some(([source, revision]) => source.nativeHandoverRevision() !== revision)) {
+            throw Object.assign(new Error('The previous turn is still finishing or was stopped. Your history and queued message are safe; the switch will wait.'), { handoverBlocked: true });
+          }
+        };
         const savedConversation = async (): Promise<string> => {
+          assertHandoverSafe();
           await flushEventLog(logKeyFor(previous.cli!, opts.repoPath, chatId));
+          assertHandoverSafe();
           const turns = extractVisibleTurns(loadEventLogSync(logKeyFor(previous.cli!, opts.repoPath, chatId)).events).slice(-50);
           const recent: string[] = [];
           let remaining = 60_000;
@@ -3403,21 +3413,26 @@ async function getOrCreateSessionUnlocked(opts: {
           return `Continue from the previous engine's recent conversation below. Older messages and the full native history remain available; consult them when needed.\n${recent.join('\n\n') || 'No visible messages were recorded. Check current commitments and owned cards before starting work.'}`;
         };
         await saveEngineHandover({ chatId, sourceId: previous.sessionId, sourceRevision: previous.updatedAt, target: opts.cli }, async () => {
+          assertHandoverSafe();
           if (sourceEngine === 'codex') {
             const { interruptCodex } = await import('./codex-runner.ts');
+            assertHandoverSafe();
             await interruptCodex({ repoPath: opts.repoPath, chatId, cli: previous.cli });
             return exportCodexHandover({ chatId, cwd: opts.repoPath, sessionId: previous.sessionId!, model: previous.model, nativeProfile: previous.nativeProfile });
           }
           if (!isClaudeFamilyCli(previous.cli!)) return savedConversation();
           const source = await getOrCreateSessionUnlocked({ ...opts, cli: previous.cli!, model: previous.model, effort: previous.effort, recycleOnMismatch: false, handoverSource: true });
-          if (!(source instanceof ClaudeSession) || source.isBusy()) throw new Error('The previous engine is still answering.');
+          live = source;
+          if (!(source instanceof ClaudeSession) || source.nativeTurnActive()) throw Object.assign(new Error('The previous engine is still answering.'), { handoverBlocked: true });
           await compactForHandover(source);
+          assertHandoverSafe();
           const { readClaudeHandover } = await import('./nativeSessionStorage.ts');
           return readClaudeHandover(chatId, previous.sessionId!);
         }, sourceEngine === 'codex' ? () => recoverCodexHandover({ chatId, cwd: opts.repoPath, sessionId: previous.sessionId!, nativeProfile: previous.nativeProfile }) : undefined, savedConversation);
         // The note is durable before worker teardown, so a slow exit cannot
         // discard an already-paid handover or force another export.
         if (live && live.cli !== opts.cli) {
+          assertHandoverSafe();
           await live.shutdown('native engine handover');
           if (!(live instanceof CodexSession) && !(live instanceof BananaSession)) {
             await waitForChildExit(live, 5_000);

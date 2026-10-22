@@ -41,7 +41,7 @@ export async function saveEngineHandover(opts: { chatId: string; sourceId: strin
   await store.modify(items => {
     record = items.find(item => item.id === id || (item.chatId === chatId && item.sourceId === opts.sourceId && !item.accepted));
     if (record) {
-      record = { ...record, target };
+      record = { ...record, target, ...(record.note ? { failed: false } : {}) };
       return items.map(item => item.id === record!.id ? record! : item);
     }
     claimed = true;
@@ -50,10 +50,15 @@ export async function saveEngineHandover(opts: { chatId: string; sourceId: strin
   });
   const recover = async (recordId: string): Promise<boolean> => {
     const native = await recoverNote?.().catch(() => undefined);
-    const conversation = native ? undefined : await savedConversation?.();
+    let conversation: string | undefined;
+    try { conversation = native ? undefined : await savedConversation?.(); }
+    catch (error) {
+      if ((error as { handoverBlocked?: boolean }).handoverBlocked) throw error;
+      return false;
+    }
     const note = (native || conversation)?.trim();
     if (!note || note.length > 64_000) return false;
-    await store.update(recordId, { note, failed: !native, savedConversation: !native });
+    await store.update(recordId, { note, failed: false, savedConversation: !native });
     return true;
   };
   if (!claimed) {
@@ -69,6 +74,10 @@ export async function saveEngineHandover(opts: { chatId: string; sourceId: strin
     if (!note || note.length > 64_000) throw new Error('Invalid handover note');
     await store.update(id, { note });
   } catch (cause) {
+    if ((cause as { handoverBlocked?: boolean }).handoverBlocked) {
+      if (!noteProduced && !(cause as { billed?: boolean }).billed) await store.delete(id);
+      throw cause;
+    }
     if (noteProduced || (cause as { billed?: boolean }).billed === true) {
       if (await recover(id)) return;
       await store.update(id, { failed: true });
