@@ -1,4 +1,4 @@
-import { codexEffortsForModel, useCodexCliStatus, useCodexModels } from '../codexModels';
+import { codexEffortsForModel, codexModelLabel, useCodexCliStatus, useCodexModels } from '../codexModels';
 
 // Model + reasoning-effort selector for Codex. The chosen values ride the WS
 // send/steer payload and reach `codex -m` / `-c model_reasoning_effort`.
@@ -41,7 +41,7 @@ export function CodexEnginePicker(props: {
   const cli = useCodexCliStatus();
   const listedModels = props.models ?? live;
   const models = listedModels.some((model) => model.id === props.model)
-    ? listedModels : [...listedModels, { id: props.model, label: props.model }];
+    ? listedModels : [...listedModels, { id: props.model, label: `${codexModelLabel(props.model)} · saved choice` }];
   const listedEfforts = props.efforts ?? codexEffortsForModel(props.model);
   const efforts = listedEfforts.includes(props.effort) ? listedEfforts : [...listedEfforts, props.effort];
   const base = {

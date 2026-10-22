@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import type { CompanionId } from '../data/types';
 import {
   codexModelSpec,
+  codexModelChange,
+  rememberCodexModel,
   normalizeCodexEffort,
   normalizeCodexModel,
   readStoredCodexEffort,
@@ -254,6 +256,8 @@ export function useCompanionPicker(storageKey: string) {
   const [claudeEffort, setClaudeEffortState] = useState(() => normalizeClaudeEffort(readLS('rivendell:claude-effort', 'xhigh')));
   const [codexModel, setCodexModelState] = useState(readStoredCodexModel);
   const [codexEffort, setCodexEffortState] = useState(() => readStoredCodexEffort(codexModel));
+  const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
+  useEffect(() => { rememberCodexModel(codexModel); }, [codexModel]);
   // Catalog updates can refresh labels, never replace a stored selection.
   const codexCatalogVersion = useCodexCatalogVersion();
   useEffect(() => {
@@ -356,8 +360,8 @@ export function useCompanionPicker(storageKey: string) {
   const setClaudeEffort = (value: string) => persist('rivendell:claude-effort', setClaudeEffortState, 'claude')(normalizeClaudeEffort(value));
   const setCodexModel = (value: string) => {
     const model = normalizeCodexModel(value);
-    const spec = codexModelSpec(model);
-    const effort = spec.efforts.includes(codexEffort) ? codexEffort : spec.defaultEffort;
+    const { effort, notice } = codexModelChange(model, codexEffort);
+    setSelectionNotice(notice);
     setCodexModelState(model);
     setCodexEffortState(effort);
     if (typeof window !== 'undefined') {
@@ -366,6 +370,7 @@ export function useCompanionPicker(storageKey: string) {
     }
   };
   const setCodexEffort = (value: string) => {
+    setSelectionNotice(null);
     const effort = normalizeCodexEffort(codexModel, value);
     setCodexEffortState(effort);
     if (typeof window !== 'undefined') {
@@ -561,6 +566,9 @@ export function useCompanionPicker(storageKey: string) {
     companion, setCompanion, applyAuthoritativeBrain,
     cli, account, model, effort, selectionRevision: selectionRevisions[companion] ?? 0,
     brainPending: false,
+    selectionNotice,
+    selectionError: null as string | null,
+    dismissSelectionFeedback: () => setSelectionNotice(null),
     isClaude, isCodex, isXai, isZai, isFireworks, isOpenRouter, isOpenRouter2, isAgy,
     claudeModel, setClaudeModel, claudeEffort, setClaudeEffort,
     codexModel, setCodexModel, codexEffort, setCodexEffort,

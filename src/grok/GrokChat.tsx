@@ -16,7 +16,7 @@ import {
   normalizeZaiModel,
   useCompanionPicker,
 } from '../chat/hooks/useCompanionPicker';
-import { codexModelSpec, normalizeCodexEffort, normalizeCodexModel } from '../chat/codexModels';
+import { codexModelChange, normalizeCodexEffort, normalizeCodexModel } from '../chat/codexModels';
 import { normalizeFireworksEffort, normalizeFireworksModel } from '../chat/fireworksModels';
 import { normalizeOpenRouterEffort, normalizeOpenRouterModel } from '../chat/openrouterModels';
 import { CLAUDE_EFFORTS, normalizeClaudeModel } from '../chat/components/CodexEnginePicker';
@@ -26,7 +26,7 @@ import type { CompanionId, Repo } from '../chat/data/types';
 import { GrokConversation, type ConversationDock } from './GrokConversation';
 import type { ChatMeta } from './BotPanel';
 import type { Agent } from './agents';
-import { markAgentRead, updateAgentReq } from './agents';
+import { AgentUpdateConflictError, markAgentRead, updateAgentReq } from './agents';
 import { onPresenceChange, userPresent } from '../chat/utils/userPresence';
 
 type BrainDraft = { engine: string; model?: string; effort?: string };
@@ -88,6 +88,7 @@ export type GrokChatProps = {
 
 export function GrokChat(props: GrokChatProps) {
   const [brainSaveError, setBrainSaveError] = useState<string | null>(null);
+  const [brainSaveNotice, setBrainSaveNotice] = useState<string | null>(null);
   const savedBrain = useRef<BrainDraft>({ engine: props.agent?.engine ?? 'claude', model: props.agent?.model, effort: props.agent?.effort });
   useEffect(() => {
     if (props.agent) savedBrain.current = { engine: props.agent.engine, model: props.agent.model, effort: props.agent.effort };
@@ -230,8 +231,9 @@ export function GrokChat(props: GrokChatProps) {
     );
     return { engine, model, effort };
   };
-  const persistBrain = useCallback((patch: Partial<BrainDraft>) => {
+  const persistBrain = useCallback((patch: Partial<BrainDraft>, notice: string | null = null) => {
     setBrainSaveError(null);
+    setBrainSaveNotice(null);
     const next = canonicalBrain({ ...desiredBrain.current, ...patch });
     desiredBrain.current = next;
     if (!agentId) {
@@ -252,6 +254,7 @@ export function GrokChat(props: GrokChatProps) {
           savedBrain.current = { engine: saved.engine, model: saved.model, effort: saved.effort };
           desiredBrain.current = canonicalBrain({ engine: saved.engine, model: saved.model, effort: saved.effort });
           picker.applyAuthoritativeBrain(saved.engine, saved.model, saved.effort);
+          setBrainSaveNotice(notice);
         }
         props.onAgentBrainSaved();
       } catch (error) {
@@ -259,8 +262,16 @@ export function GrokChat(props: GrokChatProps) {
         // reload the central brain and let the explicit next click retry.
         props.onAgentBrainSaved();
         if (gen === persistGen.current) {
+          if (error instanceof AgentUpdateConflictError) {
+            const current = error.current;
+            savedBrain.current = { engine: current.engine, model: current.model, effort: current.effort };
+            serverBrainRevision.current = current.brainRevision ?? serverBrainRevision.current;
+            picker.applyAuthoritativeBrain(current.engine, current.model, current.effort);
+          }
           desiredBrain.current = canonicalBrain(savedBrain.current);
-          setBrainSaveError(`Couldn’t confirm that change. ${error instanceof Error ? error.message : 'Please try again.'}`);
+          setBrainSaveError(error instanceof AgentUpdateConflictError
+            ? 'Settings changed on another device. Refreshed them here; try your change again.'
+            : `Change wasn’t saved. ${error instanceof Error ? error.message : 'Please try again.'}`);
         }
       }
     });
@@ -268,6 +279,9 @@ export function GrokChat(props: GrokChatProps) {
 
   const pickerForUi = !agentId ? picker : {
     ...picker,
+    selectionNotice: brainSaveNotice,
+    selectionError: brainSaveError,
+    dismissSelectionFeedback: () => { setBrainSaveError(null); setBrainSaveNotice(null); },
     brainPending: chat.serverBrain?.pending ?? false,
     setCompanion: (engine: string) => persistBrain(selectionForLane(engine)),
     setClaudeModel: (value: string) => persistBrain({
@@ -277,13 +291,12 @@ export function GrokChat(props: GrokChatProps) {
     setClaudeEffort: (effort: string) => persistBrain({ engine: 'claude', effort }),
     setCodexModel: (value: string) => {
       const model = normalizeCodexModel(value);
-      const spec = codexModelSpec(model);
+      const { effort, notice } = codexModelChange(model, desiredBrain.current.effort ?? picker.codexEffort);
       persistBrain({
         engine: 'codex',
         model,
-        effort: desiredBrain.current.effort && spec.efforts.includes(desiredBrain.current.effort)
-          ? desiredBrain.current.effort : spec.defaultEffort,
-      });
+        effort,
+      }, notice);
     },
     setCodexEffort: (value: string) => persistBrain({
       engine: 'codex',
@@ -367,7 +380,6 @@ export function GrokChat(props: GrokChatProps) {
       onOpenAgentEditor={props.onOpenAgentEditor}
       dock={props.dock}
     />
-      {brainSaveError ? <div className="bt-toast" role="alert">{brainSaveError} <button type="button" aria-label="Dismiss settings error" onClick={() => setBrainSaveError(null)}>Dismiss</button></div> : null}
     </>
   );
 }

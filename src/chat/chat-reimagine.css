@@ -420,6 +420,11 @@
 .rc .lane.on .ring { border-color: color-mix(in oklch, var(--accent) 50%, transparent); color: var(--accent-glow); box-shadow: var(--glow-accent); }
 .rc .lane.on .nm { color: var(--fg); } .rc .lane.on .tick { opacity: 1; }
 .rc .lane-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 2px 14px 10px 51px; }
+.model-choice-hint { flex-basis: 100%; margin: 4px 0; color: var(--r-ink-muted); font-size: 12px; line-height: 1.5; }
+.model-choice-feedback { display: flex; align-items: flex-start; gap: 12px; flex-basis: 100%; margin: 8px 0; padding: 12px; border: 1px solid var(--r-line); border-radius: 12px; background: var(--r-bg-raised); color: var(--r-ink); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.model-choice-feedback.is-error { border-color: var(--r-rose); }
+.model-choice-feedback > span { flex: 1; min-width: 0; }
+.model-choice-feedback > button { flex: none; padding: 6px 8px; border: 1px solid var(--r-line); border-radius: 8px; font: inherit; color: inherit; cursor: pointer; }
 .rc .ctl-lab { flex-basis: 100%; font-family: var(--r-sign); font-weight: 400; font-size: 8.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--faint); padding-top: 4px; }
 .rc .mini { padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border); font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); transition: all .15s ease; min-height: 30px; display: inline-flex; align-items: center; }
 .rc .mini:hover { border-color: var(--border-strong); color: var(--fg-soft); }
