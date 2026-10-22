@@ -426,6 +426,26 @@ export function CounselPopover({
   open: boolean;
   onClose: () => void;
 }) {
+  const panel = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!open || !panel.current) return;
+    const popup = panel.current;
+    const anchor = popup.parentElement;
+    if (!anchor) return;
+    const conversation = popup.closest('.bt-conv-wrap');
+    const header = conversation?.querySelector(':scope > .bt-head, :scope > .desk-chat-head');
+    const place = () => {
+      const top = Math.max(header?.getBoundingClientRect().bottom ?? conversation?.getBoundingClientRect().top ?? 0, window.visualViewport?.offsetTop ?? 0);
+      popup.style.maxHeight = `${Math.max(0, Math.floor(anchor.getBoundingClientRect().top - top - 18))}px`;
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(anchor);
+    if (header) observer.observe(header);
+    window.addEventListener('resize', place);
+    window.visualViewport?.addEventListener('resize', place);
+    return () => { observer.disconnect(); window.removeEventListener('resize', place); window.visualViewport?.removeEventListener('resize', place); };
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -449,6 +469,7 @@ export function CounselPopover({
   if (!open) return null;
   return (
     <div
+      ref={panel}
       className="pop modelpop show"
       role="dialog"
       aria-label="Choose a companion"

@@ -9,6 +9,7 @@ import type { ChatBlock } from '../../data/types';
 import { REACTION_EMOJIS } from '../../data/reactions';
 import { groupHasLiveContent } from '../../data/liveGroup';
 import { Markdown } from '../primitives/Markdown';
+import { CLAUDE_MODELS } from '../CodexEnginePicker';
 import { DeskRefText } from '../primitives/DeskRef';
 import { ArtifactCard } from '../blocks/ArtifactCard';
 import { DocLinkCard } from '../blocks/DocLinkCard';
@@ -858,7 +859,9 @@ function engineLabel(id: string): string {
 function SwitchDivider({ block }: { block: Extract<ChatBlock, { kind: 'switch' }> }) {
   const from = block.from ? engineLabel(block.from) : '';
   const to = engineLabel(block.to);
-  const model = block.model?.split('/').pop()?.replace(/-/g, ' ').replace(/\b[a-z]/g, c => c.toUpperCase()).replace(/\bGpt\b/, 'GPT').replace(/\bGlm\b/, 'GLM') || to;
+  const modelId = block.model?.split('/').pop();
+  const claude = CLAUDE_MODELS.find(item => item.id === modelId?.replace(/\[[^\]]+\]$/, ''));
+  const model = claude ? `Claude ${claude.label}` : modelId?.replace(/-/g, ' ').replace(/\b[a-z]/g, c => c.toUpperCase()).replace(/\bGpt\b/, 'GPT').replace(/\bGlm\b/, 'GLM') || to;
   return (
     <div className="compact-mark switch-mark" title={`${model} accepted this turn. Your conversation stayed here.`}>
       <span className="compact-line" />
