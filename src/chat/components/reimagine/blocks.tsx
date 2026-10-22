@@ -613,6 +613,7 @@ function PeerMessageBubble({
 }) {
   const initial = (block.from || '?').trim().slice(0, 1).toUpperCase();
   const routineResult = block.fromRole === 'automation-result';
+  const informational = block.fromRole === 'informational';
   // Quiet routines stay hidden. Deliverable ones (dashboards, briefs) are
   // something Matt has to read, so they start open in the thread. Channel
   // history marks member posts expanded: the post is the message.
@@ -641,8 +642,8 @@ function PeerMessageBubble({
   // agent's board through the same ThreadPin the assistant prose uses.
   const peerPinned = pin ? pin.pinnedBlockIds.includes(block.id) : false;
   // Keep the addressee readable on a phone, ahead of optional job titles.
-  const role = routineResult ? 'routine update' : `to ${recipient}`;
-  const subject = hasResponse ? 'exchange' : 'message';
+  const role = informational ? 'saved update' : routineResult ? 'routine update' : `to ${recipient}`;
+  const subject = informational ? 'update' : hasResponse ? 'exchange' : 'message';
 
   return (
     <>

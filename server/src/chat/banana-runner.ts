@@ -167,6 +167,7 @@ type BananaTurnState = {
    *  the window between this turn's state being created and its prompt being
    *  accepted, and would fake-complete the turn before the real answer streams. */
   promptAccepted: boolean;
+  acceptContext?: () => void;
   /** Durable team outbox id acknowledged once Banana accepts this prompt. */
   peerDeliveryId?: string;
   /** True when this prompt was prepended with an event-log recovery recap. */
@@ -3101,11 +3102,7 @@ export class BananaSession {
     const promptText = localDirective ? `${localDirective}\n${effectiveText}` : effectiveText;
     const providerVariant = this.cli !== 'banana-local' && opts?.effort ? opts.effort : undefined;
     const thisTurn = this.turn;
-    const handoverUnsubscribe = handover.text ? this.subscribe(({ ev }) => {
-      if (this.turn !== thisTurn) { handoverUnsubscribe?.(); return; }
-      if (ev.type === 'event' && ev.event?.type === 'result' && !ev.event.is_error) { handover.accept(); handoverUnsubscribe?.(); }
-      if (ev.type === 'turnEnd' || ev.type === 'closed') handoverUnsubscribe?.();
-    }, this.latestSeq(), false) : undefined;
+    thisTurn.acceptContext = handover.accept;
     const promptKind = slashCommand ? 'command' : 'prompt';
     try {
       if (opts.peerDeliveryId && !this.submitPeerDelivery(opts.peerDeliveryId)) return;
@@ -3381,6 +3378,8 @@ export class BananaSession {
   }
 
   private markPromptAccepted(state: BananaTurnState): void {
+    state.acceptContext?.();
+    state.acceptContext = undefined;
     if (!state.promptAccepted && state.peerDeliveryId) {
       this.emit({
         type: 'event',

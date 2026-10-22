@@ -1317,7 +1317,7 @@ class ClaudeSession {
    *  peer_message instead of _user_echo and don't tick compaction. */
   async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge; compactRerun?: boolean; echoText?: string; replyTo?: { from: string; snippet: string } } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
-    assertSelectedEngine(this.chatId, this.cli);
+    const selectionRevision = assertSelectedEngine(this.chatId, this.cli);
     // A receipt timeout must not write a second copy of an input that the
     // native CLI already holds. A retry listens for that same delivery ID.
     if (opts.peerDeliveryId && this.pendingPeerAccepts.has(opts.peerDeliveryId)) return;
@@ -1678,7 +1678,7 @@ class ClaudeSession {
         abandonUnsentTurn();
         return;
       }
-      assertSelectedEngine(this.chatId, this.cli);
+      assertSelectedEngine(this.chatId, this.cli, selectionRevision);
       if (!startsNewTurn && this.activeToolIds.size === 0) {
         throw Object.assign(new Error('the native steering window closed before delivery'), { notAdmitted: true });
       }
@@ -2643,6 +2643,7 @@ class ClaudeSession {
     // Writing stdin does not prove the saved native session or provider took
     // a handoff. Keep its durable queue receipt until a real response arrives.
     if (ev?.type === 'assistant' && !ev.parent_tool_use_id && !isSyntheticApiErrorEvent(ev)) {
+      this.statusAcks.splice(0).forEach(ack => ack());
       for (const deliveryId of this.pendingPeerAccepts) this.emit({ type: 'event', event: { type: 'peer_delivery_accepted', deliveryId, ts: Date.now() } });
       this.pendingPeerAccepts.clear();
       this.pendingPeerSteerAccepts.clear();
@@ -2860,8 +2861,7 @@ class ClaudeSession {
       recordNativeCompact(this.chatId, 'claude-code', this.currentSessionId, ev.compact_metadata);
     }
     if (!sidechain && ev?.type === 'result') {
-      if (!ev.is_error && !this.syntheticApiErrorSeen) this.statusAcks.splice(0).forEach(ack => ack());
-      else this.statusAcks = [];
+      this.statusAcks = [];
     }
 
     this.trackStreamText(ev);
@@ -3346,6 +3346,8 @@ async function getOrCreateSessionUnlocked(opts: {
   recycleOnMismatch?: boolean;
   /** Internal native-compaction lookup, never a work admission. */
   handoverSource?: boolean;
+  /** Startup control warmup cannot buy a handover or change providers. */
+  passive?: boolean;
 }): Promise<AnySession> {
   const selectedAgent = agentForChatId(opts.chatId || 'main');
   if (selectedAgent && !opts.handoverSource) {
@@ -3387,6 +3389,7 @@ async function getOrCreateSessionUnlocked(opts: {
       const sourceEngine = previous?.cli && nativeEngine(previous.cli);
       const targetEngine = nativeEngine(opts.cli);
       if (previous?.sessionId && previous.cli && sourceEngine !== targetEngine) {
+        if (opts.passive) throw new Error('The model handover will start with the next real message.');
         let live = sourceEngine === 'codex'
           ? peekCodexSession({ repoPath: opts.repoPath, chatId, cli: previous.cli })
           : peekClaudeSession({ cli: previous.cli, repoPath: opts.repoPath, chatId });
@@ -3412,7 +3415,8 @@ async function getOrCreateSessionUnlocked(opts: {
           }
           return `Continue from the previous engine's recent conversation below. Older messages and the full native history remain available; consult them when needed.\n${recent.join('\n\n') || 'No visible messages were recorded. Check current commitments and owned cards before starting work.'}`;
         };
-        await saveEngineHandover({ chatId, sourceId: previous.sessionId, sourceRevision: previous.updatedAt, target: opts.cli }, async () => {
+        await saveEngineHandover({ chatId, sourceId: previous.sessionId, sourceRevision: previous.updatedAt, target: opts.cli,
+          noteSource: sourceEngine !== 'codex' && !isClaudeFamilyCli(previous.cli) ? 'savedConversation' : undefined }, async () => {
           assertHandoverSafe();
           if (sourceEngine === 'codex') {
             const { interruptCodex } = await import('./codex-runner.ts');
@@ -3447,6 +3451,7 @@ async function getOrCreateSessionUnlocked(opts: {
       let handedOver = false;
       for (const [sourceKey, source] of [...sessions]) {
         if (source.cli === opts.cli || source.logKey !== logKey || !source.isAlive()) continue;
+        if (opts.passive) throw new Error('The model handover will start with the next real message.');
         if (!(source instanceof ClaudeSession)) throw new Error('The selected model is waiting for the previous engine to stop.');
         // The running turn remains the one place Matt can steer. A changed
         // provider applies at its boundary, never as a second process.
@@ -3464,6 +3469,7 @@ async function getOrCreateSessionUnlocked(opts: {
       if (previous?.sessionId && previous.cli && isClaudeFamilyCli(previous.cli)
           && (previous.cli !== opts.cli || (previous.model && previous.model !== wanted && !['claude', 'assistant'].includes(opts.cli)
             && (opts.recycleOnMismatch === true || !sessions.has(keyOf(opts.cli, opts.repoPath, chatId)))))) {
+        if (opts.passive) throw new Error('The model handover will start with the next real message.');
         const sourceKey = keyOf(previous.cli, opts.repoPath, chatId);
         // This also covers a model switch immediately after a service restart.
         const source = await getOrCreateSessionUnlocked({ ...opts, cli: previous.cli, model: previous.model, effort: previous.effort, recycleOnMismatch: false, handoverSource: true });
@@ -3532,14 +3538,12 @@ async function getOrCreateSessionUnlocked(opts: {
       // first real turn. Passive hello/reconnect callers never opt in, which is
       // what prevents replacement storms during normal startup.
       const matches = existing.spawnModel === wantModel && existing.spawnEffort === wantEffort;
+      if (opts.passive && !matches) return existing;
       const recyclable =
         opts.recycleOnMismatch === true &&
         !matches &&
         !existing.isBusy();
-      // The switch waits (bounded) for background work, which dies with this process.
-      if (recyclable && existing instanceof ClaudeSession && existing.keepForBackgroundWork(`${wantModel}|${wantEffort}`)) {
-        return existing;
-      }
+      // An explicit idle model choice applies at this turn boundary.
       if (!recyclable) return existing;
       if (existing instanceof ClaudeSession && existing.spawnModel !== wantModel && !['claude', 'assistant'].includes(opts.cli)) await compactForHandover(existing);
       if (existing instanceof ClaudeSession) existing.shutdown('model/effort change', 'model');

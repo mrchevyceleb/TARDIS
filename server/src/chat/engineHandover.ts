@@ -12,6 +12,7 @@ import type { CliKind } from './runner.ts';
 
 type Handover = { id: string; chatId: string; sourceId: string; target: string; note?: string; failed?: boolean; savedConversation?: boolean; accepted?: boolean; selectionRevision?: number };
 const store = new JsonStore<Handover>('native-engine-handovers.json', []);
+let acceptanceWrites = Promise.resolve();
 const HANDOVER_MARKER = 'This is the single handover-only request authorized for this model switch.';
 const HANDOVER_PAUSED = 'The previous model did not finish its handover. Your history is safe. This switch is paused for recovery, so another attempt cannot charge you again.';
 export const nativeEngine = (cli: string): string => ['codex', 'codex-personal'].includes(cli) ? 'codex'
@@ -22,16 +23,17 @@ export function isSelectedEngineChanged(error: unknown): boolean {
 }
 
 /** A retained socket/worker must never submit work to a deselected engine. */
-export function assertSelectedEngine(chatId: string, cli: string): void {
+export function assertSelectedEngine(chatId: string, cli: string, revision?: number): number | undefined {
   const agent = agentForChatId(chatId);
-  if (agent && cliForAgentEngine(brainForAgent(agent).engine) !== cli) {
+  if (agent && (cliForAgentEngine(brainForAgent(agent).engine) !== cli || revision !== undefined && revision !== agent.brainRevision)) {
     throw Object.assign(new Error('Your model changed. I’ll use the selected model for this message.'), { code: 'MODEL_SELECTION_CHANGED' });
   }
+  return agent?.brainRevision;
 }
 
 /** The attempted marker lands BEFORE the billed request. An ambiguous failure
  * retains history and work, rather than automatically buying another export. */
-export async function saveEngineHandover(opts: { chatId: string; sourceId: string; sourceRevision: number; target: CliKind }, makeNote: () => Promise<string>, recoverNote?: () => Promise<string | undefined>, savedConversation?: () => Promise<string>): Promise<void> {
+export async function saveEngineHandover(opts: { chatId: string; sourceId: string; sourceRevision: number; target: CliKind; noteSource?: 'savedConversation' }, makeNote: () => Promise<string>, recoverNote?: () => Promise<string | undefined>, savedConversation?: () => Promise<string>): Promise<void> {
   const chatId = bareChatId(opts.chatId);
   const target = nativeEngine(opts.target);
   const selectionRevision = agentForChatId(chatId)?.brainRevision ?? 0;
@@ -72,7 +74,7 @@ export async function saveEngineHandover(opts: { chatId: string; sourceId: strin
     const note = (await makeNote()).trim();
     noteProduced = true;
     if (!note || note.length > 64_000) throw new Error('Invalid handover note');
-    await store.update(id, { note });
+    await store.update(id, { note, savedConversation: opts.noteSource === 'savedConversation', failed: false });
   } catch (cause) {
     if ((cause as { handoverBlocked?: boolean }).handoverBlocked) {
       if (!noteProduced && !(cause as { billed?: boolean }).billed) await store.delete(id);
@@ -129,12 +131,14 @@ export async function recoverCodexHandover(opts: { chatId: string; cwd: string; 
 }
 
 export async function pendingEngineHandover(chatId: string): Promise<{ text: string; accept(): void }> {
+  await acceptanceWrites;
   if (!isAgentThread(chatId)) return { text: '', accept() {} };
   const agent = agentForChatId(chatId);
   const target = agent ? nativeEngine(cliForAgentEngine(brainForAgent(agent).engine)) : '';
   const record = (await store.list()).find(item => item.chatId === bareChatId(chatId) && item.target === target && !item.accepted && item.note);
   return { text: record ? `<native-engine-handover>\n${record.savedConversation ? 'The previous model could not finish its note. Continue from the saved conversation below without another paid handover. The full original history is retained.' : 'Continue the same conversation from this handover.'} Preserve its decisions and check current state before acting.\n${record.note}\n</native-engine-handover>` : '', accept() {
-    if (record) void store.update(record.id, { accepted: true }).catch(() => console.warn('[handover] acknowledgement will retry'));
+    if (record) acceptanceWrites = acceptanceWrites.then(async () => { await store.update(record.id, { accepted: true }); })
+      .catch(() => console.warn('[handover] acknowledgement will retry'));
   } };
 }
 

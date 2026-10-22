@@ -426,6 +426,7 @@ export class AgySession {
           return;
         }
         if (step.step_type !== 'tool' && step.step_type !== 'agent_response') return;
+        this.pendingStateAccepts.splice(0).forEach(accept => accept());
         const sid = this.agyConversationId ?? '';
         const stream = (event: Record<string, unknown>) => this.emit({ type: 'event', event: { type: 'stream_event', event, session_id: sid } });
         const idx = typeof step.step_index === 'number' ? step.step_index : -1;
@@ -758,7 +759,6 @@ export class AgySession {
     }
     this.finalizeOpenStep();
     const failed = this.turnFailed;
-    if (!failed) for (const accept of this.pendingStateAccepts) accept();
     this.pendingStateAccepts = [];
     if (failed && !this.terminalNoticeEmitted) {
       this.terminalNoticeEmitted = true;

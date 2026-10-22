@@ -829,12 +829,7 @@ export class PiSession {
     }
     // The recap reached the model; the next turn recaps only what came after.
     if (startsNewTurn) this.laneSyncSeq = historyThroughSeq;
-    if (handover.text) {
-      const off = this.subscribe(({ ev }) => {
-        if (ev.type === 'event' && ev.event?.type === 'result') { if (!ev.event.is_error) handover.accept(); off(); }
-        if (ev.type === 'turnEnd' || ev.type === 'closed') off();
-      }, this.latestSeq(), false);
-    }
+    handover.accept();
     if (wantSeed) {
       this.seedWindowOnNextTurn = false;
       // The seed was delivered, so the rotation debt that asked for it is paid.

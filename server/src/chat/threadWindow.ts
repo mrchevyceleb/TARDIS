@@ -237,6 +237,9 @@ function extractLaneTurns(events: Seqish[], maxChars: number): VisibleTurn[] {
     }
 
     if (t === 'peer_message') {
+      // Quiet receipts are visible to the person; their one model delivery
+      // comes from the pending inbox rather than a second primer copy.
+      if (inner.fromRole === 'informational') continue;
       if (typeof inner.deliveryId === 'string' && inner.deliveryId) {
         if (seenPeerDeliveries.has(inner.deliveryId)) continue;
         seenPeerDeliveries.add(inner.deliveryId);

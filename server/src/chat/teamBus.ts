@@ -1,4 +1,4 @@
-import { claimOutbound, releaseOutbound, saveInformational, informationalPending } from './messagingPolicy.ts';
+import { acknowledgementOnly, claimOutbound, releaseOutbound, saveInformational, informationalPending, legacyActionableInformation, removeSavedInformation } from './messagingPolicy.ts';
 // Team bus — agent-to-agent messaging. Any teammate can message any other
 // teammate through the `rivendell-team` MCP tool (see server/scripts/team-mcp.mjs);
 // delivery lands in the recipient's home thread as a `peer_message` event
@@ -9,7 +9,7 @@ import { claimOutbound, releaseOutbound, saveInformational, informationalPending
 
 import { createHash, randomUUID } from 'node:crypto';
 import { DESK_OWNER_NAME, ELROND_WORKSPACE_PATH } from '../config.ts';
-import { brainForAgent, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
+import { agentForChatId, brainForAgent, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
 import { backgroundChatId, backgroundLaneEnabled, bareChatId, isBackgroundChatId, logKeyFor } from './threadKey.ts';
 import { extractVisibleTurns } from './threadWindow.ts';
 import { JsonStore, type StoredRecord } from '../lib/jsonStore.ts';
@@ -1627,15 +1627,6 @@ function retryDelay(): Promise<void> {
 }
 
 async function drainQueuedRecipient(queueKey: string): Promise<void> {
-  const oldNudges = (await queueStoreOperation(() => queuedDeliveryStore.list()))
-    .filter(item => queueKeyOf(item) === queueKey && (item.nudgeHoldSince !== undefined || item.admissionAck === 'flag-digest'));
-  for (const item of oldNudges) {
-    const agent = findAgent(item.toId);
-    if (!agent) continue;
-    await saveInformational(agent.home || `bot-${agent.id}`, item.fromName, item.text, item.admissionAck, item.id);
-    await queueStoreOperation(() => queuedDeliveryStore.delete(item.id));
-  }
-
   // Quiet hours (Matt, Oct 15 2026): teammate chatter to a non-Max lane
   // holds through 22:00-05:00 ET. Person-sourced records (Desk answers,
   // voice continuations, human channel posts) still deliver — the boss may
@@ -1935,6 +1926,21 @@ function scheduleQueuedRecipient(queueKey: string, delayMs = 0): void {
 
 /** Resume accepted fire-and-forget handoffs after a TARDIS restart. */
 export async function resumeQueuedTeamDeliveries(): Promise<number> {
+  // The first quiet-delivery build incorrectly parked actionable digests.
+  // Restore their original IDs before scheduling, so source admission acks
+  // settle once. Unknown legacy urgency fails open instead of waiting forever.
+  for (const item of await legacyActionableInformation()) {
+    const to = agentForChatId(item.chatId);
+    if (!to) continue;
+    const from = findAgent(item.from);
+    const stamp = new Date().toISOString();
+    await queueStoreOperation(() => queuedDeliveryStore.modify(items => items.some(row => row.id === item.id) ? items : [...items, {
+      id: item.id, createdAt: stamp, updatedAt: stamp, fromId: from?.id ?? 'unknown', fromName: item.from,
+      toId: to.id, text: item.text, hop: 1, priority: true, admissionAck: item.admissionAck,
+      chainId: randomUUID(), chainEdges: [], chainRoute: [],
+    }]));
+    await removeSavedInformation(item.id);
+  }
   const records = await queueStoreOperation(() => queuedDeliveryStore.list());
   new Set(records.map(queueKeyOf)).forEach((queueKey) => scheduleQueuedRecipient(queueKey));
   return records.length;
@@ -2037,13 +2043,14 @@ export async function deliverTeamMessage(input: {
     // lane preference) so it can never sit behind teammate chatter or a
     // busy turn (card-c26bfa follow-up, Oct 20).
     ? { id: 'slack:inbound', name: input.from.trim() || 'Slack', role: 'slack', engine: '', home: '', createdAt: 0 }
-    : findAgent(input.from) ?? { id: 'unknown', name: input.from || 'Unknown', role: '', engine: '', home: '', createdAt: 0 };
+    : findAgent(input.from) ?? { id: `external:${createHash('sha256').update(input.from.trim().toLowerCase()).digest('hex').slice(0, 16)}`, name: input.from || 'Unknown', role: '', engine: '', home: '', createdAt: 0 };
   if (to.id === from.id && input.from.trim().toLowerCase() === to.name.trim().toLowerCase()) {
     return { delivered: false, reason: 'that is you — no need to message yourself' };
   }
 
   const fromLane = input.fromLane === 'bg' ? 'bg' : 'main';
-  const request = input.source ? randomUUID() : await outboundRequest(from, fromLane);
+  const rosterSender = findAgent(from.id);
+  const request = input.source || !rosterSender ? randomUUID() : await outboundRequest(from, fromLane);
   let { chain } = inheritedTeamChain(from.id, to.id, fromLane);
   if (chain.id !== request) chain = { id: request, edges: [replyEdge(from.id, to.id)], route: [from.id, to.id] };
   const requestedWaitForReply = teamMessageWaitRequested(input.wait);
@@ -2075,9 +2082,9 @@ export async function deliverTeamMessage(input: {
   const rl = rateOk(replyEdge(from.id, to.id));
   if (!rl.ok) return { delivered: false, reason: rl.reason };
 
-  const claim = !input.source ? await claimOutbound(from.id, to.id, text, request) : undefined;
+  const claim = !input.source && rosterSender ? await claimOutbound(from.id, to.id, text, request) : undefined;
   if (claim === null) return { delivered: false, to: to.name, reason: 'You already sent this exact message. Do not send it again; continue only when there is new information.' };
-  if ((input.informational === true || input.nudgeHoldSince !== undefined || input.admissionAck === 'flag-digest') && !input.source) {
+  if ((input.informational === true || acknowledgementOnly(text)) && input.priority !== true && !input.source) {
     let deliveryId: string;
     try { deliveryId = await saveInformational(to.home || `bot-${to.id}`, from.name, text, input.admissionAck); }
     catch (error) { if (claim) await releaseOutbound(claim); throw error; }

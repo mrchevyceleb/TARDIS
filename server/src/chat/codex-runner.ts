@@ -556,7 +556,7 @@ export class CodexSession {
   }
 
   async send(text: string, images?: ChatImage[], opts: CodexSendOptions = {}): Promise<void> {
-    assertSelectedEngine(this.chatId, this.cli);
+    const selectionRevision = assertSelectedEngine(this.chatId, this.cli);
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
     if (opts.peerDeliveryId && this.submittedPeerDeliveries.has(opts.peerDeliveryId)) {
@@ -604,6 +604,7 @@ export class CodexSession {
       const steerState = await prepareSessionStateDelta(this.chatId);
       const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', true, true);
       steerText += `\n\n${computerContext}${steerState.text ? `\n\n${steerState.text}` : ''}`;
+      assertSelectedEngine(this.chatId, this.cli, selectionRevision);
       if (opts.peerDeliveryId && !this.submitPeerDelivery(opts.peerDeliveryId)) return;
       try {
         await this.sendNativeSteer(steerText, opts.peerDeliveryId ?? opts.clientMsgId ?? randomUUID());
@@ -898,7 +899,7 @@ export class CodexSession {
     if (this.dead) {
       contextProxy.close(); cleanupImages(); this.emitCancellationTurnEnd(); return;
     }
-    try { assertSelectedEngine(this.chatId, this.cli); echoInput(); }
+    try { assertSelectedEngine(this.chatId, this.cli, selectionRevision); echoInput(); }
     catch (error) {
       contextProxy.close(); cleanupImages(); this.busy = false;
       throw error;
@@ -990,6 +991,7 @@ export class CodexSession {
           return;
         }
         if (ev?.type === 'turn.started') {
+          stateDelta.accept();
           this.nativeSteerReady = true;
           // The visible peer echo lands only now that the turn really
           // started, so a failed start leaves no phantom row behind (the
@@ -1028,7 +1030,6 @@ export class CodexSession {
           sawActionableItem = true;
         }
         if (ev?.type === 'turn.completed') {
-          if (!ev.error) stateDelta.accept();
           sawTurnCompleted = true;
           this.nativeSteerReady = false;
         }
