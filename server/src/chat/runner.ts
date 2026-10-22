@@ -54,7 +54,7 @@ import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { fireworksCapability, fireworksContextWindow, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
 import { openRouterCapability, openRouterContextWindow, openRouterMaxOutput, resolveOpenRouter2Effort, resolveOpenRouter2Model, resolveOpenRouterEffort, resolveOpenRouterModel, requireOpenRouterModel } from './openrouter-models.ts';
-import { plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
+import { plainEnglishWritingReminderFor, plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
 import { AgySession, AGY_READY_TIMEOUT_MS } from './agy-runner.ts';
 import { AGY_LANE_EFFORT, AGY_LANE_MODEL, resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
 import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, openRouterContinueBudget, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutEventFields, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
@@ -1636,6 +1636,10 @@ class ClaudeSession {
         ].join('\n')
       : recall ? `${recall}\n\n${commandText}` : commandText;
     const humanTurn = continuing ? continuing.origin.human : !opts.peerFrom && opts.peerFromRole !== 'automation';
+    // The native CLI keeps its saved system prompt on --resume. A brief
+    // human-only reminder refreshes the writing rule without resetting history.
+    const writingReminder = plainEnglishWritingReminderFor({ cli: this.cli, model: this.spawnModel,
+      voiceMode: Boolean(opts.voiceMode || isVoiceChatId(this.chatId)), humanTurn: humanTurn && !continuing });
     // Full computer rules only on the message that seeds a fresh window; every later
     // message of the same warm process carries the brief form (fresh token + device + policy).
     const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
@@ -1646,7 +1650,7 @@ class ClaudeSession {
     // is rejected downstream (Anthropic 400 — see reply-quote.ts; codex
     // app-server rejects the JSONRPC outright), so replace unpaired units
     // with U+FFFD here instead of wedging the lane.
-    const stdinText = wellFormedText(`${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}`);
+    const stdinText = wellFormedText(`${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}${writingReminder ? `\n\n${writingReminder}` : ''}`);
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];

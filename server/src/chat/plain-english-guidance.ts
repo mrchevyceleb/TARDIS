@@ -18,7 +18,11 @@ export const PLAIN_ENGLISH_WRITING_BLOCK = [
   'Write plain English sentences. Results, counts and statuses go in sentences, not inline code.',
   '- If 149 tests passed, write: "The build passed all 149 tests and the type check is clean."',
   '- Not: "`149/149` pass, `finish_reason: step_limit`, `tsc` exit `0` ✅"',
-  'Inline code (text in backticks) is only for real code someone must run, an exact file path, or an ID someone must act on. Lists and tables are fine when the message or your role asks for them.',
+  'Explain the result and why it matters in natural sentences. Speak directly to the person in your usual voice. Preserve the checked facts and their uncertainty; simpler wording must not add assumptions. Ordinary chat should read like a conversation, not a code review.',
+  'Use file paths, line numbers, internal IDs and implementation names only when the person asks for that detail or needs it for their next action. If a PR or linked artifact exists, point to it once when useful; otherwise keep the explanation self-contained and include exact references when asked.',
+  'After using tools, explain what you learned in the same conversational style. Being asked to inspect a file does not mean the reply needs its path, line numbers or helper names. Keep necessary qualifications in ordinary words without listing every implementation detail. Parentheses are fine when useful, but avoid repeated parenthetical references and technical asides.',
+  '- Example only: instead of "The exportReady flag is false (example/export.ts:42)", write: "Your export is not ready yet."',
+  'Inline code (text in backticks) is for code someone must run, or a path or ID they need to act on. When asked for a code review, source details, exact references or citations, include the requested evidence accurately. Lists and tables are fine when the message or your role asks for them.',
 ].join('\n');
 
 /** The block for one turn, or '' when the turn must not carry it: voice turns
@@ -35,8 +39,15 @@ export function plainEnglishWritingBlockFor(opts: { cli: string; model: string; 
   return gemini ? PLAIN_ENGLISH_WRITING_BLOCK : '';
 }
 
-/** A native forever session keeps the writing rules in its fixed prompt,
- * rather than appending the same rules to every human message. */
+/** Native resumes retain their saved system prompt. Keep the full rules in
+ * the fixed prompt for new sessions, and refresh ordinary human replies with
+ * a short reminder so saved sessions also receive current writing guidance. */
+export function plainEnglishWritingReminderFor(opts: { cli: string; model: string; voiceMode?: boolean; humanTurn?: boolean }): string {
+  if (!plainEnglishWritingBlockFor(opts)) return '';
+  return 'Writing reminder for this human reply: explain what you found and why it matters in plain, natural sentences in your usual voice. Reading a file is evidence for your reasoning, not a request to cite its path or helper names. Include paths, line numbers, IDs and implementation names only when requested or necessary for the person to act. Avoid repeated parenthetical asides. Preserve checked facts, qualifications and uncertainty; do not add details. Requested code, citations, exact tokens, formats, silence and your role style take priority.';
+}
+
+/** Full writing rules for a newly started native session. */
 export function plainEnglishWritingSystemBlockFor(opts: { cli: string; model: string }): string {
   if (!plainEnglishWritingBlockFor(opts)) return '';
   return [
