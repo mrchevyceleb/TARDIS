@@ -21,6 +21,9 @@ import { codexModelLabel, isCodexModelUnlisted, codexEffortsForModel, useCodexMo
 import { FIREWORKS_MODELS, fireworksEffortsForModel, useFireworksModels } from '../../fireworksModels';
 import { OPENROUTER_MODELS, openRouterEffortsForModel, useOpenRouterModels, type OpenRouterModelSpec } from '../../openrouterModels';
 import { StarSigil } from './icons';
+import { AccountControl, type AccountControlProps } from '../../../grok/AccountControl';
+
+type AccountContext = Omit<AccountControlProps, 'engine'>;
 
 type LaneMeta = { ring: string; short: string; word: string };
 
@@ -112,7 +115,7 @@ function EffortPills({
 }
 
 // ── the expandable lane list (shared by popover + sheet) ───────────────────
-function LaneList({ picker }: { picker: CompanionPicker }) {
+function LaneList({ picker, accountContext }: { picker: CompanionPicker; accountContext?: AccountContext }) {
   return (
     <>
       {WORKSPACE_COMPANIONS.map((lane) => {
@@ -134,7 +137,7 @@ function LaneList({ picker }: { picker: CompanionPicker }) {
                 <StarSigil style={{ width: 13, height: 13 }} />
               </span>
             </button>
-            {on ? <LaneControls picker={picker} /> : null}
+            {on ? <LaneControls picker={picker} accountContext={accountContext} /> : null}
           </div>
         );
       })}
@@ -262,12 +265,13 @@ function ModelList({
 }
 
 // The active lane's model + effort controls, expanded in place.
-function LaneControls({ picker }: { picker: CompanionPicker }) {
+function LaneControls({ picker, accountContext }: { picker: CompanionPicker; accountContext?: AccountContext }) {
   const codexModels = useCodexModels();
   useFireworksModels();
   useOpenRouterModels();
   return (
     <div className="lane-ctl">
+      {accountContext ? <AccountControl {...accountContext} engine={picker.cli} /> : null}
       {picker.isClaude && (
         <>
           <span className="ctl-lab">model</span>
@@ -415,11 +419,33 @@ export function CounselPopover({
   picker,
   open,
   onClose,
+  accountContext,
 }: {
   picker: CompanionPicker;
+  accountContext?: AccountContext;
   open: boolean;
   onClose: () => void;
 }) {
+  const panel = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!open || !panel.current) return;
+    const popup = panel.current;
+    const anchor = popup.parentElement;
+    if (!anchor) return;
+    const conversation = popup.closest('.bt-conv-wrap');
+    const header = conversation?.querySelector(':scope > .bt-head, :scope > .desk-chat-head');
+    const place = () => {
+      const top = Math.max(header?.getBoundingClientRect().bottom ?? conversation?.getBoundingClientRect().top ?? 0, window.visualViewport?.offsetTop ?? 0);
+      popup.style.maxHeight = `${Math.max(0, Math.floor(anchor.getBoundingClientRect().top - top - 18))}px`;
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(anchor);
+    if (header) observer.observe(header);
+    window.addEventListener('resize', place);
+    window.visualViewport?.addEventListener('resize', place);
+    return () => { observer.disconnect(); window.removeEventListener('resize', place); window.visualViewport?.removeEventListener('resize', place); };
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -443,13 +469,14 @@ export function CounselPopover({
   if (!open) return null;
   return (
     <div
+      ref={panel}
       className="pop modelpop show"
-      role="listbox"
+      role="dialog"
       aria-label="Choose a companion"
       onMouseDown={(e) => e.stopPropagation()}
     >
       <div className="pop-h">Choose a companion</div>
-      <LaneList picker={picker} />
+      <LaneList picker={picker} accountContext={accountContext} />
     </div>
   );
 }
@@ -459,8 +486,10 @@ export function CounselSheet({
   picker,
   open,
   onClose,
+  accountContext,
 }: {
   picker: CompanionPicker;
+  accountContext?: AccountContext;
   open: boolean;
   onClose: () => void;
 }) {
@@ -474,7 +503,7 @@ export function CounselSheet({
         </button>
         <h2>Choose a companion</h2>
         <div className="sheet-list">
-          <LaneList picker={picker} />
+          <LaneList picker={picker} accountContext={accountContext} />
         </div>
       </div>
     </>
