@@ -1,14 +1,141 @@
-import { closeSync, existsSync, fstatSync, openSync, opendirSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
+import { closeSync, createReadStream, existsSync, fstatSync, openSync, opendirSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { createInterface } from 'node:readline';
+import { createHash } from 'node:crypto';
 import { STATE_DIR } from './config.ts';
 import { bareChatId } from './threadKey.ts';
 import { sessionDirectory } from './sessionPolicy.ts';
 import { accountEnv, accountEnvForAccount, accountForAgent, accountFromChatId } from '../lib/accountResolver.ts';
+import { JsonStore } from '../lib/jsonStore.ts';
 
 type CompactEvidence = { input: number; at: number; source: 'native-transcript' };
 const cache = new Map<string, { size: number; modified: number; rows: any[] }>();
 const evidenceCache = new Map<string, CompactEvidence>();
+type SavedEvidence = CompactEvidence & { id: string; key: string };
+const evidenceStore = new JsonStore<SavedEvidence>('compact-evidence.json', [], join(STATE_DIR, 'native-session-metrics'));
+const savedEvidence = new Map<string, CompactEvidence>();
+const evidenceLoaded = evidenceStore.list().then(rows => {
+  for (const row of rows) if (typeof row.key === 'string' && row.input > 0 && Number.isFinite(row.at) && row.source === 'native-transcript') savedEvidence.set(row.key, row);
+}).catch(() => { console.warn('[native-session] saved compact evidence could not be read'); });
+const toSave = new Map<string, SavedEvidence>();
+let saving: Promise<void> | undefined;
+function keepEvidence(key: string, evidence: CompactEvidence): CompactEvidence {
+  if (savedEvidence.has(key)) return savedEvidence.get(key)!;
+  savedEvidence.set(key, evidence);
+  toSave.set(key, { ...evidence, key, id: createHash('sha256').update(key).digest('hex') });
+  saving ??= evidenceLoaded.then(async () => {
+    while (toSave.size) {
+      const batch = [...toSave.values()]; toSave.clear();
+      await evidenceStore.modify(rows => {
+        const merged = new Map(rows.map(row => [row.key, row]));
+        for (const row of batch) merged.set(row.key, row);
+        return [...merged.values()].sort((a, b) => a.at - b.at).slice(-50_000);
+      });
+    }
+  }).catch(() => { console.warn('[native-session] compact evidence could not be saved'); }).finally(() => { saving = undefined; });
+  return evidence;
+}
+type IndexJob = { path: string; lane: string; sessionId: string; codex: boolean; targets: Set<number> };
+const indexes = new Map<string, IndexJob>();
+const indexedVersions = new Map<string, string>();
+const indexedBoundaries = new Set<string>();
+let indexing = false;
+const evidenceKey = (lane: string, id: string, at: number, codex: boolean) => `${codex ? 'codex|' : ''}${lane}|${id}|${at}`;
+/** Old boundaries can leave the tail of a growing transcript. Read those files
+ * incrementally in the background, retaining only numeric evidence and UUID
+ * ancestry. Report requests and active conversations never wait on a replay. */
+function queueEvidenceIndex(path: string, lane: string, sessionId: string, compactAt: number, codex: boolean): void {
+  const key = `${codex}|${lane}|${sessionId}`;
+  const active = indexes.get(key);
+  if (active) { active.targets.add(compactAt); return; }
+  let version: string;
+  try { const s = statSync(path); version = `${s.size}:${s.mtimeMs}`; } catch { return; }
+  if (indexedVersions.get(key) === version) return;
+  indexes.set(key, { path, lane, sessionId, codex, targets: new Set([compactAt]) });
+  if (indexing) return;
+  indexing = true;
+  setImmediate(async () => {
+    try {
+      for (const [jobKey, job] of indexes) {
+        let versionBefore = '';
+        try {
+          await evidenceLoaded;
+          const s = statSync(job.path); versionBefore = `${s.size}:${s.mtimeMs}`;
+          const roots = new Map<string, number>();
+          const parents = new Map<string, string>();
+          const candidates: Array<{ parent: string; input: number; at: number }> = [];
+          let current = 0, installed = false, total = 0, count = 0;
+          const found = new Set<number>();
+          const stream = createReadStream(job.path, { highWaterMark: 64 * 1024, end: s.size - 1 });
+          const reader = createInterface({ input: stream, crlfDelay: Infinity });
+          let readError: Error | undefined;
+          stream.on('error', error => { readError = error; reader.close(); });
+          for await (const line of reader) {
+            if (++count % 500 === 0) await new Promise<void>(resolve => setImmediate(resolve));
+            // Oversized content rows cannot become usage evidence.
+            if (line.length > 16 * 1024 * 1024) continue;
+            let row: any; try { row = JSON.parse(line); } catch { continue; }
+            const at = typeof row.timestamp === 'number' ? row.timestamp : Date.parse(row.timestamp);
+            const boundary = job.codex ? row.type === 'compacted' : row.type === 'system' && row.subtype === 'compact_boundary';
+            if (boundary) {
+              current = [...job.targets].filter(target => Math.abs(target - at) < 5000).sort((a, b) => Math.abs(a - at) - Math.abs(b - at))[0] ?? 0;
+              installed = false;
+              if (!job.codex && row.uuid && current) roots.set(row.uuid, current);
+            }
+            let target = 0, input = 0;
+            if (job.codex) {
+              if (row.payload?.type === 'context_compacted') installed = true;
+              const previous = total; total = Math.max(total, Number(row.payload?.info?.total_token_usage?.input_tokens) || 0);
+              const usage = row.payload?.info?.last_token_usage;
+              if (current && installed && Number(usage?.output_tokens) > 0 && total > previous) { target = current; input = Number(usage?.input_tokens) || 0; }
+            } else {
+              if (row.uuid && row.parentUuid) parents.set(row.uuid, row.parentUuid);
+              const root = roots.get(row.parentUuid);
+              if (row.uuid && root) roots.set(row.uuid, root);
+              if (row.type === 'assistant' && !row.isSidechain && row.parentUuid) {
+                const usage = row.message?.usage;
+                const input = Number(usage?.input_tokens || 0) + Number(usage?.cache_read_input_tokens || 0) + Number(usage?.cache_creation_input_tokens || 0);
+                if (input > 0) candidates.push({ parent: row.parentUuid, input, at });
+              }
+              if (row.type === 'assistant' && !row.isSidechain && root && at >= root) {
+                const usage = row.message?.usage;
+                target = root; input = Number(usage?.input_tokens || 0) + Number(usage?.cache_read_input_tokens || 0) + Number(usage?.cache_creation_input_tokens || 0);
+              }
+              if (roots.size > 100_000) roots.delete(roots.keys().next().value!);
+              if (parents.size > 100_000) parents.delete(parents.keys().next().value!);
+            }
+            if (target && input > 0 && !found.has(target)) {
+              found.add(target);
+              keepEvidence(evidenceKey(job.lane, job.sessionId, target, job.codex), { input, at, source: 'native-transcript' });
+            }
+          }
+          if (readError) throw readError;
+          // A compacted preserved segment can precede the parent it names in
+          // file order. Resolve that ancestry after the bounded metadata pass.
+          for (const candidate of candidates.sort((a, b) => a.at - b.at)) {
+            const seen = new Set<string>(); let parent: string | undefined = candidate.parent;
+            while (parent && !roots.has(parent) && !seen.has(parent) && seen.size < 10_000) { seen.add(parent); parent = parents.get(parent); }
+            const target = parent ? roots.get(parent) : undefined;
+            if (target && candidate.at >= target && !found.has(target)) {
+              found.add(target);
+              keepEvidence(evidenceKey(job.lane, job.sessionId, target, false), { input: candidate.input, at: candidate.at, source: 'native-transcript' });
+            }
+          }
+          indexedVersions.set(jobKey, versionBefore);
+          if (indexedVersions.size > 128) indexedVersions.delete(indexedVersions.keys().next().value!);
+          for (const at of job.targets) indexedBoundaries.add(evidenceKey(job.lane, job.sessionId, at, job.codex));
+          while (indexedBoundaries.size > 50_000) indexedBoundaries.delete(indexedBoundaries.values().next().value!);
+          await saving;
+        } catch { /* Unavailable history remains explicitly unavailable. */ }
+        finally { indexes.delete(jobKey); }
+      }
+    } finally { indexing = false; }
+  });
+}
+export function compactEvidencePending(lane: string, sessionId: string | undefined, codex: boolean, at: number): boolean {
+  return !!sessionId && !indexedBoundaries.has(evidenceKey(lane, sessionId, at, codex)) && indexes.has(`${codex}|${lane}|${sessionId}`);
+}
 const fileCache = new Map<string, { view: string; version: string; files: Array<{ path: string; content: string; start: number }> }>();
 type RestoredContextBlock = { kind: 'instructions' | 'invoked_skills'; texts: string[];
   files: Array<{ path: string; content: string }>; skills: Array<{ name: string; path: string }> };
@@ -106,9 +233,11 @@ function codexRollout(lane: string, sessionId: string): string | undefined {
 export function codexCompactEvidence(lane: string, sessionId: string | undefined, compactAt: number): CompactEvidence | undefined {
   if (!sessionId) return;
   const key = `codex|${lane}|${sessionId}|${compactAt}`;
+  if (savedEvidence.has(key)) return savedEvidence.get(key);
   if (evidenceCache.has(key)) return evidenceCache.get(key);
   try {
     const path = codexRollout(lane, sessionId); if (!path) return;
+    queueEvidenceIndex(path, lane, sessionId, compactAt, true);
     const rows = tailRows(path);
     const at = (row: any) => typeof row.timestamp === 'number' ? row.timestamp : Date.parse(row.timestamp);
     const boundary = rows.findIndex(row => row.type === 'compacted' && Math.abs(at(row) - compactAt) < 5000);
@@ -124,7 +253,7 @@ export function codexCompactEvidence(lane: string, sessionId: string | undefined
       if (installed && input > 0 && Number(row.nativeUsage?.output_tokens) > 0 && total > previous) {
         const evidence: CompactEvidence = { input, at: at(row), source: 'native-transcript' };
         if (evidenceCache.size >= 128) evidenceCache.delete(evidenceCache.keys().next().value!);
-        evidenceCache.set(key, evidence); return evidence;
+        evidenceCache.set(key, evidence); return keepEvidence(key, evidence);
       }
     }
   } catch { /* Missing, compressed or unprovable history stays unmeasured. */ }
@@ -133,11 +262,14 @@ export function codexCompactEvidence(lane: string, sessionId: string | undefined
  * assistant whose parent chain reaches the compact boundary is evidence. */
 export function nativeCompactEvidence(lane: string, sessionId: string | undefined, compactAt: number): CompactEvidence | undefined {
   const evidenceKey = `${lane}|${sessionId}|${compactAt}`;
+  if (savedEvidence.has(evidenceKey)) return savedEvidence.get(evidenceKey);
   if (evidenceCache.has(evidenceKey)) return evidenceCache.get(evidenceKey);
   try {
     const location = JSON.parse(readFileSync(join(STATE_DIR, 'native-claude-locations.json'), 'utf8'))[bareChatId(lane)];
     if (!sessionId || location?.id !== sessionId) return;
-    const rows = tailRows(join(location.profile, 'projects', location.project, `${sessionId}.jsonl`));
+    const path = join(location.profile, 'projects', location.project, `${sessionId}.jsonl`);
+    queueEvidenceIndex(path, lane, sessionId, compactAt, false);
+    const rows = tailRows(path);
     const timestamp = (row: any) => typeof row.timestamp === 'number' ? row.timestamp : Date.parse(row.timestamp);
     const boundary = rows.filter(row => row.type === 'system' && row.subtype === 'compact_boundary'
       && Math.abs(timestamp(row) - compactAt) < 5000).sort((a, b) => Math.abs(timestamp(a) - compactAt) - Math.abs(timestamp(b) - compactAt))[0];
@@ -158,20 +290,82 @@ export function nativeCompactEvidence(lane: string, sessionId: string | undefine
         const evidence: CompactEvidence = { input, at: timestamp(row), source: 'native-transcript' };
         if (evidenceCache.size >= 128) evidenceCache.delete(evidenceCache.keys().next().value!);
         evidenceCache.set(evidenceKey, evidence);
-        return evidence;
+        return keepEvidence(evidenceKey, evidence);
       }
     }
   } catch { /* Missing or old history stays explicitly unmeasured. */ }
 }
 
+type RestartEvidence = { id: string; lane: string; at: number };
+const restartStore = new JsonStore<RestartEvidence>('restart-evidence.json', [], join(STATE_DIR, 'native-session-metrics'));
+const restartTimes = new Map<string, Set<number>>();
+const restartLoaded = restartStore.list().then(rows => {
+  for (const row of rows) if (typeof row.lane === 'string' && Number.isFinite(row.at)) {
+    const times = restartTimes.get(row.lane) ?? new Set<number>(); times.add(row.at); restartTimes.set(row.lane, times);
+  }
+}).catch(() => { console.warn('[native-session] saved restart evidence could not be read'); });
+const restartScans = new Map<string, Promise<void>>();
+const restartVersions = new Map<string, string>();
+const restartTargets = new Map<string, Set<number>>();
+const restartChecked = new Set<string>();
+let restartQueue = Promise.resolve();
+function indexRestartMarkers(path: string, lane: string, at: number): boolean {
+  let version: string;
+  try { const s = statSync(path); version = `${s.size}:${s.mtimeMs}`; } catch { return false; }
+  if (restartVersions.get(path) === version) return false;
+  const targetKey = `${path}|${at}`;
+  const targets = restartTargets.get(path) ?? new Set<number>();
+  targets.add(at); restartTargets.set(path, targets);
+  if (restartScans.has(path)) return !restartChecked.has(targetKey);
+  const scan = restartQueue.then(async () => {
+    await restartLoaded;
+    const stat = statSync(path);
+    const times = restartTimes.get(lane) ?? new Set<number>();
+    const stream = createReadStream(path, { highWaterMark: 64 * 1024, end: stat.size - 1 });
+    const reader = createInterface({ input: stream, crlfDelay: Infinity });
+    let readError: Error | undefined;
+    stream.on('error', error => { readError = error; reader.close(); });
+    let count = 0;
+    for await (const line of reader) {
+      if (++count % 500 === 0) await new Promise<void>(resolve => setImmediate(resolve));
+      if (!line.includes('_serviceRestart')) continue;
+      let row: any; try { row = JSON.parse(line); } catch { continue; }
+      if (row.ev?.type === 'event' && row.ev.event?._serviceRestart === true && Number.isFinite(row.at)) times.add(row.at);
+    }
+    if (readError) throw readError;
+    restartTimes.set(lane, times);
+    await restartStore.modify(rows => {
+      const merged = new Map(rows.map(row => [row.id, row]));
+      for (const at of times) {
+        const id = createHash('sha256').update(`${lane}|${at}`).digest('hex');
+        merged.set(id, { id, lane, at });
+      }
+      return [...merged.values()].sort((a, b) => a.at - b.at).slice(-50_000);
+    });
+    restartVersions.set(path, `${stat.size}:${stat.mtimeMs}`);
+  }).catch(() => { /* Missing restart evidence cannot certify an interruption. */ }).finally(() => {
+    for (const target of targets) restartChecked.add(`${path}|${target}`);
+    while (restartChecked.size > 50_000) restartChecked.delete(restartChecked.values().next().value!);
+    restartTargets.delete(path); restartScans.delete(path);
+  });
+  restartScans.set(path, scan);
+  restartQueue = scan;
+  return !restartChecked.has(targetKey);
+}
 /** Only a persisted service-restart marker can explain a legacy interrupted
- * turn. Matching a time shared by other failures alone is never sufficient. */
-export function recordedRestartNear(lane: string, at: number): boolean {
+ * turn. Undefined means its saved markers are still being read. */
+export function recordedRestartNear(lane: string, at: number): boolean | undefined {
+  lane = bareChatId(lane);
+  if ([...(restartTimes.get(lane) ?? [])].some(time => Math.abs(time - at) < 3000)) return true;
   const directory = join(STATE_DIR, 'event-logs');
   if (!existsSync(directory)) return false;
-  const suffix = `_${bareChatId(lane)}.jsonl`;
-  return readdirSync(directory).filter(name => name.endsWith(suffix)).some(name => tailRows(join(directory, name), '_serviceRestart').some(row =>
-    row.ev?.type === 'event' && row.ev.event?._serviceRestart === true && Number.isFinite(row.at) && Math.abs(row.at - at) < 3000));
+  const paths = readdirSync(directory).filter(name => name.endsWith(`_${lane}.jsonl`)).map(name => join(directory, name));
+  let pending = false;
+  for (const path of paths) {
+    if (tailRows(path, '_serviceRestart').some(row => row.ev?.type === 'event' && row.ev.event?._serviceRestart === true && Number.isFinite(row.at) && Math.abs(row.at - at) < 3000)) return true;
+    pending = indexRestartMarkers(path, lane, at) || pending;
+  }
+  return pending ? undefined : false;
 }
 
 /** Return only the engine's verified reattached text files after its latest
