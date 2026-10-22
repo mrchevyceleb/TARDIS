@@ -47,6 +47,12 @@ export interface TombstoneOpts {
   signal: string | null;
   /** ms the turn had been running when the child died. Omit if not tracked. */
   ranMs?: number;
+  /** The resource guard's manager-recorded stop result for a contained
+   *  worker ('oom-kill', 'timeout', …). A bare SIGKILL cannot tell the
+   *  cgroup OOM kill from a stop escalation or a time limit; the manager
+   *  record can. Absent on non-contained hosts or when no record exists,
+   *  in which case the signal-number guess below still applies. */
+  stopReason?: string | null;
 }
 
 export function crashTombstoneText(opts: TombstoneOpts): string {
@@ -61,7 +67,20 @@ export function crashTombstoneText(opts: TombstoneOpts): string {
   lines.push(
     `[TARDIS] This turn was KILLED before it could reply. The ${cli} process died${ranPhrase} (${how}).`,
   );
-  if (likelyOom(code, signal)) {
+  const guardResult = (opts.stopReason ?? '').trim() || null;
+  if (guardResult === 'oom-kill') {
+    lines.push(
+      `The resource guard's memory limit stopped this worker (cgroup OOM kill). Its private scratch and child processes were released; other lanes kept their own limits. Check what survived before re-running anything heavy.`,
+    );
+  } else if (guardResult === 'timeout') {
+    lines.push(
+      `The resource guard stopped this worker at its runtime limit. The turn ran out of allotted time, not a crash; re-running the same long command hits the same limit, so recover or split the work instead.`,
+    );
+  } else if (guardResult) {
+    lines.push(
+      `The service manager recorded this worker's stop result as "${guardResult}".`,
+    );
+  } else if (likelyOom(code, signal)) {
     lines.push(
       `That is a SIGKILL, which on this box is almost always the OOM killer, not an agent choosing to stop. Run \`free -g\` before retrying anything browser- or build-heavy.`,
     );

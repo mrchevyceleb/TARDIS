@@ -1,5 +1,7 @@
-import { useEffect } from 'react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useEffect, useRef, useState } from 'react';
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
+import { getResourceGuardHealth } from './data/api';
+import { showToast } from './native/shell';
 import { Studio } from './shell/Studio';
 import { GrokApp } from './grok/GrokApp';
 import { ProxyViewerProvider } from './components/ProxyViewer';
@@ -29,12 +31,32 @@ function dismissBoot() {
   }, wait);
 }
 
+function ResourceNotices() {
+  const seen = useRef<string[] | null>(null);
+  const [notice, setNotice] = useState('');
+  const { data } = useQuery({ queryKey: ['resource-guard'], queryFn: getResourceGuardHealth, refetchInterval: 15_000, retry: false });
+  useEffect(() => {
+    if (!data || data.mode === 'off') return;
+    const known = seen.current;
+    seen.current = [...new Set([...data.incidents.map((item) => item.id), ...(known ?? [])])].slice(0, 200);
+    if (known === null) return; // seed old receipts silently; no client clock assumptions
+    const fresh = data.incidents.filter((item) => item.kind !== 'hold' && !known.includes(item.id));
+    if (!fresh.length) return;
+    const latest = fresh[0];
+    const text = `${latest.owner}: ${latest.message}${fresh.length > 1 ? ` (${fresh.length} new notices.)` : ''} Details are on the Desk.`;
+    setNotice(text);
+    showToast(text);
+  }, [data]);
+  return <span className="sr-only" role="status" aria-live="polite">{notice}</span>;
+}
+
 export default function App() {
   useEffect(dismissBoot, []);
   return (
     <QueryClientProvider client={queryClient}>
       <ProxyViewerProvider>
         <JarvisProvider>
+          <ResourceNotices />
           {studioMatch ? <Studio /> : <GrokApp initialRoom={legacyRoom || undefined} />}
           <JarvisOverlay />
         </JarvisProvider>

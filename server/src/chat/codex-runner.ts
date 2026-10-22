@@ -1,6 +1,8 @@
 import { recordNativeCall, recordNativeSession, recordNativeCompact, recordNativeFailure } from './sessionMetrics.ts';
 import { prepareSessionStateDelta, resetSessionStateDelta } from './sessionContext.ts';
 import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
+
+import { assertResourcesForSpawn, signalContainedWorker, ResourceHoldError, containedScopeOf, scopeOutcome, resourceGuardRequired } from '../lib/resourceGuard.ts';
 import { execFileSync, type ChildProcess, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
@@ -29,7 +31,7 @@ import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
-import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
+import { MemoryPressureSpawnError } from './memory.ts';
 import { accountEnv, accountEnvForAccount, accountFromChatId, accountForAgent } from '../lib/accountResolver.ts';
 import { codexHomeFor, codexRolloutMissing, latestThreadIdFromEvents } from './codex-threads.ts';
 import { resolveCodexBin, resolveCodexSelection } from './codex-models.ts';
@@ -48,6 +50,7 @@ const CODEX_BIN = resolveCodexBin();
 console.log(`[chat codex] binary: ${CODEX_BIN}`);
 
 function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (signalContainedWorker(child, signal)) return;
   // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
   if (!child.pid || child.pid <= 1) return;
   const descendants = collectDescendantPids(child.pid);
@@ -710,12 +713,12 @@ export class CodexSession {
     }
 
     try {
-      assertMemoryAvailableForSpawn('codex');
+      assertResourcesForSpawn(agentForChatId(this.chatId)?.name ?? 'Codex', this.cwd, { conversationTurn: true });
     } catch (error) {
       this.busy = false;
       this.emit({
         type: 'error',
-        code: error instanceof MemoryPressureSpawnError ? error.code : undefined,
+        code: error instanceof MemoryPressureSpawnError || error instanceof ResourceHoldError ? error.code : undefined,
         retryable: true,
         message: (error as Error).message,
       });
@@ -888,13 +891,24 @@ export class CodexSession {
     // pin that cannot be honored already unwedged the session above.
     const codexSpawnEnv: NodeJS.ProcessEnv = childEnv;
     const turnStartedAtMs = Date.now();
-    const child = spawnLaneWorker(process.execPath, [CODEX_APP_TURN_SCRIPT], {
+    let child: ChildProcessByStdio<Writable, Readable, Readable>;
+    try {
+      child = spawnLaneWorker(process.execPath, [CODEX_APP_TURN_SCRIPT], {
       cwd: this.cwd,
       // The marker tells the installed long-call gate hook this is a TARDIS agent turn.
       env: { ...codexSpawnEnv, ...localMcpSecretEnv(laneName ?? 'Teammate', { unnamedLane: !laneName }), ...longCallGateEnv(this.chatId) },
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
-    }) as ChildProcessByStdio<Writable, Readable, Readable>;
+    }, agentForChatId(this.chatId)?.name ?? this.chatId) as ChildProcessByStdio<Writable, Readable, Readable>;
+    } catch (error) {
+      cleanupImages();
+      this.busy = false;
+      this.busySince = null;
+      this.nativeSteerReady = false;
+      this.emit({ type: 'error', retryable: true, message: (error as Error).message });
+      this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
+      return;
+    }
     this.currentChild = child;
     // The adapter queues turn/steer requests received during app-server startup
     // and flushes them against the announced active turn id.
@@ -1079,6 +1093,11 @@ export class CodexSession {
       // and report it did nothing. Leave an assistant-shaped marker instead.
       if (!producedAgentMessage && (signal === 'SIGKILL' || code === 137)) {
         try {
+          // The guard's manager record knows WHY a contained worker died; a
+          // bare SIGKILL only guesses (cgroup OOM kill vs stop escalation vs
+          // time limit). Ask it so the tombstone tells the next turn the truth.
+          const scope = resourceGuardRequired() ? containedScopeOf(child) : null;
+          const stopReason = scope ? (await scopeOutcome(scope)) || null : null;
           this.emit(crashTombstoneEvent(crashTombstoneText({
             cli: 'codex',
             cwd: this.cwd,
@@ -1086,6 +1105,7 @@ export class CodexSession {
             code: code ?? null,
             signal: signal ?? null,
             ranMs: Date.now() - turnStartedAtMs,
+            stopReason,
           })));
         } catch (err) {
           console.warn('[chat codex] tombstone emit failed:', (err as Error).message);
