@@ -1,3 +1,5 @@
+import { CONTEXT_TOKEN_BUDGET } from './contextBudget.ts';
+
 /** TARDIS owns teammate identity, routing, durability, and cycle guards.
  * Codex's unrelated native multi-agent runtime creates a second `/root/...`
  * roster and exposes `send_message`, which looks deceptively correct but cannot
@@ -11,7 +13,7 @@ export function buildCodexAppServerArgs(mcpArgs: readonly string[]): string[] {
     'app-server',
     '--listen', 'stdio://',
     ...codexRivendellIsolationArgs(),
-    '-c', 'model_auto_compact_token_limit=300000',
+    '-c', `model_auto_compact_token_limit=${CONTEXT_TOKEN_BUDGET}`,
     '-c', 'model_auto_compact_token_limit_scope="total"',
     ...mcpArgs,
   ];
