@@ -10,14 +10,29 @@ type Information = { id: string; chatId: string; from: string; text: string; adm
 const inbox = new JsonStore<Information>('informational-inbox.json', []);
 let acceptanceWrites = Promise.resolve();
 
-export function acknowledgementOnly(text: string): boolean {
-  return /^(?:done|thanks?(?: you)?|got it|noted|ack(?:nowledged)?|ok(?:ay)?|no_update)[.!\s]*$/i.test(text.trim());
+export function acknowledgementOnly(text: string, addressees: string[] = []): boolean {
+  let value = text.trim();
+  for (const name of addressees) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    value = value.replace(new RegExp(`,\\s*${escaped}[.!\\s]*$`, 'i'), '');
+  }
+  const emojiOnly = /^[👍🙏👌✅🙌👏🙂😊\s.!]+$/u.test(value);
+  value = value.replace(/[👍🙏👌✅🙌👏🙂😊]/gu, '').replace(/[.,!;:]+/g, ' ').trim();
+  return emojiOnly || /^(?:(?:done|thanks?(?: you)?|got it|noted|ack(?:nowledged)?|ok(?:ay)?|no_update|sounds good|will do|understood)(?:\s+|$))+$/i.test(value);
+}
+
+export async function publishContextReceipt(chatId: string, event: Record<string, unknown>): Promise<void> {
+  const key = logKeyFor('claude', ELROND_WORKSPACE_PATH, bareChatId(chatId));
+  const row = { seq: reserveEventLogSeq(key), at: Date.now(), ev: { type: 'event' as const, event } };
+  await appendEventLogDurable(key, row);
+  const { publishExternalThreadEvent } = await import('./runner.ts');
+  publishExternalThreadEvent(key, row);
 }
 
 /** Shared across every engine and across restarts. Claim before publication
  * so concurrent identical tool calls cannot both send. Human input is exempt. */
-export async function claimOutbound(from: string, to: string, text: string, request: string): Promise<string | null> {
-  const normalized = acknowledgementOnly(text) ? '<acknowledgement>' : text.trim().replace(/\s+/g, ' ');
+export async function claimOutbound(from: string, to: string, text: string, request: string, acknowledgement = acknowledgementOnly(text)): Promise<string | null> {
+  const normalized = acknowledgement ? '<acknowledgement>' : text.trim().replace(/\s+/g, ' ');
   const id = createHash('sha256').update(JSON.stringify([from, to, request, normalized])).digest('hex');
   let claimed = false;
   await sent.modify(items => {
@@ -63,7 +78,10 @@ export async function removeSavedInformation(id: string): Promise<void> { await 
 export async function informationalPending(id: string): Promise<boolean> { return (await inbox.list()).some(item => item.id === id); }
 export async function pendingInformational(chatId: string): Promise<{ text: string; accept(): void }> {
   await acceptanceWrites;
-  const items = (await inbox.list()).filter(item => item.chatId === bareChatId(chatId));
+  const saved = (await inbox.list()).filter(item => item.chatId === bareChatId(chatId));
+  const empty = new Set(saved.filter(item => !item.admissionAck && acknowledgementOnly(item.text)).map(item => item.id));
+  if (empty.size) await inbox.modify(items => items.filter(item => !empty.has(item.id)));
+  const items = saved.filter(item => !empty.has(item.id));
   for (const item of items) await publishSavedInformation(item);
   // Bound one input. Remaining messages ride the following real turn.
   const selected: typeof items = [];
@@ -74,6 +92,7 @@ export async function pendingInformational(chatId: string): Promise<{ text: stri
     if (ids.size) acceptanceWrites = acceptanceWrites.then(async () => {
       const { admittedDeliveryAck } = await import('../lib/flagDigest.ts');
       for (const item of selected) if (item.admissionAck === 'flag-digest') admittedDeliveryAck(bareChatId(chatId).replace(/^bot-/, ''), item.id);
+      for (const item of selected) await publishContextReceipt(item.chatId, { type: 'peer_delivery_accepted', deliveryId: item.id, ts: Date.now() });
       await inbox.modify(items => items.filter(item => !ids.has(item.id)));
     }).catch(() => console.warn('[messages] saved updates will retry'));
   } };

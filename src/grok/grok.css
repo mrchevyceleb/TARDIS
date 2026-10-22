@@ -1329,7 +1329,10 @@
   border-radius: 14px;
   background: var(--r-bg-card);
   animation: bt-msg-in 0.25s ease both;
+  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
 }
+.bt-peer:hover { transform: translateY(-2px); border-color: var(--r-line-gold); box-shadow: 0 6px 22px #0002; }
+@media (prefers-reduced-motion: reduce) { .bt-peer:hover { transform: none; } }
 /* A teammate message pinned to an agent's board carries the same accent the
    assistant bubbles use, so a pinned handoff reads at a glance. */
 .bt-peer.pinned { border-color: var(--r-line-gold); }

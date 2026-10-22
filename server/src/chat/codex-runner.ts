@@ -29,7 +29,7 @@ import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
-import { agentForChatId, noteAgentLane } from './agents.ts';
+import { agentForChatId, brainForAgent, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { accountEnv, accountEnvForAccount, accountFromChatId, accountForAgent } from '../lib/accountResolver.ts';
@@ -557,6 +557,11 @@ export class CodexSession {
 
   async send(text: string, images?: ChatImage[], opts: CodexSendOptions = {}): Promise<void> {
     const selectionRevision = assertSelectedEngine(this.chatId, this.cli);
+    const agent = agentForChatId(this.chatId);
+    if (agent) {
+      const brain = brainForAgent(agent);
+      opts = { ...opts, model: brain.model, effort: brain.effort };
+    }
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
     if (opts.peerDeliveryId && this.submittedPeerDeliveries.has(opts.peerDeliveryId)) {

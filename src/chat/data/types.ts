@@ -81,6 +81,7 @@ export type ChatBlock =
       replyAudience?: 'peer' | 'owner';
       /** Stable durable delivery id; retries reuse it and render only once. */
       deliveryId?: string;
+      receivedAt?: number;
       text: string;
       ts: number;
       /** Time unknown (history logged before events were time-stamped). */

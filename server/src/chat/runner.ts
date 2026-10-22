@@ -1,5 +1,5 @@
 import { extractVisibleTurns } from './threadWindow.ts';
-import { assertSelectedEngine, isSelectedEngineChanged, exportCodexHandover, recoverCodexHandover, nativeEngine, saveEngineHandover } from './engineHandover.ts';
+import { assertSelectedEngine, isSelectedEngineChanged, exportCodexHandover, recoverCodexHandover, nativeEngine, pendingEngineHandover, saveEngineHandover } from './engineHandover.ts';
 import { prepareSessionStateDelta, resetSessionStateDelta } from './sessionContext.ts';
 import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 import { assertClaudeSubscription } from './subscription-auth.ts';
@@ -3415,7 +3415,7 @@ async function getOrCreateSessionUnlocked(opts: {
           }
           return `Continue from the previous engine's recent conversation below. Older messages and the full native history remain available; consult them when needed.\n${recent.join('\n\n') || 'No visible messages were recorded. Check current commitments and owned cards before starting work.'}`;
         };
-        await saveEngineHandover({ chatId, sourceId: previous.sessionId, sourceRevision: previous.updatedAt, target: opts.cli,
+        await saveEngineHandover({ chatId, sourceId: previous.sessionId, sourceRevision: previous.updatedAt, target: opts.cli, sourceCli: previous.cli,
           noteSource: sourceEngine !== 'codex' && !isClaudeFamilyCli(previous.cli) ? 'savedConversation' : undefined }, async () => {
           assertHandoverSafe();
           if (sourceEngine === 'codex') {
@@ -3446,7 +3446,11 @@ async function getOrCreateSessionUnlocked(opts: {
         if (isThreadResetting(opts)) throw new Error('The handover was canceled; the saved history is retained.');
       }
     }
-    if (isClaudeFamilyCli(opts.cli)) {
+    // A saved cross-engine note already bridges the inactive Claude window.
+    // Retrying a return must reuse it, even if a failed old-window lookup
+    // refreshed that window's provenance, rather than compacting it again.
+    const carriedHandover = !opts.handoverSource && Boolean((await pendingEngineHandover(chatId)).text);
+    if (isClaudeFamilyCli(opts.cli) && !carriedHandover) {
       const logKey = logKeyFor(opts.cli, opts.repoPath, chatId);
       let handedOver = false;
       for (const [sourceKey, source] of [...sessions]) {

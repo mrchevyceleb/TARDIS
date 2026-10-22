@@ -2082,9 +2082,13 @@ export async function deliverTeamMessage(input: {
   const rl = rateOk(replyEdge(from.id, to.id));
   if (!rl.ok) return { delivered: false, reason: rl.reason };
 
-  const claim = !input.source && rosterSender ? await claimOutbound(from.id, to.id, text, request) : undefined;
+  const quietAcknowledgement = acknowledgementOnly(text, [to.name, DESK_OWNER_NAME]);
+  const claim = !input.source && rosterSender ? await claimOutbound(from.id, to.id, text, request, quietAcknowledgement) : undefined;
   if (claim === null) return { delivered: false, to: to.name, reason: 'You already sent this exact message. Do not send it again; continue only when there is new information.' };
-  if ((input.informational === true || acknowledgementOnly(text)) && input.priority !== true && !input.source) {
+  if (quietAcknowledgement && input.priority !== true && !input.source) {
+    return { delivered: true, to: to.name, queued: true, reason: 'Acknowledgement noted. No wake-up or message card was needed.' };
+  }
+  if (input.informational === true && input.priority !== true && !input.source) {
     let deliveryId: string;
     try { deliveryId = await saveInformational(to.home || `bot-${to.id}`, from.name, text, input.admissionAck); }
     catch (error) { if (claim) await releaseOutbound(claim); throw error; }
