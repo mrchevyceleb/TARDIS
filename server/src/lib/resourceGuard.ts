@@ -125,7 +125,6 @@ export async function initializeResourceGuard(): Promise<void> {
       throw new Error('Install the bounded tardis-workers.slice policy from docs/RESOURCE-GUARD.md.');
     }
     aggregateTaskLimit = Number(values.TasksMax);
-    await refreshManagerEnv();
     // Real capability check on the REAL launch path. A bare bwrap probe proves
     // nothing about what every worker actually runs, and a refused
     // `systemd-run` (unsupported property, manager trouble) used to leave
@@ -139,7 +138,11 @@ export async function initializeResourceGuard(): Promise<void> {
     // things) must not reach a worker that did not pass it. The probe's own
     // env also carries one value systemd cannot carry, which must be dropped
     // without refusing the launch.
+    // Plant the canary BEFORE snapshotting the manager env: the snapshot is
+    // what the unset list is computed from, so a canary planted after it
+    // never gets unset and the probe fails its own exactness check.
     await commandOutput('systemctl', ['--user', 'set-environment', 'TARDIS_PROBE_MANAGER_CANARY=yes']).catch(() => '');
+    await refreshManagerEnv();
     try {
       await probeContainedLaunch(false);
       await probeContainedLaunch(true);
@@ -149,7 +152,18 @@ export async function initializeResourceGuard(): Promise<void> {
     recent = (await incidents.list()).slice(0, 50);
     await reapOwnedConfigs();
     ready = true;
-    if (!monitor) { monitor = setInterval(() => { void monitorWrites(); }, 2000); monitor.unref(); }
+    if (!monitor) {
+      let ticks = 0;
+      monitor = setInterval(() => {
+        void monitorWrites();
+        // The manager-env snapshot drives every launch's unset list. Without
+        // a refresh, a name the manager gains later (an import, a new login
+        // session) would reach workers whose caller never passed it, forever.
+        // Refresh on a slow tick: bounded drift, no per-launch spawn cost.
+        if (++ticks % 15 === 0) void refreshManagerEnv();
+      }, 2000);
+      monitor.unref();
+    }
     readiness = 'Each worker has kernel memory, swap, CPU and process limits, private scratch that disappears on exit, and a read-only systemd unit directory. Host PIDs, the user bus and /dev/shm stay shared by design; a buggy same-UID process can still signal peers, which the guard bounds but cannot prevent.';
   } catch (err) {
     readiness = (err as Error).message;
@@ -321,7 +335,9 @@ function storageLow(path: string): boolean {
 
 /** Snapshot the user manager's environment NAMES. Workers are transient
  *  units: they start from this environment plus what the launch passes, so
- *  the launch must explicitly unset every manager name the caller removed. */
+ *  the launch must explicitly unset every manager name the caller removed.
+ *  The monitor refreshes this every 30s, so a name the manager gains later
+ *  can leak into at most ~30s of launches, never forever. */
 async function refreshManagerEnv(): Promise<void> {
   const out = await commandOutput('systemctl', ['--user', 'show-environment']);
   managerEnvNames = new Set(out.split('\n').filter(Boolean).map((line) => line.split('=')[0])
@@ -545,7 +561,7 @@ async function probeContainedLaunch(durable: boolean): Promise<void> {
   const probeEnv = { ...process.env, TARDIS_PROBE_PASSED: 'ok', TARDIS_PROBE_INVALID: 'not\x1bcarriable' } as NodeJS.ProcessEnv;
   await new Promise<void>((resolve, reject) => {
     execFile('systemd-run', containedLaunchArgs(unit, '/bin/sh', ['-c', PROBE_SCRIPT], durable, durable ? 60 : undefined, { env: probeEnv }), { timeout: 30_000, env: probeEnv }, (err, _stdout, stderr) => {
-      if (err) reject(new Error(`The real contained launch failed in its ${durable ? 'job' : 'lane'} shape: ${String(stderr || err.message).trim().slice(0, 300)}`));
+      if (err) reject(new Error(`The real contained launch failed in its ${durable ? 'job' : 'lane'} shape: ${String(stderr || err.message).trim().slice(0, 300)}${'code' in err ? ` (exit ${err.code})` : ''}`));
       else resolve();
     });
   });

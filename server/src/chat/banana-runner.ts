@@ -1,6 +1,6 @@
 import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 
-import { signalContainedWorker } from '../lib/resourceGuard.ts';
+import { signalContainedWorker, containedScopeOf, scopeOutcome } from '../lib/resourceGuard.ts';
 import { assertSubscriptionLane } from './subscription-policy.ts';
 import { execFile, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
@@ -2333,7 +2333,7 @@ class BananaServer {
     const owners = new Set(this.routes.values());
     this.routes.clear();
     for (const session of owners) {
-      session.onServerDeath(reason);
+      session.onServerDeath(reason, child);
     }
   }
 
@@ -3160,24 +3160,41 @@ export class BananaSession {
   // ── server-event entry points ──────────────────────────────
 
   /** Called by BananaServer when its serve child dies. Fail any in-flight
-   *  turn so the UI shows an error instead of freezing. */
-  onServerDeath(reason: string): void {
+   *  turn so the UI shows an error instead of freezing. `serverChild` is the
+   *  dead serve process when the server still had it, so the tombstone can
+   *  ask the guard for the real stop reason instead of guessing. */
+  onServerDeath(reason: string, serverChild?: ChildProcess | null): void {
     if (this.busy && this.turn && !this.turn.done) {
       // The serve process died under an in-flight turn. failTurn() emits error +
       // result, but neither is an assistant turn, so the model window would come
       // back blank and the next turn would report it did nothing. Leave a
       // durable marker first. See crashTombstone.ts.
-      try {
-        const killed = /SIGKILL|code=137/.test(reason);
-        this.emit(crashTombstoneEvent(crashTombstoneText({
-          cli: 'banana',
-          cwd: this.cwd,
-          sessionId: this.threadId,
-          code: killed ? 137 : null,
-          signal: killed ? 'SIGKILL' : null,
-        })));
-      } catch (err) {
-        console.warn('[banana] tombstone emit failed:', (err as Error).message);
+      const killed = /SIGKILL|code=137/.test(reason);
+      const leaveTombstone = (stopReason?: string | null) => {
+        try {
+          this.emit(crashTombstoneEvent(crashTombstoneText({
+            cli: 'banana',
+            cwd: this.cwd,
+            sessionId: this.threadId,
+            code: killed ? 137 : null,
+            signal: killed ? 'SIGKILL' : null,
+            stopReason,
+          })));
+        } catch (err) {
+          console.warn('[banana] tombstone emit failed:', (err as Error).message);
+        }
+      };
+      const scope = killed && serverChild && resourceGuardRequired() ? containedScopeOf(serverChild) : null;
+      if (scope) {
+        // A SIGKILL alone cannot tell the cgroup OOM kill from a stop
+        // escalation; the manager record can. failTurn already ends the turn
+        // now, and the marker lands moments later, still before any next turn
+        // reads the window.
+        void scopeOutcome(scope)
+          .then((stopReason) => leaveTombstone(stopReason || null))
+          .catch(() => leaveTombstone(null));
+      } else {
+        leaveTombstone(null);
       }
       this.failTurn(`banana server stopped: ${reason}`);
     }

@@ -1,6 +1,6 @@
 import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 
-import { assertResourcesForSpawn, signalContainedWorker, ResourceHoldError } from '../lib/resourceGuard.ts';
+import { assertResourcesForSpawn, signalContainedWorker, ResourceHoldError, containedScopeOf, scopeOutcome, resourceGuardRequired } from '../lib/resourceGuard.ts';
 import { execFileSync, type ChildProcess, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
@@ -1151,6 +1151,11 @@ export class CodexSession {
       // and report it did nothing. Leave an assistant-shaped marker instead.
       if (!producedAgentMessage && (signal === 'SIGKILL' || code === 137)) {
         try {
+          // The guard's manager record knows WHY a contained worker died; a
+          // bare SIGKILL only guesses (cgroup OOM kill vs stop escalation vs
+          // time limit). Ask it so the tombstone tells the next turn the truth.
+          const scope = resourceGuardRequired() ? containedScopeOf(child) : null;
+          const stopReason = scope ? (await scopeOutcome(scope)) || null : null;
           this.emit(crashTombstoneEvent(crashTombstoneText({
             cli: 'codex',
             cwd: this.cwd,
@@ -1158,6 +1163,7 @@ export class CodexSession {
             code: code ?? null,
             signal: signal ?? null,
             ranMs: Date.now() - turnStartedAtMs,
+            stopReason,
           })));
         } catch (err) {
           console.warn('[chat codex] tombstone emit failed:', (err as Error).message);
