@@ -10,6 +10,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { stripVTControlCharacters } from 'node:util';
 import { CODEX_APP_TURN_SCRIPT } from '../config.ts';
 import { localMcpCodexArgs, localMcpSecretEnv } from './local-mcp.ts';
 import { officeMcpCodexArgs } from './office-mcp.ts';
@@ -132,9 +133,7 @@ async function probeProjectConfigFile(path: string): Promise<ProjectConfigProbeR
 
   return {
     ok: false,
-    message:
-      `OneDrive is still locking ${path} after ${PROJECT_CONFIG_PROBE_RETRIES + 1} read attempts. ` +
-      `Retry in a moment, or move ASSISTANT-HUB off OneDrive. Last error: ${fileProviderErrorMessage(lastErr)}`,
+    message: codexFailureMessage(`project config ${fileProviderErrorMessage(lastErr)}`),
   };
 }
 
@@ -243,12 +242,42 @@ const imageExtension = (mediaType: string): string => {
 
 const CODEX_TRACING_LINE = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+(ERROR|WARN|INFO|DEBUG|TRACE)\s+[\w_]+(?:::[\w_]+)*:/;
 const CODEX_PROJECT_CONFIG_ERROR = /(config\.toml|hooks\.json|project config|error loading config)/i;
+const CODEX_FAILED_TURN = 'Codex stopped before finishing this turn. Your conversation is saved.';
 
 function isIgnorableCodexStderr(line: string): boolean {
   if (/Reading additional input from stdin/i.test(line)) return true;
   if (/failed to record rollout items/i.test(line)) return true;
   if (/write_stdin failed: stdin is closed for this session/i.test(line)) return true;
   return CODEX_TRACING_LINE.test(line);
+}
+
+/** Diagnostics belong in the server log. A chat error describes the failed
+ * turn and a useful next action without exposing terminal escapes or stacks. */
+function codexFailureMessage(detail: string): string {
+  const text = stripVTControlCharacters(detail);
+  const saved = ' Your conversation is saved.';
+  if (isTransientFileProviderError(text) && CODEX_PROJECT_CONFIG_ERROR.test(text)) {
+    return 'Codex settings are temporarily locked by file sync. Try again in a moment.' + saved;
+  }
+  if (/unauthorized|authentication (?:failed|required)|(?:HTTP|status)\s*:?\s*401\b|\bsign[ -]?in\b|\blog[ -]?in\b|token.{0,30}expired|invalid.{0,15}(?:api.?key|token)/i.test(text)) {
+    return 'Codex needs you to sign in again.' + saved;
+  }
+  if (/rate.?limit|usage.?limit|quota|(?:HTTP|status)\s*:?\s*429\b|insufficient.{0,15}(?:credits|balance)/i.test(text)) {
+    return 'Codex has reached its usage limit. Try again when it resets.' + saved;
+  }
+  if (/context.{0,25}(?:limit|exceed|length)|too many tokens/i.test(text)) {
+    return 'Codex needs this conversation compacted before it can continue.' + saved;
+  }
+  if (/model.{0,30}(?:not found|does not exist|not available|not supported)/i.test(text)) {
+    return 'This Codex model is unavailable. Choose another model to continue.' + saved;
+  }
+  if (/timed? ?out|timeout|connection (?:failed|refused|reset|closed)|failed to connect|network (?:error|failure|unavailable)|fetch failed|service unavailable|(?:HTTP|status)\s*:?\s*50[234]\b/i.test(text)) {
+    return "Codex couldn't connect right now. Try again in a moment." + saved;
+  }
+  if (/permission denied|EACCES|EPERM/i.test(text)) {
+    return "Codex couldn't access a file it needs. Check this chat's folder permissions and try again." + saved;
+  }
+  return CODEX_FAILED_TURN;
 }
 
 export class CodexSession {
@@ -771,7 +800,8 @@ export class CodexSession {
     } catch (e) {
       cleanupImages();
       this.busy = false;
-      this.emit({ type: 'error', message: `image preparation failed: ${(e as Error).message}` });
+      console.warn('[chat codex] image preparation failed:', (e as Error).message);
+      this.emit({ type: 'error', message: "Codex couldn't read that image. Try attaching it again. Your conversation is saved." });
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
       return;
     }
@@ -961,18 +991,11 @@ export class CodexSession {
       : null;
     const stderrChunks: string[] = [];
     let transientProjectConfigError: string | null = null;
+    let terminalError: string | null = null;
 
     const rememberTransientProjectConfigError = (text: string) => {
       if (!isTransientFileProviderError(text) || !CODEX_PROJECT_CONFIG_ERROR.test(text)) return false;
-      transientProjectConfigError =
-        'OneDrive locked Codex project config while Codex was starting. ' +
-        `Retry in a moment, or move ASSISTANT-HUB off OneDrive. Last error: ${text}`;
-      this.emit({
-        type: 'error',
-        code: 'CODEX_PROJECT_CONFIG_LOCKED',
-        retryable: true,
-        message: transientProjectConfigError,
-      });
+      transientProjectConfigError = codexFailureMessage(text);
       return true;
     };
 
@@ -983,6 +1006,10 @@ export class CodexSession {
         const ev = JSON.parse(line);
         if (ev?.type === 'turn.failed' || ev?.type === 'error') {
           noteProviderGateFailure('Codex', () => agentForChatId(this.chatId)?.name ?? this.chatId, String(ev.error?.message ?? ev.message ?? ''));
+        }
+        if (ev?.type === 'turn.failed' || (ev?.type === 'turn.completed' && ev.status && ev.status !== 'completed')) {
+          terminalError = typeof ev.error === 'string' ? ev.error : ev.error?.message ?? (ev.error ? JSON.stringify(ev.error) : ev.message ?? 'Codex turn failed');
+          console.warn(`[chat codex terminal ${this.chatId}] ${stripVTControlCharacters(terminalError!)}`);
         }
         if (ev?.type === 'rivendell.steer.accepted' && typeof ev.request_id === 'string') {
           this.settleNativeSteer(ev.request_id);
@@ -996,6 +1023,9 @@ export class CodexSession {
           return;
         }
         if (ev?.type === 'turn.started') {
+          // Startup passed the config read. An earlier lock is recovered,
+          // so it must not override a later, unrelated terminal failure.
+          transientProjectConfigError = null;
           stateDelta.accept();
           this.nativeSteerReady = true;
           // The visible peer echo lands only now that the turn really
@@ -1035,7 +1065,7 @@ export class CodexSession {
           sawActionableItem = true;
         }
         if (ev?.type === 'turn.completed') {
-          sawTurnCompleted = true;
+          sawTurnCompleted = !ev.status || ev.status === 'completed';
           this.nativeSteerReady = false;
         }
         this.handleCodexEvent(ev, turnState);
@@ -1062,21 +1092,32 @@ export class CodexSession {
     child.stdout.on('end', flushStdout);
 
     child.stderr.setEncoding('utf8');
+    let stderrBuffer = '';
+    const handleStderrLine = (raw: string) => {
+      const text = stripVTControlCharacters(raw).trim();
+      if (!text) return;
+      console.warn(`[chat codex diagnostic ${this.chatId}] ${text}`);
+      noteProviderGateFailure('Codex', () => agentForChatId(this.chatId)?.name ?? this.chatId, text);
+      if (isIgnorableCodexStderr(text)) return;
+      rememberTransientProjectConfigError(text);
+      stderrChunks.push(text);
+      // Keep bounded diagnostic context for a possible terminal failure.
+      while (stderrChunks.length > 100) stderrChunks.shift();
+    };
+    const flushStderr = () => {
+      if (stderrBuffer.trim()) handleStderrLine(stderrBuffer);
+      stderrBuffer = '';
+    };
     child.stderr.on('data', (chunk: string) => {
-      // Codex stderr mixes real failures with structured internal tracing.
-      // The common `write_stdin failed: stdin is closed` trace is Codex's own
-      // recovery path after a non-TTY command, not a user-actionable chat
-      // error, so keep it out of the transcript.
-      for (const raw of chunk.split('\n')) {
-        const text = raw.trim();
-        if (!text) continue;
-        noteProviderGateFailure('Codex', () => agentForChatId(this.chatId)?.name ?? this.chatId, text);
-        if (isIgnorableCodexStderr(text)) continue;
-        if (rememberTransientProjectConfigError(text)) continue;
-        stderrChunks.push(text);
-        this.emit({ type: 'error', message: text });
+      stderrBuffer += chunk;
+      let nl = stderrBuffer.indexOf('\n');
+      while (nl !== -1) {
+        handleStderrLine(stderrBuffer.slice(0, nl));
+        stderrBuffer = stderrBuffer.slice(nl + 1);
+        nl = stderrBuffer.indexOf('\n');
       }
     });
+    child.stderr.on('end', flushStderr);
 
     let childTerminalHandled = false;
     child.on('close', async (code, signal) => {
@@ -1084,6 +1125,7 @@ export class CodexSession {
       if (childTerminalHandled) return;
       childTerminalHandled = true;
       flushStdout();
+      flushStderr();
       settlePeerAdmission(false);
       console.log(
         `[chat codex] child close cwd=${this.cwd} code=${code} threadId=${this.threadId ?? '-'}`,
@@ -1101,10 +1143,7 @@ export class CodexSession {
       // transcript.
       if (this.intentionalKill) return;
       const stderrText = stderrChunks.join('\n').trim();
-      if (code !== 0 && !transientProjectConfigError && rememberTransientProjectConfigError(stderrText)) {
-        stderrChunks.length = 0;
-      }
-      this.closeDanglingToolBlocks(turnState, code, transientProjectConfigError ?? stderrText);
+      if (code !== 0 && !transientProjectConfigError) rememberTransientProjectConfigError(stderrChunks.slice(-3).join('\n'));
       // Killed mid-turn (OOM SIGKILL / 137) with no reply delivered. An `error`
       // event reaches the UI but NOT the model window — extractVisibleTurns only
       // keeps user/assistant turns — so the next turn would see a blank window
@@ -1127,16 +1166,17 @@ export class CodexSession {
       // completes with last_agent_message=null + exit 1 and no useful stderr.
       // Without an explicit error event the UI just drops out of "thinking".
       const emptyTurn =
-        !producedAgentMessage && !transientProjectConfigError && (code !== 0 || !sawTurnCompleted);
-      const failedTurn = code !== 0 || emptyTurn;
-      const failureMessage = transientProjectConfigError || stderrText || (emptyTurn
-        ? 'Codex ended before returning an answer. The saved thread and queued messages were retained.'
-        : `Codex turn failed (${signal || code}). The saved thread was retained.`);
+        !producedAgentMessage && (code !== 0 || !sawTurnCompleted);
+      const failedTurn = code !== 0 || emptyTurn || terminalError !== null;
+      const terminalMessage = codexFailureMessage(terminalError ?? stderrChunks.slice(-3).join('\n'));
+      const failureMessage = terminalMessage === CODEX_FAILED_TURN && transientProjectConfigError
+        ? transientProjectConfigError : terminalMessage;
+      this.closeDanglingToolBlocks(turnState, failedTurn ? (code || 1) : 0, failedTurn ? failureMessage : '');
       if (failedTurn) {
         recordNativeFailure(this.chatId, 'codex', emptyTurn
           ? 'Codex ended without an answer. Its saved thread and queued messages were retained.'
           : 'Codex returned a failed turn. Its saved thread was retained; the turn error has the details.');
-        this.emit({ type: 'error', message: failureMessage });
+        this.emit({ type: 'error', ...(failureMessage === transientProjectConfigError ? { code: 'CODEX_PROJECT_CONFIG_LOCKED', retryable: true } : {}), message: failureMessage });
       }
       this.emitClaudeEvent({
         type: 'result',
@@ -1163,15 +1203,18 @@ export class CodexSession {
       if (childTerminalHandled) return;
       childTerminalHandled = true;
       flushStdout();
+      flushStderr();
       settlePeerAdmission(false);
       this.busy = false;
       this.currentChild = null;
       this.nativeSteerReady = false;
       this.rejectNativeSteers(err);
       cleanupImages();
-      this.closeDanglingToolBlocks(turnState, null, err.message);
+      const message = codexFailureMessage(err.message);
+      this.closeDanglingToolBlocks(turnState, null, message);
       recordNativeFailure(this.chatId, 'codex', 'Codex could not start. Its saved thread and queued messages were retained; the turn error has the details.');
-      this.emit({ type: 'error', message: `codex spawn failed: ${err.message}` });
+      console.warn('[chat codex] spawn failed:', err.message);
+      this.emit({ type: 'error', message });
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
     });
 
