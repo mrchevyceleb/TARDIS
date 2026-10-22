@@ -73,6 +73,54 @@ isolation, not a security boundary against a fully privileged agent: Docker,
 SSH and externally dispatched user services require their own resource budgets.
 Treat scratch as disposable; save deliverables in the workspace.
 
+**Worker environments are exact.** A transient unit starts from the user
+manager's environment plus what the launch passes, so every manager-env name
+the caller did not pass (including names a runner's secret scrub removed) is
+explicitly unset at launch: a deleted `ANTHROPIC_API_KEY` cannot come back
+through an `environment.d` import. A value systemd cannot carry (control
+characters) is dropped with a one-line warning rather than refusing the whole
+launch. The readiness probe proves both on the real launch path with a
+manager-planted canary and an uncarriable value. Unit descriptions carry the
+unit name only: prompts and commands never enter the journal via a
+description. The worker's systemd unit directory (`~/.config/systemd`) is
+read-only inside the sandbox; installs run from the host.
+
+**Signals go to the command, not the launcher.** SIGINT/SIGTERM are delivered
+to the CLI inside the sandbox (the launcher's direct child); the bwrap
+launcher itself is never signaled gracefully, because it has no handler and
+would convert every graceful interrupt into a die-with-parent SIGKILL.
+SIGKILL (and any fallback) goes through the manager — whole-cgroup kill, then
+`systemctl stop` with its own escalation — never to the systemd-run client,
+which is not the worker. A launcher that dies while its unit still runs
+(server restart, killed client) is detected at exit: the unit keeps its
+watch and identity instead of being silently untracked, and jobs/watches
+read liveness from the unit's ActiveState, so a restart never reports a
+still-running command as finished.
+
+**Admission classes.** Machine work (background jobs, command watches, the
+background worker, content generation) holds under pressure. Lane workers
+(person turns) are admitted by default — a hold is a valve on machine load,
+never a mute button on a person — but an admitted turn whose slice cannot
+spare a full worker's memory runs with a cap sized to the headroom (floor
+1 GiB), so answering a person can never push the slice into an OOM that
+kills a healthy sibling. Known residual: automation wakes routed through an
+engine lane are admitted like person turns until turn-origin is available at
+spawn time; they are bounded by the same cap.
+
+**Orphaned shared memory.** tmpfs pages (`/dev/shm`, a tmpfs `/tmp`) reparent
+to the slice when their writer exits without freeing them, and `io.stat`
+cannot see tmpfs writes. A 30-second audit compares slice memory against the
+sum over live worker units; past 2 GiB of unaccounted memory, machine work
+holds and the incident names the largest `/dev/shm` entries so the leak is
+actionable. Clear them and the hold lifts.
+
+**Honest limits.** Containment is cooperative, not a security boundary:
+workers share host PIDs, the user bus and `/dev/shm` by design, so a buggy
+same-UID process can still signal peers or start work through the bus, and
+`STATE_DIR` stays writable because agents write their own notes. Per-worker
+memory caps scale down on small hosts so they can actually bite; slice
+policy checks scale the same way.
+
 A two-second
 non-overlapping monitor also reads each owned scope's kernel disk-write counter.
 It stops a background job/watch if it writes over 16 GiB during its lifetime,

@@ -87,7 +87,7 @@ function killChild(child: ChildProcess): void {
 async function runCli(binary: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, prompt: string, signal: AbortSignal): Promise<string> {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawnLaneWorker(binary, args, { cwd, env, detached: process.platform !== 'win32', windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }, 'content generation') as ChildProcess & { stdout: NodeJS.ReadableStream; stderr: NodeJS.ReadableStream; stdin: NodeJS.WritableStream };
+    const child = spawnLaneWorker(binary, args, { cwd, env, detached: process.platform !== 'win32', windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }, 'content generation', { conversationTurn: false }) as ChildProcess & { stdout: NodeJS.ReadableStream; stderr: NodeJS.ReadableStream; stdin: NodeJS.WritableStream };
     let output = ''; let error = ''; let failure: Error | undefined;
     const abort = () => { failure = new Error('Content generation cancelled or timed out.'); killChild(child); };
     signal.addEventListener('abort', abort, { once: true });

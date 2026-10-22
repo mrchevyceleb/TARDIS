@@ -488,6 +488,7 @@ export function spawnLaneWorker(
   args: readonly string[],
   options: SpawnOptions,
   owner = command,
+  admission: { conversationTurn?: boolean } = { conversationTurn: true },
 ): ChildProcess {
   const env = options.env
     ? { ...options.env, ...laneWorkerEnv() }
@@ -496,9 +497,14 @@ export function spawnLaneWorker(
   // spawns, so a caller's own shell parsing is never nested inside ours.
   // /bin/sh (not bash): the wrapper is POSIX sh and /bin/sh is guaranteed
   // where /proc is.
+  // Lane workers default to person-class admission: a hold is a valve on
+  // machine load, never a mute button on a person, and every admitted turn
+  // is still capped to the memory the slice can actually spare. Pure machine
+  // surfaces (the background worker, content generation) pass an explicit
+  // opt-out; engine runners that know a turn's origin can pass it through.
   const child = IS_LINUX && !options.shell && commandResolves(command, options, env)
-    ? spawnContained('/bin/sh', ['-c', LANE_WORKER_WRAPPER, 'lane-worker', command, ...args], { ...options, env }, owner)
-    : spawnContained(command, args, { ...options, env }, owner);
+    ? spawnContained('/bin/sh', ['-c', LANE_WORKER_WRAPPER, 'lane-worker', command, ...args], { ...options, env }, owner, undefined, undefined, false, admission)
+    : spawnContained(command, args, { ...options, env }, owner, undefined, undefined, false, admission);
   markLaneWorkerKillable(child.pid);
   return child;
 }

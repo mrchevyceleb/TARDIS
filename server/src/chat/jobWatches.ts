@@ -25,7 +25,7 @@ import { inQuietHours, isQuietExemptWork, lastQuietEndMs, msUntilQuietEnd } from
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { listAgents } from './agents.ts';
 import { sendToAgentHome } from './teamBus.ts';
-import { assertResourcesForSpawn, resourceGuardRequired, spawnContained, containedScopeOf, releaseContainedScope, signalContainedWorker, watchContainedScope, scopeOutcome, scopeStorageFailure, recordResourceIncident, MEMORY_FAILURE_NOTICE, expectContainedScopeExit } from '../lib/resourceGuard.ts';
+import { assertResourcesForSpawn, resourceGuardRequired, spawnContained, containedScopeOf, releaseContainedScope, signalContainedWorker, watchContainedScope, scopeOutcome, scopeStorageFailure, recordResourceIncident, MEMORY_FAILURE_NOTICE, expectContainedScopeExit, unitActiveState } from '../lib/resourceGuard.ts';
 
 export type JobWatchKind = 'pid' | 'file' | 'command';
 
@@ -374,7 +374,7 @@ export async function deleteJobWatch(id: string): Promise<boolean> {
 
 /** Fresh resolution detail for a watch on this tick, or null to keep
  *  waiting. A resolvedText already on the record skips this entirely. */
-function checkWatch(watch: JobWatch, now: number): string | null {
+function checkWatch(watch: JobWatch, now: number, unitStillRunning = false): string | null {
   if (now >= watch.deadline) {
     // This watch is done: its scope keeps running only until the hard
     // RuntimeMaxSec backstop stops it, and that stop is expected, not a
@@ -401,6 +401,13 @@ function checkWatch(watch: JobWatch, now: number): string | null {
   if (watch.kind === 'command' && watch.spawned && !children.has(watch.id)) {
     // Restarted server (or the child already drained): no live child handle.
     // resolvedText carries the real outcome when there was one.
+    if (watch.unit) {
+      // The unit is the identity that survives restarts: only a manager
+      // answer of inactive/failed finishes the watch. The dead launcher's
+      // pid proves nothing either way (it died with the old server).
+      if (unitStillRunning) return null;
+      return `finished: the command's worker unit ended. Its outcome was recorded across a server restart; the log has the details.`;
+    }
     if (typeof watch.pid === 'number' && !pidMatches(watch.pid, watch.pidStart)) {
       return `finished: the process exited. Exit code unknown — the server restarted while the job ran.`;
     }
@@ -543,7 +550,16 @@ export function startJobWatchScheduler(): void {
         watchContainedScope(watch.unit, `${owner} / ${watch.note}`, process.cwd());
       }
       if (delivering.has(watch.id) || (retryUntil.get(watch.id) ?? 0) > now) continue;
-      const outcome = watch.resolvedText ?? checkWatch(watch, now);
+      // A restarted server has no live child handle for a command watch, and
+      // the launcher pid died with the old server while the durable unit
+      // lives on. Ask the UNIT whether it is still running; an unanswered
+      // manager counts as running so a wedged manager never finishes a watch.
+      let unitStillRunning = false;
+      if (watch.unit && watch.kind === 'command' && watch.spawned && !children.has(watch.id)) {
+        const state = await unitActiveState(watch.unit);
+        unitStillRunning = state !== 'inactive' && state !== 'failed';
+      }
+      const outcome = watch.resolvedText ?? checkWatch(watch, now, unitStillRunning);
       // Gate synchronously: checkWatch is cheap and sync, so no exit listener
       // can interleave between the resolution and the gate.
       if (outcome && beginDelivery(watch.id)) {

@@ -425,12 +425,20 @@ function wrapperAlive(job: Job): boolean {
 async function jobAlive(job: Job): Promise<boolean> {
   if (job.bootId && job.bootId !== BOOT_ID) return false;
   if (job.unit) {
-    const active = await runQuiet('systemctl', ['--user', 'is-active', '--quiet', containedUnitName(job.unit!)]);
-    // Unanswered is not evidence of death: a wedged user manager must leave the
-    // job alive rather than let the reaper report a running job as gone.
-    if (active === RUN_TIMED_OUT) return true;
-    if (active !== null) {
-      if (active !== 0) return false;
+    // ActiveState, not is-active's exit code: is-active is non-zero for
+    // activating and deactivating too, which would call a starting job dead
+    // and report a stop as finished while its processes sit in the stop window.
+    const state = await runCaptured('systemctl', ['--user', 'show', containedUnitName(job.unit!), '-p', 'ActiveState', '--value']);
+    // Unanswered is not evidence of death: a wedged or unreachable user
+    // manager must leave the job alive rather than let the reaper report a
+    // running job as gone. runCaptured answers null exactly then.
+    if (state === null) return true;
+    {
+      const activeState = state.trim();
+      // An unloaded unit (show prints an empty ActiveState) cannot have any
+      // process left: nothing of the job is still running.
+      if (activeState === '') return false;
+      if (!['active', 'activating', 'reloading', 'deactivating'].includes(activeState)) return false;
       // An ABANDONED scope keeps ActiveState=active with nothing left inside
       // it, so is-active on its own calls a long-finished job alive forever.
       // That is a live loop, not a cosmetic wrong answer: the timeout stop

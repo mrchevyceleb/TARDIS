@@ -1,9 +1,9 @@
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
-import { existsSync, readFileSync, readlinkSync, statfsSync } from 'node:fs';
+import { existsSync, readFileSync, readlinkSync, readdirSync, statfsSync, statSync } from 'node:fs';
 import { mkdir, open, rm } from 'node:fs/promises';
+import { homedir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { totalmem } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { assertMemoryAvailableForSpawn } from '../chat/memory.ts';
 import { JsonStore } from './jsonStore.ts';
@@ -11,6 +11,12 @@ import { STATE_DIR } from '../config.ts';
 
 const GiB = 1024 ** 3;
 export const WORKER_LIMITS = { memoryHigh: 6 * GiB, memoryMax: 8 * GiB, swapMax: 256 * 1024 ** 2, tasks: 512, cpuPercent: 200, scratch: 4 * GiB };
+/** The same limits, scaled down on a small host so a per-worker cap can
+ *  actually bite: an 8 GiB MemoryMax proves nothing on a 16 GiB box. */
+const HOST_LIMITS = {
+  memoryHigh: Math.min(WORKER_LIMITS.memoryHigh, Math.floor(totalmem() * 0.25)),
+  memoryMax: Math.min(WORKER_LIMITS.memoryMax, Math.floor(totalmem() * 0.33)),
+};
 const SLICE = 'tardis-workers.slice';
 const OWNED_UNIT = /^tardis-(?:worker|job|watch)-[a-f0-9-]+(?:\.(?:scope|service))?$/;
 /** New launches store their full service name; bare persisted names are legacy scopes. */
@@ -39,10 +45,23 @@ const accountingFaults = new Set<string>();
 // the stop result instead of permanently saving an unexplained SIGKILL wake.
 const pendingStorageStops = new Map<string, Promise<string | undefined>>();
 const startingScopes = new Map<string, number>();
+/** Names currently set in the user manager's own environment. A transient
+ *  unit starts from THAT environment plus what the launch sets, so any
+ *  manager-env name the caller did not pass must be unset explicitly, or a
+ *  secret the runners deliberately removed comes straight back in. */
+let managerEnvNames = new Set<string>();
+/** Env names dropped for values systemd cannot carry (control characters,
+ *  invalid UTF-8): one warning each, never a per-launch refusal. */
+const warnedEnvNames = new Set<string>();
+/** Slice memory no live worker accounts for (tmpfs pages reparent to the
+ *  slice when a worker exits without freeing /dev/shm or /tmp files).
+ *  Refreshed by the accounting audit; a hold reason once it grows. */
+let orphanSliceMemory = 0;
 let aggregateTaskLimit = 4096;
 let monitor: ReturnType<typeof setInterval> | undefined;
 let retryInitialization: ReturnType<typeof setTimeout> | undefined;
 let monitoring = false;
+let monitorTicks = 0;
 let userCgroup = '';
 
 /** Opt-in on hosts with systemd + bubblewrap. Required mode NEVER falls back
@@ -62,9 +81,12 @@ function sandboxArgs(durable = false): string[] {
   // Host PID/IPC identities and /dev/shm are part of the teammate contract.
   // A PID namespace makes sd-bus reject clients even with the correct UID.
   // systemd now owns descendant cleanup; only TMPDIR is private/disposable.
+  // The user's systemd config is the manager's to own: a worker can read it
+  // but never install or edit units from inside a sandbox.
+  const unitConfig = join(homedir(), '.config/systemd');
   return ['--unshare-user', ...(!durable ? ['--die-with-parent'] : []), '--cap-drop', 'ALL',
     '--bind', '/', '/', '--dev-bind', '/dev', '/dev', '--proc', '/proc', '--size', String(WORKER_LIMITS.scratch), '--tmpfs', '/tmp/tardis-private',
-    '--ro-bind', '/sys/fs/cgroup', '/sys/fs/cgroup',
+    '--ro-bind', '/sys/fs/cgroup', '/sys/fs/cgroup', '--ro-bind-try', unitConfig, unitConfig,
     '--setenv', 'TMPDIR', '/tmp/tardis-private', '--setenv', 'TMP', '/tmp/tardis-private', '--setenv', 'TEMP', '/tmp/tardis-private'];
 }
 
@@ -87,6 +109,8 @@ export async function initializeResourceGuard(): Promise<void> {
     }
     const properties = await commandOutput('systemctl', ['--user', 'show', SLICE, '-p', 'LoadState', '-p', 'MemoryHigh', '-p', 'MemoryMax', '-p', 'MemorySwapMax', '-p', 'TasksMax', '-p', 'CPUQuotaPerSecUSec']);
     const values: Record<string, string> = Object.fromEntries(properties.split('\n').map((line) => line.split('=')));
+    // Slice caps must be able to bite on THIS host: a 32 GiB MemoryMax on a
+    // 16 GiB box is no cap at all, so the ceiling scales with real memory.
     const bounded = (key: string, ceiling: number) => Number(values[key]) > 0 && Number(values[key]) <= ceiling;
     const quota = values.CPUQuotaPerSecUSec?.match(/^([\d.]+)(us|ms|s)$/);
     const units: Record<string, number> = { us: 1, ms: 1000, s: 1_000_000 };
@@ -94,12 +118,14 @@ export async function initializeResourceGuard(): Promise<void> {
     // A slice-level memory.oom.group can only ever read 0 (systemd never sets
     // it on slices); the check that matters is per-scope and runs below, on
     // the real launch path.
-    if (values.LoadState !== 'loaded' || !bounded('MemoryHigh', 28 * GiB) || !bounded('MemoryMax', 32 * GiB)
+    if (values.LoadState !== 'loaded' || !bounded('MemoryHigh', Math.min(28 * GiB, Math.floor(totalmem() * 0.9)))
+      || !bounded('MemoryMax', Math.min(32 * GiB, Math.floor(totalmem() * 1.25)))
       || !Number.isFinite(Number(values.MemorySwapMax)) || Number(values.MemorySwapMax) > GiB
       || !bounded('TasksMax', 4096) || !(quotaMicros > 0 && quotaMicros <= 12_000_000)) {
       throw new Error('Install the bounded tardis-workers.slice policy from docs/RESOURCE-GUARD.md.');
     }
     aggregateTaskLimit = Number(values.TasksMax);
+    await refreshManagerEnv();
     // Real capability check on the REAL launch path. A bare bwrap probe proves
     // nothing about what every worker actually runs, and a refused
     // `systemd-run` (unsupported property, manager trouble) used to leave
@@ -108,13 +134,23 @@ export async function initializeResourceGuard(): Promise<void> {
     // own kernel limits from inside the scope — including memory.oom.group=1,
     // which OOMPolicy=kill sets, so one worker's OOM kill takes its whole
     // cgroup and never sacrifices another lane.
-    await probeContainedLaunch(false);
-    await probeContainedLaunch(true);
+    // Prove environment exactness on the real launch path: a name planted in
+    // the MANAGER's environment (where imports and desktop sessions put
+    // things) must not reach a worker that did not pass it. The probe's own
+    // env also carries one value systemd cannot carry, which must be dropped
+    // without refusing the launch.
+    await commandOutput('systemctl', ['--user', 'set-environment', 'TARDIS_PROBE_MANAGER_CANARY=yes']).catch(() => '');
+    try {
+      await probeContainedLaunch(false);
+      await probeContainedLaunch(true);
+    } finally {
+      await commandOutput('systemctl', ['--user', 'unset-environment', 'TARDIS_PROBE_MANAGER_CANARY']).catch(() => '');
+    }
     recent = (await incidents.list()).slice(0, 50);
     await reapOwnedConfigs();
     ready = true;
     if (!monitor) { monitor = setInterval(() => { void monitorWrites(); }, 2000); monitor.unref(); }
-    readiness = 'Each worker has kernel memory, swap, CPU and process limits, with private scratch that disappears on exit.';
+    readiness = 'Each worker has kernel memory, swap, CPU and process limits, private scratch that disappears on exit, and a read-only systemd unit directory. Host PIDs, the user bus and /dev/shm stay shared by design; a buggy same-UID process can still signal peers, which the guard bounds but cannot prevent.';
   } catch (err) {
     readiness = (err as Error).message;
     console.warn(`[resource-guard] Work is held: ${readiness}`);
@@ -189,6 +225,11 @@ export function expectContainedScopeExit(unit: string): void {
 async function monitorWrites(): Promise<void> {
   if (monitoring) return;
   monitoring = true;
+  monitorTicks += 1;
+  if (monitorTicks % 15 === 0) {
+    await refreshManagerEnv().catch(() => { /* keep the last known names */ });
+    await auditSliceOrphans().catch(() => { /* accounting is best-effort */ });
+  }
   try {
     // Bounded probes, no recursive filesystem walks or /proc-wide scans.
     for (const [unit, entry] of [...watchedScopes].slice(0, 256)) {
@@ -198,6 +239,11 @@ async function monitorWrites(): Promise<void> {
         // A completed scope can disappear before the coarse jobs tick records
         // its result. That is normal cleanup, not loss of controller support.
         if (!existsSync(`${userCgroup}/tardis.slice/${SLICE}/${containedUnitName(unit)}`)) {
+          // A unit that is still activating or active owns this entry even
+          // though its cgroup directory has not (re)appeared: keep watching
+          // instead of dropping a slow-starting lane's disk monitoring.
+          const state = await unitActiveState(unit);
+          if (state === 'active' || state === 'activating' || state === 'reloading') { entry.missingAt = Date.now(); continue; }
           if (Date.now() - entry.missingAt > 10_000) unwatchContainedScope(unit);
           continue;
         }
@@ -213,6 +259,9 @@ async function monitorWrites(): Promise<void> {
       }
       accountingFaults.delete(unit); // a transient accounting outage can heal
       entry.missingAt = Date.now();
+      // The unit is registered: its real pids.current now counts inside the
+      // slice, so the 60s start reservation stops double-holding the budget.
+      startingScopes.delete(unit);
       const written = [...io.matchAll(/\bwbytes=(\d+)/g)].reduce((sum, match) => sum + Number(match[1]), 0);
       let lowDisk = false;
       let criticalDisk = false;
@@ -270,6 +319,62 @@ function storageLow(path: string): boolean {
   return fs.bavail * fs.bsize < reserve || (fs.files > 0 && fs.ffree / fs.files < 0.01);
 }
 
+/** Snapshot the user manager's environment NAMES. Workers are transient
+ *  units: they start from this environment plus what the launch passes, so
+ *  the launch must explicitly unset every manager name the caller removed. */
+async function refreshManagerEnv(): Promise<void> {
+  const out = await commandOutput('systemctl', ['--user', 'show-environment']);
+  managerEnvNames = new Set(out.split('\n').filter(Boolean).map((line) => line.split('=')[0])
+    .filter((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)));
+}
+
+/** A value systemd can carry over D-Bus into a unit environment: printable
+ *  text (tab and newline included), no other control characters. */
+function envValueCarriable(value: unknown): boolean {
+  return typeof value === 'string' && !/[\x00-\x08\x0b-\x1f\x7f]/.test(value);
+}
+
+/** Slice memory no live worker accounts for: tmpfs pages (/dev/shm, a
+ *  tmpfs /tmp) reparent to the slice when their writer exits without
+ *  freeing them, and io.stat cannot see tmpfs writes at all. Name the
+ *  biggest shared-memory entries so the leak is actionable, not mysterious. */
+async function auditSliceOrphans(): Promise<void> {
+  const sliceDir = `${userCgroup}/tardis.slice/${SLICE}`;
+  const readMem = (p: string): number => { try { return Number(readFileSync(p, 'utf8')); } catch { return NaN; } };
+  const total = readMem(`${sliceDir}/memory.current`);
+  if (!Number.isFinite(total)) { orphanSliceMemory = 0; return; }
+  let accounted = 0;
+  for (const entry of readdirSync(sliceDir)) {
+    if (!/^tardis-(?:worker|job|watch)-/.test(entry)) continue;
+    const used = readMem(`${sliceDir}/${entry}/memory.current`);
+    if (Number.isFinite(used)) accounted += used;
+  }
+  orphanSliceMemory = Math.max(0, total - accounted);
+  if (orphanSliceMemory < 2 * GiB) return;
+  const entries: [string, number][] = [];
+  try {
+    for (const name of readdirSync('/dev/shm')) {
+      try { entries.push([name, statSync(join('/dev/shm', name)).size]); } catch { /* raced */ }
+    }
+  } catch { /* unreadable /dev/shm: the number still stands */ }
+  const biggest = entries.sort((a, b) => b[1] - a[1]).slice(0, 5)
+    .map(([name, size]) => `${name} (${(size / 1024 / 1024).toFixed(0)} MB)`).join(', ');
+  recordResourceIncident('TARDIS', `The shared worker budget holds ${(orphanSliceMemory / GiB).toFixed(1)} GiB that no live worker accounts for, probably files a finished worker left in /dev/shm or /tmp. New machine work is held until they are cleared.${biggest ? ` Largest /dev/shm entries: ${biggest}.` : ''}`, { kind: 'hold' });
+}
+
+/** The unit's real state per the manager, or 'unknown' when the manager
+ *  cannot answer. Callers treat unknown as alive, never as evidence of
+ *  death: a wedged manager must not get a running worker reaped. */
+export async function unitActiveState(unit: string): Promise<'active' | 'activating' | 'reloading' | 'deactivating' | 'inactive' | 'failed' | 'unknown'> {
+  if (!OWNED_UNIT.test(unit)) return 'unknown';
+  const out = await commandOutput('systemctl', ['--user', 'show', containedUnitName(unit), '-p', 'ActiveState', '-p', 'LoadState']).catch(() => '');
+  const values = Object.fromEntries(out.split('\n').map((line) => line.split('=')));
+  if (!out || values.LoadState === 'not-found') return values.LoadState === 'not-found' ? 'inactive' : 'unknown';
+  const state = values.ActiveState;
+  if (state === 'active' || state === 'activating' || state === 'reloading' || state === 'deactivating' || state === 'inactive' || state === 'failed') return state;
+  return 'unknown';
+}
+
 export function recordResourceIncident(owner: string, message: string, detail: Pick<ResourceIncident, 'unit' | 'kind'> = {}): void {
   if (recent.some((item) => item.owner === owner && item.message === message && item.unit === detail.unit && Date.now() - item.at < 60_000)) return;
   const incident = { id: randomUUID(), at: Date.now(), owner, message, ...detail };
@@ -305,6 +410,7 @@ export function resourcePressure(): string | null {
         const max = Number(readFileSync(`${slice}/memory.max`, 'utf8').trim());
         const used = Number(readFileSync(`${slice}/memory.current`, 'utf8').trim());
         if (!Number.isFinite(max) || !Number.isFinite(used) || max - used < GiB) return 'The shared worker budget is full; TARDIS held new work until another job releases memory.';
+        if (orphanSliceMemory >= 2 * GiB) return 'The shared worker budget holds leftover files from finished workers; TARDIS held new work until /dev/shm and /tmp are cleared.';
         taskMax = Number(readFileSync(`${slice}/pids.max`, 'utf8').trim());
         tasks = Number(readFileSync(`${slice}/pids.current`, 'utf8').trim());
       } catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ENOENT' || existsSync(slice)) throw err; } // slice may not have started yet
@@ -357,21 +463,46 @@ export function resourceGuardStatus() {
 /** The manager owns the whole worker tree, including detached descendants.
  * A transient service can reap them when its main command exits without a
  * PID namespace, so host bus credentials and cross-lane handoffs keep working. */
-function containedLaunchArgs(unit: string, command: string, args: readonly string[], durable: boolean, runtimeSeconds?: number, options: SpawnOptions = {}): string[] {
+function containedLaunchArgs(unit: string, command: string, args: readonly string[], durable: boolean, runtimeSeconds?: number, options: SpawnOptions = {}, memoryCeiling?: { high: number; max: number }): string[] {
   const environment = options.env ?? process.env;
   const envNames = Object.keys(environment).filter((key) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
+  // A value systemd cannot carry (control characters) would make the manager
+  // refuse the ENTIRE launch. Drop the name, warn once, never fail the worker.
+  const carried = envNames.filter((key) => {
+    const value = environment[key];
+    if (value === undefined) return false; // effectively absent: unset below if the manager holds it
+    if (envValueCarriable(value)) return true;
+    if (!warnedEnvNames.has(key)) {
+      warnedEnvNames.add(key);
+      console.warn(`[resource-guard] Dropped environment name ${key}: its value cannot be passed to a contained worker.`);
+    }
+    return false;
+  });
+  const carriedSet = new Set(carried);
+  // EXACT environment: a transient unit starts from the user manager's
+  // environment plus what this launch sets, so every manager-env name the
+  // caller did not pass (or had removed, like the runners' secret scrub) is
+  // unset here. Without this, a secret deleted from a runner's env comes
+  // straight back into the worker through the manager.
+  const unsetNames = [...managerEnvNames].filter((name) => !carriedSet.has(name));
+  const limits = memoryCeiling ?? { high: HOST_LIMITS.memoryHigh, max: HOST_LIMITS.memoryMax };
   const cwd = options.cwd instanceof URL ? fileURLToPath(options.cwd) : options.cwd ?? process.cwd();
   // A lane cannot outlive the service/job that owns its server. Durable jobs
-  // deliberately omit this dependency and survive a TARDIS restart.
+  // deliberately omit this dependency and survive a TARDIS restart. A dev or
+  // precheck server may itself run in a scope: bind to that scope the same way.
   const parentUnit = !durable ? readFileSync('/proc/self/cgroup', 'utf8').trim().split('/').reverse()
-    .find((part) => part.endsWith('.service') && !/^user@\d+\.service$/.test(part)) : undefined;
+    .find((part) => /\.(?:service|scope)$/.test(part) && !/^user@\d+\.service$/.test(part)) : undefined;
   return ['--user', '--pipe', '--wait', '--quiet', '--collect', '--service-type=exec', '--expand-environment=no',
     `--slice=${SLICE}`, `--unit=${unit}`, `--working-directory=${cwd}`,
+    // A clean description: without one, systemd-run uses the whole command
+    // line (prompts and all) as the unit description, and the journal prints
+    // it on every unit start.
+    `--description=TARDIS contained ${durable ? 'job' : 'lane'} worker ${unit}`,
     // Names only: systemd-run reads values from its inherited environment and
     // passes them over D-Bus. Secrets never enter argv or unit descriptions.
-    ...envNames.filter((key) => environment[key] !== undefined).map((key) => `--setenv=${key}`),
-    ...envNames.filter((key) => environment[key] === undefined).flatMap((key) => ['-p', `UnsetEnvironment=${key}`]),
-    '-p', `MemoryHigh=${WORKER_LIMITS.memoryHigh}`, '-p', `MemoryMax=${WORKER_LIMITS.memoryMax}`,
+    ...carried.map((key) => `--setenv=${key}`),
+    ...unsetNames.flatMap((name) => ['-p', `UnsetEnvironment=${name}`]),
+    '-p', `MemoryHigh=${limits.high}`, '-p', `MemoryMax=${limits.max}`,
     '-p', `MemorySwapMax=${WORKER_LIMITS.swapMax}`, '-p', `TasksMax=${WORKER_LIMITS.tasks}`,
     '-p', 'IOAccounting=yes', '-p', `CPUQuota=${WORKER_LIMITS.cpuPercent}%`, '-p', 'OOMPolicy=kill',
     '-p', 'KillMode=control-group', '-p', 'TimeoutStopSec=3s', '-p', 'TimeoutStartSec=60s', '-p', 'LimitFSIZE=infinity',
@@ -383,15 +514,24 @@ function containedLaunchArgs(unit: string, command: string, args: readonly strin
 const PROBE_SCRIPT = `set -e
 cg=$(sed -n 's/^0:://p' /proc/self/cgroup)
 [ -n "$cg" ]
-[ "$(cat /sys/fs/cgroup$cg/memory.max)" = "${WORKER_LIMITS.memoryMax}" ]
-[ "$(cat /sys/fs/cgroup$cg/memory.high)" = "${WORKER_LIMITS.memoryHigh}" ]
+case "$cg" in *tardis-workers.slice*) ;; *) exit 1 ;; esac
+[ "$(cat /sys/fs/cgroup$cg/memory.max)" = "${HOST_LIMITS.memoryMax}" ]
+[ "$(cat /sys/fs/cgroup$cg/memory.high)" = "${HOST_LIMITS.memoryHigh}" ]
 [ "$(cat /sys/fs/cgroup$cg/memory.swap.max)" = "${WORKER_LIMITS.swapMax}" ]
 [ "$(cat /sys/fs/cgroup$cg/pids.max)" = "${WORKER_LIMITS.tasks}" ]
+[ "$(cat /sys/fs/cgroup$cg/cpu.max)" = "200000 100000" ]
 [ "$(cat /sys/fs/cgroup$cg/memory.oom.group)" = "1" ]
+[ -e /sys/fs/cgroup$cg/io.stat ]
 [ -d /tmp/tardis-private ]
-[ -d /dev/shm ]
+touch "$TMPDIR/tardis-probe" && rm -f "$TMPDIR/tardis-probe"
+[ -d /dev/shm ] && touch "/dev/shm/tardis-probe-$$" && rm -f "/dev/shm/tardis-probe-$$"
 [ "$(ulimit -f)" = "unlimited" ]
 systemctl --user show tardis-workers.slice -p LoadState --value >/dev/null
+# Exact environment: the value the caller passed arrives; the uncarriable
+# value and the manager-planted canary do not.
+[ "\${TARDIS_PROBE_PASSED:-}" = "ok" ]
+[ -z "\${TARDIS_PROBE_INVALID:-}" ]
+[ -z "\${TARDIS_PROBE_MANAGER_CANARY:-}" ]
 test -c /dev/null && : >/dev/null && dd if=/dev/urandom of=/dev/null bs=1 count=1 status=none`;
 
 /** Run one real contained launch — the same argv every worker uses — and fail
@@ -399,8 +539,12 @@ test -c /dev/null && : >/dev/null && dd if=/dev/urandom of=/dev/null bs=1 count=
  * in force. `durable` picks the job/watch shape. */
 async function probeContainedLaunch(durable: boolean): Promise<void> {
   const unit = `tardis-${durable ? 'job' : 'worker'}-${randomUUID()}.service`;
+  // The probe runs the real argv with a REPRESENTATIVE runner environment:
+  // one carriable value, one value systemd cannot carry, and (planted by the
+  // initializer) one manager-env canary the caller never passed.
+  const probeEnv = { ...process.env, TARDIS_PROBE_PASSED: 'ok', TARDIS_PROBE_INVALID: 'not\x1bcarriable' } as NodeJS.ProcessEnv;
   await new Promise<void>((resolve, reject) => {
-    execFile('systemd-run', containedLaunchArgs(unit, '/bin/sh', ['-c', PROBE_SCRIPT], durable, durable ? 60 : undefined), { timeout: 30_000 }, (err, _stdout, stderr) => {
+    execFile('systemd-run', containedLaunchArgs(unit, '/bin/sh', ['-c', PROBE_SCRIPT], durable, durable ? 60 : undefined, { env: probeEnv }), { timeout: 30_000, env: probeEnv }, (err, _stdout, stderr) => {
       if (err) reject(new Error(`The real contained launch failed in its ${durable ? 'job' : 'lane'} shape: ${String(stderr || err.message).trim().slice(0, 300)}`));
       else resolve();
     });
@@ -409,14 +553,30 @@ async function probeContainedLaunch(durable: boolean): Promise<void> {
 
 /** All agent execution surfaces share this path, including background jobs,
  * watch commands and content generation. Arguments never include secrets. */
-export function spawnContained(command: string, args: readonly string[], options: SpawnOptions, owner: string, unit = `tardis-worker-${randomUUID()}`, runtimeSeconds?: number, durable = false): ChildProcess {
-  assertResourcesForSpawn(owner, typeof options.cwd === 'string' ? options.cwd : undefined, { conversationTurn: !durable });
+export function spawnContained(command: string, args: readonly string[], options: SpawnOptions, owner: string, unit = `tardis-worker-${randomUUID()}`, runtimeSeconds?: number, durable = false, admission: { conversationTurn?: boolean } = {}): ChildProcess {
+  // Person-initiated turns are the ONLY launches admitted while pressure
+  // holds (an automation wake is machine work and waits its turn like any
+  // job). The person path opts in explicitly; nothing is inferred from shape.
+  assertResourcesForSpawn(owner, typeof options.cwd === 'string' ? options.cwd : undefined, { conversationTurn: admission.conversationTurn === true });
   if (!resourceGuardRequired()) return spawn(command, args, options);
   if (options.shell) throw new Error('Contained launches require an explicit shell command.');
   if (!OWNED_UNIT.test(unit)) throw new Error('Invalid worker scope identity.');
   unit = unit.endsWith('.service') ? unit : `${unit}.service`;
   if (!OWNED_UNIT.test(unit)) throw new Error('Invalid worker service identity.');
-  const child = spawn('systemd-run', containedLaunchArgs(unit, command, args, durable, runtimeSeconds, options), options);
+  // A person's turn is never muted, but it must not evict a healthy sibling
+  // either: when the slice cannot fit a full worker, this one runs with a
+  // memory cap sized to what is actually left (floor 1 GiB) instead of
+  // pushing the slice into an OOM that kills the largest resident worker.
+  let memoryCeiling: { high: number; max: number } | undefined;
+  if (admission.conversationTurn === true) {
+    const headroom = sliceMemoryHeadroom();
+    if (headroom !== null && headroom < HOST_LIMITS.memoryHigh) {
+      const max = Math.max(GiB, Math.floor(headroom * 0.95));
+      memoryCeiling = { high: Math.floor(max * 0.75), max };
+      console.warn(`[resource-guard] Admitted a conversation turn with a reduced memory cap (${(max / GiB).toFixed(1)} GiB) to protect running workers.`);
+    }
+  }
+  const child = spawn('systemd-run', containedLaunchArgs(unit, command, args, durable, runtimeSeconds, options, memoryCeiling), options);
   const identity = { unit, expectedExit: false };
   startingScopes.set(unit, Date.now() + 60_000);
   containedChildren.set(child, identity);
@@ -438,13 +598,23 @@ export function spawnContained(command: string, args: readonly string[], options
   child.once('exit', (code, signal) => {
     clearTimeout(arm);
     startingScopes.delete(unit);
-    scopeIdentities.delete(unit);
-    unwatchContainedScope(unit);
-    if (identity.expectedExit || (code === 0 && !signal)) return;
-    // Failed scopes stay loaded until inspected, so an OOM can be attributed
-    // from systemd's result instead of guessing from exit 137. Then release
-    // only this launch's randomly named failure record, never another unit.
-    void scopeOutcome(unit).then(async (result) => {
+    // The launcher client exiting does NOT prove the worker stopped: under
+    // --wait it usually does, but a stopped launcher can orphan a unit that
+    // is still running. Confirm the unit settled before clearing tracking;
+    // an orphan keeps its watch and identity so its owner can still stop it.
+    void confirmUnitSettled(unit).then(async (settled) => {
+      scopeIdentities.delete(unit);
+      unwatchContainedScope(unit);
+      if (!settled) {
+        watchContainedScope(unit, owner, typeof options.cwd === 'string' ? options.cwd : process.cwd());
+        recordResourceIncident(owner, 'The worker outlived its launcher (the launcher was stopped while the unit still runs). It keeps running under its own limits and stays tracked by its unit.');
+        return;
+      }
+      if (identity.expectedExit || (code === 0 && !signal)) return;
+      // Failed scopes stay loaded until inspected, so an OOM can be attributed
+      // from systemd's result instead of guessing from exit 137. Then release
+      // only this launch's randomly named failure record, never another unit.
+      const result = await scopeOutcome(unit);
       // A launch that never registered a scope never ran a command: systemd-run
       // itself refused it (unsupported property, unit clash, manager trouble).
       // Say so plainly — a silent refusal must never look like a healthy host.
@@ -515,9 +685,73 @@ export function signalContainedWorker(child: ChildProcess, signal: NodeJS.Signal
   if (!identity) return false;
   if (signal === 'SIGTERM' || signal === 'SIGKILL') identity.expectedExit = true;
   if (child.exitCode !== null || child.signalCode !== null) return true;
-  void commandOutput('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${signal}`, containedUnitName(identity.unit)])
-    .catch(() => { try { child.kill(signal); } catch { /* launcher already gone */ } });
+  const unit = containedUnitName(identity.unit);
+  if (signal === 'SIGKILL') {
+    // The manager owns the tree: kill the whole cgroup, escalating to a stop
+    // (TimeoutStopSec applies its own escalation) if the manager is busy.
+    // NEVER fall back to signaling the launcher: the systemd-run client is
+    // not the worker, and killing it only orphans a live unit and silently
+    // drops its monitoring.
+    void commandOutput('systemctl', ['--user', 'kill', '--kill-whom=all', '--signal=SIGKILL', unit])
+      .catch(() => commandOutput('systemctl', ['--user', 'stop', unit]).catch(() => { /* manager unreachable */ }));
+  } else {
+    // Graceful: signal the command INSIDE the sandbox (the launcher's direct
+    // child, which prlimit exec'd into the CLI), never the bwrap launcher
+    // itself: bwrap has no signal handler, so signaling it turns every
+    // graceful interrupt into a die-with-parent SIGKILL of the CLI.
+    void gracefulUnitSignal(identity.unit, signal)
+      .catch(() => commandOutput('systemctl', ['--user', 'kill', '--kill-whom=main', `--signal=${signal}`, unit])
+        .catch(() => commandOutput('systemctl', ['--user', 'stop', unit]).catch(() => { /* manager unreachable */ })));
+  }
   return true;
+}
+
+/** Signal the CLI inside a worker unit without touching the bwrap launcher:
+ *  the unit's MainPID is bwrap; the direct child of MainPID is the command
+ *  (prlimit exec'd into the CLI). Throws when the tree cannot be read, so
+ *  callers fall back to manager-level signaling. */
+async function gracefulUnitSignal(unit: string, signal: NodeJS.Signals): Promise<void> {
+  const name = containedUnitName(unit);
+  const main = Number(await commandOutput('systemctl', ['--user', 'show', name, '-p', 'MainPID', '--value']));
+  if (!Number.isSafeInteger(main) || main <= 0) throw new Error('no main pid');
+  const procs = readFileSync(`${userCgroup}/tardis.slice/${SLICE}/${name}/cgroup.procs`, 'utf8')
+    .trim().split('\n').map(Number).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+  const inner = procs.filter((pid) => pid !== main);
+  if (!inner.length) throw new Error('no inner command pid');
+  const targets: number[] = [];
+  for (const pid of inner) {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[1]);
+      if (ppid === main) targets.push(pid);
+    } catch { /* raced */ }
+  }
+  if (!targets.length) throw new Error('no direct child of the launcher');
+  for (const pid of targets) {
+    try { process.kill(pid, signal); } catch { /* raced */ }
+  }
+}
+
+/** Wait for a unit to be inactive/failed (it usually already is when its
+ *  --wait client exits). False when it is still running or the manager
+ *  cannot answer: tracking must be KEPT, never cleared on a guess. */
+async function confirmUnitSettled(unit: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    const state = await unitActiveState(unit);
+    if (state === 'inactive' || state === 'failed') return true;
+    if (state === 'unknown') return false;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return false;
+}
+
+/** Free memory inside the shared slice right now, or null when unreadable. */
+function sliceMemoryHeadroom(): number | null {
+  try {
+    const max = Number(readFileSync(`${userCgroup}/tardis.slice/${SLICE}/memory.max`, 'utf8').trim());
+    const used = Number(readFileSync(`${userCgroup}/tardis.slice/${SLICE}/memory.current`, 'utf8').trim());
+    return Number.isFinite(max) && Number.isFinite(used) ? max - used : null;
+  } catch { return null; }
 }
 
 export function containedScopeOf(child: ChildProcess): string | undefined { return containedChildren.get(child)?.unit; }

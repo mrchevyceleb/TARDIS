@@ -36,7 +36,7 @@ export async function runJob(job: RivendellJob): Promise<DispatcherResult> {
       cwd: job.repo || process.cwd(),
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
-    }) as ChildProcessByStdio<null, Readable, Readable>;
+    }, 'claude worker', { conversationTurn: false }) as ChildProcessByStdio<null, Readable, Readable>;
 
     let output = '';
     child.stdout.setEncoding('utf8');
