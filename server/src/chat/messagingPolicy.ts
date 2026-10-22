@@ -8,12 +8,14 @@ const inbox = new JsonStore<{ id: string; chatId: string; from: string; text: st
 
 /** Shared across every engine and across restarts. Claim before publication
  * so concurrent identical tool calls cannot both send. Human input is exempt. */
-export async function claimOutbound(from: string, to: string, text: string): Promise<string | null> {
-  const id = createHash('sha256').update(`${from}|${to}|${text.trim().replace(/\s+/g, ' ')}`).digest('hex');
+export async function claimOutbound(from: string, to: string, text: string, request: string): Promise<string | null> {
+  const id = createHash('sha256').update(JSON.stringify([from, to, request, text.trim().replace(/\s+/g, ' ')])).digest('hex');
   let claimed = false;
   const now = Date.now();
   await sent.modify(items => {
-    const recent = items.filter(item => now - item.at < 60 * 60_000);
+    // A new request may need the same answer. Keep retries of the same
+    // request blocked across turn ends and restarts, rather than using a timer.
+    const recent = items.slice(-9999);
     if (recent.some(item => item.id === id)) return recent;
     claimed = true;
     return [...recent, { id, at: now }];

@@ -1,5 +1,5 @@
 import { extractVisibleTurns } from './threadWindow.ts';
-import { assertSelectedEngine, exportCodexHandover, nativeEngine, saveEngineHandover } from './engineHandover.ts';
+import { assertSelectedEngine, isSelectedEngineChanged, exportCodexHandover, recoverCodexHandover, nativeEngine, saveEngineHandover } from './engineHandover.ts';
 import { prepareSessionStateDelta, resetSessionStateDelta } from './sessionContext.ts';
 import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 import { assertClaudeSubscription } from './subscription-auth.ts';
@@ -1687,6 +1687,7 @@ class ClaudeSession {
         abandonUnsentTurn();
         return;
       }
+      assertSelectedEngine(this.chatId, this.cli);
       if (startsNewTurn) {
         this.preparingTurnAborter = null;
         this.turnPromptSubmitted = true;
@@ -1697,7 +1698,6 @@ class ClaudeSession {
         if (!startsNewTurn) this.pendingPeerSteerAccepts.add(opts.peerDeliveryId);
       }
       await new Promise<void>((resolve, reject) => {
-        assertSelectedEngine(this.chatId, this.cli);
         this.child.stdin.write(payload + '\n', (error) => {
           if (error) reject(error);
           else resolve();
@@ -1711,6 +1711,10 @@ class ClaudeSession {
         if (seed) this.pendingSeedAck = true;
       }
     } catch (e) {
+      if (isSelectedEngineChanged(e)) {
+        abandonUnsentTurn();
+        throw e;
+      }
       if (opts.peerDeliveryId) {
         this.pendingPeerAccepts.delete(opts.peerDeliveryId);
         this.pendingPeerSteerAccepts.delete(opts.peerDeliveryId);
@@ -3381,8 +3385,7 @@ async function getOrCreateSessionUnlocked(opts: {
         .sort((a, b) => b!.updatedAt - a!.updatedAt)[0];
       const sourceEngine = previous?.cli && nativeEngine(previous.cli);
       const targetEngine = nativeEngine(opts.cli);
-      if (previous?.sessionId && previous.cli && sourceEngine !== targetEngine
-          && (sourceEngine === 'codex' || targetEngine === 'codex')) {
+      if (previous?.sessionId && previous.cli && sourceEngine !== targetEngine) {
         const live = sourceEngine === 'codex'
           ? peekCodexSession({ repoPath: opts.repoPath, chatId, cli: previous.cli })
           : peekClaudeSession({ cli: previous.cli, repoPath: opts.repoPath, chatId });
@@ -3410,7 +3413,7 @@ async function getOrCreateSessionUnlocked(opts: {
           await compactForHandover(source);
           const { readClaudeHandover } = await import('./nativeSessionStorage.ts');
           return readClaudeHandover(chatId, previous.sessionId!);
-        });
+        }, sourceEngine === 'codex' ? () => recoverCodexHandover({ chatId, cwd: opts.repoPath, sessionId: previous.sessionId!, nativeProfile: previous.nativeProfile }) : undefined);
         // The note is durable before worker teardown, so a slow exit cannot
         // discard an already-paid handover or force another export.
         if (live && live.cli !== opts.cli) {

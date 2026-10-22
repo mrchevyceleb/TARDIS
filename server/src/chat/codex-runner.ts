@@ -448,12 +448,12 @@ export class CodexSession {
       });
     }
     return new Promise((resolve, reject) => {
+      assertSelectedEngine(this.chatId, this.cli);
       this.nativeSteerWaiters.set(requestId, { resolve, reject });
       // Well-form the text at the transport boundary: app-server's JSONRPC
       // deserializer rejects the whole message on a lone surrogate, which
       // would fail this steer (and every retry) instead of delivering it.
-      assertSelectedEngine(this.chatId, this.cli);
-    child.stdin!.write(`${JSON.stringify({ type: 'steer', requestId, text: wellFormedText(text) })}\n`, (error) => {
+      child.stdin!.write(`${JSON.stringify({ type: 'steer', requestId, text: wellFormedText(text) })}\n`, (error) => {
         if (error) this.settleNativeSteer(requestId, error);
       });
     });
@@ -902,6 +902,11 @@ export class CodexSession {
     if (this.dead) {
       contextProxy.close(); cleanupImages(); this.emitCancellationTurnEnd(); return;
     }
+    try { assertSelectedEngine(this.chatId, this.cli); }
+    catch (error) {
+      contextProxy.close(); cleanupImages(); this.busy = false;
+      throw error;
+    }
     appServerArgs.push('-c', `openai_base_url=${JSON.stringify(contextProxy.baseUrl)}`);
 
     // The spawn reuses the account environment the guarded rollout-check
@@ -1169,7 +1174,6 @@ export class CodexSession {
     });
 
     if (opts.peerDeliveryId && !this.submitPeerDelivery(opts.peerDeliveryId)) return;
-    assertSelectedEngine(this.chatId, this.cli);
     child.stdin!.write(`${JSON.stringify({
       type: 'start',
       codexBin: CODEX_BIN,

@@ -2067,7 +2067,7 @@ export async function deliverTeamMessage(input: {
   const rl = rateOk(replyEdge(from.id, to.id));
   if (!rl.ok) return { delivered: false, reason: rl.reason };
 
-  const claim = !input.source ? await claimOutbound(from.id, to.id, text) : undefined;
+  const claim = !input.source ? await claimOutbound(from.id, to.id, text, await outboundRequest(from, input.fromLane === 'bg' ? 'bg' : 'main')) : undefined;
   if (claim === null) return { delivered: false, to: to.name, reason: 'You already sent this exact message. Do not send it again; continue only when there is new information.' };
   if ((input.informational === true || input.nudgeHoldSince !== undefined || input.admissionAck === 'flag-digest') && !input.source) {
     let deliveryId: string;
@@ -2297,6 +2297,23 @@ export async function deliverTeamMessage(input: {
 import { appendEventLogDurable, appendEventLogSync, flushEventLog, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { redactEventSecrets } from './secretRedaction.ts';
 
+/** Durable input identity, shared by every engine. Assistant output and tool
+ * results cannot turn a retry into a new request. */
+async function outboundRequest(agent: Pick<Agent, 'id'>, lane: AgentLane): Promise<string> {
+  const owner = findAgent(agent.id);
+  if (!owner) return 'automation';
+  const { cli, chatKey } = agentLogKey(owner, lane);
+  const key = logKeyFor(cli, ELROND_WORKSPACE_PATH, chatKey);
+  await flushEventLog(key);
+  const events = loadEventLogSync(key).events.filter(event => !foreignLaneEvent(event, lane));
+  for (const event of events.reverse()) {
+    const inner = event.ev?.type === 'event' ? event.ev.event : undefined;
+    if (inner?.type === 'peer_delivery_accepted' && inner.deliveryId) return `${key}|peer:${inner.deliveryId}`;
+    if (inner?.type === '_user_echo') return `${key}|user:${inner.clientMsgId ?? `${event.at ?? 0}:${event.seq}`}`;
+  }
+  return `${key}|no-input`;
+}
+
 /** Explicit owner publication uses the same durable thread and live fanout on
  * every engine. Posting is a tool result, never an inference from reply prose. */
 export async function publishOwnerReply(from: string, text: string, lane: AgentLane = 'main'): Promise<number> {
@@ -2306,7 +2323,7 @@ export async function publishOwnerReply(from: string, text: string, lane: AgentL
   const logKey = logKeyFor(cli, ELROND_WORKSPACE_PATH, chatKey);
   const { publishExternalThreadEvent } = await import('./runner.ts');
   await flushEventLog(logKey);
-  const claim = await claimOutbound(agent.id, 'owner', text);
+  const claim = await claimOutbound(agent.id, 'owner', text, await outboundRequest(agent, lane));
   if (!claim) throw new Error('You already posted this exact reply. Do not repeat it; continue only with new information.');
   // Reserve, save and broadcast in one synchronous slice after older writes
   // finish. A later native frame must not overtake this published message.

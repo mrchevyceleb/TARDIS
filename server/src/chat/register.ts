@@ -1,4 +1,5 @@
 import { assertSubscriptionLane } from './subscription-policy.ts';
+import { isSelectedEngineChanged } from './engineHandover.ts';
 import { normalizeReplyTo, withReplyQuote } from './reply-quote.ts';
 import { eventInner, eventType, isAutomationPeerEvent, isNoopToken } from './routineNoise.ts';
 import type express from 'express';
@@ -1539,7 +1540,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
       if (msg.type === 'send' && repoPath && cliKind) {
         const target = normalizeChatId(msg.chatId ?? chatId);
         const owner = agentForChatId(target) ? peekThreadSession({ cli: cliKind, repoPath, chatId: target }) : null;
-        if ((owner as { isHandingOver?: () => boolean } | null)?.isHandingOver?.()) {
+        const selected = resolvedBrain(target, { cli: cliKind });
+        if ((owner as { isHandingOver?: () => boolean } | null)?.isHandingOver?.()
+            || (owner?.isBusy() && sessionCli(owner) !== selected.cli)) {
           msg = { ...msg, type: 'steer', cli: cliKind, repo: repoPath, chatId: target, queue: true };
         }
       }
@@ -1654,7 +1657,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 chatId,
               })
             : peekClaudeSession({ cli: desiredBrain.cli, repoPath: msg.repo, chatId }));
-          if (!warm && isPersistentProcessCli(desiredBrain.cli)) {
+          if (!warm) {
             // Drop any session this socket was already bound to. Without it a
             // socket that re-helloes onto a different, cold lane keeps the old
             // lane's subscription - those events would stream into the new
@@ -1698,9 +1701,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             return;
           }
           const session = await bindSession(
-            warm
-              ? Promise.resolve(warm)
-              : getOrCreateSession({ cli: desiredBrain.cli, repoPath: msg.repo, chatId, model: desiredBrain.model, effort: desiredBrain.effort }),
+            Promise.resolve(warm),
             sinceSeq,
             resetAt,
             forceResetReplay,
@@ -1937,7 +1938,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           for (let gate = stopBarriers.get(gateScope); gate; gate = stopBarriers.get(gateScope)) await gate;
           if (chatQuiesced) {
             safeSend({ type: 'error', code: 'STEER_REJECTED', clientMsgId: msg.clientMsgId, message: 'TARDIS is regenerating — try again in a few seconds.' });
-            safeSend({ type: 'turnEnd' });
+            if (!peekThreadSession({ cli: cliKind ?? msg.cli, repoPath: repoPath ?? msg.repo, chatId: normalizeChatId(msg.chatId) })?.isBusy()) safeSend({ type: 'turnEnd' });
             return;
           }
           turnGeneration += 1;
@@ -1998,6 +1999,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             console.warn(
               `[chat ws#${wsId}] steer rejected from ${peer} cli=${steerCli} repo=${steerRepo} chatId=${chatId} clientMsgId=${msg.clientMsgId ?? 'none'}: ${message}`,
             );
+            busy = peekThreadSession({ cli: steerCli, repoPath: steerRepo, chatId })?.isBusy() === true;
             safeSend({ type: 'steerRejected', clientMsgId: msg.clientMsgId, message, busy });
           };
           // Pin to the engine already bound on this socket. Counsel picker
@@ -2127,7 +2129,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               steerAborter.signal,
               30 * 60_000,
               !hasSteerImages && !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli) && msg.queue !== true,
-              msg.queue !== true,
+              msg.queue !== true && !needsAuthoritativeBoundary,
             );
             if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') { rejectSteer(); releaseSteer(); return; }
             if (boundary === 'steerable') {
@@ -2210,7 +2212,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             } catch (error) {
               rejectSteer(`Guidance could not bind safely: ${(error as Error).message}`);
               releaseSteer();
-              safeSend({ type: 'turnEnd' });
+              if (!peekThreadSession({ cli: cliKind ?? msg.cli, repoPath: repoPath ?? msg.repo, chatId: normalizeChatId(msg.chatId) })?.isBusy()) safeSend({ type: 'turnEnd' });
               return;
             }
           }
@@ -2274,7 +2276,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           if (!session) {
             rejectSteer('Guidance target closed before delivery — try again.');
             releaseSteer();
-            safeSend({ type: 'turnEnd' });
+            if (!peekThreadSession({ cli: cliKind ?? msg.cli, repoPath: repoPath ?? msg.repo, chatId: normalizeChatId(msg.chatId) })?.isBusy()) safeSend({ type: 'turnEnd' });
             return;
           }
           if (authoritativeAgent && !nativeActiveSteer) {
@@ -2306,13 +2308,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
           if ((session as { isAlive?: () => boolean }).isAlive?.() === false) {
             rejectSteer('Guidance target closed before delivery — try again.');
             releaseSteer();
-            safeSend({ type: 'turnEnd' });
+            if (!peekThreadSession({ cli: cliKind ?? msg.cli, repoPath: repoPath ?? msg.repo, chatId: normalizeChatId(msg.chatId) })?.isBusy()) safeSend({ type: 'turnEnd' });
             return;
           }
           if (chatQuiesced) {
             rejectSteer('TARDIS is regenerating — try again in a few seconds.');
             releaseSteer();
-            safeSend({ type: 'turnEnd' });
+            if (!peekThreadSession({ cli: cliKind ?? msg.cli, repoPath: repoPath ?? msg.repo, chatId: normalizeChatId(msg.chatId) })?.isBusy()) safeSend({ type: 'turnEnd' });
             return;
           }
           cliKind = steerCli;
@@ -2353,6 +2355,36 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 });
                 break;
               } catch (error) {
+                if (authoritativeAgent && isSelectedEngineChanged(error)) {
+                  // A picker change can land after the earlier boundary check.
+                  // Keep the same pending message and wait for the old turn;
+                  // never steer it into the deselected provider or fake its end.
+                  nativeActiveSteer = false;
+                  while (session && sessionHasActiveBoundary(session)) {
+                    const boundary = await waitForSteerOrTurnEnd(session, steerAborter.signal, 30 * 60_000, false, false);
+                    if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') { rejectSteer(); releaseSteer(); return; }
+                    if (boundary === 'closed') session = null;
+                  }
+                  desiredSteerBrain = resolvedBrain(chatId, desiredSteerBrain);
+                  steerCli = desiredSteerBrain.cli;
+                  steerModel = desiredSteerBrain.model;
+                  steerEffort = desiredSteerBrain.effort;
+                  const desiredKey = laneGenKey(steerCli, steerRepo, chatId);
+                  if (desiredKey !== waitKey) {
+                    removeLaneWaiter(waitKey, steerAborter);
+                    deletePendingSteer(waitKey, msg.clientMsgId);
+                    untrackSteerPayload(waitKey);
+                    waitKey = desiredKey;
+                    laneGen = peekLaneGen(steerCli, steerRepo, chatId);
+                    addLaneWaiter(waitKey, steerAborter);
+                    addPendingSteer(waitKey, msg.clientMsgId);
+                    trackSteerPayload(waitKey);
+                  }
+                  session = await bindSession(getOrCreateSession({ cli: steerCli, repoPath: steerRepo, chatId,
+                    model: steerModel, effort: steerEffort, recycleOnMismatch: true }));
+                  cliKind = steerCli;
+                  continue;
+                }
                 if (!nativeWindowClosed(error) || ++boundaryRetries > 1000) throw error;
                 // The tool window closed (or another turn started) between
                 // admission and stdin. Do not drop the message. Wait for the
@@ -2388,7 +2420,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 if (!session) {
                   rejectSteer('Guidance target closed before delivery — try again.');
                   releaseSteer();
-                  safeSend({ type: 'turnEnd' });
+                  if (!peekThreadSession({ cli: cliKind ?? msg.cli, repoPath: repoPath ?? msg.repo, chatId: normalizeChatId(msg.chatId) })?.isBusy()) safeSend({ type: 'turnEnd' });
                   return;
                 }
                 // Not busy yet the send still refused: give the lane a beat
@@ -2399,7 +2431,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           } catch (error) {
             rejectSteer(`Guidance could not be delivered: ${(error as Error).message}`);
             releaseSteer();
-            safeSend({ type: 'turnEnd' });
+            if (!peekThreadSession({ cli: cliKind ?? msg.cli, repoPath: repoPath ?? msg.repo, chatId: normalizeChatId(msg.chatId) })?.isBusy()) safeSend({ type: 'turnEnd' });
             return;
           }
           // A send that saw the abort mid-flight (for instance while saving
@@ -2431,7 +2463,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             );
             if (stillPending) {
               rejectSteer(`Guidance could not be delivered: ${(error as Error).message}`);
-              safeSend({ type: 'turnEnd' });
+              if (!peekThreadSession({ cli: cliKind ?? msg.cli, repoPath: repoPath ?? msg.repo, chatId: normalizeChatId(msg.chatId) })?.isBusy()) safeSend({ type: 'turnEnd' });
             }
             releaseSteer();
           }
@@ -2795,7 +2827,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
           }
         }
       } catch (error) {
-        busy = false;
+        if (isSelectedEngineChanged(error) && msg.type === 'send' && repoPath && cliKind) {
+          // No provider input was submitted. Transfer this exact client id to
+          // the retained guidance path, which follows a changing selection.
+          if (reservedSendAdmission) sendAdmissions.delete(reservedSendAdmission.key);
+          reservedSendAdmission = null;
+          ws.emit('message', Buffer.from(JSON.stringify({ ...msg, type: 'steer', cli: cliKind, repo: repoPath, queue: true })));
+          return;
+        }
+        busy = Boolean(cliKind && repoPath && peekThreadSession({ cli: cliKind, repoPath, chatId })?.isBusy());
         if (error instanceof MemoryPressureSpawnError) {
           console.warn(`[chat ws#${wsId}] memory-pressure spawn refused: ${error.message}`);
           safeSend({
@@ -2812,7 +2852,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             message: (error as Error).message,
           });
         }
-        safeSend({ type: 'turnEnd' });
+        if (!busy) safeSend({ type: 'turnEnd' });
       } finally {
         finishHello?.();
         unsubscribeSendAdmission?.();
