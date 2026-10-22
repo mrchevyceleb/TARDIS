@@ -680,42 +680,28 @@ export class CodexSession {
       this.busy = false;
       return;
     }
-    if (opts.peerFrom && !opts.suppressEcho) {
-      this.emit({ type: 'turnStart' });
-      // The visible peer echo waits for turn.started (see the stdout handler):
-      // a turn that never starts (transport reject, spawn failure) must leave
-      // no phantom bubble for the next delivery attempt to duplicate.
-      if (isPersonMessage(opts)) this.replyWatch.arm();
-    } else if (!opts.suppressEcho) {
-      let attachments: Array<{ id: string; mediaType: string }>;
-      try {
-        attachments = opts.skipAttachments ? [] : await saveChatAttachments(images);
-      } catch (error) {
-        this.busy = false;
-        throw error;
-      }
-      if (opts.signal?.aborted) {
-        this.busy = false;
-        return;
-      }
+    let attachments: Array<{ id: string; mediaType: string }> = [];
+    if (!opts.peerFrom && !opts.suppressEcho) {
+      try { attachments = opts.skipAttachments ? [] : await saveChatAttachments(images); }
+      catch (error) { this.busy = false; throw error; }
       await flushEventLog(this.logKey);
-      if (opts.signal?.aborted) {
-        this.busy = false;
-        return;
-      }
-      try {
+      if (opts.signal?.aborted) { this.busy = false; return; }
+    }
+    const echoInput = () => {
+      if (opts.peerFrom && !opts.suppressEcho) {
+        this.emit({ type: 'turnStart' });
+        // The peer echo waits for actual provider acceptance below.
+        if (isPersonMessage(opts)) this.replyWatch.arm();
+      } else if (!opts.suppressEcho) {
         this.emit({
           type: 'event',
           event: { type: '_user_echo', startsTurn: true, text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
         });
-      } catch (error) {
-        this.busy = false;
-        throw error;
+        noteUserTurn(this.logKey);
+        noteAgentLane(this.chatId, this.cli);
+        this.replyWatch.arm();
       }
-      noteUserTurn(this.logKey); // compaction cadence (monotonic)
-      noteAgentLane(this.chatId, this.cli); // historical lane diagnostics
-      this.replyWatch.arm();
-    }
+    };
 
     try {
       assertMemoryAvailableForSpawn('codex');
@@ -902,7 +888,7 @@ export class CodexSession {
     if (this.dead) {
       contextProxy.close(); cleanupImages(); this.emitCancellationTurnEnd(); return;
     }
-    try { assertSelectedEngine(this.chatId, this.cli); }
+    try { assertSelectedEngine(this.chatId, this.cli); echoInput(); }
     catch (error) {
       contextProxy.close(); cleanupImages(); this.busy = false;
       throw error;

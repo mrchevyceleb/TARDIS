@@ -1537,72 +1537,71 @@ class ClaudeSession {
       throw new Error('the native steering window closed before delivery');
     }
 
-    // Echo only now: this is the durable admission boundary reconnecting
-    // clients and the team outbox trust.
-    if (continuing) {
-      this.emit({ type: 'turnStart' });
-      this.emit({
-        type: 'event',
-        event: {
-          type: PROVIDER_CONTINUE_EVENT,
-          id: continuing.id,
-          ...providerCutEventFields(continuing.cut),
-          ...(continuing.origin.automation ? { automation: true } : {}),
-          ts: Date.now(),
-        },
-      });
-    } else if (replyNudge) {
-      this.emit({ type: 'turnStart' });
-      this.emit(replyNudgeEvent(replyNudge));
-    } else if (opts.peerFrom) {
-      const origin = this.turnOrigin ??= emptyTurnOrigin();
-      noteTurnPeer(origin, opts.peerFrom, opts.peerFromRole, opts.peerText ?? text);
-      if (isPersonMessage(opts)) this.watchReply().arm();
-      if (startsNewTurn && opts.peerFromRole === 'automation') origin.automation = true;
-      if (startsNewTurn) this.emit({ type: 'turnStart' });
-      // The echo stays ahead of the stdin write: it must be causally before
-      // any provider frame of the turn it opens (a steered turn's output can
-      // interleave with the write callback), and the write window here is
-      // synchronous — only a failed write could strand it.
-      this.emit({
-        type: 'event',
-        event: {
-          type: 'peer_message',
-          startsTurn: startsNewTurn,
-          from: opts.peerFrom,
-          fromRole: opts.peerFromRole ?? '',
-          text: opts.peerText !== undefined ? opts.peerText : text,
-          ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}),
-          ts: Date.now(),
-        },
-      });
-    } else {
-      await flushEventLog(this.logKey);
-      if (sendAborted()) {
-        abandonUnsentTurn();
-        return;
+    // Emit only in the same synchronous slice as the final selection guard
+    // and stdin write; an unsubmitted old-model message has no durable echo.
+    const echoInput = () => {
+      // Echo only now: this is the durable admission boundary reconnecting
+      // clients and the team outbox trust.
+      if (continuing) {
+        this.emit({ type: 'turnStart' });
+        this.emit({
+          type: 'event',
+          event: {
+            type: PROVIDER_CONTINUE_EVENT,
+            id: continuing.id,
+            ...providerCutEventFields(continuing.cut),
+            ...(continuing.origin.automation ? { automation: true } : {}),
+            ts: Date.now(),
+          },
+        });
+      } else if (replyNudge) {
+        this.emit({ type: 'turnStart' });
+        this.emit(replyNudgeEvent(replyNudge));
+      } else if (opts.peerFrom) {
+        const origin = this.turnOrigin ??= emptyTurnOrigin();
+        noteTurnPeer(origin, opts.peerFrom, opts.peerFromRole, opts.peerText ?? text);
+        if (isPersonMessage(opts)) this.watchReply().arm();
+        if (startsNewTurn && opts.peerFromRole === 'automation') origin.automation = true;
+        if (startsNewTurn) this.emit({ type: 'turnStart' });
+        // The echo stays ahead of the stdin write: it must be causally before
+        // any provider frame of the turn it opens (a steered turn's output can
+        // interleave with the write callback), and the write window here is
+        // synchronous — only a failed write could strand it.
+        this.emit({
+          type: 'event',
+          event: {
+            type: 'peer_message',
+            startsTurn: startsNewTurn,
+            from: opts.peerFrom,
+            fromRole: opts.peerFromRole ?? '',
+            text: opts.peerText !== undefined ? opts.peerText : text,
+            ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}),
+            ts: Date.now(),
+          },
+        });
+      } else {
+        if (!startsNewTurn && this.activeToolIds.size === 0) {
+          throw new Error('the native steering window closed before delivery');
+        }
+        this.emit({
+          type: 'event',
+          event: {
+            type: '_user_echo', startsTurn: startsNewTurn,
+            text: opts.echoText ?? text,
+            imageCount: images?.length ?? 0,
+            attachments,
+            clientMsgId: opts.clientMsgId,
+            humanOrigin: opts.humanOrigin === true,
+            ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+            ts: Date.now(),
+          },
+        });
+        noteUserTurn(this.logKey); // forever-thread compaction cadence (monotonic)
+        noteAgentLane(this.chatId, this.cli); // historical lane diagnostics
+        (this.turnOrigin ??= emptyTurnOrigin()).human = true;
+        this.watchReply().arm();
       }
-      if (!startsNewTurn && this.activeToolIds.size === 0) {
-        throw new Error('the native steering window closed before delivery');
-      }
-      this.emit({
-        type: 'event',
-        event: {
-          type: '_user_echo', startsTurn: startsNewTurn,
-          text: opts.echoText ?? text,
-          imageCount: images?.length ?? 0,
-          attachments,
-          clientMsgId: opts.clientMsgId,
-          humanOrigin: opts.humanOrigin === true,
-          ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
-          ts: Date.now(),
-        },
-      });
-      noteUserTurn(this.logKey); // forever-thread compaction cadence (monotonic)
-      noteAgentLane(this.chatId, this.cli); // historical lane diagnostics
-      (this.turnOrigin ??= emptyTurnOrigin()).human = true;
-      this.watchReply().arm();
-    }
+    };
     if (visionNote) {
       console.log(`[chat ${this.cli}] vision adapter: ${visionNote}`);
       this.emit({
@@ -1688,6 +1687,7 @@ class ClaudeSession {
         return;
       }
       assertSelectedEngine(this.chatId, this.cli);
+      echoInput();
       if (startsNewTurn) {
         this.preparingTurnAborter = null;
         this.turnPromptSubmitted = true;
@@ -3390,30 +3390,31 @@ async function getOrCreateSessionUnlocked(opts: {
           ? peekCodexSession({ repoPath: opts.repoPath, chatId, cli: previous.cli })
           : peekClaudeSession({ cli: previous.cli, repoPath: opts.repoPath, chatId });
         if (live?.isBusy()) throw new Error('The current turn is finishing. Your next turn will use the model you selected.');
+        const savedConversation = async (): Promise<string> => {
+          await flushEventLog(logKeyFor(previous.cli!, opts.repoPath, chatId));
+          const turns = extractVisibleTurns(loadEventLogSync(logKeyFor(previous.cli!, opts.repoPath, chatId)).events).slice(-50);
+          const recent: string[] = [];
+          let remaining = 60_000;
+          for (const turn of turns.reverse()) {
+            const entry = `${turn.role}: ${turn.text}`;
+            if (entry.length > remaining) { if (!recent.length) recent.unshift(entry.slice(-remaining)); break; }
+            recent.unshift(entry); remaining -= entry.length + 2;
+          }
+          return `Continue from the previous engine's recent conversation below. Older messages and the full native history remain available; consult them when needed.\n${recent.join('\n\n') || 'No visible messages were recorded. Check current commitments and owned cards before starting work.'}`;
+        };
         await saveEngineHandover({ chatId, sourceId: previous.sessionId, sourceRevision: previous.updatedAt, target: opts.cli }, async () => {
           if (sourceEngine === 'codex') {
             const { interruptCodex } = await import('./codex-runner.ts');
             await interruptCodex({ repoPath: opts.repoPath, chatId, cli: previous.cli });
             return exportCodexHandover({ chatId, cwd: opts.repoPath, sessionId: previous.sessionId!, model: previous.model, nativeProfile: previous.nativeProfile });
           }
-          if (!isClaudeFamilyCli(previous.cli!)) {
-            await flushEventLog(logKeyFor(previous.cli!, opts.repoPath, chatId));
-            const turns = extractVisibleTurns(loadEventLogSync(logKeyFor(previous.cli!, opts.repoPath, chatId)).events).slice(-50);
-            const recent: string[] = [];
-            let remaining = 60_000;
-            for (const turn of turns.reverse()) {
-              const entry = `${turn.role}: ${turn.text}`;
-              if (entry.length > remaining) { if (!recent.length) recent.unshift(entry.slice(-remaining)); break; }
-              recent.unshift(entry); remaining -= entry.length + 2;
-            }
-            return `Continue from the previous engine's recent conversation below. Older messages and the full native history remain available; consult them when needed.\n${recent.join('\n\n') || 'No visible messages were recorded. Check current commitments and owned cards before starting work.'}`;
-          }
+          if (!isClaudeFamilyCli(previous.cli!)) return savedConversation();
           const source = await getOrCreateSessionUnlocked({ ...opts, cli: previous.cli!, model: previous.model, effort: previous.effort, recycleOnMismatch: false, handoverSource: true });
           if (!(source instanceof ClaudeSession) || source.isBusy()) throw new Error('The previous engine is still answering.');
           await compactForHandover(source);
           const { readClaudeHandover } = await import('./nativeSessionStorage.ts');
           return readClaudeHandover(chatId, previous.sessionId!);
-        }, sourceEngine === 'codex' ? () => recoverCodexHandover({ chatId, cwd: opts.repoPath, sessionId: previous.sessionId!, nativeProfile: previous.nativeProfile }) : undefined);
+        }, sourceEngine === 'codex' ? () => recoverCodexHandover({ chatId, cwd: opts.repoPath, sessionId: previous.sessionId!, nativeProfile: previous.nativeProfile }) : undefined, savedConversation);
         // The note is durable before worker teardown, so a slow exit cannot
         // discard an already-paid handover or force another export.
         if (live && live.cli !== opts.cli) {

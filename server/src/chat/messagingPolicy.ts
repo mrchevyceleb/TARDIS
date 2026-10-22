@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { JsonStore } from '../lib/jsonStore.ts';
 import { bareChatId } from './threadKey.ts';
 
-type Sent = { id: string; at: number };
+type Sent = { id: string; claims?: string[] };
 const sent = new JsonStore<Sent>('outbound-message-claims.json', []);
 const inbox = new JsonStore<{ id: string; chatId: string; from: string; text: string; admissionAck?: 'flag-digest' }>('informational-inbox.json', []);
 
@@ -11,18 +11,19 @@ const inbox = new JsonStore<{ id: string; chatId: string; from: string; text: st
 export async function claimOutbound(from: string, to: string, text: string, request: string): Promise<string | null> {
   const id = createHash('sha256').update(JSON.stringify([from, to, request, text.trim().replace(/\s+/g, ' ')])).digest('hex');
   let claimed = false;
-  const now = Date.now();
   await sent.modify(items => {
-    // A new request may need the same answer. Keep retries of the same
-    // request blocked across turn ends and restarts, rather than using a timer.
-    const recent = items.slice(-9999);
-    if (recent.some(item => item.id === id)) return recent;
+    const owner = `sender:${from}`;
+    const claims = items.find(item => item.id === owner)?.claims ?? [];
+    if (claims.includes(id)) return items;
     claimed = true;
-    return [...recent, { id, at: now }];
+    // A small bounded bucket per sender; retries cannot grow a global ledger.
+    return [...items.filter(item => item.id.startsWith('sender:') && item.id !== owner).slice(-63), { id: owner, claims: [...claims.slice(-127), id] }];
   });
   return claimed ? id : null;
 }
-export async function releaseOutbound(id: string): Promise<void> { await sent.delete(id); }
+export async function releaseOutbound(id: string): Promise<void> {
+  await sent.modify(items => items.map(item => ({ ...item, claims: item.claims?.filter(claim => claim !== id) })));
+}
 
 export async function saveInformational(chatId: string, from: string, text: string, admissionAck?: 'flag-digest', id: string = randomUUID()): Promise<string> {
   await inbox.modify(items => items.some(item => item.id === id) ? items : [...items, { id, chatId: bareChatId(chatId), from, text, admissionAck }]);

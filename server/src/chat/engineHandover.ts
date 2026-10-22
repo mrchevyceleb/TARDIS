@@ -10,7 +10,7 @@ import { resolveCodexBin } from './codex-models.ts';
 import { codexHomeFor } from './codex-threads.ts';
 import type { CliKind } from './runner.ts';
 
-type Handover = { id: string; chatId: string; sourceId: string; target: string; note?: string; failed?: boolean; accepted?: boolean; selectionRevision?: number };
+type Handover = { id: string; chatId: string; sourceId: string; target: string; note?: string; failed?: boolean; savedConversation?: boolean; accepted?: boolean; selectionRevision?: number };
 const store = new JsonStore<Handover>('native-engine-handovers.json', []);
 const HANDOVER_MARKER = 'This is the single handover-only request authorized for this model switch.';
 const HANDOVER_PAUSED = 'The previous model did not finish its handover. Your history is safe. This switch is paused for recovery, so another attempt cannot charge you again.';
@@ -31,7 +31,7 @@ export function assertSelectedEngine(chatId: string, cli: string): void {
 
 /** The attempted marker lands BEFORE the billed request. An ambiguous failure
  * retains history and work, rather than automatically buying another export. */
-export async function saveEngineHandover(opts: { chatId: string; sourceId: string; sourceRevision: number; target: CliKind }, makeNote: () => Promise<string>, recoverNote?: () => Promise<string | undefined>): Promise<void> {
+export async function saveEngineHandover(opts: { chatId: string; sourceId: string; sourceRevision: number; target: CliKind }, makeNote: () => Promise<string>, recoverNote?: () => Promise<string | undefined>, savedConversation?: () => Promise<string>): Promise<void> {
   const chatId = bareChatId(opts.chatId);
   const target = nativeEngine(opts.target);
   const selectionRevision = agentForChatId(chatId)?.brainRevision ?? 0;
@@ -39,17 +39,26 @@ export async function saveEngineHandover(opts: { chatId: string; sourceId: strin
   let record: Handover | undefined;
   let claimed = false;
   await store.modify(items => {
-    record = items.find(item => item.id === id || (item.chatId === chatId && item.sourceId === opts.sourceId && item.target === target && !item.accepted));
-    if (record) return items;
+    record = items.find(item => item.id === id || (item.chatId === chatId && item.sourceId === opts.sourceId && !item.accepted));
+    if (record) {
+      record = { ...record, target };
+      return items.map(item => item.id === record!.id ? record! : item);
+    }
     claimed = true;
     record = { id, chatId, sourceId: opts.sourceId, target, selectionRevision };
     return [...items.filter(item => item.chatId !== chatId || item.accepted), record!];
   });
+  const recover = async (recordId: string): Promise<boolean> => {
+    const native = await recoverNote?.().catch(() => undefined);
+    const conversation = native ? undefined : await savedConversation?.();
+    const note = (native || conversation)?.trim();
+    if (!note || note.length > 64_000) return false;
+    await store.update(recordId, { note, failed: !native, savedConversation: !native });
+    return true;
+  };
   if (!claimed) {
     if (!record?.note) {
-      const note = await recoverNote?.().catch(() => undefined);
-      if (!note || note.length > 64_000) throw new Error(record?.failed ? HANDOVER_PAUSED : 'The handover is still pending. Your history is safe; another paid attempt will not start.');
-      await store.update(record!.id, { note, failed: false });
+      if (!await recover(record!.id)) throw new Error(record?.failed ? HANDOVER_PAUSED : 'The handover is still pending. Your history is safe; another paid attempt will not start.');
     }
     return;
   }
@@ -61,11 +70,11 @@ export async function saveEngineHandover(opts: { chatId: string; sourceId: strin
     await store.update(id, { note });
   } catch (cause) {
     if (noteProduced || (cause as { billed?: boolean }).billed === true) {
-      const note = await recoverNote?.().catch(() => undefined);
-      if (note && note.length <= 64_000) { await store.update(id, { note, failed: false }); return; }
+      if (await recover(id)) return;
       await store.update(id, { failed: true });
       throw new Error(HANDOVER_PAUSED, { cause });
     }
+    else if (await recover(id)) return;
     else await store.delete(id);
     throw new Error('The handover note could not be saved. Your history and queued messages are safe; the old model will not run more work.', { cause });
   }
@@ -115,7 +124,7 @@ export async function pendingEngineHandover(chatId: string): Promise<{ text: str
   const agent = agentForChatId(chatId);
   const target = agent ? nativeEngine(cliForAgentEngine(brainForAgent(agent).engine)) : '';
   const record = (await store.list()).find(item => item.chatId === bareChatId(chatId) && item.target === target && !item.accepted && item.note);
-  return { text: record ? `<native-engine-handover>\nThe previous engine wrote this handover. Continue the same conversation, preserve its decisions, and check current state before acting.\n${record.note}\n</native-engine-handover>` : '', accept() {
+  return { text: record ? `<native-engine-handover>\n${record.savedConversation ? 'The previous model could not finish its note. Continue from the saved conversation below without another paid handover. The full original history is retained.' : 'Continue the same conversation from this handover.'} Preserve its decisions and check current state before acting.\n${record.note}\n</native-engine-handover>` : '', accept() {
     if (record) void store.update(record.id, { accepted: true }).catch(() => console.warn('[handover] acknowledgement will retry'));
   } };
 }

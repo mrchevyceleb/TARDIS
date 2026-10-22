@@ -7,7 +7,7 @@ import { claimOutbound, releaseOutbound, saveInformational, informationalPending
 // limits, text cap, and per-recipient FIFO delivery — long legitimate chains
 // stay open without allowing a tight runaway loop or losing busy handoffs.
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DESK_OWNER_NAME, ELROND_WORKSPACE_PATH } from '../config.ts';
 import { brainForAgent, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
 import { backgroundChatId, backgroundLaneEnabled, bareChatId, isBackgroundChatId, logKeyFor } from './threadKey.ts';
@@ -160,6 +160,8 @@ type ActiveInboundChain = TeamChain & { deliveryId: string; at: number };
 // inherit that collaboration's route automatically. Repeating a directed edge
 // closes a real loop; merely having a long route never blocks legitimate work.
 const activeInboundChains = new Map<string, ActiveInboundChain>();
+const requestRoots = new JsonStore<{ id: string; chainId: string; admittedSeq: number }>('message-request-roots.json', []);
+const requestRootWrites = new Map<string, Promise<unknown>>();
 
 type QueuedTeamDelivery = StoredRecord & {
   fromId: string;
@@ -309,6 +311,9 @@ function activateInboundChain(
   const key = chainKey(recipientId, lane);
   const active: ActiveInboundChain = { ...chain, deliveryId, at: Date.now() };
   activeInboundChains.set(key, active);
+  const write = requestRoots.modify(items => [...items.filter(item => item.id !== key), { id: key, chainId: chain.id, admittedSeq }]);
+  requestRootWrites.set(key, write);
+  void write.catch(() => console.warn('[messages] request identity will retry'));
   let unsubscribe: (() => void) | null = null;
   const clear = () => {
     if (activeInboundChains.get(key)?.deliveryId === deliveryId) {
@@ -2037,7 +2042,10 @@ export async function deliverTeamMessage(input: {
     return { delivered: false, reason: 'that is you — no need to message yourself' };
   }
 
-  const { chain } = inheritedTeamChain(from.id, to.id, input.fromLane === 'bg' ? 'bg' : 'main');
+  const fromLane = input.fromLane === 'bg' ? 'bg' : 'main';
+  const request = input.source ? randomUUID() : await outboundRequest(from, fromLane);
+  let { chain } = inheritedTeamChain(from.id, to.id, fromLane);
+  if (chain.id !== request) chain = { id: request, edges: [replyEdge(from.id, to.id)], route: [from.id, to.id] };
   const requestedWaitForReply = teamMessageWaitRequested(input.wait);
   // Historical route repetition is never a reason to discard a message. Only
   // a CURRENT synchronous wait path can deadlock; that exact case is degraded
@@ -2067,7 +2075,7 @@ export async function deliverTeamMessage(input: {
   const rl = rateOk(replyEdge(from.id, to.id));
   if (!rl.ok) return { delivered: false, reason: rl.reason };
 
-  const claim = !input.source ? await claimOutbound(from.id, to.id, text, await outboundRequest(from, input.fromLane === 'bg' ? 'bg' : 'main')) : undefined;
+  const claim = !input.source ? await claimOutbound(from.id, to.id, text, request) : undefined;
   if (claim === null) return { delivered: false, to: to.name, reason: 'You already sent this exact message. Do not send it again; continue only when there is new information.' };
   if ((input.informational === true || input.nudgeHoldSince !== undefined || input.admissionAck === 'flag-digest') && !input.source) {
     let deliveryId: string;
@@ -2294,7 +2302,7 @@ export async function deliverTeamMessage(input: {
 
 // ---- reply extraction ---------------------------------------------------------
 
-import { appendEventLogDurable, appendEventLogSync, flushEventLog, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
+import { appendEventLogDurable, appendEventLogSync, flushEventLog, loadEventLogSync, loadEventLogTail, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { redactEventSecrets } from './secretRedaction.ts';
 
 /** Durable input identity, shared by every engine. Assistant output and tool
@@ -2305,13 +2313,17 @@ async function outboundRequest(agent: Pick<Agent, 'id'>, lane: AgentLane): Promi
   const { cli, chatKey } = agentLogKey(owner, lane);
   const key = logKeyFor(cli, ELROND_WORKSPACE_PATH, chatKey);
   await flushEventLog(key);
-  const events = loadEventLogSync(key).events.filter(event => !foreignLaneEvent(event, lane));
+  const rootKey = chainKey(agent.id, lane);
+  await requestRootWrites.get(rootKey);
+  const root = (await requestRoots.list()).find(item => item.id === rootKey);
+  const identity = (text: string) => createHash('sha256').update(text).digest('hex');
+  const events = (await loadEventLogTail(key)).events.filter(event => !foreignLaneEvent(event, lane));
   for (const event of events.reverse()) {
     const inner = event.ev?.type === 'event' ? event.ev.event : undefined;
-    if (inner?.type === 'peer_delivery_accepted' && inner.deliveryId) return `${key}|peer:${inner.deliveryId}`;
-    if (inner?.type === '_user_echo') return `${key}|user:${inner.clientMsgId ?? `${event.at ?? 0}:${event.seq}`}`;
+    if (inner?.type === 'peer_delivery_accepted' && inner.deliveryId) return root && root.admittedSeq <= event.seq ? root.chainId : identity(`${key}|peer:${inner.deliveryId}`);
+    if (inner?.type === '_user_echo') return identity(`${key}|user:${inner.clientMsgId ?? `${event.at ?? 0}:${event.seq}`}`);
   }
-  return `${key}|no-input`;
+  return identity(`${key}|no-input`);
 }
 
 /** Explicit owner publication uses the same durable thread and live fanout on
