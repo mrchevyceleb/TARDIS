@@ -1,3 +1,5 @@
+import { prepareSessionStateDelta } from './sessionContext.ts';
+import { assertSelectedEngine } from './engineHandover.ts';
 import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 import { assertSubscriptionLane } from './subscription-policy.ts';
 import { execFile, type ChildProcess } from 'node:child_process';
@@ -165,6 +167,7 @@ type BananaTurnState = {
    *  the window between this turn's state being created and its prompt being
    *  accepted, and would fake-complete the turn before the real answer streams. */
   promptAccepted: boolean;
+  acceptContext?: () => void;
   /** Durable team outbox id acknowledged once Banana accepts this prompt. */
   peerDeliveryId?: string;
   /** True when this prompt was prepended with an event-log recovery recap. */
@@ -2763,6 +2766,7 @@ export class BananaSession {
   }
 
   async send(text: string, images?: ChatImage[], opts: BananaSendOptions = {}): Promise<void> {
+    assertSelectedEngine(this.chatId, this.cli);
     assertSubscriptionLane(this.cli);
     if (opts.signal?.aborted) return;
     if (opts.peerDeliveryId && this.submittedPeerDeliveries.has(opts.peerDeliveryId)) {
@@ -3077,8 +3081,9 @@ export class BananaSession {
       this.busy = false;
       return;
     }
+    const handover = await prepareSessionStateDelta(this.chatId);
     const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
-    const effectiveText = `${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, false, true)}\n\n${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${commandExpandedText}`;
+    const effectiveText = `${handover.text ? `${handover.text}\n\n` : ''}${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, false, true)}\n\n${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${commandExpandedText}`;
     if (seed) {
       this.turn.recoveryRecapUsed = true;
       this.emit({
@@ -3097,6 +3102,7 @@ export class BananaSession {
     const promptText = localDirective ? `${localDirective}\n${effectiveText}` : effectiveText;
     const providerVariant = this.cli !== 'banana-local' && opts?.effort ? opts.effort : undefined;
     const thisTurn = this.turn;
+    thisTurn.acceptContext = handover.accept;
     const promptKind = slashCommand ? 'command' : 'prompt';
     try {
       if (opts.peerDeliveryId && !this.submitPeerDelivery(opts.peerDeliveryId)) return;
@@ -3372,6 +3378,8 @@ export class BananaSession {
   }
 
   private markPromptAccepted(state: BananaTurnState): void {
+    state.acceptContext?.();
+    state.acceptContext = undefined;
     if (!state.promptAccepted && state.peerDeliveryId) {
       this.emit({
         type: 'event',

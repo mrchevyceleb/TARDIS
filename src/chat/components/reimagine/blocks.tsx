@@ -613,6 +613,7 @@ function PeerMessageBubble({
 }) {
   const initial = (block.from || '?').trim().slice(0, 1).toUpperCase();
   const routineResult = block.fromRole === 'automation-result';
+  const informational = block.fromRole === 'informational';
   // Quiet routines stay hidden. Deliverable ones (dashboards, briefs) are
   // something Matt has to read, so they start open in the thread. Channel
   // history marks member posts expanded: the post is the message.
@@ -641,8 +642,8 @@ function PeerMessageBubble({
   // agent's board through the same ThreadPin the assistant prose uses.
   const peerPinned = pin ? pin.pinnedBlockIds.includes(block.id) : false;
   // Keep the addressee readable on a phone, ahead of optional job titles.
-  const role = routineResult ? 'routine update' : `to ${recipient}`;
-  const subject = hasResponse ? 'exchange' : 'message';
+  const role = informational ? block.receivedAt ? `${recipient} received` : `waiting for ${recipient}` : routineResult ? 'routine update' : `to ${recipient}`;
+  const subject = informational ? 'update' : hasResponse ? 'exchange' : 'message';
 
   return (
     <>
@@ -675,6 +676,7 @@ function PeerMessageBubble({
       </button>
       {open ? (
         <div className="bt-peer-body" id={bodyId}>
+          {informational ? <p className="bt-peer-recovery">{block.receivedAt ? `${recipient} received this with a real turn. No notification was sent.` : `Saved for ${recipient}’s next turn. No notification was sent.`}</p> : null}
           <section className="bt-peer-turn">
             <span className="bt-peer-turn-label">{block.from}</span>
             {routineResult
@@ -693,7 +695,7 @@ function PeerMessageBubble({
                 onPinLink={pin && !mobile ? (url) =>
                   pin.onToggle({ blockId: `${block.id}::link-${shortHash(url)}`, text: url, ts: block.ts })
                 : undefined}
-                onPinSelection={pin && !mobile ? (sel) =>
+                onPinSelection={pin && !mobile && !informational ? (sel) =>
                   pin.onToggle({ blockId: `${block.id}::sel-${shortHash(sel)}`, text: sel, ts: block.ts })
                 : undefined}
               />
@@ -854,13 +856,13 @@ function engineLabel(id: string): string {
 }
 
 function SwitchDivider({ block }: { block: Extract<ChatBlock, { kind: 'switch' }> }) {
-  const from = engineLabel(block.from);
+  const from = block.from ? engineLabel(block.from) : '';
   const to = engineLabel(block.to);
-  const model = block.model ? ` · ${block.model}` : '';
+  const model = block.model?.split('/').pop()?.replace(/-/g, ' ').replace(/\b[a-z]/g, c => c.toUpperCase()).replace(/\bGpt\b/, 'GPT').replace(/\bGlm\b/, 'GLM') || to;
   return (
-    <div className="compact-mark switch-mark" title={`This thread stayed put. ${to} will answer from here on${block.model ? ` (${block.model})` : ''}.`}>
+    <div className="compact-mark switch-mark" title={`${model} accepted this turn. Your conversation stayed here.`}>
       <span className="compact-line" />
-      <span className="compact-label">Switched {from} → {to}{model}</span>
+      <span className="compact-label">Now on {model}{from ? ` · continued from ${from}` : ''}</span>
       <span className="compact-line" />
     </div>
   );

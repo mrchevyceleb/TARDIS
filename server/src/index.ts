@@ -333,6 +333,7 @@ server.listen(PORT, HOST, () => {
             model: brain.model,
             effort: brain.effort,
             recycleOnMismatch: true,
+            passive: true,
           });
           if (tearingDown) {
             session.shutdown('prewarm-teardown');

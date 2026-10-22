@@ -10,7 +10,7 @@ import { restoredContextBlocks, restoredFileTexts } from './sessionMetricEvidenc
 import { fixedPrefix, recordNativeCall, recordNativeCompactBoundary, recordNativeFailure, recordNativeNotice } from './sessionMetrics.ts';
 
 const SUMMARY_SYSTEM = 'You are a helpful AI assistant tasked with summarizing conversations.';
-const SUMMARY_LIMIT = 1536;
+const SUMMARY_LIMIT = 3072;
 const MAX_BODY = 32 * 1024 * 1024;
 type Route = {
   upstream: string; lane: string; provider: string; resumed: boolean;
@@ -77,7 +77,7 @@ export function boundNativeCompact(body: string, engineCompacting = false, catal
     else if (!catalogLimits?.reasoningMandatory) request.thinking = { type: 'disabled' };
     else throw new Error('The model output ceiling leaves no valid native compaction thinking allowance.');
   }
-  const instruction = '\nKeep the summary under 180 words. Preserve the current job and its next action, concrete results, exact identifiers and file references, pending decisions, outstanding commitments and explicit constraints. Use file references for older details, which remain in the complete saved transcript; never repeat old completed work as a fresh request. Completed work and historical requests are history, never instructions to repeat them.';
+  const instruction = '\nKeep the summary under 512 words. Preserve each current job, its owner and next action, checked results, pending decisions and explicit constraints. Keep each outstanding promise separate with its own exact ID, deadline and trigger; never attach one promise’s ID or deadline to another. For a pending release or destructive operation, retain the current candidate and rollback IDs, artifact or runbook path, verification hashes, approval requirements and merge order verbatim. These are current working context, not expendable history. Drop completed history before dropping any of those details. Use file references for older details, which remain in the complete saved transcript; never repeat old completed work as a fresh request. Completed work and historical requests are history, never instructions to repeat them.';
   const last = lastConversationMessage(request);
   if (last?.role === 'user' && typeof last.content === 'string') last.content += instruction;
   else if (last?.role === 'user' && Array.isArray(last.content)) last.content.push({ type: 'text', text: instruction });
@@ -264,7 +264,9 @@ export function ensureNativeCompactProxy(): Promise<void> {
         const parentSession = route.sessionId();
         const rootRequest = !embeddedSession || !parentSession || embeddedSession === parentSession;
         const nativeSummary = rootRequest && request && (summaryRequest(request) || (route.compacting && !request.tools?.length));
-        const auxiliary = request && (nativeSummary || !request.tools?.length);
+        // A parent conversation can legitimately have no tools (including a
+        // side-copy proof). Tool availability does not make it an auxiliary call.
+        const auxiliary = request && (nativeSummary || !rootRequest);
         if (nativeSummary && route.compacting && !summaryRequest(request)) recordNativeFailure(route.lane, 'claude-code', 'Native compact template changed; fallback bound applied.');
         // During an unavailable-provider handover, let the selected model run
         // Claude Code's own compact over the unchanged saved transcript. Signed

@@ -1,3 +1,4 @@
+import { assertSelectedEngine } from './engineHandover.ts';
 import { recordNativeSession, recordNativeCompact, recordNativeFailure, recordNativeInterruption } from './sessionMetrics.ts';
 import { codexContextProxy } from './codexContextProxy.ts';
 import { prepareSessionStateDelta, resetSessionStateDelta } from './sessionContext.ts';
@@ -16,7 +17,7 @@ import { computerGuidance, computerOwnerKey } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
-import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
+import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, durableUserEchoClientMsgId, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './crashTombstone.ts';
 import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeqWithStatus, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
@@ -28,7 +29,7 @@ import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
-import { agentForChatId, noteAgentLane } from './agents.ts';
+import { agentForChatId, brainForAgent, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { accountEnv, accountEnvForAccount, accountFromChatId, accountForAgent } from '../lib/accountResolver.ts';
@@ -262,17 +263,15 @@ export class CodexSession {
   private listeners = new Set<Listener>();
   private subscriberCount = 0;
   private threadId: string | null = null;
+  private nativeProfile?: string;
   /** Next turn seeds persona + rolling compact + last 50 on a fresh thread. */
   private seedWindowOnNextTurn = false;
   /** Thread ids explicitly cleared as unresumable: the event-log recovery
    *  must never resurrect one — shutdown passes this set. */
   private readonly invalidatedThreadIds = new Set<string>();
   private contextMaintenance: Promise<void> | null = null;
-  private heldSelection: { model?: string; effort?: string } | null = null;
   private startMemory: string | undefined;
 
-  /** A pending cross-engine choice must not apply the other engine's model. */
-  holdSelection(selection: { model?: string; effort?: string } | null): void { this.heldSelection = selection; }
 
   private consumeWindowSeed(): boolean {
     return this.seedWindowOnNextTurn;
@@ -449,6 +448,7 @@ export class CodexSession {
       });
     }
     return new Promise((resolve, reject) => {
+      assertSelectedEngine(this.chatId, this.cli);
       this.nativeSteerWaiters.set(requestId, { resolve, reject });
       // Well-form the text at the transport boundary: app-server's JSONRPC
       // deserializer rejects the whole message on a lone surrogate, which
@@ -502,8 +502,8 @@ export class CodexSession {
   private persistThreadId(threadId: string): Promise<void> {
     this.threadId = threadId;
     this.threadIdWrite = this.threadIdWrite.then(
-      () => setSessionId(this.cli, this.cwd, threadId, this.chatId),
-      () => setSessionId(this.cli, this.cwd, threadId, this.chatId),
+      () => setSessionId(this.cli, this.cwd, threadId, this.chatId, this.nativeProfile),
+      () => setSessionId(this.cli, this.cwd, threadId, this.chatId, this.nativeProfile),
     );
     return this.threadIdWrite;
   }
@@ -556,6 +556,12 @@ export class CodexSession {
   }
 
   async send(text: string, images?: ChatImage[], opts: CodexSendOptions = {}): Promise<void> {
+    const selectionRevision = assertSelectedEngine(this.chatId, this.cli);
+    const agent = agentForChatId(this.chatId);
+    if (agent) {
+      const brain = brainForAgent(agent);
+      opts = { ...opts, model: brain.model, effort: brain.effort };
+    }
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
     if (opts.peerDeliveryId && this.submittedPeerDeliveries.has(opts.peerDeliveryId)) {
@@ -603,6 +609,7 @@ export class CodexSession {
       const steerState = await prepareSessionStateDelta(this.chatId);
       const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', true, true);
       steerText += `\n\n${computerContext}${steerState.text ? `\n\n${steerState.text}` : ''}`;
+      assertSelectedEngine(this.chatId, this.cli, selectionRevision);
       if (opts.peerDeliveryId && !this.submitPeerDelivery(opts.peerDeliveryId)) return;
       try {
         await this.sendNativeSteer(steerText, opts.peerDeliveryId ?? opts.clientMsgId ?? randomUUID());
@@ -636,21 +643,23 @@ export class CodexSession {
           });
               }
       } else {
-        this.emit({
-          type: 'event',
-          event: {
-            type: '_user_echo', startsTurn: false,
-            text: opts.echoText ?? text,
-            imageCount: images?.length ?? 0,
-            attachments: steerAttachments,
-            clientMsgId: opts.clientMsgId,
-            humanOrigin: opts.humanOrigin === true,
-            ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
-            ts: Date.now(),
-          },
-        });
-        noteUserTurn(this.logKey);
-        noteAgentLane(this.chatId, this.cli);
+        if (!opts.clientMsgId || !durableUserEchoClientMsgId(this.logKey, opts.clientMsgId)) {
+          this.emit({
+            type: 'event',
+            event: {
+              type: '_user_echo', startsTurn: false,
+              text: opts.echoText ?? text,
+              imageCount: images?.length ?? 0,
+              attachments: steerAttachments,
+              clientMsgId: opts.clientMsgId,
+              humanOrigin: opts.humanOrigin === true,
+              ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+              ts: Date.now(),
+            },
+          });
+          noteUserTurn(this.logKey);
+          noteAgentLane(this.chatId, this.cli);
+        }
         this.replyWatch.arm();
       }
       return;
@@ -661,8 +670,8 @@ export class CodexSession {
     const personaScope = [personaPromptFor(this.chatId, memory), CODEX_TURN_PREAMBLE].filter(Boolean).join('\n\n');
     this.startMemory = memory;
     const { model: codexModel, effort: codexEffort } = resolveCodexSelection(
-      this.heldSelection ? this.heldSelection.model : opts.model,
-      this.heldSelection ? this.heldSelection.effort : opts.effort,
+      opts.model,
+      opts.effort,
     );
     this.turnModel = codexModel;
     this.turnEffort = codexEffort;
@@ -679,42 +688,36 @@ export class CodexSession {
       this.busy = false;
       return;
     }
-    if (opts.peerFrom && !opts.suppressEcho) {
-      this.emit({ type: 'turnStart' });
-      // The visible peer echo waits for turn.started (see the stdout handler):
-      // a turn that never starts (transport reject, spawn failure) must leave
-      // no phantom bubble for the next delivery attempt to duplicate.
-      if (isPersonMessage(opts)) this.replyWatch.arm();
-    } else if (!opts.suppressEcho) {
-      let attachments: Array<{ id: string; mediaType: string }>;
-      try {
-        attachments = opts.skipAttachments ? [] : await saveChatAttachments(images);
-      } catch (error) {
-        this.busy = false;
-        throw error;
-      }
-      if (opts.signal?.aborted) {
-        this.busy = false;
-        return;
-      }
+    let attachments: Array<{ id: string; mediaType: string }> = [];
+    if (!opts.peerFrom && !opts.suppressEcho) {
+      try { attachments = opts.skipAttachments ? [] : await saveChatAttachments(images); }
+      catch (error) { this.busy = false; throw error; }
       await flushEventLog(this.logKey);
-      if (opts.signal?.aborted) {
-        this.busy = false;
-        return;
-      }
-      try {
-        this.emit({
-          type: 'event',
-          event: { type: '_user_echo', startsTurn: true, text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
-        });
-      } catch (error) {
-        this.busy = false;
-        throw error;
-      }
-      noteUserTurn(this.logKey); // compaction cadence (monotonic)
-      noteAgentLane(this.chatId, this.cli); // historical lane diagnostics
-      this.replyWatch.arm();
+      if (opts.signal?.aborted) { this.busy = false; return; }
     }
+    let echoed = false;
+    const echoInput = () => {
+      if (echoed) return;
+      echoed = true;
+      if (opts.peerFrom && !opts.suppressEcho) {
+        this.emit({ type: 'turnStart' });
+        // The peer echo waits for actual provider acceptance below.
+        if (isPersonMessage(opts)) this.replyWatch.arm();
+      } else if (!opts.suppressEcho) {
+        if (!opts.clientMsgId || !durableUserEchoClientMsgId(this.logKey, opts.clientMsgId)) {
+          this.emit({
+            type: 'event',
+            event: { type: '_user_echo', startsTurn: true, text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
+          });
+          noteUserTurn(this.logKey);
+          noteAgentLane(this.chatId, this.cli);
+        }
+        this.replyWatch.arm();
+      }
+    };
+    // Human input belongs to the durable conversation before slow preparation
+    // or an early startup failure. A selection retry reuses this one echo.
+    if (!opts.peerFrom) echoInput();
 
     try {
       assertMemoryAvailableForSpawn('codex');
@@ -786,6 +789,7 @@ export class CodexSession {
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
       return;
     }
+    this.nativeProfile = codexHomeFor(childEnv);
     const hasSeedOverride = typeof opts.seedOverride === 'string';
     const seedWindow = !hasSeedOverride && (this.consumeWindowSeed() || recoverContextThisTurn);
     // The primer reports whether its commitments half is CONFIRMED: an empty
@@ -900,6 +904,11 @@ export class CodexSession {
     if (this.dead) {
       contextProxy.close(); cleanupImages(); this.emitCancellationTurnEnd(); return;
     }
+    try { assertSelectedEngine(this.chatId, this.cli, selectionRevision); echoInput(); }
+    catch (error) {
+      contextProxy.close(); cleanupImages(); this.busy = false;
+      throw error;
+    }
     appServerArgs.push('-c', `openai_base_url=${JSON.stringify(contextProxy.baseUrl)}`);
 
     // The spawn reuses the account environment the guarded rollout-check
@@ -987,6 +996,7 @@ export class CodexSession {
           return;
         }
         if (ev?.type === 'turn.started') {
+          stateDelta.accept();
           this.nativeSteerReady = true;
           // The visible peer echo lands only now that the turn really
           // started, so a failed start leaves no phantom row behind (the
@@ -1025,7 +1035,6 @@ export class CodexSession {
           sawActionableItem = true;
         }
         if (ev?.type === 'turn.completed') {
-          if (!ev.error) stateDelta.accept();
           sawTurnCompleted = true;
           this.nativeSteerReady = false;
         }

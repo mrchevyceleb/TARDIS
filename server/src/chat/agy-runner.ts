@@ -1,3 +1,4 @@
+import { assertSelectedEngine } from './engineHandover.ts';
 import { prepareSessionStateDelta } from './sessionContext.ts';
 /** Agy engine lane — Google's Antigravity CLI (`agy`) on Matt's subscription.
  *
@@ -425,6 +426,7 @@ export class AgySession {
           return;
         }
         if (step.step_type !== 'tool' && step.step_type !== 'agent_response') return;
+        this.pendingStateAccepts.splice(0).forEach(accept => accept());
         const sid = this.agyConversationId ?? '';
         const stream = (event: Record<string, unknown>) => this.emit({ type: 'event', event: { type: 'stream_event', event, session_id: sid } });
         const idx = typeof step.step_index === 'number' ? step.step_index : -1;
@@ -757,7 +759,6 @@ export class AgySession {
     }
     this.finalizeOpenStep();
     const failed = this.turnFailed;
-    if (!failed) for (const accept of this.pendingStateAccepts) accept();
     this.pendingStateAccepts = [];
     if (failed && !this.terminalNoticeEmitted) {
       this.terminalNoticeEmitted = true;
@@ -937,6 +938,7 @@ export class AgySession {
   }
 
   async send(text: string, images?: ChatImage[], opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; providerContinue?: unknown; echoText?: string; replyTo?: { from: string; snippet: string } } = {}): Promise<void> {
+    assertSelectedEngine(this.chatId, this.cli);
     assertSubscriptionLane(this.cli);
     if (opts.signal?.aborted) return;
     if (!this.isAlive()) throw new Error('session has exited');

@@ -353,7 +353,14 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   }
 
   // Agent-to-agent delivery: a teammate's message landing in this thread.
+  if (ev.type === 'peer_delivery_accepted' && typeof ev.deliveryId === 'string') {
+    return blocks.map(block => block.kind === 'peer' && block.deliveryId === ev.deliveryId
+      ? { ...block, receivedAt: typeof ev.ts === 'number' ? ev.ts : Date.now() } : block);
+  }
+
   if (ev.type === 'peer_message' && typeof ev.text === 'string') {
+    // Older builds saved bare acknowledgements as informational cards.
+    if (ev.fromRole === 'informational' && /^(?:done|thanks?(?: you)?|got it|noted|ack(?:nowledged)?|ok(?:ay)?|no_update)[.!\s]*$/i.test(ev.text.trim())) return blocks;
     const from = typeof ev.from === 'string' ? ev.from : 'Companion';
     const fromRole = typeof ev.fromRole === 'string' ? ev.fromRole : undefined;
     const deliveryId = typeof ev.deliveryId === 'string' ? ev.deliveryId : undefined;

@@ -119,6 +119,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
+        informational: { type: 'boolean', description: 'True for information or an FYI. Saves it for their next real turn without waking or interrupting them. Use false or omit only when they must act now.' },
         from: { type: 'string', description: 'Your own teammate name (the sender)' },
         to: { type: 'string', description: "Teammate name, e.g. 'Chief of Staff'" },
         text: { type: 'string', description: 'What to say or ask' },
@@ -918,7 +919,7 @@ async function callTool(name, args, signal) {
         // Version the async-default behavior at the MCP boundary. The raw HTTP
         // API keeps its historical synchronous default for non-MCP callers.
         wait: args.wait === true,
-        priority: args.priority === true,
+        informational: args.informational, priority: args.priority === true,
       }),
     }, signal);
     if (!result.delivered) return `NOT DELIVERED: ${result.reason}`;

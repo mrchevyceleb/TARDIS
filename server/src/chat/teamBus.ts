@@ -1,3 +1,4 @@
+import { acknowledgementOnly, claimOutbound, releaseOutbound, saveInformational, informationalPending, legacyActionableInformation, removeSavedInformation } from './messagingPolicy.ts';
 // Team bus — agent-to-agent messaging. Any teammate can message any other
 // teammate through the `rivendell-team` MCP tool (see server/scripts/team-mcp.mjs);
 // delivery lands in the recipient's home thread as a `peer_message` event
@@ -6,9 +7,9 @@
 // limits, text cap, and per-recipient FIFO delivery — long legitimate chains
 // stay open without allowing a tight runaway loop or losing busy handoffs.
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DESK_OWNER_NAME, ELROND_WORKSPACE_PATH } from '../config.ts';
-import { brainForAgent, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
+import { agentForChatId, brainForAgent, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
 import { backgroundChatId, backgroundLaneEnabled, bareChatId, isBackgroundChatId, logKeyFor } from './threadKey.ts';
 import { extractVisibleTurns } from './threadWindow.ts';
 import { JsonStore, type StoredRecord } from '../lib/jsonStore.ts';
@@ -159,6 +160,8 @@ type ActiveInboundChain = TeamChain & { deliveryId: string; at: number };
 // inherit that collaboration's route automatically. Repeating a directed edge
 // closes a real loop; merely having a long route never blocks legitimate work.
 const activeInboundChains = new Map<string, ActiveInboundChain>();
+const requestRoots = new JsonStore<{ id: string; chainId: string; admittedSeq: number; deliveryId?: string }>('message-request-roots.json', []);
+const requestRootWrites = new Map<string, Promise<unknown>>();
 
 type QueuedTeamDelivery = StoredRecord & {
   fromId: string;
@@ -308,6 +311,9 @@ function activateInboundChain(
   const key = chainKey(recipientId, lane);
   const active: ActiveInboundChain = { ...chain, deliveryId, at: Date.now() };
   activeInboundChains.set(key, active);
+  const write = requestRoots.modify(items => [...items.filter(item => item.id !== key), { id: key, chainId: chain.id, admittedSeq, deliveryId }]);
+  requestRootWrites.set(key, write);
+  void write.catch(() => console.warn('[messages] request identity will retry'));
   let unsubscribe: (() => void) | null = null;
   const clear = () => {
     if (activeInboundChains.get(key)?.deliveryId === deliveryId) {
@@ -1920,6 +1926,21 @@ function scheduleQueuedRecipient(queueKey: string, delayMs = 0): void {
 
 /** Resume accepted fire-and-forget handoffs after a TARDIS restart. */
 export async function resumeQueuedTeamDeliveries(): Promise<number> {
+  // The first quiet-delivery build incorrectly parked actionable digests.
+  // Restore their original IDs before scheduling, so source admission acks
+  // settle once. Unknown legacy urgency fails open instead of waiting forever.
+  for (const item of await legacyActionableInformation()) {
+    const to = agentForChatId(item.chatId);
+    if (!to) continue;
+    const from = findAgent(item.from);
+    const stamp = new Date().toISOString();
+    await queueStoreOperation(() => queuedDeliveryStore.modify(items => items.some(row => row.id === item.id) ? items : [...items, {
+      id: item.id, createdAt: stamp, updatedAt: stamp, fromId: from?.id ?? 'unknown', fromName: item.from,
+      toId: to.id, text: item.text, hop: 1, priority: true, admissionAck: item.admissionAck,
+      chainId: randomUUID(), chainEdges: [], chainRoute: [],
+    }]));
+    await removeSavedInformation(item.id);
+  }
   const records = await queueStoreOperation(() => queuedDeliveryStore.list());
   new Set(records.map(queueKeyOf)).forEach((queueKey) => scheduleQueuedRecipient(queueKey));
   return records.length;
@@ -1933,6 +1954,7 @@ export async function resumeQueuedTeamDeliveries(): Promise<number> {
  *  (admitted — the admission ack should have fired — or dropped), null when
  *  the queue cannot be read (the caller re-checks rather than guess). */
 export async function teamDeliveryRecordPending(deliveryId: string): Promise<boolean | null> {
+  if (await informationalPending(deliveryId)) return true;
   const id = deliveryId.trim().slice(0, 120);
   if (!id) return false;
   try {
@@ -1951,6 +1973,8 @@ export function teamMessageWaitRequested(wait: boolean | undefined): boolean {
 }
 
 export async function deliverTeamMessage(input: {
+  /** Status/FYI only: save for the next real turn, never start or steer one. */
+  informational?: boolean;
   from: string;
   to: string;
   text: string;
@@ -2019,12 +2043,16 @@ export async function deliverTeamMessage(input: {
     // lane preference) so it can never sit behind teammate chatter or a
     // busy turn (card-c26bfa follow-up, Oct 20).
     ? { id: 'slack:inbound', name: input.from.trim() || 'Slack', role: 'slack', engine: '', home: '', createdAt: 0 }
-    : findAgent(input.from) ?? { id: 'unknown', name: input.from || 'Unknown', role: '', engine: '', home: '', createdAt: 0 };
+    : findAgent(input.from) ?? { id: `external:${createHash('sha256').update(input.from.trim().toLowerCase()).digest('hex').slice(0, 16)}`, name: input.from || 'Unknown', role: '', engine: '', home: '', createdAt: 0 };
   if (to.id === from.id && input.from.trim().toLowerCase() === to.name.trim().toLowerCase()) {
     return { delivered: false, reason: 'that is you — no need to message yourself' };
   }
 
-  const { chain } = inheritedTeamChain(from.id, to.id, input.fromLane === 'bg' ? 'bg' : 'main');
+  const fromLane = input.fromLane === 'bg' ? 'bg' : 'main';
+  const rosterSender = findAgent(from.id);
+  const request = input.source || !rosterSender ? randomUUID() : await outboundRequest(from, fromLane);
+  let { chain } = inheritedTeamChain(from.id, to.id, fromLane);
+  if (chain.id !== request) chain = { id: request, edges: [replyEdge(from.id, to.id)], route: [from.id, to.id] };
   const requestedWaitForReply = teamMessageWaitRequested(input.wait);
   // Historical route repetition is never a reason to discard a message. Only
   // a CURRENT synchronous wait path can deadlock; that exact case is degraded
@@ -2054,6 +2082,19 @@ export async function deliverTeamMessage(input: {
   const rl = rateOk(replyEdge(from.id, to.id));
   if (!rl.ok) return { delivered: false, reason: rl.reason };
 
+  const quietAcknowledgement = acknowledgementOnly(text, [to.name, DESK_OWNER_NAME]);
+  const claim = !input.source && rosterSender ? await claimOutbound(from.id, to.id, text, request, quietAcknowledgement) : undefined;
+  if (claim === null) return { delivered: false, to: to.name, reason: 'You already sent this exact message. Do not send it again; continue only when there is new information.' };
+  if (quietAcknowledgement && input.priority !== true && !input.source) {
+    return { delivered: true, to: to.name, queued: true, reason: 'Acknowledgement noted. No wake-up or message card was needed.' };
+  }
+  if (input.informational === true && input.priority !== true && !input.source) {
+    let deliveryId: string;
+    try { deliveryId = await saveInformational(to.home || `bot-${to.id}`, from.name, text, input.admissionAck); }
+    catch (error) { if (claim) await releaseOutbound(claim); throw error; }
+    return { delivered: true, to: to.name, deliveryId, queued: true, reason: 'Saved for their next real turn. This update did not wake or interrupt them.' };
+  }
+
   const fifoKey = queueKeyOf({ toId: to.id });
   const queuedBehindAnotherTurn = recipientDeliveryTails.has(fifoKey);
   let record: QueuedTeamDelivery;
@@ -2079,6 +2120,7 @@ export async function deliverTeamMessage(input: {
       chainRoute: chain.route,
     }));
   } catch (error) {
+    if (claim) await releaseOutbound(claim);
     return { delivered: false, to: to.name, hop, reason: `could not persist queued delivery: ${(error as Error).message}` };
   }
 
@@ -2230,6 +2272,7 @@ export async function deliverTeamMessage(input: {
       (await queuedDeliveryStore.list()).some((item) => item.id === record.id));
     if (!result.delivered && input.signal?.aborted) {
       if (remains) await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
+      if (claim) await releaseOutbound(claim);
       return result;
     }
     if (remains) scheduleQueuedRecipient(queueKeyOf(record));
@@ -2247,10 +2290,12 @@ export async function deliverTeamMessage(input: {
           : 'reply wait ended, but the handoff remains durably queued and will deliver automatically',
       };
     }
+    if (!result.delivered && !remains && claim) await releaseOutbound(claim);
     return result;
   } catch (error) {
     if (input.signal?.aborted) {
       await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
+      if (claim) await releaseOutbound(claim);
       return { delivered: false, to: to.name, hop, reason: 'sender stopped before delivery' };
     }
     scheduleQueuedRecipient(queueKeyOf(record));
@@ -2268,8 +2313,29 @@ export async function deliverTeamMessage(input: {
 
 // ---- reply extraction ---------------------------------------------------------
 
-import { appendEventLogDurable, appendEventLogSync, flushEventLog, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
+import { appendEventLogDurable, appendEventLogSync, flushEventLog, loadEventLogSync, loadEventLogTail, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { redactEventSecrets } from './secretRedaction.ts';
+
+/** Durable input identity, shared by every engine. Assistant output and tool
+ * results cannot turn a retry into a new request. */
+async function outboundRequest(agent: Pick<Agent, 'id'>, lane: AgentLane): Promise<string> {
+  const owner = findAgent(agent.id);
+  if (!owner) return 'automation';
+  const { cli, chatKey } = agentLogKey(owner, lane);
+  const key = logKeyFor(cli, ELROND_WORKSPACE_PATH, chatKey);
+  await flushEventLog(key);
+  const rootKey = chainKey(agent.id, lane);
+  await requestRootWrites.get(rootKey);
+  const root = (await requestRoots.list()).find(item => item.id === rootKey);
+  const identity = (text: string) => createHash('sha256').update(text).digest('hex');
+  const events = (await loadEventLogTail(key)).events.filter(event => !foreignLaneEvent(event, lane));
+  for (const event of events.reverse()) {
+    const inner = event.ev?.type === 'event' ? event.ev.event : undefined;
+    if (inner?.type === 'peer_delivery_accepted' && inner.deliveryId) return root && root.deliveryId === inner.deliveryId ? root.chainId : identity(`${key}|peer:${inner.deliveryId}`);
+    if (inner?.type === '_user_echo') return identity(`${key}|user:${inner.clientMsgId ?? `${event.at ?? 0}:${event.seq}`}`);
+  }
+  return identity(`${key}|no-input`);
+}
 
 /** Explicit owner publication uses the same durable thread and live fanout on
  * every engine. Posting is a tool result, never an inference from reply prose. */
@@ -2280,12 +2346,14 @@ export async function publishOwnerReply(from: string, text: string, lane: AgentL
   const logKey = logKeyFor(cli, ELROND_WORKSPACE_PATH, chatKey);
   const { publishExternalThreadEvent } = await import('./runner.ts');
   await flushEventLog(logKey);
+  const claim = await claimOutbound(agent.id, 'owner', text, await outboundRequest(agent, lane));
+  if (!claim) throw new Error('You already posted this exact reply. Do not repeat it; continue only with new information.');
   // Reserve, save and broadcast in one synchronous slice after older writes
   // finish. A later native frame must not overtake this published message.
   const event = { seq: reserveEventLogSeq(logKey), at: Date.now(), ...(lane === 'bg' ? { lane: 'bg' as const } : {}),
     ev: { type: 'event' as const, event: redactEventSecrets({ type: 'assistant', _replyNow: true, _replyNowForOwner: true,
       message: { id: `reply_now_${randomUUID()}`, role: 'assistant', content: [{ type: 'text', text }], stop_reason: 'tool_use' } }) } };
-  if (!appendEventLogSync(logKey, event)) throw new Error('The owner reply could not be saved. It was not published.');
+  if (!appendEventLogSync(logKey, event)) { await releaseOutbound(claim); throw new Error('The owner reply could not be saved. It was not published.'); }
   publishExternalThreadEvent(logKey, event);
   return event.seq;
 }
