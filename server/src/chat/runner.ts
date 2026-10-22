@@ -2860,8 +2860,8 @@ class ClaudeSession {
     if (!sidechain && ev?.type === 'system' && ev.subtype === 'compact_boundary') {
       confirmNativeCompact(this.nativeBaseUrl);
       markNativeCompacting(this.nativeBaseUrl, false);
-      resetSessionStateDelta(this.chatId);
-      this.statusAcks = [];
+      // Native compaction keeps this conversation and its current input.
+      // Keep delivered status receipts and the pending admission ack too.
       recordNativeCompact(this.chatId, 'claude-code', this.currentSessionId, ev.compact_metadata);
     }
     if (!sidechain && ev?.type === 'result') {
