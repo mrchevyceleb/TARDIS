@@ -24,6 +24,8 @@ import {
   normalizeOpenRouterModel,
   readStoredOpenRouterEffort,
   readStoredOpenRouterModel,
+  readStoredOpenRouter2Effort,
+  readStoredOpenRouter2Model,
   useOpenRouterCatalogVersion,
 } from '../openrouterModels';
 
@@ -50,6 +52,7 @@ export const WORKSPACE_COMPANIONS: {
   { id: 'zai', cli: 'zai', label: 'GLM' },
   { id: 'fireworks', cli: 'fireworks', label: 'Fireworks' },
   { id: 'openrouter', cli: 'openrouter', label: 'OpenRouter' },
+  { id: 'openrouter2', cli: 'openrouter2', label: 'Personal' },
   { id: 'agy', cli: 'agy', label: 'Gemini' },
 ];
 
@@ -69,6 +72,7 @@ export function companionAuthBlurb(cli: CompanionId, account: RepoAccount | null
     case 'zai':              return 'GLM via your Z.ai coding plan.';
     case 'fireworks':        return 'Any serverless Fireworks model via your Fireworks API key.';
     case 'openrouter':       return 'Any tool-capable OpenRouter model via your OpenRouter API key.';
+    case 'openrouter2':      return 'Any tool-capable OpenRouter model via PERSONAL_OPENROUTER_API_KEY.';
     case 'agy':               return 'Gemini via your Google AI subscription (Antigravity CLI login).';
     default:                 return '';
   }
@@ -81,14 +85,16 @@ function readLS(key: string, fallback: string): string {
 
 /** Legacy stamps remain readable; new selections use subscription engines only.
  *  `fireworks` is the API-key provider lane (any serverless Fireworks model);
- *  the retired `banana-fireworks` engine maps onto it. `openrouter` is the
- *  same kind of lane for any tool-capable OpenRouter model. */
-export function normalizeCompanion(engine: string | undefined): 'claude' | 'codex' | 'xai' | 'zai' | 'fireworks' | 'openrouter' | 'agy' {
+ *  the retired `banana-fireworks` engine maps onto it. `openrouter` and
+ *  `openrouter2` are the same kind of lane for tool-capable OpenRouter models,
+ *  backed by separate accounts. */
+export function normalizeCompanion(engine: string | undefined): 'claude' | 'codex' | 'xai' | 'zai' | 'fireworks' | 'openrouter' | 'openrouter2' | 'agy' {
   if (engine === 'claude' || engine === 'assistant' || engine === 'claude-kim') return 'claude';
   if (engine === 'codex' || engine === 'codex-kim') return 'codex';
   if (engine === 'zai') return 'zai';
   if (engine === 'fireworks' || engine === 'banana-fireworks') return 'fireworks';
   if (engine === 'openrouter') return 'openrouter';
+  if (engine === 'openrouter2') return 'openrouter2';
   if (engine === 'agy') return 'agy';
   return 'xai';
 }
@@ -296,6 +302,8 @@ export function useCompanionPicker(storageKey: string) {
   }, [fireworksCatalogVersion]);
   const [openRouterModel, setOpenRouterModelState] = useState(readStoredOpenRouterModel);
   const [openRouterEffort, setOpenRouterEffortState] = useState(readStoredOpenRouterEffort);
+  const [openRouter2Model, setOpenRouter2ModelState] = useState(readStoredOpenRouter2Model);
+  const [openRouter2Effort, setOpenRouter2EffortState] = useState(readStoredOpenRouter2Effort);
   // Same reconciliation as Fireworks when OpenRouter's live catalog lands.
   const openRouterCatalogVersion = useOpenRouterCatalogVersion();
   useEffect(() => {
@@ -315,6 +323,20 @@ export function useCompanionPicker(storageKey: string) {
   // Process-local, intentionally not persisted. A new device starts at zero,
   // while every actual picker click advances only that lane's revision—even if
   // the clicked value matches what that device already displayed.
+  useEffect(() => {
+    if (!isOpenRouterCatalogLoaded()) return;
+    const model = normalizeOpenRouterModel(openRouter2Model);
+    const effort = model === openRouter2Model
+      ? normalizeOpenRouterEffort(model, openRouter2Effort)
+      : normalizeOpenRouterEffort(model, undefined);
+    if (model === openRouter2Model && effort === openRouter2Effort) return;
+    setOpenRouter2ModelState(model);
+    setOpenRouter2EffortState(effort);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('rivendell:openrouter2-model', model);
+      localStorage.setItem('rivendell:openrouter2-effort', effort);
+    }
+  }, [openRouterCatalogVersion]);
   const [selectionRevisions, setSelectionRevisions] = useState<Record<string, number>>({});
   const markSelectionChanged = (lane: string) => {
     setSelectionRevisions((revisions) => ({
@@ -423,6 +445,23 @@ export function useCompanionPicker(storageKey: string) {
     setOpenRouterEffortState(effort);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:openrouter-effort', effort);
   };
+  const setOpenRouter2Model = (v: string) => {
+    markSelectionChanged('openrouter2');
+    const model = normalizeOpenRouterModel(v);
+    setOpenRouter2ModelState(model);
+    const effort = normalizeOpenRouterEffort(model, openRouter2Effort);
+    setOpenRouter2EffortState(effort);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('rivendell:openrouter2-model', model);
+      localStorage.setItem('rivendell:openrouter2-effort', effort);
+    }
+  };
+  const setOpenRouter2Effort = (v: string) => {
+    markSelectionChanged('openrouter2');
+    const effort = normalizeOpenRouterEffort(openRouter2Model, v);
+    setOpenRouter2EffortState(effort);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:openrouter2-effort', effort);
+  };
 
   /** Apply the server-owned brain without marking it as a device-local picker
    * action. Used by agent chats so cross-device updates converge without
@@ -496,6 +535,15 @@ export function useCompanionPicker(storageKey: string) {
         localStorage.setItem('rivendell:openrouter-model', nextModel);
         localStorage.setItem('rivendell:openrouter-effort', nextEffort);
       }
+    } else if (lane === 'openrouter2') {
+      const nextModel = normalizeOpenRouterModel(model ?? '');
+      const nextEffort = normalizeOpenRouterEffort(nextModel, effort ?? '');
+      setOpenRouter2ModelState(nextModel);
+      setOpenRouter2EffortState(nextEffort);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rivendell:openrouter2-model', nextModel);
+        localStorage.setItem('rivendell:openrouter2-effort', nextEffort);
+      }
     }
   }, [storageKey]);
 
@@ -506,15 +554,16 @@ export function useCompanionPicker(storageKey: string) {
   const isZai = cli === 'zai';
   const isFireworks = cli === 'fireworks';
   const isOpenRouter = cli === 'openrouter';
+  const isOpenRouter2 = cli === 'openrouter2';
   const isAgy = cli === 'agy';
-  const model = isZai ? zaiModel : isFireworks ? fireworksModel : isOpenRouter ? openRouterModel : isAgy ? agyModel : isXai ? xaiModel : isCodex ? codexModel : claudeModel;
-  const effort = isZai ? zaiEffort : isFireworks ? fireworksEffort : isOpenRouter ? openRouterEffort : isAgy ? agyEffort : isXai ? xaiEffort : isCodex ? codexEffort : claudeEffort;
+  const model = isZai ? zaiModel : isFireworks ? fireworksModel : isOpenRouter2 ? openRouter2Model : isOpenRouter ? openRouterModel : isAgy ? agyModel : isXai ? xaiModel : isCodex ? codexModel : claudeModel;
+  const effort = isZai ? zaiEffort : isFireworks ? fireworksEffort : isOpenRouter2 ? openRouter2Effort : isOpenRouter ? openRouterEffort : isAgy ? agyEffort : isXai ? xaiEffort : isCodex ? codexEffort : claudeEffort;
 
   return {
     companion, setCompanion, applyAuthoritativeBrain,
     cli, account, model, effort, selectionRevision: selectionRevisions[companion] ?? 0,
     brainPending: false,
-    isClaude, isCodex, isXai, isZai, isFireworks, isOpenRouter, isAgy,
+    isClaude, isCodex, isXai, isZai, isFireworks, isOpenRouter, isOpenRouter2, isAgy,
     claudeModel, setClaudeModel, claudeEffort, setClaudeEffort,
     codexModel, setCodexModel, codexEffort, setCodexEffort,
     xaiModel, setXaiModel, xaiEffort, setXaiEffort,
@@ -522,5 +571,6 @@ export function useCompanionPicker(storageKey: string) {
     agyModel, setAgyModel, agyEffort, setAgyEffort,
     fireworksModel, setFireworksModel, fireworksEffort, setFireworksEffort,
     openRouterModel, setOpenRouterModel, openRouterEffort, setOpenRouterEffort,
+    openRouter2Model, setOpenRouter2Model, openRouter2Effort, setOpenRouter2Effort,
   };
 }

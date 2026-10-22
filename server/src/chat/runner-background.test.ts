@@ -7,7 +7,7 @@ function harness() {
   const events: Array<{ type: string }> = [];
   const session = Object.assign(Object.create(ClaudeSession.prototype), {
     cli: 'xai', disposed: false, turnStartedAt: null,
-    activeToolIds: new Set(), streamTextBlocks: new Map(),
+    activeToolIds: new Set(), streamTextBlocks: new Map(), pendingPeerAccepts: new Set(), pendingPeerSteerAccepts: new Set(), statusAcks: [],
     emit: (event: { type: string }) => events.push(event),
     trackStreamText: () => {}, persistAppliedSelection: () => {},
     maybeCompact: async () => {},
@@ -71,4 +71,68 @@ test('content starts native turns on older CLIs without resetting an admitted hu
     assert.equal(session.automationTurn, true);
     assert.equal(events.filter(e => e.type === 'turnStart').length, 1);
   }
+});
+
+// A provider's own recovery prompt must never look like a completed tool.
+// Teammate delivery also cannot take a human's turn before its visible reply.
+function boundaryHarness(human = false) {
+  const { session, events } = harness();
+  Object.assign(session, {
+    child: { exitCode: null }, turnStartedAt: Date.now(),
+    boundaryInterruptWanted: true, boundaryWaiters: 1,
+    boundaryHumanWaiters: human ? 1 : 0, lastBoundaryInterruptAt: 0,
+    automationTurn: false, pausedForMessage: false,
+    nudgeForReply: () => {},
+  });
+  let interrupts = 0;
+  session.interrupt = async () => { interrupts++; return true; };
+  return { session, events, interrupted: () => interrupts };
+}
+const nextBoundary = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test('native recovery nudges and unrelated tool results cannot trigger queued interruption', async () => {
+  const { session, interrupted } = boundaryHarness();
+  session.handleEvent({ type: 'user', message: { content: [{ type: 'text', text: 'No visible output, continue the same task.' }] } });
+  session.handleEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'unknown' }] } });
+  await nextBoundary();
+  assert.equal(interrupted(), 0);
+  assert.equal(session.boundaryInterruptWanted, true);
+});
+
+test('queued teammate waits until the admitted human has a visible answer', async () => {
+  const { session, interrupted } = boundaryHarness();
+  session.watchReply().arm();
+  session.activeToolIds.add('before-answer');
+  session.handleEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'before-answer' }] } });
+  await nextBoundary();
+  assert.equal(interrupted(), 0);
+  session.handleEvent({ type: 'assistant', message: { content: [{ type: 'text', text: 'Your answer stays here.' }] } });
+  session.activeToolIds.add('after-answer');
+  session.handleEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'after-answer' }] } });
+  await nextBoundary();
+  assert.equal(interrupted(), 1);
+});
+
+test('a newer human still steers safely at the actual completed-tool boundary', async () => {
+  const { session, interrupted } = boundaryHarness(true);
+  session.watchReply().arm();
+  session.activeToolIds.add('first'); session.activeToolIds.add('second');
+  session.handleEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'first' }] } });
+  await nextBoundary();
+  assert.equal(interrupted(), 0);
+  session.handleEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'second' }] } });
+  await nextBoundary();
+  assert.equal(interrupted(), 1);
+});
+
+test('a queued teammate cannot suppress the still-owed human reply nudge', async () => {
+  const { session, interrupted } = boundaryHarness();
+  delete session.nudgeForReply;
+  const watch = session.watchReply(); watch.arm();
+  for (let n = 0; n < 5; n++) watch.noteTool('tool-'+n);
+  let nudges = 0; session.deliverReplyNudge = async () => { nudges++; };
+  session.nudgeForReply();
+  await nextBoundary();
+  assert.equal(interrupted(), 1);
+  assert.equal(nudges, 1);
 });

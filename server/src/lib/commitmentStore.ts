@@ -1,3 +1,4 @@
+import { checkpointDueError } from './checkpointDue.ts';
 // Agent-scoped open commitments — the small always-there list that survives
 // compaction by construction. Agents add and clear their own entries (owed
 // replies, promises with times, parked items); nothing here is ever rewritten
@@ -226,7 +227,7 @@ export function addCommitment(
   agentId: string,
   text: string,
   due?: string,
-  opts?: { dueAt?: number; sourceId?: string },
+  opts?: { dueAt?: number; sourceId?: string; enforceCheckpoint?: boolean },
 ): { commitment?: Commitment; error?: string } {
   const owner = agentId.trim();
   const body = (text ?? '').trim();
@@ -246,6 +247,7 @@ export function addCommitment(
     return { error: `Your commitments list is full (${MAX_PER_AGENT}). Clear one that is done before adding another.` };
   }
   const dueAt = asFiniteNumber(opts?.dueAt, 0);
+  if (dueAt > 0 && opts?.enforceCheckpoint !== false) { const error = checkpointDueError(dueAt); if (error) return { error }; }
   const sourceId = typeof opts?.sourceId === 'string' ? opts.sourceId.trim().slice(0, 120) : '';
   const commitment: Commitment = {
     id: `cm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,

@@ -207,7 +207,7 @@ export function useJobsSummary(enabled = true): Map<string, JobsSummaryEntry> {
     refetchInterval: SUMMARY_POLL_MS,
     ...POLL,
   });
-  const jobs = query.data?.jobs;
+  const jobs = query.isError ? undefined : query.data?.jobs;
   return useMemo(() => {
     if (!jobs?.length) return EMPTY_SUMMARY;
     const summary = new Map<string, JobsSummaryEntry>();

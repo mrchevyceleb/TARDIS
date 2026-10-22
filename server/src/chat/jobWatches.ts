@@ -18,10 +18,13 @@
 
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { backgroundAccountEnv } from '../lib/accountResolver.ts';
+import { ELROND_WORKSPACE_PATH } from '../config.ts';
 import { statSync, readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { JsonStore } from '../lib/jsonStore.ts';
 import { inQuietHours, isQuietExemptWork, lastQuietEndMs, msUntilQuietEnd } from '../lib/quietHours.ts';
+import { wellFormedText } from '../lib/wellFormed.ts';
 import { listAgents } from './agents.ts';
 import { sendToAgentHome } from './teamBus.ts';
 
@@ -172,10 +175,10 @@ export function canLaunchInScope(): Promise<boolean> {
  *  keeps it outside rivendell.service's cgroup: a service restart used to kill
  *  every watcher (KillMode=control-group) and wake the agent with a SIGTERM
  *  for a job that was still running. */
-function launchWatchCommand(command: string, scoped: boolean): ChildProcess {
-  if (!scoped) return spawn(command, { shell: true, detached: true, stdio: 'ignore' });
+function launchWatchCommand(command: string, scoped: boolean, env: NodeJS.ProcessEnv): ChildProcess {
+  if (!scoped) return spawn(command, { shell: true, detached: true, stdio: 'ignore', env });
   const startedAt = Date.now();
-  const child = spawn('systemd-run', ['--user', '--scope', '--quiet', '--collect', '--expand-environment=no', '--unit', `tardis-watch-${randomUUID().slice(0, 8)}`, '/bin/sh', '-c', command], { detached: true, stdio: 'ignore' });
+  const child = spawn('systemd-run', ['--user', '--scope', '--quiet', '--collect', '--expand-environment=no', '--unit', `tardis-watch-${randomUUID().slice(0, 8)}`, '/bin/sh', '-c', command], { detached: true, stdio: 'ignore', env });
   // A scope that fails to register exits 1 within moments. Probe again on the
   // next launch instead of trusting the earlier answer forever.
   child.once('exit', (code) => { if (code === 1 && Date.now() - startedAt < 2000) scopeProbe = null; });
@@ -195,7 +198,8 @@ export type CreateJobWatchInput = {
 /** Create a watch. Exactly one of pid | file | command. Throws Error with a
  *  plain reason on bad input (the route maps it to 4xx). */
 export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWatch> {
-  if (!listAgents().some((a) => a.id === input.agentId)) throw new Error('unknown agentId');
+  const agent = listAgents().find((a) => a.id === input.agentId);
+  if (!agent) throw new Error('unknown agentId');
   if (typeof input.note !== 'string') throw new Error('note is required (a short label for the wake message)');
   const note = input.note.trim().replace(/\s+/g, ' ').slice(0, 120);
   if (!note) throw new Error('note is required (a short label for the wake message)');
@@ -240,7 +244,7 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
   if (typeof input.command !== 'string' || !input.command.trim()) throw new Error('command must be a shell command');
   const command = input.command.trim();
   const scoped = await canLaunchInScope();
-  const child = launchWatchCommand(command, scoped);
+  const child = launchWatchCommand(command, scoped, backgroundAccountEnv(ELROND_WORKSPACE_PATH, agent.name));
   // Listen IMMEDIATELY, before anything else: a spawn failure (EAGAIN/EMFILE,
   // no pid) emits an async 'error' that would crash the process with no
   // listener, and a fast command can exit while the record is still being
@@ -432,17 +436,20 @@ async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
     const detail = watch.kind === 'command' && watch.command
       ? `command: ${watch.command.slice(0, 120)}`
       : watch.kind === 'file' && watch.file ? `file: ${watch.file}` : `pid: ${watch.pid}`;
-    const text = [
+    const text = wellFormedText([
       `[job: ${watch.note}] Your job "${watch.note}" ${outcome}`,
       `(${detail})`,
       'Background job wake from watch_job. If the result matters, check it now — this wake is the only notification.',
-    ].join('\n');
+    ].join('\n'));
     const createdMs = typeof watch.createdAt === 'string' ? Date.parse(watch.createdAt) : NaN;
     const result = await sendToAgentHome(agent, text, {
       peerFrom: `⏱ ${watch.note}`,
       peerFromRole: 'automation',
       peerText: visibleWakeText(text),
       lane: watch.lane === 'main' ? 'main' : 'bg',
+      // A wake never steers (card-c26bfa): the watch result starts its own
+      // turn at the next real turn end instead of landing inside a live one.
+      neverSteer: true,
       // Quiet hours (Opus review 3, Oct 16): a watch armed inside the current
       // quiet window after an exempt wake belongs to legitimate overnight
       // emergency work; pre-22:00 turns and prior-night watches still hold.

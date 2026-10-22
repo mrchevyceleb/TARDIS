@@ -16,7 +16,7 @@ import { STATE_DIR } from '../config.ts';
 import { listAgents, type Agent } from './agents.ts';
 import { sendToAgentHome } from './teamBus.ts';
 import { jevConfigured } from '../lib/jev.ts';
-import { inQuietHours, isMaxLane, msUntilQuietEnd, MAX_EMERGENCY_ROUTINE_ID } from '../lib/quietHours.ts';
+import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, MAX_EMERGENCY_ROUTINE_ID } from '../lib/quietHours.ts';
 import { runRoutineGate, type RoutineGateConfig } from './routineGate.ts';
 
 export type Routine = {
@@ -136,7 +136,7 @@ async function runRoutineFor(routine: Routine, agent: Agent, opts: { manual?: bo
   // now, like a person message).
   const nowEntry = Date.now();
   if (!opts.manual && id !== MAX_EMERGENCY_ROUTINE_ID
-      && inQuietHours(nowEntry) && !isMaxLane(agent.id)) {
+      && inQuietHours(nowEntry) && !isQuietExemptLane(agent.id)) {
     markHeld(id, nowEntry);
     skipUntil.set(id, nowEntry + msUntilQuietEnd(nowEntry));
     return { ran: false, reason: 'quiet hours (22:00-05:00 ET): held until 05:00' };
@@ -332,7 +332,7 @@ export function routineIsDue(routine: Routine, now: number): boolean {
     return typeof routine.heldSlotAt === 'number'
       && last < routine.heldSlotAt
       && !inQuietHours(now)
-      && !isMaxLane(routine.agentId);
+      && !isQuietExemptLane(routine.agentId);
   }
   // cron: due if the most recent matching slot has not been delivered yet.
   // A watched-thread skip must not burn that slot for the rest of the day.

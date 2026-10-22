@@ -1,15 +1,20 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import { SESSIONS_FILE, STATE_DIR } from './config.ts';
+import { bareChatId, isAgentThread } from './threadKey.ts';
+import { NATIVE_SESSION_GENERATION } from './sessionPolicy.ts';
 
 // One mapping per native lane → session id plus last proven model/effort.
 // Persists across server restarts so chats resume or prewarm with the same brain.
 
-type Cli = 'claude' | 'codex' | 'assistant' | 'banana' | 'codex-personal' | 'banana-local' | 'banana-fireworks' | 'zai' | 'xai' | 'fireworks' | 'openrouter' | 'agy';
+type Cli = 'claude' | 'codex' | 'assistant' | 'banana' | 'codex-personal' | 'banana-local' | 'banana-fireworks' | 'zai' | 'xai' | 'fireworks' | 'openrouter' | 'openrouter2' | 'agy';
 type Key = string; // `${cli}|${repoPath}` or `${cli}|${repoPath}|${chatId}`
 
 type StoredSession = {
+  cli?: Cli;
   sessionId?: string;
+  generation?: number;
   updatedAt: number;
   /** Last model/effort actually applied to this native process. Kept even when
    * rotation clears sessionId so boot prewarm uses the same brain settings. */
@@ -25,8 +30,14 @@ let loadPromise: Promise<Stored> | null = null;
 let writeQueue: Promise<void> = Promise.resolve();
 
 const key = (cli: Cli, repoPath: string, chatId = 'main'): Key => {
-  const normalized = chatId || 'main';
+  const normalized = isAgentThread(chatId) ? bareChatId(chatId) : chatId || 'main';
   return normalized === 'main' ? `${cli}|${repoPath}` : `${cli}|${repoPath}|${normalized}`;
+};
+const nativeKey = (cli: Cli, repoPath: string, chatId: string): Key => {
+  if (!isAgentThread(chatId)) return key(cli, repoPath, chatId);
+  const engine = ['claude', 'assistant', 'zai', 'xai', 'fireworks', 'openrouter', 'openrouter2'].includes(cli) ? 'claude-code'
+    : cli === 'codex-personal' ? 'codex' : cli;
+  return `${engine}|${bareChatId(chatId)}`;
 };
 
 async function load(): Promise<Stored> {
@@ -36,7 +47,9 @@ async function load(): Promise<Stored> {
     try {
       const raw = await readFile(SESSIONS_FILE, 'utf8');
       cache = JSON.parse(raw) as Stored;
-    } catch {
+      if (!cache || typeof cache !== 'object' || Array.isArray(cache)) throw new Error('Invalid native session store');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       cache = {};
     }
     return cache;
@@ -51,20 +64,24 @@ async function load(): Promise<Stored> {
 async function flush() {
   if (!cache) return;
   await mkdir(dirname(SESSIONS_FILE), { recursive: true });
-  await writeFile(SESSIONS_FILE, JSON.stringify(cache, null, 2));
+  const temporary = `${SESSIONS_FILE}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temporary, JSON.stringify(cache, null, 2), { mode: 0o600, flush: true });
+  await rename(temporary, SESSIONS_FILE);
 }
 
 export async function getSessionId(cli: Cli, repoPath: string, chatId = 'main'): Promise<string | undefined> {
   const all = await load();
-  return all[key(cli, repoPath, chatId)]?.sessionId;
+  const record = all[nativeKey(cli, repoPath, chatId)] ?? all[key(cli, repoPath, chatId)];
+  if (isAgentThread(chatId) && record?.generation !== NATIVE_SESSION_GENERATION) return undefined;
+  return record?.sessionId;
 }
 
 export async function setSessionId(cli: Cli, repoPath: string, sessionId: string, chatId = 'main'): Promise<void> {
   const all = await load();
-  const storageKey = key(cli, repoPath, chatId);
+  const storageKey = nativeKey(cli, repoPath, chatId);
   const existing = all[storageKey];
   if (sessionId) {
-    all[storageKey] = { ...existing, sessionId, updatedAt: Date.now() };
+    all[storageKey] = { ...existing, cli, sessionId, generation: NATIVE_SESSION_GENERATION, updatedAt: Date.now() };
   } else if (existing?.model || existing?.effort) {
     const { sessionId: _discard, ...selection } = existing;
     all[storageKey] = { ...selection, updatedAt: Date.now() };
@@ -82,7 +99,7 @@ export async function getSessionSelection(
   chatId = 'main',
 ): Promise<SessionSelection | null> {
   const all = await load();
-  const storageKey = key(cli, repoPath, chatId);
+  const storageKey = nativeKey(cli, repoPath, chatId);
   const stored = all[storageKey] ?? Object.entries(all)
     .filter(([candidate]) => candidate.startsWith(`${storageKey}__acct__`))
     .sort(([, a], [, b]) => b.updatedAt - a.updatedAt)[0]?.[1];
@@ -102,11 +119,11 @@ export async function setSessionSelection(
   chatId = 'main',
 ): Promise<void> {
   const all = await load();
-  const storageKey = key(cli, repoPath, chatId);
+  const storageKey = nativeKey(cli, repoPath, chatId);
   const existing = all[storageKey];
   const model = typeof selection.model === 'string' && selection.model ? selection.model : undefined;
   const effort = typeof selection.effort === 'string' && selection.effort ? selection.effort : undefined;
-  all[storageKey] = { ...existing, model, effort, updatedAt: Date.now() };
+  all[storageKey] = { ...existing, cli, model, effort, updatedAt: Date.now() };
   writeQueue = writeQueue.then(flush, flush);
   await writeQueue;
 }
@@ -142,4 +159,25 @@ export async function clearThreadSessionIds(repoPath: string, chatId = 'main', c
 
 export async function ensureStateDir(): Promise<void> {
   await mkdir(STATE_DIR, { recursive: true });
+}
+
+/** Last accepted engine/provider, independent of the working directory. */
+export async function nativeSessionProvenance(cli: Cli, repoPath: string, chatId: string): Promise<StoredSession | undefined> {
+  const all = await load();
+  const record = all[nativeKey(cli, repoPath, chatId)];
+  if (!record || record.cli) return record;
+  // Older records may have no explicit CLI. Recover only from a key that
+  // proves the exact same native ID, never from a default subscription.
+  const variants = new Set<Cli>();
+  const known = new Set<Cli>(['claude', 'assistant', 'codex', 'codex-personal', 'banana', 'banana-local', 'banana-fireworks', 'zai', 'xai', 'fireworks', 'openrouter', 'openrouter2', 'agy']);
+  for (const [storageKey, candidate] of Object.entries(all)) {
+    if (!record.sessionId || candidate.sessionId !== record.sessionId) continue;
+    // A CLI name alone cannot reproduce a directory-specific subscription.
+    // Leave this legacy account selection held for repair instead of billing
+    // whichever account happens to be the current directory default.
+    if (storageKey.includes('__acct__')) return record;
+    const variant = candidate.cli ?? storageKey.split('|')[0] as Cli;
+    if (known.has(variant)) variants.add(variant);
+  }
+  return variants.size === 1 ? { ...record, cli: [...variants][0] } : record;
 }

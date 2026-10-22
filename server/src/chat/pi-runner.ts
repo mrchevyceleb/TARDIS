@@ -48,8 +48,9 @@ import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiModeFor, zaiTurnOutcome, type ZaiMode } from './zaiQuota.ts';
-import { emptyTurnOrigin, noteTurnPeer, notifyHandoffSenders, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
+import { emptyTurnOrigin, noteTurnPeer, notifyHandoffSenders, PROVIDER_CONTINUE_EVENT, providerCutEventFields, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { longCallGateEnv } from './longCallGate.ts';
+import { wellFormedText } from '../lib/wellFormed.ts';
 import { laneMcpServers, laneTagFor, shareBackgroundLaneEvent, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, replyNudgeEvent, ReplyWatch } from './replyNudge.ts';
 
@@ -102,12 +103,6 @@ export function piProviderFor(cli: CliKind, model: string): PiProvider {
     return { provider: 'fireworks', model: `accounts/fireworks/models/${bare.replace(/\./g, 'p')}`, env: { FIREWORKS_API_KEY: key }, mode: 'fireworks' };
   }
   return { provider: 'zai', model: bare, env: { ZAI_API_KEY: process.env.Z_AI_API_KEY ?? '' }, mode: 'plan' };
-}
-
-export function usePiHarness(cli: CliKind): boolean {
-  const setting = (cli === 'zai' ? process.env.RIVENDELL_GLM_HARNESS : cli === 'xai' ? process.env.RIVENDELL_XAI_HARNESS : '')?.trim().toLowerCase();
-  if (cli !== 'zai' && cli !== 'xai') return false;
-  return setting !== 'claude';
 }
 
 type Listener = (e: SeqEvent) => void;
@@ -755,17 +750,17 @@ export class PiSession {
 
     if (continuing) {
       this.emit({ type: 'turnStart' });
-      this.emit({ type: 'event', event: { type: PROVIDER_CONTINUE_EVENT, id: continuing.id, from: continuing.cut.from, to: continuing.cut.to, ...(continuing.origin.automation ? { automation: true } : {}), ts: Date.now() } });
+      this.emit({ type: 'event', event: { type: PROVIDER_CONTINUE_EVENT, id: continuing.id, ...providerCutEventFields(continuing.cut), ...(continuing.origin.automation ? { automation: true } : {}), ts: Date.now() } });
     } else if (opts.peerFrom) {
       noteTurnPeer(this.turnOrigin, opts.peerFrom, opts.peerFromRole, opts.peerText ?? text);
       if (isPersonMessage(opts)) this.replyWatch.arm();
       if (startsNewTurn && automationRequest) this.turnOrigin.automation = true;
       if (startsNewTurn) this.emit({ type: 'turnStart' });
-      this.emit({ type: 'event', event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}), ts: Date.now() } });
+      this.emit({ type: 'event', event: { type: 'peer_message', startsTurn: startsNewTurn, from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}), ts: Date.now() } });
     } else {
       await flushEventLog(this.logKey);
       if (opts.signal?.aborted) { abandon(); return; }
-      this.emit({ type: 'event', event: { type: '_user_echo', text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() } });
+      this.emit({ type: 'event', event: { type: '_user_echo', startsTurn: startsNewTurn, text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() } });
       noteUserTurn(this.logKey);
       noteAgentLane(this.chatId, this.cli);
       this.turnOrigin.human = true;
@@ -798,7 +793,10 @@ export class PiSession {
     // messages of the same warm process get the brief form (fresh token + device + policy).
     const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
     const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
-    const message = `${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuation}`;
+    // Well-formed at the transport boundary: pi's JSONRPC parser (like
+    // codex's) rejects a lone surrogate, which would fail this prompt and
+    // every retry of it.
+    const message = wellFormedText(`${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuation}`);
     const piImages = outImages?.map((img) => ({ type: 'image', data: img.base64, mimeType: img.mediaType }));
 
     const command = startsNewTurn

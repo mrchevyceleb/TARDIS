@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -8,6 +8,7 @@ import { join } from 'node:path';
  *  load, so the test redirects it to a throwaway dir BEFORE importing. */
 const stateDir = mkdtempSync(join(tmpdir(), 'flagdigest-test-'));
 process.env.RIVENDELL_STATE_DIR = stateDir;
+writeFileSync(join(stateDir, 'agent-session-policy.json'), JSON.stringify({ agents: { naomi: { lead: true } } }));
 const { queueFlagDigest, flushFlagDigests } = await import('./flagDigest.ts');
 
 /** A fixed instant inside the quiet window, Eastern wall-clock via the

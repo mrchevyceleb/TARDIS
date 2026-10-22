@@ -1,7 +1,9 @@
+import { prepareSessionStateDelta, resetSessionStateDelta } from './sessionContext.ts';
+import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 import { assertClaudeSubscription } from './subscription-auth.ts';
 import { assertSubscriptionLane, subscriptionEnvironment } from './subscription-policy.ts';
 import { execFileSync, type ChildProcessByStdio } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -11,14 +13,18 @@ import { localMcpServers, writeClaudeMcpConfigFile } from './local-mcp.ts';
 import { officeMcpServers } from './office-mcp.ts';
 import { computerGuidance, computerOwnerKey } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
-import { getSessionId, setSessionId, setSessionSelection } from './sessions.ts';
-import { CodexSession, getOrCreateCodexSession, activeCodexSessions, publishCodexExternalEvent } from './codex-runner.ts';
+import { getSessionId, setSessionId, setSessionSelection, nativeSessionProvenance } from './sessions.ts';
+import { CodexSession, getOrCreateCodexSession, peekCodexSession, activeCodexSessions, publishCodexExternalEvent } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions, publishBananaExternalEvent } from './banana-runner.ts';
 import { appendEventLog, appendEventLogDurable, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
 import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
 import { CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKEN_BUDGET, NATIVE_COMPACT_MARGIN, contextRotationDue, contextTokens, learnContextLimit, providerContextBudget, recordContextUsage, recordContextRotation } from './contextBudget.ts';
-import { shouldSkipEngineResume } from './threadWindow.ts';
+import { bareChatId } from './threadKey.ts';
+import { sessionDirectory, nativeClaudeSettings } from './sessionPolicy.ts';
+import { prepareClaudeNativeStorage } from './nativeSessionStorage.ts';
+import { recordNativeSession, recordNativeCompact, recordNativeFailure, recordNativeNotice } from './sessionMetrics.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
+import { wellFormedText } from '../lib/wellFormed.ts';
 import { backgroundChatId, isAgentThread, isBackgroundChatId, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
@@ -40,16 +46,17 @@ import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
 import { applyProviderLimits } from './providerEnv.ts';
+import { ensureNativeCompactProxy, nativeCompactBaseUrl, markNativeCompacting, markNativeHandoverRecovery, releaseNativeCompactRoute, confirmNativeCompact } from './nativeCompactProxy.ts';
 import { compactFailureError, isContextLengthRejection, isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { fireworksCapability, fireworksContextWindow, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
-import { openRouterCapability, openRouterContextWindow, openRouterMaxOutput, resolveOpenRouterEffort, resolveOpenRouterModel } from './openrouter-models.ts';
-import { plainEnglishWritingBlockFor } from './plain-english-guidance.ts';
+import { openRouterCapability, openRouterContextWindow, openRouterMaxOutput, resolveOpenRouter2Effort, resolveOpenRouter2Model, resolveOpenRouterEffort, resolveOpenRouterModel, requireOpenRouterModel } from './openrouter-models.ts';
+import { plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
 import { AgySession, AGY_READY_TIMEOUT_MS } from './agy-runner.ts';
 import { AGY_LANE_EFFORT, AGY_LANE_MODEL, resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
-import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
-import { PiSession, usePiHarness } from './pi-runner.ts';
+import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, openRouterContinueBudget, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutEventFields, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
+import type { PiSession } from './pi-runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, REPLY_NUDGE_NOTE_TOOL, replyNowText, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
@@ -114,6 +121,7 @@ export type CliKind =
   | 'xai'
   | 'fireworks'
   | 'openrouter'
+  | 'openrouter2'
   | 'agy';
 
 export type StreamEvent = unknown;
@@ -309,8 +317,8 @@ export function isPersistentProcessCli(cli: CliKind | null | undefined): boolean
   return isClaudeFamilyCli(cli) || cli === 'agy';
 }
 
-export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' | 'fireworks' | 'openrouter' {
-  return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai' || cli === 'fireworks' || cli === 'openrouter';
+export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' | 'fireworks' | 'openrouter' | 'openrouter2' {
+  return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai' || cli === 'fireworks' || cli === 'openrouter' || cli === 'openrouter2';
 }
 
 // Fireworks provider lane — any serverless chat model from the Fireworks
@@ -352,14 +360,21 @@ function fireworksEnv(model: string): NodeJS.ProcessEnv {
 // A host wrapper that unsets the metered keys before exec can stash this one
 // as RIVENDELL_OPENROUTER_API_KEY first (the Fireworks fallback pattern).
 const OPENROUTER_CONFIG_DIR = join(homedir(), '.claude-openrouter');
-function openRouterEnv(model: string): NodeJS.ProcessEnv {
+const OPENROUTER2_CONFIG_DIR = join(homedir(), '.claude-openrouter-personal');
+function openRouterEnvFor(cli: 'openrouter' | 'openrouter2', model: string): NodeJS.ProcessEnv {
+  const personal = cli === 'openrouter2';
   const env = subscriptionEnvironment(process.env);
-  env.CLAUDE_CONFIG_DIR = OPENROUTER_CONFIG_DIR;
+  env.CLAUDE_CONFIG_DIR = personal ? OPENROUTER2_CONFIG_DIR : OPENROUTER_CONFIG_DIR;
   env.ANTHROPIC_BASE_URL =
     process.env.RIVENDELL_OPENROUTER_ANTHROPIC_BASE_URL?.trim() || 'https://openrouter.ai/api';
-  env.ANTHROPIC_AUTH_TOKEN =
-    process.env.RIVENDELL_OPENROUTER_API_KEY?.trim() || process.env.OPENROUTER_API_KEY?.trim() || '';
+  env.ANTHROPIC_AUTH_TOKEN = personal
+    ? process.env.RIVENDELL_PERSONAL_OPENROUTER_API_KEY?.trim()
+      || process.env.PERSONAL_OPENROUTER_API_KEY?.trim() || ''
+    : process.env.RIVENDELL_OPENROUTER_API_KEY?.trim() || process.env.OPENROUTER_API_KEY?.trim() || '';
   env.ANTHROPIC_API_KEY = '';
+  // Alibaba needs a text cache marker after tools; Gemini folds system notices
+  // into its fixed prefix and loses the cache. Override cached CLI experiments.
+  env.CLAUDE_CODE_TOTAL_TOKENS_REMINDER = /gemini/i.test(model) ? 'off' : 'padded-countdown';
   // Every model role (subagents, background haiku calls) stays on the picked
   // OpenRouter model; an inherited Anthropic default id would route elsewhere.
   for (const role of ['ANTHROPIC_DEFAULT_FABLE_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL']) {
@@ -387,8 +402,16 @@ function openRouterEnv(model: string): NodeJS.ProcessEnv {
   env.BASH_MAX_TIMEOUT_MS = '3600000';
   env.MCP_TOOL_TIMEOUT = '3600000';
   env.API_TIMEOUT_MS = '3600000';
-  env.SAMWISE_ACCOUNT = 'openrouter';
+  env.SAMWISE_ACCOUNT = personal ? 'openrouter-personal' : 'openrouter';
   return env;
+}
+
+function openRouterEnv(model: string): NodeJS.ProcessEnv {
+  return openRouterEnvFor('openrouter', model);
+}
+
+function openRouter2Env(model: string): NodeJS.ProcessEnv {
+  return openRouterEnvFor('openrouter2', model);
 }
 
 const resolveClaudeModel = (cli: CliKind, m?: string): string => {
@@ -397,6 +420,7 @@ const resolveClaudeModel = (cli: CliKind, m?: string): string => {
   if (cli === 'xai') return resolveXaiModel(m, XAI_MODEL);
   if (cli === 'fireworks') return resolveFireworksModel(m);
   if (cli === 'openrouter') return resolveOpenRouterModel(m);
+  if (cli === 'openrouter2') return resolveOpenRouter2Model(m);
   // Anthropic Claude Code only. A drifted Counsel picker can send grok-* / glm-*
   // here; those ids are valid xAI/Z.ai spawn args and must not become `--model`
   // on an Anthropic Claude process (which then prints unrecognized_model to stderr).
@@ -416,6 +440,7 @@ const resolveClaudeEffort = (cli: CliKind, e?: string, model?: string): string =
   : cli === 'xai' ? resolveXaiEffort(e, XAI_EFFORT)
   : cli === 'fireworks' ? resolveFireworksEffort(e, model)
   : cli === 'openrouter' ? resolveOpenRouterEffort(e, model)
+  : cli === 'openrouter2' ? resolveOpenRouter2Effort(e, model)
   : e && VALID_CLAUDE_EFFORTS.has(e) ? e : CLAUDE_EFFORT;
 
 /** Prime the SuperGrok OAuth token (refreshing now if it's near expiry) and
@@ -543,12 +568,30 @@ export function laneTagFor(chatId: string): { lane?: 'bg' } {
   return isBackgroundChatId(chatId) ? { lane: 'bg' } : {};
 }
 
-type ZaiCutDecision = { outcome: ZaiTurnOutcome; cut: ProviderCut; origin: TurnOrigin };
+/** What a cut turn does next, with the turn's origin snapshotted. Shared by
+ *  the GLM provider-switch decision and the OpenRouter-family cut decision. */
+type LaneCutDecision = { outcome: ZaiTurnOutcome; cut: ProviderCut; origin: TurnOrigin };
 
 /** A teammate's handoff may pause a working turn at most this often, so a burst
  *  of handoffs cannot starve the agent of any uninterrupted work. A person's
  *  message is never held off. */
 const PEER_BOUNDARY_INTERRUPT_GAP_MS = 60_000;
+
+/** Lanes whose tool calls arrive in one piece at the END of a response, so a
+ *  tool boundary is never a safe interrupt point for a queued peer message:
+ *  the CLI has already begun the next response (30-90s to its first frame),
+ *  and the boundary interrupt discards that in-flight generation, minutes of
+ *  work per message, with nothing ever landing (measured Oct 21 on Felix's
+ *  lane: every turn cut at a boundary re-attempted the same doomed write). A
+ *  person's message still interrupts on these lanes: person-first, and a
+ *  person waits for no tool boundary anywhere. */
+const ONE_PIECE_TOOL_CALL_CLIS: ReadonlySet<CliKind> = new Set(['openrouter', 'openrouter2']);
+
+/** How long a queued peer message waits out the one-piece stand-down before
+ *  the boundary interrupt fires anyway. Healthy responses on these lanes land
+ *  within 2-3 minutes, so a turn that still holds a message past this is
+ *  stuck, and the message is worth more than the in-flight generation. */
+const ONE_PIECE_PEER_STANDDOWN_CEILING_MS = 10 * 60_000;
 
 /** How long a scheduled, wake- or job-result-started (automation) turn runs
  *  before a teammate's handoff may end it at a tool boundary. Tim's
@@ -556,6 +599,12 @@ const PEER_BOUNDARY_INTERRUPT_GAP_MS = 60_000;
  *  time because automation turns were never interruptible for peers; the
  *  grace only protects a just-started turn's chance to report. */
 const PEER_AUTOMATION_TURN_GRACE_MS = 60_000;
+/** A person-class delivery (Desk, voice, Slack) waiting behind a busy turn is
+ *  bounded by this: after this long with the interrupt request armed, the turn
+ *  ends at the nearest safe point even with a background subagent running, so
+ *  a helper can never hold a person's message past the one-minute bar. A tool
+ *  in flight is still never cancelled (card-c26bfa follow-up, Oct 20). */
+const HUMAN_HAZARD_OVERRIDE_MS = 35_000;
 
 /** Prepended to the turn that follows a boundary interrupt. */
 const PAUSED_FOR_MESSAGE_NOTE = '<rivendell-steer>Your previous turn was paused right after a tool call finished, so the message below reaches you as a normal message. Answer it first. Then, unless it changes the plan, carry on with what you were doing; the transcript above shows where you stopped.</rivendell-steer>';
@@ -563,8 +612,18 @@ const PAUSED_FOR_MESSAGE_NOTE = '<rivendell-steer>Your previous turn was paused 
  *  message in a thinking summary and goes straight to tools unless the reply has a tool to ride. */
 const PAUSED_FOR_MESSAGE_NOTE_TOOL = PAUSED_FOR_MESSAGE_NOTE.replace(
   'Answer it first.',
-  'Answer it first: if you will use tools before you finish, call reply_now with your answer as your first action.',
+  'Answer it first: if you will use tools before you finish, call reply_now with audience: "owner" and your answer as your first action.',
 );
+const PAUSED_FOR_PEER_NOTE = PAUSED_FOR_MESSAGE_NOTE.replace(
+  'Answer it first.',
+  'Use team_message for a teammate result unless this message explicitly says your final answer is returned automatically. Inline text is not otherwise delivered to teammates. Use reply_now with audience: "owner" for anything separately meant for the owner, then continue the work.',
+);
+
+export function pausedMessageNote(opts: { peerFrom?: string; peerFromRole?: string }, replyTool: boolean): string {
+  const ownerMessage = isPersonMessage(opts) || opts.peerFromRole === 'voice';
+  if (!ownerMessage) return PAUSED_FOR_PEER_NOTE;
+  return replyTool ? PAUSED_FOR_MESSAGE_NOTE_TOOL : PAUSED_FOR_MESSAGE_NOTE;
+}
 class ClaudeSession {
   readonly key: string;
   /** Durable-history key. Equals `key` for ordinary lanes; for an agent home
@@ -599,6 +658,13 @@ class ClaudeSession {
   readonly spawnModel: string;
   readonly spawnEffort: string;
   private resumeFailed = false;
+  private nativeBaseUrl?: string;
+  private nativeStorageAccept: (id: string) => void = () => {};
+  private harnessChars = 0;
+  private harnessPhase: 'startup' | 'turn' = 'startup';
+  private statusAcks: Array<() => void> = [];
+  private pendingPeerAccepts = new Set<string>();
+  private pendingPeerSteerAccepts = new Set<string>();
   private spawnError: string | null = null;
   /** Set once we detect a fatal 401. Guards failAuth() so a retry storm only
    *  tears the child down once, and flips isAlive() false so the next
@@ -640,6 +706,7 @@ class ClaudeSession {
   /** This process reported usage of its own; until then the lane's recorded
    *  context may belong to a previous model and must not teach a budget. */
   private usageSeen = false;
+  private statusContext?: Map<string, string>;
   /** Claude Code compacted the seeded start before any usage came back: the
    *  seed alone filled the window. */
   private seedOverflowed = false;
@@ -664,6 +731,11 @@ class ClaudeSession {
    *  ended by a warm interrupt the moment every tool call in flight has returned,
    *  so the message can start a fresh turn instead of riding inside a tool result. */
   private boundaryInterruptWanted = false;
+
+  /** When the one-piece-tool-call peer stand-down began (see
+   *  ONE_PIECE_PEER_STANDDOWN_CEILING_MS); null while it holds nothing back.
+   *  Reset with the rest of the boundary state. */
+  private peerBoundaryStanddownSince: number | null = null;
   /** Live waiters that asked for the interrupt; it is dropped when the last one gives up. */
   private boundaryWaiters = 0;
   /** How many of those waiters are a person (Matt, the Desk) rather than a teammate. */
@@ -671,6 +743,10 @@ class ClaudeSession {
   /** Bumped whenever the waiter counts are reset, so a release handed out before
    *  the reset cannot decrement waiters that registered after it. */
   private boundaryGeneration = 0;
+  /** A person-class request past its hazard override: the interrupt no longer
+   *  stands down for a running background subagent (card-c26bfa follow-up). */
+  private hazardOverrideActive = false;
+  private humanHazardTimer?: ReturnType<typeof setTimeout>;
   private lastBoundaryInterruptAt = 0;
   /** Last shared-log seq this process was told about by the lane recap. */
   private laneSyncSeq?: number;
@@ -700,6 +776,10 @@ class ClaudeSession {
    *  every turn start and overwritten by the next; a steer never touches it,
    * and a native query adopted without send() leaves it null so that turn
    *  still reports for a human. */
+  private nativeCompactRecovering = false;
+  private nativeCompactCommand = false;
+  private nativeStopGeneration = 0;
+  private nativeHandoverPending = false;
   private compactRerunPrompt: { text: string; images?: Array<{ mediaType: string; base64: string }>; rerun: boolean; echoText?: string; replyTo?: { from: string; snippet: string }; clientMsgId?: string } | null = null;
   /** Boot/rotation warmup uses Claude's read-only `mcp_status` control request:
    * no model turn, no tool call, and no transcript event. */
@@ -708,6 +788,10 @@ class ClaudeSession {
   private warmupPromise: Promise<void> | null = null;
   private finishWarmupWait: ((error?: Error) => void) | null = null;
   private warmupTimer: NodeJS.Timeout | null = null;
+  private mcpRecoveryTimer?: NodeJS.Timeout;
+  private mcpRecoveryRequest?: { id: string; kind: 'status' | 'reconnect'; timer: NodeJS.Timeout };
+  private mcpRecoveryAttempts = 0;
+  private mcpRecoveryEnabled = false;
   private selectionPersisted = false;
   private initSeen = false;
   private exitedBeforeInit = false;
@@ -834,7 +918,7 @@ class ClaudeSession {
       ...(OPTIONAL_MCP_DISABLED
         ? ['--tools', '', '--permission-prompts', 'none']
         : ['--dangerously-skip-permissions']),
-      '--model', zaiCredential?.wireModel ?? this.spawnModel,
+      '--model', zaiCredential?.wireModel ?? ((cli === 'claude' || cli === 'assistant') && /^claude-(sonnet|opus)-5-5$/.test(this.spawnModel) ? `${this.spawnModel}[1m]` : this.spawnModel),
       // The claude binary's --effort has no `minimal`; only the Pi harness does.
       '--effort', this.spawnEffort === 'minimal' ? 'low' : this.spawnEffort,
     ];
@@ -850,26 +934,27 @@ class ClaudeSession {
     // home thread's chatId — survives rebrains (any engine) and compaction
     // rotations (fresh spawns re-read the file).
     const personaScope = personaPromptFor(chatId);
+    const writingScope = plainEnglishWritingSystemBlockFor({ cli, model: this.spawnModel });
     if (cli === 'assistant') {
       args.push(
         '--append-system-prompt',
-        [ASSISTANT_AGENT_PROMPT, voiceAddendum, personaScope, isAgentThread(chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n'),
+        [ASSISTANT_AGENT_PROMPT, voiceAddendum, personaScope, writingScope, isAgentThread(chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n'),
       );
     } else {
-      const sys = [voiceAddendum, personaScope, isAgentThread(chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n');
+      const sys = [voiceAddendum, personaScope, writingScope, isAgentThread(chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n');
       if (sys) args.push('--append-system-prompt', sys);
     }
 
     // Long foreground shell calls are blocked/nudged toward job_start so an
     // agent stays reachable (see longCallGate.ts). Before --mcp-config, which is variadic.
     const gateSettings = longCallGateSettings(chatId);
-    if (gateSettings) args.push('--settings', gateSettings);
+    args.push('--settings', JSON.stringify({ ...nativeClaudeSettings(chatId), ...(gateSettings ? JSON.parse(gateSettings) : {}) }));
 
     // Same toolbox on every Claude-family engine: optional external MCPs plus
     // rivendell-team. --strict-mcp-config so a model switch cannot
     // silently pick up extra (or stale) servers from ~/.claude*.json. Keep
     // --mcp-config last: it is variadic and swallows any plain arg after it.
-    if (cli === 'assistant' || cli === 'xai' || cli === 'claude' || cli === 'zai' || cli === 'fireworks' || cli === 'openrouter') {
+    if (cli === 'assistant' || cli === 'xai' || cli === 'claude' || cli === 'zai' || cli === 'fireworks' || cli === 'openrouter' || cli === 'openrouter2') {
       args.push('--strict-mcp-config', '--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, this.cwd, chatId));
     }
 
@@ -881,13 +966,36 @@ class ClaudeSession {
       : cli === 'zai' ? zaiEnv(this.spawnModel, zaiCredential!)
       : cli === 'fireworks' ? fireworksEnv(this.spawnModel)
       : cli === 'openrouter' ? openRouterEnv(this.spawnModel)
+      : cli === 'openrouter2' ? openRouter2Env(this.spawnModel)
       : forcedAccount ? accountEnvForAccount(forcedAccount, cwd) : accountEnv(cwd);
-    if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks' && cli !== 'openrouter') assertClaudeSubscription(spawnEnv, cwd);
-    if (cli === 'claude' || cli === 'assistant') spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
+    if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks' && cli !== 'openrouter' && cli !== 'openrouter2') assertClaudeSubscription(spawnEnv, cwd);
+    if (cli === 'claude' || cli === 'assistant') {
+      spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
+      // The installed CLI's catalog can lag a newly released Claude model.
+      // Its 200k fallback otherwise wins over the requested 333k window.
+      if (/^claude-(sonnet|opus)-5-5$/.test(this.spawnModel)) spawnEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '1000000';
+    }
+    delete spawnEnv.DISABLE_AUTO_COMPACT;
+    delete spawnEnv.DISABLE_COMPACT;
+    spawnEnv.ENABLE_TOOL_SEARCH = 'true';
+    spawnEnv.SLASH_COMMAND_TOOL_CHAR_BUDGET = '3500';
+    if (cli === 'openrouter' || cli === 'openrouter2') {
+      const cacheSession = createHash('sha256').update(`${cli}|${this.logKey}`).digest('hex');
+      spawnEnv.ANTHROPIC_CUSTOM_HEADERS = [spawnEnv.ANTHROPIC_CUSTOM_HEADERS, `x-session-id: ${cacheSession}`].filter(Boolean).join('\n');
+    }
+    this.nativeBaseUrl = nativeCompactBaseUrl(spawnEnv.ANTHROPIC_BASE_URL || 'https://api.anthropic.com', {
+      lane: chatId, provider: cli === 'zai' && zaiCredential?.mode === 'fireworks' ? 'fireworks' : cli, resumed: Boolean(resumeId),
+      sessionId: () => this.currentSessionId ?? this.startedResumeId, harnessChars: () => this.harnessChars, harnessPhase: () => this.harnessPhase,
+    });
+    spawnEnv.ANTHROPIC_BASE_URL = this.nativeBaseUrl;
     // Provider lanes rotate at a budget sized to the model's own window.
     this.providerWindow = cli === 'claude' || cli === 'assistant' ? 0 : Number(spawnEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS) || 0;
     this.nativeCompactWindow = Number(spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW) || 0;
     const profileDir = spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
+    spawnEnv.CLAUDE_CONFIG_DIR = profileDir;
+    const nativeStorage = prepareClaudeNativeStorage(chatId, profileDir, resumeId);
+    this.nativeStorageAccept = nativeStorage.accept;
+    if (nativeStorage.project) spawnEnv.CLAUDE_CODE_PROJECT_DIR_NAME = nativeStorage.project;
     this.providerAccount = existsSync(profileDir) ? realpathSync(profileDir) : profileDir;
     this.providerAccountName = typeof spawnEnv.SAMWISE_ACCOUNT === 'string' && spawnEnv.SAMWISE_ACCOUNT.trim()
       ? spawnEnv.SAMWISE_ACCOUNT.trim()
@@ -910,6 +1018,8 @@ class ClaudeSession {
     this.child.stderr.on('close', () => this.flushStderr());
 
     this.child.on('exit', (code, signal) => {
+      this.clearMcpRecovery();
+      releaseNativeCompactRoute(this.nativeBaseUrl);
       this.flushStderr();
       if (this.warmupPromise) {
         this.finishWarmupWait?.(new Error(`Max warmup process exited (${code ?? signal ?? 'unknown'})`));
@@ -920,7 +1030,7 @@ class ClaudeSession {
       );
       if (!this.initSeen) {
         this.exitedBeforeInit = true;
-        if (this.pendingResumeId) void setSessionId(this.cli, this.cwd, '', this.chatId);
+        // A failed resume never discards the native session id.
         this.resolveReady(false);
         this.resolveStartupWaiters('closed');
       }
@@ -1060,8 +1170,131 @@ class ClaudeSession {
     }
   }
 
+  private clearMcpRecovery(): void {
+    if (this.mcpRecoveryTimer) clearTimeout(this.mcpRecoveryTimer);
+    if (this.mcpRecoveryRequest) clearTimeout(this.mcpRecoveryRequest.timer);
+    this.mcpRecoveryTimer = undefined;
+    this.mcpRecoveryRequest = undefined;
+  }
+
+  private scheduleMcpCheck(delay = 30_000): void {
+    if (OPTIONAL_MCP_DISABLED || !this.mcpRecoveryEnabled || this.disposed || this.child.exitCode !== null
+      || this.mcpRecoveryTimer || this.mcpRecoveryRequest) return;
+    this.mcpRecoveryTimer = setTimeout(() => {
+      this.mcpRecoveryTimer = undefined;
+      this.requestMcpRecovery('status');
+    }, delay);
+    this.mcpRecoveryTimer.unref();
+  }
+
+  private requestMcpRecovery(kind: 'status' | 'reconnect'): void {
+    if (this.disposed || this.child.exitCode !== null || this.mcpRecoveryRequest) return;
+    const id = `mcp-recovery-${randomUUID()}`;
+    const retryDelay = () => Math.min(15_000 * 2 ** Math.min(this.mcpRecoveryAttempts, 3), 120_000);
+    const timer = setTimeout(() => {
+      if (this.mcpRecoveryRequest?.id !== id) return;
+      this.mcpRecoveryRequest = undefined;
+      this.scheduleMcpCheck(retryDelay());
+    }, kind === 'reconnect' ? 120_000 : 15_000);
+    timer.unref();
+    this.mcpRecoveryRequest = { id, kind, timer };
+    if (kind === 'reconnect') this.mcpRecoveryAttempts++;
+    try {
+      this.child.stdin.write(JSON.stringify({ type: 'control_request', request_id: id,
+        request: kind === 'status' ? { subtype: 'mcp_status' }
+          : { subtype: 'mcp_reconnect', serverName: 'assistant-mcp' } }) + '\n');
+    } catch {
+      clearTimeout(timer);
+      this.mcpRecoveryRequest = undefined;
+      this.scheduleMcpCheck(retryDelay());
+    }
+  }
+
+  /** Native control messages refresh tools inside the same process and saved
+   * session. They never send a model prompt, interrupt a turn or replay work. */
+  private handleMcpRecovery(ev: any): boolean {
+    const request = this.mcpRecoveryRequest;
+    if (ev?.type !== 'control_response' || !request || ev.response?.request_id !== request.id) return false;
+    clearTimeout(request.timer);
+    this.mcpRecoveryRequest = undefined;
+    const servers = ev.response?.response?.mcpServers;
+    const status = Array.isArray(servers) ? servers.find((item: any) => item?.name === 'assistant-mcp')?.status : undefined;
+    if (request.kind === 'status' && ev.response?.subtype === 'success' && status === 'connected') {
+      this.mcpRecoveryAttempts = 0;
+      this.scheduleMcpCheck(60_000);
+    } else if (request.kind === 'status' && ['failed', 'disconnected', 'needs-auth'].includes(status)) {
+      this.requestMcpRecovery('reconnect');
+    } else {
+      this.scheduleMcpCheck(Math.min(15_000 * 2 ** Math.min(this.mcpRecoveryAttempts, 3), 120_000));
+    }
+    return true;
+  }
+
   isPrewarming(): boolean {
     return this.warmupPromise !== null;
+  }
+
+  /** Ask this engine to compact its own history, without a TARDIS primer or
+   * model-written replacement. Used before changing providers that cannot
+   * consume one another's signed thinking blocks. */
+  async compactNative(): Promise<void> {
+    if (this.nativeCompactCommand) throw new Error('Native compaction is already running.');
+    const generation = this.nativeStopGeneration;
+    this.nativeCompactCommand = true;
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          await this.compactNativeOnce();
+          if (generation !== this.nativeStopGeneration) throw new Error('Native handover canceled by Stop; the current session is retained.');
+          return;
+        }
+        catch (error) {
+          if (generation !== this.nativeStopGeneration) throw new Error('Handover stopped. The current session and queued messages are retained.');
+          if (attempt || !this.isAlive() || this.turnStartedAt !== null) throw error;
+          recordNativeNotice(this.chatId, 'claude-code', 'Native compact attempt failed; retrying once in the same session.');
+        }
+      }
+    } finally { this.nativeCompactCommand = false; }
+  }
+
+  nativeProviderUnavailable(): boolean {
+    return /(?:HTTP[ :]+(?:401|403|404|429|5\d\d)|usage limit|RESOURCE_EXHAUSTED)/i.test([this.syntheticApiErrorReason, this.compactFailure].filter(Boolean).join(' '));
+  }
+
+  async compactAfterProviderRecovery(): Promise<void> {
+    markNativeHandoverRecovery(this.nativeBaseUrl, true);
+    try { await this.compactNative(); }
+    finally { markNativeHandoverRecovery(this.nativeBaseUrl, false); }
+  }
+
+  private async compactNativeOnce(): Promise<void> {
+    this.compactFailure = null;
+    this.syntheticApiErrorReason = null;
+    if (!this.isAlive() || this.turnStartedAt !== null) throw new Error('Native compaction requires this lane to reach its turn boundary.');
+    if (!this.sessionId()) return;
+    await new Promise<void>((resolve, reject) => {
+      let compacted = false;
+      let failure: Error | undefined;
+      let unsubscribe = () => {};
+      const done = (error?: Error) => { clearTimeout(timer); unsubscribe(); error ? reject(error) : resolve(); };
+      const timer = setTimeout(() => done(new Error('Native compaction did not finish; the existing session is retained.')), 180_000);
+      timer.unref();
+      unsubscribe = this.subscribe(({ ev }) => {
+        const event = ev.type === 'event' ? ev.event : null;
+        if (event?.type === 'system' && event.subtype === 'compact_boundary') compacted = true;
+        if (event?.type === '_terminal_error') failure = new Error('Native compaction failed; the existing session is retained.');
+        if (event?.type === 'result' && !compacted && typeof event.result === 'string') {
+          // Claude Code sometimes returns a /compact API refusal as a
+          // successful command result. Keep only the status, never its body.
+          const status = /API Error:\s*(401|403|404|429|5\d\d)\b/.exec(event.result);
+          if (status) this.syntheticApiErrorReason = `HTTP ${status[1]}`;
+        }
+        if (ev.type === 'turnEnd') done(compacted ? undefined : failure ?? new Error('The engine did not produce a native compaction boundary.'));
+        if (ev.type === 'closed') done(new Error('The engine exited during native compaction; its saved session is retained.'));
+      }, -1, false);
+      this.turnStartedAt = Date.now();
+      this.child.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content: '/compact' } })}\n`, error => { if (error) done(error); });
+    });
   }
 
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
@@ -1069,8 +1302,38 @@ class ClaudeSession {
    *  peer_message instead of _user_echo and don't tick compaction. */
   async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge; compactRerun?: boolean; echoText?: string; replyTo?: { from: string; snippet: string } } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
+    // A receipt timeout must not write a second copy of an input that the
+    // native CLI already holds. A retry listens for that same delivery ID.
+    if (opts.peerDeliveryId && this.pendingPeerAccepts.has(opts.peerDeliveryId)) return;
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
+    if (this.nativeHandoverPending) {
+      const lookup = nativeLookups.get(bareChatId(this.chatId));
+      if (lookup) await lookup;
+      if (opts.signal?.aborted) return;
+      const replacement = peekThreadSession({ cli: this.cli, repoPath: this.cwd, chatId: this.chatId });
+      if (replacement && replacement !== this) {
+        // Peer callers must re-acquire the replacement so their receipt
+        // listener follows the actual worker. Their durable outbox keeps it.
+        if (opts.peerFrom) throw new Error('The handover finished; re-acquire the replacement before admitting this delivery.');
+        while (replacement.isBusy()) {
+          await new Promise<void>((resolve, reject) => {
+            let unsubscribe = () => {};
+            const onAbort = () => done();
+            const done = (error?: Error) => { clearTimeout(timer); unsubscribe(); opts.signal?.removeEventListener('abort', onAbort); error ? reject(error) : resolve(); };
+            const timer = setTimeout(() => done(new Error('The replacement is still working; the message has not been admitted.')), 30 * 60_000);
+            timer.unref?.();
+            unsubscribe = replacement.subscribe(() => { if (!replacement.isBusy() || !replacement.isAlive()) done(); }, replacement.latestSeq(), false);
+            opts.signal?.addEventListener('abort', onAbort, { once: true });
+            if (opts.signal?.aborted || !replacement.isBusy()) done();
+          });
+          if (opts.signal?.aborted) return;
+          if (!replacement.isAlive()) throw new Error('The replacement stopped before message admission. The saved session is retained.');
+        }
+        return replacement.send(text, images, opts);
+      }
+      if (this.nativeHandoverPending || !this.isAlive()) throw new Error('The provider handover has not completed. The saved session is retained.');
+    }
     if (this.contextRotated) {
       const next = await getOrCreateSession({ cli: this.cli, repoPath: this.cwd, chatId: this.chatId, model: this.spawnModel, effort: this.spawnEffort });
       return next.send(text, images, opts);
@@ -1097,12 +1360,12 @@ class ClaudeSession {
     // the check/write race that previously acknowledged guidance after provider
     // inference had already begun.
     if (!startsNewTurn) {
-      if (opts.peerFrom && !opts.allowNativePeerSteer) return;
+      if (opts.peerFrom && !opts.allowNativePeerSteer) throw new Error('The lane became busy before peer admission; the delivery remains queued.');
       if (!opts.peerFrom && !opts.allowNativeHumanSteer) {
         throw new Error('the current turn must reach a safe boundary before guidance is delivered');
       }
       if (this.activeToolIds.size === 0) {
-        if (opts.peerFrom) return;
+        if (opts.peerFrom) throw new Error('The native peer steering window closed before admission; the delivery remains queued.');
         throw new Error('the native steering window closed before delivery');
       }
     }
@@ -1165,7 +1428,7 @@ class ClaudeSession {
     const providerCut = startsNewTurn && !continuing && !replyNudge ? providerCutGuidance(fallbackHistory) : '';
     // The turn before this one was ended at a tool boundary to make room for
     // this message. Say so, so the model answers first and then carries on.
-    const pausedNote = startsNewTurn && !continuing && !replyNudge && !automationRequest && this.pausedForMessage ? (agentForChatId(this.chatId) ? PAUSED_FOR_MESSAGE_NOTE_TOOL : PAUSED_FOR_MESSAGE_NOTE) : '';
+    const pausedNote = startsNewTurn && !continuing && !replyNudge && !automationRequest && this.pausedForMessage ? pausedMessageNote(opts, !!agentForChatId(this.chatId)) : '';
     if (sendAborted()) {
       abandonUnsentTurn();
       return;
@@ -1210,7 +1473,7 @@ class ClaudeSession {
     }
     const textOnlyLane = this.cli === 'zai'
       || (this.cli === 'fireworks' && !fireworksCapability(this.spawnModel)?.imageInput)
-      || (this.cli === 'openrouter' && !openRouterCapability(this.spawnModel)?.imageInput);
+      || ((this.cli === 'openrouter' || this.cli === 'openrouter2') && !openRouterCapability(this.spawnModel)?.imageInput);
     if (textOnlyLane && images && images.length) {
       const result = await adaptImagesForTextModel({ text, images, modelSupportsImages: false });
       if (result.adapted) {
@@ -1267,8 +1530,7 @@ class ClaudeSession {
         event: {
           type: PROVIDER_CONTINUE_EVENT,
           id: continuing.id,
-          from: continuing.cut.from,
-          to: continuing.cut.to,
+          ...providerCutEventFields(continuing.cut),
           ...(continuing.origin.automation ? { automation: true } : {}),
           ts: Date.now(),
         },
@@ -1282,10 +1544,15 @@ class ClaudeSession {
       if (isPersonMessage(opts)) this.watchReply().arm();
       if (startsNewTurn && opts.peerFromRole === 'automation') origin.automation = true;
       if (startsNewTurn) this.emit({ type: 'turnStart' });
+      // The echo stays ahead of the stdin write: it must be causally before
+      // any provider frame of the turn it opens (a steered turn's output can
+      // interleave with the write callback), and the write window here is
+      // synchronous — only a failed write could strand it.
       this.emit({
         type: 'event',
         event: {
           type: 'peer_message',
+          startsTurn: startsNewTurn,
           from: opts.peerFrom,
           fromRole: opts.peerFromRole ?? '',
           text: opts.peerText !== undefined ? opts.peerText : text,
@@ -1305,7 +1572,7 @@ class ClaudeSession {
       this.emit({
         type: 'event',
         event: {
-          type: '_user_echo',
+          type: '_user_echo', startsTurn: startsNewTurn,
           text: opts.echoText ?? text,
           imageCount: images?.length ?? 0,
           attachments,
@@ -1338,37 +1605,24 @@ class ClaudeSession {
     // Max run `date`, reload session context, and narrate "I'm on it" on every
     // ordinary follow-up. Supply the runtime fact inline so agent-home turns
     // continue immediately instead of acting like cold starts.
-    const conversationGuidance = conversationGuidanceForTurn({
+    const conversationGuidance = wantSeed || opts.peerFromRole === 'voice' ? conversationGuidanceForTurn({
       chatId: this.chatId, logKey: this.logKey, historyThroughSeq,
       peerFrom: opts.peerFrom,
       peerFromRole: continuing?.origin.automation ? 'automation' : opts.peerFromRole,
       // A continue keeps the voice of the turn it finishes.
       hidden: Boolean(continuing && !continuing.origin.human),
-    });
-    const laneContext = startsNewTurn
-      ? laneContextForTurn({ chatId: this.chatId, logKey: this.logKey, sinceSeq: this.laneSyncSeq ?? null, throughSeq: historyThroughSeq, seeded: Boolean(seed) })
-      : '';
-    // Auto-recall: put recorded knowledge (lane memory notes, Desk cards,
-    // assistant-mcp memories) in front of every new human or teammate turn.
-    // Automation traffic (routines, job wakes, reply nudges, continues) never
-    // spends the search; every source fails open under a hard deadline.
-    const recall = startsNewTurn && !continuing && !replyNudge && !automationRequest
-      && recallEligibleTurn(this.chatId, { peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole, voiceMode: opts.voiceMode })
-      ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, logKey: this.logKey, messageText: opts.peerText ?? text })
-      : '';
+    }) : '';
+    const laneContext = '';
+    const recall = '';
     if (sendAborted()) {
       abandonUnsentTurn();
       return;
     }
     const continuationText = isAgentThread(this.chatId)
       ? [
-          '<rivendell-continuation>',
-          `This is a warm continuation of the existing conversation, not a new user-visible session. Host time: ${new Date().toString()}.`,
-          'Do not repeat session-start rituals for this turn: do not run `date`, do not call session_start_context, and do not open with empty boilerplate such as “I’m on it” or “checking now.” TARDIS already renders basic liveness.',
-          '</rivendell-continuation>',
           ...(conversationGuidance ? ['', conversationGuidance] : []),
           ...(laneContext ? ['', laneContext] : []),
-          ...(recall ? ['', recall] : []),
+
           ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []),
           '',
           commandText,
@@ -1379,19 +1633,13 @@ class ClaudeSession {
     // message of the same warm process carries the brief form (fresh token + device + policy).
     const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
     // Matt's Priorities ride every turn (continues and steers too), read fresh.
-    const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
-    // Plain-English writing block (card-0d1015): the OpenRouter lane's
-    // Gemini models lose a writing rule buried at the top of this long
-    // message, so it rides at the very END instead. Voice turns keep their
-    // own spoken-style addendum, and automation, peer, reply-nudge and
-    // continuation traffic stays silent or exact (review 1 P0/P1).
-    const plainEnglishWriting = plainEnglishWritingBlockFor({
-      cli: this.cli,
-      model: this.spawnModel,
-      voiceMode: opts.voiceMode,
-      humanTurn: humanTurn && !continuing && !replyNudge,
-    });
-    const stdinText = `${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}${plainEnglishWriting ? `\n\n${plainEnglishWriting}` : ''}`;
+    const stateDelta = await prepareSessionStateDelta(this.chatId);
+    const priorities = stateDelta.text;
+    // Well-formed at the transport boundary: a lone surrogate in the prompt
+    // is rejected downstream (Anthropic 400 — see reply-quote.ts; codex
+    // app-server rejects the JSONRPC outright), so replace unpaired units
+    // with U+FFFD here instead of wedging the lane.
+    const stdinText = wellFormedText(`${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${backgroundEnded ? `${backgroundEnded}\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${pausedNote ? `${pausedNote}\n\n` : ''}${continuationText}`);
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];
@@ -1404,6 +1652,8 @@ class ClaudeSession {
       }
     }
     if (stdinText) content.push({ type: 'text', text: stdinText });
+    this.harnessChars = Math.max(0, stdinText.length - commandText.length);
+    this.harnessPhase = wantSeed ? 'startup' : 'turn';
     const payload = JSON.stringify({
       type: 'user',
       message: {
@@ -1426,6 +1676,10 @@ class ClaudeSession {
         this.turnPromptSubmitted = true;
         if (pausedNote) this.pausedForMessage = false;
       }
+      if (opts.peerDeliveryId) {
+        this.pendingPeerAccepts.add(opts.peerDeliveryId);
+        if (!startsNewTurn) this.pendingPeerSteerAccepts.add(opts.peerDeliveryId);
+      }
       await new Promise<void>((resolve, reject) => {
         this.child.stdin.write(payload + '\n', (error) => {
           if (error) reject(error);
@@ -1433,18 +1687,18 @@ class ClaudeSession {
         });
       });
       // The recap reached the model; the next turn recaps only what came after.
+      this.statusAcks.push(stateDelta.accept);
       if (startsNewTurn) this.laneSyncSeq = historyThroughSeq;
       if (wantSeed) {
         this.seedWindowOnNextTurn = false;
         if (seed) this.pendingSeedAck = true;
       }
-      if (opts.peerDeliveryId) {
-        this.emit({
-          type: 'event',
-          event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() },
-        });
-      }
     } catch (e) {
+      if (opts.peerDeliveryId) {
+        this.pendingPeerAccepts.delete(opts.peerDeliveryId);
+        this.pendingPeerSteerAccepts.delete(opts.peerDeliveryId);
+        this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId: opts.peerDeliveryId, ts: Date.now() } });
+      }
       if (wantSeed) this.seedWindowOnNextTurn = true;
       if (startsNewTurn && this.turnStartedAt !== null) {
         this.turnStartedAt = null;
@@ -1467,6 +1721,7 @@ class ClaudeSession {
       this.endBackgroundWork(ended);
     }
     this.disposed = true;
+    this.clearMcpRecovery();
     const idleMs = Date.now() - this.lastActivityAtMs;
     console.warn(
       `[chat ${this.cli}] shutdown key=${this.key} pid=${this.child.pid ?? '-'} initSeen=${this.initSeen} listeners=${this.subscriberCount} idleMs=${idleMs} reason=${reason}`,
@@ -1483,6 +1738,7 @@ class ClaudeSession {
    * and then accepts the next user message in the same process. Fall back to a
    * process kill only if the control channel itself fails or never settles. */
   interrupt(reason = 'interrupt'): Promise<boolean> {
+    if (reason === 'interruptSession') this.nativeStopGeneration++;
     if (this.interruptInFlight) {
       if (this.nudgeInterrupt && reason !== 'reply-nudge') this.nudgeInterrupt.cancelled = true;
       return this.interruptInFlight;
@@ -1627,7 +1883,16 @@ class ClaudeSession {
 
   /** True while this session is actively processing a turn (between user send and result event). */
   isBusy(): boolean {
-    return this.turnStartedAt !== null;
+    return this.turnStartedAt !== null || this.nativeHandoverPending === true;
+  }
+
+  isHandingOver(): boolean { return this.nativeHandoverPending === true; }
+
+  nativeHandoverRevision(): number { return this.nativeStopGeneration; }
+
+  setNativeHandoverPending(pending: boolean): void {
+    this.nativeHandoverPending = pending;
+    if (!pending && this.isAlive() && this.turnStartedAt === null) this.emit({ type: 'event', event: { type: 'native_handover_released' } });
   }
 
   /** Plain descriptions of the background work still running in this process. */
@@ -1795,6 +2060,7 @@ class ClaudeSession {
    *  turn still gets to report. Returns a release function, or null when
    *  there is no turn to end. */
   requestBoundaryInterrupt(opts: { human?: boolean } = {}): (() => void) | null {
+    if (this.nativeHandoverPending) return null;
     const human = opts.human === true;
     if (this.turnStartedAt === null || this.disposed || this.child.exitCode !== null) return null;
     this.boundaryInterruptWanted = true;
@@ -1834,6 +2100,19 @@ class ClaudeSession {
         } catch {}
       });
     }
+    // (card-c26bfa follow-up) A person's message is bounded even when
+    // background work would hold the interrupt: HUMAN_HAZARD_OVERRIDE_MS
+    // after the request arms, the turn ends at the nearest safe point
+    // regardless of a running subagent. The rule lives here, not in a lane's
+    // persona.
+    if (human && this.humanHazardTimer === undefined) {
+      const timer = setTimeout(() => {
+        this.humanHazardTimer = undefined;
+        this.armHumanHazardOverride();
+      }, HUMAN_HAZARD_OVERRIDE_MS);
+      timer.unref?.();
+      this.humanHazardTimer = timer;
+    }
     const generation = this.boundaryGeneration;
     let released = false;
     // The caller releases when its message no longer needs the turn ended
@@ -1846,6 +2125,10 @@ class ClaudeSession {
       this.boundaryWaiters = Math.max(0, this.boundaryWaiters - 1);
       if (human) this.boundaryHumanWaiters = Math.max(0, this.boundaryHumanWaiters - 1);
       if (this.boundaryWaiters === 0) this.boundaryInterruptWanted = false;
+      if (this.boundaryHumanWaiters === 0) {
+        this.hazardOverrideActive = false;
+        if (this.humanHazardTimer) { clearTimeout(this.humanHazardTimer); this.humanHazardTimer = undefined; }
+      }
     };
   }
 
@@ -1854,6 +2137,43 @@ class ClaudeSession {
     this.boundaryWaiters = 0;
     this.boundaryHumanWaiters = 0;
     this.boundaryGeneration += 1;
+    this.hazardOverrideActive = false;
+    this.peerBoundaryStanddownSince = null;
+    if (this.humanHazardTimer) { clearTimeout(this.humanHazardTimer); this.humanHazardTimer = undefined; }
+  }
+
+  /** The bounded override for a waiting person (card-c26bfa follow-up): at the
+   *  deadline the turn ends at the nearest safe point even with a background
+   *  subagent running. A tool in flight is never cancelled — the request then
+   *  waits for that tool's boundary, where the hazard no longer stands the
+   *  interrupt down. */
+  private armHumanHazardOverride(): void {
+    if (this.boundaryHumanWaiters === 0 || this.turnStartedAt === null || this.disposed) return;
+    this.hazardOverrideActive = true;
+    if (this.activeToolIds.size > 0) {
+      this.boundaryInterruptWanted = true;
+      return;
+    }
+    const turn = this.turnStartedAt;
+    setImmediate(() => {
+      try {
+        if (this.turnStartedAt === null || this.turnStartedAt !== turn || this.disposed) return;
+        if (this.boundaryHumanWaiters === 0) {
+          // A human released before this ran and only peer waiters remain:
+          // re-arm for the normal tool-boundary path (the same stand-down the
+          // immediate-human path uses) instead of interrupting for a peer.
+          this.hazardOverrideActive = false;
+          this.boundaryInterruptWanted = true;
+          return;
+        }
+        if (this.activeToolIds.size > 0) { this.boundaryInterruptWanted = true; return; }
+        this.lastBoundaryInterruptAt = Date.now();
+        this.pausedForMessage = true;
+        void this.interrupt('message-boundary').then((kept) => {
+          if (!kept) this.pausedForMessage = false;
+        });
+      } catch {}
+    });
   }
 
   private watchReply(): ReplyWatch {
@@ -1865,9 +2185,9 @@ class ClaudeSession {
   /** reply_now calls waiting to be posted right after the event that carried them. */
   private replyNowQueue: Array<{ id: string; text: string; model?: string }> = [];
 
-  /** Note a reply_now call. A routine or job wake never speaks into the thread. */
+  /** An explicit owner publication is visible regardless of what woke the turn. */
   private queueReplyNow(toolId: string, text: string, model?: string): void {
-    if (this.automationTurn || this.replyNowPosted?.has(toolId)) return;
+    if (this.replyNowPosted?.has(toolId)) return;
     this.replyNowPosted.add(toolId);
     this.replyNowQueue.push({ id: toolId, text, model });
   }
@@ -1886,6 +2206,7 @@ class ClaudeSession {
         event: {
           type: 'assistant',
           _replyNow: true,
+          _replyNowForOwner: true,
           message: { id: `reply_now_${id}`, role: 'assistant', model, content: [{ type: 'text', text }], stop_reason: 'tool_use' },
         },
       });
@@ -1903,7 +2224,8 @@ class ClaudeSession {
   private nudgeForReply(): void {
     try {
       const watch = this.watchReply();
-      const blocked = () => this.boundaryWaiters > 0 || Boolean(this.interruptInFlight) || this.hasInterruptHazard() || this.activeToolIds.size > 0;
+      // Peer waiters are held for this reply; they cannot also block its nudge.
+      const blocked = () => this.boundaryHumanWaiters > 0 || Boolean(this.interruptInFlight) || this.hasInterruptHazard() || this.activeToolIds.size > 0;
       if (!watch.due() || blocked()) return;
       const turn = this.turnStartedAt;
       // After this event has been emitted, so the tool_result reaches the
@@ -2062,7 +2384,7 @@ class ClaudeSession {
 
   /** GLM only: what a failed turn does next, with the turn's origin
    *  snapshotted, or null when the provider had nothing to do with it. */
-  private zaiCutOutcome(heldForBackground: boolean): ZaiCutDecision | null {
+  private zaiCutOutcome(heldForBackground: boolean): LaneCutDecision | null {
     if (this.cli !== 'zai') return null;
     const cut: ProviderCut = { from: this.zaiMode, to: zaiModeFor(this.spawnModel) };
     const outcome = zaiTurnOutcome(this.spawnModel, {
@@ -2075,17 +2397,59 @@ class ClaudeSession {
     return { outcome, cut, origin: { peers: [...origin.peers], human: origin.human, automation: origin.automation } };
   }
 
-  private zaiCutTerminal(terminal: TerminalProviderError, decision: ZaiCutDecision): TerminalProviderError {
-    const message = decision.outcome.message ?? terminal.message;
+  /** OpenRouter-family lanes only: what a provider-cut turn does next. Two
+   *  cuts reach here. 'provider': a retryable provider failure ended the
+   *  turn as a failed result. 'aborted': the provider dropped the response
+   *  stream itself and the CLI closed the turn as a normal-looking result
+   *  whose work never landed (on these lanes the tool call arrives in one
+   *  piece at the END of a response, so a mid-stream cut lands nothing on
+   *  disk). Same continue machinery as a GLM provider switch, bounded per
+   *  lane, so the teammate keeps working instead of going dark until someone
+   *  notices (Oct 21: 12-31 minutes per cut on Felix's lane). Null when the
+   *  failure has its own handling (usage limit, context length, auth) or is
+   *  not retryable. */
+  private openRouterCutOutcome(cause: 'provider' | 'aborted', terminal: TerminalProviderError | null): LaneCutDecision | null {
+    const cli = this.cli;
+    if (cli !== 'openrouter' && cli !== 'openrouter2') return null;
+    if (cause === 'provider' && (terminal?.retryable !== true || terminal.usageLimit || terminal.contextLength === true)) return null;
+    const origin = this.turnOrigin ?? emptyTurnOrigin();
+    const snapshot = { peers: [...origin.peers], human: origin.human, automation: origin.automation };
+    if (!openRouterContinueBudget({ logKey: this.logKey, chatId: this.chatId })) {
+      return {
+        outcome: {
+          kind: 'stopped',
+          message: 'OpenRouter kept cutting this lane\'s turns, so the automatic continue stopped instead of retrying in a loop. Send again in a few minutes or switch brains.',
+          reason: 'OpenRouter cut this lane\'s turns too many times in a row',
+        },
+        cut: { engine: cli },
+        origin: snapshot,
+      };
+    }
+    return {
+      outcome: {
+        kind: 'continue',
+        message: cause === 'aborted'
+          ? 'OpenRouter cut this turn\'s response mid-generation (its tool call never landed), so TARDIS is continuing it automatically.'
+          : 'OpenRouter dropped this turn mid-generation, so TARDIS is continuing it automatically.',
+      },
+      cut: { engine: cli },
+      origin: snapshot,
+    };
+  }
+
+  private laneCutTerminal(terminal: TerminalProviderError | null, decision: LaneCutDecision, fallbackCode: string): TerminalProviderError {
+    const message = decision.outcome.message ?? terminal?.message ?? '';
     return decision.outcome.kind === 'continue'
-      ? { message, code: 'provider_switch' }
-      : { ...terminal, message, retryable: true };
+      ? { message, code: fallbackCode }
+      : terminal
+        ? { ...terminal, message, retryable: true }
+        : { message, code: fallbackCode, retryable: true };
   }
 
   /** `continuing` renders the notice as a switch; `unread` badges a cut that
    *  nothing will finish on its own. `providerCut` lets the next turn (and
    *  its respawn) know the cut is still open. */
-  private zaiCutNoticeFields(decision: ZaiCutDecision): Record<string, unknown> {
+  private laneCutNoticeFields(decision: LaneCutDecision): Record<string, unknown> {
     return decision.outcome.kind === 'continue'
       ? { providerCut: decision.cut, continuing: true }
       : { providerCut: decision.cut, unread: true };
@@ -2093,7 +2457,7 @@ class ClaudeSession {
 
   /** After the cut turn's boundary: queue its one automatic continue, or tell
    *  the teammate whose handoff it was that it did not run. */
-  private afterZaiCut(decision: ZaiCutDecision, noticeSeq: number): void {
+  private afterProviderCut(decision: LaneCutDecision, noticeSeq: number): void {
     if (decision.outcome.kind === 'continue') {
       scheduleProviderContinue({
         cli: this.cli,
@@ -2193,84 +2557,7 @@ class ClaudeSession {
     return this.startTokens + 2 * ROTATE_BEFORE_NATIVE >= this.nativeCompactWindow - NATIVE_COMPACT_MARGIN;
   }
 
-  private rotationWanted(): boolean {
-    return this.rotateAfterNativeCompact || contextRotationDue(this.contextKey, this.contextBudget());
-  }
-
-  private async rotateContextAtBoundary(): Promise<boolean> {
-    if (!this.rotationWanted() || this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) return false;
-    const refreshed = await refreshCompactForRotation({
-      key: this.logKey, cli: this.cli, chatId: this.chatId, events: this.eventLog,
-      isBusy: () => this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork(),
-      emit: (ev) => this.emit(ev as SessionEvent), rotate: () => false,
-    });
-    if (!refreshed || this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) return true;
-    await setSessionId(this.cli, this.cwd, '', this.chatId);
-    if (this.turnStartedAt !== null || this.disposed || this.hasBackgroundWork()) {
-      if (!this.disposed && this.currentSessionId) await setSessionId(this.cli, this.cwd, this.currentSessionId, this.chatId);
-      return true;
-    }
-    bankRotation(this.logKey);
-    recordContextRotation(this.contextKey);
-    this.rotateAfterNativeCompact = false;
-    this.contextRotated = true;
-    this.shutdown('context-budget');
-    return true;
-  }
-
-  /** Every later turn on a session whose compaction failed hits the same
-   *  limit again. Drop it at the turn boundary so the next send spawns fresh
-   *  from compact+50, the same way a context rotation does. */
-  /** All in one tick, so no turn can be admitted onto this child in between;
-   *  the banked rotation alone already forces a seed if the id write fails. */
-  private reseedAfterCompactFailure(lengthRejected: boolean): void {
-    if (this.turnStartedAt !== null || this.disposed) return;
-    bankRotation(this.logKey);
-    // A length-rejected session can never serve another turn: any new
-    // prompt, including a background task's completion wake, hits the same
-    // oversized context. Work on that child is already undeliverable, so it
-    // is retired now (the ended note names what went with it) and the next
-    // send spawns fresh from the banked rotation. Oct 13: deferring the
-    // reseed behind background work held Maria's fireworks lane dead through
-    // 14 straight failed turns. A failed compact is different: that child
-    // can still serve turns, so its reseed keeps deferring behind live work.
-    if (this.hasBackgroundWork() && !lengthRejected) return;
-    setSessionId(this.cli, this.cwd, '', this.chatId).catch((err) => {
-      console.warn(`[chat ${this.cli}] could not clear the session after a failed compaction:`, (err as Error).message);
-    });
-    // A send waiting on the reseed barrier follows to the fresh process.
-    this.contextRotated = true;
-    this.shutdown(lengthRejected ? 'length-rejected-reseed' : 'compact-failed');
-  }
-
   awaitContextMaintenance(): Promise<void> { return this.contextMaintenance ?? Promise.resolve(); }
-
-  /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
-  private async maybeCompact(): Promise<void> {
-    try {
-      await maybeAutoCompact({
-        key: this.logKey,
-        cli: this.cli,
-        chatId: this.chatId,
-        events: this.eventLog,
-        isBusy: () => this.turnStartedAt !== null,
-        emit: (ev) => this.emit(ev as SessionEvent),
-        rotate: () => this.keepWarmAfterCompact(),
-      });
-    } catch (err) {
-      console.warn(`[chat ${this.cli}] compaction check failed for ${this.key}:`, (err as Error).message);
-    }
-  }
-
-  /** The durable compact is for recovery, not a reason to kill a healthy
-   * persistent process. Claude/xAI retain their live context and native
-   * auto-compaction; the next genuine process start receives compact+window.
-   * Returning true clears obsolete rotation debt without a handoff gap. */
-  private keepWarmAfterCompact(): boolean {
-    if (sessions.get(this.key) !== this || !this.isAlive()) return false;
-    console.warn(`[chat ${this.cli}] compact saved; keeping warm session ${this.key}`);
-    return true;
-  }
 
   private resolveStartupWaiters(state: 'initialized' | 'closed'): void {
     const waiters = Array.from(this.startupWaiters);
@@ -2327,6 +2614,17 @@ class ClaudeSession {
   }
 
   private handleEvent(ev: any): void {
+    if (this.handleMcpRecovery(ev)) return;
+    if (ev?.type === 'autocompact_state') {
+      console.log(`[native-compact-state] lane=${this.chatId} provider=${this.cli} ${JSON.stringify(ev.value)}`);
+    }
+    // Writing stdin does not prove the saved native session or provider took
+    // a handoff. Keep its durable queue receipt until a real response arrives.
+    if (ev?.type === 'assistant' && !ev.parent_tool_use_id && !isSyntheticApiErrorEvent(ev)) {
+      for (const deliveryId of this.pendingPeerAccepts) this.emit({ type: 'event', event: { type: 'peer_delivery_accepted', deliveryId, ts: Date.now() } });
+      this.pendingPeerAccepts.clear();
+      this.pendingPeerSteerAccepts.clear();
+    }
     // Monitor/background-task notifications can start a query inside the warm
     // CLI without send(). Adopt that query before forwarding its first event,
     // so health, Stop, queued input and reconnects agree that the lane is busy.
@@ -2388,7 +2686,9 @@ class ClaudeSession {
               // A reply_now call is the agent speaking: it counts as visible text
               // for the reply watch, and becomes a real message in the thread.
               this.watchReply().noteText();
-              this.queueReplyNow(block.id, posted, ev.message?.model);
+              // Named agents' tool server posts durably on all engines. Only
+              // anonymous legacy Claude lanes still need runner conversion.
+              if (!agentForChatId(this.chatId)) this.queueReplyNow(block.id, posted, ev.message?.model);
             } else {
               this.watchReply().noteTool(block.id);
             }
@@ -2397,13 +2697,18 @@ class ClaudeSession {
           }
         }
       } else if (ev?.type === 'user' && Array.isArray(ev.message?.content)) {
+        let completedTool = false;
         for (const block of ev.message.content) {
           if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-            this.activeToolIds.delete(block.tool_use_id);
+            completedTool = this.activeToolIds.delete(block.tool_use_id) || completedTool;
           }
         }
-        if (this.activeToolIds.size === 0) this.nudgeForReply();
-        if (this.boundaryInterruptWanted && this.activeToolIds.size === 0) {
+        // CLI recovery nudges are user-shaped envelopes, not completed tools.
+        // A queued handoff must not reset that recovery loop or take away the
+        // person's still-unanswered turn. An actual new human message can steer.
+        if (completedTool && this.activeToolIds.size === 0) this.nudgeForReply();
+        if (completedTool && this.boundaryInterruptWanted && this.activeToolIds.size === 0
+          && (this.boundaryHumanWaiters > 0 || !this.watchReply().waiting())) {
           const now = Date.now();
           // Claude's interrupt stops background subagents, and a person who
           // never asked for that should not lose one to a chat message. With
@@ -2412,7 +2717,18 @@ class ClaudeSession {
           // before. Background commands and monitors are unaffected by the
           // interrupt (they keep running and still report), so they do not
           // hold a message back.
-          if (this.hasInterruptHazard()) {
+          // One-piece-tool-call lanes: a queued peer message stands down at a
+          // tool boundary (the CLI has already begun the next response; see
+          // ONE_PIECE_TOOL_CALL_CLIS), but only within
+          // ONE_PIECE_PEER_STANDDOWN_CEILING_MS of the stand-down beginning,
+          // so a stuck turn cannot hold a message forever. A person's message
+          // never waits.
+          if (this.boundaryHumanWaiters === 0 && ONE_PIECE_TOOL_CALL_CLIS.has(this.cli) && this.peerBoundaryStanddownSince === null) this.peerBoundaryStanddownSince = now;
+          const peerStoodDown = this.boundaryHumanWaiters === 0 && ONE_PIECE_TOOL_CALL_CLIS.has(this.cli)
+            && now - (this.peerBoundaryStanddownSince ?? now) < ONE_PIECE_PEER_STANDDOWN_CEILING_MS;
+          if (this.hasInterruptHazard() && !this.hazardOverrideActive) {
+            this.boundaryInterruptWanted = false;
+          } else if (peerStoodDown) {
             this.boundaryInterruptWanted = false;
           } else if (
             (this.boundaryHumanWaiters > 0 || now - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS)
@@ -2432,13 +2748,23 @@ class ClaudeSession {
             setImmediate(() => {
               if (this.turnStartedAt === null || this.turnStartedAt !== turn || this.disposed) return;
               if (this.boundaryWaiters === 0) return;
+              // The human waiter released before this ran and only peers
+              // remain on a one-piece-tool-call lane: same stand-down (and
+              // the same ceiling) as the outer check, so the in-flight
+              // generation is not discarded.
+              if (this.boundaryHumanWaiters === 0 && ONE_PIECE_TOOL_CALL_CLIS.has(this.cli)) {
+                this.peerBoundaryStanddownSince ??= Date.now();
+                if (Date.now() - this.peerBoundaryStanddownSince < ONE_PIECE_PEER_STANDDOWN_CEILING_MS) { this.boundaryInterruptWanted = false; return; }
+                this.peerBoundaryStanddownSince = null;
+              }
               // Another tool started before this ran: the request still stands.
               if (this.activeToolIds.size > 0) { this.boundaryInterruptWanted = true; return; }
               // A background subagent can also have started between the outer
               // check and this deferred fire. Same stand-down as that check:
               // the turn is left to finish and the message starts the next one.
-              if (this.hasInterruptHazard()) { this.boundaryInterruptWanted = false; return; }
+              if (this.hasInterruptHazard() && !this.hazardOverrideActive) { this.boundaryInterruptWanted = false; return; }
               this.lastBoundaryInterruptAt = Date.now();
+              this.peerBoundaryStanddownSince = null;
               this.pausedForMessage = true;
               void this.interrupt('message-boundary').then((kept) => {
                 if (!kept) this.pausedForMessage = false;
@@ -2472,29 +2798,48 @@ class ClaudeSession {
     }
 
     // Detect init + silent-resume-failure.
-    if (!this.disposed && ev?.type === 'system' && ev.subtype === 'init' && typeof ev.session_id === 'string') {
+    if (!this.disposed && !sidechain && ev?.type === 'system' && ev.subtype === 'init' && typeof ev.session_id === 'string') {
       const pending = this.pendingResumeId;
       this.pendingResumeId = null;
-      this.initSeen = true;
-      this.resolveReady(true);
-      this.resolveStartupWaiters('initialized');
       if (pending && pending !== ev.session_id) {
         this.resumeFailed = true;
-        this.emit({
-          type: 'error',
-          message: `Resume failed (session ${pending.slice(0, 8)}… not found). Started a fresh thread.`,
-        });
+        recordNativeFailure(this.chatId, 'claude-code', 'Native resume failed. The saved ID and queued messages are retained. Matt’s Fresh thread or native transcript repair is required.');
+        this.currentSessionId = pending;
+        this.emit({ type: 'error', code: 'NATIVE_RESUME_MISMATCH', fatal: true,
+          message: 'The engine did not resume its saved session. The saved session was retained.' });
+        this.shutdown('native resume mismatch');
+        return;
       }
+      this.initSeen = true;
+      if (!OPTIONAL_MCP_DISABLED && Array.isArray(ev.mcp_servers)) {
+        const shared = ev.mcp_servers.find((server: any) => server?.name === 'assistant-mcp');
+        this.mcpRecoveryEnabled = Boolean(shared);
+        this.scheduleMcpCheck(shared?.status === 'connected' ? 60_000 : 1000);
+      }
+      this.resolveReady(true);
+      this.resolveStartupWaiters('initialized');
+      recordNativeSession(this.chatId, 'claude-code', ev.session_id, this.startedResumeId);
+      this.nativeStorageAccept(ev.session_id);
       this.currentSessionId = ev.session_id;
       void setSessionId(this.cli, this.cwd, ev.session_id, this.chatId);
     }
+    // Only the root init above establishes a resumable session. Startup hook
+    // events already carry an ID before Claude creates a native transcript.
+    // Saving that provisional ID makes the next boot try to resume no history.
 
-    // Track session_id from any event that carries it (some events carry it
-    // as well as init; persisting on every change keeps us safe across forks).
-    if (!this.disposed && ev && typeof ev === 'object' && typeof ev.session_id === 'string'
-        && ev.session_id !== this.currentSessionId) {
-      this.currentSessionId = ev.session_id;
-      void setSessionId(this.cli, this.cwd, ev.session_id, this.chatId);
+    if (!sidechain && ev?.type === 'system' && ev.subtype === 'status') {
+      markNativeCompacting(this.nativeBaseUrl, ev.status === 'compacting');
+    }
+    if (!sidechain && ev?.type === 'system' && ev.subtype === 'compact_boundary') {
+      confirmNativeCompact(this.nativeBaseUrl);
+      markNativeCompacting(this.nativeBaseUrl, false);
+      resetSessionStateDelta(this.chatId);
+      this.statusAcks = [];
+      recordNativeCompact(this.chatId, 'claude-code', this.currentSessionId, ev.compact_metadata);
+    }
+    if (!sidechain && ev?.type === 'result') {
+      if (!ev.is_error && !this.syntheticApiErrorSeen) this.statusAcks.splice(0).forEach(ack => ack());
+      else this.statusAcks = [];
     }
 
     this.trackStreamText(ev);
@@ -2515,18 +2860,7 @@ class ClaudeSession {
     // refused Qwen 3.8 Max near 140K of 262K), and Claude Code answers with a
     // reactive compact. Below the native threshold that is the only sign of
     // it: learn a lower budget for this model and rotate at the boundary.
-    if (!sidechain && this.providerWindow && ev?.type === 'system' && ev.subtype === 'status' && ev.status === 'compacting') {
-      // The native compact already shrank an oversized seed; rotating would
-      // reload the same seed and compact again.
-      if (this.pendingSeedAck && !this.usageSeen) this.seedOverflowed = true;
-      if (!this.seedFillsWindow()) this.rotateAfterNativeCompact = true;
-      const accepted = this.usageSeen ? contextTokens(this.contextKey) : 0;
-      // A gap this wide below the native threshold is more than one turn adds,
-      // so a plain backstop compact after a big tool result does not count.
-      if (accepted > 0 && accepted < this.nativeCompactWindow - NATIVE_COMPACT_MARGIN - REACTIVE_COMPACT_GAP) {
-        learnContextLimit(this.spawnModel, accepted, this.providerWindow);
-      }
-    }
+    
     const syntheticApiError = isSyntheticApiErrorEvent(ev);
     if (syntheticApiError) {
       this.syntheticApiErrorSeen = true;
@@ -2565,9 +2899,8 @@ class ClaudeSession {
     // owns the failure (a 401 kills the child; a zai provider cut schedules
     // its own continue). The reseed block below re-checks every one of these
     // gates before scheduling, so the notice and the action cannot disagree.
-    const compactRerunPlanned = compactFailed && this.compactRerunPrompt !== null && !this.compactRerunPrompt.rerun
-      && ev?.api_error_status !== 401
-      && !(this.cli === 'zai' && zaiModeFor(this.spawnModel) !== this.zaiMode);
+    const compactRerunPlanned = false;
+    if (compactFailed) recordNativeFailure(this.chatId, 'claude-code', 'Native compaction failed. The native session ID and queued handoffs are retained; retry native compaction or use Matt’s Fresh thread.');
     const terminal = (compactFailed ? compactFailureError(this.cli, this.compactFailure ?? '', compactRerunPlanned) : null)
       ?? providerTerminal
       ?? (ev?.type === 'result' && !expectedUserInterrupt
@@ -2578,6 +2911,16 @@ class ClaudeSession {
             [...this.streamTextBlocks.values()].map((block) => block.text).join('\n'),
           )
         : null);
+    // (review P1, Oct 20) terminalExecutionError classifies the streamed turn
+    // text too, so a context rejection that only reached the stream is caught
+    // there, not by the detail-only check above. Without folding its flag in,
+    // the reseed decision at turn end never fires and the oversized session
+    // stays resumable on every message.
+    if (!lengthRejected && terminal?.contextLength === true) {
+      lengthRejected = true;
+      const accepted = this.usageSeen ? contextTokens(this.contextKey) : 0;
+      if (accepted > 0 && this.providerWindow) learnContextLimit(this.spawnModel, accepted, this.providerWindow);
+    }
     if (terminal?.usageLimit) {
       noteProviderUsageLimit(this.providerAccount, agentForChatId(this.chatId)?.name ?? 'a lane', terminal);
     }
@@ -2585,6 +2928,7 @@ class ClaudeSession {
     // deployment named may roll over, only with the turn's opening prompt in
     // hand, and never stacked on the compact re-run below.
     const usageFallbackDue = terminal?.usageLimit === true
+      && !isAgentThread(this.chatId)
       && (this.cli === 'claude' || this.cli === 'assistant')
       && USAGE_FALLBACK_ACCOUNTS.has(this.providerAccountName)
       && this.compactRerunPrompt !== null
@@ -2616,21 +2960,43 @@ class ClaudeSession {
     const zaiStale = this.cli === 'zai' && ev?.type === 'result'
       && zaiModeFor(this.spawnModel) !== this.zaiMode;
     // A failed GLM turn the provider cut: continue it automatically on the new
-    // provider, or say plainly that nothing will. Decided (and the turn's
-    // origin snapshotted) before turnEnd, whose subscribers may admit the next
-    // turn synchronously.
+    // provider, or say plainly that nothing will. An OpenRouter-family lane
+    // gets the same decision for its own cut (a retryable provider failure);
+    // the aborted-stream cut below is decided after this. Decided (and the
+    // turn's origin snapshotted) before turnEnd, whose subscribers may admit
+    // the next turn synchronously.
     const zaiCut = terminal && this.turnStartedAt !== null ? this.zaiCutOutcome(zaiStale && this.hasBackgroundWork()) : null;
-    let zaiCutNoticeSeq = 0;
+    // Only a terminal with explicit provider provenance (an API status on the
+    // result) is a provider cut. The merged terminal also classifies step
+    // limits, budget caps, malformed tool calls and dead local runners, which
+    // have their own handling and must not be continued as provider drops. A
+    // failed compaction recovers itself (recoverNative below), and a
+    // context-length rejection in any shape (flag or raw detail) never
+    // continues: that session must reseed, not retry the same oversized turn.
+    const orProviderCut = !zaiCut && !compactFailed && !lengthRejected && providerTerminal !== null && this.turnStartedAt !== null
+      ? this.openRouterCutOutcome('provider', providerTerminal) : null;
+    // The sneaky cut: a normal-looking result whose response stream the
+    // provider aborted mid-generation. On these lanes the tool call arrives
+    // in one piece at the END of a response, so the cut lands nothing on disk
+    // and the turn ends as if it succeeded (Oct 21: every oversized single
+    // Write on Felix's lane died this way and the lane went dark).
+    const orAbortedCut = !orProviderCut && terminal === null && this.turnStartedAt !== null
+      && ev?.type === 'result' && !expectedUserInterrupt && ev.terminal_reason === 'aborted_streaming'
+      ? this.openRouterCutOutcome('aborted', null) : null;
+    const orCut = orProviderCut ?? orAbortedCut;
+    let cutNoticeSeq = 0;
     if (terminal) {
       // Never persist the raw failed result: provider payloads can include
       // request metadata or echoed prompt fragments. The normalized notice is
       // the durable transcript record; turnEnd below remains the boundary.
       this.emitTerminalNotice(
-        zaiCut ? this.zaiCutTerminal(terminal, zaiCut) : terminal,
+        zaiCut ? this.laneCutTerminal(terminal, zaiCut, 'provider_switch')
+          : orProviderCut ? this.laneCutTerminal(terminal, orProviderCut, 'openrouter_cut')
+          : terminal,
         this.syntheticApiErrorSeen,
-        zaiCut ? this.zaiCutNoticeFields(zaiCut) : undefined,
+        (zaiCut ?? orProviderCut) ? this.laneCutNoticeFields(zaiCut ?? orProviderCut!) : undefined,
       );
-      zaiCutNoticeSeq = this.nextSeq - 1;
+      cutNoticeSeq = this.nextSeq - 1;
       if (usageFallbackDue) {
         this.emit({
           type: 'event',
@@ -2655,6 +3021,17 @@ class ClaudeSession {
       }
     } else {
       this.emit({ type: 'event', event: ev });
+      // The aborted-stream cut has no failed result to hang its notice on:
+      // post it right after the normal result event, marked as a cut the
+      // continue machinery owns (an unread one badges it if it gave up).
+      if (orAbortedCut) {
+        this.emitTerminalNotice(
+          this.laneCutTerminal(null, orAbortedCut, 'aborted_streaming'),
+          false,
+          this.laneCutNoticeFields(orAbortedCut),
+        );
+        cutNoticeSeq = this.nextSeq - 1;
+      }
     }
     this.flushReplyNow();
     if ((ev?.type === 'assistant' && !syntheticApiError) || ev?.type === 'result') {
@@ -2677,10 +3054,10 @@ class ClaudeSession {
       // carrying error:"authentication_failed" is a plan/permission problem a
       // respawn can't fix, so it must NOT be treated as fatal.
       const fatalAuth = ev.error_status === 401;
-      const tokenBacked = this.cli === 'zai' || this.cli === 'xai' || this.cli === 'fireworks' || this.cli === 'openrouter';
+      const tokenBacked = this.cli === 'zai' || this.cli === 'xai' || this.cli === 'fireworks' || this.cli === 'openrouter' || this.cli === 'openrouter2';
       if (fatalAuth) {
         const provider = tokenBacked
-          ? (this.cli === 'xai' ? 'xAI' : this.cli === 'openrouter' ? 'OpenRouter' : this.cli === 'fireworks' || this.zaiMode === 'fireworks' ? 'Fireworks' : 'Z.ai')
+          ? (this.cli === 'xai' ? 'xAI' : this.cli === 'openrouter' ? 'OpenRouter' : this.cli === 'openrouter2' ? 'OpenRouter Personal' : this.cli === 'fireworks' || this.zaiMode === 'fireworks' ? 'Fireworks' : 'Z.ai')
           : 'Claude';
         const authTerminal: TerminalProviderError = {
           message: `${provider} could not authenticate. Check its account or API key, then try again.`,
@@ -2692,9 +3069,9 @@ class ClaudeSession {
           ? this.zaiCutOutcome(zaiModeFor(this.spawnModel) !== this.zaiMode && this.hasBackgroundWork())
           : null;
         this.emitTerminalNotice(
-          authCut ? this.zaiCutTerminal(authTerminal, authCut) : authTerminal,
+          authCut ? this.laneCutTerminal(authTerminal, authCut, 'provider_switch') : authTerminal,
           true,
-          authCut ? this.zaiCutNoticeFields(authCut) : undefined,
+          authCut ? this.laneCutNoticeFields(authCut) : undefined,
         );
         const authCutNoticeSeq = this.nextSeq - 1;
         // This one dies mid-turn, so no `result` is coming to close it out.
@@ -2711,7 +3088,7 @@ class ClaudeSession {
           this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
         }
         this.failAuth();
-        if (authCut) this.afterZaiCut(authCut, authCutNoticeSeq);
+        if (authCut) this.afterProviderCut(authCut, authCutNoticeSeq);
       } else {
         const attempt = ev.attempt ? ` (attempt ${ev.attempt}/${ev.max_retries ?? '?'})` : '';
         this.emit({ type: 'error', message: `API ${ev.error} ${ev.error_status}${attempt} — retrying…`, code: String(ev.error_status), retryable: true });
@@ -2731,60 +3108,41 @@ class ClaudeSession {
       this.userInterruptPending = false;
       const seeded = this.pendingSeedAck;
       const resultFailed = ev.is_error === true || typeof ev.api_error_status === 'number';
-      const failed = seeded && resultFailed;
-      if (seeded) this.pendingSeedAck = false;
-      if (failed) this.seedWindowOnNextTurn = true;
-      if (!resultFailed) this.persistAppliedSelection();
-      // A dead native session reseeds instead. A native compact rotates even
-      // when the turn then failed, so no later turn runs on its lossy summary.
-      const reseed = (compactFailed || lengthRejected) && !authFailPending && !zaiStale && !zaiCut;
-      const rotationDue = !reseed && isClaudeFamilyCli(this.cli)
-        && (this.rotateAfterNativeCompact || (!resultFailed && this.rotationWanted()));
-      const rotateIfDue = async (): Promise<boolean> => {
-        if (seeded && !failed) await clearRotation(this.logKey);
-        return rotationDue && await this.rotateContextAtBoundary();
-      };
-      const housekeeping = async () => {
-        if (!(await rotateIfDue())) await this.maybeCompact();
-      };
-      // Installed before turnEnd, so a send admitted by a turnEnd subscriber
-      // waits for the reseed instead of landing on the oversized session.
-      if (reseed) {
-        this.contextMaintenance = Promise.resolve().then(() => this.reseedAfterCompactFailure(lengthRejected))
-          .finally(() => { this.contextMaintenance = null; });
-        // The compact failure's one automatic re-run (the copy above already
-        // promised it). lengthRejected stays manual: its oversized prompt may
-        // still be oversized after the reseed, so a human decides there.
-        // The usage rollover above already reruns this turn on the backup
-        // engine; a second, same-engine replay here would double-answer.
-        if (compactFailed && compactRerunPlanned && !usageFallbackDue) {
-          scheduleCompactRerun({
-            cli: this.cli,
-            cwd: this.cwd,
-            chatId: this.chatId,
-            logKey: this.logKey,
-            model: this.spawnModel,
-            effort: this.spawnEffort,
-            text: this.compactRerunPrompt!.text,
-            images: this.compactRerunPrompt!.images,
-            echoText: this.compactRerunPrompt!.echoText,
-            replyTo: this.compactRerunPrompt!.replyTo,
-            clientMsgId: this.compactRerunPrompt!.clientMsgId,
-            retiring: this,
-          });
+      if (resultFailed) {
+        for (const deliveryId of this.pendingPeerAccepts) {
+          // Stdin guidance can belong to the native CLI's next query. A
+          // failure of the query already running does not reject that input.
+          if (this.pendingPeerSteerAccepts.has(deliveryId)) continue;
+          this.pendingPeerAccepts.delete(deliveryId);
+          this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, ts: Date.now() } });
         }
       }
-      if (rotationDue) {
-        // Only the rotation holds sends. When it can't rotate (background
-        // work), the durable compact is a slow model call that keeps the warm
-        // session, so it runs unbarriered: Oct 12 2026 it held Riley's lane
-        // (every hello and send) for four minutes and Matt's messages looked lost.
-        this.contextMaintenance = Promise.resolve().then(rotateIfDue).then((rotated) => {
-          if (!rotated) void this.maybeCompact();
-        }).catch((err) => {
-          console.warn(`[context-rotation] ${this.logKey}: deferred after maintenance failure`, (err as Error).message);
-        }).finally(() => { this.contextMaintenance = null; });
+      this.pendingPeerSteerAccepts.clear();
+      const failed = seeded && resultFailed;
+      if (seeded) this.pendingSeedAck = false;
+      // An accepted handover is never replayed after an API failure.
+      if (!resultFailed) this.persistAppliedSelection();
+      // Recover a failed automatic compact through this same native engine.
+      // The old message is already in its transcript; no replay or reseed.
+      const recoverNative = compactFailed && !this.nativeCompactRecovering && !this.nativeCompactCommand && this.compactRerunPrompt?.rerun !== true && this.isAlive() && !authFailPending && !zaiCut;
+      if (recoverNative) {
+        this.nativeCompactRecovering = true;
+        const maintenance = new Promise<void>(resolve => setImmediate(resolve)).then(async () => {
+          try {
+            await this.compactNative();
+            this.contextMaintenance = null;
+            await this.send('Continue the pending task from before the native compaction failure. Check its last actual result and carry on in this same session.', undefined,
+              { compactRerun: true, peerFrom: 'TARDIS', peerFromRole: 'automation', echoText: 'Native compaction recovered. Continuing the pending task.' });
+          } catch {
+            recordNativeFailure(this.chatId, 'claude-code', 'Native compaction retry failed; the original transcript and undelivered handoffs remain available for repair.');
+          } finally {
+            this.nativeCompactRecovering = false;
+            if (this.contextMaintenance === maintenance) this.contextMaintenance = null;
+          }
+        });
+        this.contextMaintenance = maintenance;
       }
+      // Native compaction keeps the session id and the complete tool history.
       this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
       // Only now, with the turn boundary already delivered, retire a child
       // whose provider moved. shutdown() flips `disposed`, after which emit()
@@ -2794,8 +3152,8 @@ class ClaudeSession {
       // its completion wakes a turn here, and that turn's result retires it.
       if (authFailPending) this.failAuth();
       else if (zaiStale && !this.hasBackgroundWork()) this.shutdown(`zai-provider-switch-${zaiModeFor(this.spawnModel)}`);
-      if (zaiCut) this.afterZaiCut(zaiCut, zaiCutNoticeSeq);
-      if (!rotationDue && !reseed) void housekeeping();
+      if (zaiCut) this.afterProviderCut(zaiCut, cutNoticeSeq);
+      if (orCut) this.afterProviderCut(orCut, cutNoticeSeq);
     }
   }
 }
@@ -2851,6 +3209,12 @@ const sessions = new Map<string, LaneSession>();
 let sessionsShuttingDown = false;
 const resettingThreadLogs = new Set<string>();
 const inFlightSessionLookups = new Map<string, Set<Promise<void>>>();
+const nativeHandovers = new Map<string, Set<ClaudeSession>>();
+const heldEngineSwitches = new Map<string, string>();
+
+function cancelNativeHandover(logKey: string): void {
+  for (const source of nativeHandovers.get(logKey) ?? []) void source.interrupt('interruptSession');
+}
 
 function trackedThreadLogKey(opts: { cli: CliKind; repoPath: string; chatId?: string }): string {
   const chatId = opts.chatId || 'main';
@@ -2891,7 +3255,26 @@ export function beginThreadReset(opts: { cli: CliKind; repoPath: string; chatId?
   if (resettingThreadLogs.has(logKey)) return null;
   resettingThreadLogs.add(logKey);
   cancelProviderContinue(logKey);
+  cancelNativeHandover(logKey);
   return () => { resettingThreadLogs.delete(logKey); };
+}
+
+/** Claim the Fresh barrier for an already-computed thread log key (the
+ *  programmatic path resolves the key from the agent home, not one engine). */
+export function beginThreadResetForLogKey(logKey: string): (() => void) | null {
+  if (resettingThreadLogs.has(logKey)) return null;
+  resettingThreadLogs.add(logKey);
+  cancelProviderContinue(logKey);
+  cancelNativeHandover(logKey);
+  return () => { resettingThreadLogs.delete(logKey); };
+}
+
+/** Live sessions (main lane only) belonging to one durable thread log key,
+ *  across every engine registry. The WS freshStart uses the same shape so a
+ *  reset retires all of them, including account-pinned siblings. */
+export function liveSessionsForLogKey(logKey: string): LiveSession[] {
+  return activeChatSessions().filter((session) => !isBackgroundChatId(session.chatId)
+    && trackedThreadLogKey({ cli: session.cli as CliKind, repoPath: session.cwd, chatId: session.chatId }) === logKey);
 }
 
 export function isThreadResetting(opts: { cli: CliKind; repoPath: string; chatId?: string }): boolean {
@@ -2916,7 +3299,8 @@ function holdsBackgroundWork(session: AnySession): boolean {
 }
 
 function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
-  const normalized = chatId || 'main';
+  const normalized = isAgentThread(chatId) ? bareChatId(chatId) : chatId || 'main';
+  cwd = sessionDirectory(normalized, cwd);
   return normalized === 'main' ? `${cli}|${cwd}` : `${cli}|${cwd}|${normalized}`;
 }
 
@@ -2926,7 +3310,7 @@ export type AnySession = ClaudeSession | PiSession | AgySession | CodexSession |
  *  the agy subscription lane (Google Antigravity CLI, agy-runner.ts). */
 export type LaneSession = ClaudeSession | PiSession | AgySession;
 
-export async function getOrCreateSession(opts: {
+async function getOrCreateSessionUnlocked(opts: {
   cli: CliKind;
   repoPath: string;
   chatId?: string;
@@ -2939,26 +3323,104 @@ export async function getOrCreateSession(opts: {
    *  that would SIGTERM the warm session each time. With 30-70s MCP startup the
    *  replacement never reaches init → the "asleep"/"no session" storm. */
   recycleOnMismatch?: boolean;
+  /** Internal recursion: serve the saved engine while Matt's switch is held. */
+  servingHeldSwitch?: boolean;
 }): Promise<AnySession> {
   assertSubscriptionLane(opts.cli);
   if (sessionsShuttingDown) throw new Error('TARDIS is shutting down');
-  const chatId = opts.chatId || 'main';
+  const chatId = isAgentThread(opts.chatId || '') ? bareChatId(opts.chatId!) : opts.chatId || 'main';
+  opts = { ...opts, chatId, repoPath: sessionDirectory(chatId, opts.repoPath) };
   if (isThreadResetting({ cli: opts.cli, repoPath: opts.repoPath, chatId })) {
     throw new Error('This thread is being reset — retry in a moment.');
   }
   const finishLookup = beginSessionLookup(trackedThreadLogKey({ ...opts, chatId }));
+  const handedSources = new Set<ClaudeSession>();
+  const handoverRevisions = new Map<ClaudeSession, number>();
+  const markHandover = (source: ClaudeSession) => {
+    if (!handoverRevisions.has(source)) handoverRevisions.set(source, source.nativeHandoverRevision());
+    source.setNativeHandoverPending(true);
+    handedSources.add(source);
+    const sources = nativeHandovers.get(source.logKey) ?? new Set<ClaudeSession>();
+    sources.add(source);
+    nativeHandovers.set(source.logKey, sources);
+  };
+  const compactForHandover = async (source: ClaudeSession) => {
+    markHandover(source);
+    await source.compactNative();
+    if (isThreadResetting(opts)) throw new Error('Native handover canceled by Matt’s Fresh thread.');
+  };
   try {
+  if (isAgentThread(chatId)) {
+    const requestedCodex = opts.cli === 'codex' || opts.cli === 'codex-personal';
+    const otherEngineId = await getSessionId(requestedCodex ? 'claude' : 'codex', opts.repoPath, chatId);
+    if (otherEngineId && !opts.servingHeldSwitch) {
+      const switchKey = `${opts.cli}|${opts.model || ''}|${otherEngineId}`;
+      if (heldEngineSwitches.get(chatId) !== switchKey) {
+        heldEngineSwitches.set(chatId, switchKey);
+        recordNativeNotice(chatId, requestedCodex ? 'codex' : 'claude-code', 'Cross-engine switch involving Codex is held for Matt’s pending handover choice. Existing sessions and queued work are retained.');
+      }
+      const previous = await nativeSessionProvenance(requestedCodex ? 'claude' : 'codex', opts.repoPath, chatId);
+      const live = peekThreadSession(opts);
+      const savedCli = previous?.cli ?? live?.cli;
+      if (!savedCli) {
+        throw new Error('The engine switch is held because the saved session has no proven account selection. Its ID and queued messages are retained; Max can repair the saved CLI without clearing the chat.');
+      }
+      const source = live?.cli === savedCli ? live : await getOrCreateSessionUnlocked({ ...opts, cli: savedCli,
+        model: previous?.model, effort: previous?.effort, recycleOnMismatch: false, servingHeldSwitch: true });
+      if (source instanceof CodexSession) source.holdSelection(previous ?? {});
+      return source;
+    }
+    if (!opts.servingHeldSwitch) heldEngineSwitches.delete(chatId);
+    if (isClaudeFamilyCli(opts.cli)) {
+      const logKey = logKeyFor(opts.cli, opts.repoPath, chatId);
+      let handedOver = false;
+      for (const [sourceKey, source] of [...sessions]) {
+        if (source.cli === opts.cli || source.logKey !== logKey || !source.isAlive()) continue;
+        if (!(source instanceof ClaudeSession)) return source;
+        // The running turn remains the one place Matt can steer. A changed
+        // provider applies at its boundary, never as a second process.
+        if (source.isBusy()) return source;
+        await compactForHandover(source);
+        source.shutdown('native provider switch', 'model');
+        await waitForChildExit(source, 5_000);
+        if (!source.processExited()) throw new Error('The previous provider is still stopping; its native session is retained.');
+        if (sessions.get(sourceKey) === source) sessions.delete(sourceKey);
+        handedOver = true;
+      }
+      if (handedOver) await setSessionSelection(opts.cli, opts.repoPath, { model: resolveClaudeModel(opts.cli, opts.model), effort: opts.effort }, chatId);
+      const previous = await nativeSessionProvenance(opts.cli, opts.repoPath, chatId);
+      const wanted = resolveClaudeModel(opts.cli, opts.model);
+      if (previous?.sessionId && previous.cli && isClaudeFamilyCli(previous.cli)
+          && (previous.cli !== opts.cli || (previous.model && previous.model !== wanted && !['claude', 'assistant'].includes(opts.cli)
+            && (opts.recycleOnMismatch === true || !sessions.has(keyOf(opts.cli, opts.repoPath, chatId)))))) {
+        const sourceKey = keyOf(previous.cli, opts.repoPath, chatId);
+        // This also covers a model switch immediately after a service restart.
+        const source = await getOrCreateSessionUnlocked({ ...opts, cli: previous.cli, model: previous.model, effort: previous.effort, recycleOnMismatch: false });
+        if (!(source instanceof ClaudeSession) || source.isBusy()) return source;
+        await compactForHandover(source);
+        source.shutdown('native model handover', 'model');
+        await waitForChildExit(source, 5_000);
+        if (!source.processExited()) throw new Error('The previous model is still stopping; its native session is retained.');
+        if (sessions.get(sourceKey) === source) sessions.delete(sourceKey);
+        // Mark the intended provider only after the old engine has compacted.
+        await setSessionSelection(opts.cli, opts.repoPath, { model: wanted, effort: opts.effort }, chatId);
+      }
+    }
+  }
   retireOtherEnginesOnThread(opts.cli, opts.repoPath, chatId);
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
-    return await getOrCreateCodexSession({
+    const session = await getOrCreateCodexSession({
       repoPath: opts.repoPath,
       chatId,
       cli: opts.cli,
     });
+    if (!opts.servingHeldSwitch) session.holdSelection(null);
+    return session;
   }
   if (opts.cli === 'banana' || opts.cli === 'banana-local' || opts.cli === 'banana-fireworks') {
     return await getOrCreateBananaSession({ repoPath: opts.repoPath, chatId, cli: opts.cli });
   }
+  if (opts.cli === 'openrouter' || opts.cli === 'openrouter2') await requireOpenRouterModel(resolveClaudeModel(opts.cli, opts.model));
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
   const wantModel = resolveClaudeModel(opts.cli, opts.model);
@@ -2981,17 +3443,6 @@ export async function getOrCreateSession(opts: {
     if (sessions.get(key) !== existing) continue;
     if (ok && existing.isAlive()) {
       await flushEventLog(existing.logKey);
-      const priorEngine = lastEngineOf(loadEventLogSync(existing.logKey).events);
-      if (!existing.isBusy() && priorEngine && priorEngine !== opts.cli) {
-        // This native session predates turns from another brain on the shared
-        // agent thread. Recreate it so the next turn seeds current context.
-        if (existing instanceof ClaudeSession) existing.shutdown('cross-engine context refresh', 'engine');
-        else existing.shutdown('cross-engine context refresh');
-        sessions.delete(key);
-        // The replacement reads the log from disk: land the kill note first.
-        await flushEventLog(existing.logKey);
-        continue;
-      }
       // A GLM child whose provider moved while it sat idle cannot be re-pointed
       // in place. Retire it here rather than waiting for its own failing turn,
       // so every lane picks up the switch — not just the one that hit the 429.
@@ -3020,8 +3471,11 @@ export async function getOrCreateSession(opts: {
         return existing;
       }
       if (!recyclable) return existing;
+      if (existing instanceof ClaudeSession && existing.spawnModel !== wantModel && !['claude', 'assistant'].includes(opts.cli)) await compactForHandover(existing);
       if (existing instanceof ClaudeSession) existing.shutdown('model/effort change', 'model');
       else existing.shutdown('model/effort change');
+      await waitForChildExit(existing, 5_000);
+      if (!existing.processExited()) throw new Error('The previous native worker is still stopping. Its saved session is retained.');
       sessions.delete(key);
       // The replacement reads the log from disk: land the kill note first.
       await flushEventLog(existing.logKey);
@@ -3030,7 +3484,7 @@ export async function getOrCreateSession(opts: {
     sessions.delete(key);
   }
 
-  if (opts.cli === 'xai' && !usePiHarness('xai')) {
+  if (opts.cli === 'xai') {
     // The xAI engine runs through a localhost transform proxy; never spawn
     // without it (an empty ANTHROPIC_BASE_URL would fall back to Anthropic and
     // leak the Grok credential to the wrong provider). Throws if the proxy
@@ -3050,9 +3504,63 @@ export async function getOrCreateSession(opts: {
     return await spawnSessionOnce(opts.cli, cwd, chatId, key, wantModel, wantEffort);
   }
   return spawned;
+  } catch (error) {
+    if ([...handoverRevisions].some(([source, revision]) => source.nativeHandoverRevision() !== revision)) throw error;
+    // The old provider may be out of quota or no longer serve the saved
+    // model. The selected provider can compact the exact same native Claude
+    // transcript; this is neither a new ID nor a TARDIS-written summary.
+    const previous = isAgentThread(chatId) && isClaudeFamilyCli(opts.cli)
+      ? await nativeSessionProvenance(opts.cli, opts.repoPath, chatId) : undefined;
+    const unavailable = [...handedSources].some(source => source.nativeProviderUnavailable())
+      || (previous?.cli && ['openrouter', 'openrouter2'].includes(previous.cli)
+        && /OpenRouter has no current context\/output limits|not (?:in|present in|available in).*catalog|catalog.*(?:missing|not found)/i.test(String((error as Error).message)));
+    const wanted = resolveClaudeModel(opts.cli, opts.model);
+    if (!unavailable || isThreadResetting(opts) || !previous?.sessionId || !previous.cli || !isClaudeFamilyCli(previous.cli)
+        || (previous.cli === opts.cli && previous.model === wanted)) throw error;
+    if (opts.cli === 'openrouter' || opts.cli === 'openrouter2') await requireOpenRouterModel(wanted);
+    for (const [sourceKey, source] of [...sessions]) {
+      if (source.logKey !== logKeyFor(opts.cli, opts.repoPath, chatId) || !(source instanceof ClaudeSession)) continue;
+      source.shutdown('unavailable provider handover', 'model');
+      await waitForChildExit(source, 5_000);
+      if (!source.processExited()) throw error;
+      if (sessions.get(sourceKey) === source) sessions.delete(sourceKey);
+    }
+    recordNativeNotice(chatId, 'claude-code', 'The old provider is unavailable; the selected provider is running native compaction on the same saved session.');
+    const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
+    const recovery = await spawnSessionOnce(opts.cli, cwd, chatId, keyOf(opts.cli, cwd, chatId), wanted, resolveClaudeEffort(opts.cli, opts.effort, wanted));
+    if (!(recovery instanceof ClaudeSession)) throw error;
+    markHandover(recovery);
+    try { await recovery.compactAfterProviderRecovery(); }
+    catch (recoveryError) {
+      recovery.shutdown('native provider recovery did not complete', 'model');
+      await waitForChildExit(recovery, 5_000);
+      await setSessionSelection(previous.cli, opts.repoPath, { model: previous.model, effort: previous.effort }, chatId);
+      throw recoveryError;
+    }
+    if (isThreadResetting(opts)) throw new Error('The handover was canceled; the native session is retained.');
+    return recovery;
   } finally {
+    for (const source of handedSources) {
+      const sources = nativeHandovers.get(source.logKey);
+      sources?.delete(source);
+      if (!sources?.size) nativeHandovers.delete(source.logKey);
+      source.setNativeHandoverPending(false);
+    }
     finishLookup();
   }
+}
+
+/** Serialize lane lookups across provider keys. A switch cannot race a
+ * handoff into two native processes for the same agent. */
+const nativeLookups = new Map<string, Promise<void>>();
+export async function getOrCreateSession(opts: Parameters<typeof getOrCreateSessionUnlocked>[0]): Promise<AnySession> {
+  const lane = isAgentThread(opts.chatId || '') ? bareChatId(opts.chatId!) : `${opts.repoPath}|${opts.chatId || 'main'}`;
+  const previous = nativeLookups.get(lane);
+  let release = () => {};
+  const held = new Promise<void>(resolve => { release = resolve; });
+  nativeLookups.set(lane, held);
+  try { if (previous) await previous; return await getOrCreateSessionUnlocked(opts); }
+  finally { release(); if (nativeLookups.get(lane) === held) nativeLookups.delete(lane); }
 }
 
 /** One live engine per thread.
@@ -3107,14 +3615,18 @@ export function peekClaudeSession(opts: {
   const key = keyOf(opts.cli, cwd, opts.chatId || 'main');
   const live = sessions.get(key);
   if (!live || !live.isAlive()) return null;
-  const priorEngine = lastEngineOf(loadEventLogSync(live.logKey).events);
-  if (!live.isBusy() && priorEngine && priorEngine !== opts.cli) {
-    if (live instanceof ClaudeSession) live.shutdown('cross-engine context refresh', 'engine');
-    else live.shutdown('cross-engine context refresh');
-    sessions.delete(key);
-    return null;
-  }
   return live;
+}
+
+/** Control paths attach directly and never wait for a native handover lock. */
+export function peekThreadSession(opts: { cli: CliKind; repoPath: string; chatId?: string }): AnySession | null {
+  const logKey = trackedThreadLogKey(opts);
+  for (const session of sessions.values()) if (session.logKey === logKey && session.isAlive()) return session;
+  for (const cli of ['codex', 'codex-personal'] as const) {
+    const session = peekCodexSession({ ...opts, cli });
+    if (session?.isAlive()) return session;
+  }
+  return null;
 }
 
 /** Durable event-log key for a lane - the same key its session would use, so a
@@ -3153,50 +3665,9 @@ async function spawnSessionOnce(
   if (inFlight) return inFlight;
   const spawnPromise = (async () => {
     const logKey = logKeyFor(cli, cwd, chatId);
-    let resumeId = (await getSessionId(cli, cwd, chatId)) ?? null;
-    let seedFirst = !resumeId;
-    await flushEventLog(logKey);
-    const restored = loadEventLogSync(logKey);
-    const durable = loadEventLogForCompactionSync(logKey);
-    const history = durable.length ? durable : restored.events;
-    // Who spoke last on this thread. On a model switch that is a DIFFERENT
-    // engine, and this engine's own native session id (if it kept one from an
-    // earlier stint) is stale by exactly the turns the other brain produced.
-    // Resuming it would silently drop them, so seed compact+50 from the shared
-    // thread log instead. Cross-engine resume is never attempted: that is what
-    // produced `No conversation found with session ID: <uuid>`.
-    const priorEngine = lastEngineOf(history);
-    const switchedFrom = priorEngine && priorEngine !== cli ? priorEngine : null;
-    const skipResume = shouldSkipEngineResume({
-      events: history,
-      cli,
-      cwd,
-      sessionId: resumeId,
-    });
-    // Right after a provider cut, only the native session still holds the cut
-    // turn's tool calls; reseeding from visible text would make the agent
-    // redo finished work. Same context the retired child had a moment ago.
-    const resumeAfterCut = Boolean(resumeId) && preferResumeAfterProviderCut(restored.events.filter((event) => (event.lane === 'bg') === isBackgroundChatId(chatId)));
-    if (switchedFrom) {
-      console.warn(
-        `[chat ${cli}] model switch on ${logKey}: ${switchedFrom} → ${cli} — seeding compact+50 from the thread log, not resuming`,
-      );
-      if (resumeId) await setSessionId(cli, cwd, '', chatId);
-      resumeId = null;
-      seedFirst = true;
-    } else if (resumeId && resumeAfterCut && (isRotationOwed(logKey) || skipResume)) {
-      console.warn(
-        `[chat ${cli}] provider cut on ${logKey}: resuming ${resumeId.slice(0, 8)} so the cut turn's tool history survives`,
-      );
-    } else if (resumeId && (isRotationOwed(logKey) || skipResume)) {
-      const why = isRotationOwed(logKey) ? 'overflow-compact owed' : 'seed compact+50 (do not replay jsonl/tool dump)';
-      console.warn(
-        `[chat ${cli}] ${why} — skipping resume ${resumeId.slice(0, 8)}… for ${logKey}`,
-      );
-      await setSessionId(cli, cwd, '', chatId);
-      resumeId = null;
-      seedFirst = true;
-    }
+    const resumeId = (await getSessionId(cli, cwd, chatId)) ?? null;
+    const seedFirst = !resumeId;
+    const switchedFrom = null;
     if (sessionsShuttingDown) throw new Error('TARDIS is shutting down');
     return spawnSession(cli, cwd, chatId, resumeId, key, 0, model, effort, seedFirst, switchedFrom);
   })();
@@ -3235,13 +3706,10 @@ async function spawnSession(
     );
   }
   assertMemoryAvailableForSpawn(cli);
-  // GLM and Grok run in the Pi harness by default: the persona is the whole
-  // system prompt there, and the providers are spoken to natively. The agy
-  // lane (Gemini on Matt's Google subscription) is its own runner.
+  await ensureNativeCompactProxy();
+  // Metered providers share Claude Code. Subscription engines retain their native runner.
   const session: LaneSession = cli === 'agy'
     ? new AgySession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort, model), seedFirst, switchedFrom)
-    : usePiHarness(cli)
-    ? new PiSession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort), seedFirst, switchedFrom)
     : new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, seedFirst, switchedFrom);
   sessions.set(key, session);
   notifySessionCreated(session.logKey, session);
@@ -3271,8 +3739,14 @@ async function spawnSession(
     // retry, so a hanging --conversation resume was retried forever with no
     // cooldown. It flows into the normal failure path: one fresh retry
     // without the resume id, then the breaker.
-    if (!readyTimedOut && (session.isDisposed() || sessionsShuttingDown)) {
+    if (!readyTimedOut && (session.isDisposed() || sessionsShuttingDown) && !session.hasResumeFailed()) {
       throw new Error('claude startup was intentionally cancelled');
+    }
+    if (resumeId && attempt === 0 && !sessionsShuttingDown && !resettingThreadLogs.has(logKeyFor(cli, cwd, chatId))) {
+      await waitForChildExit(session, 5_000);
+      if (!session.processExited()) throw new Error('The old native worker is still stopping. Its saved ID is retained.');
+      recordNativeFailure(chatId, cli, 'Native resume failed before admission; retrying once with the same saved session ID.');
+      return spawnSession(cli, cwd, chatId, resumeId, key, attempt + 1, model, effort, seedFirst, switchedFrom);
     }
     const owner = sessions.get(key);
     if (owner && owner !== session) {
@@ -3284,17 +3758,7 @@ async function spawnSession(
     // session before ready resolves. An empty slot is still ours to recover;
     // it is not evidence that another spawn superseded us.
     if (owner === session) sessions.delete(key);
-    // Recover from a stale persisted session id: drop it and retry without
-    // --resume. Only one retry — if even a fresh spawn dies before init,
-    // something else is wrong.
-    if (resumeId && attempt === 0) {
-      await setSessionId(cli, cwd, '', chatId); // clear the bad id
-      const replacement = sessions.get(key);
-      if (replacement) return replacement;
-      return spawnSession(
-        cli, cwd, chatId, null, key, attempt + 1, model, effort, true,
-      );
-    }
+    // A missing native session is surfaced; its saved id is never silently discarded.
     const priorFailure = spawnFailures.get(key);
     spawnFailures.set(key, {
       count: (priorFailure?.count ?? 0) + 1,
@@ -3306,110 +3770,7 @@ async function spawnSession(
   return session;
 }
 
-/** One automatic re-run after a failed native compact killed a live turn
- *  (card-bfdad5). The reseed already dropped the oversized native session and
- *  banked the rotation, so this waits for the dying child, then replays the
- *  turn's opening prompt on the fresh session exactly once: nobody has to
- *  send the message again. A re-run that fails again reports for a human
- *  instead of looping (the re-send carries the rerun marker, which cancels
- *  the next plan). */
-type CompactRerunJob = {
-  cli: CliKind;
-  cwd: string;
-  chatId: string;
-  logKey: string;
-  model: string;
-  effort: string;
-  text: string;
-  images?: Array<{ mediaType: string; base64: string }>;
-  /** The raw echo text and reply target of the original send (card-cbb4af,
-   *  verify P1 2), so the re-run's echo matches the first one and the client
-   *  dedupes by clientMsgId instead of adding a quoted duplicate bubble. */
-  echoText?: string;
-  replyTo?: { from: string; snippet: string };
-  clientMsgId?: string;
-  retiring: ClaudeSession;
-};
-const compactRerunJobs = new Set<CompactRerunJob>();
-/** How long the re-run failure notice waits for the lane to go idle before it
- *  is dropped. providerSwitch's NOTICE_IDLE_WAIT_MS (6h) is the precedent. */
 const COMPACT_RERUN_NOTICE_IDLE_WAIT_MS = 6 * 60 * 60_000;
-
-/** Post the re-run failure notice the way every other out-of-band terminal
- *  notice lands (providerSwitch.postProviderCutNotice is the precedent):
- *  through the live lane session once it is idle — it owns the seq allocator
- *  and its connected viewers — waiting for a running turn to end so the
- *  notice is never read as that turn failing, and otherwise durably to the
- *  log plus the external listeners for cold viewers. */
-async function postCompactRerunFailureNotice(job: CompactRerunJob, reason: string): Promise<void> {
-  try {
-    const event = {
-      type: '_terminal_error',
-      message: `TARDIS re-seeded this thread after the failed history shrink but could not re-run the message automatically (${reason}). Send it again.`,
-      code: 'compact_rerun_failed',
-    };
-    const deadline = Date.now() + COMPACT_RERUN_NOTICE_IDLE_WAIT_MS;
-    for (;;) {
-      const live = liveLaneSession(job.logKey, job.chatId);
-      if (!live?.isBusy()) {
-        if (live?.postNotice(event)) return;
-        break;
-      }
-      if (Date.now() >= deadline) {
-        console.warn(`[chat ${job.cli}] compact re-run failure notice on ${job.logKey} dropped: the thread never went idle`);
-        return;
-      }
-      await new Promise((resolve) => { const t = setTimeout(resolve, 250); t.unref?.(); });
-    }
-    const persisted = { ...laneTagFor(job.chatId), seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event' as const, event }, eng: job.cli, mdl: job.model };
-    const saved = appendEventLogDurable(job.logKey, persisted);
-    publishExternalThreadEvent(job.logKey, persisted);
-    await saved;
-  } catch { /* best effort */ }
-}
-
-function scheduleCompactRerun(job: CompactRerunJob): void {
-  // One per lane: a second failure while a re-run is still landing waits for
-  // that one instead of stacking a second replay of the same prompt.
-  for (const pending of compactRerunJobs) {
-    if (pending.logKey === job.logKey && pending.chatId === job.chatId) return;
-  }
-  compactRerunJobs.add(job);
-  console.warn(`[chat ${job.cli}] native compact failed on ${job.logKey}; re-seeding and re-running the message automatically`);
-  void (async () => {
-    try {
-      // Wait for the reseeded child to die (its shutdown already SIGKILLs after
-      // its grace), so two processes never hold the same thread.
-      const started = Date.now();
-      while (!job.retiring.processExited() && Date.now() - started < 15_000) {
-        await new Promise((resolve) => { const t = setTimeout(resolve, 250); t.unref?.(); });
-      }
-      if (!job.retiring.processExited()) throw new Error('the old engine had not exited after the reseed');
-      const session = await getOrCreateSession({
-        cli: job.cli,
-        repoPath: job.cwd,
-        chatId: job.chatId,
-        model: job.model,
-        effort: job.effort,
-      });
-      await session.send(job.text, job.images, {
-        compactRerun: true,
-        ...(job.echoText !== undefined ? { echoText: job.echoText } : {}),
-        ...(job.replyTo ? { replyTo: job.replyTo } : {}),
-        ...(job.clientMsgId ? { clientMsgId: job.clientMsgId } : {}),
-      });
-    } catch (err) {
-      console.warn(`[chat ${job.cli}] automatic re-run after the failed compact did not land:`, (err as Error).message);
-      // The re-run is finished and failed, so free the lane's dedupe key now:
-      // a new compact failure while the notice below waits must still get its
-      // own re-run instead of folding into this dead one.
-      compactRerunJobs.delete(job);
-      await postCompactRerunFailureNotice(job, (err as Error).message);
-    } finally {
-      compactRerunJobs.delete(job);
-    }
-  })();
-}
 
 type UsageFallbackJob = {
   cwd: string;
@@ -3575,12 +3936,13 @@ export type LiveSession = {
    *  (Claude, Codex, banana); absent when idle or unknown. Per-turn, so a
    *  chained sequence of short turns never looks like one long turn. */
   busySince?: number;
+  activity?: LiveActivity;
   /** Background tasks running inside the process (Claude lanes only). A
    *  restart ends them, so deploys check this alongside busy turns. */
   backgroundTasks?: string[];
 };
 
-export function activeClaudeSessions(): LiveSession[] {
+export function activeClaudeSessions(includeActivity = false): LiveSession[] {
   const out: LiveSession[] = [];
   for (const s of sessions.values()) {
     out.push({
@@ -3591,6 +3953,7 @@ export function activeClaudeSessions(): LiveSession[] {
       sessionId: s.sessionId(),
       lastActivityAt: s.lastActivityAt(),
       busySince: s.activeTurnStartedAt() ?? undefined,
+      activity: includeActivity ? sessionLiveActivity(s) : undefined,
       ...(s instanceof ClaudeSession && s.hasBackgroundWork() ? { backgroundTasks: s.backgroundWork() } : {}),
     });
   }
@@ -3719,6 +4082,14 @@ export async function interruptSession(opts: { cli: CliKind; repoPath: string; c
     const keptWarm = await s.interrupt('interruptSession');
     if (!keptWarm && sessions.get(laneKey) === s) sessions.delete(laneKey);
   };
+  if (isAgentThread(chatId)) {
+    const { interruptCodex } = await import('./codex-runner.ts');
+    await Promise.all([
+      ...[...sessions].filter(([, s]) => s.logKey === logKey).map(stopLane),
+      ...(['codex', 'codex-personal'] as const).map(cli => interruptCodex({ repoPath: sessionDirectory(chatId, opts.repoPath), chatId, cli })),
+    ]);
+    return;
+  }
   // Stop on a thread stops both of its lanes, whatever engine the home lane runs.
   const stopBackground = Promise.all(backgroundSiblings(logKey, chatId).map(stopLane));
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {

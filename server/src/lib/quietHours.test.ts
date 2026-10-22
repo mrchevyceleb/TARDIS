@@ -4,7 +4,9 @@ import {
   etHour,
   inQuietHours,
   isMaxLane,
+  isQuietExemptLane,
   isQuietExemptWork,
+  isSamwiseLane,
   lastQuietEndMs,
   lastQuietStartMs,
   msUntilQuietEnd,
@@ -60,6 +62,25 @@ test('Max lanes are exempt, everything else holds', () => {
   assert.equal(isMaxLane('naomi'), false);
   assert.equal(isMaxLane(undefined), false);
   assert.equal(isMaxLane(null), false);
+});
+
+test('Samwise is the one teammate exempt from quiet hours; nobody else moves', () => {
+  assert.equal(isSamwiseLane('samwise'), true);
+  assert.equal(isSamwiseLane('chief-of-staff'), false);
+  assert.equal(isQuietExemptLane('samwise'), true);
+  assert.equal(isQuietExemptLane('chief-of-staff'), true);
+  assert.equal(isQuietExemptLane('max-voice'), true);
+  assert.equal(isQuietExemptLane('naomi'), false);
+  assert.equal(isQuietExemptLane('jessica'), false);
+  assert.equal(isQuietExemptLane(undefined), false);
+});
+
+test('Samwise lane work is exempt overnight even with no exempt wake', () => {
+  resetQuietExemptWakes();
+  const tonightNow = et('2026-10-15T23:30');
+  assert.equal(isQuietExemptWork('samwise', et('2026-10-15T22:05'), tonightNow), true);
+  assert.equal(isQuietExemptWork('jessica', et('2026-10-15T22:05'), tonightNow), false);
+  resetQuietExemptWakes();
 });
 
 test('isQuietExemptWork requires an exempt wake inside the current quiet window', () => {

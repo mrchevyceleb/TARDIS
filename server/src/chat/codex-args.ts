@@ -11,7 +11,7 @@ export function buildCodexAppServerArgs(mcpArgs: readonly string[]): string[] {
     'app-server',
     '--listen', 'stdio://',
     ...codexRivendellIsolationArgs(),
-    '-c', 'model_auto_compact_token_limit=200000',
+    '-c', 'model_auto_compact_token_limit=300000',
     '-c', 'model_auto_compact_token_limit_scope="total"',
     ...mcpArgs,
   ];

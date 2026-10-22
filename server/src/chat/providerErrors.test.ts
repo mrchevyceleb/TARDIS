@@ -1,6 +1,36 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isSyntheticApiErrorText, syntheticApiErrorReason, terminalExecutionError, terminalProviderError } from './providerErrors.ts';
+import { isContextLengthRejection, isSyntheticApiErrorText, syntheticApiErrorReason, terminalExecutionError, terminalProviderError } from './providerErrors.ts';
+
+test('every provider family\'s context-length wording is caught, output caps are not', () => {
+  // Oct 20: OpenRouter's "exceeds the model's context window" slipped past the
+  // old list and the runner never reseeded, so a lane died on every message.
+  for (const detail of [
+    'This endpoint\'s maximum context length is 16384 tokens. However, you requested about 20000 tokens.',
+    'prompt is too long: 1050000 tokens > 1048576 maximum',
+    'This model\'s context window was exceeded',
+    'The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).',
+    'Input length (12345) exceeds the maximum length (4096)',
+    'Please reduce the length of the messages or completion.',
+    'The maximum prompt length is 131072 but the prompt is longer.',
+    'Codex ran out of room in the model\'s context window. Start a new conversation.',
+    'context_length_exceeded',
+    'Input too long',
+    'too many input tokens',
+    // Review P2 (Oct 20): these two wordings slipped the list entirely.
+    'context limit exceeded',
+    'input tokens exceed the configured limit',
+  ]) {
+    assert.equal(isContextLengthRejection(detail), true, detail);
+  }
+  // An output-cap error is a different recovery and must not reseed.
+  assert.equal(isContextLengthRejection('exceeded the 32000 output token maximum'), false);
+  assert.equal(isContextLengthRejection('the model produced invalid JSON twice'), false);
+  // Review P2 (Oct 20): prose that merely mentions the window, and
+  // output-subject wording, must not match.
+  assert.equal(isContextLengthRejection('The context window is full of useful details'), false);
+  assert.equal(isContextLengthRejection('Requested output exceeds the model context window.'), false);
+});
 
 test('xAI capacity errors are not mislabeled as account rate limits', () => {
   const error = terminalProviderError('xai', {

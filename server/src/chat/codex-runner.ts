@@ -1,3 +1,6 @@
+import { recordNativeCall, recordNativeSession, recordNativeCompact, recordNativeFailure } from './sessionMetrics.ts';
+import { prepareSessionStateDelta, resetSessionStateDelta } from './sessionContext.ts';
+import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 import { execFileSync, type ChildProcess, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
@@ -17,12 +20,13 @@ import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './
 import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeqWithStatus, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
-import { isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
+import { isAgentThread, bareChatId, isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
+import { sessionDirectory, sessionPolicy, sessionSkills, sessionMemory } from './sessionPolicy.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateEnv } from './longCallGate.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
-import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
+import { wellFormedText } from '../lib/wellFormed.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
@@ -251,6 +255,9 @@ export class CodexSession {
   readonly cli: CliKind;
   readonly cwd: string;
   readonly chatId: string;
+  // A timed-out receipt is ambiguous, not permission to submit the same input twice.
+  // Keep the guard across worker replacement using the durable submission event.
+  private submittedPeerDeliveries = new Set<string>();
   private listeners = new Set<Listener>();
   private subscriberCount = 0;
   private threadId: string | null = null;
@@ -260,6 +267,11 @@ export class CodexSession {
    *  must never resurrect one — shutdown passes this set. */
   private readonly invalidatedThreadIds = new Set<string>();
   private contextMaintenance: Promise<void> | null = null;
+  private heldSelection: { model?: string; effort?: string } | null = null;
+  private startMemory: string | undefined;
+
+  /** A pending cross-engine choice must not apply the other engine's model. */
+  holdSelection(selection: { model?: string; effort?: string } | null): void { this.heldSelection = selection; }
 
   private consumeWindowSeed(): boolean {
     return this.seedWindowOnNextTurn;
@@ -273,79 +285,6 @@ export class CodexSession {
     return clearRotation(this.logKey);
   }
 
-  /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
-  private async rotateContextAtBoundary(): Promise<void> {
-    if (!contextRotationDue(this.logKey) || this.busy || this.dead) return;
-    const refreshed = await refreshCompactForRotation({
-      key: this.logKey, cli: this.cli, chatId: this.chatId, events: this.eventLog,
-      isBusy: () => this.busy || this.dead, emit: (ev) => this.emit(ev as any), rotate: () => false,
-    });
-    if (!refreshed || this.busy || this.dead) return;
-    // Tombstone synchronously BEFORE the awaited clear: a shutdown landing
-    // during setSessionId must not resurrect the id this rotation is dropping
-    // (the recovery excludes tombstoned ids, and the dead-return below can no
-    // longer skip the tombstone).
-    this.invalidateThreadId();
-    await setSessionId(this.cli, this.cwd, '', this.chatId);
-    if (this.dead) return;
-    this.seedWindowOnNextTurn = true;
-    bankRotation(this.logKey);
-    recordContextRotation(this.logKey);
-  }
-
-  /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
-  private async maybeCompact(): Promise<void> {
-    try {
-      await maybeAutoCompact({
-        key: this.logKey,
-        cli: this.cli,
-        chatId: this.chatId,
-        events: this.eventLog,
-        // busy || dead: the delivery-path probe can start a fold that outlives
-        // this session, and shutdown clears busy — a replaced instance must
-        // keep reading as busy or its rotate can fire after the fact.
-        isBusy: () => this.busy || this.dead,
-        emit: (ev) => this.emit(ev as any),
-        rotate: async () => {
-          // Same outlive risk: a dead instance must never mutate thread or
-          // persisted session state — the clear would wipe the id the
-          // replacement session now owns. Every supersede path (engine
-          // switch, idle prune, interrupt, shutdown-all) sets dead first.
-          if (this.dead) return false;
-          this.seedWindowOnNextTurn = true;
-          this.invalidateThreadId();
-          await setSessionId(this.cli, this.cwd, '', this.chatId);
-          if (this.dead) return false;
-          bankRotation(this.logKey);
-          return false;
-        },
-      });
-    } catch (err) {
-      console.warn(`[chat ${this.cli}] compaction check failed for ${this.logKey}:`, (err as Error).message);
-    }
-  }
-  /** A wedged marathon turn never exits cleanly, so the turn-end hook never
-   *  fires and the lane's rolling memory freezes (Oct 14: one live turn, zero
-   *  turn ends for five hours while every team delivery steered into it).
-   *  Each accepted delivery probes the compaction at most once per
-   *  DELIVERY_COMPACT_PROBE_MS. The probe runs the same maybeCompact the
-   *  turn-end hook runs, so every guard (busy lanes defer owed rotations,
-   *  the overflow gate, in-flight serialization) applies unchanged. */
-  private lastDeliveryCompactProbeMs = 0;
-  private probeCompactFromDeliveryPath(): void {
-    // Monotonic on purpose: a wall-clock correction must not stretch the
-    // window (recreating the starvation) or shrink it (probe storms).
-    const now = performance.now();
-    if (now - this.lastDeliveryCompactProbeMs < DELIVERY_COMPACT_PROBE_MS) return;
-    this.lastDeliveryCompactProbeMs = now;
-    // An accepted delivery is real input pressure on this lane even though it
-    // never becomes a user turn: note one pressure unit per probe window (the
-    // limiter above is the rate bound) so the compaction counter tracks
-    // delivery-heavy lanes instead of freezing for days (Oct 14: two days of
-    // team deliveries left userTurnsTotal unmoved while the lane worked).
-    noteUserTurn(this.logKey);
-    void this.maybeCompact();
-  }
   private busy = false;
   /** When the active turn opened (ms), for the client's elapsed timer on
    *  reattach (register.ts ready payload); meaningful only while busy. */
@@ -354,6 +293,10 @@ export class CodexSession {
   private currentChild: ChildProcess | null = null;
   /** True after app-server announces turn/started and until turn/completed. */
   private nativeSteerReady = false;
+  private harnessChars = 0;
+  private harnessPhase: 'startup' | 'turn' = 'startup';
+  private resumedNative = false;
+  private lastNativeInput = 0;
   private nativeSteerWaiters = new Map<string, NativeSteerWaiter>();
   /** Has the person's message got visible text yet; see replyNudge.ts. */
   private readonly replyWatch: ReplyWatch;
@@ -377,6 +320,7 @@ export class CodexSession {
   constructor(cwd: string, chatId: string, threadId: string | null, opts: CodexSessionOptions = {}) {
     this.cwd = cwd;
     this.chatId = chatId;
+    this.resumedNative = Boolean(threadId);
     this.cli = opts.cli ?? 'codex';
     this.key = keyOf(this.cli, cwd, chatId);
     this.logKey = logKeyFor(this.cli, cwd, chatId);
@@ -400,42 +344,16 @@ export class CodexSession {
     } catch (err) {
       console.warn(`[chat codex] event-log restore failed for ${this.logKey}:`, (err as Error).message);
     }
-    // A different brain spoke last on this thread: its rollout is not ours to
-    // resume, so seed compact+50 from the COMPLETE shared log and mark the
-    // handover. The 2,000-event replay tail can contain less than one tool-heavy
-    // turn and is not a safe continuity source.
-    const durableHistory = opts.durableHistory ?? loadEventLogForCompactionSync(this.logKey);
-    const history = durableHistory.length ? durableHistory : this.eventLog;
-    const priorEngine = lastEngineOf(history);
-    const switchedFrom = priorEngine && priorEngine !== this.cli ? priorEngine : null;
-    if (switchedFrom) {
-      this.seedWindowOnNextTurn = true;
-      this.invalidateThreadId();
-      this.recoverContextOnNextTurn = true;
-      void this.clearPersistedThreadId();
-      console.warn(
-        `[chat codex] model switch on ${this.logKey}: ${switchedFrom} → ${this.cli} — seeding compact+50 from the thread log`,
-      );
-      this.emit({
-        type: 'event',
-        event: { type: '_engine_switch', from: switchedFrom, to: this.cli, ts: Date.now() },
-      } as SessionEvent);
+    for (const row of loadEventLogForCompactionSync(this.logKey)) {
+      const event = row.ev.type === 'event' ? row.ev.event : null;
+      if (typeof event?.deliveryId !== 'string') continue;
+      if (event.type === 'peer_delivery_submitted') this.submittedPeerDeliveries.add(event.deliveryId);
+      if (event.type === 'peer_delivery_released') this.submittedPeerDeliveries.delete(event.deliveryId);
     }
-    // Never exec-resume a rollout jsonl (tool novels). Seed compact(history − last50) + last 50.
-    const visible = extractVisibleTurns(history);
-    if (!switchedFrom && (isRotationOwed(this.logKey) || visible.length > WINDOW_TURNS)) {
-      this.seedWindowOnNextTurn = true;
-      this.invalidateThreadId();
-      this.recoverContextOnNextTurn = true;
-      void this.clearPersistedThreadId();
-      console.warn(
-        `[chat codex] seeding compact+50 for ${this.logKey} (visible=${visible.length}, owed=${isRotationOwed(this.logKey)}) — will not exec-resume a rollout dump`,
-      );
-    } else if (!switchedFrom && !this.threadId && this.eventLog.length > 0) {
-      this.recoverContextOnNextTurn = true;
-      console.warn(`[chat codex] no saved thread id for ${this.logKey}; will recover context from event log on next turn`);
-    }
-    void compactEventLog(this.logKey, compactedThroughSeq(this.logKey));
+    // Native thread history is authoritative. The generation gate in sessions.ts
+    // permits one cutover; ordinary process replacement always resumes the id.
+    this.recoverContextOnNextTurn = !this.threadId;
+
   }
 
   subscribe(fn: Listener, sinceSeq = -1, countSubscriber = true): () => void {
@@ -518,7 +436,7 @@ export class CodexSession {
   private sendNativeSteer(text: string, requestId: string): Promise<void> {
     const child = this.currentChild;
     if (!this.canAcceptNativeHumanSteer() || !child?.stdin) {
-      return Promise.reject(new Error('the active Codex turn closed before steering'));
+      return Promise.reject(Object.assign(new Error('the active Codex turn closed before steering'), { notAdmitted: true }));
     }
     const existing = this.nativeSteerWaiters.get(requestId);
     if (existing) {
@@ -531,7 +449,10 @@ export class CodexSession {
     }
     return new Promise((resolve, reject) => {
       this.nativeSteerWaiters.set(requestId, { resolve, reject });
-      child.stdin!.write(`${JSON.stringify({ type: 'steer', requestId, text })}\n`, (error) => {
+      // Well-form the text at the transport boundary: app-server's JSONRPC
+      // deserializer rejects the whole message on a lone surrogate, which
+      // would fail this steer (and every retry) instead of delivering it.
+      child.stdin!.write(`${JSON.stringify({ type: 'steer', requestId, text: wellFormedText(text) })}\n`, (error) => {
         if (error) this.settleNativeSteer(requestId, error);
       });
     });
@@ -587,6 +508,7 @@ export class CodexSession {
   private invalidateThreadId(): void {
     if (this.threadId) this.invalidatedThreadIds.add(this.threadId);
     this.threadId = null;
+    this.startMemory = undefined;
   }
 
   private clearPersistedThreadId(): Promise<void> {
@@ -609,9 +531,30 @@ export class CodexSession {
     this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
   }
 
+  private submitPeerDelivery(deliveryId: string): boolean {
+    if (this.submittedPeerDeliveries.has(deliveryId)) {
+      this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, terminal: true, message: 'The earlier submission has no definite receipt. Automatic replay stopped to prevent a duplicate; the original handoff is retained in the failure notice.', ts: Date.now() } });
+      return false;
+    }
+    this.emit({ type: 'event', event: { type: 'peer_delivery_submitted', deliveryId, ts: Date.now() } });
+    this.submittedPeerDeliveries.add(deliveryId);
+    return true;
+  }
+
+  private releasePeerDelivery(deliveryId: string, message: string): void {
+    // The durable release must precede making this ID eligible for another write.
+    this.emit({ type: 'event', event: { type: 'peer_delivery_released', deliveryId, message, ts: Date.now() } });
+    this.submittedPeerDeliveries.delete(deliveryId);
+    this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, message, ts: Date.now() } });
+  }
+
   async send(text: string, images?: ChatImage[], opts: CodexSendOptions = {}): Promise<void> {
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
+    if (opts.peerDeliveryId && this.submittedPeerDeliveries.has(opts.peerDeliveryId)) {
+      this.submitPeerDelivery(opts.peerDeliveryId);
+      return;
+    }
     if (this.busy) {
       const nativeSteerAllowed = opts.peerFrom
         ? opts.allowNativePeerSteer === true
@@ -626,7 +569,7 @@ export class CodexSession {
           // so the caller rejects the steer honestly.
           throw new Error('Codex is still answering. Queue guidance or wait for the current turn.');
         }
-        return;
+        throw new Error('Codex is still answering; this handoff remains queued for its next turn.');
       }
       if (!this.canAcceptNativeHumanSteer()) {
         throw new Error('the active Codex steer channel closed before delivery');
@@ -650,13 +593,19 @@ export class CodexSession {
           : `${text}\n\n[Matt attached ${images.length === 1 ? 'a screenshot' : 'screenshots'} that could not be saved. Ask him to resend if it matters.]`;
       }
 
-      // Matt's Priorities ride steers too, read fresh.
-      const steerPriorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
-      if (steerPriorities) steerText = `${steerPriorities}\n\n${steerText}`;
-      await this.sendNativeSteer(
-        steerText,
-        opts.peerDeliveryId ?? opts.clientMsgId ?? randomUUID(),
-      );
+      const steerState = await prepareSessionStateDelta(this.chatId);
+      const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', true, true);
+      steerText += `\n\n${computerContext}${steerState.text ? `\n\n${steerState.text}` : ''}`;
+      if (opts.peerDeliveryId && !this.submitPeerDelivery(opts.peerDeliveryId)) return;
+      try {
+        await this.sendNativeSteer(steerText, opts.peerDeliveryId ?? opts.clientMsgId ?? randomUUID());
+      } catch (error) {
+        if (opts.peerDeliveryId && (error as Error & { notAdmitted?: boolean }).notAdmitted === true) {
+          this.releasePeerDelivery(opts.peerDeliveryId, (error as Error).message);
+        }
+        throw error;
+      }
+      steerState.accept();
       // Echo only after app-server accepted turn/steer. This is the same durable
       // admission contract used for a brand-new turn, without a fake turnStart.
       if (opts.peerFrom) {
@@ -664,6 +613,7 @@ export class CodexSession {
           type: 'event',
           event: {
             type: 'peer_message',
+            startsTurn: false,
             from: opts.peerFrom,
             fromRole: opts.peerFromRole ?? '',
             text: opts.peerText !== undefined ? opts.peerText : text,
@@ -677,13 +627,12 @@ export class CodexSession {
             type: 'event',
             event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() },
           });
-          this.probeCompactFromDeliveryPath();
-        }
+              }
       } else {
         this.emit({
           type: 'event',
           event: {
-            type: '_user_echo',
+            type: '_user_echo', startsTurn: false,
             text: opts.echoText ?? text,
             imageCount: images?.length ?? 0,
             attachments: steerAttachments,
@@ -699,9 +648,14 @@ export class CodexSession {
       }
       return;
     }
+    // Required operator briefs must resolve before claiming or echoing a turn.
+    // The native developer instructions are rebuilt on start/resume and compact.
+    const memory = this.startMemory ?? sessionMemory(this.chatId);
+    const personaScope = [personaPromptFor(this.chatId, memory), CODEX_TURN_PREAMBLE].filter(Boolean).join('\n\n');
+    this.startMemory = memory;
     const { model: codexModel, effort: codexEffort } = resolveCodexSelection(
-      opts.model,
-      opts.effort,
+      this.heldSelection ? this.heldSelection.model : opts.model,
+      this.heldSelection ? this.heldSelection.effort : opts.effort,
     );
     this.turnModel = codexModel;
     this.turnEffort = codexEffort;
@@ -720,17 +674,9 @@ export class CodexSession {
     }
     if (opts.peerFrom && !opts.suppressEcho) {
       this.emit({ type: 'turnStart' });
-      this.emit({
-        type: 'event',
-        event: {
-          type: 'peer_message',
-          from: opts.peerFrom,
-          fromRole: opts.peerFromRole ?? '',
-          text: opts.peerText !== undefined ? opts.peerText : text,
-          ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}),
-          ts: Date.now(),
-        },
-      });
+      // The visible peer echo waits for turn.started (see the stdout handler):
+      // a turn that never starts (transport reject, spawn failure) must leave
+      // no phantom bubble for the next delivery attempt to duplicate.
       if (isPersonMessage(opts)) this.replyWatch.arm();
     } else if (!opts.suppressEcho) {
       let attachments: Array<{ id: string; mediaType: string }>;
@@ -752,7 +698,7 @@ export class CodexSession {
       try {
         this.emit({
           type: 'event',
-          event: { type: '_user_echo', text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
+          event: { type: '_user_echo', startsTurn: true, text: opts.echoText ?? text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, humanOrigin: opts.humanOrigin === true, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}), ts: Date.now() },
         });
       } catch (error) {
         this.busy = false;
@@ -833,24 +779,6 @@ export class CodexSession {
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
       return;
     }
-    // Resuming a rollout codex no longer has fails the whole turn with "no
-    // rollout found for thread id …" before the model sees the prompt. Check
-    // first: an unresumable thread becomes a fresh one seeded with the compact
-    // window, which costs context rather than the answer.
-    if (this.threadId && (await codexRolloutMissing(codexHomeFor(childEnv), this.threadId))) {
-      const unresumable = this.threadId;
-      // Tombstone the cleared id: shutdown's event-log recovery must never
-      // resurrect it (the fresh turn may fail before minting a new session
-      // id, and the old id's turnEnd/init events still sit in the log).
-      this.invalidatedThreadIds.add(unresumable);
-      // Drops the in-memory id synchronously; a failed write is not worth
-      // wedging a busy lane over, and the next turn re-checks the rollout.
-      await this.clearPersistedThreadId().catch(() => undefined);
-      this.seedWindowOnNextTurn = true;
-      console.warn(
-        `[chat codex] no rollout for thread ${unresumable} on ${this.logKey} — starting a fresh thread and seeding the window`,
-      );
-    }
     const hasSeedOverride = typeof opts.seedOverride === 'string';
     const seedWindow = !hasSeedOverride && (this.consumeWindowSeed() || recoverContextThisTurn);
     // The primer reports whether its commitments half is CONFIRMED: an empty
@@ -888,12 +816,11 @@ export class CodexSession {
     } else if (recoverContextThisTurn) {
       this.recoverContextOnNextTurn = false;
     }
-    const personaScope = personaPromptFor(this.chatId);
-    const conversationGuidance = conversationGuidanceForTurn({
+    const conversationGuidance = !this.threadId || opts.peerFromRole === 'voice' ? conversationGuidanceForTurn({
       chatId: this.chatId, logKey: this.logKey, historyThroughSeq,
       peerFrom: opts.peerFrom,
       peerFromRole: opts.peerFromRole,
-    });
+    }) : '';
     // Auto-recall: recorded knowledge in front of every new human or teammate
     // turn; automation deliveries never spend the search (the reply nudge
     // rides the steer path and never reaches here).
@@ -904,8 +831,19 @@ export class CodexSession {
       this.busy = false;
       return;
     }
-    const priorities = prioritiesBlockFor(sessionAgent?.id);
-    const prompt = `${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, !(seedWindow || hasSeedOverride))}\n\n${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
+    const stateDelta = await prepareSessionStateDelta(this.chatId);
+    const priorities = stateDelta.text;
+    const prompt = [
+      priorities,
+      computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, Boolean(this.threadId)),
+      seed,
+      conversationGuidance,
+      recall,
+      opts.voiceMode ? THREAD_VOICE_STYLE_ADDENDUM : '',
+      text,
+    ].filter(Boolean).join('\n\n');
+    this.harnessChars = Math.max(0, prompt.length - text.length);
+    this.harnessPhase = this.threadId ? 'turn' : 'startup';
     // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
     // -c overrides rather than written into ~/.codex/config.toml so this stays
     // scoped to TARDIS.
@@ -979,6 +917,7 @@ export class CodexSession {
     let sawActionableItem = false;
     let sawTurnCompleted = false;
     let peerAdmissionSettled = false;
+    let peerEchoEmitted = false;
     let settlePeerAdmission: (accepted: boolean) => void = () => {};
     const peerAdmission = opts.peerDeliveryId
       ? new Promise<boolean>((resolve) => {
@@ -1021,20 +960,37 @@ export class CodexSession {
         if (ev?.type === 'rivendell.steer.rejected' && typeof ev.request_id === 'string') {
           this.settleNativeSteer(
             ev.request_id,
-            new Error(typeof ev.message === 'string' ? ev.message : 'Codex rejected same-turn steering'),
+            Object.assign(new Error(typeof ev.message === 'string' ? ev.message : 'Codex rejected same-turn steering'), { notAdmitted: ev.notAdmitted === true }),
           );
           return;
         }
         if (ev?.type === 'turn.started') {
           this.nativeSteerReady = true;
+          // The visible peer echo lands only now that the turn really
+          // started, so a failed start leaves no phantom row behind (the
+          // sender's retry used to write one bubble per attempt).
+          if (opts.peerFrom && !opts.suppressEcho && !peerEchoEmitted) {
+            peerEchoEmitted = true;
+            this.emit({
+              type: 'event',
+              event: {
+                type: 'peer_message',
+                startsTurn: true,
+                from: opts.peerFrom,
+                fromRole: opts.peerFromRole ?? '',
+                text: opts.peerText !== undefined ? opts.peerText : text,
+                ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}),
+                ts: Date.now(),
+              },
+            });
+          }
           if (opts.peerDeliveryId && !peerAdmissionSettled) {
             this.emit({
               type: 'event',
               event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() },
             });
             settlePeerAdmission(true);
-            this.probeCompactFromDeliveryPath();
-          }
+                  }
         }
         if (ev?.type === 'item.completed' && ev?.item?.type === 'agent_message') {
           producedAgentMessage = true;
@@ -1047,6 +1003,7 @@ export class CodexSession {
           sawActionableItem = true;
         }
         if (ev?.type === 'turn.completed') {
+          if (!ev.error) stateDelta.accept();
           sawTurnCompleted = true;
           this.nativeSteerReady = false;
         }
@@ -1139,133 +1096,34 @@ export class CodexSession {
       // Without an explicit error event the UI just drops out of "thinking".
       const emptyTurn =
         !producedAgentMessage && !transientProjectConfigError && (code !== 0 || !sawTurnCompleted);
-      const retryEmptyTurn = !opts.signal?.aborted && shouldRetryEmptyCodexTurn({
-        code,
-        signal,
-        producedAgentMessage,
-        sawActionableItem,
-        sawTurnCompleted,
-        stderr: stderrText,
-        transientProjectConfigError: Boolean(transientProjectConfigError),
-        retryDepth: opts.emptyRetryDepth ?? 0,
-      });
-      if (retryEmptyTurn) {
-        const failedThread = this.threadId;
-        this.invalidateThreadId();
-        await setSessionId(this.cli, this.cwd, '', this.chatId);
-        let retrySeed = seed;
-        let retryAvailable = seedAvailable;
-        // An unavailable primer is refetched even when nonempty (a partial
-        // primer: history without the commitments half), and never becomes
-        // a confirmed override: the window below stays open so the next
-        // turn retries the commitments half.
-        if (!retrySeed || !retryAvailable) {
-          const retryStatus = await peekEnginePrimerThroughSeqWithStatus(this.logKey, historyThroughSeq, fallbackHistory)
-            .catch(() => ({ primer: '', available: false }));
-          retrySeed = retryStatus.primer;
-          retryAvailable = retryStatus.available;
-        }
-        this.seedWindowOnNextTurn = !retryAvailable;
-        this.recoverContextOnNextTurn = false;
-        this.busy = false;
-        console.warn(`[chat codex] empty exit from ${failedThread ?? 'new thread'} — retrying once on a fresh thread`);
-        try {
-          await this.send(text, images, {
-            ...opts,
-            emptyRetryDepth: (opts.emptyRetryDepth ?? 0) + 1,
-            suppressEcho: true,
-            seedOverride: retrySeed,
-            seedOverrideAvailable: retryAvailable,
-            skipAttachments: true,
-          });
-        } catch (error) {
-          this.busy = false;
-          this.emit({ type: 'error', message: `Codex retry failed before starting: ${(error as Error).message}` });
-          this.emitClaudeEvent({
-            type: 'result',
-            subtype: 'error_during_execution',
-            is_error: true,
-            session_id: this.threadId ?? undefined,
-          });
-          this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
-        }
-        return;
+      const failedTurn = code !== 0 || emptyTurn;
+      const failureMessage = transientProjectConfigError || stderrText || (emptyTurn
+        ? 'Codex ended before returning an answer. The saved thread and queued messages were retained.'
+        : `Codex turn failed (${signal || code}). The saved thread was retained.`);
+      if (failedTurn) {
+        recordNativeFailure(this.chatId, 'codex', emptyTurn
+          ? 'Codex ended without an answer. Its saved thread and queued messages were retained.'
+          : 'Codex returned a failed turn. Its saved thread was retained; the turn error has the details.');
+        this.emit({ type: 'error', message: failureMessage });
       }
-      if (emptyTurn) {
-        const detail = stderrText
-          ? stderrText.slice(0, 500)
-          : `codex exit ${code ?? 'null'} with no agent message (thread ${this.threadId ?? 'new'})`;
-        this.emit({
-          type: 'error',
-          message:
-            code === 0
-              ? `Codex finished without a reply. ${detail}`
-              : `Codex failed before producing a reply. ${detail}`,
-        });
-      } else if (code !== 0 && !transientProjectConfigError && stderrText) {
-        // Non-empty stderr already emitted line-by-line above; if filtering ate
-        // everything, still leave a breadcrumb.
-        if (stderrChunks.length === 0) {
-          this.emit({
-            type: 'error',
-            message: `Codex exited ${code} without a delivered reply.`,
-          });
-        }
-      }
-      // Emit a result event so the front-end flips status back to 'ready'.
-      // Forward codex's per-turn token usage (captured from `turn.completed`)
-      // mapped to claude's field names so the same client-side meter works.
       this.emitClaudeEvent({
         type: 'result',
-        subtype: code === 0 ? 'success' : 'error_during_execution',
-        is_error: code !== 0,
+        subtype: failedTurn ? 'error_during_execution' : 'success',
+        is_error: failedTurn,
+        ...(failedTurn ? { result: failureMessage } : {}),
         session_id: this.threadId ?? undefined,
         usage: turnState.usage ?? undefined,
       });
-      if (emptyTurn && code !== 0) {
-        // Drop poisoned thread ids after empty hard-fails so the next send
-        // starts clean instead of resuming a corpse that keeps exiting 1.
-        // Do not go through persistThreadId('') — that would leave this.threadId as ''.
-        const deadThread = this.threadId;
-        this.invalidateThreadId();
-        await setSessionId(this.cli, this.cwd, '', this.chatId);
-        this.seedWindowOnNextTurn = true;
-        if (deadThread) {
-          console.warn(
-            `[chat codex] cleared poisoned thread ${deadThread} after empty exit ${code}`,
-          );
-        }
-      } else if (this.threadId) {
-        // Acknowledge a CONFIRMED seed only: a real seed, or a confirmed-empty
-        // one (the second turn must not re-seed a warm session). An unconfirmed
-        // primer — empty OR nonempty-partial (history without the commitments
-        // half) — discards the thread and leaves the window open instead: the
-        // next turn seeds the full primer on a genuinely fresh thread, so the
-        // commitments are retried without re-seeding history into the warm
-        // one (a persistent failure must not replay growing history every
-        // turn).
-        if (seedAvailable && (seed || seedWindow)) await this.ackWindowSeed();
-        else if (seedWindow && !seedAvailable) {
-          const unconfirmedThread = this.threadId;
-          this.threadId = null;
-          await this.clearPersistedThreadId().catch(() => undefined);
-          console.warn(
-            `[chat codex] discarding unconfirmed-seed thread ${unconfirmedThread} on ${this.logKey} — the next turn reseeds fresh`,
-          );
-        }
-        if (this.threadId) await this.persistThreadId(this.threadId);
+      // Engine failures retain the same thread, including its unconfirmed
+      // first handover. Never replace a thread to conceal a failed turn.
+      if (this.threadId) {
+        if (seedWindow) await this.ackWindowSeed();
+        await this.persistThreadId(this.threadId);
       }
       this.busy = false;
-      const rotationDue = contextRotationDue(this.logKey) && code === 0;
-      if (rotationDue) {
-        this.contextMaintenance = this.rotateContextAtBoundary().catch((err) => {
-          console.warn(`[context-rotation] ${this.logKey}: deferred after maintenance failure`, (err as Error).message);
-        }).finally(() => { this.contextMaintenance = null; });
-      }
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
       // Forever-thread housekeeping: compact after successful turns only —
       // error/interrupt paths retry on the next clean turn end.
-      if (!rotationDue) void this.maybeCompact();
     });
 
     child.on('error', (err) => {
@@ -1279,10 +1137,12 @@ export class CodexSession {
       this.rejectNativeSteers(err);
       cleanupImages();
       this.closeDanglingToolBlocks(turnState, null, err.message);
+      recordNativeFailure(this.chatId, 'codex', 'Codex could not start. Its saved thread and queued messages were retained; the turn error has the details.');
       this.emit({ type: 'error', message: `codex spawn failed: ${err.message}` });
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
     });
 
+    if (opts.peerDeliveryId && !this.submitPeerDelivery(opts.peerDeliveryId)) return;
     child.stdin!.write(`${JSON.stringify({
       type: 'start',
       codexBin: CODEX_BIN,
@@ -1291,7 +1151,12 @@ export class CodexSession {
       threadId: this.threadId,
       model: codexModel,
       effort: codexEffort,
-      prompt,
+      // Well-formed at the transport boundary: one lone surrogate anywhere
+      // in the prompt makes app-server reject the JSONRPC message and the
+      // turn never starts (Quinn's wake, Oct 19).
+      prompt: wellFormedText(prompt),
+      persona: wellFormedText(personaScope),
+      roleSkills: sessionSkills(this.chatId),
       imagePaths,
     })}\n`, (error) => {
       if (error) child.emit('error', error);
@@ -1319,7 +1184,7 @@ export class CodexSession {
     // spread below re-stamps the same value, harmlessly).
     const se: SeqEvent = { seq: this.reserveSeq(), ev: msg, at: Date.now(), eng: this.cli, ...(isBackgroundChatId(this.chatId) ? { lane: 'bg' as const } : {}) };
     const persisted = { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) };
-    const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
+    const durableUserEcho = msg.type === 'event' && ['_user_echo', 'peer_delivery_submitted', 'peer_delivery_released'].includes(msg.event?.type);
     if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) {
       throw new Error('could not durably accept the user message');
     }
@@ -1347,7 +1212,9 @@ export class CodexSession {
         if (ev.type === 'item.completed' && typeof item.text === 'string' && item.text.trim()) this.replyWatch.noteText();
         return;
       }
-      if (item.type === 'reasoning' || item.type === 'error') return;
+      // Native housekeeping and the user message are not tool calls. A slow
+      // compaction must never inject a second request for the pending answer.
+      if (!['command_execution', 'mcp_tool_call', 'file_change', 'webSearch', 'web_search'].includes(item.type)) return;
       if (ev.type === 'item.started') {
         this.replyWatch.noteTool(String(item.id));
         return;
@@ -1370,7 +1237,22 @@ export class CodexSession {
     ev: any,
     state: CodexTurnState,
   ): void {
+    if (ev?.type === 'rivendell.native_resume_retry') {
+      recordNativeFailure(this.chatId, 'codex', 'Native resume failed before admission; retrying once with the same saved thread ID.');
+      return;
+    }
+    if (ev?.type === 'rivendell.native_compact') {
+      resetSessionStateDelta(this.chatId);
+      recordNativeCompact(this.chatId, 'codex', this.threadId, { ...ev.metadata, before: this.lastNativeInput });
+      return;
+    }
     if (ev?.type === 'rivendell.context_usage') {
+      const u = ev.usage ?? {};
+      const input = Number(u.input_tokens || 0);
+      if (input > 0) this.lastNativeInput = input;
+      recordNativeCall({ lane: this.chatId, engine: 'codex', model: this.turnModel || '', sessionId: this.threadId || undefined,
+        input, cached: Number(u.cached_input_tokens || 0), output: Number(u.output_tokens || 0), harnessChars: this.harnessChars, harnessPhase: this.harnessPhase, resumed: this.resumedNative });
+      this.resumedNative = true;
       recordContextUsage(this.logKey, 'codex', ev.usage);
       return;
     }
@@ -1378,6 +1260,13 @@ export class CodexSession {
 
     // Capture the thread id for resume on later turns.
     if (ev.type === 'thread.started' && typeof ev.thread_id === 'string') {
+      recordNativeSession(this.chatId, 'codex', ev.thread_id, this.threadId);
+      if (this.threadId && this.threadId !== ev.thread_id) {
+        recordNativeFailure(this.chatId, 'codex', 'Codex did not resume its saved thread. Messages remain queued; native recovery or Matt’s Fresh thread is required.');
+        this.emit({ type: 'error', code: 'NATIVE_RESUME_MISMATCH', fatal: true, message: 'Codex did not resume the saved thread. Its ID was retained.' });
+        void this.shutdown();
+        return;
+      }
       void this.persistThreadId(ev.thread_id);
       this.emitClaudeEvent({
         type: 'system',
@@ -1489,13 +1378,11 @@ export class CodexSession {
       const input = Number(u.input_tokens ?? 0);
       const cached = Number(u.cached_input_tokens ?? 0);
       const output = Number(u.output_tokens ?? 0);
-      const effectiveInput = cached > 0 && cached < input ? input - cached : input;
       state.usage = {
-        // Codex reports huge cumulative cache-read counts. For the context
-        // meter, show the effective fresh input instead of reconstructing the
-        // full cache history and producing impossible multi-million totals.
-        input_tokens: Math.max(0, effectiveInput),
-        cache_read_input_tokens: 0,
+        // The app-server adapter selects tokenUsage.last (one call), never
+        // its cumulative total. Preserve actual context and cached share.
+        input_tokens: Math.max(0, input - Math.min(input, cached)),
+        cache_read_input_tokens: Math.max(0, Math.min(input, cached)),
         cache_creation_input_tokens: 0,
         output_tokens: output,
       };
@@ -1541,7 +1428,8 @@ export class CodexSession {
 }
 
 function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
-  const normalized = chatId || 'main';
+  const normalized = isAgentThread(chatId) ? bareChatId(chatId) : chatId || 'main';
+  cwd = sessionDirectory(normalized, cwd);
   return normalized === 'main' ? `${cli}|${cwd}` : `${cli}|${cwd}|${normalized}`;
 }
 
@@ -1582,13 +1470,15 @@ export function markBusyCodexLanesRestarting(signal: string): number {
   return marked;
 }
 
-export function activeCodexSessions(): {
+export function activeCodexSessions(includeActivity = false): {
   cli: CliKind;
   cwd: string;
   chatId: string;
   busy: boolean;
   sessionId: string | null;
   lastActivityAt: number;
+  busySince?: number;
+  activity?: LiveActivity;
 }[] {
   return Array.from(codexSessions.values()).map((s) => ({
     cli: s.cli,
@@ -1598,6 +1488,7 @@ export function activeCodexSessions(): {
     sessionId: s.sessionId(),
     lastActivityAt: s.lastActivityAt(),
     busySince: s.activeTurnStartedAt() ?? undefined,
+    activity: includeActivity ? sessionLiveActivity(s) : undefined,
   }));
 }
 
@@ -1629,15 +1520,7 @@ export async function getOrCreateCodexSession(opts: {
   const existing = codexSessions.get(key);
   if (existing && existing.isAlive()) {
     await flushEventLog(existing.logKey);
-    const priorEngine = lastEngineOf(loadEventLogSync(existing.logKey).events);
-    if (!existing.isBusy() && priorEngine && priorEngine !== cli) {
-      // This Codex rollout predates turns written by another brain. Resuming it
-      // would answer from stale context even though the UI thread is shared.
-      codexSessions.delete(key);
-      await existing.shutdown();
-    } else {
-      return existing;
-    }
+    return existing;
   }
 
   const threadId = (await getSessionId(cli, cwd, chatId)) ?? null;

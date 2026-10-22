@@ -1,3 +1,4 @@
+import { checkpointCeiling, checkpointDueError } from './checkpointDue.ts';
 // The Desk: "Needs you" todos for the owner plus a board of agent work.
 // Store: ~/.rivendell/desk.json (RIVENDELL_DESK_FILE overrides the path).
 //
@@ -11,7 +12,7 @@ import { dirname } from 'node:path';
 import { DESK_FILE } from '../config.ts';
 import { closeMattAsksForAgent } from './mattAsks.ts';
 import { queueMirror } from './deskMirror.ts';
-import { inQuietHours, isMaxLane, lastQuietEndMs } from './quietHours.ts';
+import { inQuietHours, isQuietExemptLane, lastQuietEndMs } from './quietHours.ts';
 import { LIVE_HOLD_CEILING_MS, agentsWithLiveTurns } from './laneLiveness.ts';
 
 // Matt's five stages (2026-10-09; order staging-first per the locked rally
@@ -57,6 +58,7 @@ export type DeskTodo = {
   /** Pick-one options for a one-tap answer (the Desk offers Yes / No when absent). */
   choices?: string[];
   answer?: DeskAnswer;
+  resolution?: { note: string; at: string; by: DeskActor };
 };
 
 export type DeskComment = { id: string; author: DeskActor; text: string; at: string };
@@ -78,7 +80,7 @@ export type DeskCard = {
   /** Silence is an event (card-baadaf A): every In progress / In QA card
    *  carries a check-in deadline set by the owner's last touch (create,
    *  move, or comment: 30 minutes out by default, or a written check-in
-   *  time in the comment honored up to 12 hours out). The hygiene tick
+   *  time within 30 minutes, or the quiet-hours morning checkpoint). The hygiene tick
    *  nudges the owner when it passes; 15 quiet minutes later it nudges the
    *  Chief. Only a new touch (a fresh nextCheckAt) clears the nudges. */
   nextCheckAt?: string;
@@ -88,6 +90,7 @@ export type DeskCard = {
    *  legitimate park (an overnight quiet-hours park) survives reloads while
    *  no deadline can suppress checks indefinitely. */
   nextCheckWritten?: boolean;
+  nextCheckWrittenByOwner?: boolean;
   nudgeAt?: string;
   escalatedAt?: string;
   createdBy?: DeskActor;
@@ -97,10 +100,8 @@ export type DeskCard = {
 /** The check-in window: every owner touch without a written time sets a
  *  deadline this far out, and no such touch can push it further. */
 export const CARD_NEXT_CHECK_MS = 30 * 60_000;
-/** A written next check-in time in a comment is honored up to this far out:
- *  long enough for an overnight quiet-hours park, never long enough to
- *  suppress checks on a live card indefinitely. */
-export const CARD_NEXT_CHECK_WRITTEN_MAX_MS = 12 * 60 * 60_000;
+/** Compatibility export; agent due times now use the shared 30-minute rule. */
+export const CARD_NEXT_CHECK_WRITTEN_MAX_MS = CARD_NEXT_CHECK_MS;
 /** Quiet time after the owner nudge before the Chief copy. */
 export const CARD_CHECK_ESCALATE_MS = 15 * 60_000;
 
@@ -236,7 +237,7 @@ export function parseWrittenNextCheck(text: string, nowMs: number): number | nul
   return found;
 }
 
-function touchCardNextCheck(card: DeskCard, nowIso: string, writtenNextCheckMs?: number | null): void {
+function touchCardNextCheck(card: DeskCard, nowIso: string, writtenNextCheckMs?: number | null, by?: DeskActor): void {
   // Archived cards carry no check state even in a live column: a PATCH or
   // comment on an archived card must not re-create a deadline.
   if (!card.archived && (card.column === 'in_progress' || card.column === 'in_qa')) {
@@ -245,17 +246,22 @@ function touchCardNextCheck(card: DeskCard, nowIso: string, writtenNextCheckMs?:
       // A written check-in time in the comment is honored, capped at the
       // written maximum so no comment can park a live card indefinitely:
       // parking until a stated time actually silences the card until then.
-      card.nextCheckAt = new Date(Math.min(writtenNextCheckMs, nowMs + CARD_NEXT_CHECK_WRITTEN_MAX_MS)).toISOString();
+      const error = by?.kind === 'owner' ? undefined : checkpointDueError(writtenNextCheckMs, nowMs);
+      if (error) throw new DeskError(409, error);
+      card.nextCheckAt = new Date(writtenNextCheckMs).toISOString();
+      if (by?.kind === 'owner') card.nextCheckWrittenByOwner = true; else delete card.nextCheckWrittenByOwner;
       card.nextCheckWritten = true;
     } else {
       card.nextCheckAt = new Date(nowMs + CARD_NEXT_CHECK_MS).toISOString();
       delete card.nextCheckWritten;
+      delete card.nextCheckWrittenByOwner;
     }
     delete card.nudgeAt;
     delete card.escalatedAt;
   } else {
     delete card.nextCheckAt;
     delete card.nextCheckWritten;
+    delete card.nextCheckWrittenByOwner;
     delete card.nudgeAt;
     delete card.escalatedAt;
   }
@@ -451,6 +457,10 @@ function normalizeTodo(value: unknown, now: string): DeskTodo | null {
   if (choices.length) todo.choices = choices;
   const answer = normalizeAnswer(raw.answer, todo.updatedAt);
   if (answer) todo.answer = answer;
+  const resolution = raw.resolution as Record<string, unknown> | undefined;
+  const by = normalizeActor(resolution?.by);
+  const note = clip(resolution?.note, DESK_LIMITS.answerText);
+  if (by && note) todo.resolution = { by, note, at: isoOr(resolution?.at, todo.updatedAt) };
   return todo;
 }
 
@@ -489,6 +499,7 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     columnSince: isoOr(raw.columnSince, updatedAt),
     ...(validIso(raw.nextCheckAt) ? { nextCheckAt: raw.nextCheckAt as string } : {}),
     ...(raw.nextCheckWritten === true ? { nextCheckWritten: true } : {}),
+    ...(raw.nextCheckWrittenByOwner === true ? { nextCheckWrittenByOwner: true } : {}),
     ...(validIso(raw.nudgeAt) ? { nudgeAt: raw.nudgeAt as string } : {}),
     ...(validIso(raw.escalatedAt) ? { escalatedAt: raw.escalatedAt as string } : {}),
   };
@@ -503,6 +514,7 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     // raw.archived, not card.archived: the copy onto card happens below.
     delete card.nextCheckAt;
     delete card.nextCheckWritten;
+    delete card.nextCheckWrittenByOwner;
     delete card.nudgeAt;
     delete card.escalatedAt;
   } else {
@@ -514,7 +526,9 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     // marker without a deadline is incoherent and drops. A missing deadline is
     // seeded; an existing one is capped.
     if (card.nextCheckWritten && !card.nextCheckAt) delete card.nextCheckWritten;
-    const cap = Date.parse(now) + (card.nextCheckWritten ? CARD_NEXT_CHECK_WRITTEN_MAX_MS : CARD_NEXT_CHECK_MS);
+    const lastComment = card.comments.at(-1);
+    if (card.nextCheckWritten && lastComment?.at === card.updatedAt && lastComment.author.kind === 'owner') card.nextCheckWrittenByOwner = true;
+    const cap = card.nextCheckWrittenByOwner ? Infinity : checkpointCeiling(Date.parse(now));
     if (!card.nextCheckAt) {
       const base = Math.min(Date.parse(updatedAt || now), Date.parse(now));
       card.nextCheckAt = new Date(base + CARD_NEXT_CHECK_MS).toISOString();
@@ -839,7 +853,7 @@ function placeCard(data: DeskData, card: DeskCard, index: number | undefined): v
 // ---- todos --------------------------------------------------------------------
 
 export type TodoInput = {
-  title?: unknown; detail?: unknown; due?: unknown; priority?: unknown; link?: unknown; cardId?: unknown; status?: unknown; choices?: unknown;
+  title?: unknown; detail?: unknown; due?: unknown; priority?: unknown; link?: unknown; cardId?: unknown; status?: unknown; choices?: unknown; note?: unknown;
 };
 
 export function createTodo(input: TodoInput, from: DeskActor): Promise<DeskTodo> {
@@ -869,9 +883,10 @@ export function createTodo(input: TodoInput, from: DeskActor): Promise<DeskTodo>
   });
 }
 
-export function updateTodo(id: string, input: TodoInput): Promise<DeskTodo> {
+export function updateTodo(id: string, input: TodoInput, by?: DeskActor): Promise<DeskTodo> {
   return mutate((data, now) => {
     const todo = findTodo(data, id);
+    if (input.note !== undefined && input.status !== 'done') throw new DeskError(400, 'A resolution note needs status done. Nothing was changed.');
     if (input.title !== undefined) todo.title = requireTitle(input.title);
     if (input.detail !== undefined) {
       const detail = requireClip(input.detail, DESK_LIMITS.detail, 'detail');
@@ -896,21 +911,29 @@ export function updateTodo(id: string, input: TodoInput): Promise<DeskTodo> {
     }
     if (input.status !== undefined) {
       if (input.status !== 'open' && input.status !== 'done') throw new DeskError(400, 'status must be open or done');
-      applyTodoStatus(todo, input.status, now);
+      applyTodoStatus(todo, input.status, now, { note: input.note, by });
     }
     todo.updatedAt = now;
     return todo;
   });
 }
 
-function applyTodoStatus(todo: DeskTodo, status: 'open' | 'done', now: string): void {
+function applyTodoStatus(todo: DeskTodo, status: 'open' | 'done', now: string, resolution?: { note?: unknown; by?: DeskActor }): void {
   if (status === todo.status) return;
+  // Every completion path shares this check, including PATCH and older clients.
+  // An answerless close must explain who resolved this exact question and why.
+  if (status === 'done' && !todo.answer) {
+    const note = requireClip(resolution?.note, DESK_LIMITS.answerText, 'note');
+    if (!note || !resolution?.by) throw new DeskError(409, 'This question needs an answer. Choose an answer on the Desk, or pass your name and a note explaining how this exact item was resolved. Nothing was closed.');
+    todo.resolution = { note, by: resolution.by, at: now };
+  }
   todo.status = status;
   if (status === 'done') todo.completedAt = now;
   else {
     delete todo.completedAt;
     // Reopened means "ask me again": a stale answer would block the next one.
     delete todo.answer;
+    delete todo.resolution;
   }
 }
 
@@ -985,10 +1008,10 @@ export function setAnswerDelivery(id: string, delivery: 'sent' | 'failed', claim
   });
 }
 
-export function setTodoStatus(id: string, status: 'open' | 'done'): Promise<DeskTodo> {
+export function setTodoStatus(id: string, status: 'open' | 'done', resolution?: { note?: unknown; by?: DeskActor }): Promise<DeskTodo> {
   return mutate((data, now) => {
     const todo = findTodo(data, id);
-    applyTodoStatus(todo, status, now);
+    applyTodoStatus(todo, status, now, resolution);
     todo.updatedAt = now;
     return todo;
   });
@@ -1132,7 +1155,7 @@ export async function commentCard(id: string, text: unknown, author: DeskActor):
     // quiet-hours park with a stated time stays silent until that time. It
     // also closes the commenter's open Matt asks (card-baadaf B: the card
     // touch is the close), best effort.
-    touchCardNextCheck(card, now, parseWrittenNextCheck(body, Date.parse(now)));
+    touchCardNextCheck(card, now, parseWrittenNextCheck(body, Date.parse(now)), author);
     return { card, comment };
   });
   // Only a live roster agent's card comment closes their asks, and only after
@@ -1227,7 +1250,7 @@ export async function sweepCardChecks(options: { dryRun?: boolean; liveLanes?: R
         // holds through 22:00-05:00 ET. The card stays unmarked, so the
         // first sweep after 05:00 nudges it unchanged — held never means
         // lost. Chief escalation below targets Max's lane and always goes.
-        if (inQuietHours(nowMs) && !isMaxLane(ownerAgent)) {
+        if (inQuietHours(nowMs) && !isQuietExemptLane(ownerAgent)) {
           // held: unmarked, retried by the next post-05:00 sweep
         } else if (liveLanes.has(ownerAgent) && nowMs - next < LIVE_HOLD_CEILING_MS) {
           // Lane-liveness hold (Max, Oct 18 2026, card-b3468c): the owner's
@@ -1267,12 +1290,12 @@ export async function sweepCardChecks(options: { dryRun?: boolean; liveLanes?: R
         // the last quiet end — the held nudge only just landed then (Opus
         // verify, Oct 16). Max-lane nudges deliver immediately, so their
         // timing is unchanged.
-        const escalateFrom = isMaxLane(ownerAgent)
+        const escalateFrom = isQuietExemptLane(ownerAgent)
           ? Date.parse(card.nudgeAt)
           : Math.max(Date.parse(card.nudgeAt), lastQuietEndMs(nowMs));
         if (
           nowMs - escalateFrom >= CARD_CHECK_ESCALATE_MS
-          && !(inQuietHours(nowMs) && !isMaxLane(ownerAgent))
+          && !(inQuietHours(nowMs) && !isQuietExemptLane(ownerAgent))
           // Lane-liveness (card-b3468c): the escalation's recipient is the
           // Chief; hold it unmarked while that lane is mid-turn, bounded by
           // the same ceiling from the escalation's own due instant, so a
@@ -1345,6 +1368,7 @@ export function archiveCard(id: string, archived: boolean): Promise<DeskCard> {
       // nudge/escalation mark must not survive into an unarchive.
       delete card.nextCheckAt;
       delete card.nextCheckWritten;
+      delete card.nextCheckWrittenByOwner;
       delete card.nudgeAt;
       delete card.escalatedAt;
     } else {

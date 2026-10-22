@@ -247,3 +247,10 @@ export function fetchPriorityBoards(): Promise<{ boards: PriorityBoard[] }> {
 export function priorityAction(agent: string, { action, ...body }: PriorityAction): Promise<{ items: PriorityItem[] }> {
   return apiJson(`/api/priorities/${action}`, { method: 'POST', body: JSON.stringify({ agent, ...body }) });
 }
+
+/** Native engine measurements, also available as an HTML nightly report. */
+export async function getSessionHealth(date?: string): Promise<{ date: string; rows: Array<{ lane: string; engine: string; calls: number; starts: number[]; compacts: Array<{ before: number; after: number; trigger: string }>; replacements: number; cachedShare: number | null; maxHarnessChars: number; fixedPrefixes: number }> }> {
+  const response = await fetch(`/api/session-health${date ? `?date=${encodeURIComponent(date)}` : ""}`);
+  if (!response.ok) throw new Error("Session measurements could not be loaded.");
+  return response.json();
+}

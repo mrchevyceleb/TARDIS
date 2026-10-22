@@ -1,3 +1,4 @@
+import { sessionPolicy } from '../chat/sessionPolicy.ts';
 // One shared owner flag digest (Matt, Oct 14, card-d7bf78 b): past-due
 // commitment raises and Desk silence nudges go to their owner as ONE digest
 // message every 30 minutes instead of one message per item. There is ONE
@@ -27,7 +28,7 @@
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
-import { inQuietHours, isMaxLane } from './quietHours.ts';
+import { inQuietHours, isQuietExemptLane } from './quietHours.ts';
 import { LIVE_HOLD_CEILING_MS, agentsWithLiveTurns } from './laneLiveness.ts';
 
 const DIGEST_INTERVAL_MS = 30 * 60_000;
@@ -44,6 +45,12 @@ const MAX_SLOTS_PER_KEY = 8;
 const MAX_DIGEST_ENTRIES = 40;
 const MAX_DIGEST_CHARS = 20_000;
 const STATE_FILE = join(STATE_DIR, 'flag-digest.json');
+const SESSION_LEADS = new Set(['chief-of-staff', 'max-voice', 'kip', 'riley', 'samwise']);
+
+function digestOwner(ownerId: string): string {
+  const policy = sessionPolicy(`bot-${ownerId}`);
+  return policy.lead || SESSION_LEADS.has(ownerId) ? ownerId : policy.reportsTo || 'chief-of-staff';
+}
 
 type Entry = {
   key: string;
@@ -155,6 +162,19 @@ function restore(): void {
     }
     queues.set(ownerId, map);
   }
+  for (const [owner, entries] of [...queues]) {
+    const lead = digestOwner(owner);
+    if (lead === owner) continue;
+    for (const [key, entry] of [...entries]) {
+      if (entry.sentDeliveryId) continue;
+      entries.delete(key);
+      const destination = queues.get(lead) ?? new Map<string, Entry>();
+      const movedKey = `${owner}:${key}`;
+      if (!destination.has(movedKey)) destination.set(movedKey, { ...entry, key: movedKey, text: `For ${owner}: ${entry.text}` });
+      queues.set(lead, destination);
+      migrated = true;
+    }
+  }
   // Persist the migration immediately: a legacy entry's concrete
   // firstQueuedAt must survive a restart before any other write happens.
   if (migrated) persistNow();
@@ -173,6 +193,12 @@ function restore(): void {
  *  whose raise names a different id) gets its OWN successor slot and its
  *  own line, instead of hijacking the in-flight record's admission mark. */
 export function queueFlagDigest(ownerId: string, key: string, text: string, onDelivered?: () => void, priority = false): void {
+  const lead = digestOwner(ownerId);
+  if (lead !== ownerId) {
+    text = `For ${ownerId}: ${text}`;
+    key = `${ownerId}:${key}`;
+    ownerId = lead;
+  }
   restore();
   const entries = queues.get(ownerId) ?? new Map<string, Entry>();
   const slotNames: string[] = [key];
@@ -255,7 +281,7 @@ export async function flushFlagDigests(now: number = Date.now(), liveLanes?: Rea
     // the global rate limit Matt's Desk answers need. Skip before any
     // delivery: the entries stay queued untouched and the first flush after
     // 05:00 delivers them once.
-    if (inQuietHours(now) && !isMaxLane(ownerId)) continue;
+    if (inQuietHours(now) && !isQuietExemptLane(ownerId)) continue;
     const last = ownerLastFlush.get(ownerId);
     if (last !== undefined && now - last < DIGEST_INTERVAL_MS) continue;
     // Bounded batch (see MAX_DIGEST_ENTRIES / MAX_DIGEST_CHARS): the

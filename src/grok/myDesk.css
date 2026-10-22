@@ -147,7 +147,7 @@
 .md-todo .desk-answered-line { font-size: 12.5px; }
 .md-todo .desk-answered-warn { font-size: 12px; }
 .md-todo.is-answered { border-left-color: var(--r-emerald); }
-.md-todo.is-answered.is-undelivered { border-left-color: var(--r-amber); }
+.md-todo.is-answered.is-rejected, .md-todo.is-answered.is-conflict, .md-todo.is-answered.is-undelivered { border-left-color: var(--r-amber); }
 .md-todo.is-answered.is-sent { opacity: 0.72; }
 .md-todo.is-answered .md-check { color: var(--r-bg-deep); background: var(--r-emerald); border-color: var(--r-emerald); animation: md-pop 0.42s cubic-bezier(0.2, 1.6, 0.4, 1); }
 .md-row-main { display: block; flex: 1 1 auto; min-width: 0; width: 100%; padding: 0; text-align: left; }
@@ -307,3 +307,5 @@
 .mp-row.is-done { opacity: 0.6; }
 .mp-row.is-done .mp-text { text-decoration: line-through; text-decoration-color: var(--r-ink-faint); color: var(--r-ink-mute); }
 .mp-row.is-done .mp-check { color: var(--r-emerald); border-color: var(--r-emerald); }
+
+.md-todo.is-answered.is-rejected .md-check { color: var(--r-amber); border-color: var(--r-amber); background: color-mix(in srgb, var(--r-amber) 14%, var(--r-bg-deep)); animation: none; }

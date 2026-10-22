@@ -15,6 +15,7 @@
 
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { dirname, relative } from 'node:path';
 
 let pendingOutputWrites = 0;
 let exitRequested = false;
@@ -43,6 +44,7 @@ let threadId = null;
 let completed = false;
 let targetExitCode = 1;
 let lastUsage = null;
+let compactNotified = false;
 const pending = new Map();
 const pendingSteers = [];
 const steerAttempts = new Map();
@@ -55,12 +57,12 @@ function rejectPending(error) {
   pending.clear();
   while (pendingSteers.length) {
     const steer = pendingSteers.shift();
-    writeEvent({ type: 'rivendell.steer.rejected', request_id: steer.requestId, message: error.message });
+    writeEvent({ type: 'rivendell.steer.rejected', request_id: steer.requestId, message: error.message, notAdmitted: true });
   }
 }
 
 function request(method, params, timeoutMs = 120_000) {
-  if (!app?.stdin.writable) return Promise.reject(new Error('Codex app-server is not writable'));
+  if (!app?.stdin.writable) return Promise.reject(Object.assign(new Error('Codex app-server is not writable'), { notAdmitted: true }));
   const id = nextRequestId++;
   return new Promise((resolve, reject) => {
     const timer = timeoutMs == null ? null : setTimeout(() => {
@@ -144,6 +146,11 @@ function finish(code) {
 function handleNotification(message) {
   const method = message.method;
   const params = message.params ?? {};
+  // App-server also publishes notifications from native child tasks. Only
+  // this adapter's thread may speak, change its usage, or end its turn.
+  if (!threadId || params.threadId !== threadId) return;
+  const notificationTurnId = params.turnId ?? params.turn?.id;
+  if (activeTurnId && notificationTurnId && notificationTurnId !== activeTurnId) return;
   if (method === 'turn/started') {
     activeTurnId = params.turn?.id ?? activeTurnId;
     writeEvent({ type: 'turn.started' });
@@ -154,12 +161,24 @@ function handleNotification(message) {
     return;
   }
   if (method === 'item/completed') {
+    if (params.item?.type === 'contextCompaction') {
+      if (!compactNotified) writeEvent({ type: 'rivendell.native_compact', metadata: { trigger: 'native' } });
+      compactNotified = true;
+    }
     writeEvent({ type: 'item.completed', item: normalizeItem(params.item) });
+    return;
+  }
+  if (method === 'thread/compacted') {
+    if (!compactNotified) writeEvent({ type: 'rivendell.native_compact', metadata: { trigger: 'native' } });
+    compactNotified = true;
     return;
   }
   if (method === 'thread/tokenUsage/updated') {
     lastUsage = normalizeUsage(params.tokenUsage) ?? lastUsage;
     if (lastUsage) writeEvent({ type: 'rivendell.context_usage', usage: lastUsage });
+    // Both native compact notifications describe one boundary. A later model
+    // call can be followed by another boundary, including within this turn.
+    compactNotified = false;
     return;
   }
   if (method === 'error') {
@@ -168,8 +187,9 @@ function handleNotification(message) {
     return;
   }
   if (method === 'turn/completed') {
+    if (!activeTurnId || params.turn?.id !== activeTurnId) return;
     const status = params.turn?.status;
-    writeEvent({ type: 'turn.completed', ...(lastUsage ? { usage: lastUsage } : {}) });
+    writeEvent({ type: 'turn.completed', status, ...(status !== 'completed' ? { error: params.turn?.error || { message: `Codex turn ${status || 'failed'}` } } : {}), ...(lastUsage ? { usage: lastUsage } : {}) });
     finish(status === 'completed' ? 0 : 1);
   }
 }
@@ -187,7 +207,7 @@ function handleAppLine(raw) {
     if (!waiter) return;
     pending.delete(message.id);
     if (waiter.timer) clearTimeout(waiter.timer);
-    if (message.error) waiter.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
+    if (message.error) waiter.reject(Object.assign(new Error(message.error.message ?? JSON.stringify(message.error)), { notAdmitted: true }));
     else waiter.resolve(message.result);
     return;
   }
@@ -214,14 +234,15 @@ async function sendSteer(requestId, text) {
       input: [{ type: 'text', text }],
     }, null).then(
       () => ({ ok: true }),
-      (error) => ({ ok: false, message: error.message }),
+      (error) => ({ ok: false, message: error.message, notAdmitted: error.notAdmitted === true }),
     );
     steerAttempts.set(requestId, attempt);
   }
   const outcome = await attempt;
+  if (!outcome.ok && outcome.notAdmitted) steerAttempts.delete(requestId);
   writeEvent(outcome.ok
     ? { type: 'rivendell.steer.accepted', request_id: requestId }
-    : { type: 'rivendell.steer.rejected', request_id: requestId, message: outcome.message });
+    : { type: 'rivendell.steer.rejected', request_id: requestId, message: outcome.message, notAdmitted: outcome.notAdmitted });
 }
 
 async function flushPendingSteers() {
@@ -280,17 +301,93 @@ async function start(config) {
   });
   notify('initialized');
 
+  // Remote plugin discovery otherwise races thread context construction. A
+  // cold app-server can render host-only skills, then append the entire skills
+  // and world-state prefix once its installed-plugin catalog finishes loading.
+  // Resolve the native catalog before either start or resume. This preserves
+  // plugin identities, native skill reads, and MCP tools; it does not replace
+  // the catalog with a hand-written prompt or change the user's profile.
+  let roleCatalog = '';
+  let catalogSkills = [];
+  const catalogDeadline = Date.now() + 15_000;
+  const catalogRequest = (method, params) => request(
+    method, params, Math.max(1, catalogDeadline - Date.now()),
+  );
+  try {
+    await catalogRequest('account/read', { refreshToken: false });
+    await catalogRequest('plugin/installed', { cwds: [config.cwd] });
+    const skills = await catalogRequest('skills/list', { cwds: [config.cwd], forceReload: true });
+    // Keep every enabled skill discoverable and readable. Only descriptions
+    // are role-scoped; no skills/config/write or tool overrides are applied.
+    if (Array.isArray(config.roleSkills) && config.roleSkills.every((name) => typeof name === 'string')) {
+      const entries = skills?.data ?? [];
+      const available = entries.flatMap((entry) => entry.skills ?? []).filter((skill) => skill.enabled !== false);
+      catalogSkills = available;
+      if (entries.length && entries.every((entry) => !entry.errors?.length)
+        && available.length && available.every((skill) => typeof skill.name === 'string' && typeof skill.path === 'string')) {
+        const descriptions = new Set(config.roleSkills);
+        const byPath = new Map(available.map((skill) => [skill.path, skill]));
+        const roots = [...new Set([...byPath.keys()].map((path) => dirname(dirname(path))))].sort();
+        roleCatalog = [
+          '## Skills',
+          'All listed skills remain available. Read the matching SKILL.md when requested or relevant; follow its instructions and resolve references beside that file. Only role skills include descriptions here. Other skills can be discovered by name/path and read with the shell. Read only relevant files. Tell the user when applying a skill.',
+          'Expand each rN/ path using these absolute skill roots before reading:',
+          ...roots.map((root, index) => `r${index}=${root}`),
+          ...[...byPath.values()].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0).map((skill) => {
+            const root = dirname(dirname(skill.path));
+            return `- ${skill.name}${descriptions.has(skill.name) && typeof skill.description === 'string' ? `: ${skill.description.replace(/\s+/g, ' ').trim()}` : ''} (file: r${roots.indexOf(root)}/${relative(root, skill.path)})`;
+          }),
+        ].join('\n');
+      }
+    }
+    writeEvent({
+      type: 'rivendell.native_catalog_ready',
+      skills: (skills?.data ?? []).reduce((count, entry) => count + (entry.skills?.length ?? 0), 0),
+      leanSkills: Boolean(roleCatalog),
+      unmatchedRoleSkills: (config.roleSkills ?? []).filter((name) => !catalogSkills.some((skill) => skill.name === name)),
+    });
+  } catch (error) {
+    // Discovery is an optimization, never a new prerequisite for answering.
+    // Keep the native cached catalog and tools on older/offline installations.
+    writeEvent({ type: 'rivendell.native_catalog_degraded', message: error.message });
+  }
+
+  // The runner supplies the same trusted persona on every cold resume. Native
+  // developer instructions are reconstructed after compaction, rather than
+  // relying on the first user message surviving an encrypted summary forever.
+  const persona = typeof config.persona === 'string' ? config.persona.trim() : '';
+  const developerInstructions = [
+    'Do not use Codex native collaboration agents for TARDIS companion handoffs. TARDIS supplies its own team_message MCP.',
+    persona,
+    roleCatalog,
+  ].filter(Boolean).join('\n\n');
+  const nativeContext = {
+    developerInstructions,
+    // Per-thread override only, after complete discovery. On errors the full
+    // native skill instructions remain enabled, preserving the fallback.
+    ...(Array.isArray(config.roleSkills) ? { config: { 'skills.include_instructions': !roleCatalog } } : {}),
+  };
   let thread;
   if (config.threadId) {
-    const resumed = await request('thread/resume', {
-      threadId: config.threadId,
-      cwd: config.cwd,
-      model: config.model,
-      approvalPolicy: 'never',
-      sandbox: 'danger-full-access',
-      excludeTurns: true,
-    });
-    thread = resumed.thread;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const resumed = await request('thread/resume', {
+          threadId: config.threadId,
+          cwd: config.cwd,
+          model: config.model,
+          approvalPolicy: 'never',
+          sandbox: 'danger-full-access',
+          excludeTurns: true,
+          ...nativeContext,
+        });
+        if (resumed.thread?.id !== config.threadId) throw new Error('Codex did not resume the saved thread ID');
+        thread = resumed.thread;
+        break;
+      } catch (error) {
+        if (attempt || appExited || completed) throw error;
+        writeEvent({ type: 'rivendell.native_resume_retry' });
+      }
+    }
   } else {
     const started = await request('thread/start', {
       cwd: config.cwd,
@@ -299,7 +396,7 @@ async function start(config) {
       sandbox: 'danger-full-access',
       historyMode: 'legacy',
       ephemeral: false,
-      developerInstructions: 'Do not use Codex native collaboration agents for TARDIS companion handoffs. TARDIS supplies its own team_message MCP.',
+      ...nativeContext,
     });
     thread = started.thread;
   }

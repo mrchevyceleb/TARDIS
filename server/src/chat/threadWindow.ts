@@ -67,10 +67,10 @@ export type WindowSplit = {
 
 export type Seqish = { seq?: number; ev?: any; lane?: string };
 
-function clipTurn(text: string): string {
+function clipTurn(text: string, maxChars = MAX_TURN_CHARS): string {
   const t = text.trim();
-  if (t.length <= MAX_TURN_CHARS) return t;
-  const keep = Math.max(200, Math.floor((MAX_TURN_CHARS - 48) / 2));
+  if (t.length <= maxChars) return t;
+  const keep = Math.max(200, Math.floor((maxChars - 48) / 2));
   return `${t.slice(0, keep)}\n…[clipped ${t.length - keep * 2} chars]…\n${t.slice(-keep)}`;
 }
 
@@ -106,6 +106,7 @@ function flushPending(
   seq: number,
   afterAutomation: boolean,
   turns: VisibleTurn[],
+  maxChars: number,
 ): boolean {
   const body = pending.trim();
   if (!body) return afterAutomation;
@@ -113,23 +114,24 @@ function flushPending(
   // regardless of whether the originating turn was scheduled automation.
   if (isModelEosToken(body)) return false;
   if (afterAutomation && (isQuietRoutineReply(body) || isExactNoUpdate(body))) return false;
-  turns.push({ role: 'assistant', text: clipTurn(body), seq });
+  turns.push({ role: 'assistant', text: clipTurn(body, maxChars), seq });
   return false;
 }
 
 /** Visible user+assistant turns for the model window. Skips tool results,
- *  MCP dumps, hidden routine prompts, and quiet NO_UPDATE replies. */
-export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
+ *  MCP dumps, hidden routine prompts, and quiet NO_UPDATE replies. The model
+ *  window keeps its default cap; display-only callers can request full text. */
+export function extractVisibleTurns(events: Seqish[], maxChars = MAX_TURN_CHARS): VisibleTurn[] {
   // An agent's background lane streams into the same log as its home lane, so
   // their frames interleave. Read each lane's stream on its own, then merge.
-  if (!events.some((event) => event.lane === 'bg')) return extractLaneTurns(events);
+  if (!events.some((event) => event.lane === 'bg')) return extractLaneTurns(events, maxChars);
   return [
-    ...extractLaneTurns(events.filter((event) => event.lane !== 'bg')),
-    ...extractLaneTurns(events.filter((event) => event.lane === 'bg')),
+    ...extractLaneTurns(events.filter((event) => event.lane !== 'bg'), maxChars),
+    ...extractLaneTurns(events.filter((event) => event.lane === 'bg'), maxChars),
   ].sort((a, b) => a.seq - b.seq);
 }
 
-function extractLaneTurns(events: Seqish[]): VisibleTurn[] {
+function extractLaneTurns(events: Seqish[], maxChars: number): VisibleTurn[] {
   const turns: VisibleTurn[] = [];
   const openText = new Map<number, string>();
   let pendingAssistant = '';
@@ -173,7 +175,7 @@ function extractLaneTurns(events: Seqish[]): VisibleTurn[] {
     pendingAssistantSeq = 0;
     haveAssistantEvent = false;
     priorRounds = '';
-    afterAutomation = flushPending(body, seq, afterAutomation, turns);
+    afterAutomation = flushPending(body, seq, afterAutomation, turns, maxChars);
   };
 
   for (let i = 0; i < events.length; i++) {
@@ -194,7 +196,7 @@ function extractLaneTurns(events: Seqish[]): VisibleTurn[] {
       flushAssistant();
       afterAutomation = automation;
       for (const index of indexes) openText.set(index, '');
-      turns.push({ role: inner.role, text: clipTurn(inner.text), seq });
+      turns.push({ role: inner.role, text: clipTurn(inner.text, maxChars), seq });
       continue;
     }
 
@@ -217,7 +219,7 @@ function extractLaneTurns(events: Seqish[]): VisibleTurn[] {
         afterAutomation = true;
         continue;
       }
-      turns.push({ role: 'user', text: clipTurn(text), seq });
+      turns.push({ role: 'user', text: clipTurn(text, maxChars), seq });
       afterAutomation = false;
       continue;
     }
@@ -247,7 +249,7 @@ function extractLaneTurns(events: Seqish[]): VisibleTurn[] {
       const from = typeof inner.from === 'string' && inner.from.trim() ? inner.from.trim() : 'peer';
       const text = typeof inner.text === 'string' ? inner.text.trim() : '';
       if (text) {
-        turns.push({ role: 'user', text: clipTurn(`[${from}] ${text}`), seq });
+        turns.push({ role: 'user', text: clipTurn(`[${from}] ${text}`, maxChars), seq });
         afterAutomation = false;
       }
       continue;
@@ -521,6 +523,7 @@ export function claudeConfigDir(cli: string): string {
   if (cli === 'zai') return join(homedir(), '.claude-zai');
   if (cli === 'fireworks') return join(homedir(), '.claude-fireworks');
   if (cli === 'openrouter') return join(homedir(), '.claude-openrouter');
+  if (cli === 'openrouter2') return join(homedir(), '.claude-openrouter-personal');
   return join(homedir(), '.claude');
 }
 

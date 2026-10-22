@@ -3,7 +3,7 @@
 // /api/desk data as the Desk room, through the same hooks, so a check-off here
 // is a check-off there.
 
-import { ArrowUpRight, Check, ChevronDown, RotateCcw } from 'lucide-react';
+import { AlertTriangle, ArrowUpRight, Check, ChevronDown, MessageSquare, RotateCcw } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Chip } from '../components/Primitives';
 import {
@@ -23,7 +23,7 @@ import {
   type DeskTodo,
 } from '../data/desk';
 import { showToast } from '../native/shell';
-import { ActorChip, AnswerBar, AnsweredNote, answerRecipient, canAnswer, errorText, priorityClass, useDeskAgents, useTodoAnswers } from '../rooms/deskParts';
+import { ActorChip, AnswerBar, AnsweredNote, answerRecipient, canAnswer, errorText, focusTodoAnswer, priorityClass, useDeskAgents, useTodoAnswers } from '../rooms/deskParts';
 import '../rooms/desk.css';
 import './myDesk.css';
 import { MattsPriorities } from './MattsPriorities';
@@ -82,14 +82,15 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
   // and the row leaves. The timer is deliberately not cancelled on unmount: the
   // write needs nothing from this component, and closing the pane a beat after a
   // check must still save it.
-  const complete = (todo: DeskTodo, index: number) => {
+  const complete = (todo: DeskTodo, index: number, button: HTMLButtonElement) => {
+    if (canAnswer(todo)) { if (!focusTodoAnswer(button)) focusDeskRef({ kind: 'todo', id: todo.id }); return; }
     if (leaving.has(todo.id)) return;
     setLeaving((prev) => new Set(prev).add(todo.id));
     refocus.current = { id: todo.id, index };
     window.setTimeout(() => {
       const now = new Date().toISOString();
       void write(
-        () => deskApi.completeTodo(todo.id),
+        () => deskApi.completeTodo(todo.id, todo.from.kind === 'owner' ? 'Completed on the Desk' : undefined),
         (d) => ({ ...d, todos: d.todos.map((t) => (t.id === todo.id ? { ...t, status: 'done', completedAt: now, updatedAt: now } : t)) }),
       )
         .then(() => setAnnounce(`Marked ${todo.title} done`))
@@ -156,13 +157,13 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
                     <li key={todo.id} className={`md-todo ${priorityClass(todo.priority)}${going ? ' is-leaving' : ''}${pending ? ` is-answered is-${pending.phase}` : ''}`}>
                       <button
                         type="button"
-                        className="md-check"
-                        onClick={() => complete(todo, index)}
-                        disabled={going || Boolean(pending)}
-                        aria-label={pending ? `${todo.title} is answered` : `Mark ${todo.title} done`}
-                        title={pending ? 'Answered' : 'Done'}
+                        className={`md-check${canAnswer(todo) ? ' is-question' : ''}`}
+                        onClick={(event) => complete(todo, index, event.currentTarget)}
+                        disabled={going || Boolean(pending) || (canAnswer(todo) && !answerable)}
+                        aria-label={pending ? `${todo.title} ${pending.phase === 'rejected' ? 'answer was not saved' : 'is answered'}` : canAnswer(todo) ? `Answer ${todo.title}` : `Mark ${todo.title} done`}
+                        title={pending ? (pending.phase === 'rejected' ? 'Answer was not saved' : 'Answered') : canAnswer(todo) ? 'Choose an answer' : 'Done'}
                       >
-                        <Check size={13} aria-hidden="true" />
+                        {pending?.phase === 'rejected' ? <AlertTriangle size={13} aria-hidden="true" /> : canAnswer(todo) ? <MessageSquare size={13} aria-hidden="true" /> : <Check size={13} aria-hidden="true" />}
                       </button>
                       <div className="md-todo-main">
                         <button
@@ -182,8 +183,9 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
                           <AnsweredNote
                             answer={pending}
                             phase={pending.phase}
+                            error={pending.error}
                             to={pending.to ?? answerRecipient(todo, todo.cardId ? cardsById.get(todo.cardId) : undefined, agents)}
-                            onDismiss={pending.phase === 'undelivered' ? () => answers.dismiss(todo.id) : undefined}
+                            onDismiss={pending.phase === 'undelivered' || pending.phase === 'conflict' || pending.phase === 'rejected' ? () => answers.dismiss(todo.id) : undefined}
                           />
                         ) : answerable && canAnswer(todo) && !going ? (
                           <AnswerBar todo={todo} answers={answers} compact />

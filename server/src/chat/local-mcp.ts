@@ -50,11 +50,11 @@ export function localMcpServers(agentName?: string, opts: { replyNow?: boolean; 
   const base = { RIVENDELL_TEAM_URL: `http://127.0.0.1:${PORT}`, RIVENDELL_OWNER_NAME: DESK_OWNER_NAME };
   return {
     'rivendell-team': { type: 'stdio', command: 'node', args: [TEAM_MCP_SCRIPT],
-      // reply_now is advertised only to lanes whose runner posts it as a message (Claude).
+      // Every engine can explicitly publish an owner reply through the host.
       // RIVENDELL_AGENT_LANE lets jobs, watches and handoffs report back to the lane that started them.
       // RIVENDELL_AGENT_ID is the stable roster id, so owner-isolated tools
       // (commitments) never resolve identity through a mutable display name.
-      env: { ...base, ...(agentName ? { RIVENDELL_AGENT_NAME: agentName } : {}), ...(opts.agentId ? { RIVENDELL_AGENT_ID: opts.agentId } : {}), ...(opts.replyNow ? { RIVENDELL_REPLY_NOW: '1' } : {}), ...(opts.backgroundLane ? { RIVENDELL_AGENT_LANE: 'bg' } : {}) } },
+      env: { ...base, ...(agentName ? { RIVENDELL_AGENT_NAME: agentName } : {}), ...(opts.agentId ? { RIVENDELL_AGENT_ID: opts.agentId } : {}), RIVENDELL_REPLY_NOW: '1', ...(!opts.replyNow || opts.agentId ? { RIVENDELL_REPLY_NOW_HOST: '1' } : {}), ...(opts.backgroundLane ? { RIVENDELL_AGENT_LANE: 'bg' } : {}) } },
     'rivendell-device': { type: 'stdio', command: 'node', args: [DEVICE_MCP_SCRIPT],
       // The owner env binds this shim's calls to its lane: computer_start
       // refuses a context whose owner lane is not the caller. Banana's serve

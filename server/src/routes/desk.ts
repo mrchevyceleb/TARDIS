@@ -78,9 +78,9 @@ function resolveAuthor(value: unknown): DeskActor {
  *  (the team MCP field) or the author alias (what lanes that curl this API
  *  directly tend to send). The owner is credited only when the request is
  *  a same-origin browser fetch from the Desk app: browsers set
- *  Sec-Fetch-Site on every request and a page cannot forge it, while curl
- *  does not send one, so a missing or spoofed identity can never silently
- *  credit the owner (Oct 17 2026: raw curls posted teammate check-ins as
+ *  Sec-Fetch-Site on every request and a page cannot forge it. This is a
+ *  cross-site request guard, not authentication against local tools.
+ *  Callers without the browser signal must name a teammate (Oct 17 2026: raw curls posted teammate check-ins as
  *  the owner, which also woke cards as fake owner comments). Anything else
  *  is refused. */
 export function resolveWriteAuthor(input: Record<string, unknown>, fetchSite?: string): DeskActor {
@@ -100,6 +100,13 @@ export function resolveWriteAuthor(input: Record<string, unknown>, fetchSite?: s
     throw new DeskError(400, 'The Desk app could not be verified on this request; reload the Desk and try again.');
   }
   throw new DeskError(400, 'Pass agent (or author): your teammate name, so the Desk can credit you.');
+}
+
+/** Resolving a question requires a real current teammate (or the owner UI). */
+function resolveCloser(input: Record<string, unknown>, site?: string): DeskActor {
+  const by = resolveWriteAuthor(input, site);
+  if (by.kind === 'agent' && !findAgent(by.id)) throw new DeskError(400, 'Pass your current teammate name to resolve this question. Nothing was closed.');
+  return by;
 }
 
 /** Who a card belongs to. Strict: a typo must not invent a ghost owner. */
@@ -145,8 +152,7 @@ function flag(value: unknown): boolean {
   return value === '1' || value === 'true' || value === true;
 }
 
-/** Browsers set Sec-Fetch-Site on every request and pages cannot forge it;
- *  curl and other plain clients do not send it. */
+/** Browser cross-site request hint. It is not a local-client identity proof. */
 function fetchSite(req: Request): string | undefined {
   const value = req.headers['sec-fetch-site'];
   return typeof value === 'string' ? value : undefined;
@@ -218,7 +224,7 @@ deskRouter.post('/todos', route(async (req, res) => {
 
 deskRouter.patch('/todos/:id', route(async (req, res) => {
   const input = body(req);
-  const todo = await updateTodo(param(req, 'id'), input);
+  const todo = await updateTodo(param(req, 'id'), input, input.status === 'done' && input.note ? resolveCloser(input, fetchSite(req)) : undefined);
   if (input.priority !== undefined) notifyTodoTouched();
   res.json({ todo });
 }));
@@ -226,7 +232,8 @@ deskRouter.patch('/todos/:id', route(async (req, res) => {
 deskRouter.post('/todos/:id/answer', answerTodoHandler());
 
 deskRouter.post('/todos/:id/complete', route(async (req, res) => {
-  res.json({ todo: await setTodoStatus(param(req, 'id'), 'done') });
+  const input = body(req);
+  res.json({ todo: await setTodoStatus(param(req, 'id'), 'done', { note: input.note, by: input.note ? resolveCloser(input, fetchSite(req)) : undefined }) });
 }));
 
 deskRouter.post('/todos/:id/reopen', route(async (req, res) => {
@@ -436,10 +443,17 @@ export async function deliverDeskAnswer(todoId: string, deliver: TeamMessenger =
  *  messenger instead of waking a real agent. */
 export function answerTodoHandler(deliver: TeamMessenger = deliverTeamMessage) {
   return route(async (req, res) => {
-    const { todo, duplicate } = await answerTodo(param(req, 'id'), body(req));
+    const input = body(req);
+    if (fetchSite(req) !== 'same-origin' || input.agent || input.author) {
+      throw new DeskError(403, 'Only you can answer this question from the Desk. Nothing was saved.');
+    }
+    const { todo, duplicate } = await answerTodo(param(req, 'id'), input);
     // Double tap: the first call already saved and delivered.
     if (duplicate) {
-      res.json({ todo, duplicate: true });
+      const choice = typeof input.choice === 'string' ? input.choice.replace(/\s+/g, ' ').trim().toLowerCase() : '';
+      const text = typeof input.text === 'string' ? input.text.replace(/\r\n?/g, '\n').trim() : '';
+      const conflict = choice !== (todo.answer?.choice ?? '').toLowerCase() || text !== (todo.answer?.text ?? '');
+      res.json({ todo, duplicate: true, conflict });
       return;
     }
     if (todo.answer?.delivery !== 'failed') {

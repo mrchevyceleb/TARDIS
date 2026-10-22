@@ -1,3 +1,4 @@
+import { hasRecentTurnSignal } from '../chat/utils/livePresence';
 // Grok Bot left rail — THE TEAM, one list, no redundancy:
 //
 //   mark [+]   ·   Search
@@ -470,24 +471,22 @@ export function BotRail(props: BotRailProps) {
   const liveAgents = useMemo(() => {
     const set = new Set<string>();
     for (const s of live) {
-      const a = props.agents.find((aa) => sameChatId(s.chatId, aa.home)
-        && (!props.hubRepo || s.cwd === props.hubRepo));
+      const a = props.agents.find((aa) => (s.agentId ? s.agentId === aa.id : s.chatId.replace(/__acct__[a-z0-9-]+$/i, '').replace(/__bg$/, '') === aa.home));
       if (a) set.add(a.id);
     }
     return set;
-  }, [live, props.agents, props.hubRepo]);
+  }, [live, props.agents]);
   // Same match, but only lanes mid-turn: the "working" count on a folded group
   // and the ring on a row's presence lamp.
   const busyAgents = useMemo(() => {
     const set = new Set<string>();
     for (const s of live) {
-      if (!s.busy) continue;
-      const a = props.agents.find((aa) => sameChatId(s.chatId, aa.home)
-        && (!props.hubRepo || s.cwd === props.hubRepo));
+      if (!hasRecentTurnSignal(s)) continue;
+      const a = props.agents.find((aa) => (s.agentId ? s.agentId === aa.id : s.chatId.replace(/__acct__[a-z0-9-]+$/i, '').replace(/__bg$/, '') === aa.home));
       if (a) set.add(a.id);
     }
     return set;
-  }, [live, props.agents, props.hubRepo]);
+  }, [live, props.agents]);
   // Running background jobs per agent (one request for the whole rail). A job
   // is not a turn: an agent on jobs is busy but free to talk, so it gets its
   // own outlined badge and never the working lamp.
@@ -636,10 +635,10 @@ export function BotRail(props: BotRailProps) {
         g,
         rows: listed,
         pinned: g.agents.length - listed.length,
-        working: listed.filter((r) => busyAgents.has(r.a.id)).length,
+        working: g.agents.filter((a) => busyAgents.has(a.id)).length,
         // Every listed row wearing a jobs badge. Independent of "working": an
         // agent mid-turn can be on jobs too, and the header must not hide that.
-        jobs: listed.filter((r) => jobsByAgent.has(r.a.id)).length,
+        jobs: g.agents.filter((a) => jobsByAgent.has(a.id)).length,
         unread: listed.reduce((sum, r) => sum + (r.a.muted ? 0 : r.a.unread ?? 0), 0),
       };
     });
@@ -1027,6 +1026,7 @@ export function BotRail(props: BotRailProps) {
             <NativeOpenHelper />
           </div>
         ) : null}
+        <a className="bt-foot-row" href="/api/session-health/report" target="_blank" rel="noreferrer"><Activity size={17} /> Session health</a>
         <button className="bt-foot-row" onClick={() => { setAppearanceOpen(false); setPluginsOpen((o) => !o); }} aria-haspopup="menu" aria-expanded={pluginsOpen}>
           <Plug size={17} /> Plugins
         </button>

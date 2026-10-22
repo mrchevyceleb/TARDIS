@@ -37,8 +37,10 @@ const DESK_COLUMNS = ['not_started', 'in_progress', 'on_staging', 'in_qa', 'in_p
 const DESK_COLUMN_ENUM = [...DESK_COLUMNS, 'pipeline', 'up_next', 'waiting', 'done'];
 const DESK_COLUMN_TITLES = { not_started: 'Not started', in_progress: 'In progress', in_qa: 'In QA (Sud)', on_staging: 'Merged to staging', in_production: 'Live in production' };
 const DESK_PRIORITIES = ['low', 'normal', 'high'];
-// Only lanes whose runner turns the call into a message (Claude) are told about reply_now.
+// Named agents publish through the host on every engine. Anonymous legacy
+// Claude conversations keep their runner conversion.
 const REPLY_NOW_ENABLED = process.env.RIVENDELL_REPLY_NOW === '1';
+const REPLY_NOW_HOST = process.env.RIVENDELL_REPLY_NOW_HOST === '1';
 // Which of the agent's two lanes this tool server belongs to. Jobs and watches
 // report back to the lane that started them; handoffs keep chains per lane.
 const LANE = process.env.RIVENDELL_AGENT_LANE === 'bg' ? 'bg' : 'main';
@@ -47,10 +49,10 @@ const FROM_PROP = { type: 'string', description: 'Your own teammate name. Only n
 const TOOLS = [
   {
     name: 'reply_now',
-    description: 'Post a short visible message to the person in the thread right now. Use it when you owe them a reply and still have work to do: one or two plain sentences. Your thinking is never shown to them; this is.',
+    description: 'Post one or two sentences to the human owner right now, even during a teammate turn. Use team_message for a teammate; inline text is returned only when the handoff explicitly says so. This publishes immediately and stays visible: do not repeat or reword it later. Continue with only new information; if there is nothing new, finish with NO_UPDATE. Your thinking is never shown.',
     // Always in the tool list, so using it never costs a ToolSearch first.
     _meta: { 'anthropic/alwaysLoad': true },
-    inputSchema: { type: 'object', properties: { text: { type: 'string', description: 'One or two sentences for the person.' } }, required: ['text'], additionalProperties: false },
+    inputSchema: { type: 'object', properties: { from: FROM_PROP, text: { type: 'string', description: 'One or two sentences for the person.' }, audience: { type: 'string', enum: ['owner'], description: `Explicitly addresses ${OWNER}. Teammate replies use team_message, or the explicitly promised inline return.` } }, required: ['text', 'audience'], additionalProperties: false },
   },
   {
     name: 'content_ideas',
@@ -428,6 +430,7 @@ const TOOLS = [
         cardId: { type: 'string' },
         choices: { type: 'array', items: { type: 'string', maxLength: 40 }, maxItems: 4, description: 'Pick-one options (1 to 4, each 40 characters max); an empty list goes back to Yes / No' },
         status: { type: 'string', enum: ['open', 'done'] },
+        note: { type: 'string', description: 'Required to close an unanswered item: how this exact item was resolved' },
       },
       required: ['id'],
       additionalProperties: false,
@@ -435,7 +438,7 @@ const TOOLS = [
   },
   {
     name: 'desk_todo_complete',
-    description: `Mark a Needs-you item done once it is resolved (${OWNER} answered, the login worked, it no longer matters). An optional note is added as a comment on the linked card.`,
+    description: `Mark a Needs-you item done once it is resolved (${OWNER} answered, the login worked, it no longer matters). If it has no saved answer, your name and a note explaining how this exact item was resolved are required and saved with it.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -621,6 +624,7 @@ function describeTodo(t) {
   const extra = [
     t.detail ? clipLine(t.detail, 200) : null,
     !t.answer && t.choices?.length ? `choices: ${t.choices.join(' / ')}` : null,
+    t.resolution ? `resolved by ${t.resolution.by.name}: ${t.resolution.note}` : null,
     t.answer ? `answered: ${[t.answer.choice ? `"${t.answer.choice}"` : null, t.answer.text ? clipLine(t.answer.text, 300) : null].filter(Boolean).join(' ')}` : null,
   ].filter(Boolean);
   return `- [${t.id}] (${t.priority}) ${t.title} · ${bits.join(' · ')}${extra.map((line) => `\n  ${line}`).join('')}`;
@@ -655,9 +659,17 @@ function deniesGhWorkflowDisable(command) {
 async function callTool(name, args, signal) {
   // The runner turns this call into a visible message in the thread; the tool itself only acknowledges.
   if (name === 'reply_now' && REPLY_NOW_ENABLED) {
+    if (args.audience !== 'owner') throw new Error(`Choose audience: "owner" only for ${OWNER}. Use team_message for a teammate unless the handoff explicitly promises an inline return.`);
     const text = typeof args.text === 'string' ? args.text.trim() : '';
     if (!text) throw new Error('reply_now needs one or two sentences of text.');
     if (text.length > 2000) throw new Error('reply_now is for one or two sentences; keep it short and call it again.');
+    if (REPLY_NOW_HOST) {
+      const result = await api('/api/team/reply', { method: 'POST', body: JSON.stringify({
+        from: process.env.RIVENDELL_AGENT_ID || process.env.RIVENDELL_AGENT_NAME || args.from,
+        text, audience: 'owner', lane: LANE,
+      }) }, signal);
+      return `Posted to the thread (${result.seq}).`;
+    }
     return 'Posted to the thread.';
   }
   if (name === 'content_ideas') {
@@ -789,13 +801,14 @@ async function callTool(name, args, signal) {
     }
     if (name === 'desk_todo_update') {
       const patch = {};
-      for (const key of ['title', 'detail', 'due', 'priority', 'link', 'cardId', 'choices', 'status']) if (args[key] !== undefined) patch[key] = args[key];
+      for (const key of ['title', 'detail', 'due', 'priority', 'link', 'cardId', 'choices', 'status', 'note']) if (args[key] !== undefined) patch[key] = args[key];
       if (!Object.keys(patch).length) throw new Error('Nothing to change.');
+      if (args.status === 'done') patch.agent = self;
       const { todo } = await api(`/api/desk/todos/${encodeURIComponent(args.id)}`, { method: 'PATCH', body: JSON.stringify(patch) }, signal);
       return `Updated:\n${describeTodo(todo)}`;
     }
     if (name === 'desk_todo_complete') {
-      const { todo } = await post(`/api/desk/todos/${encodeURIComponent(args.id)}/complete`, {});
+      const { todo } = await post(`/api/desk/todos/${encodeURIComponent(args.id)}/complete`, { agent: self, note: args.note });
       let extra = '';
       if (args.note && todo.cardId) {
         try {

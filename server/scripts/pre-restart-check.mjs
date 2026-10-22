@@ -42,10 +42,20 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
+import { copyTree, stateFilter } from './lib/state-copy.mjs';
+
+// The state the side copy must boot with: required in the copy whenever it
+// exists in the source (and parse-checked, so a torn save fails and
+// retries), must-exist in the source at all, and always-copied however
+// large, so a required file that outgrows the byte cap is taken whole
+// instead of being silently dropped (jobs.json is 10 MB, past the 8 MB cap,
+// and the old gate never copied it at all).
+const REQUIRED_STATE = ['desk.json', 'personas/agents.json', 'jobs.json', 'chat-sessions.json', 'compaction-state.json'];
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -78,6 +88,7 @@ let pass = false;
 let interrupted = false; // set SYNCHRONOUSLY on a signal, before any await
 let targetSha = '';
 let liveHead = '';
+let checkedManifest = null;
 
 // Signals tear the side copy down too: `finally` alone never runs on a
 // default SIGINT/SIGTERM death, and a leaked child/worktree is exactly the
@@ -138,24 +149,56 @@ try {
   // 3. Copy state (selective: the copy must be fast; everything the check
   //    exercises — desk, roster, personas, compaction state, lane config —
   //    is small; the excluded bulk is logs and media no gated-off subsystem
-  //    ever reads). The probe lane's own log is seeded below.
-  fs.cpSync(LIVE_STATE, stateDir, {
-    recursive: true,
-    filter: (s) => {
-      const rel = path.relative(LIVE_STATE, s);
-      if (!rel) return true;
-      // desk.json is core check state (named above) and it outgrew the bulk
-      // cap (15.8MB, Oct 17): always copied, whatever its size, so the side
-      // copy always boots the real Desk — a Deskless side copy exercises
-      // none of the Desk routes it is supposed to prove.
-      if (rel === 'desk.json') return true;
-      const top = rel.split(path.sep)[0];
-      if (big.includes(top)) return false;
-      try { return fs.statSync(s).size <= 8 * 1024 * 1024; } catch { return true; }
-    },
-  });
+  //    ever reads). The probe lane's own log is seeded below. The copy is
+  //    vanish-tolerant: the live state dir is being written while we copy
+  //    it (jobs.json saves land as a tmp file that is renamed into place),
+  //    so a path that disappears between list and open is skipped, not a
+  //    FAIL — the first try must pass or fail on the build, never on how
+  //    busy TARDIS happens to be. desk.json is REQUIRED: a side copy without
+  //    the real Desk exercises none of the Desk routes the check claims to
+  //    prove, so losing it fails the copy; one lost to a writer race is
+  //    retried a couple of times before it does.
+  let stateCopy = null;
+  for (let attempt = 1; !stateCopy; attempt += 1) {
+    try {
+      stateCopy = copyTree(LIVE_STATE, stateDir, {
+        filter: stateFilter(LIVE_STATE, { big, always: REQUIRED_STATE }),
+        required: REQUIRED_STATE,
+        mustExist: REQUIRED_STATE,
+        // Unreadable-but-present files are not writer races: permissions
+        // persist, and a side copy that silently boots without them proves
+        // less than this check claims. fs.cpSync failed here; so do we.
+        failOnUnreadable: true,
+      });
+    } catch (err) {
+      if (err.code === 'ESTATEREQUIRED' && attempt < 3) {
+        // A clean slate per retry: mixing snapshots from two attempts could
+        // both resurrect vanished files and wedge on file-turned-directory.
+        // A reset that itself fails is fatal — the next attempt would copy
+        // into exactly the mixed snapshot this exists to prevent.
+        try {
+          fs.rmSync(stateDir, { recursive: true, force: true });
+        } catch (cleanErr) {
+          fail(`could not reset the side-copy state dir between attempts: ${cleanErr.message}`);
+        }
+        step(`state copy attempt ${attempt}: ${err.message}; retrying`);
+        continue;
+      }
+      throw err;
+    }
+  }
   const deskCopy = path.join(stateDir, 'desk.json');
-  step(`state copied to ${stateDir} (${mb(stateDir)} MB${fs.existsSync(deskCopy) ? `, desk.json ${Math.round(fs.statSync(deskCopy).size / 1024 / 1024)} MB` : ''})`);
+  let deskNote = '';
+  try {
+    deskNote = `, desk.json ${Math.round(fs.statSync(deskCopy).size / 1024 / 1024)} MB`;
+  } catch {
+    deskNote = ', desk.json not copied';
+  }
+  const names = (list) => list.slice(0, 5).join(', ') + (list.length > 5 ? ` (+${list.length - 5} more)` : '');
+  step(`state copied to ${stateDir} (${Math.round(stateCopy.bytes / 1024 / 1024)} MB${deskNote})`
+    + (stateCopy.healed ? `, ${stateCopy.healed} path(s) lost to a mid-copy race and healed back in (${names(stateCopy.healedPaths)})` : '')
+    + (stateCopy.vanished ? `, ${stateCopy.vanished} path(s) vanished mid-copy (live writers, skipped: ${names(stateCopy.vanishedPaths)})` : '')
+    + (stateCopy.skipped.length ? `, skipped special/out-of-tree: ${names(stateCopy.skipped)}` : ''));
 
   // 4. A synthetic probe workspace: the probe engine's cwd is never a live
   //    repo, so no unproven code or unexpected agent behavior can touch real
@@ -250,13 +293,31 @@ try {
     step(`team round trip ok (reply: ${JSON.stringify(String(team.reply).slice(0, 40))})`);
   }
 
+  if (MESSAGE) {
+    const names = execFileSync('git', ['ls-files', 'server/src', 'server/scripts'], { cwd: srcDir, encoding: 'utf8' }).trim().split('\n');
+    checkedManifest = Object.fromEntries(names.filter((name) => fs.statSync(path.join(srcDir, name)).isFile())
+      .map((name) => [name, createHash('sha256').update(fs.readFileSync(path.join(srcDir, name))).digest('hex')]));
+  }
   pass = true;
 } catch (err) {
   if (!failedMsg) fail(String(err.message || err));
 } finally {
   await teardown();
   const elapsed = Math.round((Date.now() - T0) / 1000);
-  const ok = pass && !interrupted;
+  let ok = pass && !interrupted;
+  // The independent exact-head gate also gives the already-installed watchdog
+  // a durable handover for future releases. Never publish a partial/failed gate.
+  if (ok && MESSAGE) {
+    try {
+      const receipt = path.join(LIVE_STATE, 'restart-check-approved.json');
+      const temporary = `${receipt}.${process.pid}.tmp`;
+      fs.writeFileSync(temporary, JSON.stringify({ schema: 1, head: targetSha, message: true, at: Date.now(), files: checkedManifest }), { mode: 0o600 });
+      fs.renameSync(temporary, receipt);
+    } catch (error) {
+      ok = false;
+      console.error('[check] Could not retain the watchdog handover:', error.code || error.name);
+    }
+  }
   console.log(ok
     ? `\nPASS — ${targetSha.slice(0, 10)} boots clean${MESSAGE ? ' and answers the probe lane above a 5000-seq watermark, replays it once with the same seqs, and completes a probe-to-probe team round trip' : ''} in ${elapsed}s.`
       + `\nRollback point if the live restart fails: ${liveHead.slice(0, 10)}.`
@@ -298,11 +359,6 @@ function fail(msg) {
   failedMsg = msg;
   console.error(`[check] FAIL: ${msg}`);
   throw new Error(msg);
-}
-function mb(dir) {
-  let n = 0;
-  try { for (const e of fs.readdirSync(dir, { withFileTypes: true })) n += e.isFile() ? fs.statSync(path.join(dir, e.name)).size : 0; } catch {}
-  return Math.round(n / 1024 / 1024);
 }
 function run(cmd, cmdArgs, cwd, toFile, quiet) {
   try {

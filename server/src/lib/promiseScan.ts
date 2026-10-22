@@ -255,7 +255,7 @@ export function scanOutgoingPromise(
     if (perSource && existingSources.has(perSource)) continue;
     const clause = promise.clause.replace(/\s+/g, ' ').trim().slice(0, 160);
     if (open.some((c) => c.dueAt === promise.dueAt && norm(c.text) === norm(clause))) continue;
-    const result = addCommitment(agentId, clause, promise.due, { dueAt: promise.dueAt, sourceId: perSource });
+    const result = addCommitment(agentId, clause, promise.due, { dueAt: promise.dueAt, sourceId: perSource, enforceCheckpoint: false });
     if (result.error) {
       // Keep going: the later promises in this message still land, and every
       // failure is reported (the first one carries the nudge).

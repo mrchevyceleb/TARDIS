@@ -66,7 +66,7 @@ function defaultWindowForCli(cli: CompanionId, model?: string): number {
   if (isCodexCli(cli)) return contextWindowForCodexModel(model);
   // Fireworks context windows vary per model (128K to 1M); the catalog entry carries the real one.
   if (cli === 'fireworks') return contextWindowForFireworksModel(model);
-  if (cli === 'openrouter') return contextWindowForOpenRouterModel(model);
+  if (cli === 'openrouter' || cli === 'openrouter2') return contextWindowForOpenRouterModel(model);
   if (cli === 'banana' || cli === 'banana-local' || cli === 'banana-fireworks') return BANANA_WINDOW_TOKENS;
   // xAI always runs Grok (500K). Pin before system/init arrives so the meter
   // never flashes the 200K non-claude default.
@@ -135,7 +135,7 @@ function isSyntheticApiErrorEvent(ev: any): boolean {
 // Pure reducer — all per-turn state lives on the blocks themselves
 // (turnId + cbIndex). This keeps it safe under React Strict Mode, which
 // invokes reducers twice for purity-checking.
-type ReducerCursor = { current: string; peerId?: string; lane?: 'bg'; bg?: ReducerCursor; agyStep?: number; agySession?: string };
+type ReducerCursor = { current: string; peerId?: string; promptPeerId?: string; ownerPrompt?: boolean; originKnown?: boolean; automation?: boolean; lane?: 'bg'; bg?: ReducerCursor; agyStep?: number; agySession?: string; legacyReplies?: Record<string, { text: string; turnId: string }> };
 
 /** Blocks this cursor's lane owns. The agent's background lane streams into
  *  the same thread as the home lane, so closing one lane's turn must never
@@ -218,6 +218,10 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       code: typeof ev.code === 'string' ? ev.code : undefined,
       retryable: ev.retryable === true || undefined,
       continuing: ev.continuing === true || undefined,
+      peerId: turnIdRef.peerId ?? turnIdRef.promptPeerId,
+      background: turnIdRef.automation || undefined,
+      turnId: currentTurnId,
+      ...laneStamp(turnIdRef),
       ts,
     }];
   }
@@ -247,8 +251,11 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // A historical turn ended (replay keeps the boundary; live turns reset via
   // the turnEnd control message). The next block starts a fresh turn.
   if (ev.type === '_turn_boundary') {
+    turnIdRef.legacyReplies = undefined;
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
+    turnIdRef.ownerPrompt = false;
+    turnIdRef.originKnown = false;
     if (!blocks.some((b) => b.kind === 'text' && b.open && ownsBlock(turnIdRef, b))) return blocks;
     return blocks.map((b) => (b.kind === 'text' && b.open && ownsBlock(turnIdRef, b) ? { ...b, open: false } : b));
   }
@@ -258,8 +265,11 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // its open/running blocks too — otherwise a dead tool card ticks "working"
   // forever after replay.
   if ((ev.type === 'assistant' && ev._serviceRestart) || ev.type === '_service_restart') {
+    turnIdRef.legacyReplies = undefined;
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
+    turnIdRef.ownerPrompt = false;
+    turnIdRef.originKnown = false;
     const ts = typeof ev.ts === 'number' ? ev.ts : Date.now();
     const reason = typeof ev.reason === 'string' ? ev.reason : undefined;
     const closed = blocks.map((b) => {
@@ -323,7 +333,11 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // Voice handoffs are control envelopes for an already-visible spoken user
   // request, not a second teammate conversation. Replies belong in main chat.
   if (ev.type === 'peer_message' && ev.fromRole === 'voice') {
+    // A newly admitted owner request takes priority even inside a peer turn.
+    turnIdRef.ownerPrompt = true;
     turnIdRef.peerId = undefined;
+    turnIdRef.promptPeerId = undefined;
+    turnIdRef.automation = false;
     return blocks;
   }
 
@@ -331,7 +345,10 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // thread. Display-only here: the delivered record still reaches the agent's
   // own turn on the server side.
   if (ev.type === 'peer_message' && ev.fromRole === 'channel') {
+    if (ev.startsTurn === false) return blocks;
     turnIdRef.peerId = undefined;
+    turnIdRef.promptPeerId = undefined;
+    turnIdRef.automation = false;
     return blocks;
   }
 
@@ -340,20 +357,35 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const from = typeof ev.from === 'string' ? ev.from : 'Companion';
     const fromRole = typeof ev.fromRole === 'string' ? ev.fromRole : undefined;
     const deliveryId = typeof ev.deliveryId === 'string' ? ev.deliveryId : undefined;
+    const automation = isAutomationPeer(from, fromRole, ev.text);
     const existing = deliveryId
       ? blocks.find((block) => block.kind === 'peer' && block.deliveryId === deliveryId)
       : undefined;
-    if (existing?.kind === 'peer') {
-      turnIdRef.peerId = isAutomationPeer(from, fromRole, ev.text) ? undefined : existing.id;
-      return blocks;
+    const blockId = existing?.id ?? id();
+    const publicOrigin = automation || fromRole === 'desk';
+    // Only the runner knows whether this input opened the native turn or
+    // joined one already running. A steer never changes its original audience.
+    // Missing provenance in old history stays plain instead of being guessed.
+    if (ev.startsTurn === true || fromRole === 'desk') {
+      turnIdRef.originKnown = true;
+      turnIdRef.automation = automation;
+      turnIdRef.ownerPrompt = publicOrigin;
+      turnIdRef.peerId = publicOrigin ? undefined : blockId;
+      turnIdRef.promptPeerId = turnIdRef.peerId;
+    } else if (ev.startsTurn === undefined && !turnIdRef.originKnown && !turnIdRef.ownerPrompt) {
+      // With no admission provenance even the tool association is unknown.
+      turnIdRef.automation = automation;
+      turnIdRef.peerId = undefined;
+      turnIdRef.promptPeerId = undefined;
     }
-    const blockId = id();
-    turnIdRef.peerId = isAutomationPeer(from, fromRole, ev.text) ? undefined : blockId;
+    if (existing?.kind === 'peer') return blocks;
     return [...blocks, {
       kind: 'peer',
       id: blockId,
       from,
       fromRole,
+      ...(ev.startsTurn === true ? { replyAudience: publicOrigin ? 'owner' as const : 'peer' as const } : {}),
+      ...(typeof ev.startsTurn === 'boolean' ? { startsTurn: ev.startsTurn } : {}),
       deliveryId,
       text: ev.text,
       ts: typeof ev.ts === 'number' ? ev.ts : Date.now(),
@@ -364,7 +396,13 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   // Server-injected echo of the user's prompt — keeps the user's message in
   // the visible thread when a client reconnects and replays the buffer.
   if (ev.type === '_user_echo' && typeof ev.text === 'string') {
+    // The owner's admitted question is authoritative, including a native
+    // steer. Subsequent words answer the owner; later peers cannot capture it.
+    turnIdRef.originKnown = true;
     turnIdRef.peerId = undefined;
+    turnIdRef.promptPeerId = undefined;
+    turnIdRef.automation = false;
+    turnIdRef.ownerPrompt = true;
     const attachments: Array<{ id: string; mediaType: string }> = Array.isArray(ev.attachments) ? ev.attachments : [];
     const echoImages = attachments.length
       ? attachments.map((a) => ({ mediaType: a.mediaType, dataUrl: `/api/chat/attachments/${a.id}` }))
@@ -390,6 +428,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       // bubble instead of adding a duplicate.
       const nextMatch: Extract<ChatBlock, { kind: 'user' }> = {
         ...match,
+        ...(typeof ev.startsTurn === 'boolean' ? { startsTurn: ev.startsTurn } : {}),
         deliveryState: undefined,
         ...(match.replyTo ? {} : echoReplyTo ? { replyTo: echoReplyTo } : {}),
         ...(echoImages && !match.images?.some((i) => i.dataUrl.startsWith('/')) ? { images: echoImages } : {}),
@@ -399,6 +438,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       };
       if (
         match.deliveryState === undefined
+        && nextMatch.startsTurn === match.startsTurn
         && nextMatch.images === match.images
         && nextMatch.attachmentsLost === match.attachmentsLost
         && nextMatch.replyTo === match.replyTo
@@ -410,7 +450,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // Feature-present echo with zero kept attachments: every image failed to
     // persist — say "not kept", not "attached".
     const attachmentsLost = Boolean(imageCount && Array.isArray(ev.attachments) && ev.attachments.length === 0) || undefined;
-    return [...blocks, { kind: 'user', id: id(), text: ev.text, imageCount, images: echoImages, clientMsgId: cmid ?? undefined, attachmentsLost, ...(echoReplyTo ? { replyTo: echoReplyTo } : {}), ts }];
+    return [...blocks, { kind: 'user', ...(typeof ev.startsTurn === 'boolean' ? { startsTurn: ev.startsTurn } : {}), id: id(), text: ev.text, imageCount, images: echoImages, clientMsgId: cmid ?? undefined, attachmentsLost, ...(echoReplyTo ? { replyTo: echoReplyTo } : {}), ts }];
   }
 
   if (ev.type === 'message_start') {
@@ -435,14 +475,20 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
 
   // Turn over (result) or killed (interrupted): nothing stays open/running.
   if (ev.type === 'result' || ev.type === '_interrupted') {
+    turnIdRef.legacyReplies = undefined;
     const resultSeq = typeof ev.seq === 'number' ? ev.seq : undefined;
     const finalTurnId = turnIdRef.current || `t${nextId++}`;
     const finalPeerId = turnIdRef.peerId;
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
+    turnIdRef.ownerPrompt = false;
+    turnIdRef.originKnown = false;
     turnIdRef.agyStep = undefined;
     turnIdRef.agySession = undefined;
     const closed = blocks.map((b) => {
+      if (b.kind === 'peer' && b.id === finalPeerId) {
+        return { ...b, interrupted: ev.type === '_interrupted' || ev.is_error === true || undefined };
+      }
       if (b.kind === 'text' && b.turnId === finalTurnId) {
         return { ...b, open: false, seq: b.seq ?? resultSeq };
       }
@@ -470,7 +516,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // Legacy thought blocks never count, and an empty streamed block is not
     // a delivered answer: only non-empty parts reconcile.
     const finalTextBlocks = closed
-      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && !b.thought && b.text.trim().length > 0 && (!finalTurnId || b.turnId === finalTurnId));
+      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && !b.thought && !b.replyNow && b.text.trim().length > 0 && (!finalTurnId || b.turnId === finalTurnId));
     if (!finalText) return closed;
     const appendResult = (): ChatBlock[] => [...closed, {
       kind: 'text',
@@ -484,8 +530,13 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       open: false,
       seq: typeof ev.seq === 'number' ? ev.seq : undefined,
     }];
-    if (finalTextBlocks.length === 0) return appendResult();
     const squash = (s: string) => s.replace(/\s+/g, '');
+    if (finalTextBlocks.length === 0) {
+      // A published reply-now is its own durable message. A later result may
+      // repeat it, but must never replace or re-key it as another reply.
+      return closed.some((b) => b.kind === 'text' && b.replyNow && b.turnId === finalTurnId
+        && squash(b.text) === squash(finalText)) ? closed : appendResult();
+    }
     const streamedSq = squash(finalTextBlocks.map((b) => b.text).join(''));
     const finalSq = squash(finalText);
     if (streamedSq.length > 0 && finalSq.endsWith(streamedSq) && finalSq.length > streamedSq.length) {
@@ -557,7 +608,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const reason = ev.delta?.stop_reason;
     const presentation = reason === 'tool_use' ? 'update' : reason === 'end_turn' ? 'answer' : undefined;
     if (!presentation) return blocks;
-    return blocks.map((b) => b.kind === 'text' && b.turnId === turnIdRef.current
+    return blocks.map((b) => b.kind === 'text' && !b.replyNow && b.turnId === turnIdRef.current
       ? { ...b, presentation } : b);
   }
 
@@ -637,6 +688,24 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
             ? { ...b, result: summary, running: false }
             : b,
         );
+        const legacy = turnIdRef.legacyReplies?.[c.tool_use_id];
+        if (legacy) {
+          // Keep it until the turn boundary. React may evaluate this updater
+          // twice from the same input; consuming the entry would lose the
+          // recovered message on that second evaluation.
+          // Old reply_now was an owner-only publisher. A successful recorded
+          // acknowledgement is evidence of the exact text promised, not an
+          // audience guess. Recover only missing publications, without writes
+          // to history or another copy of an already published message.
+          if (!c.is_error && summary.trim() === 'Posted to the thread.'
+            && !next.some((b) => b.kind === 'text' && b.replyNow
+              && b.turnId === legacy.turnId && b.text === legacy.text)) {
+            next = [...next, { kind: 'text', id: `legacy-reply-${c.tool_use_id}`, text: legacy.text,
+              ...eventTime(ev), turnId: legacy.turnId, peerId: null, ...laneStamp(turnIdRef),
+              cbIndex: -1, open: false, presentation: 'update', replyNow: true,
+              seq: typeof ev.seq === 'number' ? ev.seq : undefined }];
+          }
+        }
       }
     }
     return next;
@@ -664,7 +733,8 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     const turnId = turnIdRef.current;
     return [...blocks, {
       kind: 'text', id: id(), text, ...eventTime(ev),
-      turnId, peerId: turnIdRef.peerId, ...laneStamp(turnIdRef), cbIndex: -1, open: false, presentation: 'update',
+      turnId, peerId: ev._replyNowForOwner === true ? null : turnIdRef.peerId ?? null,
+      ...laneStamp(turnIdRef), cbIndex: -1, open: false, presentation: 'update', replyNow: true,
       seq: typeof ev.seq === 'number' ? ev.seq : undefined,
     }];
   }
@@ -672,10 +742,17 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
     if (!turnIdRef.current) turnIdRef.current = `t${nextId++}`;
     const turnId = turnIdRef.current;
+    for (const call of ev.message.content) {
+      if (call?.type === 'tool_use' && typeof call.id === 'string'
+        && /^(mcp__.+__)?reply_now$/.test(call.name ?? '')
+        && call.input?.audience === undefined && typeof call.input?.text === 'string' && call.input.text.trim()) {
+        (turnIdRef.legacyReplies ??= {})[call.id] = { text: call.input.text, turnId };
+      }
+    }
     const presentation = ev.message.stop_reason === 'tool_use' ? 'update'
       : ev.message.stop_reason === 'end_turn' ? 'answer' : undefined;
     const annotated: ChatBlock[] = blocks.map((b): ChatBlock => {
-      if (b.kind !== 'text' || b.turnId !== turnId) return b;
+      if (b.kind !== 'text' || b.replyNow || b.turnId !== turnId) return b;
       return {
         ...b,
         ...(presentation ? { presentation } : {}),
@@ -866,7 +943,7 @@ function pendingSteersFor(key: string): PendingSteer[] {
 // latestSeq assertion as coverage (deduped hello, no replay) saved head
 // cursors over holed blocks. The writer is fixed below; bump once to purge
 // every copy poisoned before the fix (a desktop client, Oct 9 2026).
-const CHAT_CACHE_VERSION = 'v12';
+const CHAT_CACHE_VERSION = 'v13';
 
 function blocksStorageKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
   // Browser snapshots are disposable; transcript history remains on the server.
@@ -1645,6 +1722,8 @@ export function useChat(opts: {
     pendingSendRef.current = queuedSteerRef.current.size > 0;
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
+    turnIdRef.ownerPrompt = false;
+    turnIdRef.originKnown = false;
     turnIdRef.bg = undefined;
     clearTurnStarted();
     reconnectAttemptRef.current = 0;

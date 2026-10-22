@@ -2,10 +2,20 @@
 
 import { Router } from 'express';
 import { asyncHandler } from './helpers.ts';
-import { deliverTeamMessage, teamRoster, teamRecent } from '../chat/teamBus.ts';
+import { deliverTeamMessage, teamRoster, teamRecent, publishOwnerReply } from '../chat/teamBus.ts';
 import { createJobWatch, deleteJobWatch, jobWatchesWithAgents } from '../chat/jobWatches.ts';
 
 export const teamRouter = Router();
+
+teamRouter.post('/reply', asyncHandler(async (req, res) => {
+  const { from, text, audience, lane } = req.body ?? {};
+  if (typeof from !== 'string' || !from.trim() || typeof text !== 'string' || !text.trim()
+    || text.length > 2000 || audience !== 'owner' || (lane !== undefined && lane !== 'main' && lane !== 'bg')) {
+    res.status(400).json({ error: 'An owner reply needs your identity, audience: owner, and 1 to 2000 characters of text.' });
+    return;
+  }
+  res.json({ posted: true, seq: await publishOwnerReply(from, text, lane) });
+}));
 
 teamRouter.get('/', asyncHandler(async (_req, res) => {
   res.json({ agents: await teamRoster() });
@@ -17,7 +27,7 @@ teamRouter.post('/message', asyncHandler(async (req, res) => {
     res.status(400).json({ error: 'from, to and text are required' });
     return;
   }
-  if (source !== undefined && source !== 'voice') {
+  if (source !== undefined && source !== 'voice' && source !== 'slack') {
     res.status(400).json({ error: 'unknown message source' });
     return;
   }
@@ -33,8 +43,11 @@ teamRouter.post('/message', asyncHandler(async (req, res) => {
   try {
     result = await deliverTeamMessage({ from, to, text, hop, wait, source, priority,
       fromLane: lane === 'bg' ? 'bg' : 'main',
-      // A voice recovery outbox item must survive the HTTP caller leaving too.
-      signal: source === 'voice' ? undefined : aborter.signal,
+      // A voice recovery outbox item and a Slack bridge post must both survive
+      // the HTTP caller leaving: the durable record is the delivery, and the
+      // bridge's connection can drop mid-wait (review 2026-10-20). Without
+      // this, an aborted request deletes the queued Slack message.
+      signal: source === 'voice' || source === 'slack' ? undefined : aborter.signal,
     });
   } finally {
     req.off('aborted', abortWait);
@@ -75,3 +88,5 @@ teamRouter.delete('/watch/:id', asyncHandler(async (req, res) => {
   const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   res.json({ deleted: await deleteJobWatch(id) });
 }));
+
+// Fresh is Matt's manual WebSocket UI control only. No agent HTTP reset route.

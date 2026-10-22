@@ -12,6 +12,7 @@ import {
   deskApi,
   discussOnDesk,
   dueLabel,
+  focusDeskRef,
   openAgentThread,
   useDeskWrite,
   type CardPatch,
@@ -22,7 +23,7 @@ import {
 } from '../data/desk';
 import { showToast } from '../native/shell';
 import type { Agent } from '../grok/agents';
-import { ActorChip, DiscussButton, errorText, linkLabel, priorityClass, useDeskChatOpen } from './deskParts';
+import { ActorChip, DiscussButton, canAnswer, errorText, linkLabel, priorityClass, useDeskChatOpen } from './deskParts';
 import { columnTitle, ownerKey, ownerOptions, projectOptions, useCardMover } from './DeskBoard';
 
 type Draft = { title: string; description: string; owner: string; project: string; priority: DeskPriority; links: string[] };
@@ -87,6 +88,12 @@ export function DeskCardDrawer({
   const [todoTitle, setTodoTitle] = useState('');
   const [busy, setBusy] = useState<'save' | 'comment' | 'todo' | null>(null);
   const [copied, setCopied] = useState(false);
+  const [reopenId, setReopenId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!reopenId) return;
+    const timer = window.setTimeout(() => setReopenId(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [reopenId]);
   const closeRef = useRef<HTMLButtonElement>(null);
   const threadRef = useRef<HTMLOListElement>(null);
   const dirty = !sameDraft(draft, base);
@@ -281,7 +288,7 @@ export function DeskCardDrawer({
     const now = new Date().toISOString();
     try {
       await write(
-        () => (done ? deskApi.completeTodo(id) : deskApi.reopenTodo(id)),
+        () => (done ? deskApi.completeTodo(id, 'Completed on the Desk') : deskApi.reopenTodo(id)),
         (d) => ({ ...d, todos: d.todos.map((t) => (t.id === id ? { ...t, status: done ? 'done' : 'open', completedAt: done ? now : undefined } : t)) }),
       );
     } catch (error) {
@@ -410,13 +417,17 @@ export function DeskCardDrawer({
                     <li key={todo.id} className={`${priorityClass(todo.priority)}${todo.status === 'done' ? ' is-done' : ''}`}>
                       <button
                         type="button"
-                        className="desk-check"
-                        onClick={() => void toggleTodo(todo.id, todo.status === 'open')}
-                        aria-label={todo.status === 'open' ? `Mark ${todo.title} done` : `Reopen ${todo.title}`}
+                        className={`desk-check${canAnswer(todo) ? ' is-question' : ''}`}
+                        onClick={() => {
+                          if (canAnswer(todo)) { onClose(); focusDeskRef({ kind: 'todo', id: todo.id }); }
+                          else if (todo.status === 'done' && reopenId !== todo.id) setReopenId(todo.id);
+                          else { setReopenId(null); void toggleTodo(todo.id, todo.status === 'open'); }
+                        }}
+                        aria-label={canAnswer(todo) ? `Answer ${todo.title}` : todo.status === 'open' ? `Mark ${todo.title} done` : `${reopenId === todo.id ? 'Confirm reopen' : 'Reopen'} ${todo.title}`}
                       >
-                        <Check size={13} aria-hidden="true" />
+                        {canAnswer(todo) ? <MessageSquare size={13} aria-hidden="true" /> : <Check size={13} aria-hidden="true" />}
                       </button>
-                      <span className="desk-mini-todo-text">{todo.title}</span>
+                      <span className="desk-mini-todo-text">{todo.title}{reopenId === todo.id ? <span className="desk-answer-error" role="status"> Clear the saved answer and ask again? Tap the check once more.</span> : null}</span>
                       {due ? <span className={`desk-due is-${due.tone}`}>{due.text}</span> : null}
                     </li>
                   );

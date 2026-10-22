@@ -31,6 +31,17 @@ export const PLAIN_ENGLISH_WRITING_BLOCK = [
 export function plainEnglishWritingBlockFor(opts: { cli: string; model: string; voiceMode?: boolean; humanTurn?: boolean }): string {
   if (opts.voiceMode) return '';
   if (opts.humanTurn === false) return '';
-  const gemini = opts.cli === 'agy' || (opts.cli === 'openrouter' && /^~?google\/gemini/i.test(opts.model));
+  const gemini = opts.cli === 'agy' || ((opts.cli === 'openrouter' || opts.cli === 'openrouter2') && /^~?google\/gemini/i.test(opts.model));
   return gemini ? PLAIN_ENGLISH_WRITING_BLOCK : '';
+}
+
+/** A native forever session keeps the writing rules in its fixed prompt,
+ * rather than appending the same rules to every human message. */
+export function plainEnglishWritingSystemBlockFor(opts: { cli: string; model: string }): string {
+  if (!plainEnglishWritingBlockFor(opts)) return '';
+  return [
+    'Keep each Write, Edit or shell-command payload below about 15 KB. Build large files with several bounded writes or edits, checking each result before continuing. Keep the whole job and its full scope; only the individual tool payloads are smaller.',
+    'For ordinary human replies, use the writing rules below. A request for a specific format, an exact token or silence takes priority. For voice replies, follow the spoken style. Teammate messages, automation and continuation events follow their own reply instructions.',
+    ...PLAIN_ENGLISH_WRITING_BLOCK.split('\n').slice(1),
+  ].join('\n');
 }

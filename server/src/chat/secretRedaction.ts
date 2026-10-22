@@ -7,7 +7,19 @@ const REDACTED = '[redacted secret]';
  *  credential: INPUT_TOKEN_COUNT, MAX_TOKEN_LIMIT, RATE_LIMIT_SECRET_PATH.
  *  Matched against the prefix tail so these lines are never masked (the
  *  unquoted rule would otherwise erase the whole remainder of the line). */
-const NON_SECRET_NAME = /(?:COUNT|LIMIT|SIZE|WIDTH|HEIGHT|LENGTH|URL|URI|ORIGIN|HOST|PORT|NAME|TITLE|PATH|DIR|PREFIX|SUFFIX|TTL|TIMEOUT|ID|IDS|VERSION|TYPE|MODE|FORMAT|LABEL|TAG|FLAG|DEBUG|RETRIES?|NUM|CAP|BUDGET|WINDOW|EXPIRY|EXPIRES|AT|ON|IN|OF)[A-Z0-9_]*["']?\s*[:=]\s*$/;
+const DIMENSION_WORD = /COUNT|LIMIT|SIZE|WIDTH|HEIGHT|LENGTH|URL|URI|ORIGIN|HOST|PORT|NAME|TITLE|PATH|DIR|PREFIX|SUFFIX|TTL|TIMEOUT|ID|IDS|VERSION|TYPE|MODE|FORMAT|LABEL|TAG|FLAG|DEBUG|RETRIES?|NUM|CAP|BUDGET|WINDOW|EXPIRY|EXPIRES|AT|ON|IN|OF/;
+
+/** The dimension word must sit in the name's trailing all-caps run, which is
+ *  what the old end-anchored `DIMENSION[A-Z0-9_]*["']?\s*[:=]\s*$` test
+ *  meant. Scanned from the end: that regex retried every start position,
+ *  quadratic on a long hostile name. */
+function isNonSecretName(prefix: string): boolean {
+  let end = prefix.length;
+  while (end > 0 && /\W/.test(prefix[end - 1])) end--;
+  let start = end;
+  while (start > 0 && /[A-Z0-9_]/.test(prefix[start - 1])) start--;
+  return DIMENSION_WORD.test(prefix.slice(start, end));
+}
 const REDACTED_SENTINEL = 'RIVENDELL_REDACTED_SECRET_VALUE';
 
 function preserveFence(value: string): string {
@@ -107,10 +119,48 @@ export function redactSecrets(text: string): string {
       /([?&#](?:x-amz-(?:signature|credential|security-token)|x-goog-(?:signature|credential)|awsaccesskeyid|signature|sig|token|access_token|auth|api_key|apikey|key|secret|password|code)=)[^&#\s]*/gi,
       `$1${REDACTED}`,
     )
-    .replace(/\b(Bearer|Basic)(\s+)[A-Za-z0-9._~+/=-]{8,}/gi, (_all, scheme: string, gap: string) => `${scheme}${gap}${REDACTED}`)
+    // Studio recorder links and handoff claim links (card-281af4): the secret
+    // rides a named query parameter (?readyToken=, ?appId=, ?roomKey=) that
+    // the exact-name rule above does not cover, or a path segment
+    // (/handoff/claim/<value>, /warm-handoff-claims/<value>). The named
+    // parameters also match bare in prose ("appId=..." quoted out of its
+    // URL), never inside a longer word. The value runs to the URL's own hard
+    // delimiter — &, #, whitespace, quote, backtick, angle bracket — so
+    // nothing past the token is eaten, and the whole token is masked, never a
+    // prefix of it. (review P1, Oct 20) The name decides regardless of
+    // spelling style, because a short shapeless value has no shape rule to
+    // fall back on: quoted (readyToken="…", appId='…'), spaced (roomKey = …),
+    // and structured ("recorderToken":"…") forms all mask, so the separator
+    // may be = or : with surrounding space and the name or value may carry
+    // quotes; an unterminated quote still starts the value (a truncated
+    // stream must not leak its tail). Trailing sentence punctuation belongs
+    // to the prose, not the token (review P2): "appId=demo-client, then"
+    // keeps its comma.
     .replace(
-      /(\b(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)*\s*=\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/gi,
-      (_all, prefix: string, value: string) => (NON_SECRET_NAME.test(prefix) ? _all : `${prefix}${preserveFence(value)}`),
+      /((?:[?&#]|(?<![\w-]))(?:"|')?(?:readyToken|appId|roomKey|recorderToken)(?:"|')?\s*[=:]\s*)("(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|`(?:\\.|[^`\\\r\n])*`|["'`][^&#\s"'`<>]*|[^&#\s"'`<>]+)/gi,
+      (_all, prefix: string, value: string) => {
+        if (/^["'`]/.test(value)) return `${prefix}${preserveFence(value)}`;
+        const trimmed = value.replace(/[.,;:!?)\]}]+$/, '');
+        return `${prefix}${trimmed ? REDACTED : ''}${value.slice(trimmed.length)}`;
+      },
+    )
+    .replace(
+      /(\/(?:handoff\/claim|warm-handoff-claims)\/)([^\s/?#"'`<>]+)/gi,
+      (_all, prefix: string, value: string) => {
+        const trimmed = value.replace(/[.,;:!?)\]}]+$/, '');
+        return `${prefix}${trimmed ? REDACTED : ''}${value.slice(trimmed.length)}`;
+      },
+    )
+    .replace(/\b(Bearer|Basic)(\s+)[A-Za-z0-9._~+/=-]{8,}/gi, (_all, scheme: string, gap: string) => `${scheme}${gap}${REDACTED}`)
+    // Linear on hostile names (Oct 21: one 358-underscore tool line froze the
+    // event loop for good). The lookahead rejects a word with no "=" and value
+    // after it before any name parsing, so a miss costs one scan instead of
+    // one per keyword in the word, and the suffix is one optional `_…` run:
+    // the old repeated `(?:_[A-Z0-9_]+)*` could split an underscore run 2^n
+    // ways. Same matches as before.
+    .replace(
+      /(\b(?=[A-Z0-9_]+\s*=\s*[^\r\n])(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)?\s*=\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/gi,
+      (_all, prefix: string, value: string) => (isNonSecretName(prefix) ? _all : `${prefix}${preserveFence(value)}`),
     )
     // A value under a secret-shaped UPPERCASE name in JSON/YAML/JS object
     // form: quotes and a colon instead of "=". The env rule above needs "=",
@@ -121,10 +171,11 @@ export function redactSecrets(text: string): string {
     // The unquoted form masks the whole remainder of the line, like the
     // header rule: a secret-named YAML scalar can be a multi-word passphrase
     // ("PASSWORD: correct horse battery staple") and token-shape matching
-    // would leak most of it.
+    // would leak most of it. Same lookahead and one-run suffix as the rule
+    // above.
     .replace(
-      /(\b(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)*["']?\s*:\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/g,
-      (_all, prefix: string, value: string) => (NON_SECRET_NAME.test(prefix) ? _all : `${prefix}${preserveFence(value)}`),
+      /(\b(?=[A-Z0-9_]+["']?\s*:\s*[^\r\n])(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)?["']?\s*:\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/g,
+      (_all, prefix: string, value: string) => (isNonSecretName(prefix) ? _all : `${prefix}${preserveFence(value)}`),
     )
     .replace(
       /(\b(?:password|passcode|passwd|pwd|api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|bearer token|client[_ -]?secret|refresh[_ -]?token|private[_ -]?key|credential|cookie|session token|otp|one[- ]time (?:password|code)|verification code|recovery code)\b[^:\r\n=]{0,80}(?::|=)\s*)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/gi,
