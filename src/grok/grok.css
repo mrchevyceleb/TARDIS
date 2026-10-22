@@ -347,13 +347,14 @@
 .bt-head-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; min-width: 0; }
 
 .bt-head-identity { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; gap: 2px; }
-.bt-account-chip { display: flex; align-items: center; gap: 5px; min-width: 0; max-width: 220px; padding: 3px 5px; margin-left: -5px; border: 0; border-radius: 8px; color: var(--r-ink-mute); background: transparent; font: inherit; font-size: 10px; cursor: pointer; transition: transform .16s ease, background .16s ease, color .16s ease; }
-.bt-account-chip > span:nth-child(2) { min-width: 0; white-space: normal; overflow-wrap: anywhere; text-align: left; }
-.bt-account-chip:hover { transform: translateY(-1px); color: var(--r-ink); background: var(--r-line); }
-.bt-account-chip:focus-visible, .bt-account-refresh:focus-visible { outline: 2px solid var(--r-brass); outline-offset: 3px; }
 .bt-account-dot { width: 5px; height: 5px; border-radius: 50%; flex: none; background: #64b98b; box-shadow: 0 0 7px #64b98b33; animation: bt-account-breathe 3s ease-in-out infinite; }
-.bt-account-chip.needs-attention .bt-account-dot { background: var(--r-brass); }
-.bt-account-pop { position: fixed; z-index: 500; width: min(360px, calc(100vw - 24px)); max-height: min(70vh, 620px); overflow: auto; padding: 16px; border: 1px solid var(--r-line); border-radius: 22px; background: var(--r-bg-card); color: var(--r-ink); box-shadow: 0 20px 65px #0004; animation: bt-account-appear .18s ease backwards; }
+.bt-account-inline { width: 100%; min-width: 0; box-sizing: border-box; padding: 12px; margin: 0 0 14px; border: 1px solid var(--r-line); border-radius: 18px; background: var(--r-bg-card); color: var(--r-ink); animation: bt-account-appear .18s ease backwards; }
+.bt-account-inline .bt-account-pop-head strong { font-size: 13px; }
+.bt-account-inline .bt-account-emblem { width: 30px; height: 30px; border-radius: 11px; }
+.bt-account-inline .bt-account-current { margin: 9px 0; }
+.bt-account-inline .bt-account-row { width: 100%; text-align: left; font: inherit; color: inherit; background: transparent; cursor: pointer; }
+.bt-account-inline .bt-account-row:disabled { cursor: default; }
+.bt-account-inline .bt-account-row.is-selected { background: color-mix(in srgb, var(--r-brass) 7%, transparent); }
 .bt-account-pop-head { display: flex; align-items: center; gap: 10px; }
 .bt-account-pop-head > div { display: flex; flex-direction: column; gap: 3px; flex: 1; }
 .bt-account-pop-head strong { font-size: 15px; }
@@ -374,8 +375,7 @@
 @keyframes bt-account-spin { to { transform: rotate(360deg); } }
 @keyframes bt-account-breathe { 50% { opacity: .6; transform: scale(.8); } }
 @keyframes bt-account-appear { from { opacity: 0; transform: translateY(-5px) scale(.97); } }
-@media (max-width: 760px) { .bt-account-chip { max-width: 130px; } }
-@media (prefers-reduced-motion: reduce) { .bt-account-dot, .bt-account-pop, .bt-account-refresh .is-checking { animation: none; } .bt-account-chip, .bt-account-refresh { transition: none; } .bt-account-chip:hover, .bt-account-refresh:hover:not(:disabled) { transform: none; } }
+@media (prefers-reduced-motion: reduce) { .bt-account-dot, .bt-account-inline, .bt-account-refresh .is-checking { animation: none; } .bt-account-refresh { transition: none; } .bt-account-refresh:hover:not(:disabled) { transform: none; } }
 
 /* feed */
 .bt-conv-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
@@ -2065,11 +2065,16 @@ button.bt-account-row:focus-visible, .bt-account-add:focus-visible, .bt-account-
 .bt-account-row .is-checking { animation: bt-account-spin 1s linear infinite; }
 @media (prefers-reduced-motion: reduce) { button.bt-account-row, .bt-account-add, .bt-account-login-link { transition: none; transform: none !important; } .bt-account-row .is-checking { animation: none; } }
 
-.bt-rail-account { display: flex; align-items: center; gap: 5px; margin: 4px 0; color: var(--r-ink-mute); font-size: 10px; line-height: 1.4; white-space: normal; overflow-wrap: anywhere; }
 .bt-account-avatar { background: linear-gradient(135deg, hsl(var(--account-hue) 65% 65% / .3), hsl(calc(var(--account-hue) + 45) 70% 50% / .15)); color: hsl(var(--account-hue) 60% 68%); border: 1px solid hsl(var(--account-hue) 65% 65% / .4); font-weight: 700; box-shadow: inset 0 1px 0 #ffffff28; transition: transform .2s ease; }
 .bt-account-row:hover .bt-account-avatar { transform: rotate(-8deg) scale(1.09); }
 .bt-account-row.is-selected .bt-account-avatar { animation: bt-account-float 4s ease-in-out infinite; }
 @keyframes bt-account-float { 50% { transform: translateY(-2px) rotate(4deg); } }
 @media (prefers-reduced-motion: reduce) { .bt-account-avatar { transition: none; animation: none !important; transform: none !important; } }
 
-.bt-pin-account { justify-content: center; width: 100%; font-size: 9px; line-height: 1.35; margin: 3px 0 0; }
+
+/* Subscription choices live with the agent's model, including the Desk dock. */
+.bot-app .rc .modelpop:has(.bt-account-inline) { box-sizing: border-box; width: min(410px, 100%); max-width: calc(100vw - 24px); max-height: min(720px, calc(var(--bt-viewport-height, 100dvh) - 160px)); }
+.bt-account-inline .bt-account-row { min-height: 48px; padding: 7px; gap: 8px; }
+.bt-account-inline .bt-account-avatar { width: 26px; height: 26px; border-radius: 9px; font-size: 11px; }
+.bt-account-inline .bt-account-promise { margin: 8px 0; }
+.bt-account-inline .bt-account-add, .bt-account-inline .bt-account-refresh { min-height: 32px; margin-top: 7px; }
