@@ -30,6 +30,7 @@ export function subscriptionEnvironment(source: NodeJS.ProcessEnv): NodeJS.Proce
   const env = { ...source };
   for (const key of Object.keys(env)) {
     if (/^TARDIS_OFFICE_ADMIN_TOKEN$/i.test(key)) delete env[key];
+    if (/^(?:CLAUDE_CODE_OAUTH_TOKEN(?:_FILE)?|CLAUDECODE|ANTHROPIC_CUSTOM_HEADERS)$/i.test(key)) delete env[key];
     if (/^(ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)|OPENAI_(API_KEY|BASE_URL)|CODEX_API_KEY|OPENROUTER_|FIREWORKS_|GROK_PERSONAL_API_KEY|XAI_API_KEY|Z_AI_API_KEY|RIVENDELL_ZAI_FALLBACK_API_KEY|RIVENDELL_OPENROUTER_API_KEY|PERSONAL_OPENROUTER_API_KEY|RIVENDELL_PERSONAL_OPENROUTER_API_KEY|TYPESAFE_|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))/i.test(key)) delete env[key];
   }
   return env;

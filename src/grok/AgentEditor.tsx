@@ -23,6 +23,7 @@ import { codexPickerModels, codexModelChange, codexModelLabel, isCodexModelUnlis
 import { DEFAULT_FIREWORKS_EFFORT, DEFAULT_FIREWORKS_MODEL, FIREWORKS_MODELS, fireworksEffortsForModel, useFireworksModels } from '../chat/fireworksModels';
 import { DEFAULT_OPENROUTER_EFFORT, DEFAULT_OPENROUTER_MODEL, OPENROUTER_MODELS, openRouterEffortsForModel, useOpenRouterModels } from '../chat/openrouterModels';
 import { AgentUpdateConflictError, createAgent, updateAgentReq, deleteAgentReq, uploadAgentAvatar, removeAgentAvatar, agentAvatarUrl, DISC_INK, agentColor, type Agent } from './agents';
+import { AccountControl } from './AccountControl';
 import { GROK_VOICES } from '../voice/useGrokCall';
 
 type BrainModelOption = { id: string; label: string };
@@ -446,6 +447,8 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
             </select>
           </label>
         </div>
+
+        {agent ? <AccountControl engine={engine} agentId={agent.id} chatId={`agent:${agent.id}`} /> : null}
 
         {engine === 'codex' && isCodexModelUnlisted(model) ? <p className="model-choice-hint">Your saved model is missing from the current list. You can still select it.</p> : null}
         {effortNotice ? <p className="model-choice-hint" role="status">{effortNotice}</p> : null}

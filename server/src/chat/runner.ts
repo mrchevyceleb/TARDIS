@@ -36,7 +36,7 @@ import { agentForChatId, brainForAgent, cliForAgentEngine, noteAgentLane } from 
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { crashTombstoneEvent, crashTombstoneText, restartMarkerEvent } from './crashTombstone.ts';
 import { BACKGROUND_MODEL_HOLD_MINUTES, backgroundEndedGuidance, backgroundTaskLabel, backgroundWorkEvent, type BackgroundWorkCause } from './backgroundWork.ts';
-import { accountEnv, accountEnvForAccount, accountFromChatId, accountForAgent } from '../lib/accountResolver.ts';
+import { subscriptionEnvForLane, subscriptionRoutingKey, subscriptionEmail, cliProfileForEnv, cliProfileId } from '../lib/cliProfiles.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
@@ -728,6 +728,8 @@ class ClaudeSession {
   /** The context a seeded process started with. */
   private startTokens = 0;
   private providerAccount = '';
+  private providerRoutingKey = '';
+  private providerEmail: string | null = null;
   /** Named subscription account this child runs under (SAMWISE_ACCOUNT);
    *  'default' when no account map is configured. */
   private providerAccountName = 'default';
@@ -976,13 +978,12 @@ class ClaudeSession {
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
     // login; a per-agent pin (RIVENDELL_AGENT_ACCOUNTS) comes next; everything else
     // keeps the per-repo account-map resolution.
-    const forcedAccount = accountFromChatId(chatId) ?? accountForAgent(agentForChatId(chatId)?.name);
     const spawnEnv = cli === 'xai' ? xaiEnv(this.spawnModel)
       : cli === 'zai' ? zaiEnv(this.spawnModel, zaiCredential!)
       : cli === 'fireworks' ? fireworksEnv(this.spawnModel)
       : cli === 'openrouter' ? openRouterEnv(this.spawnModel)
       : cli === 'openrouter2' ? openRouter2Env(this.spawnModel)
-      : forcedAccount ? accountEnvForAccount(forcedAccount, cwd) : accountEnv(cwd);
+      : subscriptionEnvForLane('claude', cwd, chatId, agentForChatId(chatId)?.name);
     if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks' && cli !== 'openrouter' && cli !== 'openrouter2') assertClaudeSubscription(spawnEnv, cwd);
     if (cli === 'claude' || cli === 'assistant') {
       spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
@@ -1011,6 +1012,10 @@ class ClaudeSession {
     const nativeStorage = prepareClaudeNativeStorage(chatId, profileDir, resumeId);
     this.nativeStorageAccept = nativeStorage.accept;
     if (nativeStorage.project) spawnEnv.CLAUDE_CODE_PROJECT_DIR_NAME = nativeStorage.project;
+    if (cli === 'claude' || cli === 'assistant') {
+      this.providerRoutingKey = subscriptionRoutingKey('claude', spawnEnv);
+      this.providerEmail = subscriptionEmail('claude', spawnEnv);
+    }
     this.providerAccount = existsSync(profileDir) ? realpathSync(profileDir) : profileDir;
     this.providerAccountName = typeof spawnEnv.SAMWISE_ACCOUNT === 'string' && spawnEnv.SAMWISE_ACCOUNT.trim()
       ? spawnEnv.SAMWISE_ACCOUNT.trim()
@@ -1362,6 +1367,7 @@ class ClaudeSession {
       throw new Error('session has exited');
     }
     const startsNewTurn = this.turnStartedAt === null;
+    if (startsNewTurn) this.assertSubscriptionAccount();
     // The automatic continue only ever opens a turn. If anything else already
     // holds the lane, that turn carries the cut guidance instead.
     const continuing = opts.providerContinue;
@@ -1875,6 +1881,22 @@ class ClaudeSession {
 
   isDisposed(): boolean {
     return this.disposed;
+  }
+
+  /** Read the profile this process actually spawned with, without starting it. */
+  subscriptionProfile(): string | null {
+    return this.cli === 'claude' || this.cli === 'assistant' ? this.providerAccount || null : null;
+  }
+
+  subscriptionAccountKey(): string { return this.providerRoutingKey; }
+  subscriptionAccountEmail(): string | null { return this.providerEmail; }
+
+  private assertSubscriptionAccount(): void {
+    if (this.cli !== 'claude' && this.cli !== 'assistant') return;
+    const desired = subscriptionEnvForLane('claude', this.cwd, this.chatId, agentForChatId(this.chatId)?.name);
+    if (subscriptionRoutingKey('claude', desired) !== this.providerRoutingKey) {
+      throw Object.assign(new Error('Your account changed. This message will use the selected account.'), { code: 'MODEL_SELECTION_CHANGED' });
+    }
   }
 
   /** True when GLM has moved between the Z.ai coding plan and Fireworks since
@@ -3494,7 +3516,34 @@ async function getOrCreateSessionUnlocked(opts: {
   }
   retireOtherEnginesOnThread(opts.cli, opts.repoPath, chatId);
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
+    const desiredEnv = subscriptionEnvForLane('codex', opts.repoPath, chatId, selectedAgent?.name);
+    const previous = await nativeSessionProvenance(opts.cli, opts.repoPath, chatId);
+    const desiredProfile = cliProfileForEnv('codex', desiredEnv);
+    const accountHandover = Boolean(previous?.sessionId && previous.nativeProfile
+      && cliProfileId('codex', previous.nativeProfile) !== cliProfileId('codex', desiredProfile));
+    if (accountHandover) {
+      if (opts.passive) throw new Error('The account switch will finish with the next message.');
+      const live = peekCodexSession({ repoPath: opts.repoPath, chatId, cli: opts.cli });
+      if (live?.isBusy()) throw new Error('This reply is finishing on its original account. Your next reply will use the saved account.');
+      const { interruptCodex } = await import('./codex-runner.ts');
+      await interruptCodex({ repoPath: opts.repoPath, chatId, cli: opts.cli });
+      await saveEngineHandover({ chatId, sourceId: previous!.sessionId!, sourceRevision: previous!.updatedAt, target: opts.cli, sourceCli: opts.cli },
+        () => exportCodexHandover({ chatId, cwd: opts.repoPath, sessionId: previous!.sessionId!, model: previous!.model, nativeProfile: previous!.nativeProfile }),
+        () => recoverCodexHandover({ chatId, cwd: opts.repoPath, sessionId: previous!.sessionId!, nativeProfile: previous!.nativeProfile }),
+        async () => {
+          await flushEventLog(logKeyFor(opts.cli, opts.repoPath, chatId));
+          const turns = extractVisibleTurns(loadEventLogSync(logKeyFor(opts.cli, opts.repoPath, chatId)).events).slice(-50);
+          const recent: string[] = []; let remaining = 60_000;
+          for (const turn of turns.reverse()) {
+            const text = `${turn.role}: ${turn.text}`;
+            if (text.length > remaining) { if (!recent.length) recent.unshift(text.slice(-remaining)); break; }
+            recent.unshift(text); remaining -= text.length + 2;
+          }
+          return `Continue this same conversation on the selected account. The previous account could not finish its handover. Older messages and the original native history remain saved.\n${recent.join('\n\n') || 'Check the current commitments and owned cards before acting.'}`;
+        });
+    }
     const session = await getOrCreateCodexSession({
+      accountHandover,
       repoPath: opts.repoPath,
       chatId,
       cli: opts.cli,
@@ -3545,7 +3594,9 @@ async function getOrCreateSessionUnlocked(opts: {
       // emitting `init`; it is still safe and necessary to replace before its
       // first real turn. Passive hello/reconnect callers never opt in, which is
       // what prevents replacement storms during normal startup.
-      const matches = existing.spawnModel === wantModel && existing.spawnEffort === wantEffort;
+      const accountMatches = !(existing instanceof ClaudeSession) || !['claude', 'assistant'].includes(opts.cli)
+        || existing.subscriptionAccountKey() === subscriptionRoutingKey('claude', subscriptionEnvForLane('claude', cwd, chatId, selectedAgent?.name));
+      const matches = existing.spawnModel === wantModel && existing.spawnEffort === wantEffort && accountMatches;
       if (opts.passive && !matches) return existing;
       const recyclable =
         opts.recycleOnMismatch === true &&
@@ -3554,7 +3605,7 @@ async function getOrCreateSessionUnlocked(opts: {
       // An explicit idle model choice applies at this turn boundary.
       if (!recyclable) return existing;
       if (existing instanceof ClaudeSession && existing.spawnModel !== wantModel && !['claude', 'assistant'].includes(opts.cli)) await compactForHandover(existing);
-      if (existing instanceof ClaudeSession) existing.shutdown('model/effort change', 'model');
+      if (existing instanceof ClaudeSession) existing.shutdown(accountMatches ? 'model/effort change' : 'account change', accountMatches ? 'model' : undefined);
       else existing.shutdown('model/effort change');
       await waitForChildExit(existing, 5_000);
       if (!existing.processExited()) throw new Error('The previous native worker is still stopping. Its saved session is retained.');

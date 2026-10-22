@@ -109,6 +109,62 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
+export type CliAccount = {
+  id: string;
+  engine: 'claude' | 'codex';
+  email?: string;
+  organization?: string;
+  plan?: string;
+  status: 'connected' | 'signed_out' | 'unavailable' | 'unsupported';
+  checkedAt: number;
+  profileIds: string[];
+};
+export type CliAccounts = {
+  accounts: CliAccount[];
+  engine: 'claude' | 'codex';
+  selectedId: string | null;
+  activeId: string | null;
+  activeEngine: string | null;
+  activeEmail: string | null;
+  selectionNotice: string | null;
+  busy: boolean;
+};
+export function fetchCliAccounts(options: { engine: 'claude' | 'codex'; agentId?: string; chatId?: string; repo?: string; refresh?: boolean }, signal?: AbortSignal): Promise<CliAccounts> {
+  const query = new URLSearchParams({ engine: options.engine });
+  for (const key of ['agentId', 'chatId', 'repo'] as const) if (options[key]) query.set(key, options[key]);
+  if (options.refresh) query.set('refresh', '1');
+  return apiJson<CliAccounts>(`/api/accounts?${query}`, { signal, cache: 'no-store' });
+}
+
+export type CliAccountAssignment = {
+  agentId: string; engine: 'claude' | 'codex'; email: string | null;
+  selectedEmail: string | null; busy: boolean; status: CliAccount['status'];
+};
+export function fetchCliAccountAssignments(signal?: AbortSignal): Promise<{ assignments: CliAccountAssignment[] }> {
+  return apiJson('/api/accounts/agents', { signal, cache: 'no-store' });
+}
+
+export type CliLogin = {
+  id: string; engine: 'claude' | 'codex';
+  status: 'starting' | 'waiting' | 'checking' | 'connected' | 'failed' | 'cancelled';
+  expiresAt: number; url?: string; userCode?: string; accountId?: string; email?: string; message?: string;
+};
+export function selectCliAccount(engine: string, agentId: string, accountId: string): Promise<{ ok: boolean }> {
+  return apiJson('/api/accounts/select', { method: 'POST', body: JSON.stringify({ engine, agentId, accountId }) });
+}
+export function startCliSignIn(engine: string): Promise<CliLogin> {
+  return apiJson('/api/accounts/logins', { method: 'POST', body: JSON.stringify({ engine }) });
+}
+export function fetchCliSignIn(id: string): Promise<CliLogin> {
+  return apiJson(`/api/accounts/logins/${encodeURIComponent(id)}`, { cache: 'no-store' });
+}
+export function submitCliSignInCode(id: string, code: string): Promise<{ ok: boolean }> {
+  return apiJson(`/api/accounts/logins/${encodeURIComponent(id)}/code`, { method: 'POST', body: JSON.stringify({ code }) });
+}
+export function cancelCliSignIn(id: string): Promise<{ ok: boolean }> {
+  return apiJson(`/api/accounts/logins/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
 export function fetchWorkspaceFileForEdit(path: string): Promise<WorkspaceEditFileResponse> {
   return apiJson<WorkspaceEditFileResponse>(`/api/docs/file/edit?path=${encodeURIComponent(path)}`);
 }
