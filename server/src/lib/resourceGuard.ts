@@ -568,8 +568,11 @@ async function probeContainedLaunch(durable: boolean): Promise<void> {
 }
 
 /** All agent execution surfaces share this path, including background jobs,
- * watch commands and content generation. Arguments never include secrets. */
-export function spawnContained(command: string, args: readonly string[], options: SpawnOptions, owner: string, unit = `tardis-worker-${randomUUID()}`, runtimeSeconds?: number, durable = false, admission: { conversationTurn?: boolean } = {}): ChildProcess {
+ * watch commands and content generation. Arguments never include secrets.
+ * `memoryCeiling` overrides the worker-class memory caps for this launch only
+ * (verification, deliberate small workers); the admission path computes its
+ * own reduced ceiling for conversation turns, so callers rarely pass it. */
+export function spawnContained(command: string, args: readonly string[], options: SpawnOptions, owner: string, unit = `tardis-worker-${randomUUID()}`, runtimeSeconds?: number, durable = false, admission: { conversationTurn?: boolean } = {}, memoryCeiling?: { high: number; max: number }): ChildProcess {
   // Person-initiated turns are the ONLY launches admitted while pressure
   // holds (an automation wake is machine work and waits its turn like any
   // job). The person path opts in explicitly; nothing is inferred from shape.
@@ -583,16 +586,16 @@ export function spawnContained(command: string, args: readonly string[], options
   // either: when the slice cannot fit a full worker, this one runs with a
   // memory cap sized to what is actually left (floor 1 GiB) instead of
   // pushing the slice into an OOM that kills the largest resident worker.
-  let memoryCeiling: { high: number; max: number } | undefined;
-  if (admission.conversationTurn === true) {
+  let ceiling: { high: number; max: number } | undefined = memoryCeiling;
+  if (!ceiling && admission.conversationTurn === true) {
     const headroom = sliceMemoryHeadroom();
     if (headroom !== null && headroom < HOST_LIMITS.memoryHigh) {
       const max = Math.max(GiB, Math.floor(headroom * 0.95));
-      memoryCeiling = { high: Math.floor(max * 0.75), max };
+      ceiling = { high: Math.floor(max * 0.75), max };
       console.warn(`[resource-guard] Admitted a conversation turn with a reduced memory cap (${(max / GiB).toFixed(1)} GiB) to protect running workers.`);
     }
   }
-  const child = spawn('systemd-run', containedLaunchArgs(unit, command, args, durable, runtimeSeconds, options, memoryCeiling), options);
+  const child = spawn('systemd-run', containedLaunchArgs(unit, command, args, durable, runtimeSeconds, options, ceiling), options);
   const identity = { unit, expectedExit: false };
   startingScopes.set(unit, Date.now() + 60_000);
   containedChildren.set(child, identity);
