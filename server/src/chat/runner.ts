@@ -20,7 +20,7 @@ import { CodexSession, getOrCreateCodexSession, peekCodexSession, activeCodexSes
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions, publishBananaExternalEvent } from './banana-runner.ts';
 import { appendEventLog, appendEventLogDurable, appendEventLogSync, clearEventLog, compactEventLog, durableUserEchoClientMsgId, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
 import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
-import { CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKEN_BUDGET, NATIVE_COMPACT_MARGIN, contextRotationDue, contextTokens, learnContextLimit, providerContextBudget, recordContextUsage, recordContextRotation } from './contextBudget.ts';
+import { CLAUDE_CONTEXT_TOKEN_BUDGET, CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKEN_BUDGET, NATIVE_COMPACT_MARGIN, contextRotationDue, contextTokens, learnContextLimit, providerContextBudget, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { bareChatId } from './threadKey.ts';
 import { NATIVE_SESSION_GENERATION, sessionDirectory, nativeClaudeSettings } from './sessionPolicy.ts';
 import { prepareClaudeNativeStorage } from './nativeSessionStorage.ts';
@@ -987,7 +987,7 @@ class ClaudeSession {
     if (cli === 'claude' || cli === 'assistant') {
       spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
       // The installed CLI's catalog can lag a newly released Claude model.
-      // Its 200k fallback otherwise wins over the requested 333k window.
+      // Its 200k fallback otherwise wins over the requested 213k window.
       if (/^claude-(sonnet|opus)-5-5$/.test(this.spawnModel)) spawnEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '1000000';
     }
     delete spawnEnv.DISABLE_AUTO_COMPACT;
@@ -2559,10 +2559,10 @@ class ClaudeSession {
   /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
   /** Returns false when it never reached the compaction refresh (the normal
    *  rolling compact still has to run); true once the refresh was attempted. */
-  /** Anthropic lanes keep the flat 200k budget; a provider lane rotates below
+  /** Anthropic lanes keep the shared budget; a provider lane rotates below
    *  its own model's window, and lower once the provider has refused a size. */
   private contextBudget(): number {
-    if (!this.providerWindow) return CONTEXT_TOKEN_BUDGET;
+    if (!this.providerWindow) return CLAUDE_CONTEXT_TOKEN_BUDGET;
     // A seed already past a (learned) budget gets half a budget to grow
     // before the next rotation, or every turn would rotate.
     const budget = providerContextBudget(this.spawnModel, this.providerWindow);
@@ -2860,8 +2860,8 @@ class ClaudeSession {
     if (!sidechain && ev?.type === 'system' && ev.subtype === 'compact_boundary') {
       confirmNativeCompact(this.nativeBaseUrl);
       markNativeCompacting(this.nativeBaseUrl, false);
-      resetSessionStateDelta(this.chatId);
-      this.statusAcks = [];
+      // Native compaction keeps this conversation and its current input.
+      // Keep delivered status receipts and the pending admission ack too.
       recordNativeCompact(this.chatId, 'claude-code', this.currentSessionId, ev.compact_metadata);
     }
     if (!sidechain && ev?.type === 'result') {

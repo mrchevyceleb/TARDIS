@@ -1,16 +1,18 @@
 /** Usage from one model call, never a turn's accumulated billing totals. */
 export const CONTEXT_TOKEN_BUDGET = 300_000;
+export const CLAUDE_CONTEXT_TOKEN_BUDGET = 180_000;
 /** Native Claude Code reserves 20k output tokens plus a 13k compact buffer.
- * A 333k window makes its actual automatic trigger 300k. TARDIS never rotates. */
+ * A 213k window makes its actual automatic trigger 180k. TARDIS never rotates. */
 export const NATIVE_COMPACT_MARGIN = 33_000;
 export const NATIVE_COMPACT_PAD = NATIVE_COMPACT_MARGIN;
-export const CLAUDE_NATIVE_COMPACT_WINDOW = CONTEXT_TOKEN_BUDGET + NATIVE_COMPACT_MARGIN;
+export const CLAUDE_NATIVE_COMPACT_WINDOW = CLAUDE_CONTEXT_TOKEN_BUDGET + NATIVE_COMPACT_MARGIN;
+const PROVIDER_NATIVE_COMPACT_WINDOW = CONTEXT_TOKEN_BUDGET + NATIVE_COMPACT_MARGIN;
 /** Budgets learned this process from a provider refusing a context below its
  *  catalog window, keyed by model id. Never persisted: a restart retries the
  *  catalog number, and the first refusal teaches it again. */
 const learnedBudgets = new Map<string, number>();
 
-/** Rotation budget for a non-Anthropic `claude` lane: the 200k budget, or the
+/** Rotation budget for a non-Anthropic `claude` lane: the shared budget, or the
  *  model's window less the native-compact pad when that is smaller. A small
  *  window shrinks the pad but keeps the budget a quarter of the window below
  *  the native threshold, so rotation still comes first. */
@@ -22,7 +24,7 @@ export function providerContextBudget(model: string, window: number): number {
 /** The native compact only backstops the lane's own rotation budget. */
 export function providerNativeCompactWindow(_model: string, window: number): number {
   const learned = learnedBudgets.get(_model);
-  return Math.min(window, CLAUDE_NATIVE_COMPACT_WINDOW, learned === undefined ? Infinity : learned + NATIVE_COMPACT_MARGIN);
+  return Math.min(window, PROVIDER_NATIVE_COMPACT_WINDOW, learned === undefined ? Infinity : learned + NATIVE_COMPACT_MARGIN);
 }
 /** A provider refused (or Claude Code compacted reactively at) `tokens`; rotate
  *  this model 15% below that for the rest of the process. Returns the budget. */
