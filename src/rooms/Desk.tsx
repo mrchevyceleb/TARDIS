@@ -297,6 +297,9 @@ function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
   };
 
   const setStatus = async (todo: DeskTodo, status: 'open' | 'done') => {
+    // A stale row can ask for the status the item already has. Leave the
+    // record (its timestamp and any saved answer) exactly as it is.
+    if (todo.status === status) return;
     if (status === 'done') {
       setJustDone(todo.id);
       window.setTimeout(() => setJustDone((id) => (id === todo.id ? null : id)), 700);
@@ -307,9 +310,17 @@ function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
         () => (status === 'done' ? deskApi.completeTodo(todo.id, todo.from.kind === 'owner' ? 'Completed on the Desk' : undefined) : deskApi.reopenTodo(todo.id)),
         (d) => ({
           ...d,
-          todos: d.todos.map((t) => (t.id === todo.id
-            ? { ...t, status, completedAt: status === 'done' ? now : undefined, updatedAt: now }
-            : t)),
+          todos: d.todos.map((t) => {
+            if (t.id !== todo.id || t.status === status) return t;
+            const next = { ...t, status, updatedAt: now };
+            if (status === 'done') next.completedAt = now;
+            else {
+              delete next.completedAt;
+              delete next.answer;
+              delete next.resolution;
+            }
+            return next;
+          }),
         }),
       );
     } catch (error) {
@@ -364,7 +375,9 @@ function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
     if (!flash) return;
     if (flashDone && doneRef.current) doneRef.current.open = true;
     const raf = window.requestAnimationFrame(() => {
-      document.querySelector(`[data-todo-id="${CSS.escape(flash.id)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      // Target the actual item, including one beyond the latest Done rows.
+      // The Done heading stays visible while its list scrolls underneath.
+      document.querySelector(`[data-todo-id="${CSS.escape(flash.id)}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     });
     setLit(flash.id);
     const timer = window.setTimeout(() => setLit((id) => (id === flash.id ? null : id)), 2400);
@@ -386,7 +399,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
           <input
             value={draft.title}
             onChange={(e) => setDraft({ ...draft, title: e.target.value })}
-            placeholder="Add something that needs you"
+            placeholder="What needs you?"
             aria-label="New item"
             maxLength={200}
           />
@@ -427,7 +440,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
               <TodoRow key={todo.id} todo={todo} {...rowProps} lit={lit === todo.id} onEdit={undefined} />
             ))}
           </ul>
-          {done.length > 60 ? <p className="desk-muted">Showing the latest 60 of {done.length}.</p> : null}
+          {done.length > 60 ? <p className="desk-muted">Showing the latest 60 of {done.length}{doneShown.length > 60 ? ", plus the item you opened." : "."}</p> : null}
         </details>
       ) : null}
     </section>

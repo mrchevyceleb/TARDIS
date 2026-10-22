@@ -159,6 +159,7 @@
 .desk-todo-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .desk-todo {
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: start;
+  scroll-margin-top: calc(96px + env(safe-area-inset-top, 0px));
   padding: 12px 12px 10px; border: 1px solid var(--r-line);
   border-left: 3px solid var(--priority-color, var(--r-line-strong)); border-radius: 12px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.022), transparent 45%), var(--r-bg-card);
@@ -232,14 +233,16 @@ span.desk-todo-text { cursor: default; }
 .desk-empty strong { display: block; color: var(--r-ink); font-size: 15px; }
 .desk-empty span { font-size: 13px; }
 
-.desk-done { margin-top: 18px; }
+.desk-done { margin-top: 18px; scroll-margin-top: calc(96px + env(safe-area-inset-top, 0px)); }
 .desk-done summary {
-  display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 999px;
+  position: sticky; top: 0; z-index: 1; background: var(--r-bg-card);
+  display: flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 10px;
+  border-bottom: 1px solid var(--r-line);
   list-style: none; cursor: pointer; color: var(--r-ink-mute); font-size: 13px; font-weight: 600;
   transition: background 0.15s ease, color 0.15s ease;
 }
 .desk-done summary::-webkit-details-marker { display: none; }
-.desk-done summary:hover { color: var(--r-ink); background: var(--r-line); }
+.desk-done summary:hover { color: var(--r-ink); background: color-mix(in srgb, var(--r-gold) 8%, var(--r-bg-card)); }
 .desk-done summary svg { transition: transform 0.2s ease; transform: rotate(-90deg); }
 .desk-done[open] summary svg { transform: none; }
 .desk-done .desk-todo-list { margin-top: 10px; }
@@ -649,7 +652,7 @@ span.desk-todo-text { cursor: default; }
 /* ---------- Desk chat: the Chief of Staff's thread beside the Desk ---------- */
 .desk-split { --desk-chat-w: clamp(340px, 32vw, 440px); flex: 1; min-height: 0; display: flex; position: relative; }
 .desk-split > .bt-room { flex: 1; min-width: 0; }
-.desk-split .bt-room-wrap { padding-bottom: 96px; }
+.desk-split .bt-room-wrap { padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px)); }
 /* The card drawer opens beside the chat, not over it. */
 .desk-split.chat-open:not(.is-phone) .desk-drawer-layer { right: var(--desk-chat-w); }
 
@@ -699,7 +702,7 @@ span.desk-todo-text { cursor: default; }
 
 /* "Ask <agent>" floater while the chat is closed. */
 .desk-chat-fab {
-  position: absolute; right: 22px; bottom: calc(20px + env(safe-area-inset-bottom, 0px)); z-index: 12;
+  position: fixed; right: max(22px, env(safe-area-inset-right, 0px)); bottom: calc(20px + env(safe-area-inset-bottom, 0px)); z-index: 12;
   display: inline-flex; align-items: center; gap: 8px; min-height: 46px; padding: 0 18px 0 15px; border-radius: 999px;
   background: var(--r-gold); color: var(--r-on-accent); font-size: 14px; font-weight: 650;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.25);

@@ -26,6 +26,7 @@ import {
   readDesk,
   setAnswerDelivery,
   setTodoStatus,
+  setTodoStatusWithChange,
   updateCard,
   updateTodo,
   type DeskActor,
@@ -233,7 +234,7 @@ deskRouter.post('/todos/:id/answer', answerTodoHandler());
 
 deskRouter.post('/todos/:id/complete', route(async (req, res) => {
   const input = body(req);
-  res.json({ todo: await setTodoStatus(param(req, 'id'), 'done', { note: input.note, by: input.note ? resolveCloser(input, fetchSite(req)) : undefined }) });
+  res.json(await setTodoStatusWithChange(param(req, 'id'), 'done', { note: input.note, by: input.note ? resolveCloser(input, fetchSite(req)) : undefined }));
 }));
 
 deskRouter.post('/todos/:id/reopen', route(async (req, res) => {

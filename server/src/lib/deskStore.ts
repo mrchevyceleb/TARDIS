@@ -887,6 +887,7 @@ export function updateTodo(id: string, input: TodoInput, by?: DeskActor): Promis
   return mutate((data, now) => {
     const todo = findTodo(data, id);
     if (input.note !== undefined && input.status !== 'done') throw new DeskError(400, 'A resolution note needs status done. Nothing was changed.');
+    const before = JSON.stringify(todo);
     if (input.title !== undefined) todo.title = requireTitle(input.title);
     if (input.detail !== undefined) {
       const detail = requireClip(input.detail, DESK_LIMITS.detail, 'detail');
@@ -913,6 +914,9 @@ export function updateTodo(id: string, input: TodoInput, by?: DeskActor): Promis
       if (input.status !== 'open' && input.status !== 'done') throw new DeskError(400, 'status must be open or done');
       applyTodoStatus(todo, input.status, now, { note: input.note, by });
     }
+    // A request that lands on the record already on disk changes nothing:
+    // leave its timestamp and the desk revision alone.
+    if (JSON.stringify(todo) === before) return new Unchanged(todo);
     todo.updatedAt = now;
     return todo;
   });
@@ -1008,13 +1012,21 @@ export function setAnswerDelivery(id: string, delivery: 'sent' | 'failed', claim
   });
 }
 
-export function setTodoStatus(id: string, status: 'open' | 'done', resolution?: { note?: unknown; by?: DeskActor }): Promise<DeskTodo> {
-  return mutate((data, now) => {
+/** The change result is decided under the same lock as the transition, so
+ * callers can suppress follow-up effects even when completion requests race. */
+export function setTodoStatusWithChange(id: string, status: 'open' | 'done', resolution?: { note?: unknown; by?: DeskActor }): Promise<{ todo: DeskTodo; changed: boolean }> {
+  return mutate<{ todo: DeskTodo; changed: boolean }>((data, now) => {
     const todo = findTodo(data, id);
+    const before = JSON.stringify(todo);
     applyTodoStatus(todo, status, now, resolution);
+    if (JSON.stringify(todo) === before) return new Unchanged({ todo, changed: false });
     todo.updatedAt = now;
-    return todo;
+    return { todo, changed: true };
   });
+}
+
+export async function setTodoStatus(id: string, status: 'open' | 'done', resolution?: { note?: unknown; by?: DeskActor }): Promise<DeskTodo> {
+  return (await setTodoStatusWithChange(id, status, resolution)).todo;
 }
 
 export function deleteTodo(id: string): Promise<void> {

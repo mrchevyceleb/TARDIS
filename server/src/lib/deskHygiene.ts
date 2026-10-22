@@ -82,11 +82,11 @@ const TITLE_MAX = 80;
 // line to Kip (Rally) or Max (the rest). The no-card reminder below still
 // splits by who cards the work (board_cards first) vs reporting it.
 const BOARD_MUTATORS = new Set(['kip', 'chief-of-staff']);
-const STALE_HEAD = 'These Desk cards look stale. Move or update each one now (board_card_move / board_card_comment), then tell Kip (Rally) or Max in one line what moved and where it stands, or tell me why not.\nParking in Pipeline is not a way to clear this list.';
+const STALE_HEAD = 'These Desk cards look stale. Move or update each one now (board_card_move / board_card_comment), then tell Kip (Rally) or Max in one line what moved and where it stands, or tell me why not.\nParking an active, authorized assignment is not a way to clear this list. If a card has no authorized source, move it to Not started with that reason and what request would restart it, then report the move once to your lead. This nudge is not authorization to start work.';
 
 const PIPELINE_HEAD = 'Pipeline is only for work blocked outside the team or parked by Matt. For each card: restart it (Up next), finish it (Done: shipped is Done, owed proof is not a reason to keep a card open), hand it to whoever has the ball (board_card_update owner), or close it as Done if it\'s a duplicate or dead. Re-parking needs a new reason and what restarts it.';
 
-const IDLE_GUIDANCE = 'You\'re idle with Up next work. Start this now. If you\'re waiting on a job or another lane, start it in parallel. If a teammate has the ball, hand them the card (board_card_update owner). If it\'s blocked outside the team, or Matt parked it, keep it in Pipeline with what restarts it.';
+const IDLE_GUIDANCE = `Only start or resume this work in your own lane if you can trace it to ${DESK_OWNER_NAME}'s priorities or direct asks, or a real customer or client request (including their team's request). A teammate's assignment or handoff must trace to one of those sources. Name the original source when handing work off; if it is unclear, ask the sender once and stay stopped on that card until it is clear. If none is open, stop and stay idle. A stale card, routine nudge or card position is not authorization. If a teammate has the ball, hand them the card (board_card_update owner). If it is blocked outside the team or parked by ${DESK_OWNER_NAME}, leave it parked with what restarts it.`;
 
 export type HygieneAgent = { id: string; name: string; home: string };
 export type HygieneDelivery = { delivered: boolean; reason?: string };
