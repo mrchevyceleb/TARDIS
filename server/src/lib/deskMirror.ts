@@ -2,8 +2,10 @@
 // mutation pushes the card's title, stage and PR links to the tracker's
 // desk-mirror edge function, keyed by Desk card id so a re-push updates
 // instead of duplicating. Fire-and-forget: a failed push never blocks or
-// fails a Desk write. Only title/stage/links/project ever leave the Desk —
-// no owner names, no agent ids, no comments, no internal notes.
+// fails a Desk write. Title/stage/links/project plus the card owner's
+// display name leave the Desk (Matt via the 2026-10-22 tracker audit: a
+// board Kim's team reads must name who owns each card) — never agent ids,
+// comments or internal notes.
 // Dormant until DESK_MIRROR_URL and DESK_MIRROR_SECRET are both set, and
 // never active in a side copy (RIVENDELL_SIDE_COPY=1): a check's Desk
 // writes must never reach the real Dev PR Tracker.
@@ -58,6 +60,7 @@ function payloadFor(card: DeskCard, closing: boolean): string {
     stage: STAGE_ALIASES[card.column] ?? card.column,
     pr_urls: (card.links ?? []).filter((l) => PR_URL.test(l)),
     project: card.project ?? '',
+    desk_owner: (card.owner?.name ?? '').trim(),
     // A closing tombstone (archived on the Desk, or the card left the Rally
     // lane) closes the mirror row; the receiver refuses to create-as-closed.
     archived: closing || card.archived === true,
