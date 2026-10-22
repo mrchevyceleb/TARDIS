@@ -136,6 +136,14 @@ export function fetchCliAccounts(options: { engine: 'claude' | 'codex'; agentId?
   return apiJson<CliAccounts>(`/api/accounts?${query}`, { signal, cache: 'no-store' });
 }
 
+export type CliAccountAssignment = {
+  agentId: string; engine: 'claude' | 'codex'; email: string | null;
+  selectedEmail: string | null; busy: boolean; status: CliAccount['status'];
+};
+export function fetchCliAccountAssignments(signal?: AbortSignal): Promise<{ assignments: CliAccountAssignment[] }> {
+  return apiJson('/api/accounts/agents', { signal, cache: 'no-store' });
+}
+
 export type CliLogin = {
   id: string; engine: 'claude' | 'codex';
   status: 'starting' | 'waiting' | 'checking' | 'connected' | 'failed' | 'cancelled';

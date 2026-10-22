@@ -1,6 +1,6 @@
 import { Router, type Request } from 'express';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
-import { listAgents } from '../chat/agents.ts';
+import { listAgents, cliForAgentEngine } from '../chat/agents.ts';
 import { peekThreadSession } from '../chat/runner.ts';
 import { subscriptionEnvForLane, chooseCliProfile, cliProfiles } from '../lib/cliProfiles.ts';
 import { startCliLogin, getCliLogin, submitCliLoginCode, cancelCliLogin } from '../lib/cliLogin.ts';
@@ -8,6 +8,28 @@ import { accountForProfile, cliProfileForEnv, listCliAccounts, type AccountEngin
 import { asyncHandler } from './helpers.ts';
 
 export const accountsRouter = Router();
+
+// One metadata read serves the whole rail; profile identity checks coalesce.
+accountsRouter.get('/agents', asyncHandler(async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const accounts = await listCliAccounts();
+  const assignments = listAgents().flatMap(agent => {
+    const engine = cliForAgentEngine(agent.engine);
+    if (engine !== 'claude' && engine !== 'codex') return [];
+    let selected;
+    try {
+      const env = subscriptionEnvForLane(engine, ELROND_WORKSPACE_PATH, agent.home, agent.name);
+      selected = accountForProfile(accounts, engine, cliProfileForEnv(engine, env));
+    } catch { /* The row offers the same account recovery as the picker. */ }
+    const live = peekThreadSession({ cli: engine, repoPath: ELROND_WORKSPACE_PATH, chatId: agent.home });
+    const busy = live?.isBusy() ?? false;
+    const activeEmail = busy && live && 'subscriptionAccountEmail' in live ? live.subscriptionAccountEmail() : null;
+    return [{ agentId: agent.id, engine, email: busy ? activeEmail : selected?.email ?? null,
+      selectedEmail: selected?.email ?? null, busy,
+      status: busy && activeEmail ? 'connected' : selected?.status ?? 'unavailable' }];
+  });
+  res.json({ assignments });
+}));
 
 accountsRouter.get('/', asyncHandler(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -33,7 +55,7 @@ accountsRouter.get('/', asyncHandler(async (req, res) => {
     const active = profile && (activeEngine === 'claude' || activeEngine === 'codex')
       ? accountForProfile(accounts, activeEngine, profile) : undefined;
     res.json({
-      accounts, engine, selectionNotice, selectedId: selected?.id ?? null,
+      accounts: accounts.filter(account => account.engine === engine), engine, selectionNotice, selectedId: selected?.id ?? null,
       activeId: live?.isBusy() ? active?.id ?? null : null,
       activeEmail: live?.isBusy() && 'subscriptionAccountEmail' in live ? live.subscriptionAccountEmail() : null,
       activeEngine: live?.isBusy() ? activeEngine ?? null : null,

@@ -1,3 +1,4 @@
+import { fetchCliAccountAssignments, type CliAccountAssignment } from '../data/api';
 import { hasRecentTurnSignal } from '../chat/utils/livePresence';
 // Grok Bot left rail — THE TEAM, one list, no redundancy:
 //
@@ -357,6 +358,19 @@ function storedRailWidth(): number {
 
 export function BotRail(props: BotRailProps) {
   const flags = useDeploymentFlags();
+  const [accountAssignments, setAccountAssignments] = useState<Record<string, CliAccountAssignment>>({});
+  useEffect(() => {
+    let closed = false;
+    const controller = new AbortController();
+    const load = () => { void fetchCliAccountAssignments(controller.signal).then(result => {
+      if (!closed) setAccountAssignments(Object.fromEntries(result.assignments.map(row => [row.agentId, row])));
+    }).catch(() => { if (!closed) setAccountAssignments({}); }); };
+    load();
+    const timer = window.setInterval(load, 15_000);
+    window.addEventListener('tardis:accounts-changed', load);
+    return () => { closed = true; controller.abort(); window.clearInterval(timer); window.removeEventListener('tardis:accounts-changed', load); };
+  }, []);
+
   const [query, setQuery] = useState('');
   const [pluginsOpen, setPluginsOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
@@ -798,6 +812,7 @@ export function BotRail(props: BotRailProps) {
                 <Pencil size={12} />
               </span>
             </span>
+            {accountAssignments[a.id] ? <span className="bt-rail-account" title={accountAssignments[a.id].busy && accountAssignments[a.id].selectedEmail !== accountAssignments[a.id].email ? `Using ${accountAssignments[a.id].email || 'the original account'} now; ${accountAssignments[a.id].selectedEmail || 'the saved account'} next` : undefined}><span className="bt-account-dot" aria-hidden="true" />{accountAssignments[a.id].engine === 'claude' ? 'Claude' : 'Codex'} · {accountAssignments[a.id].email || 'Check sign-in'}</span> : null}
             <AgentPrsSub name={a.name} fallback={r.item?.preview} />
             {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
           </span>
@@ -907,6 +922,7 @@ export function BotRail(props: BotRailProps) {
                   </span>
                   <span className="bt-pin-name">{a.name}</span>
                   <span className="bt-pin-role">{a.role}</span>
+                  {accountAssignments[a.id] ? <span className="bt-rail-account bt-pin-account">{accountAssignments[a.id].email || 'Check sign-in'}</span> : null}
                   {onJobs ? <RailJobsBadge running={onJobs.running} latest={onJobs.latest} latestLine={onJobs.latestLine} /> : null}
                   {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
                 </button>
