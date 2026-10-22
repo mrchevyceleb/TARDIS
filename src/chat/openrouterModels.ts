@@ -3,8 +3,8 @@ import { useSyncExternalStore } from 'react';
 // OpenRouter model catalog, fetched from /api/openrouter/models (the server's
 // read of OpenRouter's public list, tool-capable models only). Same store as
 // fireworksModels.ts: a hand fallback list until the catalog lands, an
-// in-place swap so every importer sees the update, and a stored pick survives
-// until the catalog can judge it. Each model carries its own effort tiers,
+// in-place swap so every importer sees the update. Discovery never rewrites
+// a stored choice. Each model carries its own effort tiers,
 // taken from the catalog's published reasoning efforts (see the server's
 // openrouter-models.ts).
 
@@ -107,8 +107,9 @@ export function contextWindowForOpenRouterModel(model: string | undefined): numb
   return openRouterModelSpec(normalizeOpenRouterModel(model)).contextWindow;
 }
 
-/** Same rule as the server: step down to the nearest tier the model has. */
+/** Preserve an explicit tier; availability changes must fail visibly at save or run. */
 export function normalizeOpenRouterEffort(model: string, effort: string | null | undefined): string {
+  if (effort && /^[a-z]{2,12}$/.test(effort)) return effort;
   const spec = openRouterModelSpec(normalizeOpenRouterModel(model));
   if (spec.efforts.includes(effort as string)) return effort as string;
   const target = ALL_EFFORTS.indexOf(effort && ALL_EFFORTS.includes(effort) ? effort : DEFAULT_OPENROUTER_EFFORT);

@@ -107,6 +107,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
   const nameRef = useRef<HTMLInputElement | null>(null);
   const agentRef = useRef('');
   const savingRef = useRef(false);
+  const initialBrain = useRef({ engine: '', model: '', effort: '' });
 
   // Reset the form when the editor OPENS, or when it retargets to a
   // different agent (by id — object identity changes every agents poll, and
@@ -125,11 +126,11 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     const defaults = defaultBrainSelection(nextEngine);
     const nextModel = agent?.engine === 'assistant' ? normalizeClaudeModel(agent.model)
       : nextEngine === agent?.engine ? agent.model ?? defaults.model : defaults.model;
-    const allowedEfforts = effortOptions(nextEngine, nextModel);
     setEngine(nextEngine);
     setBrainRevision(agent?.brainRevision ?? 1);
     setModel(nextModel);
-    setEffort(agent?.effort && allowedEfforts.includes(agent.effort) ? agent.effort : defaults.effort);
+    setEffort(agent?.effort ?? defaults.effort);
+    initialBrain.current = { engine: nextEngine, model: nextModel, effort: agent?.effort ?? defaults.effort };
     setVoice(agent?.voice ?? 'ara');
     setPinned(Boolean(agent?.pinned));
     setMuted(Boolean(agent?.muted));
@@ -266,7 +267,8 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
   const modelOptions = model && !configuredModels.some((option) => option.id === model)
     ? [{ id: model, label: model }, ...configuredModels]
     : configuredModels;
-  const availableEfforts = effortOptions(engine, model);
+  const listedEfforts = effortOptions(engine, model);
+  const availableEfforts = listedEfforts.includes(effort) ? listedEfforts : [effort, ...listedEfforts];
   const chooseEngine = (nextEngine: string) => {
     const defaults = defaultBrainSelection(nextEngine);
     setEngine(nextEngine);
@@ -301,7 +303,8 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     setBusy(true);
     setErr(null);
     try {
-      const brain = { engine, model: model || undefined, effort };
+      const brainChanged = engine !== initialBrain.current.engine || model !== initialBrain.current.model || effort !== initialBrain.current.effort;
+      const brain = !agent || brainChanged ? { engine, model: model || undefined, effort } : {};
       const saved = agent
         ? await updateAgentReq(agent.id, { name, role, ...brain, brainRevision, voice, pinned, muted, scope: scope.trim() || undefined })
         : await createAgent({ name, role, ...brain, voice, scope: scope.trim() || undefined });
@@ -314,10 +317,10 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
         const defaults = defaultBrainSelection(currentEngine);
         const currentModel = current.engine === 'assistant' ? normalizeClaudeModel(current.model)
           : currentEngine === current.engine ? current.model ?? defaults.model : defaults.model;
-        const options = effortOptions(currentEngine, currentModel);
         setEngine(currentEngine);
         setModel(currentModel);
-        setEffort(current.effort && options.includes(current.effort) ? current.effort : defaults.effort);
+        setEffort(current.effort ?? defaults.effort);
+        initialBrain.current = { engine: currentEngine, model: currentModel, effort: current.effort ?? defaults.effort };
         setBrainRevision(current.brainRevision ?? 1);
         onSaved(current);
         setErr('Brain settings changed on another device. Refreshed them here; review and save again.');

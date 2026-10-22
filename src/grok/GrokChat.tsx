@@ -4,7 +4,7 @@
 // a ChatMeta snapshot up to the right pane (Session card: model, status,
 // context meter, compaction).
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useChat } from '../chat/hooks/useChat';
 import {
   normalizeAgyEffort,
@@ -16,7 +16,7 @@ import {
   normalizeZaiModel,
   useCompanionPicker,
 } from '../chat/hooks/useCompanionPicker';
-import { normalizeCodexEffort, normalizeCodexModel } from '../chat/codexModels';
+import { codexModelSpec, normalizeCodexEffort, normalizeCodexModel } from '../chat/codexModels';
 import { normalizeFireworksEffort, normalizeFireworksModel } from '../chat/fireworksModels';
 import { normalizeOpenRouterEffort, normalizeOpenRouterModel } from '../chat/openrouterModels';
 import { CLAUDE_EFFORTS, normalizeClaudeModel } from '../chat/components/CodexEnginePicker';
@@ -87,6 +87,11 @@ export type GrokChatProps = {
 };
 
 export function GrokChat(props: GrokChatProps) {
+  const [brainSaveError, setBrainSaveError] = useState<string | null>(null);
+  const savedBrain = useRef<BrainDraft>({ engine: props.agent?.engine ?? 'claude', model: props.agent?.model, effort: props.agent?.effort });
+  useEffect(() => {
+    if (props.agent) savedBrain.current = { engine: props.agent.engine, model: props.agent.model, effort: props.agent.effort };
+  }, [props.agent?.engine, props.agent?.model, props.agent?.effort, props.agent?.brainRevision]);
   const { chatId, cli, lane, repo } = props;
   // Seed the picker lane SYNCHRONOUSLY (before the hook's useState initializer
   // reads localStorage) so persona threads never connect on the wrong lane.
@@ -226,6 +231,7 @@ export function GrokChat(props: GrokChatProps) {
     return { engine, model, effort };
   };
   const persistBrain = useCallback((patch: Partial<BrainDraft>) => {
+    setBrainSaveError(null);
     const next = canonicalBrain({ ...desiredBrain.current, ...patch });
     desiredBrain.current = next;
     if (!agentId) {
@@ -243,14 +249,19 @@ export function GrokChat(props: GrokChatProps) {
         });
         serverBrainRevision.current = saved.brainRevision ?? serverBrainRevision.current + 1;
         if (gen === persistGen.current) {
+          savedBrain.current = { engine: saved.engine, model: saved.model, effort: saved.effort };
           desiredBrain.current = canonicalBrain({ engine: saved.engine, model: saved.model, effort: saved.effort });
           picker.applyAuthoritativeBrain(saved.engine, saved.model, saved.effort);
         }
         props.onAgentBrainSaved();
-      } catch {
+      } catch (error) {
         // A 409 means another device won. Never overwrite it with stale fields;
         // reload the central brain and let the explicit next click retry.
         props.onAgentBrainSaved();
+        if (gen === persistGen.current) {
+          desiredBrain.current = canonicalBrain(savedBrain.current);
+          setBrainSaveError(`Couldn’t confirm that change. ${error instanceof Error ? error.message : 'Please try again.'}`);
+        }
       }
     });
   }, [agentId, picker.applyAuthoritativeBrain, props.onAgentBrainSaved]);
@@ -266,10 +277,12 @@ export function GrokChat(props: GrokChatProps) {
     setClaudeEffort: (effort: string) => persistBrain({ engine: 'claude', effort }),
     setCodexModel: (value: string) => {
       const model = normalizeCodexModel(value);
+      const spec = codexModelSpec(model);
       persistBrain({
         engine: 'codex',
         model,
-        effort: normalizeCodexEffort(model, desiredBrain.current.effort),
+        effort: desiredBrain.current.effort && spec.efforts.includes(desiredBrain.current.effort)
+          ? desiredBrain.current.effort : spec.defaultEffort,
       });
     },
     setCodexEffort: (value: string) => persistBrain({
@@ -337,7 +350,7 @@ export function GrokChat(props: GrokChatProps) {
   }, [props.agent?.id, chat.status]);
 
   return (
-    <GrokConversation
+    <><GrokConversation
       // No repo yet on first load: catching up, not an empty conversation.
       s={!repo && props.reposLoading ? { ...s, hydrating: true } : s}
       picker={pickerForUi}
@@ -354,5 +367,7 @@ export function GrokChat(props: GrokChatProps) {
       onOpenAgentEditor={props.onOpenAgentEditor}
       dock={props.dock}
     />
+      {brainSaveError ? <div className="bt-toast" role="alert">{brainSaveError} <button type="button" aria-label="Dismiss settings error" onClick={() => setBrainSaveError(null)}>Dismiss</button></div> : null}
+    </>
   );
 }

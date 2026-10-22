@@ -97,7 +97,7 @@ function EffortPills({
 }) {
   return (
     <>
-      {options.map((v) => (
+      {(options.includes(current) ? options : [...options, current]).map((v) => (
         <button
           key={v}
           type="button"
@@ -288,7 +288,8 @@ function LaneControls({ picker }: { picker: CompanionPicker }) {
       {picker.isCodex && (
         <>
           <span className="ctl-lab">model</span>
-          {CODEX_MODELS.map((m) => (
+          {(CODEX_MODELS.some((model) => model.id === picker.codexModel) ? CODEX_MODELS
+            : [...CODEX_MODELS, { id: picker.codexModel, label: picker.codexModel }]).map((m) => (
             <button
               key={m.id}
               type="button"

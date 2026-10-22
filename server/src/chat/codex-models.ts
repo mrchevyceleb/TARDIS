@@ -132,7 +132,7 @@ export function codexModelList(): CodexModelInfo[] {
 }
 
 export function codexCapability(model: string): CodexModelInfo | undefined {
-  return codexModelList().find((entry) => entry.id === model);
+  return codexModelList().find((entry) => entry.id === model) ?? HAND_BY_ID.get(model);
 }
 
 export function codexCatalogPayload(): {
@@ -206,11 +206,7 @@ export function startCodexCatalog(bin = resolveCodexBin()): Promise<void> {
 
 function configuredCodexSelection(): { model: string; effort: string } {
   const configured = engineDefault('codex', 'gpt-5.6-sol', 'low');
-  const capability = codexCapability(configured.model) ?? codexCapability('gpt-5.6-sol') ?? codexModelList()[0]!;
-  return {
-    model: capability.id,
-    effort: capability.efforts.includes(configured.effort) ? configured.effort : capability.defaultEffort,
-  };
+  return { model: configured.model, effort: configured.effort };
 }
 
 /** Resolve browser-supplied values before they can reach Codex CLI arguments. */
@@ -218,16 +214,15 @@ export function resolveCodexSelection(
   requestedModel?: unknown,
   requestedEffort?: unknown,
 ): { model: string; effort: string } {
-  const modelValue = typeof requestedModel === 'string' ? requestedModel : undefined;
-  const effortValue = typeof requestedEffort === 'string' ? requestedEffort : undefined;
-  const requestedCapability = modelValue ? codexCapability(modelValue) : undefined;
   const configured = configuredCodexSelection();
-  const model = requestedCapability ? modelValue! : configured.model;
-  const capability = codexCapability(model)!;
-  const fallbackEffort = model === configured.model ? configured.effort : capability.defaultEffort;
-  const invalidRequestedModel = requestedModel !== undefined && !requestedCapability;
-  const effort = !invalidRequestedModel && effortValue && capability.efforts.includes(effortValue)
-    ? effortValue
-    : fallbackEffort;
+  const model = requestedModel === undefined ? configured.model : requestedModel;
+  if (typeof model !== 'string' || !SLUG.test(model)) throw new Error('Choose a valid Codex model. The saved conversation is retained.');
+  const capability = codexCapability(model);
+  const effort = requestedEffort === undefined
+    ? model === configured.model ? configured.effort : capability?.defaultEffort ?? 'medium'
+    : requestedEffort;
+  // Do not replace an explicit choice with another model or effort. The CLI
+  // validates availability for this login and reports an error if it cannot run.
+  if (typeof effort !== 'string' || !EFFORT.test(effort)) throw new Error('Choose a valid Codex effort. The saved conversation is retained.');
   return { model, effort };
 }

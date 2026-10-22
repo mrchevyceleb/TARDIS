@@ -139,7 +139,7 @@ function normalizeBrainModel(engine: string, value: unknown, fallback?: string):
   // before its built-in default, same contract as the fireworks resolver.
   if (engine === 'agy') return resolveAgyModel(model, fallback);
   const valid = engine === 'claude' ? CLAUDE_BRAIN_MODELS.has(model)
-    : engine === 'codex' ? codexCapability(model) !== undefined
+    : engine === 'codex' ? /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(model)
     : engine === 'xai' ? model === 'grok-4.7' || model === 'grok-4.6' || model === 'grok-4.5'
     : engine === 'zai' ? ZAI_BRAIN_MODELS.has(model)
     : engine === 'banana' ? model.startsWith('openrouter/')
@@ -161,7 +161,7 @@ function normalizeBrainEffort(engine: string, model: string | undefined, value: 
   if (engine === 'openrouter2') return resolveOpenRouter2Effort(effort, model, fallback);
   if (engine === 'agy') return resolveAgyEffort(model ?? '', effort, fallback);
   if (engine === 'xai' && effort === 'max') effort = 'xhigh';
-  const allowed = engine === 'codex' && model ? new Set(codexCapability(model)?.efforts)
+  const allowed = engine === 'codex' && model ? new Set(codexCapability(model)?.efforts ?? [...STANDARD_BRAIN_EFFORTS, 'ultra'])
     : engine === 'xai' ? XAI_BRAIN_EFFORTS
     : engine === 'zai' ? new Set(['high', 'max'])
     : engine.startsWith('banana') ? BANANA_BRAIN_EFFORTS
@@ -203,8 +203,15 @@ function normalizeAgentBrain(agent: Agent): Agent {
     : agent.engine;
   const defaults = defaultAgentBrain(engine);
   const persisted = !agent.model || !agent.effort ? lastPersistedSelection(agent, engine) : {};
-  const model = normalizeBrainModel(engine, agent.model ?? persisted.model, defaults.model);
-  const effort = normalizeBrainEffort(engine, model, agent.effort ?? persisted.effort, defaults.effort);
+  // Catalogs describe availability, not the operator's intent. A read (including
+  // boot migration) must never rewrite an explicit model or effort when a
+  // provider's catalog is incomplete or temporarily unavailable.
+  const selectedModel = cleanBrainValue(agent.model ?? persisted.model) ?? defaults.model;
+  const model = migrated ? normalizeBrainModel(engine, selectedModel, defaults.model)
+    : engine === 'zai' && selectedModel ? ZAI_MODEL_ALIASES[selectedModel] ?? selectedModel : selectedModel;
+  const storedEffort = cleanBrainValue(agent.effort ?? persisted.effort);
+  const effort = migrated ? normalizeBrainEffort(engine, model, storedEffort, defaults.effort)
+    : engine === 'xai' && storedEffort === 'max' ? 'xhigh' : storedEffort ?? defaults.effort;
   return {
     ...agent,
     engine,
@@ -393,19 +400,17 @@ export function createAgent(input: AgentInput): Agent {
   while (agents.some((a) => a.id === id) || retired.has(id)) id = `${base}-${n++}`;
   const engine = input.engine && VALID_ENGINES.has(input.engine) ? input.engine : 'claude';
   const defaults = defaultAgentBrain(engine);
+  const model = normalizeBrainModel(engine, input.model, defaults.model);
+  const effort = normalizeBrainEffort(engine, model, input.effort, defaults.effort);
+  assertBrainSelection(input, model, effort);
   const now = Date.now();
   const agent: Agent = {
     id,
     name: input.name.trim().slice(0, 60),
     role: (input.role ?? '').trim().slice(0, 120) || 'Companion',
     engine,
-    model: normalizeBrainModel(engine, input.model, defaults.model),
-    effort: normalizeBrainEffort(
-      engine,
-      normalizeBrainModel(engine, input.model, defaults.model),
-      input.effort,
-      defaults.effort,
-    ),
+    model,
+    effort,
     brainRevision: 1,
     brainUpdatedAt: now,
     voice: input.voice ?? 'ara',
@@ -436,6 +441,18 @@ export class AgentBrainRevisionRequiredError extends Error {
   }
 }
 
+export class AgentBrainSelectionError extends Error {}
+
+function assertBrainSelection(input: Pick<AgentInput, 'model' | 'effort'>, model?: string, effort?: string): void {
+  for (const field of ['model', 'effort'] as const) {
+    if (input[field] === undefined) continue;
+    const value = input[field];
+    if (typeof value !== 'string' || !value.trim() || value.trim() !== (field === 'model' ? model : effort)) {
+      throw new AgentBrainSelectionError(`That ${field} is not supported for this selection. Your saved settings have not changed.`);
+    }
+  }
+}
+
 export function updateAgent(
   id: string,
   patch: Partial<AgentInput>,
@@ -456,13 +473,20 @@ export function updateAgent(
   const engine = patch.engine && VALID_ENGINES.has(patch.engine) ? patch.engine : cur.engine;
   const engineChanged = engine !== cur.engine;
   const defaults = defaultAgentBrain(engine);
-  const model = patch.model !== undefined
+  const modelChanged = patch.model !== undefined && patch.model !== cur.model;
+  const effortChanged = patch.effort !== undefined && patch.effort !== cur.effort;
+  const model = modelChanged || (engineChanged && patch.model !== undefined)
     ? normalizeBrainModel(engine, patch.model, defaults.model)
     : engineChanged ? defaults.model : cur.model;
   const effortInput = patch.effort !== undefined
     ? patch.effort
     : engineChanged ? defaults.effort : cur.effort;
-  const effort = normalizeBrainEffort(engine, model, effortInput, defaults.effort);
+  const effort = engineChanged || modelChanged || effortChanged
+    ? normalizeBrainEffort(engine, model, effortInput, defaults.effort) : cur.effort;
+  if (changesBrain) assertBrainSelection(patch, model, effort);
+  if (!engineChanged && modelChanged && patch.effort === undefined && effort !== cur.effort) {
+    throw new AgentBrainSelectionError('Choose an effort supported by this model as well. Your saved settings have not changed.');
+  }
   const brainChanged = engineChanged || model !== cur.model || effort !== cur.effort;
   const next: Agent = {
     ...cur,

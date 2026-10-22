@@ -414,11 +414,19 @@ function openRouter2Env(model: string): NodeJS.ProcessEnv {
   return openRouterEnvFor('openrouter2', model);
 }
 
+class ProviderSelectionUnavailableError extends Error {
+  constructor(readonly cli: CliKind, readonly model: string | undefined, message: string) { super(message); }
+}
+
 const resolveClaudeModel = (cli: CliKind, m?: string): string => {
   if (cli === 'agy') return resolveAgyModel(m, AGY_LANE_MODEL);
   if (cli === 'zai') return resolveZaiModel(m, ZAI_MODEL);
   if (cli === 'xai') return resolveXaiModel(m, XAI_MODEL);
-  if (cli === 'fireworks') return resolveFireworksModel(m);
+  if (cli === 'fireworks') {
+    const model = resolveFireworksModel(m);
+    if (m && model !== m.trim()) throw new ProviderSelectionUnavailableError(cli, m, `Fireworks could not confirm model ${m}. Your saved settings and queued messages are retained.`);
+    return model;
+  }
   if (cli === 'openrouter') return resolveOpenRouterModel(m);
   if (cli === 'openrouter2') return resolveOpenRouter2Model(m);
   // Anthropic Claude Code only. A drifted Counsel picker can send grok-* / glm-*
@@ -434,14 +442,19 @@ export function isClaudeUnrecognizedModelWarning(message: string): boolean {
   return message.includes('[claude-code:unrecognized_model]');
 }
 
-const resolveClaudeEffort = (cli: CliKind, e?: string, model?: string): string =>
-  cli === 'agy' ? resolveAgyEffort(model ?? '', e, AGY_LANE_EFFORT)
+const resolveClaudeEffort = (cli: CliKind, e?: string, model?: string): string => {
+  const effort = cli === 'agy' ? resolveAgyEffort(model ?? '', e, AGY_LANE_EFFORT)
   : cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT)
   : cli === 'xai' ? resolveXaiEffort(e, XAI_EFFORT)
   : cli === 'fireworks' ? resolveFireworksEffort(e, model)
   : cli === 'openrouter' ? resolveOpenRouterEffort(e, model)
   : cli === 'openrouter2' ? resolveOpenRouter2Effort(e, model)
   : e && VALID_CLAUDE_EFFORTS.has(e) ? e : CLAUDE_EFFORT;
+  if (e && ['fireworks', 'openrouter', 'openrouter2'].includes(cli) && effort !== e.trim()) {
+    throw new ProviderSelectionUnavailableError(cli, model, `${cli === 'fireworks' ? 'Fireworks' : 'OpenRouter'} could not use the selected effort ${e} for ${model}. Your saved settings and queued messages are retained.`);
+  }
+  return effort;
+};
 
 /** Prime the SuperGrok OAuth token (refreshing now if it's near expiry) and
  *  keep it fresh on a background interval so xaiEnv() always has a valid token
@@ -3512,6 +3525,7 @@ async function getOrCreateSessionUnlocked(opts: {
     const previous = isAgentThread(chatId) && isClaudeFamilyCli(opts.cli)
       ? await nativeSessionProvenance(opts.cli, opts.repoPath, chatId) : undefined;
     const unavailable = [...handedSources].some(source => source.nativeProviderUnavailable())
+      || (error instanceof ProviderSelectionUnavailableError && error.cli === previous?.cli && error.model === previous?.model)
       || (previous?.cli && ['openrouter', 'openrouter2'].includes(previous.cli)
         && /OpenRouter has no current context\/output limits|not (?:in|present in|available in).*catalog|catalog.*(?:missing|not found)/i.test(String((error as Error).message)));
     const wanted = resolveClaudeModel(opts.cli, opts.model);

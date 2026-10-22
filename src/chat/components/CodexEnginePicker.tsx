@@ -39,8 +39,11 @@ export function CodexEnginePicker(props: {
 }) {
   const live = useCodexModels();
   const cli = useCodexCliStatus();
-  const models = props.models ?? live;
-  const efforts = props.efforts ?? codexEffortsForModel(props.model);
+  const listedModels = props.models ?? live;
+  const models = listedModels.some((model) => model.id === props.model)
+    ? listedModels : [...listedModels, { id: props.model, label: props.model }];
+  const listedEfforts = props.efforts ?? codexEffortsForModel(props.model);
+  const efforts = listedEfforts.includes(props.effort) ? listedEfforts : [...listedEfforts, props.effort];
   const base = {
     fontSize: 12.5,
     border: '1px solid var(--rule, currentColor)',

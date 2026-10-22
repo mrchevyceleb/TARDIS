@@ -33,7 +33,7 @@ test('legacy agents receive one canonical server brain', () => {
   });
 });
 
-test('agent brain rejects a model from a different engine and ignores stale cli', () => {
+test('reading a saved brain preserves model and effort and ignores stale cli', () => {
   const brain = brainForAgent(baseAgent({
     engine: 'xai',
     model: 'gpt-5.6-sol',
@@ -42,7 +42,7 @@ test('agent brain rejects a model from a different engine and ignores stale cli'
     brainRevision: 4,
   }));
   assert.equal(cliForAgentEngine(brain.engine), 'xai');
-  assert.equal(brain.model, 'grok-4.7');
+  assert.equal(brain.model, 'gpt-5.6-sol');
   assert.equal(brain.effort, 'low');
   assert.equal(brain.revision, 4);
 
@@ -52,11 +52,11 @@ test('agent brain rejects a model from a different engine and ignores stale cli'
     effort: 'ultra',
   }));
   assert.equal(codex.model, 'gpt-5.5');
-  assert.equal(codex.effort, 'medium');
+  assert.equal(codex.effort, 'ultra');
   const astra = brainForAgent(baseAgent({ engine: 'codex', model: 'gpt-6-astra', effort: 'ultra' }));
   assert.equal(astra.model, 'gpt-6-astra');
   assert.equal(astra.effort, 'ultra');
-  assert.equal(brainForAgent(baseAgent({ engine: 'codex', model: 'gpt-unknown' })).model, 'gpt-5.6-sol');
+  assert.equal(brainForAgent(baseAgent({ engine: 'codex', model: 'gpt-unknown' })).model, 'gpt-unknown');
 });
 
 test('named teammate Fresh barrier covers every engine for the shared thread', () => {

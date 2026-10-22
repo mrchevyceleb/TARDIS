@@ -174,16 +174,15 @@ if (typeof window !== 'undefined') {
 
 export function codexModelSpec(model: string): CodexModelSpec {
   return CODEX_MODELS.find((entry) => entry.id === model)
+    ?? FALLBACK_CODEX_MODELS.find((entry) => entry.id === model)
     ?? CODEX_MODELS.find((entry) => entry.id === DEFAULT_CODEX_MODEL)
     ?? CODEX_MODELS[0]!;
 }
 
-/** Before the catalog arrives any well-formed id is kept, so a model picked
- *  after it was added (GPT-6.1 Sol, say) survives a reload instead of being
- *  reset to the default by a stale fallback list. */
+/** A catalog is discovery, never permission to replace a saved selection. */
 export function normalizeCodexModel(model: string | null | undefined): string {
   if (model && CODEX_MODELS.some((entry) => entry.id === model)) return model;
-  if (model && !catalogLoaded && MODEL_ID.test(model)) return model;
+  if (model && MODEL_ID.test(model)) return model;
   return CODEX_MODELS.some((entry) => entry.id === DEFAULT_CODEX_MODEL) ? DEFAULT_CODEX_MODEL : CODEX_MODELS[0]!.id;
 }
 
@@ -196,9 +195,9 @@ export function contextWindowForCodexModel(model: string | undefined): number {
 }
 
 export function normalizeCodexEffort(model: string, effort: string | null | undefined): CodexEffort {
-  // A model the fallback list has never heard of may take an effort it has not
-  // either; keep a well-formed one until the catalog can say.
-  if (!catalogLoaded && effort && /^[a-z]{2,12}$/.test(effort) && !CODEX_MODELS.some((entry) => entry.id === model)) return effort;
+  // Saved effort survives refreshes too. Explicit updates are checked by the
+  // server; the CLI reports availability without substituting another tier.
+  if (effort && /^[a-z]{2,12}$/.test(effort)) return effort;
   const spec = codexModelSpec(normalizeCodexModel(model));
   return spec.efforts.includes(effort as CodexEffort)
     ? effort as CodexEffort
