@@ -20,7 +20,7 @@ export const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
 
 // Only the fallback: the server reads the Codex CLI's own model catalog
 // (/api/codex/models) and this list is replaced by it, so a new model needs no
-// edit here. It also keeps the picker usable before that answer arrives.
+// edit here. These are metadata defaults, not proof an account offers them.
 const FALLBACK_CODEX_MODELS: CodexModelSpec[] = [
   {
     id: 'gpt-6.1-sol',
@@ -127,7 +127,9 @@ export function isCodexModelUnlisted(model: string): boolean {
 }
 
 export function codexPickerModels(): Array<{ id: string; label: string }> {
-  return [...CODEX_MODELS, ...[...savedModels].filter(isCodexModelUnlisted)
+  const offered = catalogLoaded ? CODEX_MODELS : [];
+  const offeredIds = new Set(offered.map((model) => model.id));
+  return [...offered, ...[...savedModels].filter((id) => !offeredIds.has(id))
     .map((id) => ({ id, label: `${codexModelLabel(id)} · saved choice` }))];
 }
 
@@ -193,7 +195,7 @@ async function fetchCodexCatalog(): Promise<void> {
     const response = await fetch('/api/codex/models');
     if (response.ok) applyCodexCatalog(await response.json());
   } catch {
-    // Offline or an older server: the fallback list stays in force.
+    // Offline or an older server: keep explicit saved choices available.
   }
   // The server reads the CLI's catalog in the background after it starts, so
   // an early answer can still be the fallback: ask again soon, a few times.

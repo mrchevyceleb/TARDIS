@@ -376,5 +376,15 @@ export function historicalDelivery<T extends { seq: number; ev: unknown }>(frame
       type: '_terminal_error', message: event.message, code: event.code, retryable: event.retryable === true,
     } } };
   }
+  // Older Codex versions wrote these already-clean failed-turn notices only
+  // as transport errors. Recover those notices, never raw stderr diagnostics.
+  const cleanCodexFailure = typeof event.message === 'string'
+    && /^(?:Codex |This Codex model )[^\n\u001b]+ Your conversation is saved\.$/.test(event.message);
+  if ((frame as T & { eng?: string }).eng === 'codex' && cleanCodexFailure) {
+    return { ...frame, ev: { type: 'event', event: {
+      type: '_terminal_error', message: event.message, code: 'CODEX_TURN_FAILED',
+      retryable: event.retryable === true, ts: (frame as T & { at?: number }).at,
+    } } };
+  }
   return null;
 }

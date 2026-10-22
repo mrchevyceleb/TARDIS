@@ -60,6 +60,8 @@ export function Conversation({ s, picker, repo, agent }: ShellViewProps) {
                 waitingOn={waitingOn}
                 onReact={s.react}
                 onRetry={s.retry}
+                onRestore={(text) => s.setValue((draft) => draft.trim() ? `${draft}\n\n${text}` : text)}
+                onChooseModel={() => setCounselOpen(true)}
                 agentName={agent}
               />
               {s.error ? (

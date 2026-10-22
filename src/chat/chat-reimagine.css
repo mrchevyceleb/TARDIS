@@ -649,3 +649,21 @@
   color: var(--fg); border-color: var(--accent);
   background: color-mix(in oklch, var(--accent) 12%, transparent);
 }
+
+/* A saved failed turn stays visible and offers the existing recovery actions. */
+.turn-recovery {
+  width: min(100%, 540px); box-sizing: border-box; margin: 16px 0;
+  padding: 16px 18px; border: 1px solid color-mix(in srgb, var(--r-amber, #c68b35) 35%, transparent);
+  border-radius: 18px; background: color-mix(in srgb, var(--r-amber, #c68b35) 8%, var(--r-bg-card, #19212b));
+  color: var(--r-ink, #f0eee9); box-shadow: 0 5px 18px #0000000a;
+}
+.turn-recovery-title { display: flex; align-items: center; gap: 9px; font-size: 14px; font-weight: 650; }
+.turn-recovery-title > span { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: color-mix(in srgb, var(--r-amber, #c68b35) 15%, transparent); font-size: 22px; }
+.turn-recovery p { margin: 10px 0 0; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.turn-recovery-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.turn-recovery-actions button { min-height: 44px; padding: 8px 14px; border: 1px solid color-mix(in srgb, var(--r-amber, #c68b35) 32%, transparent); border-radius: 12px; color: inherit; background: color-mix(in srgb, var(--r-amber, #c68b35) 11%, transparent); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: transform 140ms, box-shadow 140ms, background 140ms; }
+.turn-recovery-actions button:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 4px 12px #00000018; background: color-mix(in srgb, var(--r-amber, #c68b35) 22%, transparent); }
+.turn-recovery-actions button:active:not(:disabled) { transform: translateY(1px) scale(.97); }
+.turn-recovery-actions button:focus-visible { outline: 2px solid var(--r-amber, #c68b35); outline-offset: 3px; }
+.turn-recovery-actions button:disabled { opacity: .5; cursor: default; }
+@media (prefers-reduced-motion: reduce) { .turn-recovery-actions button { transition: none; } }

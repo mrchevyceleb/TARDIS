@@ -573,6 +573,8 @@ type PeerFailure = Extract<ChatBlock, { kind: 'terminal-error' }> & {
 };
 
 function peerFailureKey(error: PeerFailure): string {
+  // Codex failures belong to their individual prompts, even across reloads.
+  if (error.code?.startsWith('CODEX_')) return error.id;
   // One provider can return different status codes during the same troubled
   // stretch. Keep its complete attempt list together, not one card per code.
   return `${Boolean(error.continuing)}|${error.message.split(/\s/, 1)[0]}`;
@@ -828,7 +830,17 @@ function RestartDivider({ block }: { block: Extract<ChatBlock, { kind: 'restart'
   );
 }
 
-function TerminalErrorCard({ block }: { block: PeerFailure }) {
+function TerminalErrorCard({ block, onRestore, onChooseModel, busy }: { block: PeerFailure; onRestore?: () => void; onChooseModel?: () => void; busy?: boolean }) {
+  if (block.code?.startsWith('CODEX_') && !block.continuing) {
+    return <section className="turn-recovery" role="status">
+      <div className="turn-recovery-title"><span aria-hidden="true">↻</span> Let’s pick up from here</div>
+      <p>{block.message}</p>
+      {(onRestore || onChooseModel) && <div className="turn-recovery-actions">
+        {onRestore && <button type="button" disabled={busy} onClick={onRestore}>Restore message</button>}
+        {onChooseModel && <button type="button" disabled={busy} onClick={onChooseModel}>Choose model</button>}
+      </div>}
+    </section>;
+  }
   return (
     <details className={`bt-peer-recovery${block.background ? ' background-recovery' : ''}${block.continuing ? '' : ' failed'}`}>
       <summary>{block.continuing ? 'Trying another provider' : 'The provider couldn’t finish this turn'}{(block.attempts?.length ?? 0) > 1 ? ` · ${block.attempts!.length} attempts` : ''}</summary>
@@ -1310,6 +1322,9 @@ export type ChatThreadProps = {
   agentName?: string;
   /** One-tap resend of a bubble that read "Not delivered". */
   onRetry?: (clientMsgId: string) => void;
+  /** Restore an admitted failed prompt for review, without sending it again. */
+  onRestore?: (text: string) => void;
+  onChooseModel?: () => void;
   /** The model's own background shells/subagents still running after the turn
    *  ended. The jobs pill in the chat header lists them, so the feed only stops
    *  saying "Turn complete" while they run. */
@@ -1324,7 +1339,7 @@ export type ChatThreadProps = {
 // Renders the full feed: day marks on day changes, user bubbles, per-turn
 // assistant groups (tool cards + streaming prose), and the live-turn pill
 // while a turn is live but no content has landed yet.
-export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, onReply, suppressTyping = false, workingSince, backgroundWork = [], waitingOn = [], agentName, onRetry }: ChatThreadProps) {
+export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = true, pin, onReact, onReply, suppressTyping = false, workingSince, backgroundWork = [], waitingOn = [], agentName, onRetry, onRestore, onChooseModel }: ChatThreadProps) {
   const streaming = status === 'streaming';
   // Reply-to-message (card-cbb4af): groups report their id and a snippet
   // (and their own speaker when they have one — channel member posts); the
@@ -1565,7 +1580,13 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       nodes.push(<RestartDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'terminal-error') {
       const attempts = failureAttempts.get(peerFailureKey(g.block))!;
-      if (attempts.at(-1)?.id === g.block.id) nodes.push(<TerminalErrorCard key={g.block.id} block={{ ...g.block, attempts }} />);
+      const before = blocks.slice(0, blocks.indexOf(g.block));
+      const prompt = [...before].reverse().find((block) => block.kind === 'user' || block.kind === 'peer');
+      const restorable = prompt?.kind === 'user' && !prompt.imageCount && !prompt.images?.length
+        && !prompt.attachmentsLost && !g.block.background && !g.block.peerId ? prompt.text : undefined;
+      if (attempts.at(-1)?.id === g.block.id) nodes.push(<TerminalErrorCard key={g.block.id} block={{ ...g.block, attempts }}
+        busy={streaming} onRestore={restorable && onRestore ? () => onRestore(restorable) : undefined}
+        onChooseModel={g.block.background || g.block.peerId ? undefined : onChooseModel} />);
     } else if (g.type === 'switch') {
       nodes.push(<SwitchDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'background') {

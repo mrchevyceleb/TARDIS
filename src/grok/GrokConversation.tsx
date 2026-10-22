@@ -267,6 +267,8 @@ export function GrokConversation(props: BotConversationProps) {
               onReact={s.react}
               onReply={s.setReply}
               onRetry={s.retry}
+              onRestore={(text) => s.setValue((draft) => draft.trim() ? `${draft}\n\n${text}` : text)}
+              onChooseModel={() => setCounselOpen(true)}
               agentName={agentName}
               pin={agent ? {
                 pinnedBlockIds: messagePins.pins.map((p) => p.blockId),

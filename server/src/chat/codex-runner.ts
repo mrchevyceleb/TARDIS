@@ -769,12 +769,7 @@ export class CodexSession {
       assertMemoryAvailableForSpawn('codex');
     } catch (error) {
       this.busy = false;
-      this.emit({
-        type: 'error',
-        code: error instanceof MemoryPressureSpawnError ? error.code : undefined,
-        retryable: true,
-        message: (error as Error).message,
-      });
+      this.emitTurnFailure((error as Error).message, error instanceof MemoryPressureSpawnError ? error.code : 'CODEX_START_FAILED', true);
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
       return;
     }
@@ -801,7 +796,7 @@ export class CodexSession {
       cleanupImages();
       this.busy = false;
       console.warn('[chat codex] image preparation failed:', (e as Error).message);
-      this.emit({ type: 'error', message: "Codex couldn't read that image. Try attaching it again. Your conversation is saved." });
+      this.emitTurnFailure("Codex couldn't read that image. Try attaching it again. Your conversation is saved.", 'CODEX_IMAGE_FAILED');
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
       return;
     }
@@ -906,12 +901,7 @@ export class CodexSession {
     if (!configProbe.ok) {
       cleanupImages();
       this.busy = false;
-      this.emit({
-        type: 'error',
-        code: 'CODEX_PROJECT_CONFIG_LOCKED',
-        retryable: true,
-        message: configProbe.message,
-      });
+      this.emitTurnFailure(configProbe.message, 'CODEX_PROJECT_CONFIG_LOCKED', true);
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
       return;
     }
@@ -927,7 +917,7 @@ export class CodexSession {
         model: codexModel, resumed: this.resumedNative, harnessChars: this.harnessChars, harnessPhase: this.harnessPhase });
     } catch {
       cleanupImages(); this.busy = false;
-      this.emit({ type: 'error', message: 'The native Codex connection could not start. Try again.' });
+      this.emitTurnFailure('Codex could not connect. Try again in a moment. Your conversation is saved.', 'CODEX_CONNECTION_FAILED', true);
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
       return;
     }
@@ -1176,7 +1166,7 @@ export class CodexSession {
         recordNativeFailure(this.chatId, 'codex', emptyTurn
           ? 'Codex ended without an answer. Its saved thread and queued messages were retained.'
           : 'Codex returned a failed turn. Its saved thread was retained; the turn error has the details.');
-        this.emit({ type: 'error', ...(failureMessage === transientProjectConfigError ? { code: 'CODEX_PROJECT_CONFIG_LOCKED', retryable: true } : {}), message: failureMessage });
+        this.emitTurnFailure(failureMessage, failureMessage === transientProjectConfigError ? 'CODEX_PROJECT_CONFIG_LOCKED' : 'CODEX_TURN_FAILED', failureMessage === transientProjectConfigError);
       }
       this.emitClaudeEvent({
         type: 'result',
@@ -1214,7 +1204,7 @@ export class CodexSession {
       this.closeDanglingToolBlocks(turnState, null, message);
       recordNativeFailure(this.chatId, 'codex', 'Codex could not start. Its saved thread and queued messages were retained; the turn error has the details.');
       console.warn('[chat codex] spawn failed:', err.message);
-      this.emit({ type: 'error', message });
+      this.emitTurnFailure(message, 'CODEX_START_FAILED');
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
     });
 
@@ -1242,6 +1232,12 @@ export class CodexSession {
   }
 
   // ── private ────────────────────────────────────────────────
+
+  /** A failed admitted turn is part of the conversation, including on reload.
+   * Transport errors are reserved for rejecting transport/control requests. */
+  private emitTurnFailure(message: string, code: string, retryable = false): void {
+    this.emitClaudeEvent({ type: '_terminal_error', message, code, retryable, ts: Date.now() });
+  }
 
   ingestExternalEvent(se: SeqEvent): void {
     this.eventLog.push(se);
