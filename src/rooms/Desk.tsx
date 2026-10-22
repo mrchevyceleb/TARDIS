@@ -374,12 +374,10 @@ function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
   useEffect(() => {
     if (!flash) return;
     if (flashDone && doneRef.current) doneRef.current.open = true;
-    const row = document.querySelector(`[data-todo-id="${CSS.escape(flash.id)}"]`);
-    // A Done target needs its section heading in view too, so land on the
-    // heading rather than the row peeking out from under the top bar.
-    const target = flashDone ? doneRef.current : row;
     const raf = window.requestAnimationFrame(() => {
-      target?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      // Target the actual item, including one beyond the latest Done rows.
+      // The Done heading stays visible while its list scrolls underneath.
+      document.querySelector(`[data-todo-id="${CSS.escape(flash.id)}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     });
     setLit(flash.id);
     const timer = window.setTimeout(() => setLit((id) => (id === flash.id ? null : id)), 2400);
@@ -401,7 +399,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
           <input
             value={draft.title}
             onChange={(e) => setDraft({ ...draft, title: e.target.value })}
-            placeholder="Add something that needs you"
+            placeholder="What needs you?"
             aria-label="New item"
             maxLength={200}
           />
@@ -442,7 +440,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
               <TodoRow key={todo.id} todo={todo} {...rowProps} lit={lit === todo.id} onEdit={undefined} />
             ))}
           </ul>
-          {done.length > 60 ? <p className="desk-muted">Showing the latest 60 of {done.length}.</p> : null}
+          {done.length > 60 ? <p className="desk-muted">Showing the latest 60 of {done.length}{doneShown.length > 60 ? ", plus the item you opened." : "."}</p> : null}
         </details>
       ) : null}
     </section>

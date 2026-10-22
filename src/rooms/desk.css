@@ -235,12 +235,14 @@ span.desk-todo-text { cursor: default; }
 
 .desk-done { margin-top: 18px; scroll-margin-top: calc(96px + env(safe-area-inset-top, 0px)); }
 .desk-done summary {
-  display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 999px;
+  position: sticky; top: 0; z-index: 1; background: var(--r-bg-card);
+  display: flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 10px;
+  border-bottom: 1px solid var(--r-line);
   list-style: none; cursor: pointer; color: var(--r-ink-mute); font-size: 13px; font-weight: 600;
   transition: background 0.15s ease, color 0.15s ease;
 }
 .desk-done summary::-webkit-details-marker { display: none; }
-.desk-done summary:hover { color: var(--r-ink); background: var(--r-line); }
+.desk-done summary:hover { color: var(--r-ink); background: color-mix(in srgb, var(--r-gold) 8%, var(--r-bg-card)); }
 .desk-done summary svg { transition: transform 0.2s ease; transform: rotate(-90deg); }
 .desk-done[open] summary svg { transform: none; }
 .desk-done .desk-todo-list { margin-top: 10px; }

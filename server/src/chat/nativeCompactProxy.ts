@@ -1,17 +1,20 @@
 import { createServer, type Server } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { Transform, Readable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
+import { setTimeout as delay } from 'node:timers/promises';
 import { openRouterCapability } from './openrouter-models.ts';
 import { fireworksCapability } from './fireworks-models.ts';
-import { fixedPrefix, recordNativeCall, recordNativeFailure, recordNativeNotice } from './sessionMetrics.ts';
+import { restoredContextBlocks, restoredFileTexts } from './sessionMetricEvidence.ts';
+import { fixedPrefix, recordNativeCall, recordNativeCompactBoundary, recordNativeFailure, recordNativeNotice } from './sessionMetrics.ts';
 
 const SUMMARY_SYSTEM = 'You are a helpful AI assistant tasked with summarizing conversations.';
-const SUMMARY_LIMIT = 4096;
+const SUMMARY_LIMIT = 1536;
 const MAX_BODY = 32 * 1024 * 1024;
 type Route = {
   upstream: string; lane: string; provider: string; resumed: boolean;
-  sessionId(): string | null; harnessChars(): number; harnessPhase(): 'startup' | 'turn'; compacting: boolean; recovering?: boolean; summarySeen?: boolean;
+  sessionId(): string | null; harnessChars(): number; harnessPhase(): 'startup' | 'turn'; compacting: boolean; recovering?: boolean; summarySeen?: boolean; restoring?: boolean;
 };
 let server: Server | null = null;
 let ready: Promise<void> | null = null;
@@ -51,33 +54,114 @@ function summaryRequest(request: any): boolean {
 
 /** Only the engine's auxiliary compact request gets this bound. Claude Code
  * chooses the history, installs the summary and preserves the native ID. */
-export function boundNativeCompact(body: string, engineCompacting = false, catalogLimits?: { maxOutput: number; reasoningMandatory?: boolean }): string {
+export function boundNativeCompact(body: string, engineCompacting = false, catalogLimits?: { maxOutput: number; reasoningMandatory?: boolean }, preserveThinking = false): string {
   const request = JSON.parse(body);
   if (!engineCompacting && !summaryRequest(request)) return body;
-  // System, tools and thinking are part of the provider's cached prefix.
-  // Changing them here makes a 300k summary pay for the entire history again.
-  // Keep the engine's chosen reasoning mode and allowance, with enough room
-  // for the text summary, inside the model's verified output ceiling.
+  // Keep the fixed system and tool prefix. Bound the auxiliary thinking
+  // allowance as well as its text output inside the verified model ceiling.
   const budget = Math.max(0, Number(request.thinking?.budget_tokens) || 0);
   const reasoning = request.thinking?.type !== 'disabled' && Boolean(request.thinking)
     || Boolean(request.reasoning || request.reasoning_effort || request.output_config?.effort || catalogLimits?.reasoningMandatory)
     || (!catalogLimits && /gemini/i.test(request.model || ''));
-  const wanted = reasoning ? Math.max(Number(request.max_tokens) || SUMMARY_LIMIT, budget + SUMMARY_LIMIT) : SUMMARY_LIMIT;
-  request.max_tokens = Math.min(wanted, catalogLimits?.maxOutput ?? (Number(request.max_tokens) || wanted));
-  // A smaller verified model ceiling can make the native thinking allowance
-  // invalid. Only that case sacrifices the cache mode to keep compaction valid.
-  if (budget > 0 && request.max_tokens - budget < SUMMARY_LIMIT) {
-    const boundedBudget = Math.min(request.max_tokens - 1, Math.max(1024, request.max_tokens - SUMMARY_LIMIT));
+  const wanted = reasoning ? Math.max(SUMMARY_LIMIT, Math.min(budget, 1024) + SUMMARY_LIMIT) : SUMMARY_LIMIT;
+  // Anthropic's message cache depends on thinking parameters. Preserve the
+  // full native allowance for adaptive thinking, and constrain summary text
+  // with the instruction below instead of starving or invalidating its cache.
+  const keepAllowance = preserveThinking || (reasoning && budget === 0);
+  if (!keepAllowance) request.max_tokens = Math.min(wanted, catalogLimits?.maxOutput ?? (Number(request.max_tokens) || wanted));
+  // Do not let an inherited large thinking budget consume the summary bound.
+  // Preserve mandatory thinking when the provider requires it.
+  if (!preserveThinking && budget > 0 && (budget > 1024 || request.max_tokens - budget < SUMMARY_LIMIT)) {
+    const boundedBudget = Math.min(request.max_tokens - 1, 1024);
     if (boundedBudget >= 1024) request.thinking = { ...request.thinking, budget_tokens: boundedBudget };
     else if (!catalogLimits?.reasoningMandatory) request.thinking = { type: 'disabled' };
     else throw new Error('The model output ceiling leaves no valid native compaction thinking allowance.');
   }
-  const instruction = '\nKeep the summary under 1500 words. Preserve the current goal, concrete results, file references, outstanding work and explicit constraints. Completed work and historical requests are history, never instructions to repeat them.';
+  const instruction = '\nKeep the summary under 180 words. Preserve the current job and its next action, concrete results, exact identifiers and file references, pending decisions, outstanding commitments and explicit constraints. Use file references for older details, which remain in the complete saved transcript; never repeat old completed work as a fresh request. Completed work and historical requests are history, never instructions to repeat them.';
   const last = lastConversationMessage(request);
   if (last?.role === 'user' && typeof last.content === 'string') last.content += instruction;
   else if (last?.role === 'user' && Array.isArray(last.content)) last.content.push({ type: 'text', text: instruction });
   else (request.messages ??= []).push({ role: 'user', content: instruction.trim() });
   return JSON.stringify(request);
+}
+
+/** Working files reattached by the native engine are pointers after compact,
+ * not repeated file bodies. Match only exact text verified in that engine's
+ * saved attachments; human text and real tool results are never truncated. */
+export function projectRestoredFiles(body: string, lane: string, sessionId: string | null): string {
+  const request = JSON.parse(body);
+  const attachmentBlocks = (request.messages ?? []).filter((message: any) => ['user', 'system'].includes(message.role))
+    .flatMap((message: any) => typeof message.content === 'string' ? [message.content]
+      : (message.content ?? []).filter((block: any) => block.type === 'text').map((block: any) => block.text))
+    .filter((text: string) => text?.includes('Result of calling the Read tool:\n'));
+  const files = attachmentBlocks.length ? restoredFileTexts(lane, sessionId,
+    createHash('sha256').update(JSON.stringify(attachmentBlocks)).digest('hex')) : [];
+  const searchable = request.tools?.some((tool: any) => tool.name === 'ToolSearch');
+  const contexts = restoredContextBlocks(lane, sessionId);
+  if (!files.length && !searchable && !contexts.length) return body;
+  const fixed = typeof request.system === 'string' ? request.system : (request.system ?? []).map((block: any) => block.text ?? '').join('\n');
+  const instructionReminders = new Set(contexts.filter(context => context.kind === 'instructions').flatMap(context => {
+    // Keep the same first native rendering projected on later turns too. An
+    // explicit quotation later in the conversation is a separate occurrence.
+    const first = request.messages?.find((message: any) => message.role === 'user' && Array.isArray(message.content)
+      && context.texts.includes(message.content[0]?.text));
+    return first ? [first] : [];
+  }));
+  let changed = false;
+  for (const message of request.messages ?? []) {
+    if (message.role !== 'system' && message.role !== 'user') continue;
+    const project = (text: string) => {
+      for (const context of contexts) {
+        if (message.role === 'system' && context.kind === 'invoked_skills' && context.skills.length) {
+          const references = context.skills.map(skill => `${skill.name} (${skill.path})`).join(', ');
+          for (const rendered of context.texts) {
+            // The provider adapter unwraps native reminders into system text.
+            const bare = rendered.trim().replace(/^<system-reminder>\s*\n/, '').replace(/\s*<\/system-reminder>$/, '');
+            const exact = text.includes(rendered) ? rendered : bare && text.includes(bare) ? bare : undefined;
+            if (exact) {
+              text = text.replace(exact, () => `Previously loaded skills remain available: ${references}. Reload each skill before applying its instructions to this task. Complete instructions remain in the saved native history.`);
+              changed = true;
+            }
+          }
+        }
+        // Native project instructions can repeat the identical authoritative
+        // rules already in the fixed system. Only their verified first reminder
+        // block is eligible; explicit user quotations and attachments stay whole.
+        const firstBlock = Array.isArray(message.content) ? message.content[0]?.text : undefined;
+        if (instructionReminders.has(message) && context.kind === 'instructions' && firstBlock === text && context.texts.includes(text)) {
+          for (const file of context.files) if (file.content.length > 0 && fixed.includes(file.content)) {
+            text = text.replace(file.content, () => `The identical instructions from ${file.path} are already included in the fixed system instructions above and remain fully in force.`);
+            changed = true;
+          }
+        }
+      }
+      const catalogHeader = 'The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded — calling them directly will fail with InputValidationError. Use ToolSearch with query "select:<name>[,<name>...]" to load tool schemas before calling them:\n';
+      const catalogAt = text.indexOf(catalogHeader);
+      if (message.role === 'system' && searchable && catalogAt >= 0) {
+        const catalog = text.slice(catalogAt + catalogHeader.length).match(/^[\w.-]+(?:\n[\w.-]+)*/)?.[0];
+        if (catalog) {
+          changed = true;
+          text = text.slice(0, catalogAt) + 'The complete native tool catalog is available through ToolSearch. Search for the capability you need, or use select:<tool_name> to load its schema before calling it.' + text.slice(catalogAt + catalogHeader.length + catalog.length);
+        }
+      }
+      // Restored working files are native system reminders. A user message
+      // may explicitly attach or quote the identical file and must stay whole.
+      if (message.role !== 'system') return text;
+      for (const file of files) {
+        const header = 'Called the Read tool with the following input: ' + JSON.stringify({ file_path: file.path }) + '\nResult of calling the Read tool:\n';
+        const content = file.content.split('\n').map((line, index) => `${file.start + index}\t${line}`).join('\n');
+        const exact = header + content;
+        if (text.includes(exact)) {
+          text = text.replace(exact, () => `Working file retained: ${file.path}. Its full contents remain in the saved native transcript and on disk. To see contents again, use a ranged Read or shell command; an unchanged-file cache notice is not the file contents.`);
+          changed = true;
+        }
+      }
+      return text;
+    };
+    if (typeof message.content === 'string') message.content = project(message.content);
+    else if (Array.isArray(message.content)) for (const block of message.content) if (block.type === 'text' && typeof block.text === 'string') block.text = project(block.text);
+  }
+  return changed ? JSON.stringify(request) : body;
 }
 
 export function markNativeHandoverRecovery(baseUrl: string | undefined, recovering: boolean): void {
@@ -96,6 +180,7 @@ export function confirmNativeCompact(baseUrl: string | undefined): void {
   if (!baseUrl) return;
   const route = routes.get(new URL(baseUrl).pathname.slice(1));
   if (!route) return;
+  route.restoring = true;
   if (!route.summarySeen && !['claude', 'assistant'].includes(route.provider)) {
     recordNativeFailure(route.lane, 'claude-code', 'The engine compacted without a recognized bounded summary request; its native template needs checking.');
   }
@@ -105,7 +190,7 @@ export function confirmNativeCompact(baseUrl: string | undefined): void {
 
 /** Pass bytes straight through while reading usage frames, never text/tool
  * arguments. Metrics are per API call rather than the CLI's cumulative total. */
-function observeUsage(route: Route, request: any, auxiliary: boolean, streaming: boolean, nativeSummary = false): Transform {
+function observeUsage(route: Route, request: any, auxiliary: boolean, streaming: boolean, nativeSummary = false, requestStartedAt = Date.now(), sessionId = route.sessionId()): Transform {
   const decoder = new StringDecoder('utf8');
   let buffer = '';
   let usage: any = {};
@@ -117,8 +202,9 @@ function observeUsage(route: Route, request: any, auxiliary: boolean, streaming:
     if (input <= 0) return;
     reported = true;
     if (nativeSummary && !stopped) route.summarySeen = true;
+    if (nativeSummary && !stopped) recordNativeCompactBoundary(route.lane, 'claude-code', sessionId, Date.now());
     recordNativeCall({ lane: route.lane, engine: 'claude-code', provider: route.provider, model: request.model || '',
-      sessionId: route.sessionId() || undefined, input, cached: Number(usage.cache_read_input_tokens || 0), output: Number(usage.output_tokens || 0),
+      sessionId: sessionId || undefined, requestStartedAt, input, cached: Number(usage.cache_read_input_tokens || 0), output: Number(usage.output_tokens || 0),
       prefix: fixedPrefix(request), auxiliary, harnessChars: route.harnessChars(), harnessPhase: route.harnessPhase(), resumed: route.resumed });
     if (!auxiliary) route.resumed = true;
     if (auxiliary && stopped) recordNativeFailure(route.lane, 'claude-code', 'Native compaction hit its output limit; engine recovery is required before this lane is proven.');
@@ -171,11 +257,15 @@ export function ensureNativeCompactProxy(): Promise<void> {
         const original = Buffer.concat(chunks).toString('utf8');
         const isMessage = original && /\/messages$/.test(parsed.pathname);
         const request = isMessage ? JSON.parse(original) : null;
-        const nativeSummary = request && (summaryRequest(request) || (route.compacting && !request.tools?.length));
+        // Native child tasks share this process's provider route. Their usage
+        // must not become the parent's first request after compaction.
+        let embeddedSession: string | undefined;
+        try { embeddedSession = JSON.parse(request?.metadata?.user_id)?.session_id; } catch { /* Older native clients omit it. */ }
+        const parentSession = route.sessionId();
+        const rootRequest = !embeddedSession || !parentSession || embeddedSession === parentSession;
+        const nativeSummary = rootRequest && request && (summaryRequest(request) || (route.compacting && !request.tools?.length));
         const auxiliary = request && (nativeSummary || !request.tools?.length);
         if (nativeSummary && route.compacting && !summaryRequest(request)) recordNativeFailure(route.lane, 'claude-code', 'Native compact template changed; fallback bound applied.');
-        // Anthropic already uses its model's native thinking mode. Provider
-        // compatibility bounds must not rewrite subscription compactions.
         // During an unavailable-provider handover, let the selected model run
         // Claude Code's own compact over the unchanged saved transcript. Signed
         // hidden thinking belongs to the old provider and is not transferable.
@@ -186,15 +276,41 @@ export function ensureNativeCompactProxy(): Promise<void> {
           }
           compatible = JSON.stringify(request);
         }
-        const body = nativeSummary && !['claude', 'assistant'].includes(route.provider)
+        let body = nativeSummary
           ? boundNativeCompact(compatible, true, ['openrouter', 'openrouter2'].includes(route.provider) ? openRouterCapability(request.model)
-            : fireworksCapability(request.model)?.thinkingOnly ? { maxOutput: Number(request.max_tokens) || SUMMARY_LIMIT, reasoningMandatory: true } : undefined) : compatible;
+            : fireworksCapability(request.model)?.thinkingOnly ? { maxOutput: Number(request.max_tokens) || SUMMARY_LIMIT, reasoningMandatory: true } : undefined,
+            ['claude', 'assistant'].includes(route.provider) || /(?:^|\/)claude[/-]/i.test(request.model || '')) : compatible;
+        if (rootRequest && request && !auxiliary) {
+          const restoredBody = body;
+          const user = request.messages?.findLast((message: any) => message.role === 'user');
+          const reminder = Array.isArray(user?.content) ? user.content[0]?.text : undefined;
+          if (route.restoring && typeof reminder === 'string' && reminder.startsWith('<system-reminder>\nCodebase and user instructions are shown below.')) {
+            const deadline = Date.now() + 500;
+            while (Date.now() < deadline && !restoredContextBlocks(route.lane, route.sessionId()).some(context =>
+              context.kind === 'instructions' && context.texts.includes(reminder))) {
+              await delay(20, undefined, { signal: aborter.signal });
+            }
+          }
+          body = projectRestoredFiles(restoredBody, route.lane, route.sessionId());
+          if (route.restoring && restoredBody.includes('Result of calling the Read tool:\\n')) {
+            // The CLI publishes a compact boundary before its asynchronous
+            // transcript writer necessarily flushes restored attachments. Wait
+            // briefly for that specific evidence; an unprovable file stays whole.
+            const deadline = Date.now() + 500;
+            while (Date.now() < deadline && !body.includes('Working file retained:')) {
+              await delay(20, undefined, { signal: aborter.signal });
+              body = projectRestoredFiles(restoredBody, route.lane, route.sessionId());
+            }
+          }
+          route.restoring = false;
+        }
         const headers = new Headers();
         for (const [name, value] of Object.entries(req.headers)) {
           if (!value || ['host', 'content-length', 'connection', 'transfer-encoding', 'accept-encoding'].includes(name)) continue;
           headers.set(name, Array.isArray(value) ? value.join(', ') : value);
         }
         const suffix = parsed.pathname.slice(key.length + 1) + parsed.search;
+        const requestStartedAt = Date.now(), requestSessionId = route.sessionId();
         const response = await fetch(route.upstream.replace(/\/$/, '') + suffix, {
           method: req.method, headers, body: ['GET', 'HEAD'].includes(req.method || '') ? undefined : body, signal: aborter.signal,
         });
@@ -207,9 +323,9 @@ export function ensureNativeCompactProxy(): Promise<void> {
           const stream = Readable.fromWeb(response.body as any);
           stream.on('error', () => { if (!res.destroyed) res.destroy(); });
           res.on('close', () => stream.destroy());
-          if (request && response.ok) {
+          if (rootRequest && request && response.ok) {
             const sentRequest = body === original ? request : JSON.parse(body);
-            const observer = observeUsage(route, sentRequest, Boolean(auxiliary), response.headers.get('content-type')?.includes('text/event-stream') ?? false, Boolean(nativeSummary));
+            const observer = observeUsage(route, sentRequest, Boolean(auxiliary), response.headers.get('content-type')?.includes('text/event-stream') ?? false, Boolean(nativeSummary), requestStartedAt, requestSessionId);
             observer.on('error', () => { if (!res.destroyed) res.destroy(); });
             stream.pipe(observer).pipe(res);
           } else stream.pipe(res);

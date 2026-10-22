@@ -1012,17 +1012,21 @@ export function setAnswerDelivery(id: string, delivery: 'sent' | 'failed', claim
   });
 }
 
-export function setTodoStatus(id: string, status: 'open' | 'done', resolution?: { note?: unknown; by?: DeskActor }): Promise<DeskTodo> {
-  return mutate((data, now) => {
+/** The change result is decided under the same lock as the transition, so
+ * callers can suppress follow-up effects even when completion requests race. */
+export function setTodoStatusWithChange(id: string, status: 'open' | 'done', resolution?: { note?: unknown; by?: DeskActor }): Promise<{ todo: DeskTodo; changed: boolean }> {
+  return mutate<{ todo: DeskTodo; changed: boolean }>((data, now) => {
     const todo = findTodo(data, id);
-    // Repeating the status already on disk is a safe no-op, not a fresh touch.
-    // A completion carrying a resolution still runs through applyTodoStatus,
-    // which validates it, exactly as it did before.
-    if (todo.status === status && resolution?.note === undefined && resolution?.by === undefined) return new Unchanged(todo);
+    const before = JSON.stringify(todo);
     applyTodoStatus(todo, status, now, resolution);
+    if (JSON.stringify(todo) === before) return new Unchanged({ todo, changed: false });
     todo.updatedAt = now;
-    return todo;
+    return { todo, changed: true };
   });
+}
+
+export async function setTodoStatus(id: string, status: 'open' | 'done', resolution?: { note?: unknown; by?: DeskActor }): Promise<DeskTodo> {
+  return (await setTodoStatusWithChange(id, status, resolution)).todo;
 }
 
 export function deleteTodo(id: string): Promise<void> {

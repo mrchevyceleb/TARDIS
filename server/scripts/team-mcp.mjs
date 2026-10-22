@@ -808,9 +808,10 @@ async function callTool(name, args, signal) {
       return `Updated:\n${describeTodo(todo)}`;
     }
     if (name === 'desk_todo_complete') {
-      const { todo } = await post(`/api/desk/todos/${encodeURIComponent(args.id)}/complete`, { agent: self, note: args.note });
+      const { todo, changed } = await post(`/api/desk/todos/${encodeURIComponent(args.id)}/complete`, { agent: self, note: args.note });
+      if (changed === false) return `Already completed [${todo.id}] ${todo.title}. Nothing changed.`;
       let extra = '';
-      if (args.note && todo.cardId) {
+      if (changed === true && args.note && todo.cardId) {
         try {
           await comment(todo.cardId, `Resolved: ${todo.title}. ${args.note}`);
         } catch (error) {
