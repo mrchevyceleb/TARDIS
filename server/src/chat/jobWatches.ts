@@ -27,6 +27,7 @@ import { inQuietHours, isQuietExemptWork, lastQuietEndMs, msUntilQuietEnd } from
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { listAgents } from './agents.ts';
 import { sendToAgentHome } from './teamBus.ts';
+import { assertResourcesForSpawn, resourceGuardRequired, spawnContained, containedScopeOf, releaseContainedScope, signalContainedWorker, watchContainedScope, scopeOutcome, scopeStorageFailure, recordResourceIncident, MEMORY_FAILURE_NOTICE, expectContainedScopeExit, unitActiveState } from '../lib/resourceGuard.ts';
 
 export type JobWatchKind = 'pid' | 'file' | 'command';
 
@@ -59,6 +60,7 @@ export type JobWatch = {
    *  The tick retries this exact text so retries and restarts never re-derive
    *  or degrade the outcome. */
   resolvedText?: string;
+  unit?: string;
 };
 
 const store = new JsonStore<JobWatch>('job-watches.json', []);
@@ -175,7 +177,9 @@ export function canLaunchInScope(): Promise<boolean> {
  *  keeps it outside rivendell.service's cgroup: a service restart used to kill
  *  every watcher (KillMode=control-group) and wake the agent with a SIGTERM
  *  for a job that was still running. */
-function launchWatchCommand(command: string, scoped: boolean, env: NodeJS.ProcessEnv): ChildProcess {
+function launchWatchCommand(command: string, scoped: boolean, owner: string, timeoutMin: number, env: NodeJS.ProcessEnv): ChildProcess {
+  assertResourcesForSpawn(owner);
+  if (resourceGuardRequired()) return spawnContained('/bin/sh', ['-c', command], { detached: true, stdio: 'ignore', env }, owner, `tardis-watch-${randomUUID()}`, timeoutMin * 60 + 120, true);
   if (!scoped) return spawn(command, { shell: true, detached: true, stdio: 'ignore', env });
   const startedAt = Date.now();
   const child = spawn('systemd-run', ['--user', '--scope', '--quiet', '--collect', '--expand-environment=no', '--unit', `tardis-watch-${randomUUID().slice(0, 8)}`, '/bin/sh', '-c', command], { detached: true, stdio: 'ignore', env });
@@ -243,8 +247,8 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
   // command: the server runs it detached right now.
   if (typeof input.command !== 'string' || !input.command.trim()) throw new Error('command must be a shell command');
   const command = input.command.trim();
-  const scoped = await canLaunchInScope();
-  const child = launchWatchCommand(command, scoped, backgroundAccountEnv(ELROND_WORKSPACE_PATH, agent.name));
+  const scoped = resourceGuardRequired() || await canLaunchInScope();
+  const child = launchWatchCommand(command, scoped, `${agent.name} / ${note}`, timeoutMin, backgroundAccountEnv(ELROND_WORKSPACE_PATH, agent.name));
   // Listen IMMEDIATELY, before anything else: a spawn failure (EAGAIN/EMFILE,
   // no pid) emits an async 'error' that would crash the process with no
   // listener, and a fast command can exit while the record is still being
@@ -264,7 +268,7 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
   const id = randomUUID();
   try {
     const created = await serialize(() => store.create({
-      id, agentId: input.agentId, lane: input.lane === 'main' ? 'main' as const : 'bg' as const, note, kind: 'command' as const, command, pid, pidStart: start, timeoutMin, deadline, spawned: true,
+      id, agentId: input.agentId, lane: input.lane === 'main' ? 'main' as const : 'bg' as const, note, kind: 'command' as const, command, pid, pidStart: start, timeoutMin, deadline, spawned: true, unit: containedScopeOf(child),
     }));
     if (buffered === null) {
       // Not exited yet: swap the buffer listeners for the durable arm. If the
@@ -282,7 +286,7 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
     // leave it running untracked. Kill the detached process group.
     child.removeListener('exit', onExit);
     child.removeListener('error', onError);
-    try { process.kill(-pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { /* already gone */ } }
+    if (!signalContainedWorker(child, 'SIGTERM')) { try { process.kill(-pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { /* already gone */ } } }
     throw err;
   }
 }
@@ -298,15 +302,25 @@ function beginDelivery(id: string): boolean {
 
 
 /** Command child: listen for exit while this process lives. */
+const childCleanup = new Map<string, () => void>();
 function armChild(id: string, child: ChildProcess): void {
   children.set(id, child);
-  child.once('exit', (code, signal) => {
+  const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+    childCleanup.get(id)?.();
     children.delete(id);
     resolveWatchById(id, exitText(code, signal));
-  });
-  child.once('error', (err) => {
+  };
+  const onError = (err: Error) => {
+    childCleanup.get(id)?.();
     children.delete(id);
     resolveWatchById(id, `failed to run: ${err.message}`);
+  };
+  child.once('exit', onExit);
+  child.once('error', onError);
+  childCleanup.set(id, () => {
+    child.removeListener('exit', onExit);
+    child.removeListener('error', onError);
+    childCleanup.delete(id);
   });
   child.unref();
 }
@@ -340,8 +354,7 @@ function forgetWatch(id: string): void {
   const child = children.get(id);
   if (child) {
     children.delete(id);
-    child.removeAllListeners('exit');
-    child.removeAllListeners('error');
+    childCleanup.get(id)?.();
   }
 }
 
@@ -363,8 +376,13 @@ export async function deleteJobWatch(id: string): Promise<boolean> {
 
 /** Fresh resolution detail for a watch on this tick, or null to keep
  *  waiting. A resolvedText already on the record skips this entirely. */
-function checkWatch(watch: JobWatch, now: number): string | null {
+function checkWatch(watch: JobWatch, now: number, unitStillRunning = false): string | null {
   if (now >= watch.deadline) {
+    // This watch is done: its scope keeps running only until the hard
+    // RuntimeMaxSec backstop stops it, and that stop is expected, not a
+    // second incident the agent should be told about.
+    if (watch.unit) expectContainedScopeExit(watch.unit);
+    if (watch.unit) return `timed out after ${watch.timeoutMin}m without reporting completion. Its worker has a hard time limit and will be stopped within two minutes. Work saved in the workspace remains available; check the job before continuing. No further watch result will arrive.`;
     return `timed out after ${watch.timeoutMin}m. The watch gave up — check the job yourself; nothing further will arrive.`;
   }
   if (watch.kind === 'pid' && typeof watch.pid === 'number') {
@@ -385,6 +403,13 @@ function checkWatch(watch: JobWatch, now: number): string | null {
   if (watch.kind === 'command' && watch.spawned && !children.has(watch.id)) {
     // Restarted server (or the child already drained): no live child handle.
     // resolvedText carries the real outcome when there was one.
+    if (watch.unit) {
+      // The unit is the identity that survives restarts: only a manager
+      // answer of inactive/failed finishes the watch. The dead launcher's
+      // pid proves nothing either way (it died with the old server).
+      if (unitStillRunning) return null;
+      return `finished: the command's worker unit ended. Its outcome was recorded across a server restart; the log has the details.`;
+    }
     if (typeof watch.pid === 'number' && !pidMatches(watch.pid, watch.pidStart)) {
       return `finished: the process exited. Exit code unknown — the server restarted while the job ran.`;
     }
@@ -418,6 +443,21 @@ export function visibleWakeText(text: string): string {
  *  unhandled rejection. */
 async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
   try {
+    if (watch.unit) {
+      // Read the kernel's cause before releasing failed-unit metadata, and
+      // persist it in the normal wake even after the launching server exits.
+      if (!watch.resolvedText) {
+        const storageFailure = await scopeStorageFailure(watch.unit);
+        const cause = await scopeOutcome(watch.unit);
+        if (storageFailure) outcome = storageFailure;
+        else if (cause === 'oom-kill') {
+          outcome = MEMORY_FAILURE_NOTICE;
+          const owner = listAgents().find((agent) => agent.id === watch.agentId)?.name ?? watch.agentId;
+          recordResourceIncident(`${owner} / ${watch.note}`, outcome);
+        } else if (cause === 'timeout') outcome = 'This command reached its time limit and was stopped. It did not finish; work saved in the workspace remains available.';
+      }
+      await releaseContainedScope(watch.unit);
+    }
     const agent = listAgents().find((a) => a.id === watch.agentId);
     if (!agent) {
       console.warn(`[job-watches] ${watch.note}: agent was deleted; dropping the wake`);
@@ -505,8 +545,23 @@ export function startJobWatchScheduler(): void {
     }
     const now = Date.now();
     for (const watch of watches) {
+      // Durable command scopes survive a server restart. Resume their disk
+      // accounting as well as their completion watch on the new server.
+      if (watch.unit) {
+        const owner = listAgents().find((agent) => agent.id === watch.agentId)?.name ?? watch.agentId;
+        watchContainedScope(watch.unit, `${owner} / ${watch.note}`, process.cwd());
+      }
       if (delivering.has(watch.id) || (retryUntil.get(watch.id) ?? 0) > now) continue;
-      const outcome = watch.resolvedText ?? checkWatch(watch, now);
+      // A restarted server has no live child handle for a command watch, and
+      // the launcher pid died with the old server while the durable unit
+      // lives on. Ask the UNIT whether it is still running; an unanswered
+      // manager counts as running so a wedged manager never finishes a watch.
+      let unitStillRunning = false;
+      if (watch.unit && watch.kind === 'command' && watch.spawned && !children.has(watch.id)) {
+        const state = await unitActiveState(watch.unit);
+        unitStillRunning = state !== 'inactive' && state !== 'failed';
+      }
+      const outcome = watch.resolvedText ?? checkWatch(watch, now, unitStillRunning);
       // Gate synchronously: checkWatch is cheap and sync, so no exit listener
       // can interleave between the resolution and the gate.
       if (outcome && beginDelivery(watch.id)) {

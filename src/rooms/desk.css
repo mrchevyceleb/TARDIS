@@ -761,3 +761,15 @@ span.desk-todo-text { cursor: default; }
 .desk-answer.is-invited { outline: 2px solid var(--r-gold); outline-offset: 4px; border-radius: 10px; background: color-mix(in srgb, var(--r-gold) 8%, transparent); }
 
 .is-answered.is-rejected > .desk-check { color: var(--r-amber); border-color: var(--r-amber); background: color-mix(in srgb, var(--r-amber) 14%, var(--r-bg-deep)); animation: none; }
+
+/* Quiet, owner-facing receipts for automatic resource protection. */
+.desk-safety { margin: 0 0 16px; border: 1px solid color-mix(in srgb, var(--text, #aab8c5) 20%, transparent); border-radius: 14px; overflow: hidden; }
+.desk-safety summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px 14px; cursor: pointer; transition: background .15s ease; }
+.desk-safety summary:hover { background: color-mix(in srgb, currentColor 5%, transparent); }
+.desk-safety summary:focus-visible { outline: 2px solid currentColor; outline-offset: -3px; }
+.desk-safety summary > span:last-child { margin-left: auto; font-size: 12px; opacity: .72; }
+.desk-safety-dot { flex: 0 0 8px; height: 8px; border-radius: 50%; background: #48b98d; }
+.desk-safety.is-held .desk-safety-dot { background: #e6b75b; }
+.desk-safety-body { padding: 0 14px 12px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.desk-safety-body p { margin: 8px 0; }
+.desk-safety[role='status'] { padding: 12px 14px; }

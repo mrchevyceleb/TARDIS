@@ -1,4 +1,5 @@
 import { prepareSessionStateDelta } from './sessionContext.ts';
+import { signalContainedWorker } from '../lib/resourceGuard.ts';
 /** Agy engine lane — Google's Antigravity CLI (`agy`) on Matt's subscription.
  *
  *  Protocol (probed 2026-10-14, headless): one persistent
@@ -265,7 +266,7 @@ export class AgySession {
       '--print-timeout', '3600s',
       ...(resumeId ? ['--conversation', resumeId] : []),
     ];
-    this.child = spawnLaneWorker(resolveAgyBin(), args, { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessByStdio<Writable, Readable, Readable>;
+    this.child = spawnLaneWorker(resolveAgyBin(), args, { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }, agentForChatId(chatId)?.name ?? chatId) as ChildProcessByStdio<Writable, Readable, Readable>;
     this.child.stdout.setEncoding('utf8');
     this.child.stdout.on('data', (chunk: string) => this.onStdout(chunk));
     this.child.stderr.setEncoding('utf8');
@@ -1125,10 +1126,12 @@ export class AgySession {
     this.clearBoundaryRequest();
     this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
     const pid = this.child.pid;
-    try { this.child.kill('SIGINT'); } catch { /* gone */ }
+    if (!signalContainedWorker(this.child, 'SIGINT')) { try { this.child.kill('SIGINT'); } catch { /* gone */ } }
     setTimeout(() => {
       if (!pid || pid <= 1) return;
-      if (boundaryPause) {
+      if (signalContainedWorker(this.child, 'SIGTERM')) {
+        setTimeout(() => signalContainedWorker(this.child, 'SIGKILL'), 3000).unref();
+      } else if (boundaryPause) {
         try { this.child.kill('SIGTERM'); } catch { /* gone */ }
         setTimeout(() => { try { this.child.kill('SIGKILL'); } catch { /* gone */ } }, 3_000).unref();
       } else {
@@ -1170,7 +1173,9 @@ export class AgySession {
     // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
     const pid = this.child.pid;
     if (!pid || pid <= 1) return;
-    if (this.pausedForMessage) {
+    if (signalContainedWorker(this.child, 'SIGTERM')) {
+      setTimeout(() => signalContainedWorker(this.child, 'SIGKILL'), 3000).unref();
+    } else if (this.pausedForMessage) {
       try { this.child.kill('SIGTERM'); } catch { /* gone */ }
       setTimeout(() => { try { this.child.kill('SIGKILL'); } catch { /* gone */ } }, 3000).unref();
     } else {

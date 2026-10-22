@@ -1,8 +1,9 @@
-import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { spawnContained } from './resourceGuard.ts';
 
 /**
  * TARDIS spawns every lane worker (claude, codex, agy, pi, banana, the
@@ -201,7 +202,7 @@ function ownUnitsOf(cgroupText: string): Set<string> {
 function inForeignServiceUnit(cgroupText: string, ownUnits: Set<string>): boolean {
   for (const line of cgroupText.split('\n')) {
     const unit = serviceUnitOf(line);
-    if (unit && !ownUnits.has(unit) && !TARDIS_UNIT_NAMES.has(unit)) return true;
+    if (unit && !ownUnits.has(unit) && !TARDIS_UNIT_NAMES.has(unit) && !/^tardis-worker-[a-f0-9-]+\.service$/.test(unit)) return true;
   }
   return false;
 }
@@ -486,6 +487,8 @@ export function spawnLaneWorker(
   command: string,
   args: readonly string[],
   options: SpawnOptions,
+  owner = command,
+  admission: { conversationTurn?: boolean } = { conversationTurn: true },
 ): ChildProcess {
   const env = options.env
     ? { ...options.env, ...laneWorkerEnv() }
@@ -494,9 +497,14 @@ export function spawnLaneWorker(
   // spawns, so a caller's own shell parsing is never nested inside ours.
   // /bin/sh (not bash): the wrapper is POSIX sh and /bin/sh is guaranteed
   // where /proc is.
+  // Lane workers default to person-class admission: a hold is a valve on
+  // machine load, never a mute button on a person, and every admitted turn
+  // is still capped to the memory the slice can actually spare. Pure machine
+  // surfaces (the background worker, content generation) pass an explicit
+  // opt-out; engine runners that know a turn's origin can pass it through.
   const child = IS_LINUX && !options.shell && commandResolves(command, options, env)
-    ? spawn('/bin/sh', ['-c', LANE_WORKER_WRAPPER, 'lane-worker', command, ...args], { ...options, env })
-    : spawn(command, args, { ...options, env });
+    ? spawnContained('/bin/sh', ['-c', LANE_WORKER_WRAPPER, 'lane-worker', command, ...args], { ...options, env }, owner, undefined, undefined, false, admission)
+    : spawnContained(command, args, { ...options, env }, owner, undefined, undefined, false, admission);
   markLaneWorkerKillable(child.pid);
   return child;
 }

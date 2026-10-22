@@ -1,3 +1,4 @@
+import { ResourceHoldError } from '../lib/resourceGuard.ts';
 import { assertSubscriptionLane } from './subscription-policy.ts';
 import { normalizeReplyTo, withReplyQuote } from './reply-quote.ts';
 import { eventInner, eventType, isAutomationPeerEvent, isNoopToken } from './routineNoise.ts';
@@ -169,10 +170,8 @@ function waitForSteerOrTurnEnd(
   });
 }
 
-// Personas stay warm all day: measured cost is ~0.5GB per warm session
-// (claude CLI + MCP stack) on a 128GB box, so the 30-minute prune was pure
-// cold-start tax. 24h still self-heals stale processes overnight (old CLI
-// builds, dead OAuth) — and sessions with an open tab are never pruned.
+// Resource containment does not change native-session retention.
+// Session lifetime and compaction belong to the session policy.
 const IDLE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const IDLE_REAPER_INTERVAL_MS = 60 * 1000;
 const RESUME_STARTUP_WATCH_MS = 8000;
@@ -2796,7 +2795,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         }
       } catch (error) {
         busy = false;
-        if (error instanceof MemoryPressureSpawnError) {
+        if (error instanceof MemoryPressureSpawnError || error instanceof ResourceHoldError) {
           console.warn(`[chat ws#${wsId}] memory-pressure spawn refused: ${error.message}`);
           safeSend({
             type: 'error',

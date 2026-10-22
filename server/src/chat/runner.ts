@@ -1,5 +1,7 @@
 import { prepareSessionStateDelta, resetSessionStateDelta } from './sessionContext.ts';
 import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
+
+import { signalContainedWorker } from '../lib/resourceGuard.ts';
 import { assertClaudeSubscription } from './subscription-auth.ts';
 import { assertSubscriptionLane, subscriptionEnvironment } from './subscription-policy.ts';
 import { execFileSync, type ChildProcessByStdio } from 'node:child_process';
@@ -62,6 +64,7 @@ import { isPersonMessage, REPLY_NUDGE_NOTE, REPLY_NUDGE_NOTE_TOOL, replyNowText,
 export { MemoryPressureSpawnError } from './memory.ts';
 
 function terminateProcessTree(child: ChildProcessByStdio<Writable, Readable, Readable>, signal: NodeJS.Signals): void {
+  if (signalContainedWorker(child, signal)) return;
   // Never signal pid <= 1: process.kill(-1) hits every process this user owns.
   if (!child.pid || child.pid <= 1) return;
   const descendants = collectDescendantPids(child.pid);
@@ -1005,7 +1008,7 @@ class ClaudeSession {
       env: spawnEnv,
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
-    }) as ChildProcessByStdio<Writable, Readable, Readable>;
+    }, agentForChatId(chatId)?.name ?? chatId) as ChildProcessByStdio<Writable, Readable, Readable>;
 
     this.child.stdout.setEncoding('utf8');
     this.child.stdout.on('data', (chunk: string) => this.onStdout(chunk));
@@ -3982,7 +3985,8 @@ export function pruneIdleClaudeSessions(ttlMs: number, now = Date.now()): number
     if (session.listenerCount() > 0 && !isBackgroundChatId(session.chatId)) continue;
     const idleMs = now - session.lastActivityAt();
     if (idleMs < ttlMs) continue;
-    if (holdsBackgroundWork(session) && idleMs < ttlMs * BACKGROUND_IDLE_TTL_MULTIPLE) continue;
+    const backgroundTtl = ttlMs * BACKGROUND_IDLE_TTL_MULTIPLE;
+    if (holdsBackgroundWork(session) && idleMs < backgroundTtl) continue;
     if (session instanceof ClaudeSession) session.shutdown('idle-prune', 'idle');
     else session.shutdown('idle-prune');
     sessions.delete(key);
