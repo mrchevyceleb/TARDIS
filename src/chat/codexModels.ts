@@ -1,3 +1,4 @@
+import type { ChatBlock } from './data/types';
 import { useSyncExternalStore } from 'react';
 
 // Efforts come from the Codex CLI's own catalog, so a new level needs no code change.
@@ -269,4 +270,11 @@ export function readStoredCodexEffort(model = readStoredCodexModel()): CodexEffo
   const effort = normalizeCodexEffort(model, raw);
   if (raw !== effort && catalogLoaded) localStorage.setItem('rivendell:codex-effort', effort);
   return effort;
+}
+
+/** A rejection belongs to this conversation, not every account's catalog. */
+export function lastRejectedCodexModel(blocks: ChatBlock[]): string | undefined {
+  const failure = [...blocks].reverse().find(block => block.kind === 'terminal-error'
+    && block.code === 'CODEX_MODEL_UNAVAILABLE' && block.model);
+  return failure?.kind === 'terminal-error' ? failure.model : undefined;
 }

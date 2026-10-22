@@ -1,3 +1,4 @@
+import { lastRejectedCodexModel } from '../../codexModels';
 // Reimagined DESKTOP chat shell — §4. A single main column with a chronicle
 // ribbon ticker, a 760px feed, and the composer dock. (The old 296px sidebar
 // — new-errand, Chronicle pane, hubs, companion footer — was removed: the
@@ -83,7 +84,7 @@ export function Conversation({ s, picker, repo, agent }: ShellViewProps) {
 
           <div className="dock">
             <div className="dock-inner">
-              <CounselPopover picker={picker} open={counselOpen} onClose={() => setCounselOpen(false)} />
+              <CounselPopover rejectedCodexModel={lastRejectedCodexModel(s.blocks)} picker={picker} open={counselOpen} onClose={() => setCounselOpen(false)} />
               <Composer
                 chatId={s.chatId}
                 value={s.value}

@@ -224,6 +224,8 @@
   align-self: flex-start;
   gap: 8px;
   width: fit-content;
+  max-width: 100%;
+  box-sizing: border-box;
   min-height: 34px;
   padding: 7px 11px;
   overflow: hidden;
@@ -245,8 +247,8 @@
 .rc .active-turn-star { width: 14px; height: 14px; flex: none; }
 .rc .active-turn-label.active-turn-step { max-width: 42ch; }
 .bot-app .rc .active-turn-label.active-turn-step, .rc-mobile .active-turn-label.active-turn-step { max-width: 28ch; }
-.rc .active-turn-label { min-width: 15ch; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 600; }
-.bot-app .rc .active-turn-label, .rc-mobile .active-turn-label { max-width: 18ch; }
+.rc .active-turn-label { min-width: 0; max-width: 28ch; overflow-wrap: anywhere; white-space: normal; font-size: 12.5px; font-weight: 600; }
+.bot-app .rc .active-turn-label, .rc-mobile .active-turn-label { max-width: 28ch; }
 .rc .active-turn-dots { display: inline-flex; align-items: center; gap: 3px; }
 .rc .active-turn-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: rc-console-blink 1.5s ease-in-out infinite; }
 .rc .active-turn-dots i:nth-child(2) { animation-delay: .5s; }
@@ -667,3 +669,10 @@
 .turn-recovery-actions button:focus-visible { outline: 2px solid var(--r-amber, #c68b35); outline-offset: 3px; }
 .turn-recovery-actions button:disabled { opacity: .5; cursor: default; }
 @media (prefers-reduced-motion: reduce) { .turn-recovery-actions button { transition: none; } }
+
+.rc .turn-recovery-history { max-width: 560px; padding: 8px 12px; color: var(--muted); font-size: 12px; border-left: 2px solid var(--border); }
+.rc .turn-recovery-history summary { cursor: pointer; min-height: 32px; display: list-item; }
+.rc .turn-recovery-history p { margin: 6px 0; line-height: 1.5; }
+.rc .turn-recovery-title > span { animation: rc-recovery-rock 3s ease-in-out infinite; }
+@keyframes rc-recovery-rock { 0%, 100% { transform: rotate(-12deg); } 50% { transform: rotate(12deg) scale(1.08); } }
+@media (prefers-reduced-motion: reduce) { .rc .turn-recovery-title > span { animation: none; } }

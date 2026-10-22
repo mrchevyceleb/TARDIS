@@ -1163,9 +1163,7 @@ export class CodexSession {
         ? transientProjectConfigError : terminalMessage;
       this.closeDanglingToolBlocks(turnState, failedTurn ? (code || 1) : 0, failedTurn ? failureMessage : '');
       if (failedTurn) {
-        recordNativeFailure(this.chatId, 'codex', emptyTurn
-          ? 'Codex ended without an answer. Its saved thread and queued messages were retained.'
-          : 'Codex returned a failed turn. Its saved thread was retained; the turn error has the details.');
+        recordNativeFailure(this.chatId, 'codex', failureMessage);
         this.emitTurnFailure(failureMessage, failureMessage === transientProjectConfigError ? 'CODEX_PROJECT_CONFIG_LOCKED' : 'CODEX_TURN_FAILED', failureMessage === transientProjectConfigError);
       }
       this.emitClaudeEvent({
@@ -1236,7 +1234,9 @@ export class CodexSession {
   /** A failed admitted turn is part of the conversation, including on reload.
    * Transport errors are reserved for rejecting transport/control requests. */
   private emitTurnFailure(message: string, code: string, retryable = false): void {
-    this.emitClaudeEvent({ type: '_terminal_error', message, code, retryable, ts: Date.now() });
+    this.emitClaudeEvent({ type: '_terminal_error', message,
+      code: message.startsWith('This Codex model is unavailable.') ? 'CODEX_MODEL_UNAVAILABLE' : code,
+      model: this.turnModel ?? undefined, retryable, ts: Date.now() });
   }
 
   ingestExternalEvent(se: SeqEvent): void {

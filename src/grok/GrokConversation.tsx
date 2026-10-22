@@ -1,3 +1,4 @@
+import { lastRejectedCodexModel } from '../chat/codexModels';
 // Grok Bot conversation screen, anatomy from the desktop app:
 //
 //   header:  agent disc + name .............. settings gear, pane toggle >>
@@ -296,7 +297,7 @@ export function GrokConversation(props: BotConversationProps) {
       <div className="bt-dock">
         <div className="bt-dock-inner">
           {!counselOpen ? <SelectionFeedback picker={picker} /> : null}
-          <CounselPopover picker={picker} accountContext={agent ? { agentId: agent.id, chatId: s.chatId, repo: props.repo?.path } : undefined} open={counselOpen} onClose={() => setCounselOpen(false)} />
+          <CounselPopover rejectedCodexModel={lastRejectedCodexModel(s.blocks)} picker={picker} accountContext={agent ? { agentId: agent.id, chatId: s.chatId, repo: props.repo?.path } : undefined} open={counselOpen} onClose={() => setCounselOpen(false)} />
           {composer}
         </div>
       </div>

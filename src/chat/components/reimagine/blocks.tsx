@@ -9,6 +9,7 @@ import type { ChatBlock } from '../../data/types';
 import { REACTION_EMOJIS } from '../../data/reactions';
 import { groupHasLiveContent } from '../../data/liveGroup';
 import { Markdown } from '../primitives/Markdown';
+import { codexModelLabel } from '../../codexModels';
 import { CLAUDE_MODELS } from '../CodexEnginePicker';
 import { DeskRefText } from '../primitives/DeskRef';
 import { ArtifactCard } from '../blocks/ArtifactCard';
@@ -830,11 +831,13 @@ function RestartDivider({ block }: { block: Extract<ChatBlock, { kind: 'restart'
   );
 }
 
-function TerminalErrorCard({ block, onRestore, onChooseModel, busy }: { block: PeerFailure; onRestore?: () => void; onChooseModel?: () => void; busy?: boolean }) {
+function TerminalErrorCard({ block, onRestore, onChooseModel, busy, historical }: { block: PeerFailure; onRestore?: () => void; onChooseModel?: () => void; busy?: boolean; historical?: boolean }) {
   if (block.code?.startsWith('CODEX_') && !block.continuing) {
+    const message = block.model ? block.message.replace('This Codex model', codexModelLabel(block.model)) : block.message;
+    if (historical) return <details className="turn-recovery-history"><summary>Earlier turn · {block.code === 'CODEX_MODEL_UNAVAILABLE' ? `${block.model ? codexModelLabel(block.model) : 'Model'} unavailable` : 'Codex couldn’t finish'}</summary><p>{message}</p></details>;
     return <section className="turn-recovery" role="status">
       <div className="turn-recovery-title"><span aria-hidden="true">↻</span> Let’s pick up from here</div>
-      <p>{block.message}</p>
+      <p>{message}</p>
       {(onRestore || onChooseModel) && <div className="turn-recovery-actions">
         {onRestore && <button type="button" disabled={busy} onClick={onRestore}>Restore message</button>}
         {onChooseModel && <button type="button" disabled={busy} onClick={onChooseModel}>Choose model</button>}
@@ -1580,12 +1583,14 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       nodes.push(<RestartDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'terminal-error') {
       const attempts = failureAttempts.get(peerFailureKey(g.block))!;
-      const before = blocks.slice(0, blocks.indexOf(g.block));
+      const failureIndex = blocks.indexOf(g.block);
+      const before = blocks.slice(0, failureIndex);
+      const historical = blocks.slice(failureIndex + 1).some(block => block.kind === 'user' || block.kind === 'peer');
       const prompt = [...before].reverse().find((block) => block.kind === 'user' || block.kind === 'peer');
       const restorable = prompt?.kind === 'user' && !prompt.imageCount && !prompt.images?.length
         && !prompt.attachmentsLost && !g.block.background && !g.block.peerId ? prompt.text : undefined;
       if (attempts.at(-1)?.id === g.block.id) nodes.push(<TerminalErrorCard key={g.block.id} block={{ ...g.block, attempts }}
-        busy={streaming} onRestore={restorable && onRestore ? () => onRestore(restorable) : undefined}
+        busy={streaming} historical={historical} onRestore={restorable && onRestore ? () => onRestore(restorable) : undefined}
         onChooseModel={g.block.background || g.block.peerId ? undefined : onChooseModel} />);
     } else if (g.type === 'switch') {
       nodes.push(<SwitchDivider key={g.block.id} block={g.block} />);
