@@ -1,3 +1,4 @@
+import { assertSelectedEngine } from './engineHandover.ts';
 import { recordNativeSession, recordNativeCompact, recordNativeFailure, recordNativeInterruption } from './sessionMetrics.ts';
 import { codexContextProxy } from './codexContextProxy.ts';
 import { prepareSessionStateDelta, resetSessionStateDelta } from './sessionContext.ts';
@@ -262,17 +263,15 @@ export class CodexSession {
   private listeners = new Set<Listener>();
   private subscriberCount = 0;
   private threadId: string | null = null;
+  private nativeProfile?: string;
   /** Next turn seeds persona + rolling compact + last 50 on a fresh thread. */
   private seedWindowOnNextTurn = false;
   /** Thread ids explicitly cleared as unresumable: the event-log recovery
    *  must never resurrect one — shutdown passes this set. */
   private readonly invalidatedThreadIds = new Set<string>();
   private contextMaintenance: Promise<void> | null = null;
-  private heldSelection: { model?: string; effort?: string } | null = null;
   private startMemory: string | undefined;
 
-  /** A pending cross-engine choice must not apply the other engine's model. */
-  holdSelection(selection: { model?: string; effort?: string } | null): void { this.heldSelection = selection; }
 
   private consumeWindowSeed(): boolean {
     return this.seedWindowOnNextTurn;
@@ -453,7 +452,8 @@ export class CodexSession {
       // Well-form the text at the transport boundary: app-server's JSONRPC
       // deserializer rejects the whole message on a lone surrogate, which
       // would fail this steer (and every retry) instead of delivering it.
-      child.stdin!.write(`${JSON.stringify({ type: 'steer', requestId, text: wellFormedText(text) })}\n`, (error) => {
+      assertSelectedEngine(this.chatId, this.cli);
+    child.stdin!.write(`${JSON.stringify({ type: 'steer', requestId, text: wellFormedText(text) })}\n`, (error) => {
         if (error) this.settleNativeSteer(requestId, error);
       });
     });
@@ -502,8 +502,8 @@ export class CodexSession {
   private persistThreadId(threadId: string): Promise<void> {
     this.threadId = threadId;
     this.threadIdWrite = this.threadIdWrite.then(
-      () => setSessionId(this.cli, this.cwd, threadId, this.chatId),
-      () => setSessionId(this.cli, this.cwd, threadId, this.chatId),
+      () => setSessionId(this.cli, this.cwd, threadId, this.chatId, this.nativeProfile),
+      () => setSessionId(this.cli, this.cwd, threadId, this.chatId, this.nativeProfile),
     );
     return this.threadIdWrite;
   }
@@ -556,6 +556,7 @@ export class CodexSession {
   }
 
   async send(text: string, images?: ChatImage[], opts: CodexSendOptions = {}): Promise<void> {
+    assertSelectedEngine(this.chatId, this.cli);
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
     if (opts.peerDeliveryId && this.submittedPeerDeliveries.has(opts.peerDeliveryId)) {
@@ -661,8 +662,8 @@ export class CodexSession {
     const personaScope = [personaPromptFor(this.chatId, memory), CODEX_TURN_PREAMBLE].filter(Boolean).join('\n\n');
     this.startMemory = memory;
     const { model: codexModel, effort: codexEffort } = resolveCodexSelection(
-      this.heldSelection ? this.heldSelection.model : opts.model,
-      this.heldSelection ? this.heldSelection.effort : opts.effort,
+      opts.model,
+      opts.effort,
     );
     this.turnModel = codexModel;
     this.turnEffort = codexEffort;
@@ -786,6 +787,7 @@ export class CodexSession {
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
       return;
     }
+    this.nativeProfile = codexHomeFor(childEnv);
     const hasSeedOverride = typeof opts.seedOverride === 'string';
     const seedWindow = !hasSeedOverride && (this.consumeWindowSeed() || recoverContextThisTurn);
     // The primer reports whether its commitments half is CONFIRMED: an empty
@@ -1167,6 +1169,7 @@ export class CodexSession {
     });
 
     if (opts.peerDeliveryId && !this.submitPeerDelivery(opts.peerDeliveryId)) return;
+    assertSelectedEngine(this.chatId, this.cli);
     child.stdin!.write(`${JSON.stringify({
       type: 'start',
       codexBin: CODEX_BIN,

@@ -13,6 +13,7 @@ type Key = string; // `${cli}|${repoPath}` or `${cli}|${repoPath}|${chatId}`
 
 type StoredSession = {
   cli?: Cli;
+  nativeProfile?: string;
   sessionId?: string;
   generation?: number;
   updatedAt: number;
@@ -76,12 +77,12 @@ export async function getSessionId(cli: Cli, repoPath: string, chatId = 'main'):
   return record?.sessionId;
 }
 
-export async function setSessionId(cli: Cli, repoPath: string, sessionId: string, chatId = 'main'): Promise<void> {
+export async function setSessionId(cli: Cli, repoPath: string, sessionId: string, chatId = 'main', nativeProfile?: string): Promise<void> {
   const all = await load();
   const storageKey = nativeKey(cli, repoPath, chatId);
   const existing = all[storageKey];
   if (sessionId) {
-    all[storageKey] = { ...existing, cli, sessionId, generation: NATIVE_SESSION_GENERATION, updatedAt: Date.now() };
+    all[storageKey] = { ...existing, cli, sessionId, ...(nativeProfile ? { nativeProfile } : {}), generation: NATIVE_SESSION_GENERATION, updatedAt: Date.now() };
   } else if (existing?.model || existing?.effort) {
     const { sessionId: _discard, ...selection } = existing;
     all[storageKey] = { ...selection, updatedAt: Date.now() };

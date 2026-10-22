@@ -55,3 +55,19 @@ export function prepareClaudeNativeStorage(lane: string, profile: string, resume
     renameSync(tmp, file);
   } };
 }
+
+/** Claude's native compactor writes a portable user summary. Keep the full
+ * transcript and copy only its own summary into the other engine's input. */
+export function readClaudeHandover(lane: string, id: string): string {
+  const location = locations()[bareChatId(lane)];
+  if (!location || location.id !== id) throw new Error('The native handover transcript is unavailable.');
+  const lines = readFileSync(join(location.profile, 'projects', location.project, `${id}.jsonl`), 'utf8').trim().split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const event = JSON.parse(lines[i]);
+    if (event.type !== 'user' || !event.isCompactSummary) continue;
+    const content = event.message?.content;
+    const note = typeof content === 'string' ? content : Array.isArray(content) ? content.filter(item => item.type === 'text').map(item => item.text).join('\n') : '';
+    if (note) return note;
+  }
+  throw new Error('The previous engine did not save a readable handover.');
+}

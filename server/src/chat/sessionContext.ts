@@ -1,3 +1,5 @@
+import { pendingInformational } from './messagingPolicy.ts';
+import { pendingEngineHandover } from './engineHandover.ts';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -44,7 +46,11 @@ export async function prepareSessionStateDelta(chatId: string): Promise<{ text: 
     const cards = desk.cards.filter(card => card.owner.kind === 'agent' && card.owner.id === agent.id && card.column !== 'in_production');
     changed('cards', JSON.stringify(cards.map(card => [card.id, card.title, card.column])), `Owned cards changed: ${cards.length}; ${cards.filter(card => card.column === 'in_progress').length} in progress. Read the Desk for current state.`);
   } catch { /* leave the previous fingerprint intact */ }
-  return { text: lines.join('\n'), accept() {
+  const handover = await pendingEngineHandover(chatId);
+  const informational = await pendingInformational(chatId);
+  return { text: [handover.text, informational.text, ...lines].filter(Boolean).join('\n'), accept() {
+    handover.accept();
+    informational.accept();
     if (!lines.length || (generations.get(agent.id) ?? 0) !== generation) return;
     // Called only after the engine accepted the turn. A native compaction
     // invalidates preparations from before that boundary.

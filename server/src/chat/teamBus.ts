@@ -1,3 +1,4 @@
+import { claimOutbound, releaseOutbound, saveInformational, informationalPending } from './messagingPolicy.ts';
 // Team bus — agent-to-agent messaging. Any teammate can message any other
 // teammate through the `rivendell-team` MCP tool (see server/scripts/team-mcp.mjs);
 // delivery lands in the recipient's home thread as a `peer_message` event
@@ -1621,6 +1622,15 @@ function retryDelay(): Promise<void> {
 }
 
 async function drainQueuedRecipient(queueKey: string): Promise<void> {
+  const oldNudges = (await queueStoreOperation(() => queuedDeliveryStore.list()))
+    .filter(item => queueKeyOf(item) === queueKey && (item.nudgeHoldSince !== undefined || item.admissionAck === 'flag-digest'));
+  for (const item of oldNudges) {
+    const agent = findAgent(item.toId);
+    if (!agent) continue;
+    await saveInformational(agent.home || `bot-${agent.id}`, item.fromName, item.text, item.admissionAck, item.id);
+    await queueStoreOperation(() => queuedDeliveryStore.delete(item.id));
+  }
+
   // Quiet hours (Matt, Oct 15 2026): teammate chatter to a non-Max lane
   // holds through 22:00-05:00 ET. Person-sourced records (Desk answers,
   // voice continuations, human channel posts) still deliver — the boss may
@@ -1933,6 +1943,7 @@ export async function resumeQueuedTeamDeliveries(): Promise<number> {
  *  (admitted — the admission ack should have fired — or dropped), null when
  *  the queue cannot be read (the caller re-checks rather than guess). */
 export async function teamDeliveryRecordPending(deliveryId: string): Promise<boolean | null> {
+  if (await informationalPending(deliveryId)) return true;
   const id = deliveryId.trim().slice(0, 120);
   if (!id) return false;
   try {
@@ -1951,6 +1962,8 @@ export function teamMessageWaitRequested(wait: boolean | undefined): boolean {
 }
 
 export async function deliverTeamMessage(input: {
+  /** Status/FYI only: save for the next real turn, never start or steer one. */
+  informational?: boolean;
   from: string;
   to: string;
   text: string;
@@ -2054,6 +2067,15 @@ export async function deliverTeamMessage(input: {
   const rl = rateOk(replyEdge(from.id, to.id));
   if (!rl.ok) return { delivered: false, reason: rl.reason };
 
+  const claim = !input.source ? await claimOutbound(from.id, to.id, text) : undefined;
+  if (claim === null) return { delivered: false, to: to.name, reason: 'You already sent this exact message. Do not send it again; continue only when there is new information.' };
+  if ((input.informational === true || input.nudgeHoldSince !== undefined || input.admissionAck === 'flag-digest') && !input.source) {
+    let deliveryId: string;
+    try { deliveryId = await saveInformational(to.home || `bot-${to.id}`, from.name, text, input.admissionAck); }
+    catch (error) { if (claim) await releaseOutbound(claim); throw error; }
+    return { delivered: true, to: to.name, deliveryId, queued: true, reason: 'Saved for their next real turn. This update did not wake or interrupt them.' };
+  }
+
   const fifoKey = queueKeyOf({ toId: to.id });
   const queuedBehindAnotherTurn = recipientDeliveryTails.has(fifoKey);
   let record: QueuedTeamDelivery;
@@ -2079,6 +2101,7 @@ export async function deliverTeamMessage(input: {
       chainRoute: chain.route,
     }));
   } catch (error) {
+    if (claim) await releaseOutbound(claim);
     return { delivered: false, to: to.name, hop, reason: `could not persist queued delivery: ${(error as Error).message}` };
   }
 
@@ -2230,6 +2253,7 @@ export async function deliverTeamMessage(input: {
       (await queuedDeliveryStore.list()).some((item) => item.id === record.id));
     if (!result.delivered && input.signal?.aborted) {
       if (remains) await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
+      if (claim) await releaseOutbound(claim);
       return result;
     }
     if (remains) scheduleQueuedRecipient(queueKeyOf(record));
@@ -2247,10 +2271,12 @@ export async function deliverTeamMessage(input: {
           : 'reply wait ended, but the handoff remains durably queued and will deliver automatically',
       };
     }
+    if (!result.delivered && !remains && claim) await releaseOutbound(claim);
     return result;
   } catch (error) {
     if (input.signal?.aborted) {
       await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
+      if (claim) await releaseOutbound(claim);
       return { delivered: false, to: to.name, hop, reason: 'sender stopped before delivery' };
     }
     scheduleQueuedRecipient(queueKeyOf(record));
@@ -2280,12 +2306,14 @@ export async function publishOwnerReply(from: string, text: string, lane: AgentL
   const logKey = logKeyFor(cli, ELROND_WORKSPACE_PATH, chatKey);
   const { publishExternalThreadEvent } = await import('./runner.ts');
   await flushEventLog(logKey);
+  const claim = await claimOutbound(agent.id, 'owner', text);
+  if (!claim) throw new Error('You already posted this exact reply. Do not repeat it; continue only with new information.');
   // Reserve, save and broadcast in one synchronous slice after older writes
   // finish. A later native frame must not overtake this published message.
   const event = { seq: reserveEventLogSeq(logKey), at: Date.now(), ...(lane === 'bg' ? { lane: 'bg' as const } : {}),
     ev: { type: 'event' as const, event: redactEventSecrets({ type: 'assistant', _replyNow: true, _replyNowForOwner: true,
       message: { id: `reply_now_${randomUUID()}`, role: 'assistant', content: [{ type: 'text', text }], stop_reason: 'tool_use' } }) } };
-  if (!appendEventLogSync(logKey, event)) throw new Error('The owner reply could not be saved. It was not published.');
+  if (!appendEventLogSync(logKey, event)) { await releaseOutbound(claim); throw new Error('The owner reply could not be saved. It was not published.'); }
   publishExternalThreadEvent(logKey, event);
   return event.seq;
 }

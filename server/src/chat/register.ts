@@ -1648,7 +1648,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const pendingThreadOwner = pendingAdmissionForLogKey(requestedLogKey);
           const threadOwner = activeThreadOwner ?? pendingThreadOwner;
           const warm = peekThreadSession({ cli: desiredBrain.cli, repoPath: msg.repo, chatId }) ?? (threadOwner
-            ? await getOrCreateSession({
+            ? peekThreadSession({
                 cli: threadOwner.cli,
                 repoPath: 'repo' in threadOwner ? threadOwner.repo : threadOwner.cwd,
                 chatId,

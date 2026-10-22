@@ -1,3 +1,5 @@
+import { extractVisibleTurns } from './threadWindow.ts';
+import { assertSelectedEngine, exportCodexHandover, nativeEngine, saveEngineHandover } from './engineHandover.ts';
 import { prepareSessionStateDelta, resetSessionStateDelta } from './sessionContext.ts';
 import { sessionLiveActivity, type LiveActivity } from './liveActivity.ts';
 import { assertClaudeSubscription } from './subscription-auth.ts';
@@ -20,7 +22,7 @@ import { appendEventLog, appendEventLogDurable, appendEventLogSync, clearEventLo
 import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
 import { CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKEN_BUDGET, NATIVE_COMPACT_MARGIN, contextRotationDue, contextTokens, learnContextLimit, providerContextBudget, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { bareChatId } from './threadKey.ts';
-import { sessionDirectory, nativeClaudeSettings } from './sessionPolicy.ts';
+import { NATIVE_SESSION_GENERATION, sessionDirectory, nativeClaudeSettings } from './sessionPolicy.ts';
 import { prepareClaudeNativeStorage } from './nativeSessionStorage.ts';
 import { recordNativeSession, recordNativeCompact, recordNativeFailure, recordNativeNotice } from './sessionMetrics.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
@@ -30,7 +32,7 @@ import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateSettings } from './longCallGate.ts';
 import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
-import { agentForChatId, noteAgentLane } from './agents.ts';
+import { agentForChatId, brainForAgent, cliForAgentEngine, noteAgentLane } from './agents.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { crashTombstoneEvent, crashTombstoneText, restartMarkerEvent } from './crashTombstone.ts';
 import { BACKGROUND_MODEL_HOLD_MINUTES, backgroundEndedGuidance, backgroundTaskLabel, backgroundWorkEvent, type BackgroundWorkCause } from './backgroundWork.ts';
@@ -1315,6 +1317,7 @@ class ClaudeSession {
    *  peer_message instead of _user_echo and don't tick compaction. */
   async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge; compactRerun?: boolean; echoText?: string; replyTo?: { from: string; snippet: string } } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
+    assertSelectedEngine(this.chatId, this.cli);
     // A receipt timeout must not write a second copy of an input that the
     // native CLI already holds. A retry listens for that same delivery ID.
     if (opts.peerDeliveryId && this.pendingPeerAccepts.has(opts.peerDeliveryId)) return;
@@ -1694,6 +1697,7 @@ class ClaudeSession {
         if (!startsNewTurn) this.pendingPeerSteerAccepts.add(opts.peerDeliveryId);
       }
       await new Promise<void>((resolve, reject) => {
+        assertSelectedEngine(this.chatId, this.cli);
         this.child.stdin.write(payload + '\n', (error) => {
           if (error) reject(error);
           else resolve();
@@ -3223,7 +3227,6 @@ let sessionsShuttingDown = false;
 const resettingThreadLogs = new Set<string>();
 const inFlightSessionLookups = new Map<string, Set<Promise<void>>>();
 const nativeHandovers = new Map<string, Set<ClaudeSession>>();
-const heldEngineSwitches = new Map<string, string>();
 
 function cancelNativeHandover(logKey: string): void {
   for (const source of nativeHandovers.get(logKey) ?? []) void source.interrupt('interruptSession');
@@ -3336,9 +3339,14 @@ async function getOrCreateSessionUnlocked(opts: {
    *  that would SIGTERM the warm session each time. With 30-70s MCP startup the
    *  replacement never reaches init → the "asleep"/"no session" storm. */
   recycleOnMismatch?: boolean;
-  /** Internal recursion: serve the saved engine while Matt's switch is held. */
-  servingHeldSwitch?: boolean;
+  /** Internal native-compaction lookup, never a work admission. */
+  handoverSource?: boolean;
 }): Promise<AnySession> {
+  const selectedAgent = agentForChatId(opts.chatId || 'main');
+  if (selectedAgent && !opts.handoverSource) {
+    const brain = brainForAgent(selectedAgent);
+    opts = { ...opts, cli: cliForAgentEngine(brain.engine) as CliKind, model: brain.model, effort: brain.effort };
+  }
   assertSubscriptionLane(opts.cli);
   if (sessionsShuttingDown) throw new Error('TARDIS is shutting down');
   const chatId = isAgentThread(opts.chatId || '') ? bareChatId(opts.chatId!) : opts.chatId || 'main';
@@ -3364,35 +3372,66 @@ async function getOrCreateSessionUnlocked(opts: {
   };
   try {
   if (isAgentThread(chatId)) {
-    const requestedCodex = opts.cli === 'codex' || opts.cli === 'codex-personal';
-    const otherEngineId = await getSessionId(requestedCodex ? 'claude' : 'codex', opts.repoPath, chatId);
-    if (otherEngineId && !opts.servingHeldSwitch) {
-      const switchKey = `${opts.cli}|${opts.model || ''}|${otherEngineId}`;
-      if (heldEngineSwitches.get(chatId) !== switchKey) {
-        heldEngineSwitches.set(chatId, switchKey);
-        recordNativeNotice(chatId, requestedCodex ? 'codex' : 'claude-code', 'Cross-engine switch involving Codex is held for Matt’s pending handover choice. Existing sessions and queued work are retained.');
+    const busySource = peekThreadSession(opts);
+    if (!opts.handoverSource && busySource?.isBusy() && busySource.cli !== opts.cli) throw new Error('The current turn is finishing. Your next turn will use the model you selected.');
+    if (!opts.handoverSource) {
+      const records = await Promise.all((['claude', 'codex', 'agy', 'banana', 'banana-local', 'banana-fireworks'] as const)
+        .map(cli => nativeSessionProvenance(cli, opts.repoPath, chatId)));
+      const previous = records.filter(record => record?.sessionId && record.cli && record.generation === NATIVE_SESSION_GENERATION)
+        .sort((a, b) => b!.updatedAt - a!.updatedAt)[0];
+      const sourceEngine = previous?.cli && nativeEngine(previous.cli);
+      const targetEngine = nativeEngine(opts.cli);
+      if (previous?.sessionId && previous.cli && sourceEngine !== targetEngine
+          && (sourceEngine === 'codex' || targetEngine === 'codex')) {
+        const live = sourceEngine === 'codex'
+          ? peekCodexSession({ repoPath: opts.repoPath, chatId, cli: previous.cli })
+          : peekClaudeSession({ cli: previous.cli, repoPath: opts.repoPath, chatId });
+        if (live?.isBusy()) throw new Error('The current turn is finishing. Your next turn will use the model you selected.');
+        await saveEngineHandover({ chatId, sourceId: previous.sessionId, sourceRevision: previous.updatedAt, target: opts.cli }, async () => {
+          if (sourceEngine === 'codex') {
+            const { interruptCodex } = await import('./codex-runner.ts');
+            await interruptCodex({ repoPath: opts.repoPath, chatId, cli: previous.cli });
+            return exportCodexHandover({ chatId, cwd: opts.repoPath, sessionId: previous.sessionId!, model: previous.model, nativeProfile: previous.nativeProfile });
+          }
+          if (!isClaudeFamilyCli(previous.cli!)) {
+            await flushEventLog(logKeyFor(previous.cli!, opts.repoPath, chatId));
+            const turns = extractVisibleTurns(loadEventLogSync(logKeyFor(previous.cli!, opts.repoPath, chatId)).events).slice(-50);
+            const recent: string[] = [];
+            let remaining = 60_000;
+            for (const turn of turns.reverse()) {
+              const entry = `${turn.role}: ${turn.text}`;
+              if (entry.length > remaining) { if (!recent.length) recent.unshift(entry.slice(-remaining)); break; }
+              recent.unshift(entry); remaining -= entry.length + 2;
+            }
+            return `Continue from the previous engine's recent conversation below. Older messages and the full native history remain available; consult them when needed.\n${recent.join('\n\n') || 'No visible messages were recorded. Check current commitments and owned cards before starting work.'}`;
+          }
+          const source = await getOrCreateSessionUnlocked({ ...opts, cli: previous.cli!, model: previous.model, effort: previous.effort, recycleOnMismatch: false, handoverSource: true });
+          if (!(source instanceof ClaudeSession) || source.isBusy()) throw new Error('The previous engine is still answering.');
+          await compactForHandover(source);
+          const { readClaudeHandover } = await import('./nativeSessionStorage.ts');
+          return readClaudeHandover(chatId, previous.sessionId!);
+        });
+        // The note is durable before worker teardown, so a slow exit cannot
+        // discard an already-paid handover or force another export.
+        if (live && live.cli !== opts.cli) {
+          await live.shutdown('native engine handover');
+          if (!(live instanceof CodexSession) && !(live instanceof BananaSession)) {
+            await waitForChildExit(live, 5_000);
+            if (!live.processExited()) throw new Error('The previous engine is still stopping. Your handover note is saved.');
+          }
+        }
+        if (isThreadResetting(opts)) throw new Error('The handover was canceled; the saved history is retained.');
       }
-      const previous = await nativeSessionProvenance(requestedCodex ? 'claude' : 'codex', opts.repoPath, chatId);
-      const live = peekThreadSession(opts);
-      const savedCli = previous?.cli ?? live?.cli;
-      if (!savedCli) {
-        throw new Error('The engine switch is held because the saved session has no proven account selection. Its ID and queued messages are retained; Max can repair the saved CLI without clearing the chat.');
-      }
-      const source = live?.cli === savedCli ? live : await getOrCreateSessionUnlocked({ ...opts, cli: savedCli,
-        model: previous?.model, effort: previous?.effort, recycleOnMismatch: false, servingHeldSwitch: true });
-      if (source instanceof CodexSession) source.holdSelection(previous ?? {});
-      return source;
     }
-    if (!opts.servingHeldSwitch) heldEngineSwitches.delete(chatId);
     if (isClaudeFamilyCli(opts.cli)) {
       const logKey = logKeyFor(opts.cli, opts.repoPath, chatId);
       let handedOver = false;
       for (const [sourceKey, source] of [...sessions]) {
         if (source.cli === opts.cli || source.logKey !== logKey || !source.isAlive()) continue;
-        if (!(source instanceof ClaudeSession)) return source;
+        if (!(source instanceof ClaudeSession)) throw new Error('The selected model is waiting for the previous engine to stop.');
         // The running turn remains the one place Matt can steer. A changed
         // provider applies at its boundary, never as a second process.
-        if (source.isBusy()) return source;
+        if (source.isBusy()) throw new Error('The current turn is finishing. Your next turn will use the model you selected.');
         await compactForHandover(source);
         source.shutdown('native provider switch', 'model');
         await waitForChildExit(source, 5_000);
@@ -3408,8 +3447,8 @@ async function getOrCreateSessionUnlocked(opts: {
             && (opts.recycleOnMismatch === true || !sessions.has(keyOf(opts.cli, opts.repoPath, chatId)))))) {
         const sourceKey = keyOf(previous.cli, opts.repoPath, chatId);
         // This also covers a model switch immediately after a service restart.
-        const source = await getOrCreateSessionUnlocked({ ...opts, cli: previous.cli, model: previous.model, effort: previous.effort, recycleOnMismatch: false });
-        if (!(source instanceof ClaudeSession) || source.isBusy()) return source;
+        const source = await getOrCreateSessionUnlocked({ ...opts, cli: previous.cli, model: previous.model, effort: previous.effort, recycleOnMismatch: false, handoverSource: true });
+        if (!(source instanceof ClaudeSession) || source.isBusy()) throw new Error('The previous model is still answering; your next turn will use the selected model.');
         await compactForHandover(source);
         source.shutdown('native model handover', 'model');
         await waitForChildExit(source, 5_000);
@@ -3427,7 +3466,6 @@ async function getOrCreateSessionUnlocked(opts: {
       chatId,
       cli: opts.cli,
     });
-    if (!opts.servingHeldSwitch) session.holdSelection(null);
     return session;
   }
   if (opts.cli === 'banana' || opts.cli === 'banana-local' || opts.cli === 'banana-fireworks') {

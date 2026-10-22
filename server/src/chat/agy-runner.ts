@@ -1,3 +1,4 @@
+import { assertSelectedEngine } from './engineHandover.ts';
 import { prepareSessionStateDelta } from './sessionContext.ts';
 /** Agy engine lane — Google's Antigravity CLI (`agy`) on Matt's subscription.
  *
@@ -937,6 +938,7 @@ export class AgySession {
   }
 
   async send(text: string, images?: ChatImage[], opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; providerContinue?: unknown; echoText?: string; replyTo?: { from: string; snippet: string } } = {}): Promise<void> {
+    assertSelectedEngine(this.chatId, this.cli);
     assertSubscriptionLane(this.cli);
     if (opts.signal?.aborted) return;
     if (!this.isAlive()) throw new Error('session has exited');

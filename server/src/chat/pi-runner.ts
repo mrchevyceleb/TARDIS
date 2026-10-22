@@ -1,3 +1,5 @@
+import { prepareSessionStateDelta } from './sessionContext.ts';
+import { assertSelectedEngine } from './engineHandover.ts';
 /** Pi harness for the GLM and Grok lanes.
  *
  *  Why not the claude binary: Claude Code puts thousands of tokens of its own
@@ -683,6 +685,7 @@ export class PiSession {
   }
 
   async send(text: string, images?: ChatImage[], opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; providerContinue?: ProviderContinueOpts; echoText?: string; replyTo?: { from: string; snippet: string } } = {}): Promise<void> {
+    assertSelectedEngine(this.chatId, this.cli);
     assertSubscriptionLane(this.cli);
     if (opts.signal?.aborted) return;
     if (!this.isAlive()) throw new Error('session has exited');
@@ -792,11 +795,12 @@ export class PiSession {
     // Full computer rules ride the seed message that starts a fresh pi window; later
     // messages of the same warm process get the brief form (fresh token + device + policy).
     const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
+    const handover = await prepareSessionStateDelta(this.chatId);
     const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
     // Well-formed at the transport boundary: pi's JSONRPC parser (like
     // codex's) rejects a lone surrogate, which would fail this prompt and
     // every retry of it.
-    const message = wellFormedText(`${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuation}`);
+    const message = wellFormedText(`${handover.text ? `${handover.text}\n\n` : ''}${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${providerCut ? `${providerCut}\n\n` : ''}${continuation}`);
     const piImages = outImages?.map((img) => ({ type: 'image', data: img.base64, mimeType: img.mediaType }));
 
     const command = startsNewTurn
@@ -825,6 +829,12 @@ export class PiSession {
     }
     // The recap reached the model; the next turn recaps only what came after.
     if (startsNewTurn) this.laneSyncSeq = historyThroughSeq;
+    if (handover.text) {
+      const off = this.subscribe(({ ev }) => {
+        if (ev.type === 'event' && ev.event?.type === 'result') { if (!ev.event.is_error) handover.accept(); off(); }
+        if (ev.type === 'turnEnd' || ev.type === 'closed') off();
+      }, this.latestSeq(), false);
+    }
     if (wantSeed) {
       this.seedWindowOnNextTurn = false;
       // The seed was delivered, so the rotation debt that asked for it is paid.

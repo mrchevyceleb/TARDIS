@@ -22,7 +22,7 @@ teamRouter.get('/', asyncHandler(async (_req, res) => {
 }));
 
 teamRouter.post('/message', asyncHandler(async (req, res) => {
-  const { from, to, text, hop, wait, source, lane, priority } = req.body ?? {};
+  const { from, to, text, hop, wait, source, lane, priority, informational } = req.body ?? {};
   if (typeof to !== 'string' || typeof text !== 'string' || typeof from !== 'string') {
     res.status(400).json({ error: 'from, to and text are required' });
     return;
@@ -35,13 +35,14 @@ teamRouter.post('/message', asyncHandler(async (req, res) => {
     res.status(400).json({ error: 'priority must be a boolean' });
     return;
   }
+  if (informational !== undefined && typeof informational !== 'boolean') { res.status(400).json({ error: 'informational must be a boolean' }); return; }
   const aborter = new AbortController();
   const abortWait = () => aborter.abort();
   req.once('aborted', abortWait);
   res.once('close', abortWait);
   let result;
   try {
-    result = await deliverTeamMessage({ from, to, text, hop, wait, source, priority,
+    result = await deliverTeamMessage({ from, to, text, hop, wait, source, priority, informational,
       fromLane: lane === 'bg' ? 'bg' : 'main',
       // A voice recovery outbox item and a Slack bridge post must both survive
       // the HTTP caller leaving: the durable record is the delivery, and the
