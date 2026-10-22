@@ -98,6 +98,38 @@ let catalogLoaded = false;
 let cliStatus: CodexCliStatus = { version: null, latest: null, outdated: false };
 let storeVersion = 0;
 const listeners = new Set<() => void>();
+const SAVED_MODELS_KEY = 'rivendell:codex-saved-models';
+const savedModels = new Set<string>();
+try {
+  const stored: unknown = JSON.parse(localStorage.getItem(SAVED_MODELS_KEY) ?? '[]');
+  if (Array.isArray(stored)) for (const id of stored.slice(-40)) {
+    if (typeof id === 'string' && MODEL_ID.test(id)) savedModels.add(id);
+  }
+} catch { /* browser storage can be unavailable */ }
+
+/** Keep actual saved choices reachable, separately from catalog availability. */
+export function rememberCodexModel(model: string): void {
+  if (!MODEL_ID.test(model) || savedModels.has(model)) return;
+  savedModels.add(model);
+  if (savedModels.size > 40) savedModels.delete(savedModels.values().next().value!);
+  try { localStorage.setItem(SAVED_MODELS_KEY, JSON.stringify([...savedModels])); } catch { /* memory still works */ }
+  storeVersion++;
+  for (const listener of listeners) listener();
+}
+
+export function codexModelLabel(model: string): string {
+  return CODEX_MODELS.find((entry) => entry.id === model)?.label
+    ?? FALLBACK_CODEX_MODELS.find((entry) => entry.id === model)?.label ?? model;
+}
+
+export function isCodexModelUnlisted(model: string): boolean {
+  return !CODEX_MODELS.some((entry) => entry.id === model);
+}
+
+export function codexPickerModels(): Array<{ id: string; label: string }> {
+  return [...CODEX_MODELS, ...[...savedModels].filter(isCodexModelUnlisted)
+    .map((id) => ({ id, label: `${codexModelLabel(id)} · saved choice` }))];
+}
 
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
@@ -109,9 +141,9 @@ export function isCodexCatalogLoaded(): boolean {
 }
 
 /** Subscribe a component to catalog updates; returns the live list. */
-export function useCodexModels(): CodexModelSpec[] {
+export function useCodexModels(): Array<{ id: string; label: string }> {
   useSyncExternalStore(subscribe, () => storeVersion);
-  return CODEX_MODELS;
+  return codexPickerModels();
 }
 
 /** Bumps whenever the live list changes, for effects that must re-normalize. */
@@ -174,16 +206,15 @@ if (typeof window !== 'undefined') {
 
 export function codexModelSpec(model: string): CodexModelSpec {
   return CODEX_MODELS.find((entry) => entry.id === model)
+    ?? FALLBACK_CODEX_MODELS.find((entry) => entry.id === model)
     ?? CODEX_MODELS.find((entry) => entry.id === DEFAULT_CODEX_MODEL)
     ?? CODEX_MODELS[0]!;
 }
 
-/** Before the catalog arrives any well-formed id is kept, so a model picked
- *  after it was added (GPT-6.1 Sol, say) survives a reload instead of being
- *  reset to the default by a stale fallback list. */
+/** A catalog is discovery, never permission to replace a saved selection. */
 export function normalizeCodexModel(model: string | null | undefined): string {
   if (model && CODEX_MODELS.some((entry) => entry.id === model)) return model;
-  if (model && !catalogLoaded && MODEL_ID.test(model)) return model;
+  if (model && MODEL_ID.test(model)) return model;
   return CODEX_MODELS.some((entry) => entry.id === DEFAULT_CODEX_MODEL) ? DEFAULT_CODEX_MODEL : CODEX_MODELS[0]!.id;
 }
 
@@ -191,14 +222,25 @@ export function codexEffortsForModel(model: string): CodexEffort[] {
   return codexModelSpec(model).efforts;
 }
 
+/** An explicit model switch uses the nearest supported effort, with a notice. */
+export function codexModelChange(model: string, current: string): { effort: string; notice: string | null } {
+  const spec = codexModelSpec(model);
+  if (spec.efforts.includes(current)) return { effort: current, notice: null };
+  const order = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+  const index = order.indexOf(current);
+  const lower = order.slice(0, index).reverse().find((tier) => spec.efforts.includes(tier));
+  const effort = index < 0 ? spec.defaultEffort : lower ?? spec.efforts[0]!;
+  return { effort, notice: `${codexModelLabel(model)} doesn’t offer ${current}. Effort changed to ${effort}, the closest supported level.` };
+}
+
 export function contextWindowForCodexModel(model: string | undefined): number {
   return codexModelSpec(normalizeCodexModel(model)).contextWindow;
 }
 
 export function normalizeCodexEffort(model: string, effort: string | null | undefined): CodexEffort {
-  // A model the fallback list has never heard of may take an effort it has not
-  // either; keep a well-formed one until the catalog can say.
-  if (!catalogLoaded && effort && /^[a-z]{2,12}$/.test(effort) && !CODEX_MODELS.some((entry) => entry.id === model)) return effort;
+  // Saved effort survives refreshes too. Explicit updates are checked by the
+  // server; the CLI reports availability without substituting another tier.
+  if (effort && /^[a-z]{2,12}$/.test(effort)) return effort;
   const spec = codexModelSpec(normalizeCodexModel(model));
   return spec.efforts.includes(effort as CodexEffort)
     ? effort as CodexEffort

@@ -17,7 +17,7 @@ import {
   companionAuthBlurb,
 } from '../../hooks/useCompanionPicker';
 import { CLAUDE_MODELS, CLAUDE_EFFORTS } from '../CodexEnginePicker';
-import { CODEX_MODELS, codexEffortsForModel, useCodexModels } from '../../codexModels';
+import { codexModelLabel, isCodexModelUnlisted, codexEffortsForModel, useCodexModels } from '../../codexModels';
 import { FIREWORKS_MODELS, fireworksEffortsForModel, useFireworksModels } from '../../fireworksModels';
 import { OPENROUTER_MODELS, openRouterEffortsForModel, useOpenRouterModels, type OpenRouterModelSpec } from '../../openrouterModels';
 import { StarSigil } from './icons';
@@ -47,7 +47,7 @@ export function counselChipInfo(picker: CompanionPicker) {
   let name = picker.companion;
   const effort = picker.effort ?? '';
   if (picker.isClaude) name = labelFor(picker.claudeModel, CLAUDE_MODELS);
-  else if (picker.isCodex) name = labelFor(picker.codexModel, CODEX_MODELS);
+  else if (picker.isCodex) name = codexModelLabel(picker.codexModel);
   else if (picker.isXai) name = labelFor(picker.xaiModel, XAI_MODELS);
   else if (picker.isZai) name = labelFor(picker.zaiModel, ZAI_MODELS);
   else if (picker.isFireworks) name = labelFor(picker.fireworksModel, FIREWORKS_MODELS);
@@ -97,7 +97,7 @@ function EffortPills({
 }) {
   return (
     <>
-      {options.map((v) => (
+      {(options.includes(current) ? options : [...options, current]).map((v) => (
         <button
           key={v}
           type="button"
@@ -263,7 +263,7 @@ function ModelList({
 
 // The active lane's model + effort controls, expanded in place.
 function LaneControls({ picker }: { picker: CompanionPicker }) {
-  useCodexModels();
+  const codexModels = useCodexModels();
   useFireworksModels();
   useOpenRouterModels();
   return (
@@ -288,7 +288,8 @@ function LaneControls({ picker }: { picker: CompanionPicker }) {
       {picker.isCodex && (
         <>
           <span className="ctl-lab">model</span>
-          {CODEX_MODELS.map((m) => (
+          {(codexModels.some((model) => model.id === picker.codexModel) ? codexModels
+            : [...codexModels, { id: picker.codexModel, label: `${codexModelLabel(picker.codexModel)} · saved choice` }]).map((m) => (
             <button
               key={m.id}
               type="button"
@@ -304,6 +305,7 @@ function LaneControls({ picker }: { picker: CompanionPicker }) {
             current={picker.codexEffort}
             onPick={picker.setCodexEffort}
           />
+          {isCodexModelUnlisted(picker.codexModel) ? <p className="model-choice-hint">Your saved model is missing from the current list. You can still select it.</p> : null}
         </>
       )}
       {picker.isXai && (
@@ -394,9 +396,18 @@ function LaneControls({ picker }: { picker: CompanionPicker }) {
           />
         </>
       )}
+      <SelectionFeedback picker={picker} />
       <span className="lane-note">{counselChipInfo(picker).blurb}</span>
     </div>
   );
+}
+
+export function SelectionFeedback({ picker }: { picker: CompanionPicker }) {
+  const text = picker.selectionError ?? picker.selectionNotice;
+  return text ? <div className={`model-choice-feedback${picker.selectionError ? ' is-error' : ''}`} role={picker.selectionError ? 'alert' : 'status'}>
+    <span>{text}</span>
+    <button type="button" aria-label="Dismiss settings message" onClick={picker.dismissSelectionFeedback}>Dismiss</button>
+  </div> : null;
 }
 
 // ── desktop popover ─────────────────────────────────────────────────────────

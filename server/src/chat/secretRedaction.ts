@@ -8,17 +8,91 @@ const REDACTED = '[redacted secret]';
  *  Matched against the prefix tail so these lines are never masked (the
  *  unquoted rule would otherwise erase the whole remainder of the line). */
 const DIMENSION_WORD = /COUNT|LIMIT|SIZE|WIDTH|HEIGHT|LENGTH|URL|URI|ORIGIN|HOST|PORT|NAME|TITLE|PATH|DIR|PREFIX|SUFFIX|TTL|TIMEOUT|ID|IDS|VERSION|TYPE|MODE|FORMAT|LABEL|TAG|FLAG|DEBUG|RETRIES?|NUM|CAP|BUDGET|WINDOW|EXPIRY|EXPIRES|AT|ON|IN|OF/;
+/** Segments that make a secret-word segment read as a config field rather
+ *  than a credential: INPUT_TOKEN_COUNT, MAX_TOKEN_LIMIT,
+ *  RATE_LIMIT_SECRET_PATH, PASSWORD_EXPIRY_DAYS. Compared as whole segments
+ *  only: a substring test let ON inside SESSION, AT inside DATABASE/ADMIN
+ *  and EXPIRY inside PASSWORD_EXPIRY exempt real credentials such as
+ *  DATABASE_PASSWORD and SESSION_SECRET (Oct 22). Generic connectors
+ *  (AT, ON, IN, OF) never count: SIGN_IN_PASSWORD and ON_CALL_SECRET are
+ *  credentials, not config fields. */
+const DIMENSION_SEGMENTS = new Set(['COUNT', 'TOTAL', 'LIMIT', 'SIZE', 'WIDTH', 'HEIGHT', 'LENGTH', 'NAME', 'TITLE', 'PATH', 'DIR', 'PREFIX', 'SUFFIX', 'TTL', 'TIMEOUT', 'ID', 'IDS', 'VERSION', 'TYPE', 'MODE', 'FORMAT', 'LABEL', 'TAG', 'FLAG', 'DEBUG', 'RETRY', 'RETRIES', 'NUM', 'CAP', 'BUDGET', 'WINDOW', 'EXPIRY', 'EXPIRES', 'EXPIRE', 'DAYS', 'MIN', 'MAX', 'POLICY', 'ENABLED', 'DISABLED', 'ROTATION_DAYS', 'REQUIRE', 'REQUIRED', 'SPECIAL', 'CHAR', 'CHARS', 'POLICY_ROTATION_DAYS', 'HISTORY', 'DEPTH', 'HASH_ALGORITHM']);
+/** Every single segment the env/JSON name rules can match as the secret
+ *  word, API + KEY(S) being the compound form glued from two segments. */
+const SECRET_SEGMENTS = new Set(['KEY', 'KEYS', 'TOKEN', 'TOKENS', 'SECRET', 'SECRETS', 'PASSWORD', 'PASSWORDS', 'PASSWD', 'PASSCODE', 'PASS', 'PWD', 'COOKIE', 'COOKIES', 'CREDENTIAL', 'CREDENTIALS']);
 
-/** The dimension word must sit in the name's trailing all-caps run, which is
- *  what the old end-anchored `DIMENSION[A-Z0-9_]*["']?\s*[:=]\s*$` test
- *  meant. Scanned from the end: that regex retried every start position,
- *  quadratic on a long hostile name. */
+/** camelCase guard for the JSON-name rule ("databasePassword", "apiKey",
+ *  "clientSecret"): split into snake segments and mask only when the last
+ *  segment is a secret word. Bare "tokenCount"/"passwordExpiryDays" end in
+ *  dimension segments, so they never match. */
+const CAMEL_SECRET_RE = /(?:^|_)(?:api_key|key|keys|token|tokens|secret|secrets|password|passwords|passwd|passcode|pass|pwd|cookie|cookies|credential|credentials)$/;
+function camelSecretName(name: string): boolean {
+  const normalized = name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2');
+  return CAMEL_SECRET_RE.test(normalized.toLowerCase());
+}
+
+/** A name only counts as a config field when EVERY secret segment of the
+ *  name sits next to a whole dimension segment, on either side
+ *  (TOKEN_COUNT/COUNT_TOKEN, SECRET_PATH, URL_SECRET, PASSWORD_EXPIRY_DAYS
+ *  and INPUT_TOKEN_COUNT all stay readable), while DATABASE_PASSWORD and
+ *  SESSION_SECRET have no dimension neighbour anywhere and mask.
+ *  Credential-carrying shape segments (URL, URI, ORIGIN, HOST, PORT) are
+ *  deliberately NOT dimensions: HOST_PASSWORD is a credential, not a
+ *  config field (Oct 22). The name regex can select any secret span of
+ *  the name (its `[head_]` group is greedy but only ever consumes one
+ *  segment, so the selected span is a secret segment with a head segment
+ *  before it or nothing before it and a tail after it), and a value must
+ *  never survive by riding one count-shaped span:
+ *  TOKEN_COUNT_DATABASE_PASSWORD and DATABASE_PASSWORD_TOKEN_COUNT both
+ *  stay unmasked credentials. Lowercase JSON names ("database_password")
+ *  and camelCase ("databasePassword") reach this judge too, so segments
+ *  are case-folded. The check is a bounded segment walk: no regex retries,
+ *  linear on a long hostile name (the Oct 21 liveness fix stays). The
+ *  trailing run is the name's own [A-Za-z0-9_]+ tail: the run the old
+ *  end-anchored test measured after stripping quotes and separators, so
+ *  TOKEN_COUNT_DATABASE_PASSWORD's run INCLUDES its PASSWORD and the
+ *  segment judge decides the whole name rather than a truncated
+ *  suffix. An empty prefix has no name to judge: never exempt. */
 function isNonSecretName(prefix: string): boolean {
   let end = prefix.length;
-  while (end > 0 && /\W/.test(prefix[end - 1])) end--;
+  if (end === 0) return false;
+  // Trailing quotes/brackets ARE the name boundary: not stripping the
+  // closing quote leaves zero segments to judge and masks quoted config
+  // names that their env equivalents keep readable.
+  while (end > 0 && /[^A-Za-z0-9_]/.test(prefix[end - 1])) end--;
   let start = end;
-  while (start > 0 && /[A-Z0-9_]/.test(prefix[start - 1])) start--;
-  return DIMENSION_WORD.test(prefix.slice(start, end));
+  while (start > 0 && /[A-Za-z0-9_]/.test(prefix[start - 1])) start--;
+  // Split the run into segments once (API + KEY(S) counts as one compound
+  // segment; segments are uppercase-folded because lowercase JSON names go
+  // through this judge too), then every secret segment must be glued to a
+  // dimension segment on some side. A secret segment with no dimension
+  // neighbour anywhere condemns the name: it masks. A bare ROTATION is
+  // never a dimension (DATABASE_PASSWORD_ROTATION is a credential): only
+  // the pair ROTATION_DAYS reads as a policy period, so the pair merges
+  // into one virtual dimension segment before judging.
+  const rawSegments = prefix.slice(start, end).toUpperCase().split('_');
+  const segments: string[] = [];
+  for (let i = 0; i < rawSegments.length; i++) {
+    if (rawSegments[i] === 'ROTATION' && rawSegments[i + 1] === 'DAYS') {
+      segments.push('ROTATION_DAYS');
+      i++;
+    } else if (rawSegments[i] === 'HASH' && rawSegments[i + 1] === 'ALGORITHM') {
+      segments.push('HASH_ALGORITHM');
+      i++;
+    } else segments.push(rawSegments[i]);
+  }
+  let hasSecret = false;
+  for (let i = 0; i < segments.length; i++) {
+    const compound = segments[i] === 'API' && i + 1 < segments.length && (segments[i + 1] === 'KEY' || segments[i + 1] === 'KEYS');
+    const len = compound ? 2 : SECRET_SEGMENTS.has(segments[i]) ? 1 : 0;
+    if (!len) continue;
+    hasSecret = true;
+    const before = i > 0 ? segments[i - 1] : '';
+    const after = i + len < segments.length ? segments[i + len] : '';
+    if (!DIMENSION_SEGMENTS.has(before) && !DIMENSION_SEGMENTS.has(after)) return false;
+    if (len === 2) i++;
+  }
+  return hasSecret;
 }
 const REDACTED_SENTINEL = 'RIVENDELL_REDACTED_SECRET_VALUE';
 
@@ -159,23 +233,49 @@ export function redactSecrets(text: string): string {
     // the old repeated `(?:_[A-Z0-9_]+)*` could split an underscore run 2^n
     // ways. Same matches as before.
     .replace(
-      /(\b(?=[A-Z0-9_]+\s*=\s*[^\r\n])(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)?\s*=\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/gi,
+      /(\b(?=[A-Z0-9_]+\s*=\s*[^\r\n])(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|API_KEYS|KEY|KEYS|TOKEN|TOKENS|SECRET|SECRETS|PASSWORD|PASSWORDS|PASSWD|PASSCODE|PASS|PWD|COOKIE|COOKIES|CREDENTIAL|CREDENTIALS)(?:_[A-Z0-9_]+)?\s*=\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/gi,
       (_all, prefix: string, value: string) => (isNonSecretName(prefix) ? _all : `${prefix}${preserveFence(value)}`),
     )
     // A value under a secret-shaped UPPERCASE name in JSON/YAML/JS object
     // form: quotes and a colon instead of "=". The env rule above needs "=",
     // so `"VERCEL_API_KEY": "abc"` slipped, and the value is masked by its
     // NAME here regardless of shape, so short shapeless tokens cannot slip
-    // either. Bare lowercase "key"/"token" names stay readable on purpose
-    // (keyboard events, token counters).
+    // either. Bare single-word lowercase "key"/"token" names stay readable
+    // on purpose (keyboard events, token counters); the compound lowercase
+    // rule below still masks forms such as database_password, because a
+    // lowercase JSON password field is a credential, not a keyboard event
+    // (Oct 22 verifier finding).
     // The unquoted form masks the whole remainder of the line, like the
     // header rule: a secret-named YAML scalar can be a multi-word passphrase
     // ("PASSWORD: correct horse battery staple") and token-shape matching
     // would leak most of it. Same lookahead and one-run suffix as the rule
     // above.
     .replace(
-      /(\b(?=[A-Z0-9_]+["']?\s*:\s*[^\r\n])(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSCODE|PASS|PWD|COOKIE|CREDENTIAL)(?:_[A-Z0-9_]+)?["']?\s*:\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/g,
+      /(\b(?=[A-Z0-9_]+["']?\s*:\s*[^\r\n])(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|API_KEYS|KEY|KEYS|TOKEN|TOKENS|SECRET|SECRETS|PASSWORD|PASSWORDS|PASSWD|PASSCODE|PASS|PWD|COOKIE|COOKIES|CREDENTIAL|CREDENTIALS)(?:_[A-Z0-9_]+)?["']?\s*:\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)/g,
       (_all, prefix: string, value: string) => (isNonSecretName(prefix) ? _all : `${prefix}${preserveFence(value)}`),
+    )
+    // Compound lowercase names in JSON/colon form (database_password,
+    // db_password, api_key_v2, access_token, auth_cookie) are credentials,
+    // so their values mask by name (Oct 22 findings). Bare single-word
+    // lowercase key/token names stay readable on purpose (keyboard events,
+    // token counters); single-word password/secret/pwd names mask through
+    // the prose rules below. The name has 2+ segments with the secret word
+    // as the final segment (a trailing segment after it, API_KEY_V2
+    // included, is part of the credential name; isNonSecretName judges
+    // it). Quoted and bare names both reach the colon: the name pattern
+    // closes on the quote when one is present.
+    .replace(
+      /((?:^|[{,\["'])\s*"?[a-z][a-z0-9]*(?:_[a-z0-9]+)*?_(?:api_key|key|keys|token|tokens|secret|secrets|password|passwords|passwd|passcode|pass|pwd|cookie|cookies|credential|credentials)(?:_[a-z0-9]+)?"?\s*:\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n,\\]+)/g,
+      (_all, prefix: string, value: string) => (isNonSecretName(prefix) ? _all : `${prefix}${preserveFence(value)}`),
+    )
+    // camelCase JSON names ("databasePassword", "apiKey", "clientSecret"):
+    // the value masks by name, gated by isNonSecretName's credential tests.
+    .replace(
+      /(("[a-z][A-Za-z0-9]*?[A-Z][A-Za-z0-9]*?)"\s*:\s*)(`[^`\r\n]+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\r\n,\\]+)/g,
+      (_all, prefix: string, name: string, value: string) => {
+        if (isNonSecretName(prefix)) return _all;
+        return camelSecretName(name) ? `${prefix}${preserveFence(value)}` : _all;
+      },
     )
     .replace(
       /(\b(?:password|passcode|passwd|pwd|api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|bearer token|client[_ -]?secret|refresh[_ -]?token|private[_ -]?key|credential|cookie|session token|otp|one[- ]time (?:password|code)|verification code|recovery code)\b[^:\r\n=]{0,80}(?::|=)\s*)(`(?:\\.|[^`\\\r\n])+`|"(?:\\.|[^"\\\r\n])+"|'(?:\\.|[^'\\\r\n])+'|[^\s,;]+)/gi,
@@ -321,8 +421,11 @@ export function redactSerializedSecrets(line: string): string {
  *  JSON.stringify re-escapes whatever the mask leaves, so the result is
  *  always a valid JSON string token — the escaped-content pass could split
  *  an escape sequence or match across escape boundaries. A token that fails
- *  to decode falls back to the escaped pass: this runs on the sync append
- *  path and must never throw. */
+ *  to decode falls back to the escaped pass, which still redacts whole
+ *  tokens: the mask must never split a credential at an escape boundary
+ *  (Oct 22 review: "DATABASE_PASSWORD=\x…" split into two fragments, each
+ *  non-matching, so the secret survived). This runs on the sync append path
+ *  and must never throw. */
 function maskStringToken(token: string): string {
   try {
     return JSON.stringify(redactSecrets(JSON.parse(token)));

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import type { CompanionId } from '../data/types';
 import {
   codexModelSpec,
+  codexModelChange,
+  rememberCodexModel,
   normalizeCodexEffort,
   normalizeCodexModel,
   readStoredCodexEffort,
@@ -254,8 +256,9 @@ export function useCompanionPicker(storageKey: string) {
   const [claudeEffort, setClaudeEffortState] = useState(() => normalizeClaudeEffort(readLS('rivendell:claude-effort', 'xhigh')));
   const [codexModel, setCodexModelState] = useState(readStoredCodexModel);
   const [codexEffort, setCodexEffortState] = useState(() => readStoredCodexEffort(codexModel));
-  // When the CLI's catalog lands, a stored model it does not offer gives way to
-  // one it does (and an effort the model lacks to its default).
+  const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
+  useEffect(() => { rememberCodexModel(codexModel); }, [codexModel]);
+  // Catalog updates can refresh labels, never replace a stored selection.
   const codexCatalogVersion = useCodexCatalogVersion();
   useEffect(() => {
     if (!isCodexCatalogLoaded()) return;
@@ -279,10 +282,8 @@ export function useCompanionPicker(storageKey: string) {
   const [agyEffort, setAgyEffortState] = useState(readStoredAgyEffort);
   const [fireworksModel, setFireworksModelState] = useState(readStoredFireworksModel);
   const [fireworksEffort, setFireworksEffortState] = useState(readStoredFireworksEffort);
-  // Mirror the Codex reconciliation: when the live catalog lands, a stored
-  // model it no longer offers gives way to one it does, and a stale effort
-  // falls to the replacement's tiers. Without this, a removed pin renders a
-  // blank selector and keeps being sent to the server.
+  // Catalog refreshes can repair malformed local values, but never replace a
+  // well-formed saved model or effort just because discovery omitted it.
   const fireworksCatalogVersion = useFireworksCatalogVersion();
   useEffect(() => {
     if (!isFireworksCatalogLoaded()) return;
@@ -304,7 +305,7 @@ export function useCompanionPicker(storageKey: string) {
   const [openRouterEffort, setOpenRouterEffortState] = useState(readStoredOpenRouterEffort);
   const [openRouter2Model, setOpenRouter2ModelState] = useState(readStoredOpenRouter2Model);
   const [openRouter2Effort, setOpenRouter2EffortState] = useState(readStoredOpenRouter2Effort);
-  // Same reconciliation as Fireworks when OpenRouter's live catalog lands.
+  // Preserve saved selections when OpenRouter's discovery changes too.
   const openRouterCatalogVersion = useOpenRouterCatalogVersion();
   useEffect(() => {
     if (!isOpenRouterCatalogLoaded()) return;
@@ -359,7 +360,8 @@ export function useCompanionPicker(storageKey: string) {
   const setClaudeEffort = (value: string) => persist('rivendell:claude-effort', setClaudeEffortState, 'claude')(normalizeClaudeEffort(value));
   const setCodexModel = (value: string) => {
     const model = normalizeCodexModel(value);
-    const effort = normalizeCodexEffort(model, codexEffort);
+    const { effort, notice } = codexModelChange(model, codexEffort);
+    setSelectionNotice(notice);
     setCodexModelState(model);
     setCodexEffortState(effort);
     if (typeof window !== 'undefined') {
@@ -368,6 +370,7 @@ export function useCompanionPicker(storageKey: string) {
     }
   };
   const setCodexEffort = (value: string) => {
+    setSelectionNotice(null);
     const effort = normalizeCodexEffort(codexModel, value);
     setCodexEffortState(effort);
     if (typeof window !== 'undefined') {
@@ -563,6 +566,9 @@ export function useCompanionPicker(storageKey: string) {
     companion, setCompanion, applyAuthoritativeBrain,
     cli, account, model, effort, selectionRevision: selectionRevisions[companion] ?? 0,
     brainPending: false,
+    selectionNotice,
+    selectionError: null as string | null,
+    dismissSelectionFeedback: () => setSelectionNotice(null),
     isClaude, isCodex, isXai, isZai, isFireworks, isOpenRouter, isOpenRouter2, isAgy,
     claudeModel, setClaudeModel, claudeEffort, setClaudeEffort,
     codexModel, setCodexModel, codexEffort, setCodexEffort,

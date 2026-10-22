@@ -16,7 +16,7 @@ import { DRAFT_APPEND_EVENT, type DraftAppendDetail } from '../native/shell';
 import { Composer, AttachButton } from '../chat/components/reimagine/Composer';
 import { ChatHeaderChips, useNarrowHeader } from '../chat/components/ChatHeaderChips';
 import { agentIdFromChatId, useWaitingOn } from '../chat/hooks/useJobs';
-import { CounselPopover, ModelChip } from '../chat/components/reimagine/CounselPicker';
+import { CounselPopover, ModelChip, SelectionFeedback } from '../chat/components/reimagine/CounselPicker';
 import { Plus } from '../chat/components/reimagine/icons';
 import { BotMark } from './GrokLogo';
 import { agentMark, DISC_INK, agentColor, agentAvatarUrl, chatColorOf, type Agent } from './agents';
@@ -293,6 +293,7 @@ export function GrokConversation(props: BotConversationProps) {
 
       <div className="bt-dock">
         <div className="bt-dock-inner">
+          {!counselOpen ? <SelectionFeedback picker={picker} /> : null}
           <CounselPopover picker={picker} open={counselOpen} onClose={() => setCounselOpen(false)} />
           {composer}
         </div>

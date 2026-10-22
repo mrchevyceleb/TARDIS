@@ -19,7 +19,7 @@ import {
   ZAI_MODELS,
 } from '../chat/hooks/useCompanionPicker';
 import { CLAUDE_EFFORTS, CLAUDE_MODELS, normalizeClaudeModel } from '../chat/components/CodexEnginePicker';
-import { CODEX_MODELS, DEFAULT_CODEX_MODEL, codexEffortsForModel, codexModelSpec, useCodexModels } from '../chat/codexModels';
+import { codexPickerModels, codexModelChange, codexModelLabel, isCodexModelUnlisted, rememberCodexModel, DEFAULT_CODEX_MODEL, codexEffortsForModel, codexModelSpec, useCodexModels } from '../chat/codexModels';
 import { DEFAULT_FIREWORKS_EFFORT, DEFAULT_FIREWORKS_MODEL, FIREWORKS_MODELS, fireworksEffortsForModel, useFireworksModels } from '../chat/fireworksModels';
 import { DEFAULT_OPENROUTER_EFFORT, DEFAULT_OPENROUTER_MODEL, OPENROUTER_MODELS, openRouterEffortsForModel, useOpenRouterModels } from '../chat/openrouterModels';
 import { AgentUpdateConflictError, createAgent, updateAgentReq, deleteAgentReq, uploadAgentAvatar, removeAgentAvatar, agentAvatarUrl, DISC_INK, agentColor, type Agent } from './agents';
@@ -53,7 +53,7 @@ function effortOptions(engine: string, model: string): string[] {
 
 function staticModelOptions(engine: string): BrainModelOption[] {
   if (engine === 'claude') return CLAUDE_MODELS;
-  if (engine === 'codex') return CODEX_MODELS;
+  if (engine === 'codex') return codexPickerModels();
   if (engine === 'xai') return XAI_MODELS;
   if (engine === 'zai') return ZAI_MODELS;
   if (engine === 'fireworks') return FIREWORKS_MODELS;
@@ -90,6 +90,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
   const [brainRevision, setBrainRevision] = useState(1);
   const [model, setModel] = useState(DEFAULT_XAI_MODEL);
   const [effort, setEffort] = useState(DEFAULT_XAI_EFFORT);
+  const [effortNotice, setEffortNotice] = useState<string | null>(null);
   const [voice, setVoice] = useState('ara');
   const [voiceListOpen, setVoiceListOpen] = useState(false);
   const [preview, setPreview] = useState<{ id: string; status: 'loading' | 'playing' } | null>(null);
@@ -107,6 +108,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
   const nameRef = useRef<HTMLInputElement | null>(null);
   const agentRef = useRef('');
   const savingRef = useRef(false);
+  const initialBrain = useRef({ engine: '', model: '', effort: '' });
 
   // Reset the form when the editor OPENS, or when it retargets to a
   // different agent (by id — object identity changes every agents poll, and
@@ -125,11 +127,13 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     const defaults = defaultBrainSelection(nextEngine);
     const nextModel = agent?.engine === 'assistant' ? normalizeClaudeModel(agent.model)
       : nextEngine === agent?.engine ? agent.model ?? defaults.model : defaults.model;
-    const allowedEfforts = effortOptions(nextEngine, nextModel);
     setEngine(nextEngine);
     setBrainRevision(agent?.brainRevision ?? 1);
     setModel(nextModel);
-    setEffort(agent?.effort && allowedEfforts.includes(agent.effort) ? agent.effort : defaults.effort);
+    setEffort(agent?.effort ?? defaults.effort);
+    setEffortNotice(null);
+    if (nextEngine === 'codex') rememberCodexModel(nextModel);
+    initialBrain.current = { engine: nextEngine, model: nextModel, effort: agent?.effort ?? defaults.effort };
     setVoice(agent?.voice ?? 'ara');
     setPinned(Boolean(agent?.pinned));
     setMuted(Boolean(agent?.muted));
@@ -264,16 +268,25 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     ...staticModelOptions(engine),
   ]);
   const modelOptions = model && !configuredModels.some((option) => option.id === model)
-    ? [{ id: model, label: model }, ...configuredModels]
+    ? [{ id: model, label: engine === 'codex' ? `${codexModelLabel(model)} · saved choice` : model }, ...configuredModels]
     : configuredModels;
-  const availableEfforts = effortOptions(engine, model);
+  const listedEfforts = effortOptions(engine, model);
+  const availableEfforts = listedEfforts.includes(effort) ? listedEfforts : [effort, ...listedEfforts];
   const chooseEngine = (nextEngine: string) => {
+    setEffortNotice(null);
     const defaults = defaultBrainSelection(nextEngine);
     setEngine(nextEngine);
     setModel(defaults.model);
     setEffort(defaults.effort);
   };
   const chooseModel = (nextModel: string) => {
+    if (engine === 'codex') {
+      const next = codexModelChange(nextModel, effort);
+      setModel(nextModel);
+      setEffort(next.effort);
+      setEffortNotice(next.notice);
+      return;
+    }
     const options = effortOptions(engine, nextModel);
     const fallback = defaultBrainSelection(engine).effort;
     setModel(nextModel);
@@ -301,7 +314,8 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     setBusy(true);
     setErr(null);
     try {
-      const brain = { engine, model: model || undefined, effort };
+      const brainChanged = engine !== initialBrain.current.engine || model !== initialBrain.current.model || effort !== initialBrain.current.effort;
+      const brain = !agent || brainChanged ? { engine, model: model || undefined, effort } : {};
       const saved = agent
         ? await updateAgentReq(agent.id, { name, role, ...brain, brainRevision, voice, pinned, muted, scope: scope.trim() || undefined })
         : await createAgent({ name, role, ...brain, voice, scope: scope.trim() || undefined });
@@ -314,10 +328,10 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
         const defaults = defaultBrainSelection(currentEngine);
         const currentModel = current.engine === 'assistant' ? normalizeClaudeModel(current.model)
           : currentEngine === current.engine ? current.model ?? defaults.model : defaults.model;
-        const options = effortOptions(currentEngine, currentModel);
         setEngine(currentEngine);
         setModel(currentModel);
-        setEffort(current.effort && options.includes(current.effort) ? current.effort : defaults.effort);
+        setEffort(current.effort ?? defaults.effort);
+        initialBrain.current = { engine: currentEngine, model: currentModel, effort: current.effort ?? defaults.effort };
         setBrainRevision(current.brainRevision ?? 1);
         onSaved(current);
         setErr('Brain settings changed on another device. Refreshed them here; review and save again.');
@@ -425,13 +439,16 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
 
           <label className="bt-agent-field">
             <span>{engine === 'xai' || engine === 'fireworks' || engine === 'openrouter' || engine === 'openrouter2' || engine === 'agy' ? 'Thinking' : engine === 'zai' ? 'Effort' : 'Reasoning effort'}</span>
-            <select value={effort} onChange={(e) => setEffort(e.target.value)}>
+            <select value={effort} onChange={(e) => { setEffort(e.target.value); setEffortNotice(null); }}>
               {availableEfforts.map((option) => (
                 <option key={option} value={option}>{option[0].toUpperCase() + option.slice(1)}</option>
               ))}
             </select>
           </label>
         </div>
+
+        {engine === 'codex' && isCodexModelUnlisted(model) ? <p className="model-choice-hint">Your saved model is missing from the current list. You can still select it.</p> : null}
+        {effortNotice ? <p className="model-choice-hint" role="status">{effortNotice}</p> : null}
 
         {agent ? (
           <>

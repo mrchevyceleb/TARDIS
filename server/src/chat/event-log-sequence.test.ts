@@ -60,3 +60,43 @@ test('event redaction finishes on hostile names and retains baseline masking', (
     assert.equal(redactSecrets(redactSecrets(input)), redactSecrets(input));
   }
 });
+
+test('password-named credentials mask; config-dimension names stay readable', () => {
+  for (const [input, expected] of [
+    ['DATABASE_PASSWORD=example-value-42', 'DATABASE_PASSWORD=[redacted secret]'],
+    ['SESSION_SECRET=example-value-42', 'SESSION_SECRET=[redacted secret]'],
+    ['ADMIN_PASSWORD=example-value-42', 'ADMIN_PASSWORD=[redacted secret]'],
+    ['DATABASE_PASSWORD: correct horse battery staple', 'DATABASE_PASSWORD: [redacted secret]'],
+    ['"SESSION_SECRET": "example-value-42"', '"SESSION_SECRET": "[redacted secret]"'],
+    ['TOKEN_COUNT_DATABASE_PASSWORD=example-value-42', 'TOKEN_COUNT_DATABASE_PASSWORD=[redacted secret]'],
+    ['DATABASE_PASSWORD_TOKEN_COUNT=example-value-42', 'DATABASE_PASSWORD_TOKEN_COUNT=[redacted secret]'],
+    ['SIGN_IN_PASSWORD=example-value-42', 'SIGN_IN_PASSWORD=[redacted secret]'],
+    ['ON_CALL_SECRET=example-value-42', 'ON_CALL_SECRET=[redacted secret]'],
+    ['SECRET_IN_KEYVAULT=example-value-42', 'SECRET_IN_KEYVAULT=[redacted secret]'],
+    ['"database_password": "example-value-42"', '"database_password": "[redacted secret]"'],
+    ['"db_password": "example-value-42"', '"db_password": "[redacted secret]"'],
+    ['"api_key_v2": "example-value-42"', '"api_key_v2": "[redacted secret]"'],
+    ['DATABASE_PASSWD=example-value-42', 'DATABASE_PASSWD=[redacted secret]'],
+    ['HOST_PASSWORD=example-value-42', 'HOST_PASSWORD=[redacted secret]'],
+    ['DATABASE_PASSWORD_ROTATION=example-value-42', 'DATABASE_PASSWORD_ROTATION=[redacted secret]'],
+    ['PASSWORD_HASH=argon2FakeWhatever1', 'PASSWORD_HASH=[redacted secret]'],
+    ['{"databasePassword":"example-value-42"}', '{"databasePassword":"[redacted secret]"}'],
+  ]) {
+    assert.equal(redactSecrets(input), expected);
+  }
+  for (const input of [
+    'PASSWORD_EXPIRY_DAYS=90',
+    'PASSWORD_MIN_LENGTH=12',
+    'INPUT_TOKEN_COUNT=2048',
+    'MAX_TOKEN_LIMIT=4096',
+    'RATE_LIMIT_SECRET_PATH=/tmp/x',
+    'TOKEN_COUNT_ROTATION_DAYS=30',
+    'SESSION_SECRET_ROTATION_DAYS=30',
+    'PASSWORD_HASH_ALGORITHM=argon2id',
+    'PASSWORD_POLICY_ENABLED=false',
+    'PASSWORD_REQUIRE_SPECIAL_CHAR=true',
+    'PASSWORD_HISTORY_DEPTH=8',
+  ]) {
+    assert.equal(redactSecrets(input), input);
+  }
+});

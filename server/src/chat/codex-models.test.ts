@@ -7,10 +7,7 @@ test('resolves model-specific Codex efforts', () => {
     model: 'gpt-6-astra',
     effort: 'ultra',
   });
-  assert.deepEqual(resolveCodexSelection('gpt-6-astra', 'not-real'), {
-    model: 'gpt-6-astra',
-    effort: 'medium',
-  });
+  assert.throws(() => resolveCodexSelection('gpt-6-astra', 'not-real'), /valid Codex effort/);
   assert.deepEqual(resolveCodexSelection('gpt-5.6-sol', 'ultra'), {
     model: 'gpt-5.6-sol',
     effort: 'ultra',
@@ -20,21 +17,18 @@ test('resolves model-specific Codex efforts', () => {
     effort: 'max',
   });
   assert.deepEqual(resolveCodexSelection('gpt-6-sol', 'ultra'), { model: 'gpt-6-sol', effort: 'ultra' });
-  assert.deepEqual(resolveCodexSelection('gpt-6-luna', 'ultra'), { model: 'gpt-6-luna', effort: 'medium' });
+  assert.deepEqual(resolveCodexSelection('gpt-6-luna', 'ultra'), { model: 'gpt-6-luna', effort: 'ultra' });
   assert.deepEqual(resolveCodexSelection('gpt-5.6-luna', 'ultra'), {
     model: 'gpt-5.6-luna',
-    effort: 'medium',
+    effort: 'ultra',
   });
 });
 
 test('rejects malformed browser values without coercing them', () => {
-  const fallback = resolveCodexSelection();
   const hostile = { toString: null, valueOf: null };
-
-  assert.doesNotThrow(() => resolveCodexSelection(hostile, hostile));
-  assert.deepEqual(resolveCodexSelection(['gpt-5.6-sol'], ['ultra']), fallback);
-  assert.deepEqual(resolveCodexSelection(hostile, hostile), fallback);
-  assert.deepEqual(resolveCodexSelection(null, null), fallback);
-  assert.deepEqual(resolveCodexSelection('__proto__', 'ultra'), fallback);
-  assert.deepEqual(resolveCodexSelection('not-a-real-model', 'ultra'), fallback);
+  assert.throws(() => resolveCodexSelection(['gpt-5.6-sol'], ['ultra']), /valid Codex model/);
+  assert.throws(() => resolveCodexSelection(hostile, hostile), /valid Codex model/);
+  assert.throws(() => resolveCodexSelection(null, null), /valid Codex model/);
+  assert.throws(() => resolveCodexSelection('__proto__', 'ultra'), /valid Codex model/);
+  assert.deepEqual(resolveCodexSelection('new-model-not-yet-listed', 'ultra'), { model: 'new-model-not-yet-listed', effort: 'ultra' });
 });

@@ -30,7 +30,7 @@ test('Personal is a selectable engine with the same model defaults', () => {
   assert.deepEqual(brainForAgent(baseAgent({ model: 'deepseek/deepseek-v4.1-flash', effort: 'xhigh' })), {
     engine: 'openrouter2',
     model: 'deepseek/deepseek-v4.1-flash',
-    effort: resolveOpenRouter2Effort('xhigh', 'deepseek/deepseek-v4.1-flash'),
+    effort: 'xhigh',
     revision: 1,
     updatedAt: undefined,
   });

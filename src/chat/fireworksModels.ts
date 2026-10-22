@@ -3,7 +3,7 @@ import { useSyncExternalStore } from 'react';
 // Fireworks serverless model catalog, fetched from /api/fireworks/models (the
 // server's live control-plane read). Mirrors codexModels.ts: a hand-verified
 // fallback list until the catalog lands, an in-place swap so every importer
-// sees the update, and a stored pick survives until the catalog can judge it.
+// sees the update. Catalog discovery never rewrites a stored choice.
 // Thinking tiers are per model: each model's published tiers (models.dev
 // reasoning_options, 2026-10-06), since Fireworks accepts any tier without
 // saying which are real. Three models are thinking-only (they reject
@@ -133,16 +133,16 @@ if (typeof window !== 'undefined') {
 
 export function fireworksModelSpec(model: string): FireworksModelSpec {
   return FIREWORKS_MODELS.find((entry) => entry.id === model)
+    ?? FALLBACK_FIREWORKS_MODELS.find((entry) => entry.id === model)
     ?? FIREWORKS_MODELS.find((entry) => entry.id === DEFAULT_FIREWORKS_MODEL)
     ?? FIREWORKS_MODELS[0]!;
 }
 
-/** A well-formed unknown id is kept until the catalog can judge it, so a model
- *  picked right after Fireworks adds it survives a reload. */
+/** Discovery may be incomplete. Keep a well-formed saved selection. */
 export function normalizeFireworksModel(model: string | null | undefined): string {
   const aliased = model ? FIREWORKS_MODEL_ALIASES[model] ?? model : '';
   if (aliased && FIREWORKS_MODELS.some((entry) => entry.id === aliased)) return aliased;
-  if (aliased && !catalogLoaded && FIREWORKS_MODEL_ID.test(aliased)) return aliased;
+  if (aliased && FIREWORKS_MODEL_ID.test(aliased)) return aliased;
   return FIREWORKS_MODELS.some((entry) => entry.id === DEFAULT_FIREWORKS_MODEL) ? DEFAULT_FIREWORKS_MODEL : FIREWORKS_MODELS[0]!.id;
 }
 
@@ -155,6 +155,7 @@ export function contextWindowForFireworksModel(model: string | undefined): numbe
 }
 
 export function normalizeFireworksEffort(model: string, effort: string | null | undefined): string {
+  if (effort && /^[a-z]{2,12}$/.test(effort)) return effort;
   const spec = fireworksModelSpec(normalizeFireworksModel(model));
   if (spec.efforts.includes(effort as string)) return effort as string;
   // Same rule as the server: step down to the nearest tier the model has
