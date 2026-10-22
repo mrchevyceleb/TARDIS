@@ -18,7 +18,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { backgroundAccountEnv } from '../lib/accountResolver.ts';
+import { backgroundSubscriptionEnv } from '../lib/cliProfiles.ts';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
 import { statSync, readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
@@ -244,7 +244,7 @@ export async function createJobWatch(input: CreateJobWatchInput): Promise<JobWat
   if (typeof input.command !== 'string' || !input.command.trim()) throw new Error('command must be a shell command');
   const command = input.command.trim();
   const scoped = await canLaunchInScope();
-  const child = launchWatchCommand(command, scoped, backgroundAccountEnv(ELROND_WORKSPACE_PATH, agent.name));
+  const child = launchWatchCommand(command, scoped, await backgroundSubscriptionEnv(ELROND_WORKSPACE_PATH, agent.name, agent.home || `bot-${agent.id}`));
   // Listen IMMEDIATELY, before anything else: a spawn failure (EAGAIN/EMFILE,
   // no pid) emits an async 'error' that would crash the process with no
   // listener, and a fast command can exit while the record is still being

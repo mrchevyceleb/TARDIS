@@ -40,6 +40,14 @@ function loadMap(): AccountMap | null {
   }
 }
 
+/** Only profiles the operator explicitly configured, or the CLI's normal
+ * profile on a fresh install. This does not scan neighboring credentials. */
+export function configuredAccountNames(): Array<string | null> {
+  const map = loadMap();
+  if (MAP_PATH && !map) throw new Error('The configured account list could not be read.');
+  return map ? Object.keys(map.accounts) : [null];
+}
+
 /** Which named profile owns this path; null if no map is configured. */
 export function resolveAccount(cwd: string): string | null {
   const map = loadMap();

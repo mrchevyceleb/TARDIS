@@ -346,6 +346,37 @@
 .bt-head-name { min-width: 0; font-size: 14px; font-weight: 600; color: var(--r-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bt-head-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; min-width: 0; }
 
+.bt-head-identity { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; gap: 2px; }
+.bt-account-chip { display: flex; align-items: center; gap: 5px; min-width: 0; max-width: 220px; padding: 3px 5px; margin-left: -5px; border: 0; border-radius: 8px; color: var(--r-ink-mute); background: transparent; font: inherit; font-size: 10px; cursor: pointer; transition: transform .16s ease, background .16s ease, color .16s ease; }
+.bt-account-chip > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bt-account-chip:hover { transform: translateY(-1px); color: var(--r-ink); background: var(--r-line); }
+.bt-account-chip:focus-visible, .bt-account-refresh:focus-visible { outline: 2px solid var(--r-brass); outline-offset: 3px; }
+.bt-account-dot { width: 5px; height: 5px; border-radius: 50%; flex: none; background: #64b98b; box-shadow: 0 0 7px #64b98b33; animation: bt-account-breathe 3s ease-in-out infinite; }
+.bt-account-chip.needs-attention .bt-account-dot { background: var(--r-brass); }
+.bt-account-pop { position: fixed; z-index: 500; width: min(360px, calc(100vw - 24px)); max-height: min(70vh, 620px); overflow: auto; padding: 16px; border: 1px solid var(--r-line); border-radius: 22px; background: var(--r-bg-card); color: var(--r-ink); box-shadow: 0 20px 65px #0004; animation: bt-account-appear .18s ease backwards; }
+.bt-account-pop-head { display: flex; align-items: center; gap: 10px; }
+.bt-account-pop-head > div { display: flex; flex-direction: column; gap: 3px; flex: 1; }
+.bt-account-pop-head strong { font-size: 15px; }
+.bt-account-pop-head small, .bt-account-row small { color: var(--r-ink-mute); font-size: 11px; }
+.bt-account-emblem { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 14px; color: var(--r-brass); background: color-mix(in srgb, var(--r-brass) 12%, transparent); transform: rotate(-5deg); }
+.bt-account-current { font-size: 12px; line-height: 1.5; color: var(--r-ink-mute); overflow-wrap: anywhere; margin: 14px 0; }
+.bt-account-list { display: flex; flex-direction: column; gap: 6px; }
+.bt-account-row { display: flex; align-items: center; gap: 10px; min-height: 60px; padding: 10px; border: 1px solid transparent; border-radius: 14px; }
+.bt-account-row.is-selected { background: color-mix(in srgb, var(--r-brass) 7%, transparent); border-color: color-mix(in srgb, var(--r-brass) 28%, transparent); }
+.bt-account-avatar { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: 12px; background: var(--r-line); color: var(--r-ink); font-size: 13px; }
+.bt-account-row-copy { display: flex; flex-direction: column; gap: 5px; min-width: 0; flex: 1; }
+.bt-account-row strong { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.bt-account-row > svg { color: var(--r-brass); flex: none; }
+.bt-account-refresh { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 40px; margin-top: 12px; border: 1px solid var(--r-line); border-radius: 12px; font: inherit; font-size: 12px; color: var(--r-ink); background: transparent; cursor: pointer; transition: transform .16s ease, background .16s ease; }
+.bt-account-refresh:hover:not(:disabled) { transform: translateY(-2px); background: var(--r-line); }
+.bt-account-refresh:disabled { cursor: wait; opacity: .65; }
+.bt-account-refresh .is-checking { animation: bt-account-spin 1s linear infinite; }
+@keyframes bt-account-spin { to { transform: rotate(360deg); } }
+@keyframes bt-account-breathe { 50% { opacity: .6; transform: scale(.8); } }
+@keyframes bt-account-appear { from { opacity: 0; transform: translateY(-5px) scale(.97); } }
+@media (max-width: 760px) { .bt-account-chip { max-width: 130px; } }
+@media (prefers-reduced-motion: reduce) { .bt-account-dot, .bt-account-pop, .bt-account-refresh .is-checking { animation: none; } .bt-account-chip, .bt-account-refresh { transition: none; } .bt-account-chip:hover, .bt-account-refresh:hover:not(:disabled) { transform: none; } }
+
 /* feed */
 .bt-conv-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
 .bt-feed { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 14px 22px 22px; scrollbar-width: thin; scrollbar-color: var(--r-line-strong) transparent; }
@@ -2009,3 +2040,27 @@ body.bt-rail-resizing { cursor: col-resize; user-select: none; }
 .bot-app .rc .pin-extras .act { max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
 .bot-app .rc .prose li > p { margin-block: 0; }
 .bot-app .rc .prose li + li { margin-block-start: 4px; }
+
+/* Account tokens feel like little cards you can pick up. */
+button.bt-account-row { width: 100%; text-align: left; background: transparent; color: inherit; font: inherit; cursor: pointer; transition: transform .15s ease, background .15s ease, box-shadow .15s ease; }
+button.bt-account-row:hover:not(:disabled) { transform: translateY(-2px) scale(1.012); background: color-mix(in srgb, var(--r-brass) 10%, var(--r-bg-card)); box-shadow: 0 5px 16px #0002; }
+button.bt-account-row:active:not(:disabled) { transform: scale(.98); }
+button.bt-account-row:disabled { cursor: default; }
+button.bt-account-row:disabled:not(.is-selected) { opacity: .65; }
+button.bt-account-row:focus-visible, .bt-account-add:focus-visible, .bt-account-login-link:focus-visible { outline: 2px solid var(--r-brass); outline-offset: 2px; }
+.bt-account-select-arrow { opacity: 0; transition: opacity .15s, transform .15s; }
+.bt-account-row:hover .bt-account-select-arrow, .bt-account-row:focus-visible .bt-account-select-arrow { opacity: 1; transform: translateX(2px); }
+.bt-account-promise { font-size: 10px; color: var(--r-ink-mute); margin: 12px 0; }
+.bt-account-notice { padding: 10px; border-radius: 12px; font-size: 12px; line-height: 1.5; color: var(--r-ink); background: color-mix(in srgb, var(--r-brass) 12%, transparent); overflow-wrap: anywhere; }
+.bt-account-add, .bt-account-login-link { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 42px; border: 1px solid color-mix(in srgb, var(--r-brass) 38%, var(--r-line)); border-radius: 13px; background: color-mix(in srgb, var(--r-brass) 12%, transparent); color: var(--r-ink); font: inherit; font-size: 12px; cursor: pointer; text-decoration: none; transition: transform .15s ease, background .15s ease; }
+.bt-account-add:hover, .bt-account-login-link:hover { transform: translateY(-2px); background: color-mix(in srgb, var(--r-brass) 22%, transparent); }
+.bt-account-signin { margin-top: 12px; padding: 12px; border: 1px solid var(--r-line); border-radius: 16px; }
+.bt-account-signin > strong { font-size: 13px; }
+.bt-account-signin p, .bt-account-signin label { font-size: 12px; line-height: 1.5; color: var(--r-ink-mute); }
+.bt-account-signin form { margin-top: 12px; }
+.bt-account-signin form > div { display: flex; gap: 6px; margin-top: 5px; }
+.bt-account-signin input { width: 100%; min-width: 0; border: 1px solid var(--r-line); border-radius: 9px; padding: 9px; font: inherit; font-size: 12px; color: var(--r-ink); background: var(--r-bg); }
+.bt-account-signin form button { border: 0; border-radius: 9px; min-width: 36px; color: var(--r-bg); background: var(--r-brass); cursor: pointer; }
+.bt-account-device-code { display: block; padding: 10px; margin-bottom: 10px; border: 1px dashed var(--r-brass); border-radius: 10px; text-align: center; font-size: 20px; letter-spacing: 2px; }
+.bt-account-row .is-checking { animation: bt-account-spin 1s linear infinite; }
+@media (prefers-reduced-motion: reduce) { button.bt-account-row, .bt-account-add, .bt-account-login-link { transition: none; transform: none !important; } .bt-account-row .is-checking { animation: none; } }

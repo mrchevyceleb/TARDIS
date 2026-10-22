@@ -23,6 +23,7 @@ import { agentMark, DISC_INK, agentColor, agentAvatarUrl, chatColorOf, type Agen
 import { useAgentMessagePins } from './messagePins';
 import { BRAND, THINKING_PHRASES, composerPlaceholders } from '../theme/voice';
 import { useMediaQuery } from '../chat/hooks/useMediaQuery';
+import { AccountControl } from './AccountControl';
 
 /** Docked beside a room (the Desk chat): its own compact header, and
  *  reference chips that ride along with the next message. */
@@ -190,7 +191,7 @@ export function GrokConversation(props: BotConversationProps) {
       {dock ? dock.header({ chips }) : <div className="bt-head" ref={headRef}>
         <div className="bt-head-agent" title={agent ? `${agent.name} — ${agent.role}` : agentName}>
           <span className="bt-disc" data-chat-color={chatColorOf(agent)} style={agent ? { color: DISC_INK, background: agentColor(agent.name) } : undefined}>{agent && agentAvatarUrl(agent) ? <img className="bt-disc-img" src={agentAvatarUrl(agent) ?? undefined} alt={agent.name} /> : agentMark(agent, agentName.slice(0, 1))}</span>
-          <span className="bt-head-name">{agentName}</span>
+          <div className="bt-head-identity"><span className="bt-head-name">{agentName}</span><AccountControl engine={picker.cli} agentId={agent?.id} chatId={s.chatId} repo={props.repo?.path} /></div>
         </div>
         <div className="bt-head-actions">
           {chips}

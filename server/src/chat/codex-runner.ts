@@ -16,7 +16,7 @@ import { officeMcpCodexArgs } from './office-mcp.ts';
 import { computerGuidance, computerOwnerKey } from '../devices/context.ts';
 import { redactComputerImages } from '../devices/transcript.ts';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
-import { getSessionId, setSessionId } from './sessions.ts';
+import { getSessionId, setSessionId, nativeSessionProvenance } from './sessions.ts';
 import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, durableUserEchoClientMsgId, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './crashTombstone.ts';
 import { maybeAutoCompact, refreshCompactForRotation, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeqWithStatus, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
@@ -32,7 +32,7 @@ import { wellFormedText } from '../lib/wellFormed.ts';
 import { agentForChatId, brainForAgent, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
-import { accountEnv, accountEnvForAccount, accountFromChatId, accountForAgent } from '../lib/accountResolver.ts';
+import { subscriptionEnvForLane, subscriptionEmail, cliProfileId } from '../lib/cliProfiles.ts';
 import { codexHomeFor, codexRolloutMissing, latestThreadIdFromEvents } from './codex-threads.ts';
 import { resolveCodexBin, resolveCodexSelection } from './codex-models.ts';
 import { buildCodexAppServerArgs, shouldRetryEmptyCodexTurn } from './codex-args.ts';
@@ -193,6 +193,7 @@ type CodexSendOptions = {
   voiceMode?: boolean;
 };
 type CodexSessionOptions = {
+  nativeProfile?: string;
   recoverContextOnNextTurn?: boolean;
   /** Seed the primer on the first send. freshStart passes true so a reset
    *  thread still receives its agent's code-carried open commitments
@@ -264,6 +265,7 @@ export class CodexSession {
   private subscriberCount = 0;
   private threadId: string | null = null;
   private nativeProfile?: string;
+  private nativeAccountEmail: string | null = null;
   /** Next turn seeds persona + rolling compact + last 50 on a fresh thread. */
   private seedWindowOnNextTurn = false;
   /** Thread ids explicitly cleared as unresumable: the event-log recovery
@@ -326,6 +328,7 @@ export class CodexSession {
     this.logKey = logKeyFor(this.cli, cwd, chatId);
     this.replyWatch = new ReplyWatch(() => agentForChatId(chatId)?.id ?? chatId, this.cli);
     this.threadId = threadId;
+    this.nativeProfile = opts.nativeProfile;
     this.recoverContextOnNextTurn = opts.recoverContextOnNextTurn === true;
     this.seedWindowOnNextTurn = opts.seedFirst === true;
 
@@ -408,6 +411,13 @@ export class CodexSession {
       effort: this.turnEffort ?? undefined,
     };
   }
+
+  /** Account metadata may inspect a running turn without a native query. */
+  subscriptionProfile(): string | null {
+    return this.nativeProfile ?? null;
+  }
+
+  subscriptionAccountEmail(): string | null { return this.nativeAccountEmail; }
 
   /** Codex app-server accepts true same-turn input through `turn/steer` during
    * inference and tool execution. Unlike `codex exec`, no turn boundary or
@@ -675,6 +685,13 @@ export class CodexSession {
     );
     this.turnModel = codexModel;
     this.turnEffort = codexEffort;
+    const childEnv = subscriptionEnvForLane('codex', this.cwd, this.chatId, agent?.name);
+    const selectedProfile = codexHomeFor(childEnv);
+    if (this.threadId && this.nativeProfile && cliProfileId('codex', this.nativeProfile) !== cliProfileId('codex', selectedProfile)) {
+      throw Object.assign(new Error('Your account changed. This message will keep the conversation and use the selected account.'), { code: 'MODEL_SELECTION_CHANGED' });
+    }
+    this.nativeProfile = selectedProfile;
+    this.nativeAccountEmail = subscriptionEmail('codex', childEnv);
     this.busy = true;
     this.busySince = Date.now();
     this.cancellationEmitted = false;
@@ -773,23 +790,6 @@ export class CodexSession {
     // resolution, the prompt, and the MCP identity must all describe the
     // same agent.
     const sessionAgent = agentForChatId(this.chatId);
-    let childEnv: NodeJS.ProcessEnv;
-    try {
-      const forcedAccount = accountFromChatId(this.chatId) ?? accountForAgent(sessionAgent?.name);
-      childEnv = forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd);
-    } catch (err) {
-      cleanupImages();
-      this.busy = false;
-      this.emit({
-        type: 'error',
-        code: 'CODEX_ACCOUNT_PIN_UNAVAILABLE',
-        retryable: true,
-        message: `account pin unavailable: ${(err as Error).message}`,
-      });
-      this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
-      return;
-    }
-    this.nativeProfile = codexHomeFor(childEnv);
     const hasSeedOverride = typeof opts.seedOverride === 'string';
     const seedWindow = !hasSeedOverride && (this.consumeWindowSeed() || recoverContextThisTurn);
     // The primer reports whether its commitments half is CONFIRMED: an empty
@@ -1543,6 +1543,7 @@ export function pruneIdleCodexSessions(ttlMs: number, now = Date.now()): number 
 }
 
 export async function getOrCreateCodexSession(opts: {
+  accountHandover?: boolean;
   repoPath: string;
   chatId?: string;
   cli?: CliKind;
@@ -1552,12 +1553,17 @@ export async function getOrCreateCodexSession(opts: {
   const cli = opts.cli ?? 'codex';
   const key = keyOf(cli, cwd, chatId);
   const existing = codexSessions.get(key);
-  if (existing && existing.isAlive()) {
+  if (existing && existing.isAlive() && opts.accountHandover) {
+    await existing.shutdown();
+    codexSessions.delete(key);
+  }
+  if (existing && existing.isAlive() && !opts.accountHandover) {
     await flushEventLog(existing.logKey);
     return existing;
   }
 
-  const threadId = (await getSessionId(cli, cwd, chatId)) ?? null;
+  const provenance = await nativeSessionProvenance(cli, cwd, chatId);
+  const threadId = opts.accountHandover ? null : (await getSessionId(cli, cwd, chatId)) ?? null;
   const logKey = logKeyFor(cli, cwd, chatId);
   await flushEventLog(logKey);
   const durableHistory = loadEventLogForCompactionSync(logKey);
@@ -1565,7 +1571,7 @@ export async function getOrCreateCodexSession(opts: {
   // when there is no resume id), so an ordinary brand-new codex session also
   // receives the primer - and with it the agent's code-carried open
   // commitments - instead of only explicit Fresh and rotation paths.
-  const session = new CodexSession(cwd, chatId, threadId, { cli, durableHistory, seedFirst: !threadId });
+  const session = new CodexSession(cwd, chatId, threadId, { cli, durableHistory, nativeProfile: opts.accountHandover ? undefined : provenance?.nativeProfile, seedFirst: !threadId });
   codexSessions.set(key, session);
   return session;
 }
