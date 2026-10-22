@@ -59,8 +59,9 @@ const MAX_FLIP = 32;
  *  desk.json); a required file that is missing or torn throws an error with
  *  code ESTATEREQUIRED so the caller can retry the whole copy. `mustExist`
  *  lists paths that must exist in the SOURCE at all. Returns
- *  { files, bytes, vanished, vanishedPaths, healed, skipped, unreadable }
- *  so the caller can report what it skipped instead of hiding it. */
+ *  { files, bytes, vanished, vanishedPaths, healed, healedPaths, skipped,
+ *  unreadable } so the caller can report what it skipped and what it
+ *  recovered, by name, instead of hiding it. */
 export function copyTree(src, dest, opts = {}) {
   const filter = opts.filter ?? (() => true);
   const required = opts.required ?? [];
@@ -71,7 +72,7 @@ export function copyTree(src, dest, opts = {}) {
   // every in-tree link as an escape (Oct 21).
   src = path.resolve(src);
   dest = path.resolve(dest);
-  const result = { files: 0, bytes: 0, vanished: 0, vanishedPaths: [], healed: 0, skipped: [], unreadable: [] };
+  const result = { files: 0, bytes: 0, vanished: 0, vanishedPaths: [], healed: 0, healedPaths: [], skipped: [], unreadable: [] };
   walk(src, dest, 0, true);
   healVanished();
   enforceRequired();
@@ -303,7 +304,10 @@ export function copyTree(src, dest, opts = {}) {
           result.skipped.push(relPath);
           continue;
         }
-        if (!result.vanishedPaths.includes(relPath)) result.healed += 1;
+        if (!result.vanishedPaths.includes(relPath)) {
+          result.healed += 1;
+          result.healedPaths.push(relPath);
+        }
       } catch (err) {
         if (err.code === 'ESTATEREQUIRED') throw err;
         // Destination and system failures never became tolerable.

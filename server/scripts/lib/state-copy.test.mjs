@@ -78,6 +78,7 @@ test('a vanished path that comes back is healed into the copy, not dropped', () 
   assert.equal(fs.readFileSync(path.join(dest, 'live.json'), 'utf8'), 'back', 'the recreated file is copied by the heal pass');
   assert.equal(result.vanished, 0, 'a healed path is not also counted vanished');
   assert.equal(result.healed, 1);
+  assert.deepEqual(result.healedPaths, ['live.json'], 'healed paths are named, not just counted');
   assert.equal(result.files, 3);
 });
 

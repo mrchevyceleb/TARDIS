@@ -49,11 +49,13 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { copyTree, stateFilter } from './lib/state-copy.mjs';
 
-// The state the side copy must boot with: required in the copy, checked in
-// the source for desk.json, and always-copied however large, so a required
-// file that outgrows the byte cap is taken whole instead of failing every
-// copy attempt.
-const REQUIRED_STATE = ['desk.json', 'personas/agents.json'];
+// The state the side copy must boot with: required in the copy whenever it
+// exists in the source (and parse-checked, so a torn save fails and
+// retries), must-exist in the source at all, and always-copied however
+// large, so a required file that outgrows the byte cap is taken whole
+// instead of being silently dropped (jobs.json is 10 MB, past the 8 MB cap,
+// and the old gate never copied it at all).
+const REQUIRED_STATE = ['desk.json', 'personas/agents.json', 'jobs.json', 'chat-sessions.json', 'compaction-state.json'];
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -162,7 +164,7 @@ try {
       stateCopy = copyTree(LIVE_STATE, stateDir, {
         filter: stateFilter(LIVE_STATE, { big, always: REQUIRED_STATE }),
         required: REQUIRED_STATE,
-        mustExist: ['desk.json'],
+        mustExist: REQUIRED_STATE,
         // Unreadable-but-present files are not writer races: permissions
         // persist, and a side copy that silently boots without them proves
         // less than this check claims. fs.cpSync failed here; so do we.
@@ -193,8 +195,8 @@ try {
     deskNote = ', desk.json not copied';
   }
   const names = (list) => list.slice(0, 5).join(', ') + (list.length > 5 ? ` (+${list.length - 5} more)` : '');
-  step(`state copied to ${stateDir} (${mb(stateDir)} MB${deskNote})`
-    + (stateCopy.healed ? `, ${stateCopy.healed} path(s) lost to a mid-copy race and healed back in` : '')
+  step(`state copied to ${stateDir} (${Math.round(stateCopy.bytes / 1024 / 1024)} MB${deskNote})`
+    + (stateCopy.healed ? `, ${stateCopy.healed} path(s) lost to a mid-copy race and healed back in (${names(stateCopy.healedPaths)})` : '')
     + (stateCopy.vanished ? `, ${stateCopy.vanished} path(s) vanished mid-copy (live writers, skipped: ${names(stateCopy.vanishedPaths)})` : '')
     + (stateCopy.skipped.length ? `, skipped special/out-of-tree: ${names(stateCopy.skipped)}` : ''));
 
@@ -357,11 +359,6 @@ function fail(msg) {
   failedMsg = msg;
   console.error(`[check] FAIL: ${msg}`);
   throw new Error(msg);
-}
-function mb(dir) {
-  let n = 0;
-  try { for (const e of fs.readdirSync(dir, { withFileTypes: true })) n += e.isFile() ? fs.statSync(path.join(dir, e.name)).size : 0; } catch {}
-  return Math.round(n / 1024 / 1024);
 }
 function run(cmd, cmdArgs, cwd, toFile, quiet) {
   try {
