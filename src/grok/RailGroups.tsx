@@ -27,6 +27,21 @@ function menuButtons(root: HTMLElement | null): HTMLButtonElement[] {
   return root ? [...root.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')] : [];
 }
 
+/** A fixed menu only becomes stale when a scroll moves its anchor. Close
+ *  when the scrolling element contains that anchor (the rail list under a
+ *  teammate row, for example); unrelated background scrolls, including the
+ *  chat feed's smooth autoscroll, must not kill a pick already in flight.
+ *  Matt, Oct 23 2026: the feed autoscroll closed the color menu before a
+ *  swatch could be clicked, while rail scrolling left it floating. */
+export function menuClosesOnScroll(menu: HTMLElement | null, anchor: HTMLElement | null, target: EventTarget | null): boolean {
+  // The menu itself is never a scroller today; if one ever gains overflow,
+  // its own wheel/touch scroll is interaction with it, not dismissal.
+  if (menu && target instanceof Node && (target === menu || menu.contains(target))) return false;
+  if (!anchor?.isConnected) return true;
+  if (!(target instanceof Element)) return true;
+  return target === anchor || target.contains(anchor);
+}
+
 /** Shared popup shell: portaled into .bot-app (so theme tokens apply), kept on
  *  screen, arrow-key navigable, closed by Escape / outside press / scroll. */
 function RailMenu({ x, y, restore, skipRestore, label, onClose, children }: {
@@ -59,16 +74,17 @@ function RailMenu({ x, y, restore, skipRestore, label, onClose, children }: {
       e.stopPropagation();
       onClose();
     };
-    const onViewport = () => onClose();
+    const onResize = () => onClose();
+    const onScroll = (e: Event) => { if (menuClosesOnScroll(ref.current, restore, e.target)) onClose(); };
     document.addEventListener('pointerdown', onDown);
     document.addEventListener('keydown', onKey, true);
-    window.addEventListener('resize', onViewport);
-    document.addEventListener('scroll', onViewport, true);
+    window.addEventListener('resize', onResize);
+    document.addEventListener('scroll', onScroll, true);
     return () => {
       document.removeEventListener('pointerdown', onDown);
       document.removeEventListener('keydown', onKey, true);
-      window.removeEventListener('resize', onViewport);
-      document.removeEventListener('scroll', onViewport, true);
+      window.removeEventListener('resize', onResize);
+      document.removeEventListener('scroll', onScroll, true);
       if (!skipRestore?.current && restore?.isConnected) restore.focus();
     };
   }, [onClose, x, y, restore, skipRestore]);
