@@ -17,7 +17,7 @@ export type QaItem = {
 };
 
 export type QaColumn = { id: 'sud' | 'edgar' | 'martin'; name: string; items: QaItem[] };
-export type QaBoard = { testers: QaColumn[] };
+export type QaBoard = { me?: QaColumn['id']; testers: QaColumn[] };
 
 export const fetchQaBoard = (signal?: AbortSignal) =>
   apiJson<QaBoard>('/api/qa', { signal, cache: 'no-store' });

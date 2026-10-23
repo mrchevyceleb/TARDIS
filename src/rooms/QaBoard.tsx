@@ -77,8 +77,8 @@ export function QaSignInLanding() {
   );
 }
 
-/** `tester` is the bare page testers get on the public QA address: their own
- *  list only, with no operator controls. */
+/** `tester` is the bare page testers get on the public QA address: the whole
+ *  board with their own column first, and no operator controls. */
 export function QaBoard({ tester = false }: { tester?: boolean } = {}) {
   const [now, setNow] = useState(() => Date.now());
   const [links, setLinks] = useState<QaSignInLink[] | null>(null);
@@ -143,7 +143,7 @@ export function QaBoard({ tester = false }: { tester?: boolean } = {}) {
             {columns.map((col) => (
               <section key={col.id} className="qa-col" aria-label={`${col.name}'s QA list`}>
                 <header className="qa-col-head">
-                  <h3>{col.name}</h3>
+                  <h3>{col.name}{col.id === board.data?.me ? ' (you)' : ''}</h3>
                   <span>{col.items.length} open</span>
                 </header>
                 <p className="qa-col-blurb">{TESTER_BLURB[col.id]}</p>
