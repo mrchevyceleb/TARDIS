@@ -20,7 +20,7 @@ import { briefEnvelopeForHandoff, isCoderBrief } from './briefEnvelope.ts';
 import { recordNativeFailure } from './sessionMetrics.ts';
 import { freshThreadOnTask, freshTaskSenders, sessionDirectory } from './sessionPolicy.ts';
 import { freshLifecycleStarted, freshLifecycleCompleted } from './freshLifecycle.ts';
-import { persistThreadResetEpoch, noteThreadResetEpoch, persistThreadResetTaskState, threadResetTaskState, type ThreadResetTaskState } from './threadResetStore.ts';
+import { persistThreadResetEpoch, noteThreadResetEpoch, persistThreadResetTaskState, restoreThreadResetTaskState, threadResetTaskState, type ThreadResetTaskState } from './threadResetStore.ts';
 import { clearThreadSessionIds } from './sessions.ts';
 import type { CliKind } from './runner.ts';
 
@@ -264,21 +264,29 @@ export async function freshStartForAgent(agent: Agent, taskId?: string): Promise
     // task resumes its wipe after restart instead of delivering into a
     // half-erased thread. The epoch is committed first so a failure here
     // never leaves a `resetting` row suppressing a wipe that never began.
+    const priorTaskState = taskId ? threadResetTaskState(logKey, taskId) : undefined;
     if (taskId) await persistThreadResetTaskState(logKey, taskId, resetAt, 'resetting');
-    // The durable writes above yield: a turn (or background job) that
-    // started on an existing lane meanwhile must not be killed. Nothing
-    // destructive has run yet, so hold for retry; the `resetting` state
-    // keeps the task owed and stops it falling open later.
+    // The durable writes above, and each interrupt below, yield: a turn (or
+    // background job) that started on any lane meanwhile must never be
+    // killed. Interrupting idle lanes and dropping their handles erases
+    // nothing durable, so until the session ids are cleared a busy recipient
+    // simply backs out: the task's state goes back to what it was, and the
+    // drain treats it like any busy refusal (held, then the 5-minute
+    // fallback) instead of a half-wiped thread.
+    const backOut = async () => {
+      if (taskId) await restoreThreadResetTaskState(logKey, taskId, priorTaskState);
+      return { fresh: false, reason: 'recipient became busy during reset' };
+    };
     const current = runner.liveSessionsForLogKey(logKey);
-    if (!recipientIdle(current)) return { fresh: false, retryable: true, reason: 'recipient became busy during reset' };
+    if (!recipientIdle(current)) return await backOut();
     noteThreadResetEpoch(logKey, committed);
     freshLifecycleStarted({ logKey, repo: repoPath, chatId, cli: home.cli });
     for (const prior of current) {
-      // Each interrupt yields, so re-read before the next one: a lane that
-      // picked up a turn meanwhile is never killed; the task holds instead
-      // (still `resetting`, so it can only retry, never fall open).
-      const live = runner.liveSessionsForLogKey(logKey).find((s) => s.cli === prior.cli && s.cwd === prior.cwd && s.chatId === prior.chatId);
-      if (live && !recipientIdle([live])) return { fresh: false, retryable: true, reason: 'recipient became busy during reset' };
+      // The interrupt is thread-wide, so every lane must still be idle. Past
+      // the started hook (held steers are gone), a busy lane can no longer
+      // back out cleanly: hold for retry with `resetting` kept, which never
+      // kills the turn and never delivers into the reset thread.
+      if (!recipientIdle(runner.liveSessionsForLogKey(logKey))) return { fresh: false, retryable: true, reason: 'recipient became busy during reset' };
       await runner.interruptSession({ cli: prior.cli as CliKind, repoPath: prior.cwd, chatId: prior.chatId });
       runner.dropSession(prior.cli as CliKind, prior.cwd, prior.chatId);
     }

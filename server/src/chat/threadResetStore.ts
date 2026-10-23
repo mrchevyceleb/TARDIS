@@ -184,3 +184,31 @@ export async function persistThreadResetTaskState(
   await writeQueue;
   return committed;
 }
+
+/** Put a task's reset state back to what it was before this attempt wrote
+ *  `resetting`, when the attempt stopped before anything destructive ran (the
+ *  recipient became busy). Leaving `resetting` behind would mark the task as
+ *  half-wiped and hold it forever behind a recipient that never goes idle
+ *  (Codex review, Oct 23 2026). A prior state (an earlier crashed attempt's
+ *  `resetting`) is restored as-is; none means the entry is removed. */
+export async function restoreThreadResetTaskState(
+  logKey: string,
+  taskId: string,
+  prior: ThreadResetTaskState | undefined,
+): Promise<void> {
+  if (prior) { await persistThreadResetTaskState(logKey, taskId, prior.resetAt, prior.state); return; }
+  const write = async () => {
+    const records = await store.list();
+    const index = records.findIndex((record) => record.id === logKey);
+    if (index >= 0) {
+      const next = { ...records[index], taskResets: { ...(records[index].taskResets ?? {}) } };
+      delete next.taskResets[taskId];
+      if (next.taskId === taskId) { delete next.taskId; delete next.taskState; delete next.taskResetAt; }
+      records[index] = next;
+      await store.replace(records);
+    }
+    memoryTaskResets.get(logKey)?.delete(taskId);
+  };
+  writeQueue = writeQueue.then(write, write);
+  await writeQueue;
+}
