@@ -132,7 +132,9 @@ export function qaTesterByLogin(login: string): QaTesterId | undefined {
  *  (Matt, Oct 23 2026: Martin is out until Matt says otherwise). */
 export function routeQaItem(input: { tester?: string; needsSud?: boolean; builderIsTester?: boolean; app: QaApp }): QaTesterId {
   const requested = (input.tester ?? '').trim().toLowerCase();
-  if (requested === 'sud' || requested === 'edgar' || requested === 'martin') return requested;
+  // Martin is out for now (Matt, Oct 23 2026), so a Martin request lands on Edgar.
+  if (requested === 'sud' || requested === 'edgar') return requested;
+  if (requested === 'martin') return 'edgar';
   if (input.needsSud || input.builderIsTester) return 'sud';
   return 'edgar';
 }
