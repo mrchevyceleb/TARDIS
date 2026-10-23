@@ -51,7 +51,7 @@ export function qaSignInPath(tester: QaTesterId, now = Date.now()): string | nul
   const expiresAt = now + LINK_TTL_MS;
   const nonce = randomBytes(12).toString('base64url');
   const payload = `${encodeURIComponent(login)}.${nonce}.${expiresAt}`;
-  return `/api/qa/auth/start?d=${payload}&s=${signature(payload)}`;
+  return `/qa-signin?d=${payload}&s=${signature(payload)}`;
 }
 
 export function verifyQaSignIn(data: string, suppliedSignature: string, now = Date.now()): QaTesterId | null {
@@ -89,7 +89,19 @@ export function verifyQaSignIn(data: string, suppliedSignature: string, now = Da
  *  local Chrome sends no such header. */
 export type QaForwardedIdentity = { tailscaleUser?: string; xForwardedFor?: string };
 
-export function qaIsOperator(headers: QaForwardedIdentity, remoteAddress: string | undefined, operatorLogin: string | undefined): boolean {
+/** Operator identity. `requestTrusted` is the Host/Origin guard from
+ *  origin.ts (trustedRequestOrigin): a bare-loopback request with no proxy
+ *  identity is the operator's own browser, and it only counts when the
+ *  request itself proves it was addressed to this server by that browser.
+ *  Without the guard, any web page on the operator's machine could reach
+ *  loopback and DNS-rebind into operator powers (read every column, issue
+ *  sign-in links, land and move cards). */
+export function qaIsOperator(
+  headers: QaForwardedIdentity,
+  remoteAddress: string | undefined,
+  operatorLogin: string | undefined,
+  requestTrusted = false,
+): boolean {
   const remote = remoteAddress ?? '';
   const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
   if (!loopback) return false;
@@ -103,10 +115,10 @@ export function qaIsOperator(headers: QaForwardedIdentity, remoteAddress: string
     return Boolean(op) && ts === op;
   }
   // No tailnet identity: a proxy that forwards headers without an identity
-  // (a generic reverse proxy) is not the operator; plain local Chrome,
-  // which sends neither header, is.
+  // (a generic reverse proxy) is not the operator; plain local Chrome, which
+  // sends neither header, is, provided Host/Origin check out.
   if (headers.xForwardedFor) return false;
-  return true;
+  return requestTrusted;
 }
 
 export function createQaSession(tester: QaTesterId, now = Date.now()): string {

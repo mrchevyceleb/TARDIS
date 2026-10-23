@@ -83,7 +83,11 @@ export class JsonStore<T extends StoredRecord> {
       raw = await readFile(this.path, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      await this.write(this.seed);
+      // No file yet: the seed is the answer, but it is never written here.
+      // Reads stay off the write chain on purpose (a slow read must not stall
+      // mutations), so seeding from a read would race the first queued
+      // mutation: whichever rename landed last would win, and an empty seed
+      // landing after the first record would silently erase it.
       return [...this.seed];
     }
 

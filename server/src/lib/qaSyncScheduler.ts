@@ -6,6 +6,7 @@
 
 import { syncQaFromGithub } from './qaSync.ts';
 import { qaBoardEnabled } from './qaBoard.ts';
+import { refreshQaPins } from './qaPins.ts';
 
 const TICK_MS = 2 * 60_000;
 const FIRST_TICK_MS = 15_000;
@@ -24,6 +25,9 @@ export function startQaSyncScheduler(): boolean {
     if (result.authoritative && (result.added || result.drift.length)) {
       console.log(`[qa-sync] sweep: ${result.added} added, ${result.drift.length} drift, ${result.open} open`);
     }
+    // Cards the sweep itself added change the pinned lists too; a sync
+    // add must not wait for the next land or outcome to refresh them.
+    if (result.added > 0) await refreshQaPins();
   };
   const tick = () => {
     if (sweepInFlight) return;

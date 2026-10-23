@@ -7,14 +7,16 @@
 // GitHub truth comes from the Desk PR snapshot (gh, read-only). That
 // snapshot is a cache, not an authority: it can be pending, stale, unknown
 // or disabled, and it only ever shows merges from the last 48 hours. So
-// the sync only ADDS cards from a healthy snapshot, and drift is only ever
-// reported, never auto-deleted: the snapshot cannot distinguish "PR closed
-// unmerged" from "PR merged a while back", and deleting on that guess
-// would erase live work and the validated tombstones with it. A card
-// leaves the board through its Slack thread outcome, and nowhere else.
+// the sync only ADDS cards from a healthy snapshot that covers every QA
+// repo (the snapshot pull already includes RIVENDELL_QA_REPOS), and drift
+// is only ever reported, never auto-deleted: the snapshot cannot
+// distinguish "PR closed unmerged" from "PR merged a while back", and
+// deleting on that guess would erase live work and the validated
+// tombstones with it. A card leaves the board through its Slack thread
+// outcome, and nowhere else.
 
-import { deskPrs, type DeskPr, type DeskPrSnapshot } from './githubPrs.ts';
-import { applyQaOutcome, qaAllItems, qaDriftCheck, qaRepoAllowed, upsertQaItem, type QaDrift, type QaItem } from './qaBoard.ts';
+import { deskPrs, snapshotCoversRepos, type DeskPr, type DeskPrSnapshot } from './githubPrs.ts';
+import { applyQaOutcome, qaAllItems, qaDriftCheck, qaRepoAllowed, qaRepos, upsertQaItem, type QaDrift, type QaItem } from './qaBoard.ts';
 
 export type QaSyncResult = {
   added: number;
@@ -33,8 +35,13 @@ function appForRepo(repo: string): 'Operly' | 'Studio' {
   return /operly/i.test(repo) ? 'Operly' : 'Studio';
 }
 
+/** A snapshot only speaks for the QA board when it actually covers every
+ *  configured QA repo. Coverage is the whole of QA authority: the Desk's
+ *  own stale/unknown flags describe Desk repos, so a Desk outage must never
+ *  stall QA adds, and drift computed against repos nobody pulled would flag
+ *  live cards as gone. */
 function snapshotAuthoritative(snapshot: DeskPrSnapshot): boolean {
-  return !snapshot.disabled && !snapshot.pending && !snapshot.stale && !snapshot.unknown;
+  return snapshotCoversRepos(snapshot, qaRepos());
 }
 
 /** A merged PR in a configured QA repo becomes a QA item for its tester.

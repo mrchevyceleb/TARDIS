@@ -22,7 +22,19 @@ export type DeskPr = {
   updatedAt: string;
 };
 
-export type DeskPrSnapshot = { prs: DeskPr[]; stale: boolean; pending: boolean; unknown: boolean; disabled: boolean };
+export type DeskPrSnapshot = {
+  prs: DeskPr[];
+  stale: boolean;
+  pending: boolean;
+  unknown: boolean;
+  disabled: boolean;
+  /** Repos never successfully pulled, and repos whose last pull failed.
+   *  Per-repo truth, so one board's broken repo cannot read as another
+   *  board's staleness and a consumer can tell "my repos were never
+   *  pulled" apart from "no merges anywhere". */
+  failedRepos: string[];
+  unknownRepos: string[];
+};
 
 /** Deployment configuration, never code (AGENTS.md open-source safety: an
  *  optional private integration stays disabled until explicitly configured
@@ -33,11 +45,47 @@ export type DeskPrSnapshot = { prs: DeskPr[]; stale: boolean; pending: boolean; 
  *  Credentials stay gh's own configured auth; a purpose-scoped token can be
  *  pinned by the deployment env later (gh honors GH_TOKEN) with no code
  *  change. */
-const REPOS = (() => {
+/** The Desk's own repos, for the Desk room and sidebar only. */
+const DESK_REPOS = (() => {
   const configured = (process.env.RIVENDELL_DESK_PR_REPOS ?? '')
     .split(',').map((s) => s.trim()).filter(Boolean);
   return configured.length && configured[0].toLowerCase() !== 'off' ? configured : [];
 })();
+
+/** The pull covers the Desk repos plus any repos another board owns through
+ *  its own setting (the QA board's RIVENDELL_QA_REPOS), deduplicated. A QA
+ *  repo nobody told the snapshot about would otherwise mean that board's
+ *  sync sees a healthy-looking snapshot that can never contain its merges:
+ *  permanent no-op sweeps with no signal anywhere. Consumers filter by
+ *  their own repo list (the Desk route by deskRepos(), the QA sync by
+ *  qaRepos()), so one board's repos never leak into another board's view
+ *  and RIVENDELL_DESK_PR_REPOS=off still turns the Desk pull fully off. */
+const REPOS = [...new Set([
+  ...DESK_REPOS,
+  ...(process.env.RIVENDELL_QA_REPOS ?? '').split(',').map((s) => s.trim()).filter((s) => s && s.toLowerCase() !== 'off'),
+])];
+
+const canonRepo = (repo: string) => repo.trim().toLowerCase();
+const isDeskRepo = (repo: string) => DESK_REPOS.some((r) => canonRepo(r) === canonRepo(repo));
+
+/** The Desk room's repo list; the Desk routes never serve PRs outside it. */
+export function deskRepos(): string[] { return [...DESK_REPOS]; }
+
+/** True when every given repo was actually pulled for this snapshot: named
+ *  in the pull and neither failed nor never-seen. "No merges anywhere" is
+ *  then distinguishable from "my repos were never pulled", which is the
+ *  silent no-op the QA board must never sit in. */
+export function snapshotCoversRepos(snapshot: DeskPrSnapshot, repos: string[]): boolean {
+  const wanted = new Set(repos.map(canonRepo).filter(Boolean));
+  if (!wanted.size || snapshot.pending || snapshot.disabled) return false;
+  const pulled = new Set(REPOS.map(canonRepo));
+  const failed = new Set(snapshot.failedRepos.map(canonRepo));
+  const unknown = new Set(snapshot.unknownRepos.map(canonRepo));
+  for (const repo of wanted) {
+    if (!pulled.has(repo) || failed.has(repo) || unknown.has(repo)) return false;
+  }
+  return true;
+}
 
 const PREFIX_OWNERS: Record<string, string> = {
   naomi: 'Naomi', jill: 'Jill', christina: 'Christina', maria: 'Maria', adam: 'Adam',
@@ -146,12 +194,12 @@ function hasPendingChecks(pr: RawPr): boolean {
  *  on the board instead of erasing teammates into "idle". */
 const lastGood = new Map<string, DeskPr[]>();
 let snapshot: DeskPrSnapshot = REPOS.length
-  ? { prs: [], stale: false, pending: true, unknown: false, disabled: false }
-  : { prs: [], stale: false, pending: false, unknown: false, disabled: true };
+  ? { prs: [], stale: false, pending: true, unknown: false, disabled: false, failedRepos: [...REPOS], unknownRepos: [...REPOS] }
+  : { prs: [], stale: false, pending: false, unknown: false, disabled: true, failedRepos: [], unknownRepos: [] };
 let refreshedAt = 0;
 let refreshing: Promise<void> | null = null;
 
-async function pullAll(): Promise<{ prs: DeskPr[]; stale: boolean; unknown: boolean }> {
+async function pullAll(): Promise<{ prs: DeskPr[]; stale: boolean; unknown: boolean; failedRepos: string[]; unknownRepos: string[] }> {
   const mergedCutoff = new Date(Date.now() - MERGED_WINDOW_MS).toISOString();
   const staleRepos: string[] = [];
   const unknownRepos: string[] = [];
@@ -200,7 +248,11 @@ async function pullAll(): Promise<{ prs: DeskPr[]; stale: boolean; unknown: bool
   }
   if (staleRepos.length) console.warn('[deskPrs] stale repos (serving last-known-good):', staleRepos.join(', '), unknownRepos.length ? `never pulled: ${unknownRepos.join(', ')}` : '');
   prs.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : a.repo === b.repo ? a.number - b.number : a.repo < b.repo ? -1 : 1));
-  return { prs, stale: staleRepos.length > 0, unknown: unknownRepos.length > 0 };
+  // Stale/unknown stay Desk-scoped flags (the Desk payload's contract); the
+  // per-repo lists carry the unfiltered truth for other consumers.
+  const deskFailed = staleRepos.filter(isDeskRepo);
+  const deskUnknown = unknownRepos.filter(isDeskRepo);
+  return { prs, stale: deskFailed.length > 0, unknown: deskUnknown.length > 0, failedRepos: staleRepos, unknownRepos };
 }
 
 /** Serve the last snapshot immediately; refresh in the background whenever it

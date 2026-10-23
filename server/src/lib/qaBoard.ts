@@ -68,18 +68,29 @@ function configuredRepos(): string[] {
   return configured.length && configured[0].toLowerCase() !== 'off' ? configured.map(canonRepo) : [];
 }
 
-function configuredTesterLogins(): Record<string, string> {
+/** Tester logins are only valid as a complete, unique assignment: every
+ *  tester has one, no two testers share one, no unknown ids. Anything less
+ *  is rejected wholesale (undefined), because a partial map once let a
+ *  duplicate login authenticate one tester as another, and a missing login
+ *  silently hid a tester's column. A deployment with a broken map runs no
+ *  QA board at all, which fails loudly at startup instead of insecurely. */
+export function configuredTesterLogins(): Record<QaTesterId, string> | undefined {
   const map: Record<string, string> = {};
   for (const pair of splitEnv('RIVENDELL_QA_TESTER_LOGINS')) {
     const eq = pair.indexOf('=');
     if (eq > 0) map[pair.slice(0, eq).trim().toLowerCase()] = pair.slice(eq + 1).trim();
   }
-  return map;
+  const ids = Object.keys(map);
+  if (ids.length !== QA_TESTERS.length) return undefined;
+  const logins = QA_TESTERS.map(({ id }) => (map[id] ?? '').trim().toLowerCase());
+  if (logins.some((login) => !login)) return undefined;
+  if (new Set(logins).size !== QA_TESTERS.length) return undefined;
+  return map as Record<QaTesterId, string>;
 }
 
 export function qaBoardEnabled(): boolean {
   const secret = (process.env.RIVENDELL_QA_AUTH_SECRET ?? '').trim();
-  return configuredRepos().length > 0 && Object.keys(configuredTesterLogins()).length > 0 && secret.length > 0;
+  return configuredRepos().length > 0 && configuredTesterLogins() !== undefined && secret.length > 0;
 }
 
 export const qaRepos = (): string[] => configuredRepos();
@@ -89,15 +100,17 @@ export function qaRepoAllowed(repo: string): boolean {
   return qaRepos().includes(canonRepo(repo));
 }
 
-/** The login a tester signs in with, or undefined when unconfigured. The
- *  board never names a tester it cannot authenticate. */
+/** The login a tester signs in with, or undefined when the tester-login
+ *  config is absent or invalid. The board never names a tester it cannot
+ *  authenticate. */
 export function qaTesterLogin(id: QaTesterId): string | undefined {
-  return configuredTesterLogins()[id];
+  return configuredTesterLogins()?.[id];
 }
 
 export function qaTesterByLogin(login: string): QaTesterId | undefined {
   const wanted = login.trim().toLowerCase();
   const logins = configuredTesterLogins();
+  if (!logins) return undefined;
   for (const tester of QA_TESTERS) {
     if (logins[tester.id]?.toLowerCase() === wanted) return tester.id;
   }

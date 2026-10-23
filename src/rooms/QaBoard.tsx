@@ -28,6 +28,55 @@ const TESTER_BLURB: Record<string, string> = {
   martin: 'Operly · 9 to 5',
 };
 
+/** Landing page for a tester sign-in link (/qa-signin?d=...&s=...). The GET
+ *  itself consumes nothing: link scanners and prefetchers can fetch this
+ *  page harmlessly, and even a scanner that runs the page's scripts finds
+ *  only a button. The exchange POST fires on the tester's own tap, once,
+ *  for the HttpOnly session; success sends them to their board. */
+export function QaSignInLanding() {
+  const [state, setState] = useState<'ready' | 'working' | 'failed'>('ready');
+  const [credentials] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return { d: params.get('d') ?? '', s: params.get('s') ?? '' };
+  });
+  const usable = Boolean(credentials.d && credentials.s);
+  return (
+    <div className="qa-board">
+      <header className="qa-head">
+        <div>
+          <p className="qa-eyebrow">Rally QA</p>
+          <h2>{state === 'failed' || !usable ? 'This sign-in link has expired' : state === 'working' ? 'Signing you in…' : 'Your QA list is ready'}</h2>
+          <p className="qa-sub">{state === 'working'
+            ? 'One moment while we open your list.'
+            : state === 'failed' || !usable
+              ? 'Ask for a fresh link and open it within ten minutes.'
+              : 'Tap below to open your list. The link works once.'}</p>
+          {usable && state !== 'failed' ? (
+            <button
+              type="button"
+              className="qa-refresh"
+              disabled={state === 'working'}
+              onClick={() => {
+                setState('working');
+                void fetch('/api/qa/auth/exchange', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(credentials),
+                }).then((res) => {
+                  if (res.ok) window.location.replace('/qa');
+                  else setState('failed');
+                }).catch(() => setState('failed'));
+              }}
+            >
+              Sign in
+            </button>
+          ) : null}
+        </div>
+      </header>
+    </div>
+  );
+}
+
 export function QaBoard() {
   const [now, setNow] = useState(() => Date.now());
   const [links, setLinks] = useState<QaSignInLink[] | null>(null);
