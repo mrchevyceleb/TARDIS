@@ -70,8 +70,11 @@ export async function loadThreadResetEpochs(): Promise<Map<string, number>> {
   const epochs = new Map<string, number>();
   for (const record of records) {
     if (typeof record.id !== 'string' || !record.id) continue;
-    if (!Number.isFinite(record.resetAt) || record.resetAt <= 0) continue;
-    epochs.set(record.id, Math.max(epochs.get(record.id) ?? 0, record.resetAt));
+    // A row with no committed epoch can still carry task outcomes (a busy
+    // fallback records only its `complete` waiver), so those always load.
+    if (Number.isFinite(record.resetAt) && record.resetAt > 0) {
+      epochs.set(record.id, Math.max(epochs.get(record.id) ?? 0, record.resetAt));
+    }
     const perTask = new Map<string, ThreadResetTaskState>();
     if (typeof record.taskId === 'string' && record.taskId
       && (record.taskState === 'resetting' || record.taskState === 'complete')
@@ -133,7 +136,11 @@ export async function persistThreadResetEpoch(logKey: string, resetAt: number): 
  *  another task's outcome: every task keeps its own entry in the per-task
  *  map (Codex verify round 6, Oct 23 2026: the single-slot form made an
  *  earlier completed task look owed again once a later task overwrote it). */
-const TASK_RESET_KEEP = 32;
+// Outcomes are kept generously (one per task, so years of work per thread):
+// a waived or completed task's late clarification must still find its
+// `complete` state, or it would wipe the thread that task is running in
+// (Codex review, Oct 23 2026).
+const TASK_RESET_KEEP = 5000;
 export async function persistThreadResetTaskState(
   logKey: string,
   taskId: string,
@@ -176,4 +183,32 @@ export async function persistThreadResetTaskState(
   writeQueue = writeQueue.then(write, write);
   await writeQueue;
   return committed;
+}
+
+/** Put a task's reset state back to what it was before this attempt wrote
+ *  `resetting`, when the attempt stopped before anything destructive ran (the
+ *  recipient became busy). Leaving `resetting` behind would mark the task as
+ *  half-wiped and hold it forever behind a recipient that never goes idle
+ *  (Codex review, Oct 23 2026). A prior state (an earlier crashed attempt's
+ *  `resetting`) is restored as-is; none means the entry is removed. */
+export async function restoreThreadResetTaskState(
+  logKey: string,
+  taskId: string,
+  prior: ThreadResetTaskState | undefined,
+): Promise<void> {
+  if (prior) { await persistThreadResetTaskState(logKey, taskId, prior.resetAt, prior.state); return; }
+  const write = async () => {
+    const records = await store.list();
+    const index = records.findIndex((record) => record.id === logKey);
+    if (index >= 0) {
+      const next = { ...records[index], taskResets: { ...(records[index].taskResets ?? {}) } };
+      delete next.taskResets[taskId];
+      if (next.taskId === taskId) { delete next.taskId; delete next.taskState; delete next.taskResetAt; }
+      records[index] = next;
+      await store.replace(records);
+    }
+    memoryTaskResets.get(logKey)?.delete(taskId);
+  };
+  writeQueue = writeQueue.then(write, write);
+  await writeQueue;
 }
