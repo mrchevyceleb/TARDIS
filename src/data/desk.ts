@@ -297,13 +297,127 @@ export function useDeskSummary(enabled: boolean) {
 export function useDeskPrs(enabled: boolean) {
   return useQuery({
     queryKey: PRS_KEY,
-    queryFn: ({ signal }) => apiJson<{ prs: DeskPr[]; stale?: boolean; pending?: boolean }>('/api/desk/prs', { signal, cache: 'no-store' }),
+    queryFn: ({ signal }) => apiJson<{ prs: DeskPr[]; stale?: boolean; pending?: boolean; unknown?: boolean }>('/api/desk/prs', { signal, cache: 'no-store' }),
     enabled,
     refetchInterval: 60_000,
     refetchOnWindowFocus: 'always',
     staleTime: 30_000,
     retry: false,
   });
+}
+
+export type DeskCardLite = Pick<DeskCard, 'id' | 'title' | 'owner' | 'column' | 'updatedAt'> & { archived?: boolean };
+
+const TASKS_KEY = ['desk-tasks'] as const;
+
+/** The sidebar's current-task poll: a tiny server projection (no comments, no
+ *  todos, no archived cards) under its own query key, so the always-mounted
+ *  sidebar never drags the full Desk snapshot around or interferes with the
+ *  room's own polling. An older server 404s and the sidebar keeps its PR
+ *  lines (feature-detected). */
+export function useDeskCardsLight(enabled: boolean) {
+  return useQuery({
+    queryKey: TASKS_KEY,
+    queryFn: ({ signal }) => apiJson<{ rev: number; cards: DeskCardLite[] }>('/api/desk/tasks', { signal, cache: 'no-store' }),
+    enabled,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: 'always',
+    staleTime: 30_000,
+    retry: false,
+  });
+}
+
+export const CARD_STAGE_WORDS: Record<DeskColumn, string> = {
+  not_started: 'parked',
+  in_progress: 'in progress',
+  on_staging: 'waiting on staging',
+  in_qa: 'in QA',
+  in_production: 'shipped',
+};
+
+export type AgentRef = { id: string; name: string };
+
+/** "Current" expires: a card nobody has touched in this long no longer says
+ *  what its owner is on. Parked cards use the same 30-day limit as /desk/tasks,
+ *  so the full Desk and lightweight sidebar agree about next-up work. */
+const TASK_MAX_DAYS: Partial<Record<DeskColumn, number>> = { in_progress: 7, on_staging: 14, in_qa: 14, not_started: 30 };
+
+export type AgentTaskSlot = { current?: DeskCardLite; waiting?: DeskCardLite; next?: DeskCardLite };
+export type AgentTaskMap = Map<string, AgentTaskSlot>;
+
+/** Resolve every agent's current task in one pass over the card list, so
+ *  per-render callers stay O(1) lookups instead of N agents x M cards.
+ *  Callers must advance their memo on poll timestamps, not just payloads:
+ *  React Query structurally shares unchanged cards while their ages advance. */
+export function agentTaskMap(cards: DeskCardLite[], agents: AgentRef[], now = Date.now()): AgentTaskMap {
+  const byId = new Map(agents.map((a) => [a.id, a]));
+  const byName = new Map<string, AgentRef | undefined>();
+  for (const agent of agents) {
+    const name = agent.name.trim().toLowerCase();
+    // A legacy card with an ambiguous name cannot safely pick a name twin.
+    byName.set(name, byName.has(name) ? undefined : agent);
+  }
+  const out: AgentTaskMap = new Map(agents.map((a) => [a.id, {}]));
+  for (const card of cards) {
+    if (card.archived || card.owner.kind !== 'agent') continue;
+    const maxDays = TASK_MAX_DAYS[card.column];
+    const updatedAt = Date.parse(card.updatedAt);
+    if (maxDays === undefined || !Number.isFinite(updatedAt) || updatedAt < now - maxDays * 86_400_000) continue;
+    // Only pre-id legacy cards can use the name bridge. A deleted agent's
+    // stored id must never transfer its work to a teammate with the same name.
+    const agent = card.owner.id ? byId.get(card.owner.id) : byName.get(card.owner.name.trim().toLowerCase());
+    if (!agent) continue;
+    const slot = out.get(agent.id)!;
+    const key = card.column === 'in_progress' ? 'current' : card.column === 'not_started' ? 'next' : 'waiting';
+    const previous = slot[key];
+    if (!previous || updatedAt > Date.parse(previous.updatedAt)) slot[key] = card;
+  }
+  return out;
+}
+
+/** Which slot backs a headline, for labels that must not call parked or
+ *  waiting work "current". */
+export type TaskKind = 'current' | 'waiting' | 'next';
+export const TASK_LABEL: Record<TaskKind, string> = { current: 'Current task', waiting: 'Waiting', next: 'Next up' };
+export function taskKindOf(slot: AgentTaskSlot): TaskKind | undefined {
+  return slot.current ? 'current' : slot.waiting ? 'waiting' : slot.next ? 'next' : undefined;
+}
+
+export type AgentTaskInfo = {
+  /** What the agent is on right now (fresh in-progress only). */
+  current?: DeskCardLite;
+  /** Newest staging/QA card: real work, but waiting, not current. */
+  waiting?: DeskCardLite;
+  /** Newest parked card, for the "next up" tail. */
+  next?: DeskCardLite;
+  /** One-line plain-speak summary of the above, for tile headlines. */
+  headline?: string;
+};
+
+export type TaskQueryState = 'loading' | 'error' | 'ready';
+
+/** The rail's single line, in priority order. Never assert an empty workload
+ *  while either source is still unknown, or pass cached work off as current. */
+export function agentTaskSubline(slot: AgentTaskSlot, prs: DeskPr[], tasksState: TaskQueryState, prsState: TaskQueryState): { text: string; quiet?: boolean } {
+  if (slot.current) return { text: `${tasksState === 'error' ? 'Last known: ' : ''}${slot.current.title}` };
+  if (prs.length) return { text: `${prsState === 'error' ? 'Last known: ' : ''}${prs.map((p) => `${p.repo.split('/')[1]} #${p.number} · ${p.reviewer ? `with ${p.reviewer}` : p.state === 'merged' ? 'merged to staging' : p.state === 'ci' ? 'CI' : p.state}`).join(' · ')}` };
+  if (tasksState === 'loading') return { text: 'Checking current task…' };
+  if (tasksState === 'error') return { text: 'Current task unavailable' };
+  const task = withHeadline(slot);
+  if (task.headline) return { text: task.headline, quiet: true };
+  if (prsState === 'loading') return { text: 'Checking PRs…' };
+  if (prsState === 'error') return { text: 'PR status unavailable' };
+  return { text: 'No current task' };
+}
+
+const capitalise = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+
+export function withHeadline(slot: AgentTaskSlot): AgentTaskInfo {
+  const { current, waiting, next } = slot;
+  const headline = current?.title
+    ?? (waiting ? `${capitalise(CARD_STAGE_WORDS[waiting.column])}: ${waiting.title}` : undefined)
+    ?? (next ? `Next up: ${next.title}` : undefined);
+  return { current, waiting, next, headline };
 }
 
 /** The summary counts moved by the same amount an optimistic edit moved the
@@ -375,6 +489,7 @@ export function useDeskWrite() {
     } finally {
       void queryClient.invalidateQueries({ queryKey: DESK_KEY });
       void queryClient.invalidateQueries({ queryKey: SUMMARY_KEY });
+      void queryClient.invalidateQueries({ queryKey: TASKS_KEY });
     }
   }, [queryClient]);
 }

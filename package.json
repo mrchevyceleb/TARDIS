@@ -24,7 +24,7 @@
     "preview": "vite preview",
     "start": "npm --workspace server run start",
     "typecheck": "tsc -b && npm --workspace server run typecheck",
-    "test": "npm --workspace server run test",
+    "test": "npm --workspace server run test && tsx --test tests/desk-tasks.test.ts",
     "computer:host": "tsx server/src/devices/host.ts",
     "deadcode": "knip --include files,dependencies,unlisted,devDependencies",
     "icons": "node scripts/generate-pwa-icons.mjs",
