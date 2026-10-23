@@ -8,6 +8,7 @@ import { createPortal } from 'react-dom';
 import { ArrowDown, ArrowUp, Check, ChevronRight, Ellipsis, Pencil, Plus, Trash2 } from 'lucide-react';
 import { RailJobsBadge } from '../chat/components/jobs/RailJobsBadge';
 import { GROUP_NAME_MAX, OTHER_GROUP_NAME } from './railGroups';
+import { menuClosesOnScroll } from './menuScroll';
 import './railGroups.css';
 
 /** A count chip that pops whenever its number changes (not on first paint). */
@@ -59,16 +60,17 @@ function RailMenu({ x, y, restore, skipRestore, label, onClose, children }: {
       e.stopPropagation();
       onClose();
     };
-    const onViewport = () => onClose();
+    const onResize = () => onClose();
+    const onScroll = (e: Event) => { if (menuClosesOnScroll(ref.current, restore, e.target)) onClose(); };
     document.addEventListener('pointerdown', onDown);
     document.addEventListener('keydown', onKey, true);
-    window.addEventListener('resize', onViewport);
-    document.addEventListener('scroll', onViewport, true);
+    window.addEventListener('resize', onResize);
+    document.addEventListener('scroll', onScroll, true);
     return () => {
       document.removeEventListener('pointerdown', onDown);
       document.removeEventListener('keydown', onKey, true);
-      window.removeEventListener('resize', onViewport);
-      document.removeEventListener('scroll', onViewport, true);
+      window.removeEventListener('resize', onResize);
+      document.removeEventListener('scroll', onScroll, true);
       if (!skipRestore?.current && restore?.isConnected) restore.focus();
     };
   }, [onClose, x, y, restore, skipRestore]);
