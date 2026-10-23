@@ -27,12 +27,20 @@ const observations = new Map<string, Array<{ at: number; amount: number }>>();
 /** Estimate only from fresh readings of the same balance or cumulative spend.
  * A top-up, reset or changed currency starts a new sample. No invented prices. */
 function measuredPace(a: UsageAccount): UsagePace[] {
-  if (a.status !== 'live' || !a.checkedAt) return [];
+  if (!a.checkedAt) return [];
+  // A stale account keeps its last measured pace: nothing new is being
+  // measured, so inventing a fresh estimate from the old figures would be
+  // wrong, but erasing the honest "last known pace" is just as wrong.
+  if (a.status !== 'live') return a.pace ?? [];
   const at = Date.parse(a.checkedAt), result: UsagePace[] = [];
   const balances = a.amounts.filter(m => ['Account credit balance', 'Available balance', 'Key budget remaining', 'Cash balance', 'Voucher balance', 'Cash', 'Voucher'].includes(m.label));
+  // Sub-balances (Cash, Voucher) only feed the forecast when no total is
+  // present: a $0 voucher beside real cash must never read as empty.
+  const hasTotal = balances.some(m => m.label === 'Available balance' || m.label === 'Account credit balance');
+  const trackedBalances = hasTotal ? balances.filter(m => m.label === 'Available balance' || m.label === 'Account credit balance' || m.label === 'Key budget remaining') : balances;
   const spending = a.amounts.find(m => /spend/i.test(m.label) && /day/i.test(m.period)) || a.amounts.find(m => /spend/i.test(m.label));
-  for (const tracked of balances.length ? balances : spending ? [spending] : []) {
-    const m = tracked, isBalance = balances.includes(m), id = [a.id, m.label, m.currency, m.period, m.scope].join('|');
+  for (const tracked of trackedBalances.length ? trackedBalances : spending ? [spending] : []) {
+    const m = tracked, isBalance = trackedBalances.includes(m), id = [a.id, m.label, m.currency, m.period, m.scope].join('|');
     let points = (observations.get(id) || []).filter(p => at - p.at <= 15 * 60_000 && p.at <= at);
     const previous = points.at(-1);
     if (previous && (isBalance ? m.amount > previous.amount + 0.000001 : m.amount < previous.amount - 0.000001)) points = [];
@@ -41,14 +49,27 @@ function measuredPace(a: UsageAccount): UsagePace[] {
     const first = points[0], elapsed = (at - first.at) / 60_000;
     const change = isBalance ? first.amount - m.amount : m.amount - first.amount;
     if (elapsed < 0.75 || change < 0 || points.length < 2) continue;
+    // A flat series never forecasts "empty": only a balance that truly reads
+    // zero does, and only once it has been observed twice.
     const perMinute = change / elapsed;
+    const minutesLeft = !isBalance ? null
+      : m.amount <= 0 && change > 0 ? 0
+      : perMinute > 0 ? m.amount / perMinute
+      : null;
     result.push({ label: m.label, currency: m.currency, perMinute, observedMinutes: elapsed, samples: points.length,
-      minutesLeft: isBalance && m.amount <= 0 ? 0 : isBalance && perMinute > 0 ? m.amount / perMinute : null,
+      minutesLeft,
       balance: isBalance ? m.amount : null, scope: m.scope });
   }
   // Account/key changes cannot grow the process cache without bound.
   if (observations.size > 200) for (const [id, points] of observations) if (!points.length || at - points.at(-1)!.at > 30 * 60_000) observations.delete(id);
-  while (observations.size > 200) observations.delete(observations.keys().next().value!);
+  while (observations.size > 200) {
+    // Recency is observation time, not insertion order: a Map set on an
+    // existing key keeps its original slot, so age by the last point.
+    let oldestId: string | undefined, oldestAt = Infinity;
+    for (const [id, points] of observations) { const t = points.at(-1)?.at ?? 0; if (t < oldestAt) { oldestAt = t; oldestId = id; } }
+    if (oldestId === undefined) break;
+    observations.delete(oldestId);
+  }
   return result;
 }
 let last: AccountUsage | undefined;
@@ -215,8 +236,7 @@ async function openRouter(token: string, personal: boolean): Promise<UsageAccoun
     const budgets = Array.isArray(data.budgets) ? data.budgets : [];
     base.windows = budgets.flatMap((raw: unknown, index: number) => {
       const item = rec(raw), limit = num(item.limit_usd), used = num(item.spend_usd);
-        const scope = item.scope === 'key_limit' ? 'Key' : item.scope === 'account_limit' ? 'Account' : (label(item.scope) || 'Key').replaceAll('_', ' ');
-        const window = limit !== undefined && limit > 0 && used !== undefined ? percent('budget-' + index, scope + ' budget', used / limit * 100, item.resets_at) : null;
+      const window = limit !== undefined && limit > 0 && used !== undefined ? percent('budget-' + index, (item.scope === 'key_limit' ? 'Key' : item.scope === 'account_limit' ? 'Account' : 'Budget') + ' budget', used / limit * 100, item.resets_at) : null;
       return window ? [window] : [];
     });
     if (!base.amounts.length && !base.windows.length) throw new FeedError(502);

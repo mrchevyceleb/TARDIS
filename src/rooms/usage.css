@@ -159,8 +159,8 @@
 [data-theme="light"] .usage-account { --usage-color:hsl(var(--usage-hue) 60% 28%); }
 [data-theme="light"] .usage-eyebrow.sparkle svg { color:#805018; }
 
-/* Keep each real account snug without making short cards wait on long ones. */
-.usage-account-grid { grid-auto-rows:8px; row-gap:0; grid-auto-flow:row dense; }
+/* Cards keep their read order; short ones never jump ahead of a warning. */
+.usage-account-grid { row-gap:18px; }
 .usage-cell { min-width:0; align-self:start; }
 .usage-account { padding:18px; }
 .usage-window { margin:12px 0; }
