@@ -248,12 +248,21 @@ test('a task start is a batch boundary and a busy wipe holds the task', () => {
   const markedOtherTask = { taskStart: true, taskId: 'task-b', fromId: 'riley' } as never;
   const markedOther = { taskStart: true, taskId: 'task-c', fromId: 'kip' } as never;
   const plain = { fromId: 'riley' } as never;
+  const clarification = { taskId: 'task-a', fromId: 'riley' } as never;
+  const clarificationOther = { taskId: 'task-b', fromId: 'riley' } as never;
   assert.equal(batchJoinableFresh(marked, markedSame), true);
   assert.equal(batchJoinableFresh(marked, markedOtherTask), false);
   assert.equal(batchJoinableFresh(marked, markedOther), false);
   assert.equal(batchJoinableFresh(marked, plain), false);
   assert.equal(batchJoinableFresh(plain, marked), false);
   assert.equal(batchJoinableFresh(plain, plain), true);
+  // A claimed clarification is a boundary too: it may join its own task's
+  // stamped lead or sibling clarification, never an unrelated lead.
+  assert.equal(batchJoinableFresh(marked, clarification), true);
+  assert.equal(batchJoinableFresh(clarification, marked), true);
+  assert.equal(batchJoinableFresh(clarification, clarificationOther), false);
+  assert.equal(batchJoinableFresh(clarification, plain), false);
+  assert.equal(batchJoinableFresh(plain, clarification), false);
   // Legacy marked rows without a task id keep the same-sender grouping.
   const legacy = { taskStart: true, fromId: 'riley' } as never;
   const legacySame = { taskStart: true, fromId: 'riley' } as never;
