@@ -28,12 +28,12 @@ function safeResetTime(text: string): string | undefined {
 }
 
 function usageLimitError(cli: string, text: string, trustedReason = false): TerminalProviderError | null {
-  if (!['claude', 'assistant'].includes(cli) || !(trustedReason ? /^usage limit(?: \((session|weekly|model|usage)\))?(?:;|$)/i.test(text) : NATIVE_LIMIT.test(text))) return null;
+  if (!['claude', 'assistant'].includes(cli) || !(trustedReason ? /^usage limit(?: \((session|weekly|monthly|model|usage)\))?(?:;|$)/i.test(text) : NATIVE_LIMIT.test(text))) return null;
   const resetTime = safeResetTime(text);
   // The native monthly-spend string names the WEEKLY limit's reset time, not
   // the monthly cap's (Oct 7 review): never claim the spend cap "resets"
   // then. The actionable step is raising the cap at settings/usage.
-  if (/monthly spend/i.test(text)) {
+  if (/monthly spend|\(monthly\)/i.test(text)) {
     return {
       message: `Claude's monthly spend limit is reached. Raise it at claude.ai/settings/usage, or switch brains and try again later.`,
       code: '429', retryable: true, usageLimit: true, limitKind: 'monthly',

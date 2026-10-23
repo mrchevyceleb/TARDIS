@@ -1,6 +1,83 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { EventEmitter } from 'node:events';
 import { ClaudeSession } from './runner.ts';
+
+test('account rollover keeps the lane, native resume ID and pending teammate receipts', async () => {
+  const { session, events } = harness();
+  const child = Object.assign(new EventEmitter(), {
+    exitCode: null as number | null,
+    stdin: { end: () => setImmediate(() => { child.exitCode = 0; child.emit('close'); }) },
+  });
+  const prompt = { text: 'Finish the task', images: [{ mediaType: 'image/png', base64: 'test' }], opts: { peerFrom: 'Tester', peerDeliveryId: 'delivery-1', peerFromRole: 'teammate' } };
+  const origin = { peers: [{ name: 'Tester', role: 'teammate', text: prompt.text }], human: false, automation: false };
+  Object.assign(session, {
+    cli: 'claude', chatId: 'bot-test', logKey: 'test-account-rollover', child,
+    currentSessionId: 'saved-native-id', nativeStopGeneration: 0,
+    turnStartedAt: Date.now(), accountRerunPrompt: prompt, turnOrigin: origin,
+    endBackgroundWork: () => {}, pendingPeerAccepts: new Set(['delivery-1', 'delivery-2']),
+    pendingPeerSteerAccepts: new Set(['delivery-2']),
+    pendingPeerInputs: new Map([['delivery-2', { text: 'Keep the queued guidance', images: prompt.images, from: 'Other tester' }]]),
+  });
+  let resumed: string | undefined;
+  session.startWorker = (id: string) => { resumed = id; };
+  session.send = async (text: string, images: unknown, opts: Record<string, unknown>) => {
+    assert.match(text, /Continue the pending request/);
+    assert.match(text, /Keep the queued guidance/);
+    assert.deepEqual(images, prompt.images);
+    assert.equal(opts.peerDeliveryId, 'delivery-1');
+    assert.equal(opts.accountRerun, true);
+    assert.equal(opts.accountRerunOrigin, origin);
+    assert.equal(session.pendingPeerAccepts.has('delivery-1'), true);
+    assert.equal(session.pendingPeerAccepts.has('delivery-2'), true);
+    assert.equal(session.pendingPeerSteerAccepts.size, 0);
+  };
+  const rerun = session.retryOnAccount({ message: 'full', usageLimit: true });
+  assert.equal(session.isBusy(), true);
+  await rerun;
+  assert.equal(resumed, 'saved-native-id');
+  assert.equal(session.accountSwitching, false);
+  assert.deepEqual(events, [], 'no failure, rejected receipt, closed event or false turn boundary');
+});
+
+test('steering waits through account rollover; explicit Stop cancels its restart', async () => {
+  const { session, events } = harness();
+  Object.assign(session, { accountSwitching: true, nativeStopGeneration: 0, shutdown: () => { session.disposed = true; } });
+  assert.equal(await session.interrupt('message-boundary'), true);
+  assert.equal(session.disposed, false);
+  assert.equal(session.nativeStopGeneration, 0);
+  assert.equal(await session.interrupt('interruptSession'), false);
+  assert.equal(session.disposed, true);
+  assert.equal(session.nativeStopGeneration, 1);
+  assert.equal(events.at(-1)?.type, 'turnEnd');
+});
+
+test('usage-limit results enter asynchronous recovery before emitting a failure or rejecting a handoff', () => {
+  const { session, events } = harness();
+  Object.assign(session, {
+    cli: 'claude', chatId: 'bot-limit-test', providerAccount: '/tmp/test-profile',
+    compactFailure: null, syntheticApiErrorReason: null, turnStartedAt: Date.now(),
+    pendingPeerAccepts: new Set(['waiting-delivery']),
+  });
+  let recovering = false;
+  session.recoverAccountLimit = (error: { usageLimit: boolean }) => { recovering = error.usageLimit; };
+  session.handleEvent({ type: 'result', is_error: true, result: "You've hit your session limit · resets 5pm (UTC)" });
+  assert.equal(recovering, true);
+  assert.equal(session.pendingPeerAccepts.has('waiting-delivery'), true);
+  assert.deepEqual(events, []);
+});
+
+test('account retry handles a worker that closed before quota refresh finished', async () => {
+  const { session, events } = harness();
+  Object.assign(session, {
+    workerClosed: true, cli: 'claude', logKey: 'test-already-closed', nativeStopGeneration: 0,
+    child: { exitCode: 0 }, currentSessionId: null, startedResumeId: null,
+    accountRerunPrompt: { text: 'Pending request', opts: {} },
+    endBackgroundWork: () => {}, startWorker: () => {}, send: async () => {},
+  });
+  await session.retryOnAccount({ message: 'full', usageLimit: true });
+  assert.deepEqual(events, []);
+});
 
 // Exercise the real event handler without spawning a CLI or writing a transcript.
 function harness() {

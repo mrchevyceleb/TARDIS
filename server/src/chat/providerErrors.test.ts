@@ -2,6 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { isContextLengthRejection, isSyntheticApiErrorText, syntheticApiErrorReason, terminalExecutionError, terminalProviderError } from './providerErrors.ts';
 
+test('a scrubbed monthly usage-limit message still triggers account rollover', () => {
+  const reason = syntheticApiErrorReason("You've hit your monthly spend limit · resets 5pm (UTC)");
+  assert.equal(reason, 'usage limit (monthly)');
+  const error = terminalExecutionError('claude', { type: 'result', is_error: true }, reason);
+  assert.equal(error?.usageLimit, true);
+  assert.equal(error?.limitKind, 'monthly');
+  assert.equal(error?.resetTime, undefined);
+});
+
 test('every provider family\'s context-length wording is caught, output caps are not', () => {
   // Oct 20: OpenRouter's "exceeds the model's context window" slipped past the
   // old list and the runner never reseeded, so a lane died on every message.

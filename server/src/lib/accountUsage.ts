@@ -10,6 +10,8 @@ import { resolveCodexBin } from '../chat/codex-models.ts';
 import { getXaiAuth, type XaiAuth } from '../routes/xai-oauth.ts';
 import { cliProfiles, subscriptionEnvForLane, cliProfileForEnv, type CliProfile } from './cliProfiles.ts';
 import { listCliAccounts, accountForProfile, type CliAccount } from './cliAccounts.ts';
+import { claudeAccountPool } from './claudeAccountPool.ts';
+import { clearAllClaudeAccountsFullAlert } from './providerLimitAlert.ts';
 
 export type UsageWindow = { id: string; label: string; used: number; limit: number; remaining: number; unit: 'percent' | 'requests' | 'characters' | 'credits'; resetsAt: string | null; active?: boolean };
 export type UsageAmount = { label: string; amount: number; currency: string; period: string; scope: 'key' | 'account' | 'subscription' };
@@ -168,6 +170,31 @@ async function claude(accountInfo: CliAccount, profile: CliProfile): Promise<Usa
     if (!base.amounts.length) base.note += ' Subscription price is not supplied by this quota feed.';
     return base;
   });
+}
+
+let claudeRead: Promise<UsageAccount[]> | undefined;
+let claudeReadAt = 0;
+let claudeLast: UsageAccount[] = [];
+/** Also used at turn admission: rollover cannot depend on an open Usage tab. */
+export function refreshClaudeAccountUsage(): Promise<UsageAccount[]> {
+  if (claudeRead) return claudeRead;
+  if (Date.now() - claudeReadAt < RECENT_MS) return Promise.resolve(claudeLast);
+  claudeRead = (async () => {
+    const accounts = (await listCliAccounts()).filter(item => item.engine === 'claude');
+    const profiles = cliProfiles();
+    const readings = await Promise.all(accounts.map(async info => {
+      const profile = profiles.find(item => info.profileIds.includes(item.id));
+      const usage = profile && info.status === 'connected' ? await claude(info, profile)
+        : unavailable(info.id, 'Claude', 'Subscription needs attention', 'subscription', 'https://claude.ai/settings/usage', 'Open an agent account picker to check this sign-in.');
+      return { profileIds: info.profileIds, usage };
+    }));
+    claudeAccountPool.update(readings);
+    if (readings.some(item => item.usage.status === 'live' && item.usage.windows.length > 0 && !claudeAccountPool.isLimited(item.profileIds[0]))) clearAllClaudeAccountsFullAlert();
+    claudeLast = readings.map(item => item.usage);
+    claudeReadAt = Date.now();
+    return claudeLast;
+  })().finally(() => { claudeRead = undefined; });
+  return claudeRead;
 }
 async function codexRpc(profile: CliProfile): Promise<Record<string, any>> {
   const child = spawn(resolveCodexBin(), ['app-server'], { cwd: APP_ROOT, env: profile.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
@@ -359,11 +386,12 @@ function unavailable(id: string, provider: string, name: string, kind: UsageAcco
 }
 async function collect(): Promise<AccountUsage> {
   const native = await listCliAccounts(); const profiles = cliProfiles(), agents = listAgents();
-  const pending: Array<Promise<UsageAccount[]>> = native.map(info => {
+  const pending: Array<Promise<UsageAccount[]>> = native.filter(info => info.engine !== 'claude').map(info => {
     const profile = profiles.find(p => p.engine === info.engine && info.profileIds.includes(p.id));
     if (!profile || info.status !== 'connected') return Promise.resolve([unavailable(info.id, info.engine === 'claude' ? 'Claude' : 'Codex', 'Subscription needs attention', 'subscription', info.engine === 'claude' ? 'https://claude.ai/settings/usage' : 'https://chatgpt.com/codex/settings/usage', 'Open an agent account picker to check this sign-in.')]);
     return (info.engine === 'claude' ? claude(info, profile) : codex(info, profile)).then(value => [value]);
   });
+  pending.push(refreshClaudeAccountUsage().then(accounts => accounts.map(item => ({ ...item, agents: [] }))));
   const router = key('RIVENDELL_OPENROUTER_API_KEY', 'OPENROUTER_API_KEY'), personal = key('RIVENDELL_PERSONAL_OPENROUTER_API_KEY', 'PERSONAL_OPENROUTER_API_KEY');
   if (router) pending.push(openRouter(router, false).then(value => [value]));
   if (personal && personal !== router) pending.push(openRouter(personal, true).then(value => [value]));
