@@ -281,6 +281,7 @@ test('a task start is a batch boundary and a busy wipe holds the task', () => {
   assert.equal(freshHoldReason({ fresh: false, reason: 'recipient became busy before reset' }), 'recipient became busy before reset');
   assert.equal(freshHoldReason({ fresh: false, reason: 'thread already resetting' }), 'thread already resetting');
   assert.equal(freshHoldReason({ fresh: false, reason: 'recipient became busy before reset' }, 6 * 60_000), undefined);
+  assert.equal(freshHoldReason({ fresh: false, reason: 'recipient became busy before reset' }, 6 * 60_000, true), 'recipient became busy before reset');
   assert.equal(freshHoldReason({ fresh: false, retryable: true, reason: 'fresh start failed: boom' }), 'fresh start failed: boom');
   assert.equal(freshHoldReason({ fresh: false, reason: 'some other refusal' }), undefined);
   assert.equal(freshHoldReason({ fresh: true }), undefined);

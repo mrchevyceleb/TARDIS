@@ -149,6 +149,7 @@ export function chainContinues(parentChain: TeamChain | undefined, fromId: strin
 export function freshHoldReason(
   wiped: { fresh: boolean; retryable?: boolean; reason?: string },
   heldMs = 0,
+  resetBegun = false,
 ): string | undefined {
   if (wiped.fresh) return undefined;
   if (wiped.retryable) return wiped.reason ?? 'fresh start failed after reset began';
@@ -156,9 +157,11 @@ export function freshHoldReason(
   // A busy recipient (a live turn, or background work a wipe would kill)
   // holds the task only up to a ceiling (Matt, Oct 23 2026: fresh threads
   // were switched off because handoffs to lanes running long background
-  // jobs sat queued forever). Past it, nothing destructive has run, so the
-  // task falls open into the standing thread: late but never lost.
-  if (/became busy/i.test(reason)) return heldMs < FRESH_BUSY_HOLD_MS ? reason : undefined;
+  // jobs sat queued forever). Past it the task falls open into the standing
+  // thread, late but never lost, but only when this task's wipe never
+  // began: a `resetting` state may mean a half-erased thread, so that task
+  // keeps waiting for idle and finishes its wipe first.
+  if (/became busy/i.test(reason)) return heldMs < FRESH_BUSY_HOLD_MS || resetBegun ? reason : undefined;
   if (/already resetting|brain changed/i.test(reason)) return reason;
   return undefined;
 }
@@ -259,9 +262,15 @@ export async function freshStartForAgent(agent: Agent, taskId?: string): Promise
     // half-erased thread. The epoch is committed first so a failure here
     // never leaves a `resetting` row suppressing a wipe that never began.
     if (taskId) await persistThreadResetTaskState(logKey, taskId, resetAt, 'resetting');
+    // The durable writes above yield: a turn (or background job) that
+    // started on an existing lane meanwhile must not be killed. Nothing
+    // destructive has run yet, so hold for retry; the `resetting` state
+    // keeps the task owed and stops it falling open later.
+    const current = runner.liveSessionsForLogKey(logKey);
+    if (!recipientIdle(current)) return { fresh: false, retryable: true, reason: 'recipient became busy during reset' };
     noteThreadResetEpoch(logKey, committed);
     freshLifecycleStarted({ logKey, repo: repoPath, chatId, cli: home.cli });
-    for (const prior of priors) {
+    for (const prior of current) {
       await runner.interruptSession({ cli: prior.cli as CliKind, repoPath: prior.cwd, chatId: prior.chatId });
       runner.dropSession(prior.cli as CliKind, prior.cwd, prior.chatId);
     }
@@ -2110,12 +2119,26 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // delivering without a wipe until they drain.
         if (freshResetOwed(lead.taskId, lead.taskId ? threadResetTaskState(toLogKey, lead.taskId) : undefined)) {
           const wiped = await freshStartForAgent(to, lead.taskId);
+          // A missing or future queue stamp cannot prove a short wait, so it
+          // counts as past the ceiling rather than holding indefinitely.
           const queuedAt = Date.parse(lead.createdAt ?? '');
-          const hold = freshHoldReason(wiped, Number.isFinite(queuedAt) ? Date.now() - queuedAt : 0);
+          const now = Date.now();
+          const heldMs = Number.isFinite(queuedAt) && queuedAt <= now ? now - queuedAt : FRESH_BUSY_HOLD_MS;
+          const resetBegun = threadResetTaskState(toLogKey, lead.taskId!)?.state === 'resetting';
+          const hold = freshHoldReason(wiped, heldMs, resetBegun);
           if (hold) {
             freshRetryReason = hold;
           } else if (!wiped.fresh) {
-            console.warn(`[team] fresh thread for ${to.name} skipped: ${wiped.reason ?? 'unknown'}`);
+            // Falling open is durable: the task is marked settled, so a
+            // later clarification with the same task id never wipes the
+            // thread this task is now running in. If the mark cannot be
+            // written, hold and retry rather than deliver unmarked.
+            try {
+              await persistThreadResetTaskState(toLogKey, lead.taskId!, now, 'complete');
+              console.warn(`[team] fresh thread for ${to.name} skipped: ${wiped.reason ?? 'unknown'}`);
+            } catch (error) {
+              freshRetryReason = `fresh-thread waiver not saved: ${(error as Error).message}`;
+            }
           }
         }
       }
