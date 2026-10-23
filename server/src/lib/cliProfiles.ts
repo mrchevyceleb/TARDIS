@@ -234,7 +234,7 @@ export async function registerLoginProfile(managedId: string, engine: AccountEng
  * else bills it to whatever account that other directory maps to. Callers
  * pass the directory the command will actually run in. */
 export async function backgroundSubscriptionEnv(cwd: string, agentName: string, chatId: string): Promise<NodeJS.ProcessEnv> {
-  const { peekThreadSession } = await import('../chat/runner.ts');
+  const { peekThreadSessions } = await import('../chat/runner.ts');
   const { sessionDirectory } = await import('../chat/sessionPolicy.ts');
   const env = backgroundAccountEnv(cwd, agentName);
   const claude = subscriptionEnvForLane('claude', cwd, chatId, agentName);
@@ -249,15 +249,10 @@ export async function backgroundSubscriptionEnv(cwd: string, agentName: string, 
   // Rally money. When the borrow is refused the job keeps its own lane's
   // resolved profile, which is always in-pool by construction.
   const laneDir = sessionDirectory(chatId, cwd);
-  type Borrowable = { isBusy(): boolean; cli: string; subscriptionProfile(): string | null };
-  const candidates = [laneDir, ...(laneDir !== cwd ? [cwd] : [])]
-    .map(repoPath => peekThreadSession({ cli: 'claude', repoPath, chatId }) as unknown as Borrowable | null)
-    .filter((session): session is Borrowable => !!session?.isBusy() && typeof session.subscriptionProfile === 'function');
-  for (const active of candidates) {
-    const profile = active.subscriptionProfile();
-    if (profile && ['claude', 'assistant'].includes(active.cli)
-      && claudeProfileInLanePool(profile, cliProfileForEnv('claude', claude))) { env.CLAUDE_CONFIG_DIR = profile; break; }
-    if (profile && ['codex', 'codex-personal'].includes(active.cli)) { env.CODEX_HOME = profile; break; }
+  for (const active of peekThreadSessions({ cli: 'claude', repoPath: cwd, chatId }, laneDir)) {
+    if (!active.busy) continue;
+    if (active.claudeProfile && ['claude', 'assistant'].includes(active.cli)
+      && claudeProfileInLanePool(active.claudeProfile, cliProfileForEnv('claude', claude))) { env.CLAUDE_CONFIG_DIR = active.claudeProfile; break; }
   }
   return env;
 }

@@ -4040,6 +4040,32 @@ export function peekClaudeSession(opts: {
   return live;
 }
 
+export type ThreadSessionCandidate = {
+  cli: string;
+  cwd: string;
+  busy: boolean;
+  /** CLAUDE_CONFIG_DIR this live session actually spawned with, if any. */
+  claudeProfile: string | null;
+};
+
+/** Every live session on one agent thread, lane-home directory first, then
+ *  the caller's own directory. Agent thread log keys discard the directory,
+ *  so a single peek can only ever return the first live session; detached
+ *  billing needs all of them to pick a busy one in the right pool. */
+export function peekThreadSessions(opts: { cli: CliKind; repoPath: string; chatId?: string }, preferredCwd?: string): ThreadSessionCandidate[] {
+  const logKey = trackedThreadLogKey(opts);
+  const rank = (cwd: string): number => cwd === preferredCwd ? 0 : cwd === opts.repoPath ? 1 : 2;
+  return [...sessions.values()]
+    .filter(session => session.logKey === logKey && session.isAlive())
+    .sort((a, b) => rank(a.cwd) - rank(b.cwd))
+    .map(session => ({
+      cli: session.cli,
+      cwd: session.cwd,
+      busy: session.isBusy(),
+      claudeProfile: 'subscriptionProfile' in session ? session.subscriptionProfile() : null,
+    }));
+}
+
 /** Control paths attach directly and never wait for a native handover lock. */
 export function peekThreadSession(opts: { cli: CliKind; repoPath: string; chatId?: string }): AnySession | null {
   const logKey = trackedThreadLogKey(opts);
