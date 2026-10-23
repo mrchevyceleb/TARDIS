@@ -5,10 +5,11 @@ import { abortInFlightChannelDeliveries, agentLogKey, batchJoinable, deliveryInt
 import { laneChatId } from './threadKey.ts';
 import type { Agent } from './agents.ts';
 import { freshThreadOnTask, freshTaskSenders } from './sessionPolicy.ts';
-import { isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed } from './teamBus.ts';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed, freshResetAction, providerParkKey, providerQueueEligible, sendWithAdmission } from './teamBus.ts';
+import { mkdtempSync, writeFileSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { clearProviderParks, providerParkedUntil } from '../lib/providerLimitAlert.ts';
 
 test('raw API preserves its reply default while the MCP can request async delivery', () => {
   assert.equal(teamMessageWaitRequested(undefined), true);
@@ -208,11 +209,41 @@ test('only an explicit task-start handoff from a task source stamps a fresh thre
     assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', continuesChain: true }), false);
     // An unflagged recipient never stamps.
     assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'kip', recipientHome: 'bot-kip' }), false);
+    // A paused recipient never stamps either: the operator pause keeps the
+    // ongoing thread so a reset can never lock the agent out.
+    writeFileSync(file, JSON.stringify({
+      defaults: { reportsTo: 'chief-of-staff' },
+      agents: {
+        christina: { freshThreadOnTask: true },
+        tim: { freshThreadOnTask: true, freshThreadPaused: true, freshTaskSenders: ['riley'] },
+        kip: { lead: true },
+      },
+    }));
+    // The policy cache keys on mtime; force a fresh read.
+    const stat = statSync(file);
+    utimesSync(file, stat.atime, new Date(stat.mtimeMs + 2000));
+    assert.equal(isTaskStartHandoff({ senderId: 'riley', recipientId: 'tim', recipientHome: 'bot-tim' }), false);
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina' }), true);
   } finally {
     if (previous === undefined) delete process.env.RIVENDELL_SESSION_POLICY_FILE;
     else process.env.RIVENDELL_SESSION_POLICY_FILE = previous;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('provider park keys share one profile across claude lanes only', () => {
+  // Every claude lane on the same CLI profile parks together: that is the
+  // account whose window is full.
+  assert.equal(
+    providerParkKey('claude', 'bot-juno', '/profiles/main'),
+    providerParkKey('claude', 'bot-tim', '/profiles/main'),
+  );
+  assert.notEqual(
+    providerParkKey('claude', 'bot-juno', '/profiles/main'),
+    providerParkKey('claude', 'bot-juno', '/profiles/other'),
+  );
+  // Other engines park per agent, so one lane's limit idles nobody else.
+  assert.notEqual(providerParkKey('codex', 'bot-piper'), providerParkKey('codex', 'bot-felix'));
 });
 
 test('a fresh wipe is owed per task id until that task completes its reset', () => {
@@ -227,6 +258,47 @@ test('a fresh wipe is owed per task id until that task completes its reset', () 
   assert.equal(freshResetOwed('task-b', undefined), true);
   // Legacy marked rows carry no task id and never trigger this gate.
   assert.equal(freshResetOwed(undefined, { taskId: 'task-a', state: 'resetting', resetAt: 1 }), false);
+});
+
+test('parked priority chatter cannot lead ahead of a queued person message', () => {
+  const now = Date.now();
+  const priorityPeer = { id: 'priority', priority: true, fromRole: 'teammate' };
+  const queuedPerson = { id: 'person', queue: true, fromRole: 'desk' };
+  const candidates = [priorityPeer, queuedPerson].filter(record => providerQueueEligible(record, now + 60_000, now));
+  assert.deepEqual(candidates, [queuedPerson]);
+  assert.equal(providerQueueEligible(priorityPeer, now, now), true);
+  assert.equal(providerQueueEligible({ fromRole: 'channel', personPosted: true }, now + 60_000, now), true);
+  assert.equal(providerQueueEligible({ personSourced: true }, now + 60_000, now), true);
+});
+
+test('policy pauses waive only untouched tasks and cannot bypass an interrupted wipe', () => {
+  assert.equal(freshResetAction('task', undefined, true), 'reset');
+  assert.equal(freshResetAction('task', undefined, false), 'waive');
+  // The same false gate covers a pause, revoked sender or disabled policy.
+  assert.equal(freshResetAction('task', { taskId: 'task', state: 'resetting', resetAt: 1 }, false), 'reset');
+  assert.equal(freshResetAction('task', { taskId: 'task', state: 'complete', resetAt: 1 }, true), 'none');
+  assert.equal(freshResetAction(undefined, undefined, true), 'none');
+});
+
+test('a usage rejection parks the actual session profile, not another account or delivery', async () => {
+  clearProviderParks();
+  let notify: Parameters<Parameters<typeof sendWithAdmission>[0]['subscribe']>[0] = () => {};
+  let unsubscribed = false;
+  const session: Parameters<typeof sendWithAdmission>[0] = {
+    cli: 'claude', chatId: 'bot-test', key: 'claude|workspace|bot-test', logKey: 'test',
+    subscriptionProfile: () => '/profiles/rejected', latestSeq: () => 0, send: async () => {},
+    subscribe: listener => { notify = listener; return () => { unsubscribed = true; }; },
+  };
+  try {
+    await assert.rejects(sendWithAdmission(session, 'pending', async () => {
+      notify({ ev: { type: 'event', event: { type: 'peer_delivery_rejected', deliveryId: 'unrelated', usageLimit: true } } });
+      assert.equal(providerParkedUntil(providerParkKey('claude', session.chatId, '/profiles/rejected')), 0);
+      notify({ ev: { type: 'event', event: { type: 'peer_delivery_rejected', deliveryId: 'pending', usageLimit: true } } });
+    }), /admission rejected/);
+    assert.ok(providerParkedUntil(providerParkKey('claude', session.chatId, '/profiles/rejected')) > Date.now());
+    assert.equal(providerParkedUntil(providerParkKey('claude', session.chatId, '/profiles/healthy')), 0);
+    assert.equal(unsubscribed, true);
+  } finally { clearProviderParks(); }
 });
 
 test('the fresh wipe only runs at an idle boundary', () => {

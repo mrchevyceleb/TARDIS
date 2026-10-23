@@ -18,7 +18,9 @@ import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, recordQuietExemptWake
 import { LIVE_HOLD_CEILING_MS } from '../lib/laneLiveness.ts';
 import { briefEnvelopeForHandoff, isCoderBrief } from './briefEnvelope.ts';
 import { recordNativeFailure } from './sessionMetrics.ts';
-import { freshThreadOnTask, freshTaskSenders, sessionDirectory } from './sessionPolicy.ts';
+import { freshThreadOnTask, freshThreadPaused, freshTaskSenders, sessionDirectory } from './sessionPolicy.ts';
+import { parkProviderAccount, providerParkedUntil, providerParkKeyForProfile, PROVIDER_LIMIT_FALLBACK_PARK_MS } from '../lib/providerLimitAlert.ts';
+import { cliProfileForEnv, subscriptionEnvForLane } from '../lib/cliProfiles.ts';
 import { freshLifecycleStarted, freshLifecycleCompleted } from './freshLifecycle.ts';
 import { persistThreadResetEpoch, noteThreadResetEpoch, persistThreadResetTaskState, restoreThreadResetTaskState, threadResetTaskState, type ThreadResetTaskState } from './threadResetStore.ts';
 import { clearThreadSessionIds } from './sessions.ts';
@@ -39,7 +41,7 @@ type SessionLike = {
     fn: (event: {
       seq?: number;
       lane?: string;
-      ev?: { type?: string; event?: { type?: string; deliveryId?: string; continuing?: boolean; unread?: boolean; message?: string; terminal?: boolean } };
+      ev?: { type?: string; event?: { type?: string; deliveryId?: string; continuing?: boolean; unread?: boolean; message?: string; terminal?: boolean; usageLimit?: boolean; resetTime?: string } };
     }) => void,
     sinceSeq?: number,
     countSubscriber?: boolean,
@@ -47,19 +49,62 @@ type SessionLike = {
   key: string;
   logKey: string;
   chatId?: string;
+  cli?: string;
+  subscriptionProfile?: () => string | null;
 };
 
 
+/** Provider-account identity for the usage-limit park. Claude-family lanes
+ *  park on their CLI profile directory (the account every lane on it
+ *  shares); other engines park per agent, so one lane's limit never idles
+ *  an unrelated engine. Exported for tests. */
+export function providerParkKey(cli: string, chatId: string | undefined, providerAccount?: string): string {
+  if (cli === 'claude' || cli === 'assistant') {
+    return providerParkKeyForProfile(providerAccount || cliProfileForEnv('claude', process.env));
+  }
+  return `agent:${chatId ?? 'unknown'}`;
+}
+
+/** The park key for a recipient's home lane, resolved from its agent record:
+ *  the same key the runner parks when that lane's turn dies on a usage
+ *  limit, so the drain checks the park the failure actually set. Claude
+ *  profiles resolve through the same per-lane account routing the runner
+ *  spawns with (cliProfiles), never a bare env guess: a lane pinned to a
+ *  second account parks on that account, not the default one. */
+export function providerParkKeyForAgent(agent: Agent): string {
+  const home = agentLogKey(agent);
+  if (home.cli === 'claude' || home.cli === 'assistant') {
+    return providerParkKey(home.cli, home.chatKey, subscriptionProfileForLane(home.chatKey, agent.name));
+  }
+  return providerParkKey(home.cli, home.chatKey);
+}
+
+/** The CLI profile directory a lane will spawn with, via the runner's own
+ *  account routing. Undefined when routing cannot resolve (a broken account
+ *  choice): the caller then falls back to the env-default key, and the
+ *  admission failure itself still parks through the session's real profile. */
+function subscriptionProfileForLane(chatId: string, agentName: string): string | undefined {
+  try {
+    const env = subscriptionEnvForLane('claude', ELROND_WORKSPACE_PATH, chatId, agentName);
+    return cliProfileForEnv('claude', env);
+  } catch {
+    return undefined;
+  }
+}
+
 /** A stdin write is not a provider receipt. Keep listening through startup
  * so callers do not retry an admitted wake or accept an empty reply. */
-async function sendWithAdmission(session: SessionLike, deliveryId: string, send: () => Promise<void>): Promise<void> {
+export async function sendWithAdmission(session: SessionLike, deliveryId: string, send: () => Promise<void>): Promise<void> {
   let finish = (_outcome: 'accepted' | 'rejected' | 'terminal' | 'closed' | 'timeout') => {};
   const admitted = new Promise<'accepted' | 'rejected' | 'terminal' | 'closed' | 'timeout'>(resolve => { finish = resolve; });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const unsubscribe = session.subscribe(event => {
     const inner = event.ev?.type === 'event' ? event.ev.event : undefined;
     if (inner?.type === 'peer_delivery_accepted' && inner.deliveryId === deliveryId) finish('accepted');
-    if (inner?.type === 'peer_delivery_rejected' && inner.deliveryId === deliveryId) finish(inner.terminal ? 'terminal' : 'rejected');
+    if (inner?.type === 'peer_delivery_rejected' && inner.deliveryId === deliveryId) {
+      if (inner.usageLimit) parkProviderAccount(providerParkKey(session.cli ?? session.key.split('|')[0] ?? '', session.chatId, session.subscriptionProfile?.() ?? undefined), inner.resetTime);
+      finish(inner.terminal ? 'terminal' : 'rejected');
+    }
     if (event.ev?.type === 'closed') finish('closed');
   }, session.latestSeq(), false);
   try {
@@ -109,6 +154,13 @@ export function freshResetOwed(
 ): boolean {
   if (!taskId) return false;
   return state === undefined || state.state !== 'complete';
+}
+
+/** Policy changes may waive an untouched task, never a begun wipe. Persist
+ * the waiver before delivery so unpausing cannot wipe a later clarification. */
+export function freshResetAction(taskId: string | undefined, state: ThreadResetTaskState | undefined, allowed: boolean): 'reset' | 'waive' | 'none' {
+  if (!freshResetOwed(taskId, state)) return 'none';
+  return state?.state === 'resetting' || allowed ? 'reset' : 'waive';
 }
 
 /** A fresh-task stamp is a batch boundary (Codex verify rounds 6-8, Oct 23
@@ -199,7 +251,7 @@ export function isTaskStartHandoff(opts: {
   if (opts.personSourced === true) return false;
   if (opts.nudgeHoldSince !== undefined) return false;
   if (opts.continuesChain === true) return false;
-  if (!freshThreadOnTask(opts.recipientHome)) return false;
+  if (!freshThreadOnTask(opts.recipientHome) || freshThreadPaused(opts.recipientHome)) return false;
   const allowed = freshTaskSenders(opts.recipientHome);
   if (allowed.length) return allowed.includes(opts.senderId);
   return isCoderBrief(opts.senderId, opts.recipientId);
@@ -1962,8 +2014,9 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
   // left is same-tier chatter, and the finally in scheduleQueuedRecipient
   // reschedules the queue at the 05:00 ET window end.
   let quietParked = false;
+  let providerParked = false;
   for (const record of batch) {
-    if (quietParked) break;
+    if (quietParked || providerParked) break;
     while (true) {
       const stillQueued = await queueStoreOperation(async () =>
         (await queuedDeliveryStore.list()).some((item) => item.id === record.id));
@@ -1998,8 +2051,10 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       // characters so an admitted turn never grows past admission limits.
       // Whatever does not fit stays queued and the next admission takes it.
       const holdNow = isNonMax && inQuietHours(Date.now());
+      const providerHeldUntil = providerParkedUntil(providerParkKeyForAgent(to));
       let candidates = (await queueStoreOperation(() => queuedDeliveryStore.list()))
-        .filter((item) => queueKeyOf(item) === queueKey && (!holdNow || personSourced(item)))
+        .filter((item) => queueKeyOf(item) === queueKey && (!holdNow || personSourced(item))
+          && providerQueueEligible(item, providerHeldUntil))
         .sort((a, b) => (Number(sortsAhead(b)) - Number(sortsAhead(a)))
           || String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
       // Rows marked acked rode a batch the recipient already saw, but their
@@ -2011,7 +2066,10 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         await queueStoreOperation(() => queuedDeliveryStore.delete(row.id));
       }
       if (seenRows.length > 0) candidates = candidates.filter((item) => item.acked !== true);
-      if (candidates.length === 0) break;
+      if (candidates.length === 0) {
+        if (providerHeldUntil > Date.now()) providerParked = true;
+        break;
+      }
       // (card-504beb, verify P1 3 + review 3 P1 7) A queued record never
       // leads over a non-queued one in its OWN tier: it would wait out the
       // live turn for up to 30 minutes with no interrupt, blocking the
@@ -2115,25 +2173,39 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       // retry instead.
       const batchIsPersonSourced = siblings.some((sibling) => personSourced(sibling));
       const leadIsChannelFanout = lead.fromRole === 'channel';
+      // Provider-limit park (Oct 23 2026): this recipient's account already
+      // reported a full usage window. Admitting now would only respawn into
+      // the same 429, and a fresh-thread wipe would strand mid-reset, so the
+      // whole recipient parks until the reset. Records stay durable and the
+      // finally reschedules a routing check, without another provider call.
+      // Person-sourced records keep their existing gates and never wait on
+      // the park: the boss may always speak, and their own admission failure
+      // simply re-parks.
+      const parkedUntil = providerParkedUntil(providerParkKeyForAgent(to));
+      if (parkedUntil > Date.now() && !batchIsPersonSourced) {
+        console.log(`[team] queued delivery ${lead.fromName} -> ${to.name} held: provider usage window resets at ${new Date(parkedUntil).toISOString()}`);
+        providerParked = true;
+        break;
+      }
       let freshRetryReason: string | undefined;
-      if (freshThreadOnTask(to.home)
-        && !batchIsPersonSourced
-        && !leadIsChannelFanout
-        && !nudgeHoldActive(lead)
-        // Defense in depth: the drain re-derives the sender gate instead of
-        // trusting a stored marker alone, so an operator list change (or a
-        // stale stamp from an earlier build) can never wipe for a sender
-        // that is no longer a task source for this recipient.
-        && isTaskStartHandoff({ senderId: lead.fromId, recipientId: to.id, recipientHome: to.home })) {
+      if (lead.taskId) {
         const toHome = agentLogKey(to);
         const toLogKey = logKeyFor(toHome.cli, sessionDirectory(toHome.chatKey, ELROND_WORKSPACE_PATH), toHome.chatKey);
-        // The batch is owed a wipe until its own task id's durable reset
-        // state says complete: an interrupted wipe (`resetting`) resumes
-        // after restart, and a different task is never suppressed by an
-        // earlier task's completion (Codex verify, Oct 23 2026). Legacy
-        // marked rows carry no task id; they keep the old behavior of
-        // delivering without a wipe until they drain.
-        if (freshResetOwed(lead.taskId, lead.taskId ? threadResetTaskState(toLogKey, lead.taskId) : undefined)) {
+        const leadState = threadResetTaskState(toLogKey, lead.taskId);
+        const allowed = !batchIsPersonSourced && !leadIsChannelFanout && !nudgeHoldActive(lead)
+          && isTaskStartHandoff({ senderId: lead.fromId, recipientId: to.id, recipientHome: to.home });
+        // Recovery is outside every mutable policy gate: pausing, disabling
+        // fresh threads or changing the sender list cannot admit a task into
+        // a half-erased thread. An untouched task instead gets a durable
+        // waiver before it is admitted into the standing conversation.
+        const action = freshResetAction(lead.taskId, leadState, allowed);
+        if (action === 'waive') {
+          try {
+            await persistThreadResetTaskState(toLogKey, lead.taskId, Date.now(), 'complete');
+          } catch (error) {
+            freshRetryReason = `fresh-thread waiver not saved: ${(error as Error).message}`;
+          }
+        } else if (action === 'reset') {
           const wiped = await freshStartForAgent(to, lead.taskId);
           // A missing or future queue stamp cannot prove a short wait, so it
           // counts as past the ceiling rather than holding indefinitely.
@@ -2243,15 +2315,39 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
   }
 }
 
+/** Node timers overflow past ~24.8 days and fire immediately, which would
+ *  turn a long park into a hot retry loop. Cap every scheduled delay. */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/** Filter before choosing a lead: an older priority teammate otherwise
+ * wins the person's tier, parks the drain and strands the person's post. */
+export function providerQueueEligible(record: { fromRole?: string; personPosted?: boolean; personSourced?: boolean }, parkedUntil: number, now = Date.now()): boolean {
+  return parkedUntil <= now || personSourced(record);
+}
+
 /** Retry delay for a paused queue with records still pending. Fast retry
  *  normally; during quiet hours a non-Max recipient's held teammate records
  *  wait for the 05:00 ET window end instead of churning the drain every 15
  *  seconds all night. Person-sourced records keep the fast retry whatever
  *  the hour — the boss's messages never wait out the window. */
-function queuedRetryDelay(queueKey: string, remains: QueuedTeamDelivery[]): number {
+export function queuedRetryDelay(queueKey: string, remains: QueuedTeamDelivery[]): number {
   const now = Date.now();
+  // A provider park suppresses 15s retries into a window that cannot answer.
+  // Wake at reset or the next bounded routing check, whichever comes first.
+  // Person-sourced records never wait on the park, matching the admission
+  // gate above.
+  if (!remains.some((item) => personSourced(item))) {
+    const recipient = findAgent(queueKey);
+    if (recipient) {
+      const parkedUntil = providerParkedUntil(providerParkKeyForAgent(recipient), now);
+      // Re-evaluate routing periodically without spawning a provider turn:
+      // a new sign-in, picker change or refreshed healthy backup must not
+      // wait out the old profile's day-long reset timer.
+      if (parkedUntil > now) return Math.min(parkedUntil - now, PROVIDER_LIMIT_FALLBACK_PARK_MS, MAX_TIMER_DELAY_MS);
+    }
+  }
   if (!inQuietHours(now) || isQuietExemptLane(queueKey)) return ASYNC_RETRY_MS;
-  return remains.some((item) => personSourced(item)) ? ASYNC_RETRY_MS : msUntilQuietEnd(now);
+  return remains.some((item) => personSourced(item)) ? ASYNC_RETRY_MS : Math.min(msUntilQuietEnd(now), MAX_TIMER_DELAY_MS);
 }
 
 function scheduleQueuedRecipient(queueKey: string, delayMs = 0): void {

@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
 import { ClaudeSession } from './runner.ts';
 import { preferredSubscriptionEnv, subscriptionRoutingKey } from '../lib/cliProfiles.ts';
+import { clearProviderParks, providerParkedUntil, providerParkKeyForProfile } from '../lib/providerLimitAlert.ts';
 
 test('pooled account redirects do not look like picker changes', () => {
   const { session } = harness();
@@ -78,7 +79,8 @@ test('steering waits through account rollover; explicit Stop cancels its restart
   assert.equal(events.at(-1)?.type, 'turnEnd');
 });
 
-test('usage-limit results enter asynchronous recovery before emitting a failure or rejecting a handoff', () => {
+test('usage-limit results park the failed account before recovery and preserve rejection metadata', () => {
+  clearProviderParks();
   const { session, events } = harness();
   Object.assign(session, {
     cli: 'claude', chatId: 'bot-limit-test', providerAccount: '/tmp/test-profile',
@@ -90,8 +92,20 @@ test('usage-limit results enter asynchronous recovery before emitting a failure 
   session.recoverAccountLimit = (error: { usageLimit: boolean }) => { recovering = error.usageLimit; };
   session.handleEvent({ type: 'result', is_error: true, result: "You've hit your session limit · resets 5pm (UTC)" });
   assert.equal(recovering, true);
+  assert.ok(providerParkedUntil(providerParkKeyForProfile('/tmp/test-profile')) > Date.now());
+  assert.equal(providerParkedUntil(providerParkKeyForProfile('/tmp/healthy-profile')), 0);
   assert.equal(session.pendingPeerAccepts.has('waiting-delivery'), true);
   assert.deepEqual(events, []);
+  session.pendingPeerInputs = new Map([['waiting-delivery', { text: 'Pending request' }]]);
+  // All accounts full: recovery completes the original result, once, rather
+  // than recursively retrying it. The team bus receives the limit fact.
+  session.handleEvent({ type: 'result', is_error: true, result: "You've hit your session limit · resets 5pm (UTC)" }, true);
+  const rejection = events.find((event: any) => event.event?.type === 'peer_delivery_rejected') as any;
+  assert.equal(rejection.event.deliveryId, 'waiting-delivery');
+  assert.equal(rejection.event.usageLimit, true);
+  assert.equal(rejection.event.resetTime, '5:00 PM (UTC)');
+  assert.equal(session.pendingPeerInputs.has('waiting-delivery'), false);
+  clearProviderParks();
 });
 
 test('a late usage-limit result cannot replay a completed turn', () => {

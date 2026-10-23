@@ -47,7 +47,7 @@ import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { chatAttachmentPath, saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
-import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
+import { noteProviderUsageLimit, parkProviderAccount, providerParkKeyForProfile } from '../lib/providerLimitAlert.ts';
 import { claudeAccountPool } from '../lib/claudeAccountPool.ts';
 import { refreshClaudeAccountUsage } from '../lib/accountUsage.ts';
 import { applyProviderLimits } from './providerEnv.ts';
@@ -3210,11 +3210,16 @@ class ClaudeSession {
       const accepted = this.usageSeen ? contextTokens(this.contextKey) : 0;
       if (accepted > 0 && this.providerWindow) learnContextLimit(this.spawnModel, accepted, this.providerWindow);
     }
-    if (!accountLimitHandled && terminal?.usageLimit && this.turnStartedAt !== null && this.accountRerunPrompt
-        && (this.cli === 'claude' || this.cli === 'assistant')) {
+    if (!accountLimitHandled && terminal?.usageLimit && (this.cli === 'claude' || this.cli === 'assistant')) {
+      // Park the failed profile before asynchronous recovery. The drain
+      // resolves the pool's selected profile, so a healthy failover account
+      // remains available instead of inheriting the failed account's park.
+      parkProviderAccount(providerParkKeyForProfile(this.providerAccount), terminal.resetTime);
       claudeAccountPool.reject(cliProfileId('claude', this.providerAccount), terminal);
-      this.recoverAccountLimit(terminal, ev);
-      return;
+      if (this.turnStartedAt !== null && this.accountRerunPrompt) {
+        this.recoverAccountLimit(terminal, ev);
+        return;
+      }
     }
     // Z.ai meters the coding plan in fixed windows, so an exhausted window is
     // never a balance problem and topping up credits cannot clear it. Attribute
@@ -3378,7 +3383,12 @@ class ClaudeSession {
           if (this.pendingPeerSteerAccepts.has(deliveryId)) continue;
           this.pendingPeerAccepts.delete(deliveryId);
           this.pendingPeerInputs?.delete(deliveryId);
-          this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, ts: Date.now() } });
+          this.emit({ type: 'event', event: {
+            type: 'peer_delivery_rejected',
+            deliveryId,
+            ...(terminal?.usageLimit ? { usageLimit: true, resetTime: terminal.resetTime } : {}),
+            ts: Date.now(),
+          } });
         }
       }
       this.pendingPeerSteerAccepts.clear();
