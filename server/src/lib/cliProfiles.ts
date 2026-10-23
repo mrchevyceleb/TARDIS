@@ -78,8 +78,27 @@ export function subscriptionEnvForLane(engine: AccountEngine, cwd: string, chatI
   if (engine !== 'claude') return preferred;
   const profiles = cliProfiles().filter(item => item.engine === 'claude');
   const id = cliProfileId('claude', cliProfileForEnv('claude', preferred));
-  const selected = claudeAccountPool.select(id, profiles.map(item => item.id));
-  return selected === id ? preferred : { ...profiles.find(item => item.id === selected)!.env };
+  const peers = claudePoolPeers(id, profiles);
+  const selected = claudeAccountPool.select(id, peers.map(item => item.id));
+  return selected === id ? preferred : { ...peers.find(item => item.id === selected)!.env };
+}
+
+/** Claude logins are billed in separate pools (Matt, Oct 23 2026: the game
+ *  studio runs on his own money, Rally work on the company's), so failover
+ *  never moves a lane into another pool's account. Pools are account-map names,
+ *  `RIVENDELL_CLAUDE_ACCOUNT_POOLS="mjohnst,mattio|kim,tardis"`. A lane whose
+ *  preferred login is in no pool only fails over to other unpooled logins. */
+function claudePoolPeers(preferredId: string, profiles: CliProfile[]): CliProfile[] {
+  const raw = process.env.RIVENDELL_CLAUDE_ACCOUNT_POOLS?.trim();
+  if (!raw) return profiles;
+  const idOf = (name: string): string | null => {
+    try { return cliProfileId('claude', cliProfileForEnv('claude', accountEnvForAccount(name, APP_ROOT))); } catch { return null; }
+  };
+  const pools = raw.split('|').map(group => new Set(group.split(',').map(name => name.trim()).filter(Boolean)
+    .map(idOf).filter((id): id is string => Boolean(id))));
+  const mine = pools.find(pool => pool.has(preferredId));
+  const pooled = new Set(pools.flatMap(pool => [...pool]));
+  return profiles.filter(profile => mine ? mine.has(profile.id) : !pooled.has(profile.id));
 }
 
 export function preferredSubscriptionEnv(engine: AccountEngine, cwd: string, chatId: string, agentName?: string): NodeJS.ProcessEnv {
