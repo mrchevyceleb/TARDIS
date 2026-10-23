@@ -13,7 +13,7 @@
 // Studio IDE stays at /studio.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from 'react';
-import { ClipboardList, Menu, MessageSquare, Pencil } from 'lucide-react';
+import { ClipboardCheck, ClipboardList, Menu, MessageSquare, Pencil } from 'lucide-react';
 import { apiJson } from '../data/api';
 import { useJarvis } from '../jarvis/JarvisProvider';
 import { useMediaQuery } from '../chat/hooks/useMediaQuery';
@@ -41,6 +41,7 @@ import { OPEN_PANE_EVENT } from './messagePins';
 import { Council } from '../rooms/Council';
 import { Desk } from '../rooms/Desk';
 import { Usage } from '../rooms/Usage';
+import { QaBoard } from '../rooms/QaBoard';
 import { DeskChatDock, DeskChatOpenContext, useDeskChat } from '../rooms/DeskChat';
 import { DESK_FOCUS_EVENT, FIRST_OPEN_REF, OPEN_AGENT_EVENT, focusDeskRef, hasDeskDeepLink, useDeskDeepLinks, useDeskSummary } from '../data/desk';
 import { NeedsYouBadge, useNeedsYouAlerts } from '../components/NeedsYouBadge';
@@ -65,6 +66,7 @@ const ROOMS: Record<string, ComponentType> = {
   integrations: Integrations,
   content: Content,
   desk: Desk,
+  qa: QaBoard,
   usage: Usage,
   council: Council,
   dashboard: Dashboard,
@@ -477,6 +479,9 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
               {flags.contentRoom && <button type="button" aria-pressed={activeRoom === 'content'} onClick={() => {
                 if (activeRoom !== 'content') openRoom('content');
               }}><Pencil size={16} aria-hidden="true" /><span className="bt-ws-label">{ROOM_NAMES.content.name}</span></button>}
+              <button type="button" aria-pressed={activeRoom === 'qa'} onClick={() => {
+                if (activeRoom !== 'qa') openRoom('qa');
+              }}><ClipboardCheck size={16} aria-hidden="true" /><span className="bt-ws-label">{ROOM_NAMES.qa.name}</span></button>
             </nav>
             {/* Always on screen, far from the composer and the phone's thumb zone. */}
             {flags.deskRoom ? <NeedsYouBadge summary={deskSummary.data} onOpen={openNeedsYou} /> : null}
