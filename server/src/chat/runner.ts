@@ -3998,19 +3998,25 @@ function retireOtherEnginesOnThread(cli: CliKind, repoPath: string, chatId: stri
  *  key carries the folder, so a session-policy directory change used to leave
  *  the old-folder engine running while a second one spawned in the new folder,
  *  both on the same thread and branch. A busy old-folder engine keeps the
- *  message (it queues behind the running turn); an idle one stops first. */
+ *  message (it queues behind the running turn); an idle one stops, and must
+ *  have exited, before a replacement may start. Background work does not hold
+ *  it, for the same reason as retireOtherEnginesOnThread. */
 async function settleMovedThreadSession(cli: CliKind, key: string, logKey: string): Promise<LaneSession | null> {
   if (!isThreadLogKey(logKey)) return null;
+  const current = sessions.get(key);
+  let busy: LaneSession | null = null;
   for (const [otherKey, other] of [...sessions]) {
     if (otherKey === key || other.cli !== cli || other.logKey !== logKey || !other.isAlive()) continue;
-    if (other.isBusy() || holdsBackgroundWork(other)) return other;
+    if (other.isBusy()) { busy ??= other; continue; }
     console.warn(`[chat ${cli}] retiring ${otherKey} on ${logKey}: work folder moved, one engine per thread`);
     if (other instanceof ClaudeSession) other.shutdown('work folder moved', 'engine');
     else other.shutdown('work folder moved');
     await waitForChildExit(other, 5_000);
+    if (!other.processExited()) throw new Error('This agent’s previous engine is still stopping. Your message is safe; it runs in a moment.');
     if (sessions.get(otherKey) === other) sessions.delete(otherKey);
+    await flushEventLog(other.logKey);
   }
-  return null;
+  return busy && !current?.isAlive() ? busy : null;
 }
 
 /** Live, already-spawned session for a persistent-process lane (claude
