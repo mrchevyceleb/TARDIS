@@ -48,6 +48,7 @@ import {
 } from 'lucide-react';
 import { BotMark } from './GrokLogo';
 import { MoveToGroupMenu, RailGroupSection, RailNewGroup } from './RailGroups';
+import { menuClosesOnScroll } from './menuScroll';
 import { OTHER_GROUP_ID, OTHER_GROUP_NAME } from './railGroups';
 import { useRailGroups } from './useRailGroups';
 import { agentMark, DISC_INK, agentColor, agentAvatarUrl, sameChatId, CHAT_COLORS, chatColorOf, type Agent, type AgentFlagPatch, type ChatColor } from './agents';
@@ -206,16 +207,19 @@ function AgentContextMenu({
       e.stopPropagation();
       onClose();
     };
-    const onViewport = () => onClose();
+    const onResize = () => onClose();
+    // Only scrolling this row's ancestors can stale the fixed menu. Feed
+    // autoscroll beside the rail must not dismiss a color pick in flight.
+    const onScroll = (e: Event) => { if (menuClosesOnScroll(ref.current, menu.restore, e.target)) onClose(); };
     document.addEventListener('pointerdown', onDown);
     document.addEventListener('keydown', onKey, true);
-    window.addEventListener('resize', onViewport);
-    document.addEventListener('scroll', onViewport, true);
+    window.addEventListener('resize', onResize);
+    document.addEventListener('scroll', onScroll, true);
     return () => {
       document.removeEventListener('pointerdown', onDown);
       document.removeEventListener('keydown', onKey, true);
-      window.removeEventListener('resize', onViewport);
-      document.removeEventListener('scroll', onViewport, true);
+      window.removeEventListener('resize', onResize);
+      document.removeEventListener('scroll', onScroll, true);
       if (menu.restore?.isConnected) menu.restore.focus();
     };
   }, [onClose, menu.x, menu.y, menu.restore]);
