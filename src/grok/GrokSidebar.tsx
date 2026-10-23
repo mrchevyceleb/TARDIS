@@ -52,7 +52,7 @@ import { menuClosesOnScroll } from './menuScroll';
 import { OTHER_GROUP_ID, OTHER_GROUP_NAME } from './railGroups';
 import { useRailGroups } from './useRailGroups';
 import { agentMark, DISC_INK, agentColor, agentAvatarUrl, sameChatId, CHAT_COLORS, chatColorOf, type Agent, type AgentFlagPatch, type ChatColor } from './agents';
-import { useDeskPrs } from '../data/desk';
+import { agentTaskMap, agentTaskSubline, useDeskCardsLight, useDeskPrs, type AgentTaskSlot, type DeskPr, type TaskQueryState } from '../data/desk';
 import { useLive } from '../chat/hooks/useLive';
 import { useJobsSummary } from '../chat/hooks/useJobs';
 import { RailJobsBadge } from '../chat/components/jobs/RailJobsBadge';
@@ -499,6 +499,13 @@ export function BotRail(props: BotRailProps) {
   // is not a turn: an agent on jobs is busy but free to talk, so it gets its
   // own outlined badge and never the working lamp.
   const jobsByAgent = useJobsSummary();
+  // Each teammate's current board task (one tiny poll for the whole rail).
+  const deskTasksQuery = useDeskCardsLight(true);
+  const deskTasks = deskTasksQuery.data;
+  const tasksState: TaskQueryState = deskTasksQuery.isError ? 'error' : deskTasks ? 'ready' : 'loading';
+  const taskMap = useMemo(() => agentTaskMap(deskTasks?.cards ?? [], props.agents), [deskTasks, props.agents, deskTasksQuery.dataUpdatedAt, deskTasksQuery.errorUpdatedAt]);
+  const deskPrsQuery = useDeskPrs(true);
+  const prsState: TaskQueryState = deskPrsQuery.isError || deskPrsQuery.data?.stale || deskPrsQuery.data?.unknown ? 'error' : !deskPrsQuery.data || deskPrsQuery.data.pending ? 'loading' : 'ready';
 
   // Named, collapsible groups (layout + sync live in useRailGroups). Group
   // mode replaces the flat list unless a search is running.
@@ -806,7 +813,7 @@ export function BotRail(props: BotRailProps) {
                 <Pencil size={12} />
               </span>
             </span>
-            <AgentPrsSub name={a.name} fallback={r.item?.preview} />
+            <AgentPrsSub name={a.name} info={taskMap.get(a.id)} tasksState={tasksState} prs={deskPrsQuery.data?.prs ?? []} prsState={prsState} />
             {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
           </span>
         </button>
@@ -1097,14 +1104,10 @@ export function BotRail(props: BotRailProps) {
   );
 }
 
-// The snippet line under a teammate's name: their open PRs when the server
-// serves them (feature-detected: an older server 404s and the line keeps the
-// chat preview), else the chat preview.
-function AgentPrsSub({ name, fallback }: { name: string; fallback?: string }) {
-  const { data } = useDeskPrs(true);
-  const mine = (data?.prs ?? []).filter((p) => p.owner === name);
-  const line = mine
-    .map((p) => `${p.repo.split('/')[1]} #${p.number} · ${p.reviewer ? `with ${p.reviewer}` : p.state === 'merged' ? 'merged' : p.state === 'ci' ? 'CI' : p.state}`)
-    .join(' · ');
-  return <span className="bt-conv-sub">{line || (fallback ?? 'No work yet — give them something real.')}</span>;
+// The line under a teammate's name: what they are actually working on, in
+// plain words. A fresh in-progress card wins. Open PRs come next. Staging/QA
+// and next-up cards fill the tail. The stale chat preview is never shown.
+function AgentPrsSub({ name, info, tasksState, prs, prsState }: { name: string; info?: AgentTaskSlot; tasksState: TaskQueryState; prs: DeskPr[]; prsState: TaskQueryState }) {
+  const line = agentTaskSubline(info ?? {}, prs.filter((p) => p.owner === name), tasksState, prsState);
+  return <span className={`bt-conv-sub${line.quiet ? ' bt-conv-sub-next' : ''}`} title={line.text}>{line.text}</span>;
 }

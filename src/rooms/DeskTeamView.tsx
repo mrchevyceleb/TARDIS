@@ -15,7 +15,7 @@ import { hasRecentTurnSignal, lastTurnSignal } from '../chat/utils/livePresence'
 import type { LiveSession } from '../chat/data/types';
 import { apiJson } from '../data/api';
 import { resolveGroups, starterLayout, type RailLayout } from '../grok/railGroups';
-import { agoText, hoursSince, openAgentThread, type DeskActor, type DeskCard, type DeskSnapshot, type DeskTodo } from '../data/desk';
+import { agoText, agentTaskMap, CARD_STAGE_WORDS as STAGE_WORDS, hoursSince, openAgentThread, TASK_LABEL, taskKindOf, withHeadline, type DeskActor, type DeskCard, type DeskSnapshot, type DeskTodo } from '../data/desk';
 import { agentAvatarUrl, agentColor, chatColorOf, DISC_INK, type Agent } from '../grok/agents';
 import './deskTeam.css';
 
@@ -25,18 +25,8 @@ type Team = { id: string; label: string; members: Agent[] };
 
 /** A card older than this in an active column reads as stuck. */
 const STUCK_HOURS = 48;
-/** Recent board work is a labeled fallback when no turn or job is active. */
-const RECENT_CARD_HOURS = 48;
 /** "Moving now" looks back this far. */
 const DAY_HOURS = 24;
-
-const STAGE_WORDS: Record<string, string> = {
-  not_started: 'parked',
-  in_progress: 'in progress',
-  on_staging: 'waiting on staging',
-  in_qa: 'with Sud QA',
-  in_production: 'shipped',
-};
 
 function cardOwnerName(card: DeskCard): string {
   return card.owner.kind === 'owner' ? 'Matt' : card.owner.name;
@@ -63,7 +53,7 @@ type ZoneFacts = {
   parkedCount: number;
   stagingCount: number;
   staleStaging: DeskCard[];
-  onNow: Map<string, { text: string; detail?: string; at?: number; source: 'live' | 'job' | 'card'; caption?: string; label?: string; ageText?: string; quiet?: boolean; starting?: boolean; jobText?: string; sections?: Array<{ title: string; meta: string; text: string; kind: 'turn' | 'job' }> }>;
+  onNow: Map<string, { text: string; detail?: string; at?: number; source: 'live' | 'job' | 'card'; caption?: string; label?: string; ageText?: string; quiet?: boolean; starting?: boolean; jobText?: string; headline?: string; cue?: string; cardId?: string; kindLabel?: string; sections?: Array<{ title: string; meta: string; text: string; kind: 'task' | 'turn' | 'job' }> }>;
 };
 
 export function DeskTeamView({ desk, agents, onOpenCard, onShowBoard }: Props) {
@@ -163,6 +153,8 @@ export function DeskTeamView({ desk, agents, onOpenCard, onShowBoard }: Props) {
     return byAgent;
   }, [activity.data, activity.isError, agents]);
 
+  const taskMap = useMemo(() => agentTaskMap(desk.cards, agents), [desk.cards, agents, activity.dataUpdatedAt, activity.errorUpdatedAt]);
+
   const facts = useMemo<ZoneFacts[]>(() => {
     return teams.map((team) => {
       const inTeam = (actor: DeskActor) => actor.kind === 'agent' && team.members.some((a) => a.id === actor.id);
@@ -177,7 +169,13 @@ export function DeskTeamView({ desk, agents, onOpenCard, onShowBoard }: Props) {
         const lanes = liveByAgent.get(agent.id);
         const running = jobsByAgent.get(agent.id);
         const laneName = (session: LiveSession) => /__bg(?:__acct__[a-z0-9-]+)?$/i.test(session.chatId) ? 'Background turn' : 'Chat turn';
+        const slot = taskMap.get(agent.id) ?? {};
+        const task = withHeadline(slot);
+        const taskCard = slot.current ?? slot.waiting ?? slot.next;
+        const kind = taskKindOf(slot);
+        const kindLabel = kind ? TASK_LABEL[kind] : 'Current task';
         const sections: NonNullable<NonNullable<ReturnType<typeof onNow.get>>['sections']> = [
+          ...(taskCard && task.headline ? [{ title: kindLabel, meta: `${STAGE_WORDS[taskCard.column]} · updated ${agoText(taskCard.updatedAt)}`, text: task.headline, kind: 'task' as const }] : []),
           ...(lanes ?? []).map((session) => ({ title: session.busy ? laneName(session) : 'Background task', meta: `${hasRecentTurnSignal(session) ? 'Active' : session.busy ? 'Quiet · no signal in 2+ minutes' : 'Running'} · last signal ${agoText(new Date(lastTurnSignal(session)).toISOString())}`, text: session.activity?.detail || session.activity?.text || (session.backgroundTasks?.length ? session.backgroundTasks.join(' · ') : 'No visible activity update yet.'), kind: 'turn' as const })),
           ...(running ?? []).map((job) => ({ title: 'Background job', meta: `Started ${agoText(new Date(job.startedAt).toISOString())}`, text: job.name, kind: 'job' as const })),
         ];
@@ -186,7 +184,8 @@ export function DeskTeamView({ desk, agents, onOpenCard, onShowBoard }: Props) {
         if (running?.length && !activeLane) {
           const label = running.length === 1 ? 'Background job' : `${running.length} background jobs`;
           const ageText = `Started ${agoText(new Date(running[0].startedAt).toISOString())}`;
-          onNow.set(agent.id, { text: running[0].name, sections, label, ageText, caption: `${label} · ${ageText}`, jobText: lanes?.some((lane) => lane.busy) ? 'Also has a quiet open turn' : undefined, at: running[0].startedAt, source: 'job' });
+          const cue = `${label} · ${ageText}`;
+          onNow.set(agent.id, { text: running[0].name, sections, label, ageText, caption: cue, headline: task.headline, cue: taskCard ? cue : undefined, kindLabel, cardId: taskCard?.id, jobText: lanes?.some((lane) => lane.busy) ? 'Also has a quiet open turn' : undefined, at: running[0].startedAt, source: 'job' });
           continue;
         }
         if (lanes?.length) {
@@ -197,13 +196,11 @@ export function DeskTeamView({ desk, agents, onOpenCard, onShowBoard }: Props) {
           const label = lane.busy ? `${quiet ? 'Quiet ' : starting ? 'Starting ' : ''}${laneName(lane).toLowerCase()}` : 'Background task';
           const ageText = `${lane.activity ? 'Updated' : 'Last signal'} ${agoText(new Date(at).toISOString())}`;
           const text = lane.busy ? lane.activity?.text || (starting ? 'A new turn is getting underway' : 'Waiting for a fresh activity update') : `Running in background: ${lane.backgroundTasks?.join(' · ')}`;
-          onNow.set(agent.id, { text, label, ageText, caption: `${label} · ${ageText}`, quiet, starting, sections, jobText: running?.length ? `Job: ${running[0].name}${running.length > 1 ? ` · +${running.length - 1} more` : ''}` : lanes.length > 1 ? `+${lanes.length - 1} more lane${lanes.length > 2 ? 's' : ''}` : undefined, at, source: lane.busy ? 'live' : 'job' });
+          const cue = `${label} · ${ageText}`;
+          onNow.set(agent.id, { text, label, ageText, caption: cue, headline: task.headline, cue: taskCard ? cue : undefined, kindLabel, cardId: taskCard?.id, quiet, starting, sections, jobText: running?.length ? `Job: ${running[0].name}${running.length > 1 ? ` · +${running.length - 1} more` : ''}` : lanes.length > 1 ? `+${lanes.length - 1} more lane${lanes.length > 2 ? 's' : ''}` : undefined, at, source: lane.busy ? 'live' : 'job' });
           continue;
         }
-        const mine = cards
-          .filter((c) => ['in_progress', 'on_staging', 'in_qa', 'in_production'].includes(c.column) && c.owner.kind === 'agent' && c.owner.id === agent.id && hoursSince(c.updatedAt) <= RECENT_CARD_HOURS)
-          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-        if (mine[0]) onNow.set(agent.id, { text: `${STAGE_WORDS[mine[0].column]} · ${mine[0].title}`, at: Date.parse(mine[0].updatedAt), source: 'card' });
+        if (taskCard && task.headline) onNow.set(agent.id, { text: task.headline, headline: task.headline, kindLabel, cue: `${kindLabel} · updated ${agoText(taskCard.updatedAt)}`, cardId: taskCard.id, label: kindLabel, ageText: `Updated ${agoText(taskCard.updatedAt)}`, caption: `${kindLabel} · ${task.headline}`, at: Date.parse(taskCard.updatedAt), source: 'card', sections });
       }
       return {
         team,
@@ -222,7 +219,7 @@ export function DeskTeamView({ desk, agents, onOpenCard, onShowBoard }: Props) {
       };
     });
   // Poll timestamps advance age cutoffs even when every API payload is unchanged.
-  }, [desk, cardsById, teams, liveByAgent, jobsByAgent, activity.dataUpdatedAt, activity.errorUpdatedAt]);
+  }, [desk, cardsById, teams, liveByAgent, jobsByAgent, taskMap, activity.dataUpdatedAt, activity.errorUpdatedAt]);
 
   // Items visibly travel: a card whose stage changed since the last snapshot
   // gets the travel note for a few seconds.
@@ -313,7 +310,7 @@ export function DeskTeamView({ desk, agents, onOpenCard, onShowBoard }: Props) {
                       data-desk-agent={agent.id}
                       key={agent.id}
                       className={`desk-avatar-tile${on?.quiet ? ' awaiting-update' : ''}${on?.starting ? ' starting-turn' : ''}${working ? ' working' : ''}${on ? ' has-on' : ''}${on?.source === 'job' ? ' has-job' : ''}${selectedAgent === agent.id ? ' expanded' : ''}`}
-                      title={`${name} — ${on ? `${on.caption ?? 'Recent board work'}: ${on.text}` : activity.isError ? 'Live activity unavailable' : 'No live turn or recent board work'}`}
+                      title={`${name} — ${on?.headline ? `${on.kindLabel ?? 'Current task'}: ${on.headline}${on.cue ? ` · ${on.cue}` : ''}` : on ? `${on.caption ?? 'Activity'}: ${on.text}` : activity.isError ? 'Live activity unavailable' : 'No current task'}`}
                     >
                       <span
                         className="desk-avatar"
@@ -324,8 +321,8 @@ export function DeskTeamView({ desk, agents, onOpenCard, onShowBoard }: Props) {
                         {working ? <span className="desk-avatar-pulse" /> : null}
                       </span>
                       <span className="desk-avatar-name">{name}</span>
-                      <span className={`desk-avatar-source${working ? ' is-live' : ''}`}><span>{on?.label ?? (on ? 'Recent board card' : activity.isError ? 'Live unavailable' : activity.isPending ? 'Connecting' : 'No live turn')}</span>{on?.at ? <span className="desk-avatar-age">{on.ageText ?? `Updated ${agoText(new Date(on.at).toISOString())}`}</span> : null}</span>
-                      {on ? <span className="desk-avatar-on">{on.text}</span> : <span className="desk-avatar-on is-quiet">{activity.isError || activity.isPending ? 'Checking current activity' : 'No recent card update'}</span>}
+                      <span className={`desk-avatar-source${working ? ' is-live' : ''}`}><span>{on?.headline ? (on.cue ?? (on.kindLabel ?? 'Current task')) : (on?.label ?? (activity.isError ? 'Live unavailable' : activity.isPending ? 'Connecting' : 'No current task'))}</span>{!on?.headline && on?.at ? <span className="desk-avatar-age">{on.ageText ?? `Updated ${agoText(new Date(on.at).toISOString())}`}</span> : null}</span>
+                      {on?.headline ? <span className="desk-avatar-on">{on.headline}</span> : on ? <span className="desk-avatar-on">{on.text}</span> : <span className="desk-avatar-on is-quiet">{activity.isError || activity.isPending ? 'Checking current activity' : 'No current task'}</span>}
                       {on?.jobText ? <span className="desk-avatar-job">{on.jobText}</span> : null}
                     </button>
                   );
@@ -404,8 +401,9 @@ export function DeskTeamView({ desk, agents, onOpenCard, onShowBoard }: Props) {
               <button type="button" className="desk-team-board" onClick={() => closeDetail()}>Close</button>
             </div>
             <div className="desk-person-sections">
-              {selectedLine?.sections?.length ? selectedLine.sections.map((section, index) => <section className={`desk-person-section is-${section.kind}`} key={`${section.title}-${index}`}><div className="desk-person-section-head"><strong>{section.title}</strong><span>{section.meta}</span></div><p className="desk-person-copy">{section.text}</p></section>) : <section className="desk-person-section"><div className="desk-person-section-head"><strong>{selectedLine ? 'Recent board work' : 'No current activity'}</strong>{selectedLine?.at ? <span>Updated {agoText(new Date(selectedLine.at).toISOString())}</span> : null}</div><p className="desk-person-copy">{selectedLine?.text ?? 'No live turn or recent card update.'}</p></section>}
+              {selectedLine?.sections?.length ? selectedLine.sections.map((section, index) => <section className={`desk-person-section is-${section.kind}`} key={`${section.title}-${index}`}><div className="desk-person-section-head"><strong>{section.title}</strong><span>{section.meta}</span></div><p className="desk-person-copy">{section.text}</p></section>) : <section className="desk-person-section"><div className="desk-person-section-head"><strong>{selectedLine ? 'Current task' : 'No current activity'}</strong>{selectedLine?.at ? <span>Updated {agoText(new Date(selectedLine.at).toISOString())}</span> : null}</div><p className="desk-person-copy">{selectedLine?.text ?? 'No live turn or recent card update.'}</p></section>}
             </div>
+            {selectedLine?.cardId ? <button type="button" className="desk-team-board" onClick={() => { const id = selectedLine.cardId!; closeDetail(false); onOpenCard(id); }}>Open the card <ArrowRight size={12} /></button> : null}
             <button type="button" className="desk-team-board" onClick={() => { closeDetail(false); openAgentThread(selected.id); }}>Open {selected.name}'s thread <ArrowRight size={12} /></button>
           </div>
         </div>, document.body,

@@ -201,6 +201,7 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   margin-top: 2px;
 }
+.bt-conv-sub.bt-conv-sub-next { color: var(--r-ink-faint); font-style: italic; }
 
 /* rail footer — Plugins + account */
 .bt-rail-foot { flex: none; border-top: 1px solid var(--r-line); padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px)); }

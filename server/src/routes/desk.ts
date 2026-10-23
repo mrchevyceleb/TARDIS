@@ -176,6 +176,21 @@ deskRouter.get('/', route(async (req, res) => {
   res.json({ rev: data.rev, owner: ownerActor(), columns: COLUMN_META, todos: data.todos, cards, ...prsPayload });
 }));
 
+/** The sidebar's current-task poll: only the fields a "what is this teammate
+ *  on" line needs (id, title, owner, column, updatedAt), non-archived cards
+ *  only, no comments or todos. An older server without the route 404s and the
+ *  sidebar keeps its PR lines. */
+deskRouter.get('/tasks', route(async (_req, res) => {
+  const data = await readDesk();
+  // Only cards that can still be someone's current, waiting or next work:
+  // active columns, or parked cards touched in the last 30 days.
+  const nextCutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const cards = data.cards
+    .filter((c) => !c.archived && (c.column !== 'in_production' && (c.column !== 'not_started' || Date.parse(c.updatedAt) >= nextCutoff)))
+    .map((c) => ({ id: c.id, title: c.title, owner: c.owner, column: c.column, updatedAt: c.updatedAt }));
+  res.json({ rev: data.rev, cards });
+}));
+
 // The sidebar's light poll: the same cached snapshot as the room's read, so
 // an older server without the route simply 404s and the client keeps its
 // snippet lines.
