@@ -34,7 +34,7 @@ import {
   type DeskComment,
   type DeskTodo,
 } from '../lib/deskStore.ts';
-import { deskPrs } from '../lib/githubPrs.ts';
+import { deskPrs, deskRepos } from '../lib/githubPrs.ts';
 
 export const deskRouter = Router();
 
@@ -162,10 +162,13 @@ deskRouter.get('/', route(async (req, res) => {
   const data = await readDesk();
   const cards = req.query.archived === '0' ? data.cards.filter((c) => !c.archived) : data.cards;
   const prs = deskPrs();
-  // Disabled (no configured repos) serves no PR fields at all: exactly an
-  // older server's payload, so the client degrades by design.
-  const prsPayload = prs.disabled ? {} : {
-    prs: prs.prs,
+  const desk = deskRepos();
+  // Disabled (no configured Desk repos) serves no PR fields at all: exactly
+  // an older server's payload, so the client degrades by design. The shared
+  // pull may also cover other boards' repos; the Desk only ever serves its
+  // own, filtered here.
+  const prsPayload = !desk.length ? {} : {
+    prs: prs.prs.filter((p) => desk.some((r) => r.trim().toLowerCase() === p.repo.trim().toLowerCase())),
     ...(prs.stale ? { prsStale: true } : {}),
     ...(prs.pending ? { prsPending: true } : {}),
     ...(prs.unknown ? { prsUnknown: true } : {}),
@@ -178,9 +181,13 @@ deskRouter.get('/', route(async (req, res) => {
 // snippet lines.
 deskRouter.get('/prs', route(async (_req, res) => {
   const prs = deskPrs();
+  const desk = deskRepos();
   // Not configured: an older server's 404, so the sidebar falls back.
-  if (prs.disabled) { res.status(404).json({ error: 'desk PRs not configured' }); return; }
-  res.json(prs);
+  if (!desk.length || prs.disabled) { res.status(404).json({ error: 'desk PRs not configured' }); return; }
+  res.json({
+    prs: prs.prs.filter((p) => desk.some((r) => r.trim().toLowerCase() === p.repo.trim().toLowerCase())),
+    stale: prs.stale, pending: prs.pending, unknown: prs.unknown, disabled: prs.disabled,
+  });
 }));
 
 /** Cheap poll for the workspace badge and desktop alerts. */

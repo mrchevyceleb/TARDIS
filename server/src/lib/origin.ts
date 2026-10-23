@@ -23,6 +23,29 @@ function requestHost(req: IncomingMessage): URL | null {
   try { return new URL(`http://${host}`); } catch { return null; }
 }
 
+type HeaderSource = { headers: Record<string, string | string[] | undefined> };
+
+function singleHeader(req: HeaderSource, name: string): string | undefined {
+  const value = req.headers[name];
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+/** Host/Origin trust for a plain HTTP request, the same rule the WebSocket
+ *  upgrade applies (trustedWebSocketOrigin): loopback or operator-configured
+ *  hosts only, and a browser Origin must name the trusted target itself.
+ *  DNS rebinding is the attack this exists for: a hostile page can reach a
+ *  loopback server, but it cannot make the browser send a loopback Host or a
+ *  matching Origin for it. Accepts the raw header shapes Express exposes so
+ *  routes can apply it without an IncomingMessage. */
+export function trustedRequestOrigin(headers: Record<string, string | string[] | undefined>): boolean {
+  const host = singleHeader({ headers }, 'host');
+  const origin = singleHeader({ headers }, 'origin');
+  return trustedWebSocketOrigin({
+    headers: { ...(host ? { host } : {}), ...(origin ? { origin } : {}) },
+  } as IncomingMessage);
+}
+
 /** Browsers send Origin during WebSocket upgrades. Accept loopback development
  * and exact origins explicitly trusted by the operator. Arbitrary matching
  * Origin/Host pairs are rejected to prevent DNS rebinding into the local agent

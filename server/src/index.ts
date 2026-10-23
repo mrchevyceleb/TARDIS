@@ -18,6 +18,8 @@ import { resumeQueuedTeamDeliveries } from './chat/teamBus.ts';
 import { agentsRouter } from './routes/agents.ts';
 import { accountsRouter } from './routes/accounts.ts';
 import { usageRouter } from './routes/usage.ts';
+import { qaRouter } from './routes/qa.ts';
+import { startQaSyncScheduler } from './lib/qaSyncScheduler.ts';
 import { teamRouter } from './routes/team.ts';
 import { channelsRouter } from './routes/channels.ts';
 import { headlessRouter } from './routes/headless.ts';
@@ -152,6 +154,7 @@ app.use('/api/robots', robotsRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/accounts', accountsRouter);
 app.use('/api/usage', usageRouter);
+app.use('/api/qa', qaRouter);
 app.use('/api/team', teamRouter);
 app.use('/api/channels', channelsRouter);
 app.use('/api/headless', headlessRouter);
@@ -242,6 +245,7 @@ const stopChat = await registerChat(app, server);
 registerVoiceCalls(server);
 if (!SIDE_COPY) registerDeviceBridge(server);
 if (!SIDE_COPY) startSessionMetricsReport();
+if (!SIDE_COPY) startQaSyncScheduler(); // QA board self-sync (first sweep at 15s, then 2m tick)
 if (!SIDE_COPY) startRoutineScheduler(); // agent-scoped routine scheduler (30s tick)
 if (!SIDE_COPY) startJobWatchScheduler(); // background job watches (10s tick): pid/file/command → agent wake
 if (!SIDE_COPY) startJobScheduler(); // job_start jobs (5s tick): exit records → agent job-result
