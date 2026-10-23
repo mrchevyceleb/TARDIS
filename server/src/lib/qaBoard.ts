@@ -163,10 +163,14 @@ const byPriority = (a: QaItem, b: QaItem) =>
 export async function qaBoard(): Promise<Record<QaTesterId, QaItem[]>> {
   const items = (await store.list()).filter(onBoard);
   const board: Record<QaTesterId, QaItem[]> = { sud: [], edgar: [], martin: [] };
-  for (const item of items) board[item.tester]?.push(item);
+  for (const item of items) board[columnOf(item)]?.push(item);
   for (const tester of QA_TESTERS) board[tester.id] = capColumn(board[tester.id]);
   return board;
 }
+
+/** The column a card shows in. Martin is out (Matt, Oct 23 2026), so cards
+ *  stored under him show in Edgar's column without rewriting the records. */
+const columnOf = (item: QaItem): QaTesterId => (item.tester === 'martin' ? 'edgar' : item.tester);
 
 /** One tester's column as shown: priority order, at most QA_CARDS_PER_APP
  *  per app. The board and the pinned list both use it, so they agree. */
@@ -292,7 +296,7 @@ export async function applyQaOutcome(id: string, outcome: string): Promise<QaIte
  *  construction. */
 export function qaPinnedList(tester: QaTesterId, items: QaItem[]): string {
   const name = QA_TESTERS.find((t) => t.id === tester)?.name ?? tester;
-  const open = capColumn(items.filter((i) => i.tester === tester && onBoard(i)));
+  const open = capColumn(items.filter((i) => columnOf(i) === tester && onBoard(i)));
   const lines = open.map((item, index) => {
     const due = new Date(item.dueAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
     const status = item.status.replace('_', ' ');

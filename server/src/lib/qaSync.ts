@@ -38,6 +38,10 @@ function previewUrlFor(repo: string, pr: number): Promise<string | null> {
 /** Open cards still missing a preview link get one, a few per sweep so a
  *  backlog never floods gh. */
 const PREVIEW_FILLS_PER_SWEEP = 6;
+const PREVIEW_RETRY_MS = 15 * 60_000;
+/** Last lookup per card, so cards with no preview yet step aside and every
+ *  missing card gets its turn. */
+const previewTried = new Map<string, number>();
 
 export type QaSyncResult = {
   added: number;
@@ -115,8 +119,12 @@ async function syncQaFromGithubOnce(snapshot = deskPrs()): Promise<QaSyncResult>
       if (created) added += 1;
     }
   }
-  const missing = (await qaAllItems()).filter((i) => i.status !== 'validated' && i.status !== 'parked' && !i.stagingUrl).slice(0, PREVIEW_FILLS_PER_SWEEP);
+  const now = Date.now();
+  const missing = (await qaAllItems())
+    .filter((i) => i.status !== 'validated' && i.status !== 'parked' && !i.stagingUrl && now - (previewTried.get(i.id) ?? 0) > PREVIEW_RETRY_MS)
+    .slice(0, PREVIEW_FILLS_PER_SWEEP);
   for (const item of missing) {
+    previewTried.set(item.id, now);
     const stagingUrl = await previewUrlFor(item.repo, item.pr);
     if (stagingUrl) await upsertQaItem({ repo: item.repo, pr: item.pr, title: item.title, app: item.app, stagingUrl });
   }
