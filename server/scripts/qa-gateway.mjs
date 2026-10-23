@@ -22,7 +22,7 @@ const DROP = /^(tailscale-|x-forwarded-|forwarded$|x-real-ip$|cookie2$)/i;
 
 function allowed(method, path) {
   if (method === 'GET' || method === 'HEAD') {
-    if (path === '/') return { path: '/qa-board' };
+    if (path === '/') return { redirect: '/qa-board' };
     if (PAGES.has(path) || STATIC.test(path)) return { path };
   }
   if (API.has(`${method === 'HEAD' ? 'GET' : method} ${path}`)) return { path };
@@ -33,6 +33,9 @@ http.createServer((req, res) => {
   const url = new URL(req.url || '/', 'http://gateway');
   const hit = allowed(req.method || 'GET', url.pathname.replace(/\/+$/, '') || '/');
   if (!hit) { res.writeHead(404, { 'content-type': 'text/plain' }).end('Not found'); return; }
+  // The app picks the bare tester page from the browser URL, so the bare
+  // address redirects rather than rewriting (a rewrite would boot the shell).
+  if (hit.redirect) { res.writeHead(302, { location: hit.redirect }).end(); return; }
   const headers = {};
   for (const [k, v] of Object.entries(req.headers)) if (!DROP.test(k) && k !== 'host') headers[k] = v;
   headers.host = `${UPSTREAM.host}:${UPSTREAM.port}`;
