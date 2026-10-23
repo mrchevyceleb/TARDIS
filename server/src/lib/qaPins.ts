@@ -118,7 +118,7 @@ async function refreshQaPinsWith(slacker: SlackTool): Promise<{ refreshed: QaTes
       held.push(tester.id);
       continue;
     }
-    if (sent.success === true && sent.timestamp) {
+    if (sent?.success === true && sent.timestamp) {
       if (record) await pinStore.update(record.id, { channel, messageTs: sent.timestamp, text, lastAttemptedText: text });
       else await pinStore.create({ tester: tester.id, channel, messageTs: sent.timestamp, text, lastAttemptedText: text });
       refreshed.push(tester.id);

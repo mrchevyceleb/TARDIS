@@ -15,7 +15,8 @@ const queryClient = new QueryClient();
 const studioMatch = /^\/studio(\/|$)/.test(window.location.pathname);
 // A tester sign-in link gets its own bare page, outside the shell and its
 // providers: the GET must render something harmless (no credential
-// consumed), and Jarvis must never boot on a tester's screen.
+// consumed), and the shell's Jarvis and viewers stay out of the way until
+// the tester has signed in and lands on the board.
 const qaSigninMatch = /^\/qa-signin(\/|$)/.test(window.location.pathname);
 const legacyRoom = window.location.pathname.replace(/^\/+/, '').replace(/\/+$/, '');
 

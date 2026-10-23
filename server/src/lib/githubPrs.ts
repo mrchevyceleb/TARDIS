@@ -60,12 +60,13 @@ const DESK_REPOS = (() => {
  *  their own repo list (the Desk route by deskRepos(), the QA sync by
  *  qaRepos()), so one board's repos never leak into another board's view
  *  and RIVENDELL_DESK_PR_REPOS=off still turns the Desk pull fully off. */
-const REPOS = [...new Set([
-  ...DESK_REPOS,
-  ...(process.env.RIVENDELL_QA_REPOS ?? '').split(',').map((s) => s.trim()).filter((s) => s && s.toLowerCase() !== 'off'),
-])];
-
 const canonRepo = (repo: string) => repo.trim().toLowerCase();
+
+const REPOS = [...new Map(
+  [...DESK_REPOS, ...(process.env.RIVENDELL_QA_REPOS ?? '').split(',').map((s) => s.trim()).filter((s) => s && s.toLowerCase() !== 'off')]
+    .map((repo) => [canonRepo(repo), repo] as const),
+).values()];
+
 const isDeskRepo = (repo: string) => DESK_REPOS.some((r) => canonRepo(r) === canonRepo(repo));
 
 /** The Desk room's repo list; the Desk routes never serve PRs outside it. */
