@@ -38,6 +38,7 @@ function local(method, path, { body, cookie } = {}) {
     if (cookie) headers.cookie = cookie;
     const r = http.request({ ...UPSTREAM, method, path, headers }, (res) => {
       let data = ''; res.on('data', (c) => { data += c; });
+      res.on('error', reject); res.on('aborted', () => reject(new Error('upstream aborted')));
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, data }));
     });
     r.on('error', reject); r.end(body);
@@ -102,6 +103,7 @@ http.createServer((req, res) => {
   headers['x-forwarded-proto'] = 'https';
   const up = http.request({ ...UPSTREAM, method: req.method, path: hit.path + url.search, headers }, (r) => {
     res.writeHead(r.statusCode || 502, r.headers);
+    r.on('error', () => res.destroy());
     r.pipe(res);
   });
   up.on('error', () => { if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' }); res.end('QA board is restarting, try again in a moment.'); });
