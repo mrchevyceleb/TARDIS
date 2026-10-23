@@ -133,7 +133,11 @@ export async function persistThreadResetEpoch(logKey: string, resetAt: number): 
  *  another task's outcome: every task keeps its own entry in the per-task
  *  map (Codex verify round 6, Oct 23 2026: the single-slot form made an
  *  earlier completed task look owed again once a later task overwrote it). */
-const TASK_RESET_KEEP = 32;
+// Outcomes are kept by age, not a small count: a waived or completed task's
+// late clarification must still find its `complete` state, or it would wipe
+// the thread that task is running in (Codex review, Oct 23 2026).
+const TASK_RESET_KEEP = 2000;
+const TASK_RESET_MAX_AGE_MS = 30 * 24 * 60 * 60_000;
 export async function persistThreadResetTaskState(
   logKey: string,
   taskId: string,
@@ -154,7 +158,7 @@ export async function persistThreadResetTaskState(
     // Bound the map: keep the newest outcomes (by reset time), never the
     // in-flight one just written.
     const ids = Object.keys(taskResets).sort((a, b) => (taskResets[a].resetAt - taskResets[b].resetAt));
-    while (ids.length > TASK_RESET_KEEP) {
+    while (ids.length > TASK_RESET_KEEP || (ids.length && resetAt - taskResets[ids[0]].resetAt > TASK_RESET_MAX_AGE_MS)) {
       const oldest = ids.shift()!;
       if (oldest !== taskId) delete taskResets[oldest];
     }

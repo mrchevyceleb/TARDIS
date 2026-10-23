@@ -154,6 +154,9 @@ export function freshHoldReason(
   if (wiped.fresh) return undefined;
   if (wiped.retryable) return wiped.reason ?? 'fresh start failed after reset began';
   const reason = wiped.reason ?? '';
+  // Once this task's wipe began (`resetting`), the thread may be half
+  // erased: every refusal holds until the wipe completes, whatever the cause.
+  if (resetBegun) return reason || 'fresh start already began for this task';
   // A busy recipient (a live turn, or background work a wipe would kill)
   // holds the task only up to a ceiling (Matt, Oct 23 2026: fresh threads
   // were switched off because handoffs to lanes running long background
@@ -161,7 +164,7 @@ export function freshHoldReason(
   // thread, late but never lost, but only when this task's wipe never
   // began: a `resetting` state may mean a half-erased thread, so that task
   // keeps waiting for idle and finishes its wipe first.
-  if (/became busy/i.test(reason)) return heldMs < FRESH_BUSY_HOLD_MS || resetBegun ? reason : undefined;
+  if (/became busy/i.test(reason)) return heldMs < FRESH_BUSY_HOLD_MS ? reason : undefined;
   if (/already resetting|brain changed/i.test(reason)) return reason;
   return undefined;
 }
