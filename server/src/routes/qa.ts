@@ -56,12 +56,15 @@ function operatorOk(req: QaReq): boolean {
   );
 }
 
-/** Who may read a tester's column: a signed-in tester sees only their own;
- *  the operator sees all three. Anyone else is granted no column. */
+const ALL_TESTERS: QaTesterId[] = ['sud', 'edgar', 'martin'];
+
+/** Who may read the board: one board for all three (Matt, Oct 23 2026), so a
+ *  signed-in tester sees every column with their own first, and the operator
+ *  sees all three. Anyone else is granted no column. */
 function visibleTesters(req: QaReq): QaTesterId[] | null {
   const tester = qaSessionTester(req.header('cookie'));
-  if (tester) return [tester];
-  return operatorOk(req) ? ['sud', 'edgar', 'martin'] : null;
+  if (tester) return [tester, ...ALL_TESTERS.filter((id) => id !== tester)];
+  return operatorOk(req) ? ALL_TESTERS : null;
 }
 
 /** Operator-only link issuance: for each configured tester, a fresh
@@ -87,6 +90,7 @@ qaRouter.get('/', asyncHandler(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const board = await qaBoard();
   res.json({
+    me: qaSessionTester(req.header('cookie')) ?? undefined,
     testers: visible.map((id) => ({
       id,
       name: QA_TESTERS.find((t) => t.id === id)?.name ?? id,
