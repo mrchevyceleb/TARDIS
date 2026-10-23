@@ -22,7 +22,7 @@ import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { ELROND_WORKSPACE_PATH, STATE_DIR } from '../config.ts';
+import { STATE_DIR } from '../config.ts';
 import { JsonStore } from '../lib/jsonStore.ts';
 import { backgroundSubscriptionEnv } from '../lib/cliProfiles.ts';
 import { inQuietHours, isQuietExemptLane, isQuietExemptWork } from '../lib/quietHours.ts';
@@ -252,7 +252,7 @@ export async function createJob(input: CreateJobInput): Promise<Job> {
   }
   const timeoutMin = typeof input.timeoutMin === 'number' ? input.timeoutMin : DEFAULT_TIMEOUT_MIN;
 
-  const env = await backgroundSubscriptionEnv(ELROND_WORKSPACE_PATH, agent.name, agent.home || `bot-${agent.id}`);
+  const env = await backgroundSubscriptionEnv(cwd, agent.name, agent.home || `bot-${agent.id}`);
   const id = randomUUID();
   const short = id.slice(0, 8);
   const scoped = await canLaunchInScope();
