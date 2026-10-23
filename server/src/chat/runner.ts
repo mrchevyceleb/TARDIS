@@ -48,8 +48,6 @@ import { chatAttachmentPath, saveChatAttachments } from '../routes/chatAttachmen
 import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
 import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
-import { claudeAccountPool } from '../lib/claudeAccountPool.ts';
-import { refreshClaudeAccountUsage } from '../lib/accountUsage.ts';
 import { applyProviderLimits } from './providerEnv.ts';
 import { ensureNativeCompactProxy, nativeCompactBaseUrl, markNativeCompacting, markNativeHandoverRecovery, releaseNativeCompactRoute, confirmNativeCompact } from './nativeCompactProxy.ts';
 import { compactFailureError, isContextLengthRejection, isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
@@ -172,6 +170,18 @@ export function wrapSlashArgs(text: string): string {
 // truth. Opus 4.7+ uses adaptive thinking and ignores MAX_THINKING_TOKENS; the
 // live lever is the `--effort` flag (low|medium|high|xhigh|max). "max" is top.
 const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', 'claude-opus-5-5', 'xhigh');
+
+// Usage-limit rollover (Matt, Oct 15 2026): a Claude-family lane on one of the
+// accounts named in RIVENDELL_USAGE_FALLBACK_ACCOUNTS reruns its turn on the
+// agy subscription lane instead of dead-ending on "switch brains". The
+// account names are deployment config, never repo identity: unset/empty
+// disables the rollover entirely. The lane keeps its own model, so the next
+// turn tries Claude again as soon as the limit resets.
+const USAGE_FALLBACK_ACCOUNTS = new Set(
+  (process.env.RIVENDELL_USAGE_FALLBACK_ACCOUNTS ?? '')
+    .split(',').map((name) => name.trim()).filter(Boolean),
+);
+const USAGE_FALLBACK = { cli: 'agy' as const, model: 'gemini-4-argon', effort: 'high' };
 
 // Z.ai coding plan — GLM models served over the Anthropic-compatible endpoint.
 // Runs through the same `claude` binary with the base URL + auth token
@@ -630,8 +640,6 @@ export function pausedMessageNote(opts: { peerFrom?: string; peerFromRole?: stri
   if (!ownerMessage) return PAUSED_FOR_PEER_NOTE;
   return replyTool ? PAUSED_FOR_MESSAGE_NOTE_TOOL : PAUSED_FOR_MESSAGE_NOTE;
 }
-type ClaudeSendOptions = { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge; compactRerun?: boolean; echoText?: string; replyTo?: { from: string; snippet: string }; accountRerun?: boolean; accountRerunOrigin?: TurnOrigin };
-
 class ClaudeSession {
   readonly key: string;
   /** Durable-history key. Equals `key` for ordinary lanes; for an agent home
@@ -642,10 +650,7 @@ class ClaudeSession {
   readonly cli: CliKind;
   readonly cwd: string;
   readonly chatId: string;
-  private child!: ChildProcessByStdio<Writable, Readable, Readable>;
-  private accountSwitching = false;
-  private workerClosed = false;
-  private accountRerunPrompt: { text: string; images?: Array<{ mediaType: string; base64: string }>; opts: ClaudeSendOptions } | null = null;
+  private child: ChildProcessByStdio<Writable, Readable, Readable>;
   private contextMaintenance: Promise<void> | null = null;
   private contextRotated = false;
   private stdoutBuf = '';
@@ -660,7 +665,7 @@ class ClaudeSession {
   private pendingResumeId: string | null = null;
   /** session_id reported by the most recent init event. Persisted on every change. */
   private currentSessionId: string | null = null;
-  private startedResumeId: string | null = null;
+  private readonly startedResumeId: string | null = null;
   /** Next send prepends compact + last 50 at user-message precedence (not system). */
   private seedWindowOnNextTurn = false;
   /** Seeded stdin is in flight; ack rotation debt only after a successful result. */
@@ -676,7 +681,6 @@ class ClaudeSession {
   private statusAcks: Array<() => void> = [];
   private pendingPeerAccepts = new Set<string>();
   private pendingPeerSteerAccepts = new Set<string>();
-  private pendingPeerInputs = new Map<string, { text: string; images?: Array<{ mediaType: string; base64: string }>; from?: string }>();
   private spawnError: string | null = null;
   /** Set once we detect a fatal 401. Guards failAuth() so a retry storm only
    *  tears the child down once, and flips isAlive() false so the next
@@ -686,7 +690,7 @@ class ClaudeSession {
    *  once running — its base URL and token are frozen into its environment — so
    *  when zaiModeFor() disagrees with this, the child is stale and has to be
    *  replaced before it can serve another turn. Always 'plan' off the GLM lane. */
-  private zaiMode: ZaiMode = 'plan';
+  private readonly zaiMode: ZaiMode;
   /** Who the current turn is for. A GLM turn cut by a provider switch is
    *  continued in the same role, or its teammate is told it did not run.
    *  Lazy like stopWatch: prototype-built test sessions skip initializers. */
@@ -727,6 +731,9 @@ class ClaudeSession {
   private providerAccount = '';
   private providerRoutingKey = '';
   private providerEmail: string | null = null;
+  /** Named subscription account this child runs under (SAMWISE_ACCOUNT);
+   *  'default' when no account map is configured. */
+  private providerAccountName = 'default';
   /** Text-block seqs for the current Claude stream. A later synthetic marker
    * lets us surgically remove only its protocol prose from durable storage. */
   private streamTextBlocks = new Map<number, { text: string; seqs: number[] }>();
@@ -894,11 +901,6 @@ class ClaudeSession {
       }
     }, 2000).unref();
 
-    this.startWorker(resumeId);
-  }
-
-  private startWorker(resumeId: string | null): void {
-    const { cli, cwd, chatId } = this;
     // xai also blocks the built-in web tools: they are unusable against xAI's
     // Anthropic endpoint (WebSearch is a server tool xAI 422s for a missing
     // `description`; WebFetch's summarization call returns "No response from
@@ -1000,14 +1002,7 @@ class ClaudeSession {
     }
     const profileDir = spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
     spawnEnv.CLAUDE_CONFIG_DIR = profileDir;
-    const nativeStorage = prepareClaudeNativeStorage(chatId, profileDir, resumeId, cwd);
-    if (nativeStorage.reseed) {
-      const resumeArg = args.indexOf('--resume');
-      if (resumeArg >= 0) args.splice(resumeArg, 2);
-      this.pendingResumeId = this.startedResumeId = this.currentSessionId = null;
-      resumeId = null;
-      this.seedWindowOnNextTurn = true;
-    }
+    const nativeStorage = prepareClaudeNativeStorage(chatId, profileDir, resumeId);
     this.nativeBaseUrl = nativeCompactBaseUrl(spawnEnv.ANTHROPIC_BASE_URL || 'https://api.anthropic.com', {
       lane: chatId, provider: cli === 'zai' && zaiCredential?.mode === 'fireworks' ? 'fireworks' : cli, resumed: Boolean(resumeId),
       sessionId: () => this.currentSessionId ?? this.startedResumeId, harnessChars: () => this.harnessChars, harnessPhase: () => this.harnessPhase,
@@ -1024,7 +1019,9 @@ class ClaudeSession {
       this.providerEmail = subscriptionEmail('claude', spawnEnv);
     }
     this.providerAccount = existsSync(profileDir) ? realpathSync(profileDir) : profileDir;
-    this.workerClosed = false;
+    this.providerAccountName = typeof spawnEnv.SAMWISE_ACCOUNT === 'string' && spawnEnv.SAMWISE_ACCOUNT.trim()
+      ? spawnEnv.SAMWISE_ACCOUNT.trim()
+      : 'default';
     this.child = spawnLaneWorker('claude', args, {
       cwd,
       env: spawnEnv,
@@ -1032,21 +1029,19 @@ class ClaudeSession {
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessByStdio<Writable, Readable, Readable>;
 
-    this.child.once('close', () => { this.workerClosed = true; });
     this.child.stdout.setEncoding('utf8');
-    this.child.stdout.on('data', (chunk: string) => { if (!this.accountSwitching) this.onStdout(chunk); });
+    this.child.stdout.on('data', (chunk: string) => this.onStdout(chunk));
 
     this.child.stderr.setEncoding('utf8');
-    this.child.stderr.on('data', (chunk: string) => { if (!this.accountSwitching) this.onStderr(chunk); });
+    this.child.stderr.on('data', (chunk: string) => this.onStderr(chunk));
     // Remaining bytes can arrive after `exit`; flush on stream close so a
     // trailing error without a newline is not stuck in stderrBuf forever.
-    this.child.stderr.on('end', () => { if (!this.accountSwitching) this.flushStderr(); });
-    this.child.stderr.on('close', () => { if (!this.accountSwitching) this.flushStderr(); });
+    this.child.stderr.on('end', () => this.flushStderr());
+    this.child.stderr.on('close', () => this.flushStderr());
 
     this.child.on('exit', (code, signal) => {
       this.clearMcpRecovery();
       releaseNativeCompactRoute(this.nativeBaseUrl);
-      if (this.accountSwitching && !this.disposed) return;
       this.flushStderr();
       if (this.warmupPromise) {
         this.finishWarmupWait?.(new Error(`Max warmup process exited (${code ?? signal ?? 'unknown'})`));
@@ -1327,13 +1322,13 @@ class ClaudeSession {
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
-  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: ClaudeSendOptions = {}): Promise<void> {
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge; compactRerun?: boolean; echoText?: string; replyTo?: { from: string; snippet: string } } = {}): Promise<void> {
     assertSubscriptionLane(this.cli);
     const selectionRevision = assertSelectedEngine(this.chatId, this.cli);
     // A receipt timeout must not write a second copy of an input that the
     // native CLI already holds. A retry listens for that same delivery ID.
-    if (!opts.accountRerun && opts.peerDeliveryId && this.pendingPeerAccepts.has(opts.peerDeliveryId)) return;
-    if (this.contextMaintenance && !opts.accountRerun) await this.contextMaintenance;
+    if (opts.peerDeliveryId && this.pendingPeerAccepts.has(opts.peerDeliveryId)) return;
+    if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
     if (this.nativeHandoverPending) {
       const lookup = nativeLookups.get(bareChatId(this.chatId));
@@ -1373,7 +1368,7 @@ class ClaudeSession {
     if (this.child.exitCode !== null || this.disposed) {
       throw new Error('session has exited');
     }
-    const startsNewTurn = opts.accountRerun === true || this.turnStartedAt === null;
+    const startsNewTurn = this.turnStartedAt === null;
     if (startsNewTurn) this.assertSubscriptionAccount();
     // The automatic continue only ever opens a turn. If anything else already
     // holds the lane, that turn carries the cut guidance instead.
@@ -1411,9 +1406,9 @@ class ClaudeSession {
     if (startsNewTurn) {
       this.turnStartedAt = Date.now();
       this.automationTurn = automationRequest;
-      this.turnOrigin = opts.accountRerunOrigin ?? (continuing
+      this.turnOrigin = continuing
         ? { peers: [...continuing.origin.peers], human: continuing.origin.human, automation: continuing.origin.automation }
-        : emptyTurnOrigin());
+        : emptyTurnOrigin();
       this.turnIsContinuation = Boolean(continuing);
       // The nudge is still the person's turn, and their one nudge is spent.
       if (replyNudge) this.turnOrigin.human = true;
@@ -1425,7 +1420,6 @@ class ClaudeSession {
       this.syntheticApiErrorSeen = false;
       this.syntheticApiErrorReason = null;
       this.compactFailure = null;
-      this.accountRerunPrompt = { text, images, opts: { ...opts } };
       this.compactRerunPrompt = { text, images, rerun: opts.compactRerun === true, echoText: opts.echoText, replyTo: opts.replyTo, clientMsgId: opts.clientMsgId };
       this.streamTextBlocks.clear();
       this.preparingTurnAborter = preparationAborter;
@@ -1554,10 +1548,6 @@ class ClaudeSession {
     // Emit only in the same synchronous slice as the final selection guard
     // and stdin write; an unsubmitted old-model message has no durable echo.
     const echoInput = () => {
-      if (opts.accountRerun) {
-        if (this.turnOrigin?.human || isPersonMessage(opts)) this.watchReply().arm();
-        return;
-      }
       // Echo only now: this is the durable admission boundary reconnecting
       // clients and the team outbox trust.
       if (continuing) {
@@ -1716,7 +1706,6 @@ class ClaudeSession {
       }
       if (opts.peerDeliveryId) {
         this.pendingPeerAccepts.add(opts.peerDeliveryId);
-        this.pendingPeerInputs.set(opts.peerDeliveryId, { text, images, from: opts.peerFrom });
         if (!startsNewTurn) this.pendingPeerSteerAccepts.add(opts.peerDeliveryId);
       }
       await new Promise<void>((resolve, reject) => {
@@ -1739,7 +1728,6 @@ class ClaudeSession {
       }
       if (opts.peerDeliveryId) {
         this.pendingPeerAccepts.delete(opts.peerDeliveryId);
-        this.pendingPeerInputs.delete(opts.peerDeliveryId);
         this.pendingPeerSteerAccepts.delete(opts.peerDeliveryId);
         this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId: opts.peerDeliveryId, ts: Date.now() } });
       }
@@ -1782,14 +1770,6 @@ class ClaudeSession {
    * and then accepts the next user message in the same process. Fall back to a
    * process kill only if the control channel itself fails or never settles. */
   interrupt(reason = 'interrupt'): Promise<boolean> {
-    if (this.accountSwitching) {
-      if (reason !== 'interruptSession') return Promise.resolve(true);
-      this.nativeStopGeneration++;
-      this.turnStartedAt = null;
-      this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
-      this.shutdown('stop during account rollover', 'stop');
-      return Promise.resolve(false);
-    }
     if (reason === 'interruptSession') this.nativeStopGeneration++;
     if (this.interruptInFlight) {
       if (this.nudgeInterrupt && reason !== 'reply-nudge') this.nudgeInterrupt.cancelled = true;
@@ -1898,7 +1878,7 @@ class ClaudeSession {
   }
 
   isAlive(): boolean {
-    return (this.accountSwitching || this.child.exitCode === null) && !this.spawnError && !this.authFailed && !this.disposed;
+    return this.child.exitCode === null && !this.spawnError && !this.authFailed && !this.disposed;
   }
 
   isDisposed(): boolean {
@@ -1912,100 +1892,6 @@ class ClaudeSession {
 
   subscriptionAccountKey(): string { return this.providerRoutingKey; }
   subscriptionAccountEmail(): string | null { return this.providerEmail; }
-
-  private recoverAccountLimit(terminal: TerminalProviderError, result: any): void {
-    const generation = this.nativeStopGeneration;
-    this.accountSwitching = true;
-    const recovery = refreshClaudeAccountUsage().catch(() => {}).then(async () => {
-      if (this.disposed || generation !== this.nativeStopGeneration) return;
-      const id = cliProfileId('claude', this.providerAccount);
-      const desired = subscriptionEnvForLane('claude', this.cwd, this.chatId, agentForChatId(this.chatId)?.name);
-      const target = cliProfileId('claude', cliProfileForEnv('claude', desired));
-      const moved = target !== id && !claudeAccountPool.isLimited(target) && this.accountRerunPrompt !== null;
-      noteProviderUsageLimit(id, agentForChatId(this.chatId)?.name ?? 'a lane', terminal, undefined, Date.now(), moved ? target : undefined);
-      if (moved) await this.retryOnAccount(terminal);
-      else {
-        this.accountSwitching = false;
-        this.handleEvent(result, true);
-      }
-    }).catch(() => {
-      if (!this.disposed) {
-        this.accountSwitching = false;
-        this.handleEvent(result, true);
-      }
-    }).finally(() => {
-      if (this.contextMaintenance === recovery) {
-        this.accountSwitching = false;
-        this.contextMaintenance = null;
-      }
-    });
-    this.contextMaintenance = recovery;
-  }
-
-  private async retryOnAccount(terminal: TerminalProviderError): Promise<void> {
-    const prompt = this.accountRerunPrompt!;
-    const origin = this.turnOrigin;
-    const generation = this.nativeStopGeneration;
-    this.accountSwitching = true;
-    // Keep the lane, listeners and unacknowledged peer receipts. Only the
-    // failed worker is replaced; no failed result or turn boundary escapes.
-    try {
-      this.endBackgroundWork('other');
-      const child = this.child;
-      if (!this.workerClosed) {
-        const exited = new Promise<void>((resolve, reject) => {
-          const timeout = setTimeout(() => reject(new Error('The previous worker did not stop.')), 5_000);
-          child.once('close', () => { clearTimeout(timeout); resolve(); });
-        });
-        child.stdin.end();
-        terminateProcessTree(child, 'SIGTERM');
-        const kill = setTimeout(() => { if (child.exitCode === null) terminateProcessTree(child, 'SIGKILL'); }, 3_000);
-        try { await exited; } finally { clearTimeout(kill); }
-      }
-      if (this.disposed || generation !== this.nativeStopGeneration) return;
-      await flushEventLog(this.logKey);
-      if (this.disposed || generation !== this.nativeStopGeneration) return;
-      this.stdoutBuf = '';
-      this.stderrBuf = '';
-      this.pendingResumeId = this.currentSessionId ?? this.startedResumeId;
-      this.startedResumeId = this.pendingResumeId;
-      this.initSeen = false;
-      this.exitedBeforeInit = false;
-      this.resumeFailed = false;
-      this.mcpPrewarmed = false;
-      const steers = [...this.pendingPeerSteerAccepts].flatMap(id => {
-        const input = this.pendingPeerInputs?.get(id);
-        if (input) return [input];
-        this.pendingPeerAccepts.delete(id);
-        this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId: id, ts: Date.now() } });
-        return [];
-      });
-      this.pendingPeerSteerAccepts.clear();
-      if (prompt.opts.signal?.aborted) throw new Error('The pending delivery was cancelled.');
-      this.startWorker(this.pendingResumeId);
-      const resuming = this.pendingResumeId !== null;
-      const text = [resuming ? 'Continue the pending request from before the Claude account usage limit. Check its last actual result and finish it without repeating completed actions.' : prompt.text,
-        ...steers.map(input => `Queued guidance from ${input.from ?? 'a teammate'}:\n${input.text}`)].join('\n\n');
-      const images = [...(resuming ? [] : prompt.images ?? []), ...steers.flatMap(input => input.images ?? [])];
-      this.accountSwitching = false;
-      this.statusAcks = [];
-      this.pendingSeedAck = false;
-      await this.send(text, images.length ? images : undefined, { ...prompt.opts, accountRerun: true, accountRerunOrigin: origin });
-    } catch {
-      if (!this.disposed) {
-        this.accountSwitching = false;
-        this.emitTerminalNotice({ ...terminal, message: 'Claude account rollover could not finish. Your saved session and pending messages are retained. Try again.' });
-        for (const deliveryId of this.pendingPeerAccepts) this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, ts: Date.now() } });
-        this.pendingPeerAccepts.clear();
-        this.pendingPeerInputs?.clear();
-        if (this.turnStartedAt !== null) {
-          this.turnStartedAt = null;
-          this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
-        }
-        if (this.processExited()) this.emit({ type: 'closed', code: this.child.exitCode, signal: this.child.signalCode });
-      }
-    }
-  }
 
   private assertSubscriptionAccount(): void {
     if (this.cli !== 'claude' && this.cli !== 'assistant') return;
@@ -2045,7 +1931,7 @@ class ClaudeSession {
 
   /** True while this session is actively processing a turn (between user send and result event). */
   isBusy(): boolean {
-    return this.turnStartedAt !== null || this.accountSwitching === true || this.nativeHandoverPending === true;
+    return this.turnStartedAt !== null || this.nativeHandoverPending === true;
   }
 
   isHandingOver(): boolean { return this.nativeHandoverPending === true; }
@@ -2777,8 +2663,7 @@ class ClaudeSession {
     }
   }
 
-  private handleEvent(ev: any, accountLimitHandled = false): void {
-    if (this.accountSwitching && !accountLimitHandled) return;
+  private handleEvent(ev: any): void {
     if (this.handleMcpRecovery(ev)) return;
     if (ev?.type === 'autocompact_state') {
       console.log(`[native-compact-state] lane=${this.chatId} provider=${this.cli} ${JSON.stringify(ev.value)}`);
@@ -2789,7 +2674,6 @@ class ClaudeSession {
       this.statusAcks.splice(0).forEach(ack => ack());
       for (const deliveryId of this.pendingPeerAccepts) this.emit({ type: 'event', event: { type: 'peer_delivery_accepted', deliveryId, ts: Date.now() } });
       this.pendingPeerAccepts.clear();
-      this.pendingPeerInputs?.clear();
       this.pendingPeerSteerAccepts.clear();
     }
     // Monitor/background-task notifications can start a query inside the warm
@@ -2808,7 +2692,6 @@ class ClaudeSession {
     if (!this.disposed && this.turnStartedAt === null && nativeQueryStarted) {
       this.turnStartedAt = Date.now();
       this.automationTurn = false;
-      this.accountRerunPrompt = { text: 'Continue the pending task from its last actual result in this same session.', opts: { peerFrom: 'TARDIS', peerFromRole: 'automation' } };
       this.turnOrigin = emptyTurnOrigin();
       this.turnIsContinuation = false;
       this.watchReply().reset();
@@ -3088,11 +2971,18 @@ class ClaudeSession {
       const accepted = this.usageSeen ? contextTokens(this.contextKey) : 0;
       if (accepted > 0 && this.providerWindow) learnContextLimit(this.spawnModel, accepted, this.providerWindow);
     }
-    if (!accountLimitHandled && terminal?.usageLimit && (this.cli === 'claude' || this.cli === 'assistant')) {
-      claudeAccountPool.reject(cliProfileId('claude', this.providerAccount), terminal);
-      this.recoverAccountLimit(terminal, ev);
-      return;
+    if (terminal?.usageLimit) {
+      noteProviderUsageLimit(this.providerAccount, agentForChatId(this.chatId)?.name ?? 'a lane', terminal);
     }
+    // The usage-limit rollover: same turn, backup engine. Only an account the
+    // deployment named may roll over, only with the turn's opening prompt in
+    // hand, and never stacked on the compact re-run below.
+    const usageFallbackDue = terminal?.usageLimit === true
+      && !isAgentThread(this.chatId)
+      && (this.cli === 'claude' || this.cli === 'assistant')
+      && USAGE_FALLBACK_ACCOUNTS.has(this.providerAccountName)
+      && this.compactRerunPrompt !== null
+      && (this.compactRerunPrompt.text.trim() !== '' || (this.compactRerunPrompt.images?.length ?? 0) > 0);
     // Z.ai meters the coding plan in fixed windows, so an exhausted window is
     // never a balance problem and topping up credits cannot clear it. Attribute
     // the failure to the provider THIS child is actually talking to: a 1308
@@ -3157,7 +3047,28 @@ class ClaudeSession {
         (zaiCut ?? orProviderCut) ? this.laneCutNoticeFields(zaiCut ?? orProviderCut!) : undefined,
       );
       cutNoticeSeq = this.nextSeq - 1;
-
+      if (usageFallbackDue) {
+        this.emit({
+          type: 'event',
+          event: {
+            type: '_terminal_error',
+            message: `Claude's usage window is full, so this turn is rerunning automatically on the Gemini backup (${USAGE_FALLBACK.model}). The lane returns to Claude when the limit resets.`,
+            code: 'usage_fallback',
+            ts: Date.now(),
+          },
+        });
+        scheduleUsageFallback({
+          cwd: this.cwd,
+          chatId: this.chatId,
+          logKey: this.logKey,
+          text: this.compactRerunPrompt!.text,
+          images: this.compactRerunPrompt!.images,
+          echoText: this.compactRerunPrompt!.echoText,
+          replyTo: this.compactRerunPrompt!.replyTo,
+          clientMsgId: this.compactRerunPrompt!.clientMsgId,
+          retiring: this,
+        });
+      }
     } else {
       this.emit({ type: 'event', event: ev });
       // The aborted-stream cut has no failed result to hang its notice on:
@@ -3253,7 +3164,6 @@ class ClaudeSession {
           // failure of the query already running does not reject that input.
           if (this.pendingPeerSteerAccepts.has(deliveryId)) continue;
           this.pendingPeerAccepts.delete(deliveryId);
-          this.pendingPeerInputs?.delete(deliveryId);
           this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, ts: Date.now() } });
         }
       }
@@ -3478,12 +3388,6 @@ async function getOrCreateSessionUnlocked(opts: {
     opts = { ...opts, cli: cliForAgentEngine(brain.engine) as CliKind, model: brain.model, effort: brain.effort };
   }
   assertSubscriptionLane(opts.cli);
-  if (!opts.passive && (opts.cli === 'claude' || opts.cli === 'assistant')) {
-    let quotaTimer: NodeJS.Timeout | undefined;
-    try {
-      await Promise.race([refreshClaudeAccountUsage().catch(() => {}), new Promise<void>(resolve => { quotaTimer = setTimeout(resolve, 500); })]);
-    } finally { clearTimeout(quotaTimer); }
-  }
   if (sessionsShuttingDown) throw new Error('TARDIS is shutting down');
   const chatId = isAgentThread(opts.chatId || '') ? bareChatId(opts.chatId!) : opts.chatId || 'main';
   opts = { ...opts, chatId, repoPath: sessionDirectory(chatId, opts.repoPath) };
@@ -4005,6 +3909,150 @@ async function spawnSession(
   }
   spawnFailures.delete(key);
   return session;
+}
+
+const COMPACT_RERUN_NOTICE_IDLE_WAIT_MS = 6 * 60 * 60_000;
+
+type UsageFallbackJob = {
+  cwd: string;
+  chatId: string;
+  logKey: string;
+  text: string;
+  images?: Array<{ mediaType: string; base64: string }>;
+  /** The raw echo text and reply target of the original send (card-cbb4af,
+   *  review 3 P1 2), so the backup replay's echo matches the first one and
+   *  the client dedupes by clientMsgId instead of adding a quoted
+   *  duplicate bubble. */
+  echoText?: string;
+  replyTo?: { from: string; snippet: string };
+  clientMsgId?: string;
+  retiring: ClaudeSession;
+};
+/** One FIFO queue per thread: replays run serially, oldest prompt first, so
+ *  two limited turns on one lane each get their answer in order. */
+const usageFallbackQueues = new Map<string, UsageFallbackJob[]>();
+const usageFallbackDraining = new Set<string>();
+
+/** Rerun one usage-limited turn on the backup engine (USAGE_FALLBACK). */
+function scheduleUsageFallback(job: UsageFallbackJob): void {
+  console.warn(`[chat] usage limit on ${job.logKey}; rerunning the turn on ${USAGE_FALLBACK.cli} ${USAGE_FALLBACK.model}`);
+  const queue = usageFallbackQueues.get(job.logKey) ?? [];
+  queue.push(job);
+  usageFallbackQueues.set(job.logKey, queue);
+  void drainUsageFallback(job.logKey);
+}
+
+function drainUsageFallback(logKey: string): Promise<void> {
+  if (usageFallbackDraining.has(logKey)) return Promise.resolve();
+  usageFallbackDraining.add(logKey);
+  return (async () => {
+    try {
+      for (;;) {
+        const job = usageFallbackQueues.get(logKey)?.shift();
+        if (!job) {
+          usageFallbackQueues.delete(logKey);
+          return;
+        }
+        await runUsageFallback(job);
+      }
+    } finally {
+      usageFallbackDraining.delete(logKey);
+    }
+  })();
+}
+
+async function runUsageFallback(job: UsageFallbackJob): Promise<void> {
+  const sleep = (ms: number) => new Promise<void>((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
+  const otherEngineBusy = () => {
+    for (const s of [...sessions.values()]) {
+      if (s.logKey === job.logKey && s.cli !== USAGE_FALLBACK.cli && s.isAlive()
+        && typeof s.isBusy === 'function' && s.isBusy()) return true;
+    }
+    return false;
+  };
+  try {
+    // Wait for the limited turn's boundary: the backup engine takes the
+    // thread by retiring this one, and retirement only lands on an idle
+    // session (retireOtherEnginesOnThread skips a busy child).
+    const limitedStart = Date.now();
+    while (job.retiring.isBusy() && Date.now() - limitedStart < 15_000) await sleep(250);
+    if (job.retiring.isBusy()) throw new Error('the limited turn never went idle');
+    // A newer turn on the lane's own engine owns the thread while it runs;
+    // wait it out (bounded) instead of discarding this replay.
+    const freeStart = Date.now();
+    while (otherEngineBusy() && Date.now() - freeStart < 60_000) await sleep(250);
+    if (otherEngineBusy()) throw new Error('a newer turn on the lane is still running');
+    let startupTimer: NodeJS.Timeout | undefined;
+    const startup = getOrCreateSession({
+      cli: USAGE_FALLBACK.cli,
+      repoPath: job.cwd,
+      chatId: job.chatId,
+      model: USAGE_FALLBACK.model,
+      effort: USAGE_FALLBACK.effort,
+    });
+    const startupTimeout = new Promise<never>((_, reject) => {
+      startupTimer = setTimeout(() => reject(new Error('the backup engine did not start within 120s')), 120_000);
+      startupTimer.unref?.();
+    });
+    let session: Awaited<typeof startup>;
+    try {
+      session = await Promise.race([startup, startupTimeout]);
+    } catch (err) {
+      // The startup itself keeps running. A late success must not leave a
+      // stray backup session holding the thread or retiring things under a
+      // newer turn: close it the moment it lands, unless a newer turn is
+      // already using it (a newer job's getOrCreate may have joined the same
+      // in-flight startup, which is fine).
+      void startup.then((late) => {
+        if (!late.isAlive() || (typeof late.isBusy === 'function' && late.isBusy())) return;
+        console.warn(`[chat] usage fallback on ${job.logKey}: closing a late backup session after the startup timeout`);
+        for (const [key, s] of [...sessions]) {
+          if (s === late) {
+            late.shutdown('usage-fallback-startup-timeout');
+            if (sessions.get(key) === late) sessions.delete(key);
+            break;
+          }
+        }
+      }).catch(() => { /* the startup failed too; the notice below already said so */ });
+      throw err;
+    } finally {
+      if (startupTimer) clearTimeout(startupTimer);
+    }
+    await session.send(job.text, job.images, {
+      ...(job.echoText !== undefined ? { echoText: job.echoText } : {}),
+      ...(job.replyTo ? { replyTo: job.replyTo } : {}),
+      ...(job.clientMsgId ? { clientMsgId: job.clientMsgId } : {}),
+    });
+  } catch (err) {
+    await postUsageFallbackFailureNotice(job, (err as Error).message);
+  }
+}
+
+async function postUsageFallbackFailureNotice(job: UsageFallbackJob, reason: string): Promise<void> {
+  try {
+    const event = {
+      type: '_terminal_error',
+      message: `Claude's usage window is full and the automatic rerun on the Gemini backup did not land (${reason}). Send the message again, or switch brains.`,
+      code: 'usage_fallback_failed',
+    };
+    const deadline = Date.now() + COMPACT_RERUN_NOTICE_IDLE_WAIT_MS;
+    for (;;) {
+      const live = liveLaneSession(job.logKey, job.chatId);
+      if (!live?.isBusy()) {
+        if (live?.postNotice(event)) return;
+        break;
+      }
+      if (Date.now() >= deadline) {
+        console.warn(`[chat] usage-fallback failure notice on ${job.logKey} dropped: the thread never went idle`);
+        return;
+      }
+      await new Promise((resolve) => { const t = setTimeout(resolve, 250); t.unref?.(); });
+    }
+    const persisted = { ...laneTagFor(job.chatId), seq: reserveEventLogSeq(job.logKey), at: Date.now(), ev: { type: 'event' as const, event }, eng: USAGE_FALLBACK.cli, mdl: USAGE_FALLBACK.model };
+    const saved = appendEventLogDurable(job.logKey, persisted);
+    publishExternalThreadEvent(job.logKey, persisted);
+    await saved;
+  } catch { /* best effort */ }
 }
 
 export function shutdownAllSessions(): void {

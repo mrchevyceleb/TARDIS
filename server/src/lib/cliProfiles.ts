@@ -8,7 +8,6 @@ import { bareChatId, isAgentThread } from '../chat/threadKey.ts';
 import { subscriptionEnvironment } from '../chat/subscription-policy.ts';
 import { accountEnv, accountEnvForAccount, accountForAgent, accountFromChatId, configuredAccountNames, backgroundAccountEnv } from './accountResolver.ts';
 import { JsonStore } from './jsonStore.ts';
-import { claudeAccountPool } from './claudeAccountPool.ts';
 
 export type AccountEngine = 'claude' | 'codex';
 export type CliProfile = { id: string; engine: AccountEngine; path: string; env: NodeJS.ProcessEnv };
@@ -74,15 +73,6 @@ function choiceKey(engine: AccountEngine, cwd: string, chatId: string): string {
 }
 
 export function subscriptionEnvForLane(engine: AccountEngine, cwd: string, chatId: string, agentName?: string): NodeJS.ProcessEnv {
-  const preferred = preferredSubscriptionEnv(engine, cwd, chatId, agentName);
-  if (engine !== 'claude') return preferred;
-  const profiles = cliProfiles().filter(item => item.engine === 'claude');
-  const id = cliProfileId('claude', cliProfileForEnv('claude', preferred));
-  const selected = claudeAccountPool.select(id, profiles.map(item => item.id));
-  return selected === id ? preferred : { ...profiles.find(item => item.id === selected)!.env };
-}
-
-export function preferredSubscriptionEnv(engine: AccountEngine, cwd: string, chatId: string, agentName?: string): NodeJS.ProcessEnv {
   const legacyPin = accountFromChatId(chatId);
   if (legacyPin) return accountEnvForAccount(legacyPin, cwd);
   const choice = readRecords<Choice>('cli-account-choices.json').find(item => item.id === choiceKey(engine, cwd, chatId));
