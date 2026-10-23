@@ -21,3 +21,8 @@ export type QaBoard = { testers: QaColumn[] };
 
 export const fetchQaBoard = (signal?: AbortSignal) =>
   apiJson<QaBoard>('/api/qa', { signal, cache: 'no-store' });
+
+export type QaSignInLink = { id: 'sud' | 'edgar' | 'martin'; name: string; path: string };
+
+export const fetchQaSignInLinks = (signal?: AbortSignal) =>
+  apiJson<{ links: QaSignInLink[] }>('/api/qa/auth/links', { signal, cache: 'no-store' });

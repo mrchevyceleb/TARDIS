@@ -42,15 +42,48 @@ function snapshotAuthoritative(snapshot: DeskPrSnapshot): boolean {
  *  validated tombstone absorbs a retried merge as a no-op. Draft and
  *  still-open PRs are work in flight, not test work, so they never land
  *  early. With a non-authoritative snapshot nothing is added at all. */
+let syncInFlight: Promise<QaSyncResult> | null = null;
+const SYNC_ABANDON_MS = 90_000;
+
+/** One sweep at a time, process-wide. The scheduler ticks, the operator's
+ *  diagnostic endpoint and any future caller all share the in-flight sweep
+ *  instead of reconciling the same store concurrently. A sweep that outlives
+ *  SYNC_ABANDON_MS is abandoned: the guard releases and the next caller runs
+ *  a fresh sweep, so stalled I/O can never wedge the board until restart.
+ *  The abandoned sweep itself is harmless if it later settles: it only ever
+ *  adds records that are still missing, keyed by repo + PR. */
 export async function syncQaFromGithub(snapshot = deskPrs()): Promise<QaSyncResult> {
+  if (syncInFlight) return syncInFlight;
+  const run = syncQaFromGithubOnce(snapshot);
+  syncInFlight = run;
+  const abandon = setTimeout(() => {
+    if (syncInFlight === run) syncInFlight = null;
+  }, SYNC_ABANDON_MS);
+  abandon.unref();
+  const clear = () => {
+    clearTimeout(abandon);
+    if (syncInFlight === run) syncInFlight = null;
+  };
+  void run.then(clear, clear);
+  return run;
+}
+
+async function syncQaFromGithubOnce(snapshot = deskPrs()): Promise<QaSyncResult> {
   const authoritative = snapshotAuthoritative(snapshot);
   let added = 0;
   if (authoritative) {
     const known = new Set((await qaAllItems()).map((i) => `${i.repo.trim().toLowerCase()}#${i.pr}`));
     for (const pr of snapshot.prs) {
       if (pr.state !== 'merged' || !qaRepoAllowed(pr.repo)) continue;
+      const key = `${pr.repo.trim().toLowerCase()}#${pr.number}`;
+      // Known keys (open cards and validated tombstones alike) are left
+      // exactly as the flow left them: re-upserting them would rewrite the
+      // store and advance updatedAt on every two-minute sweep while
+      // changing nothing. Authoritative re-routing still arrives through
+      // the merge-signal endpoint, which upserts explicitly.
+      if (known.has(key)) continue;
       const created = await upsertQaItem({ repo: pr.repo, pr: pr.number, title: pr.title, app: appForRepo(pr.repo) });
-      if (created && !known.has(`${pr.repo.trim().toLowerCase()}#${pr.number}`)) added += 1;
+      if (created) added += 1;
     }
   }
   const items = await qaAllItems();

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowUpRight, CheckCircle2, Clock3, RefreshCw, TriangleAlert } from 'lucide-react';
-import { fetchQaBoard, type QaItem } from '../data/qa';
+import { fetchQaBoard, fetchQaSignInLinks, type QaItem, type QaSignInLink } from '../data/qa';
 import './qa.css';
 
 const STATUS: Record<QaItem['status'], { label: string; className: string }> = {
@@ -30,6 +30,9 @@ const TESTER_BLURB: Record<string, string> = {
 
 export function QaBoard() {
   const [now, setNow] = useState(() => Date.now());
+  const [links, setLinks] = useState<QaSignInLink[] | null>(null);
+  const [copied, setCopied] = useState('');
+  const [linkError, setLinkError] = useState('');
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
@@ -46,10 +49,36 @@ export function QaBoard() {
           <h2>What to test next</h2>
           <p className="qa-sub">Each column is one tester&apos;s live list, in the order to work it. The highlighted card is the one to do now. Replies happen in Slack; this board just always matches it.</p>
         </div>
-        <button className="qa-refresh" onClick={() => board.refetch()} disabled={board.isFetching} aria-label="Refresh the QA board">
-          <RefreshCw size={15} className={board.isFetching ? 'qa-spin' : ''} /> Refresh
-        </button>
+        <div className="qa-head-actions">
+          <button className="qa-refresh" onClick={async () => {
+            setLinkError('');
+            try { setLinks((await fetchQaSignInLinks()).links); }
+            catch { setLinkError('Links are operator-only.'); }
+          }} aria-label="Get tester sign-in links">
+            <ArrowUpRight size={15} /> Tester links
+          </button>
+          <button className="qa-refresh" onClick={() => board.refetch()} disabled={board.isFetching} aria-label="Refresh the QA board">
+            <RefreshCw size={15} className={board.isFetching ? 'qa-spin' : ''} /> Refresh
+          </button>
+        </div>
       </header>
+
+      {linkError ? <p className="qa-state qa-state-error"><TriangleAlert size={15} /> {linkError}</p> : null}
+      {links ? (
+        <div className="qa-links-panel">
+          <p>Fresh single-use sign-in links (10 minutes, one session each). Copy the link for the tester and hand it over.</p>
+          {links.map((link) => (
+            <div key={link.id} className="qa-link-row">
+              <span>{link.name}</span>
+              <code>{`${window.location.origin}${link.path}`}</code>
+              <button type="button" onClick={async () => {
+                try { await navigator.clipboard.writeText(`${window.location.origin}${link.path}`); setCopied(link.id); }
+                catch { setCopied(''); }
+              }}>{copied === link.id ? 'Copied' : 'Copy'}</button>
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       {board.isPending ? <p className="qa-state">Loading the live lists…</p> : null}
       {board.isError ? (

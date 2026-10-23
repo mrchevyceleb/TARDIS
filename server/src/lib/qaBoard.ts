@@ -63,38 +63,43 @@ const canonRepo = (repo: string) => repo.trim().toLowerCase();
  *  on; RIVENDELL_QA_TESTER_LOGINS maps tester ids to their board logins
  *  (comma-separated id=login pairs). Both must be set; unset or "off"
  *  leaves the board off. */
-const REPOS = (() => {
+function configuredRepos(): string[] {
   const configured = splitEnv('RIVENDELL_QA_REPOS');
   return configured.length && configured[0].toLowerCase() !== 'off' ? configured.map(canonRepo) : [];
-})();
+}
 
-const TESTER_LOGINS: Record<string, string> = (() => {
+function configuredTesterLogins(): Record<string, string> {
   const map: Record<string, string> = {};
   for (const pair of splitEnv('RIVENDELL_QA_TESTER_LOGINS')) {
     const eq = pair.indexOf('=');
-    if (eq > 0) map[pair.slice(0, eq).toLowerCase()] = pair.slice(eq + 1);
+    if (eq > 0) map[pair.slice(0, eq).trim().toLowerCase()] = pair.slice(eq + 1).trim();
   }
   return map;
-})();
+}
 
-export const qaBoardEnabled = REPOS.length > 0 && Object.keys(TESTER_LOGINS).length > 0;
-export const qaRepos = (): string[] => [...REPOS];
+export function qaBoardEnabled(): boolean {
+  const secret = (process.env.RIVENDELL_QA_AUTH_SECRET ?? '').trim();
+  return configuredRepos().length > 0 && Object.keys(configuredTesterLogins()).length > 0 && secret.length > 0;
+}
+
+export const qaRepos = (): string[] => configuredRepos();
 
 /** Only configured QA repos may ever land a card. */
 export function qaRepoAllowed(repo: string): boolean {
-  return REPOS.includes(canonRepo(repo));
+  return qaRepos().includes(canonRepo(repo));
 }
 
 /** The login a tester signs in with, or undefined when unconfigured. The
  *  board never names a tester it cannot authenticate. */
 export function qaTesterLogin(id: QaTesterId): string | undefined {
-  return TESTER_LOGINS[id];
+  return configuredTesterLogins()[id];
 }
 
 export function qaTesterByLogin(login: string): QaTesterId | undefined {
   const wanted = login.trim().toLowerCase();
+  const logins = configuredTesterLogins();
   for (const tester of QA_TESTERS) {
-    if (TESTER_LOGINS[tester.id]?.toLowerCase() === wanted) return tester.id;
+    if (logins[tester.id]?.toLowerCase() === wanted) return tester.id;
   }
   return undefined;
 }

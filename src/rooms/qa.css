@@ -35,3 +35,11 @@
 .qa-staging{color:#4f8cff;font-size:12px;font-weight:700;text-decoration:none}
 .qa-staging:hover{text-decoration:underline}
 .qa-no-thread{color:#888;font-size:12px}
+
+.qa-head-actions{display:flex;gap:8px;flex-wrap:wrap}
+.qa-links-panel{background:#151a31;border:1px solid #2a3160;border-radius:14px;padding:12px 14px;margin-bottom:12px}
+.qa-links-panel p{margin:0 0 10px;color:var(--mut,#9aa3c7);font-size:13px}
+.qa-link-row{display:flex;gap:10px;align-items:center;margin-bottom:8px}
+.qa-link-row span{font-weight:800;min-width:56px}
+.qa-link-row code{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#0d1024;color:#cdd6ff;padding:6px 8px;border-radius:8px;font-size:12px}
+.qa-link-row button{background:#4a154b;color:#fff;border:0;border-radius:8px;padding:6px 12px;font-weight:800;cursor:pointer}
