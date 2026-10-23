@@ -94,8 +94,10 @@ function claudePoolPeers(preferredId: string, profiles: CliProfile[]): CliProfil
   const idOf = (name: string): string | null => {
     try { return cliProfileId('claude', cliProfileForEnv('claude', accountEnvForAccount(name, APP_ROOT))); } catch { return null; }
   };
-  const pools = raw.split('|').map(group => new Set(group.split(',').map(name => name.trim()).filter(Boolean)
-    .map(idOf).filter((id): id is string => Boolean(id))));
+  const groups = raw.split('|').map(group => group.split(',').map(name => name.trim()).filter(Boolean).map(idOf));
+  // A misspelled name must never widen failover across pools: stay put.
+  if (groups.some(group => !group.length || group.includes(null))) return profiles.filter(profile => profile.id === preferredId);
+  const pools = groups.map(group => new Set(group as string[]));
   const mine = pools.find(pool => pool.has(preferredId));
   const pooled = new Set(pools.flatMap(pool => [...pool]));
   return profiles.filter(profile => mine ? mine.has(profile.id) : !pooled.has(profile.id));
