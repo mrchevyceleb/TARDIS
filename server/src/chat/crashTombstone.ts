@@ -47,10 +47,12 @@ export interface TombstoneOpts {
   signal: string | null;
   /** ms the turn had been running when the child died. Omit if not tracked. */
   ranMs?: number;
+  /** Actual Claude transcript path when account routing uses a custom project. */
+  nativeTranscriptPath?: string | null;
 }
 
 export function crashTombstoneText(opts: TombstoneOpts): string {
-  const { cli, cwd, sessionId, code, signal, ranMs } = opts;
+  const { cli, cwd, sessionId, code, signal, ranMs, nativeTranscriptPath } = opts;
   const how = [
     code !== null ? `code=${code}` : null,
     signal ? `signal=${signal}` : null,
@@ -70,8 +72,9 @@ export function crashTombstoneText(opts: TombstoneOpts): string {
     `Work from this turn may have COMPLETED and written files even though no answer came back. Do NOT tell the user nothing was done until you have checked:`,
   );
   const slug = engineProjectSlug(cwd);
+  const transcript = nativeTranscriptPath ?? `~/.claude/projects/${slug}/${sessionId ? `${sessionId}.jsonl` : '<session-id>.jsonl'}`;
   lines.push(
-    `  1. the engine log \`~/.claude/projects/${slug}/${sessionId ? `${sessionId}.jsonl` : '<session-id>.jsonl'}\` for the tool calls that ran`,
+    `  1. the engine log \`${transcript}\` for the tool calls that ran`,
   );
   lines.push(
     `  2. \`scratch/<today>/\` and any project \`tmp/\` dirs for surviving artifacts (screenshots, reports, generated files)`,

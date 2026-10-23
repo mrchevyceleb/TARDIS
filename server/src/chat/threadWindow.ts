@@ -31,6 +31,7 @@ import {
   isRoutinePromptText,
 } from './routineNoise.ts';
 import { isSyntheticApiErrorEvent, isSyntheticApiErrorText } from './providerErrors.ts';
+import { claudeNativeTranscriptPath } from './nativeSessionStorage.ts';
 
 export const WINDOW_TURNS = 50;
 /** Clip a single visible turn so one essay cannot blow the window. */
@@ -536,7 +537,8 @@ export function encodeClaudeProject(cwd: string): string {
 
 export function claudeSessionJsonlBytes(cli: string, cwd: string, sessionId: string | null | undefined): number {
   if (!sessionId) return 0;
-  const path = join(claudeConfigDir(cli), 'projects', encodeClaudeProject(cwd), `${sessionId}.jsonl`);
+  const path = claudeNativeTranscriptPath(sessionId)
+    ?? join(claudeConfigDir(cli), 'projects', encodeClaudeProject(cwd), `${sessionId}.jsonl`);
   try {
     if (!existsSync(path)) return 0;
     return statSync(path).size;
