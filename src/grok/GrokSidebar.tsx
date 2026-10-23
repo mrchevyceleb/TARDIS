@@ -28,6 +28,7 @@ import {
   Coins,
   FolderInput,
   Gauge,
+  Fuel,
   Hammer,
   Heart,
   LayoutGrid,
@@ -71,6 +72,7 @@ export const ROOM_ENTRIES: RoomEntry[] = [
   { key: 'setup', label: ROOM_NAMES.setup.name, icon: <Plug size={16} /> },
   { key: 'content', label: ROOM_NAMES.content.name, icon: <Pencil size={16} /> },
   { key: 'desk', label: ROOM_NAMES.desk.name, icon: <ClipboardList size={16} /> },
+  { key: 'usage', label: ROOM_NAMES.usage.name, icon: <Fuel size={16} /> },
   { key: 'council', label: ROOM_NAMES.council.name, icon: <LayoutGrid size={16} /> },
   { key: 'dashboard', label: ROOM_NAMES.dashboard.name, icon: <Gauge size={16} /> },
   { key: 'tidings', label: ROOM_NAMES.tidings.name, icon: <Mail size={16} /> },
@@ -1026,6 +1028,7 @@ export function BotRail(props: BotRailProps) {
             <NativeOpenHelper />
           </div>
         ) : null}
+        <button className="bt-foot-row" aria-current={props.activeRoom === 'usage' ? 'page' : undefined} onClick={() => props.onOpenRoom('usage')}><Fuel size={17} /> Usage</button>
         <a className="bt-foot-row" href="/api/session-health/report" target="_blank" rel="noreferrer"><Activity size={17} /> Session health</a>
         <button className="bt-foot-row" onClick={() => { setAppearanceOpen(false); setPluginsOpen((o) => !o); }} aria-haspopup="menu" aria-expanded={pluginsOpen}>
           <Plug size={17} /> Plugins

@@ -17,6 +17,7 @@ import { brainForAgent, cliForAgentEngine, ensureAgents, listAgents } from './ch
 import { resumeQueuedTeamDeliveries } from './chat/teamBus.ts';
 import { agentsRouter } from './routes/agents.ts';
 import { accountsRouter } from './routes/accounts.ts';
+import { usageRouter } from './routes/usage.ts';
 import { teamRouter } from './routes/team.ts';
 import { channelsRouter } from './routes/channels.ts';
 import { headlessRouter } from './routes/headless.ts';
@@ -150,6 +151,7 @@ app.use('/api/devices', devicesRouter);
 app.use('/api/robots', robotsRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/accounts', accountsRouter);
+app.use('/api/usage', usageRouter);
 app.use('/api/team', teamRouter);
 app.use('/api/channels', channelsRouter);
 app.use('/api/headless', headlessRouter);

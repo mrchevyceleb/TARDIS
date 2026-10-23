@@ -7,6 +7,7 @@ export type RoomId =
   | 'integrations'
   | 'content'
   | 'desk'
+  | 'usage'
   | 'hall'
   | 'dashboard'
   | 'council'
@@ -36,6 +37,7 @@ export const ROOM_NAMES: Record<RoomId, RoomName> = {
   integrations: { name: 'Integrations', eyebrow: 'Your office', tagline: 'Connections and approvals' },
   content: { name: 'Content', eyebrow: 'Content Studio', tagline: 'Create, review, and publish' },
   desk: { name: 'Desk', eyebrow: 'The Desk', tagline: 'What needs you, and what the crew is doing' },
+  usage: { name: 'Usage', eyebrow: 'Live usage', tagline: 'Every account, every limit, every reset' },
   hall: { name: 'Console Room', eyebrow: 'Console Room', tagline: 'Live with TARDIS' },
   dashboard: { name: 'Scanner', eyebrow: 'Scanner', tagline: 'Today at a glance' },
   council: { name: 'Missions', eyebrow: 'Missions', tagline: 'Task board' },
