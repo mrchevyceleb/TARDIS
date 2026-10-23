@@ -4,6 +4,11 @@ import { ELROND_WORKSPACE_PATH } from '../config.ts';
 import { abortInFlightChannelDeliveries, agentLogKey, batchJoinable, deliveryInterruptClass, deliveryLanePolicy, extendTeamChain, frozenBatchMembers, liveChannelTurnLanes, registerInFlightChannelDelivery, releaseInFlightChannelDelivery, teamAvailability, teamMessageWaitRequested, waitForDeliveryBoundary, type TeamChain } from './teamBus.ts';
 import { laneChatId } from './threadKey.ts';
 import type { Agent } from './agents.ts';
+import { freshThreadOnTask, freshTaskSenders } from './sessionPolicy.ts';
+import { isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed } from './teamBus.ts';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 test('raw API preserves its reply default while the MCP can request async delivery', () => {
   assert.equal(teamMessageWaitRequested(undefined), true);
@@ -141,6 +146,137 @@ test('team delivery uses the persisted agent brain instead of a stale live-lane 
     model: 'grok-4.5',
     effort: 'low',
   });
+});
+
+test('fresh thread on task policy: flagged coders fresh, leads never', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tardis-policy-'));
+  const file = join(dir, 'policy.json');
+  writeFileSync(file, JSON.stringify({
+    defaults: { reportsTo: 'chief-of-staff' },
+    agents: {
+      christina: { freshThreadOnTask: true },
+      tim: { freshThreadOnTask: true, freshTaskSenders: ['riley'] },
+      kip: { lead: true },
+      riley: { lead: true },
+    },
+  }));
+  const previous = process.env.RIVENDELL_SESSION_POLICY_FILE;
+  process.env.RIVENDELL_SESSION_POLICY_FILE = file;
+  try {
+    assert.equal(freshThreadOnTask('bot-christina'), true);
+    assert.equal(freshThreadOnTask('bot-kip'), false);
+    assert.equal(freshThreadOnTask('bot-riley'), false);
+    assert.equal(freshThreadOnTask('bot-unknown'), false);
+    assert.deepEqual(freshTaskSenders('bot-tim'), ['riley']);
+    assert.deepEqual(freshTaskSenders('bot-christina'), []);
+  } finally {
+    if (previous === undefined) delete process.env.RIVENDELL_SESSION_POLICY_FILE;
+    else process.env.RIVENDELL_SESSION_POLICY_FILE = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('only an explicit task-start handoff from a task source stamps a fresh thread', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tardis-policy-'));
+  const file = join(dir, 'policy.json');
+  writeFileSync(file, JSON.stringify({
+    defaults: { reportsTo: 'chief-of-staff' },
+    agents: {
+      christina: { freshThreadOnTask: true },
+      tim: { freshThreadOnTask: true, freshTaskSenders: ['riley'] },
+      kip: { lead: true },
+    },
+  }));
+  const previous = process.env.RIVENDELL_SESSION_POLICY_FILE;
+  process.env.RIVENDELL_SESSION_POLICY_FILE = file;
+  try {
+    // Unconfigured recipient: a lead-to-coder brief is a task start, a
+    // peer's follow-up or a worker's reply back is not.
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina' }), true);
+    assert.equal(isTaskStartHandoff({ senderId: 'samwise', recipientId: 'christina', recipientHome: 'bot-christina' }), true);
+    assert.equal(isTaskStartHandoff({ senderId: 'christina', recipientId: 'christina', recipientHome: 'bot-christina' }), false);
+    // Configured allowlist wins over the coder set: only Riley opens tasks
+    // for Tim, not even another lead.
+    assert.equal(isTaskStartHandoff({ senderId: 'riley', recipientId: 'tim', recipientHome: 'bot-tim' }), true);
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'tim', recipientHome: 'bot-tim' }), false);
+    // Person-sourced, channel and nudged deliveries never stamp.
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', personSourced: true }), false);
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', source: 'channel' }), false);
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', nudgeHoldSince: 1 }), false);
+    // A follow-up inside work the sender is already having with this
+    // recipient (chain leg) never stamps, even from a task source.
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', continuesChain: true }), false);
+    // An unflagged recipient never stamps.
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'kip', recipientHome: 'bot-kip' }), false);
+  } finally {
+    if (previous === undefined) delete process.env.RIVENDELL_SESSION_POLICY_FILE;
+    else process.env.RIVENDELL_SESSION_POLICY_FILE = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a fresh wipe is owed per task id until that task completes its reset', () => {
+  // No durable state yet: the task is owed its wipe.
+  assert.equal(freshResetOwed('task-a', undefined), true);
+  // An interrupted wipe for the same task resumes after restart.
+  assert.equal(freshResetOwed('task-a', { taskId: 'task-a', state: 'resetting', resetAt: 1 }), true);
+  // Only this task's own completion clears what it is owed.
+  assert.equal(freshResetOwed('task-a', { taskId: 'task-a', state: 'complete', resetAt: 1 }), false);
+  // A different task is never suppressed by an earlier task's completion,
+  // and an earlier task is not cleared by a later task's state.
+  assert.equal(freshResetOwed('task-b', { taskId: 'task-a', state: 'complete', resetAt: 1 }), true);
+  assert.equal(freshResetOwed('task-a', { taskId: 'task-b', state: 'complete', resetAt: 2 }), true);
+  // Legacy marked rows carry no task id and never trigger this gate.
+  assert.equal(freshResetOwed(undefined, { taskId: 'task-a', state: 'resetting', resetAt: 1 }), false);
+});
+
+test('the fresh wipe only runs at an idle boundary', () => {
+  assert.equal(recipientIdle([]), true);
+  assert.equal(recipientIdle([{ busy: false }, { busy: false }]), true);
+  assert.equal(recipientIdle([{ busy: false }, { busy: true }]), false);
+  // A live session carrying background work is not idle either: the reset
+  // would terminate that work even with no visible turn running.
+  assert.equal(recipientIdle([{ busy: false, backgroundTasks: ['render'] }]), false);
+  assert.equal(recipientIdle([{ busy: false, backgroundTasks: [] }]), true);
+});
+
+test('a task start is a batch boundary and a busy wipe holds the task', () => {
+  // Marked and unmarked records never share a turn; marked records share
+  // one only with the same durable task id, so two distinct tasks from one
+  // sender never batch behind one wipe.
+  const marked = { taskStart: true, taskId: 'task-a', fromId: 'riley' } as never;
+  const markedSame = { taskStart: true, taskId: 'task-a', fromId: 'riley' } as never;
+  const markedOtherTask = { taskStart: true, taskId: 'task-b', fromId: 'riley' } as never;
+  const markedOther = { taskStart: true, taskId: 'task-c', fromId: 'kip' } as never;
+  const plain = { fromId: 'riley' } as never;
+  assert.equal(batchJoinableFresh(marked, markedSame), true);
+  assert.equal(batchJoinableFresh(marked, markedOtherTask), false);
+  assert.equal(batchJoinableFresh(marked, markedOther), false);
+  assert.equal(batchJoinableFresh(marked, plain), false);
+  assert.equal(batchJoinableFresh(plain, marked), false);
+  assert.equal(batchJoinableFresh(plain, plain), true);
+  // Legacy marked rows without a task id keep the same-sender grouping.
+  const legacy = { taskStart: true, fromId: 'riley' } as never;
+  const legacySame = { taskStart: true, fromId: 'riley' } as never;
+  const legacyOther = { taskStart: true, fromId: 'kip' } as never;
+  assert.equal(batchJoinableFresh(legacy, legacySame), true);
+  assert.equal(batchJoinableFresh(legacy, legacyOther), false);
+  assert.equal(batchJoinableFresh(legacy, marked), false);
+  // Chain legs: an edge the sender's active chain already carries is a
+  // follow-up; a first leg is a new task.
+  const chain = { id: 'c1', edges: ['kip->christina'], route: ['kip', 'christina'] };
+  assert.equal(chainContinues(chain, 'kip', 'christina'), true);
+  assert.equal(chainContinues(chain, 'kip', 'adam'), false);
+  assert.equal(chainContinues(undefined, 'kip', 'christina'), false);
+  // Busy, resetting, switched-brain and destructive wipe failures hold the
+  // task for retry; only a clean fresh start admits it.
+  assert.equal(freshHoldReason({ fresh: false, reason: 'recipient became busy before reset' }), 'recipient became busy before reset');
+  assert.equal(freshHoldReason({ fresh: false, reason: 'thread already resetting' }), 'thread already resetting');
+  assert.equal(freshHoldReason({ fresh: false, retryable: true, reason: 'fresh start failed: boom' }), 'fresh start failed: boom');
+  assert.equal(freshHoldReason({ fresh: false, reason: 'some other refusal' }), undefined);
+  assert.equal(freshHoldReason({ fresh: true }), undefined);
+  // (The per-task owed-wipe gate itself is covered by the freshResetOwed
+  // test above: durable state, not process memory, decides.)
 });
 
 test('the person’s channel posts get person-class delivery, agent posts stay peer class', () => {

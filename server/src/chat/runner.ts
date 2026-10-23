@@ -28,7 +28,7 @@ import { openRouterToolSearch } from './openrouterCompatibility.ts';
 import { recordNativeSession, recordNativeCompact, recordNativeFailure, recordNativeNotice } from './sessionMetrics.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
-import { backgroundChatId, isAgentThread, isBackgroundChatId, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
+import { backgroundChatId, backgroundLaneEnabled, isAgentThread, isBackgroundChatId, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateSettings } from './longCallGate.ts';
@@ -3265,12 +3265,6 @@ function cancelNativeHandover(logKey: string): void {
   for (const source of nativeHandovers.get(logKey) ?? []) void source.interrupt('interruptSession');
 }
 
-function trackedThreadLogKey(opts: { cli: CliKind; repoPath: string; chatId?: string }): string {
-  const chatId = opts.chatId || 'main';
-  const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
-  return logKeyFor(opts.cli, cwd, chatId);
-}
-
 function beginSessionLookup(logKey: string): () => void {
   let resolve!: () => void;
   const token = new Promise<void>((done) => { resolve = done; });
@@ -3308,6 +3302,14 @@ export function beginThreadReset(opts: { cli: CliKind; repoPath: string; chatId?
   return () => { resettingThreadLogs.delete(logKey); };
 }
 
+/** The engine-neutral log key of a thread (agent home or lane): the same
+ *  key the Fresh barrier and the live-session sweep resolve from. */
+export function trackedThreadLogKey(opts: { cli: CliKind; repoPath: string; chatId?: string }): string {
+  const chatId = opts.chatId || 'main';
+  const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
+  return logKeyFor(opts.cli, cwd, chatId);
+}
+
 /** Claim the Fresh barrier for an already-computed thread log key (the
  *  programmatic path resolves the key from the agent home, not one engine). */
 export function beginThreadResetForLogKey(logKey: string): (() => void) | null {
@@ -3318,12 +3320,15 @@ export function beginThreadResetForLogKey(logKey: string): (() => void) | null {
   return () => { resettingThreadLogs.delete(logKey); };
 }
 
-/** Live sessions (main lane only) belonging to one durable thread log key,
- *  across every engine registry. The WS freshStart uses the same shape so a
- *  reset retires all of them, including account-pinned siblings. */
+/** Every live session belonging to one durable thread log key, across
+ *  every engine registry: the main lane, its account-pinned siblings, and
+ *  the background lane when the background lane is live. The WS freshStart
+ *  uses the same shape so a reset validates and retires all of them. */
 export function liveSessionsForLogKey(logKey: string): LiveSession[] {
-  return activeChatSessions().filter((session) => !isBackgroundChatId(session.chatId)
-    && trackedThreadLogKey({ cli: session.cli as CliKind, repoPath: session.cwd, chatId: session.chatId }) === logKey);
+  return activeChatSessions().filter((session) => (
+    (!isBackgroundChatId(session.chatId) || backgroundLaneEnabled())
+    && trackedThreadLogKey({ cli: session.cli as CliKind, repoPath: session.cwd, chatId: session.chatId }) === logKey
+  ));
 }
 
 export function isThreadResetting(opts: { cli: CliKind; repoPath: string; chatId?: string }): boolean {
