@@ -3781,6 +3781,8 @@ async function getOrCreateSessionUnlocked(opts: {
   const key = keyOf(opts.cli, cwd, chatId);
   const wantModel = resolveClaudeModel(opts.cli, opts.model);
   const wantEffort = resolveClaudeEffort(opts.cli, opts.effort, wantModel);
+  const moved = await settleMovedThreadSession(opts.cli, key, logKeyFor(opts.cli, cwd, chatId));
+  if (moved) return moved;
 
   while (true) {
     const existing = sessions.get(key);
@@ -3990,6 +3992,25 @@ function retireOtherEnginesOnThread(cli: CliKind, repoPath: string, chatId: stri
   }
   // Only claude-family engines are retired here. Codex and banana expose no live
   // session accessor, so their child lingers until idle timeout after a switch.
+}
+
+/** One live engine per agent thread, even when its work folder moves. The lane
+ *  key carries the folder, so a session-policy directory change used to leave
+ *  the old-folder engine running while a second one spawned in the new folder,
+ *  both on the same thread and branch. A busy old-folder engine keeps the
+ *  message (it queues behind the running turn); an idle one stops first. */
+async function settleMovedThreadSession(cli: CliKind, key: string, logKey: string): Promise<LaneSession | null> {
+  if (!isThreadLogKey(logKey)) return null;
+  for (const [otherKey, other] of [...sessions]) {
+    if (otherKey === key || other.cli !== cli || other.logKey !== logKey || !other.isAlive()) continue;
+    if (other.isBusy() || holdsBackgroundWork(other)) return other;
+    console.warn(`[chat ${cli}] retiring ${otherKey} on ${logKey}: work folder moved, one engine per thread`);
+    if (other instanceof ClaudeSession) other.shutdown('work folder moved', 'engine');
+    else other.shutdown('work folder moved');
+    await waitForChildExit(other, 5_000);
+    if (sessions.get(otherKey) === other) sessions.delete(otherKey);
+  }
+  return null;
 }
 
 /** Live, already-spawned session for a persistent-process lane (claude
