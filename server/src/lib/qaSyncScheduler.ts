@@ -20,6 +20,9 @@ export function startQaSyncScheduler(): boolean {
     console.log('[qa-sync] off until QA repos and tester logins are configured');
     return false;
   }
+  // The first sweep after boot always refreshes the pins, so a change in how
+  // the lists render (routing, caps) reaches Slack without waiting for a merge.
+  let firstSweep = true;
   const run = async () => {
     const result = await syncQaFromGithub();
     if (result.authoritative && (result.added || result.drift.length)) {
@@ -27,7 +30,8 @@ export function startQaSyncScheduler(): boolean {
     }
     // Cards the sweep itself added change the pinned lists too; a sync
     // add must not wait for the next land or outcome to refresh them.
-    if (result.added > 0) await refreshQaPins();
+    if (result.added > 0 || firstSweep) await refreshQaPins();
+    firstSweep = false;
   };
   const tick = () => {
     if (sweepInFlight) return;

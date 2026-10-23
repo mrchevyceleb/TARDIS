@@ -122,6 +122,7 @@ async function syncQaFromGithubOnce(snapshot = deskPrs()): Promise<QaSyncResult>
   const now = Date.now();
   const missing = (await qaAllItems())
     .filter((i) => i.status !== 'validated' && i.status !== 'parked' && !i.stagingUrl && now - (previewTried.get(i.id) ?? 0) > PREVIEW_RETRY_MS)
+    .sort((a, b) => (previewTried.get(a.id) ?? 0) - (previewTried.get(b.id) ?? 0))
     .slice(0, PREVIEW_FILLS_PER_SWEEP);
   for (const item of missing) {
     previewTried.set(item.id, now);
