@@ -306,6 +306,108 @@ export function useDeskPrs(enabled: boolean) {
   });
 }
 
+export type DeskCardLite = Pick<DeskCard, 'id' | 'title' | 'owner' | 'column' | 'updatedAt'> & { archived?: boolean };
+
+const TASKS_KEY = ['desk-tasks'] as const;
+
+/** The sidebar's current-task poll: a tiny server projection (no comments, no
+ *  todos, no archived cards) under its own query key, so the always-mounted
+ *  sidebar never drags the full Desk snapshot around or interferes with the
+ *  room's own polling. An older server 404s and the sidebar keeps its PR
+ *  lines (feature-detected). */
+export function useDeskCardsLight(enabled: boolean) {
+  return useQuery({
+    queryKey: TASKS_KEY,
+    queryFn: ({ signal }) => apiJson<{ rev: number; cards: DeskCardLite[] }>('/api/desk/tasks', { signal, cache: 'no-store' }),
+    enabled,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: 'always',
+    staleTime: 30_000,
+    retry: false,
+  });
+}
+
+export const CARD_STAGE_WORDS: Record<DeskColumn, string> = {
+  not_started: 'parked',
+  in_progress: 'in progress',
+  on_staging: 'waiting on staging',
+  in_qa: 'with Sud QA',
+  in_production: 'shipped',
+};
+
+export type AgentRef = { id: string; name: string };
+
+function ownerMatches(owner: DeskActor, agent: AgentRef, knownIds: Set<string>): boolean {
+  if (owner.kind !== 'agent') return false;
+  // Exact id match always wins. The name bridge exists only for pre-id legacy
+  // cards (no stored id at all); a stored id that belongs to no living agent
+  // is a deleted agent's card and must never transfer to a name twin.
+  if (owner.id === agent.id) return true;
+  return !owner.id && owner.name.toLowerCase() === agent.name.toLowerCase();
+}
+
+/** "Current" expires: a card nobody has touched in this long no longer says
+ *  what its owner is on. Waiting cards get twice as long before they stop
+ *  counting as anyone's active wait. */
+const CURRENT_TASK_MAX_DAYS = 7;
+const WAITING_TASK_MAX_DAYS = 14;
+const daysAgoMs = (days: number) => Date.now() - days * 24 * 60 * 60 * 1000;
+
+export type AgentTaskMap = Map<string, { current?: DeskCardLite; waiting?: DeskCardLite; next?: DeskCardLite }>;
+
+/** Resolve every agent's current task in one pass over the card list, so
+ *  per-render callers stay O(1) lookups instead of N agents x M cards. */
+export function agentTaskMap(cards: DeskCardLite[], agents: AgentRef[]): AgentTaskMap {
+  const knownIds = new Set(agents.map((a) => a.id));
+  const out: AgentTaskMap = new Map(agents.map((a) => [a.id, {}]));
+  const currentCutoff = daysAgoMs(CURRENT_TASK_MAX_DAYS);
+  const waitingCutoff = daysAgoMs(WAITING_TASK_MAX_DAYS);
+  for (const card of cards) {
+    if (card.archived) continue;
+    const agent = agents.find((a) => ownerMatches(card.owner, a, knownIds));
+    if (!agent) continue;
+    const slot = out.get(agent.id)!;
+    const newer = (cur?: DeskCardLite) => !cur || card.updatedAt.localeCompare(cur.updatedAt) > 0;
+    if (card.column === 'in_progress') {
+      if (Date.parse(card.updatedAt) >= currentCutoff && newer(slot.current)) slot.current = card;
+    } else if (card.column === 'on_staging' || card.column === 'in_qa') {
+      if (Date.parse(card.updatedAt) >= waitingCutoff && newer(slot.waiting)) slot.waiting = card;
+    } else if (card.column === 'not_started') {
+      if (newer(slot.next)) slot.next = card;
+    }
+  }
+  return out;
+}
+
+/** Which slot backs a headline, for labels that must not call parked or
+ *  waiting work "current". */
+export type TaskKind = 'current' | 'waiting' | 'next';
+export const TASK_LABEL: Record<TaskKind, string> = { current: 'Current task', waiting: 'Waiting', next: 'Next up' };
+export function taskKindOf(slot: { current?: DeskCardLite; waiting?: DeskCardLite; next?: DeskCardLite }): TaskKind | undefined {
+  return slot.current ? 'current' : slot.waiting ? 'waiting' : slot.next ? 'next' : undefined;
+}
+
+export type AgentTaskInfo = {
+  /** What the agent is on right now (fresh in-progress only). */
+  current?: DeskCardLite;
+  /** Newest staging/QA card: real work, but waiting, not current. */
+  waiting?: DeskCardLite;
+  /** Newest parked card, for the "next up" tail. */
+  next?: DeskCardLite;
+  /** One-line plain-speak summary of the above, for tile headlines. */
+  headline?: string;
+};
+
+const capitalise = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+
+export function withHeadline(slot: { current?: DeskCardLite; waiting?: DeskCardLite; next?: DeskCardLite }): AgentTaskInfo {
+  const { current, waiting, next } = slot;
+  const headline = current?.title
+    ?? (waiting ? `${capitalise(CARD_STAGE_WORDS[waiting.column])}: ${waiting.title}` : undefined)
+    ?? (next ? `Next up: ${next.title}` : undefined);
+  return { current, waiting, next, headline };
+}
+
 /** The summary counts moved by the same amount an optimistic edit moved the
  *  snapshot, so the Needs-you badge changes with the row (a delta, because the
  *  cached snapshot can be older than the summary). */

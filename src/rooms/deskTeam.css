@@ -300,6 +300,7 @@
 .desk-person-section { padding: 12px 14px; border-radius: 12px; border: 1px solid var(--r-line); background: var(--r-bg-soft); }
 .desk-person-section.is-turn { border-left: 3px solid var(--r-emerald); }
 .desk-person-section.is-job { border-left: 3px solid var(--r-amber); }
+.desk-person-section.is-task { border-left: 3px solid var(--r-violet); }
 .desk-person-section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
 .desk-person-section-head strong { font-size: 12px; }
 .desk-person-section-head > span { font-size: 11px; color: var(--r-ink-mute); }

@@ -13,6 +13,7 @@ import {
   DESK_FIRST_OPEN,
   DESK_FOCUS_EVENT,
   ageLabel,
+  agentTaskMap,
   agoText,
   clearDeskFocus,
   deskApi,
@@ -22,6 +23,7 @@ import {
   peekDeskFocus,
   sortOpenTodos,
   useDesk,
+  withHeadline,
   useDeskSummary,
   useDeskWrite,
   type DeskCard,
@@ -683,13 +685,13 @@ function TodoRow({
 
 const PR_STATE_LABEL: Record<string, string> = { draft: 'draft', ci: 'CI', merged: 'merged to staging', open: 'open' };
 
-/** One row per teammate: the open PRs they own, else their in-progress card
- *  title, else idle. PRs arrive with the snapshot (an older server sends no
- *  prs, so the rows degrade to the card/idle line until the server rides).
- *  PR owners that match no teammate (an unmapped branch prefix renders under
- *  its GitHub login) still get their own row, so real work never vanishes
- *  behind a false idle. */
+/** One row per teammate: their current task in plain words first (the card
+ *  says what they are on), then their open PRs, else idle. PR owners that
+ *  match no teammate (an unmapped branch prefix renders under its GitHub
+ *  login) still get their own row, so real work never vanishes behind a
+ *  false idle. */
 function PeopleRows({ desk, agents, onOpenCard }: { desk: DeskSnapshot; agents: Agent[]; onOpenCard: (id: string) => void }) {
+  const taskMap = useMemo(() => agentTaskMap(desk.cards, agents), [desk.cards, agents]);
   const prs = desk.prs ?? [];
   const known = new Set(agents.map((a) => a.name));
   const unmatchedOwners = [...new Set(prs.map((p) => p.owner).filter((owner) => !known.has(owner)))];
@@ -710,15 +712,27 @@ function PeopleRows({ desk, agents, onOpenCard }: { desk: DeskSnapshot; agents: 
       <ul className="desk-people-list">
         {agents.map((a) => {
           const mine = prs.filter((p) => p.owner === a.name);
-          const onCard = desk.cards.find((c) => c.column === 'in_progress' && !c.archived && c.owner.name === a.name);
+          const slot = taskMap.get(a.id) ?? {};
+          const task = withHeadline(slot);
+          const leadCard = slot.current ?? (!mine.length ? (slot.waiting ?? slot.next) : undefined);
           return (
             <li key={a.id} className="desk-person">
               <span className="desk-person-name">{a.name}</span>
-              {mine.length ? renderPrs(mine)
-                : onCard ? <button type="button" className="desk-person-on" onClick={() => onOpenCard(onCard.id)}>{onCard.title}</button>
+              {slot.current
+                ? <>
+                    <button type="button" className="desk-person-on" onClick={() => onOpenCard(slot.current!.id)}>{slot.current.title}</button>
+                    {mine.length ? renderPrs(mine) : null}
+                  </>
+                : mine.length
+                ? <>
+                    {renderPrs(mine)}
+                    {leadCard ? <button type="button" className="desk-person-on is-quiet" onClick={() => onOpenCard(leadCard.id)}>{task.headline}</button> : null}
+                  </>
+                : leadCard
+                ? <button type="button" className="desk-person-on" onClick={() => onOpenCard(leadCard.id)}>{task.headline}</button>
                 : desk.prsPending ? <span className="desk-person-on is-quiet">checking PRs…</span>
                 : desk.prsStale && desk.prsUnknown ? <span className="desk-person-on is-quiet">PR status unavailable</span>
-                : <span className="desk-person-on is-quiet">idle</span>}
+                : <span className="desk-person-on is-quiet">No current task</span>}
             </li>
           );
         })}

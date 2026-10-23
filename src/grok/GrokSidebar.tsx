@@ -50,7 +50,7 @@ import { MoveToGroupMenu, RailGroupSection, RailNewGroup } from './RailGroups';
 import { OTHER_GROUP_ID, OTHER_GROUP_NAME } from './railGroups';
 import { useRailGroups } from './useRailGroups';
 import { agentMark, DISC_INK, agentColor, agentAvatarUrl, sameChatId, CHAT_COLORS, chatColorOf, type Agent, type AgentFlagPatch, type ChatColor } from './agents';
-import { useDeskPrs } from '../data/desk';
+import { agentTaskMap, useDeskCardsLight, useDeskPrs, withHeadline } from '../data/desk';
 import { useLive } from '../chat/hooks/useLive';
 import { useJobsSummary } from '../chat/hooks/useJobs';
 import { RailJobsBadge } from '../chat/components/jobs/RailJobsBadge';
@@ -493,6 +493,11 @@ export function BotRail(props: BotRailProps) {
   // is not a turn: an agent on jobs is busy but free to talk, so it gets its
   // own outlined badge and never the working lamp.
   const jobsByAgent = useJobsSummary();
+  // Each teammate's current board task (one tiny poll for the whole rail).
+  const deskTasksQuery = useDeskCardsLight(true);
+  const deskTasks = deskTasksQuery.data;
+  const tasksState: 'loading' | 'error' | 'ready' = deskTasks ? 'ready' : deskTasksQuery.isError ? 'error' : 'loading';
+  const taskMap = useMemo(() => agentTaskMap(deskTasks?.cards ?? [], props.agents), [deskTasks, props.agents]);
 
   // Named, collapsible groups (layout + sync live in useRailGroups). Group
   // mode replaces the flat list unless a search is running.
@@ -800,7 +805,7 @@ export function BotRail(props: BotRailProps) {
                 <Pencil size={12} />
               </span>
             </span>
-            <AgentPrsSub name={a.name} fallback={r.item?.preview} />
+            <AgentPrsSub agent={a} info={taskMap.get(a.id)} tasksState={tasksState} />
             {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
           </span>
         </button>
@@ -1091,14 +1096,21 @@ export function BotRail(props: BotRailProps) {
   );
 }
 
-// The snippet line under a teammate's name: their open PRs when the server
-// serves them (feature-detected: an older server 404s and the line keeps the
-// chat preview), else the chat preview.
-function AgentPrsSub({ name, fallback }: { name: string; fallback?: string }) {
-  const { data } = useDeskPrs(true);
-  const mine = (data?.prs ?? []).filter((p) => p.owner === name);
-  const line = mine
+// The line under a teammate's name: what they are actually working on, in
+// plain words. A fresh in-progress card wins. Open PRs come next. Staging/QA
+// and next-up cards fill the tail. The stale chat preview is never shown.
+function AgentPrsSub({ agent, info, tasksState }: { agent: Agent; info?: ReturnType<typeof agentTaskMap> extends Map<string, infer V> ? V : never; tasksState: 'loading' | 'error' | 'ready' }) {
+  const { data: prsData } = useDeskPrs(true);
+  const task = info ? withHeadline(info) : undefined;
+  const mine = (prsData?.prs ?? []).filter((p) => p.owner === agent.name);
+  const prLine = mine
     .map((p) => `${p.repo.split('/')[1]} #${p.number} · ${p.reviewer ? `with ${p.reviewer}` : p.state === 'merged' ? 'merged' : p.state === 'ci' ? 'CI' : p.state}`)
     .join(' · ');
-  return <span className="bt-conv-sub">{line || (fallback ?? 'No work yet — give them something real.')}</span>;
+  if (task?.current) return <span className="bt-conv-sub" title={task.current.title}>{task.current.title}</span>;
+  if (prLine) return <span className="bt-conv-sub" title={prLine}>{prLine}</span>;
+  if (tasksState === 'loading') return <span className="bt-conv-sub">Checking current task…</span>;
+  if (tasksState === 'error') return <span className="bt-conv-sub">Current task unavailable</span>;
+  if (task?.waiting) return <span className="bt-conv-sub bt-conv-sub-next" title={task.headline}>{task.headline}</span>;
+  if (task?.next) return <span className="bt-conv-sub bt-conv-sub-next" title={task.headline}>{task.headline}</span>;
+  return <span className="bt-conv-sub">No current task</span>;
 }
