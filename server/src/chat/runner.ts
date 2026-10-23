@@ -989,7 +989,7 @@ class ClaudeSession {
     if (cli === 'claude' || cli === 'assistant') {
       spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
       // The installed CLI's catalog can lag a newly released Claude model.
-      // Its 200k fallback otherwise wins over the requested 213k window.
+      // Its 200k fallback otherwise wins over the requested 333k window.
       if (/^claude-(sonnet|opus)-5-5$/.test(this.spawnModel)) spawnEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '1000000';
     }
     delete spawnEnv.DISABLE_AUTO_COMPACT;
