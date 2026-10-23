@@ -111,17 +111,22 @@ export function freshResetOwed(
   return state === undefined || state.state !== 'complete';
 }
 
-/** A task start is a batch boundary (Codex review, Oct 23 2026): a marked
- *  record leads alone, so its wipe is never decided by an unmarked lead, and
- *  an unmarked lead never pulls a marked record along as a silent sibling
- *  (the marked record would ride the old thread and never reset). Marked
- *  records share one turn only when they carry the same durable task id:
- *  one task can be handed over as several capped records, and the wipe
- *  precedes the batch. Legacy marked rows without a task id keep the old
- *  same-sender grouping until they drain. */
+/** A fresh-task stamp is a batch boundary (Codex verify rounds 6-8, Oct 23
+ *  2026): a marked record leads alone, so its wipe is never decided by an
+ *  unmarked lead, and an unmarked lead never pulls a marked record along as
+ *  a silent sibling (the marked record would ride the old thread and never
+ *  reset). Marked records share one turn only when they carry the same
+ *  durable task id: one task can be handed over as several capped records,
+ *  and the wipe precedes the batch. A claimed clarification (taskId, no
+ *  taskStart) is also a boundary: it may batch only with records carrying
+ *  the same task id, never under an unrelated lead, because the drain only
+ *  checks the lead's owed wipe. Legacy marked rows without a task id keep
+ *  the old same-sender grouping until they drain. */
 export function batchJoinableFresh(lead: QueuedTeamDelivery, record: QueuedTeamDelivery): boolean {
-  if ((lead.taskStart === true) !== (record.taskStart === true)) return false;
-  if (lead.taskStart !== true) return true;
+  const leadClaimed = lead.taskStart === true || lead.taskId !== undefined;
+  const recordClaimed = record.taskStart === true || record.taskId !== undefined;
+  if (leadClaimed !== recordClaimed) return false;
+  if (!leadClaimed) return true;
   if (lead.taskId || record.taskId) return lead.taskId === record.taskId;
   return lead.fromId === record.fromId;
 }
@@ -253,6 +258,11 @@ export async function freshStartForAgent(agent: Agent, taskId?: string): Promise
     // drain never re-implements that order and can never erase the log
     // before the memory staging has succeeded.
     await runner.freshStart({ cli: home.cli as CliKind, repoPath, chatId, model: home.model, effort: home.effort });
+    // The wipe succeeded: only now may the task stop being "owed". If this
+    // completion write fails, the catch below reports the reset as
+    // retryable, so the caller holds the durable batch instead of admitting
+    // a clarification later as if the task were settled (Codex round 8).
+    if (taskId) await persistThreadResetTaskState(logKey, taskId, resetAt, 'complete');
     freshLifecycleCompleted({ logKey, repo: repoPath, chatId, cli: home.cli, resetAt: committed });
     return { fresh: true };
   } catch (error) {
@@ -460,18 +470,27 @@ async function claimFreshTaskId(requestId: string, senderId: string, recipientId
 }
 
 /** Release a claim minted by this send when the durable queue write fails:
- *  no record carries the id, so keeping the claim would swallow the retry's
- *  task start. Reused claims (an earlier send already owns them) stay. */
-async function releaseFreshTaskClaim(requestId: string, senderId: string, recipientId: string): Promise<void> {
+ *  the release is keyed by the exact task id this send minted, and it only
+ *  removes the claim when no queued record carries that task id. A
+ *  concurrent clarification may have queued successfully against the same
+ *  claim; deleting it would make later clarifications mint a second task
+ *  and trigger a second wipe (Codex verify round 8). */
+async function releaseFreshTaskClaim(requestId: string, senderId: string, recipientId: string, taskId: string): Promise<void> {
   const claimId = freshClaimId(requestId, senderId, recipientId);
-  await freshTaskClaims.modify((items) => items.filter((item) => item.id !== claimId));
+  const queued = await queuedDeliveryStore.list();
+  if (queued.some((item) => item.taskId === taskId)) return;
+  await freshTaskClaims.modify((items) => items.filter((item) => item.id !== claimId || item.taskId !== taskId));
 }
 
-/** The recipient's real reply closes the chain: every claim on the
- *  (original sender, recipient) edge retires with it, so the next genuine
- *  task on that edge mints a new id and can stamp a new reset. */
-async function retireFreshTaskClaimsForReply(replierId: string, originalSenderId: string): Promise<void> {
-  await freshTaskClaims.modify((items) => items.filter((item) => !(item.senderId === originalSenderId && item.recipientId === replierId)));
+/** A message closes a fresh-task claim only when it is a real reply inside
+ *  that task's chain: the sender's live inbound chain for this exact edge
+ *  carries the request id that minted the claim. Unrelated proactive sends
+ *  and replies to a different task never retire an active claim (Codex
+ *  verify round 8: retiring the whole reverse edge made later
+ *  clarifications mint new task ids and wipe live context). */
+async function retireFreshTaskClaimForReply(replierId: string, originalSenderId: string, requestId: string | undefined): Promise<void> {
+  if (!requestId) return;
+  await freshTaskClaims.modify((items) => items.filter((item) => !(item.requestId === requestId && item.senderId === originalSenderId && item.recipientId === replierId)));
 }
 
 function chainForQueuedDelivery(record: QueuedTeamDelivery): TeamChain {
@@ -2469,15 +2488,16 @@ export async function deliverTeamMessage(input: {
     }));
   } catch (error) {
     if (claim) await releaseOutbound(claim);
-    if (mintedFreshClaim) await releaseFreshTaskClaim(request, from.id, to.id).catch(() => undefined);
+    if (mintedFreshClaim && taskId) await releaseFreshTaskClaim(request, from.id, to.id, taskId).catch(() => undefined);
     return { delivered: false, to: to.name, hop, reason: `could not persist queued delivery: ${(error as Error).message}` };
   }
 
-  // This send is a real reply back to the original sender, so the chain is
-  // closed: retire any fresh-task claim on that edge. The reply itself is
-  // already durable, so a retirement failure must never fail the delivery.
-  if (rosterSender) {
-    try { await retireFreshTaskClaimsForReply(from.id, to.id); } catch (error) { console.warn('[team] fresh-task claim retirement failed:', (error as Error).message); }
+  // A real reply inside the task's own chain closes that chain: retire the
+  // claim minted for this exact request and edge, and nothing else. The
+  // reply itself is already durable, so a retirement failure must never
+  // fail the delivery.
+  if (rosterSender && parentChain?.id === request) {
+    try { await retireFreshTaskClaimForReply(from.id, to.id, request); } catch (error) { console.warn('[team] fresh-task claim retirement failed:', (error as Error).message); }
   }
 
   try { input.onQueued?.(); } catch (error) {
