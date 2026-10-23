@@ -146,13 +146,26 @@ export function chainContinues(parentChain: TeamChain | undefined, fromId: strin
  *  standing thread (Codex review, Oct 23 2026): busy, a reset already in
  *  flight, a brain switch, or any retryable failure. Anything else (notably
  *  a pre-destructive barrier refusal) falls open to ordinary delivery. */
-export function freshHoldReason(wiped: { fresh: boolean; retryable?: boolean; reason?: string }): string | undefined {
+export function freshHoldReason(
+  wiped: { fresh: boolean; retryable?: boolean; reason?: string },
+  heldMs = 0,
+): string | undefined {
   if (wiped.fresh) return undefined;
   if (wiped.retryable) return wiped.reason ?? 'fresh start failed after reset began';
   const reason = wiped.reason ?? '';
-  if (/became busy|already resetting|brain changed/i.test(reason)) return reason;
+  // A busy recipient (a live turn, or background work a wipe would kill)
+  // holds the task only up to a ceiling (Matt, Oct 23 2026: fresh threads
+  // were switched off because handoffs to lanes running long background
+  // jobs sat queued forever). Past it, nothing destructive has run, so the
+  // task falls open into the standing thread: late but never lost.
+  if (/became busy/i.test(reason)) return heldMs < FRESH_BUSY_HOLD_MS ? reason : undefined;
+  if (/already resetting|brain changed/i.test(reason)) return reason;
   return undefined;
 }
+
+/** How long a fresh-thread task waits for its recipient to go idle before it
+ *  is delivered into the standing thread instead. */
+export const FRESH_BUSY_HOLD_MS = 5 * 60_000;
 
 /** Server-side stamp decision (Codex verify Oct 23 2026: never infer a task
  *  boundary from timestamps or broad sender classes). A handoff opens a task
@@ -2097,7 +2110,8 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // delivering without a wipe until they drain.
         if (freshResetOwed(lead.taskId, lead.taskId ? threadResetTaskState(toLogKey, lead.taskId) : undefined)) {
           const wiped = await freshStartForAgent(to, lead.taskId);
-          const hold = freshHoldReason(wiped);
+          const queuedAt = Date.parse(lead.createdAt ?? '');
+          const hold = freshHoldReason(wiped, Number.isFinite(queuedAt) ? Date.now() - queuedAt : 0);
           if (hold) {
             freshRetryReason = hold;
           } else if (!wiped.fresh) {
