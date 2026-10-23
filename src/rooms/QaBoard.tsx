@@ -49,7 +49,7 @@ export function QaSignInLanding() {
           <p className="qa-sub">{state === 'working'
             ? 'One moment while we open your list.'
             : state === 'failed' || !usable
-              ? 'Ask for a fresh link and open it within ten minutes.'
+              ? 'Ask for a fresh link.'
               : 'Tap below to open your list. The link works once.'}</p>
           {usable && state !== 'failed' ? (
             <button
@@ -63,7 +63,7 @@ export function QaSignInLanding() {
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify(credentials),
                 }).then((res) => {
-                  if (res.ok) window.location.replace('/qa');
+                  if (res.ok) window.location.replace('/qa-board');
                   else setState('failed');
                 }).catch(() => setState('failed'));
               }}
@@ -77,7 +77,9 @@ export function QaSignInLanding() {
   );
 }
 
-export function QaBoard() {
+/** `tester` is the bare page testers get on the public QA address: their own
+ *  list only, with no operator controls. */
+export function QaBoard({ tester = false }: { tester?: boolean } = {}) {
   const [now, setNow] = useState(() => Date.now());
   const [links, setLinks] = useState<QaSignInLink[] | null>(null);
   const [copied, setCopied] = useState('');
@@ -99,13 +101,13 @@ export function QaBoard() {
           <p className="qa-sub">Each column is one tester&apos;s live list, in the order to work it. The highlighted card is the one to do now. Replies happen in Slack; this board just always matches it.</p>
         </div>
         <div className="qa-head-actions">
-          <button className="qa-refresh" onClick={async () => {
+          {tester ? null : <button className="qa-refresh" onClick={async () => {
             setLinkError('');
             try { setLinks((await fetchQaSignInLinks()).links); }
             catch { setLinkError('Links are operator-only.'); }
           }} aria-label="Get tester sign-in links">
             <ArrowUpRight size={15} /> Tester links
-          </button>
+          </button>}
           <button className="qa-refresh" onClick={() => board.refetch()} disabled={board.isFetching} aria-label="Refresh the QA board">
             <RefreshCw size={15} className={board.isFetching ? 'qa-spin' : ''} /> Refresh
           </button>
@@ -115,13 +117,13 @@ export function QaBoard() {
       {linkError ? <p className="qa-state qa-state-error"><TriangleAlert size={15} /> {linkError}</p> : null}
       {links ? (
         <div className="qa-links-panel">
-          <p>Fresh single-use sign-in links (10 minutes, one session each). Copy the link for the tester and hand it over.</p>
+          <p>Fresh single-use sign-in links (good for 7 days, one sign-in each). Copy the link for the tester and hand it over.</p>
           {links.map((link) => (
             <div key={link.id} className="qa-link-row">
               <span>{link.name}</span>
-              <code>{`${window.location.origin}${link.path}`}</code>
+              <code>{link.url ?? `${window.location.origin}${link.path}`}</code>
               <button type="button" onClick={async () => {
-                try { await navigator.clipboard.writeText(`${window.location.origin}${link.path}`); setCopied(link.id); }
+                try { await navigator.clipboard.writeText(link.url ?? `${window.location.origin}${link.path}`); setCopied(link.id); }
                 catch { setCopied(''); }
               }}>{copied === link.id ? 'Copied' : 'Copy'}</button>
             </div>

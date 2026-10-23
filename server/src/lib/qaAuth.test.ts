@@ -1,9 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 process.env.RIVENDELL_QA_REPOS = 'acme/operly,acme/studio';
 process.env.RIVENDELL_QA_TESTER_LOGINS = 'sud=sud-board,edgar=edgar-board,martin=martin-board';
 process.env.RIVENDELL_QA_AUTH_SECRET = 'test-only-secret-value';
+process.env.RIVENDELL_STATE_DIR = mkdtempSync(join(tmpdir(), 'qa-auth-'));
 
 const { qaSignInPath, verifyQaSignIn, createQaSession, qaSessionTester, clearQaSession, qaSessionCookie } =
   await import('./qaAuth.ts');
@@ -25,7 +29,7 @@ test('a signed link verifies once for its tester, then exchanges for a session',
 });
 
 test('tampered, wrong-secret and expired links never verify', () => {
-  const path = qaSignInPath('edgar', Date.now() - 20 * 60_000);
+  const path = qaSignInPath('edgar', Date.now() - 8 * 24 * 60 * 60_000);
   assert.ok(path);
   const url = new URL(path, 'http://localhost');
   const data = url.searchParams.get('d')!;
