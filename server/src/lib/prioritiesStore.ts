@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 
 /** Agents that have a board. One line adds another. */
-export const PRIORITY_AGENTS = ['chief-of-staff', 'riley'] as const;
+export const PRIORITY_AGENTS = ['chief-of-staff', 'riley', 'kip'] as const;
 
 export type PriorityItem = {
   id: string;
