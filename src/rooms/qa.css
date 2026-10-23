@@ -32,6 +32,7 @@
 .qa-links{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0}
 .qa-slack{display:inline-flex;gap:4px;align-items:center;background:#4a154b;color:#fff;text-decoration:none;font-size:12px;font-weight:800;padding:5px 10px;border-radius:8px;transition:transform .2s}
 .qa-slack:hover{transform:translateY(-1px) rotate(-1deg)}
+.qa-pr{background:#24292f}
 .qa-staging{color:#4f8cff;font-size:12px;font-weight:700;text-decoration:none}
 .qa-staging:hover{text-decoration:underline}
 .qa-no-thread{color:#888;font-size:12px}

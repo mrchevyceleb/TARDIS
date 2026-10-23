@@ -162,11 +162,12 @@ export function QaBoard({ tester = false }: { tester?: boolean } = {}) {
                         <span className="qa-app">{item.app}</span>
                       </p>
                       <p className="qa-links">
+                        {/* Every card links to its PR; the Slack thread joins it once the
+                            item has been posted for testing. */}
+                        <a className="qa-slack qa-pr" href={`https://github.com/${item.repo}/pull/${item.pr}`} target="_blank" rel="noreferrer">Open PR #{item.pr} <ArrowUpRight size={13} /></a>
                         {item.slackThreadUrl ? (
                           <a className="qa-slack" href={item.slackThreadUrl} target="_blank" rel="noreferrer">Open Slack thread <ArrowUpRight size={13} /></a>
-                        ) : (
-                          <span className="qa-no-thread">Slack thread opens with the item</span>
-                        )}
+                        ) : null}
                         {item.stagingUrl ? <a className="qa-staging" href={item.stagingUrl} target="_blank" rel="noreferrer">Open on staging</a> : null}
                       </p>
                     </article>
