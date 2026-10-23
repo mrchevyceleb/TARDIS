@@ -13,15 +13,44 @@ import { listCliAccounts, accountForProfile, type CliAccount } from './cliAccoun
 
 export type UsageWindow = { id: string; label: string; used: number; limit: number; remaining: number; unit: 'percent' | 'requests' | 'characters' | 'credits'; resetsAt: string | null; active?: boolean };
 export type UsageAmount = { label: string; amount: number; currency: string; period: string; scope: 'key' | 'account' | 'subscription' };
+export type UsagePace = { label: string; currency: string; perMinute: number; observedMinutes: number; samples: number; minutesLeft: number | null; balance: number | null; scope: UsageAmount['scope'] };
 export type UsageAccount = {
   id: string; provider: string; name: string; email?: string; plan?: string;
   kind: 'subscription' | 'api'; status: 'live' | 'unavailable' | 'stale';
   checkedAt: string | null; attemptedAt: string; windows: UsageWindow[];
   amounts: UsageAmount[]; agents: string[]; note: string;
-  source: string; href: string; billingGroup?: string;
+  source: string; href: string; billingGroup?: string; pace?: UsagePace[];
 };
 export type AccountUsage = { generatedAt: string; refreshSeconds: number; accounts: UsageAccount[] };
 const cache = new Map<string, UsageAccount>();
+const observations = new Map<string, Array<{ at: number; amount: number }>>();
+/** Estimate only from fresh readings of the same balance or cumulative spend.
+ * A top-up, reset or changed currency starts a new sample. No invented prices. */
+function measuredPace(a: UsageAccount): UsagePace[] {
+  if (a.status !== 'live' || !a.checkedAt) return [];
+  const at = Date.parse(a.checkedAt), result: UsagePace[] = [];
+  const balances = a.amounts.filter(m => ['Account credit balance', 'Available balance', 'Key budget remaining'].includes(m.label));
+  const spending = a.amounts.find(m => /spend/i.test(m.label) && /day/i.test(m.period)) || a.amounts.find(m => /spend/i.test(m.label));
+  for (const m of balances.length ? balances : spending ? [spending] : []) {
+    const isBalance = balances.includes(m), id = [a.id, m.label, m.currency, m.period, m.scope].join('|');
+    let points = (observations.get(id) || []).filter(p => at - p.at <= 15 * 60_000 && p.at <= at);
+    const previous = points.at(-1);
+    if (previous && (isBalance ? m.amount > previous.amount + 0.000001 : m.amount < previous.amount - 0.000001)) points = [];
+    if (!previous || at - previous.at >= 10_000 || !points.length) points.push({ at, amount: m.amount });
+    observations.set(id, points);
+    const first = points[0], elapsed = (at - first.at) / 60_000;
+    const change = isBalance ? first.amount - m.amount : m.amount - first.amount;
+    if (elapsed < 0.75 || change < 0 || points.length < 2) continue;
+    const perMinute = change / elapsed;
+    result.push({ label: m.label, currency: m.currency, perMinute, observedMinutes: elapsed, samples: points.length,
+      minutesLeft: isBalance && m.amount <= 0 ? 0 : isBalance && perMinute > 0 ? m.amount / perMinute : null,
+      balance: isBalance ? m.amount : null, scope: m.scope });
+  }
+  // Account/key changes cannot grow the process cache without bound.
+  if (observations.size > 200) for (const [id, points] of observations) if (!points.length || at - points.at(-1)!.at > 30 * 60_000) observations.delete(id);
+  while (observations.size > 200) observations.delete(observations.keys().next().value!);
+  return result;
+}
 let last: AccountUsage | undefined;
 let inFlight: Promise<AccountUsage> | undefined;
 let lastRead = 0;
@@ -186,7 +215,8 @@ async function openRouter(token: string, personal: boolean): Promise<UsageAccoun
     const budgets = Array.isArray(data.budgets) ? data.budgets : [];
     base.windows = budgets.flatMap((raw: unknown, index: number) => {
       const item = rec(raw), limit = num(item.limit_usd), used = num(item.spend_usd);
-      const window = limit !== undefined && limit > 0 && used !== undefined ? percent('budget-' + index, (label(item.scope) || 'Key') + ' budget', used / limit * 100, item.resets_at) : null;
+        const scope = item.scope === 'key_limit' ? 'Key' : item.scope === 'account_limit' ? 'Account' : (label(item.scope) || 'Key').replaceAll('_', ' ');
+        const window = limit !== undefined && limit > 0 && used !== undefined ? percent('budget-' + index, scope + ' budget', used / limit * 100, item.resets_at) : null;
       return window ? [window] : [];
     });
     if (!base.amounts.length && !base.windows.length) throw new FeedError(502);
@@ -355,6 +385,7 @@ async function collect(): Promise<AccountUsage> {
     }
     if (id && unique.has(id)) unique.get(id)!.agents.push(agent.name);
   }
+  for (const a of unique.values()) a.pace = measuredPace(a);
   return { generatedAt: now(), refreshSeconds: 60, accounts: [...unique.values()] };
 }
 export function readAccountUsage(force = false): Promise<AccountUsage> {
