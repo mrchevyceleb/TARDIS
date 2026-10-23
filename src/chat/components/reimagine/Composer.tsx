@@ -787,7 +787,7 @@ export function Composer(props: ComposerProps) {
       {props.chatId && props.robotControl !== false && <RobotControl />}
       {props.attachMenu}
       <div
-        className={`composer${images.length > 0 || refCount > 0 || uploads.length > 0 || imageIngesting > 0 ? ' has-attach' : ''}${dictating ? ' dictating' : ''}`}
+        className={`composer${props.value ? ' has-draft' : ''}${images.length > 0 || refCount > 0 || uploads.length > 0 || imageIngesting > 0 ? ' has-attach' : ''}${dictating ? ' dictating' : ''}`}
         onDragOver={(e) => {
           if (acceptImages && Array.from(e.dataTransfer.types).includes('Files')) {
             e.preventDefault();

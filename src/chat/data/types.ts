@@ -119,6 +119,7 @@ export type ChatBlock =
       kind: 'terminal-error';
       id: string;
       message: string;
+      model?: string;
       code?: string;
       retryable?: boolean;
       /** The model provider switched mid-turn and the agent is continuing on

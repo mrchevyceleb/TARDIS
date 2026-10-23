@@ -1,3 +1,4 @@
+import { lastRejectedCodexModel } from '../../codexModels';
 // Reimagined MOBILE chat shell — §5 (the flagship). Header + chronicle ribbon
 // + feed + composer dock, with Chronicle + Counsel bottom sheets, an attach
 // menu, a toast, and tap-toggle timestamps/actions. The phone preview frame
@@ -117,6 +118,8 @@ export function Mobile({ s, picker, repo, agent }: ShellViewProps) {
             waitingOn={waitingOn}
             onReact={s.react}
             onRetry={s.retry}
+            onRestore={(text) => s.setValue((draft) => draft.trim() ? `${draft}\n\n${text}` : text)}
+            onChooseModel={() => setSheet('counsel')}
             agentName={agent}
           />
           {s.error ? (
@@ -229,7 +232,7 @@ export function Mobile({ s, picker, repo, agent }: ShellViewProps) {
             </div>
           </>
         ) : null}
-        <CounselSheet picker={picker} open={sheet === 'counsel'} onClose={closeAll} />
+        <CounselSheet rejectedCodexModel={lastRejectedCodexModel(s.blocks)} picker={picker} open={sheet === 'counsel'} onClose={closeAll} />
       </div>
       {s.sparks.sparks}
     </div>
