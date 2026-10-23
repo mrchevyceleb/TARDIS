@@ -5,6 +5,7 @@ import { Transform, Readable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { setTimeout as delay } from 'node:timers/promises';
 import { openRouterCapability } from './openrouter-models.ts';
+import { OpenRouterCompatibilityError, pinOpenRouterProvider, rememberOpenRouterProvider, type OpenRouterTranscript } from './openrouterCompatibility.ts';
 import { fireworksCapability } from './fireworks-models.ts';
 import { restoredContextBlocks, restoredFileTexts } from './sessionMetricEvidence.ts';
 import { fixedPrefix, recordNativeCall, recordNativeCompactBoundary, recordNativeFailure, recordNativeNotice } from './sessionMetrics.ts';
@@ -15,6 +16,7 @@ const MAX_BODY = 32 * 1024 * 1024;
 type Route = {
   upstream: string; lane: string; provider: string; resumed: boolean;
   sessionId(): string | null; harnessChars(): number; harnessPhase(): 'startup' | 'turn'; compacting: boolean; recovering?: boolean; summarySeen?: boolean; restoring?: boolean;
+  transcript?: OpenRouterTranscript;
 };
 let server: Server | null = null;
 let ready: Promise<void> | null = null;
@@ -190,13 +192,16 @@ export function confirmNativeCompact(baseUrl: string | undefined): void {
 
 /** Pass bytes straight through while reading usage frames, never text/tool
  * arguments. Metrics are per API call rather than the CLI's cumulative total. */
-function observeUsage(route: Route, request: any, auxiliary: boolean, streaming: boolean, nativeSummary = false, requestStartedAt = Date.now(), sessionId = route.sessionId()): Transform {
+function observeUsage(route: Route, request: any, auxiliary: boolean, streaming: boolean, nativeSummary = false, requestStartedAt = Date.now(), sessionId = route.sessionId(), reportUsage = true): Transform {
   const decoder = new StringDecoder('utf8');
   let buffer = '';
   let usage: any = {};
   let stopped = false;
   let reported = false;
+  let provider: unknown;
+  const signatures = new Map<number, string>();
   const report = () => {
+    if (!reportUsage) return;
     if (reported) return;
     const input = Number(usage.input_tokens || 0) + Number(usage.cache_read_input_tokens || 0) + Number(usage.cache_creation_input_tokens || 0);
     if (input <= 0) return;
@@ -210,6 +215,19 @@ function observeUsage(route: Route, request: any, auxiliary: boolean, streaming:
     if (auxiliary && stopped) recordNativeFailure(route.lane, 'claude-code', 'Native compaction hit its output limit; engine recovery is required before this lane is proven.');
   };
   const absorb = (frame: any) => {
+    if (frame?.message?.provider) provider = frame.message.provider;
+    if (frame?.provider) provider = frame.provider;
+    if (['openrouter', 'openrouter2'].includes(route.provider)) {
+      rememberOpenRouterProvider(request.model || '', provider, frame.content ?? frame.message?.content ?? (frame.content_block ? [frame.content_block] : []));
+      if (frame.type === 'content_block_start' && frame.content_block?.type === 'thinking') signatures.set(frame.index, frame.content_block.signature || '');
+      if (frame.type === 'content_block_delta' && frame.delta?.type === 'signature_delta' && signatures.has(frame.index)) {
+        signatures.set(frame.index, signatures.get(frame.index)! + (frame.delta.signature || ''));
+      }
+      if (frame.type === 'content_block_stop' && signatures.has(frame.index)) {
+        rememberOpenRouterProvider(request.model || '', provider, [{ type: 'thinking', signature: signatures.get(frame.index) }]);
+        signatures.delete(frame.index);
+      }
+    }
     if (frame?.usage) usage = { ...usage, ...frame.usage };
     if (frame?.message?.usage) usage = { ...usage, ...frame.message.usage };
     if (frame?.delta?.stop_reason === 'max_tokens' || frame?.stop_reason === 'max_tokens') stopped = true;
@@ -306,6 +324,11 @@ export function ensureNativeCompactProxy(): Promise<void> {
           }
           route.restoring = false;
         }
+        const gemini = request && ['openrouter', 'openrouter2'].includes(route.provider) && /^google\/gemini/i.test(request.model || '');
+        if (gemini) {
+          const outgoing = JSON.parse(body);
+          if (await pinOpenRouterProvider(outgoing, route.lane, embeddedSession || parentSession, aborter.signal, route.transcript)) body = JSON.stringify(outgoing);
+        }
         const headers = new Headers();
         for (const [name, value] of Object.entries(req.headers)) {
           if (!value || ['host', 'content-length', 'connection', 'transfer-encoding', 'accept-encoding'].includes(name)) continue;
@@ -325,16 +348,17 @@ export function ensureNativeCompactProxy(): Promise<void> {
           const stream = Readable.fromWeb(response.body as any);
           stream.on('error', () => { if (!res.destroyed) res.destroy(); });
           res.on('close', () => stream.destroy());
-          if (rootRequest && request && response.ok) {
+          if (request && (rootRequest || gemini) && response.ok) {
             const sentRequest = body === original ? request : JSON.parse(body);
-            const observer = observeUsage(route, sentRequest, Boolean(auxiliary), response.headers.get('content-type')?.includes('text/event-stream') ?? false, Boolean(nativeSummary), requestStartedAt, requestSessionId);
+            const observer = observeUsage(route, sentRequest, Boolean(auxiliary), response.headers.get('content-type')?.includes('text/event-stream') ?? false, Boolean(nativeSummary), requestStartedAt, requestSessionId, rootRequest);
             observer.on('error', () => { if (!res.destroyed) res.destroy(); });
             stream.pipe(observer).pipe(res);
           } else stream.pipe(res);
         } else res.end();
-      } catch {
-        if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
-        if (!res.destroyed) res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'The native provider connection failed.' } }));
+      } catch (error) {
+        const conflict = error instanceof OpenRouterCompatibilityError;
+        if (!res.headersSent) res.writeHead(conflict ? 400 : 502, { 'content-type': 'application/json', ...(conflict ? { 'x-should-retry': 'false' } : {}) });
+        if (!res.destroyed) res.end(JSON.stringify({ type: 'error', error: { type: conflict ? 'invalid_request_error' : 'api_error', message: conflict ? error.message : 'The native provider connection failed.' } }));
       }
     });
     server.once('error', error => { ready = null; reject(error); });

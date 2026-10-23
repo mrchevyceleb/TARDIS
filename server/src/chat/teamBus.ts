@@ -969,17 +969,6 @@ type TeamDelivery = {
   onAdmitted?: (session: SessionLike) => Promise<void>;
 };
 
-function hasDurableDeliveryReceipt(logKey: string, deliveryId: string): boolean {
-  try {
-    return loadEventLogSync(logKey).events.some((event) => {
-      const outer = event.ev;
-      const inner = outer?.type === 'event' ? outer.event : undefined;
-      return inner?.type === 'peer_delivery_accepted' && inner.deliveryId === deliveryId;
-    });
-  } catch {
-    return false;
-  }
-}
 
 async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResult> {
   // Channel deliveries register in flight so Stop can abort a worker
@@ -1192,7 +1181,7 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
     }
     if (
       delivery.deliveryId
-      && (admittedQueuedDeliveries.has(deliveryId) || hasDurableDeliveryReceipt(session.logKey, deliveryId))
+      && (admittedQueuedDeliveries.has(deliveryId) || await hasDurablePeerDeliveryReceipt(session.logKey, deliveryId))
     ) {
       await onAdmitted?.(session);
       admittedQueuedDeliveries.delete(deliveryId);
@@ -1443,7 +1432,7 @@ async function acknowledgeQueuedDelivery(record: QueuedTeamDelivery, session: Se
   // Persist and verify the provider-accepted receipt before deleting the outbox
   // row. A swallowed event-log write can never lose the message.
   await flushEventLog(session.logKey);
-  if (!hasDurableDeliveryReceipt(session.logKey, record.id)) {
+  if (!await hasDurablePeerDeliveryReceipt(session.logKey, record.id)) {
     throw new Error('accepted delivery receipt did not reach the event log');
   }
   await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
@@ -1573,7 +1562,7 @@ export function frozenBatchMembers(
  *  rows, never by resending a message the recipient already saw. */
 async function acknowledgeQueuedBatch(lead: QueuedTeamDelivery, session: SessionLike): Promise<void> {
   await flushEventLog(session.logKey);
-  if (!hasDurableDeliveryReceipt(session.logKey, lead.id)) {
+  if (!await hasDurablePeerDeliveryReceipt(session.logKey, lead.id)) {
     throw new Error('accepted delivery receipt did not reach the event log');
   }
   const members = [lead, ...(await queueStoreOperation(() => queuedDeliveryStore.list()))
@@ -1585,7 +1574,7 @@ async function acknowledgeQueuedBatch(lead: QueuedTeamDelivery, session: Session
       : item))));
   for (const member of members) {
     if (member.id === lead.id) continue;
-    if (hasDurableDeliveryReceipt(session.logKey, member.id)) continue;
+    if (await hasDurablePeerDeliveryReceipt(session.logKey, member.id)) continue;
     await appendEventLogDurable(session.logKey, {
       seq: reserveEventLogSeq(session.logKey),
       ev: { type: 'event', event: { type: 'peer_delivery_accepted', deliveryId: member.id } } as PersistedEvent['ev'],
@@ -2313,7 +2302,7 @@ export async function deliverTeamMessage(input: {
 
 // ---- reply extraction ---------------------------------------------------------
 
-import { appendEventLogDurable, appendEventLogSync, flushEventLog, loadEventLogSync, loadEventLogTail, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
+import { appendEventLogDurable, appendEventLogSync, flushEventLog, hasDurablePeerDeliveryReceipt, loadEventLogSync, loadEventLogTail, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { redactEventSecrets } from './secretRedaction.ts';
 
 /** Durable input identity, shared by every engine. Assistant output and tool

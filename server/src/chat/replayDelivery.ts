@@ -364,6 +364,11 @@ export function historicalDelivery<T extends { seq: number; ev: unknown }>(frame
   // routine reply ("NO_UPDATE") hid a real report from an earlier turn.
   if (event.type === 'turnEnd') return { ...frame, ev: { type: 'event', event: { type: '_turn_boundary' } } };
   if (event.type === 'event') {
+    if (event.event?.type === '_terminal_error' && event.event.code?.startsWith('CODEX_')) {
+      const model = event.event.model ?? (frame as T & { mdl?: string }).mdl;
+      return { ...frame, ev: { ...event, event: { ...event.event, model,
+        code: event.event.message?.startsWith('This Codex model is unavailable.') ? 'CODEX_MODEL_UNAVAILABLE' : event.event.code } } };
+    }
     const slim = trimHistoricalSystemInit(trimHistoricalToolOutput(event));
     return slim === event ? frame : { ...frame, ev: slim };
   }
@@ -374,6 +379,18 @@ export function historicalDelivery<T extends { seq: number; ev: unknown }>(frame
   if (typeof event.code === 'string' && event.code.startsWith('BANANA_') && typeof event.message === 'string') {
     return { ...frame, ev: { type: 'event', event: {
       type: '_terminal_error', message: event.message, code: event.code, retryable: event.retryable === true,
+    } } };
+  }
+  // Older Codex versions wrote these already-clean failed-turn notices only
+  // as transport errors. Recover those notices, never raw stderr diagnostics.
+  const cleanCodexFailure = typeof event.message === 'string'
+    && /^(?:Codex |This Codex model )[^\n\u001b]+ Your conversation is saved\.$/.test(event.message);
+  if ((frame as T & { eng?: string }).eng === 'codex' && cleanCodexFailure) {
+    return { ...frame, ev: { type: 'event', event: {
+      type: '_terminal_error', message: event.message,
+      code: event.message.startsWith('This Codex model is unavailable.') ? 'CODEX_MODEL_UNAVAILABLE' : 'CODEX_TURN_FAILED',
+      model: (frame as T & { mdl?: string }).mdl,
+      retryable: event.retryable === true, ts: (frame as T & { at?: number }).at,
     } } };
   }
   return null;

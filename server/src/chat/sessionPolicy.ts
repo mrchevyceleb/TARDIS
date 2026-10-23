@@ -2,6 +2,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { STATE_DIR } from './config.ts';
+import { CONTEXT_TOKEN_BUDGET } from './contextBudget.ts';
 import { bareChatId, isAgentThread } from './threadKey.ts';
 import { DESK_OWNER_NAME } from '../config.ts';
 
@@ -125,7 +126,7 @@ export function sessionMemory(chatId: string): string {
 
 /** The generation permits exactly one cutover from TARDIS-seeded sessions. */
 export const NATIVE_SESSION_GENERATION = 1;
-export const NATIVE_COMPACT_TOKENS = 300_000;
+export const NATIVE_COMPACT_TOKENS = CONTEXT_TOKEN_BUDGET;
 
 /** Per-session deltas: unchanged status never consumes another model call's context. */
 export function changedContext(previous: Map<string, string>, name: string, text: string): string {

@@ -274,7 +274,9 @@ async function start(config) {
     appBuffer = '';
   });
   app.stderr.setEncoding('utf8');
-  app.stderr.on('data', (chunk) => writeError(chunk));
+  // Preserve line boundaries across pipe chunks. Adding a newline to every
+  // chunk turns half a tracing line into a misleading standalone error.
+  app.stderr.on('data', (chunk) => trackedWrite(process.stderr, chunk));
   app.on('error', (error) => {
     writeError(`Codex app-server spawn failed: ${error.message}`);
     rejectPending(error);

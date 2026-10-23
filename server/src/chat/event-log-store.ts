@@ -105,6 +105,69 @@ function archivePath(key: string): string {
   return join(EVENT_LOG_DIR, `${sanitizeKey(key)}.archive.jsonl`);
 }
 
+// Provider receipts are durable delivery evidence, independent of the bounded
+// UI replay window. Scan only complete appended records, asynchronously, and
+// keep the sparse receipt IDs rather than retaining the conversation bodies.
+type PeerReceiptIndex = { ino: number; consumed: number; ids: Set<string>; fingerprint?: Buffer };
+const peerReceiptIndexes = new Map<string, PeerReceiptIndex>();
+const peerReceiptScans = new Map<string, Promise<PeerReceiptIndex>>();
+async function peerReceiptsAt(path: string): Promise<PeerReceiptIndex> {
+  const pending = peerReceiptScans.get(path);
+  if (pending) { await pending; return peerReceiptsAt(path); }
+  const scan = (async () => {
+    const handle = await openFile(path, 'r');
+    try {
+      const stat = await handle.stat();
+      let index = peerReceiptIndexes.get(path);
+      if (!index || index.ino !== stat.ino || stat.size < index.consumed
+        || (index.fingerprint && !index.fingerprint.equals(await readRangeAsync(handle, Math.max(0, index.consumed - 64), index.consumed)))) {
+        index = { ino: stat.ino, consumed: 0, ids: new Set() };
+        peerReceiptIndexes.set(path, index);
+      }
+      let position = index.consumed;
+      let fragments: Buffer[] = [];
+      while (position < stat.size) {
+        const start = position;
+        const chunk = await readRangeAsync(handle, position, Math.min(stat.size, position + 1024 * 1024));
+        if (!chunk.length) break;
+        position += chunk.length;
+        let lineStart = 0;
+        for (let end = chunk.indexOf(0x0a); end >= 0; end = chunk.indexOf(0x0a, lineStart)) {
+          const piece = chunk.subarray(lineStart, end);
+          const line = fragments.length ? Buffer.concat([...fragments, piece]) : piece;
+          fragments = [];
+          if (line.includes('peer_delivery_accepted')) {
+            try {
+              let event = JSON.parse(line.toString('utf8')).ev;
+              while (['event', 'stream_event'].includes(event?.type) && event.event) event = event.event;
+              if (event?.type === 'peer_delivery_accepted' && typeof event.deliveryId === 'string') index.ids.add(event.deliveryId);
+            } catch { /* Only a complete, valid receipt proves acceptance. */ }
+          }
+          lineStart = end + 1;
+          index.consumed = start + lineStart;
+        }
+        if (lineStart < chunk.length) fragments.push(chunk.subarray(lineStart));
+        await yieldToEventLoop();
+      }
+      index.fingerprint = await readRangeAsync(handle, Math.max(0, index.consumed - 64), index.consumed);
+      return index;
+    } finally { await handle.close(); }
+  })();
+  peerReceiptScans.set(path, scan);
+  try { return await scan; }
+  finally { if (peerReceiptScans.get(path) === scan) peerReceiptScans.delete(path); }
+}
+
+export async function hasDurablePeerDeliveryReceipt(key: string, deliveryId: string): Promise<boolean> {
+  for (const path of [logPath(key), archivePath(key)]) {
+    try { if ((await peerReceiptsAt(path)).ids.has(deliveryId)) return true; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  return false;
+}
+
 // Synchronous load — called once during ClaudeSession / CodexSession
 // construction so the new instance can prime its in-memory buffer and
 // `nextSeq` counter before any new emit. Hot files only stay small once the

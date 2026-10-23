@@ -215,6 +215,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
       kind: 'terminal-error',
       id: id(),
       message: ev.message,
+      model: typeof ev.model === 'string' ? ev.model : undefined,
       code: typeof ev.code === 'string' ? ev.code : undefined,
       retryable: ev.retryable === true || undefined,
       continuing: ev.continuing === true || undefined,
@@ -2545,7 +2546,19 @@ export function useChat(opts: {
       if (replayOps.length) {
         const ops = replayOps;
         replayOps = [];
-        setBlocks((prev) => ops.reduce((acc, op) => op(acc), prev));
+        // A message typed while history loads belongs AFTER that history.
+        // Reducing onto the optimistic bubble put it at the top; its later
+        // durable echo deduped there, leaving the reply without its question.
+        // Capture the outbound IDs before ready flushes them to the server.
+        const pendingIds = new Set((outboundQueue.get(conversationKey(cli, repo.path, chatId)) ?? [])
+          .map(item => item.clientMsgId));
+        setBlocks((prev) => {
+          const pending = prev.filter(block => block.kind === 'user' && block.clientMsgId && pendingIds.has(block.clientMsgId));
+          const history = prev.filter(block => !(block.kind === 'user' && block.clientMsgId && pendingIds.has(block.clientMsgId)));
+          const replayed = ops.reduce((acc, op) => op(acc), history);
+          const admittedIds = new Set(replayed.flatMap(block => block.kind === 'user' && block.clientMsgId ? [block.clientMsgId] : []));
+          return [...replayed, ...pending.filter(block => block.kind === 'user' && !admittedIds.has(block.clientMsgId!))];
+        });
       }
       // Committed together with the blocks those frames produced, and still
       // committed when the window held only control frames.
