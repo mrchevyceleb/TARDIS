@@ -18,6 +18,11 @@ import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, recordQuietExemptWake
 import { LIVE_HOLD_CEILING_MS } from '../lib/laneLiveness.ts';
 import { briefEnvelopeForHandoff, isCoderBrief } from './briefEnvelope.ts';
 import { recordNativeFailure } from './sessionMetrics.ts';
+import { freshThreadOnTask, freshTaskSenders, sessionDirectory } from './sessionPolicy.ts';
+import { freshLifecycleStarted, freshLifecycleCompleted } from './freshLifecycle.ts';
+import { persistThreadResetEpoch, noteThreadResetEpoch, persistThreadResetTaskState, threadResetTaskState, type ThreadResetTaskState } from './threadResetStore.ts';
+import { clearThreadSessionIds } from './sessions.ts';
+import type { CliKind } from './runner.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
 // both sides touch shared graph modules — keeping this lazy is cheap insurance).
@@ -81,9 +86,185 @@ async function getRunner() {
   const mod = await import('./runner.ts');
   return mod as unknown as {
     getOrCreateSession: (opts: { cli: string; repoPath: string; chatId: string; model?: string; effort?: string; recycleOnMismatch?: boolean }) => Promise<SessionLike>;
-    activeChatSessions: () => Array<{ cli: string; cwd: string; chatId: string; busy: boolean }>;
+    activeChatSessions: () => Array<{ cli: string; cwd: string; chatId: string; busy: boolean; backgroundTasks?: string[] }>;
     isPersistentProcessCli: (cli: string) => boolean;
+    beginThreadResetForLogKey: (logKey: string) => (() => void) | null;
+    settleThreadSessionLookups: (opts: { cli: CliKind; repoPath: string; chatId?: string }) => Promise<void>;
+    liveSessionsForLogKey: (logKey: string) => Array<{ cli: string; cwd: string; chatId: string; busy: boolean; backgroundTasks?: string[] }>;
+    interruptSession: (opts: { cli: CliKind; repoPath: string; chatId?: string }) => Promise<void>;
+    dropSession: (cli: CliKind, repoPath: string, chatId?: string) => void;
+    freshStart: (opts: { cli: CliKind; repoPath: string; chatId?: string; model?: string; effort?: string }) => Promise<unknown>;
+    trackedThreadLogKey: (opts: { cli: CliKind; repoPath: string; chatId?: string }) => string;
   };
+}
+
+/** The fresh-thread decision for one queued batch, keyed by the batch's
+ *  durable task id rather than by agent, sender or timestamps. A task is
+ *  owed a wipe until its own per-task reset state says `complete`; a later
+ *  task with a different id is never suppressed by an earlier completion,
+ *  and an interrupted `resetting` state resumes after a process restart. */
+export function freshResetOwed(
+  taskId: string | undefined,
+  state: ThreadResetTaskState | undefined,
+): boolean {
+  if (!taskId) return false;
+  return state === undefined || state.state !== 'complete';
+}
+
+/** A task start is a batch boundary (Codex review, Oct 23 2026): a marked
+ *  record leads alone, so its wipe is never decided by an unmarked lead, and
+ *  an unmarked lead never pulls a marked record along as a silent sibling
+ *  (the marked record would ride the old thread and never reset). Marked
+ *  records share one turn only when they carry the same durable task id:
+ *  one task can be handed over as several capped records, and the wipe
+ *  precedes the batch. Legacy marked rows without a task id keep the old
+ *  same-sender grouping until they drain. */
+export function batchJoinableFresh(lead: QueuedTeamDelivery, record: QueuedTeamDelivery): boolean {
+  if ((lead.taskStart === true) !== (record.taskStart === true)) return false;
+  if (lead.taskStart !== true) return true;
+  if (lead.taskId || record.taskId) return lead.taskId === record.taskId;
+  return lead.fromId === record.fromId;
+}
+
+/** Whether this handoff continues the conversation the sender is already
+ *  having with the recipient: the sender's active inbound chain (the work
+ *  it is currently handling) has already reached this recipient, so this
+ *  send is a clarification, answer or follow-up inside that same work —
+ *  never a new task. A first handoff in any direction starts a new chain
+ *  leg, so the chain identity (request) and its edge set are the durable
+ *  task signal Codex asked for, not timestamps or sender classes alone. */
+export function chainContinues(parentChain: TeamChain | undefined, fromId: string, toId: string): boolean {
+  return parentChain?.edges.includes(replyEdge(fromId, toId)) === true;
+}
+
+/** A wipe outcome that must hold the task instead of admitting it into the
+ *  standing thread (Codex review, Oct 23 2026): busy, a reset already in
+ *  flight, a brain switch, or any retryable failure. Anything else (notably
+ *  a pre-destructive barrier refusal) falls open to ordinary delivery. */
+export function freshHoldReason(wiped: { fresh: boolean; retryable?: boolean; reason?: string }): string | undefined {
+  if (wiped.fresh) return undefined;
+  if (wiped.retryable) return wiped.reason ?? 'fresh start failed after reset began';
+  const reason = wiped.reason ?? '';
+  if (/became busy|already resetting|brain changed/i.test(reason)) return reason;
+  return undefined;
+}
+
+/** Server-side stamp decision (Codex verify Oct 23 2026: never infer a task
+ *  boundary from timestamps or broad sender classes). A handoff opens a task
+ *  only when: the recipient is flagged for fresh threads, the sender is a
+ *  roster teammate speaking directly (no Desk/voice/Slack/channel or explicit
+ *  person-sourced provenance, no nudge hold), the sender is a task source
+ *  for this recipient — either named on the operator list, or (list empty) a
+ *  lead briefing one of its coders — AND the handoff does not continue the
+ *  conversation the sender is already having with this recipient (chain
+ *  leg: a clarification, answer or follow-up inside work in flight carries
+ *  the inbound chain's edge and never stamps). A first handoff from a task
+ *  source stamps; the recipient's next one stamps again once the earlier
+ *  work's chain has closed. Worker replies back never stamp for a lead that
+ *  is not flagged. */
+export function isTaskStartHandoff(opts: {
+  senderId: string;
+  recipientId: string;
+  recipientHome: string;
+  source?: string;
+  personSourced?: boolean;
+  nudgeHoldSince?: number;
+  continuesChain?: boolean;
+}): boolean {
+  if (!opts.senderId || opts.source) return false;
+  if (opts.personSourced === true) return false;
+  if (opts.nudgeHoldSince !== undefined) return false;
+  if (opts.continuesChain === true) return false;
+  if (!freshThreadOnTask(opts.recipientHome)) return false;
+  const allowed = freshTaskSenders(opts.recipientHome);
+  if (allowed.length) return allowed.includes(opts.senderId);
+  return isCoderBrief(opts.senderId, opts.recipientId);
+}
+
+/** True when the recipient has no live busy turn on any lane and no live
+ *  session is carrying background work: the drain only wipes at an idle
+ *  task boundary, never mid-turn and never through background work the
+ *  reset would terminate. */
+export function recipientIdle(sessions: Array<{ busy: boolean; backgroundTasks?: string[] }>): boolean {
+  return sessions.every((s) => !s.busy && !(s.backgroundTasks?.length));
+}
+
+/** Wipe a recipient's home thread so the next task lands in a clean one
+ *  (Matt, Oct 22 2026: Christina, Adam and Ivy, and Riley's game devs, start
+ *  every new task fresh; Kip and Riley keep their ongoing threads). Driven
+ *  from the drain at an idle boundary only: the caller has already confirmed
+ *  no live lane is busy, and this re-validates idle under the reset barrier
+ *  before anything destructive runs, so a turn that started after the
+ *  candidate pick aborts the wipe instead of being killed. The sequence
+ *  mirrors the WebSocket Fresh: claim the barrier, settle in-flight
+ *  lookups, commit the durable reset epoch, retire every live lane, then
+ *  let runner.freshStart do the durable wipe itself (native ids, staged
+ *  compact memory, shared log, in that order) and spawn the clean session.
+ *  The barrier refuses new session lookups until the reset releases, so a
+ *  handoff landing mid-wipe queues behind the fresh spawn instead of
+ *  joining the dying thread. If anything after the epoch commit fails, the
+ *  durable task records stay queued: the caller holds the batch for retry
+ *  instead of delivering into a possibly half-erased thread, and the reset
+ *  epoch already committed tells the retry the wipe was attempted, so the
+ *  retry re-runs the idempotent freshStart rather than redelivering into
+ *  the old conversation. */
+export async function freshStartForAgent(agent: Agent, taskId?: string): Promise<{ fresh: boolean; retryable?: boolean; reason?: string }> {
+  const runner = await getRunner();
+  const home = agentLogKey(agent);
+  const chatId = home.chatKey;
+  const repoPath = sessionDirectory(chatId, ELROND_WORKSPACE_PATH);
+  const logKey = runner.trackedThreadLogKey({ cli: home.cli as CliKind, repoPath, chatId });
+  const releaseReset = runner.beginThreadResetForLogKey(logKey);
+  if (!releaseReset) return { fresh: false, reason: 'thread already resetting' };
+  let destructive = false;
+  try {
+    await runner.settleThreadSessionLookups({ cli: home.cli as CliKind, repoPath, chatId });
+    const latest = findAgent(agent.id) ?? agent;
+    const latestHome = agentLogKey(latest);
+    if (latestHome.cli !== home.cli) {
+      return { fresh: false, reason: 'recipient brain changed during reset' };
+    }
+    // Idle revalidation under the barrier: a turn that began after the
+    // drain's candidate pick must not be killed. Priors are read here (not
+    // before the barrier) so this is the same set the wipe would retire.
+    const priors = runner.liveSessionsForLogKey(logKey);
+    if (!recipientIdle(priors)) return { fresh: false, reason: 'recipient became busy before reset' };
+    const resetAt = Date.now();
+    // The durable per-task state commits before the epoch and before any
+    // destructive work: if the process dies anywhere from here to the end,
+    // the task is still owed its wipe (`resetting`), keyed by its own id.
+    const committed = await persistThreadResetEpoch(logKey, resetAt);
+    destructive = true;
+    // Per-task state commits after the epoch but before destructive work:
+    // a crash before completion leaves `resetting` behind, so the queued
+    // task resumes its wipe after restart instead of delivering into a
+    // half-erased thread. The epoch is committed first so a failure here
+    // never leaves a `resetting` row suppressing a wipe that never began.
+    if (taskId) await persistThreadResetTaskState(logKey, taskId, resetAt, 'resetting');
+    noteThreadResetEpoch(logKey, committed);
+    freshLifecycleStarted({ logKey, repo: repoPath, chatId, cli: home.cli });
+    for (const prior of priors) {
+      await runner.interruptSession({ cli: prior.cli as CliKind, repoPath: prior.cwd, chatId: prior.chatId });
+      runner.dropSession(prior.cli as CliKind, prior.cwd, prior.chatId);
+    }
+    await clearThreadSessionIds(repoPath, chatId);
+    // runner.freshStart owns the durable wipe (clearThreadMemory staged
+    // before clearEventLog, native ids first) on every engine, so the
+    // drain never re-implements that order and can never erase the log
+    // before the memory staging has succeeded.
+    await runner.freshStart({ cli: home.cli as CliKind, repoPath, chatId, model: home.model, effort: home.effort });
+    freshLifecycleCompleted({ logKey, repo: repoPath, chatId, cli: home.cli, resetAt: committed });
+    return { fresh: true };
+  } catch (error) {
+    // A failure before the reset began leaves nothing destructive behind:
+    // any committed epoch or `resetting` state simply makes the retry
+    // re-run the idempotent wipe before delivering into the fresh thread.
+    // A failure after it must never deliver into a possibly half-erased
+    // thread — the caller holds the durable records for retry.
+    return { fresh: false, retryable: destructive, reason: `fresh start failed: ${(error as Error).message}` };
+  } finally {
+    releaseReset();
+  }
 }
 
 /** Which of an agent's two live sessions a delivery runs in. `main` is the
@@ -161,6 +342,19 @@ type ActiveInboundChain = TeamChain & { deliveryId: string; at: number };
 // closes a real loop; merely having a long route never blocks legitimate work.
 const activeInboundChains = new Map<string, ActiveInboundChain>();
 const requestRoots = new JsonStore<{ id: string; chainId: string; admittedSeq: number; deliveryId?: string }>('message-request-roots.json', []);
+
+type FreshTaskClaimRecord = StoredRecord & {
+  requestId: string;
+  senderId: string;
+  recipientId: string;
+  taskId: string;
+};
+
+/** Durable first-handoff claims, keyed by (request, sender, recipient).
+ *  The first stamped handoff of a request claims a task id atomically; a
+ *  later send on the same request edge (a clarification sent before the
+ *  recipient replies) reuses that id instead of stamping a second task. */
+const freshTaskClaims = new JsonStore<FreshTaskClaimRecord>('fresh-task-claims.json', []);
 const requestRootWrites = new Map<string, Promise<unknown>>();
 
 type QueuedTeamDelivery = StoredRecord & {
@@ -204,6 +398,18 @@ type QueuedTeamDelivery = StoredRecord & {
   chainId?: string;
   chainEdges?: string[];
   chainRoute?: string[];
+  /** Explicit new-task marker (server-stamped, Oct 22 2026): set only by
+   *  deliverTeamMessage when a roster sender on the recipient's task-source
+   *  list hands work to a flagged recipient (see isTaskStartHandoff). Client
+   *  input can never set it. Only a lead record carrying this marker may
+   *  trigger a fresh-thread wipe; follow-ups and worker replies back carry
+   *  no marker unless they are themselves a new handoff from a task source. */
+  taskStart?: true;
+  /** Durable identity of the task this record belongs to: claimed once for
+   *  the (request, sender, recipient) edge at stamp time. Batching and the
+   *  per-task reset state key on it, so distinct tasks from one sender
+   *  never share a wipe decision. */
+  taskId?: string;
   /** Batch stamp, persisted before a batch is sent: the lead carries its
    *  own id (self-stamp, freezing the membership across retries) and each
    *  sibling carries the lead's id, so an ack, or its retry after a
@@ -215,6 +421,58 @@ type QueuedTeamDelivery = StoredRecord & {
    *  batch build, never resent. */
   acked?: true;
 };
+
+
+const FRESH_CLAIM_TTL_MS = 30 * 24 * 60 * 60_000;
+const FRESH_CLAIM_LIMIT = 5_000;
+
+function freshClaimId(requestId: string, senderId: string, recipientId: string): string {
+  return `claim:${createHash('sha256').update(`${requestId}\u0000${senderId}\u0000${recipientId}`).digest('hex')}`;
+}
+
+/** Atomically claim (or reuse) the durable task id for one first-handoff
+ *  edge. The read-modify-write runs inside the store's mutation chain, so
+ *  two concurrent sends on the same request edge can never mint two ids.
+ *  Minting is deferred until every cheap exit (rate limit, duplicate,
+ *  acknowledgement-only, informational) has already passed, and every mint
+ *  prunes expired and excess rows, so the store stays bounded even if a
+ *  process dies between the mint and the queue write. */
+async function claimFreshTaskId(requestId: string, senderId: string, recipientId: string): Promise<{ taskId: string; minted: boolean }> {
+  const claimId = freshClaimId(requestId, senderId, recipientId);
+  let taskId = '', minted = false;
+  await freshTaskClaims.modify((items) => {
+    const cutoff = Date.now() - FRESH_CLAIM_TTL_MS;
+    const kept = items.filter((item) => {
+      const at = Date.parse(item.updatedAt || item.createdAt || '');
+      return Number.isFinite(at) && at >= cutoff;
+    });
+    const existing = kept.find((item) => item.id === claimId);
+    if (existing) {
+      taskId = existing.taskId;
+      return kept;
+    }
+    taskId = randomUUID();
+    minted = true;
+    const stamp = new Date().toISOString();
+    return [...kept.slice(-(FRESH_CLAIM_LIMIT - 1)), { id: claimId, createdAt: stamp, updatedAt: stamp, requestId, senderId, recipientId, taskId }];
+  });
+  return { taskId, minted };
+}
+
+/** Release a claim minted by this send when the durable queue write fails:
+ *  no record carries the id, so keeping the claim would swallow the retry's
+ *  task start. Reused claims (an earlier send already owns them) stay. */
+async function releaseFreshTaskClaim(requestId: string, senderId: string, recipientId: string): Promise<void> {
+  const claimId = freshClaimId(requestId, senderId, recipientId);
+  await freshTaskClaims.modify((items) => items.filter((item) => item.id !== claimId));
+}
+
+/** The recipient's real reply closes the chain: every claim on the
+ *  (original sender, recipient) edge retires with it, so the next genuine
+ *  task on that edge mints a new id and can stamp a new reset. */
+async function retireFreshTaskClaimsForReply(replierId: string, originalSenderId: string): Promise<void> {
+  await freshTaskClaims.modify((items) => items.filter((item) => !(item.senderId === originalSenderId && item.recipientId === replierId)));
+}
 
 function chainForQueuedDelivery(record: QueuedTeamDelivery): TeamChain {
   return {
@@ -1504,6 +1762,10 @@ function batchRoleClass(record: { fromRole?: string }): 'desk' | 'voice' | 'auto
  *  admitted per idle break. */
 /** Exported for tests. */
 export function batchJoinable(lead: QueuedTeamDelivery, record: QueuedTeamDelivery): boolean {
+  // A task start is a batch boundary (see batchJoinableFresh): marked and
+  // unmarked records never share a turn, and marked records share one only
+  // with the same sender.
+  if (!batchJoinableFresh(lead, record)) return false;
   if (batchRoleClass(lead) !== batchRoleClass(record)) return false;
   // card-b3468c: an under-ceiling nudge batches only with other
   // under-ceiling nudges. Its admission waits for a real turn end, so a
@@ -1780,10 +2042,61 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         home: '',
         createdAt: 0,
       };
+      // Fresh thread on task (Matt, Oct 22 2026): a flagged recipient's next
+      // new task lands in a clean thread. The trigger is deliberately narrow:
+      // the recipient is flagged, the lead record is a direct non-person
+      // handoff (no Desk/voice/Slack/channel fan-out, no nudge hold), and the
+      // batch's durable task id is still owed its reset (per-task state, so
+      // an interrupted wipe resumes after restart and one task's completion
+      // never suppresses another's). The wipe itself waits for an idle
+      // boundary and re-checks idle under the barrier, so a busy recipient
+      // is never killed for a queued task: admission below simply joins the
+      // live turn as today. Person-sourced records never trigger it: they
+      // steer the thread the person is talking in. A wipe that fails before
+      // anything destructive ran delivers into the intact old thread; one
+      // that fails after the reset began holds the durable records for
+      // retry instead.
+      const batchIsPersonSourced = siblings.some((sibling) => personSourced(sibling));
+      const leadIsChannelFanout = lead.fromRole === 'channel';
+      let freshRetryReason: string | undefined;
+      if (freshThreadOnTask(to.home)
+        && !batchIsPersonSourced
+        && !leadIsChannelFanout
+        && !nudgeHoldActive(lead)
+        // Defense in depth: the drain re-derives the sender gate instead of
+        // trusting a stored marker alone, so an operator list change (or a
+        // stale stamp from an earlier build) can never wipe for a sender
+        // that is no longer a task source for this recipient.
+        && isTaskStartHandoff({ senderId: lead.fromId, recipientId: to.id, recipientHome: to.home })) {
+        const toHome = agentLogKey(to);
+        const toLogKey = logKeyFor(toHome.cli, sessionDirectory(toHome.chatKey, ELROND_WORKSPACE_PATH), toHome.chatKey);
+        // The batch is owed a wipe until its own task id's durable reset
+        // state says complete: an interrupted wipe (`resetting`) resumes
+        // after restart, and a different task is never suppressed by an
+        // earlier task's completion (Codex verify, Oct 23 2026). Legacy
+        // marked rows carry no task id; they keep the old behavior of
+        // delivering without a wipe until they drain.
+        if (freshResetOwed(lead.taskId, lead.taskId ? threadResetTaskState(toLogKey, lead.taskId) : undefined)) {
+          const wiped = await freshStartForAgent(to, lead.taskId);
+          const hold = freshHoldReason(wiped);
+          if (hold) {
+            freshRetryReason = hold;
+          } else if (!wiped.fresh) {
+            console.warn(`[team] fresh thread for ${to.name} skipped: ${wiped.reason ?? 'unknown'}`);
+          }
+        }
+      }
+      if (freshRetryReason) {
+        // Keep the durable records queued and let the drain retry: the
+        // reset epoch is already committed, so the retry re-runs the
+        // idempotent wipe rather than delivering into a half-erased thread.
+        console.warn(`[team] fresh thread for ${to.name} will retry: ${freshRetryReason}`);
+        await retryDelay();
+        continue;
+      }
       const joinedText = siblings.length > 1
         ? [lead.text, '', ...siblings.slice(1).map(batchDeliveryBlock)].join('\n')
         : lead.text;
-      const batchIsPersonSourced = siblings.some((sibling) => personSourced(sibling));
       const result = await runTeamDelivery({
         from,
         to,
@@ -2040,6 +2353,14 @@ export async function deliverTeamMessage(input: {
   const fromLane = input.fromLane === 'bg' ? 'bg' : 'main';
   const rosterSender = findAgent(from.id);
   const request = input.source || !rosterSender ? randomUUID() : await outboundRequest(from, fromLane);
+  let parentChain: TeamChain | undefined;
+  const parentActive = activeInboundChains.get(chainKey(from.id, fromLane));
+  if (parentActive && Date.now() - parentActive.at <= 2 * 60 * 60_000) parentChain = parentActive;
+  // A send that continues the conversation the sender is already having
+  // with this recipient (its active inbound chain already carries this
+  // edge) is follow-up inside work in flight, never a new task (Codex
+  // review, Oct 23 2026). Only a first handoff leg can stamp a fresh thread.
+  const continuesChain = chainContinues(parentChain, from.id, to.id);
   let { chain } = inheritedTeamChain(from.id, to.id, fromLane);
   if (chain.id !== request) chain = { id: request, edges: [replyEdge(from.id, to.id)], route: [from.id, to.id] };
   const requestedWaitForReply = teamMessageWaitRequested(input.wait);
@@ -2062,12 +2383,23 @@ export async function deliverTeamMessage(input: {
     personSourced: input.personSourced === true,
   });
   const quietHoldRecipient = !isPersonSourced && !isQuietExemptLane(to.id) && inQuietHours(Date.now());
-  const waitForReply = requestedWaitForReply && !closesReplyCycle && !quietHoldRecipient;
-  // card-b3468c: an under-ceiling nudge reports its idle-boundary delivery in
-  // the receipt (the drain-side admission never steers a live turn).
-  const nudgeHoldEntry = typeof input.nudgeHoldSince === 'number' && Number.isFinite(input.nudgeHoldSince) && input.nudgeHoldSince > 0
-    && Date.now() - input.nudgeHoldSince < LIVE_HOLD_CEILING_MS;
-
+  // Fresh thread on task: a stamped handoff must reach the drain, which owns
+  // the idle-boundary wipe. The synchronous path admits straight into the
+  // standing thread, so a task start rides the durable queue like every
+  // other drain delivery; the sender simply stops waiting on a reply.
+  const taskStartCandidate = rosterSender !== undefined && isTaskStartHandoff({
+    senderId: from.id,
+    recipientId: to.id,
+    recipientHome: to.home,
+    source: input.source,
+    personSourced: input.personSourced === true,
+    nudgeHoldSince: input.nudgeHoldSince,
+    continuesChain,
+  });
+  // Every cheap exit runs BEFORE any claim is minted: a send that dies at
+  // the rate limit, the duplicate guard, the acknowledgement path or the
+  // informational path never owns a task id, so its retry still stamps the
+  // fresh thread (Codex verify round 6, Oct 23 2026).
   const rl = rateOk(replyEdge(from.id, to.id));
   if (!rl.ok) return { delivered: false, reason: rl.reason };
 
@@ -2083,6 +2415,31 @@ export async function deliverTeamMessage(input: {
     catch (error) { if (claim) await releaseOutbound(claim); throw error; }
     return { delivered: true, to: to.name, deliveryId, queued: true, reason: 'Saved for their next real turn. This update did not wake or interrupt them.' };
   }
+
+  // The first handoff of a request claims its task id durably; a second
+  // send on the same (request, sender, recipient) edge before the
+  // recipient replies is a clarification of that same task, so it reuses
+  // the claimed id and never stamps a new task start (Codex verify,
+  // Oct 23 2026). Detection reads the sender's live inbound chain above,
+  // which a first outbound send does not update — the claim is the durable
+  // identity that closes that gap. A claim retires when the recipient's
+  // reply closes the chain (below), so the next genuine task mints anew.
+  let taskStart = false, taskId: string | undefined, mintedFreshClaim = false;
+  if (taskStartCandidate) {
+    const priorTaskId = (await freshTaskClaims.list()).find((item) => item.requestId === request && item.senderId === from.id && item.recipientId === to.id)?.taskId;
+    taskStart = priorTaskId === undefined;
+    if (priorTaskId !== undefined) taskId = priorTaskId;
+    else { const mintedClaim = await claimFreshTaskId(request, from.id, to.id); taskId = mintedClaim.taskId; mintedFreshClaim = mintedClaim.minted; }
+  }
+  // Any record carrying a fresh-task claim (the stamped lead AND its
+  // pre-reply clarifications) must ride the drain, never the synchronous
+  // path: the drain is what performs the owed wipe, and a clarification
+  // that slipped in synchronously could land before it (Codex verify).
+  const waitForReply = requestedWaitForReply && !closesReplyCycle && !quietHoldRecipient && taskId === undefined;
+  // card-b3468c: an under-ceiling nudge reports its idle-boundary delivery in
+  // the receipt (the drain-side admission never steers a live turn).
+  const nudgeHoldEntry = typeof input.nudgeHoldSince === 'number' && Number.isFinite(input.nudgeHoldSince) && input.nudgeHoldSince > 0
+    && Date.now() - input.nudgeHoldSince < LIVE_HOLD_CEILING_MS;
 
   const fifoKey = queueKeyOf({ toId: to.id });
   const queuedBehindAnotherTurn = recipientDeliveryTails.has(fifoKey);
@@ -2104,13 +2461,23 @@ export async function deliverTeamMessage(input: {
       personSourced: input.personSourced === true ? true : undefined,
       nudgeHoldSince: typeof input.nudgeHoldSince === 'number' && Number.isFinite(input.nudgeHoldSince) && input.nudgeHoldSince > 0 ? input.nudgeHoldSince : undefined,
       admissionAck: input.admissionAck === 'flag-digest' ? 'flag-digest' : undefined,
+      taskStart: taskStart ? true : undefined,
+      taskId,
       chainId: chain.id,
       chainEdges: chain.edges,
       chainRoute: chain.route,
     }));
   } catch (error) {
     if (claim) await releaseOutbound(claim);
+    if (mintedFreshClaim) await releaseFreshTaskClaim(request, from.id, to.id).catch(() => undefined);
     return { delivered: false, to: to.name, hop, reason: `could not persist queued delivery: ${(error as Error).message}` };
+  }
+
+  // This send is a real reply back to the original sender, so the chain is
+  // closed: retire any fresh-task claim on that edge. The reply itself is
+  // already durable, so a retirement failure must never fail the delivery.
+  if (rosterSender) {
+    try { await retireFreshTaskClaimsForReply(from.id, to.id); } catch (error) { console.warn('[team] fresh-task claim retirement failed:', (error as Error).message); }
   }
 
   try { input.onQueued?.(); } catch (error) {
@@ -2180,6 +2547,8 @@ export async function deliverTeamMessage(input: {
         ? 'stored durably for quiet hours (22:00-05:00 ET); delivery is automatic after 05:00'
         : nudgeHoldEntry
         ? 'stored durably; the live-turn hold (card-b3468c) delivers it at the recipient\'s next idle boundary'
+        : taskStart
+        ? 'stored durably; it opens a fresh thread for the recipient at their next idle boundary'
         : closesReplyCycle
         ? 'stored durably to avoid a cross-agent reply cycle; delivery is automatic'
         : queuedBehindAnotherTurn

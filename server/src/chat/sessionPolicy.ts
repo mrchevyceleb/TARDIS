@@ -21,6 +21,18 @@ export type AgentSessionPolicy = {
   houseRules?: string;
   /** Bounded own-notes excerpt; the complete file remains available for recall. */
   notesCharacters?: number;
+  /** Every new task handed to this agent starts in a fresh thread: the
+   *  drain wipes the home thread before admitting the handoff, so nothing
+   *  from the old conversation carries in. Leads and ongoing-thread roles
+   *  simply never set it. */
+  freshThreadOnTask?: boolean;
+  /** Agent ids whose explicit new-task handoffs may open a fresh thread
+   *  for this agent (e.g. Riley for the game devs). Sender identity only:
+   *  a sender listed here still needs the task-start marker to trigger a
+   *  wipe; other senders' handoffs never reset the thread. When the list is
+   *  empty, there is no operator allowlist: only a lead briefing one of its
+   *  coders may stamp a task start. */
+  freshTaskSenders?: string[];
 };
 type Policy = { agents?: Record<string, AgentSessionPolicy>; defaults?: AgentSessionPolicy };
 const lastGoodPolicies = new Map<string, { mtime: number; data: Policy }>();
@@ -33,7 +45,8 @@ function validPolicy(value: unknown): boolean {
     if (key === 'directory' || key === 'reportsTo' || key === 'houseRules') return typeof v === 'string' && v.length > 0;
     if (key === 'skills' || key === 'excludeInstructions') return Array.isArray(v) && v.every(x => typeof x === 'string');
     if (key === 'briefs') return validBriefs(v);
-    if (key === 'lead' || key === 'memoryIndex') return typeof v === 'boolean';
+    if (key === 'lead' || key === 'memoryIndex' || key === 'freshThreadOnTask') return typeof v === 'boolean';
+    if (key === 'freshTaskSenders') return Array.isArray(v) && v.every(x => typeof x === 'string' && x.length > 0);
     if (key === 'startTokenCeiling') return typeof v === 'number' && Number.isInteger(v) && v > 0;
     if (key === 'notesCharacters') return typeof v === 'number' && Number.isInteger(v) && v >= 512 && v <= 8192;
     return false;
@@ -140,6 +153,22 @@ export function changedContext(previous: Map<string, string>, name: string, text
  * pay for one description rather than the whole workflow. */
 export function sessionSkills(chatId: string): string[] {
   return [...new Set([...(sessionPolicy(chatId).skills ?? ['codex-fix', 'opus-fix']), 'fast-task'])];
+}
+
+/** True when the operator wants every new task handed to this agent to
+ *  start in a fresh thread (no old conversation carried in). Reads the
+ *  agent's home chatId, so the drain checks one flag per recipient. */
+export function freshThreadOnTask(chatId: string): boolean {
+  return sessionPolicy(chatId).freshThreadOnTask === true;
+}
+
+/** Agent ids allowed to start a fresh thread for this recipient. Empty
+ *  means no operator allowlist is configured, so the stamp gate falls back
+ *  to lead-to-coder briefs only; a listed set gates the trigger to those
+ *  senders. Either way the drain still requires the explicit task-start
+ *  marker. */
+export function freshTaskSenders(chatId: string): string[] {
+  return sessionPolicy(chatId).freshTaskSenders ?? [];
 }
 
 /** Provider profiles need not install the same native skill catalog. Keep
