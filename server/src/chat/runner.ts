@@ -47,7 +47,7 @@ import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { chatAttachmentPath, saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-guidance.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
-import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
+import { noteProviderUsageLimit, parkProviderAccount, providerParkKeyForProfile } from '../lib/providerLimitAlert.ts';
 import { applyProviderLimits } from './providerEnv.ts';
 import { ensureNativeCompactProxy, nativeCompactBaseUrl, markNativeCompacting, markNativeHandoverRecovery, releaseNativeCompactRoute, confirmNativeCompact } from './nativeCompactProxy.ts';
 import { compactFailureError, isContextLengthRejection, isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
@@ -2973,6 +2973,12 @@ class ClaudeSession {
     }
     if (terminal?.usageLimit) {
       noteProviderUsageLimit(this.providerAccount, agentForChatId(this.chatId)?.name ?? 'a lane', terminal);
+      // Park the account at the first failure, before any peer rejection
+      // is even emitted: every queued admission to this account then waits
+      // for the reset instead of respawning into a dead window. The key is
+      // the canonical park key for this child's actual profile, the same
+      // one the team bus derives for the drain.
+      parkProviderAccount(providerParkKeyForProfile(this.providerAccount), terminal.resetTime);
     }
     // The usage-limit rollover: same turn, backup engine. Only an account the
     // deployment named may roll over, only with the turn's opening prompt in
@@ -3164,7 +3170,16 @@ class ClaudeSession {
           // failure of the query already running does not reject that input.
           if (this.pendingPeerSteerAccepts.has(deliveryId)) continue;
           this.pendingPeerAccepts.delete(deliveryId);
-          this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, ts: Date.now() } });
+          // Carry the usage-limit fact (and its reset label) on the
+          // rejection: the team bus parks the whole account until the
+          // window resets instead of retrying every 15s into a dead
+          // window, which is what locked Juno and Tim out on Oct 23 2026.
+          this.emit({ type: 'event', event: {
+            type: 'peer_delivery_rejected',
+            deliveryId,
+            ...(terminal?.usageLimit ? { usageLimit: true, resetTime: terminal.resetTime } : {}),
+            ts: Date.now(),
+          } });
         }
       }
       this.pendingPeerSteerAccepts.clear();

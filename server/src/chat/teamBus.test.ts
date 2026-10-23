@@ -5,8 +5,8 @@ import { abortInFlightChannelDeliveries, agentLogKey, batchJoinable, deliveryInt
 import { laneChatId } from './threadKey.ts';
 import type { Agent } from './agents.ts';
 import { freshThreadOnTask, freshTaskSenders } from './sessionPolicy.ts';
-import { isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed } from './teamBus.ts';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed, providerParkKey } from './teamBus.ts';
+import { mkdtempSync, writeFileSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -208,11 +208,41 @@ test('only an explicit task-start handoff from a task source stamps a fresh thre
     assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', continuesChain: true }), false);
     // An unflagged recipient never stamps.
     assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'kip', recipientHome: 'bot-kip' }), false);
+    // A paused recipient never stamps either: the operator pause keeps the
+    // ongoing thread so a reset can never lock the agent out.
+    writeFileSync(file, JSON.stringify({
+      defaults: { reportsTo: 'chief-of-staff' },
+      agents: {
+        christina: { freshThreadOnTask: true },
+        tim: { freshThreadOnTask: true, freshThreadPaused: true, freshTaskSenders: ['riley'] },
+        kip: { lead: true },
+      },
+    }));
+    // The policy cache keys on mtime; force a fresh read.
+    const stat = statSync(file);
+    utimesSync(file, stat.atime, new Date(stat.mtimeMs + 2000));
+    assert.equal(isTaskStartHandoff({ senderId: 'riley', recipientId: 'tim', recipientHome: 'bot-tim' }), false);
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina' }), true);
   } finally {
     if (previous === undefined) delete process.env.RIVENDELL_SESSION_POLICY_FILE;
     else process.env.RIVENDELL_SESSION_POLICY_FILE = previous;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('provider park keys share one profile across claude lanes only', () => {
+  // Every claude lane on the same CLI profile parks together: that is the
+  // account whose window is full.
+  assert.equal(
+    providerParkKey('claude', 'bot-juno', '/profiles/main'),
+    providerParkKey('claude', 'bot-tim', '/profiles/main'),
+  );
+  assert.notEqual(
+    providerParkKey('claude', 'bot-juno', '/profiles/main'),
+    providerParkKey('claude', 'bot-juno', '/profiles/other'),
+  );
+  // Other engines park per agent, so one lane's limit idles nobody else.
+  assert.notEqual(providerParkKey('codex', 'bot-piper'), providerParkKey('codex', 'bot-felix'));
 });
 
 test('a fresh wipe is owed per task id until that task completes its reset', () => {

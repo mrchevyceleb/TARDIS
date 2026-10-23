@@ -26,6 +26,12 @@ export type AgentSessionPolicy = {
    *  from the old conversation carries in. Leads and ongoing-thread roles
    *  simply never set it. */
   freshThreadOnTask?: boolean;
+  /** Operator pause for the fresh-thread wipe: while true, a flagged
+   *  recipient keeps its ongoing thread, so a reset can never lock the
+   *  agent out when the provider cannot take the replacement turn (Oct 23
+   *  2026: Juno and Tim's reset looped forever on a full usage window).
+   *  Clearing it resumes fresh threads on the next task. */
+  freshThreadPaused?: boolean;
   /** Agent ids whose explicit new-task handoffs may open a fresh thread
    *  for this agent (e.g. Riley for the game devs). Sender identity only:
    *  a sender listed here still needs the task-start marker to trigger a
@@ -45,7 +51,7 @@ function validPolicy(value: unknown): boolean {
     if (key === 'directory' || key === 'reportsTo' || key === 'houseRules') return typeof v === 'string' && v.length > 0;
     if (key === 'skills' || key === 'excludeInstructions') return Array.isArray(v) && v.every(x => typeof x === 'string');
     if (key === 'briefs') return validBriefs(v);
-    if (key === 'lead' || key === 'memoryIndex' || key === 'freshThreadOnTask') return typeof v === 'boolean';
+    if (key === 'lead' || key === 'memoryIndex' || key === 'freshThreadOnTask' || key === 'freshThreadPaused') return typeof v === 'boolean';
     if (key === 'freshTaskSenders') return Array.isArray(v) && v.every(x => typeof x === 'string' && x.length > 0);
     if (key === 'startTokenCeiling') return typeof v === 'number' && Number.isInteger(v) && v > 0;
     if (key === 'notesCharacters') return typeof v === 'number' && Number.isInteger(v) && v >= 512 && v <= 8192;
@@ -160,6 +166,13 @@ export function sessionSkills(chatId: string): string[] {
  *  agent's home chatId, so the drain checks one flag per recipient. */
 export function freshThreadOnTask(chatId: string): boolean {
   return sessionPolicy(chatId).freshThreadOnTask === true;
+}
+
+/** True while the operator has paused fresh-thread wipes for this agent:
+ *  the recipient keeps its ongoing thread, so a reset can never lock it
+ *  out when the provider cannot take the replacement turn. */
+export function freshThreadPaused(chatId: string): boolean {
+  return sessionPolicy(chatId).freshThreadPaused === true;
 }
 
 /** Agent ids allowed to start a fresh thread for this recipient. Empty
