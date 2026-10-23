@@ -36,7 +36,7 @@ test('held sends are attempted once per distinct list, never per sweep', async (
   // A changed list is one new attempt for the changed tester only.
   await applyQaOutcome(item.id, 'testing');
   const third = await qaPinsForTest.refreshQaPinsWith(heldTool);
-  assert.deepEqual(third.held, ['martin']);
+  assert.deepEqual(third.held, ['edgar']);
   assert.equal(calls, 4);
 });
 

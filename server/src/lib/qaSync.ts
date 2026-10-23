@@ -15,8 +15,33 @@
 // tombstones with it. A card leaves the board through its Slack thread
 // outcome, and nowhere else.
 
+import { execFile } from 'node:child_process';
 import { deskPrs, snapshotCoversRepos, type DeskPr, type DeskPrSnapshot } from './githubPrs.ts';
 import { applyQaOutcome, qaAllItems, qaDriftCheck, qaRepoAllowed, qaRepos, upsertQaItem, type QaDrift, type QaItem } from './qaBoard.ts';
+
+/** Each app's deploy workflow posts the PR's Vercel preview (built against
+ *  staging) as a marked comment, "<!-- operly-preview-url -->" or
+ *  "<!-- rlink-preview-url -->". The latest one is the card's test link, so a
+ *  tester can open the change straight from the board. Null when the PR has
+ *  none yet or gh fails; the next sweep tries again. */
+function previewUrlFor(repo: string, pr: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile('gh', ['api', `repos/${repo}/issues/${pr}/comments`, '--paginate', '--jq', '.[] | select(.body | test("-preview-url -->")) | .body'],
+      { encoding: 'utf8', timeout: 15_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+        if (error) { resolve(null); return; }
+        const urls = String(stdout).match(/https:\/\/[\w.-]+\.vercel\.app/g);
+        resolve(urls?.length ? urls[urls.length - 1] : null);
+      });
+  });
+}
+
+/** Open cards still missing a preview link get one, a few per sweep so a
+ *  backlog never floods gh. */
+const PREVIEW_FILLS_PER_SWEEP = 6;
+const PREVIEW_RETRY_MS = 15 * 60_000;
+/** Last lookup per card, so cards with no preview yet step aside and every
+ *  missing card gets its turn. */
+const previewTried = new Map<string, number>();
 
 export type QaSyncResult = {
   added: number;
@@ -89,9 +114,20 @@ async function syncQaFromGithubOnce(snapshot = deskPrs()): Promise<QaSyncResult>
       // changing nothing. Authoritative re-routing still arrives through
       // the merge-signal endpoint, which upserts explicitly.
       if (known.has(key)) continue;
-      const created = await upsertQaItem({ repo: pr.repo, pr: pr.number, title: pr.title, app: appForRepo(pr.repo) });
+      const stagingUrl = (await previewUrlFor(pr.repo, pr.number)) ?? undefined;
+      const created = await upsertQaItem({ repo: pr.repo, pr: pr.number, title: pr.title, app: appForRepo(pr.repo), stagingUrl });
       if (created) added += 1;
     }
+  }
+  const now = Date.now();
+  const missing = (await qaAllItems())
+    .filter((i) => i.status !== 'validated' && i.status !== 'parked' && !i.stagingUrl && now - (previewTried.get(i.id) ?? 0) > PREVIEW_RETRY_MS)
+    .sort((a, b) => (previewTried.get(a.id) ?? 0) - (previewTried.get(b.id) ?? 0))
+    .slice(0, PREVIEW_FILLS_PER_SWEEP);
+  for (const item of missing) {
+    previewTried.set(item.id, now);
+    const stagingUrl = await previewUrlFor(item.repo, item.pr);
+    if (stagingUrl) await upsertQaItem({ repo: item.repo, pr: item.pr, title: item.title, app: item.app, stagingUrl });
   }
   const items = await qaAllItems();
   const drift = authoritative ? await qaDrift(items, snapshot.prs) : [];
