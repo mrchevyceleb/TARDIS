@@ -8,6 +8,7 @@ import { bareChatId, isAgentThread } from '../chat/threadKey.ts';
 import { subscriptionEnvironment } from '../chat/subscription-policy.ts';
 import { accountEnv, accountEnvForAccount, accountForAgent, accountFromChatId, configuredAccountNames, backgroundAccountEnv } from './accountResolver.ts';
 import { JsonStore } from './jsonStore.ts';
+import { claudeAccountPool } from './claudeAccountPool.ts';
 
 export type AccountEngine = 'claude' | 'codex';
 export type CliProfile = { id: string; engine: AccountEngine; path: string; env: NodeJS.ProcessEnv };
@@ -73,6 +74,15 @@ function choiceKey(engine: AccountEngine, cwd: string, chatId: string): string {
 }
 
 export function subscriptionEnvForLane(engine: AccountEngine, cwd: string, chatId: string, agentName?: string): NodeJS.ProcessEnv {
+  const preferred = preferredSubscriptionEnv(engine, cwd, chatId, agentName);
+  if (engine !== 'claude') return preferred;
+  const profiles = cliProfiles().filter(item => item.engine === 'claude');
+  const id = cliProfileId('claude', cliProfileForEnv('claude', preferred));
+  const selected = claudeAccountPool.select(id, profiles.map(item => item.id));
+  return selected === id ? preferred : { ...profiles.find(item => item.id === selected)!.env };
+}
+
+export function preferredSubscriptionEnv(engine: AccountEngine, cwd: string, chatId: string, agentName?: string): NodeJS.ProcessEnv {
   const legacyPin = accountFromChatId(chatId);
   if (legacyPin) return accountEnvForAccount(legacyPin, cwd);
   const choice = readRecords<Choice>('cli-account-choices.json').find(item => item.id === choiceKey(engine, cwd, chatId));
@@ -108,6 +118,21 @@ export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.Proces
   identity = createHash('sha256').update(identity).digest('hex').slice(0, 20);
   routingCache.set(id, { signature, identity });
   return `${id}:${identity}`;
+}
+
+/** A transient credential-file read must not look like an account change. The
+ * profile path still has to match; once both identities are known, they must
+ * match too so a real re-login recycles the warm worker. */
+export function subscriptionRoutingKeysMatch(current: string, desired: string): boolean {
+  if (current === desired) return true;
+  const split = (value: string) => {
+    const at = value.lastIndexOf(':');
+    return at < 0 ? { profile: value, identity: '' } : { profile: value.slice(0, at), identity: value.slice(at + 1) };
+  };
+  const left = split(current);
+  const right = split(desired);
+  return left.profile === right.profile
+    && (left.identity === 'not-signed-in' || right.identity === 'not-signed-in');
 }
 
 export function subscriptionEmail(engine: AccountEngine, env: NodeJS.ProcessEnv): string | null {

@@ -2,7 +2,7 @@ import { Router, type Request } from 'express';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
 import { listAgents, cliForAgentEngine } from '../chat/agents.ts';
 import { peekThreadSession } from '../chat/runner.ts';
-import { subscriptionEnvForLane, chooseCliProfile, cliProfiles } from '../lib/cliProfiles.ts';
+import { preferredSubscriptionEnv, chooseCliProfile, cliProfiles } from '../lib/cliProfiles.ts';
 import { startCliLogin, getCliLogin, submitCliLoginCode, cancelCliLogin } from '../lib/cliLogin.ts';
 import { accountForProfile, cliProfileForEnv, listCliAccounts, type AccountEngine } from '../lib/cliAccounts.ts';
 import { asyncHandler } from './helpers.ts';
@@ -18,7 +18,7 @@ accountsRouter.get('/agents', asyncHandler(async (_req, res) => {
     if (engine !== 'claude' && engine !== 'codex') return [];
     let selected;
     try {
-      const env = subscriptionEnvForLane(engine, ELROND_WORKSPACE_PATH, agent.home, agent.name);
+      const env = preferredSubscriptionEnv(engine, ELROND_WORKSPACE_PATH, agent.home, agent.name);
       selected = accountForProfile(accounts, engine, cliProfileForEnv(engine, env));
     } catch { /* The row offers the same account recovery as the picker. */ }
     const live = peekThreadSession({ cli: engine, repoPath: ELROND_WORKSPACE_PATH, chatId: agent.home });
@@ -46,7 +46,7 @@ accountsRouter.get('/', asyncHandler(async (req, res) => {
     let selected;
     let selectionNotice: string | null = null;
     try {
-      const env = subscriptionEnvForLane(engine, cwd, chatId, agent?.name);
+      const env = preferredSubscriptionEnv(engine, cwd, chatId, agent?.name);
       selected = accountForProfile(accounts, engine, cliProfileForEnv(engine, env));
     } catch { selectionNotice = 'Your saved account is unavailable. Choose another signed-in account.'; }
     const live = peekThreadSession({ cli: engine, repoPath: cwd, chatId });
