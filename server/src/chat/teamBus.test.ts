@@ -216,16 +216,15 @@ test('only an explicit task-start handoff from a task source stamps a fresh thre
 });
 
 test('a fresh wipe is owed per task id until that task completes its reset', () => {
-  // No durable state yet: the task is owed its wipe.
+  // Per-task lookup: the drain asks for this task's own durable entry, so
+  // completing task B never makes completed task A look owed again.
   assert.equal(freshResetOwed('task-a', undefined), true);
   // An interrupted wipe for the same task resumes after restart.
   assert.equal(freshResetOwed('task-a', { taskId: 'task-a', state: 'resetting', resetAt: 1 }), true);
   // Only this task's own completion clears what it is owed.
   assert.equal(freshResetOwed('task-a', { taskId: 'task-a', state: 'complete', resetAt: 1 }), false);
-  // A different task is never suppressed by an earlier task's completion,
-  // and an earlier task is not cleared by a later task's state.
-  assert.equal(freshResetOwed('task-b', { taskId: 'task-a', state: 'complete', resetAt: 1 }), true);
-  assert.equal(freshResetOwed('task-a', { taskId: 'task-b', state: 'complete', resetAt: 2 }), true);
+  // A different task's completion is a different lookup and changes nothing.
+  assert.equal(freshResetOwed('task-b', undefined), true);
   // Legacy marked rows carry no task id and never trigger this gate.
   assert.equal(freshResetOwed(undefined, { taskId: 'task-a', state: 'resetting', resetAt: 1 }), false);
 });

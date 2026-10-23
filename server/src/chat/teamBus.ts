@@ -108,7 +108,7 @@ export function freshResetOwed(
   state: ThreadResetTaskState | undefined,
 ): boolean {
   if (!taskId) return false;
-  return state?.taskId !== taskId || state.state !== 'complete';
+  return state === undefined || state.state !== 'complete';
 }
 
 /** A task start is a batch boundary (Codex review, Oct 23 2026): a marked
@@ -233,9 +233,14 @@ export async function freshStartForAgent(agent: Agent, taskId?: string): Promise
     // The durable per-task state commits before the epoch and before any
     // destructive work: if the process dies anywhere from here to the end,
     // the task is still owed its wipe (`resetting`), keyed by its own id.
-    if (taskId) await persistThreadResetTaskState(logKey, taskId, resetAt, 'resetting');
     const committed = await persistThreadResetEpoch(logKey, resetAt);
     destructive = true;
+    // Per-task state commits after the epoch but before destructive work:
+    // a crash before completion leaves `resetting` behind, so the queued
+    // task resumes its wipe after restart instead of delivering into a
+    // half-erased thread. The epoch is committed first so a failure here
+    // never leaves a `resetting` row suppressing a wipe that never began.
+    if (taskId) await persistThreadResetTaskState(logKey, taskId, resetAt, 'resetting');
     noteThreadResetEpoch(logKey, committed);
     freshLifecycleStarted({ logKey, repo: repoPath, chatId, cli: home.cli });
     for (const prior of priors) {
@@ -248,14 +253,14 @@ export async function freshStartForAgent(agent: Agent, taskId?: string): Promise
     // drain never re-implements that order and can never erase the log
     // before the memory staging has succeeded.
     await runner.freshStart({ cli: home.cli as CliKind, repoPath, chatId, model: home.model, effort: home.effort });
-    if (taskId) await persistThreadResetTaskState(logKey, taskId, resetAt, 'complete');
     freshLifecycleCompleted({ logKey, repo: repoPath, chatId, cli: home.cli, resetAt: committed });
     return { fresh: true };
   } catch (error) {
-    // A failure before the epoch committed changed nothing durable: the
-    // batch may deliver into the intact old thread. A failure after it
-    // must never deliver into a possibly half-erased thread — the caller
-    // holds the durable records for retry.
+    // A failure before the reset began leaves nothing destructive behind:
+    // any committed epoch or `resetting` state simply makes the retry
+    // re-run the idempotent wipe before delivering into the fresh thread.
+    // A failure after it must never deliver into a possibly half-erased
+    // thread — the caller holds the durable records for retry.
     return { fresh: false, retryable: destructive, reason: `fresh start failed: ${(error as Error).message}` };
   } finally {
     releaseReset();
@@ -2071,7 +2076,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // earlier task's completion (Codex verify, Oct 23 2026). Legacy
         // marked rows carry no task id; they keep the old behavior of
         // delivering without a wipe until they drain.
-        if (freshResetOwed(lead.taskId, threadResetTaskState(toLogKey))) {
+        if (freshResetOwed(lead.taskId, lead.taskId ? threadResetTaskState(toLogKey, lead.taskId) : undefined)) {
           const wiped = await freshStartForAgent(to, lead.taskId);
           const hold = freshHoldReason(wiped);
           if (hold) {
@@ -2426,7 +2431,11 @@ export async function deliverTeamMessage(input: {
     if (priorTaskId !== undefined) taskId = priorTaskId;
     else { const mintedClaim = await claimFreshTaskId(request, from.id, to.id); taskId = mintedClaim.taskId; mintedFreshClaim = mintedClaim.minted; }
   }
-  const waitForReply = requestedWaitForReply && !closesReplyCycle && !quietHoldRecipient && !taskStart;
+  // Any record carrying a fresh-task claim (the stamped lead AND its
+  // pre-reply clarifications) must ride the drain, never the synchronous
+  // path: the drain is what performs the owed wipe, and a clarification
+  // that slipped in synchronously could land before it (Codex verify).
+  const waitForReply = requestedWaitForReply && !closesReplyCycle && !quietHoldRecipient && taskId === undefined;
   // card-b3468c: an under-ceiling nudge reports its idle-boundary delivery in
   // the receipt (the drain-side admission never steers a live turn).
   const nudgeHoldEntry = typeof input.nudgeHoldSince === 'number' && Number.isFinite(input.nudgeHoldSince) && input.nudgeHoldSince > 0

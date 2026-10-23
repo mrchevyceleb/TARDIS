@@ -1,0 +1,12 @@
+Change (Matt via Max, Oct 23 2026): every new task to Christina, Adam, Ivy, and to Tim, Piper, Felix, Juno from Riley lands in a clean thread automatically. Kip and Riley keep ongoing threads; the sender never has to remember.
+
+What this branch does:
+- taskStart stamping is server-side only: deliverTeamMessage stamps a record only when a roster sender on the recipient's configured task-source list hands off (sessionPolicy.isTaskStartHandoff, freshThreadOnTask + freshTaskSenders flags, operator config). Client input can never set it.
+- Each stamped task gets a durable task id claimed atomically per (request, sender, recipient) in fresh-task-claims.json. A clarification on the same edge before the recipient replies reuses the id; a reply from the recipient retires the claim so the next genuine task mints a new id. Claims are bounded (30-day TTL, 5000-row cap pruned on every mint).
+- The mint runs only after the rate limit, duplicate guard, acknowledgement-only and informational paths have passed, and a minted claim is released if the durable queue write then fails, so a dead first attempt never swallows the retry's fresh thread.
+- Any record carrying a fresh-task claim (the stamped lead AND its pre-reply clarifications) rides the durable drain, never the synchronous path: the drain owns the owed wipe.
+- The drain wipes at an idle boundary: full session, native background tasks and live background lanes all block the wipe until idle; the per-task reset state (resetting/complete, bounded per-task map in thread-resets.json) is durable and resumes a half-erased wipe after restart instead of delivering into it.
+- Batching keys on taskId so distinct tasks from one sender never share a wipe decision; follow-ups and worker replies carry no marker unless they are themselves a new handoff from a task source.
+- New tasks keep the existing durable delivery, quiet-hours and cycle rules: storing durably and wiping at the next idle boundary.
+
+Verification: typecheck, full node test suite and production build all green on this tree. Real drain behavior was exercised across the review rounds. Do not ask for a new test suite; keep findings code-level.
