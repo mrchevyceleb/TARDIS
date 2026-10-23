@@ -7,7 +7,7 @@ export type QaItem = {
   title: string;
   app: 'Operly' | 'Studio';
   tester: 'sud' | 'edgar' | 'martin';
-  status: 'up_next' | 'testing' | 'fixing' | 'retest' | 'validated';
+  status: 'up_next' | 'testing' | 'fixing' | 'retest' | 'validated' | 'parked';
   dueAt: string;
   slackThreadUrl?: string;
   slackThreadTs?: string;

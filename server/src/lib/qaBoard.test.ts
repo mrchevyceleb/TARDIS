@@ -14,8 +14,8 @@ const { routeQaItem, upsertQaItem, qaBoard, applyQaOutcome, qaPinnedList, qaDrif
 
 test.after(() => rmSync(stateDir, { recursive: true, force: true }));
 
-test('routing sends Operly to Martin, Studio to Edgar, Sud work to Sud', () => {
-  assert.equal(routeQaItem({ app: 'Operly' }), 'martin');
+test('routing sends both apps to Edgar, Sud work to Sud', () => {
+  assert.equal(routeQaItem({ app: 'Operly' }), 'edgar');
   assert.equal(routeQaItem({ app: 'Studio' }), 'edgar');
   assert.equal(routeQaItem({ app: 'Operly', needsSud: true }), 'sud');
   assert.equal(routeQaItem({ app: 'Studio', builderIsTester: true }), 'sud');
@@ -25,7 +25,7 @@ test('routing sends Operly to Martin, Studio to Edgar, Sud work to Sud', () => {
 test('a staging merge lands once and keeps the thread status on re-merge', async () => {
   const item = await upsertQaItem({ repo: 'acme/operly', pr: 12, title: 'Usage meter reset', app: 'Operly', slackThreadUrl: 'https://slack.example/t12' });
   assert.ok(item);
-  assert.equal(item.tester, 'martin');
+  assert.equal(item.tester, 'edgar');
   assert.equal(item.status, 'up_next');
   await applyQaOutcome(item.id, 'testing');
   const again = await upsertQaItem({ repo: 'acme/operly', pr: 12, title: 'Usage meter reset', app: 'Operly' });
@@ -33,8 +33,8 @@ test('a staging merge lands once and keeps the thread status on re-merge', async
   assert.equal(again.id, item.id);
   assert.equal(again.status, 'testing');
   const board = await qaBoard();
-  assert.equal(board.martin.length, 1);
-  assert.equal(board.martin[0].id, item.id);
+  assert.equal(board.edgar.filter((i) => i.app === 'Operly').length, 1);
+  assert.equal(board.edgar.find((i) => i.app === 'Operly')?.id, item.id);
 });
 
 test('validated drops the card; a fail loops Sud to retest', async () => {
@@ -50,8 +50,8 @@ test('validated drops the card; a fail loops Sud to retest', async () => {
 
 test('the pinned Slack list renders from the same records as the board', async () => {
   const board = await qaBoard();
-  const list = qaPinnedList('martin', board.martin);
-  assert.match(list, /Martin's live list/);
+  const list = qaPinnedList('edgar', board.edgar);
+  assert.match(list, /Edgar's live list/);
   assert.match(list, /Usage meter reset \[testing\] due /);
 });
 
@@ -78,7 +78,7 @@ test('unconfigured repos never land, and concurrent merges land once', async () 
   ]);
   assert.equal(a?.id, b?.id);
   const board = await qaBoard();
-  assert.equal(board.martin.filter((i) => i.pr === 21).length, 1);
+  assert.equal(board.edgar.filter((i) => i.pr === 21).length, 1);
 });
 
 test('a validated card stays validated under a racing fail and a retried merge', async () => {
@@ -91,9 +91,22 @@ test('a validated card stays validated under a racing fail and a retried merge',
   assert.equal(board.edgar.filter((i) => i.pr === 22).length, 0);
 });
 
+test('a column shows at most eight cards per app, and parked cards wait off the board', async () => {
+  for (let pr = 400; pr < 410; pr++) await upsertQaItem({ repo: 'acme/studio', pr, title: `Cap ${pr}`, app: 'Studio' });
+  const capped = (await qaBoard()).edgar.filter((i) => i.app === 'Studio');
+  assert.equal(capped.length, 8);
+  const parked = capped[0];
+  await applyQaOutcome(parked.id, 'parked');
+  const after = (await qaBoard()).edgar.filter((i) => i.app === 'Studio');
+  assert.equal(after.length, 8);
+  assert.ok(!after.some((i) => i.id === parked.id));
+  await applyQaOutcome(parked.id, 'up_next');
+  assert.ok((await qaBoard()).edgar.some((i) => i.id === parked.id));
+});
+
 test('routing on a later signal moves an existing card; titles never name the builder', async () => {
   const synced = await upsertQaItem({ repo: 'acme/operly', pr: 23, title: 'Naomi — repair billing', app: 'Operly' });
-  assert.equal(synced?.tester, 'martin');
+  assert.equal(synced?.tester, 'edgar');
   assert.equal(synced?.title, 'repair billing');
   const routed = await upsertQaItem({ repo: 'acme/operly', pr: 23, title: 'repair billing', app: 'Operly', needsSud: true });
   assert.equal(routed?.tester, 'sud');

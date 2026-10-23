@@ -10,6 +10,7 @@ const STATUS: Record<QaItem['status'], { label: string; className: string }> = {
   fixing: { label: 'fixing', className: 'qa-status-fixing' },
   retest: { label: 'retest', className: 'qa-status-retest' },
   validated: { label: 'validated', className: 'qa-status-validated' },
+  parked: { label: 'parked', className: 'qa-status-validated' },
 };
 
 const dueLabel = (dueAt: string, now: number) => {
@@ -168,7 +169,7 @@ export function QaBoard({ tester = false }: { tester?: boolean } = {}) {
                         {item.slackThreadUrl ? (
                           <a className="qa-slack" href={item.slackThreadUrl} target="_blank" rel="noreferrer">Open Slack thread <ArrowUpRight size={13} /></a>
                         ) : null}
-                        {item.stagingUrl ? <a className="qa-staging" href={item.stagingUrl} target="_blank" rel="noreferrer">Open on staging</a> : null}
+                        {item.stagingUrl ? <a className="qa-staging" href={item.stagingUrl} target="_blank" rel="noreferrer">Open preview <ArrowUpRight size={13} /></a> : null}
                       </p>
                     </article>
                   );

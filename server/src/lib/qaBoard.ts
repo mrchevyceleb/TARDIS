@@ -23,7 +23,7 @@ import { JsonStore } from './jsonStore.ts';
 import { STATE_DIR } from '../config.ts';
 
 export type QaTesterId = 'sud' | 'edgar' | 'martin';
-export type QaStatus = 'up_next' | 'testing' | 'fixing' | 'retest' | 'validated';
+export type QaStatus = 'up_next' | 'testing' | 'fixing' | 'retest' | 'validated' | 'parked';
 export type QaApp = 'Operly' | 'Studio';
 
 export type QaItem = {
@@ -51,7 +51,17 @@ export const QA_TESTERS: { id: QaTesterId; name: string }[] = [
   { id: 'martin', name: 'Martin' },
 ];
 
-const STATUSES: QaStatus[] = ['up_next', 'testing', 'fixing', 'retest', 'validated'];
+const STATUSES: QaStatus[] = ['up_next', 'testing', 'fixing', 'retest', 'validated', 'parked'];
+
+/** On the board: not validated, and not parked. A parked card waits off the
+ *  board (Matt, Oct 23 2026: the backlog was too much to face) and comes
+ *  back when its thread says up_next, testing or retest. */
+const onBoard = (i: QaItem) => i.status !== 'validated' && i.status !== 'parked';
+
+/** Most cards a tester sees per app at once (Matt, Oct 23 2026: "eight most
+ *  important cards maximum for each app"). The rest wait their turn in
+ *  priority order and appear as cards clear. */
+export const QA_CARDS_PER_APP = 8;
 
 function splitEnv(name: string): string[] {
   return (process.env[name] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -118,13 +128,13 @@ export function qaTesterByLogin(login: string): QaTesterId | undefined {
 }
 
 /** Routing rule from the flow: explicit tester first, then the Sud list for
- *  Sud-flagged work and Edgar/Martin's own work, then by app (Operly to
- *  Martin, Studio to Edgar). */
+ *  Sud-flagged work and Edgar/Martin's own work, then Edgar for both apps
+ *  (Matt, Oct 23 2026: Martin is out until Matt says otherwise). */
 export function routeQaItem(input: { tester?: string; needsSud?: boolean; builderIsTester?: boolean; app: QaApp }): QaTesterId {
   const requested = (input.tester ?? '').trim().toLowerCase();
   if (requested === 'sud' || requested === 'edgar' || requested === 'martin') return requested;
   if (input.needsSud || input.builderIsTester) return 'sud';
-  return input.app === 'Operly' ? 'martin' : 'edgar';
+  return 'edgar';
 }
 
 /** Card titles never name the builder. PR titles in this flow often arrive
@@ -146,14 +156,25 @@ const byPriority = (a: QaItem, b: QaItem) =>
   a.dueAt === b.dueAt ? (a.createdAt ?? '') < (b.createdAt ?? '') ? -1 : 1 : a.dueAt < b.dueAt ? -1 : 1;
 
 /** Open items grouped by tester, each list in priority order (earliest due
- *  first, so the first card is always "do this one now"). Validated items
- *  have dropped off. */
+ *  first, so the first card is always "do this one now"), capped at
+ *  QA_CARDS_PER_APP per app. Validated and parked items have dropped off. */
 export async function qaBoard(): Promise<Record<QaTesterId, QaItem[]>> {
-  const items = (await store.list()).filter((i) => i.status !== 'validated');
+  const items = (await store.list()).filter(onBoard);
   const board: Record<QaTesterId, QaItem[]> = { sud: [], edgar: [], martin: [] };
   for (const item of items) board[item.tester]?.push(item);
-  for (const tester of QA_TESTERS) board[tester.id].sort(byPriority);
+  for (const tester of QA_TESTERS) board[tester.id] = capColumn(board[tester.id]);
   return board;
+}
+
+/** One tester's column as shown: priority order, at most QA_CARDS_PER_APP
+ *  per app. The board and the pinned list both use it, so they agree. */
+function capColumn(items: QaItem[]): QaItem[] {
+  const shown = new Map<QaApp, number>();
+  return [...items].sort(byPriority).filter((item) => {
+    const n = shown.get(item.app) ?? 0;
+    shown.set(item.app, n + 1);
+    return n < QA_CARDS_PER_APP;
+  });
 }
 
 /** The key that makes "a staging merge adds the card" idempotent. */
@@ -250,6 +271,7 @@ export async function applyQaOutcome(id: string, outcome: string): Promise<QaIte
   else if (word === 'testing') status = 'testing';
   else if (word === 'fixing') status = 'fixing';
   else if (word === 'retest') status = 'retest';
+  else if (word === 'parked' || word === 'park') status = 'parked';
   else if (word === 'fail' || word === 'fails' || word === 'failed' || word === 'broken') status = item.tester === 'sud' ? 'retest' : 'testing';
   else if (STATUSES.includes(word as QaStatus)) status = word as QaStatus;
   if (!status) return null;
@@ -268,7 +290,7 @@ export async function applyQaOutcome(id: string, outcome: string): Promise<QaIte
  *  construction. */
 export function qaPinnedList(tester: QaTesterId, items: QaItem[]): string {
   const name = QA_TESTERS.find((t) => t.id === tester)?.name ?? tester;
-  const open = items.filter((i) => i.tester === tester && i.status !== 'validated');
+  const open = capColumn(items.filter((i) => i.tester === tester && onBoard(i)));
   const lines = open.map((item, index) => {
     const due = new Date(item.dueAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
     const status = item.status.replace('_', ' ');
@@ -291,7 +313,7 @@ export function qaDriftCheck(items: QaItem[], truth: { repo: string; pr: number;
   const drift: QaDrift[] = [];
   const byKey = new Map(truth.map((t) => [keyOf(t.repo, t.pr), t]));
   for (const item of items) {
-    if (item.status === 'validated') continue;
+    if (!onBoard(item)) continue;
     const reasons: string[] = [];
     const seen = byKey.get(keyOf(item.repo, item.pr));
     if (!seen || seen.state === 'closed' || seen.state === 'missing') reasons.push('PR is closed or gone but the item is still open');
