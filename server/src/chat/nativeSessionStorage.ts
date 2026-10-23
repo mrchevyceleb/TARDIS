@@ -13,12 +13,12 @@ function locations(): Record<string, Location> {
 }
 /** Provider credentials retain their own profiles. Only the engine's full
  * native transcript moves when a lane changes provider. No summary/reseed. */
-export function prepareClaudeNativeStorage(lane: string, profile: string, resumeId: string | null): { project?: string; accept(id: string): void } {
-  if (!isAgentThread(lane)) return { accept() {} };
-  const agent = bareChatId(lane);
+export function prepareClaudeNativeStorage(lane: string, profile: string, resumeId: string | null, cwd?: string): { project?: string; reseed?: boolean; accept(id: string): void } {
+  const agent = isAgentThread(lane) ? bareChatId(lane) : `${cwd ?? ''}|${lane}`;
   const project = `tardis-${createHash('sha256').update(agent).digest('hex').slice(0, 24)}`;
   const target = join(profile, 'projects', project);
   const previous = locations()[agent];
+  let reseed = false;
   if (resumeId) {
     let source: string | undefined;
     if (previous?.id === resumeId) {
@@ -35,10 +35,13 @@ export function prepareClaudeNativeStorage(lane: string, profile: string, resume
       }
     }
     if (!source || !existsSync(join(source, `${resumeId}.jsonl`))) {
-      recordNativeFailure(lane, 'claude-code', 'Saved native transcript is missing. Queued messages are retained; native recovery or Matt’s Fresh thread is required.');
-      throw new Error('The saved native transcript is unavailable; refusing to replace this session.');
+      if (isAgentThread(lane)) {
+        recordNativeFailure(lane, 'claude-code', 'Saved native transcript is missing. Queued messages are retained; native recovery or Matt’s Fresh thread is required.');
+        throw new Error('The saved native transcript is unavailable; refusing to replace this session.');
+      }
+      reseed = true;
     }
-    if (source !== target) {
+    if (source && source !== target) {
       mkdirSync(target, { recursive: true });
       const temporary = join(target, `${resumeId}.jsonl.tmp`);
       copyFileSync(join(source, `${resumeId}.jsonl`), temporary);
@@ -46,7 +49,7 @@ export function prepareClaudeNativeStorage(lane: string, profile: string, resume
       if (existsSync(join(source, resumeId))) cpSync(join(source, resumeId), join(target, resumeId), { recursive: true });
     }
   }
-  return { project, accept(id: string) {
+  return { project, reseed, accept(id: string) {
     const all = locations();
     all[agent] = { profile, project, id };
     mkdirSync(STATE_DIR, { recursive: true });
