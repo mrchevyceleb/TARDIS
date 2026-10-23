@@ -29,10 +29,10 @@ const observations = new Map<string, Array<{ at: number; amount: number }>>();
 function measuredPace(a: UsageAccount): UsagePace[] {
   if (a.status !== 'live' || !a.checkedAt) return [];
   const at = Date.parse(a.checkedAt), result: UsagePace[] = [];
-  const balances = a.amounts.filter(m => ['Account credit balance', 'Available balance', 'Key budget remaining'].includes(m.label));
+  const balances = a.amounts.filter(m => ['Account credit balance', 'Available balance', 'Key budget remaining', 'Cash balance', 'Voucher balance', 'Cash', 'Voucher'].includes(m.label));
   const spending = a.amounts.find(m => /spend/i.test(m.label) && /day/i.test(m.period)) || a.amounts.find(m => /spend/i.test(m.label));
-  for (const m of balances.length ? balances : spending ? [spending] : []) {
-    const isBalance = balances.includes(m), id = [a.id, m.label, m.currency, m.period, m.scope].join('|');
+  for (const tracked of balances.length ? balances : spending ? [spending] : []) {
+    const m = tracked, isBalance = balances.includes(m), id = [a.id, m.label, m.currency, m.period, m.scope].join('|');
     let points = (observations.get(id) || []).filter(p => at - p.at <= 15 * 60_000 && p.at <= at);
     const previous = points.at(-1);
     if (previous && (isBalance ? m.amount > previous.amount + 0.000001 : m.amount < previous.amount - 0.000001)) points = [];
