@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Studio } from './shell/Studio';
 import { GrokApp } from './grok/GrokApp';
-import { QaSignInLanding } from './rooms/QaBoard';
+import { QaBoard, QaSignInLanding } from './rooms/QaBoard';
 import { ProxyViewerProvider } from './components/ProxyViewer';
 import { JarvisProvider } from './jarvis/JarvisProvider';
 import { JarvisOverlay } from './jarvis/JarvisOverlay';
@@ -18,6 +18,9 @@ const studioMatch = /^\/studio(\/|$)/.test(window.location.pathname);
 // consumed), and the shell's Jarvis and viewers stay out of the way until
 // the tester has signed in and lands on the board.
 const qaSigninMatch = /^\/qa-signin(\/|$)/.test(window.location.pathname);
+// The tester's board: the only app page the public QA gateway serves, so it
+// renders bare, with no shell, rooms or team lanes behind it.
+const qaBoardMatch = /^\/qa-board(\/|$)/.test(window.location.pathname);
 const legacyRoom = window.location.pathname.replace(/^\/+/, '').replace(/\/+$/, '');
 
 // The inline boot layer in index.html (the box materialising) fades out once
@@ -38,6 +41,7 @@ function dismissBoot() {
 export default function App() {
   useEffect(dismissBoot, []);
   if (qaSigninMatch) return <QaSignInLanding />;
+  if (qaBoardMatch) return <QueryClientProvider client={queryClient}><QaBoard tester /></QueryClientProvider>;
   return (
     <QueryClientProvider client={queryClient}>
       <ProxyViewerProvider>

@@ -6,13 +6,48 @@
 // nonce so a copied link cannot be repurposed later than its short lifetime.
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { STATE_DIR } from '../config.ts';
 import { qaTesterByLogin, qaTesterLogin, type QaTesterId } from './qaBoard.ts';
 
-const LINK_TTL_MS = 10 * 60_000;
-export const QA_SESSION_MAX_AGE_SECONDS = 12 * 60 * 60;
+// Testers reach the board from outside the tailnet through the public QA
+// gateway (Matt, Oct 23 2026), so a link has to survive being handed over in
+// a meeting or a DM, and a session has to survive TARDIS restarts. Links
+// stay single-use; sessions and spent link nonces are kept on disk.
+const LINK_TTL_MS = 7 * 24 * 60 * 60_000;
+export const QA_SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 const COOKIE_NAME = 'rivendell_qa_session';
+const STORE_PATH = join(STATE_DIR, 'qa-sessions.json');
 const sessions = new Map<string, { tester: QaTesterId; expiresAt: number }>();
 const consumedLinkNonces = new Map<string, number>();
+
+function loadStore(): void {
+  try {
+    const raw = JSON.parse(readFileSync(STORE_PATH, 'utf8')) as {
+      sessions?: Record<string, { tester: QaTesterId; expiresAt: number }>;
+      consumed?: Record<string, number>;
+    };
+    const now = Date.now();
+    for (const [nonce, s] of Object.entries(raw.sessions ?? {})) {
+      if (s && typeof s.tester === 'string' && Number(s.expiresAt) > now) sessions.set(nonce, { tester: s.tester, expiresAt: Number(s.expiresAt) });
+    }
+    for (const [nonce, at] of Object.entries(raw.consumed ?? {})) {
+      if (Number(at) + LINK_TTL_MS > now) consumedLinkNonces.set(nonce, Number(at));
+    }
+  } catch { /* first run, or an unreadable file: start empty */ }
+}
+loadStore();
+
+/** Write-through, atomic: a crash mid-write never leaves a torn file, and a
+ *  spent link nonce is on disk before its session cookie is handed out. */
+function saveStore(): void {
+  const body = JSON.stringify({ sessions: Object.fromEntries(sessions), consumed: Object.fromEntries(consumedLinkNonces) });
+  mkdirSync(STATE_DIR, { recursive: true });
+  const tmp = `${STORE_PATH}.${process.pid}.tmp`;
+  writeFileSync(tmp, body, { mode: 0o600 });
+  renameSync(tmp, STORE_PATH);
+}
 
 function signingSecret(): string {
   return process.env.RIVENDELL_QA_AUTH_SECRET?.trim() ?? '';
@@ -79,6 +114,7 @@ export function verifyQaSignIn(data: string, suppliedSignature: string, now = Da
   const tester = qaTesterByLogin(login) ?? null;
   if (!tester) return null;
   consumedLinkNonces.set(nonce, now);
+  saveStore();
   return tester;
 }
 
@@ -125,15 +161,16 @@ export function createQaSession(tester: QaTesterId, now = Date.now()): string {
   pruneSessions(now);
   const nonce = randomBytes(32).toString('base64url');
   sessions.set(nonce, { tester, expiresAt: now + QA_SESSION_MAX_AGE_SECONDS * 1000 });
+  saveStore();
   return nonce;
 }
 
 export function qaSessionCookie(nonce: string): string {
-  return `${COOKIE_NAME}=${encodeURIComponent(nonce)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${QA_SESSION_MAX_AGE_SECONDS}`;
+  return `${COOKIE_NAME}=${encodeURIComponent(nonce)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${QA_SESSION_MAX_AGE_SECONDS}`;
 }
 
 export function clearQaSessionCookie(): string {
-  return `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+  return `${COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
 }
 
 function cookieValue(cookieHeader: string | undefined, name: string): string | undefined {
@@ -154,6 +191,7 @@ export function qaSessionTester(cookieHeader: string | undefined, now = Date.now
   if (!session) return null;
   if (session.expiresAt <= now) {
     sessions.delete(nonce);
+    saveStore();
     return null;
   }
   return session.tester;
@@ -161,5 +199,5 @@ export function qaSessionTester(cookieHeader: string | undefined, now = Date.now
 
 export function clearQaSession(cookieHeader: string | undefined): void {
   const nonce = cookieValue(cookieHeader, COOKIE_NAME);
-  if (nonce) sessions.delete(nonce);
+  if (nonce && sessions.delete(nonce)) saveStore();
 }

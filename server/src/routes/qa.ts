@@ -74,7 +74,10 @@ qaRouter.get('/auth/links', (req, res) => {
   const links = QA_TESTERS
     .map((t) => ({ id: t.id, name: t.name, path: qaSignInPath(t.id) }))
     .filter((l): l is { id: QaTesterId; name: string; path: string } => Boolean(l.path));
-  res.json({ links });
+  // Testers open the board on the public QA address, never the tailnet one
+  // the operator is looking at, so hand out links on that origin.
+  const origin = process.env.RIVENDELL_QA_PUBLIC_ORIGIN?.trim().replace(/\/+$/, '');
+  res.json({ links: links.map((l) => ({ ...l, url: origin ? `${origin}${l.path}` : undefined })) });
 });
 
 qaRouter.get('/', asyncHandler(async (req, res) => {
