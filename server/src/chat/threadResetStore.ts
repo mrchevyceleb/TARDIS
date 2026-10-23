@@ -70,8 +70,11 @@ export async function loadThreadResetEpochs(): Promise<Map<string, number>> {
   const epochs = new Map<string, number>();
   for (const record of records) {
     if (typeof record.id !== 'string' || !record.id) continue;
-    if (!Number.isFinite(record.resetAt) || record.resetAt <= 0) continue;
-    epochs.set(record.id, Math.max(epochs.get(record.id) ?? 0, record.resetAt));
+    // A row with no committed epoch can still carry task outcomes (a busy
+    // fallback records only its `complete` waiver), so those always load.
+    if (Number.isFinite(record.resetAt) && record.resetAt > 0) {
+      epochs.set(record.id, Math.max(epochs.get(record.id) ?? 0, record.resetAt));
+    }
     const perTask = new Map<string, ThreadResetTaskState>();
     if (typeof record.taskId === 'string' && record.taskId
       && (record.taskState === 'resetting' || record.taskState === 'complete')
@@ -133,11 +136,11 @@ export async function persistThreadResetEpoch(logKey: string, resetAt: number): 
  *  another task's outcome: every task keeps its own entry in the per-task
  *  map (Codex verify round 6, Oct 23 2026: the single-slot form made an
  *  earlier completed task look owed again once a later task overwrote it). */
-// Outcomes are kept by age, not a small count: a waived or completed task's
-// late clarification must still find its `complete` state, or it would wipe
-// the thread that task is running in (Codex review, Oct 23 2026).
-const TASK_RESET_KEEP = 2000;
-const TASK_RESET_MAX_AGE_MS = 30 * 24 * 60 * 60_000;
+// Outcomes are kept generously (one per task, so years of work per thread):
+// a waived or completed task's late clarification must still find its
+// `complete` state, or it would wipe the thread that task is running in
+// (Codex review, Oct 23 2026).
+const TASK_RESET_KEEP = 5000;
 export async function persistThreadResetTaskState(
   logKey: string,
   taskId: string,
@@ -158,7 +161,7 @@ export async function persistThreadResetTaskState(
     // Bound the map: keep the newest outcomes (by reset time), never the
     // in-flight one just written.
     const ids = Object.keys(taskResets).sort((a, b) => (taskResets[a].resetAt - taskResets[b].resetAt));
-    while (ids.length > TASK_RESET_KEEP || (ids.length && resetAt - taskResets[ids[0]].resetAt > TASK_RESET_MAX_AGE_MS)) {
+    while (ids.length > TASK_RESET_KEEP) {
       const oldest = ids.shift()!;
       if (oldest !== taskId) delete taskResets[oldest];
     }

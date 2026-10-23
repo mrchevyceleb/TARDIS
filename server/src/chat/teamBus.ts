@@ -274,6 +274,11 @@ export async function freshStartForAgent(agent: Agent, taskId?: string): Promise
     noteThreadResetEpoch(logKey, committed);
     freshLifecycleStarted({ logKey, repo: repoPath, chatId, cli: home.cli });
     for (const prior of current) {
+      // Each interrupt yields, so re-read before the next one: a lane that
+      // picked up a turn meanwhile is never killed; the task holds instead
+      // (still `resetting`, so it can only retry, never fall open).
+      const live = runner.liveSessionsForLogKey(logKey).find((s) => s.cli === prior.cli && s.cwd === prior.cwd && s.chatId === prior.chatId);
+      if (live && !recipientIdle([live])) return { fresh: false, retryable: true, reason: 'recipient became busy during reset' };
       await runner.interruptSession({ cli: prior.cli as CliKind, repoPath: prior.cwd, chatId: prior.chatId });
       runner.dropSession(prior.cli as CliKind, prior.cwd, prior.chatId);
     }
