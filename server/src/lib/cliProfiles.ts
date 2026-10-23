@@ -88,19 +88,61 @@ export function subscriptionEnvForLane(engine: AccountEngine, cwd: string, chatI
  *  never moves a lane into another pool's account. Pools are account-map names,
  *  `RIVENDELL_CLAUDE_ACCOUNT_POOLS="mjohnst,mattio|kim,tardis"`. A lane whose
  *  preferred login is in no pool only fails over to other unpooled logins. */
-function claudePoolPeers(preferredId: string, profiles: CliProfile[]): CliProfile[] {
+export function claudePoolGroups(): Set<string>[] | null {
   const raw = process.env.RIVENDELL_CLAUDE_ACCOUNT_POOLS?.trim();
-  if (!raw) return profiles;
+  if (!raw) return null;
   const idOf = (name: string): string | null => {
     try { return cliProfileId('claude', cliProfileForEnv('claude', accountEnvForAccount(name, APP_ROOT))); } catch { return null; }
   };
   const groups = raw.split('|').map(group => group.split(',').map(name => name.trim()).filter(Boolean).map(idOf));
-  // A misspelled name must never widen failover across pools: stay put.
-  if (groups.some(group => !group.length || group.includes(null))) return profiles.filter(profile => profile.id === preferredId);
+  // A misspelled name must never widen a pool: the config is unusable.
+  if (groups.some(group => !group.length || group.includes(null))) return null;
   const pools = groups.map(group => new Set(group as string[]));
+  // An account in two pools would bridge them, and `find` would silently
+  // pick the first: the config is unusable, not order-dependent.
+  const seen = new Set<string>();
+  for (const pool of pools) for (const id of pool) {
+    if (seen.has(id)) return null;
+    seen.add(id);
+  }
+  return pools;
+}
+
+function claudePoolPeers(preferredId: string, profiles: CliProfile[]): CliProfile[] {
+  const pools = claudePoolGroups();
+  if (!pools) {
+    // Pools are configured but unusable (or unset): never fail over blind.
+    // With no pool config at all the old single-pool behaviour applies only
+    // when the operator never set the variable; a set-but-broken value fails
+    // closed to the preferred login alone.
+    return process.env.RIVENDELL_CLAUDE_ACCOUNT_POOLS?.trim()
+      ? profiles.filter(profile => profile.id === preferredId)
+      : profiles;
+  }
   const mine = pools.find(pool => pool.has(preferredId));
   const pooled = new Set(pools.flatMap(pool => [...pool]));
   return profiles.filter(profile => mine ? mine.has(profile.id) : !pooled.has(profile.id));
+}
+
+/** True when a Claude profile may bill work whose own lane lives in another
+ *  pool. Detached work (jobs, watch commands, reviews) has no turn to borrow
+ *  a profile from: it resolves its account from its working directory and the
+ *  agent's pin/choice exactly like a turn would, then checks the pool. When
+ *  pools are configured, a profile outside that pool (or outside every pool
+ *  while the lane's own login is pooled) must never be handed to the job, or
+ *  `claude -p` inside it silently bills the wrong money (Felix's Candy review,
+ *  Oct 23 2026: a game-lane job ran on the default ~/.claude, Rally money).
+ *  With no pool config there is nothing to check against. */
+export function claudeProfileInLanePool(profileDir: string, lanePreferredDir: string): boolean {
+  if (resolve(profileDir) === resolve(lanePreferredDir)) return true;
+  const pools = claudePoolGroups();
+  if (!pools) return !process.env.RIVENDELL_CLAUDE_ACCOUNT_POOLS?.trim();
+  const id = cliProfileId('claude', profileDir);
+  const laneId = cliProfileId('claude', lanePreferredDir);
+  const mine = pools.find(pool => pool.has(laneId));
+  if (mine) return mine.has(id);
+  const pooled = new Set(pools.flatMap(pool => [...pool]));
+  return !pooled.has(id);
 }
 
 export function preferredSubscriptionEnv(engine: AccountEngine, cwd: string, chatId: string, agentName?: string): NodeJS.ProcessEnv {
@@ -185,20 +227,32 @@ export async function registerLoginProfile(managedId: string, engine: AccountEng
 }
 
 /** New detached work follows the saved choices. Work started by a turn already
- * answering keeps that turn's original profile until its boundary. */
+ * answering keeps that turn's original profile until its boundary.
+ *
+ * `cwd` is the work's own working directory, never a stand-in workspace: the
+ * account map resolves by directory, so resolving detached work from anywhere
+ * else bills it to whatever account that other directory maps to. Callers
+ * pass the directory the command will actually run in. */
 export async function backgroundSubscriptionEnv(cwd: string, agentName: string, chatId: string): Promise<NodeJS.ProcessEnv> {
-  const { peekThreadSession } = await import('../chat/runner.ts');
+  const { peekThreadSessions } = await import('../chat/runner.ts');
+  const { sessionDirectory } = await import('../chat/sessionPolicy.ts');
   const env = backgroundAccountEnv(cwd, agentName);
   const claude = subscriptionEnvForLane('claude', cwd, chatId, agentName);
   const codex = subscriptionEnvForLane('codex', cwd, chatId, agentName);
   env.CLAUDE_CONFIG_DIR = cliProfileForEnv('claude', claude);
   env.CODEX_HOME = cliProfileForEnv('codex', codex);
   env.SAMWISE_ACCOUNT = claude.SAMWISE_ACCOUNT;
-  const active = peekThreadSession({ cli: 'claude', repoPath: cwd, chatId });
-  if (active?.isBusy() && 'subscriptionProfile' in active) {
-    const profile = active.subscriptionProfile();
-    if (profile && ['claude', 'assistant'].includes(active.cli)) env.CLAUDE_CONFIG_DIR = profile;
-    if (profile && ['codex', 'codex-personal'].includes(active.cli)) env.CODEX_HOME = profile;
+  // A busy turn's live profile may be borrowed only when it bills to the same
+  // pool this detached work belongs to. A lane can hold sessions in more than
+  // one directory (its configured home plus wherever a job's cwd resolved),
+  // and borrowing across pools is exactly how a game-lane review ended up on
+  // Rally money. When the borrow is refused the job keeps its own lane's
+  // resolved profile, which is always in-pool by construction.
+  const laneDir = sessionDirectory(chatId, cwd);
+  for (const active of peekThreadSessions({ cli: 'claude', repoPath: cwd, chatId }, laneDir)) {
+    if (!active.busy) continue;
+    if (active.claudeProfile && ['claude', 'assistant'].includes(active.cli)
+      && claudeProfileInLanePool(active.claudeProfile, cliProfileForEnv('claude', claude))) { env.CLAUDE_CONFIG_DIR = active.claudeProfile; break; }
   }
   return env;
 }
