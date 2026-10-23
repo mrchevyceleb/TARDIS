@@ -243,8 +243,13 @@ export function useCompanionPicker(storageKey: string) {
     if (raw !== stored && typeof window !== 'undefined') localStorage.setItem(storageKey, raw);
     return raw;
   });
-  const setCompanion = (value: string) => {
+  const setCompanion = async (value: string, model?: string, effort?: string) => {
     const c = normalizeCompanion(value);
+    if (model !== undefined || effort !== undefined) {
+      markSelectionChanged(c);
+      applyAuthoritativeBrain(c, model, effort);
+      return;
+    }
     setCompanionState(c);
     if (typeof window !== 'undefined') localStorage.setItem(storageKey, c);
   };
@@ -566,6 +571,7 @@ export function useCompanionPicker(storageKey: string) {
     companion, setCompanion, applyAuthoritativeBrain,
     cli, account, model, effort, selectionRevision: selectionRevisions[companion] ?? 0,
     brainPending: false,
+    engineSwitchSaving: false,
     selectionNotice,
     selectionError: null as string | null,
     dismissSelectionFeedback: () => setSelectionNotice(null),

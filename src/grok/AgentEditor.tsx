@@ -77,7 +77,7 @@ export type AgentEditorProps = {
   /** Present in edit mode. */
   agent?: Agent;
   onClose: () => void;
-  onSaved: (agent: Agent) => void;
+  onSaved: (agent: Agent, options?: { keepEditing: boolean }) => void;
   onDeleted: (agent: Agent) => void;
 };
 
@@ -334,8 +334,8 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
         setEffort(current.effort ?? defaults.effort);
         initialBrain.current = { engine: currentEngine, model: currentModel, effort: current.effort ?? defaults.effort };
         setBrainRevision(current.brainRevision ?? 1);
-        onSaved(current);
-        setErr('Brain settings changed on another device. Refreshed them here; review and save again.');
+        onSaved(current, { keepEditing: true });
+        setErr('Settings changed on another device. Refreshed the model and effort here. Your other edits are still here; review and save again.');
       } else {
         setErr((e as Error).message || 'Save failed');
       }
@@ -547,7 +547,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
           />
         </label>
 
-        {err ? <div className="bt-agent-err">{err}</div> : null}
+        {err ? <div className="bt-agent-err" role="alert">{err}</div> : null}
 
         <div className="bt-agent-editor-actions">
           {agent ? (

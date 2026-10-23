@@ -122,7 +122,10 @@ function SubscriptionAccount({ engine, agentId, chatId, repo }: AccountControlPr
   const active = data?.accounts.find((account) => account.id === data.activeId);
   const pending = Boolean(data?.busy && data.activeId !== data.selectedId);
   const title = engine === 'claude' ? 'Claude' : 'Codex';
-  const accounts = data?.accounts.filter((account) => account.engine === engine) ?? [];
+  // Empty, disconnected profiles are sign-in slots, not saved accounts.
+  const accounts = data?.accounts.filter((account) => account.engine === engine && (
+    account.email || account.status !== 'signed_out' || account.id === data.selectedId || account.id === data.activeId
+  )) ?? [];
   const connectedCount = accounts.filter((account) => account.status === 'connected').length;
   return <section className="bt-account-inline" aria-label={`${title} subscription`}>
       <div className="bt-account-pop-head"><span className="bt-account-emblem"><UserRound size={18} /></span><div><strong>Subscription</strong><small>{checking && !data ? 'Checking sign-ins…' : `${connectedCount} ${title} ${connectedCount === 1 ? 'account' : 'accounts'} signed in`}</small></div></div>

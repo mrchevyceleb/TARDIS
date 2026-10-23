@@ -14,6 +14,7 @@ import {
   normalizeXaiModel,
   normalizeZaiEffort,
   normalizeZaiModel,
+  WORKSPACE_COMPANIONS,
   useCompanionPicker,
 } from '../chat/hooks/useCompanionPicker';
 import { codexModelChange, normalizeCodexEffort, normalizeCodexModel } from '../chat/codexModels';
@@ -88,6 +89,7 @@ export type GrokChatProps = {
 
 export function GrokChat(props: GrokChatProps) {
   const [brainSaveError, setBrainSaveError] = useState<string | null>(null);
+  const [engineSwitchSaving, setEngineSwitchSaving] = useState(false);
   const [brainSaveNotice, setBrainSaveNotice] = useState<string | null>(null);
   const savedBrain = useRef<BrainDraft>({ engine: props.agent?.engine ?? 'claude', model: props.agent?.model, effort: props.agent?.effort });
   useEffect(() => {
@@ -238,7 +240,7 @@ export function GrokChat(props: GrokChatProps) {
     desiredBrain.current = next;
     if (!agentId) {
       picker.applyAuthoritativeBrain(next.engine, next.model, next.effort);
-      return;
+      return Promise.resolve();
     }
     const gen = ++persistGen.current;
     persistChain.current = persistChain.current.catch(() => {}).then(async () => {
@@ -275,6 +277,7 @@ export function GrokChat(props: GrokChatProps) {
         }
       }
     });
+    return persistChain.current;
   }, [agentId, picker.applyAuthoritativeBrain, props.onAgentBrainSaved]);
 
   const pickerForUi = !agentId ? picker : {
@@ -283,7 +286,16 @@ export function GrokChat(props: GrokChatProps) {
     selectionError: brainSaveError,
     dismissSelectionFeedback: () => { setBrainSaveError(null); setBrainSaveNotice(null); },
     brainPending: chat.serverBrain?.pending ?? false,
-    setCompanion: (engine: string) => persistBrain(selectionForLane(engine)),
+    engineSwitchSaving,
+    setCompanion: async (engine: string, model?: string, effort?: string) => {
+      setEngineSwitchSaving(true);
+      const label = WORKSPACE_COMPANIONS.find(lane => lane.id === engine)?.label ?? engine;
+      const confirmation = chat.status === 'streaming'
+        ? `${label} saved for ${props.agent?.name ?? 'your companion'}. It takes over after this reply.`
+        : `${props.agent?.name ?? 'Your companion'} now uses ${label}. Your conversation stays here.`;
+      try { await persistBrain(selectionForLane(engine, model, effort), confirmation); }
+      finally { setEngineSwitchSaving(false); }
+    },
     setClaudeModel: (value: string) => persistBrain({
       engine: 'claude',
       model: normalizeClaudeModel(value),

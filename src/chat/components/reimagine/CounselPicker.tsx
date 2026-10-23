@@ -1,8 +1,8 @@
 // Choose a companion — the reimagined companion + model + effort picker
 // (§3.10). Reskins CompanionControls.tsx into a single "model chip" that opens
 // either a desktop popover ("Counsel of the house") or a mobile bottom sheet
-// ("The Counsel"). All state + persistence already live in useCompanionPicker;
-// this is presentation-only, with subscription model and effort controls.
+// ("The Counsel"). Browsing another provider is local to this open picker;
+// only its explicit Use action persists an engine change.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CompanionPicker } from '../../hooks/useCompanionPicker';
@@ -17,9 +17,9 @@ import {
   companionAuthBlurb,
 } from '../../hooks/useCompanionPicker';
 import { CLAUDE_MODELS, CLAUDE_EFFORTS } from '../CodexEnginePicker';
-import { codexModelLabel, isCodexModelUnlisted, codexEffortsForModel, useCodexModels } from '../../codexModels';
-import { FIREWORKS_MODELS, fireworksEffortsForModel, useFireworksModels } from '../../fireworksModels';
-import { OPENROUTER_MODELS, openRouterEffortsForModel, useOpenRouterModels, type OpenRouterModelSpec } from '../../openrouterModels';
+import { codexModelLabel, codexModelChange, isCodexModelUnlisted, codexEffortsForModel, useCodexModels } from '../../codexModels';
+import { FIREWORKS_MODELS, fireworksEffortsForModel, normalizeFireworksEffort, useFireworksModels } from '../../fireworksModels';
+import { OPENROUTER_MODELS, openRouterEffortsForModel, normalizeOpenRouterEffort, useOpenRouterModels, type OpenRouterModelSpec } from '../../openrouterModels';
 import { StarSigil } from './icons';
 import { AccountControl, type AccountControlProps } from '../../../grok/AccountControl';
 
@@ -115,29 +115,98 @@ function EffortPills({
 }
 
 // ── the expandable lane list (shared by popover + sheet) ───────────────────
+type LaneChoice = { model: string; effort: string };
+
+function choiceModelLabel(lane: string, model: string): string {
+  if (lane === 'codex') return codexModelLabel(model);
+  const models = lane === 'claude' ? CLAUDE_MODELS : lane === 'xai' ? XAI_MODELS
+    : lane === 'zai' ? ZAI_MODELS : lane === 'agy' ? AGY_MODELS
+    : lane === 'fireworks' ? FIREWORKS_MODELS : OPENROUTER_MODELS;
+  return labelFor(model, models);
+}
+
 function LaneList({ picker, accountContext, rejectedCodexModel }: { picker: CompanionPicker; accountContext?: AccountContext; rejectedCodexModel?: string }) {
+  const [expanded, setExpanded] = useState(picker.companion);
+  const [draft, setDraft] = useState<LaneChoice | null>(null);
+  const [switchSaving, setSwitchSaving] = useState(false);
+  const saving = switchSaving || picker.engineSwitchSaving;
+  const [error, setError] = useState('');
+  const [draftNotice, setDraftNotice] = useState<string | null>(null);
+  const laneButtons = useRef<Record<string, HTMLButtonElement | null>>({});
+  const focusAfterSwitch = useRef<string | null>(null);
+  useEffect(() => {
+    if (saving || !focusAfterSwitch.current) return;
+    const button = laneButtons.current[focusAfterSwitch.current];
+    focusAfterSwitch.current = null;
+    button?.focus();
+  }, [saving, picker.companion]);
+  // A confirmed switch (including another device's) follows the saved engine.
+  useEffect(() => { setExpanded(picker.companion); setDraft(null); }, [picker.companion]);
+  const choices: Record<string, LaneChoice & { onModel: (v: string) => void; onEffort: (v: string) => void }> = {
+    claude: { model: picker.claudeModel, effort: picker.claudeEffort, onModel: picker.setClaudeModel, onEffort: picker.setClaudeEffort },
+    codex: { model: picker.codexModel, effort: picker.codexEffort, onModel: picker.setCodexModel, onEffort: picker.setCodexEffort },
+    xai: { model: picker.xaiModel, effort: picker.xaiEffort, onModel: picker.setXaiModel, onEffort: picker.setXaiEffort },
+    zai: { model: picker.zaiModel, effort: picker.zaiEffort, onModel: picker.setZaiModel, onEffort: picker.setZaiEffort },
+    fireworks: { model: picker.fireworksModel, effort: picker.fireworksEffort, onModel: picker.setFireworksModel, onEffort: picker.setFireworksEffort },
+    openrouter: { model: picker.openRouterModel, effort: picker.openRouterEffort, onModel: picker.setOpenRouterModel, onEffort: picker.setOpenRouterEffort },
+    openrouter2: { model: picker.openRouter2Model, effort: picker.openRouter2Effort, onModel: picker.setOpenRouter2Model, onEffort: picker.setOpenRouter2Effort },
+    agy: { model: picker.agyModel, effort: picker.agyEffort, onModel: picker.setAgyModel, onEffort: picker.setAgyEffort },
+  };
   return (
     <>
       {WORKSPACE_COMPANIONS.map((lane) => {
         const meta = LANE_META[lane.id] ?? { ring: '•', short: '', word: 'effort' };
         const on = picker.companion === lane.id;
+        const open = expanded === lane.id;
+        const saved = choices[lane.id];
+        const choice = open && !on && draft ? draft : saved;
+        const pickModel = (model: string) => {
+          if (on) { saved.onModel(model); return; }
+          const codex = lane.id === 'codex' ? codexModelChange(model, choice.effort) : null;
+          const effort = codex ? codex.effort
+            : lane.id === 'fireworks' ? normalizeFireworksEffort(model, choice.effort)
+            : lane.id.startsWith('openrouter') ? normalizeOpenRouterEffort(model, choice.effort) : choice.effort;
+          setDraft({ model, effort });
+          setDraftNotice(codex?.notice ?? (effort !== choice.effort ? `Effort adjusted to ${effort} for this model.` : null));
+        };
         return (
           <div key={lane.id}>
             <button
               type="button"
               className={`lane${on ? ' on' : ''}`}
-              onClick={() => picker.setCompanion(lane.id)}
+              ref={(button) => { laneButtons.current[lane.id] = button; }}
+              aria-expanded={open}
+              aria-label={`Browse ${lane.label} models and accounts${on ? ', current provider' : ''}`}
+              disabled={saving}
+              onClick={() => { setExpanded(lane.id); setDraft(null); setDraftNotice(null); setError(''); picker.dismissSelectionFeedback(); }}
             >
               <span className="ring">{meta.ring}</span>
               <span>
                 <span className="nm">{lane.label}</span>
                 <span className="sb">{meta.short}</span>
               </span>
-              <span className="tick">
-                <StarSigil style={{ width: 13, height: 13 }} />
-              </span>
+              <span className="lane-browse">{on ? 'Current' : open ? 'Browsing' : 'Browse'}</span>
+              {on ? <span className="tick"><StarSigil style={{ width: 13, height: 13 }} /></span> : null}
             </button>
-            {on ? <LaneControls picker={picker} accountContext={accountContext} rejectedCodexModel={rejectedCodexModel} /> : null}
+            {open ? <>
+              <SelectionFeedback picker={picker} />
+              {!on ? <div className="provider-switch">
+                <p><strong>{choiceModelLabel(lane.id, choice.model)} · {choice.effort} {meta.word}</strong>
+                  <span>Preview. {WORKSPACE_COMPANIONS.find(c => c.id === picker.companion)?.label} stays in use.</span></p>
+                <button type="button" disabled={saving} aria-busy={saving} onClick={async () => {
+                  focusAfterSwitch.current = lane.id;
+                  setSwitchSaving(true); setError('');
+                  try { await picker.setCompanion(lane.id, choice.model, choice.effort); }
+                  catch { setError('The switch could not be saved. Try again.'); }
+                  finally { setSwitchSaving(false); }
+                }}>{saving ? 'Switching…' : `Use ${lane.label}`}</button>
+              </div> : null}
+              {!on && draftNotice ? <p className="model-choice-hint" role="status">{draftNotice}</p> : null}
+              {error ? <p className="model-choice-hint" role="alert">{error}</p> : null}
+              <LaneControls picker={picker} laneId={lane.id} model={choice.model} effort={choice.effort}
+                onModel={pickModel} onEffort={effort => on ? saved.onEffort(effort) : setDraft({ model: choice.model, effort })}
+                accountContext={accountContext} rejectedCodexModel={rejectedCodexModel} disabled={saving} />
+            </> : null}
           </div>
         );
       })}
@@ -264,41 +333,49 @@ function ModelList({
   );
 }
 
-// The active lane's model + effort controls, expanded in place.
-function LaneControls({ picker, accountContext, rejectedCodexModel }: { picker: CompanionPicker; accountContext?: AccountContext; rejectedCodexModel?: string }) {
+// The browsed provider's controls. Inactive providers edit only the local draft.
+function LaneControls({ picker, laneId, model, effort, onModel, onEffort, accountContext, rejectedCodexModel, disabled }: {
+  picker: CompanionPicker; laneId: string; model: string; effort: string;
+  onModel: (model: string) => void; onEffort: (effort: string) => void;
+  accountContext?: AccountContext; rejectedCodexModel?: string; disabled: boolean;
+}) {
+  const lane = WORKSPACE_COMPANIONS.find(c => c.id === laneId)!;
   const codexModels = useCodexModels();
   useFireworksModels();
   useOpenRouterModels();
   return (
-    <div className="lane-ctl">
-      {accountContext ? <AccountControl {...accountContext} engine={picker.cli} /> : null}
-      {picker.isClaude && (
+    <fieldset className="lane-ctl" disabled={disabled}>
+      {accountContext ? <>
+        {laneId !== picker.companion ? <p className="model-choice-hint">Account changes save immediately, even while browsing.</p> : null}
+        <AccountControl {...accountContext} engine={lane.cli} />
+      </> : null}
+      {(laneId === 'claude') && (
         <>
           <span className="ctl-lab">model</span>
           {CLAUDE_MODELS.map((m) => (
             <button
               key={m.id}
               type="button"
-              className={`mini${picker.claudeModel === m.id ? ' on' : ''}`}
-              onClick={() => picker.setClaudeModel(m.id)}
+              className={`mini${model === m.id ? ' on' : ''}`}
+              onClick={() => onModel(m.id)}
             >
               {m.label}
             </button>
           ))}
           <span className="ctl-lab">effort</span>
-          <EffortPills options={CLAUDE_EFFORTS} current={picker.claudeEffort} onPick={picker.setClaudeEffort} />
+          <EffortPills options={CLAUDE_EFFORTS} current={effort} onPick={onEffort} />
         </>
       )}
-      {picker.isCodex && (
+      {(laneId === 'codex') && (
         <>
           <span className="ctl-lab">model</span>
-          {(codexModels.some((model) => model.id === picker.codexModel) ? codexModels
-            : [...codexModels, { id: picker.codexModel, label: `${codexModelLabel(picker.codexModel)} · saved choice` }]).map((m) => (
+          {(codexModels.some((entry) => entry.id === model) ? codexModels
+            : [...codexModels, { id: model, label: `${codexModelLabel(model)} · saved choice` }]).map((m) => (
             <button
               key={m.id}
               type="button"
-              className={`mini${picker.codexModel === m.id ? ' on' : ''}`}
-              onClick={() => picker.setCodexModel(m.id)}
+              className={`mini${model === m.id ? ' on' : ''}`}
+              onClick={() => onModel(m.id)}
               title={m.id === rejectedCodexModel ? 'Rejected on the last attempt in this chat. Choose another model, or retry after changing accounts.' : undefined}
             >
               {m.id === rejectedCodexModel ? `${codexModelLabel(m.id)} · last attempt rejected` : m.label}
@@ -306,104 +383,103 @@ function LaneControls({ picker, accountContext, rejectedCodexModel }: { picker: 
           ))}
           <span className="ctl-lab">effort</span>
           <EffortPills
-            options={codexEffortsForModel(picker.codexModel)}
-            current={picker.codexEffort}
-            onPick={picker.setCodexEffort}
+            options={codexEffortsForModel(model)}
+            current={effort}
+            onPick={onEffort}
           />
-          {picker.codexModel === rejectedCodexModel ? <p className="model-choice-hint" role="status">{codexModelLabel(rejectedCodexModel)} was rejected in this chat. Choose another listed model, or change accounts before retrying.</p> : isCodexModelUnlisted(picker.codexModel) ? <p className="model-choice-hint">Your saved model is missing from this account’s list. Choose a listed model if it cannot run.</p> : null}
+          {model === rejectedCodexModel ? <p className="model-choice-hint" role="status">{codexModelLabel(rejectedCodexModel)} was rejected in this chat. Choose another listed model, or change accounts before retrying.</p> : isCodexModelUnlisted(model) ? <p className="model-choice-hint">Your saved model is missing from this account’s list. Choose a listed model if it cannot run.</p> : null}
         </>
       )}
-      {picker.isXai && (
+      {(laneId === 'xai') && (
         <>
           <span className="ctl-lab">model</span>
           {XAI_MODELS.map((m) => (
             <button
               key={m.id}
               type="button"
-              className={`mini${picker.xaiModel === m.id ? ' on' : ''}`}
-              onClick={() => picker.setXaiModel(m.id)}
+              className={`mini${model === m.id ? ' on' : ''}`}
+              onClick={() => onModel(m.id)}
             >
               {m.label}
             </button>
           ))}
           <span className="ctl-lab">thinking</span>
-          <EffortPills options={XAI_EFFORTS} current={picker.xaiEffort} onPick={picker.setXaiEffort} />
+          <EffortPills options={XAI_EFFORTS} current={effort} onPick={onEffort} />
         </>
       )}
-      {picker.isZai && (
+      {(laneId === 'zai') && (
         <>
           <span className="ctl-lab">model</span>
           {ZAI_MODELS.map((m) => (
             <button
               key={m.id}
               type="button"
-              className={`mini${picker.zaiModel === m.id ? ' on' : ''}`}
-              onClick={() => picker.setZaiModel(m.id)}
+              className={`mini${model === m.id ? ' on' : ''}`}
+              onClick={() => onModel(m.id)}
             >
               {m.label}
             </button>
           ))}
           <span className="ctl-lab">effort</span>
-          <EffortPills options={ZAI_EFFORTS} current={picker.zaiEffort} onPick={picker.setZaiEffort} />
+          <EffortPills options={ZAI_EFFORTS} current={effort} onPick={onEffort} />
         </>
       )}
-      {picker.isAgy && (
+      {(laneId === 'agy') && (
         <>
           <span className="ctl-lab">model</span>
           {AGY_MODELS.map((m) => (
             <button
               key={m.id}
               type="button"
-              className={`mini${picker.agyModel === m.id ? ' on' : ''}`}
-              onClick={() => picker.setAgyModel(m.id)}
+              className={`mini${model === m.id ? ' on' : ''}`}
+              onClick={() => onModel(m.id)}
             >
               {m.label}
             </button>
           ))}
           <span className="ctl-lab">thinking</span>
-          <EffortPills options={AGY_EFFORTS} current={picker.agyEffort} onPick={picker.setAgyEffort} />
+          <EffortPills options={AGY_EFFORTS} current={effort} onPick={onEffort} />
         </>
       )}
-      {picker.isFireworks && (
+      {(laneId === 'fireworks') && (
         <>
           <span className="ctl-lab">model</span>
           {/* An in-page list, not a native select: phone OS pickers dropped the pick. */}
           <ModelList
             label="Fireworks model"
             groups={[['', FIREWORKS_MODELS.map((m) => ({ id: m.id, name: `${m.label}${m.thinkingOnly ? ' · always thinking' : ''}` }))]]}
-            current={picker.fireworksModel}
-            onPick={picker.setFireworksModel}
+            current={model}
+            onPick={onModel}
           />
           <span className="ctl-lab">thinking</span>
           <EffortPills
-            options={fireworksEffortsForModel(picker.fireworksModel)}
-            current={picker.fireworksEffort}
-            onPick={picker.setFireworksEffort}
+            options={fireworksEffortsForModel(model)}
+            current={effort}
+            onPick={onEffort}
           />
         </>
       )}
-      {(picker.isOpenRouter || picker.isOpenRouter2) && (
+      {((laneId === 'openrouter') || (laneId === 'openrouter2')) && (
         <>
           <span className="ctl-lab">model</span>
           {/* Hundreds of models: a searchable in-page list, grouped by vendor. */}
           <ModelList
-            label={picker.isOpenRouter2 ? 'Personal model' : 'OpenRouter model'}
+            label={(laneId === 'openrouter2') ? 'Personal model' : 'OpenRouter model'}
             groups={openRouterVendorGroups(OPENROUTER_MODELS)}
-            current={picker.isOpenRouter2 ? picker.openRouter2Model : picker.openRouterModel}
-            onPick={picker.isOpenRouter2 ? picker.setOpenRouter2Model : picker.setOpenRouterModel}
+            current={model}
+            onPick={onModel}
             searchable
           />
           <span className="ctl-lab">thinking</span>
           <EffortPills
-            options={openRouterEffortsForModel(picker.isOpenRouter2 ? picker.openRouter2Model : picker.openRouterModel)}
-            current={picker.isOpenRouter2 ? picker.openRouter2Effort : picker.openRouterEffort}
-            onPick={picker.isOpenRouter2 ? picker.setOpenRouter2Effort : picker.setOpenRouterEffort}
+            options={openRouterEffortsForModel(model)}
+            current={effort}
+            onPick={onEffort}
           />
         </>
       )}
-      <SelectionFeedback picker={picker} />
-      <span className="lane-note">{counselChipInfo(picker).blurb}</span>
-    </div>
+      <span className="lane-note">{companionAuthBlurb(lane.cli, lane.account ?? null)}</span>
+    </fieldset>
   );
 }
 

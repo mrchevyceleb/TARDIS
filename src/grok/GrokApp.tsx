@@ -586,10 +586,10 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
           open={editorOpen}
           agent={editTarget}
           onClose={() => setEditorOpen(false)}
-          onSaved={(saved) => {
+          onSaved={(saved, options) => {
             reloadAgents();
             // New companion (or engine change) → open its home thread.
-            if (!editTarget || editTarget.engine !== saved.engine) {
+            if (!options?.keepEditing && (!editTarget || editTarget.engine !== saved.engine)) {
               setView({ kind: 'chat', chatId: saved.home, lane: saved.engine });
             }
           }}
