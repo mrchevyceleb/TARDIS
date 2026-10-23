@@ -1,8 +1,8 @@
 /** Usage from one model call, never a turn's accumulated billing totals. */
 export const CONTEXT_TOKEN_BUDGET = 300_000;
-export const CLAUDE_CONTEXT_TOKEN_BUDGET = 180_000;
+export const CLAUDE_CONTEXT_TOKEN_BUDGET = CONTEXT_TOKEN_BUDGET;
 /** Native Claude Code reserves 20k output tokens plus a 13k compact buffer.
- * A 213k window makes its actual automatic trigger 180k. TARDIS never rotates. */
+ * A 333k window makes its actual automatic trigger 300k. TARDIS never rotates. */
 export const NATIVE_COMPACT_MARGIN = 33_000;
 export const NATIVE_COMPACT_PAD = NATIVE_COMPACT_MARGIN;
 export const CLAUDE_NATIVE_COMPACT_WINDOW = CLAUDE_CONTEXT_TOKEN_BUDGET + NATIVE_COMPACT_MARGIN;

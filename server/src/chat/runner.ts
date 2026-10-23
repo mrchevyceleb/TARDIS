@@ -24,6 +24,7 @@ import { CLAUDE_CONTEXT_TOKEN_BUDGET, CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKE
 import { bareChatId } from './threadKey.ts';
 import { NATIVE_SESSION_GENERATION, sessionDirectory, nativeClaudeSettings } from './sessionPolicy.ts';
 import { prepareClaudeNativeStorage } from './nativeSessionStorage.ts';
+import { openRouterToolSearch } from './openrouterCompatibility.ts';
 import { recordNativeSession, recordNativeCompact, recordNativeFailure, recordNativeNotice } from './sessionMetrics.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
@@ -988,28 +989,29 @@ class ClaudeSession {
     if (cli === 'claude' || cli === 'assistant') {
       spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
       // The installed CLI's catalog can lag a newly released Claude model.
-      // Its 200k fallback otherwise wins over the requested 213k window.
+      // Its 200k fallback otherwise wins over the requested 333k window.
       if (/^claude-(sonnet|opus)-5-5$/.test(this.spawnModel)) spawnEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '1000000';
     }
     delete spawnEnv.DISABLE_AUTO_COMPACT;
     delete spawnEnv.DISABLE_COMPACT;
-    spawnEnv.ENABLE_TOOL_SEARCH = 'true';
+    spawnEnv.ENABLE_TOOL_SEARCH = (cli === 'openrouter' || cli === 'openrouter2') && !openRouterToolSearch(this.spawnModel) ? 'false' : 'true';
     spawnEnv.SLASH_COMMAND_TOOL_CHAR_BUDGET = '3500';
     if (cli === 'openrouter' || cli === 'openrouter2') {
       const cacheSession = createHash('sha256').update(`${cli}|${this.logKey}`).digest('hex');
       spawnEnv.ANTHROPIC_CUSTOM_HEADERS = [spawnEnv.ANTHROPIC_CUSTOM_HEADERS, `x-session-id: ${cacheSession}`].filter(Boolean).join('\n');
     }
+    const profileDir = spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
+    spawnEnv.CLAUDE_CONFIG_DIR = profileDir;
+    const nativeStorage = prepareClaudeNativeStorage(chatId, profileDir, resumeId);
     this.nativeBaseUrl = nativeCompactBaseUrl(spawnEnv.ANTHROPIC_BASE_URL || 'https://api.anthropic.com', {
       lane: chatId, provider: cli === 'zai' && zaiCredential?.mode === 'fireworks' ? 'fireworks' : cli, resumed: Boolean(resumeId),
       sessionId: () => this.currentSessionId ?? this.startedResumeId, harnessChars: () => this.harnessChars, harnessPhase: () => this.harnessPhase,
+      transcript: { profile: profileDir, project: nativeStorage.project },
     });
     spawnEnv.ANTHROPIC_BASE_URL = this.nativeBaseUrl;
     // Provider lanes rotate at a budget sized to the model's own window.
     this.providerWindow = cli === 'claude' || cli === 'assistant' ? 0 : Number(spawnEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS) || 0;
     this.nativeCompactWindow = Number(spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW) || 0;
-    const profileDir = spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
-    spawnEnv.CLAUDE_CONFIG_DIR = profileDir;
-    const nativeStorage = prepareClaudeNativeStorage(chatId, profileDir, resumeId);
     this.nativeStorageAccept = nativeStorage.accept;
     if (nativeStorage.project) spawnEnv.CLAUDE_CODE_PROJECT_DIR_NAME = nativeStorage.project;
     if (cli === 'claude' || cli === 'assistant') {

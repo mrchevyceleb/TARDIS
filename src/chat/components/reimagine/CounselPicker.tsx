@@ -115,7 +115,7 @@ function EffortPills({
 }
 
 // ── the expandable lane list (shared by popover + sheet) ───────────────────
-function LaneList({ picker, accountContext }: { picker: CompanionPicker; accountContext?: AccountContext }) {
+function LaneList({ picker, accountContext, rejectedCodexModel }: { picker: CompanionPicker; accountContext?: AccountContext; rejectedCodexModel?: string }) {
   return (
     <>
       {WORKSPACE_COMPANIONS.map((lane) => {
@@ -137,7 +137,7 @@ function LaneList({ picker, accountContext }: { picker: CompanionPicker; account
                 <StarSigil style={{ width: 13, height: 13 }} />
               </span>
             </button>
-            {on ? <LaneControls picker={picker} accountContext={accountContext} /> : null}
+            {on ? <LaneControls picker={picker} accountContext={accountContext} rejectedCodexModel={rejectedCodexModel} /> : null}
           </div>
         );
       })}
@@ -265,7 +265,7 @@ function ModelList({
 }
 
 // The active lane's model + effort controls, expanded in place.
-function LaneControls({ picker, accountContext }: { picker: CompanionPicker; accountContext?: AccountContext }) {
+function LaneControls({ picker, accountContext, rejectedCodexModel }: { picker: CompanionPicker; accountContext?: AccountContext; rejectedCodexModel?: string }) {
   const codexModels = useCodexModels();
   useFireworksModels();
   useOpenRouterModels();
@@ -299,8 +299,9 @@ function LaneControls({ picker, accountContext }: { picker: CompanionPicker; acc
               type="button"
               className={`mini${picker.codexModel === m.id ? ' on' : ''}`}
               onClick={() => picker.setCodexModel(m.id)}
+              title={m.id === rejectedCodexModel ? 'Rejected on the last attempt in this chat. Choose another model, or retry after changing accounts.' : undefined}
             >
-              {m.label}
+              {m.id === rejectedCodexModel ? `${codexModelLabel(m.id)} · last attempt rejected` : m.label}
             </button>
           ))}
           <span className="ctl-lab">effort</span>
@@ -309,7 +310,7 @@ function LaneControls({ picker, accountContext }: { picker: CompanionPicker; acc
             current={picker.codexEffort}
             onPick={picker.setCodexEffort}
           />
-          {isCodexModelUnlisted(picker.codexModel) ? <p className="model-choice-hint">Your saved model is missing from the current list. You can still select it.</p> : null}
+          {picker.codexModel === rejectedCodexModel ? <p className="model-choice-hint" role="status">{codexModelLabel(rejectedCodexModel)} was rejected in this chat. Choose another listed model, or change accounts before retrying.</p> : isCodexModelUnlisted(picker.codexModel) ? <p className="model-choice-hint">Your saved model is missing from this account’s list. Choose a listed model if it cannot run.</p> : null}
         </>
       )}
       {picker.isXai && (
@@ -420,8 +421,10 @@ export function CounselPopover({
   open,
   onClose,
   accountContext,
+  rejectedCodexModel,
 }: {
   picker: CompanionPicker;
+  rejectedCodexModel?: string;
   accountContext?: AccountContext;
   open: boolean;
   onClose: () => void;
@@ -476,7 +479,7 @@ export function CounselPopover({
       onMouseDown={(e) => e.stopPropagation()}
     >
       <div className="pop-h">Choose a companion</div>
-      <LaneList picker={picker} accountContext={accountContext} />
+      <LaneList picker={picker} accountContext={accountContext} rejectedCodexModel={rejectedCodexModel} />
     </div>
   );
 }
@@ -487,8 +490,10 @@ export function CounselSheet({
   open,
   onClose,
   accountContext,
+  rejectedCodexModel,
 }: {
   picker: CompanionPicker;
+  rejectedCodexModel?: string;
   accountContext?: AccountContext;
   open: boolean;
   onClose: () => void;
@@ -503,7 +508,7 @@ export function CounselSheet({
         </button>
         <h2>Choose a companion</h2>
         <div className="sheet-list">
-          <LaneList picker={picker} accountContext={accountContext} />
+          <LaneList picker={picker} accountContext={accountContext} rejectedCodexModel={rejectedCodexModel} />
         </div>
       </div>
     </>

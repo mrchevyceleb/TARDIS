@@ -11,7 +11,6 @@ import { copyFile, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promi
 import { dirname } from 'node:path';
 import { DESK_FILE } from '../config.ts';
 import { closeMattAsksForAgent } from './mattAsks.ts';
-import { queueMirror } from './deskMirror.ts';
 import { inQuietHours, isQuietExemptLane, lastQuietEndMs } from './quietHours.ts';
 import { LIVE_HOLD_CEILING_MS, agentsWithLiveTurns } from './laneLiveness.ts';
 
@@ -1046,15 +1045,8 @@ export const DUPLICATE_CARD_PREFIX = 'An open card already has this title';
 
 /** `dedupe` refuses a second open card with the same title, checked inside the
  *  lock so two agents starting the same work at once cannot both create one. */
-/** Card mutations mirror to the Dev PR Tracker after the disk write lands
- *  (fire-and-forget; the push can never fail or block the Desk write). */
-function mirrorAfter(p: Promise<DeskCard>): Promise<DeskCard> {
-  void p.then((card) => queueMirror(card), () => {});
-  return p;
-}
-
 export function createCard(input: CardInput, owner: DeskActor, by: DeskActor, opts: { dedupe?: boolean } = {}): Promise<DeskCard> {
-  return mirrorAfter(mutate((data, now) => {
+  return mutate((data, now) => {
     if (opts.dedupe) {
       const wanted = normalizeTitleKey(requireTitle(input.title));
       const dupe = wanted ? data.cards.find((c) => !c.archived && c.column !== 'in_production' && normalizeTitleKey(c.title) === wanted) : undefined;
@@ -1081,11 +1073,11 @@ export function createCard(input: CardInput, owner: DeskActor, by: DeskActor, op
     pruneCards(data);
     placeCard(data, card, typeof input.index === 'number' ? input.index : undefined);
     return card;
-  }));
+  });
 }
 
 export function updateCard(id: string, input: CardInput, owner?: DeskActor): Promise<DeskCard> {
-  return mirrorAfter(mutate((data, now) => {
+  return mutate((data, now) => {
     const card = findCard(data, id);
     if (input.title !== undefined) card.title = requireTitle(input.title);
     if (input.description !== undefined) {
@@ -1114,11 +1106,11 @@ export function updateCard(id: string, input: CardInput, owner?: DeskActor): Pro
     // it so the new owner gets their own 30-minute window, not the old one's.
     touchCardNextCheck(card, now);
     return card;
-  }));
+  });
 }
 
 export function moveCard(id: string, column: unknown, index?: unknown): Promise<DeskCard> {
-  return mirrorAfter(mutate((data, now) => {
+  return mutate((data, now) => {
     const card = findCard(data, id);
     const target = requireColumn(column);
     if (target !== card.column) {
@@ -1131,7 +1123,7 @@ export function moveCard(id: string, column: unknown, index?: unknown): Promise<
     const at = typeof index === 'number' && Number.isFinite(index) ? index : undefined;
     placeCard(data, card, at);
     return card;
-  }));
+  });
 }
 
 export async function commentCard(id: string, text: unknown, author: DeskActor): Promise<{ card: DeskCard; comment: DeskComment }> {
@@ -1372,7 +1364,7 @@ export function deleteComment(cardId: string, commentId: string): Promise<DeskCa
 }
 
 export function archiveCard(id: string, archived: boolean): Promise<DeskCard> {
-  return mirrorAfter(mutate((data, now) => {
+  return mutate((data, now) => {
     const card = findCard(data, id);
     if (archived) {
       card.archived = true;
@@ -1391,5 +1383,5 @@ export function archiveCard(id: string, archived: boolean): Promise<DeskCard> {
     }
     card.updatedAt = now;
     return card;
-  }));
+  });
 }

@@ -1186,6 +1186,15 @@
   .bot-app .rc .composer { min-height: 60px; padding: 4px 6px; border-radius: 26px; }
   .bot-app .rc .composer textarea { font-size: 16px; padding: 9px 4px; max-height: min(148px, 24dvh); }
   .bot-app .rc .composer textarea::placeholder { font-size: 16px; }
+  /* A written draft gets the full line; the controls keep their touch targets. */
+  .bot-app .rc .composer.has-draft { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 10px; }
+  .bot-app .rc .composer.has-draft textarea { flex: 1 0 100%; order: 1; width: 100%; min-width: 0; }
+  .bot-app .rc .composer.has-draft > :is(.reply-arm, .attach-tray, .composer-send-note) { flex: 1 0 100%; order: 0; }
+  .bot-app .rc .composer.has-draft > .grok-attach { order: 2; }
+  .bot-app .rc .composer.has-draft .model-chip { order: 3; max-width: min(180px, 48vw); }
+  .bot-app .rc .composer.has-draft .chat-dictation { order: 4; margin-left: auto; }
+  .bot-app .rc .composer.has-draft .send-slot { order: 5; margin-left: 0; }
+
   .bot-app .rc .grok-attach, .bot-app .rc .send, .bot-app .rc .bt-mic { min-width: 44px; height: 44px; }
   .bot-app .rc .model-chip { min-height: 44px; padding-inline: 6px; max-width: 90px; }
   .bot-app .rc .model-chip > span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
