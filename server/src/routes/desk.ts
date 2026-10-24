@@ -328,13 +328,25 @@ async function guardOneJob(id: string, input: Record<string, unknown>, owner: De
   const existing = prLinks(card.links);
   if (owner && owner.kind === 'agent' && existing.length
     && !(card.owner.kind === 'agent' && card.owner.id === owner.id)) {
-    throw new DeskError(409, `Not reassigned. This card already has a PR (${existing.map((p) => `#${p.number}`).join(', ')}), so it stays with ${card.owner.name} until it is live. One owner per job, start to finish (Matt, Oct 24 2026). Send findings to ${card.owner.name} as one fix pass on the same PR; only Matt can move it.`);
+    throw new DeskError(409, `Not reassigned. This card already has a PR (${existing.map((p) => `#${p.number}`).join(', ')}), so it stays with ${card.owner.name} until it is live. One owner per job, start to finish (Matt, Oct 24 2026). Send findings to ${card.owner.name} as one fix pass on the same PR. Only Matt can give it to someone else.`);
+  }
+  if (input.links !== undefined) {
+    const incoming = prLinks(input.links);
+    const perRepo = new Map<string, Set<number>>();
+    for (const p of incoming) perRepo.set(p.repo, (perRepo.get(p.repo) ?? new Set()).add(p.number));
+    const kept = new Set(existing.map((p) => `${p.repo}#${p.number}`));
+    for (const [repo, nums] of perRepo) {
+      const fresh = [...nums].filter((n) => !kept.has(`${repo}#${n}`));
+      if (fresh.length > 1) {
+        throw new DeskError(409, `Not linked. ${fresh.map((n) => `#${n}`).join(', ')} are separate PRs in ${repo} for one job, and a job gets one PR (Matt, Oct 24 2026). Put all of it on one PR.`);
+      }
+    }
   }
   if (input.links !== undefined && existing.length) {
     const before = new Set(existing.map((p) => `${p.repo}#${p.number}`));
     const added = prLinks(input.links).filter((p) => !before.has(`${p.repo}#${p.number}`));
     if (added.length) {
-      const live = new Map(deskPrs().prs.map((p) => [`${p.owner}/${p.repo}`.toLowerCase() + `#${p.number}`, p.state]));
+      const live = new Map(deskPrs().prs.map((p) => [`${p.repo.toLowerCase()}#${p.number}`, p.state]));
       const open = existing.filter((p) => {
         const state = live.get(`${p.repo}#${p.number}`);
         return state === 'open' || state === 'draft' || state === 'ci';
