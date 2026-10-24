@@ -14,6 +14,7 @@ import { codexCapability } from './codex-models.ts';
 import { FIREWORKS_LANE_EFFORT, FIREWORKS_LANE_MODEL, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
 import { OPENROUTER_LANE_EFFORT, OPENROUTER_LANE_MODEL, OPENROUTER2_LANE_EFFORT, OPENROUTER2_LANE_MODEL, resolveOpenRouter2Effort, resolveOpenRouter2Model, resolveOpenRouterEffort, resolveOpenRouterModel } from './openrouter-models.ts';
 import { AGY_LANE_EFFORT, AGY_LANE_MODEL, resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
+import { META_LANE_EFFORT, META_LANE_MODEL, resolveMetaEffort, resolveMetaModel } from './meta-models.ts';
 import { deleteRoutinesForAgent } from './routines.ts';
 import { deleteJobWatchesForAgent } from './jobWatches.ts';
 import { deleteMessagePinsForAgent } from '../lib/messagePinStore.ts';
@@ -91,6 +92,7 @@ export function cliForAgentEngine(engine: string): string {
   if (engine === 'openrouter') return 'openrouter';
   if (engine === 'openrouter2') return 'openrouter2';
   if (engine === 'agy') return 'agy';
+  if (engine === 'meta') return 'meta';
   return 'xai';
 }
 
@@ -103,6 +105,7 @@ export function defaultAgentBrain(engine: string): Omit<AgentBrain, 'revision' |
     case 'openrouter': return { engine: 'openrouter', model: OPENROUTER_LANE_MODEL, effort: OPENROUTER_LANE_EFFORT };
     case 'openrouter2': return { engine: 'openrouter2', model: OPENROUTER2_LANE_MODEL, effort: OPENROUTER2_LANE_EFFORT };
     case 'agy': return { engine: 'agy', model: AGY_LANE_MODEL, effort: AGY_LANE_EFFORT };
+    case 'meta': return { engine: 'meta', model: META_LANE_MODEL, effort: META_LANE_EFFORT };
     case 'xai':
     default: return { engine: 'xai', model: 'grok-4.7', effort: 'xhigh' };
   }
@@ -138,6 +141,7 @@ function normalizeBrainModel(engine: string, value: unknown, fallback?: string):
   // honors the caller's fallback (the operator-configured lane default)
   // before its built-in default, same contract as the fireworks resolver.
   if (engine === 'agy') return resolveAgyModel(model, fallback);
+  if (engine === 'meta') return resolveMetaModel(model, fallback);
   const valid = engine === 'claude' ? CLAUDE_BRAIN_MODELS.has(model)
     : engine === 'codex' ? /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(model)
     : engine === 'xai' ? model === 'grok-4.7' || model === 'grok-4.6' || model === 'grok-4.5'
@@ -160,6 +164,7 @@ function normalizeBrainEffort(engine: string, model: string | undefined, value: 
   if (engine === 'openrouter') return resolveOpenRouterEffort(effort, model, fallback);
   if (engine === 'openrouter2') return resolveOpenRouter2Effort(effort, model, fallback);
   if (engine === 'agy') return resolveAgyEffort(model ?? '', effort, fallback);
+  if (engine === 'meta') return resolveMetaEffort(effort, model, fallback);
   if (engine === 'xai' && effort === 'max') effort = 'xhigh';
   const allowed = engine === 'codex' && model ? new Set(codexCapability(model)?.efforts ?? [...STANDARD_BRAIN_EFFORTS, 'ultra'])
     : engine === 'xai' ? XAI_BRAIN_EFFORTS

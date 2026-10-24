@@ -14,6 +14,8 @@ import {
   XAI_EFFORTS,
   ZAI_MODELS,
   ZAI_EFFORTS,
+  META_MODELS,
+  META_EFFORTS,
   companionAuthBlurb,
 } from '../../hooks/useCompanionPicker';
 import { CLAUDE_MODELS, CLAUDE_EFFORTS } from '../CodexEnginePicker';
@@ -37,6 +39,7 @@ const LANE_META: Record<string, LaneMeta> = {
   openrouter2: { ring: 'P', short: 'Personal OpenRouter API models', word: 'thinking' },
   // 'G' is taken by Grok; Gemini takes the M of GeMini.
   agy: { ring: 'M', short: 'Google AI subscription', word: 'thinking' },
+  meta: { ring: 'µ', short: 'Meta Model API models', word: 'thinking' },
 };
 
 function labelFor(id: string, list: Array<{ id: string; label: string }>): string {
@@ -57,6 +60,7 @@ export function counselChipInfo(picker: CompanionPicker) {
   else if (picker.isOpenRouter2) name = labelFor(picker.openRouter2Model, OPENROUTER_MODELS);
   else if (picker.isOpenRouter) name = labelFor(picker.openRouterModel, OPENROUTER_MODELS);
   else if (picker.isAgy) name = labelFor(picker.agyModel, AGY_MODELS);
+  else if (picker.isMeta) name = labelFor(picker.metaModel, META_MODELS);
   const lane = WORKSPACE_COMPANIONS.find((c) => c.id === picker.companion);
   const blurb = companionAuthBlurb(picker.cli, picker.account);
   return { ring: meta.ring, name, effort, word: meta.word, short: meta.short, blurb, laneLabel: lane?.label ?? name };
@@ -362,6 +366,23 @@ function LaneControls({ picker, accountContext, rejectedCodexModel }: { picker: 
           ))}
           <span className="ctl-lab">thinking</span>
           <EffortPills options={AGY_EFFORTS} current={picker.agyEffort} onPick={picker.setAgyEffort} />
+        </>
+      )}
+      {picker.isMeta && (
+        <>
+          <span className="ctl-lab">model</span>
+          {META_MODELS.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              className={`mini${picker.metaModel === m.id ? ' on' : ''}`}
+              onClick={() => picker.setMetaModel(m.id)}
+            >
+              {m.label}
+            </button>
+          ))}
+          <span className="ctl-lab">thinking</span>
+          <EffortPills options={META_EFFORTS} current={picker.metaEffort} onPick={picker.setMetaEffort} />
         </>
       )}
       {picker.isFireworks && (

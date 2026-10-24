@@ -15,6 +15,7 @@ export function companionAgentLabel(cli: string): string {
     case 'fireworks': return 'Fireworks';
     case 'openrouter': return 'OpenRouter';
     case 'openrouter2': return 'OpenRouter Personal';
+    case 'meta': return 'Meta';
     case 'zai': return 'GLM';
     case 'xai': return 'Grok 4.6';
     default: return cli;

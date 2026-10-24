@@ -57,6 +57,7 @@ import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
 import { fireworksCapability, fireworksContextWindow, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
 import { openRouterCapability, openRouterContextWindow, openRouterMaxOutput, resolveOpenRouter2Effort, resolveOpenRouter2Model, resolveOpenRouterEffort, resolveOpenRouterModel, requireOpenRouterModel } from './openrouter-models.ts';
+import { metaCapability, metaContextWindow, metaMaxOutput, resolveMetaEffort, resolveMetaModel } from './meta-models.ts';
 import { plainEnglishWritingReminderFor, plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
 import { AgySession, AGY_READY_TIMEOUT_MS } from './agy-runner.ts';
 import { AGY_LANE_EFFORT, AGY_LANE_MODEL, resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
@@ -127,7 +128,8 @@ export type CliKind =
   | 'fireworks'
   | 'openrouter'
   | 'openrouter2'
-  | 'agy';
+  | 'agy'
+  | 'meta';
 
 export type StreamEvent = unknown;
 
@@ -310,8 +312,8 @@ export function isPersistentProcessCli(cli: CliKind | null | undefined): boolean
   return isClaudeFamilyCli(cli) || cli === 'agy';
 }
 
-export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' | 'fireworks' | 'openrouter' | 'openrouter2' {
-  return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai' || cli === 'fireworks' || cli === 'openrouter' || cli === 'openrouter2';
+export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' | 'fireworks' | 'openrouter' | 'openrouter2' | 'meta' {
+  return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai' || cli === 'fireworks' || cli === 'openrouter' || cli === 'openrouter2' || cli === 'meta';
 }
 
 // Fireworks provider lane — any serverless chat model from the Fireworks
@@ -407,6 +409,40 @@ function openRouter2Env(model: string): NodeJS.ProcessEnv {
   return openRouterEnvFor('openrouter2', model);
 }
 
+// Meta Model API lane: Muse Spark direct from Meta (https://api.meta.ai/v1)
+// over its Anthropic-compatible Messages endpoint, the same stock `claude`
+// binary trick as Fireworks/OpenRouter with its own OAuth-free config dir.
+// MODEL_API_KEY is Meta's documented key name; META_API_KEY and the
+// RIVENDELL_-prefixed stash are accepted the same way as the other lanes.
+const META_CONFIG_DIR = join(homedir(), '.claude-meta');
+function metaEnv(model: string): NodeJS.ProcessEnv {
+  const env = subscriptionEnvironment(process.env);
+  env.CLAUDE_CONFIG_DIR = META_CONFIG_DIR;
+  // Meta documents the bare host here: the claude binary appends /v1/messages
+  // itself, so a /v1 suffix would double it (verified against dev.meta.ai).
+  env.ANTHROPIC_BASE_URL =
+    process.env.RIVENDELL_META_ANTHROPIC_BASE_URL?.trim() || 'https://api.meta.ai';
+  env.ANTHROPIC_AUTH_TOKEN =
+    process.env.RIVENDELL_META_API_KEY?.trim() || process.env.MODEL_API_KEY?.trim() || process.env.META_API_KEY?.trim() || process.env.META_PERSONAL_API_KEY?.trim() || '';
+  env.ANTHROPIC_API_KEY = '';
+  for (const role of ['ANTHROPIC_DEFAULT_FABLE_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL']) {
+    env[role] = model;
+  }
+  applyProviderLimits(env, {
+    model,
+    contextWindow: metaContextWindow(model),
+    maxOutputTokens: metaMaxOutput(model),
+    retriesVar: 'RIVENDELL_META_MAX_RETRIES',
+  });
+  if (!metaCapability(model)?.imageInput) env.RIVENDELL_NO_VISION = '1';
+  env.BASH_DEFAULT_TIMEOUT_MS = '600000';
+  env.BASH_MAX_TIMEOUT_MS = '3600000';
+  env.MCP_TOOL_TIMEOUT = '3600000';
+  env.API_TIMEOUT_MS = '3600000';
+  env.SAMWISE_ACCOUNT = 'meta';
+  return env;
+}
+
 class ProviderSelectionUnavailableError extends Error {
   constructor(readonly cli: CliKind, readonly model: string | undefined, message: string) { super(message); }
 }
@@ -422,6 +458,7 @@ const resolveClaudeModel = (cli: CliKind, m?: string): string => {
   }
   if (cli === 'openrouter') return resolveOpenRouterModel(m);
   if (cli === 'openrouter2') return resolveOpenRouter2Model(m);
+  if (cli === 'meta') return resolveMetaModel(m);
   // Anthropic Claude Code only. A drifted Counsel picker can send grok-* / glm-*
   // here; those ids are valid xAI/Z.ai spawn args and must not become `--model`
   // on an Anthropic Claude process (which then prints unrecognized_model to stderr).
@@ -442,9 +479,10 @@ const resolveClaudeEffort = (cli: CliKind, e?: string, model?: string): string =
   : cli === 'fireworks' ? resolveFireworksEffort(e, model)
   : cli === 'openrouter' ? resolveOpenRouterEffort(e, model)
   : cli === 'openrouter2' ? resolveOpenRouter2Effort(e, model)
+  : cli === 'meta' ? resolveMetaEffort(e, model)
   : e && VALID_CLAUDE_EFFORTS.has(e) ? e : CLAUDE_EFFORT;
-  if (e && ['fireworks', 'openrouter', 'openrouter2'].includes(cli) && effort !== e.trim()) {
-    throw new ProviderSelectionUnavailableError(cli, model, `${cli === 'fireworks' ? 'Fireworks' : 'OpenRouter'} could not use the selected effort ${e} for ${model}. Your saved settings and queued messages are retained.`);
+  if (e && ['fireworks', 'openrouter', 'openrouter2', 'meta'].includes(cli) && effort !== e.trim()) {
+    throw new ProviderSelectionUnavailableError(cli, model, `${cli === 'fireworks' ? 'Fireworks' : cli === 'meta' ? 'Meta' : 'OpenRouter'} could not use the selected effort ${e} for ${model}. Your saved settings and queued messages are retained.`);
   }
   return effort;
 };
@@ -980,7 +1018,7 @@ class ClaudeSession {
     // rivendell-team. --strict-mcp-config so a model switch cannot
     // silently pick up extra (or stale) servers from ~/.claude*.json. Keep
     // --mcp-config last: it is variadic and swallows any plain arg after it.
-    if (cli === 'assistant' || cli === 'xai' || cli === 'claude' || cli === 'zai' || cli === 'fireworks' || cli === 'openrouter' || cli === 'openrouter2') {
+    if (cli === 'assistant' || cli === 'xai' || cli === 'claude' || cli === 'zai' || cli === 'fireworks' || cli === 'openrouter' || cli === 'openrouter2' || cli === 'meta') {
       args.push('--strict-mcp-config', '--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, this.cwd, chatId));
     }
 
@@ -992,8 +1030,9 @@ class ClaudeSession {
       : cli === 'fireworks' ? fireworksEnv(this.spawnModel)
       : cli === 'openrouter' ? openRouterEnv(this.spawnModel)
       : cli === 'openrouter2' ? openRouter2Env(this.spawnModel)
+      : cli === 'meta' ? metaEnv(this.spawnModel)
       : subscriptionEnvForLane('claude', cwd, chatId, agentForChatId(chatId)?.name);
-    if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks' && cli !== 'openrouter' && cli !== 'openrouter2') assertClaudeSubscription(spawnEnv, cwd);
+    if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks' && cli !== 'openrouter' && cli !== 'openrouter2' && cli !== 'meta') assertClaudeSubscription(spawnEnv, cwd);
     if (cli === 'claude' || cli === 'assistant') {
       spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
       // The installed CLI's catalog can lag a newly released Claude model.
@@ -1536,7 +1575,8 @@ class ClaudeSession {
     }
     const textOnlyLane = this.cli === 'zai'
       || (this.cli === 'fireworks' && !fireworksCapability(this.spawnModel)?.imageInput)
-      || ((this.cli === 'openrouter' || this.cli === 'openrouter2') && !openRouterCapability(this.spawnModel)?.imageInput);
+      || ((this.cli === 'openrouter' || this.cli === 'openrouter2') && !openRouterCapability(this.spawnModel)?.imageInput)
+      || (this.cli === 'meta' && !metaCapability(this.spawnModel)?.imageInput);
     if (textOnlyLane && images && images.length) {
       const result = await adaptImagesForTextModel({ text, images, modelSupportsImages: false });
       if (result.adapted) {
@@ -3316,10 +3356,10 @@ class ClaudeSession {
       // carrying error:"authentication_failed" is a plan/permission problem a
       // respawn can't fix, so it must NOT be treated as fatal.
       const fatalAuth = ev.error_status === 401;
-      const tokenBacked = this.cli === 'zai' || this.cli === 'xai' || this.cli === 'fireworks' || this.cli === 'openrouter' || this.cli === 'openrouter2';
+      const tokenBacked = this.cli === 'zai' || this.cli === 'xai' || this.cli === 'fireworks' || this.cli === 'openrouter' || this.cli === 'openrouter2' || this.cli === 'meta';
       if (fatalAuth) {
         const provider = tokenBacked
-          ? (this.cli === 'xai' ? 'xAI' : this.cli === 'openrouter' ? 'OpenRouter' : this.cli === 'openrouter2' ? 'OpenRouter Personal' : this.cli === 'fireworks' || this.zaiMode === 'fireworks' ? 'Fireworks' : 'Z.ai')
+          ? (this.cli === 'xai' ? 'xAI' : this.cli === 'openrouter' ? 'OpenRouter' : this.cli === 'openrouter2' ? 'OpenRouter Personal' : this.cli === 'meta' ? 'Meta' : this.cli === 'fireworks' || this.zaiMode === 'fireworks' ? 'Fireworks' : 'Z.ai')
           : 'Claude';
         const authTerminal: TerminalProviderError = {
           message: `${provider} could not authenticate. Check its account or API key, then try again.`,

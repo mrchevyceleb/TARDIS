@@ -528,6 +528,7 @@ export function claudeConfigDir(cli: string): string {
   if (cli === 'fireworks') return join(homedir(), '.claude-fireworks');
   if (cli === 'openrouter') return join(homedir(), '.claude-openrouter');
   if (cli === 'openrouter2') return join(homedir(), '.claude-openrouter-personal');
+  if (cli === 'meta') return join(homedir(), '.claude-meta');
   return join(homedir(), '.claude');
 }
 
