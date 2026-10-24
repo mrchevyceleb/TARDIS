@@ -2,8 +2,9 @@
 // crosses 90% of a live usage window, Matt gets one Desk ("Needs you") alert
 // naming the login and its reset time, so he can handle it.
 //
-// One alert per crossing. A crossing is (account, window, reset time): a new
-// reset period is a new key, and a window that drops below 85% re-arms. The
+// One alert per crossing of one account window per reset period. A window
+// that drops below 85% re-arms; while an earlier alert for the same window is
+// still open on the Desk, a re-crossing adds nothing (Matt already has it). The
 // key is also written into the Desk item, so a crash between creating the
 // item and saving state adopts that item instead of duplicating it. A failed
 // create is never recorded, so the next tick retries it. Keys are pruned only
@@ -32,13 +33,12 @@ function windowPercent(window: UsageWindow): number | null {
   return window.unit === 'percent' ? window.used : (window.used / window.limit) * 100;
 }
 
-/** Providers report reset times that drift by fractions of a second between
- *  readings (Claude's swing across :59.5 and :00.5), so the key rounds the
- *  reset to 10 minutes; a real new period is days or hours away. */
+/** One key per account window, by label (provider window ids are array
+ *  positions and can shift). The reset period lives in the state entry, not
+ *  the key: providers jitter reset times by fractions of a second between
+ *  readings, so the entry simply expires once its reset has passed. */
 function crossingKey(account: UsageAccount, window: UsageWindow): string {
-  const reset = window.resetsAt ? Date.parse(window.resetsAt) : NaN;
-  const period = Number.isFinite(reset) ? String(Math.round(reset / 600_000)) : 'no-reset';
-  return `usage-alert:${account.id}:${window.id}:${period}`;
+  return `usage-alert:${account.id}:${window.label.replace(/\s+/g, '_')}`;
 }
 
 function formatReset(iso: string | null): string {
@@ -73,10 +73,12 @@ async function openAlertKeys(): Promise<Set<string>> {
   return keys;
 }
 
+let saveOwed = false;
+
 async function tick(state: AlertState): Promise<void> {
   const nowMs = Date.now();
   const { accounts } = await readAccountUsage();
-  let dirty = false;
+  let dirty = saveOwed;
   for (const [key, entry] of Object.entries(state)) if (expired(entry, nowMs)) { delete state[key]; dirty = true; }
   let openKeys: Set<string> | null = null;
   for (const account of accounts) {
@@ -84,6 +86,8 @@ async function tick(state: AlertState): Promise<void> {
     for (const window of account.windows) {
       const percent = windowPercent(window);
       if (percent === null) continue;
+      // A cached reading from a period that already reset is old news.
+      if (window.resetsAt && Date.parse(window.resetsAt) <= nowMs) continue;
       const key = crossingKey(account, window);
       if (percent < USAGE_ALERT_REARM_BELOW) { if (state[key]) { delete state[key]; dirty = true; } continue; }
       if (percent < USAGE_ALERT_THRESHOLD || state[key]) continue;
@@ -107,7 +111,9 @@ async function tick(state: AlertState): Promise<void> {
       dirty = true;
     }
   }
-  if (dirty) await writeJsonAtomic(STATE_FILE(), state);
+  if (!dirty) return;
+  try { await writeJsonAtomic(STATE_FILE(), state); saveOwed = false; }
+  catch (error) { saveOwed = true; throw error; }
 }
 
 let started = false;
