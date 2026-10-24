@@ -15,7 +15,8 @@ export type CompanionId =
   | 'openrouter'
   | 'openrouter2'
   | 'agy'
-  | 'meta';
+  | 'meta'
+  | 'muse';
 
 // A live session reported by /api/live — used to mark "running now" entries
 // in the chronicle ribbon.

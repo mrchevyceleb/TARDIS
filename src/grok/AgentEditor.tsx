@@ -28,6 +28,7 @@ import { DEFAULT_FIREWORKS_EFFORT, DEFAULT_FIREWORKS_MODEL, FIREWORKS_MODELS, fi
 import { DEFAULT_OPENROUTER_EFFORT, DEFAULT_OPENROUTER_MODEL, OPENROUTER_MODELS, openRouterEffortsForModel, useOpenRouterModels } from '../chat/openrouterModels';
 import { AgentUpdateConflictError, createAgent, updateAgentReq, deleteAgentReq, uploadAgentAvatar, removeAgentAvatar, agentAvatarUrl, DISC_INK, agentColor, type Agent } from './agents';
 import { AccountControl } from './AccountControl';
+import { DEFAULT_MUSE_EFFORT, DEFAULT_MUSE_MODEL, MUSE_EFFORTS, MUSE_MODELS } from '../chat/museModels';
 import { GROK_VOICES } from '../voice/useGrokCall';
 
 type BrainModelOption = { id: string; label: string };
@@ -43,6 +44,7 @@ function defaultBrainSelection(engine: string): { model: string; effort: string 
   if (engine === 'openrouter' || engine === 'openrouter2') return { model: DEFAULT_OPENROUTER_MODEL, effort: DEFAULT_OPENROUTER_EFFORT };
   if (engine === 'agy') return { model: DEFAULT_AGY_MODEL, effort: DEFAULT_AGY_EFFORT };
   if (engine === 'meta') return { model: DEFAULT_META_MODEL, effort: DEFAULT_META_EFFORT };
+  if (engine === 'muse') return { model: DEFAULT_MUSE_MODEL, effort: DEFAULT_MUSE_EFFORT };
   return { model: '', effort: 'medium' };
 }
 
@@ -55,6 +57,7 @@ function effortOptions(engine: string, model: string): string[] {
   if (engine === 'openrouter' || engine === 'openrouter2') return openRouterEffortsForModel(model);
   if (engine === 'agy') return AGY_EFFORTS;
   if (engine === 'meta') return META_EFFORTS;
+  if (engine === 'muse') return MUSE_EFFORTS;
   return XAI_EFFORTS;
 }
 
@@ -67,6 +70,7 @@ function staticModelOptions(engine: string): BrainModelOption[] {
   if (engine === 'openrouter' || engine === 'openrouter2') return OPENROUTER_MODELS;
   if (engine === 'agy') return AGY_MODELS;
   if (engine === 'meta') return META_MODELS;
+  if (engine === 'muse') return MUSE_MODELS;
   return [];
 }
 
@@ -446,7 +450,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
           </label>
 
           <label className="bt-agent-field">
-            <span>{engine === 'xai' || engine === 'fireworks' || engine === 'openrouter' || engine === 'openrouter2' || engine === 'agy' || engine === 'meta' ? 'Thinking' : engine === 'zai' ? 'Effort' : 'Reasoning effort'}</span>
+            <span>{engine === 'xai' || engine === 'fireworks' || engine === 'openrouter' || engine === 'openrouter2' || engine === 'agy' || engine === 'meta' || engine === 'muse' ? 'Thinking' : engine === 'zai' ? 'Effort' : 'Reasoning effort'}</span>
             <select value={effort} onChange={(e) => { setEffort(e.target.value); setEffortNotice(null); }}>
               {availableEfforts.map((option) => (
                 <option key={option} value={option}>{option[0].toUpperCase() + option.slice(1)}</option>
