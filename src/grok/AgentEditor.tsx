@@ -17,6 +17,10 @@ import {
   XAI_MODELS,
   ZAI_EFFORTS,
   ZAI_MODELS,
+  META_EFFORTS,
+  META_MODELS,
+  DEFAULT_META_EFFORT,
+  DEFAULT_META_MODEL,
 } from '../chat/hooks/useCompanionPicker';
 import { CLAUDE_EFFORTS, CLAUDE_MODELS, normalizeClaudeModel } from '../chat/components/CodexEnginePicker';
 import { codexPickerModels, codexModelChange, codexModelLabel, isCodexModelUnlisted, rememberCodexModel, DEFAULT_CODEX_MODEL, codexEffortsForModel, codexModelSpec, useCodexModels } from '../chat/codexModels';
@@ -38,6 +42,7 @@ function defaultBrainSelection(engine: string): { model: string; effort: string 
   if (engine === 'fireworks') return { model: DEFAULT_FIREWORKS_MODEL, effort: DEFAULT_FIREWORKS_EFFORT };
   if (engine === 'openrouter' || engine === 'openrouter2') return { model: DEFAULT_OPENROUTER_MODEL, effort: DEFAULT_OPENROUTER_EFFORT };
   if (engine === 'agy') return { model: DEFAULT_AGY_MODEL, effort: DEFAULT_AGY_EFFORT };
+  if (engine === 'meta') return { model: DEFAULT_META_MODEL, effort: DEFAULT_META_EFFORT };
   return { model: '', effort: 'medium' };
 }
 
@@ -49,6 +54,7 @@ function effortOptions(engine: string, model: string): string[] {
   if (engine === 'fireworks') return fireworksEffortsForModel(model);
   if (engine === 'openrouter' || engine === 'openrouter2') return openRouterEffortsForModel(model);
   if (engine === 'agy') return AGY_EFFORTS;
+  if (engine === 'meta') return META_EFFORTS;
   return XAI_EFFORTS;
 }
 
@@ -60,6 +66,7 @@ function staticModelOptions(engine: string): BrainModelOption[] {
   if (engine === 'fireworks') return FIREWORKS_MODELS;
   if (engine === 'openrouter' || engine === 'openrouter2') return OPENROUTER_MODELS;
   if (engine === 'agy') return AGY_MODELS;
+  if (engine === 'meta') return META_MODELS;
   return [];
 }
 
@@ -439,7 +446,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
           </label>
 
           <label className="bt-agent-field">
-            <span>{engine === 'xai' || engine === 'fireworks' || engine === 'openrouter' || engine === 'openrouter2' || engine === 'agy' ? 'Thinking' : engine === 'zai' ? 'Effort' : 'Reasoning effort'}</span>
+            <span>{engine === 'xai' || engine === 'fireworks' || engine === 'openrouter' || engine === 'openrouter2' || engine === 'agy' || engine === 'meta' ? 'Thinking' : engine === 'zai' ? 'Effort' : 'Reasoning effort'}</span>
             <select value={effort} onChange={(e) => { setEffort(e.target.value); setEffortNotice(null); }}>
               {availableEfforts.map((option) => (
                 <option key={option} value={option}>{option[0].toUpperCase() + option.slice(1)}</option>

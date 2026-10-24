@@ -14,7 +14,8 @@ export type CompanionId =
   | 'fireworks'
   | 'openrouter'
   | 'openrouter2'
-  | 'agy';
+  | 'agy'
+  | 'meta';
 
 // A live session reported by /api/live — used to mark "running now" entries
 // in the chronicle ribbon.
