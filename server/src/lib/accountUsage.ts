@@ -415,6 +415,9 @@ async function collect(): Promise<AccountUsage> {
     ['STEPFUN_API_KEY', 'StepFun', 'https://platform.stepfun.com', 'Usage and spend are available in the provider dashboard.'],
   ];
   const accounts = (await Promise.all(pending)).flat();
+  // Meta Model API is metered with no live usage feed wired here yet; it joins
+  // Usage as soon as a MODEL_API_KEY is present so the lane is never invisible.
+  if (key('MODEL_API_KEY', 'META_API_KEY', 'META_PERSONAL_API_KEY', 'RIVENDELL_META_API_KEY')) accounts.push(unavailable('meta-model-api', 'Meta', 'Meta Model API', 'api', 'https://dev.meta.ai', 'Metered API usage is separate from any subscription. A live usage feed is not connected here.'));
   for (const [env, provider, href, detail] of extra) if (key(env, ...(env === 'GROK_API_KEY' ? ['XAI_API_KEY'] : []))) accounts.push(unavailable(provider.toLowerCase().replaceAll(' ', '-'), provider, provider, 'api', href, detail + ' A live usage feed is not connected here.'));
   const unique = new Map<string, UsageAccount>();
   for (const value of accounts) if (!unique.has(value.id) || unique.get(value.id)!.status !== 'live') unique.set(value.id, value);
@@ -426,6 +429,7 @@ async function collect(): Promise<AccountUsage> {
     else if (engine === 'openrouter2') id = personal ? 'openrouter-' + hash(personal) : undefined;
     else if (engine === 'zai') id = zaiKey ? 'zai-' + hash(zaiKey) : undefined;
     else if (engine === 'agy') id = gemini.id;
+    else if (engine === 'meta') id = 'meta-model-api';
     else if (engine === 'xai') id = process.env.RIVENDELL_PI_XAI_PROVIDER === 'xai-oauth' ? 'xai-subscription' : 'xai-api';
     else if (engine === 'fireworks' && fireworksKey) {
       const targets = fireworksAccounts.get(hash(fireworksKey));

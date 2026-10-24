@@ -319,7 +319,7 @@ export function nativeSessionReportHtml(date = day()): string {
   const number = (n: number) => n.toLocaleString('en-US');
   const agentName = (name: string) => name === 'chief-of-staff' ? 'Max' : name.split('-').map(word => word[0]?.toUpperCase() + word.slice(1)).join(' ');
   const engineName = (engine: string) => engine === 'claude-code' ? 'Claude Code' : engine === 'codex' ? 'Codex' : engine;
-  const connectionName = (provider: string) => (({ claude: 'Claude subscription', zai: 'Z.ai', xai: 'xAI', fireworks: 'Fireworks', openrouter: 'OpenRouter', openrouter2: 'OpenRouter Personal', codex: 'ChatGPT subscription' } as Record<string, string>)[provider] ?? provider);
+  const connectionName = (provider: string) => (({ claude: 'Claude subscription', zai: 'Z.ai', xai: 'xAI', fireworks: 'Fireworks', openrouter: 'OpenRouter', openrouter2: 'OpenRouter Personal', meta: 'Meta', codex: 'ChatGPT subscription' } as Record<string, string>)[provider] ?? provider);
   const modelName = (model: string) => {
     const id = model.replace(/^accounts\/fireworks\/models\//, '').replace(/^[^/]+\//, '').replace(/\[1m\]$/, '');
     const known: Record<string, string> = {

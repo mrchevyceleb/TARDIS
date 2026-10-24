@@ -151,6 +151,7 @@ export async function completeSubscription(request: CompletionRequest, signal: A
   if (engine === 'fireworks') throw new Error('Fireworks models cannot serve content completions yet. Choose Claude, Codex, or Grok.');
   if (engine === 'openrouter') throw new Error('OpenRouter models cannot serve content completions yet. Choose Claude, Codex, or Grok.');
   if (engine === 'openrouter2') throw new Error('OpenRouter Personal models cannot serve content completions yet. Choose Claude, Codex, or Grok.');
+  if (engine === 'meta') throw new Error('Meta models cannot serve content completions yet. Choose Claude, Codex, or Grok.');
   const brain = defaultAgentBrain(engine);
   const model = selectedModel ?? brain.model!;
   if (engine === 'xai') {

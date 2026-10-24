@@ -19,6 +19,7 @@ import { ASSISTANT_HUB_PATH } from './config.ts';
 import { codexCatalogPayload, startCodexCatalog } from './codex-models.ts';
 import { fireworksCatalogPayload, startFireworksCatalog } from './fireworks-models.ts';
 import { openRouterCatalogPayload, startOpenRouterCatalog } from './openrouter-models.ts';
+import { metaCatalogPayload } from './meta-models.ts';
 import { agyCatalogPayload } from './agy-models.ts';
 import {
   clampReplayWindow,
@@ -563,6 +564,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
     res.json(openRouterCatalogPayload());
   });
 
+  // The Meta Model API list is hand-verified (three Muse Spark models), so
+  // this route is a stable read of the same list the lane validates against.
+  app.get('/api/meta/models', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(metaCatalogPayload());
+  });
+
   // The agy (Gemini on Matt's Google subscription) catalog is hand-verified
   // (no live poller in v1), so this route is a stable read of the same list.
   app.get('/api/agy/models', (_req, res) => {
@@ -615,6 +623,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       cli !== 'fireworks' &&
       cli !== 'openrouter' &&
       cli !== 'openrouter2' &&
+      cli !== 'meta' &&
       cli !== 'agy'
     ) {
       res.status(400).json({ error: 'invalid cli' });

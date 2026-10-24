@@ -16,7 +16,7 @@ let acceptanceWrites = Promise.resolve();
 const HANDOVER_MARKER = 'This is the single handover-only request authorized for this model switch.';
 const HANDOVER_PAUSED = 'The previous model did not finish its handover. Your history is safe. This switch is paused for recovery, so another attempt cannot charge you again.';
 export const nativeEngine = (cli: string): string => ['codex', 'codex-personal'].includes(cli) ? 'codex'
-  : ['claude', 'assistant', 'zai', 'xai', 'fireworks', 'openrouter', 'openrouter2'].includes(cli) ? 'claude-code' : cli;
+  : ['claude', 'assistant', 'zai', 'xai', 'fireworks', 'openrouter', 'openrouter2', 'meta'].includes(cli) ? 'claude-code' : cli;
 
 export function isSelectedEngineChanged(error: unknown): boolean {
   return (error as { code?: string })?.code === 'MODEL_SELECTION_CHANGED';

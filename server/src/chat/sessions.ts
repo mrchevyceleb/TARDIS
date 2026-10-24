@@ -8,7 +8,7 @@ import { NATIVE_SESSION_GENERATION } from './sessionPolicy.ts';
 // One mapping per native lane → session id plus last proven model/effort.
 // Persists across server restarts so chats resume or prewarm with the same brain.
 
-type Cli = 'claude' | 'codex' | 'assistant' | 'banana' | 'codex-personal' | 'banana-local' | 'banana-fireworks' | 'zai' | 'xai' | 'fireworks' | 'openrouter' | 'openrouter2' | 'agy';
+type Cli = 'claude' | 'codex' | 'assistant' | 'banana' | 'codex-personal' | 'banana-local' | 'banana-fireworks' | 'zai' | 'xai' | 'fireworks' | 'openrouter' | 'openrouter2' | 'agy' | 'meta';
 type Key = string; // `${cli}|${repoPath}` or `${cli}|${repoPath}|${chatId}`
 
 type StoredSession = {
@@ -36,7 +36,7 @@ const key = (cli: Cli, repoPath: string, chatId = 'main'): Key => {
 };
 const nativeKey = (cli: Cli, repoPath: string, chatId: string): Key => {
   if (!isAgentThread(chatId)) return key(cli, repoPath, chatId);
-  const engine = ['claude', 'assistant', 'zai', 'xai', 'fireworks', 'openrouter', 'openrouter2'].includes(cli) ? 'claude-code'
+  const engine = ['claude', 'assistant', 'zai', 'xai', 'fireworks', 'openrouter', 'openrouter2', 'meta'].includes(cli) ? 'claude-code'
     : cli === 'codex-personal' ? 'codex' : cli;
   return `${engine}|${bareChatId(chatId)}`;
 };
@@ -170,7 +170,7 @@ export async function nativeSessionProvenance(cli: Cli, repoPath: string, chatId
   // Older records may have no explicit CLI. Recover only from a key that
   // proves the exact same native ID, never from a default subscription.
   const variants = new Set<Cli>();
-  const known = new Set<Cli>(['claude', 'assistant', 'codex', 'codex-personal', 'banana', 'banana-local', 'banana-fireworks', 'zai', 'xai', 'fireworks', 'openrouter', 'openrouter2', 'agy']);
+  const known = new Set<Cli>(['claude', 'assistant', 'codex', 'codex-personal', 'banana', 'banana-local', 'banana-fireworks', 'zai', 'xai', 'fireworks', 'openrouter', 'openrouter2', 'agy', 'meta']);
   for (const [storageKey, candidate] of Object.entries(all)) {
     if (!record.sessionId || candidate.sessionId !== record.sessionId) continue;
     // A CLI name alone cannot reproduce a directory-specific subscription.
