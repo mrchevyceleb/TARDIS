@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { APP_ROOT, ELROND_WORKSPACE_PATH } from '../config.ts';
 import { listAgents, cliForAgentEngine } from '../chat/agents.ts';
 import { resolveCodexBin } from '../chat/codex-models.ts';
+import { latestMuseAllowance, museInstalled, parseMuseAllowance, resolveMuseBin, type MuseAllowance } from '../chat/muse-models.ts';
+import { museSubscriptionEnvironment } from '../chat/subscription-policy.ts';
 import { getXaiAuth, type XaiAuth } from '../routes/xai-oauth.ts';
 import { cliProfiles, subscriptionEnvForLane, cliProfileForEnv, type CliProfile } from './cliProfiles.ts';
 import { listCliAccounts, accountForProfile, type CliAccount } from './cliAccounts.ts';
@@ -249,6 +251,40 @@ async function codex(info: CliAccount, profile: CliProfile): Promise<UsageAccoun
     return base;
   });
 }
+/** `muse usage --json`: the plan allowance, no model turn. Bounded output and
+ * time; the CLI's own sign-in is the only credential involved. */
+function museUsageRead(): Promise<MuseAllowance | null> {
+  return new Promise((resolve) => {
+    const child = spawn(resolveMuseBin(), ['usage', '--json'], { cwd: APP_ROOT, env: museSubscriptionEnvironment(process.env), stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    let out = '';
+    const timer = setTimeout(() => { child.kill('SIGKILL'); }, TIMEOUT);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (part: string) => { out += part; if (out.length > 64 * 1024) child.kill('SIGKILL'); });
+    child.on('error', () => { clearTimeout(timer); resolve(null); });
+    child.on('close', () => {
+      clearTimeout(timer);
+      try { resolve(parseMuseAllowance(rec(JSON.parse(out.trim().split('\n').at(-1) || '{}')).allowance)); } catch { resolve(null); }
+    });
+  });
+}
+async function muse(): Promise<UsageAccount> {
+  const base = account('muse-subscription', 'Muse Code', 'Muse Code subscription', 'subscription', 'Muse Code plan allowance', 'https://www.meta.ai');
+  return guarded(base, async () => {
+    const live = await museUsageRead();
+    const seen = latestMuseAllowance();
+    const allowance = live && (!seen || live.asOfMs >= seen.asOfMs) ? live : seen;
+    if (!allowance) throw new FeedError(502);
+    if (allowance.tier) base.plan = allowance.tier;
+    const windowLabel = allowance.window?.resetsAtMs && allowance.window.resetsAtMs - allowance.asOfMs <= 6 * 3600_000 ? 'Muse Code · 5 hours' : 'Muse Code · window';
+    const short = allowance.window ? percent('window', windowLabel, allowance.window.usedPercent, allowance.window.resetsAtMs, undefined, true) : null;
+    const weekly = allowance.weekly ? percent('weekly', 'Muse Code · 7 days', allowance.weekly.usedPercent, allowance.weekly.resetsAtMs, undefined, true) : null;
+    base.windows = [short, weekly].filter((w): w is UsageWindow => Boolean(w));
+    if (!base.windows.length) throw new FeedError(502);
+    if (allowance !== live) base.checkedAt = new Date(allowance.asOfMs).toISOString();
+    base.note = 'Plan windows come directly from the Muse Code CLI. Agents on the Muse Code engine draw from this subscription, never a metered API key.';
+    return base;
+  });
+}
 async function openRouter(token: string, personal: boolean): Promise<UsageAccount> {
   const base = account('openrouter-' + hash(token), 'OpenRouter', personal ? 'OpenRouter personal' : 'OpenRouter', 'api', 'OpenRouter key and credit APIs', 'https://openrouter.ai/settings/credits');
   return guarded(base, async () => {
@@ -406,6 +442,7 @@ async function collect(): Promise<AccountUsage> {
   // its interactive /usage panel and secure keyring, not `agy models`.
   const gemini = unavailable('gemini-subscription', 'Gemini', 'Gemini subscription', 'subscription', 'https://antigravity.google', 'Quota and reset times are not available through this connection. Open Antigravity and check Usage.');
   if (agents.some(agent => cliForAgentEngine(agent.engine) === 'agy') || process.env.RIVENDELL_AGY_BIN?.trim() || existsSync(join(homedir(), '.gemini', 'antigravity-cli', 'cache', 'default_project_id.txt'))) pending.push(Promise.resolve([gemini]));
+  if (agents.some(agent => cliForAgentEngine(agent.engine) === 'muse') || museInstalled()) pending.push(muse().then(value => [value]));
   const extra: Array<[string, string, string, string]> = [
     ['GROK_API_KEY', 'xAI API', 'https://console.x.ai', 'Metered API usage is separate from SuperGrok.'],
     ['GOOGLE_API_KEY', 'Google AI API', 'https://console.cloud.google.com/billing', 'Cloud billing needs project-level billing access.'],
@@ -430,6 +467,7 @@ async function collect(): Promise<AccountUsage> {
     else if (engine === 'zai') id = zaiKey ? 'zai-' + hash(zaiKey) : undefined;
     else if (engine === 'agy') id = gemini.id;
     else if (engine === 'meta') id = 'meta-model-api';
+    else if (engine === 'muse') id = 'muse-subscription';
     else if (engine === 'xai') id = process.env.RIVENDELL_PI_XAI_PROVIDER === 'xai-oauth' ? 'xai-subscription' : 'xai-api';
     else if (engine === 'fireworks' && fireworksKey) {
       const targets = fireworksAccounts.get(hash(fireworksKey));

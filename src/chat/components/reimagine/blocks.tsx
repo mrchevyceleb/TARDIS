@@ -866,6 +866,7 @@ const ENGINE_LABEL: Record<string, string> = {
   openrouter: 'OpenRouter',
   openrouter2: 'OpenRouter Personal',
   meta: 'Meta',
+  muse: 'Muse Code',
 };
 
 function engineLabel(id: string): string {

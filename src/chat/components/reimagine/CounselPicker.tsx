@@ -22,6 +22,7 @@ import { CLAUDE_MODELS, CLAUDE_EFFORTS } from '../CodexEnginePicker';
 import { codexModelLabel, isCodexModelUnlisted, codexEffortsForModel, useCodexModels } from '../../codexModels';
 import { FIREWORKS_MODELS, fireworksEffortsForModel, useFireworksModels } from '../../fireworksModels';
 import { OPENROUTER_MODELS, openRouterEffortsForModel, useOpenRouterModels, type OpenRouterModelSpec } from '../../openrouterModels';
+import { MUSE_EFFORTS, MUSE_MODELS } from '../../museModels';
 import { StarSigil } from './icons';
 import { AccountControl, type AccountControlProps } from '../../../grok/AccountControl';
 
@@ -40,6 +41,7 @@ const LANE_META: Record<string, LaneMeta> = {
   // 'G' is taken by Grok; Gemini takes the M of GeMini.
   agy: { ring: 'M', short: 'Google AI subscription', word: 'thinking' },
   meta: { ring: 'µ', short: 'Meta Model API models', word: 'thinking' },
+  muse: { ring: 'm', short: 'Muse Code subscription', word: 'thinking' },
 };
 
 function labelFor(id: string, list: Array<{ id: string; label: string }>): string {
@@ -61,6 +63,7 @@ export function counselChipInfo(picker: CompanionPicker) {
   else if (picker.isOpenRouter) name = labelFor(picker.openRouterModel, OPENROUTER_MODELS);
   else if (picker.isAgy) name = labelFor(picker.agyModel, AGY_MODELS);
   else if (picker.isMeta) name = labelFor(picker.metaModel, META_MODELS);
+  else if (picker.isMuse) name = labelFor(picker.museModel, MUSE_MODELS);
   const lane = WORKSPACE_COMPANIONS.find((c) => c.id === picker.companion);
   const blurb = companionAuthBlurb(picker.cli, picker.account);
   return { ring: meta.ring, name, effort, word: meta.word, short: meta.short, blurb, laneLabel: lane?.label ?? name };
@@ -383,6 +386,23 @@ function LaneControls({ picker, accountContext, rejectedCodexModel }: { picker: 
           ))}
           <span className="ctl-lab">thinking</span>
           <EffortPills options={META_EFFORTS} current={picker.metaEffort} onPick={picker.setMetaEffort} />
+        </>
+      )}
+      {picker.isMuse && (
+        <>
+          <span className="ctl-lab">model</span>
+          {MUSE_MODELS.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              className={`mini${picker.museModel === m.id ? ' on' : ''}`}
+              onClick={() => picker.setMuseModel(m.id)}
+            >
+              {m.label}
+            </button>
+          ))}
+          <span className="ctl-lab">thinking</span>
+          <EffortPills options={MUSE_EFFORTS} current={picker.museEffort} onPick={picker.setMuseEffort} />
         </>
       )}
       {picker.isFireworks && (

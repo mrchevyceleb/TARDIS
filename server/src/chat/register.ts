@@ -21,6 +21,7 @@ import { fireworksCatalogPayload, startFireworksCatalog } from './fireworks-mode
 import { openRouterCatalogPayload, startOpenRouterCatalog } from './openrouter-models.ts';
 import { metaCatalogPayload } from './meta-models.ts';
 import { agyCatalogPayload } from './agy-models.ts';
+import { museCatalogPayload } from './muse-models.ts';
 import {
   clampReplayWindow,
   REPLAY_CATCHUP_MAX_BYTES,
@@ -578,6 +579,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
     res.json(agyCatalogPayload());
   });
 
+  // Muse Code (Meta's CLI on Matt's Muse Code subscription): hand-verified
+  // standard models only; contributor (training) twins are never offered.
+  app.get('/api/muse/models', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(museCatalogPayload());
+  });
+
   app.get('/api/repos', async (_req, res) => {
     try {
       res.json({ repos: await discoverRepos() });
@@ -624,6 +632,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       cli !== 'openrouter' &&
       cli !== 'openrouter2' &&
       cli !== 'meta' &&
+      cli !== 'muse' &&
       cli !== 'agy'
     ) {
       res.status(400).json({ error: 'invalid cli' });

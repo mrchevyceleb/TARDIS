@@ -61,6 +61,8 @@ import { metaCapability, metaContextWindow, metaMaxOutput, resolveMetaEffort, re
 import { plainEnglishWritingReminderFor, plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
 import { AgySession, AGY_READY_TIMEOUT_MS } from './agy-runner.ts';
 import { AGY_LANE_EFFORT, AGY_LANE_MODEL, resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
+import { MuseSession, MUSE_READY_TIMEOUT_MS } from './muse-runner.ts';
+import { MUSE_LANE_EFFORT, MUSE_LANE_MODEL, resolveMuseEffort, resolveMuseModel } from './muse-models.ts';
 import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, openRouterContinueBudget, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutEventFields, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import type { PiSession } from './pi-runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, REPLY_NUDGE_NOTE_TOOL, replyNowText, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
@@ -129,7 +131,8 @@ export type CliKind =
   | 'openrouter'
   | 'openrouter2'
   | 'agy'
-  | 'meta';
+  | 'meta'
+  | 'muse';
 
 export type StreamEvent = unknown;
 
@@ -309,7 +312,7 @@ const ROTATE_BEFORE_NATIVE = 10_000;
  *  predicate: agy is its own binary and protocol but shares exactly those
  *  lane semantics. */
 export function isPersistentProcessCli(cli: CliKind | null | undefined): boolean {
-  return isClaudeFamilyCli(cli) || cli === 'agy';
+  return isClaudeFamilyCli(cli) || cli === 'agy' || cli === 'muse';
 }
 
 export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' | 'fireworks' | 'openrouter' | 'openrouter2' | 'meta' {
@@ -449,6 +452,7 @@ class ProviderSelectionUnavailableError extends Error {
 
 const resolveClaudeModel = (cli: CliKind, m?: string): string => {
   if (cli === 'agy') return resolveAgyModel(m, AGY_LANE_MODEL);
+  if (cli === 'muse') return resolveMuseModel(m, MUSE_LANE_MODEL);
   if (cli === 'zai') return resolveZaiModel(m, ZAI_MODEL);
   if (cli === 'xai') return resolveXaiModel(m, XAI_MODEL);
   if (cli === 'fireworks') {
@@ -474,6 +478,7 @@ export function isClaudeUnrecognizedModelWarning(message: string): boolean {
 
 const resolveClaudeEffort = (cli: CliKind, e?: string, model?: string): string => {
   const effort = cli === 'agy' ? resolveAgyEffort(model ?? '', e, AGY_LANE_EFFORT)
+  : cli === 'muse' ? resolveMuseEffort(model ?? '', e, MUSE_LANE_EFFORT)
   : cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT)
   : cli === 'xai' ? resolveXaiEffort(e, XAI_EFFORT)
   : cli === 'fireworks' ? resolveFireworksEffort(e, model)
@@ -3613,10 +3618,10 @@ function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
 }
 
 // Returned by getOrCreateSession — common interface across all runners.
-export type AnySession = ClaudeSession | PiSession | AgySession | CodexSession | BananaSession;
+export type AnySession = ClaudeSession | PiSession | AgySession | MuseSession | CodexSession | BananaSession;
 /** The claude-family registry holds both harnesses for the zai/xai lanes, plus
  *  the agy subscription lane (Google Antigravity CLI, agy-runner.ts). */
-export type LaneSession = ClaudeSession | PiSession | AgySession;
+export type LaneSession = ClaudeSession | PiSession | AgySession | MuseSession;
 
 async function getOrCreateSessionUnlocked(opts: {
   cli: CliKind;
@@ -3671,7 +3676,7 @@ async function getOrCreateSessionUnlocked(opts: {
     const busySource = peekThreadSession(opts);
     if (!opts.handoverSource && busySource?.isBusy() && busySource.cli !== opts.cli) throw new Error('The current turn is finishing. Your next turn will use the model you selected.');
     if (!opts.handoverSource) {
-      const records = await Promise.all((['claude', 'codex', 'agy', 'banana', 'banana-local', 'banana-fireworks'] as const)
+      const records = await Promise.all((['claude', 'codex', 'agy', 'muse', 'banana', 'banana-local', 'banana-fireworks'] as const)
         .map(cli => nativeSessionProvenance(cli, opts.repoPath, chatId)));
       const previous = records.filter(record => record?.sessionId && record.cli && record.generation === NATIVE_SESSION_GENERATION)
         .sort((a, b) => b!.updatedAt - a!.updatedAt)[0];
@@ -4198,6 +4203,8 @@ async function spawnSession(
   // Metered providers share Claude Code. Subscription engines retain their native runner.
   const session: LaneSession = cli === 'agy'
     ? new AgySession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort, model), seedFirst, switchedFrom)
+    : cli === 'muse'
+    ? new MuseSession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort, resolveClaudeModel(cli, model)), seedFirst, switchedFrom)
     : new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, seedFirst, switchedFrom);
   sessions.set(key, session);
   notifySessionCreated(session.logKey, session);
@@ -4213,8 +4220,8 @@ async function spawnSession(
   // readiness shapes (claude warmups legitimately run long).
   let ok: boolean;
   let readyTimedOut = false;
-  if (session instanceof AgySession) {
-    const state = await session.waitForInitOrExit(AGY_READY_TIMEOUT_MS);
+  if (session instanceof AgySession || session instanceof MuseSession) {
+    const state = await session.waitForInitOrExit(session instanceof MuseSession ? MUSE_READY_TIMEOUT_MS : AGY_READY_TIMEOUT_MS);
     ok = state === 'initialized';
     readyTimedOut = state === 'timeout';
     if (state === 'timeout') session.shutdown('ready-timeout');

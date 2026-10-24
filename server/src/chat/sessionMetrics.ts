@@ -319,7 +319,7 @@ export function nativeSessionReportHtml(date = day()): string {
   const number = (n: number) => n.toLocaleString('en-US');
   const agentName = (name: string) => name === 'chief-of-staff' ? 'Max' : name.split('-').map(word => word[0]?.toUpperCase() + word.slice(1)).join(' ');
   const engineName = (engine: string) => engine === 'claude-code' ? 'Claude Code' : engine === 'codex' ? 'Codex' : engine;
-  const connectionName = (provider: string) => (({ claude: 'Claude subscription', zai: 'Z.ai', xai: 'xAI', fireworks: 'Fireworks', openrouter: 'OpenRouter', openrouter2: 'OpenRouter Personal', meta: 'Meta', codex: 'ChatGPT subscription' } as Record<string, string>)[provider] ?? provider);
+  const connectionName = (provider: string) => (({ claude: 'Claude subscription', zai: 'Z.ai', xai: 'xAI', fireworks: 'Fireworks', openrouter: 'OpenRouter', openrouter2: 'OpenRouter Personal', meta: 'Meta', muse: 'Muse Code subscription', codex: 'ChatGPT subscription' } as Record<string, string>)[provider] ?? provider);
   const modelName = (model: string) => {
     const id = model.replace(/^accounts\/fireworks\/models\//, '').replace(/^[^/]+\//, '').replace(/\[1m\]$/, '');
     const known: Record<string, string> = {
@@ -384,6 +384,8 @@ export function nativeSessionReportHtml(date = day()): string {
     const compactTarget = NATIVE_COMPACT_TOKENS;
     const autoStatus = row.engine === 'agy' || agentForChatId(`bot-${row.lane}`)?.engine === 'agy'
       ? `Gemini through Antigravity chooses its own compaction point; a ${number(NATIVE_COMPACT_TOKENS)}-token limit is not configured. The measurements here belong to the recorded engine.`
+      : row.engine === 'muse' || agentForChatId(`bot-${row.lane}`)?.engine === 'muse'
+      ? `Muse Code chooses its own compaction point inside its session; TARDIS rotates the lane at its own context budget. The measurements here belong to the recorded engine.`
       : row.compacts.length ? `${automatic ? `${automatic} automatic. ` : ''}${manual ? `${manual} manual. ` : ''}${native ? `${native} native engine compactions; trigger type was not reported. ` : ''}`
       : row.calls === 0 ? 'No conversation call measured yet.'
       : row.engine === 'claude-code' && !claudeSubscription ? `No native compaction recorded yet; target ${number(compactTarget)} tokens, or earlier for a smaller provider window.`

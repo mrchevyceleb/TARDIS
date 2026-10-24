@@ -5,11 +5,11 @@
  *  `openrouter` is the same kind of API-key lane (any tool-capable OpenRouter
  *  model). `openrouter2` is an additional OpenRouter account with its own
  *  credential, but the same catalog and thinking semantics. */
-export const SUBSCRIPTION_ENGINES = new Set(['claude', 'codex', 'xai', 'zai', 'fireworks', 'openrouter', 'openrouter2', 'agy', 'meta']);
+export const SUBSCRIPTION_ENGINES = new Set(['claude', 'codex', 'xai', 'zai', 'fireworks', 'openrouter', 'openrouter2', 'agy', 'meta', 'muse']);
 
 export class SubscriptionEngineError extends Error {
   constructor() {
-    super('Choose a subscription engine: Claude Code, Codex, Grok, GLM, Fireworks, OpenRouter, OpenRouter Personal, Gemini, or Meta.');
+    super('Choose a subscription engine: Claude Code, Codex, Grok, GLM, Fireworks, OpenRouter, OpenRouter Personal, Gemini, Meta, or Muse Code.');
     this.name = 'SubscriptionEngineError';
   }
 }
@@ -46,6 +46,19 @@ export function agySubscriptionEnvironment(source: NodeJS.ProcessEnv): NodeJS.Pr
   const env = subscriptionEnvironment(source);
   for (const key of Object.keys(env)) {
     if (/^(GOOGLE_API_KEY|GEMINI_API_KEY|GOOGLE_GENERATIVEAI_API_KEY|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_GENAI_USE_VERTEXAI|GOOGLE_CLOUD_PROJECT|GOOGLE_CLOUD_LOCATION|GOOGLE_CLOUD_QUOTA_PROJECT|GCLOUD_PROJECT|CLOUDSDK_CORE_PROJECT|CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE)/i.test(key)) delete env[key];
+  }
+  return env;
+}
+
+/** The muse lane's own spawn scrub, on top of the common provider isolation
+ *  (which already drops MODEL_API_KEY and the META_* keys): Muse Code signs
+ *  in with its own stored credential, and a Muse Code subscription covers
+ *  only that credential, so the lane never inherits a provider base-URL
+ *  override that would point the CLI at metered or foreign endpoints. */
+export function museSubscriptionEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = subscriptionEnvironment(source);
+  for (const key of Object.keys(env)) {
+    if (/^(MUSE_BASE_URL|META_BASE_URL|META_API_BASE|MUSE_API_KEY|TARDIS_MUSE_)/i.test(key)) delete env[key];
   }
   return env;
 }
