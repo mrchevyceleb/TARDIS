@@ -305,9 +305,66 @@ deskRouter.post('/cards', route(async (req, res) => {
   res.status(201).json({ card: await createCard(input, owner, by, { dedupe: input.dedupe === true }) });
 }));
 
+// One job, one owner, one PR (Matt, Oct 24 2026: "DONT MOVE PIECES BETWEEN
+// OWNERS EVER OR BREAK THEM UP"). Written rules kept getting broken, so the
+// Desk refuses the two moves that split a job: handing a card that already
+// has a PR to a different teammate, and linking a second PR while the first
+// is still open. Matt's own Desk edits are never blocked.
+const PR_LINK = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/i;
+
+function prLinks(links: unknown): { repo: string; number: number; url: string }[] {
+  if (!Array.isArray(links)) return [];
+  return links.flatMap((l) => {
+    const m = typeof l === 'string' ? PR_LINK.exec(l.trim()) : null;
+    return m ? [{ repo: m[1].toLowerCase(), number: Number(m[2]), url: l.trim() }] : [];
+  });
+}
+
+async function guardOneJob(id: string, input: Record<string, unknown>, owner: DeskActor | undefined, site: string | undefined): Promise<void> {
+  if (site === 'same-origin') return;
+  const { cards } = await readDesk();
+  const card = cards.find((c) => c.id === id);
+  if (!card || card.archived || card.column === 'in_production') return;
+  const existing = prLinks(card.links);
+  if (owner && owner.kind === 'agent' && existing.length
+    && !(card.owner.kind === 'agent' && card.owner.id === owner.id)) {
+    throw new DeskError(409, `Not reassigned. This card already has a PR (${existing.map((p) => `#${p.number}`).join(', ')}), so it stays with ${card.owner.name} until it is live. One owner per job, start to finish (Matt, Oct 24 2026). Send findings to ${card.owner.name} as one fix pass on the same PR. Only Matt can give it to someone else.`);
+  }
+  if (input.links !== undefined) {
+    const incoming = prLinks(input.links);
+    const perRepo = new Map<string, Set<number>>();
+    for (const p of incoming) perRepo.set(p.repo, (perRepo.get(p.repo) ?? new Set()).add(p.number));
+    const kept = new Set(existing.map((p) => `${p.repo}#${p.number}`));
+    for (const [repo, nums] of perRepo) {
+      const fresh = [...nums].filter((n) => !kept.has(`${repo}#${n}`));
+      if (fresh.length > 1) {
+        throw new DeskError(409, `Not linked. ${fresh.map((n) => `#${n}`).join(', ')} are separate PRs in ${repo} for one job, and a job gets one PR (Matt, Oct 24 2026). Put all of it on one PR.`);
+      }
+    }
+  }
+  if (input.links !== undefined && existing.length) {
+    const before = new Set(existing.map((p) => `${p.repo}#${p.number}`));
+    const added = prLinks(input.links).filter((p) => !before.has(`${p.repo}#${p.number}`));
+    if (added.length) {
+      const live = new Map(deskPrs().prs.map((p) => [`${p.repo.toLowerCase()}#${p.number}`, p.state]));
+      const open = existing.filter((p) => {
+        const state = live.get(`${p.repo}#${p.number}`);
+        return state === 'open' || state === 'draft' || state === 'ci';
+      });
+      const clash = added.filter((a) => open.some((o) => o.repo === a.repo));
+      if (clash.length) {
+        throw new DeskError(409, `Not linked. ${open.map((p) => `#${p.number}`).join(', ')} is still open for this job, and a job gets one PR (Matt, Oct 24 2026). Put the change on that PR instead of opening ${clash.map((p) => `#${p.number}`).join(', ')}.`);
+      }
+    }
+  }
+}
+
 deskRouter.patch('/cards/:id', route(async (req, res) => {
   const input = body(req);
-  res.json({ card: await updateCard(param(req, 'id'), input, resolveOwner(input.owner)) });
+  const id = param(req, 'id');
+  const owner = resolveOwner(input.owner);
+  await guardOneJob(id, input, owner, fetchSite(req));
+  res.json({ card: await updateCard(id, input, owner) });
 }));
 
 deskRouter.post('/cards/:id/move', route(async (req, res) => {
