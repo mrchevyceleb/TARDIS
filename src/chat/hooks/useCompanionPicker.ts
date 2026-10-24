@@ -21,6 +21,7 @@ import {
   useFireworksCatalogVersion,
 } from '../fireworksModels';
 import { normalizeMetaEffort, normalizeMetaModel, readStoredMetaEffort, readStoredMetaModel } from '../metaModels';
+import { normalizeMuseEffort, normalizeMuseModel, readStoredMuseEffort, readStoredMuseModel } from '../museModels';
 import {
   isOpenRouterCatalogLoaded,
   normalizeOpenRouterEffort,
@@ -58,6 +59,7 @@ export const WORKSPACE_COMPANIONS: {
   { id: 'openrouter2', cli: 'openrouter2', label: 'Personal' },
   { id: 'agy', cli: 'agy', label: 'Gemini' },
   { id: 'meta', cli: 'meta', label: 'Meta' },
+  { id: 'muse', cli: 'muse', label: 'Muse Code' },
 ];
 
 // Optional named profile for custom/private picker extensions. Public entries
@@ -79,6 +81,7 @@ export function companionAuthBlurb(cli: CompanionId, account: RepoAccount | null
     case 'openrouter2':      return 'Any tool-capable OpenRouter model via PERSONAL_OPENROUTER_API_KEY.';
     case 'agy':               return 'Gemini via your Google AI subscription (Antigravity CLI login).';
     case 'meta':              return 'Muse Wonder and Muse Spark, direct from Meta.';
+    case 'muse':              return 'Muse Wonder and Muse Spark via your Muse Code subscription (Muse Code CLI login).';
     default:                 return '';
   }
 }
@@ -93,7 +96,7 @@ function readLS(key: string, fallback: string): string {
  *  the retired `banana-fireworks` engine maps onto it. `openrouter` and
  *  `openrouter2` are the same kind of lane for tool-capable OpenRouter models,
  *  backed by separate accounts. */
-export function normalizeCompanion(engine: string | undefined): 'claude' | 'codex' | 'xai' | 'zai' | 'fireworks' | 'openrouter' | 'openrouter2' | 'agy' | 'meta' {
+export function normalizeCompanion(engine: string | undefined): 'claude' | 'codex' | 'xai' | 'zai' | 'fireworks' | 'openrouter' | 'openrouter2' | 'agy' | 'meta' | 'muse' {
   if (engine === 'claude' || engine === 'assistant' || engine === 'claude-kim') return 'claude';
   if (engine === 'codex' || engine === 'codex-kim') return 'codex';
   if (engine === 'zai') return 'zai';
@@ -102,6 +105,7 @@ export function normalizeCompanion(engine: string | undefined): 'claude' | 'code
   if (engine === 'openrouter2') return 'openrouter2';
   if (engine === 'agy') return 'agy';
   if (engine === 'meta') return 'meta';
+  if (engine === 'muse') return 'muse';
   return 'xai';
 }
 
@@ -297,6 +301,8 @@ export function useCompanionPicker(storageKey: string) {
   const [agyModel, setAgyModelState] = useState(readStoredAgyModel);
   const [metaModel, setMetaModelState] = useState(readStoredMetaModel);
   const [metaEffort, setMetaEffortState] = useState(readStoredMetaEffort);
+  const [museModel, setMuseModelState] = useState(readStoredMuseModel);
+  const [museEffort, setMuseEffortState] = useState(readStoredMuseEffort);
   const [agyEffort, setAgyEffortState] = useState(readStoredAgyEffort);
   const [fireworksModel, setFireworksModelState] = useState(readStoredFireworksModel);
   const [fireworksEffort, setFireworksEffortState] = useState(readStoredFireworksEffort);
@@ -443,6 +449,18 @@ export function useCompanionPicker(storageKey: string) {
     setMetaEffortState(effort);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:meta-effort', effort);
   };
+  const setMuseModel = (v: string) => {
+    markSelectionChanged('muse');
+    const model = normalizeMuseModel(v);
+    setMuseModelState(model);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:muse-model', model);
+  };
+  const setMuseEffort = (v: string) => {
+    markSelectionChanged('muse');
+    const effort = normalizeMuseEffort(v);
+    setMuseEffortState(effort);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:muse-effort', effort);
+  };
   const setFireworksModel = (v: string) => {
     markSelectionChanged('fireworks');
     const model = normalizeFireworksModel(v);
@@ -559,6 +577,15 @@ export function useCompanionPicker(storageKey: string) {
         localStorage.setItem('rivendell:meta-model', nextModel);
         localStorage.setItem('rivendell:meta-effort', nextEffort);
       }
+    } else if (lane === 'muse') {
+      const nextModel = normalizeMuseModel(model ?? '');
+      const nextEffort = normalizeMuseEffort(effort ?? '');
+      setMuseModelState(nextModel);
+      setMuseEffortState(nextEffort);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rivendell:muse-model', nextModel);
+        localStorage.setItem('rivendell:muse-effort', nextEffort);
+      }
     } else if (lane === 'fireworks') {
       const nextModel = normalizeFireworksModel(model ?? '');
       const nextEffort = normalizeFireworksEffort(nextModel, effort ?? '');
@@ -599,8 +626,9 @@ export function useCompanionPicker(storageKey: string) {
   const isOpenRouter2 = cli === 'openrouter2';
   const isAgy = cli === 'agy';
   const isMeta = cli === 'meta';
-  const model = isZai ? zaiModel : isFireworks ? fireworksModel : isOpenRouter2 ? openRouter2Model : isOpenRouter ? openRouterModel : isAgy ? agyModel : isMeta ? metaModel : isXai ? xaiModel : isCodex ? codexModel : claudeModel;
-  const effort = isZai ? zaiEffort : isFireworks ? fireworksEffort : isOpenRouter2 ? openRouter2Effort : isOpenRouter ? openRouterEffort : isAgy ? agyEffort : isMeta ? metaEffort : isXai ? xaiEffort : isCodex ? codexEffort : claudeEffort;
+  const isMuse = cli === 'muse';
+  const model = isZai ? zaiModel : isFireworks ? fireworksModel : isOpenRouter2 ? openRouter2Model : isOpenRouter ? openRouterModel : isAgy ? agyModel : isMeta ? metaModel : isMuse ? museModel : isXai ? xaiModel : isCodex ? codexModel : claudeModel;
+  const effort = isZai ? zaiEffort : isFireworks ? fireworksEffort : isOpenRouter2 ? openRouter2Effort : isOpenRouter ? openRouterEffort : isAgy ? agyEffort : isMeta ? metaEffort : isMuse ? museEffort : isXai ? xaiEffort : isCodex ? codexEffort : claudeEffort;
 
   return {
     companion, setCompanion, applyAuthoritativeBrain,
@@ -609,7 +637,7 @@ export function useCompanionPicker(storageKey: string) {
     selectionNotice,
     selectionError: null as string | null,
     dismissSelectionFeedback: () => setSelectionNotice(null),
-    isClaude, isCodex, isXai, isZai, isFireworks, isOpenRouter, isOpenRouter2, isAgy, isMeta,
+    isClaude, isCodex, isXai, isZai, isFireworks, isOpenRouter, isOpenRouter2, isAgy, isMeta, isMuse,
     claudeModel, setClaudeModel, claudeEffort, setClaudeEffort,
     codexModel, setCodexModel, codexEffort, setCodexEffort,
     xaiModel, setXaiModel, xaiEffort, setXaiEffort,
@@ -619,5 +647,6 @@ export function useCompanionPicker(storageKey: string) {
     openRouterModel, setOpenRouterModel, openRouterEffort, setOpenRouterEffort,
     openRouter2Model, setOpenRouter2Model, openRouter2Effort, setOpenRouter2Effort,
     metaModel, setMetaModel, metaEffort, setMetaEffort,
+    museModel, setMuseModel, museEffort, setMuseEffort,
   };
 }

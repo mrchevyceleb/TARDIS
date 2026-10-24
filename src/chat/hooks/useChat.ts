@@ -5,6 +5,7 @@ import { contextWindowForCodexModel } from '../codexModels';
 import { contextWindowForFireworksModel } from '../fireworksModels';
 import { contextWindowForOpenRouterModel } from '../openrouterModels';
 import { contextWindowForMetaModel } from '../metaModels';
+import { contextWindowForMuseModel } from '../museModels';
 import { automationTurnInFlight, filterAutomationNoise } from '../utils/automationNoise';
 import { isAutomationPeer } from '../utils/routineNoise';
 import { onPresenceChange, userPresent } from '../utils/userPresence';
@@ -69,6 +70,7 @@ function defaultWindowForCli(cli: CompanionId, model?: string): number {
   if (cli === 'fireworks') return contextWindowForFireworksModel(model);
   if (cli === 'openrouter' || cli === 'openrouter2') return contextWindowForOpenRouterModel(model);
   if (cli === 'meta') return contextWindowForMetaModel(model);
+  if (cli === 'muse') return contextWindowForMuseModel(model);
   if (cli === 'banana' || cli === 'banana-local' || cli === 'banana-fireworks') return BANANA_WINDOW_TOKENS;
   // xAI always runs Grok (500K). Pin before system/init arrives so the meter
   // never flashes the 200K non-claude default.
@@ -92,6 +94,7 @@ function isCodexCli(cli: CompanionId): boolean {
 
 function shouldReadResultUsage(cli: CompanionId): boolean {
   return isCodexCli(cli)
+    || cli === 'muse'
     || cli === 'banana'
     || cli === 'banana-local'
     || cli === 'banana-fireworks';
