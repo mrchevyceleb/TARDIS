@@ -32,6 +32,7 @@ import { prioritiesRouter } from './routes/priorities.ts';
 import { railLayoutRouter } from './routes/railLayout.ts';
 import { deliverDeskAnswer, deskRouter } from './routes/desk.ts';
 import { startDeskNotifier } from './lib/deskNotify.ts';
+import { startUsageThresholdAlerts } from './lib/usageThresholdAlert.ts';
 import { registerVoiceCalls } from './voice/grokCall.ts';
 import { registerDeviceBridge } from './devices/bridge.ts';
 import { voicePreviewRouter } from './voice/preview.ts';
@@ -251,6 +252,7 @@ if (!SIDE_COPY) startJobWatchScheduler(); // background job watches (10s tick): 
 if (!SIDE_COPY) startJobScheduler(); // job_start jobs (5s tick): exit records → agent job-result
 // Needs-you phone alerts and digests, plus answer delivery retries (60s tick).
 if (!SIDE_COPY && DESK_ROOM_ENABLED) startDeskNotifier({ retryAnswer: (id) => deliverDeskAnswer(id) });
+if (!SIDE_COPY && DESK_ROOM_ENABLED) startUsageThresholdAlerts(); // 90% subscription usage Desk alerts (card-2de6e4)
 registerScribeSocket(server);
 if (!SIDE_COPY) startWorkerQueue();
 if (!SIDE_COPY) startWorkspaceWatcher();
