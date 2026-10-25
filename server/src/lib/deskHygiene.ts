@@ -33,6 +33,7 @@ import { DESK_OWNER_NAME, DESK_ROOM_ENABLED, STATE_DIR } from '../config.ts';
 import { readDesk, type DeskCard, type DeskData } from './deskStore.ts';
 import { bareChatId } from '../chat/threadKey.ts';
 import { flushFlagDigests, queueFlagDigest } from './flagDigest.ts';
+import { inQuietHours } from './quietHours.ts';
 
 const TICK_MS = 60_000;
 const FIRST_TICK_MS = 15_000;
@@ -69,8 +70,6 @@ const IDLE_RESEND_MS = 60 * 60_000;
 /** Idle pickup quiet hours, Eastern minute of day: no sends 22:00-05:00 ET
  *  (Matt, Oct 8 2026). Delayed, not dropped: the nudge state keeps aging, so
  *  the first tick after 05:00 delivers if the lane is still due. */
-const IDLE_QUIET_FROM_MIN = 22 * 60;
-const IDLE_QUIET_TO_MIN = 5 * 60;
 const MAX_LINES = 10;
 /** Deliveries per tick, so one slot never eats the team's shared per-minute
  *  handoff budget (teamBus allows 20 a minute across everyone). */
@@ -683,13 +682,13 @@ export async function runDeskHygieneTick(overrides: Partial<HygieneDeps> = {}): 
     }
   }
 
-  // Idle pickup, one an hour outside quiet hours (22:00-05:00 ET): one message
+  // Idle pickup, one an hour outside quiet hours: one message
   // an hour to an agent whose lane has been quiet for 20+ minutes while it
   // owns Up next work. Skipped while a slot sweep is still delivering, so an
   // agent never gets two Desk messages in the same minute. During quiet hours
   // nothing sends; the resend clock keeps running, so the nudge lands on the
-  // first tick after 05:00 ET rather than being lost.
-  const idleQuiet = clock.minute >= IDLE_QUIET_FROM_MIN || clock.minute < IDLE_QUIET_TO_MIN;
+  // first tick after the window ends rather than being lost.
+  const idleQuiet = inQuietHours(nowMs);
   if (!state.pending?.agents.length && !idleQuiet) {
     const due = agents.filter((a) =>
       nowMs - (state.lastBusy[a.id] ?? nowMs) >= IDLE_QUIET_MS
