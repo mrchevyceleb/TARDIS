@@ -285,6 +285,10 @@ export class MuseSession {
       // A headless lane cannot answer approval prompts or questions.
       '--disable-approval', '--approval-judge', 'off', '--disable-sandbox',
       '--disable-request-user-input',
+      // Muse's reminder agents run a second model call on every step (Ivy,
+      // Oct 25 2026: 108 extra calls, 2.7M input tokens in one hour) to
+      // suggest skills; TARDIS already carries the lane's guidance.
+      '--disable-reminders',
       '--trust-workspace',
       ...images.flatMap((p) => ['--image', p]),
       '-c', `run.developer_prompt=${JSON.stringify(wellFormedText(this.developerPrompt()))}`,
