@@ -721,7 +721,9 @@ export function waitForDeliveryBoundary(
   if (acceptSteer() && session.canAcceptNativeHumanSteer?.() === true) return Promise.resolve('steerable');
   // A teammate or the Desk is waiting on this busy session: end its turn at the
   // next tool boundary so the handoff arrives as a real turn, not as text
-  // inside a tool result. Scheduled/automation senders wait for the natural end.
+  // inside a tool result. The runner refuses a non-person waiter while the
+  // turn is the person's own (boundaryPolicy.ts): that turn finishes first.
+  // Scheduled/automation senders wait for the natural end.
   const releaseBoundary = interruptAtBoundary ? session.requestBoundaryInterrupt?.({ human: interruptAtBoundary === 'human' }) ?? null : null;
   const sinceSeq = session.latestSeq();
   return new Promise((resolve) => {
@@ -2337,6 +2339,20 @@ export async function teamDeliveryRecordPending(deliveryId: string): Promise<boo
   } catch {
     return null;
   }
+}
+
+/** Withdraw a still-queued delivery whose reason is gone (a Matt-ask nudge
+ *  whose ask was answered while it waited out his turn). The drain re-checks
+ *  the outbox right before every send, so a withdrawn record never lands; an
+ *  already-admitted record is simply no longer there. */
+export async function withdrawQueuedDelivery(deliveryId: string): Promise<boolean> {
+  let removed = false;
+  await queueStoreOperation(() => queuedDeliveryStore.modify((items) => {
+    const keep = items.filter((item) => item.id !== deliveryId);
+    removed = keep.length !== items.length;
+    return keep;
+  }));
+  return removed;
 }
 
 export function teamMessageWaitRequested(wait: boolean | undefined): boolean {

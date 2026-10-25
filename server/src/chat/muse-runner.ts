@@ -53,6 +53,7 @@ import { wellFormedText } from '../lib/wellFormed.ts';
 import { officeMcpConfig } from './office-mcp.ts';
 import { laneMcpServers, laneTagFor, shareBackgroundLaneEvent, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
 import { plainEnglishWritingBlockFor } from './plain-english-guidance.ts';
+import { boundaryInterruptEligible, personStartedTurn, type BoundaryTurnState } from './boundaryPolicy.ts';
 import { noteMuseAllowance, resolveMuseBin, resolveMuseModel } from './muse-models.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
@@ -63,8 +64,6 @@ const MUSE_TERMINAL_EXIT_GRACE_MS = 10_000;
 /** A turn with no stdout records at all for this long is stalled. Longer
  *  than agy's bound: Muse emits nothing while one long shell tool runs. */
 const MUSE_TURN_STALL_MS = 20 * 60_000;
-const PEER_BOUNDARY_INTERRUPT_GAP_MS = 60_000;
-const PEER_AUTOMATION_TURN_GRACE_MS = 60_000;
 const BOUNDARY_SETTLE_MS = 100;
 const PAUSED_NOTE_TTL_MS = 10 * 60_000;
 const KEY_STATE_MAX_AGE_MS = 60 * 60_000;
@@ -132,6 +131,9 @@ export class MuseSession {
   private turnStartedAt: number | null = null;
   private turnSeq = 0;
   private automationTurn = false;
+  /** The open turn was started by the person's own message: only a waiting
+   *  person may end it at a tool boundary (boundaryPolicy.ts). */
+  private personTurn = false;
   private boundaryInterruptWanted = false;
   private boundaryWaiters = 0;
   private boundaryHumanWaiters = 0;
@@ -578,13 +580,15 @@ export class MuseSession {
     return this.completedTools.length > 0 ? `Completed tool steps before pause: ${this.completedTools.map(toolLabel).join(', ')}.` : '';
   }
 
+  private boundaryTurnState(): BoundaryTurnState {
+    return { humanWaiters: this.boundaryHumanWaiters, personTurn: this.personTurn, automationTurn: this.automationTurn, turnStartedAt: this.turnStartedAt ?? 0, lastInterruptAt: this.lastBoundaryInterruptAt };
+  }
+
   private maybeFireBoundaryInterrupt(): void {
     if (!this.boundaryInterruptWanted || this.turnStartedAt === null || this.disposed || this.stopping) return;
     if (this.hasOpenTool()) return;
     const now = Date.now();
-    const eligible =
-      (this.boundaryHumanWaiters > 0 || now - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS)
-      && (this.boundaryHumanWaiters > 0 || !this.automationTurn || now - this.turnStartedAt >= PEER_AUTOMATION_TURN_GRACE_MS);
+    const eligible = boundaryInterruptEligible(this.boundaryTurnState(), now);
     if (!eligible || this.boundarySettleTimer) return;
     const turnSeq = this.turnSeq;
     this.boundarySettleTimer = setTimeout(() => {
@@ -592,9 +596,7 @@ export class MuseSession {
       if (!this.boundaryInterruptWanted || this.turnStartedAt === null || this.turnSeq !== turnSeq || this.disposed || this.stopping) return;
       if (this.boundaryWaiters === 0 || this.hasOpenTool()) return;
       const firedAt = Date.now();
-      const stillEligible =
-        (this.boundaryHumanWaiters > 0 || firedAt - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS)
-        && (this.boundaryHumanWaiters > 0 || !this.automationTurn || firedAt - (this.turnStartedAt ?? 0) >= PEER_AUTOMATION_TURN_GRACE_MS);
+      const stillEligible = boundaryInterruptEligible(this.boundaryTurnState(), firedAt);
       if (!stillEligible) return;
       this.boundaryInterruptWanted = false;
       this.lastBoundaryInterruptAt = firedAt;
@@ -784,6 +786,7 @@ export class MuseSession {
     this.pendingStateAccepts = [];
     this.turnSeq++;
     this.automationTurn = automationRequest;
+    this.personTurn = personStartedTurn(opts);
     this.clearBoundaryRequest();
     this.pausedForMessage = false;
     this.stopping = false;
