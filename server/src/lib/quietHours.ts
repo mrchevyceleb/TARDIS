@@ -1,14 +1,16 @@
 /** Quiet hours (Matt, Oct 15 2026): nobody on the team works 22:00-05:00 ET.
+ *  Weekend nights run longer (Matt, Oct 24 2026): Friday and Saturday nights
+ *  are quiet 20:00-08:00 ET.
  *
- *  Every overnight automation delivery to a non-exempt lane holds until 05:00
- *  ET: teammate messages, routine fires, job results, watch wakes, and Desk
+ *  Every overnight automation delivery to a non-exempt lane holds until the
+ *  window ends: teammate messages, routine fires, job results, watch wakes, and Desk
  *  check-in nudges. Exempt: Matt's own messages (Desk answers, voice
  *  continuations, and human channel posts — the boss may always speak),
  *  Max's lanes (the Chief of Staff is on overnight outage duty), Samwise's
  *  lane (Matt, Oct 19 2026: he and his comms routines keep working through
  *  the window, and only him), and Max's overnight emergency check by routine
  *  id. Held never means lost: every gated path parks its record durably and
- *  the next tick after 05:00 ET delivers it unchanged.
+ *  the next tick after the window ends delivers it unchanged.
  *
  *  This module owns the shared clock and lane facts so the call sites can
  *  never drift apart on the window, the roster ids, or the exemptions. The
@@ -29,9 +31,38 @@ const etMinuteFmt = new Intl.DateTimeFormat('en-US', {
   timeZone: 'America/New_York',
 });
 
-/** Quiet window, Eastern hour of day, half-open: [22:00, 05:00). */
+const etWeekdayFmt = new Intl.DateTimeFormat('en-US', {
+  weekday: 'short',
+  timeZone: 'America/New_York',
+});
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+/** Weeknight quiet window, Eastern hour of day, half-open: [22:00, 05:00). */
 export const QUIET_START_ET = 22;
 export const QUIET_END_ET = 5;
+
+/** Friday and Saturday nights: [20:00, 08:00) ET (Matt, Oct 24 2026). */
+export const WEEKEND_QUIET_START_ET = 20;
+export const WEEKEND_QUIET_END_ET = 8;
+
+/** Eastern weekday (0 = Sunday) and minute of day for an epoch-ms timestamp. */
+function etClock(ms: number): { weekday: number; minuteOfDay: number } {
+  const d = new Date(ms);
+  const [h, m] = etMinuteFmt.format(d).split(':').map(Number);
+  return { weekday: WEEKDAYS.indexOf(etWeekdayFmt.format(d)), minuteOfDay: h * 60 + m };
+}
+
+/** Minute of day the quiet window starts on the evening of `weekday`. */
+function quietStartMinute(weekday: number): number {
+  return (weekday === 5 || weekday === 6 ? WEEKEND_QUIET_START_ET : QUIET_START_ET) * 60;
+}
+
+/** Minute of day the quiet window ends on the morning of `weekday`
+ *  (Saturday and Sunday mornings close Friday and Saturday nights). */
+function quietEndMinute(weekday: number): number {
+  return (weekday === 6 || weekday === 0 ? WEEKEND_QUIET_END_ET : QUIET_END_ET) * 60;
+}
 
 /** Max's lanes: overnight holds never apply (outage duty + the boss's voice). */
 export const MAX_LANE_AGENT_IDS: ReadonlySet<string> = new Set(['chief-of-staff', 'max-voice']);
@@ -57,10 +88,11 @@ export function etHour(ms: number): number {
   return Number(etHourFmt.format(new Date(ms)));
 }
 
-/** True inside the quiet window (22:00-05:00 ET, half-open). */
+/** True inside the quiet window (weeknights 22:00-05:00 ET, Friday and
+ *  Saturday nights 20:00-08:00 ET, half-open). */
 export function inQuietHours(ms: number): boolean {
-  const h = etHour(ms);
-  return h < QUIET_END_ET || h >= QUIET_START_ET;
+  const { weekday, minuteOfDay } = etClock(ms);
+  return minuteOfDay < quietEndMinute(weekday) || minuteOfDay >= quietStartMinute(weekday);
 }
 
 /** True when agentId is one of Max's lanes. */
@@ -80,28 +112,47 @@ export function isQuietExemptLane(agentId: string | undefined | null): boolean {
   return isMaxLane(agentId) || isSamwiseLane(agentId);
 }
 
-/** Epoch ms of the most recent 22:00 ET quiet start at or before `ms`. Inside
- *  the window this is the current window's start; outside it, the previous
- *  night's start. Floored to the minute so sub-minute timestamps compare
- *  against the true 22:00:00.000 boundary. */
-export function lastQuietStartMs(ms: number): number {
-  const [h, m] = etMinuteFmt.format(new Date(ms)).split(':').map(Number);
-  const minuteOfDay = h * 60 + m;
-  const minutesSinceStart = (minuteOfDay - QUIET_START_ET * 60 + 1440) % 1440;
-  const wholeMinuteMs = Math.floor(ms / 60_000) * 60_000;
-  return wholeMinuteMs - minutesSinceStart * 60_000;
+/** Every quiet edge is a whole Eastern hour, and Eastern offsets are whole
+ *  hours, so quiet state is constant within each real UTC hour. The edge
+ *  helpers below step through real instants an hour at a time, which keeps
+ *  them exact across DST changes with no wall-clock arithmetic. */
+const HOUR_MS = 3_600_000;
+const EDGE_SCAN_HOURS = 72;
+
+/** Start of the real hour containing `ms`. */
+function hourFloor(ms: number): number {
+  return Math.floor(ms / HOUR_MS) * HOUR_MS;
 }
 
-/** Epoch ms of the most recent 05:00 ET quiet end at or before `ms`. Inside
- *  the window this is the previous morning's end; outside it, this
- *  morning's. Minute arithmetic like msUntilQuietEnd: a DST-transition day
- *  can land an hour off, and callers only use it as a grace anchor. */
+/** Latest hour start at or before `hourMs` whose quiet state is `quiet`. */
+function prevHourWithState(hourMs: number, quiet: boolean): number {
+  let t = hourMs;
+  for (let i = 0; i < EDGE_SCAN_HOURS && inQuietHours(t) !== quiet; i++) t -= HOUR_MS;
+  return t;
+}
+
+/** Earliest hour start at or after `hourMs` whose quiet state is `quiet`. */
+function nextHourWithState(hourMs: number, quiet: boolean): number {
+  let t = hourMs;
+  for (let i = 0; i < EDGE_SCAN_HOURS && inQuietHours(t) !== quiet; i++) t += HOUR_MS;
+  return t;
+}
+
+/** Epoch ms of the most recent quiet start at or before `ms`. Inside the
+ *  window this is the current window's start; outside it, the previous
+ *  night's start. */
+export function lastQuietStartMs(ms: number): number {
+  let t = hourFloor(ms);
+  if (!inQuietHours(t)) t = prevHourWithState(t, true);
+  return prevHourWithState(t, false) + HOUR_MS;
+}
+
+/** Epoch ms of the most recent quiet end at or before `ms`. Inside the
+ *  window this is the previous morning's end; outside it, this morning's. */
 export function lastQuietEndMs(ms: number): number {
-  const [h, m] = etMinuteFmt.format(new Date(ms)).split(':').map(Number);
-  const minuteOfDay = h * 60 + m;
-  const minutesSinceEnd = (minuteOfDay - QUIET_END_ET * 60 + 1440) % 1440;
-  const wholeMinuteMs = Math.floor(ms / 60_000) * 60_000;
-  return wholeMinuteMs - minutesSinceEnd * 60_000;
+  let t = hourFloor(ms);
+  if (inQuietHours(t)) t = prevHourWithState(t, false);
+  return prevHourWithState(t, true) + HOUR_MS;
 }
 
 /** Record that `agentId` received an exempt wake (person-sourced message or
@@ -133,17 +184,10 @@ export function resetQuietExemptWakes(): void {
   exemptWakeAtByAgent.clear();
 }
 
-/** Milliseconds until the 05:00 ET quiet end, for scheduling a held retry.
- *  Minute-of-day arithmetic (not wall-clock reconstruction): a
- *  DST-transition night can land the timer up to an hour off, and the
- *  tick/retry that follows self-corrects — a held record re-aborts and
- *  reschedules, never lost. */
+/** Milliseconds until the quiet window ends, for scheduling a held retry.
+ *  Outside quiet hours this is the time until the next window's end. */
 export function msUntilQuietEnd(ms: number): number {
-  const [h, m] = etMinuteFmt.format(new Date(ms)).split(':').map(Number);
-  const minuteOfDay = h * 60 + m;
-  const QUIET_END_MIN = QUIET_END_ET * 60;
-  const remaining = minuteOfDay < QUIET_END_MIN
-    ? QUIET_END_MIN - minuteOfDay
-    : 24 * 60 - minuteOfDay + QUIET_END_MIN;
-  return Math.min(Math.max(remaining, 0), 8 * 60) * 60_000;
+  let t = hourFloor(ms);
+  if (!inQuietHours(t)) t = nextHourWithState(t, true);
+  return Math.max(nextHourWithState(t, false) - ms, 0);
 }
