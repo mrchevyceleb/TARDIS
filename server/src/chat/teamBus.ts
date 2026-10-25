@@ -22,6 +22,7 @@ import { freshThreadOnTask, freshTaskSenders, sessionDirectory } from './session
 import { freshLifecycleStarted, freshLifecycleCompleted } from './freshLifecycle.ts';
 import { persistThreadResetEpoch, noteThreadResetEpoch, persistThreadResetTaskState, restoreThreadResetTaskState, threadResetTaskState, type ThreadResetTaskState } from './threadResetStore.ts';
 import { clearThreadSessionIds } from './sessions.ts';
+import { readOwnedCards, readRunningJobs } from './compaction.ts';
 import type { CliKind } from './runner.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
@@ -139,7 +140,24 @@ export function batchJoinableFresh(lead: QueuedTeamDelivery, record: QueuedTeamD
  *  leg, so the chain identity (request) and its edge set are the durable
  *  task signal Codex asked for, not timestamps or sender classes alone. */
 export function chainContinues(parentChain: TeamChain | undefined, fromId: string, toId: string): boolean {
-  return parentChain?.edges.includes(replyEdge(fromId, toId)) === true;
+  // Either direction counts: answering the recipient's own message (the
+  // inbound chain carries to -> from) is a reply inside that work, never a
+  // new task (Oct 25 2026: Max's answer to Adam's question was stamped as a
+  // task start and would have wiped Adam's thread mid-job).
+  const edges = parentChain?.edges ?? [];
+  return edges.includes(replyEdge(fromId, toId)) || edges.includes(replyEdge(toId, fromId));
+}
+
+/** Why a fresh-thread wipe must not run for this recipient, or undefined.
+ *  One job stays in one thread start to finish (Matt, Oct 24 2026): while
+ *  the recipient owns an In progress card or has a running background job,
+ *  any handoff is part of that job, so it lands in the standing thread. An
+ *  unreadable Desk or jobs store also keeps the thread (never wipe blind). */
+export function openJobReason(cards: { ok: boolean; total: number }, jobs: { ok: boolean; total: number }): string | undefined {
+  if (!cards.ok || !jobs.ok) return 'open job state unreadable';
+  if (cards.total > 0) return 'recipient has an open job (In progress card)';
+  if (jobs.total > 0) return 'recipient has an open job (running background job)';
+  return undefined;
 }
 
 /** A wipe outcome that must hold the task instead of admitting it into the
@@ -2136,7 +2154,8 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // marked rows carry no task id; they keep the old behavior of
         // delivering without a wipe until they drain.
         if (freshResetOwed(lead.taskId, lead.taskId ? threadResetTaskState(toLogKey, lead.taskId) : undefined)) {
-          const wiped = await freshStartForAgent(to, lead.taskId);
+          const openJob = openJobReason(readOwnedCards(to.id), readRunningJobs(to.id));
+          const wiped = openJob ? { fresh: false, reason: openJob } : await freshStartForAgent(to, lead.taskId);
           // A missing or future queue stamp cannot prove a short wait, so it
           // counts as past the ceiling rather than holding indefinitely.
           const queuedAt = Date.parse(lead.createdAt ?? '');

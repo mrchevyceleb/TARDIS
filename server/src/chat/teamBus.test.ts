@@ -5,7 +5,7 @@ import { abortInFlightChannelDeliveries, agentLogKey, batchJoinable, deliveryInt
 import { laneChatId } from './threadKey.ts';
 import type { Agent } from './agents.ts';
 import { freshThreadOnTask, freshTaskSenders } from './sessionPolicy.ts';
-import { isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed } from './teamBus.ts';
+import { isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed, openJobReason } from './teamBus.ts';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -276,6 +276,12 @@ test('a task start is a batch boundary and a busy wipe holds the task', () => {
   assert.equal(chainContinues(chain, 'kip', 'christina'), true);
   assert.equal(chainContinues(chain, 'kip', 'adam'), false);
   assert.equal(chainContinues(undefined, 'kip', 'christina'), false);
+  // Answering the recipient's own message is a reply, not a new task.
+  assert.equal(chainContinues({ id: 'c2', edges: ['adam->max'], route: ['adam', 'max'] }, 'max', 'adam'), true);
+  // An open job keeps the standing thread; an unreadable store never wipes.
+  assert.equal(openJobReason({ ok: true, total: 0 }, { ok: true, total: 0 }), undefined);
+  assert.match(openJobReason({ ok: true, total: 1 }, { ok: true, total: 0 }) ?? '', /open job/);
+  assert.match(openJobReason({ ok: false, total: 0 }, { ok: true, total: 0 }) ?? '', /unreadable/);
   // Busy, resetting, switched-brain and destructive wipe failures hold the
   // task for retry; only a clean fresh start admits it.
   assert.equal(freshHoldReason({ fresh: false, reason: 'recipient became busy before reset' }), 'recipient became busy before reset');
