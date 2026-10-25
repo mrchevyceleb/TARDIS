@@ -1,6 +1,9 @@
 // Card card-2de6e4 (Matt, Oct 24 2026): the moment any account TARDIS uses
 // crosses 90% of a live usage window, Matt gets one Desk ("Needs you") alert
-// naming the login and its reset time, so he can handle it.
+// naming the login and its reset time, so he can handle it. Only the long
+// plan windows count (Matt, Oct 25 2026: "i dont want session alerts
+// everything is about weekly usage"); a short session or hours window resets
+// on its own within hours, so it never raises one.
 //
 // One alert per crossing of one account window per reset period. A window
 // that drops below 85% re-arms; while an earlier alert for the same window is
@@ -31,6 +34,12 @@ function windowPercent(window: UsageWindow): number | null {
   if (window.active === false || window.unit === 'credits') return null;
   if (!Number.isFinite(window.used) || !Number.isFinite(window.limit) || window.limit <= 0) return null;
   return window.unit === 'percent' ? window.used : (window.used / window.limit) * 100;
+}
+
+/** A session or hours-long window (Claude's Session, Five hours, Codex's
+ *  5-hour bucket, Muse Code's short window, Z.ai's hours window). */
+function shortWindow(window: UsageWindow): boolean {
+  return /session|hour/i.test(window.label) || window.id === 'window' || window.id === 'five_hour';
 }
 
 /** One key per account window, by label (provider window ids are array
@@ -84,6 +93,7 @@ async function tick(state: AlertState): Promise<void> {
   for (const account of accounts) {
     if (account.status !== 'live') continue;
     for (const window of account.windows) {
+      if (shortWindow(window)) continue;
       const percent = windowPercent(window);
       if (percent === null) continue;
       // A cached reading from a period that already reset is old news.
