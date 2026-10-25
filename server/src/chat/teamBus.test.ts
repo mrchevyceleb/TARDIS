@@ -279,9 +279,9 @@ test('a task start is a batch boundary and a busy wipe holds the task', () => {
   // Answering the recipient's own message is a reply, not a new task.
   assert.equal(chainContinues({ id: 'c2', edges: ['adam->max'], route: ['adam', 'max'] }, 'max', 'adam'), true);
   // An open job keeps the standing thread; an unreadable store never wipes.
-  assert.equal(openJobReason({ ok: true, total: 0 }, { ok: true, total: 0 }), undefined);
-  assert.match(openJobReason({ ok: true, total: 1 }, { ok: true, total: 0 }) ?? '', /open job/);
-  assert.match(openJobReason({ ok: false, total: 0 }, { ok: true, total: 0 }) ?? '', /unreadable/);
+  assert.equal(openJobReason({ ok: true, cards: 0, jobs: 0 }), undefined);
+  assert.match(openJobReason({ ok: true, cards: 1, jobs: 0 }) ?? '', /open job/);
+  assert.match(openJobReason({ ok: false, cards: 0, jobs: 0 }) ?? '', /unreadable/);
   // Busy, resetting, switched-brain and destructive wipe failures hold the
   // task for retry; only a clean fresh start admits it.
   assert.equal(freshHoldReason({ fresh: false, reason: 'recipient became busy before reset' }), 'recipient became busy before reset');

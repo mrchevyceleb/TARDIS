@@ -22,7 +22,7 @@ import { freshThreadOnTask, freshTaskSenders, sessionDirectory } from './session
 import { freshLifecycleStarted, freshLifecycleCompleted } from './freshLifecycle.ts';
 import { persistThreadResetEpoch, noteThreadResetEpoch, persistThreadResetTaskState, restoreThreadResetTaskState, threadResetTaskState, type ThreadResetTaskState } from './threadResetStore.ts';
 import { clearThreadSessionIds } from './sessions.ts';
-import { readOwnedCards, readRunningJobs } from './compaction.ts';
+import { readOpenWork, type OpenWork } from './openWork.ts';
 import type { CliKind } from './runner.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
@@ -153,10 +153,10 @@ export function chainContinues(parentChain: TeamChain | undefined, fromId: strin
  *  the recipient owns an In progress card or has a running background job,
  *  any handoff is part of that job, so it lands in the standing thread. An
  *  unreadable Desk or jobs store also keeps the thread (never wipe blind). */
-export function openJobReason(cards: { ok: boolean; total: number }, jobs: { ok: boolean; total: number }): string | undefined {
-  if (!cards.ok || !jobs.ok) return 'open job state unreadable';
-  if (cards.total > 0) return 'recipient has an open job (In progress card)';
-  if (jobs.total > 0) return 'recipient has an open job (running background job)';
+export function openJobReason(work: OpenWork): string | undefined {
+  if (!work.ok) return 'open job state unreadable';
+  if (work.cards > 0) return 'recipient has an open job (In progress card)';
+  if (work.jobs > 0) return 'recipient has an open job (running background job)';
   return undefined;
 }
 
@@ -271,6 +271,11 @@ export async function freshStartForAgent(agent: Agent, taskId?: string): Promise
     // before the barrier) so this is the same set the wipe would retire.
     const priors = runner.liveSessionsForLogKey(logKey);
     if (!recipientIdle(priors)) return { fresh: false, reason: 'recipient became busy before reset' };
+    // One job, one thread (Matt, Oct 24 2026): checked under the barrier,
+    // right before anything destructive, so work that opened during the
+    // reset's awaits still keeps the standing thread.
+    const openJob = openJobReason(readOpenWork(agent.id));
+    if (openJob) return { fresh: false, reason: openJob };
     const resetAt = Date.now();
     // The durable per-task state commits before the epoch and before any
     // destructive work: if the process dies anywhere from here to the end,
@@ -2154,8 +2159,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // marked rows carry no task id; they keep the old behavior of
         // delivering without a wipe until they drain.
         if (freshResetOwed(lead.taskId, lead.taskId ? threadResetTaskState(toLogKey, lead.taskId) : undefined)) {
-          const openJob = openJobReason(readOwnedCards(to.id), readRunningJobs(to.id));
-          const wiped = openJob ? { fresh: false, reason: openJob } : await freshStartForAgent(to, lead.taskId);
+          const wiped = await freshStartForAgent(to, lead.taskId);
           // A missing or future queue stamp cannot prove a short wait, so it
           // counts as past the ceiling rather than holding indefinitely.
           const queuedAt = Date.parse(lead.createdAt ?? '');
