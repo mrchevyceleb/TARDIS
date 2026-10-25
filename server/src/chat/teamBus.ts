@@ -22,6 +22,7 @@ import { freshThreadOnTask, freshTaskSenders, sessionDirectory } from './session
 import { freshLifecycleStarted, freshLifecycleCompleted } from './freshLifecycle.ts';
 import { persistThreadResetEpoch, noteThreadResetEpoch, persistThreadResetTaskState, restoreThreadResetTaskState, threadResetTaskState, type ThreadResetTaskState } from './threadResetStore.ts';
 import { clearThreadSessionIds } from './sessions.ts';
+import { readOpenWork, type OpenWork } from './openWork.ts';
 import type { CliKind } from './runner.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
@@ -139,7 +140,24 @@ export function batchJoinableFresh(lead: QueuedTeamDelivery, record: QueuedTeamD
  *  leg, so the chain identity (request) and its edge set are the durable
  *  task signal Codex asked for, not timestamps or sender classes alone. */
 export function chainContinues(parentChain: TeamChain | undefined, fromId: string, toId: string): boolean {
-  return parentChain?.edges.includes(replyEdge(fromId, toId)) === true;
+  // Either direction counts: answering the recipient's own message (the
+  // inbound chain carries to -> from) is a reply inside that work, never a
+  // new task (Oct 25 2026: Max's answer to Adam's question was stamped as a
+  // task start and would have wiped Adam's thread mid-job).
+  const edges = parentChain?.edges ?? [];
+  return edges.includes(replyEdge(fromId, toId)) || edges.includes(replyEdge(toId, fromId));
+}
+
+/** Why a fresh-thread wipe must not run for this recipient, or undefined.
+ *  One job stays in one thread start to finish (Matt, Oct 24 2026): while
+ *  the recipient owns an In progress card or has a running background job,
+ *  any handoff is part of that job, so it lands in the standing thread. An
+ *  unreadable Desk or jobs store also keeps the thread (never wipe blind). */
+export function openJobReason(work: OpenWork): string | undefined {
+  if (!work.ok) return 'open job state unreadable';
+  if (work.cards > 0) return 'recipient has an open job (In progress card)';
+  if (work.jobs > 0) return 'recipient has an open job (running background job)';
+  return undefined;
 }
 
 /** A wipe outcome that must hold the task instead of admitting it into the
@@ -253,6 +271,11 @@ export async function freshStartForAgent(agent: Agent, taskId?: string): Promise
     // before the barrier) so this is the same set the wipe would retire.
     const priors = runner.liveSessionsForLogKey(logKey);
     if (!recipientIdle(priors)) return { fresh: false, reason: 'recipient became busy before reset' };
+    // One job, one thread (Matt, Oct 24 2026): checked under the barrier,
+    // right before anything destructive, so work that opened during the
+    // reset's awaits still keeps the standing thread.
+    const openJob = openJobReason(readOpenWork(agent.id));
+    if (openJob) return { fresh: false, reason: openJob };
     const resetAt = Date.now();
     // The durable per-task state commits before the epoch and before any
     // destructive work: if the process dies anywhere from here to the end,
