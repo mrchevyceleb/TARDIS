@@ -50,6 +50,11 @@ export type MattAsk = {
   askedAt: number;
   nudgedAt?: number;
   escalatedAt?: number;
+  /** Queued nudge deliveries still on their way. A nudge never ends Matt's
+   *  own turn (boundaryPolicy.ts), so it can wait out a long silent turn;
+   *  when that turn answers him and the ask closes, these are withdrawn
+   *  instead of landing as a false "no reply" afterwards. */
+  deliveryIds?: string[];
 };
 
 type AskStore = { asks: MattAsk[] };
@@ -79,6 +84,7 @@ function readAsks(): AskStore {
         askedAt: typeof a.askedAt === 'number' && Number.isFinite(a.askedAt) ? a.askedAt : 0,
         ...(typeof a.nudgedAt === 'number' && a.nudgedAt > 0 ? { nudgedAt: a.nudgedAt } : {}),
         ...(typeof a.escalatedAt === 'number' && a.escalatedAt > 0 ? { escalatedAt: a.escalatedAt } : {}),
+        ...(Array.isArray(a.deliveryIds) && a.deliveryIds.length ? { deliveryIds: a.deliveryIds.filter((id): id is string => typeof id === 'string') } : {}),
       });
     }
     return { asks };
@@ -103,6 +109,32 @@ function saveAsks(store: AskStore): void {
   const tmp = `${ASK_FILE}.tmp`;
   writeFileSync(tmp, JSON.stringify(store, null, 2));
   renameSync(tmp, ASK_FILE);
+}
+
+/** Withdraw the queued nudges of asks that just closed. Fail-open. */
+function withdrawNudges(closed: MattAsk[]): void {
+  const ids = closed.flatMap((a) => a.deliveryIds ?? []);
+  if (!ids.length) return;
+  void import('../chat/teamBus.ts')
+    .then(({ withdrawQueuedDelivery }) => Promise.all(ids.map((id) => withdrawQueuedDelivery(id))))
+    .catch((err) => console.warn(`[matt-asks] nudge withdrawal failed: ${(err as Error)?.message}`));
+}
+
+/** Remember a queued nudge so a later close can withdraw it. When the ask
+ *  already closed while the nudge was being queued, withdraw it now. */
+function noteNudgeDelivery(askId: string, deliveryId: string): void {
+  try {
+    const store = readAsks();
+    const ask = store.asks.find((a) => a.id === askId);
+    if (!ask) {
+      withdrawNudges([{ deliveryIds: [deliveryId] } as MattAsk]);
+      return;
+    }
+    ask.deliveryIds = [...(ask.deliveryIds ?? []), deliveryId];
+    saveAsks(store);
+  } catch {
+    // Fail-open: an unrecorded nudge simply delivers as before.
+  }
 }
 
 function agentForLogKey(logKey: string): Agent | null {
@@ -142,12 +174,16 @@ export function closeMattAsksForLane(logKey: string, lane: 'home' | 'bg', turnSt
   if (closedLanes.get(memoKey) === turnStartedAtMs) return;
   try {
     const store = readAsks();
-    const before = store.asks.length;
     // Only a turn that STARTED after the ask arrived can close it: an older
     // turn still streaming when Matt messaged must not close his newer ask
     // with its already-in-flight text. The ask stays open for the next turn.
-    store.asks = store.asks.filter((a) => a.logKey !== logKey || a.lane !== lane || a.askedAt >= turnStartedAtMs);
-    if (store.asks.length !== before) saveAsks(store);
+    const closes = (a: MattAsk) => a.logKey === logKey && a.lane === lane && a.askedAt < turnStartedAtMs;
+    const closed = store.asks.filter(closes);
+    if (closed.length) {
+      store.asks = store.asks.filter((a) => !closes(a));
+      saveAsks(store);
+      withdrawNudges(closed);
+    }
     // Memo only after successful processing: a transient read or write
     // failure must not suppress later close attempts (a visible reply
     // followed by a false nudge is exactly what this feature exists to
@@ -164,9 +200,12 @@ export function closeMattAsksForLane(logKey: string, lane: 'home' | 'bg', turnSt
 export function closeMattAsksForAgent(agentId: string): void {
   try {
     const store = readAsks();
-    const before = store.asks.length;
-    store.asks = store.asks.filter((a) => a.agentId !== agentId);
-    if (store.asks.length !== before) saveAsks(store);
+    const closed = store.asks.filter((a) => a.agentId === agentId);
+    if (closed.length) {
+      store.asks = store.asks.filter((a) => a.agentId !== agentId);
+      saveAsks(store);
+      withdrawNudges(closed);
+    }
   } catch {
     // Never block the card path.
   }
@@ -218,7 +257,9 @@ export function sweepMattAsks(now: number = Date.now()): Array<{ askId: string; 
           askId: ask.id,
           kind: 'agent',
           to: ask.agentId,
-          text: `Matt's message in your lane is ${ageMin} minutes old with no reply: "${ask.text}". Answer him in the lane.`,
+          // This lands as its own turn, whose inline text folds under the
+          // nudge: reply_now is what reaches Matt's thread from here.
+          text: `Matt's message in your lane is ${ageMin} minutes old with no reply: "${ask.text}". Answer him now with reply_now (audience: "owner") so it reaches his thread, then carry on.`,
           ...(overnightAsk ? { personSourced: true } : {}),
         });
       } else if (ask.nudgedAt && !ask.escalatedAt) {
@@ -270,14 +311,20 @@ export function startMattAsksScheduler(): boolean {
       try {
         // A delivery that never settles must not hang the scheduler (the
         // in-flight guard would never clear): every delivery is bounded.
+        const delivery = deliverTeamMessage({
+          from: 'Desk',
+          to: nudge.to,
+          text: nudge.text,
+          wait: false,
+          ...(nudge.personSourced ? { personSourced: true } : {}),
+        });
+        // Recorded off the delivery itself, so a nudge that finishes queuing
+        // after the scheduler timeout below can still be withdrawn.
+        void delivery.then((result) => {
+          if (result.delivered && typeof result.deliveryId === 'string') noteNudgeDelivery(nudge.askId, result.deliveryId);
+        }, () => undefined);
         const sent = await Promise.race([
-          deliverTeamMessage({
-            from: 'Desk',
-            to: nudge.to,
-            text: nudge.text,
-            wait: false,
-            ...(nudge.personSourced ? { personSourced: true } : {}),
-          }),
+          delivery,
           new Promise<{ delivered: false; reason: 'delivery timed out' }>((resolve) => {
             setTimeout(() => resolve({ delivered: false, reason: 'delivery timed out' }), DELIVERY_TIMEOUT_MS).unref();
           }),
