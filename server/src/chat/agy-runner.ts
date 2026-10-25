@@ -48,6 +48,7 @@ import { longCallGateEnv } from './longCallGate.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { laneTagFor, shareBackgroundLaneEvent, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
 import { plainEnglishWritingBlockFor } from './plain-english-guidance.ts';
+import { boundaryInterruptEligible, personStartedTurn, type BoundaryTurnState } from './boundaryPolicy.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
 /** Init is immediate on a healthy spawn (probed); a live process that never
@@ -59,10 +60,8 @@ export const AGY_READY_TIMEOUT_MS = 45_000;
 const AGY_TURN_STALL_MS = 10 * 60_000;
 /** Minimum gap between teammate-triggered boundary interrupts on the same
  *  lane (human messages are never rate-limited). Matches ClaudeSession. */
-const PEER_BOUNDARY_INTERRUPT_GAP_MS = 60_000;
 /** How long an automation turn runs before a teammate's handoff may end it
  *  at a tool boundary. Matches ClaudeSession. */
-const PEER_AUTOMATION_TURN_GRACE_MS = 60_000;
 /** Short settle window after a tool step closes before firing a boundary
  *  interrupt, so a batched sibling tool's ACTIVE frame arrives and holds the
  *  turn open instead of getting hit by SIGINT. */
@@ -173,6 +172,9 @@ export class AgySession {
   /** Bumped whenever a turn opens, so a late failure can tell its turn from a newer one. */
   private turnSeq = 0;
   private automationTurn = false;
+  /** The open turn was started by the person's own message: only a waiting
+   *  person may end it at a tool boundary (boundaryPolicy.ts). */
+  private personTurn = false;
   private boundaryInterruptWanted = false;
   private boundaryWaiters = 0;
   private boundaryHumanWaiters = 0;
@@ -671,13 +673,15 @@ export class AgySession {
     return tools.length > 0 ? `Completed tool steps before pause: ${tools.join(', ')}.` : '';
   }
 
+  private boundaryTurnState(): BoundaryTurnState {
+    return { humanWaiters: this.boundaryHumanWaiters, personTurn: this.personTurn, automationTurn: this.automationTurn, turnStartedAt: this.turnStartedAt ?? 0, lastInterruptAt: this.lastBoundaryInterruptAt };
+  }
+
   private maybeFireBoundaryInterrupt(): void {
     if (!this.boundaryInterruptWanted || this.turnStartedAt === null || this.disposed || this.retiring) return;
     if (this.hasOpenToolStep()) return;
     const now = Date.now();
-    const eligible =
-      (this.boundaryHumanWaiters > 0 || now - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS)
-      && (this.boundaryHumanWaiters > 0 || !this.automationTurn || now - this.turnStartedAt >= PEER_AUTOMATION_TURN_GRACE_MS);
+    const eligible = boundaryInterruptEligible(this.boundaryTurnState(), now);
     if (!eligible) return;
     if (this.boundarySettleTimer) return; // already settling
     const turn = this.turnStartedAt;
@@ -691,9 +695,7 @@ export class AgySession {
       if (this.boundaryWaiters === 0) return;
       if (this.hasOpenToolStep()) return;
       const firedAt = Date.now();
-      const stillEligible =
-        (this.boundaryHumanWaiters > 0 || firedAt - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS)
-        && (this.boundaryHumanWaiters > 0 || !this.automationTurn || firedAt - (this.turnStartedAt ?? 0) >= PEER_AUTOMATION_TURN_GRACE_MS);
+      const stillEligible = boundaryInterruptEligible(this.boundaryTurnState(), firedAt);
       if (!stillEligible) return;
       this.boundaryInterruptWanted = false;
       this.lastBoundaryInterruptAt = firedAt;
@@ -865,8 +867,8 @@ export class AgySession {
   /** Ask the open turn to end once the current tool step has finished (never
    *  while a tool is mid-flight), so the queued message can start the next turn
    *  on the same conversation id. Human messages also fire if no tool is
-   *  currently open after a prior tool step completed; peer messages respect
-   *  PEER_BOUNDARY_INTERRUPT_GAP_MS and PEER_AUTOMATION_TURN_GRACE_MS. */
+   *  currently open after a prior tool step completed; peer messages follow
+   *  boundaryInterruptEligible (never a person's own turn). */
   requestBoundaryInterrupt(opts: { human?: boolean } = {}): (() => void) | null {
     const human = opts.human === true;
     if (this.turnStartedAt === null || !this.isAlive()) return null;
@@ -965,6 +967,7 @@ export class AgySession {
       this.pendingStateAccepts = [];
       this.turnSeq++;
       this.automationTurn = automationRequest;
+      this.personTurn = personStartedTurn(opts);
       this.clearBoundaryRequest();
       this.pausedForMessage = false;
       this.terminalNoticeEmitted = false;

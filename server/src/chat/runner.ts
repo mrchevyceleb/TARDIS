@@ -65,6 +65,7 @@ import { MuseSession, MUSE_READY_TIMEOUT_MS } from './muse-runner.ts';
 import { MUSE_LANE_EFFORT, MUSE_LANE_MODEL, resolveMuseEffort, resolveMuseModel } from './muse-models.ts';
 import { cancelProviderContinue, emptyTurnOrigin, humanQueued, noteTurnPeer, notifyHandoffSenders, openRouterContinueBudget, preferResumeAfterProviderCut, PROVIDER_CONTINUE_EVENT, providerCutEventFields, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import type { PiSession } from './pi-runner.ts';
+import { boundaryInterruptEligible, personOrigin, personStartedTurn } from './boundaryPolicy.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, REPLY_NUDGE_NOTE_TOOL, replyNowText, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
@@ -621,11 +622,6 @@ export function laneTagFor(chatId: string): { lane?: 'bg' } {
  *  the GLM provider-switch decision and the OpenRouter-family cut decision. */
 type LaneCutDecision = { outcome: ZaiTurnOutcome; cut: ProviderCut; origin: TurnOrigin };
 
-/** A teammate's handoff may pause a working turn at most this often, so a burst
- *  of handoffs cannot starve the agent of any uninterrupted work. A person's
- *  message is never held off. */
-const PEER_BOUNDARY_INTERRUPT_GAP_MS = 60_000;
-
 /** Lanes whose tool calls arrive in one piece at the END of a response, so a
  *  tool boundary is never a safe interrupt point for a queued peer message:
  *  the CLI has already begun the next response (30-90s to its first frame),
@@ -642,12 +638,6 @@ const ONE_PIECE_TOOL_CALL_CLIS: ReadonlySet<CliKind> = new Set(['openrouter', 'o
  *  stuck, and the message is worth more than the in-flight generation. */
 const ONE_PIECE_PEER_STANDDOWN_CEILING_MS = 10 * 60_000;
 
-/** How long a scheduled, wake- or job-result-started (automation) turn runs
- *  before a teammate's handoff may end it at a tool boundary. Tim's
- *  job-started turns ran 40+ minutes with Riley's handoffs queued the whole
- *  time because automation turns were never interruptible for peers; the
- *  grace only protects a just-started turn's chance to report. */
-const PEER_AUTOMATION_TURN_GRACE_MS = 60_000;
 /** A person-class delivery (Desk, voice, Slack) waiting behind a busy turn is
  *  bounded by this: after this long with the interrupt request armed, the turn
  *  ends at the nearest safe point even with a background subagent running, so
@@ -786,6 +776,9 @@ class ClaudeSession {
   /** True only while the active turn came from a scheduled routine. Human
    * input must wait for this turn's boundary instead of steering its mission. */
   private automationTurn = false;
+  /** The open turn was started by the person's own message: only a waiting
+   *  person may end it at a tool boundary (boundaryPolicy.ts). */
+  private personTurn = false;
   /** Tool calls that Claude Code has handed to its executor but has not yet
    * returned. Stream-json guidance is only reliably incorporated in this
    * window. Writing while the provider is already generating its next message
@@ -1494,6 +1487,9 @@ class ClaudeSession {
       this.turnIsContinuation = Boolean(continuing);
       // The nudge is still the person's turn, and their one nudge is spent.
       if (replyNudge) this.turnOrigin.human = true;
+      // A rerun or provider continuation keeps the origin it was cut from.
+      const resumedOrigin = opts.accountRerunOrigin ?? continuing?.origin;
+      this.personTurn = Boolean(replyNudge) || (resumedOrigin ? personOrigin(resumedOrigin) : personStartedTurn(opts));
       this.watchReply().reset();
       this.zaiTurnProviderFailed = false;
       this.activeToolIds.clear();
@@ -2381,9 +2377,10 @@ class ClaudeSession {
    *  (automation) turn ends for a person's message too — immediately while
    *  nothing is in flight, or at a tool boundary — and a teammate's handoff
    *  may end it as well, at a tool boundary only and never mid-tool, after a
-   *  short grace (PEER_AUTOMATION_TURN_GRACE_MS) so a just-started job-result
-   *  turn still gets to report. Returns a release function, or null when
-   *  there is no turn to end. */
+   *  short grace so a just-started job-result turn still gets to report. A
+   *  teammate or automated sender never ends the person's own turn: it waits
+   *  for that turn to finish (boundaryPolicy.ts). Returns a release function,
+   *  or null when there is no turn to end. */
   requestBoundaryInterrupt(opts: { human?: boolean } = {}): (() => void) | null {
     if (this.nativeHandoverPending) return null;
     const human = opts.human === true;
@@ -2975,6 +2972,7 @@ class ClaudeSession {
     if (!this.disposed && this.turnStartedAt === null && nativeQueryStarted) {
       this.turnStartedAt = Date.now();
       this.automationTurn = false;
+      this.personTurn = false;
       this.accountRerunPrompt = { text: 'Continue the pending task from its last actual result in this same session.', opts: { peerFrom: 'TARDIS', peerFromRole: 'automation' } };
       this.turnOrigin = emptyTurnOrigin();
       this.turnIsContinuation = false;
@@ -3066,13 +3064,10 @@ class ClaudeSession {
           } else if (peerStoodDown) {
             this.boundaryInterruptWanted = false;
           } else if (
-            (this.boundaryHumanWaiters > 0 || now - this.lastBoundaryInterruptAt >= PEER_BOUNDARY_INTERRUPT_GAP_MS)
-            // A teammate's handoff may end an automation (scheduled, wake- or
-            // job-result-started) turn only once it has run the grace, so a
-            // turn that just started still gets to report. A person's message
-            // never waits out the grace. Inside the grace the request stays
-            // armed and the next tool boundary after it fires.
-            && (this.boundaryHumanWaiters > 0 || !this.automationTurn || now - (this.turnStartedAt ?? 0) >= PEER_AUTOMATION_TURN_GRACE_MS)
+            // A teammate's handoff never ends the person's own turn, and may
+            // end an automation turn only once it has run the grace. Outside
+            // the gap or grace the request stays armed for the next boundary.
+            boundaryInterruptEligible({ humanWaiters: this.boundaryHumanWaiters, personTurn: this.personTurn, automationTurn: this.automationTurn, turnStartedAt: this.turnStartedAt ?? 0, lastInterruptAt: this.lastBoundaryInterruptAt }, now)
           ) {
             // A teammate inside the hold-off window stays armed for the next
             // tool boundary instead.
