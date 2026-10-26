@@ -250,7 +250,8 @@ export async function upsertQaItem(input: QaUpsertInput): Promise<QaItem | null>
       title: sanitizeQaTitle(input.title, input.builder),
       app: input.app,
       tester: routeQaItem(input),
-      status: input.status && STATUSES.includes(input.status) ? input.status : 'up_next',
+      // No tester sees a card until it has been handed to them in Slack.
+      status: !input.slackThreadTs ? 'parked' : input.status && STATUSES.includes(input.status) ? input.status : 'up_next',
       dueAt: input.dueAt ?? new Date(Date.now() + 2 * 3_600_000).toISOString(),
       slackThreadUrl: input.slackThreadUrl,
       slackThreadTs: input.slackThreadTs,
@@ -285,6 +286,7 @@ export async function applyQaOutcome(id: string, outcome: string): Promise<QaIte
   await store.modify((current) => current.map((entry) => {
     if (entry.id !== id) return entry;
     if (entry.status === 'validated' && status !== 'validated') { result = entry; return entry; }
+    if (!entry.slackThreadTs && status !== 'validated' && status !== 'parked') { result = entry; return entry; }
     result = { ...entry, status, updatedAt: new Date().toISOString() };
     return result;
   }));
