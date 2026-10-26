@@ -234,6 +234,8 @@ export async function upsertQaItem(input: QaUpsertInput): Promise<QaItem | null>
       };
       if (input.tester !== undefined || input.needsSud || input.builderIsTester) patch.tester = routeQaItem(input);
       if (existing.status === 'validated' && input.status && input.status !== 'validated') patch.status = input.status;
+      // The Slack handoff is what puts a parked card in front of its tester.
+      if (existing.status === 'parked' && input.slackThreadTs) patch.status = input.status && input.status !== 'parked' ? input.status : 'up_next';
       result = { ...existing, ...patch, updatedAt: new Date().toISOString() };
       items[index] = result;
       return items;

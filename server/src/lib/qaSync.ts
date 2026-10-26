@@ -115,7 +115,10 @@ async function syncQaFromGithubOnce(snapshot = deskPrs()): Promise<QaSyncResult>
       // the merge-signal endpoint, which upserts explicitly.
       if (known.has(key)) continue;
       const stagingUrl = (await previewUrlFor(pr.repo, pr.number)) ?? undefined;
-      const created = await upsertQaItem({ repo: pr.repo, pr: pr.number, title: pr.title, app: appForRepo(pr.repo), stagingUrl });
+      // A staging merge lands parked: it only reaches a tester's column once
+      // Sam hands it over in #dev-testing (Matt, Oct 26 2026), so the board
+      // never holds work a tester was never told about.
+      const created = await upsertQaItem({ repo: pr.repo, pr: pr.number, title: pr.title, app: appForRepo(pr.repo), stagingUrl, status: 'parked' });
       if (created) added += 1;
     }
   }
