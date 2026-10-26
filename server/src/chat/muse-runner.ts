@@ -47,7 +47,7 @@ import { chatAttachmentPath, saveChatAttachments } from '../routes/chatAttachmen
 import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-guidance.ts';
 import { isVoiceChatId, isRobotVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STYLE_ADDENDUM, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
-import { emptyTurnOrigin, noteTurnPeer, type TurnOrigin } from './providerSwitch.ts';
+import { emptyTurnOrigin, humanQueued, noteTurnPeer, type TurnOrigin } from './providerSwitch.ts';
 import { longCallGateEnv } from './longCallGate.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { officeMcpConfig } from './office-mcp.ts';
@@ -55,6 +55,7 @@ import { laneMcpServers, laneTagFor, shareBackgroundLaneEvent, type CliKind, typ
 import { plainEnglishWritingBlockFor } from './plain-english-guidance.ts';
 import { boundaryInterruptEligible, personStartedTurn, type BoundaryTurnState } from './boundaryPolicy.ts';
 import { noteMuseAllowance, resolveMuseBin, resolveMuseModel } from './muse-models.ts';
+import { isPersonMessage, isReplyNowTool, REPLY_NUDGE_NOTE, REPLY_NUDGE_NOTE_TOOL, replyNudgeEvent, ReplyWatch, type ReplyNudge } from './replyNudge.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
 /** Readiness is local (no process until the first turn), so this only bounds
@@ -68,6 +69,7 @@ const BOUNDARY_SETTLE_MS = 100;
 const PAUSED_NOTE_TTL_MS = 10 * 60_000;
 const KEY_STATE_MAX_AGE_MS = 60 * 60_000;
 const PAUSED_FOR_MESSAGE_NOTE = '<rivendell-steer>Your previous turn was paused right after a tool call finished, so the message below reaches you as a normal message. Answer it first. Then, unless it changes the plan, carry on with what you were doing; the transcript above shows where you stopped.</rivendell-steer>';
+const REPLY_NUDGE_CONTINUE_NOTE = '<rivendell-steer>Your previous turn was paused right after a tool call finished. You already gave the person visible text, so do not repeat it. Continue the work from where you stopped.</rivendell-steer>';
 /** Built-in servers the lane cannot work without; an optional server that
  *  fails its startup is dropped for the session instead of failing turns. */
 const REQUIRED_MCP = new Set(['rivendell-team']);
@@ -83,6 +85,7 @@ function pruneKeyState(now: number): void {
 type Listener = (e: SeqEvent) => void;
 type ChatImage = { mediaType: string; base64: string };
 type MuseTool = { toolUseId: string; name: string; closed: boolean };
+type MuseSendOptions = { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; providerContinue?: unknown; echoText?: string; replyTo?: { from: string; snippet: string }; replyNudge?: ReplyNudge };
 
 const finiteCount = (value: unknown): number => {
   const n = Number(value);
@@ -140,6 +143,12 @@ export class MuseSession {
   private boundaryGeneration = 0;
   private boundarySettleTimer: NodeJS.Timeout | null = null;
   private lastBoundaryInterruptAt = 0;
+  private interruptInFlight = false;
+  private replyNudgeWanted = false;
+  /** Holds the lane between the interrupted turn's turnEnd and the synchronous
+   *  admission of its reply nudge, so a peer cannot steal the owed reply. */
+  private replyNudgeReserved = false;
+  private pendingReplyNudge?: { nudge: ReplyNudge; cancelled: boolean };
   private pausedForMessage = false;
   /** Set by Stop: the open turn closes as cancelled when its child exits. */
   private stopping = false;
@@ -172,6 +181,7 @@ export class MuseSession {
   private turnSpawn: { promptFile: string; images: string[] } | null = null;
   private turnOrigin: TurnOrigin = emptyTurnOrigin();
   private laneSyncSeq?: number;
+  private readonly replyWatch: ReplyWatch;
   private get contextKey(): string {
     return isBackgroundChatId(this.chatId) ? `${this.logKey}|bg` : this.logKey;
   }
@@ -193,6 +203,7 @@ export class MuseSession {
     this.startedResumeId = resumeId;
     this.museSessionId = resumeId ?? randomUUID();
     this.sessionPersisted = Boolean(resumeId);
+    this.replyWatch = new ReplyWatch(() => agentForChatId(chatId)?.id ?? chatId, this.cli);
     this.ready = new Promise<boolean>((res) => { this.resolveReady = res; });
 
     try {
@@ -229,6 +240,7 @@ export class MuseSession {
     const operating = [
       `You are ${name}, a teammate aboard TARDIS, Matt's always-on office, running on Muse Code. You have file, shell and edit tools for this workspace, plus the rivendell-team MCP tools (mcp__rivendell_team__team_message, team_status, board_cards, priorities and friends) for talking to other teammates and working the office board, and assistant_* tools for email, calendar, tasks and integrations when they are mounted.`,
       'TARDIS teammates are reached ONLY through the rivendell-team team_message tool. Never use Muse session messaging or subagents to contact them.',
+      'A person must see your reply before tool work. If you will use tools first, call mcp__rivendell_team__reply_now with audience: "owner" and one or two sentences as your first action; it posts immediately, so never repeat it later.',
       'Do the work yourself with tools; report outcomes plainly; never claim something is done that you did not verify.',
       'Never end a turn on a stated intention. If you say you are checking, looking at, or about to do something, do it with tools in this same turn before you stop. The only things worth stopping for are a question the person must answer or a teammate reply you are waiting on, and say which.',
       'External side effects stay draft-first unless the person explicitly asked you to send, post or deploy.',
@@ -417,12 +429,18 @@ export class MuseSession {
     this.stream({ type: 'message_stop' });
   }
 
-  private closeTool(tool: MuseTool, text: string, isError: boolean): void {
+  private closeTool(tool: MuseTool, text: string, isError: boolean, turnEnding = false): void {
     if (tool.closed) return;
     tool.closed = true;
     this.completedTools.push(tool.name);
     this.emit({ type: 'event', event: { type: 'user', parent_tool_use_id: null, session_id: this.museSessionId, uuid: randomUUID(), timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: tool.toolUseId, ...(isError ? { is_error: true } : {}), content: [{ type: 'text', text: text.slice(0, 8000) }] }] } } });
-    this.maybeFireBoundaryInterrupt();
+    // reply_now's host path publishes before returning success. A proposed or
+    // rejected call is not visible and must not satisfy the watch.
+    if (!isError && isReplyNowTool(tool.name)) this.replyWatch.noteText();
+    if (!turnEnding) {
+      this.nudgeForReply();
+      this.maybeFireBoundaryInterrupt();
+    }
   }
 
   private handleRecord(rec: any): void {
@@ -446,6 +464,10 @@ export class MuseSession {
       const text = typeof p.text === 'string' ? p.text : '';
       if (!text) return;
       this.turnActivity = true;
+      if (text.trim()) {
+        this.replyWatch.noteText();
+        this.replyNudgeWanted = false;
+      }
       this.pendingStateAccepts.splice(0).forEach((accept) => accept());
       if (!this.textOpen) {
         this.textOpen = true;
@@ -467,6 +489,7 @@ export class MuseSession {
       const name = kind.slice('tool.'.length) || 'tool';
       const tool: MuseTool = { toolUseId: randomUUID(), name, closed: false };
       this.toolsByTask.set(taskId, tool);
+      this.replyWatch.noteTool(tool.toolUseId);
       this.openMessage();
       this.stream({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: tool.toolUseId, name, input: {} } });
       this.stream({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{}' } });
@@ -589,25 +612,96 @@ export class MuseSession {
   }
 
   private maybeFireBoundaryInterrupt(): void {
-    if (!this.boundaryInterruptWanted || this.turnStartedAt === null || this.disposed || this.stopping) return;
+    if (this.turnStartedAt === null || this.disposed || this.stopping) return;
     if (this.hasOpenTool()) return;
     const now = Date.now();
-    const eligible = boundaryInterruptEligible(this.boundaryTurnState(), now);
-    if (!eligible || this.boundarySettleTimer) return;
+    const boundaryDue = this.boundaryInterruptWanted && boundaryInterruptEligible(this.boundaryTurnState(), now);
+    const nudgeBlocked = () => this.boundaryHumanWaiters > 0 || this.interruptInFlight || humanQueued(this.logKey) || this.hasOpenTool();
+    const nudgeDue = this.replyNudgeWanted && !nudgeBlocked() && Boolean(this.replyWatch.due());
+    if ((!boundaryDue && !nudgeDue) || this.boundarySettleTimer) return;
     const turnSeq = this.turnSeq;
     this.boundarySettleTimer = setTimeout(() => {
       this.boundarySettleTimer = null;
-      if (!this.boundaryInterruptWanted || this.turnStartedAt === null || this.turnSeq !== turnSeq || this.disposed || this.stopping) return;
-      if (this.boundaryWaiters === 0 || this.hasOpenTool()) return;
+      if (this.turnStartedAt === null || this.turnSeq !== turnSeq || this.disposed || this.stopping || this.hasOpenTool()) return;
       const firedAt = Date.now();
-      const stillEligible = boundaryInterruptEligible(this.boundaryTurnState(), firedAt);
-      if (!stillEligible) return;
-      this.boundaryInterruptWanted = false;
-      this.lastBoundaryInterruptAt = firedAt;
-      lastBoundaryInterruptAtByKey.set(this.key, firedAt);
-      void this.interrupt('message-boundary');
+      const boundaryStillDue = this.boundaryInterruptWanted && this.boundaryWaiters > 0 && boundaryInterruptEligible(this.boundaryTurnState(), firedAt);
+      if (boundaryStillDue) {
+        this.boundaryInterruptWanted = false;
+        this.lastBoundaryInterruptAt = firedAt;
+        lastBoundaryInterruptAtByKey.set(this.key, firedAt);
+        void this.interrupt('message-boundary');
+        return;
+      }
+      if (!this.replyNudgeWanted || nudgeBlocked() || !this.replyWatch.waiting()) return;
+      const nudge = this.replyWatch.claim(firedAt);
+      if (!nudge) return;
+      this.replyNudgeWanted = false;
+      const pending = this.pendingReplyNudge = { nudge, cancelled: false };
+      void this.interrupt('reply-nudge').then((kept) => {
+        if (kept || this.pendingReplyNudge !== pending) return;
+        this.pendingReplyNudge = undefined;
+        this.replyWatch.release(nudge);
+      }).catch((err) => {
+        if (this.pendingReplyNudge === pending) {
+          this.pendingReplyNudge = undefined;
+          this.replyWatch.release(nudge);
+        }
+        console.warn(`[reply-nudge] ${this.cli} interrupt failed:`, (err as Error).message);
+      });
     }, BOUNDARY_SETTLE_MS);
     this.boundarySettleTimer.unref?.();
+  }
+
+  /** A person's message has crossed the shared tool/time threshold without
+   *  visible text. At the next all-tools-closed boundary, pause Muse's process
+   *  and resume the same native session with the reply-first harness note. */
+  private nudgeForReply(): void {
+    try {
+      if (!this.replyWatch.due()) return;
+      this.replyNudgeWanted = true;
+      this.maybeFireBoundaryInterrupt();
+    } catch (err) {
+      console.warn(`[reply-nudge] ${this.cli} check failed:`, (err as Error).message);
+    }
+  }
+
+  private async deliverReplyNudge(nudge: ReplyNudge): Promise<void> {
+    // The reservation keeps peers out between turnEnd and this admission. A
+    // person already waiting owns the next turn and starts a fresh watch.
+    if (!this.replyNudgeReserved) return;
+    if (humanQueued(this.logKey)) {
+      this.replyNudgeReserved = false;
+      this.scheduleBoundaryMaintenance();
+      return;
+    }
+    if (this.turnStartedAt !== null || this.child !== null || this.disposed) {
+      this.replyNudgeReserved = false;
+      pausedForMessageByKey.delete(this.key);
+      this.scheduleBoundaryMaintenance();
+      return;
+    }
+    try {
+      const note = this.replyWatch.waiting()
+        ? agentForChatId(this.chatId) ? REPLY_NUDGE_NOTE_TOOL : REPLY_NUDGE_NOTE
+        : REPLY_NUDGE_CONTINUE_NOTE;
+      await this.send(note, undefined, { replyNudge: nudge });
+    } catch (err) {
+      this.replyNudgeReserved = false;
+      pausedForMessageByKey.delete(this.key);
+      this.replyWatch.release(nudge);
+      this.scheduleBoundaryMaintenance();
+      throw err;
+    }
+  }
+
+  private scheduleBoundaryMaintenance(): void {
+    if (this.disposed || this.turnStartedAt !== null || this.child !== null || this.replyNudgeReserved || humanQueued(this.logKey)) return;
+    const rotationDue = contextRotationDue(this.contextKey);
+    const housekeeping = async () => {
+      if (rotationDue && (await this.rotateContextAtBoundary())) return;
+      await this.maybeCompact();
+    };
+    void housekeeping().catch((err) => console.warn(`[context-rotation] ${this.logKey}: deferred after maintenance failure`, (err as Error).message));
   }
 
   activeTurnStartedAt(): number | null {
@@ -622,8 +716,10 @@ export class MuseSession {
     }
     this.closeText();
     // A tool still open at the end never got its result; close its card.
-    for (const tool of this.toolsByTask.values()) if (!tool.closed) this.closeTool(tool, this.turnFailed ? 'The turn ended before this tool finished.' : '', Boolean(this.turnFailed));
+    for (const tool of this.toolsByTask.values()) if (!tool.closed) this.closeTool(tool, this.turnFailed ? 'The turn ended before this tool finished.' : '', Boolean(this.turnFailed), true);
     const failed = this.turnFailed;
+    const pendingReplyNudge = this.pendingReplyNudge;
+    this.pendingReplyNudge = undefined;
     this.pendingStateAccepts = [];
     if (failed && !this.terminalNoticeEmitted) {
       this.terminalNoticeEmitted = true;
@@ -646,17 +742,23 @@ export class MuseSession {
     this.completedTools = [];
     this.turnStartedAt = null;
     this.automationTurn = false;
+    this.interruptInFlight = false;
+    this.replyNudgeWanted = false;
     this.clearBoundaryRequest();
     this.turnFailed = null;
+    const humanTakesNext = Boolean(pendingReplyNudge && !pendingReplyNudge.cancelled && !this.disposed && humanQueued(this.logKey));
+    const deliverReplyNudge = Boolean(pendingReplyNudge && !pendingReplyNudge.cancelled && !this.disposed
+      && this.child === null && !humanTakesNext);
+    this.replyNudgeReserved = deliverReplyNudge;
+    if (pendingReplyNudge && !deliverReplyNudge && !humanTakesNext) pausedForMessageByKey.delete(this.key);
     this.emit({ type: 'turnEnd', sessionId: this.museSessionId });
-    if (!failed && !this.disposed) {
-      const rotationDue = contextRotationDue(this.contextKey);
-      const housekeeping = async () => {
-        if (rotationDue && (await this.rotateContextAtBoundary())) return;
-        await this.maybeCompact();
-      };
-      void housekeeping().catch((err) => console.warn(`[context-rotation] ${this.logKey}: deferred after maintenance failure`, (err as Error).message));
+    if (pendingReplyNudge && deliverReplyNudge) {
+      void this.deliverReplyNudge(pendingReplyNudge.nudge)
+        .catch((err) => {
+          console.warn(`[reply-nudge] ${this.cli} delivery failed:`, (err as Error).message);
+        });
     }
+    if (!failed && !deliverReplyNudge) this.scheduleBoundaryMaintenance();
   }
 
   /** Turn-boundary context rotation, same policy as the Pi and Claude lanes:
@@ -724,7 +826,7 @@ export class MuseSession {
     this.emit({ type: 'event', event });
     return true;
   }
-  isBusy(): boolean { return this.turnStartedAt !== null || this.child !== null; }
+  isBusy(): boolean { return this.turnStartedAt !== null || this.child !== null || this.replyNudgeReserved; }
   isAutomationTurn(): boolean { return this.turnStartedAt !== null && this.automationTurn; }
   /** One `muse exec` runs one whole turn and takes no input mid-run, so a
    *  human message during a busy turn waits for a tool boundary instead. */
@@ -747,6 +849,7 @@ export class MuseSession {
       if (this.boundaryWaiters === 0) {
         this.boundaryInterruptWanted = false;
         if (this.boundarySettleTimer) { clearTimeout(this.boundarySettleTimer); this.boundarySettleTimer = null; }
+        if (this.replyNudgeWanted) this.maybeFireBoundaryInterrupt();
       }
     };
   }
@@ -773,24 +876,28 @@ export class MuseSession {
     for (const fn of this.listeners) fn(se);
   }
 
-  async send(text: string, images?: ChatImage[], opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; providerContinue?: unknown; echoText?: string; replyTo?: { from: string; snippet: string } } = {}): Promise<void> {
+  async send(text: string, images?: ChatImage[], opts: MuseSendOptions = {}): Promise<void> {
     assertSelectedEngine(this.chatId, this.cli);
     assertSubscriptionLane(this.cli);
     if (opts.signal?.aborted) return;
     if (!this.isAlive()) throw new Error('session has exited');
-    await this.ready;
+    const replyNudge = opts.replyNudge;
+    if (!this.initSeen) await this.ready;
+    const ownsReplyNudgeReservation = Boolean(replyNudge && this.replyNudgeReserved);
     // One process per turn: a second `muse exec` on the same session while
     // one runs (or is still stopping) would interleave two turns.
-    if (this.turnStartedAt !== null || this.child !== null) {
+    if (this.turnStartedAt !== null || this.child !== null || (this.replyNudgeReserved && !ownsReplyNudgeReservation)) {
       if (opts.peerFrom) return;
       throw new Error('the current turn must reach a safe boundary before guidance is delivered');
     }
+    if (ownsReplyNudgeReservation) this.replyNudgeReserved = false;
     const automationRequest = opts.peerFromRole === 'automation';
     this.turnStartedAt = Date.now();
     this.pendingStateAccepts = [];
     this.turnSeq++;
     this.automationTurn = automationRequest;
-    this.personTurn = personStartedTurn(opts);
+    this.personTurn = Boolean(replyNudge) || personStartedTurn(opts);
+    this.replyNudgeWanted = false;
     this.clearBoundaryRequest();
     this.pausedForMessage = false;
     this.stopping = false;
@@ -818,7 +925,7 @@ export class MuseSession {
       if (!this.disposed) this.emit({ type: 'turnEnd', sessionId: this.museSessionId });
     };
     const historyThroughSeq = this.latestSeq();
-    const wantSeed = this.seedWindowOnNextTurn;
+    const wantSeed = this.seedWindowOnNextTurn && !replyNudge;
     let pausedNote = '';
     try {
       const seed = wantSeed ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, this.eventLog.slice()) : '';
@@ -836,11 +943,16 @@ export class MuseSession {
         if (opts.signal?.aborted || !this.isAlive()) { abandon(); return; }
       }
 
-      if (opts.peerFrom) {
+      if (replyNudge) {
+        this.turnOrigin.human = true;
+        this.emit(replyNudgeEvent(replyNudge));
+      } else if (opts.peerFrom) {
         noteTurnPeer(this.turnOrigin, opts.peerFrom, opts.peerFromRole, opts.peerText ?? text);
         if (opts.peerFromRole !== 'automation') this.turnOrigin.human = true;
         if (automationRequest) this.turnOrigin.automation = true;
         this.emit({ type: 'event', event: { type: 'peer_message', startsTurn: true, from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}), ts: Date.now() } });
+        if (isPersonMessage(opts)) this.replyWatch.arm();
+        else this.replyWatch.reset();
       } else {
         await flushEventLog(this.logKey);
         if (opts.signal?.aborted) { abandon(); return; }
@@ -848,6 +960,7 @@ export class MuseSession {
         noteUserTurn(this.logKey);
         noteAgentLane(this.chatId, this.cli);
         this.turnOrigin.human = true;
+        this.replyWatch.arm();
       }
 
       const guidance = conversationGuidanceForTurn({
@@ -856,12 +969,12 @@ export class MuseSession {
         hidden: false,
       });
       const laneContext = laneContextForTurn({ chatId: this.chatId, logKey: this.logKey, sinceSeq: this.laneSyncSeq ?? null, throughSeq: historyThroughSeq, seeded: Boolean(seed) });
-      const recall = !automationRequest
+      const recall = !automationRequest && !replyNudge
         && recallEligibleTurn(this.chatId, { peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole, voiceMode: opts.voiceMode })
         ? await recallBlockForTurn({ cli: this.cli, cwd: this.cwd, chatId: this.chatId, logKey: this.logKey, messageText: opts.peerText ?? text })
         : '';
       if (opts.signal?.aborted) { abandon(); return; }
-      const pausedEntry = !automationRequest ? pausedForMessageByKey.get(this.key) : undefined;
+      const pausedEntry = !automationRequest && !replyNudge ? pausedForMessageByKey.get(this.key) : undefined;
       if (pausedEntry && Date.now() - pausedEntry.at <= PAUSED_NOTE_TTL_MS) {
         pausedNote = pausedEntry.summary
           ? PAUSED_FOR_MESSAGE_NOTE.replace('</rivendell-steer>', ` ${pausedEntry.summary}</rivendell-steer>`)
@@ -896,10 +1009,11 @@ export class MuseSession {
       if (wantSeed) this.seedWindowOnNextTurn = true;
       abandon();
       this.emit({ type: 'error', message: `Muse Code turn failed before it started: ${(error as Error).message}` });
+      if (replyNudge) throw error;
       return;
     }
     this.laneSyncSeq = historyThroughSeq;
-    if (pausedNote) pausedForMessageByKey.delete(this.key);
+    if (pausedNote || replyNudge) pausedForMessageByKey.delete(this.key);
     if (wantSeed) {
       this.seedWindowOnNextTurn = false;
       void clearRotation(this.logKey);
@@ -913,12 +1027,15 @@ export class MuseSession {
    *  only the leader. The lane stays usable: the next send resumes the same
    *  native session in a new process. */
   async interrupt(reason = 'interrupt'): Promise<boolean> {
-    const boundaryPause = reason === 'message-boundary';
+    const replyNudge = reason === 'reply-nudge';
+    const boundaryPause = reason === 'message-boundary' || replyNudge;
+    if (this.pendingReplyNudge && !replyNudge) this.pendingReplyNudge.cancelled = true;
     if (!boundaryPause) {
       this.pausedForMessage = false;
       pausedForMessageByKey.delete(this.key);
     }
     if (this.disposed || this.turnStartedAt === null) return false;
+    this.interruptInFlight = true;
     const child = this.child;
     if (boundaryPause) {
       this.pausedForMessage = true;
@@ -939,13 +1056,18 @@ export class MuseSession {
     setTimeout(() => {
       if (this.turnStartedAt === null || this.turnSeq !== turnSeq) return;
       if (!this.pausedForMessage) this.turnFailed = { message: 'This turn was cancelled before it finished.', code: 'aborted' };
-      this.finishTurn();
+      // The nudge may not start until the prior leader is truly out of the
+      // lane. killChild's SIGKILL backstop has fired by now, so close the
+      // process bookkeeping here even if a descendant kept stdout open.
+      this.onChildGone(child, child.exitCode, child.signalCode);
     }, 5_000).unref();
     return true;
   }
 
   shutdown(reason = 'unspecified'): void {
     if (this.disposed) return;
+    if (this.pendingReplyNudge) this.pendingReplyNudge.cancelled = true;
+    this.replyNudgeReserved = false;
     // Close an open turn while emit still works (emit refuses once disposed).
     if (this.turnStartedAt !== null) {
       if (!this.pausedForMessage) this.turnFailed ??= { message: 'This turn was cancelled before it finished.', code: 'aborted' };
