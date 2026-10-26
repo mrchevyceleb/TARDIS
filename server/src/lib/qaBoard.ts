@@ -128,15 +128,14 @@ export function qaTesterByLogin(login: string): QaTesterId | undefined {
 }
 
 /** Routing rule from the flow: explicit tester first, then the Sud list for
- *  Sud-flagged work and Edgar/Martin's own work, then Edgar for both apps
- *  (Matt, Oct 23 2026: Martin is out until Matt says otherwise). */
+ *  Sud-flagged work and Edgar/Martin's own work, then Martin for Operly and
+ *  Edgar for Studio (Matt, Oct 26 2026: "put martin on the qa board and start
+ *  giving him operly prs"). */
 export function routeQaItem(input: { tester?: string; needsSud?: boolean; builderIsTester?: boolean; app: QaApp }): QaTesterId {
   const requested = (input.tester ?? '').trim().toLowerCase();
-  // Martin is out for now (Matt, Oct 23 2026), so a Martin request lands on Edgar.
-  if (requested === 'sud' || requested === 'edgar') return requested;
-  if (requested === 'martin') return 'edgar';
+  if (requested === 'sud' || requested === 'edgar' || requested === 'martin') return requested;
   if (input.needsSud || input.builderIsTester) return 'sud';
-  return 'edgar';
+  return input.app === 'Operly' ? 'martin' : 'edgar';
 }
 
 /** Card titles never name the builder. PR titles in this flow often arrive
@@ -168,9 +167,8 @@ export async function qaBoard(): Promise<Record<QaTesterId, QaItem[]>> {
   return board;
 }
 
-/** The column a card shows in. Martin is out (Matt, Oct 23 2026), so cards
- *  stored under him show in Edgar's column without rewriting the records. */
-const columnOf = (item: QaItem): QaTesterId => (item.tester === 'martin' ? 'edgar' : item.tester);
+/** The column a card shows in: its own tester's. */
+const columnOf = (item: QaItem): QaTesterId => item.tester;
 
 /** One tester's column as shown: priority order, at most QA_CARDS_PER_APP
  *  per app. The board and the pinned list both use it, so they agree. */
