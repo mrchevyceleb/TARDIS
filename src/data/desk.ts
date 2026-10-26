@@ -11,7 +11,16 @@ export type DeskActor = { kind: 'owner' | 'agent'; id: string; name: string };
 
 /** The owner's answer to a Needs-you item. `delivery` says whether the agent
  *  who asked was told ('none' when the item was the owner's own). */
-export type DeskAnswer = { choice?: string; text?: string; at: string; delivery: 'sent' | 'failed' | 'none' };
+export type DeskAnswer = { choice?: string; text?: string; images?: string[]; at: string; delivery: 'sent' | 'failed' | 'none' };
+
+/** Browser URL for a pasted-image path saved in the server uploads store,
+ *  or null when the path is not one (older data, another machine). */
+export function deskImageUrl(path: string): string | null {
+  const norm = path.replace(/\\/g, '/');
+  const at = norm.lastIndexOf('/uploads/');
+  if (at < 0) return null;
+  return `/api/files/uploaded?path=${encodeURIComponent(norm.slice(at + '/uploads/'.length))}`;
+}
 
 export type DeskTodo = {
   id: string;
@@ -32,7 +41,7 @@ export type DeskTodo = {
   resolution?: { note: string; at: string; by: DeskActor };
 };
 
-export type DeskComment = { id: string; author: DeskActor; text: string; at: string };
+export type DeskComment = { id: string; author: DeskActor; text: string; at: string; images?: string[] };
 
 export type DeskCard = {
   id: string;
@@ -111,8 +120,10 @@ export function openAgentThread(agentId: string): void {
 
 export type DeskRefKind = 'card' | 'todo';
 export type DeskRef = { kind: DeskRefKind; id: string };
-/** A reference waiting in the composer, with the title it had when picked. */
-export type DeskChip = DeskRef & { title: string };
+/** A reference waiting in the composer, with the title it had when picked.
+ *  `agentId` is the teammate who owns the item: discussing it talks to
+ *  them, not to the Chief of Staff by default. */
+export type DeskChip = DeskRef & { title: string; agentId?: string; agentName?: string };
 
 const DESK_REF_SOURCE = String.raw`\[desk:((card|todo)-[a-z0-9][a-z0-9_-]{0,78})\]`;
 /** Fresh global regex each call, so callers never share lastIndex. */
@@ -504,7 +515,7 @@ const enc = encodeURIComponent;
 export type CommentNotice = { delivered: boolean; to?: string; reason?: string };
 
 export type TodoPatch = Partial<{ title: string; detail: string; due: string; priority: DeskPriority; link: string; cardId: string; status: 'open' | 'done' }>;
-export type TodoAnswerInput = { choice?: string; text?: string };
+export type TodoAnswerInput = { choice?: string; text?: string; images?: string[] };
 export type TodoAnswerResult = { todo: DeskTodo; notified?: CommentNotice; duplicate?: boolean; conflict?: boolean };
 export type CardPatch = Partial<{ title: string; description: string; owner: string; project: string; priority: DeskPriority; links: string[]; column: DeskColumn }>;
 
@@ -521,7 +532,7 @@ export const deskApi = {
   createCard: (input: CardPatch & { title: string; index?: number }) => apiJson<{ card: DeskCard }>('/api/desk/cards', json('POST', { ...input, source: 'ui' })),
   updateCard: (id: string, patch: CardPatch) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${enc(id)}`, json('PATCH', patch)),
   moveCard: (id: string, column: DeskColumn, index?: number) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${enc(id)}/move`, json('POST', { column, index })),
-  comment: (id: string, text: string) => apiJson<{ card: DeskCard; notified?: CommentNotice }>(`/api/desk/cards/${enc(id)}/comments`, json('POST', { text, source: 'ui' })),
+  comment: (id: string, text: string, images?: string[]) => apiJson<{ card: DeskCard; notified?: CommentNotice }>(`/api/desk/cards/${enc(id)}/comments`, json('POST', { text, ...(images?.length ? { images } : {}), source: 'ui' })),
   deleteComment: (id: string, commentId: string) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${enc(id)}/comments/${enc(commentId)}`, json('DELETE')),
   archiveCard: (id: string, archived: boolean) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${enc(id)}/archive`, json('POST', { archived })),
 };

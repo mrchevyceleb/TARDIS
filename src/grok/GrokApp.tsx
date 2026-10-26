@@ -368,9 +368,11 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   const openNeedsYou = useCallback(() => focusDeskRef(FIRST_OPEN_REF), []);
   useNeedsYouAlerts(flags.deskRoom ? deskSummary.data : undefined, focusDeskRef);
 
-  // The Desk chat is the Chief of Staff's own thread, docked beside the Desk.
+  // The Desk chat docks one teammate's own thread beside the Desk: the
+  // teammate who owns the item Matt last hit Discuss on (his notes and
+  // mockups go straight to them), else the Chief of Staff.
   const deskChat = useDeskChat(isMobile);
-  const deskAgent = agents.find((a) => a.id === 'chief-of-staff') ?? agents[0];
+  const deskAgent = agents.find((a) => a.id === deskChat.agentId) ?? agents.find((a) => deskChat.agentName && a.name.trim().toLowerCase() === deskChat.agentName.trim().toLowerCase()) ?? agents.find((a) => a.id === 'chief-of-staff') ?? agents[0];
   // A Desk pill clicked anywhere (Chat, or the Desk chat itself) opens the
   // Desk; the room picks up which card or item to show.
   useEffect(() => {

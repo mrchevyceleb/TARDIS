@@ -1,4 +1,6 @@
-// Desk chat: the Chief of Staff's own Hall thread, docked beside the Desk.
+// Desk chat: a teammate's own Hall thread, docked beside the Desk. Discuss
+// on an item talks to the teammate who owns that item; the launcher talks to
+// whoever was discussed last (the Chief of Staff until then).
 // Right side on desktop, a full-screen sheet on phones. "Discuss" on a card or
 // Needs-you row drops a reference chip into the composer; the chip's token
 // (`[desk:card-…]`) rides along with the message so the agent can look it up.
@@ -31,6 +33,11 @@ export function useDeskChat(isMobile: boolean) {
   });
   const [chips, setChips] = useState<DeskChip[]>([]);
   const [focusTick, setFocusTick] = useState(0);
+  // Whose thread the dock shows. Discuss sets it to the item's teammate, so
+  // chatting on a Desk item talks straight to them, never through Max.
+  const [target, setTarget] = useState<{ agentId?: string; agentName?: string }>({});
+  const targetRef = useRef(target);
+  targetRef.current = target;
 
   const setOpen = useCallback((next: boolean) => {
     setOpenState(next);
@@ -41,7 +48,14 @@ export function useDeskChat(isMobile: boolean) {
     const onDiscuss = (event: Event) => {
       const chip = (event as CustomEvent<DeskChip>).detail;
       if (!chip?.id) return;
-      setChips((prev) => (prev.some((c) => c.id === chip.id) ? prev : [...prev, chip].slice(-MAX_CHIPS)));
+      // The dock is one teammate's thread: discussing another teammate's
+      // item switches threads and starts a fresh pile, so chips (and the
+      // notes typed for them) never land on the wrong person.
+      const key = chip.agentId ?? chip.agentName ?? '';
+      const prevKey = targetRef.current.agentId ?? targetRef.current.agentName ?? '';
+      if (key !== prevKey) setChips([chip]);
+      else setChips((old) => (old.some((c) => c.id === chip.id) ? old : [...old, chip].slice(-MAX_CHIPS)));
+      setTarget({ agentId: chip.agentId, agentName: chip.agentName });
       setOpen(true);
       setFocusTick((n) => n + 1);
     };
@@ -64,7 +78,7 @@ export function useDeskChat(isMobile: boolean) {
   const dropLastChip = useCallback(() => setChips((prev) => prev.slice(0, -1)), []);
   const clearChips = useCallback(() => setChips([]), []);
 
-  return { open, setOpen, openChat, chips, removeChip, dropLastChip, clearChips, focusTick };
+  return { open, setOpen, openChat, chips, removeChip, dropLastChip, clearChips, focusTick, agentId: target.agentId, agentName: target.agentName };
 }
 
 export type DeskChatState = ReturnType<typeof useDeskChat>;
