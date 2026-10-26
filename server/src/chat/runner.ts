@@ -4348,10 +4348,11 @@ export async function freshStart(opts: {
   effort?: string;
 }): Promise<AnySession> {
   assertSubscriptionLane(opts.cli);
-  const chatId = opts.chatId || 'main';
+  const chatId = isAgentThread(opts.chatId || '') ? bareChatId(opts.chatId!) : opts.chatId || 'main';
+  const repoPath = sessionDirectory(chatId, opts.repoPath);
   // The background lane shares the reset thread on every engine: end it and
   // forget its resume id before any engine-specific reset runs.
-  for (const [bgKey, bg] of backgroundSiblings(trackedThreadLogKey({ ...opts, chatId }), chatId)) {
+  for (const [bgKey, bg] of backgroundSiblings(trackedThreadLogKey({ ...opts, repoPath, chatId }), chatId)) {
     if (bg instanceof ClaudeSession) bg.shutdown('freshStart', 'fresh');
     else bg.shutdown('freshStart');
     sessions.delete(bgKey);
@@ -4359,13 +4360,17 @@ export async function freshStart(opts: {
   }
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
     const { freshStartCodex } = await import('./codex-runner.ts');
-    return freshStartCodex({ repoPath: opts.repoPath, chatId, cli: opts.cli });
+    return freshStartCodex({ repoPath, chatId, cli: opts.cli });
   }
   if (opts.cli === 'banana' || opts.cli === 'banana-local' || opts.cli === 'banana-fireworks') {
     const { freshStartBanana } = await import('./banana-runner.ts');
-    return freshStartBanana({ repoPath: opts.repoPath, chatId, cli: opts.cli });
+    return freshStartBanana({ repoPath, chatId, cli: opts.cli });
   }
-  const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
+  // Fresh Thread is a direct spawn path, so every non-Assistant lane must use
+  // the same directory policy as getOrCreateSession. Previously keyOf()
+  // normalized only the registry key while MuseSession received the browser's
+  // repo: its key said Personal-Apps but its actual cwd was ASSISTANT-HUB.
+  const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
   // A boot prewarm may still be resolving getSessionId before its constructor
   // claims the map. Let it claim, then replace that exact owner, rather than

@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { SESSIONS_FILE, STATE_DIR } from './config.ts';
 import { bareChatId, isAgentThread } from './threadKey.ts';
 import { NATIVE_SESSION_GENERATION } from './sessionPolicy.ts';
@@ -15,6 +15,9 @@ type StoredSession = {
   cli?: Cli;
   nativeProfile?: string;
   sessionId?: string;
+  /** Working directory in which the provider-native session was created.
+   * Muse binds session ids to a workspace and refuses cross-workspace resume. */
+  workspace?: string;
   generation?: number;
   updatedAt: number;
   /** Last model/effort actually applied to this native process. Kept even when
@@ -72,8 +75,27 @@ async function flush() {
 
 export async function getSessionId(cli: Cli, repoPath: string, chatId = 'main'): Promise<string | undefined> {
   const all = await load();
-  const record = all[nativeKey(cli, repoPath, chatId)] ?? all[key(cli, repoPath, chatId)];
+  const nativeStorageKey = nativeKey(cli, repoPath, chatId);
+  const scopedStorageKey = key(cli, repoPath, chatId);
+  const nativeRecord = all[nativeStorageKey];
+  const scopedRecord = all[scopedStorageKey];
+  const record = nativeRecord ?? scopedRecord;
   if (isAgentThread(chatId) && record?.generation !== NATIVE_SESSION_GENERATION) return undefined;
+  // Muse owns the native transcript and records its creation workspace. It
+  // rejects the same UUID from any other cwd. A legacy repo-scoped key already
+  // proves its workspace; only cwd-free agent records are unproven. A genuine
+  // mismatch starts a new native window seeded from the durable thread.
+  if (cli === 'muse' && record?.sessionId) {
+    const recordedWorkspace = typeof record.workspace === 'string' && record.workspace
+      ? record.workspace : null;
+    const legacyScoped = !recordedWorkspace
+      && (nativeStorageKey === scopedStorageKey || (!nativeRecord && record === scopedRecord));
+    const sameWorkspace = recordedWorkspace !== null && resolve(recordedWorkspace) === resolve(repoPath);
+    if (!legacyScoped && !sameWorkspace) {
+      console.warn(`[native-session] Muse session ${record.sessionId.slice(0, 8)} belongs to another or unknown workspace; seeding this lane instead of resuming it`);
+      return undefined;
+    }
+  }
   return record?.sessionId;
 }
 
@@ -82,7 +104,7 @@ export async function setSessionId(cli: Cli, repoPath: string, sessionId: string
   const storageKey = nativeKey(cli, repoPath, chatId);
   const existing = all[storageKey];
   if (sessionId) {
-    all[storageKey] = { ...existing, cli, sessionId, ...(nativeProfile ? { nativeProfile } : {}), generation: NATIVE_SESSION_GENERATION, updatedAt: Date.now() };
+    all[storageKey] = { ...existing, cli, sessionId, workspace: resolve(repoPath), ...(nativeProfile ? { nativeProfile } : {}), generation: NATIVE_SESSION_GENERATION, updatedAt: Date.now() };
   } else if (existing?.model || existing?.effort) {
     const { sessionId: _discard, ...selection } = existing;
     all[storageKey] = { ...selection, updatedAt: Date.now() };
