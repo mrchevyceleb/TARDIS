@@ -297,6 +297,58 @@ span.desk-todo-text { cursor: default; }
 .desk-answer-send:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; }
 .desk-answer-error { flex-basis: 100%; margin: 0; color: var(--r-rose); font-size: 12px; line-height: 1.4; }
 
+/* The notes box: multi-line text plus pasted images, on its own full-width
+   row under the choices, so it reads as a real editor, not a form field. */
+.desk-notes {
+  flex: 1 1 100%; min-width: 0; display: grid; gap: 6px;
+  padding: 9px 9px 7px; border: 1px solid var(--r-line); border-radius: 14px; background: var(--r-bg-deep);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.desk-notes:focus-within { border-color: var(--r-line-gold); box-shadow: 0 0 0 3px rgba(217, 168, 90, 0.08); }
+.desk-notes textarea {
+  width: 100%; min-width: 0; padding: 2px 4px; border: 0; outline: 0; resize: vertical;
+  background: transparent; color: var(--r-ink); font: inherit; font-size: 13.5px; line-height: 1.45;
+}
+.desk-notes textarea::placeholder { color: var(--r-ink-faint); }
+.desk-notes-actions { display: flex; align-items: center; gap: 8px; }
+.desk-notes-hint { flex: 1; min-width: 0; color: var(--r-ink-faint); font-size: 11.5px; }
+.desk-notes-hint.is-error { color: var(--r-rose); }
+.desk-notes-send { margin-left: auto; max-width: 60%; }
+.desk-notes-send span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desk-notes-attach {
+  flex: none; display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 0 10px; border-radius: 999px;
+  border: 1px solid var(--r-line); background: var(--r-bg-raised); color: var(--r-ink-soft); font-size: 12.5px; font-weight: 600;
+  transition: transform 0.14s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.15s ease, color 0.15s ease;
+}
+.desk-notes-attach:hover { transform: translateY(-1px) rotate(-2deg); border-color: var(--r-line-gold); color: var(--r-ink); }
+.desk-notes-attach:active { transform: scale(0.93); }
+.desk-notes-attach:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; }
+.desk-image-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.desk-image-chip {
+  position: relative; display: inline-block; width: 96px; height: 68px; border-radius: 10px; overflow: hidden;
+  border: 1px solid var(--r-line); background: var(--r-bg-raised);
+  transition: transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.15s ease;
+}
+.desk-image-chip:hover { transform: translateY(-2px) rotate(-1deg) scale(1.03); border-color: var(--r-line-gold); }
+.desk-image-chip img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.desk-image-chip.is-uploading img { opacity: 0.55; }
+.desk-image-chip.is-error { border-color: var(--r-rose); }
+.desk-image-chip.is-error img { opacity: 0.4; }
+.desk-image-state {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 2px 4px; text-align: center;
+  background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 10px; font-weight: 600;
+}
+.desk-image-x {
+  position: absolute; top: 3px; right: 3px; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6); color: #fff;
+  transition: transform 0.14s ease, background 0.15s ease;
+}
+.desk-image-x:hover { transform: rotate(90deg) scale(1.1); background: rgba(0, 0, 0, 0.85); }
+.desk-answered-text .desk-image-row, .desk-thread .desk-image-row { margin-top: 6px; }
+@media (prefers-reduced-motion: reduce) {
+  .desk-notes-attach:hover, .desk-image-chip:hover, .desk-image-x:hover { transform: none; }
+}
+
 /* What was answered: on a row that is leaving, and in Done. */
 .desk-answered { display: grid; gap: 6px; margin-top: 10px; }
 .desk-answered-line { display: flex; align-items: flex-start; gap: 7px; min-width: 0; margin: 0; font-size: 13px; line-height: 1.4; color: var(--r-ink-soft); }
@@ -563,7 +615,8 @@ span.desk-todo-text { cursor: default; }
 .desk-thread li:hover .desk-thread-del, .desk-thread-del:focus-visible { opacity: 1; }
 .desk-thread p { margin: 6px 0 0; color: var(--r-ink-soft); font-size: 13.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .desk-thread a { color: var(--r-elf-glow); }
-.desk-composer { display: flex; align-items: flex-end; gap: 8px; }
+.desk-composer { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.desk-composer .desk-image-row { flex-basis: 100%; }
 .desk-composer textarea {
   flex: 1; min-width: 0; min-height: 42px; max-height: 180px; resize: vertical; padding: 9px 11px;
   border: 1px solid var(--r-line); border-radius: 12px; outline: 0;

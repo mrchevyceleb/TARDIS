@@ -1,7 +1,7 @@
 // Card drawer: edit a board card, read and add to its comment thread, move or
 // archive it, and see the Needs-you items that point at it.
 
-import { Archive, ArchiveRestore, Check, Copy, ExternalLink, Link2, MessageSquare, Plus, Send, Trash2, X } from 'lucide-react';
+import { Archive, ArchiveRestore, Check, Copy, ExternalLink, ImagePlus, Link2, MessageSquare, Plus, Send, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { Button } from '../components/Primitives';
@@ -23,7 +23,7 @@ import {
 } from '../data/desk';
 import { showToast } from '../native/shell';
 import type { Agent } from '../grok/agents';
-import { ActorChip, DiscussButton, canAnswer, errorText, linkLabel, priorityClass, useDeskChatOpen } from './deskParts';
+import { ActorChip, DeskImageThumbs, DeskSavedImages, DiscussButton, canAnswer, errorText, linkLabel, priorityClass, recipientAgent, useDeskChatOpen, useImageDrafts } from './deskParts';
 import { columnTitle, ownerKey, ownerOptions, projectOptions, useCardMover } from './DeskBoard';
 
 type Draft = { title: string; description: string; owner: string; project: string; priority: DeskPriority; links: string[] };
@@ -85,6 +85,8 @@ export function DeskCardDrawer({
   const [draft, setDraft] = useState<Draft>(current);
   const [linkInput, setLinkInput] = useState('');
   const [comment, setComment] = useState('');
+  const commentImages = useImageDrafts();
+  const commentFileRef = useRef<HTMLInputElement>(null);
   const [todoTitle, setTodoTitle] = useState('');
   const [busy, setBusy] = useState<'save' | 'comment' | 'todo' | null>(null);
   const [copied, setCopied] = useState(false);
@@ -224,16 +226,18 @@ export function DeskCardDrawer({
   const sendComment = async (event?: FormEvent) => {
     event?.preventDefault();
     const text = comment.trim();
-    if (!text || busy) return;
+    const images = commentImages.paths;
+    if ((!text && !images.length) || busy || commentImages.uploading) return;
     setBusy('comment');
     try {
-      const { notified } = await write(() => deskApi.comment(card.id, text), (d) => ({
+      const { notified } = await write(() => deskApi.comment(card.id, text, images), (d) => ({
         ...d,
         cards: d.cards.map((c) => (c.id === card.id
-          ? { ...c, comments: [...c.comments, { id: `pending-${Date.now()}`, author: d.owner, text, at: new Date().toISOString() }] }
+          ? { ...c, comments: [...c.comments, { id: `pending-${Date.now()}`, author: d.owner, text, images, at: new Date().toISOString() }] }
           : c)),
       }));
       setComment('');
+      commentImages.clear();
       setNotice(notified?.to
         ? notified.delivered ? `Sent to ${notified.to}. The reply lands here.` : `Saved, but ${notified.to} was not pinged. Try again in a minute.`
         : null);
@@ -315,7 +319,7 @@ export function DeskCardDrawer({
             <h2>{card.title}</h2>
           </div>
           <div className="desk-drawer-head-actions">
-            <DiscussButton subject={card.title} label="Discuss" onClick={() => discussOnDesk({ kind: 'card', id: card.id, title: card.title })} />
+            <DiscussButton subject={card.title} label="Discuss" onClick={() => (() => { const agent = recipientAgent(card.owner, card, agents); discussOnDesk({ kind: 'card', id: card.id, title: card.title, agentId: agent?.id, agentName: agent?.name }); })()} />
             <button ref={closeRef} type="button" className="desk-icon-btn" onClick={requestClose} aria-label="Close"><X size={17} /></button>
           </div>
         </header>
@@ -456,26 +460,50 @@ export function DeskCardDrawer({
                         </button>
                       ) : null}
                     </div>
-                    <p><Linkified text={c.text} /></p>
+                    {c.text ? <p><Linkified text={c.text} /></p> : null}
+                    <DeskSavedImages images={c.images} />
                   </li>
                 ))}
               </ol>
             ) : (
               <p className="desk-muted">No comments yet. Agents post short progress notes here.</p>
             )}
-            <form className="desk-composer" onSubmit={sendComment}>
+            <form
+              className="desk-composer"
+              onSubmit={sendComment}
+              onDragOver={(e) => { if (Array.from(e.dataTransfer.types).includes('Files')) e.preventDefault(); }}
+              onDrop={(e) => { e.preventDefault(); commentImages.addFiles(e.dataTransfer.files); }}
+            >
               <textarea
                 value={comment}
                 onChange={(e) => setComment(e.target.value)}
+                onPaste={(e) => {
+                  const files = Array.from(e.clipboardData.files ?? []);
+                  if (!files.length) return;
+                  if (!e.clipboardData.getData('text/plain')) e.preventDefault();
+                  commentImages.addFiles(files);
+                }}
                 onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void sendComment(); } }}
                 rows={2}
                 maxLength={4000}
-                placeholder={pinged ? `Leave a note. ${pinged} gets pinged and answers here.` : 'Leave a note for whoever picks this up'}
+                placeholder={pinged ? `Leave a note, paste images right in. ${pinged} gets pinged and answers here.` : 'Leave a note for whoever picks this up. Paste images right in.'}
                 aria-label="New comment"
               />
-              <Button tone="gold" type="submit" disabled={!comment.trim() || busy === 'comment'} aria-label="Post comment">
+              <button type="button" className="desk-notes-attach" onClick={() => commentFileRef.current?.click()} aria-label="Attach an image" title="Attach an image (or paste one)">
+                <ImagePlus size={14} aria-hidden="true" />
+              </button>
+              <input
+                ref={commentFileRef}
+                type="file"
+                accept="image/png,image/jpeg,image/gif,image/webp"
+                multiple
+                hidden
+                onChange={(e) => { if (e.target.files) commentImages.addFiles(e.target.files); e.target.value = ''; }}
+              />
+              <Button tone="gold" type="submit" disabled={(!comment.trim() && !commentImages.paths.length) || busy === 'comment' || commentImages.uploading || commentImages.drafts.some((d) => d.error)} aria-label="Post comment">
                 <Send size={14} />
               </Button>
+              <DeskImageThumbs drafts={commentImages.drafts} onRemove={commentImages.remove} />
             </form>
             {notice ? <p className="desk-muted desk-comment-notice" role="status">{notice}</p> : null}
           </section>

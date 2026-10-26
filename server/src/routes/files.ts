@@ -103,6 +103,53 @@ filesRouter.get('/raw', asyncHandler(async (req, res) => {
   createReadStream(realTarget).pipe(res);
 }));
 
+// Serve one saved upload (a Desk pasted image) back to the app. Path is
+// relative to the uploads store, images only, symlink-resolved containment,
+// same sandbox policy as /raw so a hostile SVG cannot reach /api/*.
+filesRouter.get('/uploaded', asyncHandler(async (req, res) => {
+  const requested = String(req.query.path || '');
+  if (!requested || requested.startsWith('/') || /^[A-Za-z]:[\\/]/.test(requested)) {
+    res.status(400).json({ error: 'path must be upload-relative' });
+    return;
+  }
+  if (!['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(extname(requested).toLowerCase())) {
+    res.status(415).json({ error: 'only uploaded images are served here' });
+    return;
+  }
+  let realRoot: string;
+  let realTarget: string;
+  try {
+    realRoot = await realpath(UPLOAD_STREAM_DIR);
+    realTarget = await realpath(resolvePath(UPLOAD_STREAM_DIR, requested));
+  } catch {
+    res.status(404).json({ error: 'file not found' });
+    return;
+  }
+  const rootWithSep = realRoot.endsWith(pathSep) ? realRoot : realRoot + pathSep;
+  if (!realTarget.startsWith(rootWithSep)) {
+    res.status(400).json({ error: 'path is outside the uploads store' });
+    return;
+  }
+  let info;
+  try {
+    info = await stat(realTarget);
+  } catch {
+    res.status(404).json({ error: 'file not found' });
+    return;
+  }
+  if (!info.isFile()) {
+    res.status(400).json({ error: 'path is not a file' });
+    return;
+  }
+  res.setHeader('Content-Type', mimeFor(realTarget));
+  res.setHeader('Content-Disposition', `inline; filename="${quoteFilename(basename(realTarget))}"`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; img-src data: blob:");
+  res.setHeader('Content-Length', String(info.size));
+  createReadStream(realTarget).on('error', () => res.destroy()).pipe(res);
+}));
+
 // One-time installer for the Windows-side `rivendell://` URL handler. Served
 // as a plain-text PowerShell script the operator downloads on each Windows PC and runs
 // once. The script registers an HKCU URL scheme entry and writes a sibling

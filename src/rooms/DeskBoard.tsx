@@ -453,7 +453,7 @@ function BoardCard({
         <button type="button" className="desk-card-title" onClick={onOpen} title={`Open: ${card.title} (${columnTitle(desk, card.column)}, owner ${card.owner.name})`}>
           <strong>{card.title}</strong>
         </button>
-        <DiscussButton subject={card.title} onClick={() => discussOnDesk({ kind: 'card', id: card.id, title: card.title })} />
+        <DiscussButton subject={card.title} onClick={() => discussOnDesk({ kind: 'card', id: card.id, title: card.title, agentId: card.owner.kind === 'agent' ? card.owner.id : card.createdBy?.kind === 'agent' ? card.createdBy.id : undefined, agentName: card.owner.kind === 'agent' ? card.owner.name : card.createdBy?.name })} />
       </div>
       <div className="desk-card-meta">
         <ActorChip actor={card.owner} />
@@ -561,7 +561,7 @@ function CardList({
                         <span className={`priority-dot ${priorityClass(card.priority)}`} aria-hidden="true" />
                         <button type="button" className="desk-table-title" onClick={() => onOpen(card.id)}>{card.title}</button>
                         {needsYou.get(card.id) ? <span className="desk-needs-pill">needs you</span> : null}
-                        <DiscussButton subject={card.title} onClick={() => discussOnDesk({ kind: 'card', id: card.id, title: card.title })} />
+                        <DiscussButton subject={card.title} onClick={() => discussOnDesk({ kind: 'card', id: card.id, title: card.title, agentId: card.owner.kind === 'agent' ? card.owner.id : card.createdBy?.kind === 'agent' ? card.createdBy.id : undefined, agentName: card.owner.kind === 'agent' ? card.owner.name : card.createdBy?.name })} />
                       </td>
                       <td><ActorChip actor={card.owner} /></td>
                       <td className="desk-hide-sm">{card.project ?? ''}</td>

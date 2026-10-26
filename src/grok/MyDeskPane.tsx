@@ -188,7 +188,7 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
                             onDismiss={pending.phase === 'undelivered' || pending.phase === 'conflict' || pending.phase === 'rejected' ? () => answers.dismiss(todo.id) : undefined}
                           />
                         ) : answerable && canAnswer(todo) && !going ? (
-                          <AnswerBar todo={todo} answers={answers} compact />
+                          <AnswerBar todo={todo} answers={answers} compact recipient={answerRecipient(todo, todo.cardId ? cardsById.get(todo.cardId) : undefined, agents)} />
                         ) : null}
                       </div>
                     </li>
