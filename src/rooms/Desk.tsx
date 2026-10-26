@@ -42,6 +42,7 @@ import {
   DiscussButton,
   PRIORITY_LABEL,
   answerRecipient,
+  recipientAgent,
   canAnswer,
   errorText,
   focusTodoAnswer,
@@ -543,7 +544,7 @@ function TodoRow({
   ) : todo.resolution && (todo.from.kind !== 'owner' || Boolean(todo.choices?.length)) ? (
     <div className="desk-answered"><p className="desk-answered-line"><Check size={13} className="desk-answered-icon" aria-hidden="true" /><span className="desk-answered-text">Resolved by {todo.resolution.by.name}: <strong>{todo.resolution.note}</strong></span></p></div>
   ) : answerable && canAnswer(todo) ? (
-    <AnswerBar todo={todo} answers={answers} />
+    <AnswerBar todo={todo} answers={answers} recipient={recipient()} />
   ) : null;
 
   // A row with details opens in place to read them in full. Clicking the title,
@@ -658,7 +659,10 @@ function TodoRow({
         </div>
       </div>
       <div className="desk-todo-actions">
-        <DiscussButton subject={todo.title} onClick={() => discussOnDesk({ kind: 'todo', id: todo.id, title: todo.title })} />
+        <DiscussButton subject={todo.title} onClick={() => {
+          const agent = recipientAgent(todo.from, card, agents);
+          discussOnDesk({ kind: 'todo', id: todo.id, title: todo.title, agentId: agent?.id, agentName: agent?.name });
+        }} />
         {onEdit ? (
           <button type="button" className="desk-icon-btn desk-edit-btn" onClick={onEdit} aria-label="Edit" title="Edit"><Pencil size={14} /></button>
         ) : null}

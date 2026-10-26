@@ -10,7 +10,7 @@ import { listAgents, type Agent } from '../chat/agents.ts';
 import { deliverTeamMessage } from '../chat/teamBus.ts';
 import { DESK_OWNER_NAME } from '../config.ts';
 import { isQuietHours, notifyTodoTouched } from '../lib/deskNotify.ts';
-import {
+import { normalizeDeskImages,
   DESK_COLUMNS,
   DeskError,
   answerTodo,
@@ -390,6 +390,7 @@ export async function notifyCardOwner(card: DeskCard, comment: DeskComment): Pro
     `${DESK_OWNER_NAME} commented on ${whose} Desk card [desk:${card.id}] "${card.title}":`,
     '',
     comment.text,
+    ...(comment.images?.length ? ['', `${DESK_OWNER_NAME} pasted ${comment.images.length} image${comment.images.length === 1 ? '' : 's'} with it. Open the file${comment.images.length === 1 ? '' : 's'} to look:`, ...comment.images] : []),
     '',
     `Read the card with board_card_get (id ${card.id}) if you need the context, then answer on it with board_card_comment. Move or update the card if this changes the plan.`,
   ].join('\n');
@@ -434,6 +435,10 @@ function answerMessage(todo: DeskTodo, recipient: Agent, card: DeskCard | undefi
   const lines = [`${DESK_OWNER_NAME} answered ${whose} Needs-you item [desk:${todo.id}] "${todo.title}".`, ''];
   if (answer.choice) lines.push(`Answer: ${answer.choice}`);
   if (answer.text) lines.push(answer.choice ? `${DESK_OWNER_NAME} added: ${answer.text}` : `Answer: ${answer.text}`);
+  if (answer.images?.length) {
+    if (!answer.choice && !answer.text) lines.push('Answer: (images only)');
+    lines.push('', `${DESK_OWNER_NAME} pasted ${answer.images.length} image${answer.images.length === 1 ? '' : 's'} with the notes. Open the file${answer.images.length === 1 ? '' : 's'} to look:`, ...answer.images);
+  }
   lines.push(
     '',
     'The item is already marked answered on the Desk, so there is nothing to complete.',
@@ -492,12 +497,12 @@ export async function deliverDeskAnswer(todoId: string, deliver: TeamMessenger =
     const answer = todo.answer!;
     const answerText = answer.choice
       ? (answer.text ? `${answer.choice}; ${answer.text}` : answer.choice)
-      : (answer.text ?? '');
+      : (answer.text ?? '(images only)');
     try {
       await deliver({
         from: DESK_OWNER_NAME,
         to: 'chief-of-staff',
-        text: `Copy for Max: ${DESK_OWNER_NAME} answered ${askerName}'s Needs-you item [desk:${todo.id}] "${todo.title}". Answer: ${answerText}. It went to ${recipient.name}; make sure they act on it.`,
+        text: `Copy for Max: ${DESK_OWNER_NAME} answered ${askerName}'s Needs-you item [desk:${todo.id}] "${todo.title}". Answer: ${answerText}${answer.images?.length && (answer.choice || answer.text) ? ` (plus ${answer.images.length} pasted image${answer.images.length === 1 ? '' : 's'})` : ''}. It went to ${recipient.name}; make sure they act on it.`,
         wait: false,
         source: 'desk',
       });
@@ -521,7 +526,9 @@ export function answerTodoHandler(deliver: TeamMessenger = deliverTeamMessage) {
     if (duplicate) {
       const choice = typeof input.choice === 'string' ? input.choice.replace(/\s+/g, ' ').trim().toLowerCase() : '';
       const text = typeof input.text === 'string' ? input.text.replace(/\r\n?/g, '\n').trim() : '';
-      const conflict = choice !== (todo.answer?.choice ?? '').toLowerCase() || text !== (todo.answer?.text ?? '');
+      const images = normalizeDeskImages(input.images);
+      const conflict = choice !== (todo.answer?.choice ?? '').toLowerCase() || text !== (todo.answer?.text ?? '')
+        || JSON.stringify(images) !== JSON.stringify(todo.answer?.images ?? []);
       res.json({ todo, duplicate: true, conflict });
       return;
     }
@@ -542,7 +549,7 @@ deskRouter.post('/cards/:id/comments', route(async (req, res) => {
   // card cannot loop.
   const author = resolveWriteAuthor(input, fetchSite(req));
   const fromOwnerUi = author.kind === 'owner';
-  const result = await commentCard(param(req, 'id'), input.text, author);
+  const result = await commentCard(param(req, 'id'), input.text, author, input.images);
   const notified = fromOwnerUi ? await notifyCardOwner(result.card, result.comment) : undefined;
   res.status(201).json(notified ? { ...result, notified } : result);
 }));

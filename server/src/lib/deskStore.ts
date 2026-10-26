@@ -8,8 +8,9 @@ import { checkpointCeiling, checkpointDueError } from './checkpointDue.ts';
 
 import { randomBytes } from 'node:crypto';
 import { copyFile, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
-import { dirname } from 'node:path';
-import { DESK_FILE } from '../config.ts';
+import { existsSync, realpathSync } from 'node:fs';
+import { dirname, extname, isAbsolute, join, resolve as resolvePath, sep } from 'node:path';
+import { DESK_FILE, STATE_DIR } from '../config.ts';
 import { closeMattAsksForAgent } from './mattAsks.ts';
 import { inQuietHours, isQuietExemptLane, lastQuietEndMs } from './quietHours.ts';
 import { LIVE_HOLD_CEILING_MS, agentsWithLiveTurns } from './laneLiveness.ts';
@@ -29,6 +30,9 @@ export type DeskActor = { kind: 'owner' | 'agent'; id: string; name: string };
 export type DeskAnswer = {
   choice?: string;
   text?: string;
+  /** Absolute paths of images the owner pasted into the notes box (server
+   *  uploads store). Agents open them from the delivery message. */
+  images?: string[];
   at: string;
   /** sent: the owning agent was told. failed: not yet (retried for a while,
    *  and a crash between saving and telling lands here too). none: the
@@ -60,7 +64,7 @@ export type DeskTodo = {
   resolution?: { note: string; at: string; by: DeskActor };
 };
 
-export type DeskComment = { id: string; author: DeskActor; text: string; at: string };
+export type DeskComment = { id: string; author: DeskActor; text: string; at: string; images?: string[] };
 
 export type DeskCard = {
   id: string;
@@ -281,7 +285,8 @@ export const DESK_LIMITS = {
   cards: 2000,
   choices: 4,
   choice: 40,
-  answerText: 1000,
+  answerText: 4000,
+  images: 4,
 } as const;
 
 /** Thrown for bad input or a missing record; routes map `status` to HTTP. */
@@ -412,17 +417,58 @@ function cleanChoices(value: unknown): string[] {
   return out.slice(0, DESK_LIMITS.choices);
 }
 
+const DESK_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
+
+/** Pasted-image paths live in the server's uploads store (the same root the
+ *  upload route writes to). */
+export function deskUploadsRoot(): string {
+  return join(STATE_DIR, 'uploads');
+}
+function underUploads(candidate: string): boolean {
+  try {
+    const real = realpathSync(candidate);
+    const root = realpathSync(deskUploadsRoot());
+    return real.startsWith(root.endsWith(sep) ? root : root + sep);
+  } catch { return false; }
+}
+/** Shape-only cleaning for data already on disk: never touches the
+ *  filesystem, so a deleted upload or a moved state dir can never make an
+ *  answer or comment vanish on reload. */
+export function normalizeDeskImages(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const candidate = resolvePath(item.trim());
+    if (!isAbsolute(candidate) || candidate.length > 600 || !DESK_IMAGE_EXTS.has(extname(candidate).toLowerCase())) continue;
+    if (!candidate.split(sep).includes('uploads') || out.includes(candidate)) continue;
+    out.push(candidate);
+    if (out.length >= DESK_LIMITS.images) break;
+  }
+  return out;
+}
+/** Input validation: every named image must be a real saved upload. */
+function requireImages(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > DESK_LIMITS.images) throw new DeskError(400, `images must be a list of up to ${DESK_LIMITS.images} uploaded image paths`);
+  const cleaned = normalizeDeskImages(value).filter((candidate) => existsSync(candidate) && underUploads(candidate));
+  if (cleaned.length !== value.length) throw new DeskError(400, 'images must be image files saved by the Desk upload');
+  return cleaned;
+}
+
 function normalizeAnswer(value: unknown, fallback: string): DeskAnswer | null {
   if (!value || typeof value !== 'object') return null;
   const raw = value as Record<string, unknown>;
   const choice = oneLine(raw.choice, DESK_LIMITS.choice);
   const text = clip(raw.text, DESK_LIMITS.answerText);
-  if (!choice && !text) return null;
+  const images = normalizeDeskImages(raw.images);
+  if (!choice && !text && !images.length) return null;
   // Unknown delivery reads as failed so the answer is retried, not lost.
   const delivery = raw.delivery === 'sent' || raw.delivery === 'none' ? raw.delivery : 'failed';
   const answer: DeskAnswer = { at: isoOr(raw.at, fallback), delivery };
   if (choice) answer.choice = choice;
   if (text) answer.text = text;
+  if (images.length) answer.images = images;
   if (typeof raw.sendingAt === 'string' && Number.isFinite(Date.parse(raw.sendingAt))) answer.sendingAt = raw.sendingAt;
   return answer;
 }
@@ -469,8 +515,9 @@ function normalizeComment(value: unknown, now: string): DeskComment | null {
   const id = oneLine(raw.id, 80);
   const text = clip(raw.text, DESK_LIMITS.comment);
   const author = normalizeActor(raw.author);
-  if (!id || !text || !author) return null;
-  return { id, author, text, at: isoOr(raw.at, now) };
+  const images = normalizeDeskImages(raw.images);
+  if (!id || (!text && !images.length) || !author) return null;
+  return { id, author, text, at: isoOr(raw.at, now), ...(images.length ? { images } : {}) };
 }
 
 function normalizeCard(value: unknown, now: string): DeskCard | null {
@@ -940,7 +987,7 @@ function applyTodoStatus(todo: DeskTodo, status: 'open' | 'done', now: string, r
   }
 }
 
-export type AnswerInput = { choice?: unknown; text?: unknown };
+export type AnswerInput = { choice?: unknown; text?: unknown; images?: unknown };
 
 /** Save the owner's answer and close the item in one locked write, so a
  *  double tap lands once (the second call gets `duplicate`). Delivery starts
@@ -960,7 +1007,8 @@ export function answerTodo(id: string, input: AnswerInput): Promise<AnswerResult
     }
     const wanted = typeof input.choice === 'string' ? input.choice.replace(/\s+/g, ' ').trim() : '';
     const text = typeof input.text === 'string' ? input.text.replace(/\r\n?/g, '\n').trim() : '';
-    if (!wanted && !text) throw new DeskError(400, 'choice or text is required');
+    const images = requireImages(input.images);
+    if (!wanted && !text && !images.length) throw new DeskError(400, 'choice, text or images is required');
     if (text.length > DESK_LIMITS.answerText) throw new DeskError(400, `text must be ${DESK_LIMITS.answerText} characters or fewer`);
     let choice = '';
     if (wanted) {
@@ -972,6 +1020,7 @@ export function answerTodo(id: string, input: AnswerInput): Promise<AnswerResult
     const answer: DeskAnswer = { at: now, delivery: tellSomeone ? 'failed' : 'none' };
     if (choice) answer.choice = choice;
     if (text) answer.text = text;
+    if (images.length) answer.images = images;
     todo.answer = answer;
     applyTodoStatus(todo, 'done', now);
     todo.updatedAt = now;
@@ -1126,7 +1175,7 @@ export function moveCard(id: string, column: unknown, index?: unknown): Promise<
   });
 }
 
-export async function commentCard(id: string, text: unknown, author: DeskActor): Promise<{ card: DeskCard; comment: DeskComment }> {
+export async function commentCard(id: string, text: unknown, author: DeskActor, imagesValue?: unknown): Promise<{ card: DeskCard; comment: DeskComment }> {
   // Resolve the author against the live roster BEFORE the mutation (so the
   // close is decided with real data), then close AFTER the save (so a failed
   // save never deletes asks).
@@ -1141,7 +1190,8 @@ export async function commentCard(id: string, text: unknown, author: DeskActor):
   const result = await mutate((data, now) => {
     const card = findCard(data, id);
     const body = requireClip(text, DESK_LIMITS.comment, 'text');
-    if (!body) throw new DeskError(400, 'text is required');
+    const images = requireImages(imagesValue);
+    if (!body && !images.length) throw new DeskError(400, 'text or images is required');
     if (card.comments.length >= DESK_LIMITS.commentsPerCard) {
       throw new DeskError(409, 'This card has too many comments; start a fresh card for the next phase.');
     }
@@ -1150,6 +1200,7 @@ export async function commentCard(id: string, text: unknown, author: DeskActor):
       author,
       text: body,
       at: now,
+      ...(images.length ? { images } : {}),
     };
     card.comments.push(comment);
     card.updatedAt = now;
