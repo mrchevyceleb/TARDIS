@@ -8,6 +8,7 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { listAgents, type Agent } from '../chat/agents.ts';
 import { deliverTeamMessage } from '../chat/teamBus.ts';
+import { sessionPolicy } from '../chat/sessionPolicy.ts';
 import { DESK_OWNER_NAME } from '../config.ts';
 import { isQuietHours, notifyTodoTouched } from '../lib/deskNotify.ts';
 import { normalizeDeskImages,
@@ -427,6 +428,20 @@ const isBeccaOrRiley = (actor: { id?: string; name?: string }): boolean =>
   BECCA_OR_RILEY.includes((actor.id ?? '').trim().toLowerCase())
   || BECCA_OR_RILEY.includes((actor.name ?? '').trim().toLowerCase());
 
+/** Who gets the "make sure they act on it" copy of an answer. Riley's game
+ *  studio reports to Riley, so answers to his people go to him (Matt, Oct 26
+ *  2026: "If one of Riley's people puts something on my desk, it should go to
+ *  him instead of bothering you"); everyone else's go to the Chief of Staff. */
+function answerCopyTarget(todo: DeskTodo, recipient: Agent): { id: string; name: string } | undefined {
+  const asker = todo.from.kind === 'agent' ? todo.from.id : undefined;
+  const lead = (id: string | undefined) => (id ? sessionPolicy(`bot-${id}`).reportsTo : undefined);
+  if (lead(asker) === 'riley' || lead(recipient.id) === 'riley') {
+    return recipient.id === 'riley' ? undefined : { id: 'riley', name: 'Riley' };
+  }
+  if (recipient.id === 'chief-of-staff' || isBeccaOrRiley(todo.from) || isBeccaOrRiley(recipient)) return undefined;
+  return { id: 'chief-of-staff', name: 'Max' };
+}
+
 function answerMessage(todo: DeskTodo, recipient: Agent, card: DeskCard | undefined): string {
   const answer = todo.answer!;
   const askedByRecipient = todo.from.kind === 'agent'
@@ -492,7 +507,8 @@ export async function deliverDeskAnswer(todoId: string, deliver: TeamMessenger =
   // says it went out, so a failed main delivery must not produce one (the
   // notifier's retry that finally lands will). A failed copy never changes
   // the item's delivery status and never causes a re-send.
-  if (recipient && notice.delivered && recipient.id !== 'chief-of-staff' && !isBeccaOrRiley(todo.from) && !isBeccaOrRiley(recipient)) {
+  const copyTo = recipient && notice.delivered ? answerCopyTarget(todo, recipient) : undefined;
+  if (recipient && copyTo) {
     const askerName = todo.from.kind === 'agent' ? todo.from.name : DESK_OWNER_NAME;
     const answer = todo.answer!;
     const answerText = answer.choice
@@ -501,13 +517,13 @@ export async function deliverDeskAnswer(todoId: string, deliver: TeamMessenger =
     try {
       await deliver({
         from: DESK_OWNER_NAME,
-        to: 'chief-of-staff',
-        text: `Copy for Max: ${DESK_OWNER_NAME} answered ${askerName}'s Needs-you item [desk:${todo.id}] "${todo.title}". Answer: ${answerText}${answer.images?.length && (answer.choice || answer.text) ? ` (plus ${answer.images.length} pasted image${answer.images.length === 1 ? '' : 's'})` : ''}. It went to ${recipient.name}; make sure they act on it.`,
+        to: copyTo.id,
+        text: `Copy for ${copyTo.name}: ${DESK_OWNER_NAME} answered ${askerName}'s Needs-you item [desk:${todo.id}] "${todo.title}". Answer: ${answerText}${answer.images?.length && (answer.choice || answer.text) ? ` (plus ${answer.images.length} pasted image${answer.images.length === 1 ? '' : 's'})` : ''}. It went to ${recipient.name}; make sure they act on it.`,
         wait: false,
         source: 'desk',
       });
     } catch (error) {
-      console.warn(`[desk] could not copy the answer to ${todo.id} to the Chief of Staff: ${(error as Error).message}`);
+      console.warn(`[desk] could not copy the answer to ${todo.id} to ${copyTo.name}: ${(error as Error).message}`);
     }
   }
   return recorded ? { ...notice, todo: recorded } : { ...notice, todo };
