@@ -5,9 +5,10 @@
  *  nothing, because thinking is never rendered. Once a person's message has
  *  gone REPLY_NUDGE_TOOLS tool calls or REPLY_NUDGE_MS with no assistant text,
  *  the runner hands the agent one harness note asking it to say where it is:
- *  Claude-family lanes end the turn at a tool boundary (nothing is cancelled)
- *  and open a new one with the note, Codex and Pi take it as a native steer.
- *  One nudge per person message; only a new person message re-arms it. */
+ *  Claude-family and Muse lanes end the turn at a tool boundary (nothing is
+ *  cancelled) and open a new one with the note, while Codex and Pi take it as
+ *  a native steer. One nudge per person message; only a new person message
+ *  re-arms it. */
 
 import type { SeqEvent } from './runner.ts';
 
@@ -26,10 +27,14 @@ export const REPLY_NUDGE_NOTE = '<rivendell-steer>System note, not a new message
  *  the runner turns into a visible message. Codex and Pi keep the plain note. */
 export const REPLY_NUDGE_NOTE_TOOL = '<rivendell-steer>System note, not a new message from the person: they have seen nothing from you since their message, and they cannot see your thinking. Call reply_now with audience: "owner" and one or two sentences for them (what you understood and what you are doing), then continue.</rivendell-steer>';
 
+export function isReplyNowTool(name: unknown): name is string {
+  return typeof name === 'string' && /^(mcp__.+__)?reply_now$/.test(name);
+}
+
 /** The text of a reply_now tool call (bare name or mcp__<server>__reply_now), or ''
  *  for any other block. The agent's exact text is kept; blank text counts as none. */
 export function replyNowText(block: { type?: string; name?: string; input?: { text?: unknown; audience?: unknown } } | null | undefined): string {
-  if (block?.type !== 'tool_use' || typeof block.name !== 'string' || !/^(mcp__.+__)?reply_now$/.test(block.name)) return '';
+  if (block?.type !== 'tool_use' || !isReplyNowTool(block.name)) return '';
   if (block.input?.audience !== 'owner') return '';
   const text = block.input?.text;
   return typeof text === 'string' && text.trim() ? text : '';
