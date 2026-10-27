@@ -149,8 +149,16 @@ export type CliLogin = {
   status: 'starting' | 'waiting' | 'checking' | 'connected' | 'failed' | 'cancelled';
   expiresAt: number; url?: string; userCode?: string; accountId?: string; email?: string; message?: string;
 };
-export function selectCliAccount(engine: string, agentId: string, accountId: string): Promise<{ ok: boolean }> {
-  return apiJson('/api/accounts/select', { method: 'POST', body: JSON.stringify({ engine, agentId, accountId }) });
+export async function selectCliAccount(engine: string, agentId: string, accountId: string): Promise<{ ok: boolean; accountId: string }> {
+  const response = await fetch('/api/accounts/select', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ engine, agentId, accountId }),
+  });
+  const data = await response.json().catch(() => null) as { ok?: boolean; accountId?: string; error?: string } | null;
+  if (!response.ok) throw new Error(data?.error || `${response.status} ${response.statusText}`);
+  if (data?.ok !== true || data.accountId !== accountId) throw new Error('TARDIS did not confirm the selected account.');
+  return data as { ok: boolean; accountId: string };
 }
 export function startCliSignIn(engine: string): Promise<CliLogin> {
   return apiJson('/api/accounts/logins', { method: 'POST', body: JSON.stringify({ engine }) });
