@@ -442,7 +442,6 @@ function LaneControls({ picker, accountContext, rejectedCodexModel }: { picker: 
           />
         </>
       )}
-      <SelectionFeedback picker={picker} />
       <span className="lane-note">{counselChipInfo(picker).blurb}</span>
     </div>
   );
@@ -520,7 +519,10 @@ export function CounselPopover({
       onMouseDown={(e) => e.stopPropagation()}
     >
       <div className="pop-h">Choose a companion</div>
-      <LaneList picker={picker} accountContext={accountContext} rejectedCodexModel={rejectedCodexModel} />
+      <SelectionFeedback picker={picker} />
+      <div className="modelpop-list">
+        <LaneList picker={picker} accountContext={accountContext} rejectedCodexModel={rejectedCodexModel} />
+      </div>
     </div>
   );
 }
@@ -548,6 +550,7 @@ export function CounselSheet({
           <i />
         </button>
         <h2>Choose a companion</h2>
+        <SelectionFeedback picker={picker} />
         <div className="sheet-list">
           <LaneList picker={picker} accountContext={accountContext} rejectedCodexModel={rejectedCodexModel} />
         </div>
