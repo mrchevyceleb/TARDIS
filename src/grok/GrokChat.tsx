@@ -97,6 +97,11 @@ export type GrokChatProps = {
 export function GrokChat(props: GrokChatProps) {
   const [brainSaveError, setBrainSaveError] = useState<string | null>(null);
   const [brainSaveNotice, setBrainSaveNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!brainSaveNotice) return;
+    const timer = window.setTimeout(() => setBrainSaveNotice(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [brainSaveNotice]);
   const savedBrain = useRef<BrainDraft>({ engine: props.agent?.engine ?? 'claude', model: props.agent?.model, effort: props.agent?.effort });
   useEffect(() => {
     if (props.agent) savedBrain.current = { engine: props.agent.engine, model: props.agent.model, effort: props.agent.effort };
@@ -270,7 +275,7 @@ export function GrokChat(props: GrokChatProps) {
           savedBrain.current = { engine: saved.engine, model: saved.model, effort: saved.effort };
           desiredBrain.current = canonicalBrain({ engine: saved.engine, model: saved.model, effort: saved.effort });
           picker.applyAuthoritativeBrain(saved.engine, saved.model, saved.effort);
-          setBrainSaveNotice(notice);
+          setBrainSaveNotice(notice ?? 'Selection saved. New replies will use it.');
         }
         props.onAgentBrainSaved();
       } catch (error) {

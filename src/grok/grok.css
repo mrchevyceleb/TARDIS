@@ -2062,6 +2062,7 @@ button.bt-account-row:focus-visible, .bt-account-add:focus-visible, .bt-account-
 .bt-account-row:hover .bt-account-select-arrow, .bt-account-row:focus-visible .bt-account-select-arrow { opacity: 1; transform: translateX(2px); }
 .bt-account-promise { font-size: 10px; color: var(--r-ink-mute); margin: 12px 0; }
 .bt-account-notice { padding: 10px; border-radius: 12px; font-size: 12px; line-height: 1.5; color: var(--r-ink); background: color-mix(in srgb, var(--r-brass) 12%, transparent); overflow-wrap: anywhere; }
+.bt-account-notice.is-error { background: color-mix(in srgb, var(--r-rose) 14%, transparent); }
 .bt-account-add, .bt-account-login-link { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 42px; border: 1px solid color-mix(in srgb, var(--r-brass) 38%, var(--r-line)); border-radius: 13px; background: color-mix(in srgb, var(--r-brass) 12%, transparent); color: var(--r-ink); font: inherit; font-size: 12px; cursor: pointer; text-decoration: none; transition: transform .15s ease, background .15s ease; }
 .bt-account-add:hover, .bt-account-login-link:hover { transform: translateY(-2px); background: color-mix(in srgb, var(--r-brass) 22%, transparent); }
 .bt-account-signin { margin-top: 12px; padding: 12px; border: 1px solid var(--r-line); border-radius: 16px; }

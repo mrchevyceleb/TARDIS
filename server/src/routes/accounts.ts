@@ -6,6 +6,7 @@ import { preferredSubscriptionEnv, chooseCliProfile, cliProfiles } from '../lib/
 import { startCliLogin, getCliLogin, submitCliLoginCode, cancelCliLogin } from '../lib/cliLogin.ts';
 import { accountForProfile, cliProfileForEnv, listCliAccounts, type AccountEngine } from '../lib/cliAccounts.ts';
 import { asyncHandler } from './helpers.ts';
+import { trustedRequestOrigin } from '../lib/origin.ts';
 
 export const accountsRouter = Router();
 
@@ -68,11 +69,12 @@ accountsRouter.get('/', asyncHandler(async (req, res) => {
 
 // The app is private-network only. Mutations still refuse cross-site browser
 // requests so another page cannot change an agent's paid account or start OAuth.
+// Use the same trust policy as every other local control surface: loopback
+// aliases and operator-configured remote origins work, DNS-rebinding pairs do not.
 accountsRouter.use((req, res, next) => {
   if (req.method === 'GET') { next(); return; }
-  const origin = req.get('origin');
-  if (req.get('sec-fetch-site') === 'cross-site' || origin && (() => { try { return new URL(origin).host !== req.get('host'); } catch { return true; } })()) {
-    res.status(403).json({ error: 'Open accounts from TARDIS to make this change.' }); return;
+  if (req.get('sec-fetch-site') === 'cross-site' || !trustedRequestOrigin(req.headers)) {
+    res.status(403).json({ error: 'This TARDIS address is not trusted for account changes. Use the configured TARDIS address or add this one to RIVENDELL_ALLOWED_ORIGINS.' }); return;
   }
   next();
 });
