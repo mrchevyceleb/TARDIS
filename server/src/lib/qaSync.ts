@@ -103,6 +103,7 @@ export async function syncQaFromGithub(snapshot = deskPrs()): Promise<QaSyncResu
 async function syncQaFromGithubOnce(snapshot = deskPrs()): Promise<QaSyncResult> {
   const authoritative = snapshotAuthoritative(snapshot);
   let added = 0;
+  const landed: DeskPr[] = [];
   if (authoritative) {
     const known = new Set((await qaAllItems()).map((i) => `${i.repo.trim().toLowerCase()}#${i.pr}`));
     for (const pr of snapshot.prs) {
@@ -119,9 +120,15 @@ async function syncQaFromGithubOnce(snapshot = deskPrs()): Promise<QaSyncResult>
       // Sam hands it over in #dev-testing (Matt, Oct 26 2026), so the board
       // never holds work a tester was never told about.
       const created = await upsertQaItem({ repo: pr.repo, pr: pr.number, title: pr.title, app: appForRepo(pr.repo), stagingUrl, status: 'parked' });
-      if (created) added += 1;
+      if (created) {
+        added += 1;
+        // Only fresh merges go to Sam; an old merge first seen now lands
+        // parked and quiet (Matt, Oct 26 2026: no stale PRs to testers).
+        if (Date.now() - Date.parse(pr.updatedAt) < 24 * 60 * 60 * 1000) landed.push(pr);
+      }
     }
   }
+  if (landed.length > 0) await notifySamOfMerges(landed);
   const now = Date.now();
   const missing = (await qaAllItems())
     .filter((i) => i.status !== 'validated' && i.status !== 'parked' && !i.stagingUrl && now - (previewTried.get(i.id) ?? 0) > PREVIEW_RETRY_MS)
@@ -136,6 +143,22 @@ async function syncQaFromGithubOnce(snapshot = deskPrs()): Promise<QaSyncResult>
   const drift = authoritative ? await qaDrift(items, snapshot.prs) : [];
   const open = items.filter((i) => i.status !== 'validated').length;
   return { added, authoritative, drift, open };
+}
+
+/** Every staging merge goes to Sam, who routes it (Matt, Oct 27 2026): Sud
+ *  for a PR on Matt's priorities list unless Matt is handling it himself,
+ *  otherwise Martin (Operly) or Edgar (Studio). One message per sweep carries
+ *  every new merge, so a burst of merges wakes Sam once. Best-effort: a
+ *  failed delivery never stalls the board. */
+async function notifySamOfMerges(prs: DeskPr[]): Promise<void> {
+  const lines = prs.map((pr) => `- ${appForRepo(pr.repo)}: ${pr.title} ${pr.url}`);
+  const text = `Merged to staging, yours to route:\n${lines.join('\n')}`;
+  try {
+    const { deliverTeamMessage } = await import('../chat/teamBus.ts');
+    await deliverTeamMessage({ from: 'TARDIS', to: 'samwise', text, wait: false });
+  } catch (err) {
+    console.warn(`[qa] merge notice to Sam failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 function truthFor(items: QaItem[], prs: DeskPr[]) {
