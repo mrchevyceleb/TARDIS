@@ -151,11 +151,14 @@ async function syncQaFromGithubOnce(snapshot = deskPrs()): Promise<QaSyncResult>
  *  every new merge, so a burst of merges wakes Sam once. Best-effort: a
  *  failed delivery never stalls the board. */
 async function notifySamOfMerges(prs: DeskPr[]): Promise<void> {
-  const lines = prs.map((pr) => `- ${appForRepo(pr.repo)}: ${pr.title} ${pr.url}`);
+  const shown = prs.slice(0, 30);
+  const lines = shown.map((pr) => `- ${appForRepo(pr.repo)}: ${pr.title.slice(0, 120)} ${pr.url}`);
+  if (prs.length > shown.length) lines.push(`- and ${prs.length - shown.length} more on the QA board`);
   const text = `Merged to staging, yours to route:\n${lines.join('\n')}`;
   try {
     const { deliverTeamMessage } = await import('../chat/teamBus.ts');
-    await deliverTeamMessage({ from: 'TARDIS', to: 'samwise', text, wait: false });
+    const sent = await deliverTeamMessage({ from: 'TARDIS', to: 'samwise', text, wait: false });
+    if (!sent.delivered) console.warn(`[qa] merge notice to Sam not delivered: ${sent.reason ?? 'unknown'}`);
   } catch (err) {
     console.warn(`[qa] merge notice to Sam failed: ${err instanceof Error ? err.message : String(err)}`);
   }
