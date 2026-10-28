@@ -4,7 +4,7 @@
 
 import { AlertTriangle, Check, ChevronDown, ChevronRight, ClipboardList, ExternalLink, Inbox, LayoutGrid, MessageSquare, Pencil, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { FormEvent, KeyboardEvent, MouseEvent } from 'react';
+import type { FormEvent, KeyboardEvent, MouseEvent, RefObject } from 'react';
 import { DesktopAlertsButton } from '../components/NeedsYouBadge';
 import { Button, Chip } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
@@ -19,6 +19,7 @@ import {
   deskApi,
   discussOnDesk,
   dueLabel,
+  isTodoOpen,
   openAgentThread,
   peekDeskFocus,
   sortOpenTodos,
@@ -53,6 +54,7 @@ import {
   useTodoAnswers,
   type TodoAnswers,
 } from './deskParts';
+import { SnoozedTodos, SnoozeTodoControl } from './DeskSnooze';
 import { DeskBoard } from './DeskBoard';
 import { DeskCardDrawer } from './DeskCardDrawer';
 import { DeskTeamView } from './DeskTeamView';
@@ -80,6 +82,8 @@ export function Desk() {
   const [boardStyle, setBoardStyle] = useState<BoardStyle>(() => (localStorage.getItem(BOARD_STYLE_KEY) === 'columns' ? 'columns' : 'team'));
   const [openCardId, setOpenCardId] = useState<string | null>(null);
   const [flash, setFlash] = useState<{ id: string; at: number } | null>(null);
+  // Focus requests belong to the Desk, surviving Home/Board tab remounts.
+  const handledSnoozeFocus = useRef<number | null>(null);
   useEffect(() => { localStorage.setItem(TAB_KEY, tab); }, [tab]);
   useEffect(() => { localStorage.setItem(BOARD_STYLE_KEY, boardStyle); }, [boardStyle]);
 
@@ -119,7 +123,7 @@ export function Desk() {
       if (!isFetching) void refetch();
       return;
     }
-    const todoId = first ? sortOpenTodos(data.todos.filter((t) => t.status === 'open'))[0]?.id : ref.id;
+    const todoId = first ? sortOpenTodos(data.todos.filter((t) => isTodoOpen(t)))[0]?.id : ref.id;
     const found = ref.kind === 'card' && !first ? data.cards.some((c) => c.id === ref.id) : Boolean(todoId) && data.todos.some((t) => t.id === todoId);
     if (!found && stale) {
       if (!isFetching) void refetch();
@@ -143,7 +147,7 @@ export function Desk() {
     setTab('home');
     if (todoId && found) setFlash({ id: todoId, at: Date.now() });
   }, [focusReq, data, dataUpdatedAt, errorUpdatedAt, isFetching, refetch, openCardId]);
-  const openTodos = useMemo(() => sortOpenTodos((data?.todos ?? []).filter((t) => t.status === 'open')), [data]);
+  const openTodos = sortOpenTodos((data?.todos ?? []).filter((t) => isTodoOpen(t)));
   const liveCards = useMemo(() => (data?.cards ?? []).filter((c) => !c.archived), [data]);
   const moving = liveCards.filter((c) => c.column === 'in_progress').length;
   const notStarted = liveCards.filter((c) => c.column === 'not_started').length;
@@ -188,14 +192,14 @@ export function Desk() {
         tab === 'home'
           ? (
             <>
-              <NeedsYou desk={data} agents={agents} onOpenCard={setOpenCardId} flash={flash} answerable={answerable} />
+              <NeedsYou desk={data} agents={agents} onOpenCard={setOpenCardId} flash={flash} handledSnoozeFocus={handledSnoozeFocus} answerable={answerable} />
               <PeopleRows desk={data} agents={agents} onOpenCard={setOpenCardId} refreshedAt={Math.max(dataUpdatedAt, errorUpdatedAt)} />
             </>
           )
           : boardStyle === 'team'
             ? (
               <>
-                <DeskTeamView desk={data} agents={agents} onOpenCard={setOpenCardId} onShowBoard={() => setBoardStyle('columns')} />
+                <DeskTeamView desk={data} dataUpdatedAt={Math.max(dataUpdatedAt, errorUpdatedAt)} agents={agents} onOpenCard={setOpenCardId} onShowBoard={() => setBoardStyle('columns')} />
               </>
             )
             : (
@@ -229,11 +233,12 @@ export function Desk() {
 type TodoDraft = { title: string; detail: string; due: string; priority: DeskPriority; link: string };
 const emptyTodo: TodoDraft = { title: '', detail: '', due: '', priority: 'normal', link: '' };
 
-function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
+function NeedsYou({ desk, agents, onOpenCard, flash, handledSnoozeFocus, answerable }: {
   desk: DeskSnapshot;
   agents: Agent[];
   onOpenCard: (id: string) => void;
   flash: { id: string; at: number } | null;
+  handledSnoozeFocus: RefObject<number | null>;
   answerable: boolean;
 }) {
   const write = useDeskWrite();
@@ -267,7 +272,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
   // A row being answered stays where it was (showing the answer) until the
   // server confirms, then leaves for Done like a check-off.
   const answering = answers.pending;
-  const open = useMemo(() => sortOpenTodos(desk.todos.filter((t) => t.status === 'open' || answering.has(t.id))), [desk.todos, answering]);
+  const open = sortOpenTodos(desk.todos.filter((t) => isTodoOpen(t) || answering.has(t.id)));
   const done = useMemo(
     () => desk.todos
       .filter((t) => t.status === 'done' && !answering.has(t.id))
@@ -433,6 +438,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash, answerable }: {
         </div>
       )}
 
+      <SnoozedTodos todos={desk.todos} focus={flash} handledFocus={handledSnoozeFocus} />
       {done.length ? (
         <details className="desk-done" ref={doneRef}>
           <summary>
@@ -653,6 +659,7 @@ function TodoRow({
               <span>{linkLabel(todo.link, agents)}</span>
             </a>
           ) : null}
+          {!isDone && !pending ? <SnoozeTodoControl todo={todo} /> : null}
           <span className="desk-age" title={new Date(isDone ? todo.completedAt ?? todo.updatedAt : todo.createdAt).toLocaleString()}>
             {isDone ? `${todo.answer ? 'answered' : 'done'} ${agoText(todo.completedAt ?? todo.updatedAt)}` : ageLabel(todo.createdAt)}
           </span>

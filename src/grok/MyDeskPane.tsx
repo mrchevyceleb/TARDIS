@@ -12,6 +12,7 @@ import {
   agoText,
   deskApi,
   dueLabel,
+  isTodoOpen,
   focusDeskRef,
   sortOpenTodos,
   useDesk,
@@ -26,6 +27,7 @@ import { showToast } from '../native/shell';
 import { ActorChip, AnswerBar, AnsweredNote, answerRecipient, canAnswer, errorText, focusTodoAnswer, priorityClass, useDeskAgents, useTodoAnswers } from '../rooms/deskParts';
 import '../rooms/desk.css';
 import './myDesk.css';
+import { SnoozedTodos, SnoozeTodoControl } from '../rooms/DeskSnooze';
 import { MattsPriorities } from './MattsPriorities';
 
 /** How many rows each list shows before "N more on the Desk". */
@@ -38,7 +40,7 @@ const LEAVE_MS = 420;
 /** Cards that are the owner's, plus any with an open Needs-you item (the
  * five-stage board's needs-Matt flag: waiting is now a card state, not a column). */
 export function myCards(desk: DeskSnapshot): DeskCard[] {
-  const needsMatt = new Set(desk.todos.filter((t) => t.status === 'open' && t.cardId).map((t) => t.cardId as string));
+  const needsMatt = new Set(desk.todos.filter((t) => isTodoOpen(t) && t.cardId).map((t) => t.cardId as string));
   return desk.cards
     .filter((c) => !c.archived && c.column !== 'in_production' && (c.owner.kind === 'owner' || needsMatt.has(c.id)))
     .sort((a, b) =>
@@ -66,13 +68,10 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
 
   // A row being answered keeps its place (showing the answer) until it leaves.
   const answering = answers.pending;
-  const todos = useMemo(
-    () => sortOpenTodos((data?.todos ?? []).filter((t) => t.status === 'open' || answering.has(t.id))),
-    [data, answering],
-  );
+  const todos = sortOpenTodos((data?.todos ?? []).filter((t) => isTodoOpen(t) || answering.has(t.id)));
   const cardsById = useMemo(() => new Map((data?.cards ?? []).map((c) => [c.id, c])), [data]);
-  const cards = useMemo(() => (data ? myCards(data) : []), [data]);
-  const openCount = todos.filter((t) => t.status === 'open' && !answering.has(t.id)).length;
+  const cards = data ? myCards(data) : [];
+  const openCount = todos.filter((t) => isTodoOpen(t) && !answering.has(t.id)).length;
   const shownTodos = todos.slice(0, limits.todos);
   const shownCards = cards.slice(0, limits.cards);
   const hidden = todos.length - shownTodos.length + (cardsOpen ? cards.length - shownCards.length : 0);
@@ -154,7 +153,7 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
                   const going = leaving.has(todo.id);
                   const pending = answers.pending.get(todo.id);
                   return (
-                    <li key={todo.id} className={`md-todo ${priorityClass(todo.priority)}${going ? ' is-leaving' : ''}${pending ? ` is-answered is-${pending.phase}` : ''}`}>
+                    <li key={todo.id} data-todo-id={todo.id} className={`md-todo ${priorityClass(todo.priority)}${going ? ' is-leaving' : ''}${pending ? ` is-answered is-${pending.phase}` : ''}`}>
                       <button
                         type="button"
                         className={`md-check${canAnswer(todo) ? ' is-question' : ''}`}
@@ -173,12 +172,13 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
                           title="Open on the Desk"
                         >
                           <span className="md-row-title">{todo.title}</span>
-                          <span className="md-meta">
-                            <ActorChip actor={todo.from} compact />
-                            {due ? <Chip tone={due.tone}>{due.text}</Chip> : null}
-                            <span className="md-age">{ageLabel(todo.createdAt)}</span>
-                          </span>
                         </button>
+                        <div className="md-meta">
+                          <ActorChip actor={todo.from} compact />
+                          {due ? <Chip tone={due.tone}>{due.text}</Chip> : null}
+                          <span className="md-age">{ageLabel(todo.createdAt)}</span>
+                          {!pending ? <SnoozeTodoControl todo={todo} disabled={going} /> : null}
+                        </div>
                         {pending ? (
                           <AnsweredNote
                             answer={pending}
@@ -202,6 +202,7 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
               </div>
             )}
 
+            <SnoozedTodos todos={data.todos} />
             <MattsPriorities />
 
             <button type="button" className="md-sub md-sub-toggle" aria-expanded={cardsOpen} onClick={() => setCardsOpen((v) => !v)}>

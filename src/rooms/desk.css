@@ -817,3 +817,32 @@ span.desk-todo-text { cursor: default; }
 .desk-answer.is-invited { outline: 2px solid var(--r-gold); outline-offset: 4px; border-radius: 10px; background: color-mix(in srgb, var(--r-gold) 8%, transparent); }
 
 .is-answered.is-rejected > .desk-check { color: var(--r-amber); border-color: var(--r-amber); background: color-mix(in srgb, var(--r-amber) 14%, var(--r-bg-deep)); animation: none; }
+
+/* Snooze stays in the row flow, so every choice fits on a phone. */
+.desk-snooze { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.desk-snooze-trigger { color: var(--r-silver); }
+.desk-snooze-trigger[aria-disabled="true"] { opacity: 0.6; cursor: wait; }
+.desk-snooze-options { display: flex; flex-wrap: wrap; gap: 5px; animation: bt-msg-in 0.2s ease; }
+.desk-snooze .desk-mini-btn { min-height: 34px; border-radius: 999px; transition: transform 0.15s ease, background 0.15s ease; }
+.desk-snooze .desk-mini-btn:hover:not(:disabled) { transform: translateY(-1px); background: color-mix(in srgb, var(--r-silver) 12%, transparent); }
+.desk-snooze .desk-mini-btn:active:not(:disabled) { transform: scale(0.95); }
+.desk-snooze button:focus-visible, .desk-snoozed-title:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; }
+.desk-snoozed { margin: 14px 0; }
+.desk-snoozed-list { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 8px; }
+.desk-snoozed-list > li { scroll-margin-top: calc(96px + env(safe-area-inset-top, 0px)); min-width: 0; padding: 10px; border: 1px solid var(--r-line); border-radius: 12px; background: var(--r-bg-card); }
+.desk-snoozed-title { display: block; text-align: left; color: var(--r-ink); font-size: 13px; overflow-wrap: anywhere; }
+.desk-snoozed-title:hover { color: var(--r-gold); }
+.desk-snoozed-wake { display: flex; align-items: center; gap: 5px; margin-top: 5px; color: var(--r-ink-soft); font-size: 11px; }
+@media (pointer: coarse) {
+  .desk-snoozed > summary { min-height: 44px; }
+  .desk-snooze .desk-mini-btn { min-height: 44px; padding-inline: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .desk-snooze .desk-mini-btn { transition: none; }
+  .desk-snooze-options { animation: none; }
+  .desk-snooze .desk-mini-btn:hover:not(:disabled), .desk-snooze .desk-mini-btn:active:not(:disabled) { transform: none; }
+}
+
+.desk-todo-meta > .desk-snooze, .md-meta > .desk-snooze { margin-top: 0; }
+.desk-snoozed-list .desk-snoozed-detail { color: var(--r-ink-soft); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.desk-snoozed-list > li.is-lit { border-color: var(--r-gold); box-shadow: 0 0 0 2px color-mix(in srgb, var(--r-gold) 20%, transparent); }

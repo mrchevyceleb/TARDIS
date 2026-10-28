@@ -34,12 +34,22 @@ export type DeskTodo = {
   link?: string;
   status: 'open' | 'done';
   completedAt?: string;
+  snoozedUntil?: string;
+  snoozeReturnedPriority?: DeskPriority;
   cardId?: string;
   /** Up to four one-tap answers the agent offered (Yes / No when absent). */
   choices?: string[];
   answer?: DeskAnswer;
   resolution?: { note: string; at: string; by: DeskActor };
 };
+
+export function isTodoSnoozed(todo: DeskTodo, now = Date.now()): boolean {
+  return todo.status === 'open' && Boolean(todo.snoozedUntil && Date.parse(todo.snoozedUntil) > now);
+}
+
+export function isTodoOpen(todo: DeskTodo, now = Date.now()): boolean {
+  return todo.status === 'open' && !isTodoSnoozed(todo, now);
+}
 
 export type DeskComment = { id: string; author: DeskActor; text: string; at: string; images?: string[] };
 
@@ -91,7 +101,7 @@ export type DeskSnapshot = {
 };
 
 /** An open high-priority item, as the summary poll lists it (newest first). */
-export type DeskHighItem = { id: string; title: string; createdAt: string; from: string };
+export type DeskHighItem = { id: string; title: string; createdAt: string; from: string; notificationKey?: string; alertAt?: string; suppressAlert?: boolean };
 
 export type DeskSummary = {
   rev: number;
@@ -266,7 +276,7 @@ const fetchDesk = ({ signal }: { signal: AbortSignal }) => apiJson<DeskSnapshot>
 /** Full desk, polled while the room is open. Agents write here from their own
  *  turns, so a short interval plus refetch-on-focus keeps it live. */
 export function useDesk() {
-  return useQuery({
+  const query = useQuery({
     queryKey: DESK_KEY,
     queryFn: fetchDesk,
     refetchInterval: 10_000,
@@ -274,6 +284,10 @@ export function useDesk() {
     staleTime: 2_000,
     retry: 1,
   });
+  // Track the existing poll clock as well as each caller's own query props.
+  // Deadlines can pass even when React Query shares an unchanged payload.
+  void query.dataUpdatedAt;
+  return query;
 }
 
 /** Same snapshot for chat pills, without a poll of its own: every pill shares
@@ -435,8 +449,8 @@ export function withHeadline(slot: AgentTaskSlot): AgentTaskInfo {
  *  snapshot, so the Needs-you badge changes with the row (a delta, because the
  *  cached snapshot can be older than the summary). */
 function shiftSummary(summary: DeskSummary, before: DeskSnapshot, after: DeskSnapshot): DeskSummary {
-  const openIds = (d: DeskSnapshot) => new Set(d.todos.filter((t) => t.status === 'open').map((t) => t.id));
-  const highCount = (d: DeskSnapshot) => d.todos.filter((t) => t.status === 'open' && t.priority === 'high').length;
+  const openIds = (d: DeskSnapshot) => new Set(d.todos.filter((t) => isTodoOpen(t)).map((t) => t.id));
+  const highCount = (d: DeskSnapshot) => d.todos.filter((t) => isTodoOpen(t) && t.priority === 'high').length;
   const stillOpen = openIds(after);
   const openDelta = openIds(before).size - stillOpen.size;
   const highDelta = highCount(before) - highCount(after);
@@ -526,6 +540,7 @@ export const deskApi = {
   addTodo: (input: TodoPatch & { title: string }) => apiJson<{ todo: DeskTodo }>('/api/desk/todos', json('POST', { ...input, source: 'ui' })),
   updateTodo: (id: string, patch: TodoPatch) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}`, json('PATCH', patch)),
   completeTodo: (id: string, note?: string) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/complete`, json('POST', note ? { note } : {})),
+  snoozeTodo: (id: string, hours: number | null) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/snooze`, json('POST', { hours })),
   reopenTodo: (id: string) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/reopen`, json('POST', {})),
   deleteTodo: (id: string) => apiJson<void>(`/api/desk/todos/${enc(id)}`, json('DELETE')),
   answerTodo: (id: string, input: TodoAnswerInput) => apiJson<TodoAnswerResult>(`/api/desk/todos/${enc(id)}/answer`, json('POST', { ...input, source: 'ui' })),

@@ -21,7 +21,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { DESK_NOTIFY_FILE } from '../config.ts';
-import { readDesk, writeJsonAtomic, type DeskCard, type DeskData, type DeskTodo } from './deskStore.ts';
+import { isTodoOpen, readDesk, writeJsonAtomic, type DeskCard, type DeskData, type DeskTodo } from './deskStore.ts';
 
 const TICK_MS = 60_000;
 const DAY_START_MIN = 8 * 60;
@@ -142,7 +142,7 @@ export function digestPayload(open: DeskTodo[], baseUrl: string, cards: DeskCard
   const rank = (t: DeskTodo) => Number(t.priority === 'high' && !isParkedHigh(t, cards));
   // A missing or unreadable createdAt is not known to be old: it counts as new.
   const created = (t: DeskTodo) => {
-    const ms = Date.parse(t.createdAt);
+    const ms = Date.parse(t.snoozedUntil ?? t.createdAt);
     return Number.isFinite(ms) ? ms : nowMs;
   };
   const ranked = [...open].sort((a, b) => rank(b) - rank(a) || created(a) - created(b));
@@ -214,7 +214,7 @@ export function senderFromEnv(env: NodeJS.ProcessEnv = process.env, opts: { endp
 /** One alert's progress. Finished once sent, seeded on first run, skipped, or
  *  given up on. `sendingAt` is the claim written just before the network call. */
 type Send = { tries: number; lastTryAt?: string; sendingAt?: string; sentAt?: string; seededAt?: string; failedAt?: string; skipped?: 'empty' };
-type ItemState = { push?: Send; renudge?: Send; doneSeen?: boolean };
+type ItemState = { push?: Send; renudge?: Send; doneSeen?: boolean; wakeAt?: string };
 type NotifyState = { version: 1; createdAt: string; items: Record<string, ItemState>; digests: Record<string, Send> };
 
 function finished(send: Send | undefined): boolean {
@@ -251,6 +251,8 @@ async function loadState(file: string, log: (line: string) => void): Promise<Not
       for (const [id, value] of Object.entries(parsed.items)) {
         if (!isRecord(value)) continue;
         const item: ItemState = {};
+        if (typeof value.wakeAt === 'string') item.wakeAt = value.wakeAt;
+        if (value.doneSeen === true) item.doneSeen = true;
         const push = cleanSend(value.push);
         const renudge = cleanSend(value.renudge);
         if (push) item.push = push;
@@ -372,9 +374,11 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
     const fresh: NotifyState = { version: 1, createdAt: stamp, items: {}, digests: {} };
     let seeded = 0;
     for (const todo of data.todos) {
-      if (todo.status !== 'open') continue;
-      if (Date.parse(todo.createdAt) >= bootMs) continue;
-      fresh.items[todo.id] = { push: { tries: 0, seededAt: stamp }, renudge: { tries: 0, seededAt: stamp } };
+      if (todo.status !== 'open' || todo.priority !== 'high') continue;
+      // A lost notification state file keeps the existing no-backlog policy.
+      // Future wake-ups still re-arm on this scheduler, including after restart.
+      if (Date.parse(todo.snoozedUntil ?? todo.createdAt) >= bootMs && todo.snoozeReturnedPriority !== 'high') continue;
+      fresh.items[todo.id] = { wakeAt: todo.snoozedUntil, push: { tries: 0, seededAt: stamp }, renudge: { tries: 0, seededAt: stamp } };
       seeded += 1;
     }
     // Same for digest slots that have already started today: a first boot at
@@ -459,8 +463,20 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
     // A pushed item that was completed and then reopened is asking for the owner
     // again: forget that it was pushed so it alerts like a new one.
     for (const todo of data.todos) {
-      const item = st.items[todo.id];
+      const item = st.items[todo.id] ?? (todo.status === 'open' && (todo.priority === 'high' || todo.snoozedUntil) ? (st.items[todo.id] = {}) : undefined);
       if (!item) continue;
+      // Deadline doubles as the durable alert generation. It cannot be missed
+      // when snooze and wake both happened while this process was stopped.
+      if (item.wakeAt !== todo.snoozedUntil) {
+        delete item.push;
+        delete item.renudge;
+        if (todo.snoozeReturnedPriority === 'high') {
+          item.push = { tries: 0, seededAt: at.toISOString() };
+          item.renudge = { tries: 0, seededAt: at.toISOString() };
+        }
+        item.wakeAt = todo.snoozedUntil;
+        dirty = true;
+      }
       if (todo.status === 'done' && !item.doneSeen) {
         item.doneSeen = true;
         dirty = true;
@@ -472,7 +488,7 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
         log(`[desk-notify] ${todo.id} "${todo.title}" was reopened: alerting again if it is high priority`);
       }
     }
-    const open = data.todos.filter((t) => t.status === 'open');
+    const open = data.todos.filter((t) => isTodoOpen(t, nowMs));
     const dayHours = inPushHours(clock);
     const weekday = !isWeekend(clock);
     const stamp = at.toISOString();
@@ -485,7 +501,7 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
       weekdayOnly: kind === 'renudge',
       build: (fresh) => {
         const current = fresh.todos.find((t) => t.id === todo.id);
-        return current?.status === 'open' && current.priority === 'high' && !isParkedHigh(current, fresh.cards)
+        return current && isTodoOpen(current, now().getTime()) && current.snoozedUntil === todo.snoozedUntil && current.priority === 'high' && !isParkedHigh(current, fresh.cards)
           ? itemPayload(current, kind, baseUrl)
           : null;
       },
@@ -495,7 +511,7 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
       what: `digest ${key}`,
       weekdayOnly: true,
       build: (fresh) => {
-        const stillOpen = fresh.todos.filter((t) => t.status === 'open');
+        const stillOpen = fresh.todos.filter((t) => isTodoOpen(t, now().getTime()));
         return stillOpen.length ? digestPayload(stillOpen, baseUrl, fresh.cards, now().getTime()) : null;
       },
       onGone: () => { send.skipped = 'empty'; },
