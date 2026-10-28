@@ -12,6 +12,7 @@ import {
   ageLabel,
   agoText,
   deskApi,
+  isTodoOpen,
   discussOnDesk,
   hoursSince,
   useDeskWrite,
@@ -128,11 +129,11 @@ export function DeskBoard({ desk, agents, onOpenCard }: Props) {
 
   const owners = useMemo(() => ownerOptions(desk, agents), [desk, agents]);
   const projects = useMemo(() => projectOptions(desk), [desk]);
-  const openTodoCounts = useMemo(() => {
+  const openTodoCounts = (() => {
     const counts = new Map<string, number>();
-    for (const t of desk.todos) if (t.status === 'open' && t.cardId) counts.set(t.cardId, (counts.get(t.cardId) ?? 0) + 1);
+    for (const t of desk.todos) if (isTodoOpen(t) && t.cardId) counts.set(t.cardId, (counts.get(t.cardId) ?? 0) + 1);
     return counts;
-  }, [desk.todos]);
+  })();
 
   const visible = useMemo(() => desk.cards.filter((c) =>
     (filters.archived || !c.archived)

@@ -25,6 +25,8 @@ import { normalizeDeskImages,
   moveCard,
   parseColumn,
   readDesk,
+  isTodoOpen,
+  snoozeTodo,
   setAnswerDelivery,
   setTodoStatus,
   setTodoStatusWithChange,
@@ -209,7 +211,7 @@ deskRouter.get('/prs', route(async (_req, res) => {
 /** Cheap poll for the workspace badge and desktop alerts. */
 deskRouter.get('/summary', route(async (_req, res) => {
   const data = await readDesk();
-  const open = data.todos.filter((t) => t.status === 'open');
+  const open = data.todos.filter((t) => isTodoOpen(t));
   const high = open.filter((t) => t.priority === 'high');
   res.json({
     rev: data.rev,
@@ -222,9 +224,17 @@ deskRouter.get('/summary', route(async (_req, res) => {
     // ships before this server restarts degrades cleanly.
     answerable: true,
     high: [...high]
-      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .sort((a, b) => Date.parse(b.snoozedUntil ?? b.createdAt) - Date.parse(a.snoozedUntil ?? a.createdAt))
       .slice(0, 5)
-      .map((t) => ({ id: t.id, title: t.title, createdAt: t.createdAt, from: t.from.name })),
+      .map((t) => ({
+        id: t.id,
+        title: t.title,
+        createdAt: t.createdAt,
+        alertAt: t.snoozedUntil ?? t.createdAt,
+        suppressAlert: t.snoozeReturnedPriority === 'high',
+        notificationKey: t.snoozedUntil && t.snoozeReturnedPriority !== 'high' ? `${t.id}:${t.snoozedUntil}` : t.id,
+        from: t.from.name,
+      })),
     quiet: isQuietHours(),
   });
 }));
@@ -249,6 +259,16 @@ deskRouter.patch('/todos/:id', route(async (req, res) => {
   const input = body(req);
   const todo = await updateTodo(param(req, 'id'), input, input.status === 'done' && input.note ? resolveCloser(input, fetchSite(req)) : undefined);
   if (input.priority !== undefined) notifyTodoTouched();
+  res.json({ todo });
+}));
+
+deskRouter.post('/todos/:id/snooze', route(async (req, res) => {
+  const input = body(req);
+  if (fetchSite(req) !== 'same-origin' || input.agent || input.author) {
+    throw new DeskError(403, 'Only you can snooze an item from the Desk.');
+  }
+  const todo = await snoozeTodo(param(req, 'id'), input.hours);
+  notifyTodoTouched();
   res.json({ todo });
 }));
 

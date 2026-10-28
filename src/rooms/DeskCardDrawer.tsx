@@ -10,6 +10,8 @@ import {
   ageLabel,
   agoText,
   deskApi,
+  isTodoOpen,
+  isTodoSnoozed,
   discussOnDesk,
   dueLabel,
   focusDeskRef,
@@ -21,6 +23,7 @@ import {
   type DeskPriority,
   type DeskSnapshot,
 } from '../data/desk';
+import { SnoozeTodoControl, wakeLabel } from './DeskSnooze';
 import { showToast } from '../native/shell';
 import type { Agent } from '../grok/agents';
 import { ActorChip, DeskImageThumbs, DeskSavedImages, DiscussButton, canAnswer, errorText, linkLabel, priorityClass, recipientAgent, useDeskChatOpen, useImageDrafts } from './deskParts';
@@ -157,6 +160,8 @@ export function DeskCardDrawer({
         return;
       }
       if (event.key !== 'Escape') return;
+      // Let the nested snooze choices consume Escape before closing the drawer.
+      if ((event.target as Element | null)?.closest?.('.desk-snooze')?.querySelector('.desk-snooze-options')) return;
       event.stopPropagation();
       closeRequest.current();
     };
@@ -412,26 +417,27 @@ export function DeskCardDrawer({
           </form>
 
           <section className="desk-drawer-section">
-            <h3>Needs you <span className="desk-count is-quiet">{linkedTodos.filter((t) => t.status === 'open').length}</span></h3>
+            <h3>Needs you <span className="desk-count is-quiet">{linkedTodos.filter((t) => isTodoOpen(t)).length}</span></h3>
             {linkedTodos.length ? (
               <ul className="desk-mini-todos">
                 {linkedTodos.map((todo) => {
-                  const due = todo.status === 'open' ? dueLabel(todo.due) : null;
+                  const due = isTodoOpen(todo) ? dueLabel(todo.due) : null;
                   return (
-                    <li key={todo.id} className={`${priorityClass(todo.priority)}${todo.status === 'done' ? ' is-done' : ''}`}>
+                    <li key={todo.id} data-todo-id={todo.id} className={`${priorityClass(todo.priority)}${todo.status === 'done' ? ' is-done' : ''}`}>
                       <button
                         type="button"
+                        disabled={isTodoSnoozed(todo)}
                         className={`desk-check${canAnswer(todo) ? ' is-question' : ''}`}
                         onClick={() => {
                           if (canAnswer(todo)) { onClose(); focusDeskRef({ kind: 'todo', id: todo.id }); }
                           else if (todo.status === 'done' && reopenId !== todo.id) setReopenId(todo.id);
                           else { setReopenId(null); void toggleTodo(todo.id, todo.status === 'open'); }
                         }}
-                        aria-label={canAnswer(todo) ? `Answer ${todo.title}` : todo.status === 'open' ? `Mark ${todo.title} done` : `${reopenId === todo.id ? 'Confirm reopen' : 'Reopen'} ${todo.title}`}
+                        aria-label={isTodoSnoozed(todo) ? `Snoozed: ${todo.title}` : canAnswer(todo) ? `Answer ${todo.title}` : todo.status === 'open' ? `Mark ${todo.title} done` : `${reopenId === todo.id ? 'Confirm reopen' : 'Reopen'} ${todo.title}`}
                       >
                         {canAnswer(todo) ? <MessageSquare size={13} aria-hidden="true" /> : <Check size={13} aria-hidden="true" />}
                       </button>
-                      <span className="desk-mini-todo-text">{todo.title}{reopenId === todo.id ? <span className="desk-answer-error" role="status"> Clear the saved answer and ask again? Tap the check once more.</span> : null}</span>
+                      <div className="desk-mini-todo-text">{todo.title}{isTodoSnoozed(todo) ? <small className="desk-snoozed-wake">Snoozed until {wakeLabel(todo.snoozedUntil!)}</small> : null}{reopenId === todo.id ? <span className="desk-answer-error" role="status"> Clear the saved answer and ask again? Tap the check once more.</span> : null}{todo.status === 'open' ? <SnoozeTodoControl todo={todo} /> : null}</div>
                       {due ? <span className={`desk-due is-${due.tone}`}>{due.text}</span> : null}
                     </li>
                   );

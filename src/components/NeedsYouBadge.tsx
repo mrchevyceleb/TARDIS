@@ -81,15 +81,16 @@ function writeSeen(ids: string[]): void {
  *  when quiet ends. A focused window, or an item over a day old, is marked
  *  seen without an alert. */
 function planAlerts(high: DeskHighItem[], seen: string[] | null, opts: { quiet: boolean; focused: boolean; now: number }): { seen: string[]; fire: DeskHighItem[] } | null {
-  if (seen === null) return { seen: high.map((h) => h.id).slice(-SEEN_CAP), fire: [] };
+  if (seen === null) return { seen: high.map((h) => h.notificationKey ?? h.id).slice(-SEEN_CAP), fire: [] };
   const known = new Set(seen);
-  const fresh = high.filter((h) => h.id && !known.has(h.id));
+  const fresh = high.filter((h) => h.id && !known.has(h.notificationKey ?? h.id));
   if (!fresh.length || opts.quiet) return null;
   const fire = opts.focused ? [] : fresh.filter((h) => {
-    const created = Date.parse(h.createdAt);
+    if (h.suppressAlert) return false;
+    const created = Date.parse(h.alertAt ?? h.createdAt);
     return !Number.isFinite(created) || opts.now - created < DAY_MS;
   });
-  return { seen: [...seen, ...fresh.map((h) => h.id)].slice(-SEEN_CAP), fire };
+  return { seen: [...seen, ...fresh.map((h) => h.notificationKey ?? h.id)].slice(-SEEN_CAP), fire };
 }
 
 function notificationsSupported(): boolean {

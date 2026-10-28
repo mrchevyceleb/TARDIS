@@ -57,12 +57,25 @@ export type DeskTodo = {
   link?: string;
   status: 'open' | 'done';
   completedAt?: string;
+  /** A future instant hides the item. Kept after waking as its alert generation. */
+  snoozedUntil?: string;
+  /** Priority when the owner brought it back, so a later promotion can alert. */
+  snoozeReturnedPriority?: DeskPriority;
   cardId?: string;
   /** Pick-one options for a one-tap answer (the Desk offers Yes / No when absent). */
   choices?: string[];
   answer?: DeskAnswer;
   resolution?: { note: string; at: string; by: DeskActor };
 };
+
+/** Visibility is derived from the stored deadline, even before a scheduler tick. */
+export function isTodoSnoozed(todo: DeskTodo, now = Date.now()): boolean {
+  return todo.status === 'open' && Boolean(todo.snoozedUntil && Date.parse(todo.snoozedUntil) > now);
+}
+
+export function isTodoOpen(todo: DeskTodo, now = Date.now()): boolean {
+  return todo.status === 'open' && !isTodoSnoozed(todo, now);
+}
 
 export type DeskComment = { id: string; author: DeskActor; text: string; at: string; images?: string[] };
 
@@ -489,6 +502,11 @@ function normalizeTodo(value: unknown, now: string): DeskTodo | null {
     priority: parsePriority(raw.priority) ?? 'normal',
     status: raw.status === 'done' ? 'done' : 'open',
   };
+  if (todo.status === 'open' && validIso(raw.snoozedUntil)) {
+    todo.snoozedUntil = raw.snoozedUntil;
+    const returnedPriority = parsePriority(raw.snoozeReturnedPriority);
+    if (returnedPriority) todo.snoozeReturnedPriority = returnedPriority;
+  }
   const detail = clip(raw.detail, DESK_LIMITS.detail);
   if (detail) todo.detail = detail;
   const due = parseDue(raw.due);
@@ -929,6 +947,23 @@ export function createTodo(input: TodoInput, from: DeskActor): Promise<DeskTodo>
   });
 }
 
+/** Only the owner route can park a question. Agents keep seeing the same item. */
+export function snoozeTodo(id: string, hours: unknown): Promise<DeskTodo> {
+  if (hours !== null && ![24, 48, 72, 168].includes(hours as number)) {
+    throw new DeskError(400, 'Choose 24h, 48h, 72h or 1 week.');
+  }
+  return mutate((data, now) => {
+    const todo = findTodo(data, id);
+    if (todo.status !== 'open') throw new DeskError(409, 'This item is already done.');
+    if (hours === null && !isTodoSnoozed(todo, Date.parse(now))) return new Unchanged(todo);
+    // Bringing it back early also creates a fresh alert generation.
+    todo.snoozedUntil = new Date(Date.parse(now) + (hours === null ? 0 : (hours as number) * 3_600_000)).toISOString();
+    if (hours === null) todo.snoozeReturnedPriority = todo.priority; else delete todo.snoozeReturnedPriority;
+    todo.updatedAt = now;
+    return todo;
+  });
+}
+
 export function updateTodo(id: string, input: TodoInput, by?: DeskActor): Promise<DeskTodo> {
   return mutate((data, now) => {
     const todo = findTodo(data, id);
@@ -977,6 +1012,8 @@ function applyTodoStatus(todo: DeskTodo, status: 'open' | 'done', now: string, r
     if (!note || !resolution?.by) throw new DeskError(409, 'This question needs an answer. Choose an answer on the Desk, or pass your name and a note explaining how this exact item was resolved. Nothing was closed.');
     todo.resolution = { note, by: resolution.by, at: now };
   }
+  delete todo.snoozedUntil;
+  delete todo.snoozeReturnedPriority;
   todo.status = status;
   if (status === 'done') todo.completedAt = now;
   else {

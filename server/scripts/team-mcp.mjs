@@ -406,7 +406,7 @@ const TOOLS = [
   },
   {
     name: 'desk_todos',
-    description: `List ${OWNER}'s "Needs you" items with ids (default: open ones). Check it before adding an item, and to see whether something you asked for was answered. Pass id to read one item in full (for a [desk:todo-…] reference).`,
+    description: `List ${OWNER}'s "Needs you" items with ids (default: open ones, including snoozed items with their wake time). Snoozed items already exist: do not add a duplicate. Check it before adding an item, and to see whether something you asked for was answered. Pass id to read one item in full (for a [desk:todo-…] reference).`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -615,6 +615,7 @@ function clipLine(text, max) {
 
 function describeTodo(t) {
   const bits = [
+    t.status === 'open' && Date.parse(t.snoozedUntil) > Date.now() ? `SNOOZED until ${t.snoozedUntil}` : null,
     t.status === 'done' ? `DONE ${ago(t.completedAt ?? t.updatedAt)}` : null,
     `from ${t.from?.name ?? '?'}`,
     t.due ? `due ${t.due}` : null,
