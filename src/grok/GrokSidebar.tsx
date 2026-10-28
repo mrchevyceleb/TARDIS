@@ -12,13 +12,14 @@ import { hasRecentTurnSignal } from '../chat/utils/livePresence';
 // [+] creates a companion (name/role/engine/scope). Every row = a companion and
 // its ONE persistent forever-thread. Scratch threads surface via search only.
 
-import { Fragment, useCallback, useMemo, useRef, useState, useEffect, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { Fragment, useCallback, useId, useMemo, useRef, useState, useEffect, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Activity,
   Bell,
   BellOff,
   Check,
+  ChevronUp,
   PanelLeftClose,
   Pencil,
   AppWindow,
@@ -35,6 +36,7 @@ import {
   LayoutGrid,
   Mail,
   Moon,
+  Palette,
   Pin,
   Plug,
   Plus,
@@ -55,6 +57,7 @@ import { agentMark, DISC_INK, agentColor, agentAvatarUrl, sameChatId, CHAT_COLOR
 import { agentTaskMap, agentTaskSubline, useDeskCardsLight, useDeskPrs, type AgentTaskSlot, type DeskPr, type TaskQueryState } from '../data/desk';
 import { useLive } from '../chat/hooks/useLive';
 import { useJobsSummary } from '../chat/hooks/useJobs';
+import { useMediaQuery } from '../chat/hooks/useMediaQuery';
 import { RailJobsBadge } from '../chat/components/jobs/RailJobsBadge';
 import type { HistoryItem } from './history';
 import { NativeOpenHelper } from '../components/NativeOpenHelper';
@@ -346,6 +349,7 @@ type RowSlot = { group: string; next: string | null; seqRow?: string };
 
 // Desktop rail width, dragged from its right edge and kept per browser.
 const RAIL_WIDTH_KEY = 'rivendell:rail-width';
+const MOBILE_FOOTER_KEY = 'rivendell:mobile-footer-open';
 const RAIL_MIN = 280;
 const RAIL_MAX = 560;
 const RAIL_DEFAULT = 350;
@@ -369,6 +373,12 @@ export function BotRail(props: BotRailProps) {
   const [query, setQuery] = useState('');
   const [pluginsOpen, setPluginsOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
+  const [footerOpen, setFooterOpen] = useState(() => {
+    try { return localStorage.getItem(MOBILE_FOOTER_KEY) === 'true'; } catch { return false; }
+  });
+  const footerId = useId();
+  const mobileFooter = useMediaQuery('(max-width: 760px), (pointer: coarse) and (max-width: 1180px)');
+  const footerTrigger = useRef<HTMLButtonElement>(null);
   const appearanceTrigger = useRef<HTMLButtonElement>(null);
   const [agentMenu, setAgentMenu] = useState<AgentMenuState | null>(null);
   // Manual order drag-and-drop: the dragged agent id + where it would land.
@@ -1020,7 +1030,7 @@ export function BotRail(props: BotRailProps) {
         {props.agents.length && !query.trim() ? <RailNewGroup onCreate={railGroups.create} /> : null}
       </div>
 
-      <div className="bt-rail-foot" style={{ position: 'relative' }} ref={pluginsRef}>
+      <div className={`bt-rail-foot${footerOpen ? ' is-open' : ''}`} style={{ position: 'relative' }} ref={pluginsRef}>
         {pluginsOpen ? (
           <div className="bt-plugins-pop" role="menu">
             <div className="bt-plug-h">Rooms</div>
@@ -1042,19 +1052,46 @@ export function BotRail(props: BotRailProps) {
             <NativeOpenHelper />
           </div>
         ) : null}
-        <button className="bt-foot-row" aria-current={props.activeRoom === 'usage' ? 'page' : undefined} onClick={() => props.onOpenRoom('usage')}><Fuel size={17} /> Usage</button>
-        <a className="bt-foot-row" href="/api/session-health/report" target="_blank" rel="noreferrer"><Activity size={17} /> Session health</a>
-        <button className="bt-foot-row" onClick={() => { setAppearanceOpen(false); setPluginsOpen((o) => !o); }} aria-haspopup="menu" aria-expanded={pluginsOpen}>
-          <Plug size={17} /> Plugins
-        </button>
-        <button ref={appearanceTrigger} className="bt-foot-row" title="Your appearance settings" onClick={() => { setPluginsOpen(false); setAppearanceOpen((open) => !open); }} aria-haspopup="dialog" aria-expanded={appearanceOpen} aria-controls={appearanceOpen ? 'appearance-settings' : undefined}>
-          <span className="bt-disc">Y</span> You
+        <div className="bt-foot-details" id={footerId} inert={mobileFooter && !footerOpen}>
+          <div className="bt-foot-details-inner">
+            <button className="bt-foot-row" aria-current={props.activeRoom === 'usage' ? 'page' : undefined} onClick={() => props.onOpenRoom('usage')}><Fuel size={17} /> Usage</button>
+            <a className="bt-foot-row" href="/api/session-health/report" target="_blank" rel="noreferrer"><Activity size={17} /> Session health</a>
+            <button className="bt-foot-row" onClick={() => { setAppearanceOpen(false); setPluginsOpen((o) => !o); }} aria-haspopup="menu" aria-expanded={pluginsOpen}>
+              <Plug size={17} /> Plugins
+            </button>
+            <button ref={appearanceTrigger} className="bt-foot-row" title="Your appearance settings" onClick={() => { setPluginsOpen(false); setAppearanceOpen((open) => !open); }} aria-haspopup="dialog" aria-expanded={appearanceOpen} aria-controls={appearanceOpen ? 'appearance-settings' : undefined}>
+              <span className="bt-disc bt-foot-desktop-label">Y</span><Palette size={17} className="bt-foot-mobile-label" /> <span className="bt-foot-desktop-label">You</span><span className="bt-foot-mobile-label">Appearance</span>
+            </button>
+          </div>
+        </div>
+        <button
+          ref={footerTrigger}
+          className="bt-foot-row bt-foot-toggle"
+          aria-expanded={footerOpen}
+          aria-controls={footerId}
+          aria-label="You, sidebar tools"
+          onClick={() => {
+            setPluginsOpen(false); setAppearanceOpen(false);
+            const next = !footerOpen;
+            setFooterOpen(next);
+            try { localStorage.setItem(MOBILE_FOOTER_KEY, String(next)); } catch { /* private mode */ }
+          }}
+        >
+          <span className="bt-disc">Y</span> You <ChevronUp size={17} className="bt-foot-chevron" aria-hidden="true" />
         </button>
         {appearanceOpen ? <AppearanceSettings
           appearance={props.appearance}
           syncStatus={props.appearanceSync}
           onAppearance={props.onAppearance}
-          onClose={(restoreFocus = true) => { setAppearanceOpen(false); if (restoreFocus) appearanceTrigger.current?.focus(); }}
+          onClose={(restoreFocus = true) => {
+            setAppearanceOpen(false);
+            if (restoreFocus) {
+              const target = mobileFooter && !props.drawerOpen
+                ? document.querySelector<HTMLButtonElement>('.bt-menubtn[aria-label="Open sidebar"]')
+                : mobileFooter && !footerOpen ? footerTrigger.current : appearanceTrigger.current;
+              target?.focus();
+            }
+          }}
           triggerRef={appearanceTrigger}
         /> : null}
         {idle && !anyBusy && !props.drawerOpen ? <div className="tardis-blink" aria-hidden="true">Don't blink.</div> : null}
