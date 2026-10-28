@@ -34,7 +34,7 @@ test('snooze persists on the item, hides alerts and wakes once across notifier r
     await createDeskNotifier(options).tick();
     assert.equal(sends.length, 0);
     let resetPushes = 0;
-    const resetOptions = { ...options, stateFile: join(dir, 'future-notify.json'), send: async () => { resetPushes++; return { ok: true as const }; } };
+    const resetOptions = { ...options, stateFile: join(dir, 'future-notify.json'), send: async (payload: { title: string }) => { if (payload.title === todo.title) resetPushes++; return { ok: true as const }; } };
     await createDeskNotifier(resetOptions).tick();
     at = new Date(Date.parse(sleeping.snoozedUntil!));
     assert.equal(isTodoOpen(sleeping, at.getTime()), true);
@@ -68,14 +68,16 @@ test('snooze persists on the item, hides alerts and wakes once across notifier r
     const normalReturn = await snoozeTodo(normal.id, null);
     assert.equal(normalReturn.snoozeReturnedPriority, 'normal');
     await createDeskNotifier(options).tick();
-    const normalReset = { ...options, stateFile: join(dir, 'normal-reset.json') };
+    assert.equal(sends.filter((title) => title === normal.title).length, 0, 'normal-priority early return stays silent with intact state');
+    const normalResetSends: string[] = [];
+    const normalReset = { ...options, stateFile: join(dir, 'normal-reset.json'), send: async (payload: { title: string }) => { normalResetSends.push(payload.title); return { ok: true as const }; } };
     await createDeskNotifier(normalReset).tick();
-    assert.equal(sends.filter((title) => title === normal.title).length, 0, 'normal-priority early return stays silent');
+    assert.equal(normalResetSends.filter((title) => title === normal.title).length, 0, 'normal-priority early return stays silent after state reset');
     await updateTodo(normal.id, { priority: 'high' });
     await createDeskNotifier(options).tick();
     assert.equal(sends.filter((title) => title === normal.title).length, 1, 'promotion alerts with intact notification state');
     await createDeskNotifier(normalReset).tick();
-    assert.equal(sends.filter((title) => title === normal.title).length, 2, 'promotion also alerts after notification state reset');
+    assert.equal(normalResetSends.filter((title) => title === normal.title).length, 1, 'promotion also alerts after notification state reset');
     const done = await setTodoStatus(todo.id, 'done', { note: 'Reviewed', by: owner });
     assert.equal(done.snoozedUntil, undefined);
     await assert.rejects(snoozeTodo(todo.id, 24), /already done/);

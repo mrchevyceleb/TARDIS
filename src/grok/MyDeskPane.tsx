@@ -4,7 +4,7 @@
 // is a check-off there.
 
 import { AlertTriangle, ArrowUpRight, Check, ChevronDown, MessageSquare, RotateCcw } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Chip } from '../components/Primitives';
 import {
   PRIORITY_RANK,
@@ -63,6 +63,7 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
   const [cardsOpen, setCardsOpen] = useState(false);
   const sectionRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
+  const metaPrefix = useId();
   /** Where keyboard focus goes once a checked row has left the list. */
   const refocus = useRef<{ id: string; index: number } | null>(null);
 
@@ -168,17 +169,19 @@ export function MyDeskPane({ limits, onOpenDesk }: { limits: MyDeskLimits; onOpe
                         <button
                           type="button"
                           className="md-row-main"
+                          aria-label={`${todo.title}, open on the Desk`}
+                          aria-describedby={`${metaPrefix}-${todo.id}`}
                           onClick={() => focusDeskRef({ kind: 'todo', id: todo.id })}
                           title="Open on the Desk"
                         >
                           <span className="md-row-title">{todo.title}</span>
+                          <span id={`${metaPrefix}-${todo.id}`} className="md-meta">
+                            <ActorChip actor={todo.from} compact />
+                            {due ? <Chip tone={due.tone}>{due.text}</Chip> : null}
+                            <span className="md-age">{ageLabel(todo.createdAt)}</span>
+                          </span>
                         </button>
-                        <div className="md-meta">
-                          <ActorChip actor={todo.from} compact />
-                          {due ? <Chip tone={due.tone}>{due.text}</Chip> : null}
-                          <span className="md-age">{ageLabel(todo.createdAt)}</span>
-                          {!pending ? <SnoozeTodoControl todo={todo} disabled={going} /> : null}
-                        </div>
+                        {!pending ? <SnoozeTodoControl todo={todo} disabled={going} /> : null}
                         {pending ? (
                           <AnsweredNote
                             answer={pending}

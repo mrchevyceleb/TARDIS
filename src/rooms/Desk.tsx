@@ -20,6 +20,7 @@ import {
   discussOnDesk,
   dueLabel,
   isTodoOpen,
+  isTodoSnoozed,
   openAgentThread,
   peekDeskFocus,
   sortOpenTodos,
@@ -83,7 +84,7 @@ export function Desk() {
   const [openCardId, setOpenCardId] = useState<string | null>(null);
   const [flash, setFlash] = useState<{ id: string; at: number } | null>(null);
   // Focus requests belong to the Desk, surviving Home/Board tab remounts.
-  const handledSnoozeFocus = useRef<number | null>(null);
+  const handledFlash = useRef<number | null>(null);
   useEffect(() => { localStorage.setItem(TAB_KEY, tab); }, [tab]);
   useEffect(() => { localStorage.setItem(BOARD_STYLE_KEY, boardStyle); }, [boardStyle]);
 
@@ -192,7 +193,7 @@ export function Desk() {
         tab === 'home'
           ? (
             <>
-              <NeedsYou desk={data} agents={agents} onOpenCard={setOpenCardId} flash={flash} handledSnoozeFocus={handledSnoozeFocus} answerable={answerable} />
+              <NeedsYou desk={data} agents={agents} onOpenCard={setOpenCardId} flash={flash} handledFlash={handledFlash} answerable={answerable} />
               <PeopleRows desk={data} agents={agents} onOpenCard={setOpenCardId} refreshedAt={Math.max(dataUpdatedAt, errorUpdatedAt)} />
             </>
           )
@@ -233,18 +234,19 @@ export function Desk() {
 type TodoDraft = { title: string; detail: string; due: string; priority: DeskPriority; link: string };
 const emptyTodo: TodoDraft = { title: '', detail: '', due: '', priority: 'normal', link: '' };
 
-function NeedsYou({ desk, agents, onOpenCard, flash, handledSnoozeFocus, answerable }: {
+function NeedsYou({ desk, agents, onOpenCard, flash, handledFlash, answerable }: {
   desk: DeskSnapshot;
   agents: Agent[];
   onOpenCard: (id: string) => void;
   flash: { id: string; at: number } | null;
-  handledSnoozeFocus: RefObject<number | null>;
+  handledFlash: RefObject<number | null>;
   answerable: boolean;
 }) {
   const write = useDeskWrite();
   const answers = useTodoAnswers(desk.todos);
+  const needsRef = useRef<HTMLElement>(null);
   const doneRef = useRef<HTMLDetailsElement>(null);
-  const [lit, setLit] = useState<string | null>(null);
+  const [lit, setLit] = useState<{ id: string; at: number } | null>(null);
   const [draft, setDraft] = useState<TodoDraft>(emptyTodo);
   const [more, setMore] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -380,17 +382,32 @@ function NeedsYou({ desk, agents, onOpenCard, flash, handledSnoozeFocus, answera
   // items live in the folded list, so open it first.
   const flashDone = Boolean(flash && done.some((t) => t.id === flash.id));
   useEffect(() => {
-    if (!flash) return;
+    if (!flash || handledFlash.current === flash.at) return;
+    const target = desk.todos.find((todo) => todo.id === flash.id);
+    if (!target || isTodoSnoozed(target)) return;
     if (flashDone && doneRef.current) doneRef.current.open = true;
     const raf = window.requestAnimationFrame(() => {
       // Target the actual item, including one beyond the latest Done rows.
       // The Done heading stays visible while its list scrolls underneath.
-      document.querySelector(`[data-todo-id="${CSS.escape(flash.id)}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      const row = needsRef.current?.querySelector<HTMLElement>(`[data-todo-id="${CSS.escape(flash.id)}"]`);
+      row?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      // A repeated reference to the same item renews its existing animation.
+      for (const animation of row?.getAnimations() ?? []) {
+        if ('animationName' in animation && animation.animationName === 'desk-lit') {
+          animation.currentTime = 0;
+          animation.play();
+        }
+      }
+      handledFlash.current = flash.at;
     });
-    setLit(flash.id);
-    const timer = window.setTimeout(() => setLit((id) => (id === flash.id ? null : id)), 2400);
-    return () => { window.cancelAnimationFrame(raf); window.clearTimeout(timer); };
-  }, [flash, flashDone]);
+    setLit(flash);
+    return () => window.cancelAnimationFrame(raf);
+  }, [flash, flashDone, desk.todos, handledFlash]);
+  useEffect(() => {
+    if (!lit) return;
+    const timer = window.setTimeout(() => setLit(null), 2400);
+    return () => window.clearTimeout(timer);
+  }, [lit]);
   const doneShown = useMemo(() => {
     const shown = done.slice(0, 60);
     const extra = flash && !shown.some((t) => t.id === flash.id) ? done.find((t) => t.id === flash.id) : undefined;
@@ -400,7 +417,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash, handledSnoozeFocus, answera
   const rowProps = { agents, cardsById, onOpenCard, onStatus: setStatus, onDelete: remove, openIds, onToggleOpen: toggleOpen, answers, answerable };
 
   return (
-    <section className="desk-needs" aria-label="Needs you">
+    <section ref={needsRef} className="desk-needs" aria-label="Needs you">
       <form className="desk-add" onSubmit={add}>
         <div className="desk-add-row">
           <Plus size={16} aria-hidden="true" className="desk-add-icon" />
@@ -425,7 +442,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash, handledSnoozeFocus, answera
           {open.map((todo) => (
             editingId === todo.id
               ? <TodoEditor key={todo.id} todo={todo} onCancel={() => setEditingId(null)} onSave={(next) => save(todo, next)} />
-              : <TodoRow key={todo.id} todo={todo} {...rowProps} popping={justDone === todo.id} lit={lit === todo.id} onEdit={answering.has(todo.id) ? undefined : () => setEditingId(todo.id)} />
+              : <TodoRow key={todo.id} todo={todo} {...rowProps} popping={justDone === todo.id} lit={lit?.at === flash?.at && lit?.id === todo.id} onEdit={answering.has(todo.id) ? undefined : () => setEditingId(todo.id)} />
           ))}
         </ul>
       ) : (
@@ -438,7 +455,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash, handledSnoozeFocus, answera
         </div>
       )}
 
-      <SnoozedTodos todos={desk.todos} focus={flash} handledFocus={handledSnoozeFocus} />
+      <SnoozedTodos todos={desk.todos} focus={flash} handledFocus={handledFlash} />
       {done.length ? (
         <details className="desk-done" ref={doneRef}>
           <summary>
@@ -446,7 +463,7 @@ function NeedsYou({ desk, agents, onOpenCard, flash, handledSnoozeFocus, answera
           </summary>
           <ul className="desk-todo-list is-done">
             {doneShown.map((todo) => (
-              <TodoRow key={todo.id} todo={todo} {...rowProps} lit={lit === todo.id} onEdit={undefined} />
+              <TodoRow key={todo.id} todo={todo} {...rowProps} lit={lit?.at === flash?.at && lit?.id === todo.id} onEdit={undefined} />
             ))}
           </ul>
           {done.length > 60 ? <p className="desk-muted">Showing the latest 60 of {done.length}{doneShown.length > 60 ? ", plus the item you opened." : "."}</p> : null}

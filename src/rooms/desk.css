@@ -243,8 +243,8 @@ span.desk-todo-text { cursor: default; }
 }
 .desk-done summary::-webkit-details-marker { display: none; }
 .desk-done summary:hover { color: var(--r-ink); background: color-mix(in srgb, var(--r-gold) 8%, var(--r-bg-card)); }
-.desk-done summary svg { transition: transform 0.2s ease; transform: rotate(-90deg); }
-.desk-done[open] summary svg { transform: none; }
+.desk-done summary > svg:first-child { transition: transform 0.2s ease; transform: rotate(-90deg); }
+.desk-done[open] summary > svg:first-child { transform: none; }
 .desk-done .desk-todo-list { margin-top: 10px; }
 
 /* ---------- one-tap answers ---------- */
@@ -843,6 +843,6 @@ span.desk-todo-text { cursor: default; }
   .desk-snooze .desk-mini-btn:hover:not(:disabled), .desk-snooze .desk-mini-btn:active:not(:disabled) { transform: none; }
 }
 
-.desk-todo-meta > .desk-snooze, .md-meta > .desk-snooze { margin-top: 0; }
+.desk-todo-meta > .desk-snooze { margin-top: 0; }
 .desk-snoozed-list .desk-snoozed-detail { color: var(--r-ink-soft); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .desk-snoozed-list > li.is-lit { border-color: var(--r-gold); box-shadow: 0 0 0 2px color-mix(in srgb, var(--r-gold) 20%, transparent); }
