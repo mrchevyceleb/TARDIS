@@ -471,8 +471,9 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
         delete item.push;
         delete item.renudge;
         if (todo.snoozeReturnedPriority === 'high') {
-          item.push = { tries: 0, seededAt: at.toISOString() };
-          item.renudge = { tries: 0, seededAt: at.toISOString() };
+          // An explicit return is already acknowledged by the owner. Stay
+          // quiet now, but keep the normal reminder clock for later.
+          item.push = { tries: 0, sentAt: todo.snoozedUntil ?? at.toISOString() };
         }
         item.wakeAt = todo.snoozedUntil;
         dirty = true;

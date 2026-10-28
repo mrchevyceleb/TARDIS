@@ -846,3 +846,4 @@ span.desk-todo-text { cursor: default; }
 .desk-todo-meta > .desk-snooze { margin-top: 0; }
 .desk-snoozed-list .desk-snoozed-detail { color: var(--r-ink-soft); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .desk-snoozed-list > li.is-lit { border-color: var(--r-gold); box-shadow: 0 0 0 2px color-mix(in srgb, var(--r-gold) 20%, transparent); }
+.desk-actor.is-compact .desk-actor-name, .desk-snooze-status { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

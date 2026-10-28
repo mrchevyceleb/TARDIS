@@ -3,7 +3,7 @@
 
 import { Fragment, useEffect, useRef, type MouseEvent } from 'react';
 import { useDeploymentFlags } from '../../../data/deploymentFlags';
-import { focusDeskRef, hasDeskRef, splitDeskRefs, useDeskLookup, type DeskRef } from '../../../data/desk';
+import { focusDeskRef, hasDeskRef, isTodoSnoozed, splitDeskRefs, useDeskLookup, wakeLabel, type DeskRef } from '../../../data/desk';
 
 export function DeskRefPill({ target }: { target: DeskRef }) {
   const flags = useDeploymentFlags();
@@ -29,7 +29,7 @@ export function DeskRefPill({ target }: { target: DeskRef }) {
   const done = card ? card.column === 'in_production' : todo?.status === 'done';
   const where = card
     ? `${data?.columns.find((c) => c.key === card.column)?.title ?? card.column} · ${card.owner.name}`
-    : todo ? (todo.status === 'done' ? 'Needs you · done' : 'Needs you') : '';
+    : todo ? (todo.status === 'done' ? 'Needs you · done' : isTodoSnoozed(todo) ? `Snoozed until ${wakeLabel(todo.snoozedUntil!)}` : 'Needs you') : '';
   const hint = !flags.deskRoom
     ? target.id
     : gone

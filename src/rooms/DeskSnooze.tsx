@@ -1,18 +1,24 @@
 import { AlarmClock, ChevronDown, MoonStar, RotateCcw } from 'lucide-react';
+import { useMutation, useMutationState, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from 'react';
-import { deskApi, focusDeskRef, isTodoSnoozed, useDeskWrite, type DeskTodo } from '../data/desk';
+import { deskApi, focusDeskRef, isTodoSnoozed, useDeskWrite, wakeLabel, type DeskTodo } from '../data/desk';
 import { showToast } from '../native/shell';
 import { errorText, linkifyText } from './deskParts';
 
 const DURATIONS = [[24, '24h'], [48, '48h'], [72, '72h'], [168, '1 week']] as const;
-export const wakeLabel = (at: string) => new Date(at).toLocaleString([], {
-  weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-});
+export { wakeLabel } from '../data/desk';
 
 export function SnoozeTodoControl({ todo, disabled = false }: { todo: DeskTodo; disabled?: boolean }) {
   const write = useDeskWrite();
+  const queryClient = useQueryClient();
   const [choosing, setChoosing] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // The same item has controls in several lists. Keep its pending action in
+  // Query's shared mutation cache so an optimistic list move cannot re-enable it.
+  const latest = useMutationState({
+    filters: { mutationKey: ['desk-snooze', todo.id] },
+    select: (mutation) => mutation.state,
+  }).at(-1);
+  const busy = latest?.status === 'pending' ? (latest.variables === null ? 'return' : 'snooze') : null;
   const control = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const optionsId = useId();
@@ -38,10 +44,8 @@ export function SnoozeTodoControl({ todo, disabled = false }: { todo: DeskTodo; 
   }, [choosing]);
   const sleeping = isTodoSnoozed(todo);
   const change = async (hours: number | null) => {
-    if (busy) return;
     // Keep focus on the stable trigger while its drawer row is saving.
     if (trigger.current?.closest('.desk-snooze')?.contains(document.activeElement)) trigger.current.focus({ preventScroll: true });
-    setBusy(true);
     const until = new Date(Date.now() + (hours ?? 0) * 3_600_000).toISOString();
     // The focused row may leave its list. Keep focus near the item that moved.
     const section = trigger.current?.closest('section');
@@ -54,16 +58,23 @@ export function SnoozeTodoControl({ todo, disabled = false }: { todo: DeskTodo; 
         ?? sibling.querySelector<HTMLElement>('.md-row-main, button.desk-todo-text');
       if (nextControl) break;
     }
+    let restoredTo: HTMLElement | null = null;
     const returnFocus = (saved = false) => {
       if (!section?.isConnected) return;
       const active = document.activeElement;
-      if (active && active !== document.body && !control.current?.contains(active)) return;
+      if (active && active !== document.body && !control.current?.contains(active) && (saved || active !== restoredTo)) return;
       // An aria-disabled saving trigger remains focusable, unlike a native
       // disabled button. Keep the same item selected in a retained drawer row.
       const inPlace = row?.isConnected ? row.querySelector<HTMLElement>('.desk-snooze-trigger:not(:disabled)') : null;
       const returned = section?.querySelector<HTMLElement>(`[data-todo-id="${CSS.escape(todo.id)}"] .desk-snooze-trigger:not(:disabled):not([aria-disabled="true"])`);
       const fallback = section?.querySelector<HTMLElement>('.desk-snoozed > summary') ?? section?.querySelector<HTMLElement>('.desk-snooze-trigger:not(:disabled):not([aria-disabled="true"]), .md-open:not(:disabled)');
-      (inPlace ?? (!saved || hours === null ? returned ?? fallback : nextControl?.isConnected ? nextControl : fallback))?.focus({ preventScroll: true });
+      const target = inPlace ?? (!saved || hours === null ? returned ?? fallback : nextControl?.isConnected ? nextControl : fallback);
+      // A failed last-item bring-back remounts its fold closed. Reveal the
+      // returned control before restoring focus into it.
+      const returnedFold = target?.closest<HTMLDetailsElement>('details.desk-snoozed');
+      if (!saved && returnedFold) returnedFold.open = true;
+      target?.focus({ preventScroll: true });
+      restoredTo = document.activeElement === target ? target : null;
     };
     restoreFocus.current = () => returnFocus(true);
     try {
@@ -76,10 +87,15 @@ export function SnoozeTodoControl({ todo, disabled = false }: { todo: DeskTodo; 
     } catch (error) {
       showToast(`Could not change the snooze: ${errorText(error)}`);
       window.requestAnimationFrame(() => returnFocus());
+      throw error;
     } finally {
       restoreFocus.current = null;
-      setBusy(false);
     }
+  };
+  const save = useMutation({ mutationKey: ['desk-snooze', todo.id], mutationFn: change, networkMode: 'always' });
+  const submit = (hours: number | null) => {
+    // Read the cache synchronously: a second tap can precede React's render.
+    if (!queryClient.isMutating({ mutationKey: ['desk-snooze', todo.id] })) save.mutate(hours);
   };
   return (
     <div ref={control} className="desk-snooze" onBlur={(event) => {
@@ -87,18 +103,20 @@ export function SnoozeTodoControl({ todo, disabled = false }: { todo: DeskTodo; 
     }} onKeyDown={(event) => {
       if (event.key === 'Escape' && choosing) { event.stopPropagation(); setChoosing(false); trigger.current?.focus(); }
     }}>
-      <button ref={trigger} type="button" className="desk-mini-btn desk-snooze-trigger" disabled={disabled} aria-disabled={busy || undefined}
-        aria-label={`${sleeping ? 'Bring back' : 'Snooze'} ${todo.title}`}
+      <button ref={trigger} type="button" className="desk-mini-btn desk-snooze-trigger" disabled={disabled} aria-disabled={Boolean(busy) || undefined}
+        aria-label={busy ? `${busy === 'return' ? 'Bringing back' : 'Saving snooze for'} ${todo.title}` : `${sleeping ? 'Bring back' : 'Snooze'} ${todo.title}`}
         aria-expanded={sleeping ? undefined : choosing}
         aria-controls={choosing && !sleeping ? optionsId : undefined}
-        onClick={() => { if (!busy) { if (sleeping) void change(null); else setChoosing((v) => !v); } }}>
+        onClick={() => { if (!busy) { if (sleeping) submit(null); else setChoosing((v) => !v); } }}>
         {sleeping ? <RotateCcw size={13} aria-hidden="true" /> : <MoonStar size={13} aria-hidden="true" />}
         {busy ? 'Saving…' : sleeping ? 'Bring back now' : 'Snooze'}
       </button>
+      <span className="desk-snooze-status" role="status">{busy ? (busy === 'return' ? 'Bringing it back…' : 'Saving snooze…') : ''}</span>
+      {latest?.status === 'error' ? <p className="desk-answer-error" role="alert">That didn’t save. {errorText(latest.error)}</p> : null}
       {choosing && !sleeping ? (
         <div id={optionsId} className="desk-snooze-options" role="group" aria-label="Snooze for">
           {DURATIONS.map(([hours, label]) => (
-            <button key={hours} type="button" className="desk-mini-btn" disabled={busy || disabled} onClick={() => void change(hours)}>{label}</button>
+            <button key={hours} type="button" className="desk-mini-btn" disabled={Boolean(busy) || disabled} onClick={() => submit(hours)}>{label}</button>
           ))}
         </div>
       ) : null}
@@ -115,7 +133,7 @@ export function SnoozedTodos({ todos, focus, handledFocus: parentHandledFocus }:
   const localHandledFocus = useRef<number | null>(null);
   const handledFocus = parentHandledFocus ?? localHandledFocus;
   const [lit, setLit] = useState<{ id: string; at: number } | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!focusId || focus?.at === handledFocus.current) return;
     const target = todos.find((t) => t.id === focusId);
     if (!target) return;
@@ -127,15 +145,15 @@ export function SnoozedTodos({ todos, focus, handledFocus: parentHandledFocus }:
       if (!parentHandledFocus) handledFocus.current = focus?.at ?? null;
       return;
     }
-    if (!fold.current?.querySelector(`[data-todo-id="${CSS.escape(focusId)}"]`)) return;
+    const row = fold.current?.querySelector<HTMLElement>(`[data-todo-id="${CSS.escape(focusId)}"]`);
+    if (!row || !fold.current) return;
+    // Reveal and locate the item in the same committed layout. Deferring this
+    // to a frame can lose the handoff when the Desk refreshes in between.
     fold.current.open = true;
+    row.querySelector<HTMLButtonElement>('.desk-snoozed-title')?.focus({ preventScroll: true });
+    row.scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+    handledFocus.current = focus?.at ?? null;
     setLit(focus ?? null);
-    const raf = window.requestAnimationFrame(() => {
-      const row = fold.current?.querySelector<HTMLElement>(`[data-todo-id="${CSS.escape(focusId)}"]`);
-      row?.scrollIntoView({ block: 'start', behavior: 'smooth' });
-      handledFocus.current = focus?.at ?? null;
-    });
-    return () => window.cancelAnimationFrame(raf);
   }, [focus, focusId, sleepingIds, todos, handledFocus, parentHandledFocus]);
   useEffect(() => {
     if (!lit) return;

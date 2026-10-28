@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { Check, Dices, Pause, Play, RotateCcw, X } from 'lucide-react';
 import {
   ACCENT_PRESETS, FONTS, PALETTES, RADIUS_STEPS, TEXT_SCALES,
@@ -19,6 +20,8 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
   const [filter, setFilter] = useState<'all' | 'dark' | 'light'>('all');
   const [previous, setPrevious] = useState(readPreviousAppearance);
   const [undoLook, setUndoLook] = useState<Appearance | null>(null);
+  const undoButton = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => { if (undoLook) undoButton.current?.focus(); }, [undoLook]);
   useEffect(() => { setPrevious(readPreviousAppearance()); }, [syncStatus]);
   useEffect(() => {
     const update = (event: StorageEvent) => {
@@ -27,16 +30,32 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
     window.addEventListener('storage', update);
     return () => window.removeEventListener('storage', update);
   }, []);
-  const clearPrevious = () => {
+  const clearPrevious = (restoreFocus = true) => {
     try { localStorage.removeItem(PRE_SYNC_KEY); localStorage.setItem(SYNCED_KEY, 'true'); } catch { /* optional backup */ }
     setPrevious(null);
-    ref.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    if (restoreFocus) ref.current?.querySelector<HTMLButtonElement>('button')?.focus();
   };
   const detailLabels = { accent: 'accent', font: 'font', textScale: 'text size', radius: 'corners', motion: 'motion', contrast: 'contrast', background: 'backdrop', backgroundIntensity: 'intensity' } as const;
   const previousDetails = previous ? (Object.keys(detailLabels) as (keyof typeof detailLabels)[])
     .filter((key) => previous[key] !== appearance[key]).map((key) => detailLabels[key]).join(', ') : '';
   const palette = findPalette(appearance.palette);
   const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const panel = ref.current;
+    const footer = triggerRef.current?.closest('.bt-rail-foot');
+    if (!panel) return;
+    const mobile = window.matchMedia('(max-width: 760px), (pointer: coarse) and (max-width: 1180px)');
+    const place = () => {
+      panel.style.setProperty('--appearance-anchor', mobile.matches
+        ? 'calc(12px + env(safe-area-inset-bottom, 0px))'
+        : `${(footer?.getBoundingClientRect().height ?? 0) / appearance.textScale + 8}px`);
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    if (footer) observer.observe(footer);
+    mobile.addEventListener('change', place);
+    return () => { observer.disconnect(); mobile.removeEventListener('change', place); };
+  }, [triggerRef, appearance.textScale]);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
   useEffect(() => {
@@ -82,7 +101,15 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
     </button>;
   };
 
-  return <div ref={ref} id="appearance-settings" className="appearance-settings" role="dialog" aria-labelledby="appearance-title">
+  return createPortal(<div ref={ref} id="appearance-settings" className="appearance-settings" role="dialog" aria-labelledby="appearance-title" onKeyDown={(event) => {
+    if (event.key !== 'Tab') return;
+    const controls = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), a[href]')].filter((node) => node.getClientRects().length);
+    const edge = event.shiftKey ? controls[0] : controls.at(-1);
+    if (document.activeElement === edge) {
+      event.preventDefault();
+      onClose();
+    }
+  }}>
     <div className="appearance-head">
       <h2 id="appearance-title">Make it yours</h2>
       <button type="button" className="appearance-shuffle" onClick={() => choose(shuffleAppearance(appearance))} title="Shuffle theme (Alt+Shift+R)" aria-label="Shuffle theme"><Dices size={17} /></button>
@@ -94,13 +121,13 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
       <button type="button" className="appearance-chip" onClick={() => {
         setUndoLook({ ...appearance });
         onAppearance(previous);
-        clearPrevious();
+        clearPrevious(false);
       }}>Restore on all devices</button>
-      <button type="button" className="appearance-chip" onClick={clearPrevious} aria-label="Dismiss saved look"><X size={13} /></button>
+      <button type="button" className="appearance-chip" onClick={() => clearPrevious()} aria-label="Dismiss saved look"><X size={13} /></button>
     </div>}
     {undoLook && <div className="appearance-restore" role="status">
       <span>Restored your saved look.</span>
-      <button type="button" className="appearance-chip" onClick={() => { onAppearance(undoLook); setUndoLook(null); ref.current?.querySelector<HTMLButtonElement>('button')?.focus(); }}>Undo on all devices</button>
+      <button ref={undoButton} type="button" className="appearance-chip" onClick={() => { onAppearance(undoLook); setUndoLook(null); ref.current?.querySelector<HTMLButtonElement>('button')?.focus(); }}>Undo on all devices</button>
       <button type="button" className="appearance-chip" onClick={() => { setUndoLook(null); ref.current?.querySelector<HTMLButtonElement>('button')?.focus(); }} aria-label="Dismiss undo"><X size={13} /></button>
     </div>}
     <div className="appearance-preview" data-background={appearance.background}>
@@ -168,5 +195,5 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
     </>}
     </div>
     <div className="appearance-footer"><span role="status">{syncStatus === 'saved' ? 'Saved across this TARDIS’s devices' : syncStatus === 'loading' ? 'Checking your saved look…' : syncStatus === 'saving' ? 'Saving your look…' : syncStatus === 'error' ? 'That choice couldn’t sync. Try another look.' : 'Saved here. Will sync when connected.'}</span><small>Alt+Shift+T to cycle · Alt+Shift+R to shuffle</small></div>
-  </div>;
+  </div>, document.querySelector('.bot-app') ?? document.body);
 }

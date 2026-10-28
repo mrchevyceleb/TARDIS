@@ -978,7 +978,16 @@ export function updateTodo(id: string, input: TodoInput, by?: DeskActor): Promis
       const due = requireDue(input.due);
       if (due) todo.due = due; else delete todo.due;
     }
-    if (input.priority !== undefined) todo.priority = requirePriority(input.priority);
+    if (input.priority !== undefined) {
+      const priority = requirePriority(input.priority);
+      if (priority !== todo.priority && todo.snoozeReturnedPriority) {
+        // Re-prioritizing an explicitly returned item starts a fresh alert
+        // generation on both desktop and phone, without snoozing it again.
+        todo.snoozedUntil = now;
+        delete todo.snoozeReturnedPriority;
+      }
+      todo.priority = priority;
+    }
     if (input.link !== undefined) {
       const link = requireLink(input.link);
       if (link) todo.link = link; else delete todo.link;

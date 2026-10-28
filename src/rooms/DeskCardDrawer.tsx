@@ -1,7 +1,7 @@
 // Card drawer: edit a board card, read and add to its comment thread, move or
 // archive it, and see the Needs-you items that point at it.
 
-import { Archive, ArchiveRestore, Check, Copy, ExternalLink, ImagePlus, Link2, MessageSquare, Plus, Send, Trash2, X } from 'lucide-react';
+import { Archive, ArchiveRestore, Check, Copy, ExternalLink, ImagePlus, Link2, MessageSquare, MoonStar, Plus, Send, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { Button } from '../components/Primitives';
@@ -426,16 +426,15 @@ export function DeskCardDrawer({
                     <li key={todo.id} data-todo-id={todo.id} className={`${priorityClass(todo.priority)}${todo.status === 'done' ? ' is-done' : ''}`}>
                       <button
                         type="button"
-                        disabled={isTodoSnoozed(todo)}
-                        className={`desk-check${canAnswer(todo) ? ' is-question' : ''}`}
+                        className={`desk-check${canAnswer(todo) && !isTodoSnoozed(todo) ? ' is-question' : ''}`}
                         onClick={() => {
-                          if (canAnswer(todo)) { onClose(); focusDeskRef({ kind: 'todo', id: todo.id }); }
+                          if (isTodoSnoozed(todo) || canAnswer(todo)) { onClose(); focusDeskRef({ kind: 'todo', id: todo.id }); }
                           else if (todo.status === 'done' && reopenId !== todo.id) setReopenId(todo.id);
                           else { setReopenId(null); void toggleTodo(todo.id, todo.status === 'open'); }
                         }}
-                        aria-label={isTodoSnoozed(todo) ? `Snoozed: ${todo.title}` : canAnswer(todo) ? `Answer ${todo.title}` : todo.status === 'open' ? `Mark ${todo.title} done` : `${reopenId === todo.id ? 'Confirm reopen' : 'Reopen'} ${todo.title}`}
+                        aria-label={isTodoSnoozed(todo) ? `Show snoozed item ${todo.title}` : canAnswer(todo) ? `Answer ${todo.title}` : todo.status === 'open' ? `Mark ${todo.title} done` : `${reopenId === todo.id ? 'Confirm reopen' : 'Reopen'} ${todo.title}`}
                       >
-                        {canAnswer(todo) ? <MessageSquare size={13} aria-hidden="true" /> : <Check size={13} aria-hidden="true" />}
+                        {isTodoSnoozed(todo) ? <MoonStar size={13} aria-hidden="true" /> : canAnswer(todo) ? <MessageSquare size={13} aria-hidden="true" /> : <Check size={13} aria-hidden="true" />}
                       </button>
                       <div className="desk-mini-todo-text">{todo.title}{isTodoSnoozed(todo) ? <small className="desk-snoozed-wake">Snoozed until {wakeLabel(todo.snoozedUntil!)}</small> : null}{reopenId === todo.id ? <span className="desk-answer-error" role="status"> Clear the saved answer and ask again? Tap the check once more.</span> : null}{todo.status === 'open' ? <SnoozeTodoControl todo={todo} /> : null}</div>
                       {due ? <span className={`desk-due is-${due.tone}`}>{due.text}</span> : null}

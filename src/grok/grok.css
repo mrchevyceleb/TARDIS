@@ -9,6 +9,9 @@
    ============================================================ */
 
 .bot-app {
+  --bt-viewport-height: calc(100dvh / var(--r-text-scale, 1));
+  --bt-viewport-width: calc(100vw / var(--r-text-scale, 1));
+  --bt-viewport-top: 0px;
   --bt-bubble-agent: var(--r-bg-raised);
   --bt-bubble-user:  color-mix(in srgb, var(--r-gold) 16%, var(--r-bg-raised));
   --bt-radius: 20px;
@@ -18,7 +21,7 @@
   font-family: var(--r-body);
   display: flex;
   height: 100vh;
-  height: 100dvh;
+  height: var(--bt-viewport-height);
   overflow: clip;
   position: relative;
 }

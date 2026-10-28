@@ -103,6 +103,10 @@ export type DeskSnapshot = {
 /** An open high-priority item, as the summary poll lists it (newest first). */
 export type DeskHighItem = { id: string; title: string; createdAt: string; from: string; notificationKey?: string; alertAt?: string; suppressAlert?: boolean };
 
+export const wakeLabel = (at: string) => new Date(at).toLocaleString([], {
+  weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+});
+
 export type DeskSummary = {
   rev: number;
   openTodos: number;

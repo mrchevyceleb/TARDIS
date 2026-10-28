@@ -12,7 +12,7 @@ import { hasRecentTurnSignal } from '../chat/utils/livePresence';
 // [+] creates a companion (name/role/engine/scope). Every row = a companion and
 // its ONE persistent forever-thread. Scratch threads surface via search only.
 
-import { Fragment, useCallback, useId, useMemo, useRef, useState, useEffect, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { Fragment, useCallback, useId, useMemo, useRef, useState, useEffect, useLayoutEffect, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Activity,
@@ -380,6 +380,26 @@ export function BotRail(props: BotRailProps) {
   const mobileFooter = useMediaQuery('(max-width: 760px), (pointer: coarse) and (max-width: 1180px)');
   const footerTrigger = useRef<HTMLButtonElement>(null);
   const appearanceTrigger = useRef<HTMLButtonElement>(null);
+  const previousMobileFooter = useRef(mobileFooter);
+  useLayoutEffect(() => {
+    const becameMobile = mobileFooter && !previousMobileFooter.current;
+    previousMobileFooter.current = mobileFooter;
+    if (!mobileFooter || props.drawerOpen) return;
+    // A breakpoint change can hide the rail without changing drawerOpen.
+    // Ordinary drawer closes already restore focus in GrokApp.
+    let restore = 0;
+    if (becameMobile && document.activeElement?.closest('#appearance-settings')) {
+      // GrokApp's media query mounts the hamburger in the same resize. Wait
+      // for that commit instead of trying to focus a button not mounted yet.
+      restore = window.requestAnimationFrame(() => {
+        if (document.activeElement === document.body) {
+          document.querySelector<HTMLButtonElement>('.bt-menubtn[aria-label="Open sidebar"]')?.focus();
+        }
+      });
+    }
+    setAppearanceOpen(false);
+    return () => window.cancelAnimationFrame(restore);
+  }, [mobileFooter, props.drawerOpen]);
   const [agentMenu, setAgentMenu] = useState<AgentMenuState | null>(null);
   // Manual order drag-and-drop: the dragged agent id + where it would land.
   const [dragId, setDragId] = useState<string | null>(null);

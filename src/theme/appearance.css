@@ -61,7 +61,7 @@
 @media (prefers-reduced-motion: reduce) { .appearance-theme, .appearance-dot { transition: none; } }
 
 /* The picker is a little workbench, with a live sample always within reach. */
-.appearance-settings { width: min(410px, calc(100vw / var(--r-text-scale, 1) - 32px)); max-height: min(690px, calc(82dvh / var(--r-text-scale, 1))); padding: 16px; display: flex; flex-direction: column; overflow: hidden; box-sizing: border-box; }
+.appearance-settings { position: fixed; left: calc(12px + env(safe-area-inset-left, 0px)); bottom: var(--appearance-anchor, 12px); width: min(410px, calc(var(--bt-viewport-width, 100vw) - 32px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px))); max-height: min(690px, calc(var(--bt-viewport-height, 100dvh) - var(--appearance-anchor, 12px) - 12px - env(safe-area-inset-top, 0px))); padding: 16px; display: flex; flex-direction: column; overflow: hidden; box-sizing: border-box; }
 .appearance-head { flex: none; margin-bottom: 12px; }
 .appearance-head h2 { flex: 1; }
 .appearance-head button { flex: none; border: 1px solid var(--r-line); background: var(--r-bg-soft); cursor: pointer; transition: transform .16s, background .16s; }
@@ -107,7 +107,6 @@
 .appearance-footer { flex: none; display: grid; gap: 4px; padding-top: 10px; border-top: 1px solid var(--r-line); color: var(--r-ink-mute); font-size: 11px; }
 .appearance-footer small { font-size: 10px; }
 .appearance-settings input:focus-visible { outline: 3px solid var(--r-tardis-hi); outline-offset: 2px; }
-@media (max-width: 760px) { .appearance-settings { position: fixed; left: 12px; bottom: calc(12px + env(safe-area-inset-bottom, 0px)); max-height: calc(100dvh / var(--r-text-scale, 1) - 32px); } }
 @media (max-height: 640px) { .appearance-preview { min-height: 0; padding: 10px; } .appearance-preview-chat { display: none; } }
 @media (prefers-reduced-motion: reduce) { .appearance-settings *, .appearance-settings *::before, .appearance-settings *::after { transition: none !important; } .appearance-settings button:hover { transform: none; } }
 [data-motion="calm"] .appearance-settings button:hover { transform: none; }
@@ -116,11 +115,7 @@
 
 /* CSS zoom scales viewport lengths too. Keep the shell inside the physical
    viewport so larger text never puts the appearance controls below the phone. */
-.bot-app { --bt-viewport-height: calc(100dvh / var(--r-text-scale, 1)); --bt-viewport-width: calc(100vw / var(--r-text-scale, 1)); --bt-viewport-top: 0px; height: var(--bt-viewport-height); }
 .studio { height: calc(100dvh / var(--r-text-scale, 1)); }
-@media (pointer: coarse) {
-  .bot-app { top: var(--bt-viewport-top); height: var(--bt-viewport-height); }
-}
 
 .appearance-restore { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 10px; margin-bottom: 10px; border-radius: 12px; border: 1px solid var(--r-line-gold); background: var(--r-bg-soft); }
 .appearance-restore > span { flex: 1 1 100%; font-size: 13px; color: var(--r-ink-soft); }

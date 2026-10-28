@@ -85,3 +85,31 @@ test('snooze persists on the item, hides alerts and wakes once across notifier r
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('bringing a high item back early keeps its later reminder across notifier restarts', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'desk-return-reminder-'));
+  const { createDeskNotifier } = await import('./deskNotify.ts');
+  try {
+    let at = new Date('2026-10-26T12:00:00Z');
+    const owner = { kind: 'owner' as const, id: 'owner', name: 'Owner' };
+    const todo = { id: 'todo-return', title: 'Review proposal', status: 'open' as const, priority: 'high' as const,
+      from: owner, createdAt: at.toISOString(), updatedAt: at.toISOString(), snoozedUntil: '2026-10-27T12:00:00Z',
+      snoozeReturnedPriority: undefined as 'high' | undefined };
+    const sends: string[] = [];
+    const options = { now: () => at, readDesk: async () => ({ version: 1 as const, rev: 1, todos: [todo], cards: [] }),
+      stateFile: join(dir, 'notify.json'), log: () => {},
+      send: async (payload: { title: string }) => { sends.push(payload.title); return { ok: true as const }; } };
+    const notifier = createDeskNotifier(options);
+    await notifier.tick();
+    at = new Date(at.getTime() + 60_000);
+    todo.snoozedUntil = at.toISOString();
+    todo.snoozeReturnedPriority = 'high';
+    await notifier.tick();
+    assert.equal(sends.length, 0, 'explicit return stays quiet');
+    at = new Date(at.getTime() + 3 * 3_600_000);
+    await createDeskNotifier(options).tick();
+    assert.equal(sends.filter((title) => title === `Still waiting: ${todo.title}`).length, 1);
+    await createDeskNotifier(options).tick();
+    assert.equal(sends.filter((title) => title === `Still waiting: ${todo.title}`).length, 1, 'restart never repeats a reminder');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

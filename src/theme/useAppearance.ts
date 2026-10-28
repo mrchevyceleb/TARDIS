@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type SetStateAction } from 'react';
 import { fetchAppearance, saveAppearance } from '../data/api';
+import { showToast } from '../native/shell';
 import { APPEARANCE_KEY, PRE_SYNC_KEY, SYNCED_KEY, defaultAppearance, normalizeAppearance, queueAppearanceEdit, readAppearance, readPendingAppearance, rememberPendingAppearance, writeAppearance, type Appearance } from './themes';
 
 export function useAppearance() {
@@ -57,6 +58,7 @@ export function useAppearance() {
             if (hadSavedLook && !localStorage.getItem(SYNCED_KEY) && !localStorage.getItem(PRE_SYNC_KEY)
               && Object.entries(remote.appearance).some(([key, value]) => current.current[key as keyof Appearance] !== value)) {
               localStorage.setItem(PRE_SYNC_KEY, JSON.stringify(current.current));
+              showToast('Using your synced look. Your previous look is saved in Appearance.');
             }
           } catch { /* sync also works without storage */ }
           accept(remote.appearance);

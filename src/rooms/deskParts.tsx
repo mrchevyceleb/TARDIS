@@ -97,7 +97,7 @@ export function ActorChip({ actor, prefix, compact }: { actor: DeskActor; prefix
       >
         {actor.name.trim().slice(0, 1).toUpperCase() || '?'}
       </span>
-      {compact ? null : <span className="desk-actor-name">{prefix ? `${prefix} ` : ''}{actor.name}</span>}
+      <span className="desk-actor-name">{prefix ? `${prefix} ` : ''}{actor.name}</span>
     </span>
   );
 }

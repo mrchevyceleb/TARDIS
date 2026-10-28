@@ -224,6 +224,7 @@ deskRouter.get('/summary', route(async (_req, res) => {
     // ships before this server restarts degrades cleanly.
     answerable: true,
     high: [...high]
+      .filter((t) => t.snoozeReturnedPriority !== 'high')
       .sort((a, b) => Date.parse(b.snoozedUntil ?? b.createdAt) - Date.parse(a.snoozedUntil ?? a.createdAt))
       .slice(0, 5)
       .map((t) => ({
