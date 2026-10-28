@@ -2,7 +2,7 @@
 // and knobs; these helpers stay source-compatible with the original two-axis
 // API so existing surfaces (Studio shell, sidebar toggle) keep working and now
 // also re-apply the stored knobs instead of clobbering them.
-import { applyAppearance, appearanceAxes, readAppearance, withMode, withStyle } from './themes';
+import { queueAppearanceEdit, applyAppearance, appearanceAxes, readAppearance, withMode, withStyle } from './themes';
 
 export type ThemeName = 'dark' | 'light';
 export type VisualStyle = 'console' | 'lavender';
@@ -41,5 +41,6 @@ export function applyTheme(theme: ThemeName, style: VisualStyle = readVisualStyl
   let next = readAppearance();
   if (appearanceAxes(next).mode !== theme) next = withMode(next, theme);
   if (next.style !== style) next = withStyle(next, style);
+  queueAppearanceEdit(next);
   applyAppearance(next);
 }

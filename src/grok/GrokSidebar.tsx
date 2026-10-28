@@ -116,6 +116,7 @@ export type BotRailProps = {
   onOpenRoom: (key: string) => void;
   theme: ThemeName;
   appearance: Appearance;
+  appearanceSync: 'loading' | 'saving' | 'saved' | 'local' | 'error';
   onAppearance: (a: Appearance) => void;
   onToggleTheme: () => void;
   onOpenStudio: () => void;
@@ -1051,6 +1052,7 @@ export function BotRail(props: BotRailProps) {
         </button>
         {appearanceOpen ? <AppearanceSettings
           appearance={props.appearance}
+          syncStatus={props.appearanceSync}
           onAppearance={props.onAppearance}
           onClose={(restoreFocus = true) => { setAppearanceOpen(false); if (restoreFocus) appearanceTrigger.current?.focus(); }}
           triggerRef={appearanceTrigger}

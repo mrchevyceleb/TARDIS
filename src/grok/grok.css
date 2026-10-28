@@ -321,7 +321,7 @@
   .bt-workspace-switch button > svg { display: none; }
 }
 @container bt-workspacebar (max-width: 300px) {
-  .bt-workspace-switch button { padding: 0 10px; }
+  .bt-workspace-switch button { padding: 0 6px; font-size: 13px; }
 }
 .bot-app.rail-collapsed .bt-workspacebar { padding-left: calc(62px + env(safe-area-inset-left, 0px)); }
 @media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
@@ -1199,7 +1199,7 @@
   .bot-app .rc .grok-attach, .bot-app .rc .send, .bot-app .rc .bt-mic { min-width: 44px; height: 44px; }
   .bot-app .rc .model-chip { min-height: 44px; padding-inline: 6px; max-width: 90px; }
   .bot-app .rc .model-chip > span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bot-app .rc .pop { max-width: calc(100vw - 24px); max-height: min(430px, calc(var(--bt-viewport-height, 100dvh) - 160px)); overflow-y: auto; }
+  .bot-app .rc .pop { max-width: calc(var(--bt-viewport-width, 100vw) - 24px); max-height: min(430px, calc(var(--bt-viewport-height, 100dvh) - 160px)); overflow-y: auto; }
   .bt-room { overscroll-behavior-y: contain; }
   .bt-room-wrap { padding: 8px max(16px, env(safe-area-inset-right, 0px)) max(20px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); }
   .bot-app input, .bot-app textarea, .bot-app select { font-size: 16px; }
@@ -2009,7 +2009,7 @@ body.bt-rail-resizing { cursor: col-resize; user-select: none; }
   border: 0;
 }
 @media (pointer: coarse) {
-  .bt-agent-ctx { width: min(310px, calc(100vw - 16px)); }
+  .bt-agent-ctx { width: min(310px, calc(var(--bt-viewport-width, 100vw) - 16px)); }
   .bt-swatch { width: 26px; height: 26px; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -2084,7 +2084,7 @@ button.bt-account-row:focus-visible, .bt-account-add:focus-visible, .bt-account-
 
 
 /* Subscription choices live with the agent's model, including the Desk dock. */
-.bot-app .rc .modelpop:has(.bt-account-inline) { box-sizing: border-box; width: min(410px, 100%); max-width: calc(100vw - 24px); max-height: min(720px, calc(var(--bt-viewport-height, 100dvh) - 160px)); }
+.bot-app .rc .modelpop:has(.bt-account-inline) { box-sizing: border-box; width: min(410px, 100%); max-width: calc(var(--bt-viewport-width, 100vw) - 24px); max-height: min(720px, calc(var(--bt-viewport-height, 100dvh) - 160px)); }
 .bt-account-inline .bt-account-row { min-height: 48px; padding: 7px; gap: 8px; }
 .bt-account-inline .bt-account-avatar { width: 26px; height: 26px; border-radius: 9px; font-size: 11px; }
 .bt-account-inline .bt-account-promise { margin: 8px 0; }

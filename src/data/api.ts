@@ -1,3 +1,4 @@
+import type { Appearance } from '../theme/themes';
 import type { FileTreeNode, WorkspaceEditFileResponse, WorkspaceSaveResponse } from './types';
 
 export async function dictationChunk(id:string,audio:Blob,signal:AbortSignal):Promise<{text:string;warning?:string}> {
@@ -317,4 +318,16 @@ export async function getSessionHealth(date?: string): Promise<{ date: string; r
   const response = await fetch(`/api/session-health${date ? `?date=${encodeURIComponent(date)}` : ""}`);
   if (!response.ok) throw new Error("Session measurements could not be loaded.");
   return response.json();
+}
+
+// Appearance follows the shared office, with the browser cache as an offline fallback.
+export function fetchAppearance() {
+  return apiJson<{ appearance: Partial<Appearance> | null }>('/api/appearance', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+}
+export async function saveAppearance(patch: Partial<Appearance>): Promise<{ appearance: Partial<Appearance> }> {
+  const response = await fetch('/api/appearance', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ patch }), signal: AbortSignal.timeout(8000) });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) throw Object.assign(new Error(data?.error || 'Could not save appearance.'), { status: response.status });
+  if (!data?.appearance) throw new Error('The saved appearance response was incomplete.');
+  return data;
 }

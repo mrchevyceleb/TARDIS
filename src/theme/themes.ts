@@ -1,3 +1,5 @@
+import { BACKGROUNDS } from './backgrounds';
+
 // Theme library: named palettes, appearance knobs, and persistence.
 // Every custom palette is a compact set of canonical colors expanded into the
 // full --r-* token map. Text-bearing colors are numerically nudged during
@@ -49,6 +51,22 @@ const LAVENDER_LIGHT: PaletteColors = {
   ink: '#292035', inkSoft: '#453750', inkMute: '#695975', inkFaint: '#71607e', inkGhost: '#c0afcb',
   accent: '#7041ac', emerald: '#327252', amber: '#945414', rose: '#b13a59', violet: '#8054bc',
 };
+
+/** Small, curated seed palettes use the same canonical surface ladder as the
+ * original library. Surfaces stay opaque; accent and ink are checked below. */
+function playground(id: string, label: string, mode: Mode, blurb: string, bg: string, ink: string, accent: string, emerald: string, amber: string, rose: string, violet: string): ThemeDef {
+  const pole = '#ffffff';
+  return { id, label, mode, blurb, colors: {
+    bg, bgDeep: mix(bg, mode === 'dark' ? '#000000' : ink, .035),
+    bgSoft: mix(bg, pole, mode === 'dark' ? .025 : .28),
+    bgCard: mix(bg, pole, mode === 'dark' ? .055 : .65),
+    bgRaised: mix(bg, pole, mode === 'dark' ? .085 : .9),
+    bgHover: mix(bg, mode === 'dark' ? pole : ink, mode === 'dark' ? .12 : .07),
+    ink, inkSoft: mix(ink, bg, .12), inkMute: mix(ink, bg, .27),
+    inkFaint: mix(ink, bg, .38), inkGhost: mix(ink, bg, .5),
+    accent, emerald, amber, rose, violet,
+  } };
+}
 
 export const PALETTES: ThemeDef[] = [
   legacy('console', 'Console', 'dark', 'console', 'Warm brass & void', CONSOLE_DARK),
@@ -123,6 +141,26 @@ export const PALETTES: ThemeDef[] = [
     bg: '#f6f8fb', bgDeep: '#eef1f6', bgSoft: '#fbfcfe', bgCard: '#ffffff', bgRaised: '#ffffff', bgHover: '#e9eef5',
     ink: '#1c2430', inkSoft: '#3a4656', inkMute: '#5c6b80', inkFaint: '#6e7d92', inkGhost: '#b6c2d2',
     accent: '#2563eb', emerald: '#178a56', amber: '#b45309', rose: '#dc2626', violet: '#7c3aed' } },
+  playground('velvet-orbit', 'Velvet Orbit', 'dark', 'Plum velvet, peach starlight', '#201127', '#fbeaf8', '#ffb58f', '#94dbbd', '#f4ce84', '#f599b8', '#c8a5ff'),
+  playground('arcade-fizz', 'Arcade Fizz', 'dark', 'Grape soda, electric lime', '#160f32', '#f2ecff', '#c4f45d', '#65e8c3', '#f6d478', '#ff8ab9', '#b2a0ff'),
+  playground('lagoon-lounge', 'Lagoon Lounge', 'dark', 'Inky teal, mint reflections', '#062c2b', '#e3f8ef', '#74e0c3', '#a8df8e', '#edca78', '#f39c96', '#b5b0f4'),
+  playground('cherry-cola', 'Cherry Cola', 'dark', 'Burgundy bubbles, pink neon', '#2b101a', '#ffedf0', '#ff93ae', '#8ad8ac', '#edc17f', '#ff9e88', '#c2a3ec'),
+  playground('copper-moon', 'Copper Moon', 'dark', 'Indigo slate, burnished copper', '#18222b', '#eeeae3', '#eeb184', '#9acaac', '#e8ca8e', '#e59b9e', '#b3b5df'),
+  playground('moss-radio', 'Moss Radio', 'dark', 'Olive velvet, analogue gold', '#222710', '#f3f1db', '#e4cf75', '#a5cf8b', '#edb578', '#e8a09a', '#c0b2e1'),
+  playground('blue-hour', 'Blue Hour', 'dark', 'Cobalt twilight, apricot lights', '#11294a', '#eaf1ff', '#ffbd8c', '#8cdebd', '#e8d08e', '#f29ab3', '#bdadfc'),
+  playground('ink-octopus', 'Ink Octopus', 'dark', 'Deep aubergine, acid turquoise', '#251c36', '#f7efff', '#6fe8de', '#b4de99', '#f2d084', '#ffa0c1', '#c6a1ff'),
+  playground('campfire-club', 'Campfire Club', 'dark', 'Smoked terracotta, golden sparks', '#36201b', '#fff0df', '#ffc271', '#a9d49b', '#f7da8c', '#f3a0a2', '#c7afe8'),
+  playground('graphite-pop', 'Graphite Pop', 'dark', 'Quiet charcoal, shocking coral', '#202326', '#f4f4ed', '#ff9e91', '#a2d6ae', '#e8d08b', '#f5a8c1', '#bdbaec'),
+  playground('peach-postcard', 'Peach Postcard', 'light', 'Sunlit peach, raspberry ink', '#fff0e4', '#412b32', '#a53260', '#286b50', '#945518', '#aa3651', '#715096'),
+  playground('matcha-picnic', 'Matcha Picnic', 'light', 'Creamy matcha, fern green', '#eef3df', '#293b2d', '#3e681b', '#27634e', '#865521', '#a33e58', '#705287'),
+  playground('lemon-sorbet', 'Lemon Sorbet', 'light', 'Lemon silk, bright cornflower', '#fff8d9', '#373624', '#365bb5', '#28664a', '#84511d', '#a03c55', '#73529c'),
+  playground('pink-cloud', 'Pink Cloud', 'light', 'Blush cotton, mulberry kisses', '#fcebf3', '#462d42', '#963d7d', '#2f6d59', '#8c5421', '#b53c58', '#7154ac'),
+  playground('poolside', 'Poolside', 'light', 'Aqua tiles, Mediterranean blue', '#e4f6f6', '#173c48', '#006b91', '#256b53', '#90571a', '#a9405b', '#6550a0'),
+  playground('paper-crane', 'Paper Crane', 'light', 'Warm rice paper, vermilion stamp', '#f5f0e6', '#39312b', '#a63a28', '#3d684e', '#88571f', '#a13e57', '#70528b'),
+  playground('periwinkle-pop', 'Periwinkle Pop', 'light', 'Powder blue, violet confetti', '#edf0ff', '#30324c', '#5945b4', '#286b55', '#8e551a', '#ac3c64', '#7552b2'),
+  playground('sea-glass', 'Sea Glass', 'light', 'Washed mint, weathered jade', '#e8f3ec', '#2b4038', '#226b60', '#386d3e', '#8e591e', '#a34459', '#70548e'),
+  playground('apricot-jam', 'Apricot Jam', 'light', 'Apricot cream, burnt orange', '#faebd8', '#4a3225', '#994619', '#326b4f', '#86530e', '#a23e51', '#765094'),
+  playground('cloud-nine', 'Cloud Nine', 'light', 'Cool porcelain, candy blue', '#f2f6fc', '#26364a', '#2863bc', '#286b50', '#925616', '#ad3b5a', '#6c50a5'),
 ];
 
 export const DEFAULT_PALETTE = 'console';
@@ -253,54 +291,49 @@ function roundelSvg(mode: Mode, accent: string, bgDeep: string, line: string): s
 
 /**
  * Expand a palette (+ optional accent override) into the full --r-* token map.
- * All text-bearing colors are contrast-ensured: ink family ≥ 4.5 on bg/card/raised,
- * accent-text/gold/semantic colors ≥ 4.5 on card, mute ≥ 4.5, faint ≥ 3 on card.
+ * Body and semantic text target 5:1 (7:1 in crisp mode) on every solid
+ * surface; faint text targets AA. Filled accents retain their color and use
+ * dedicated on-accent ink. Decorative ghost ink targets 3:1, or 4.5:1 crisp.
  */
-export function expandTokens(def: ThemeDef, accentOverride?: string | null): Record<string, string> {
+export function expandTokens(def: ThemeDef, accentOverride?: string | null, strongerContrast = false): Record<string, string> {
   const c = def.colors;
   const accent = accentOverride ?? c.accent;
-  const card = c.bgCard;
+  // Check against the least forgiving surface, including hover, code blocks,
+  // sidebars and page text. A little headroom also protects ambient backdrops.
+  const surfaces = [c.bg, c.bgDeep, c.bgSoft, c.bgCard, c.bgRaised, c.bgHover];
+  const card = surfaces.reduce((a, b) => def.mode === 'dark'
+    ? (luminance(a) > luminance(b) ? a : b)
+    : (luminance(a) < luminance(b) ? a : b));
   const m = def.mode;
+  const readable = (hex: string) => ensure(hex, card, strongerContrast ? 7 : 5, m);
 
-  const goldText = ensure(accent, card, 4.5, m);
-  const accentText = ensure(accent, card, 4.5, m);
-  let accentFill = ensure(accent, card, 3, m);
+  const goldText = readable(accent);
+  const accentText = readable(accent);
+  const accentFill = ensure(accent, card, 3, m);
   const goldDim = mix(goldText, c.bg, 0.45);
-  // The ink on an accent-filled button must read at AA too: if neither plain ink
-  // reaches 4.5, deepen the fill toward the far pole until its best ink does.
-  let on = pickOn(accentFill);
-  if (contrast(on, accentFill) < 4.5) {
-    const pole = on === '#ffffff' ? BLACK : WHITE;
-    for (let i = 1; i <= 16; i++) {
-      const candidate = mix(accentFill, pole, i * 0.06);
-      if (contrast(pickOn(candidate), candidate) >= 4.5 && contrast(candidate, card) >= 3) {
-        accentFill = candidate;
-        on = pickOn(candidate);
-        break;
-      }
-    }
-  }
-  const emerald = ensure(c.emerald, card, 4.5, m);
-  const amber = ensure(c.amber, card, 4.5, m);
-  const rose = ensure(c.rose, card, 4.5, m);
-  const violet = ensure(c.violet, card, 4.5, m);
-  const mute = ensure(c.inkMute, card, 4.5, m);
-  const faint = ensure(c.inkFaint, card, 3, m);
+  const on = pickOn(accentFill);
+  const emerald = readable(c.emerald);
+  const amber = readable(c.amber);
+  const rose = readable(c.rose);
+  const violet = readable(c.violet);
+  const mute = readable(c.inkMute);
+  const faint = ensure(c.inkFaint, card, strongerContrast ? 6 : 4.5, m);
 
   const tokens: Record<string, string> = {
     '--r-bg': c.bg, '--r-bg-deep': c.bgDeep, '--r-bg-soft': c.bgSoft,
     '--r-bg-card': c.bgCard, '--r-bg-raised': c.bgRaised, '--r-bg-hover': c.bgHover,
     '--r-line': cm(goldText, 12), '--r-line-strong': cm(goldText, 18), '--r-line-gold': cm(goldText, 32),
-    '--r-ink': c.ink, '--r-ink-soft': c.inkSoft, '--r-ink-mute': mute,
-    '--r-ink-faint': faint, '--r-ink-ghost': c.inkGhost,
+    '--r-ink': readable(c.ink), '--r-ink-soft': readable(c.inkSoft), '--r-ink-mute': mute,
+    '--r-ink-faint': faint, '--r-ink-ghost': ensure(c.inkGhost, card, strongerContrast ? 4.5 : 3, m),
     '--r-silver': mute, '--r-silver-soft': faint,
     '--r-star': c.ink,
-    '--r-elf-blue': accentFill, '--r-elf-glow': accentText, '--r-on-accent': on,
+    '--r-elf-blue': accentText, '--r-elf-glow': accentText, '--r-on-accent': pickOn(accentText),
+    '--r-accent-fill': accentFill, '--r-on-accent-fill': on,
     '--r-deep-blue': goldDim, '--r-gold': goldText, '--r-gold-soft': goldDim,
-    '--r-emerald': emerald, '--r-amber': amber, '--r-rose': rose,
+    '--r-emerald': emerald, '--r-amber': amber, '--r-rose': rose, '--r-on-rose': pickOn(rose),
     '--r-blood': mix(rose, c.bg, 0.3),
     '--r-brass': goldText, '--r-brass-soft': goldDim,
-    '--r-tardis': mix(accentFill, c.bg, 0.55), '--r-tardis-lit': accentFill, '--r-tardis-hi': accentText,
+    '--r-tardis': mix(accentFill, c.bg, 0.55), '--r-tardis-lit': accentText, '--r-tardis-hi': accentText,
     '--r-violet': violet,
     '--r-vortex-1': violet, '--r-vortex-2': emerald, '--r-vortex-3': accentFill,
     '--r-glow-brass': `0 0 18px ${cm(accentFill, 26)}, 0 0 42px ${cm(accentFill, 10)}`,
@@ -331,14 +364,89 @@ export interface Appearance {
   textScale: number;          // page zoom, 1 = native
   radius: number;             // corner multiplier, 1 = native
   motion: boolean;            // ambient animation
+  contrast: 'standard' | 'strong';
+  background: string;         // BACKGROUNDS id
+  backgroundIntensity: number; // 0..1, deliberately capped by the renderer
 }
 
-const APPEARANCE_KEY = 'rivendell:appearance';
+export const APPEARANCE_KEY = 'rivendell:appearance';
+const PENDING_KEY = 'rivendell:appearance-pending';
+export const PRE_SYNC_KEY = 'rivendell:appearance-before-sync';
+export const SYNCED_KEY = 'rivendell:appearance-synced';
+// Keep failed writes in memory without taking ownership of another tab's
+// durable edits. The baseline distinguishes old disk values from later edits.
+let memoryPending: Partial<Appearance> | null = null;
+let memoryBaseline: Partial<Appearance> = {};
+
+function readDiskPending(): Partial<Appearance> {
+  const raw = JSON.parse(localStorage.getItem(PENDING_KEY) ?? '{}');
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const normalized = normalizeAppearance(raw);
+  return Object.fromEntries(Object.entries(normalized).filter(([key, value]) => Object.hasOwn(raw, key) && raw[key] === value));
+}
+
+export function readPendingAppearance(fallback: Partial<Appearance> = {}): Partial<Appearance> {
+  let disk: Partial<Appearance>;
+  try { disk = readDiskPending(); } catch { return { ...fallback, ...memoryPending }; }
+  if (memoryPending === null) return disk;
+  const merged = { ...memoryPending };
+  for (const key of Object.keys(disk) as (keyof Appearance)[]) {
+    // Disk changes since our failed write belong to a newer edit in another tab.
+    if (disk[key] !== memoryBaseline[key]) Object.assign(merged, { [key]: disk[key] });
+  }
+  for (const key of Object.keys(memoryBaseline) as (keyof Appearance)[]) {
+    // An acknowledged borrowed edit must clear here too. Our own newer edit stays.
+    if (!Object.hasOwn(disk, key) && merged[key] === memoryBaseline[key]) delete merged[key];
+  }
+  return merged;
+}
+
+export function rememberPendingAppearance(patch: Partial<Appearance>, acknowledged?: Partial<Appearance>): void {
+  let disk: Partial<Appearance> = {};
+  try { disk = readDiskPending(); } catch { /* storage may be blocked */ }
+  try {
+    localStorage.setItem(PENDING_KEY, JSON.stringify(patch));
+    memoryPending = null;
+    memoryBaseline = {};
+  } catch {
+    memoryPending = { ...patch };
+    memoryBaseline = disk;
+    if (!acknowledged) return; // Never delete another tab's unsent offline work.
+    const remaining = { ...disk };
+    for (const key of Object.keys(acknowledged) as (keyof Appearance)[]) {
+      if (remaining[key] === acknowledged[key]) delete remaining[key];
+    }
+    // Shrinking an existing value works at quota. Fully blocked storage remains
+    // best-effort in this tab, but other tabs' durable edits must remain intact.
+    try {
+      if (Object.keys(remaining).length) localStorage.setItem(PENDING_KEY, JSON.stringify(remaining));
+      else localStorage.removeItem(PENDING_KEY);
+      memoryBaseline = remaining;
+    } catch { /* keep the in-memory queue and leave other durable edits alone */ }
+  }
+}
+
+/** All user-driven entry points, including Studio and the legacy hotkeys, join
+ * the same sync queue. Remote hydration only calls applyAppearance. */
+export function queueAppearanceEdit(next: Appearance, previous: Appearance = readAppearance(), fallback: Partial<Appearance> = {}): Partial<Appearance> {
+  const changed = Object.fromEntries(Object.entries(next).filter(([key, value]) => previous[key as keyof Appearance] !== value));
+  const pending = { ...readPendingAppearance(fallback), ...changed };
+  rememberPendingAppearance(pending);
+  return pending;
+}
+
+export function readPreviousAppearance(): Appearance | null {
+  try {
+    const raw = localStorage.getItem(PRE_SYNC_KEY);
+    return raw ? normalizeAppearance(JSON.parse(raw)) : null;
+  } catch { return null; }
+}
 export const BOOT_BG_KEY = 'rivendell:boot-bg';
 
 export const DEFAULT_APPEARANCE: Appearance = {
   palette: DEFAULT_PALETTE, style: 'console', accent: null,
   font: 'system', textScale: 1, radius: 1, motion: true,
+  contrast: 'standard', background: 'original', backgroundIntensity: .65,
 };
 
 export function findPalette(id: string): ThemeDef {
@@ -355,7 +463,26 @@ function readStored(): string | null {
   try { return localStorage.getItem(APPEARANCE_KEY); } catch { return null; }
 }
 
-export function readAppearance(): Appearance {
+/** Used by both local cache hydration and server sync. Old records acquire the
+ * new controls without losing their existing palette or typography. */
+export function normalizeAppearance(value: unknown, base: Appearance = DEFAULT_APPEARANCE): Appearance {
+  const a = { ...base };
+  if (!value || typeof value !== 'object') return a;
+  const v = value as Partial<Appearance>;
+  if (typeof v.palette === 'string' && PALETTES.some((p) => p.id === v.palette)) a.palette = v.palette;
+  if (v.style === 'lavender' || v.style === 'console') a.style = v.style;
+  if (v.accent === null || (typeof v.accent === 'string' && /^#[0-9a-fA-F]{6}$/.test(v.accent))) a.accent = v.accent;
+  if (FONTS.some((f) => f.id === v.font)) a.font = v.font!;
+  if (typeof v.textScale === 'number' && v.textScale >= .8 && v.textScale <= 1.25) a.textScale = v.textScale;
+  if (typeof v.radius === 'number' && v.radius >= 0 && v.radius <= 1.6) a.radius = v.radius;
+  if (typeof v.motion === 'boolean') a.motion = v.motion;
+  if (v.contrast === 'standard' || v.contrast === 'strong') a.contrast = v.contrast;
+  if (BACKGROUNDS.some((b) => b.id === v.background)) a.background = v.background!;
+  if (typeof v.backgroundIntensity === 'number' && v.backgroundIntensity >= 0 && v.backgroundIntensity <= 1) a.backgroundIntensity = v.backgroundIntensity;
+  return a;
+}
+
+export function defaultAppearance(): Appearance {
   const a: Appearance = { ...DEFAULT_APPEARANCE };
   // Deployment defaults apply only before this browser has chosen its own
   // appearance — same contract as the original two-axis code.
@@ -366,6 +493,11 @@ export function readAppearance(): Appearance {
       ? (wantLight ? 'lavender-light' : 'lavender')
       : (wantLight ? 'console-light' : 'console');
   }
+  return a;
+}
+
+export function readAppearance(): Appearance {
+  const a = defaultAppearance();
   try {
     const legacyTheme = localStorage.getItem('rivendell:theme');
     const legacyStyle = localStorage.getItem('rivendell:style');
@@ -377,16 +509,7 @@ export function readAppearance(): Appearance {
     }
     const raw = readStored();
     if (raw) {
-      const v = JSON.parse(raw) as Partial<Appearance>;
-      if (v && typeof v === 'object') {
-        if (typeof v.palette === 'string' && PALETTES.some((p) => p.id === v.palette)) a.palette = v.palette;
-        if (v.style === 'lavender' || v.style === 'console') a.style = v.style;
-        a.accent = typeof v.accent === 'string' && /^#[0-9a-fA-F]{6}$/.test(v.accent) ? v.accent : null;
-        if (typeof v.font === 'string' && FONTS.some((f) => f.id === v.font)) a.font = v.font as FontId;
-        if (typeof v.textScale === 'number' && v.textScale >= 0.8 && v.textScale <= 1.25) a.textScale = v.textScale;
-        if (typeof v.radius === 'number' && v.radius >= 0 && v.radius <= 1.6) a.radius = v.radius;
-        if (typeof v.motion === 'boolean') a.motion = v.motion;
-      }
+      return normalizeAppearance(JSON.parse(raw), a);
     }
   } catch { /* storage unavailable: defaults still work */ }
   return a;
@@ -407,7 +530,7 @@ export function writeAppearance(a: Appearance): void {
 export const APPLIED_PROP_KEYS = [
   ...Object.keys(expandTokens(PALETTES[0])),
   '--r-body', '--r-display', '--r-sign', '--r-mono',
-  '--r-radius-sm', '--r-radius', '--r-radius-lg', '--r-radius-xl',
+  '--r-radius-sm', '--r-radius', '--r-radius-lg', '--r-radius-xl', '--r-text-scale',
 ];
 
 const RADIUS_BASE = { sm: 4, r: 8, lg: 14, xl: 20 } as const;
@@ -416,15 +539,15 @@ export function applyAppearance(a: Appearance, root: HTMLElement = document.docu
   const def = findPalette(a.palette);
   const { mode, style } = appearanceAxes(a);
   root.dataset.theme = mode;
+  root.dataset.background = a.background;
   root.dataset.style = style;
   if (a.motion) delete root.dataset.motion;
   else root.dataset.motion = 'calm';
 
   for (const key of APPLIED_PROP_KEYS) root.style.removeProperty(key);
 
-  const custom = !def.legacyStyle;
-  if (custom || a.accent) {
-    const tokens = expandTokens(def, a.accent);
+  if (!def.legacyStyle || a.accent || a.contrast === 'strong') {
+    const tokens = expandTokens(def, a.accent, a.contrast === 'strong');
     for (const [k, v] of Object.entries(tokens)) root.style.setProperty(k, v);
   }
 
@@ -438,6 +561,7 @@ export function applyAppearance(a: Appearance, root: HTMLElement = document.docu
     root.style.setProperty('--r-radius-xl', `${Math.round(RADIUS_BASE.xl * a.radius)}px`);
   }
 
+  root.style.setProperty('--r-text-scale', String(a.textScale));
   root.style.zoom = a.textScale !== 1 ? String(a.textScale) : '';
 
   const bg = def.colors.bg;
@@ -488,12 +612,14 @@ export function shuffleAppearance(a: Appearance): Appearance {
 /** Cycle/shuffle from storage, for surfaces that do not hold React state. */
 export function cycleThemeFromStorage(): Appearance {
   const next = cycleAppearance(readAppearance());
+  queueAppearanceEdit(next);
   applyAppearance(next);
   return next;
 }
 
 export function shuffleThemeFromStorage(): Appearance {
   const next = shuffleAppearance(readAppearance());
+  queueAppearanceEdit(next);
   applyAppearance(next);
   return next;
 }

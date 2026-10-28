@@ -1,0 +1,52 @@
+/* Stage isolates its negative-z decoration; it never overlays text or controls.
+   Broad washes stay subtle; small points and lines get more presence. Cards, bubbles and popovers stay opaque. */
+.bt-main { isolation: isolate; }
+.bt-main > .background-scene { z-index: -1; opacity: calc(var(--scene-intensity) * var(--scene-opacity)); }
+[data-background]:not([data-background="original"]) :is(.bt-main, .bt-rail, .bt-pane) { background-image: none !important; }
+.background-scene {
+  position: absolute; inset: 0; display: block; overflow: hidden;
+  pointer-events: none; border-radius: inherit;
+  --scene-opacity: .22;
+  --scene-a: var(--r-elf-blue); --scene-b: var(--r-violet); --scene-c: var(--r-emerald);
+}
+.scene-layer { position: absolute; display: block; inset: -15%; background-repeat: no-repeat; }
+.scene-two { animation-delay: -9s !important; }
+.scene-three { animation-delay: -17s !important; }
+[data-scene="mesh"] .scene-one, [data-scene="gradient"] .scene-one {
+  background: radial-gradient(ellipse at 15% 20%, var(--scene-a), transparent 60%), radial-gradient(ellipse at 85% 75%, var(--scene-b), transparent 60%);
+}
+[data-scene="mesh"] .scene-two, [data-scene="gradient"] .scene-two { background: radial-gradient(ellipse at 70% 20%, var(--scene-c), transparent 55%); }
+[data-scene="gradient"] .scene-layer { animation: scene-drift 28s ease-in-out infinite alternate; }
+[data-scene="sunrise"] .scene-one { background: radial-gradient(circle at 72% 72%, var(--r-amber) 0 12%, transparent 12.3%), linear-gradient(0deg, var(--scene-a), transparent 50%); }
+[data-scene="sunrise"] .scene-two { inset: 65% -10% -10%; background: linear-gradient(170deg, transparent 30%, var(--scene-b) 31% 50%, var(--scene-c) 51%); }
+[data-scene="topography"], [data-scene="grid"] { --scene-opacity: .35; }
+[data-scene="topography"] .scene-one { background: repeating-radial-gradient(ellipse at 85% 105%, transparent 0 23px, var(--scene-a) 24px 25px, transparent 26px 43px); }
+[data-scene="grid"] .scene-one { background: radial-gradient(circle, var(--scene-a) 1.2px, transparent 1.5px) 0 0 / 24px 24px; }
+[data-scene="prism"] .scene-one { background: conic-gradient(from 30deg at 70% 60%, transparent, var(--scene-a), transparent, var(--scene-b), var(--scene-c), transparent); }
+[data-scene="aurora"] .scene-layer { inset: -35%; background: linear-gradient(120deg, transparent 24%, var(--scene-c) 38%, var(--scene-a) 44%, transparent 58%); animation: scene-aurora 24s ease-in-out infinite alternate; }
+[data-scene="aurora"] .scene-two { background: linear-gradient(65deg, transparent 35%, var(--scene-b) 50%, transparent 65%); }
+[data-scene="aurora"] .scene-three { display: none; }
+[data-scene="starfield"] { --scene-opacity: .6; }
+[data-scene="starfield"] .scene-layer { background: radial-gradient(circle at 20% 30%, var(--r-ink) 1px, transparent 2px) 0 0 / 113px 127px, radial-gradient(circle at 70% 60%, var(--scene-a) 1.5px, transparent 2.5px) 0 0 / 197px 173px; animation: scene-stars 44s linear infinite alternate; }
+[data-scene="starfield"] .scene-two { opacity: .5; transform: rotate(17deg); background-size: 157px 191px, 257px 211px; animation-duration: 60s; }
+[data-scene="starfield"] .scene-three { display: none; }
+[data-scene="particles"] { --scene-opacity: .65; }
+[data-scene="particles"] .scene-layer { background: radial-gradient(circle at 30% 45%, var(--scene-a) 3px, transparent 6px) 0 0 / 137px 173px, radial-gradient(circle at 65% 70%, var(--r-amber) 3px, transparent 6px) 0 0 / 223px 191px; animation: scene-fireflies 18s ease-in-out infinite alternate; }
+[data-scene="particles"] .scene-two { transform: rotate(25deg); opacity: .6; animation-duration: 27s; }
+[data-scene="particles"] .scene-three { display: none; }
+[data-scene="waves"] .scene-layer { inset: 35% -30% -90%; border-radius: 43%; background: var(--scene-a); animation: scene-wave 24s ease-in-out infinite alternate; }
+[data-scene="waves"] .scene-two { inset-block-start: 48%; background: var(--scene-b); border-radius: 47%; animation-duration: 31s; }
+[data-scene="waves"] .scene-three { inset-block-start: 61%; background: var(--scene-c); animation-duration: 38s; }
+@keyframes scene-drift { to { transform: translate(8%, -6%) scale(1.12) rotate(12deg); } }
+@keyframes scene-aurora { from { transform: translate(-7%, -4%) rotate(-8deg); opacity: .55; } to { transform: translate(8%, 6%) rotate(10deg); opacity: 1; } }
+@keyframes scene-stars { to { transform: translate(5%, 9%); } }
+@keyframes scene-fireflies { from { transform: translate(-2%, 5%); opacity: .35; } to { transform: translate(3%, -8%); opacity: 1; } }
+@keyframes scene-wave { from { transform: translate(-4%, 4%) rotate(-12deg); } to { transform: translate(5%, -4%) rotate(10deg); } }
+.background-scene.is-preview .scene-layer { animation-play-state: paused; }
+.appearance-background:hover .scene-layer, .appearance-background:focus-visible .scene-layer { animation-play-state: running; }
+[data-motion="calm"] .background-scene .scene-layer,
+.background-scene[data-hidden] .scene-layer { animation-play-state: paused !important; }
+@media (prefers-reduced-motion: reduce) { .background-scene .scene-layer { animation: none !important; } }
+
+/* Keep even the smallest thumbnails representative of the full scene. */
+.is-preview[data-scene="particles"] .scene-layer, .is-preview[data-scene="starfield"] .scene-layer { background-size: 41px 51px, 67px 57px; }

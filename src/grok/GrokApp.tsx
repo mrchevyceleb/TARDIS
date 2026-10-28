@@ -31,7 +31,9 @@ import { BotPanel, type ChatMeta } from './BotPanel';
 import { AgentEditor } from './AgentEditor';
 import { CallOverlay } from '../voice/CallOverlay';
 import { useKonami } from '../theme/eggs';
-import { applyAppearance, appearanceAxes, cycleAppearance, readAppearance, shuffleAppearance, withMode, type Appearance } from '../theme/themes';
+import { BackgroundScene } from '../theme/BackgroundScene';
+import { useAppearance } from '../theme/useAppearance';
+import { applyAppearance, appearanceAxes, cycleAppearance, shuffleAppearance, withMode } from '../theme/themes';
 import { TAGLINE, WORKSPACE_NAV } from '../theme/voice';
 import { ROOM_NAMES } from '../data/roomNames';
 import { useAgents, reorderAgentIds, patchAgent, sameChatId, type Agent } from './agents';
@@ -104,13 +106,14 @@ function readView(): View {
 }
 
 export function GrokApp({ initialRoom }: { initialRoom?: string }) {
+  const { appearance, setAppearance, syncStatus: appearanceSync } = useAppearance();
   const flags = useDeploymentFlags();
   const jarvis = useJarvis();
   const viewer = useProxyViewer();
   const isMobile = useMediaQuery('(max-width: 760px), (pointer: coarse) and (max-width: 1180px)');
   const overlayPane = useMediaQuery('(max-width: 1180px)');
   const appRef = useRef<HTMLDivElement>(null);
-  useMobileViewport(appRef);
+  useMobileViewport(appRef, appearance.textScale);
   const { repos, status: reposStatus } = useRepos();
   const history = useChatHistory();
   const { agents, reload: reloadAgents } = useAgents();
@@ -130,7 +133,6 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   const [railCollapsed, setRailCollapsed] = useState(() => localStorage.getItem('rivendell:rail-collapsed') === 'true');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [meta, setMeta] = useState<ChatMeta | null>(null);
-  const [appearance, setAppearance] = useState<Appearance>(readAppearance);
   const { mode: theme, style: visualStyle } = appearanceAxes(appearance);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<Agent | undefined>(undefined);
@@ -454,6 +456,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
           onOpenChannel={openChannel}
           theme={theme}
           appearance={appearance}
+          appearanceSync={appearanceSync}
           onAppearance={setAppearance}
           onToggleTheme={toggleTheme}
           onOpenStudio={openStudio}
@@ -463,6 +466,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
         <div className={`bt-scrim${drawerOpen ? ' show' : ''}`} onClick={() => setDrawerOpen(false)} />
 
         <main className="bt-main">
+          <BackgroundScene scene={appearance.background} intensity={appearance.backgroundIntensity} />
           <header className="bt-workspacebar">
             <nav className="bt-workspace-switch" aria-label={WORKSPACE_NAV.label}>
               <button type="button" aria-pressed={view.kind === 'chat'} onClick={() => {
