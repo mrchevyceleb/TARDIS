@@ -116,6 +116,8 @@ export type DeskCard = {
 /** The check-in window: every owner touch without a written time sets a
  *  deadline this far out, and no such touch can push it further. */
 export const CARD_NEXT_CHECK_MS = 30 * 60_000;
+const QA_CHECK_CEILING_MS = 24 * 60 * 60_000;
+const QA_CHECK_REFUSAL = 'A card in QA can wait for its scheduled test, up to 24 hours out. Write the test time as the next check-in.';
 /** Compatibility export; agent due times now use the shared 30-minute rule. */
 export const CARD_NEXT_CHECK_WRITTEN_MAX_MS = CARD_NEXT_CHECK_MS;
 /** Quiet time after the owner nudge before the Chief copy. */
@@ -262,7 +264,11 @@ function touchCardNextCheck(card: DeskCard, nowIso: string, writtenNextCheckMs?:
       // A written check-in time in the comment is honored, capped at the
       // written maximum so no comment can park a live card indefinitely:
       // parking until a stated time actually silences the card until then.
-      const error = by?.kind === 'owner' ? undefined : checkpointDueError(writtenNextCheckMs, nowMs);
+      // In QA the ball is with the tester (Sud's slot can be tomorrow at 7am),
+      // so the owner may write the scheduled test time, up to a day out.
+      const error = by?.kind === 'owner' ? undefined
+        : card.column === 'in_qa' ? (writtenNextCheckMs - nowMs > QA_CHECK_CEILING_MS ? QA_CHECK_REFUSAL : undefined)
+        : checkpointDueError(writtenNextCheckMs, nowMs);
       if (error) throw new DeskError(409, error);
       card.nextCheckAt = new Date(writtenNextCheckMs).toISOString();
       if (by?.kind === 'owner') card.nextCheckWrittenByOwner = true; else delete card.nextCheckWrittenByOwner;
@@ -592,7 +598,9 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     if (card.nextCheckWritten && !card.nextCheckAt) delete card.nextCheckWritten;
     const lastComment = card.comments.at(-1);
     if (card.nextCheckWritten && lastComment?.at === card.updatedAt && lastComment.author.kind === 'owner') card.nextCheckWrittenByOwner = true;
-    const cap = card.nextCheckWrittenByOwner ? Infinity : checkpointCeiling(Date.parse(now));
+    const cap = card.nextCheckWrittenByOwner ? Infinity
+      : card.nextCheckWritten && card.column === 'in_qa' ? Date.parse(now) + QA_CHECK_CEILING_MS
+      : checkpointCeiling(Date.parse(now));
     if (!card.nextCheckAt) {
       const base = Math.min(Date.parse(updatedAt || now), Date.parse(now));
       card.nextCheckAt = new Date(base + CARD_NEXT_CHECK_MS).toISOString();
