@@ -6056,7 +6056,9 @@ button {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *,
+  /* Backdrop layers pause their native timelines instead. Shortening their
+     cycles would finish negative-delay layers and discard playback rates. */
+  :where(:not(.scene-layer)),
   *::before,
   *::after {
     animation-duration: 0.01ms !important;

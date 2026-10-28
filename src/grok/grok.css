@@ -1258,7 +1258,8 @@
 .bt-fade { animation: r-materialise 0.28s cubic-bezier(0.16, 1, 0.3, 1); }
 
 @media (prefers-reduced-motion: reduce) {
-  .bot-app *, .bot-app *::before, .bot-app *::after {
+  /* Backdrop layers own their pause state and retain their playback speed. */
+  .bot-app :where(:not(.scene-layer)), .bot-app *::before, .bot-app *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

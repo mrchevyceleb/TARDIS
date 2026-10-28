@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, Dices, Pause, Play, RotateCcw, X } from 'lucide-react';
 import {
@@ -18,6 +18,13 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
 }) {
   const [section, setSection] = useState<'themes' | 'backgrounds' | 'details'>('themes');
   const [filter, setFilter] = useState<'all' | 'dark' | 'light'>('all');
+  const [reducedMotion, setReducedMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const update = () => setReducedMotion(media.matches);
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
   const [previous, setPrevious] = useState(readPreviousAppearance);
   const [undoLook, setUndoLook] = useState<Appearance | null>(null);
   const undoButton = useRef<HTMLButtonElement>(null);
@@ -35,10 +42,11 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
     setPrevious(null);
     if (restoreFocus) ref.current?.querySelector<HTMLButtonElement>('button')?.focus();
   };
-  const detailLabels = { accent: 'accent', font: 'font', textScale: 'text size', radius: 'corners', motion: 'motion', contrast: 'contrast', background: 'backdrop', backgroundIntensity: 'intensity' } as const;
+  const detailLabels = { accent: 'accent', font: 'font', textScale: 'text size', radius: 'corners', motion: 'motion', contrast: 'contrast', background: 'backdrop', backgroundIntensity: 'intensity', backgroundSpeed: 'speed' } as const;
   const previousDetails = previous ? (Object.keys(detailLabels) as (keyof typeof detailLabels)[])
     .filter((key) => previous[key] !== appearance[key]).map((key) => detailLabels[key]).join(', ') : '';
   const palette = findPalette(appearance.palette);
+  const animatedBackdrop = BACKGROUNDS.some((b) => b.id === appearance.background && b.animated);
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const panel = ref.current;
@@ -131,8 +139,8 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
       <button type="button" className="appearance-chip" onClick={() => { setUndoLook(null); ref.current?.querySelector<HTMLButtonElement>('button')?.focus(); }} aria-label="Dismiss undo"><X size={13} /></button>
     </div>}
     <div className="appearance-preview" data-background={appearance.background}>
-      <BackgroundScene scene={appearance.background} intensity={appearance.backgroundIntensity} />
-      <div className="appearance-preview-copy"><span>Your little universe</span><strong>{palette.label}</strong><small>{palette.blurb}</small></div>
+      <BackgroundScene scene={appearance.background} intensity={appearance.backgroundIntensity} speed={appearance.backgroundSpeed} />
+      <div className="appearance-preview-copy"><span>Your little universe</span><strong>{palette.label}</strong><small>{palette.blurb} · {FONTS.find((f) => f.id === appearance.font)?.label}</small></div>
       <div className="appearance-preview-chat"><span>Room for a bright idea.</span><b>Let’s make something.</b></div>
     </div>
     <div className="appearance-tabs" role="group" aria-label="Appearance sections">
@@ -148,10 +156,15 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
     </>}
     {section === 'backgrounds' && <>
       <div className="appearance-row appearance-motion"><span>Ambient motion</span><button type="button" className="appearance-chip" onClick={() => patch({ motion: !appearance.motion })}>{appearance.motion ? <Pause size={13} /> : <Play size={13} />}{appearance.motion ? 'Pause' : 'Resume'}</button></div>
-      <p className="appearance-tip">Motion follows your device’s reduced motion setting too.</p>
-      {([false, true] as const).map((animated) => <fieldset key={String(animated)}><legend>{animated ? 'Slow things down · Animated' : 'Set the scene · Still'}</legend>
+      <label className="appearance-slider appearance-speed"><span>Animation speed <b>{appearance.backgroundSpeed}×</b></span>
+        <input type="range" min="0.25" max="2" step="0.25" list="appearance-speed-stops" aria-describedby="appearance-motion-tip" value={appearance.backgroundSpeed} aria-valuetext={`${appearance.backgroundSpeed} times normal speed`} onChange={(e) => patch({ backgroundSpeed: Number(e.target.value) })} />
+        <datalist id="appearance-speed-stops"><option value="0.25" /><option value="1" /><option value="2" /></datalist>
+        <small><span>Dreamy</span><span>Lively</span></small>
+      </label>
+      <p className="appearance-tip" id="appearance-motion-tip">{reducedMotion ? 'Still for now. Your device has reduced motion on.' : !appearance.motion ? 'Paused. Your pace is ready when you resume.' : !animatedBackdrop ? 'This backdrop is still. Pick an animated one to try your pace.' : 'Your pace follows every animated backdrop.'}</p>
+      {([true, false] as const).map((animated) => <fieldset key={String(animated)}><legend>{animated ? `Find your rhythm · ${BACKGROUNDS.filter((b) => b.animated).length} animated` : 'Set the scene · Still'}</legend>
         <div className="appearance-backgrounds">{BACKGROUNDS.filter((b) => b.animated === animated).map((b) => <button type="button" className="appearance-background" key={b.id} aria-pressed={appearance.background === b.id} onClick={() => patch({ background: b.id })} title={b.blurb}>
-          <span className={`appearance-background-art scene-${b.id}`}><BackgroundScene scene={b.id} preview />{b.animated && <Play size={12} />}</span>
+          <span className={`appearance-background-art scene-${b.id}`}><BackgroundScene scene={b.id} speed={appearance.backgroundSpeed} preview />{b.animated && <Play size={12} />}</span>
           <strong>{b.label}</strong>{appearance.background === b.id && <Check className="appearance-selected" size={13} aria-hidden="true" />}
         </button>)}</div>
       </fieldset>)}
@@ -167,8 +180,8 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
       </label>
     </div></fieldset>
 
-    <fieldset><legend>Font</legend><div className="appearance-dots appearance-fonts">
-      {FONTS.map((f) => <button type="button" key={f.id} className="appearance-chip" aria-pressed={appearance.font === f.id} onClick={() => patch({ font: f.id })}>{f.label}</button>)}
+    <fieldset><legend>Font · {FONTS.length} voices for your words</legend><p className="appearance-tip">Tap a name to try it everywhere. Fonts load as you explore.</p><div className="appearance-fonts">
+      {FONTS.map((f) => <button type="button" key={f.id} title={f.label} className="appearance-font" style={{ '--font-choice': f.vars?.['--r-body'] ?? "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif" } as CSSProperties} aria-pressed={appearance.font === f.id} onClick={() => patch({ font: f.id })}><strong>{f.label}</strong><small>{f.blurb}</small>{appearance.font === f.id && <Check size={14} aria-hidden="true" />}</button>)}
     </div></fieldset>
 
     <div className="appearance-rows">

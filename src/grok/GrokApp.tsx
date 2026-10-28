@@ -466,7 +466,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
         <div className={`bt-scrim${drawerOpen ? ' show' : ''}`} onClick={() => setDrawerOpen(false)} />
 
         <main className="bt-main">
-          <BackgroundScene scene={appearance.background} intensity={appearance.backgroundIntensity} />
+          <BackgroundScene scene={appearance.background} intensity={appearance.backgroundIntensity} speed={appearance.backgroundSpeed} />
           <header className="bt-workspacebar">
             <nav className="bt-workspace-switch" aria-label={WORKSPACE_NAV.label}>
               <button type="button" aria-pressed={view.kind === 'chat'} onClick={() => {

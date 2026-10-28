@@ -120,3 +120,22 @@
 .appearance-restore { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 10px; margin-bottom: 10px; border-radius: 12px; border: 1px solid var(--r-line-gold); background: var(--r-bg-soft); }
 .appearance-restore > span { flex: 1 1 100%; font-size: 13px; color: var(--r-ink-soft); }
 .appearance-restore .appearance-chip { min-height: 44px; min-width: 44px; }
+
+.appearance-speed { margin-top: 12px; padding: 12px; border: 1px solid var(--r-line); border-radius: 13px; background: var(--r-bg-soft); }
+.appearance-speed input { min-height: 28px; margin: 0; }
+.appearance-speed b { color: var(--r-elf-blue); font-variant-numeric: tabular-nums; }
+.appearance-speed small { display: flex; justify-content: space-between; gap: 4px; color: var(--r-ink-mute); font-size: 11px; }
+.appearance-fonts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.appearance-font { position: relative; min-height: 58px; min-width: 0; padding: 9px 22px 9px 10px; border: 1px solid var(--r-line-strong); border-radius: 12px; text-align: left; color: var(--r-ink); background: var(--r-bg-soft); cursor: pointer; transition: transform .16s, background .16s, box-shadow .16s; }
+.appearance-font strong, .appearance-font small { display: block; }
+.appearance-font strong { font-size: 12px; font-weight: 600; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.appearance-font small { margin-top: 3px; font: 10px/1.4 system-ui, sans-serif; color: var(--r-ink-mute); }
+.appearance-font > svg { position: absolute; top: 8px; right: 6px; color: var(--r-elf-blue); }
+.appearance-font[aria-pressed="true"] { border-color: var(--r-elf-blue); background: var(--r-bg-hover); box-shadow: 0 0 0 1px var(--r-elf-blue); }
+.appearance-font:hover { transform: translateY(-2px); background: var(--r-bg-hover); box-shadow: 0 4px 10px #0002; }
+.appearance-font:active { transform: scale(.97); }
+[data-motion="calm"] .appearance-font:hover { transform: none; }
+@media (prefers-reduced-motion: reduce) { .appearance-font:hover, .appearance-font:active { transform: none; } }
+
+/* A peek on hover or keyboard focus loads just that face, not the whole shelf. */
+.appearance-font:is(:hover, :focus-visible) strong { font-family: var(--font-choice); }

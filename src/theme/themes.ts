@@ -8,7 +8,8 @@ import { BACKGROUNDS } from './backgrounds';
 
 export type Mode = 'dark' | 'light';
 export type StyleAxis = 'console' | 'lavender';
-export type FontId = 'system' | 'grotesk' | 'serif' | 'mono' | 'rounded';
+export type FontId = 'system' | 'grotesk' | 'serif' | 'mono' | 'rounded'
+  | 'dm-sans' | 'space-grotesk' | 'outfit' | 'nunito' | 'quicksand' | 'work-sans' | 'sora' | 'lora' | 'literata' | 'newsreader' | 'fraunces' | 'roboto-mono';
 
 export interface PaletteColors {
   bg: string; bgDeep: string; bgSoft: string; bgCard: string; bgRaised: string; bgHover: string;
@@ -170,10 +171,10 @@ export const ACCENT_PRESETS = [
   '#6fcfa4', '#ff8a5c', '#f9e2af', '#e06c75',
 ] as const;
 
-export const FONTS: { id: FontId; label: string; vars?: Record<'--r-body' | '--r-display' | '--r-sign' | '--r-mono', string> }[] = [
-  { id: 'system', label: 'Default' },
+export const FONTS: { id: FontId; label: string; blurb?: string; vars?: Record<'--r-body' | '--r-display' | '--r-sign' | '--r-mono', string> }[] = [
+  { id: 'system', label: 'Default', blurb: 'The familiar TARDIS mix' },
   {
-    id: 'grotesk', label: 'Grotesk',
+    id: 'grotesk', label: 'Grotesk', blurb: 'Crisp and understated',
     vars: {
       '--r-body': "'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif",
       '--r-display': "'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif",
@@ -182,7 +183,7 @@ export const FONTS: { id: FontId; label: string; vars?: Record<'--r-body' | '--r
     },
   },
   {
-    id: 'serif', label: 'Serif',
+    id: 'serif', label: 'Serif', blurb: 'Classic reading room',
     vars: {
       '--r-body': "Georgia, 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', serif",
       '--r-display': "Georgia, 'Iowan Old Style', 'Palatino Linotype', serif",
@@ -191,7 +192,7 @@ export const FONTS: { id: FontId; label: string; vars?: Record<'--r-body' | '--r
     },
   },
   {
-    id: 'mono', label: 'Mono',
+    id: 'mono', label: 'Mono', blurb: 'Every letter in its place',
     vars: {
       '--r-body': "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
       '--r-display': "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
@@ -200,13 +201,61 @@ export const FONTS: { id: FontId; label: string; vars?: Record<'--r-body' | '--r
     },
   },
   {
-    id: 'rounded', label: 'Rounded',
+    id: 'rounded', label: 'Rounded', blurb: 'Your device’s softer side',
     vars: {
       '--r-body': "ui-rounded, 'SF Pro Rounded', 'Hiragino Maru Gothic ProN', 'Segoe UI Variable Display', system-ui, sans-serif",
       '--r-display': "ui-rounded, 'SF Pro Rounded', 'Segoe UI Variable Display', system-ui, sans-serif",
       '--r-sign': "ui-rounded, 'SF Pro Rounded', 'Segoe UI Variable Display', system-ui, sans-serif",
       '--r-mono': "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
     },
+  },
+  {
+    id: 'dm-sans', label: 'DM Sans', blurb: 'Friendly and clear',
+    vars: { '--r-body': "'DM Sans', system-ui, sans-serif", '--r-display': "'DM Sans', system-ui, sans-serif", '--r-sign': "'DM Sans', system-ui, sans-serif", '--r-mono': "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" },
+  },
+  {
+    id: 'space-grotesk', label: 'Space Grotesk', blurb: 'A little cosmic',
+    vars: { '--r-body': "'Space Grotesk', system-ui, sans-serif", '--r-display': "'Space Grotesk', system-ui, sans-serif", '--r-sign': "'Space Grotesk', system-ui, sans-serif", '--r-mono': "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" },
+  },
+  {
+    id: 'outfit', label: 'Outfit', blurb: 'Clean, with curves',
+    vars: { '--r-body': "'Outfit', system-ui, sans-serif", '--r-display': "'Outfit', system-ui, sans-serif", '--r-sign': "'Outfit', system-ui, sans-serif", '--r-mono': "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" },
+  },
+  {
+    id: 'nunito', label: 'Nunito', blurb: 'Soft and welcoming',
+    vars: { '--r-body': "'Nunito', system-ui, sans-serif", '--r-display': "'Nunito', system-ui, sans-serif", '--r-sign': "'Nunito', system-ui, sans-serif", '--r-mono': "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" },
+  },
+  {
+    id: 'quicksand', label: 'Quicksand', blurb: 'Round little letters',
+    vars: { '--r-body': "'Quicksand', system-ui, sans-serif", '--r-display': "'Quicksand', system-ui, sans-serif", '--r-sign': "'Quicksand', system-ui, sans-serif", '--r-mono': "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" },
+  },
+  {
+    id: 'work-sans', label: 'Work Sans', blurb: 'Quietly practical',
+    vars: { '--r-body': "'Work Sans', system-ui, sans-serif", '--r-display': "'Work Sans', system-ui, sans-serif", '--r-sign': "'Work Sans', system-ui, sans-serif", '--r-mono': "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" },
+  },
+  {
+    id: 'sora', label: 'Sora', blurb: 'A futuristic wink',
+    vars: { '--r-body': "'Sora', system-ui, sans-serif", '--r-display': "'Sora', system-ui, sans-serif", '--r-sign': "'Sora', system-ui, sans-serif", '--r-mono': "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" },
+  },
+  {
+    id: 'lora', label: 'Lora', blurb: 'A bookish companion',
+    vars: { '--r-body': "'Lora', Georgia, serif", '--r-display': "'Lora', Georgia, serif", '--r-sign': "'Lora', Georgia, serif", '--r-mono': "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" },
+  },
+  {
+    id: 'literata', label: 'Literata', blurb: 'Made for long reads',
+    vars: { '--r-body': "'Literata', Georgia, serif", '--r-display': "'Literata', Georgia, serif", '--r-sign': "'Literata', Georgia, serif", '--r-mono': "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" },
+  },
+  {
+    id: 'newsreader', label: 'Newsreader', blurb: 'Your daily paper',
+    vars: { '--r-body': "'Newsreader', Georgia, serif", '--r-display': "'Newsreader', Georgia, serif", '--r-sign': "'Newsreader', Georgia, serif", '--r-mono': "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" },
+  },
+  {
+    id: 'fraunces', label: 'Fraunces', blurb: 'A bit of storybook',
+    vars: { '--r-body': "'Fraunces', Georgia, serif", '--r-display': "'Fraunces', Georgia, serif", '--r-sign': "'Fraunces', Georgia, serif", '--r-mono': "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" },
+  },
+  {
+    id: 'roboto-mono', label: 'Roboto Mono', blurb: 'Typewriter rhythm',
+    vars: { '--r-body': "'Roboto Mono', ui-monospace, monospace", '--r-display': "'Roboto Mono', ui-monospace, monospace", '--r-sign': "'Roboto Mono', ui-monospace, monospace", '--r-mono': "'Roboto Mono', ui-monospace, monospace" },
   },
 ];
 
@@ -367,6 +416,7 @@ export interface Appearance {
   contrast: 'standard' | 'strong';
   background: string;         // BACKGROUNDS id
   backgroundIntensity: number; // 0..1, deliberately capped by the renderer
+  backgroundSpeed: number;     // .25..2, playback multiplier independent of pause
 }
 
 export const APPEARANCE_KEY = 'rivendell:appearance';
@@ -446,7 +496,7 @@ export const BOOT_BG_KEY = 'rivendell:boot-bg';
 export const DEFAULT_APPEARANCE: Appearance = {
   palette: DEFAULT_PALETTE, style: 'console', accent: null,
   font: 'system', textScale: 1, radius: 1, motion: true,
-  contrast: 'standard', background: 'original', backgroundIntensity: .65,
+  contrast: 'standard', background: 'original', backgroundIntensity: .65, backgroundSpeed: 1,
 };
 
 export function findPalette(id: string): ThemeDef {
@@ -479,6 +529,7 @@ export function normalizeAppearance(value: unknown, base: Appearance = DEFAULT_A
   if (v.contrast === 'standard' || v.contrast === 'strong') a.contrast = v.contrast;
   if (BACKGROUNDS.some((b) => b.id === v.background)) a.background = v.background!;
   if (typeof v.backgroundIntensity === 'number' && v.backgroundIntensity >= 0 && v.backgroundIntensity <= 1) a.backgroundIntensity = v.backgroundIntensity;
+  if (typeof v.backgroundSpeed === 'number' && v.backgroundSpeed >= .25 && v.backgroundSpeed <= 2) a.backgroundSpeed = v.backgroundSpeed;
   return a;
 }
 

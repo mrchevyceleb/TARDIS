@@ -9,10 +9,11 @@ const store = new JsonStore<AppearanceRecord>('appearance.json', []);
 export const appearanceRouter = Router();
 
 const choices: Record<string, readonly unknown[]> = {
-  style: ['console', 'lavender'], font: ['system', 'grotesk', 'serif', 'mono', 'rounded'],
+  style: ['console', 'lavender'], font: ['system', 'grotesk', 'serif', 'mono', 'rounded',
+    'dm-sans', 'space-grotesk', 'outfit', 'nunito', 'quicksand', 'work-sans', 'sora', 'lora', 'literata', 'newsreader', 'fraunces', 'roboto-mono'],
   contrast: ['standard', 'strong'],
 };
-const ranges: Record<string, [number, number]> = { textScale: [.8, 1.25], radius: [0, 1.6], backgroundIntensity: [0, 1] };
+const ranges: Record<string, [number, number]> = { textScale: [.8, 1.25], radius: [0, 1.6], backgroundIntensity: [0, 1], backgroundSpeed: [.25, 2] };
 function valid(key: string, value: unknown): boolean {
   if (Object.hasOwn(choices, key)) return choices[key].includes(value);
   if (Object.hasOwn(ranges, key)) return typeof value === 'number' && Number.isFinite(value) && value >= ranges[key][0] && value <= ranges[key][1];
