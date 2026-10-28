@@ -13,6 +13,7 @@ export type Agent = {
   engine: string;
   model?: string;
   effort?: string;
+  serviceTier?: string;
   brainRevision?: number;
   brainUpdatedAt?: number;
   /** home thread chatId (bot-<id>). */
@@ -116,7 +117,7 @@ export function useAgents(): { agents: Agent[]; reload: () => void } {
   return { agents, reload };
 }
 
-export async function createAgent(input: { name: string; role?: string; engine?: string; model?: string; effort?: string; voice?: string; scope?: string }): Promise<Agent> {
+export async function createAgent(input: { name: string; role?: string; engine?: string; model?: string; effort?: string; serviceTier?: string; voice?: string; scope?: string }): Promise<Agent> {
   const r = await apiJson<{ agent: Agent }>('/api/agents', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -132,7 +133,7 @@ export class AgentUpdateConflictError extends Error {
   }
 }
 
-export async function updateAgentReq(id: string, patch: { name?: string; role?: string; engine?: string; model?: string; effort?: string; brainRevision?: number; voice?: string; pinned?: boolean; muted?: boolean; color?: ChatColor | null; scope?: string }): Promise<Agent> {
+export async function updateAgentReq(id: string, patch: { name?: string; role?: string; engine?: string; model?: string; effort?: string; serviceTier?: string; brainRevision?: number; voice?: string; pinned?: boolean; muted?: boolean; color?: ChatColor | null; scope?: string }): Promise<Agent> {
   const response = await fetch(`/api/agents/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },

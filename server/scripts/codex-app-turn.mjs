@@ -377,6 +377,7 @@ async function start(config) {
           threadId: config.threadId,
           cwd: config.cwd,
           model: config.model,
+          serviceTier: config.serviceTier,
           approvalPolicy: 'never',
           sandbox: 'danger-full-access',
           excludeTurns: true,
@@ -394,6 +395,7 @@ async function start(config) {
     const started = await request('thread/start', {
       cwd: config.cwd,
       model: config.model,
+      serviceTier: config.serviceTier,
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
       historyMode: 'legacy',
@@ -414,6 +416,7 @@ async function start(config) {
     threadId,
     input,
     model: config.model,
+    serviceTier: config.serviceTier,
     effort: config.effort,
     approvalPolicy: 'never',
     sandboxPolicy: { type: 'dangerFullAccess' },

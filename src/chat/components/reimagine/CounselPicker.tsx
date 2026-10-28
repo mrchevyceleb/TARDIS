@@ -18,8 +18,8 @@ import {
   META_EFFORTS,
   companionAuthBlurb,
 } from '../../hooks/useCompanionPicker';
-import { CLAUDE_MODELS, CLAUDE_EFFORTS } from '../CodexEnginePicker';
-import { codexModelLabel, isCodexModelUnlisted, codexEffortsForModel, useCodexModels } from '../../codexModels';
+import { CLAUDE_MODELS, CLAUDE_EFFORTS, CodexSpeedPicker } from '../CodexEnginePicker';
+import { codexServiceTiers, codexModelLabel, isCodexModelUnlisted, codexEffortsForModel, useCodexModels } from '../../codexModels';
 import { FIREWORKS_MODELS, fireworksEffortsForModel, useFireworksModels } from '../../fireworksModels';
 import { OPENROUTER_MODELS, openRouterEffortsForModel, useOpenRouterModels, type OpenRouterModelSpec } from '../../openrouterModels';
 import { MUSE_EFFORTS, MUSE_MODELS } from '../../museModels';
@@ -278,7 +278,7 @@ function LaneControls({ picker, accountContext, rejectedCodexModel }: { picker: 
   useOpenRouterModels();
   return (
     <div className="lane-ctl">
-      {accountContext ? <AccountControl {...accountContext} engine={picker.cli} /> : null}
+      {accountContext && !picker.isCodex ? <AccountControl {...accountContext} engine={picker.cli} /> : null}
       {picker.isClaude && (
         <>
           <span className="ctl-lab">model</span>
@@ -317,9 +317,12 @@ function LaneControls({ picker, accountContext, rejectedCodexModel }: { picker: 
             current={picker.codexEffort}
             onPick={picker.setCodexEffort}
           />
+          {codexServiceTiers(picker.codexModel).length > 0 && <span className="ctl-lab">speed</span>}
+          <CodexSpeedPicker pills model={picker.codexModel} value={picker.codexServiceTier} onChange={picker.setCodexServiceTier} />
           {picker.codexModel === rejectedCodexModel ? <p className="model-choice-hint" role="status">{codexModelLabel(rejectedCodexModel)} was rejected in this chat. Choose another listed model, or change accounts before retrying.</p> : isCodexModelUnlisted(picker.codexModel) ? <p className="model-choice-hint">Your saved model is missing from this account’s list. Choose a listed model if it cannot run.</p> : null}
         </>
       )}
+      {accountContext && picker.isCodex ? <AccountControl {...accountContext} engine={picker.cli} /> : null}
       {picker.isXai && (
         <>
           <span className="ctl-lab">model</span>

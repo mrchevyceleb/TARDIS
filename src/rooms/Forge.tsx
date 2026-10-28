@@ -21,11 +21,15 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { apiJson } from '../data/api';
-import { CLAUDE_MODELS, DEFAULT_CLAUDE_MODEL } from '../chat/components/CodexEnginePicker';
+import { CodexSpeedPicker, CLAUDE_MODELS, DEFAULT_CLAUDE_MODEL } from '../chat/components/CodexEnginePicker';
 import {
   CODEX_MODELS,
   DEFAULT_CODEX_MODEL,
   codexModelSpec,
+  codexModelChange,
+  codexServiceTiers,
+  normalizeCodexServiceTier,
+  savedCodexServiceTier,
   useCodexModels,
   normalizeCodexEffort,
 } from '../chat/codexModels';
@@ -78,6 +82,7 @@ type CronDraft = {
   engine: string;
   model: string;
   effort: string;
+  serviceTier: string;
   schedMode: 'simple' | 'custom';
   freq: string;
   schedTime: string;
@@ -93,6 +98,7 @@ const emptyDraft: CronDraft = {
   engine: 'assistant',
   model: DEFAULT_CLAUDE_MODEL,
   effort: '',
+  serviceTier: 'default',
   schedMode: 'simple',
   freq: 'daily',
   schedTime: '09:00',
@@ -274,12 +280,13 @@ export function Forge() {
   const codexEffortOptions = draft.engine === 'codex'
     ? codexModelSpec(draft.model).efforts
     : [];
-  const initialSelectionFor = (engine: string): { model: string; effort: string } => {
+  const initialSelectionFor = (engine: string): { model: string; effort: string; serviceTier: string } => {
     const list = staticModelsForEngine(engine);
     const model = engine === 'codex' ? DEFAULT_CODEX_MODEL : list[0]?.id ?? '';
     return {
       model,
       effort: engine === 'codex' ? codexModelSpec(model).defaultEffort : '',
+      serviceTier: normalizeCodexServiceTier(model),
     };
   };
 
@@ -560,10 +567,9 @@ export function Forge() {
                   value={draft.model}
                   onChange={(event) => {
                     const model = event.target.value;
-                    const effort = draft.engine === 'codex'
-                      ? normalizeCodexEffort(model, draft.effort)
-                      : draft.effort;
-                    setDraft({ ...draft, model, effort });
+                    const next = draft.engine === 'codex' ? codexModelChange(model, draft.effort, draft.serviceTier) : null;
+                    setDraft({ ...draft, model, effort: next?.effort ?? draft.effort, serviceTier: next?.serviceTier ?? draft.serviceTier });
+                    if (next?.notice) flash('success', next.notice);
                   }}
                 >
                   {modelOptions.length === 0 && (
@@ -576,6 +582,7 @@ export function Forge() {
               </div>
 
               {draft.engine === 'codex' ? (
+                <>
                 <div className="cron-field">
                   Reasoning effort
                   <select
@@ -592,6 +599,11 @@ export function Forge() {
                     ))}
                   </select>
                 </div>
+                {(codexServiceTiers(draft.model).length > 0 || savedCodexServiceTier(draft.model, draft.serviceTier) !== 'default') && <div className="cron-field">
+                    Speed
+                    <CodexSpeedPicker className="cron-engine-select" model={draft.model} value={draft.serviceTier} onChange={serviceTier => setDraft({ ...draft, serviceTier })} />
+                </div>}
+                </>
               ) : null}
 
               <div className="cron-field">
@@ -916,6 +928,7 @@ function draftFromJob(job: CronJob): CronDraft {
     effort: rawEngine === 'codex'
       ? normalizeCodexEffort(model, job.reasoningEffort)
       : '',
+    serviceTier: rawEngine === 'codex' ? job.serviceTier ?? 'default' : 'default',
     schedMode: parsed ? 'simple' : 'custom',
     freq: parsed?.freq ?? 'daily',
     schedTime: parsed?.time ?? '09:00',
@@ -952,6 +965,7 @@ function normalizeDraft(draft: CronDraft): Partial<CronJob> {
     reasoningEffort: engine === 'codex'
       ? normalizeCodexEffort(draft.model, draft.effort)
       : undefined,
+    serviceTier: engine === 'codex' ? savedCodexServiceTier(draft.model, draft.serviceTier) : undefined,
     repo: repo || undefined,
     toolName: '',
     deliveryChannel: 'log_only',

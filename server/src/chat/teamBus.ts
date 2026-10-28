@@ -32,7 +32,7 @@ type SessionLike = {
   isBusy?: () => boolean;
   canAcceptNativeHumanSteer?: () => boolean;
   requestBoundaryInterrupt?: (opts?: { human?: boolean }) => (() => void) | null;
-  activeSelection?: () => { model?: string; effort?: string };
+  activeSelection?: () => { model?: string; effort?: string; serviceTier?: string };
   spawnModel?: string;
   spawnEffort?: string;
   latestSeq: () => number;
@@ -86,7 +86,7 @@ async function sendWithAdmission(session: SessionLike, deliveryId: string, send:
 async function getRunner() {
   const mod = await import('./runner.ts');
   return mod as unknown as {
-    getOrCreateSession: (opts: { cli: string; repoPath: string; chatId: string; model?: string; effort?: string; recycleOnMismatch?: boolean }) => Promise<SessionLike>;
+    getOrCreateSession: (opts: { cli: string; repoPath: string; chatId: string; model?: string; effort?: string; serviceTier?: string; recycleOnMismatch?: boolean }) => Promise<SessionLike>;
     activeChatSessions: () => Array<{ cli: string; cwd: string; chatId: string; busy: boolean; backgroundTasks?: string[] }>;
     isPersistentProcessCli: (cli: string) => boolean;
     beginThreadResetForLogKey: (logKey: string) => (() => void) | null;
@@ -94,7 +94,7 @@ async function getRunner() {
     liveSessionsForLogKey: (logKey: string) => Array<{ cli: string; cwd: string; chatId: string; busy: boolean; backgroundTasks?: string[] }>;
     interruptSession: (opts: { cli: CliKind; repoPath: string; chatId?: string }) => Promise<void>;
     dropSession: (cli: CliKind, repoPath: string, chatId?: string) => void;
-    freshStart: (opts: { cli: CliKind; repoPath: string; chatId?: string; model?: string; effort?: string }) => Promise<unknown>;
+    freshStart: (opts: { cli: CliKind; repoPath: string; chatId?: string; model?: string; effort?: string; serviceTier?: string }) => Promise<unknown>;
     trackedThreadLogKey: (opts: { cli: CliKind; repoPath: string; chatId?: string }) => string;
   };
 }
@@ -942,7 +942,7 @@ async function getRecipientSessionForDelivery(
    *  native-steer admission on Claude, no steerable early exit in the wait,
    *  no boundary interrupt on agy. Only a real turn end admits it. */
   neverSteer = false,
-): Promise<{ session: SessionLike; waited: boolean; nativeSteer: boolean; model?: string; effort?: string; lane: AgentLane }> {
+): Promise<{ session: SessionLike; waited: boolean; nativeSteer: boolean; model?: string; effort?: string; serviceTier?: string; lane: AgentLane }> {
   const runner = await getRunner();
   let waited = false;
 
@@ -951,7 +951,7 @@ async function getRecipientSessionForDelivery(
     const currentAgent = findAgent(agent.id) ?? agent;
     const home = agentLogKey(currentAgent);
     const lane = resolveLane(home.cli, requestedLane, runner);
-    const { cli, chatKey, model, effort } = agentLogKey(currentAgent, lane);
+    const { cli, chatKey, model, effort, serviceTier } = agentLogKey(currentAgent, lane);
     let session: SessionLike;
     try {
       const conflictingBusyLane = runner.activeChatSessions().some((active) => (
@@ -966,6 +966,7 @@ async function getRecipientSessionForDelivery(
         chatId: chatKey,
         model,
         effort,
+        serviceTier,
         recycleOnMismatch: true,
       });
     } catch (error) {
@@ -977,12 +978,12 @@ async function getRecipientSessionForDelivery(
     // engine/model instead of handing the caller a stale session.
     const latestAgent = findAgent(agent.id) ?? agent;
     const latest = agentLogKey(latestAgent);
-    if (latest.cli !== cli || latest.model !== model || latest.effort !== effort) {
+    if (latest.cli !== cli || latest.model !== model || latest.effort !== effort || latest.serviceTier !== serviceTier) {
       waited = true;
       continue;
     }
     const recipientBusy = session.isBusy?.() === true;
-    if (!recipientBusy) return { session, waited, nativeSteer: false, model, effort, lane };
+    if (!recipientBusy) return { session, waited, nativeSteer: false, model, effort, serviceTier, lane };
     // Same-turn steer is cheap and keeps babysitter/cron jobs from waiting for
     // a 40-minute Codex turn to finish. Prefer it even when the caller asked
     // to defer-if-busy (routines, MCP fire-and-forget).
@@ -998,10 +999,11 @@ async function getRecipientSessionForDelivery(
       };
       const brain = agentLogKey(findAgent(agent.id) ?? agent);
       return (!brain.model || selected.model === brain.model)
-        && (!brain.effort || selected.effort === brain.effort);
+        && (!brain.effort || selected.effort === brain.effort)
+        && (!brain.serviceTier || selected.serviceTier === brain.serviceTier);
     };
     if (!neverSteer && steerAdmissible() && session.canAcceptNativeHumanSteer?.() === true) {
-      return { session, waited, nativeSteer: true, model, effort, lane };
+      return { session, waited, nativeSteer: true, model, effort, serviceTier, lane };
     }
     // A synchronous MCP tool call must never sit behind somebody else's long
     // turn until Claude Code's ~5 minute tool timeout. The message is already
@@ -1035,13 +1037,14 @@ async function getRecipientSessionForDelivery(
 
 /** Resolve an agent's live session key. Account routing, when configured, is
  * derived server-side from the workspace rather than baked into public IDs. */
-export function agentLogKey(agent: Agent, lane: AgentLane = 'main'): { cli: string; chatKey: string; model?: string; effort?: string } {
+export function agentLogKey(agent: Agent, lane: AgentLane = 'main'): { cli: string; chatKey: string; model?: string; effort?: string; serviceTier?: string } {
   const brain = brainForAgent(agent);
   return {
     cli: cliForAgentEngine(brain.engine),
     chatKey: lane === 'bg' ? backgroundChatId(agent.home) : agent.home,
     model: brain.model,
     effort: brain.effort,
+    ...(brain.serviceTier !== undefined ? { serviceTier: brain.serviceTier } : {}),
   };
 }
 
@@ -1453,6 +1456,7 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
     let nativeSteer = false;
     let model: string | undefined;
     let effort: string | undefined;
+    let serviceTier: string | undefined;
     let lane: AgentLane;
     try {
       // The person's own voice continues in their lane; the person's channel
@@ -1512,6 +1516,7 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
       nativeSteer = admission.nativeSteer;
       model = admission.model;
       effort = admission.effort;
+      serviceTier = admission.serviceTier;
       waited ||= admission.waited;
     } catch (error) {
       return { delivered: false, to: to.name, hop, queued: waited || undefined, reason: (error as Error).message };
@@ -1630,6 +1635,7 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
         allowNativePeerSteer: nativeSteer,
         model,
         effort,
+        serviceTier,
         signal,
       }));
     } catch (error) {
@@ -2892,6 +2898,7 @@ export async function teamRoster() {
       engine: brain.engine,
       model: brain.model,
       effort: brain.effort,
+      ...(brain.serviceTier !== undefined ? { serviceTier: brain.serviceTier } : {}),
       ...teamAvailability(agent, sessions, queued),
     };
   });

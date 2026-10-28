@@ -161,6 +161,7 @@ type ChatImage = { mediaType: string; base64: string };
 type CodexSendOptions = {
   model?: unknown;
   effort?: unknown;
+  serviceTier?: unknown;
   peerFrom?: string;
   peerFromRole?: string;
   peerText?: string;
@@ -345,6 +346,7 @@ export class CodexSession {
    *  thread log can say which brain produced which turn. */
   private turnModel: string | null = null;
   private turnEffort: string | null = null;
+  private turnServiceTier: string | null = null;
   /** Codex doesn't need a warmup turn — ready immediately. */
   readonly ready: Promise<boolean> = Promise.resolve(true);
 
@@ -434,10 +436,11 @@ export class CodexSession {
     return this.busy;
   }
 
-  activeSelection(): { model?: string; effort?: string } {
+  activeSelection(): { model?: string; effort?: string; serviceTier?: string } {
     return {
       model: this.turnModel ?? undefined,
       effort: this.turnEffort ?? undefined,
+      serviceTier: this.turnServiceTier ?? undefined,
     };
   }
 
@@ -599,7 +602,7 @@ export class CodexSession {
     const agent = agentForChatId(this.chatId);
     if (agent) {
       const brain = brainForAgent(agent);
-      opts = { ...opts, model: brain.model, effort: brain.effort };
+      opts = { ...opts, model: brain.model, effort: brain.effort, serviceTier: brain.serviceTier };
     }
     if (this.contextMaintenance) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
@@ -708,12 +711,14 @@ export class CodexSession {
     const memory = this.startMemory ?? sessionMemory(this.chatId);
     const personaScope = [personaPromptFor(this.chatId, memory), CODEX_TURN_PREAMBLE].filter(Boolean).join('\n\n');
     this.startMemory = memory;
-    const { model: codexModel, effort: codexEffort } = resolveCodexSelection(
+    const { model: codexModel, effort: codexEffort, serviceTier } = resolveCodexSelection(
       opts.model,
       opts.effort,
+      opts.serviceTier,
     );
     this.turnModel = codexModel;
     this.turnEffort = codexEffort;
+    this.turnServiceTier = serviceTier;
     const childEnv = subscriptionEnvForLane('codex', this.cwd, this.chatId, agent?.name);
     const selectedProfile = codexHomeFor(childEnv);
     if (this.threadId && this.nativeProfile && cliProfileId('codex', this.nativeProfile) !== cliProfileId('codex', selectedProfile)) {
@@ -893,7 +898,7 @@ export class CodexSession {
     }
     const laneName = sessionAgent?.name;
     browserMcpArgs.push(...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId), agentId: sessionAgent?.id }), ...officeMcpCodexArgs());
-    const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
+    const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', `service_tier=${JSON.stringify(serviceTier)}`, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
 
     // Wait for OneDrive to release its sync lock on .codex/config.toml so
     // codex's own read at startup doesn't fail with EDEADLK and kill the turn.
@@ -1215,6 +1220,7 @@ export class CodexSession {
       threadId: this.threadId,
       model: codexModel,
       effort: codexEffort,
+      serviceTier,
       // Well-formed at the transport boundary: one lone surrogate anywhere
       // in the prompt makes app-server reject the JSONRPC message and the
       // turn never starts (Quinn's wake, Oct 19).

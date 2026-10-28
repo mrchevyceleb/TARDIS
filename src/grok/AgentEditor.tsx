@@ -22,8 +22,8 @@ import {
   DEFAULT_META_EFFORT,
   DEFAULT_META_MODEL,
 } from '../chat/hooks/useCompanionPicker';
-import { CLAUDE_EFFORTS, CLAUDE_MODELS, normalizeClaudeModel } from '../chat/components/CodexEnginePicker';
-import { codexPickerModels, codexModelChange, codexModelLabel, isCodexModelUnlisted, rememberCodexModel, DEFAULT_CODEX_MODEL, codexEffortsForModel, codexModelSpec, useCodexModels } from '../chat/codexModels';
+import { CLAUDE_EFFORTS, CLAUDE_MODELS, CodexSpeedPicker, normalizeClaudeModel } from '../chat/components/CodexEnginePicker';
+import { savedCodexServiceTier, codexServiceTiers, codexPickerModels, codexModelChange, codexModelLabel, isCodexModelUnlisted, rememberCodexModel, DEFAULT_CODEX_MODEL, codexEffortsForModel, codexModelSpec, useCodexModels } from '../chat/codexModels';
 import { DEFAULT_FIREWORKS_EFFORT, DEFAULT_FIREWORKS_MODEL, FIREWORKS_MODELS, fireworksEffortsForModel, useFireworksModels } from '../chat/fireworksModels';
 import { DEFAULT_OPENROUTER_EFFORT, DEFAULT_OPENROUTER_MODEL, OPENROUTER_MODELS, openRouterEffortsForModel, useOpenRouterModels } from '../chat/openrouterModels';
 import { AgentUpdateConflictError, createAgent, updateAgentReq, deleteAgentReq, uploadAgentAvatar, removeAgentAvatar, agentAvatarUrl, DISC_INK, agentColor, type Agent } from './agents';
@@ -101,6 +101,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
   const [engine, setEngine] = useState('xai');
   const [brainRevision, setBrainRevision] = useState(1);
   const [model, setModel] = useState(DEFAULT_XAI_MODEL);
+  const [serviceTier, setServiceTier] = useState('default');
   const [effort, setEffort] = useState(DEFAULT_XAI_EFFORT);
   const [effortNotice, setEffortNotice] = useState<string | null>(null);
   const [voice, setVoice] = useState('ara');
@@ -120,7 +121,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
   const nameRef = useRef<HTMLInputElement | null>(null);
   const agentRef = useRef('');
   const savingRef = useRef(false);
-  const initialBrain = useRef({ engine: '', model: '', effort: '' });
+  const initialBrain = useRef({ engine: '', model: '', effort: '', serviceTier: 'default' });
 
   // Reset the form when the editor OPENS, or when it retargets to a
   // different agent (by id — object identity changes every agents poll, and
@@ -143,9 +144,10 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     setBrainRevision(agent?.brainRevision ?? 1);
     setModel(nextModel);
     setEffort(agent?.effort ?? defaults.effort);
+    setServiceTier(agent?.serviceTier ?? 'default');
     setEffortNotice(null);
     if (nextEngine === 'codex') rememberCodexModel(nextModel);
-    initialBrain.current = { engine: nextEngine, model: nextModel, effort: agent?.effort ?? defaults.effort };
+    initialBrain.current = { engine: nextEngine, model: nextModel, effort: agent?.effort ?? defaults.effort, serviceTier: agent?.serviceTier ?? 'default' };
     setVoice(agent?.voice ?? 'ara');
     setPinned(Boolean(agent?.pinned));
     setMuted(Boolean(agent?.muted));
@@ -287,13 +289,15 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
   const chooseEngine = (nextEngine: string) => {
     setEffortNotice(null);
     const defaults = defaultBrainSelection(nextEngine);
+    setServiceTier('default');
     setEngine(nextEngine);
     setModel(defaults.model);
     setEffort(defaults.effort);
   };
   const chooseModel = (nextModel: string) => {
     if (engine === 'codex') {
-      const next = codexModelChange(nextModel, effort);
+      const next = codexModelChange(nextModel, effort, serviceTier);
+      setServiceTier(next.serviceTier);
       setModel(nextModel);
       setEffort(next.effort);
       setEffortNotice(next.notice);
@@ -326,8 +330,8 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     setBusy(true);
     setErr(null);
     try {
-      const brainChanged = engine !== initialBrain.current.engine || model !== initialBrain.current.model || effort !== initialBrain.current.effort;
-      const brain = !agent || brainChanged ? { engine, model: model || undefined, effort } : {};
+      const brainChanged = engine !== initialBrain.current.engine || model !== initialBrain.current.model || effort !== initialBrain.current.effort || serviceTier !== initialBrain.current.serviceTier;
+      const brain = !agent || brainChanged ? { engine, model: model || undefined, effort, ...(engine === 'codex' ? { serviceTier } : {}) } : {};
       const saved = agent
         ? await updateAgentReq(agent.id, { name, role, ...brain, brainRevision, voice, pinned, muted, scope: scope.trim() || undefined })
         : await createAgent({ name, role, ...brain, voice, scope: scope.trim() || undefined });
@@ -343,7 +347,8 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
         setEngine(currentEngine);
         setModel(currentModel);
         setEffort(current.effort ?? defaults.effort);
-        initialBrain.current = { engine: currentEngine, model: currentModel, effort: current.effort ?? defaults.effort };
+        setServiceTier(current.serviceTier ?? 'default');
+        initialBrain.current = { engine: currentEngine, model: currentModel, effort: current.effort ?? defaults.effort, serviceTier: current.serviceTier ?? 'default' };
         setBrainRevision(current.brainRevision ?? 1);
         onSaved(current);
         setErr('Brain settings changed on another device. Refreshed them here; review and save again.');
@@ -457,6 +462,9 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
               ))}
             </select>
           </label>
+          {engine === 'codex' && (codexServiceTiers(model).length > 0 || savedCodexServiceTier(model, serviceTier) !== 'default') ? <div className="bt-agent-field"><span>Speed</span>
+            <CodexSpeedPicker model={model} value={serviceTier} onChange={setServiceTier} />
+          </div> : null}
         </div>
 
         {agent ? <AccountControl engine={engine} agentId={agent.id} chatId={`agent:${agent.id}`} /> : null}

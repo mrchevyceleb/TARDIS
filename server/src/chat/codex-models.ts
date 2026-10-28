@@ -10,6 +10,8 @@ export type CodexModelInfo = {
   defaultEffort: string;
   efforts: string[];
   contextWindow: number;
+  serviceTiers?: { id: string; label: string; description: string }[];
+  defaultServiceTier?: string;
 };
 
 const STANDARD_CODEX_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
@@ -87,12 +89,52 @@ export function parseCodexCatalog(raw: unknown): CodexModelInfo[] | null {
       label: hand?.label ?? (name || id),
       defaultEffort: catalogDefault,
       efforts,
+      serviceTiers: parseServiceTiers(item),
+      defaultServiceTier: parseDefaultServiceTier(item),
       contextWindow: hand?.contextWindow ?? window,
       priority: typeof item.priority === 'number' && Number.isFinite(item.priority) ? item.priority : 1000 + index,
     });
   });
   rows.sort((a, b) => a.priority - b.priority);
   return rows.length ? rows.map(({ priority: _priority, ...model }) => model) : null;
+}
+
+export function canonicalServiceTier(value: unknown): string | undefined {
+  return value === 'fast' ? 'priority' : typeof value === 'string' && /^[a-z][a-z0-9_-]{0,31}$/.test(value) ? value : undefined;
+}
+
+function parseDefaultServiceTier(item: Record<string, unknown>): string {
+  const tier = canonicalServiceTier(item.default_service_tier ?? item.defaultServiceTier);
+  return tier && parseServiceTiers(item).some(entry => entry.id === tier) ? tier : 'default';
+}
+
+function parseServiceTiers(item: Record<string, unknown>): NonNullable<CodexModelInfo['serviceTiers']> {
+  const native = item.service_tiers ?? item.serviceTiers;
+  const legacy = item.additional_speed_tiers ?? item.additionalSpeedTiers;
+  const values = Array.isArray(native) && native.length ? native : Array.isArray(legacy) ? legacy : [];
+  const tiers: NonNullable<CodexModelInfo['serviceTiers']> = [];
+  for (const value of values) {
+    const row: Record<string, unknown> = value && typeof value === 'object' ? value as Record<string, unknown> : { id: value };
+    const id = canonicalServiceTier(row.id);
+    if (!id || id === 'default' || tiers.some(tier => tier.id === id)) continue;
+    tiers.push({ id, label: id === 'priority' ? 'Fast' : id === 'ultrafast' ? 'Ultrafast' : typeof row.name === 'string' ? row.name.slice(0, 60) : id,
+      description: typeof row.description === 'string' ? row.description.slice(0, 240) : '' });
+  }
+  return tiers;
+}
+
+/** Explicit Standard overrides any global CLI speed setting. */
+export function resolveCodexServiceTier(model: string, requested?: unknown, validateOffered = true): string {
+  const capability = codexCapability(model);
+  const tier = canonicalServiceTier(requested === undefined ? capability?.defaultServiceTier ?? 'default' : requested);
+  // Saved lane intent may belong to a different login than the discovery
+  // catalog. Native Codex validates availability for the actual turn account.
+  if (!validateOffered && tier) return tier;
+  if (tier === 'default' || (tier && capability?.serviceTiers?.some(entry => entry.id === tier))) return tier;
+  // Catalog discovery can be offline at boot. Preserve a saved native tier;
+  // the CLI, like it does for model/effort, remains the final availability check.
+  if (!catalog && (tier === 'priority' || tier === 'ultrafast')) return tier;
+  throw new Error('Choose a speed offered by this Codex model. Your saved settings and conversation are retained.');
 }
 
 let catalog: { models: CodexModelInfo[]; fetchedAt: number } | null = null;
@@ -213,7 +255,8 @@ function configuredCodexSelection(): { model: string; effort: string } {
 export function resolveCodexSelection(
   requestedModel?: unknown,
   requestedEffort?: unknown,
-): { model: string; effort: string } {
+  requestedServiceTier?: unknown,
+): { model: string; effort: string; serviceTier: string } {
   const configured = configuredCodexSelection();
   const model = requestedModel === undefined ? configured.model : requestedModel;
   if (typeof model !== 'string' || !SLUG.test(model)) throw new Error('Choose a valid Codex model. The saved conversation is retained.');
@@ -224,5 +267,5 @@ export function resolveCodexSelection(
   // Do not replace an explicit choice with another model or effort. The CLI
   // validates availability for this login and reports an error if it cannot run.
   if (typeof effort !== 'string' || !EFFORT.test(effort)) throw new Error('Choose a valid Codex effort. The saved conversation is retained.');
-  return { model, effort };
+  return { model, effort, serviceTier: resolveCodexServiceTier(model, requestedServiceTier, false) };
 }

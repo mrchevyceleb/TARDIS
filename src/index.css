@@ -2714,6 +2714,7 @@ button {
 
 .cron-form-grid input,
 .cron-field input,
+.cron-field select,
 .cron-field textarea {
   min-width: 0;
   border: 1px solid var(--r-line);
@@ -2726,6 +2727,7 @@ button {
 
 .cron-form-grid input:focus,
 .cron-field input:focus,
+.cron-field select:focus,
 .cron-field textarea:focus {
   border-color: var(--r-line-gold);
   box-shadow: 0 0 0 3px rgba(217, 168, 90, 0.08);

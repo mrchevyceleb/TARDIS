@@ -3624,6 +3624,7 @@ async function getOrCreateSessionUnlocked(opts: {
   chatId?: string;
   model?: string;
   effort?: string;
+  serviceTier?: string;
   /** Only an explicit user turn (send/steer) may recycle a warm session to
    *  apply a changed model/effort. Passive hellos/reconnects MUST default to
    *  attach-only: a backgrounded tab or a second device with a stale effort
@@ -3639,7 +3640,7 @@ async function getOrCreateSessionUnlocked(opts: {
   const selectedAgent = agentForChatId(opts.chatId || 'main');
   if (selectedAgent && !opts.handoverSource) {
     const brain = brainForAgent(selectedAgent);
-    opts = { ...opts, cli: cliForAgentEngine(brain.engine) as CliKind, model: brain.model, effort: brain.effort };
+    opts = { ...opts, cli: cliForAgentEngine(brain.engine) as CliKind, model: brain.model, effort: brain.effort, serviceTier: brain.serviceTier };
   }
   assertSubscriptionLane(opts.cli);
   const quotaRefresh = !opts.passive && (opts.cli === 'claude' || opts.cli === 'assistant')
@@ -4346,6 +4347,7 @@ export async function freshStart(opts: {
   chatId?: string;
   model?: string;
   effort?: string;
+  serviceTier?: string;
 }): Promise<AnySession> {
   assertSubscriptionLane(opts.cli);
   const chatId = isAgentThread(opts.chatId || '') ? bareChatId(opts.chatId!) : opts.chatId || 'main';

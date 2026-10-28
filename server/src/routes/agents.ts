@@ -41,13 +41,13 @@ agentsRouter.post('/reorder', asyncHandler(async (req, res) => {
 }));
 
 agentsRouter.post('/', asyncHandler(async (req, res) => {
-  const { name, role, engine, model, effort, voice, scope } = req.body ?? {};
+  const { name, role, engine, model, effort, serviceTier, voice, scope } = req.body ?? {};
   if (typeof name !== 'string' || !name.trim()) {
     res.status(400).json({ error: 'name is required' });
     return;
   }
   try {
-    res.status(201).json({ agent: createAgent({ name, role, engine, model, effort, voice, scope }) });
+    res.status(201).json({ agent: createAgent({ name, role, engine, model, effort, serviceTier, voice, scope }) });
   } catch (error) {
     if (error instanceof SubscriptionEngineError || error instanceof AgentBrainSelectionError) { res.status(400).json({ error: error.message }); return; }
     throw error;
@@ -55,7 +55,7 @@ agentsRouter.post('/', asyncHandler(async (req, res) => {
 }));
 
 agentsRouter.patch('/:id', asyncHandler(async (req, res) => {
-  const { name, role, engine, model, effort, brainRevision, voice, pinned, muted, color, scope } = req.body ?? {};
+  const { name, role, engine, model, effort, serviceTier, brainRevision, voice, pinned, muted, color, scope } = req.body ?? {};
   const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   if (muted !== undefined && typeof muted !== 'boolean') {
     res.status(400).json({ error: 'muted must be a boolean' });
@@ -72,7 +72,7 @@ agentsRouter.patch('/:id', asyncHandler(async (req, res) => {
     const agent = updateAgent(
       id,
       {
-        name, role, engine, model, effort, voice, pinned,
+        name, role, engine, model, effort, serviceTier, voice, pinned,
         muted,
         color,
         scope,
