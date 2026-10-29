@@ -62,7 +62,7 @@ export type DeskCard = {
   priority: DeskPriority;
   project?: string;
   links: string[];
-  /** Empty in the Desk room's lean poll; the open card's full thread comes from useDeskCard. */
+  /** Empty (and description absent) in the Desk room's lean poll; the open card's comes from useDeskCard. */
   comments: DeskComment[];
   /** Set by the lean poll: how many comments the card has and when the latest landed. */
   commentCount?: number;
@@ -301,11 +301,13 @@ export function useDeskCard(id: string | null) {
 }
 
 /** The open card for its drawer: lean fields from the board poll, the thread
- *  from the full card, plus any optimistic comment not on the server yet. */
-export function withThread(lean: DeskCard, full: DeskCard | undefined): DeskCard {
-  if (!full) return lean;
+ *  and description from the full card, plus any optimistic comment not on the
+ *  server yet. Null until the full card arrives, so the edit form never starts
+ *  from a card missing its description. */
+export function withThread(lean: DeskCard, full: DeskCard | undefined): DeskCard | null {
+  if (!full) return null;
   const known = new Set(full.comments.map((c) => c.id));
-  return { ...lean, comments: [...full.comments, ...lean.comments.filter((c) => !known.has(c.id))] };
+  return { ...lean, description: full.description, comments: [...full.comments, ...lean.comments.filter((c) => !known.has(c.id))] };
 }
 
 /** Full desk, polled while the room is open. Agents write here from their own
