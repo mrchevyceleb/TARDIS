@@ -347,8 +347,8 @@ async function guardOneJob(id: string, input: Record<string, unknown>, owner: De
   // Matt runs the team through Max in chat (Matt, Oct 28 2026: "if I want to
   // override things with you through chat I should [not] have to [tap]"), so
   // Max can hand a job with a PR to someone else on Matt's word.
-  const by = typeof input.agent === 'string' && input.agent.trim() ? resolveAuthor(input.agent) : undefined;
-  const chief = by?.kind === 'agent' && by.id === 'chief-of-staff';
+  // Keyed on the lane's own roster id, never a display name (names are not unique).
+  const chief = input.agentId === 'chief-of-staff' && listAgents().some((a) => a.id === 'chief-of-staff');
   const { cards } = await readDesk();
   const card = cards.find((c) => c.id === id);
   if (!card || card.archived || card.column === 'in_production') return;

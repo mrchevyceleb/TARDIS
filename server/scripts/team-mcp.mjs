@@ -904,7 +904,7 @@ async function callTool(name, args, signal) {
       for (const key of ['title', 'description', 'owner', 'project', 'priority', 'links']) if (args[key] !== undefined) patch[key] = args[key];
       if (typeof patch.owner === 'string' && ['me', 'self'].includes(patch.owner.trim().toLowerCase())) patch.owner = self;
       if (!Object.keys(patch).length) throw new Error('Nothing to change.');
-      const { card } = await api(`/api/desk/cards/${encodeURIComponent(args.id)}`, { method: 'PATCH', body: JSON.stringify({ ...patch, agent: self }) }, signal);
+      const { card } = await api(`/api/desk/cards/${encodeURIComponent(args.id)}`, { method: 'PATCH', body: JSON.stringify({ ...patch, agent: self, agentId: process.env.RIVENDELL_AGENT_ID || undefined }) }, signal);
       return `Updated:\n${describeCard(card)}`;
     }
   }
