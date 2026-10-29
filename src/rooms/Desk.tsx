@@ -25,6 +25,8 @@ import {
   peekDeskFocus,
   sortOpenTodos,
   useDesk,
+  useDeskCard,
+  withThread,
   withHeadline,
   useDeskSummary,
   useDeskWrite,
@@ -152,7 +154,9 @@ export function Desk() {
   const liveCards = useMemo(() => (data?.cards ?? []).filter((c) => !c.archived), [data]);
   const moving = liveCards.filter((c) => c.column === 'in_progress').length;
   const notStarted = liveCards.filter((c) => c.column === 'not_started').length;
-  const openCard = openCardId ? data?.cards.find((c) => c.id === openCardId) ?? null : null;
+  const fullCard = useDeskCard(openCardId).data?.card;
+  const leanCard = openCardId ? data?.cards.find((c) => c.id === openCardId) ?? null : null;
+  const openCard = useMemo(() => (leanCard ? withThread(leanCard, fullCard?.id === leanCard.id ? fullCard : undefined) : null), [leanCard, fullCard]);
 
   const subtitle = data
     ? [

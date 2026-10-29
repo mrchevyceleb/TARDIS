@@ -62,7 +62,11 @@ export type DeskCard = {
   priority: DeskPriority;
   project?: string;
   links: string[];
+  /** Empty in the Desk room's lean poll; the open card's full thread comes from useDeskCard. */
   comments: DeskComment[];
+  /** Set by the lean poll: how many comments the card has and when the latest landed. */
+  commentCount?: number;
+  lastCommentAt?: string;
   createdAt: string;
   updatedAt: string;
   columnSince: string;
@@ -275,7 +279,34 @@ export function deskDeepLinkUrl(ref: DeskRef): string {
 const DESK_KEY = ['desk'] as const;
 const SUMMARY_KEY = ['desk-summary'] as const;
 const PRS_KEY = ['desk-prs'] as const;
-const fetchDesk = ({ signal }: { signal: AbortSignal }) => apiJson<DeskSnapshot>('/api/desk', { signal, cache: 'no-store' });
+const CARD_KEY = ['desk-card'] as const;
+const fetchDesk = ({ signal }: { signal: AbortSignal }) => apiJson<DeskSnapshot>('/api/desk?lean=1', { signal, cache: 'no-store' });
+
+/** A card's comment count, from the lean poll or the full card. */
+export function commentTotal(card: DeskCard): number {
+  return card.commentCount ?? card.comments.length;
+}
+
+/** One card in full (its whole comment thread), polled while its drawer is open. */
+export function useDeskCard(id: string | null) {
+  return useQuery({
+    queryKey: [...CARD_KEY, id],
+    queryFn: ({ signal }) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${encodeURIComponent(id ?? '')}`, { signal, cache: 'no-store' }),
+    enabled: Boolean(id),
+    refetchInterval: 10_000,
+    refetchOnWindowFocus: 'always',
+    staleTime: 2_000,
+    retry: 1,
+  });
+}
+
+/** The open card for its drawer: lean fields from the board poll, the thread
+ *  from the full card, plus any optimistic comment not on the server yet. */
+export function withThread(lean: DeskCard, full: DeskCard | undefined): DeskCard {
+  if (!full) return lean;
+  const known = new Set(full.comments.map((c) => c.id));
+  return { ...lean, comments: [...full.comments, ...lean.comments.filter((c) => !known.has(c.id))] };
+}
 
 /** Full desk, polled while the room is open. Agents write here from their own
  *  turns, so a short interval plus refetch-on-focus keeps it live. */
@@ -519,6 +550,7 @@ export function useDeskWrite() {
       void queryClient.invalidateQueries({ queryKey: DESK_KEY });
       void queryClient.invalidateQueries({ queryKey: SUMMARY_KEY });
       void queryClient.invalidateQueries({ queryKey: TASKS_KEY });
+      void queryClient.invalidateQueries({ queryKey: CARD_KEY });
     }
   }, [queryClient]);
 }

@@ -176,7 +176,13 @@ deskRouter.get('/', route(async (req, res) => {
     ...(prs.pending ? { prsPending: true } : {}),
     ...(prs.unknown ? { prsUnknown: true } : {}),
   };
-  res.json({ rev: data.rev, owner: ownerActor(), columns: COLUMN_META, todos: data.todos, cards, ...prsPayload });
+  // ?lean=1 is the Desk room's poll: comment threads are most of the board's
+  // bytes (18 of 20 MB on Oct 29 2026), so they travel only with one open card
+  // (GET /cards/:id) and the list carries just their count and latest time.
+  const served = flag(req.query.lean)
+    ? cards.map(({ comments, ...card }) => ({ ...card, comments: [], commentCount: comments.length, lastCommentAt: comments.at(-1)?.at }))
+    : cards;
+  res.json({ rev: data.rev, owner: ownerActor(), columns: COLUMN_META, todos: data.todos, cards: served, ...prsPayload });
 }));
 
 /** The sidebar's current-task poll: only the fields a "what is this teammate

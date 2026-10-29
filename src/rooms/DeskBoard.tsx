@@ -16,6 +16,7 @@ import {
   discussOnDesk,
   hoursSince,
   useDeskWrite,
+  commentTotal,
   type DeskActor,
   type DeskCard,
   type DeskColumn,
@@ -354,7 +355,7 @@ const ET_TIME = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York',
 
 function cardActivity(card: DeskCard): number {
   let latest = -Infinity;
-  for (const iso of [card.updatedAt, card.columnSince, ...card.comments.map((c) => c.at)]) {
+  for (const iso of [card.updatedAt, card.columnSince, card.lastCommentAt ?? '', ...card.comments.map((c) => c.at)]) {
     const ts = Date.parse(iso);
     if (Number.isFinite(ts) && ts > latest) latest = ts;
   }
@@ -461,9 +462,9 @@ function BoardCard({
         {card.project ? <span className="desk-project">{card.project}</span> : null}
         {card.priority !== 'normal' ? <Chip tone={card.priority === 'high' ? 'rose' : 'emerald'}>{PRIORITY_LABEL[card.priority]}</Chip> : null}
         {needsYou ? <span className="desk-needs-pill" title="Open Needs-you items for this card">needs you</span> : null}
-        {card.comments.length ? (
-          <span className="desk-comments" title={`${card.comments.length} comment${card.comments.length === 1 ? '' : 's'}`}>
-            <MessageSquare size={11} aria-hidden="true" />{card.comments.length}
+        {commentTotal(card) ? (
+          <span className="desk-comments" title={`${commentTotal(card)} comment${commentTotal(card) === 1 ? '' : 's'}`}>
+            <MessageSquare size={11} aria-hidden="true" />{commentTotal(card)}
           </span>
         ) : null}
         {card.archived ? <span className="desk-project">archived</span> : null}
@@ -492,7 +493,7 @@ function sortCards(cards: DeskCard[], sort: { key: SortKey; dir: 1 | -1 } | null
       case 'owner': return c.owner.name.toLowerCase();
       case 'project': return (c.project ?? '￿').toLowerCase();
       case 'priority': return PRIORITY_RANK[c.priority];
-      case 'comments': return c.comments.length;
+      case 'comments': return commentTotal(c);
       default: return -Date.parse(c.updatedAt);
     }
   };
@@ -567,7 +568,7 @@ function CardList({
                       <td><ActorChip actor={card.owner} /></td>
                       <td className="desk-hide-sm">{card.project ?? ''}</td>
                       <td className="desk-hide-sm">{PRIORITY_LABEL[card.priority]}</td>
-                      <td className="desk-hide-sm">{card.comments.length || ''}</td>
+                      <td className="desk-hide-sm">{commentTotal(card) || ''}</td>
                       <td><span className={`desk-age${age.stale ? ' is-stale' : ''}`} title={age.title}>{age.short}</span></td>
                     </tr>
                   );
