@@ -154,7 +154,14 @@ export function Desk() {
   const liveCards = useMemo(() => (data?.cards ?? []).filter((c) => !c.archived), [data]);
   const moving = liveCards.filter((c) => c.column === 'in_progress').length;
   const notStarted = liveCards.filter((c) => c.column === 'not_started').length;
-  const fullCard = useDeskCard(openCardId).data?.card;
+  const cardQuery = useDeskCard(openCardId);
+  const fullCard = cardQuery.data?.card;
+  const cardFailed = Boolean(openCardId && cardQuery.isError && !fullCard);
+  useEffect(() => {
+    if (!cardFailed) return;
+    showToast('That card would not open. Check your connection and tap it again.');
+    setOpenCardId(null);
+  }, [cardFailed]);
   const leanCard = openCardId ? data?.cards.find((c) => c.id === openCardId) ?? null : null;
   const openCard = useMemo(() => (leanCard ? withThread(leanCard, fullCard?.id === leanCard.id ? fullCard : undefined) : null), [leanCard, fullCard]);
 

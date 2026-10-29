@@ -301,13 +301,12 @@ export function useDeskCard(id: string | null) {
 }
 
 /** The open card for its drawer: lean fields from the board poll, the thread
- *  and description from the full card, plus any optimistic comment not on the
- *  server yet. Null until the full card arrives, so the edit form never starts
- *  from a card missing its description. */
+ *  and description from the full card (useDeskWrite edits both caches). Null
+ *  until the full card arrives, so the edit form never starts from a card
+ *  missing its description. */
 export function withThread(lean: DeskCard, full: DeskCard | undefined): DeskCard | null {
   if (!full) return null;
-  const known = new Set(full.comments.map((c) => c.id));
-  return { ...lean, description: full.description, comments: [...full.comments, ...lean.comments.filter((c) => !known.has(c.id))] };
+  return { ...lean, description: full.description, comments: full.comments, commentCount: full.comments.length };
 }
 
 /** Full desk, polled while the room is open. Agents write here from their own
@@ -535,9 +534,29 @@ export function useDeskWrite() {
       const shifted = previousSummary && after ? queryClient.setQueryData<DeskSummary>(SUMMARY_KEY, shiftSummary(previousSummary, previous, after)) : undefined;
       if (after) applied = { after, shifted };
     }
+    // An open card's full copy (its thread and description) takes the same edit,
+    // and the lean list's comment count follows its thread.
+    await queryClient.cancelQueries({ queryKey: CARD_KEY });
+    const openCards = queryClient.getQueriesData<{ card: DeskCard }>({ queryKey: CARD_KEY });
+    if (previous && optimistic) {
+      for (const [key, value] of openCards) {
+        if (!value?.card) continue;
+        const edited = optimistic({ ...previous, cards: [value.card] }).cards.find((c) => c.id === value.card.id);
+        if (edited) queryClient.setQueryData(key, { ...value, card: edited });
+        if (edited && edited.comments.length !== value.card.comments.length) {
+          queryClient.setQueryData<DeskSnapshot>(DESK_KEY, (d) => d && ({ ...d, cards: d.cards.map((c) => (c.id === edited.id ? { ...c, commentCount: edited.comments.length } : c)) }));
+        }
+      }
+    }
     try {
-      return await request();
+      const result = await request();
+      // Card writes answer with the saved card in full: it replaces the
+      // optimistic copy at once (real comment ids, the saved description).
+      const saved = (result as { card?: DeskCard } | null)?.card;
+      if (saved && Array.isArray(saved.comments)) queryClient.setQueryData([...CARD_KEY, saved.id], (v: { card: DeskCard } | undefined) => ({ ...v, card: saved }));
+      return result;
     } catch (error) {
+      for (const [key, value] of openCards) queryClient.setQueryData(key, value);
       if (applied && previous) {
         const now = queryClient.getQueryData<DeskSnapshot>(DESK_KEY);
         queryClient.setQueryData(DESK_KEY, !now || now === applied.after ? previous : revertEdit(now, previous, applied.after));
