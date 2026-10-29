@@ -60,6 +60,9 @@ type Entry = {
   priority?: boolean;
   firstQueuedAt?: number;
   onDelivered?: () => void;
+  /** Lands in the owner's own digest even when the owner is a worker whose
+   *  flags normally ride its lead's (the due-time wake, commitmentSweep.ts). */
+  direct?: boolean;
   /** (card-b3468c verify P1) In flight: the digest record's durable receipt
    *  landed (sentDeliveryId is the record id, shared by every entry that
    *  rode it) but the recipient has not seen it yet. The entry waits for the
@@ -82,7 +85,7 @@ let restored = false;
 
 type Persisted = {
   lastFlush?: Record<string, number>;
-  queues?: Record<string, { key: string; text: string; priority?: boolean; firstQueuedAt?: number; sentAt?: number; sentDeliveryId?: string }[]>;
+  queues?: Record<string, { key: string; text: string; priority?: boolean; direct?: boolean; firstQueuedAt?: number; sentAt?: number; sentDeliveryId?: string }[]>;
 };
 
 function persistNow(): void {
@@ -91,7 +94,7 @@ function persistNow(): void {
     queues: {},
   };
   for (const [ownerId, entries] of queues) {
-    if (entries.size) out.queues![ownerId] = [...entries.values()].map(({ key, text, priority, firstQueuedAt, sentAt, sentDeliveryId }) => ({ key, text, priority, firstQueuedAt, sentAt, sentDeliveryId }));
+    if (entries.size) out.queues![ownerId] = [...entries.values()].map(({ key, text, priority, direct, firstQueuedAt, sentAt, sentDeliveryId }) => ({ key, text, priority, ...(direct ? { direct } : {}), firstQueuedAt, sentAt, sentDeliveryId }));
   }
   const tmp = `${STATE_FILE}.${process.pid}.tmp`;
   try {
@@ -156,6 +159,7 @@ function restore(): void {
           key: entry.key,
           text: entry.text,
           priority: entry.priority === true,
+          ...(entry.direct === true ? { direct: true } : {}),
           firstQueuedAt: legacy ? Date.now() : entry.firstQueuedAt,
           ...(sentAt !== undefined ? { sentAt } : {}),
           ...(sentDeliveryId !== undefined ? { sentDeliveryId } : {}),
@@ -168,7 +172,7 @@ function restore(): void {
     const lead = digestOwner(owner);
     if (lead === owner) continue;
     for (const [key, entry] of [...entries]) {
-      if (entry.sentDeliveryId) continue;
+      if (entry.sentDeliveryId || entry.direct) continue;
       entries.delete(key);
       const destination = queues.get(lead) ?? new Map<string, Entry>();
       const movedKey = `${owner}:${key}`;
@@ -194,8 +198,8 @@ function restore(): void {
  *  never rebind them — a genuinely fresh same-key line (a fresh commitment
  *  whose raise names a different id) gets its OWN successor slot and its
  *  own line, instead of hijacking the in-flight record's admission mark. */
-export function queueFlagDigest(ownerId: string, key: string, text: string, onDelivered?: () => void, priority = false): void {
-  const lead = digestOwner(ownerId);
+export function queueFlagDigest(ownerId: string, key: string, text: string, onDelivered?: () => void, priority = false, direct = false): void {
+  const lead = direct ? ownerId : digestOwner(ownerId);
   if (lead !== ownerId) {
     text = `For ${ownerId}: ${text}`;
     key = `${ownerId}:${key}`;
@@ -217,6 +221,7 @@ export function queueFlagDigest(ownerId: string, key: string, text: string, onDe
         text,
         onDelivered,
         priority,
+        ...(direct ? { direct } : {}),
         // The upsert preserves the slot's original firstQueuedAt (Max, Oct
         // 18 2026, card-b3468c): a producer re-queuing an undelivered flag
         // every minute must not refresh the hold age, or a busy lane would
@@ -235,7 +240,7 @@ export function queueFlagDigest(ownerId: string, key: string, text: string, onDe
   // line keeps its own first queue time.
   for (const slotKey of slotNames) {
     if (entries.has(slotKey)) continue;
-    entries.set(slotKey, { key: slotKey, text, onDelivered, priority, firstQueuedAt: Date.now() });
+    entries.set(slotKey, { key: slotKey, text, onDelivered, priority, ...(direct ? { direct } : {}), firstQueuedAt: Date.now() });
     queues.set(ownerId, entries);
     persistNow();
     return;

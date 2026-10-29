@@ -13,13 +13,16 @@
 // promised "resume at 5am" was never told the time had come: only the lead
 // heard "past due", and the work sat until someone nudged it. Now the moment
 // a worker's commitment comes due, TARDIS hands the promise straight back to
-// that worker as its own wake. The lead's past-due flag waits WAKE_GRACE_MS
-// after it and only goes out if the promise is still open.
+// that worker as its own wake. The wake rides the worker's OWN flag digest
+// (direct), so it inherits the digest's guarantees: durable across restarts,
+// held through quiet hours, never steering a live turn under the ceiling,
+// and marked only at its actual admission. The lead's past-due flag waits
+// WAKE_GRACE_MS after that admission and only goes out if the promise is
+// still open.
 
 import { digestOwner, flushFlagDigests, queueFlagDigest } from './flagDigest.ts';
-import { type Commitment, listCommitments, markCommitmentRaised, markCommitmentInheritedRaise, noteCommitmentDueAt, chiefRaiseHeldByText, inheritedOwnerRaiseAt, raiseTextKey } from './commitmentStore.ts';
+import { listCommitments, markCommitmentRaised, markCommitmentInheritedRaise, noteCommitmentDueAt, chiefRaiseHeldByText, inheritedOwnerRaiseAt, raiseTextKey } from './commitmentStore.ts';
 import { parseDue } from './promiseScan.ts';
-import { inQuietHours, isQuietExemptLane } from './quietHours.ts';
 
 const TICK_MS = 60_000;
 const CHIEF_ID = 'chief-of-staff';
@@ -30,18 +33,6 @@ const WAKE_GRACE_MS = 30 * 60_000;
  *  the longest quiet window (12h, Friday and Saturday nights) plus slack;
  *  anything older is a stale entry the past-due flag already covers. */
 const WAKE_WINDOW_MS = 16 * 3_600_000;
-
-/** Hand a worker its own due promise. True once the wake is durably queued. */
-async function wakeOwner(commitment: Commitment): Promise<boolean> {
-  const { deliverTeamMessage } = await import('../chat/teamBus.ts');
-  const text = `[TARDIS] It's time: your commitment [${commitment.id}] "${commitment.text}" (due ${commitment.due}) is due now. Pick it up now, and clear it with the commitments tool when it is done.`;
-  try {
-    const result = await deliverTeamMessage({ from: 'TARDIS', to: commitment.agentId, text, wait: false, priority: true });
-    return result.delivered === true;
-  } catch {
-    return false;
-  }
-}
 
 let busy = false;
 
@@ -63,20 +54,23 @@ async function run(): Promise<void> {
     if (dueAt > now.getTime()) continue;
     // A worker's own promise wakes the worker first (see the header). A
     // promise added after its own due is a re-track by an agent that is
-    // already awake, so it never wakes; quiet hours hold the wake until the
-    // window ends, the same as every other overnight delivery.
+    // already awake, so it never wakes. Until the wake is admitted the lead
+    // hears nothing; the wake is re-queued every tick (an upsert) so its
+    // admission mark re-arms after a restart.
     if (digestOwner(commitment.agentId) !== commitment.agentId) {
       const fresh = commitment.createdAt < dueAt && now.getTime() - dueAt < WAKE_WINDOW_MS;
-      if (fresh && !commitment.raised?.wake && !commitment.raised?.owner) {
-        if (inQuietHours(now.getTime()) && !isQuietExemptLane(commitment.agentId)) continue;
-        // A wake that cannot be queued falls through to the lead's flag, so
-        // a promise never goes silent because its owner was unreachable.
-        if (await wakeOwner(commitment)) {
-          markCommitmentRaised(commitment.id, 'wake');
-          continue;
-        }
-      }
       const wokeAt = commitment.raised?.wake;
+      if (fresh && !wokeAt && !commitment.raised?.owner) {
+        queueFlagDigest(
+          commitment.agentId,
+          `wake:${raiseTextKey(commitment.agentId, commitment.text)}`,
+          `It's time: your commitment [${commitment.id}] "${commitment.text}" (due ${commitment.due}) is due now. Pick it up now, and clear it with the commitments tool when it is done.`,
+          () => markCommitmentRaised(commitment.id, 'wake'),
+          true,
+          true,
+        );
+        continue;
+      }
       if (wokeAt && now.getTime() - wokeAt < WAKE_GRACE_MS) continue;
     }
     const raise = `Past-due commitment [${commitment.id}] "${commitment.text}" (due ${commitment.due}) is past due. Clear it with the commitments tool the moment it is done, or tell Max the new time if it slipped.`;
