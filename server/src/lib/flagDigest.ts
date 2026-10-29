@@ -150,9 +150,8 @@ function restore(): void {
         // (card-b3468c verify P1) In-flight markers survive the restart: the
         // durable record survives too, so its admission ack post-restart
         // must still find the entry. Restored entries carry no callbacks
-        // (the source's next cycle re-arms them); the ack of a callbackless
-        // entry deletes it and the sweep re-queues it, which re-sends that
-        // one line once — the stated restart limitation, not a new one.
+        // (the source's next cycle re-arms them: queueFlagDigest rebinds the
+        // callback of a restored in-flight slot carrying the exact same line).
         const sentAt = typeof entry.sentAt === 'number' && Number.isFinite(entry.sentAt) && entry.sentAt > 0 ? entry.sentAt : undefined;
         const sentDeliveryId = typeof entry.sentDeliveryId === 'string' && entry.sentDeliveryId ? entry.sentDeliveryId.slice(0, 120) : undefined;
         map.set(entry.key, {
@@ -195,7 +194,8 @@ function restore(): void {
  *  exact same line will run the mark at its admission. An IN FLIGHT slot
  *  is immutable (review P1, Oct 18): its text and callback are bound to
  *  the durable record already carrying its line, so a later queue can
- *  never rebind them — a genuinely fresh same-key line (a fresh commitment
+ *  never rebind them (only a restored slot that lost its callback in a
+ *  restart takes the same line's callback back) — a genuinely fresh same-key line (a fresh commitment
  *  whose raise names a different id) gets its OWN successor slot and its
  *  own line, instead of hijacking the in-flight record's admission mark. */
 export function queueFlagDigest(ownerId: string, key: string, text: string, onDelivered?: () => void, priority = false, direct = false): void {
@@ -230,6 +230,13 @@ export function queueFlagDigest(ownerId: string, key: string, text: string, onDe
       });
       queues.set(ownerId, entries);
       persistNow();
+    } else if (!slot.onDelivered && onDelivered) {
+      // An in-flight slot restored after a restart lost its callback (they
+      // are never persisted). The same producer re-queuing the exact same
+      // line re-arms it, so the record's admission still marks its source
+      // instead of clearing silently and getting re-sent. Text and delivery
+      // binding stay untouched: the slot remains immutable in what it says.
+      slot.onDelivered = onDelivered;
     }
     return;
   }
