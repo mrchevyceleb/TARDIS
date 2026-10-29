@@ -7,13 +7,41 @@
 // absolute instant get theirs persisted on first read, so a relative
 // display due ("10pm tomorrow") can no longer move with every reparse.
 // Same 60s cadence as the other hygiene loops; side copies never run it.
+//
+// Due-time wake (Matt, Oct 29 2026: parked work restarts at 5am on its own).
+// A worker's flags ride its lead's digest, so before this a worker who
+// promised "resume at 5am" was never told the time had come: only the lead
+// heard "past due", and the work sat until someone nudged it. Now the moment
+// a worker's commitment comes due, TARDIS hands the promise straight back to
+// that worker as its own wake. The lead's past-due flag waits WAKE_GRACE_MS
+// after it and only goes out if the promise is still open.
 
-import { flushFlagDigests, queueFlagDigest } from './flagDigest.ts';
-import { listCommitments, markCommitmentRaised, markCommitmentInheritedRaise, noteCommitmentDueAt, chiefRaiseHeldByText, inheritedOwnerRaiseAt, raiseTextKey } from './commitmentStore.ts';
+import { digestOwner, flushFlagDigests, queueFlagDigest } from './flagDigest.ts';
+import { type Commitment, listCommitments, markCommitmentRaised, markCommitmentInheritedRaise, noteCommitmentDueAt, chiefRaiseHeldByText, inheritedOwnerRaiseAt, raiseTextKey } from './commitmentStore.ts';
 import { parseDue } from './promiseScan.ts';
+import { inQuietHours, isQuietExemptLane } from './quietHours.ts';
 
 const TICK_MS = 60_000;
 const CHIEF_ID = 'chief-of-staff';
+/** The owner gets this long after its wake to pick the promise up before
+ *  the lead hears it is past due. */
+const WAKE_GRACE_MS = 30 * 60_000;
+/** Only a promise that came due recently is a wake. Long enough to cover
+ *  the longest quiet window (12h, Friday and Saturday nights) plus slack;
+ *  anything older is a stale entry the past-due flag already covers. */
+const WAKE_WINDOW_MS = 16 * 3_600_000;
+
+/** Hand a worker its own due promise. True once the wake is durably queued. */
+async function wakeOwner(commitment: Commitment): Promise<boolean> {
+  const { deliverTeamMessage } = await import('../chat/teamBus.ts');
+  const text = `[TARDIS] It's time: your commitment [${commitment.id}] "${commitment.text}" (due ${commitment.due}) is due now. Pick it up now, and clear it with the commitments tool when it is done.`;
+  try {
+    const result = await deliverTeamMessage({ from: 'TARDIS', to: commitment.agentId, text, wait: false, priority: true });
+    return result.delivered === true;
+  } catch {
+    return false;
+  }
+}
 
 let busy = false;
 
@@ -33,6 +61,24 @@ async function run(): Promise<void> {
       dueAt = parsed;
     }
     if (dueAt > now.getTime()) continue;
+    // A worker's own promise wakes the worker first (see the header). A
+    // promise added after its own due is a re-track by an agent that is
+    // already awake, so it never wakes; quiet hours hold the wake until the
+    // window ends, the same as every other overnight delivery.
+    if (digestOwner(commitment.agentId) !== commitment.agentId) {
+      const fresh = commitment.createdAt < dueAt && now.getTime() - dueAt < WAKE_WINDOW_MS;
+      if (fresh && !commitment.raised?.wake && !commitment.raised?.owner) {
+        if (inQuietHours(now.getTime()) && !isQuietExemptLane(commitment.agentId)) continue;
+        // A wake that cannot be queued falls through to the lead's flag, so
+        // a promise never goes silent because its owner was unreachable.
+        if (await wakeOwner(commitment)) {
+          markCommitmentRaised(commitment.id, 'wake');
+          continue;
+        }
+      }
+      const wokeAt = commitment.raised?.wake;
+      if (wokeAt && now.getTime() - wokeAt < WAKE_GRACE_MS) continue;
+    }
     const raise = `Past-due commitment [${commitment.id}] "${commitment.text}" (due ${commitment.due}) is past due. Clear it with the commitments tool the moment it is done, or tell Max the new time if it slipped.`;
     // Owner raises go out as one digest per owner every 30 minutes instead
     // of one message per item (Matt, Oct 14, card-d7bf78 b). The raise is

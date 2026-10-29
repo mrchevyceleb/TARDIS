@@ -47,7 +47,9 @@ const MAX_DIGEST_CHARS = 20_000;
 const STATE_FILE = join(STATE_DIR, 'flag-digest.json');
 const SESSION_LEADS = new Set(['chief-of-staff', 'max-voice', 'kip', 'riley', 'samwise']);
 
-function digestOwner(ownerId: string): string {
+/** Who reads an owner's flags: leads read their own, every worker's flags
+ *  ride its lead's digest so nags never land in a worker's session. */
+export function digestOwner(ownerId: string): string {
   const policy = sessionPolicy(`bot-${ownerId}`);
   return policy.lead || SESSION_LEADS.has(ownerId) ? ownerId : policy.reportsTo || 'chief-of-staff';
 }
