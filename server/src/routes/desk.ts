@@ -344,13 +344,18 @@ function prLinks(links: unknown): { repo: string; number: number; url: string }[
 
 async function guardOneJob(id: string, input: Record<string, unknown>, owner: DeskActor | undefined, site: string | undefined): Promise<void> {
   if (site === 'same-origin') return;
+  // Matt runs the team through Max in chat (Matt, Oct 28 2026: "if I want to
+  // override things with you through chat I should [not] have to [tap]"), so
+  // Max can hand a job with a PR to someone else on Matt's word.
+  const by = typeof input.agent === 'string' && input.agent.trim() ? resolveAuthor(input.agent) : undefined;
+  const chief = by?.kind === 'agent' && by.id === 'chief-of-staff';
   const { cards } = await readDesk();
   const card = cards.find((c) => c.id === id);
   if (!card || card.archived || card.column === 'in_production') return;
   const existing = prLinks(card.links);
-  if (owner && owner.kind === 'agent' && existing.length
+  if (!chief && owner && owner.kind === 'agent' && existing.length
     && !(card.owner.kind === 'agent' && card.owner.id === owner.id)) {
-    throw new DeskError(409, `Not reassigned. This card already has a PR (${existing.map((p) => `#${p.number}`).join(', ')}), so it stays with ${card.owner.name} until it is live. One owner per job, start to finish (Matt, Oct 24 2026). Send findings to ${card.owner.name} as one fix pass on the same PR. Only Matt can give it to someone else.`);
+    throw new DeskError(409, `Not reassigned. This card already has a PR (${existing.map((p) => `#${p.number}`).join(', ')}), so it stays with ${card.owner.name} until it is live. One owner per job, start to finish (Matt, Oct 24 2026). Send findings to ${card.owner.name} as one fix pass on the same PR. Only Matt can give it to someone else, on the Desk or by telling Max.`);
   }
   if (input.links !== undefined) {
     const incoming = prLinks(input.links);
