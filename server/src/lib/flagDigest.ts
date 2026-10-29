@@ -255,6 +255,25 @@ export function queueFlagDigest(ownerId: string, key: string, text: string, onDe
   console.warn(`[flag-digest] ${ownerId}: every slot for key "${key.slice(0, 80)}" is in flight; dropping this re-queue (the producer's next tick retries as slots free)`);
 }
 
+/** Drop every pending direct entry whose key family starts with `prefix`
+ *  but is not in `keep` (the due-time wakes, commitmentSweep.ts): a wake
+ *  whose commitment was cleared while it waited out quiet hours or a live
+ *  turn must not wake its worker for finished work. In-flight entries are
+ *  left alone; their record is already on its way. */
+export function pruneDirectFlags(prefix: string, keep: ReadonlySet<string>): void {
+  restore();
+  let changed = false;
+  for (const entries of queues.values()) {
+    for (const [slotKey, entry] of [...entries]) {
+      if (!entry.direct || entry.sentDeliveryId !== undefined || !slotKey.startsWith(prefix)) continue;
+      if (keep.has(slotKey.replace(/~\d+$/, ''))) continue;
+      entries.delete(slotKey);
+      changed = true;
+    }
+  }
+  if (changed) persistNow();
+}
+
 /** The durable queue's ground truth for one sent record (review P1, Oct
  *  18): true while the record still waits for admission, false once it is
  *  gone from the queue (admitted — its ack should have fired — or dropped),

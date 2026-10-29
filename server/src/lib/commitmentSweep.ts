@@ -20,7 +20,7 @@
 // WAKE_GRACE_MS after that admission and only goes out if the promise is
 // still open.
 
-import { digestOwner, flushFlagDigests, queueFlagDigest } from './flagDigest.ts';
+import { digestOwner, flushFlagDigests, pruneDirectFlags, queueFlagDigest } from './flagDigest.ts';
 import { listCommitments, markCommitmentRaised, markCommitmentInheritedRaise, noteCommitmentDueAt, chiefRaiseHeldByText, inheritedOwnerRaiseAt, raiseTextKey } from './commitmentStore.ts';
 import { parseDue } from './promiseScan.ts';
 
@@ -38,6 +38,7 @@ let busy = false;
 
 async function run(): Promise<void> {
   const now = new Date();
+  const wakeKeys = new Set<string>();
   for (const commitment of listCommitments()) {
     if (!commitment.due) continue;
     let dueAt = commitment.dueAt;
@@ -61,9 +62,11 @@ async function run(): Promise<void> {
       const fresh = commitment.createdAt < dueAt && now.getTime() - dueAt < WAKE_WINDOW_MS;
       const wokeAt = commitment.raised?.wake;
       if (fresh && !wokeAt && !commitment.raised?.owner) {
+        const wakeKey = `wake:${raiseTextKey(commitment.agentId, commitment.text)}`;
+        wakeKeys.add(wakeKey);
         queueFlagDigest(
           commitment.agentId,
-          `wake:${raiseTextKey(commitment.agentId, commitment.text)}`,
+          wakeKey,
           `It's time: your commitment [${commitment.id}] "${commitment.text}" (due ${commitment.due}) is due now. Pick it up now, and clear it with the commitments tool when it is done.`,
           () => markCommitmentRaised(commitment.id, 'wake'),
           true,
@@ -129,6 +132,9 @@ async function run(): Promise<void> {
       );
     }
   }
+  // A wake still waiting for its window whose promise was cleared (or
+  // otherwise stopped needing one) never goes out.
+  pruneDirectFlags('wake:', wakeKeys);
   await flushFlagDigests();
 }
 
