@@ -138,12 +138,47 @@ async function guarded(base: UsageAccount, load: () => Promise<UsageAccount>): P
   }
 }
 
+/** A Claude sign-in's short-lived pass lapses after a few hours, and only the
+ * CLI renews it, when the login is used. A backup login nobody has used yet
+ * (matt@ sat expired for three days, Oct 30 2026) then can't report usage at
+ * all. Let the CLI renew it the way it always does: one tiny turn on that
+ * profile, under the CLI's own refresh lock, at most once per cooldown. */
+const CLAUDE_RENEW_COOLDOWN_MS = 30 * 60_000;
+const CLAUDE_RENEW_TIMEOUT_MS = 90_000;
+const claudeRenewals = new Map<string, { at: number; running: boolean }>();
+/** Fire and forget: the usage read never waits on it, and the next poll reads the renewed pass. */
+function renewClaudeLogin(profile: CliProfile): void {
+  const prior = claudeRenewals.get(profile.id);
+  if (prior && (prior.running || Date.now() - prior.at < CLAUDE_RENEW_COOLDOWN_MS)) return;
+  const state = { at: Date.now(), running: true };
+  claudeRenewals.set(profile.id, state);
+  // Same isolation as content completions: no hooks, tools, MCP servers or saved session.
+  const child = spawn('claude', ['-p', '--safe-mode', '--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence',
+    '--model', 'claude-haiku-4-5-20251001', 'Reply with the single word ok'], { env: profile.env, cwd: homedir(), stdio: 'ignore', detached: process.platform !== 'win32', windowsHide: true });
+  const killGroup = (signal: NodeJS.Signals) => {
+    if (!child.pid || child.pid <= 1) return;
+    if (process.platform === 'win32') { spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).once('error', () => child.kill()); return; }
+    try { process.kill(-child.pid, signal); } catch { /* already gone */ }
+  };
+  const timer = setTimeout(() => { killGroup('SIGTERM'); setTimeout(() => killGroup('SIGKILL'), 5_000).unref(); finish(); }, CLAUDE_RENEW_TIMEOUT_MS);
+  timer.unref();
+  const finish = () => { clearTimeout(timer); state.running = false; state.at = Date.now(); };
+  child.once('error', finish);
+  child.once('exit', finish);
+  child.unref();
+}
+async function claudeAccessToken(profile: CliProfile): Promise<unknown> {
+  const oauth = rec(rec(JSON.parse(await readFile(join(profile.path, '.credentials.json'), 'utf8'))).claudeAiOauth);
+  const expiresAt = num(oauth.expiresAt);
+  if (expiresAt !== undefined && expiresAt < Date.now() + 5 * 60_000) renewClaudeLogin(profile);
+  return oauth.accessToken;
+}
+
 async function claude(accountInfo: CliAccount, profile: CliProfile): Promise<UsageAccount> {
   const base = account(accountInfo.id, 'Claude', 'Claude subscription', 'subscription', 'Claude live quota', 'https://claude.ai/settings/usage');
   base.email = accountInfo.email; base.plan = accountInfo.plan;
   return guarded(base, async () => {
-    const credentials = rec(JSON.parse(await readFile(join(profile.path, '.credentials.json'), 'utf8')));
-    const token = rec(credentials.claudeAiOauth).accessToken;
+    const token = await claudeAccessToken(profile);
     if (typeof token !== 'string' || !token) throw new FeedError(401);
     const data = await json('https://api.anthropic.com/api/oauth/usage', token, { 'anthropic-beta': 'oauth-2025-04-20', 'User-Agent': 'claude-code/usage' });
     const names: Record<string, string> = { session: 'Session', weekly_all: 'All models · week', weekly_scoped: 'Model · week' };
