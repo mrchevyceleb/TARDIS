@@ -1030,6 +1030,7 @@ class ClaudeSession {
       : cli === 'openrouter2' ? openRouter2Env(this.spawnModel)
       : cli === 'meta' ? metaEnv(this.spawnModel)
       : subscriptionEnvForLane('claude', cwd, chatId, agentForChatId(chatId)?.name);
+    if (cli === 'claude' || cli === 'assistant') withLongLivedClaudeToken(spawnEnv, spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'));
     if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks' && cli !== 'openrouter' && cli !== 'openrouter2' && cli !== 'meta') assertClaudeSubscription(spawnEnv, cwd);
     if (cli === 'claude' || cli === 'assistant') {
       spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
@@ -1047,7 +1048,6 @@ class ClaudeSession {
     }
     const profileDir = spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
     spawnEnv.CLAUDE_CONFIG_DIR = profileDir;
-    if (cli === 'claude' || cli === 'assistant') withLongLivedClaudeToken(spawnEnv, profileDir);
     const sourceProfiles = cli === 'claude' || cli === 'assistant'
       ? cliProfiles().filter(item => item.engine === 'claude').map(item => item.path)
       : [];

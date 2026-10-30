@@ -15,14 +15,18 @@ export type AccountEngine = 'claude' | 'codex';
 /** A Claude login refreshed by many lanes at once rotates its refresh token
  *  under them, and the native CLI wipes the login on the losing refresh. A
  *  long-lived token from `claude setup-token` never rotates, so lanes spawned
- *  on a profile that holds one (`<profile>/.long-lived-oauth-token`, mode 600)
- *  authenticate with it and never refresh. The profile's own credentials stay
- *  for the usage reader and the idle refresh, the only remaining refresher. */
+ *  on a profile that holds one authenticate with it and never refresh. The
+ *  file (`<profile>/.long-lived-oauth-token`, mode 600) is the account email on
+ *  line one and the token on line two; it applies only while the profile is
+ *  still signed in as that account, so a re-login to another account never
+ *  bills the old one. The profile's own credentials stay for the usage reader
+ *  and the idle renewal, the only remaining refresher. */
 export function withLongLivedClaudeToken(env: NodeJS.ProcessEnv, profileDir: string): NodeJS.ProcessEnv {
   delete env.CLAUDE_CODE_OAUTH_TOKEN;
   try {
-    const token = readFileSync(join(profileDir, '.long-lived-oauth-token'), 'utf8').trim();
-    if (/^sk-ant-oat[\w-]+$/.test(token)) env.CLAUDE_CODE_OAUTH_TOKEN = token;
+    const [email, token] = readFileSync(join(profileDir, '.long-lived-oauth-token'), 'utf8').split('\n').map(line => line.trim());
+    const signedIn = JSON.parse(readFileSync(join(profileDir, '.claude.json'), 'utf8'))?.oauthAccount?.emailAddress;
+    if (email && typeof signedIn === 'string' && signedIn.toLowerCase() === email.toLowerCase() && /^sk-ant-oat[\w-]+$/.test(token ?? '')) env.CLAUDE_CODE_OAUTH_TOKEN = token;
   } catch { /* No token for this profile: the CLI uses its own login. */ }
   return env;
 }
