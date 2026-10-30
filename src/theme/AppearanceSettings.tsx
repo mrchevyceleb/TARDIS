@@ -157,8 +157,8 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
     {section === 'backgrounds' && <>
       <div className="appearance-row appearance-motion"><span>Ambient motion</span><button type="button" className="appearance-chip" onClick={() => patch({ motion: !appearance.motion })}>{appearance.motion ? <Pause size={13} /> : <Play size={13} />}{appearance.motion ? 'Pause' : 'Resume'}</button></div>
       <label className="appearance-slider appearance-speed"><span>Animation speed <b>{appearance.backgroundSpeed}×</b></span>
-        <input type="range" min="0.25" max="2" step="0.25" list="appearance-speed-stops" aria-describedby="appearance-motion-tip" value={appearance.backgroundSpeed} aria-valuetext={`${appearance.backgroundSpeed} times normal speed`} onChange={(e) => patch({ backgroundSpeed: Number(e.target.value) })} />
-        <datalist id="appearance-speed-stops"><option value="0.25" /><option value="1" /><option value="2" /></datalist>
+        <input type="range" min="0.25" max="4" step="0.25" list="appearance-speed-stops" aria-describedby="appearance-motion-tip" value={appearance.backgroundSpeed} aria-valuetext={`${appearance.backgroundSpeed} times normal speed`} onChange={(e) => patch({ backgroundSpeed: Number(e.target.value) })} />
+        <datalist id="appearance-speed-stops"><option value="0.25" /><option value="1" /><option value="2" /><option value="4" /></datalist>
         <small><span>Dreamy</span><span>Lively</span></small>
       </label>
       <p className="appearance-tip" id="appearance-motion-tip">{reducedMotion ? 'Still for now. Your device has reduced motion on.' : !appearance.motion ? 'Paused. Your pace is ready when you resume.' : !animatedBackdrop ? 'This backdrop is still. Pick an animated one to try your pace.' : 'Your pace follows every animated backdrop.'}</p>

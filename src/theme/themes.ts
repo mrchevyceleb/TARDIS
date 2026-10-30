@@ -416,7 +416,7 @@ export interface Appearance {
   contrast: 'standard' | 'strong';
   background: string;         // BACKGROUNDS id
   backgroundIntensity: number; // 0..1, deliberately capped by the renderer
-  backgroundSpeed: number;     // .25..2, playback multiplier independent of pause
+  backgroundSpeed: number;     // .25..4, playback multiplier independent of pause
 }
 
 export const APPEARANCE_KEY = 'rivendell:appearance';
@@ -529,7 +529,7 @@ export function normalizeAppearance(value: unknown, base: Appearance = DEFAULT_A
   if (v.contrast === 'standard' || v.contrast === 'strong') a.contrast = v.contrast;
   if (BACKGROUNDS.some((b) => b.id === v.background)) a.background = v.background!;
   if (typeof v.backgroundIntensity === 'number' && v.backgroundIntensity >= 0 && v.backgroundIntensity <= 1) a.backgroundIntensity = v.backgroundIntensity;
-  if (typeof v.backgroundSpeed === 'number' && v.backgroundSpeed >= .25 && v.backgroundSpeed <= 2) a.backgroundSpeed = v.backgroundSpeed;
+  if (typeof v.backgroundSpeed === 'number' && v.backgroundSpeed >= .25 && v.backgroundSpeed <= 4) a.backgroundSpeed = v.backgroundSpeed;
   return a;
 }
 
