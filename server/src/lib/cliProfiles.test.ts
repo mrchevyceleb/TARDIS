@@ -66,9 +66,11 @@ test('no pool config means no pool restriction', () => {
   });
 });
 
-test('an account in two pools fails closed instead of bridging them', () => {
-  withPools('game|game,rally', () => {
-    assert.equal(claudeProfileInLanePool(rallyDir, gameDir), false);
+test('a shared backup stays with the pool where it comes first', () => {
+  withPools('game,other,rally|rally', () => {
+    assert.equal(claudeProfileInLanePool(rallyDir, gameDir), true, 'a game lane may borrow the shared backup');
+    assert.equal(claudeProfileInLanePool(otherDir, gameDir), true);
+    assert.equal(claudeProfileInLanePool(gameDir, rallyDir), false, 'a Rally lane never borrows the game login');
     assert.equal(claudeProfileInLanePool(otherDir, rallyDir), false);
   });
 });

@@ -13,7 +13,6 @@ function activeWindows(usage: Pick<UsageAccount, 'windows'>) {
 export class ClaudeAccountPool {
   private readings: Reading[] = [];
   private blocked = new Map<string, Block>();
-  private redirects = new Map<string, string>();
 
   update(readings: Reading[]): void {
     for (const reading of readings) {
@@ -54,20 +53,14 @@ export class ClaudeAccountPool {
 
   isLimited(profileId: string, now = Date.now()): boolean { return this.unavailable(profileId, now); }
 
+  /** `available` is the lane's pool in failover order: the first login in
+   *  it with room wins, so a lane never skips an earlier backup for a later one. */
   select(preferred: string, available: string[], now = Date.now()): string {
     if (!this.unavailable(preferred, now)) return preferred;
-    const candidates = this.readings.filter(item => (item.usage.status === 'live' || item.usage.status === 'stale')
+    const usable = new Set(this.readings.filter(item => (item.usage.status === 'live' || item.usage.status === 'stale')
       && item.usage.checkedAt
-      && activeWindows(item.usage).length > 0 && !this.unavailable(item.profileIds[0], now));
-    const fresh = (item: Reading) => item.usage.status === 'live' && now - Date.parse(item.usage.checkedAt!) < 120_000 ? 0 : 1;
-    const pressure = (item: Reading) => Math.max(0, ...activeWindows(item.usage).map(w => w.used / (w.limit || 1)));
-    candidates.sort((a, b) => fresh(a) - fresh(b) || pressure(a) - pressure(b));
-    const eligible = candidates.flatMap(item => item.profileIds).filter(id => available.includes(id));
-    const key = this.reading(preferred)?.usage.id ?? preferred;
-    const previous = this.redirects.get(key);
-    const selected = previous && eligible.includes(previous) ? previous : eligible[0];
-    if (selected) this.redirects.set(key, selected);
-    return selected ?? preferred;
+      && activeWindows(item.usage).length > 0 && !this.unavailable(item.profileIds[0], now)).flatMap(item => item.profileIds));
+    return available.find(id => id !== preferred && usable.has(id)) ?? preferred;
   }
 
   reject(profileId: string, error: TerminalProviderError, now = Date.now()): void {

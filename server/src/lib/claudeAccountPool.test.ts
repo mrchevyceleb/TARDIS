@@ -27,7 +27,7 @@ test('full accounts and duplicate logins are skipped for every lane; preferences
   assert.equal(pool.select('duplicate', ids, now), 'backup');
   assert.equal(pool.select('weekly', ids, now), 'backup');
   assert.equal(pool.select('preferred', ids, Date.parse('2026-10-23T14:00:00Z')), 'preferred');
-  assert.equal(pool.select('weekly', ids, Date.parse('2026-10-23T14:00:00Z')), 'backup');
+  assert.equal(pool.select('weekly', ids, Date.parse('2026-10-23T14:00:00Z')), 'preferred', 'the earliest login with room again');
 });
 
 test('a CLI rejection overrides a lagging feed and retries cannot slide its reset forward', () => {
@@ -58,6 +58,14 @@ test('all-full or signed-out alternatives cannot cause an account retry loop', (
   pool.reject('first', { message: 'full', usageLimit: true, limitKind: 'monthly' }, now);
   assert.equal(pool.isLimited('first', Date.parse('2026-10-31T23:59:59Z')), true);
   assert.equal(pool.isLimited('first', Date.parse('2026-11-01T00:00:00Z')), false);
+});
+
+test('failover follows the pool order, not whichever backup is emptiest', () => {
+  const pool = new ClaudeAccountPool();
+  pool.update([reading('mjohnst', 100), reading('mattio', 60), reading('kim', 5)]);
+  assert.equal(pool.select('mjohnst', ['mjohnst', 'mattio', 'kim'], now), 'mattio');
+  pool.update([reading('mjohnst', 100), reading('mattio', 100), reading('kim', 5)]);
+  assert.equal(pool.select('mjohnst', ['mjohnst', 'mattio', 'kim'], now), 'kim');
 });
 
 test('native clocks use the provider timezone, including dated weekly resets and year rollover', () => {

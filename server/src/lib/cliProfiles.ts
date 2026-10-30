@@ -105,10 +105,14 @@ export function subscriptionEnvForLane(engine: AccountEngine, cwd: string, chatI
 
 /** Claude logins are billed in separate pools (Matt, Oct 23 2026: the game
  *  studio runs on his own money, Rally work on the company's), so failover
- *  never moves a lane into another pool's account. Pools are account-map names,
- *  `RIVENDELL_CLAUDE_ACCOUNT_POOLS="mjohnst,mattio|kim,tardis"`. A lane whose
+ *  never moves a lane into another pool's account. Pools are ordered account-map
+ *  names, `RIVENDELL_CLAUDE_ACCOUNT_POOLS="mjohnst,mattio,kim|tardis,kim"`: a
+ *  lane fails over in that order (Matt, Oct 30 2026: games go mjohnst, then
+ *  matt@, then mtjohnston42). Pools may share a backup account; a lane belongs
+ *  to the pool where its preferred login sits earliest, so Rally's `kim` lanes
+ *  stay in Rally's pool even though games can borrow `kim` last. A lane whose
  *  preferred login is in no pool only fails over to other unpooled logins. */
-export function claudePoolGroups(): Set<string>[] | null {
+export function claudePoolGroups(): string[][] | null {
   const raw = process.env.RIVENDELL_CLAUDE_ACCOUNT_POOLS?.trim();
   if (!raw) return null;
   const idOf = (name: string): string | null => {
@@ -117,15 +121,18 @@ export function claudePoolGroups(): Set<string>[] | null {
   const groups = raw.split('|').map(group => group.split(',').map(name => name.trim()).filter(Boolean).map(idOf));
   // A misspelled name must never widen a pool: the config is unusable.
   if (groups.some(group => !group.length || group.includes(null))) return null;
-  const pools = groups.map(group => new Set(group as string[]));
-  // An account in two pools would bridge them, and `find` would silently
-  // pick the first: the config is unusable, not order-dependent.
-  const seen = new Set<string>();
-  for (const pool of pools) for (const id of pool) {
-    if (seen.has(id)) return null;
-    seen.add(id);
+  return groups.map(group => [...new Set(group as string[])]);
+}
+
+/** The ordered pool a lane bills: the one where its preferred login comes
+ *  first (earliest position, then earliest pool). */
+function lanePool(pools: string[][], laneId: string): string[] | undefined {
+  let best: string[] | undefined;
+  for (const pool of pools) {
+    const at = pool.indexOf(laneId);
+    if (at >= 0 && (!best || at < best.indexOf(laneId))) best = pool;
   }
-  return pools;
+  return best;
 }
 
 function claudePoolPeers(preferredId: string, profiles: CliProfile[]): CliProfile[] {
@@ -139,9 +146,10 @@ function claudePoolPeers(preferredId: string, profiles: CliProfile[]): CliProfil
       ? profiles.filter(profile => profile.id === preferredId)
       : profiles;
   }
-  const mine = pools.find(pool => pool.has(preferredId));
-  const pooled = new Set(pools.flatMap(pool => [...pool]));
-  return profiles.filter(profile => mine ? mine.has(profile.id) : !pooled.has(profile.id));
+  const mine = lanePool(pools, preferredId);
+  if (mine) return mine.flatMap(id => profiles.filter(profile => profile.id === id));
+  const pooled = new Set(pools.flat());
+  return profiles.filter(profile => !pooled.has(profile.id));
 }
 
 /** True when a Claude profile may bill work whose own lane lives in another
@@ -158,11 +166,9 @@ export function claudeProfileInLanePool(profileDir: string, lanePreferredDir: st
   const pools = claudePoolGroups();
   if (!pools) return !process.env.RIVENDELL_CLAUDE_ACCOUNT_POOLS?.trim();
   const id = cliProfileId('claude', profileDir);
-  const laneId = cliProfileId('claude', lanePreferredDir);
-  const mine = pools.find(pool => pool.has(laneId));
-  if (mine) return mine.has(id);
-  const pooled = new Set(pools.flatMap(pool => [...pool]));
-  return !pooled.has(id);
+  const mine = lanePool(pools, cliProfileId('claude', lanePreferredDir));
+  if (mine) return mine.includes(id);
+  return !pools.flat().includes(id);
 }
 
 export function preferredSubscriptionEnv(engine: AccountEngine, cwd: string, chatId: string, agentName?: string): NodeJS.ProcessEnv {
