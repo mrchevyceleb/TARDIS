@@ -255,15 +255,29 @@ deskRouter.get('/todos', route(async (req, res) => {
   res.json({ todos: status === 'all' ? todos : todos.filter((t) => t.status === status) });
 }));
 
+/** Matt single-threads his Desk through his leads (Oct 30 2026): every other
+ *  teammate hands a needs-Matt item to Max or Riley, who decides what reaches him. */
+const DESK_WRITER_IDS = new Set(['chief-of-staff', 'riley']);
+
+/** Adding or reopening a Needs-you item puts it in front of the owner. */
+function deskWriter(input: Record<string, unknown>, site?: string): DeskActor {
+  const author = resolveWriteAuthor(input, site);
+  if (author.kind === 'agent' && !DESK_WRITER_IDS.has(author.id)) {
+    throw new DeskError(403, `Only Max and Riley put items on ${DESK_OWNER_NAME}'s Desk. Send it to Max (or Riley for the game studio) in one sentence with your pick. Nothing was changed.`);
+  }
+  return author;
+}
+
 deskRouter.post('/todos', route(async (req, res) => {
   const input = body(req);
-  const todo = await createTodo(input, resolveWriteAuthor(input, fetchSite(req)));
+  const todo = await createTodo(input, deskWriter(input, fetchSite(req)));
   notifyTodoTouched();
   res.status(201).json({ todo });
 }));
 
 deskRouter.patch('/todos/:id', route(async (req, res) => {
   const input = body(req);
+  if (input.status === 'open') deskWriter(input, fetchSite(req));
   const todo = await updateTodo(param(req, 'id'), input, input.status === 'done' && input.note ? resolveCloser(input, fetchSite(req)) : undefined);
   if (input.priority !== undefined) notifyTodoTouched();
   res.json({ todo });
@@ -287,6 +301,7 @@ deskRouter.post('/todos/:id/complete', route(async (req, res) => {
 }));
 
 deskRouter.post('/todos/:id/reopen', route(async (req, res) => {
+  deskWriter(body(req), fetchSite(req));
   res.json({ todo: await setTodoStatus(param(req, 'id'), 'open') });
 }));
 
