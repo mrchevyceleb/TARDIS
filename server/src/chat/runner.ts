@@ -37,7 +37,7 @@ import { agentForChatId, brainForAgent, cliForAgentEngine, noteAgentLane } from 
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { crashTombstoneEvent, crashTombstoneText, restartMarkerEvent } from './crashTombstone.ts';
 import { BACKGROUND_MODEL_HOLD_MINUTES, backgroundEndedGuidance, backgroundTaskLabel, backgroundWorkEvent, type BackgroundWorkCause } from './backgroundWork.ts';
-import { subscriptionEnvForLane, preferredSubscriptionEnv, subscriptionRoutingKey, subscriptionRoutingKeysMatch, subscriptionEmail, cliProfileForEnv, cliProfileId, cliProfiles } from '../lib/cliProfiles.ts';
+import { subscriptionEnvForLane, withLongLivedClaudeToken, preferredSubscriptionEnv, subscriptionRoutingKey, subscriptionRoutingKeysMatch, subscriptionEmail, cliProfileForEnv, cliProfileId, cliProfiles } from '../lib/cliProfiles.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
@@ -1047,6 +1047,7 @@ class ClaudeSession {
     }
     const profileDir = spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
     spawnEnv.CLAUDE_CONFIG_DIR = profileDir;
+    if (cli === 'claude' || cli === 'assistant') withLongLivedClaudeToken(spawnEnv, profileDir);
     const sourceProfiles = cli === 'claude' || cli === 'assistant'
       ? cliProfiles().filter(item => item.engine === 'claude').map(item => item.path)
       : [];

@@ -11,6 +11,22 @@ import { JsonStore } from './jsonStore.ts';
 import { claudeAccountPool } from './claudeAccountPool.ts';
 
 export type AccountEngine = 'claude' | 'codex';
+
+/** A Claude login refreshed by many lanes at once rotates its refresh token
+ *  under them, and the native CLI wipes the login on the losing refresh. A
+ *  long-lived token from `claude setup-token` never rotates, so lanes spawned
+ *  on a profile that holds one (`<profile>/.long-lived-oauth-token`, mode 600)
+ *  authenticate with it and never refresh. The profile's own credentials stay
+ *  for the usage reader and the idle refresh, the only remaining refresher. */
+export function withLongLivedClaudeToken(env: NodeJS.ProcessEnv, profileDir: string): NodeJS.ProcessEnv {
+  delete env.CLAUDE_CODE_OAUTH_TOKEN;
+  try {
+    const token = readFileSync(join(profileDir, '.long-lived-oauth-token'), 'utf8').trim();
+    if (/^sk-ant-oat[\w-]+$/.test(token)) env.CLAUDE_CODE_OAUTH_TOKEN = token;
+  } catch { /* No token for this profile: the CLI uses its own login. */ }
+  return env;
+}
+
 export type CliProfile = { id: string; engine: AccountEngine; path: string; env: NodeJS.ProcessEnv };
 type ManagedProfile = { id: string; engine: AccountEngine };
 type Choice = { id: string; profileId: string };
@@ -254,5 +270,5 @@ export async function backgroundSubscriptionEnv(cwd: string, agentName: string, 
     if (active.claudeProfile && ['claude', 'assistant'].includes(active.cli)
       && claudeProfileInLanePool(active.claudeProfile, cliProfileForEnv('claude', claude))) { env.CLAUDE_CONFIG_DIR = active.claudeProfile; break; }
   }
-  return env;
+  return withLongLivedClaudeToken(env, env.CLAUDE_CONFIG_DIR!);
 }
