@@ -13,7 +13,6 @@ import { getXaiAuth, type XaiAuth } from '../routes/xai-oauth.ts';
 import { cliProfiles, subscriptionEnvForLane, cliProfileForEnv, type CliProfile } from './cliProfiles.ts';
 import { listCliAccounts, accountForProfile, type CliAccount } from './cliAccounts.ts';
 import { claudeAccountPool } from './claudeAccountPool.ts';
-import { clearAllClaudeAccountsFullAlert } from './providerLimitAlert.ts';
 
 export type UsageWindow = { id: string; label: string; used: number; limit: number; remaining: number; unit: 'percent' | 'requests' | 'characters' | 'credits'; resetsAt: string | null; active?: boolean };
 export type UsageAmount = { label: string; amount: number; currency: string; period: string; scope: 'key' | 'account' | 'subscription' };
@@ -226,7 +225,6 @@ export function refreshClaudeAccountUsage(): Promise<UsageAccount[]> {
       return { profileIds: info.profileIds, usage };
     }));
     claudeAccountPool.update(readings);
-    if (readings.some(item => item.usage.status === 'live' && item.usage.windows.length > 0 && !claudeAccountPool.isLimited(item.profileIds[0]))) clearAllClaudeAccountsFullAlert();
     claudeLast = readings.map(item => item.usage);
     claudeReadAt = Date.now();
     return claudeLast;

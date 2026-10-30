@@ -8,17 +8,26 @@ const deliver: Delivery = async (text) => {
   return deliverTeamMessage({ from: 'TARDIS', to: 'chief-of-staff', text, wait: false });
 };
 
-export function clearAllClaudeAccountsFullAlert(): void { sent.delete(ALL_FULL); }
+const isAllFull = (key: string) => key.startsWith(`["${ALL_FULL}"`);
+export function clearAllClaudeAccountsFullAlert(): void { for (const key of sent.keys()) if (isAllFull(key)) sent.delete(key); }
 
-/** One alert per profile/reset, or per outage when no account has room. */
+/** One alert per profile/reset, or per reset window when no account has room.
+ * Room on some other account doesn't end the outage for a lane whose pool is
+ * still full (game lanes can't use the Rally logins), so only a real move or
+ * a new reset window re-arms it, never a usage poll (Oct 30 2026: Riley's
+ * same 5pm notice woke Max three times in a few minutes). */
 export function noteProviderUsageLimit(account: string, lane: string, error: TerminalProviderError, send: Delivery = deliver, now = Date.now(), movedTo?: string): void {
   if (!error.usageLimit) return;
   const window = error.resetTime ?? 'reset unknown';
-  const key = movedTo ? JSON.stringify([account, error.limitKind ?? 'usage', window]) : ALL_FULL;
+  const key = movedTo ? JSON.stringify([account, error.limitKind ?? 'usage', window]) : JSON.stringify([ALL_FULL, window]);
   if (movedTo) clearAllClaudeAccountsFullAlert();
-  const cooldown = error.limitKind === 'weekly' || error.limitKind === 'monthly' ? 7 * 24 * 3_600_000 : error.resetTime ? 24 * 3_600_000 : 5 * 3_600_000;
-  for (const [entryKey, entry] of sent) if (entryKey !== ALL_FULL && now - entry.at >= 7 * 24 * 3_600_000) sent.delete(entryKey);
-  if (key !== ALL_FULL && sent.has(key) && now - sent.get(key)!.at >= cooldown) sent.delete(key);
+  // A session window is five hours, and its reset label ("5:00 PM") carries no
+  // date, so an all-full key must lapse within one window or tomorrow's outage
+  // with the same label would stay silent.
+  const long = error.limitKind === 'weekly' || error.limitKind === 'monthly';
+  const cooldown = long ? 7 * 24 * 3_600_000 : error.resetTime && movedTo ? 24 * 3_600_000 : 5 * 3_600_000;
+  for (const [entryKey, entry] of sent) if (now - entry.at >= 7 * 24 * 3_600_000) sent.delete(entryKey);
+  if (sent.has(key) && now - sent.get(key)!.at >= cooldown) sent.delete(key);
   if (sent.has(key)) return;
   const attempt = Symbol();
   sent.set(key, { at: now, attempt });
