@@ -275,10 +275,14 @@ export async function backgroundSubscriptionEnv(cwd: string, agentName: string, 
   // Rally money. When the borrow is refused the job keeps its own lane's
   // resolved profile, which is always in-pool by construction.
   const laneDir = sessionDirectory(chatId, cwd);
+  // Pool membership comes from the lane's own preference, never from the
+  // failover pick: a game lane that fell back to a shared backup is still a
+  // game lane and must not borrow a Rally session.
+  const laneHome = cliProfileForEnv('claude', preferredSubscriptionEnv('claude', cwd, chatId, agentName));
   for (const active of peekThreadSessions({ cli: 'claude', repoPath: cwd, chatId }, laneDir)) {
     if (!active.busy) continue;
     if (active.claudeProfile && ['claude', 'assistant'].includes(active.cli)
-      && claudeProfileInLanePool(active.claudeProfile, cliProfileForEnv('claude', claude))) { env.CLAUDE_CONFIG_DIR = active.claudeProfile; break; }
+      && claudeProfileInLanePool(active.claudeProfile, laneHome)) { env.CLAUDE_CONFIG_DIR = active.claudeProfile; break; }
   }
   return withLongLivedClaudeToken(env, env.CLAUDE_CONFIG_DIR!);
 }
