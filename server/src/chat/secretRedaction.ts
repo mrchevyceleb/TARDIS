@@ -144,9 +144,12 @@ function redactOpaqueToken(token: string, offset: number, source: string): strin
   }
   // Readable words keep a filesystem path, never a URL: URLs are where keys
   // travel (grouped activation keys, base36 tokens), so a URL path stays
-  // under the opaque rule above.
-  const word = /\S*$/.exec(context)?.[0] ?? '';
-  if (!word.includes('://') && isWordPath(token)) return token;
+  // under the opaque rule above. A filesystem path is anchored at /, ~/, ./
+  // or a bare folder name; a host (a dot before the first slash) or a
+  // scheme or protocol-relative // marks a URL.
+  const word = (/\S*$/.exec(context)?.[0] ?? '') + token;
+  const isFilesystemPath = !word.includes('//') && !/^[^/]*\./.test(word.replace(/^\.{1,2}\//, ''));
+  if (isFilesystemPath && isWordPath(token)) return token;
   return REDACTED;
 }
 
@@ -170,13 +173,13 @@ function isWordPath(token: string): boolean {
   });
 }
 
-/** One hyphen/underscore word of a path: a plain word (lowercase, UPPERCASE
- *  or Capitalized letters, up to 20), a number (up to 14 digits), or a
+/** One hyphen/underscore word of a path: a plain word (letters in any
+ *  case, up to 20: OpenAI, iOS), a number (up to 14 digits), or a
  *  short letter-digit mix (v2, runtime24). A long letter-digit run is a
  *  random token (base36, hex) and fails, as does any long hex run. */
 function isReadableWord(word: string): boolean {
   if (/^[0-9a-fA-F]{12,}$/.test(word)) return false;
-  if (/^(?:[a-z]{1,20}|[A-Z]{1,20}|[A-Z][a-z]{1,19})$/.test(word)) return true;
+  if (/^[A-Za-z]{1,20}$/.test(word)) return true;
   if (/^[0-9]{1,14}$/.test(word)) return true;
   return /^[A-Za-z0-9]{1,10}$/.test(word) && /^(?:[a-z0-9]+|[A-Z0-9]+|[A-Z][a-z0-9]+)$/.test(word);
 }
