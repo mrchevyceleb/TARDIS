@@ -33,6 +33,12 @@ export type AgentSessionPolicy = {
    *  empty, there is no operator allowlist: only a lead briefing one of its
    *  coders may stamp a task start. */
   freshTaskSenders?: string[];
+  /** When set, a handoff opens a new task (and a fresh thread) only when its
+   *  text starts with this prefix, e.g. "New job:". Every other message from
+   *  a task source is a round inside the job in flight and keeps the thread
+   *  (Matt, Nov 2 2026: Pippin stays on one job through every QA round with
+   *  Sud and Sam, and only starts fresh once Sud passes it). */
+  freshTaskPrefix?: string;
 };
 type Policy = { agents?: Record<string, AgentSessionPolicy>; defaults?: AgentSessionPolicy };
 const lastGoodPolicies = new Map<string, { mtime: number; data: Policy }>();
@@ -42,7 +48,7 @@ function validPolicy(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const p = value as Record<string, unknown>;
   return Object.entries(p).every(([key, v]) => {
-    if (key === 'directory' || key === 'reportsTo' || key === 'houseRules') return typeof v === 'string' && v.length > 0;
+    if (key === 'directory' || key === 'reportsTo' || key === 'houseRules' || key === 'freshTaskPrefix') return typeof v === 'string' && v.length > 0;
     if (key === 'skills' || key === 'excludeInstructions') return Array.isArray(v) && v.every(x => typeof x === 'string');
     if (key === 'briefs') return validBriefs(v);
     if (key === 'lead' || key === 'memoryIndex' || key === 'freshThreadOnTask') return typeof v === 'boolean';
@@ -172,6 +178,11 @@ export function freshThreadOnTask(chatId: string): boolean {
  *  marker. */
 export function freshTaskSenders(chatId: string): string[] {
   return sessionPolicy(chatId).freshTaskSenders ?? [];
+}
+
+/** The operator's new-task prefix for this recipient, if any. */
+export function freshTaskPrefix(chatId: string): string | undefined {
+  return sessionPolicy(chatId).freshTaskPrefix;
 }
 
 /** Provider profiles need not install the same native skill catalog. Keep

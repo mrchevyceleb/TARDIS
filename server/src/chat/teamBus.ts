@@ -18,7 +18,7 @@ import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, recordQuietExemptWake
 import { LIVE_HOLD_CEILING_MS } from '../lib/laneLiveness.ts';
 import { briefEnvelopeForHandoff, isCoderBrief } from './briefEnvelope.ts';
 import { recordNativeFailure } from './sessionMetrics.ts';
-import { freshThreadOnTask, freshTaskSenders, sessionDirectory } from './sessionPolicy.ts';
+import { freshThreadOnTask, freshTaskSenders, freshTaskPrefix, sessionDirectory } from './sessionPolicy.ts';
 import { freshLifecycleStarted, freshLifecycleCompleted } from './freshLifecycle.ts';
 import { persistThreadResetEpoch, noteThreadResetEpoch, persistThreadResetTaskState, restoreThreadResetTaskState, threadResetTaskState, type ThreadResetTaskState } from './threadResetStore.ts';
 import { clearThreadSessionIds } from './sessions.ts';
@@ -212,12 +212,15 @@ export function isTaskStartHandoff(opts: {
   personSourced?: boolean;
   nudgeHoldSince?: number;
   continuesChain?: boolean;
+  text?: string;
 }): boolean {
   if (!opts.senderId || opts.source) return false;
   if (opts.personSourced === true) return false;
   if (opts.nudgeHoldSince !== undefined) return false;
   if (opts.continuesChain === true) return false;
   if (!freshThreadOnTask(opts.recipientHome)) return false;
+  const prefix = freshTaskPrefix(opts.recipientHome);
+  if (prefix && !(opts.text ?? '').trimStart().toLowerCase().startsWith(prefix.toLowerCase())) return false;
   const allowed = freshTaskSenders(opts.recipientHome);
   if (allowed.length) return allowed.includes(opts.senderId);
   return isCoderBrief(opts.senderId, opts.recipientId);
@@ -2155,7 +2158,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // trusting a stored marker alone, so an operator list change (or a
         // stale stamp from an earlier build) can never wipe for a sender
         // that is no longer a task source for this recipient.
-        && isTaskStartHandoff({ senderId: lead.fromId, recipientId: to.id, recipientHome: to.home })) {
+        && isTaskStartHandoff({ senderId: lead.fromId, recipientId: to.id, recipientHome: to.home, text: lead.text })) {
         const toHome = agentLogKey(to);
         const toLogKey = logKeyFor(toHome.cli, sessionDirectory(toHome.chatKey, ELROND_WORKSPACE_PATH), toHome.chatKey);
         // The batch is owed a wipe until its own task id's durable reset
@@ -2512,6 +2515,7 @@ export async function deliverTeamMessage(input: {
     personSourced: input.personSourced === true,
     nudgeHoldSince: input.nudgeHoldSince,
     continuesChain,
+    text,
   });
   // Every cheap exit runs BEFORE any claim is minted: a send that dies at
   // the rate limit, the duplicate guard, the acknowledgement path or the
