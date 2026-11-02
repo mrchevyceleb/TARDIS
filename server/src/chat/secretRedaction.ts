@@ -142,7 +142,24 @@ function redactOpaqueToken(token: string, offset: number, source: string): strin
   if (isFilePathPrefix && !token.split('/').some(isOpaquePathSegment)) {
     return token;
   }
+  if (isWordPath(token)) return token;
   return REDACTED;
+}
+
+/** A slash-separated run made only of readable path words is a file path or
+ *  URL path, not a credential (Matt, Nov 2 2026: hub paths such as
+ *  ASSISTANT-HUB/inbox/2026-11-02-operly-studio-technical-debt-audit.md
+ *  printed as [redacted secret] because the whole dotless run is 64+ token
+ *  characters). Every hyphen/underscore-separated word must be lowercase,
+ *  UPPERCASE, Capitalized or digits, and every segment short; a base64 or
+ *  random token splits into mixed-case fragments and still redacts. */
+function isWordPath(token: string): boolean {
+  if (!token.includes('/') || /[+=]/.test(token)) return false;
+  const segments = token.split('/').filter(Boolean);
+  if (segments.length < 2) return false;
+  return segments.every((segment) => segment.length <= 80
+    && !isOpaquePathSegment(segment)
+    && segment.split(/[-_]/).every((word) => /^(?:[a-z0-9]*|[A-Z0-9]+|[A-Z][a-z0-9]*)$/.test(word) && !/^[0-9a-fA-F]{20,}$/.test(word)));
 }
 
 /** Secret-named values from this process's own environment, collected once
