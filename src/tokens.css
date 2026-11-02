@@ -46,6 +46,9 @@
   --r-gold-soft:   #8a6a32;
   --r-emerald:     #6fa887;     /* success, desaturated */
   --r-amber:       #e08a3c;     /* warning: Gallifrey burnt orange */
+  --r-on-rose: #ffffff;
+  --r-accent-fill: var(--r-elf-blue);
+  --r-on-accent-fill: var(--r-on-accent);
   --r-rose:        #cc4744;     /* danger: 4.7:1 under white labels, 4.9:1 as text on the panels */
   --r-blood:       #8c2f2b;
 

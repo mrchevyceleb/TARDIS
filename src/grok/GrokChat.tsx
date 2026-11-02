@@ -16,7 +16,7 @@ import {
   normalizeZaiModel,
   useCompanionPicker,
 } from '../chat/hooks/useCompanionPicker';
-import { codexModelChange, normalizeCodexEffort, normalizeCodexModel } from '../chat/codexModels';
+import { codexModelChange, normalizeCodexServiceTier, savedCodexServiceTier, normalizeCodexEffort, normalizeCodexModel } from '../chat/codexModels';
 import { normalizeFireworksEffort, normalizeFireworksModel } from '../chat/fireworksModels';
 import { normalizeOpenRouterEffort, normalizeOpenRouterModel } from '../chat/openrouterModels';
 import { normalizeMetaEffort, normalizeMetaModel } from '../chat/metaModels';
@@ -31,7 +31,7 @@ import type { Agent } from './agents';
 import { AgentUpdateConflictError, markAgentRead, updateAgentReq } from './agents';
 import { onPresenceChange, userPresent } from '../chat/utils/userPresence';
 
-type BrainDraft = { engine: string; model?: string; effort?: string };
+type BrainDraft = { engine: string; model?: string; effort?: string; serviceTier?: string };
 
 // Keep the write-side draft consistent with the lane displayed by the picker,
 // including while an older server snapshot still carries a retired provider.
@@ -46,7 +46,7 @@ function canonicalBrain(brain: BrainDraft): BrainDraft {
   };
   if (engine === 'codex') {
     const nextModel = normalizeCodexModel(model ?? '');
-    return { engine, model: nextModel, effort: normalizeCodexEffort(nextModel, effort ?? '') };
+    return { engine, model: nextModel, effort: normalizeCodexEffort(nextModel, effort ?? ''), serviceTier: savedCodexServiceTier(nextModel, brain.serviceTier) };
   }
   if (engine === 'zai') {
     return { engine, model: normalizeZaiModel(model ?? ''), effort: normalizeZaiEffort(effort ?? '') };
@@ -102,10 +102,10 @@ export function GrokChat(props: GrokChatProps) {
     const timer = window.setTimeout(() => setBrainSaveNotice(null), 5000);
     return () => window.clearTimeout(timer);
   }, [brainSaveNotice]);
-  const savedBrain = useRef<BrainDraft>({ engine: props.agent?.engine ?? 'claude', model: props.agent?.model, effort: props.agent?.effort });
+  const savedBrain = useRef<BrainDraft>({ engine: props.agent?.engine ?? 'claude', model: props.agent?.model, serviceTier: props.agent?.serviceTier, effort: props.agent?.effort });
   useEffect(() => {
-    if (props.agent) savedBrain.current = { engine: props.agent.engine, model: props.agent.model, effort: props.agent.effort };
-  }, [props.agent?.engine, props.agent?.model, props.agent?.effort, props.agent?.brainRevision]);
+    if (props.agent) savedBrain.current = { engine: props.agent.engine, model: props.agent.model, serviceTier: props.agent.serviceTier, effort: props.agent.effort };
+  }, [props.agent?.engine, props.agent?.model, props.agent?.effort, props.agent?.serviceTier, props.agent?.brainRevision]);
   const { chatId, cli, lane, repo } = props;
   // Seed the picker lane SYNCHRONOUSLY (before the hook's useState initializer
   // reads localStorage) so persona threads never connect on the wrong lane.
@@ -119,6 +119,7 @@ export function GrokChat(props: GrokChatProps) {
         if (localStorage.getItem(storageKey) !== seed) localStorage.setItem(storageKey, seed);
         const model = props.agent?.model;
         const effort = props.agent?.effort;
+        if (seed === 'codex') localStorage.setItem('rivendell:codex-service-tier', props.agent?.serviceTier ?? 'default');
         const modelKey = seed === 'claude' ? 'rivendell:claude-model'
           : seed === 'codex' ? 'rivendell:codex-model'
           : seed === 'xai' ? 'rivendell:xai-model'
@@ -158,6 +159,7 @@ export function GrokChat(props: GrokChatProps) {
     enabled: Boolean(repo),
     model: picker.model,
     effort: picker.effort,
+    serviceTier: picker.serviceTier,
     selectionRevision: picker.selectionRevision,
   });
 
@@ -166,7 +168,7 @@ export function GrokChat(props: GrokChatProps) {
   const desiredBrain = useRef<BrainDraft>(canonicalBrain({
     engine: props.agent?.engine ?? picker.companion,
     model: props.agent?.model ?? picker.model,
-    effort: props.agent?.effort ?? picker.effort,
+    serviceTier: props.agent?.serviceTier, effort: props.agent?.effort ?? picker.effort,
   }));
   useEffect(() => {
     if (!props.agent) return;
@@ -177,13 +179,13 @@ export function GrokChat(props: GrokChatProps) {
     desiredBrain.current = canonicalBrain({
       engine: props.agent.engine,
       model: props.agent.model,
-      effort: props.agent.effort,
+      serviceTier: props.agent.serviceTier, effort: props.agent.effort,
     });
-    picker.applyAuthoritativeBrain(props.agent.engine, props.agent.model, props.agent.effort);
+    picker.applyAuthoritativeBrain(props.agent.engine, props.agent.model, props.agent.effort, props.agent.serviceTier);
     if (chat.serverBrain && chat.serverBrain.revision !== revision) {
       window.setTimeout(chat.reconnect, 0);
     }
-  }, [chat.reconnect, chat.serverBrain, picker.applyAuthoritativeBrain, props.agent?.brainRevision, props.agent?.effort, props.agent?.engine, props.agent?.model]);
+  }, [chat.reconnect, chat.serverBrain, picker.applyAuthoritativeBrain, props.agent?.brainRevision, props.agent?.effort, props.agent?.serviceTier, props.agent?.engine, props.agent?.model]);
 
   useEffect(() => {
     if (!props.agent || !chat.serverBrain?.revision) return;
@@ -195,11 +197,13 @@ export function GrokChat(props: GrokChatProps) {
       engine: chat.serverBrain.cli,
       model: chat.serverBrain.model,
       effort: chat.serverBrain.effort,
+      serviceTier: chat.serverBrain.serviceTier,
     });
     picker.applyAuthoritativeBrain(
       chat.serverBrain.cli,
       chat.serverBrain.model,
       chat.serverBrain.effort,
+      chat.serverBrain.serviceTier,
     );
     props.onAgentBrainSaved();
   }, [chat.serverBrain, picker.applyAuthoritativeBrain, props.agent, props.onAgentBrainSaved]);
@@ -250,7 +254,7 @@ export function GrokChat(props: GrokChatProps) {
       : engine === 'muse' ? picker.museEffort
       : undefined
     );
-    return { engine, model, effort };
+    return { engine, model, effort, serviceTier: engine === 'codex' ? normalizeCodexServiceTier(model ?? picker.codexModel, picker.codexServiceTier) : undefined };
   };
   const persistBrain = useCallback((patch: Partial<BrainDraft>, notice: string | null = null) => {
     setBrainSaveError(null);
@@ -258,7 +262,7 @@ export function GrokChat(props: GrokChatProps) {
     const next = canonicalBrain({ ...desiredBrain.current, ...patch });
     desiredBrain.current = next;
     if (!agentId) {
-      picker.applyAuthoritativeBrain(next.engine, next.model, next.effort);
+      picker.applyAuthoritativeBrain(next.engine, next.model, next.effort, next.serviceTier);
       return;
     }
     const gen = ++persistGen.current;
@@ -272,9 +276,9 @@ export function GrokChat(props: GrokChatProps) {
         });
         serverBrainRevision.current = saved.brainRevision ?? serverBrainRevision.current + 1;
         if (gen === persistGen.current) {
-          savedBrain.current = { engine: saved.engine, model: saved.model, effort: saved.effort };
-          desiredBrain.current = canonicalBrain({ engine: saved.engine, model: saved.model, effort: saved.effort });
-          picker.applyAuthoritativeBrain(saved.engine, saved.model, saved.effort);
+          savedBrain.current = { engine: saved.engine, model: saved.model, serviceTier: saved.serviceTier, effort: saved.effort };
+          desiredBrain.current = canonicalBrain({ engine: saved.engine, model: saved.model, serviceTier: saved.serviceTier, effort: saved.effort });
+          picker.applyAuthoritativeBrain(saved.engine, saved.model, saved.effort, saved.serviceTier);
           setBrainSaveNotice(notice ?? 'Selection saved. New replies will use it.');
         }
         props.onAgentBrainSaved();
@@ -285,9 +289,9 @@ export function GrokChat(props: GrokChatProps) {
         if (gen === persistGen.current) {
           if (error instanceof AgentUpdateConflictError) {
             const current = error.current;
-            savedBrain.current = { engine: current.engine, model: current.model, effort: current.effort };
+            savedBrain.current = { engine: current.engine, model: current.model, serviceTier: current.serviceTier, effort: current.effort };
             serverBrainRevision.current = current.brainRevision ?? serverBrainRevision.current;
-            picker.applyAuthoritativeBrain(current.engine, current.model, current.effort);
+            picker.applyAuthoritativeBrain(current.engine, current.model, current.effort, current.serviceTier);
           }
           desiredBrain.current = canonicalBrain(savedBrain.current);
           setBrainSaveError(error instanceof AgentUpdateConflictError
@@ -312,13 +316,15 @@ export function GrokChat(props: GrokChatProps) {
     setClaudeEffort: (effort: string) => persistBrain({ engine: 'claude', effort }),
     setCodexModel: (value: string) => {
       const model = normalizeCodexModel(value);
-      const { effort, notice } = codexModelChange(model, desiredBrain.current.effort ?? picker.codexEffort);
+      const { effort, notice, serviceTier } = codexModelChange(model, desiredBrain.current.effort ?? picker.codexEffort, desiredBrain.current.serviceTier);
       persistBrain({
         engine: 'codex',
         model,
         effort,
+        serviceTier,
       }, notice);
     },
+    setCodexServiceTier: (serviceTier: string) => persistBrain({ engine: 'codex', serviceTier }),
     setCodexEffort: (value: string) => persistBrain({
       engine: 'codex',
       effort: normalizeCodexEffort(

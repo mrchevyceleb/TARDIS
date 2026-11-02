@@ -59,6 +59,7 @@ export type RivendellCronJob = {
   modelId?: string;
   /** Model-specific Codex effort stored in action_config.reasoning_effort. */
   reasoningEffort?: string;
+  serviceTier?: string;
   repo?: string;
   toolName?: string;
   deliveryChannel?: string;
@@ -543,6 +544,7 @@ function mapCron(job: AdminCron): RivendellCronJob {
     engine,
     modelId,
     reasoningEffort,
+    serviceTier: typeof job.action_config?.service_tier === 'string' ? job.action_config.service_tier : undefined,
     repo,
     toolName,
     deliveryChannel: job.delivery_channel || undefined,
@@ -599,6 +601,7 @@ export function normalizeObservedCronJob(value: unknown): RivendellCronJob | nul
     engine: observedString(record, 'engine'),
     modelId: observedString(record, 'modelId'),
     reasoningEffort: observedString(record, 'reasoningEffort'),
+    serviceTier: observedString(record, 'serviceTier'),
     repo: observedString(record, 'repo'),
     toolName: observedString(record, 'toolName'),
     deliveryChannel: observedString(record, 'deliveryChannel'),
@@ -640,6 +643,7 @@ function actionConfigFromCron(input: Partial<RivendellCronJob>): Record<string, 
   if (input.engine !== undefined) config.engine = input.engine;
   if (input.modelId !== undefined) config.model_id = input.modelId;
   if (input.reasoningEffort !== undefined) config.reasoning_effort = input.reasoningEffort;
+  if (input.serviceTier !== undefined) config.service_tier = input.serviceTier;
   const repo = normalizeOptionalString(input.repo);
   const cwd = normalizeOptionalString(input.cwd);
   if (repo !== undefined) config.repo = repo;

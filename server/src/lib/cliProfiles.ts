@@ -11,6 +11,26 @@ import { JsonStore } from './jsonStore.ts';
 import { claudeAccountPool } from './claudeAccountPool.ts';
 
 export type AccountEngine = 'claude' | 'codex';
+
+/** A Claude login refreshed by many lanes at once rotates its refresh token
+ *  under them, and the native CLI wipes the login on the losing refresh. A
+ *  long-lived token from `claude setup-token` never rotates, so lanes spawned
+ *  on a profile that holds one authenticate with it and never refresh. The
+ *  file (`<profile>/.long-lived-oauth-token`, mode 600) is the account email on
+ *  line one and the token on line two; it applies only while the profile is
+ *  still signed in as that account, so a re-login to another account never
+ *  bills the old one. The profile's own credentials stay for the usage reader
+ *  and the idle renewal, the only remaining refresher. */
+export function withLongLivedClaudeToken(env: NodeJS.ProcessEnv, profileDir: string): NodeJS.ProcessEnv {
+  delete env.CLAUDE_CODE_OAUTH_TOKEN;
+  try {
+    const [email, token] = readFileSync(join(profileDir, '.long-lived-oauth-token'), 'utf8').split('\n').map(line => line.trim());
+    const signedIn = JSON.parse(readFileSync(join(profileDir, '.claude.json'), 'utf8'))?.oauthAccount?.emailAddress;
+    if (email && typeof signedIn === 'string' && signedIn.toLowerCase() === email.toLowerCase() && /^sk-ant-oat[\w-]+$/.test(token ?? '')) env.CLAUDE_CODE_OAUTH_TOKEN = token;
+  } catch { /* No token for this profile: the CLI uses its own login. */ }
+  return env;
+}
+
 export type CliProfile = { id: string; engine: AccountEngine; path: string; env: NodeJS.ProcessEnv };
 type ManagedProfile = { id: string; engine: AccountEngine };
 type Choice = { id: string; profileId: string };
@@ -85,10 +105,14 @@ export function subscriptionEnvForLane(engine: AccountEngine, cwd: string, chatI
 
 /** Claude logins are billed in separate pools (Matt, Oct 23 2026: the game
  *  studio runs on his own money, Rally work on the company's), so failover
- *  never moves a lane into another pool's account. Pools are account-map names,
- *  `RIVENDELL_CLAUDE_ACCOUNT_POOLS="mjohnst,mattio|kim,tardis"`. A lane whose
+ *  never moves a lane into another pool's account. Pools are ordered account-map
+ *  names, `RIVENDELL_CLAUDE_ACCOUNT_POOLS="mjohnst,mattio,kim|tardis,kim"`: a
+ *  lane fails over in that order (Matt, Oct 30 2026: games go mjohnst, then
+ *  matt@, then mtjohnston42). Pools may share a backup account; a lane belongs
+ *  to the pool where its preferred login sits earliest, so Rally's `kim` lanes
+ *  stay in Rally's pool even though games can borrow `kim` last. A lane whose
  *  preferred login is in no pool only fails over to other unpooled logins. */
-export function claudePoolGroups(): Set<string>[] | null {
+export function claudePoolGroups(): string[][] | null {
   const raw = process.env.RIVENDELL_CLAUDE_ACCOUNT_POOLS?.trim();
   if (!raw) return null;
   const idOf = (name: string): string | null => {
@@ -97,15 +121,18 @@ export function claudePoolGroups(): Set<string>[] | null {
   const groups = raw.split('|').map(group => group.split(',').map(name => name.trim()).filter(Boolean).map(idOf));
   // A misspelled name must never widen a pool: the config is unusable.
   if (groups.some(group => !group.length || group.includes(null))) return null;
-  const pools = groups.map(group => new Set(group as string[]));
-  // An account in two pools would bridge them, and `find` would silently
-  // pick the first: the config is unusable, not order-dependent.
-  const seen = new Set<string>();
-  for (const pool of pools) for (const id of pool) {
-    if (seen.has(id)) return null;
-    seen.add(id);
+  return groups.map(group => [...new Set(group as string[])]);
+}
+
+/** The ordered pool a lane bills: the one where its preferred login comes
+ *  first (earliest position, then earliest pool). */
+function lanePool(pools: string[][], laneId: string): string[] | undefined {
+  let best: string[] | undefined;
+  for (const pool of pools) {
+    const at = pool.indexOf(laneId);
+    if (at >= 0 && (!best || at < best.indexOf(laneId))) best = pool;
   }
-  return pools;
+  return best;
 }
 
 function claudePoolPeers(preferredId: string, profiles: CliProfile[]): CliProfile[] {
@@ -119,9 +146,10 @@ function claudePoolPeers(preferredId: string, profiles: CliProfile[]): CliProfil
       ? profiles.filter(profile => profile.id === preferredId)
       : profiles;
   }
-  const mine = pools.find(pool => pool.has(preferredId));
-  const pooled = new Set(pools.flatMap(pool => [...pool]));
-  return profiles.filter(profile => mine ? mine.has(profile.id) : !pooled.has(profile.id));
+  const mine = lanePool(pools, preferredId);
+  if (mine) return mine.flatMap(id => profiles.filter(profile => profile.id === id));
+  const pooled = new Set(pools.flat());
+  return profiles.filter(profile => !pooled.has(profile.id));
 }
 
 /** True when a Claude profile may bill work whose own lane lives in another
@@ -138,11 +166,9 @@ export function claudeProfileInLanePool(profileDir: string, lanePreferredDir: st
   const pools = claudePoolGroups();
   if (!pools) return !process.env.RIVENDELL_CLAUDE_ACCOUNT_POOLS?.trim();
   const id = cliProfileId('claude', profileDir);
-  const laneId = cliProfileId('claude', lanePreferredDir);
-  const mine = pools.find(pool => pool.has(laneId));
-  if (mine) return mine.has(id);
-  const pooled = new Set(pools.flatMap(pool => [...pool]));
-  return !pooled.has(id);
+  const mine = lanePool(pools, cliProfileId('claude', lanePreferredDir));
+  if (mine) return mine.includes(id);
+  return !pools.flat().includes(id);
 }
 
 export function preferredSubscriptionEnv(engine: AccountEngine, cwd: string, chatId: string, agentName?: string): NodeJS.ProcessEnv {
@@ -249,10 +275,14 @@ export async function backgroundSubscriptionEnv(cwd: string, agentName: string, 
   // Rally money. When the borrow is refused the job keeps its own lane's
   // resolved profile, which is always in-pool by construction.
   const laneDir = sessionDirectory(chatId, cwd);
+  // Pool membership comes from the lane's own preference, never from the
+  // failover pick: a game lane that fell back to a shared backup is still a
+  // game lane and must not borrow a Rally session.
+  const laneHome = cliProfileForEnv('claude', preferredSubscriptionEnv('claude', cwd, chatId, agentName));
   for (const active of peekThreadSessions({ cli: 'claude', repoPath: cwd, chatId }, laneDir)) {
     if (!active.busy) continue;
     if (active.claudeProfile && ['claude', 'assistant'].includes(active.cli)
-      && claudeProfileInLanePool(active.claudeProfile, cliProfileForEnv('claude', claude))) { env.CLAUDE_CONFIG_DIR = active.claudeProfile; break; }
+      && claudeProfileInLanePool(active.claudeProfile, laneHome)) { env.CLAUDE_CONFIG_DIR = active.claudeProfile; break; }
   }
-  return env;
+  return withLongLivedClaudeToken(env, env.CLAUDE_CONFIG_DIR!);
 }

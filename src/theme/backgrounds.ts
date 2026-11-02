@@ -1,0 +1,28 @@
+// The stage and picker share these scenes. No downloads, canvas loops or timers:
+// only a few compositor-animated CSS layers, paused when hidden or requested.
+export const BACKGROUNDS = [
+  { id: 'original', label: 'Console walls', blurb: 'The familiar roundels', animated: false },
+  { id: 'plain', label: 'Clean slate', blurb: 'Just your palette', animated: false },
+  { id: 'mesh', label: 'Silk sky', blurb: 'Soft pools of color', animated: false },
+  { id: 'sunrise', label: 'Golden hour', blurb: 'A sun on the horizon', animated: false },
+  { id: 'topography', label: 'Contour club', blurb: 'Quiet, rippling contours', animated: false },
+  { id: 'grid', label: 'Dot journal', blurb: 'A little room to think', animated: false },
+  { id: 'prism', label: 'Prism party', blurb: 'Folded ribbons of color', animated: false },
+  { id: 'orbits', label: 'Orbit club', blurb: 'Three planets, one happy orbit', animated: true },
+  { id: 'rain', label: 'Window rain', blurb: 'Silver rain on a quiet window', animated: true },
+  { id: 'bubbles', label: 'Bubble bath', blurb: 'Little bubbles, happily bobbing', animated: true },
+  { id: 'ribbons', label: 'Ribbon dance', blurb: 'Silky streamers in a breeze', animated: true },
+  { id: 'eclipse', label: 'Eclipse lounge', blurb: 'A halo with a gentle heartbeat', animated: true },
+  { id: 'clouds', label: 'Cloud cruise', blurb: 'An afternoon above the clouds', animated: true },
+  { id: 'diamonds', label: 'Diamond shuffle', blurb: 'A tumbling deck of tiny gems', animated: true },
+  { id: 'ripples', label: 'Ripple pond', blurb: 'Circles spreading across still water', animated: true },
+  { id: 'lanterns', label: 'Lantern night', blurb: 'Warm lanterns wandering skyward', animated: true },
+  { id: 'blinds', label: 'Sunroom', blurb: 'Sunlight swaying through the blinds', animated: true },
+  { id: 'petals', label: 'Petal parade', blurb: 'A few blossoms caught in the breeze', animated: true },
+  { id: 'comets', label: 'Comet trails', blurb: 'Long bright wishes across the sky', animated: true },
+  { id: 'aurora', label: 'Aurora', blurb: 'Northern lights, unhurried', animated: true },
+  { id: 'gradient', label: 'Color drift', blurb: 'A slowly shifting gradient', animated: true },
+  { id: 'starfield', label: 'Stargazer', blurb: 'A drifting constellation', animated: true },
+  { id: 'particles', label: 'Firefly garden', blurb: 'Little lights, gently rising', animated: true },
+  { id: 'waves', label: 'Slow tide', blurb: 'Waves with nowhere to rush', animated: true },
+] as const;

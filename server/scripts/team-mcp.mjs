@@ -376,7 +376,7 @@ const TOOLS = [
   {
     name: 'desk_todo_add',
     description:
-      `Put an item on ${OWNER}'s "Needs you" list on the Desk. Use it ONLY for something that needs ${OWNER} personally: a decision, a login or 2FA code, an approval, a payment, or an account or physical action only they can take. ` +
+      `Put an item on ${OWNER}'s "Needs you" list on the Desk. Only Max and Riley may call this; everyone else sends the ask to Max (or Riley for the game studio) instead. Use it ONLY for something that needs ${OWNER} personally: a decision, a login or 2FA code, an approval, a payment, or an account or physical action only they can take. ` +
       'Not for your own work (that is a board card) and not for FYI updates. Write the title as the action they must take, put context in detail, and pass cardId when it unblocks a board card (the card shows its needs-' + OWNER + ' flag while your item is open). ' +
       `Titles show on ${OWNER}'s phone lock screen, so no amounts, account numbers or phone numbers in the title (put them in detail). ` +
       `For a pick-one question pass choices (up to 4 short options; without them ${OWNER} gets Yes / No) so ${OWNER} can answer with one tap. ` +
@@ -406,7 +406,7 @@ const TOOLS = [
   },
   {
     name: 'desk_todos',
-    description: `List ${OWNER}'s "Needs you" items with ids (default: open ones). Check it before adding an item, and to see whether something you asked for was answered. Pass id to read one item in full (for a [desk:todo-…] reference).`,
+    description: `List ${OWNER}'s "Needs you" items with ids (default: open ones, including snoozed items with their wake time). Snoozed items already exist: do not add a duplicate. Check it before adding an item, and to see whether something you asked for was answered. Pass id to read one item in full (for a [desk:todo-…] reference).`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -615,6 +615,7 @@ function clipLine(text, max) {
 
 function describeTodo(t) {
   const bits = [
+    t.status === 'open' && Date.parse(t.snoozedUntil) > Date.now() ? `SNOOZED until ${t.snoozedUntil}` : null,
     t.status === 'done' ? `DONE ${ago(t.completedAt ?? t.updatedAt)}` : null,
     `from ${t.from?.name ?? '?'}`,
     t.due ? `due ${t.due}` : null,
@@ -783,7 +784,7 @@ async function callTool(name, args, signal) {
     const comment = (id, text) => post(`/api/desk/cards/${encodeURIComponent(id)}/comments`, { text, agent: self });
     if (name === 'desk_todo_add') {
       const { todo } = await post('/api/desk/todos', {
-        title: args.title, detail: args.detail, due: args.due, priority: args.priority, link: args.link, cardId: args.cardId, choices: args.choices, agent: self,
+        title: args.title, detail: args.detail, due: args.due, priority: args.priority, link: args.link, cardId: args.cardId, choices: args.choices, agent: process.env.RIVENDELL_AGENT_ID || self,
       });
       return `Added to ${OWNER}'s Needs-you list:\n${describeTodo(todo)}\nIf ${OWNER} answers on the Desk, the answer arrives as a message from ${OWNER} and the item closes itself. Otherwise complete it with desk_todo_complete once it is resolved.`;
     }
@@ -805,6 +806,7 @@ async function callTool(name, args, signal) {
       for (const key of ['title', 'detail', 'due', 'priority', 'link', 'cardId', 'choices', 'status', 'note']) if (args[key] !== undefined) patch[key] = args[key];
       if (!Object.keys(patch).length) throw new Error('Nothing to change.');
       if (args.status === 'done') patch.agent = self;
+      if (args.status === 'open') patch.agent = process.env.RIVENDELL_AGENT_ID || self;
       const { todo } = await api(`/api/desk/todos/${encodeURIComponent(args.id)}`, { method: 'PATCH', body: JSON.stringify(patch) }, signal);
       return `Updated:\n${describeTodo(todo)}`;
     }
@@ -903,7 +905,7 @@ async function callTool(name, args, signal) {
       for (const key of ['title', 'description', 'owner', 'project', 'priority', 'links']) if (args[key] !== undefined) patch[key] = args[key];
       if (typeof patch.owner === 'string' && ['me', 'self'].includes(patch.owner.trim().toLowerCase())) patch.owner = self;
       if (!Object.keys(patch).length) throw new Error('Nothing to change.');
-      const { card } = await api(`/api/desk/cards/${encodeURIComponent(args.id)}`, { method: 'PATCH', body: JSON.stringify(patch) }, signal);
+      const { card } = await api(`/api/desk/cards/${encodeURIComponent(args.id)}`, { method: 'PATCH', body: JSON.stringify({ ...patch, agent: self, agentId: process.env.RIVENDELL_AGENT_ID || undefined }) }, signal);
       return `Updated:\n${describeCard(card)}`;
     }
   }

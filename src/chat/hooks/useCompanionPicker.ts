@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import type { CompanionId } from '../data/types';
 import {
   codexModelSpec,
+  normalizeCodexServiceTier,
+  savedCodexServiceTier,
   codexModelChange,
   rememberCodexModel,
   normalizeCodexEffort,
@@ -275,6 +277,7 @@ export function useCompanionPicker(storageKey: string) {
   const [claudeModel, setClaudeModelState] = useState(() => normalizeClaudeModel(readLS('rivendell:claude-model', DEFAULT_CLAUDE_MODEL)));
   const [claudeEffort, setClaudeEffortState] = useState(() => normalizeClaudeEffort(readLS('rivendell:claude-effort', 'xhigh')));
   const [codexModel, setCodexModelState] = useState(readStoredCodexModel);
+  const [codexServiceTier, setCodexServiceTierState] = useState(() => savedCodexServiceTier(codexModel, readLS('rivendell:codex-service-tier', 'default')));
   const [codexEffort, setCodexEffortState] = useState(() => readStoredCodexEffort(codexModel));
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
   useEffect(() => { rememberCodexModel(codexModel); }, [codexModel]);
@@ -287,6 +290,11 @@ export function useCompanionPicker(storageKey: string) {
     // to the model that is gone.
     const effort = model === codexModel ? normalizeCodexEffort(model, codexEffort) : codexModelSpec(model).defaultEffort;
     if (model === codexModel && effort === codexEffort) return;
+    if (model !== codexModel) {
+      const tier = normalizeCodexServiceTier(model);
+      setCodexServiceTierState(tier);
+      if (typeof window !== 'undefined') localStorage.setItem('rivendell:codex-service-tier', tier);
+    }
     setCodexModelState(model);
     setCodexEffortState(effort);
     if (typeof window !== 'undefined') {
@@ -384,7 +392,9 @@ export function useCompanionPicker(storageKey: string) {
   const setClaudeEffort = (value: string) => persist('rivendell:claude-effort', setClaudeEffortState, 'claude')(normalizeClaudeEffort(value));
   const setCodexModel = (value: string) => {
     const model = normalizeCodexModel(value);
-    const { effort, notice } = codexModelChange(model, codexEffort);
+    const { effort, notice, serviceTier: tier } = codexModelChange(model, codexEffort, codexServiceTier);
+    setCodexServiceTierState(tier);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:codex-service-tier', tier);
     setSelectionNotice(notice);
     setCodexModelState(model);
     setCodexEffortState(effort);
@@ -392,6 +402,12 @@ export function useCompanionPicker(storageKey: string) {
       localStorage.setItem('rivendell:codex-model', model);
       localStorage.setItem('rivendell:codex-effort', effort);
     }
+  };
+  const setCodexServiceTier = (value: string) => {
+    markSelectionChanged('codex');
+    const tier = normalizeCodexServiceTier(codexModel, value);
+    setCodexServiceTierState(tier);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:codex-service-tier', tier);
   };
   const setCodexEffort = (value: string) => {
     setSelectionNotice(null);
@@ -517,7 +533,7 @@ export function useCompanionPicker(storageKey: string) {
   /** Apply the server-owned brain without marking it as a device-local picker
    * action. Used by agent chats so cross-device updates converge without
    * remounting the conversation or erasing a draft. */
-  const applyAuthoritativeBrain = useCallback((engine: string, model?: string, effort?: string) => {
+  const applyAuthoritativeBrain = useCallback((engine: string, model?: string, effort?: string, serviceTier?: string) => {
     const lane = normalizeCompanion(engine);
     if (lane !== engine && engine !== 'assistant') { model = undefined; effort = undefined; }
     setCompanionState(lane);
@@ -537,9 +553,11 @@ export function useCompanionPicker(storageKey: string) {
       const nextEffort = normalizeCodexEffort(nextModel, effort ?? '');
       setCodexModelState(nextModel);
       setCodexEffortState(nextEffort);
+      setCodexServiceTierState(savedCodexServiceTier(nextModel, serviceTier));
       if (typeof window !== 'undefined') {
         localStorage.setItem('rivendell:codex-model', nextModel);
         localStorage.setItem('rivendell:codex-effort', nextEffort);
+        localStorage.setItem('rivendell:codex-service-tier', savedCodexServiceTier(nextModel, serviceTier));
       }
     } else if (lane === 'xai') {
       const nextModel = normalizeXaiModel(model ?? '');
@@ -632,14 +650,14 @@ export function useCompanionPicker(storageKey: string) {
 
   return {
     companion, setCompanion, applyAuthoritativeBrain,
-    cli, account, model, effort, selectionRevision: selectionRevisions[companion] ?? 0,
+    cli, account, model, effort, serviceTier: isCodex ? codexServiceTier : undefined, selectionRevision: selectionRevisions[companion] ?? 0,
     brainPending: false,
     selectionNotice,
     selectionError: null as string | null,
     dismissSelectionFeedback: () => setSelectionNotice(null),
     isClaude, isCodex, isXai, isZai, isFireworks, isOpenRouter, isOpenRouter2, isAgy, isMeta, isMuse,
     claudeModel, setClaudeModel, claudeEffort, setClaudeEffort,
-    codexModel, setCodexModel, codexEffort, setCodexEffort,
+    codexModel, setCodexModel, codexEffort, setCodexEffort, codexServiceTier, setCodexServiceTier,
     xaiModel, setXaiModel, xaiEffort, setXaiEffort,
     zaiModel, setZaiModel, zaiEffort, setZaiEffort,
     agyModel, setAgyModel, agyEffort, setAgyEffort,

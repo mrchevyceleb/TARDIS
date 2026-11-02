@@ -10,7 +10,7 @@ import { SUBSCRIPTION_ENGINES, assertSubscriptionEngine } from './subscription-p
 import { readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, readdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { SESSIONS_FILE, STATE_DIR } from './config.ts';
-import { codexCapability } from './codex-models.ts';
+import { canonicalServiceTier, codexCapability, resolveCodexServiceTier } from './codex-models.ts';
 import { FIREWORKS_LANE_EFFORT, FIREWORKS_LANE_MODEL, resolveFireworksEffort, resolveFireworksModel } from './fireworks-models.ts';
 import { OPENROUTER_LANE_EFFORT, OPENROUTER_LANE_MODEL, OPENROUTER2_LANE_EFFORT, OPENROUTER2_LANE_MODEL, resolveOpenRouter2Effort, resolveOpenRouter2Model, resolveOpenRouterEffort, resolveOpenRouterModel } from './openrouter-models.ts';
 import { AGY_LANE_EFFORT, AGY_LANE_MODEL, resolveAgyEffort, resolveAgyModel } from './agy-models.ts';
@@ -47,6 +47,7 @@ export type Agent = {
   engine: string;
   model?: string;
   effort?: string;
+  serviceTier?: string;
   brainRevision?: number;
   brainUpdatedAt?: number;
   /** home thread chatId (bot-<id>). */
@@ -79,7 +80,7 @@ export function isAgentColor(value: unknown): value is AgentColor {
   return typeof value === 'string' && (AGENT_COLORS as readonly string[]).includes(value);
 }
 
-export type AgentBrain = { engine: string; model?: string; effort?: string; revision: number; updatedAt?: number };
+export type AgentBrain = { engine: string; model?: string; effort?: string; serviceTier?: string; revision: number; updatedAt?: number };
 
 const VALID_ENGINES = SUBSCRIPTION_ENGINES;
 
@@ -222,11 +223,13 @@ function normalizeAgentBrain(agent: Agent): Agent {
   const storedEffort = cleanBrainValue(agent.effort ?? persisted.effort);
   const effort = migrated ? normalizeBrainEffort(engine, model, storedEffort, defaults.effort)
     : engine === 'xai' && storedEffort === 'max' ? 'xhigh' : storedEffort ?? defaults.effort;
+  const serviceTier = engine === 'codex' ? canonicalServiceTier(cleanBrainValue(agent.serviceTier)) ?? 'default' : undefined;
   return {
     ...agent,
     engine,
     model,
     effort,
+    serviceTier,
     brainRevision: Number.isSafeInteger(agent.brainRevision) && (agent.brainRevision ?? 0) > 0
       ? agent.brainRevision! + (migrated ? 1 : 0)
       : 1,
@@ -240,6 +243,7 @@ export function brainForAgent(agent: Agent): AgentBrain {
     engine: normalized.engine,
     model: normalized.model,
     effort: normalized.effort,
+    ...(normalized.serviceTier !== undefined ? { serviceTier: normalized.serviceTier } : {}),
     revision: normalized.brainRevision ?? 1,
     updatedAt: normalized.brainUpdatedAt,
   };
@@ -356,7 +360,7 @@ export function ensureAgents(): void {
   }
 }
 
-export type AgentInput = { name: string; role?: string; engine?: string; model?: string; effort?: string; voice?: string; pinned?: boolean; muted?: boolean; color?: AgentColor | null; scope?: string };
+export type AgentInput = { name: string; role?: string; engine?: string; model?: string; effort?: string; serviceTier?: string; voice?: string; pinned?: boolean; muted?: boolean; color?: AgentColor | null; scope?: string };
 
 /** Fail-closed: only a never-written ledger (ENOENT) reads as empty. An
  * unreadable or corrupt ledger THROWS - id allocation and retirement both
@@ -413,6 +417,8 @@ export function createAgent(input: AgentInput): Agent {
   const model = normalizeBrainModel(engine, input.model, defaults.model);
   const effort = normalizeBrainEffort(engine, model, input.effort, defaults.effort);
   assertBrainSelection(input, model, effort);
+  const serviceTier = engine === 'codex' ? validatedServiceTier(model!, input.serviceTier) : undefined;
+  if (input.serviceTier !== undefined && engine !== 'codex') throw new AgentBrainSelectionError('Speed choices belong to Codex models.');
   const now = Date.now();
   const agent: Agent = {
     id,
@@ -421,6 +427,7 @@ export function createAgent(input: AgentInput): Agent {
     engine,
     model,
     effort,
+    serviceTier,
     brainRevision: 1,
     brainUpdatedAt: now,
     voice: input.voice ?? 'ara',
@@ -453,6 +460,11 @@ export class AgentBrainRevisionRequiredError extends Error {
 
 export class AgentBrainSelectionError extends Error {}
 
+function validatedServiceTier(model: string, tier?: unknown): string {
+  try { return resolveCodexServiceTier(model, tier); }
+  catch (error) { throw new AgentBrainSelectionError((error as Error).message); }
+}
+
 function assertBrainSelection(input: Pick<AgentInput, 'model' | 'effort'>, model?: string, effort?: string): void {
   for (const field of ['model', 'effort'] as const) {
     if (input[field] === undefined) continue;
@@ -473,7 +485,7 @@ export function updateAgent(
   const idx = agents.findIndex((a) => a.id === id);
   if (idx < 0) return null;
   const cur = normalizeAgentBrain(agents[idx]);
-  const changesBrain = patch.engine !== undefined || patch.model !== undefined || patch.effort !== undefined;
+  const changesBrain = patch.engine !== undefined || patch.model !== undefined || patch.effort !== undefined || patch.serviceTier !== undefined;
   if (changesBrain && expectedBrainRevision === undefined) {
     throw new AgentBrainRevisionRequiredError(cur);
   }
@@ -497,7 +509,12 @@ export function updateAgent(
   if (!engineChanged && modelChanged && patch.effort === undefined && effort !== cur.effort) {
     throw new AgentBrainSelectionError('Choose an effort supported by this model as well. Your saved settings have not changed.');
   }
-  const brainChanged = engineChanged || model !== cur.model || effort !== cur.effort;
+  if (patch.serviceTier !== undefined && engine !== 'codex') throw new AgentBrainSelectionError('Speed choices belong to Codex models.');
+  const serviceTier = engine !== 'codex' ? undefined : patch.serviceTier !== undefined
+    ? !engineChanged && !modelChanged && canonicalServiceTier(patch.serviceTier) === cur.serviceTier
+      ? cur.serviceTier : validatedServiceTier(model!, patch.serviceTier)
+    : engineChanged || modelChanged ? validatedServiceTier(model!) : cur.serviceTier ?? 'default';
+  const brainChanged = engineChanged || model !== cur.model || effort !== cur.effort || serviceTier !== cur.serviceTier;
   const next: Agent = {
     ...cur,
     name: patch.name !== undefined ? (patch.name.trim().slice(0, 60) || cur.name) : cur.name,
@@ -505,6 +522,7 @@ export function updateAgent(
     engine,
     model,
     effort,
+    serviceTier,
     brainRevision: brainChanged ? (cur.brainRevision ?? 1) + 1 : cur.brainRevision,
     brainUpdatedAt: brainChanged ? Date.now() : cur.brainUpdatedAt,
     voice: patch.voice !== undefined ? (patch.voice || cur.voice) : cur.voice,

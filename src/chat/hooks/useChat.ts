@@ -35,9 +35,11 @@ export type ServerBrainState = {
   cli: CompanionId;
   model?: string;
   effort?: string;
+  serviceTier?: string;
   activeCli: CompanionId;
   activeModel?: string;
   activeEffort?: string;
+  activeServiceTier?: string;
   revision?: number;
   pending: boolean;
 };
@@ -1175,6 +1177,7 @@ export function useChat(opts: {
   contextWindowTokens?: number | null;
   /** Reasoning/thinking effort for engines that expose one. */
   effort?: string;
+  serviceTier?: string;
   /** Process-local counter advanced only by an explicit picker action. Device
    * defaults never advance it, so a new computer cannot recycle a warm lane. */
   selectionRevision?: number;
@@ -1192,6 +1195,7 @@ export function useChat(opts: {
     model,
     contextWindowTokens,
     effort,
+    serviceTier,
     selectionRevision,
   } = opts;
   // Encode the account into the chatId (same `__acct__` separator the server
@@ -1203,6 +1207,8 @@ export function useChat(opts: {
   // pick without re-subscribing the connection effect on every change.
   const modelRef = useRef<string | undefined>(model);
   modelRef.current = model;
+  const serviceTierRef = useRef(serviceTier);
+  serviceTierRef.current = serviceTier;
   const effortRef = useRef<string | undefined>(effort);
   effortRef.current = effort;
   const selectionRevisionRef = useRef(selectionRevision ?? 0);
@@ -1527,7 +1533,7 @@ export function useChat(opts: {
         ...(item.queue ? { queue: true } : {}),
         ...(item.replyTo ? { replyTo: item.replyTo } : {}),
         model: modelRef.current,
-        effort: effortRef.current,
+        effort: effortRef.current, serviceTier: serviceTierRef.current,
         ...selectionIntent(),
       }));
     } catch {
@@ -1800,7 +1806,7 @@ export function useChat(opts: {
           sinceSeq: lastSeqRef.current,
           resetAt: cacheResetAtRef.current,
           model: modelRef.current,
-          effort: effortRef.current,
+          effort: effortRef.current, serviceTier: serviceTierRef.current,
           ...selectionIntent(),
           visible: userPresent(),
         }));
@@ -1884,9 +1890,11 @@ export function useChat(opts: {
               cli: msg.cli as CompanionId,
               model: typeof msg.model === 'string' ? msg.model : undefined,
               effort: typeof msg.effort === 'string' ? msg.effort : undefined,
+              serviceTier: typeof msg.serviceTier === 'string' ? msg.serviceTier : undefined,
               activeCli: serverCliRef.current,
               activeModel: typeof msg.activeModel === 'string' ? msg.activeModel : undefined,
               activeEffort: typeof msg.activeEffort === 'string' ? msg.activeEffort : undefined,
+              activeServiceTier: typeof msg.activeServiceTier === 'string' ? msg.activeServiceTier : undefined,
               revision: Number.isSafeInteger(msg.brainRevision) ? msg.brainRevision : undefined,
               pending: msg.brainPending === true,
             });
@@ -1961,7 +1969,10 @@ export function useChat(opts: {
             const appliedEffort = Object.prototype.hasOwnProperty.call(msg, 'effort')
               ? typeof msg.effort === 'string' ? msg.effort : undefined
               : current?.effort;
+            const appliedServiceTier = Object.prototype.hasOwnProperty.call(msg, 'serviceTier')
+              ? typeof msg.serviceTier === 'string' ? msg.serviceTier : undefined : current?.serviceTier;
             return {
+              serviceTier: appliedServiceTier, activeServiceTier: appliedServiceTier,
               cli: appliedCli,
               model: appliedModel,
               effort: appliedEffort,
@@ -2631,7 +2642,7 @@ export function useChat(opts: {
             sinceSeq: lastSeqRef.current,
             resetAt: cacheResetAtRef.current,
             model: modelRef.current,
-            effort: effortRef.current,
+            effort: effortRef.current, serviceTier: serviceTierRef.current,
             ...selectionIntent(),
             visible: userPresent(),
           }));
@@ -2847,7 +2858,7 @@ export function useChat(opts: {
       repo: repo.path,
       chatId,
       model: modelRef.current,
-      effort: effortRef.current,
+      effort: effortRef.current, serviceTier: serviceTierRef.current,
       ...selectionIntent(),
     }));
   };
@@ -2968,7 +2979,7 @@ export function useChat(opts: {
     pendingSendRef.current = true;
     rememberPendingSteer(key, { text, images, clientMsgId, ts: Date.now(), ...(replyTo ? { replyTo } : {}) });
     setError(null);
-    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), clientMsgId, ...(queue ? { queue: true } : {}), ...(replyTo ? { replyTo } : {}), model: modelRef.current, effort: effortRef.current, ...selectionIntent() }));
+    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), clientMsgId, ...(queue ? { queue: true } : {}), ...(replyTo ? { replyTo } : {}), model: modelRef.current, effort: effortRef.current, serviceTier: serviceTierRef.current, ...selectionIntent() }));
     lastMessageAtRef.current = Date.now();
     compactingRef.current = false;
     setStatus('streaming');

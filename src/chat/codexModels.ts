@@ -11,6 +11,8 @@ export type CodexModelSpec = {
   defaultEffort: CodexEffort;
   efforts: CodexEffort[];
   contextWindow: number;
+  serviceTiers?: { id: string; label: string; description: string }[];
+  defaultServiceTier?: string;
 };
 
 const STANDARD_EFFORTS: CodexEffort[] = ['low', 'medium', 'high', 'xhigh'];
@@ -167,7 +169,16 @@ function cleanSpec(raw: unknown): CodexModelSpec | null {
   if (!efforts.length) return null;
   const defaultEffort = typeof m.defaultEffort === 'string' && efforts.includes(m.defaultEffort) ? m.defaultEffort : efforts[0]!;
   const contextWindow = typeof m.contextWindow === 'number' && m.contextWindow > 0 ? m.contextWindow : 272_000;
-  return { id: m.id, label: m.label.slice(0, 60), defaultEffort, efforts, contextWindow };
+  const serviceTiers: NonNullable<CodexModelSpec['serviceTiers']> = [];
+  if (Array.isArray(m.serviceTiers)) for (const value of m.serviceTiers) {
+    if (!value || typeof value !== 'object') continue;
+    const tier = value as Record<string, unknown>;
+    if (typeof tier.id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(tier.id) || tier.id === 'default') continue;
+    serviceTiers.push({ id: tier.id, label: typeof tier.label === 'string' ? tier.label.slice(0, 60) : tier.id,
+      description: typeof tier.description === 'string' ? tier.description.slice(0, 240) : '' });
+  }
+  const defaultServiceTier = typeof m.defaultServiceTier === 'string' && serviceTiers.some(tier => tier.id === m.defaultServiceTier) ? m.defaultServiceTier : 'default';
+  return { id: m.id, label: m.label.slice(0, 60), defaultEffort, efforts, contextWindow, serviceTiers, defaultServiceTier };
 }
 
 /** Swap in what the server read from the Codex CLI. */
@@ -221,19 +232,46 @@ export function normalizeCodexModel(model: string | null | undefined): string {
   return CODEX_MODELS.some((entry) => entry.id === DEFAULT_CODEX_MODEL) ? DEFAULT_CODEX_MODEL : CODEX_MODELS[0]!.id;
 }
 
+/** Unknown/saved models must never borrow another model's speed choices. */
+export function codexServiceTiers(model: string): NonNullable<CodexModelSpec['serviceTiers']> {
+  const spec = CODEX_MODELS.find(entry => entry.id === model);
+  return spec?.serviceTiers?.length ? [{ id: 'default', label: 'Standard', description: 'Standard speed and usage' }, ...spec.serviceTiers] : [];
+}
+
+/** Reads preserve explicit saved intent, just like model and effort. */
+export function savedCodexServiceTier(model: string, value?: string | null): string {
+  const tier = value === 'fast' ? 'priority' : value;
+  if (tier && /^[a-z][a-z0-9_-]{0,31}$/.test(tier)) return tier;
+  return CODEX_MODELS.find(entry => entry.id === model)?.defaultServiceTier ?? 'default';
+}
+
+export function normalizeCodexServiceTier(model: string, value?: string | null): string {
+  const tier = value === 'fast' ? 'priority' : value;
+  const spec = CODEX_MODELS.find(entry => entry.id === model);
+  return tier === 'default' || codexServiceTiers(model).some(entry => entry.id === tier)
+    ? tier! : spec?.defaultServiceTier ?? 'default';
+}
+
 export function codexEffortsForModel(model: string): CodexEffort[] {
   return codexModelSpec(model).efforts;
 }
 
 /** An explicit model switch uses the nearest supported effort, with a notice. */
-export function codexModelChange(model: string, current: string): { effort: string; notice: string | null } {
+export function codexModelChange(model: string, current: string, currentSpeed?: string): { effort: string; serviceTier: string; notice: string | null } {
   const spec = codexModelSpec(model);
-  if (spec.efforts.includes(current)) return { effort: current, notice: null };
   const order = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
   const index = order.indexOf(current);
   const lower = order.slice(0, index).reverse().find((tier) => spec.efforts.includes(tier));
-  const effort = index < 0 ? spec.defaultEffort : lower ?? spec.efforts[0]!;
-  return { effort, notice: `${codexModelLabel(model)} doesn’t offer ${current}. Effort changed to ${effort}, the closest supported level.` };
+  const effort = spec.efforts.includes(current) ? current : index < 0 ? spec.defaultEffort : lower ?? spec.efforts[0]!;
+  const serviceTier = normalizeCodexServiceTier(model, currentSpeed);
+  const notices: string[] = [];
+  if (effort !== current) notices.push(`${codexModelLabel(model)} doesn’t offer ${current}. Effort changed to ${effort}, the closest supported level.`);
+  const savedSpeed = savedCodexServiceTier(model, currentSpeed);
+  if (currentSpeed && serviceTier !== savedSpeed) {
+    const label = (tier: string) => codexServiceTiers(model).find(entry => entry.id === tier)?.label ?? (tier === 'default' ? 'Standard' : tier === 'priority' ? 'Fast' : tier === 'ultrafast' ? 'Ultrafast' : tier);
+    notices.push(`${codexModelLabel(model)} doesn’t offer ${label(savedSpeed)}. Speed changed to ${label(serviceTier)}.`);
+  }
+  return { effort, serviceTier, notice: notices.join(' ') || null };
 }
 
 export function contextWindowForCodexModel(model: string | undefined): number {

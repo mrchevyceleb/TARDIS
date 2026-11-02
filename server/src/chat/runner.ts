@@ -37,7 +37,7 @@ import { agentForChatId, brainForAgent, cliForAgentEngine, noteAgentLane } from 
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { crashTombstoneEvent, crashTombstoneText, restartMarkerEvent } from './crashTombstone.ts';
 import { BACKGROUND_MODEL_HOLD_MINUTES, backgroundEndedGuidance, backgroundTaskLabel, backgroundWorkEvent, type BackgroundWorkCause } from './backgroundWork.ts';
-import { subscriptionEnvForLane, preferredSubscriptionEnv, subscriptionRoutingKey, subscriptionRoutingKeysMatch, subscriptionEmail, cliProfileForEnv, cliProfileId, cliProfiles } from '../lib/cliProfiles.ts';
+import { subscriptionEnvForLane, withLongLivedClaudeToken, preferredSubscriptionEnv, subscriptionRoutingKey, subscriptionRoutingKeysMatch, subscriptionEmail, cliProfileForEnv, cliProfileId, cliProfiles } from '../lib/cliProfiles.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
@@ -1030,6 +1030,7 @@ class ClaudeSession {
       : cli === 'openrouter2' ? openRouter2Env(this.spawnModel)
       : cli === 'meta' ? metaEnv(this.spawnModel)
       : subscriptionEnvForLane('claude', cwd, chatId, agentForChatId(chatId)?.name);
+    if (cli === 'claude' || cli === 'assistant') withLongLivedClaudeToken(spawnEnv, spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'));
     if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks' && cli !== 'openrouter' && cli !== 'openrouter2' && cli !== 'meta') assertClaudeSubscription(spawnEnv, cwd);
     if (cli === 'claude' || cli === 'assistant') {
       spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
@@ -3624,6 +3625,7 @@ async function getOrCreateSessionUnlocked(opts: {
   chatId?: string;
   model?: string;
   effort?: string;
+  serviceTier?: string;
   /** Only an explicit user turn (send/steer) may recycle a warm session to
    *  apply a changed model/effort. Passive hellos/reconnects MUST default to
    *  attach-only: a backgrounded tab or a second device with a stale effort
@@ -3639,7 +3641,7 @@ async function getOrCreateSessionUnlocked(opts: {
   const selectedAgent = agentForChatId(opts.chatId || 'main');
   if (selectedAgent && !opts.handoverSource) {
     const brain = brainForAgent(selectedAgent);
-    opts = { ...opts, cli: cliForAgentEngine(brain.engine) as CliKind, model: brain.model, effort: brain.effort };
+    opts = { ...opts, cli: cliForAgentEngine(brain.engine) as CliKind, model: brain.model, effort: brain.effort, serviceTier: brain.serviceTier };
   }
   assertSubscriptionLane(opts.cli);
   const quotaRefresh = !opts.passive && (opts.cli === 'claude' || opts.cli === 'assistant')
@@ -4346,12 +4348,14 @@ export async function freshStart(opts: {
   chatId?: string;
   model?: string;
   effort?: string;
+  serviceTier?: string;
 }): Promise<AnySession> {
   assertSubscriptionLane(opts.cli);
-  const chatId = opts.chatId || 'main';
+  const chatId = isAgentThread(opts.chatId || '') ? bareChatId(opts.chatId!) : opts.chatId || 'main';
+  const repoPath = sessionDirectory(chatId, opts.repoPath);
   // The background lane shares the reset thread on every engine: end it and
   // forget its resume id before any engine-specific reset runs.
-  for (const [bgKey, bg] of backgroundSiblings(trackedThreadLogKey({ ...opts, chatId }), chatId)) {
+  for (const [bgKey, bg] of backgroundSiblings(trackedThreadLogKey({ ...opts, repoPath, chatId }), chatId)) {
     if (bg instanceof ClaudeSession) bg.shutdown('freshStart', 'fresh');
     else bg.shutdown('freshStart');
     sessions.delete(bgKey);
@@ -4359,13 +4363,17 @@ export async function freshStart(opts: {
   }
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
     const { freshStartCodex } = await import('./codex-runner.ts');
-    return freshStartCodex({ repoPath: opts.repoPath, chatId, cli: opts.cli });
+    return freshStartCodex({ repoPath, chatId, cli: opts.cli });
   }
   if (opts.cli === 'banana' || opts.cli === 'banana-local' || opts.cli === 'banana-fireworks') {
     const { freshStartBanana } = await import('./banana-runner.ts');
-    return freshStartBanana({ repoPath: opts.repoPath, chatId, cli: opts.cli });
+    return freshStartBanana({ repoPath, chatId, cli: opts.cli });
   }
-  const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
+  // Fresh Thread is a direct spawn path, so every non-Assistant lane must use
+  // the same directory policy as getOrCreateSession. Previously keyOf()
+  // normalized only the registry key while MuseSession received the browser's
+  // repo: its key said Personal-Apps but its actual cwd was ASSISTANT-HUB.
+  const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
   // A boot prewarm may still be resolving getSessionId before its constructor
   // claims the map. Let it claim, then replace that exact owner, rather than

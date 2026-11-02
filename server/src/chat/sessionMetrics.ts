@@ -6,7 +6,6 @@ import { bareChatId, isAgentThread } from './threadKey.ts';
 import { agentForChatId } from './agents.ts';
 import { sessionPolicy, NATIVE_COMPACT_TOKENS } from './sessionPolicy.ts';
 import { queueFlagDigest } from '../lib/flagDigest.ts';
-import { inQuietHours } from '../lib/quietHours.ts';
 import { codexCompactEvidence, compactEvidencePending, invalidateRestoredFileEvidence, nativeCompactEvidence, recordedRestartNear } from './sessionMetricEvidence.ts';
 
 export type NativeCall = {
@@ -403,7 +402,6 @@ export function startSessionMetricsReport(): void {
   let last = '';
   const tick = () => {
     const now = Date.now();
-    if (inQuietHours(now)) return;
     const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', hourCycle: 'h23' }).format(now));
     if (hour !== 21 || last === day(now)) return;
     mkdirSync(directory, { recursive: true });

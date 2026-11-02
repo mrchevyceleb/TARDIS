@@ -24,7 +24,7 @@ export type Commitment = {
   /** When the past-due sweep raised this entry, per recipient. A recipient
    *  is marked only after its delivery succeeded, so a failed raise retries
    *  on the next tick instead of being silenced forever. */
-  raised?: { owner?: number; chief?: number };
+  raised?: { owner?: number; chief?: number; wake?: number };
   createdAt: number;
 };
 
@@ -85,6 +85,7 @@ function normalizeCommitment(value: unknown): Commitment | null {
   const raisedRaw = raw.raised;
   const raisedOwner = raisedRaw && typeof raisedRaw === 'object' ? asFiniteNumber((raisedRaw as { owner?: unknown }).owner, 0) : 0;
   const raisedChief = raisedRaw && typeof raisedRaw === 'object' ? asFiniteNumber((raisedRaw as { chief?: unknown }).chief, 0) : 0;
+  const raisedWake = raisedRaw && typeof raisedRaw === 'object' ? asFiniteNumber((raisedRaw as { wake?: unknown }).wake, 0) : 0;
   return {
     id,
     agentId,
@@ -92,10 +93,11 @@ function normalizeCommitment(value: unknown): Commitment | null {
     ...(due ? { due } : {}),
     ...(dueAt > 0 ? { dueAt } : {}),
     ...(sourceId ? { sourceId } : {}),
-    ...(raisedOwner > 0 || raisedChief > 0 ? {
+    ...(raisedOwner > 0 || raisedChief > 0 || raisedWake > 0 ? {
       raised: {
         ...(raisedOwner > 0 ? { owner: raisedOwner } : {}),
         ...(raisedChief > 0 ? { chief: raisedChief } : {}),
+        ...(raisedWake > 0 ? { wake: raisedWake } : {}),
       },
     } : {}),
     createdAt: asFiniteNumber(raw.createdAt, 0),
@@ -265,8 +267,10 @@ export function addCommitment(
 
 /** The past-due sweep records a raise per recipient, only after that
  *  recipient's delivery succeeded: a failed raise retries on the next tick,
- *  a succeeded one never repeats. A no-op never rewrites the file. */
-export function markCommitmentRaised(id: string, recipient: 'owner' | 'chief', textKey?: { agentId: string; text: string }): boolean {
+ *  a succeeded one never repeats. A no-op never rewrites the file. 'wake' is
+ *  the due-time wake to a worker owner (commitmentSweep.ts); it carries no
+ *  text mark. */
+export function markCommitmentRaised(id: string, recipient: 'owner' | 'chief' | 'wake', textKey?: { agentId: string; text: string }): boolean {
   const target = id.trim();
   if (!target) return false;
   const now = Date.now();

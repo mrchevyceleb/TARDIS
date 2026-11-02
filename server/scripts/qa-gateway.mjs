@@ -29,7 +29,7 @@ const hasTeamCookie = (cookie) => Boolean(TEAM_KEY) && String(cookie || '').spli
 // The team view is all three columns. The gateway signs in as each tester
 // itself (loopback, so it may issue links) and keeps those sessions only in
 // memory, then stitches the three columns into one board.
-const TESTERS = ['sud', 'edgar'];
+const TESTERS = ['sud', 'edgar', 'martin'];
 const teamSessions = new Map();
 function local(method, path, { body, cookie } = {}) {
   return new Promise((resolve, reject) => {

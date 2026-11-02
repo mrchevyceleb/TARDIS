@@ -57,12 +57,25 @@ export type DeskTodo = {
   link?: string;
   status: 'open' | 'done';
   completedAt?: string;
+  /** A future instant hides the item. Kept after waking as its alert generation. */
+  snoozedUntil?: string;
+  /** Priority when the owner brought it back, so a later promotion can alert. */
+  snoozeReturnedPriority?: DeskPriority;
   cardId?: string;
   /** Pick-one options for a one-tap answer (the Desk offers Yes / No when absent). */
   choices?: string[];
   answer?: DeskAnswer;
   resolution?: { note: string; at: string; by: DeskActor };
 };
+
+/** Visibility is derived from the stored deadline, even before a scheduler tick. */
+export function isTodoSnoozed(todo: DeskTodo, now = Date.now()): boolean {
+  return todo.status === 'open' && Boolean(todo.snoozedUntil && Date.parse(todo.snoozedUntil) > now);
+}
+
+export function isTodoOpen(todo: DeskTodo, now = Date.now()): boolean {
+  return todo.status === 'open' && !isTodoSnoozed(todo, now);
+}
 
 export type DeskComment = { id: string; author: DeskActor; text: string; at: string; images?: string[] };
 
@@ -103,6 +116,8 @@ export type DeskCard = {
 /** The check-in window: every owner touch without a written time sets a
  *  deadline this far out, and no such touch can push it further. */
 export const CARD_NEXT_CHECK_MS = 30 * 60_000;
+const QA_CHECK_CEILING_MS = 24 * 60 * 60_000;
+const QA_CHECK_REFUSAL = 'A card in QA can wait for its scheduled test, up to 24 hours out. Write the test time as the next check-in.';
 /** Compatibility export; agent due times now use the shared 30-minute rule. */
 export const CARD_NEXT_CHECK_WRITTEN_MAX_MS = CARD_NEXT_CHECK_MS;
 /** Quiet time after the owner nudge before the Chief copy. */
@@ -249,7 +264,11 @@ function touchCardNextCheck(card: DeskCard, nowIso: string, writtenNextCheckMs?:
       // A written check-in time in the comment is honored, capped at the
       // written maximum so no comment can park a live card indefinitely:
       // parking until a stated time actually silences the card until then.
-      const error = by?.kind === 'owner' ? undefined : checkpointDueError(writtenNextCheckMs, nowMs);
+      // In QA the ball is with the tester (Sud's slot can be tomorrow at 7am),
+      // so the owner may write the scheduled test time, up to a day out.
+      const error = by?.kind === 'owner' ? undefined
+        : card.column === 'in_qa' ? (writtenNextCheckMs - nowMs > QA_CHECK_CEILING_MS ? QA_CHECK_REFUSAL : undefined)
+        : checkpointDueError(writtenNextCheckMs, nowMs);
       if (error) throw new DeskError(409, error);
       card.nextCheckAt = new Date(writtenNextCheckMs).toISOString();
       if (by?.kind === 'owner') card.nextCheckWrittenByOwner = true; else delete card.nextCheckWrittenByOwner;
@@ -489,6 +508,11 @@ function normalizeTodo(value: unknown, now: string): DeskTodo | null {
     priority: parsePriority(raw.priority) ?? 'normal',
     status: raw.status === 'done' ? 'done' : 'open',
   };
+  if (todo.status === 'open' && validIso(raw.snoozedUntil)) {
+    todo.snoozedUntil = raw.snoozedUntil;
+    const returnedPriority = parsePriority(raw.snoozeReturnedPriority);
+    if (returnedPriority) todo.snoozeReturnedPriority = returnedPriority;
+  }
   const detail = clip(raw.detail, DESK_LIMITS.detail);
   if (detail) todo.detail = detail;
   const due = parseDue(raw.due);
@@ -574,7 +598,9 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     if (card.nextCheckWritten && !card.nextCheckAt) delete card.nextCheckWritten;
     const lastComment = card.comments.at(-1);
     if (card.nextCheckWritten && lastComment?.at === card.updatedAt && lastComment.author.kind === 'owner') card.nextCheckWrittenByOwner = true;
-    const cap = card.nextCheckWrittenByOwner ? Infinity : checkpointCeiling(Date.parse(now));
+    const cap = card.nextCheckWrittenByOwner ? Infinity
+      : card.nextCheckWritten && card.column === 'in_qa' ? Date.parse(now) + QA_CHECK_CEILING_MS
+      : checkpointCeiling(Date.parse(now));
     if (!card.nextCheckAt) {
       const base = Math.min(Date.parse(updatedAt || now), Date.parse(now));
       card.nextCheckAt = new Date(base + CARD_NEXT_CHECK_MS).toISOString();
@@ -929,6 +955,23 @@ export function createTodo(input: TodoInput, from: DeskActor): Promise<DeskTodo>
   });
 }
 
+/** Only the owner route can park a question. Agents keep seeing the same item. */
+export function snoozeTodo(id: string, hours: unknown): Promise<DeskTodo> {
+  if (hours !== null && ![24, 48, 72, 168].includes(hours as number)) {
+    throw new DeskError(400, 'Choose 24h, 48h, 72h or 1 week.');
+  }
+  return mutate((data, now) => {
+    const todo = findTodo(data, id);
+    if (todo.status !== 'open') throw new DeskError(409, 'This item is already done.');
+    if (hours === null && !isTodoSnoozed(todo, Date.parse(now))) return new Unchanged(todo);
+    // Bringing it back early also creates a fresh alert generation.
+    todo.snoozedUntil = new Date(Date.parse(now) + (hours === null ? 0 : (hours as number) * 3_600_000)).toISOString();
+    if (hours === null) todo.snoozeReturnedPriority = todo.priority; else delete todo.snoozeReturnedPriority;
+    todo.updatedAt = now;
+    return todo;
+  });
+}
+
 export function updateTodo(id: string, input: TodoInput, by?: DeskActor): Promise<DeskTodo> {
   return mutate((data, now) => {
     const todo = findTodo(data, id);
@@ -943,7 +986,16 @@ export function updateTodo(id: string, input: TodoInput, by?: DeskActor): Promis
       const due = requireDue(input.due);
       if (due) todo.due = due; else delete todo.due;
     }
-    if (input.priority !== undefined) todo.priority = requirePriority(input.priority);
+    if (input.priority !== undefined) {
+      const priority = requirePriority(input.priority);
+      if (priority !== todo.priority && todo.snoozeReturnedPriority) {
+        // Re-prioritizing an explicitly returned item starts a fresh alert
+        // generation on both desktop and phone, without snoozing it again.
+        todo.snoozedUntil = now;
+        delete todo.snoozeReturnedPriority;
+      }
+      todo.priority = priority;
+    }
     if (input.link !== undefined) {
       const link = requireLink(input.link);
       if (link) todo.link = link; else delete todo.link;
@@ -977,6 +1029,8 @@ function applyTodoStatus(todo: DeskTodo, status: 'open' | 'done', now: string, r
     if (!note || !resolution?.by) throw new DeskError(409, 'This question needs an answer. Choose an answer on the Desk, or pass your name and a note explaining how this exact item was resolved. Nothing was closed.');
     todo.resolution = { note, by: resolution.by, at: now };
   }
+  delete todo.snoozedUntil;
+  delete todo.snoozeReturnedPriority;
   todo.status = status;
   if (status === 'done') todo.completedAt = now;
   else {
@@ -1302,11 +1356,11 @@ export async function sweepCardChecks(options: { dryRun?: boolean; liveLanes?: R
       const ownerAgent = resolveOwner(card);
       if (!card.nudgeAt) {
         // Quiet hours (Matt, Oct 15 2026): the owner nudge to a non-Max lane
-        // holds through 22:00-05:00 ET. The card stays unmarked, so the
-        // first sweep after 05:00 nudges it unchanged — held never means
+        // holds through 21:00-07:00 ET. The card stays unmarked, so the
+        // first sweep after 07:00 nudges it unchanged — held never means
         // lost. Chief escalation below targets Max's lane and always goes.
         if (inQuietHours(nowMs) && !isQuietExemptLane(ownerAgent)) {
-          // held: unmarked, retried by the next post-05:00 sweep
+          // held: unmarked, retried by the next post-07:00 sweep
         } else if (liveLanes.has(ownerAgent) && nowMs - next < LIVE_HOLD_CEILING_MS) {
           // Lane-liveness hold (Max, Oct 18 2026, card-b3468c): the owner's
           // lane is mid-turn; a quiet-check nudge must not derail it. Held
@@ -1341,7 +1395,7 @@ export async function sweepCardChecks(options: { dryRun?: boolean; liveLanes?: R
         // OUT, but during the window a non-Max owner's nudge can still be
         // held in the delivery queue, so escalating would tell the Chief a
         // falsehood. Never escalate a held owner inside the window, and
-        // after 05:00 count the 15 minutes from the later of the nudge and
+        // after 07:00 count the 15 minutes from the later of the nudge and
         // the last quiet end — the held nudge only just landed then (Opus
         // verify, Oct 16). Max-lane nudges deliver immediately, so their
         // timing is unchanged.

@@ -79,6 +79,7 @@ import { bareChatId, isBackgroundChatId, backgroundChatId } from './threadKey.ts
 type ClientSelection = {
   model?: string;
   effort?: string;
+  serviceTier?: string;
   /** Process-local picker revision plus explicit dirty bit. Device defaults
    * report reconfigure=false, so they can never recycle a warm process. */
   selectionRevision?: number;
@@ -237,11 +238,11 @@ function selectionRevisionOf(value: unknown): number {
   return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : 0;
 }
 
-type ResolvedBrain = { cli: CliKind; model?: string; effort?: string; revision?: number };
+type ResolvedBrain = { cli: CliKind; model?: string; effort?: string; serviceTier?: string; revision?: number };
 
 function resolvedBrain(
   chatId: string,
-  fallback: { cli: CliKind; model?: string; effort?: string },
+  fallback: { cli: CliKind; model?: string; effort?: string; serviceTier?: string },
 ): ResolvedBrain {
   const agent = agentForChatId(chatId);
   if (!agent) return fallback;
@@ -249,7 +250,7 @@ function resolvedBrain(
   return {
     cli: cliForAgentEngine(brain.engine) as CliKind,
     model: brain.model,
-    effort: brain.effort,
+    serviceTier: brain.serviceTier, effort: brain.effort,
     revision: brain.revision,
   };
 }
@@ -268,10 +269,10 @@ function claudeSpawnOf(session: AnySession | null | undefined): { model: string;
   return { model: spawned.spawnModel, effort: spawned.spawnEffort };
 }
 
-function activeSelectionOf(session: AnySession | null | undefined): { model?: string; effort?: string } {
+function activeSelectionOf(session: AnySession | null | undefined): { model?: string; effort?: string; serviceTier?: string } {
   const claude = claudeSpawnOf(session);
   if (claude) return claude;
-  const selected = (session as { activeSelection?: () => { model?: string; effort?: string } } | null | undefined)
+  const selected = (session as { activeSelection?: () => { model?: string; effort?: string; serviceTier?: string } } | null | undefined)
     ?.activeSelection?.();
   return selected ?? {};
 }
@@ -790,7 +791,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
     clientMsgId?: string;
     laneKey: string;
     model?: string;
-    effort?: string;
+    effort?: string; serviceTier?: string;
     voice?: boolean;
     /** The reply target captured when the steer was held, so the merged send
      *  keeps its quote (card-cbb4af, review 1 P2 9). */
@@ -1042,6 +1043,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
     // cannot feed grok-4.6 into a live Codex turn (Claude-family uses spawnModel).
     let lastTurnModel: string | undefined;
     let lastTurnEffort: string | undefined;
+    let lastTurnServiceTier: string | undefined;
     /** Last authoritative queue set sent to this socket. Keepalive sends one
      * empty transition after cancellation even when the lane just became idle. */
     let lastQueuedSignature = '';
@@ -1585,7 +1587,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           }
           repoPath = msg.repo;
           chatId = normalizeChatId(msg.chatId);
-          const desiredBrain = resolvedBrain(chatId, { cli: msg.cli, model: msg.model, effort: msg.effort });
+          const desiredBrain = resolvedBrain(chatId, { cli: msg.cli, model: msg.model, serviceTier: msg.serviceTier, effort: msg.effort });
           cliKind = desiredBrain.cli;
           const sinceSeq = typeof msg.sinceSeq === 'number' ? msg.sinceSeq : -1;
           const requestedLogKey = laneLogKey(desiredBrain.cli, msg.repo, chatId);
@@ -1601,7 +1603,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           if (watchedLane && watchedLane.repo === msg.repo && watchedLane.chatId === chatId) {
             setWatchVisible(watchedLane.repo, watchedLane.chatId, wsId, msg.visible !== false);
           }
-          const helloSig = `${desiredBrain.cli}|${desiredBrain.model ?? ''}|${desiredBrain.effort ?? ''}|${desiredBrain.revision ?? 0}|${msg.repo}|${chatId}|${sinceSeq}|${clientResetAt}`;
+          const helloSig = `${desiredBrain.cli}|${desiredBrain.model ?? ''}|${desiredBrain.effort ?? ''}|${desiredBrain.serviceTier ?? ''}|${desiredBrain.revision ?? 0}|${msg.repo}|${chatId}|${sinceSeq}|${clientResetAt}`;
           const helloAt = Date.now();
           if (!forceResetReplay && helloSig === lastHelloSig && helloAt - lastHelloAt < HELLO_DEDUPE_MS) {
             lastHelloAt = helloAt;
@@ -1630,15 +1632,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
               type: 'ready',
               cli: desiredBrain.cli,
               model: desiredBrain.model,
-              effort: desiredBrain.effort,
+              serviceTier: desiredBrain.serviceTier, effort: desiredBrain.effort,
               brainRevision: desiredBrain.revision,
               activeCli,
               bgBusy: bgLaneBusy(activeCli, msg.repo, chatId),
               activeModel: activeSelection.model ?? desiredBrain.model,
               activeEffort: activeSelection.effort ?? desiredBrain.effort,
+              activeServiceTier: activeSelection.serviceTier ?? desiredBrain.serviceTier,
               brainPending: activeCli !== desiredBrain.cli
                 || (activeSelection.model !== undefined && activeSelection.model !== desiredBrain.model)
-                || (activeSelection.effort !== undefined && activeSelection.effort !== desiredBrain.effort),
+                || (activeSelection.effort !== undefined && activeSelection.effort !== desiredBrain.effort)
+                || (activeSelection.serviceTier !== undefined && activeSelection.serviceTier !== desiredBrain.serviceTier),
               repo: msg.repo,
               chatId,
               latestSeq,
@@ -1692,6 +1696,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             );
             lastTurnModel = desiredBrain.model;
             lastTurnEffort = desiredBrain.effort;
+            lastTurnServiceTier = desiredBrain.serviceTier;
             busy = false;
             console.log(`[chat ws#${wsId}] attached cold ${laneLogKey(desiredBrain.cli, msg.repo, chatId)} latestSeq=${coldLatestSeq} (no spawn)`);
             const queuedClientMsgIds = pendingSteerIds(desiredBrain.cli, msg.repo, chatId);
@@ -1701,11 +1706,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
               type: 'ready',
               cli: desiredBrain.cli,
               model: desiredBrain.model,
-              effort: desiredBrain.effort,
+              serviceTier: desiredBrain.serviceTier, effort: desiredBrain.effort,
               brainRevision: desiredBrain.revision,
               activeCli: desiredBrain.cli,
               activeModel: desiredBrain.model,
               activeEffort: desiredBrain.effort,
+              activeServiceTier: desiredBrain.serviceTier,
               brainPending: false,
               repo: msg.repo,
               chatId,
@@ -1726,6 +1732,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           );
           lastTurnModel = desiredBrain.model;
           lastTurnEffort = desiredBrain.effort;
+          lastTurnServiceTier = desiredBrain.serviceTier;
           const activeCli = sessionCli(session) ?? desiredBrain.cli;
           const activeSelection = activeSelectionOf(session);
           cliKind = activeCli;
@@ -1748,15 +1755,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
             type: 'ready',
             cli: desiredBrain.cli,
             model: desiredBrain.model,
-            effort: desiredBrain.effort,
+            serviceTier: desiredBrain.serviceTier, effort: desiredBrain.effort,
             brainRevision: desiredBrain.revision,
             activeCli,
             bgBusy: bgLaneBusy(activeCli, msg.repo, chatId),
             activeModel: activeSelection.model ?? desiredBrain.model,
             activeEffort: activeSelection.effort ?? desiredBrain.effort,
+              activeServiceTier: activeSelection.serviceTier ?? desiredBrain.serviceTier,
             brainPending: activeCli !== desiredBrain.cli
               || (activeSelection.model !== undefined && activeSelection.model !== desiredBrain.model)
-              || (activeSelection.effort !== undefined && activeSelection.effort !== desiredBrain.effort),
+              || (activeSelection.effort !== undefined && activeSelection.effort !== desiredBrain.effort)
+                || (activeSelection.serviceTier !== undefined && activeSelection.serviceTier !== desiredBrain.serviceTier),
             repo: msg.repo,
             chatId,
             latestSeq: session.latestSeq(),
@@ -1772,7 +1781,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (msg.type === 'freshStart') {
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
-          let brain = resolvedBrain(chatId, { cli: msg.cli, model: msg.model, effort: msg.effort });
+          let brain = resolvedBrain(chatId, { cli: msg.cli, model: msg.model, serviceTier: msg.serviceTier, effort: msg.effort });
           const releaseReset = beginThreadReset({ cli: brain.cli, repoPath: msg.repo, chatId });
           if (!releaseReset) {
             safeSend({ type: 'error', message: 'This thread is already being reset.' });
@@ -1809,19 +1818,20 @@ export async function registerChat(app: express.Express, server: Server): Promis
             await clearThreadSessionIds(msg.repo, chatId, brain.cli);
             deliveredClientMsgIds = [];
             const session = await bindSession(
-              freshStart({ cli: brain.cli, repoPath: msg.repo, chatId, model: brain.model, effort: brain.effort }),
+              freshStart({ cli: brain.cli, repoPath: msg.repo, chatId, model: brain.model, serviceTier: brain.serviceTier, effort: brain.effort }),
             );
             lastTurnModel = brain.model;
             lastTurnEffort = brain.effort;
+            lastTurnServiceTier = brain.serviceTier;
             cliKind = brain.cli;
             repoPath = msg.repo;
             busy = false;
-            safeSend({ type: 'selectionApplied', selectionRevision: selectionRevisionOf(msg.selectionRevision), cli: brain.cli, model: brain.model ?? null, effort: brain.effort ?? null, brainRevision: brain.revision });
+            safeSend({ type: 'selectionApplied', selectionRevision: selectionRevisionOf(msg.selectionRevision), cli: brain.cli, model: brain.model ?? null, serviceTier: brain.serviceTier ?? null, effort: brain.effort ?? null, brainRevision: brain.revision });
             broadcastThreadReset(targetLogKey, ws, {
               type: 'freshStarted',
               cli: brain.cli,
               model: brain.model,
-              effort: brain.effort,
+              serviceTier: brain.serviceTier, effort: brain.effort,
               brainRevision: brain.revision,
               repo: msg.repo,
               chatId,
@@ -1962,7 +1972,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
           const authoritativeAgent = agentForChatId(chatId);
-          let desiredSteerBrain = resolvedBrain(chatId, { cli: msg.cli, model: msg.model, effort: msg.effort });
+          let desiredSteerBrain = resolvedBrain(chatId, { cli: msg.cli, model: msg.model, serviceTier: msg.serviceTier, effort: msg.effort });
           // Own cancellation from the first await through the final stdin
           // write. Stop or Fresh aborts this path. A newer steer waits in
           // line instead of superseding. A socket close does NOT: accepted
@@ -1982,7 +1992,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             laneKey: '',
             seq: ++steerEnqueueSeq,
             model: msg.model,
-            effort: msg.effort,
+            serviceTier: msg.serviceTier, effort: msg.effort,
             voice: msg.voice,
             replyTo: normalizeReplyTo(msg.replyTo) ?? undefined,
             selectionRevision: msg.selectionRevision,
@@ -2027,6 +2037,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           let steerRepo = repoPath ?? msg.repo;
           let steerModel = authoritativeAgent ? desiredSteerBrain.model : msg.model;
           let steerEffort = authoritativeAgent ? desiredSteerBrain.effort : msg.effort;
+          let steerServiceTier = authoritativeAgent ? desiredSteerBrain.serviceTier : msg.serviceTier;
           const liveControlSession = peekThreadSession({ cli: steerCli, repoPath: steerRepo, chatId });
           const bound = liveControlSession ? Promise.resolve(liveControlSession) : sessionPromise;
           // Register ownership before the FIFO wait so reconnects still see
@@ -2065,6 +2076,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 } else {
                   if (lastTurnModel !== undefined) steerModel = lastTurnModel;
                   if (lastTurnEffort !== undefined) steerEffort = lastTurnEffort;
+                  if (lastTurnServiceTier !== undefined) steerServiceTier = lastTurnServiceTier;
                 }
               }
             } catch {
@@ -2175,6 +2187,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             steerCli = desiredSteerBrain.cli;
             steerModel = desiredSteerBrain.model;
             steerEffort = desiredSteerBrain.effort;
+            steerServiceTier = desiredSteerBrain.serviceTier;
             const mustReplace = Boolean(
               session
               && sessionCli(session) !== steerCli
@@ -2186,7 +2199,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 repoPath: steerRepo,
                 chatId,
                 model: steerModel,
-                effort: steerEffort,
+                serviceTier: steerServiceTier, effort: steerEffort,
                 recycleOnMismatch: true,
               }));
               if (steerAborter.signal.aborted) { rejectSteer(); releaseSteer(); return; }
@@ -2213,7 +2226,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 repoPath: steerRepo,
                 chatId,
                 model: steerModel,
-                effort: steerEffort,
+                serviceTier: steerServiceTier, effort: steerEffort,
               });
               if (steerAborter.signal.aborted || laneGenStale()) {
                 rejectSteer();
@@ -2241,12 +2254,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
               const unchanged = latestBrain.revision === desiredSteerBrain.revision
                 && latestBrain.cli === desiredSteerBrain.cli
                 && latestBrain.model === desiredSteerBrain.model
-                && latestBrain.effort === desiredSteerBrain.effort;
+                && latestBrain.effort === desiredSteerBrain.effort && latestBrain.serviceTier === desiredSteerBrain.serviceTier;
               if (unchanged) break;
               desiredSteerBrain = latestBrain;
               steerCli = latestBrain.cli;
               steerModel = latestBrain.model;
               steerEffort = latestBrain.effort;
+              steerServiceTier = latestBrain.serviceTier;
               const desiredKey = laneGenKey(steerCli, steerRepo, chatId);
               if (desiredKey !== waitKey) {
                 removeLaneWaiter(waitKey, steerAborter);
@@ -2263,7 +2277,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 repoPath: steerRepo,
                 chatId,
                 model: steerModel,
-                effort: steerEffort,
+                serviceTier: steerServiceTier, effort: steerEffort,
                 recycleOnMismatch: true,
               }));
               if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
@@ -2302,6 +2316,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             steerCli = desiredSteerBrain.cli;
             steerModel = desiredSteerBrain.model;
             steerEffort = desiredSteerBrain.effort;
+            steerServiceTier = desiredSteerBrain.serviceTier;
             const desiredKey = laneGenKey(steerCli, steerRepo, chatId);
             if (desiredKey !== waitKey) {
               removeLaneWaiter(waitKey, steerAborter);
@@ -2318,7 +2333,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               repoPath: steerRepo,
               chatId,
               model: steerModel,
-              effort: steerEffort,
+              serviceTier: steerServiceTier, effort: steerEffort,
               recycleOnMismatch: true,
             }));
             if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
@@ -2361,7 +2376,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 // renders the same chip (review 1, P1 2 and P1 3).
                 await (session as any).send(withReplyQuote(msg.text, msg.replyTo), msg.images, {
                   model: steerModel,
-                  effort: steerEffort,
+                  serviceTier: steerServiceTier, effort: steerEffort,
                   clientMsgId: msg.clientMsgId,
                   humanOrigin: true,
                   allowNativeHumanSteer: nativeActiveSteer,
@@ -2387,6 +2402,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                   steerCli = desiredSteerBrain.cli;
                   steerModel = desiredSteerBrain.model;
                   steerEffort = desiredSteerBrain.effort;
+                  steerServiceTier = desiredSteerBrain.serviceTier;
                   const desiredKey = laneGenKey(steerCli, steerRepo, chatId);
                   if (desiredKey !== waitKey) {
                     removeLaneWaiter(waitKey, steerAborter);
@@ -2399,7 +2415,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                     trackSteerPayload(waitKey);
                   }
                   session = await bindSession(getOrCreateSession({ cli: steerCli, repoPath: steerRepo, chatId,
-                    model: steerModel, effort: steerEffort, recycleOnMismatch: true }));
+                    model: steerModel, serviceTier: steerServiceTier, effort: steerEffort, recycleOnMismatch: true }));
                   cliKind = steerCli;
                   continue;
                 }
@@ -2461,13 +2477,14 @@ export async function registerChat(app: express.Express, server: Server): Promis
           releaseSteer();
           lastTurnModel = steerModel;
           lastTurnEffort = steerEffort;
+          lastTurnServiceTier = steerServiceTier;
           if (authoritativeAgent) {
             safeSend({
               type: 'selectionApplied',
               selectionRevision: selectionRevisionOf(msg.selectionRevision),
               cli: desiredSteerBrain.cli,
               model: desiredSteerBrain.model ?? null,
-              effort: desiredSteerBrain.effort ?? null,
+              serviceTier: desiredSteerBrain.serviceTier ?? null, effort: desiredSteerBrain.effort ?? null,
               brainRevision: desiredSteerBrain.revision,
             });
           }
@@ -2506,7 +2523,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           let sendBrain = resolvedBrain(requestedChatId, {
             cli: msg.cli ?? cliKind ?? 'xai',
             model: msg.model,
-            effort: msg.effort,
+            serviceTier: msg.serviceTier, effort: msg.effort,
           });
           const hintedLaneMismatch = !authoritativeAgent && (
             (msg.cli !== undefined && msg.cli !== cliKind)
@@ -2637,6 +2654,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 repoPath,
                 chatId,
                 model: authoritativeAgent ? sendBrain.model : msg.model,
+                serviceTier: authoritativeAgent ? sendBrain.serviceTier : msg.serviceTier,
                 effort: authoritativeAgent ? sendBrain.effort : msg.effort,
               }));
               if (sendCanceled()) return;
@@ -2665,7 +2683,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           if (!session && sendCli && repoPath) {
             // sessionPromise resolved to a dead/null session — rebind a fresh
             // one rather than crashing on `null.send`.
-            session = await bindSession(getOrCreateSession({ cli: sendCli, repoPath, chatId, model: sendBrain.model, effort: sendBrain.effort }));
+            session = await bindSession(getOrCreateSession({ cli: sendCli, repoPath, chatId, model: sendBrain.model, serviceTier: sendBrain.serviceTier, effort: sendBrain.effort }));
             if (sendCanceled()) return;
           }
           let initiallyBusy = Boolean(session && (session as { isBusy?: () => boolean }).isBusy?.() === true);
@@ -2675,7 +2693,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               repoPath,
               chatId,
               model: sendBrain.model,
-              effort: sendBrain.effort,
+              serviceTier: sendBrain.serviceTier, effort: sendBrain.effort,
               recycleOnMismatch: true,
             }));
             cliKind = sendCli;
@@ -2699,6 +2717,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 repoPath,
                 chatId,
                 model: authoritativeAgent ? sendBrain.model : msg.model,
+                serviceTier: authoritativeAgent ? sendBrain.serviceTier : msg.serviceTier,
                 effort: authoritativeAgent ? sendBrain.effort : msg.effort,
                 recycleOnMismatch: selectionChangeRequested,
               });
@@ -2738,7 +2757,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               const unchanged = latestBrain.revision === sendBrain.revision
                 && latestBrain.cli === sendBrain.cli
                 && latestBrain.model === sendBrain.model
-                && latestBrain.effort === sendBrain.effort;
+                && latestBrain.effort === sendBrain.effort && latestBrain.serviceTier === sendBrain.serviceTier;
               if (unchanged) break;
               if ((session as { isBusy?: () => boolean }).isBusy?.() === true) {
                 throw new Error('This agent started another turn before admission. Please send again when it finishes.');
@@ -2770,7 +2789,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 repoPath: sendRepo,
                 chatId,
                 model: sendBrain.model,
-                effort: sendBrain.effort,
+                serviceTier: sendBrain.serviceTier, effort: sendBrain.effort,
                 recycleOnMismatch: true,
               }));
               cliKind = sendCli;
@@ -2807,6 +2826,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           }
           await (session as any).send(outgoingText, outgoingImages, {
             model: authoritativeAgent ? sendBrain.model : msg.model,
+            serviceTier: authoritativeAgent ? sendBrain.serviceTier : msg.serviceTier,
             effort: authoritativeAgent ? sendBrain.effort : msg.effort,
             clientMsgId: msg.clientMsgId,
             humanOrigin: true,
@@ -2822,12 +2842,14 @@ export async function registerChat(app: express.Express, server: Server): Promis
               selectionRevision: requestedSelectionRevision,
               cli: authoritativeAgent ? sendBrain.cli : undefined,
               model: authoritativeAgent ? sendBrain.model ?? null : undefined,
+              serviceTier: authoritativeAgent ? sendBrain.serviceTier ?? null : undefined,
               effort: authoritativeAgent ? sendBrain.effort ?? null : undefined,
               brainRevision: authoritativeAgent ? sendBrain.revision : undefined,
             });
           }
           lastTurnModel = authoritativeAgent ? sendBrain.model : msg.model;
           lastTurnEffort = authoritativeAgent ? sendBrain.effort : msg.effort;
+          lastTurnServiceTier = authoritativeAgent ? sendBrain.serviceTier : msg.serviceTier;
           void retryOnceAfterStaleResume(
             session,
             outgoingText,

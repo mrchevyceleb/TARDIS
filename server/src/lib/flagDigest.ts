@@ -47,7 +47,9 @@ const MAX_DIGEST_CHARS = 20_000;
 const STATE_FILE = join(STATE_DIR, 'flag-digest.json');
 const SESSION_LEADS = new Set(['chief-of-staff', 'max-voice', 'kip', 'riley', 'samwise']);
 
-function digestOwner(ownerId: string): string {
+/** Who reads an owner's flags: leads read their own, every worker's flags
+ *  ride its lead's digest so nags never land in a worker's session. */
+export function digestOwner(ownerId: string): string {
   const policy = sessionPolicy(`bot-${ownerId}`);
   return policy.lead || SESSION_LEADS.has(ownerId) ? ownerId : policy.reportsTo || 'chief-of-staff';
 }
@@ -58,6 +60,9 @@ type Entry = {
   priority?: boolean;
   firstQueuedAt?: number;
   onDelivered?: () => void;
+  /** Lands in the owner's own digest even when the owner is a worker whose
+   *  flags normally ride its lead's (the due-time wake, commitmentSweep.ts). */
+  direct?: boolean;
   /** (card-b3468c verify P1) In flight: the digest record's durable receipt
    *  landed (sentDeliveryId is the record id, shared by every entry that
    *  rode it) but the recipient has not seen it yet. The entry waits for the
@@ -80,7 +85,7 @@ let restored = false;
 
 type Persisted = {
   lastFlush?: Record<string, number>;
-  queues?: Record<string, { key: string; text: string; priority?: boolean; firstQueuedAt?: number; sentAt?: number; sentDeliveryId?: string }[]>;
+  queues?: Record<string, { key: string; text: string; priority?: boolean; direct?: boolean; firstQueuedAt?: number; sentAt?: number; sentDeliveryId?: string }[]>;
 };
 
 function persistNow(): void {
@@ -89,7 +94,7 @@ function persistNow(): void {
     queues: {},
   };
   for (const [ownerId, entries] of queues) {
-    if (entries.size) out.queues![ownerId] = [...entries.values()].map(({ key, text, priority, firstQueuedAt, sentAt, sentDeliveryId }) => ({ key, text, priority, firstQueuedAt, sentAt, sentDeliveryId }));
+    if (entries.size) out.queues![ownerId] = [...entries.values()].map(({ key, text, priority, direct, firstQueuedAt, sentAt, sentDeliveryId }) => ({ key, text, priority, ...(direct ? { direct } : {}), firstQueuedAt, sentAt, sentDeliveryId }));
   }
   const tmp = `${STATE_FILE}.${process.pid}.tmp`;
   try {
@@ -145,15 +150,15 @@ function restore(): void {
         // (card-b3468c verify P1) In-flight markers survive the restart: the
         // durable record survives too, so its admission ack post-restart
         // must still find the entry. Restored entries carry no callbacks
-        // (the source's next cycle re-arms them); the ack of a callbackless
-        // entry deletes it and the sweep re-queues it, which re-sends that
-        // one line once — the stated restart limitation, not a new one.
+        // (the source's next cycle re-arms them: queueFlagDigest rebinds the
+        // callback of a restored in-flight slot carrying the exact same line).
         const sentAt = typeof entry.sentAt === 'number' && Number.isFinite(entry.sentAt) && entry.sentAt > 0 ? entry.sentAt : undefined;
         const sentDeliveryId = typeof entry.sentDeliveryId === 'string' && entry.sentDeliveryId ? entry.sentDeliveryId.slice(0, 120) : undefined;
         map.set(entry.key, {
           key: entry.key,
           text: entry.text,
           priority: entry.priority === true,
+          ...(entry.direct === true ? { direct: true } : {}),
           firstQueuedAt: legacy ? Date.now() : entry.firstQueuedAt,
           ...(sentAt !== undefined ? { sentAt } : {}),
           ...(sentDeliveryId !== undefined ? { sentDeliveryId } : {}),
@@ -166,7 +171,7 @@ function restore(): void {
     const lead = digestOwner(owner);
     if (lead === owner) continue;
     for (const [key, entry] of [...entries]) {
-      if (entry.sentDeliveryId) continue;
+      if (entry.sentDeliveryId || entry.direct) continue;
       entries.delete(key);
       const destination = queues.get(lead) ?? new Map<string, Entry>();
       const movedKey = `${owner}:${key}`;
@@ -189,11 +194,12 @@ function restore(): void {
  *  exact same line will run the mark at its admission. An IN FLIGHT slot
  *  is immutable (review P1, Oct 18): its text and callback are bound to
  *  the durable record already carrying its line, so a later queue can
- *  never rebind them — a genuinely fresh same-key line (a fresh commitment
+ *  never rebind them (only a restored slot that lost its callback in a
+ *  restart takes the same line's callback back) — a genuinely fresh same-key line (a fresh commitment
  *  whose raise names a different id) gets its OWN successor slot and its
  *  own line, instead of hijacking the in-flight record's admission mark. */
-export function queueFlagDigest(ownerId: string, key: string, text: string, onDelivered?: () => void, priority = false): void {
-  const lead = digestOwner(ownerId);
+export function queueFlagDigest(ownerId: string, key: string, text: string, onDelivered?: () => void, priority = false, direct = false): void {
+  const lead = direct ? ownerId : digestOwner(ownerId);
   if (lead !== ownerId) {
     text = `For ${ownerId}: ${text}`;
     key = `${ownerId}:${key}`;
@@ -215,6 +221,7 @@ export function queueFlagDigest(ownerId: string, key: string, text: string, onDe
         text,
         onDelivered,
         priority,
+        ...(direct ? { direct } : {}),
         // The upsert preserves the slot's original firstQueuedAt (Max, Oct
         // 18 2026, card-b3468c): a producer re-queuing an undelivered flag
         // every minute must not refresh the hold age, or a busy lane would
@@ -223,6 +230,13 @@ export function queueFlagDigest(ownerId: string, key: string, text: string, onDe
       });
       queues.set(ownerId, entries);
       persistNow();
+    } else if (!slot.onDelivered && onDelivered) {
+      // An in-flight slot restored after a restart lost its callback (they
+      // are never persisted). The same producer re-queuing the exact same
+      // line re-arms it, so the record's admission still marks its source
+      // instead of clearing silently and getting re-sent. Text and delivery
+      // binding stay untouched: the slot remains immutable in what it says.
+      slot.onDelivered = onDelivered;
     }
     return;
   }
@@ -233,12 +247,31 @@ export function queueFlagDigest(ownerId: string, key: string, text: string, onDe
   // line keeps its own first queue time.
   for (const slotKey of slotNames) {
     if (entries.has(slotKey)) continue;
-    entries.set(slotKey, { key: slotKey, text, onDelivered, priority, firstQueuedAt: Date.now() });
+    entries.set(slotKey, { key: slotKey, text, onDelivered, priority, ...(direct ? { direct } : {}), firstQueuedAt: Date.now() });
     queues.set(ownerId, entries);
     persistNow();
     return;
   }
   console.warn(`[flag-digest] ${ownerId}: every slot for key "${key.slice(0, 80)}" is in flight; dropping this re-queue (the producer's next tick retries as slots free)`);
+}
+
+/** Drop every pending direct entry whose key family starts with `prefix`
+ *  but is not in `keep` (the due-time wakes, commitmentSweep.ts): a wake
+ *  whose commitment was cleared while it waited out quiet hours or a live
+ *  turn must not wake its worker for finished work. In-flight entries are
+ *  left alone; their record is already on its way. */
+export function pruneDirectFlags(prefix: string, keep: ReadonlySet<string>): void {
+  restore();
+  let changed = false;
+  for (const entries of queues.values()) {
+    for (const [slotKey, entry] of [...entries]) {
+      if (!entry.direct || entry.sentDeliveryId !== undefined || !slotKey.startsWith(prefix)) continue;
+      if (keep.has(slotKey.replace(/~\d+$/, ''))) continue;
+      entries.delete(slotKey);
+      changed = true;
+    }
+  }
+  if (changed) persistNow();
 }
 
 /** The durable queue's ground truth for one sent record (review P1, Oct
@@ -280,7 +313,7 @@ export async function flushFlagDigests(now: number = Date.now(), liveLanes?: Rea
     // delivery piled up ~840 duplicate records per owner per night and burned
     // the global rate limit Matt's Desk answers need. Skip before any
     // delivery: the entries stay queued untouched and the first flush after
-    // 05:00 delivers them once.
+    // 07:00 delivers them once.
     if (inQuietHours(now) && !isQuietExemptLane(ownerId)) continue;
     const last = ownerLastFlush.get(ownerId);
     if (last !== undefined && now - last < DIGEST_INTERVAL_MS) continue;
@@ -388,8 +421,8 @@ async function deliverDigest(ownerId: string, text: string, priority: boolean, n
     // run when the recipient sees the line, not when the receipt is durable.
     const result = await deliverTeamMessage({ from: 'TARDIS', to: ownerId, text, wait: false, priority, nudgeHoldSince, admissionAck: 'flag-digest' });
     // Quiet hours (Opus verify, Oct 16): a held digest is durable but will
-    // not land until after 05:00. Report it undelivered so the flush keeps
-    // the entries queued and unmarked — the next window after 05:00 delivers
+    // not land until after 07:00. Report it undelivered so the flush keeps
+    // the entries queued and unmarked — the next window after 07:00 delivers
     // them and runs the marks then. Marking here would let the commitment
     // sweep claim "It went to them" about a held raise.
     if (result.delivered !== true || result.held === 'quiet-hours') return { ok: false };

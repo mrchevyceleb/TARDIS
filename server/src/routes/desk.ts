@@ -8,6 +8,7 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { listAgents, type Agent } from '../chat/agents.ts';
 import { deliverTeamMessage } from '../chat/teamBus.ts';
+import { sessionPolicy } from '../chat/sessionPolicy.ts';
 import { DESK_OWNER_NAME } from '../config.ts';
 import { isQuietHours, notifyTodoTouched } from '../lib/deskNotify.ts';
 import { normalizeDeskImages,
@@ -24,6 +25,8 @@ import { normalizeDeskImages,
   moveCard,
   parseColumn,
   readDesk,
+  isTodoOpen,
+  snoozeTodo,
   setAnswerDelivery,
   setTodoStatus,
   setTodoStatusWithChange,
@@ -173,7 +176,13 @@ deskRouter.get('/', route(async (req, res) => {
     ...(prs.pending ? { prsPending: true } : {}),
     ...(prs.unknown ? { prsUnknown: true } : {}),
   };
-  res.json({ rev: data.rev, owner: ownerActor(), columns: COLUMN_META, todos: data.todos, cards, ...prsPayload });
+  // ?lean=1 is the Desk room's poll: comment threads and descriptions are most
+  // of the board's bytes (19 of 20 MB on Oct 29 2026), so they travel only with
+  // one open card (GET /cards/:id); the list carries the comment count and time.
+  const served = flag(req.query.lean)
+    ? cards.map(({ comments, description: _description, ...card }) => ({ ...card, comments: [], commentCount: comments.length, lastCommentAt: comments.at(-1)?.at }))
+    : cards;
+  res.json({ rev: data.rev, owner: ownerActor(), columns: COLUMN_META, todos: data.todos, cards: served, ...prsPayload });
 }));
 
 /** The sidebar's current-task poll: only the fields a "what is this teammate
@@ -208,7 +217,7 @@ deskRouter.get('/prs', route(async (_req, res) => {
 /** Cheap poll for the workspace badge and desktop alerts. */
 deskRouter.get('/summary', route(async (_req, res) => {
   const data = await readDesk();
-  const open = data.todos.filter((t) => t.status === 'open');
+  const open = data.todos.filter((t) => isTodoOpen(t));
   const high = open.filter((t) => t.priority === 'high');
   res.json({
     rev: data.rev,
@@ -221,9 +230,18 @@ deskRouter.get('/summary', route(async (_req, res) => {
     // ships before this server restarts degrades cleanly.
     answerable: true,
     high: [...high]
-      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .filter((t) => t.snoozeReturnedPriority !== 'high')
+      .sort((a, b) => Date.parse(b.snoozedUntil ?? b.createdAt) - Date.parse(a.snoozedUntil ?? a.createdAt))
       .slice(0, 5)
-      .map((t) => ({ id: t.id, title: t.title, createdAt: t.createdAt, from: t.from.name })),
+      .map((t) => ({
+        id: t.id,
+        title: t.title,
+        createdAt: t.createdAt,
+        alertAt: t.snoozedUntil ?? t.createdAt,
+        suppressAlert: t.snoozeReturnedPriority === 'high',
+        notificationKey: t.snoozedUntil && t.snoozeReturnedPriority !== 'high' ? `${t.id}:${t.snoozedUntil}` : t.id,
+        from: t.from.name,
+      })),
     quiet: isQuietHours(),
   });
 }));
@@ -237,17 +255,41 @@ deskRouter.get('/todos', route(async (req, res) => {
   res.json({ todos: status === 'all' ? todos : todos.filter((t) => t.status === status) });
 }));
 
+/** Matt single-threads his Desk through his leads (Oct 30 2026): every other
+ *  teammate hands a needs-Matt item to Max or Riley, who decides what reaches him. */
+const DESK_WRITER_IDS = new Set(['chief-of-staff', 'riley']);
+
+/** Adding or reopening a Needs-you item puts it in front of the owner. */
+function deskWriter(input: Record<string, unknown>, site?: string): DeskActor {
+  const author = resolveWriteAuthor(input, site);
+  if (author.kind === 'agent' && !DESK_WRITER_IDS.has(author.id)) {
+    throw new DeskError(403, `Only Max and Riley put items on ${DESK_OWNER_NAME}'s Desk. Send it to Max (or Riley for the game studio) in one sentence with your pick. Nothing was changed.`);
+  }
+  return author;
+}
+
 deskRouter.post('/todos', route(async (req, res) => {
   const input = body(req);
-  const todo = await createTodo(input, resolveWriteAuthor(input, fetchSite(req)));
+  const todo = await createTodo(input, deskWriter(input, fetchSite(req)));
   notifyTodoTouched();
   res.status(201).json({ todo });
 }));
 
 deskRouter.patch('/todos/:id', route(async (req, res) => {
   const input = body(req);
+  if (input.status === 'open') deskWriter(input, fetchSite(req));
   const todo = await updateTodo(param(req, 'id'), input, input.status === 'done' && input.note ? resolveCloser(input, fetchSite(req)) : undefined);
   if (input.priority !== undefined) notifyTodoTouched();
+  res.json({ todo });
+}));
+
+deskRouter.post('/todos/:id/snooze', route(async (req, res) => {
+  const input = body(req);
+  if (fetchSite(req) !== 'same-origin' || input.agent || input.author) {
+    throw new DeskError(403, 'Only you can snooze an item from the Desk.');
+  }
+  const todo = await snoozeTodo(param(req, 'id'), input.hours);
+  notifyTodoTouched();
   res.json({ todo });
 }));
 
@@ -259,6 +301,7 @@ deskRouter.post('/todos/:id/complete', route(async (req, res) => {
 }));
 
 deskRouter.post('/todos/:id/reopen', route(async (req, res) => {
+  deskWriter(body(req), fetchSite(req));
   res.json({ todo: await setTodoStatus(param(req, 'id'), 'open') });
 }));
 
@@ -322,13 +365,18 @@ function prLinks(links: unknown): { repo: string; number: number; url: string }[
 
 async function guardOneJob(id: string, input: Record<string, unknown>, owner: DeskActor | undefined, site: string | undefined): Promise<void> {
   if (site === 'same-origin') return;
+  // Matt runs the team through Max in chat (Matt, Oct 28 2026: "if I want to
+  // override things with you through chat I should [not] have to [tap]"), so
+  // Max can hand a job with a PR to someone else on Matt's word.
+  // Keyed on the lane's own roster id, never a display name (names are not unique).
+  const chief = input.agentId === 'chief-of-staff' && listAgents().some((a) => a.id === 'chief-of-staff');
   const { cards } = await readDesk();
   const card = cards.find((c) => c.id === id);
   if (!card || card.archived || card.column === 'in_production') return;
   const existing = prLinks(card.links);
-  if (owner && owner.kind === 'agent' && existing.length
+  if (!chief && owner && owner.kind === 'agent' && existing.length
     && !(card.owner.kind === 'agent' && card.owner.id === owner.id)) {
-    throw new DeskError(409, `Not reassigned. This card already has a PR (${existing.map((p) => `#${p.number}`).join(', ')}), so it stays with ${card.owner.name} until it is live. One owner per job, start to finish (Matt, Oct 24 2026). Send findings to ${card.owner.name} as one fix pass on the same PR. Only Matt can give it to someone else.`);
+    throw new DeskError(409, `Not reassigned. This card already has a PR (${existing.map((p) => `#${p.number}`).join(', ')}), so it stays with ${card.owner.name} until it is live. One owner per job, start to finish (Matt, Oct 24 2026). Send findings to ${card.owner.name} as one fix pass on the same PR. Only Matt can give it to someone else, on the Desk or by telling Max.`);
   }
   if (input.links !== undefined) {
     const incoming = prLinks(input.links);
@@ -427,6 +475,20 @@ const isBeccaOrRiley = (actor: { id?: string; name?: string }): boolean =>
   BECCA_OR_RILEY.includes((actor.id ?? '').trim().toLowerCase())
   || BECCA_OR_RILEY.includes((actor.name ?? '').trim().toLowerCase());
 
+/** Who gets the "make sure they act on it" copy of an answer. Riley's game
+ *  studio reports to Riley, so answers to his people go to him (Matt, Oct 26
+ *  2026: "If one of Riley's people puts something on my desk, it should go to
+ *  him instead of bothering you"); everyone else's go to the Chief of Staff. */
+function answerCopyTarget(todo: DeskTodo, recipient: Agent): { id: string; name: string } | undefined {
+  const asker = todo.from.kind === 'agent' ? todo.from.id : undefined;
+  const lead = (id: string | undefined) => (id ? sessionPolicy(`bot-${id}`).reportsTo : undefined);
+  if (lead(asker) === 'riley' || lead(recipient.id) === 'riley') {
+    return recipient.id === 'riley' ? undefined : { id: 'riley', name: 'Riley' };
+  }
+  if (recipient.id === 'chief-of-staff' || isBeccaOrRiley(todo.from) || isBeccaOrRiley(recipient)) return undefined;
+  return { id: 'chief-of-staff', name: 'Max' };
+}
+
 function answerMessage(todo: DeskTodo, recipient: Agent, card: DeskCard | undefined): string {
   const answer = todo.answer!;
   const askedByRecipient = todo.from.kind === 'agent'
@@ -492,7 +554,8 @@ export async function deliverDeskAnswer(todoId: string, deliver: TeamMessenger =
   // says it went out, so a failed main delivery must not produce one (the
   // notifier's retry that finally lands will). A failed copy never changes
   // the item's delivery status and never causes a re-send.
-  if (recipient && notice.delivered && recipient.id !== 'chief-of-staff' && !isBeccaOrRiley(todo.from) && !isBeccaOrRiley(recipient)) {
+  const copyTo = recipient && notice.delivered ? answerCopyTarget(todo, recipient) : undefined;
+  if (recipient && copyTo) {
     const askerName = todo.from.kind === 'agent' ? todo.from.name : DESK_OWNER_NAME;
     const answer = todo.answer!;
     const answerText = answer.choice
@@ -501,13 +564,13 @@ export async function deliverDeskAnswer(todoId: string, deliver: TeamMessenger =
     try {
       await deliver({
         from: DESK_OWNER_NAME,
-        to: 'chief-of-staff',
-        text: `Copy for Max: ${DESK_OWNER_NAME} answered ${askerName}'s Needs-you item [desk:${todo.id}] "${todo.title}". Answer: ${answerText}${answer.images?.length && (answer.choice || answer.text) ? ` (plus ${answer.images.length} pasted image${answer.images.length === 1 ? '' : 's'})` : ''}. It went to ${recipient.name}; make sure they act on it.`,
+        to: copyTo.id,
+        text: `Copy for ${copyTo.name}: ${DESK_OWNER_NAME} answered ${askerName}'s Needs-you item [desk:${todo.id}] "${todo.title}". Answer: ${answerText}${answer.images?.length && (answer.choice || answer.text) ? ` (plus ${answer.images.length} pasted image${answer.images.length === 1 ? '' : 's'})` : ''}. It went to ${recipient.name}; make sure they act on it.`,
         wait: false,
         source: 'desk',
       });
     } catch (error) {
-      console.warn(`[desk] could not copy the answer to ${todo.id} to the Chief of Staff: ${(error as Error).message}`);
+      console.warn(`[desk] could not copy the answer to ${todo.id} to ${copyTo.name}: ${(error as Error).message}`);
     }
   }
   return recorded ? { ...notice, todo: recorded } : { ...notice, todo };

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DESK_OWNER_NAME, DEVICE_MCP_SCRIPT, HEADLESS_MCP_SCRIPT, PORT, stateDir, TEAM_MCP_SCRIPT } from '../config.ts';
 import { COMPUTER_MCP_TOKEN } from '../devices/context.ts';
@@ -7,6 +8,8 @@ import { headlessLaneToken } from '../headless/pool.ts';
 
 export const MCP_SECRET_ENV_KEYS = ['RIVENDELL_COMPUTER_MCP_TOKEN', 'RIVENDELL_HEADLESS_TOKEN'] as const;
 const SECRET_ENV_KEYS = new Set<string>(MCP_SECRET_ENV_KEYS);
+const GROK_IMAGINE_MCP_SCRIPT = process.env.RIVENDELL_GROK_IMAGINE_MCP?.trim()
+  || join(homedir(), 'GLOBAL-AGENT-CONFIGS', 'extensions', 'grok-imagine-mcp', 'index.mjs');
 
 /** Runtime MCP tokens passed to Codex's environment for `mcp_servers.<name>.env_vars`
  *  expansion while excluded from Codex shell subprocesses via
@@ -64,6 +67,9 @@ export function localMcpServers(agentName?: string, opts: { replyNow?: boolean; 
     // Per-lane headless Chromium; the lane name picks the profile and its token only works for that name.
     'rivendell-headless': { type: 'stdio', command: 'node', args: [HEADLESS_MCP_SCRIPT],
       env: { ...base, RIVENDELL_HEADLESS_TOKEN: headlessLaneToken(headlessAgent), ...(headlessAgent ? { RIVENDELL_AGENT_NAME: headlessAgent } : {}) } },
+    // The team's image and video maker (Matt, Oct 27 2026), billed to his SuperGrok
+    // plan through the OAuth token TARDIS keeps refreshed.
+    ...(existsSync(GROK_IMAGINE_MCP_SCRIPT) ? { 'grok-imagine': { type: 'stdio', command: 'node', args: [GROK_IMAGINE_MCP_SCRIPT], env: {} as Record<string, string> } } : {}),
   };
 }
 export function localMcpCodexArgs(agentName?: string, opts: { unnamedLane?: boolean; owner?: string; agentId?: string } = {}): string[] {

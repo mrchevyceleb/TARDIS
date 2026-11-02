@@ -9,6 +9,9 @@
    ============================================================ */
 
 .bot-app {
+  --bt-viewport-height: calc(100dvh / var(--r-text-scale, 1));
+  --bt-viewport-width: calc(100vw / var(--r-text-scale, 1));
+  --bt-viewport-top: 0px;
   --bt-bubble-agent: var(--r-bg-raised);
   --bt-bubble-user:  color-mix(in srgb, var(--r-gold) 16%, var(--r-bg-raised));
   --bt-radius: 20px;
@@ -18,7 +21,7 @@
   font-family: var(--r-body);
   display: flex;
   height: 100vh;
-  height: 100dvh;
+  height: var(--bt-viewport-height);
   overflow: clip;
   position: relative;
 }
@@ -218,6 +221,36 @@
 .bt-foot-row:hover { background: var(--r-line); }
 .bt-foot-row svg { color: var(--r-ink-mute); }
 .bt-foot-row .bt-disc { width: 30px; height: 30px; font-size: 12px; }
+.bt-foot-toggle, .bt-foot-mobile-label { display: none; }
+
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
+  .bt-rail-foot { padding-top: 4px; padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px)); }
+  .bt-foot-details {
+    display: grid;
+    grid-template-rows: 0fr;
+    visibility: hidden;
+    opacity: 0;
+    transition: grid-template-rows 0.22s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.16s ease, visibility 0s linear 0.22s;
+  }
+  .bt-foot-details-inner { min-height: 0; overflow: hidden; }
+  .bt-rail-foot.is-open .bt-foot-details { grid-template-rows: 1fr; visibility: visible; opacity: 1; transition-delay: 0s; }
+  .bt-foot-row { min-height: 44px; }
+  .bt-foot-row:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: -2px; }
+  .bt-foot-toggle { display: flex; padding-block: 7px; transition: background 0.14s ease, transform 0.14s ease; }
+  .bt-foot-toggle:active { transform: scale(0.97); }
+  .bt-foot-chevron { margin-left: auto; transition: transform 0.22s ease; }
+  .bt-rail-foot.is-open .bt-foot-chevron { transform: rotate(180deg); }
+  .bt-foot-desktop-label { display: none; }
+  .bt-foot-mobile-label { display: inline; }
+}
+
+[data-motion="calm"] .bt-foot-details, [data-motion="calm"] .bt-foot-toggle, [data-motion="calm"] .bt-foot-chevron { transition: none; }
+[data-motion="calm"] .bt-foot-toggle:active { transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .bt-foot-details, .bt-foot-toggle, .bt-foot-chevron { transition: none; }
+  .bt-foot-toggle:active { transform: none; }
+}
 
 /* Plugins popover (rooms + studio + theme) */
 .bt-plugins-pop {
@@ -321,7 +354,7 @@
   .bt-workspace-switch button > svg { display: none; }
 }
 @container bt-workspacebar (max-width: 300px) {
-  .bt-workspace-switch button { padding: 0 10px; }
+  .bt-workspace-switch button { padding: 0 6px; font-size: 13px; }
 }
 .bot-app.rail-collapsed .bt-workspacebar { padding-left: calc(62px + env(safe-area-inset-left, 0px)); }
 @media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
@@ -1199,7 +1232,7 @@
   .bot-app .rc .grok-attach, .bot-app .rc .send, .bot-app .rc .bt-mic { min-width: 44px; height: 44px; }
   .bot-app .rc .model-chip { min-height: 44px; padding-inline: 6px; max-width: 90px; }
   .bot-app .rc .model-chip > span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bot-app .rc .pop { max-width: calc(100vw - 24px); max-height: min(430px, calc(var(--bt-viewport-height, 100dvh) - 160px)); overflow-y: auto; }
+  .bot-app .rc .pop { max-width: calc(var(--bt-viewport-width, 100vw) - 24px); max-height: min(430px, calc(var(--bt-viewport-height, 100dvh) - 160px)); overflow-y: auto; }
   .bt-room { overscroll-behavior-y: contain; }
   .bt-room-wrap { padding: 8px max(16px, env(safe-area-inset-right, 0px)) max(20px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); }
   .bot-app input, .bot-app textarea, .bot-app select { font-size: 16px; }
@@ -1225,7 +1258,8 @@
 .bt-fade { animation: r-materialise 0.28s cubic-bezier(0.16, 1, 0.3, 1); }
 
 @media (prefers-reduced-motion: reduce) {
-  .bot-app *, .bot-app *::before, .bot-app *::after {
+  /* Backdrop layers own their pause state and retain their playback speed. */
+  .bot-app :where(:not(.scene-layer)), .bot-app *::before, .bot-app *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
@@ -2009,7 +2043,7 @@ body.bt-rail-resizing { cursor: col-resize; user-select: none; }
   border: 0;
 }
 @media (pointer: coarse) {
-  .bt-agent-ctx { width: min(310px, calc(100vw - 16px)); }
+  .bt-agent-ctx { width: min(310px, calc(var(--bt-viewport-width, 100vw) - 16px)); }
   .bt-swatch { width: 26px; height: 26px; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -2084,7 +2118,7 @@ button.bt-account-row:focus-visible, .bt-account-add:focus-visible, .bt-account-
 
 
 /* Subscription choices live with the agent's model, including the Desk dock. */
-.bot-app .rc .modelpop:has(.bt-account-inline) { box-sizing: border-box; width: min(410px, 100%); max-width: calc(100vw - 24px); max-height: min(720px, calc(var(--bt-viewport-height, 100dvh) - 160px)); }
+.bot-app .rc .modelpop:has(.bt-account-inline) { box-sizing: border-box; width: min(410px, 100%); max-width: calc(var(--bt-viewport-width, 100vw) - 24px); max-height: min(720px, calc(var(--bt-viewport-height, 100dvh) - 160px)); }
 .bt-account-inline .bt-account-row { min-height: 48px; padding: 7px; gap: 8px; }
 .bt-account-inline .bt-account-avatar { width: 26px; height: 26px; border-radius: 9px; font-size: 11px; }
 .bt-account-inline .bt-account-promise { margin: 8px 0; }

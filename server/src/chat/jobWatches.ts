@@ -453,7 +453,7 @@ async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
       neverSteer: true,
       // Quiet hours (Opus review 3, Oct 16): a watch armed inside the current
       // quiet window after an exempt wake belongs to legitimate overnight
-      // emergency work; pre-22:00 turns and prior-night watches still hold.
+      // emergency work; pre-21:00 turns and prior-night watches still hold.
       quietExempt: isQuietExemptWork(watch.agentId, createdMs, Date.now()),
     });
     if (result.delivered) {
@@ -464,14 +464,14 @@ async function deliverWake(watch: JobWatch, outcome: string): Promise<boolean> {
     }
     // A quiet-hours hold parks the retry at the window end instead of
     // churning a warn line every minute all night; the first tick after
-    // 05:00 ET delivers the wake (Opus review, Oct 16).
+    // 07:00 ET delivers the wake (Opus review, Oct 16).
     if ((result.reason ?? '').startsWith('quiet hours')) {
       retryUntil.set(watch.id, Date.now() + msUntilQuietEnd(Date.now()));
-      console.log(`[job-watches] ${watch.note}: held for quiet hours (22:00-05:00 ET); wakes after 05:00`);
+      console.log(`[job-watches] ${watch.note}: held for quiet hours (21:00-07:00 ET); wakes after 07:00`);
       return false;
     }
     // A quiet-hours hold never burns the undeliverable grace either: anchor
-    // the grace at the most recent 05:00 ET window end, so a wake held
+    // the grace at the most recent 07:00 ET window end, so a wake held
     // overnight keeps its full delivery window after the hold releases.
     const graceAnchor = Math.max(watch.deadline, lastQuietEndMs(Date.now()));
     if (!inQuietHours(Date.now()) && Date.now() > graceAnchor + UNDELIVERABLE_GRACE_MS) {

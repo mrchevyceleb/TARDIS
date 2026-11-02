@@ -69,3 +69,13 @@ test('named teammate Fresh barrier covers every engine for the shared thread', (
   release();
   assert.equal(isThreadResetting(xai), false);
 });
+
+
+test('a saved Codex speed belongs to its canonical lane brain', () => {
+  const brain = brainForAgent(baseAgent({ engine: 'codex', model: 'gpt-6.1-sol', effort: 'low', serviceTier: 'priority' }));
+  assert.equal(brain.serviceTier, 'priority');
+  assert.equal(brainForAgent(baseAgent({ engine: 'codex', serviceTier: 'fast' })).serviceTier, 'priority');
+  assert.equal(brainForAgent(baseAgent({ engine: 'codex', model: 'unlisted', serviceTier: 'ultrafast', brainRevision: 7 })).revision, 7);
+  assert.equal(brainForAgent(baseAgent({ engine: 'codex', model: 'gpt-6.1-sol' })).serviceTier, 'default');
+  assert.equal(brainForAgent(baseAgent({ engine: 'claude', serviceTier: 'priority' })).serviceTier, undefined);
+});

@@ -34,12 +34,22 @@ export type DeskTodo = {
   link?: string;
   status: 'open' | 'done';
   completedAt?: string;
+  snoozedUntil?: string;
+  snoozeReturnedPriority?: DeskPriority;
   cardId?: string;
   /** Up to four one-tap answers the agent offered (Yes / No when absent). */
   choices?: string[];
   answer?: DeskAnswer;
   resolution?: { note: string; at: string; by: DeskActor };
 };
+
+export function isTodoSnoozed(todo: DeskTodo, now = Date.now()): boolean {
+  return todo.status === 'open' && Boolean(todo.snoozedUntil && Date.parse(todo.snoozedUntil) > now);
+}
+
+export function isTodoOpen(todo: DeskTodo, now = Date.now()): boolean {
+  return todo.status === 'open' && !isTodoSnoozed(todo, now);
+}
 
 export type DeskComment = { id: string; author: DeskActor; text: string; at: string; images?: string[] };
 
@@ -52,7 +62,11 @@ export type DeskCard = {
   priority: DeskPriority;
   project?: string;
   links: string[];
+  /** Empty (and description absent) in the Desk room's lean poll; the open card's comes from useDeskCard. */
   comments: DeskComment[];
+  /** Set by the lean poll: how many comments the card has and when the latest landed. */
+  commentCount?: number;
+  lastCommentAt?: string;
   createdAt: string;
   updatedAt: string;
   columnSince: string;
@@ -91,7 +105,11 @@ export type DeskSnapshot = {
 };
 
 /** An open high-priority item, as the summary poll lists it (newest first). */
-export type DeskHighItem = { id: string; title: string; createdAt: string; from: string };
+export type DeskHighItem = { id: string; title: string; createdAt: string; from: string; notificationKey?: string; alertAt?: string; suppressAlert?: boolean };
+
+export const wakeLabel = (at: string) => new Date(at).toLocaleString([], {
+  weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+});
 
 export type DeskSummary = {
   rev: number;
@@ -261,12 +279,40 @@ export function deskDeepLinkUrl(ref: DeskRef): string {
 const DESK_KEY = ['desk'] as const;
 const SUMMARY_KEY = ['desk-summary'] as const;
 const PRS_KEY = ['desk-prs'] as const;
-const fetchDesk = ({ signal }: { signal: AbortSignal }) => apiJson<DeskSnapshot>('/api/desk', { signal, cache: 'no-store' });
+const CARD_KEY = ['desk-card'] as const;
+const fetchDesk = ({ signal }: { signal: AbortSignal }) => apiJson<DeskSnapshot>('/api/desk?lean=1', { signal, cache: 'no-store' });
+
+/** A card's comment count, from the lean poll or the full card. */
+export function commentTotal(card: DeskCard): number {
+  return card.commentCount ?? card.comments.length;
+}
+
+/** One card in full (its whole comment thread), polled while its drawer is open. */
+export function useDeskCard(id: string | null) {
+  return useQuery({
+    queryKey: [...CARD_KEY, id],
+    queryFn: ({ signal }) => apiJson<{ card: DeskCard }>(`/api/desk/cards/${encodeURIComponent(id ?? '')}`, { signal, cache: 'no-store' }),
+    enabled: Boolean(id),
+    refetchInterval: 10_000,
+    refetchOnWindowFocus: 'always',
+    staleTime: 2_000,
+    retry: 1,
+  });
+}
+
+/** The open card for its drawer: lean fields from the board poll, the thread
+ *  and description from the full card (useDeskWrite edits both caches). Null
+ *  until the full card arrives, so the edit form never starts from a card
+ *  missing its description. */
+export function withThread(lean: DeskCard, full: DeskCard | undefined): DeskCard | null {
+  if (!full) return null;
+  return { ...lean, description: full.description, comments: full.comments, commentCount: full.comments.length };
+}
 
 /** Full desk, polled while the room is open. Agents write here from their own
  *  turns, so a short interval plus refetch-on-focus keeps it live. */
 export function useDesk() {
-  return useQuery({
+  const query = useQuery({
     queryKey: DESK_KEY,
     queryFn: fetchDesk,
     refetchInterval: 10_000,
@@ -274,6 +320,10 @@ export function useDesk() {
     staleTime: 2_000,
     retry: 1,
   });
+  // Track the existing poll clock as well as each caller's own query props.
+  // Deadlines can pass even when React Query shares an unchanged payload.
+  void query.dataUpdatedAt;
+  return query;
 }
 
 /** Same snapshot for chat pills, without a poll of its own: every pill shares
@@ -435,8 +485,8 @@ export function withHeadline(slot: AgentTaskSlot): AgentTaskInfo {
  *  snapshot, so the Needs-you badge changes with the row (a delta, because the
  *  cached snapshot can be older than the summary). */
 function shiftSummary(summary: DeskSummary, before: DeskSnapshot, after: DeskSnapshot): DeskSummary {
-  const openIds = (d: DeskSnapshot) => new Set(d.todos.filter((t) => t.status === 'open').map((t) => t.id));
-  const highCount = (d: DeskSnapshot) => d.todos.filter((t) => t.status === 'open' && t.priority === 'high').length;
+  const openIds = (d: DeskSnapshot) => new Set(d.todos.filter((t) => isTodoOpen(t)).map((t) => t.id));
+  const highCount = (d: DeskSnapshot) => d.todos.filter((t) => isTodoOpen(t) && t.priority === 'high').length;
   const stillOpen = openIds(after);
   const openDelta = openIds(before).size - stillOpen.size;
   const highDelta = highCount(before) - highCount(after);
@@ -484,9 +534,29 @@ export function useDeskWrite() {
       const shifted = previousSummary && after ? queryClient.setQueryData<DeskSummary>(SUMMARY_KEY, shiftSummary(previousSummary, previous, after)) : undefined;
       if (after) applied = { after, shifted };
     }
+    // An open card's full copy (its thread and description) takes the same edit,
+    // and the lean list's comment count follows its thread.
+    await queryClient.cancelQueries({ queryKey: CARD_KEY });
+    const openCards = queryClient.getQueriesData<{ card: DeskCard }>({ queryKey: CARD_KEY });
+    if (previous && optimistic) {
+      for (const [key, value] of openCards) {
+        if (!value?.card) continue;
+        const edited = optimistic({ ...previous, cards: [value.card] }).cards.find((c) => c.id === value.card.id);
+        if (edited) queryClient.setQueryData(key, { ...value, card: edited });
+        if (edited && edited.comments.length !== value.card.comments.length) {
+          queryClient.setQueryData<DeskSnapshot>(DESK_KEY, (d) => d && ({ ...d, cards: d.cards.map((c) => (c.id === edited.id ? { ...c, commentCount: edited.comments.length } : c)) }));
+        }
+      }
+    }
     try {
-      return await request();
+      const result = await request();
+      // Card writes answer with the saved card in full: it replaces the
+      // optimistic copy at once (real comment ids, the saved description).
+      const saved = (result as { card?: DeskCard } | null)?.card;
+      if (saved && Array.isArray(saved.comments)) queryClient.setQueryData([...CARD_KEY, saved.id], (v: { card: DeskCard } | undefined) => ({ ...v, card: saved }));
+      return result;
     } catch (error) {
+      for (const [key, value] of openCards) queryClient.setQueryData(key, value);
       if (applied && previous) {
         const now = queryClient.getQueryData<DeskSnapshot>(DESK_KEY);
         queryClient.setQueryData(DESK_KEY, !now || now === applied.after ? previous : revertEdit(now, previous, applied.after));
@@ -501,6 +571,7 @@ export function useDeskWrite() {
       void queryClient.invalidateQueries({ queryKey: DESK_KEY });
       void queryClient.invalidateQueries({ queryKey: SUMMARY_KEY });
       void queryClient.invalidateQueries({ queryKey: TASKS_KEY });
+      void queryClient.invalidateQueries({ queryKey: CARD_KEY });
     }
   }, [queryClient]);
 }
@@ -526,6 +597,7 @@ export const deskApi = {
   addTodo: (input: TodoPatch & { title: string }) => apiJson<{ todo: DeskTodo }>('/api/desk/todos', json('POST', { ...input, source: 'ui' })),
   updateTodo: (id: string, patch: TodoPatch) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}`, json('PATCH', patch)),
   completeTodo: (id: string, note?: string) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/complete`, json('POST', note ? { note } : {})),
+  snoozeTodo: (id: string, hours: number | null) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/snooze`, json('POST', { hours })),
   reopenTodo: (id: string) => apiJson<{ todo: DeskTodo }>(`/api/desk/todos/${enc(id)}/reopen`, json('POST', {})),
   deleteTodo: (id: string) => apiJson<void>(`/api/desk/todos/${enc(id)}`, json('DELETE')),
   answerTodo: (id: string, input: TodoAnswerInput) => apiJson<TodoAnswerResult>(`/api/desk/todos/${enc(id)}/answer`, json('POST', { ...input, source: 'ui' })),

@@ -44,6 +44,7 @@ export function ChatTab({
     enabled: Boolean(repo),
     model: picker.model,
     effort: picker.effort,
+    serviceTier: picker.serviceTier,
     selectionRevision: picker.selectionRevision,
   });
 

@@ -15,11 +15,11 @@ import { hasRecentTurnSignal, lastTurnSignal } from '../chat/utils/livePresence'
 import type { LiveSession } from '../chat/data/types';
 import { apiJson } from '../data/api';
 import { resolveGroups, starterLayout, type RailLayout } from '../grok/railGroups';
-import { agoText, agentTaskMap, CARD_STAGE_WORDS as STAGE_WORDS, hoursSince, openAgentThread, TASK_LABEL, taskKindOf, withHeadline, type DeskActor, type DeskCard, type DeskSnapshot, type DeskTodo } from '../data/desk';
+import { isTodoOpen, agoText, agentTaskMap, CARD_STAGE_WORDS as STAGE_WORDS, hoursSince, openAgentThread, TASK_LABEL, taskKindOf, withHeadline, type DeskActor, type DeskCard, type DeskSnapshot, type DeskTodo } from '../data/desk';
 import { agentAvatarUrl, agentColor, chatColorOf, DISC_INK, type Agent } from '../grok/agents';
 import './deskTeam.css';
 
-type Props = { desk: DeskSnapshot; agents: Agent[]; onOpenCard: (id: string) => void; onShowBoard: () => void };
+type Props = { desk: DeskSnapshot; dataUpdatedAt: number; agents: Agent[]; onOpenCard: (id: string) => void; onShowBoard: () => void };
 
 type Team = { id: string; label: string; members: Agent[] };
 
@@ -56,7 +56,7 @@ type ZoneFacts = {
   onNow: Map<string, { text: string; detail?: string; at?: number; source: 'live' | 'job' | 'card'; caption?: string; label?: string; ageText?: string; quiet?: boolean; starting?: boolean; jobText?: string; headline?: string; cue?: string; cardId?: string; kindLabel?: string; sections?: Array<{ title: string; meta: string; text: string; kind: 'task' | 'turn' | 'job' }> }>;
 };
 
-export function DeskTeamView({ desk, agents, onOpenCard, onShowBoard }: Props) {
+export function DeskTeamView({ desk, dataUpdatedAt, agents, onOpenCard, onShowBoard }: Props) {
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [openZone, setOpenZone] = useState<string | null>(null);
   const [order, setOrder] = useState<string[]>([]);
@@ -159,7 +159,7 @@ export function DeskTeamView({ desk, agents, onOpenCard, onShowBoard }: Props) {
     return teams.map((team) => {
       const inTeam = (actor: DeskActor) => actor.kind === 'agent' && team.members.some((a) => a.id === actor.id);
       const cards = desk.cards.filter((c) => !c.archived && inTeam(c.owner));
-      const needsMatt = desk.todos.filter((t) => t.status === 'open' && inTeam((t.cardId && cardsById.get(t.cardId)?.owner) || t.from));
+      const needsMatt = desk.todos.filter((t) => isTodoOpen(t) && inTeam((t.cardId && cardsById.get(t.cardId)?.owner) || t.from));
       const liveToday = cards.filter((c) => c.column === 'in_production' && isTodayEt(c.columnSince ?? c.createdAt));
       const moving = cards.filter((c) => c.column === 'in_progress' && hoursSince(c.updatedAt) <= DAY_HOURS);
       const stuck = cards.filter((c) => ['in_progress', 'in_qa'].includes(c.column) && hoursSince(c.updatedAt) > STUCK_HOURS);
@@ -218,8 +218,8 @@ export function DeskTeamView({ desk, agents, onOpenCard, onShowBoard }: Props) {
         onNow,
       };
     });
-  // Poll timestamps advance age cutoffs even when every API payload is unchanged.
-  }, [desk, cardsById, teams, liveByAgent, jobsByAgent, taskMap, activity.dataUpdatedAt, activity.errorUpdatedAt]);
+  // Poll timestamps advance deadlines even when the snapshot is shared.
+  }, [desk, dataUpdatedAt, cardsById, teams, liveByAgent, jobsByAgent, taskMap, activity.dataUpdatedAt, activity.errorUpdatedAt]);
 
   // Items visibly travel: a card whose stage changed since the last snapshot
   // gets the travel note for a few seconds.

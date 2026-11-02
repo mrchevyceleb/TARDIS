@@ -244,6 +244,7 @@ export type CronJob = {
   modelId?: string;
   /** Model-specific Codex reasoning effort persisted with Forge schedules. */
   reasoningEffort?: string;
+  serviceTier?: string;
   repo?: string;
   toolName?: string;
   deliveryChannel?: string;

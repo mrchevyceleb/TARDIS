@@ -7,18 +7,38 @@
 // absolute instant get theirs persisted on first read, so a relative
 // display due ("10pm tomorrow") can no longer move with every reparse.
 // Same 60s cadence as the other hygiene loops; side copies never run it.
+//
+// Due-time wake (Matt, Oct 29 2026: parked work restarts at 5am on its own).
+// A worker's flags ride its lead's digest, so before this a worker who
+// promised "resume at 5am" was never told the time had come: only the lead
+// heard "past due", and the work sat until someone nudged it. Now the moment
+// a worker's commitment comes due, TARDIS hands the promise straight back to
+// that worker as its own wake. The wake rides the worker's OWN flag digest
+// (direct), so it inherits the digest's guarantees: durable across restarts,
+// held through quiet hours, never steering a live turn under the ceiling,
+// and marked only at its actual admission. The lead's past-due flag waits
+// WAKE_GRACE_MS after that admission and only goes out if the promise is
+// still open.
 
-import { flushFlagDigests, queueFlagDigest } from './flagDigest.ts';
+import { digestOwner, flushFlagDigests, pruneDirectFlags, queueFlagDigest } from './flagDigest.ts';
 import { listCommitments, markCommitmentRaised, markCommitmentInheritedRaise, noteCommitmentDueAt, chiefRaiseHeldByText, inheritedOwnerRaiseAt, raiseTextKey } from './commitmentStore.ts';
 import { parseDue } from './promiseScan.ts';
 
 const TICK_MS = 60_000;
 const CHIEF_ID = 'chief-of-staff';
+/** The owner gets this long after its wake to pick the promise up before
+ *  the lead hears it is past due. */
+const WAKE_GRACE_MS = 30 * 60_000;
+/** Only a promise that came due recently is a wake. Long enough to cover
+ *  the longest quiet window (12h, Friday and Saturday nights) plus slack;
+ *  anything older is a stale entry the past-due flag already covers. */
+const WAKE_WINDOW_MS = 16 * 3_600_000;
 
 let busy = false;
 
 async function run(): Promise<void> {
   const now = new Date();
+  const wakeKeys = new Set<string>();
   for (const commitment of listCommitments()) {
     if (!commitment.due) continue;
     let dueAt = commitment.dueAt;
@@ -33,6 +53,29 @@ async function run(): Promise<void> {
       dueAt = parsed;
     }
     if (dueAt > now.getTime()) continue;
+    // A worker's own promise wakes the worker first (see the header). A
+    // promise added after its own due is a re-track by an agent that is
+    // already awake, so it never wakes. Until the wake is admitted the lead
+    // hears nothing; the wake is re-queued every tick (an upsert) so its
+    // admission mark re-arms after a restart.
+    if (digestOwner(commitment.agentId) !== commitment.agentId) {
+      const fresh = commitment.createdAt < dueAt && now.getTime() - dueAt < WAKE_WINDOW_MS;
+      const wokeAt = commitment.raised?.wake;
+      if (fresh && !wokeAt && !commitment.raised?.owner) {
+        const wakeKey = `wake:${raiseTextKey(commitment.agentId, commitment.text)}`;
+        wakeKeys.add(wakeKey);
+        queueFlagDigest(
+          commitment.agentId,
+          wakeKey,
+          `It's time: your commitment [${commitment.id}] "${commitment.text}" (due ${commitment.due}) is due now. Pick it up now, and clear it with the commitments tool when it is done.`,
+          () => markCommitmentRaised(commitment.id, 'wake'),
+          true,
+          true,
+        );
+        continue;
+      }
+      if (wokeAt && now.getTime() - wokeAt < WAKE_GRACE_MS) continue;
+    }
     const raise = `Past-due commitment [${commitment.id}] "${commitment.text}" (due ${commitment.due}) is past due. Clear it with the commitments tool the moment it is done, or tell Max the new time if it slipped.`;
     // Owner raises go out as one digest per owner every 30 minutes instead
     // of one message per item (Matt, Oct 14, card-d7bf78 b). The raise is
@@ -89,6 +132,9 @@ async function run(): Promise<void> {
       );
     }
   }
+  // A wake still waiting for its window whose promise was cleared (or
+  // otherwise stopped needing one) never goes out.
+  pruneDirectFlags('wake:', wakeKeys);
   await flushFlagDigests();
 }
 

@@ -110,11 +110,11 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 const retryUntil = new Map<string, number>();
 
 /** Quiet hours hold (Matt, Oct 8 2026; widened Oct 15 2026; tightened Oct 16):
- *  every owed wake to a non-Max lane holds through 22:00-05:00 ET and resumes
- *  after 05:00 on the next tick. Max's lanes stay exempt (overnight outage
+ *  every owed wake to a non-Max lane holds through 21:00-07:00 ET and resumes
+ *  after 07:00 on the next tick. Max's lanes stay exempt (overnight outage
  *  duty). A non-Max job only delivers overnight when it started inside the
  *  CURRENT quiet window after an exempt wake (Matt's message or an explicit
- *  quietExempt routine), so a turn started before 22:00 ET cannot self-feed
+ *  quietExempt routine), so a turn started before 21:00 ET cannot self-feed
  *  jobs all night and a job from a previous night's window still holds. */
 function heldForQuietHours(job: Job, now: number): boolean {
   if (!inQuietHours(now)) return false;
@@ -636,7 +636,7 @@ async function runTick(): Promise<void> {
   // first: a busy lane accumulates results all day, and waking it once per
   // result floods it the moment it goes idle (Oct 8: 139 single-result turns
   // to one lane between 22:03 and 00:31). Results owed to non-Max lanes hold
-  // through the quiet window (22:00-05:00 ET) and the first tick after 05:00
+  // through the quiet window (21:00-07:00 ET) and the first tick after 07:00
   // delivers them; Max's lanes deliver immediately (Oct 15, widened Oct 16);
   // jobs started inside the window keep the Oct 8 carve-out — overnight
   // emergency work must be able to report back (Opus verify, Oct 16).
@@ -703,7 +703,7 @@ async function deliverBundle(agentId: string, jobs: Job[]): Promise<void> {
       // qualify as exempt work in the current quiet window (started after an
       // exempt wake in this window, or on a Max lane) so a bundle formed at
       // 21:59:59 that mixes daytime jobs cannot bypass the post-admission
-      // hold after 22:00 ET.
+      // hold after 21:00 ET.
       quietExempt: jobs.length > 0 && jobs.every((job) => isQuietExemptWork(job.agentId, job.startedAt, now)),
     });
     if (result.delivered) {
