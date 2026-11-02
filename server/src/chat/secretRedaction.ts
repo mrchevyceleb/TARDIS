@@ -148,7 +148,7 @@ function redactOpaqueToken(token: string, offset: number, source: string): strin
   // or a bare folder name; a host (a dot before the first slash) or a
   // scheme or protocol-relative // marks a URL.
   const word = (/\S*$/.exec(context)?.[0] ?? '') + token;
-  const isFilesystemPath = !word.includes('//') && !/^[^/]*\./.test(word.replace(/^\.{1,2}\//, ''));
+  const isFilesystemPath = !/[/:]{2}|^[^/]*[.:]/.test(word.replace(/^\.{1,2}\//, ''));
   if (isFilesystemPath && isWordPath(token)) return token;
   return REDACTED;
 }
@@ -164,13 +164,11 @@ function isWordPath(token: string): boolean {
   if (!token.includes('/') || /[+=]/.test(token)) return false;
   const segments = token.split('/').filter(Boolean);
   if (segments.length < 2) return false;
-  return segments.every((segment) => {
-    const words = segment.split(/[-_]/);
-    // Grouped keys (8M4K-2N7P-9Q3R) are short letter-digit chunks; a real
-    // name has at most one (runtime24, v2).
-    const mixed = words.filter((word) => /[0-9]/.test(word) && /[A-Za-z]/.test(word)).length;
-    return segment.length <= 80 && mixed <= 1 && words.every(isReadableWord);
-  });
+  const words = segments.flatMap((segment) => segment.split(/[-_]/));
+  // Grouped keys (8M4K-2N7P-9Q3R, Q7F2/H8K9/M4P6) are short letter-digit
+  // chunks; a real path has at most a couple (runtime24, v2).
+  const mixed = words.filter((word) => /[0-9]/.test(word) && /[A-Za-z]/.test(word)).length;
+  return mixed <= 2 && segments.every((segment) => segment.length <= 80) && words.every(isReadableWord);
 }
 
 /** One hyphen/underscore word of a path: a plain word (letters in any
