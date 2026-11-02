@@ -162,11 +162,12 @@ function isWordPath(token: string): boolean {
 }
 
 /** One hyphen/underscore word of a path: a plain word (lowercase, UPPERCASE
- *  or Capitalized letters, up to 30), a number (up to 14 digits), or a
+ *  or Capitalized letters, up to 20), a number (up to 14 digits), or a
  *  short letter-digit mix (v2, runtime24). A long letter-digit run is a
- *  random token (base36, hex) and fails. */
+ *  random token (base36, hex) and fails, as does any long hex run. */
 function isReadableWord(word: string): boolean {
-  if (/^(?:[a-z]{1,30}|[A-Z]{1,30}|[A-Z][a-z]{1,29})$/.test(word)) return true;
+  if (/^[0-9a-fA-F]{12,}$/.test(word)) return false;
+  if (/^(?:[a-z]{1,20}|[A-Z]{1,20}|[A-Z][a-z]{1,19})$/.test(word)) return true;
   if (/^[0-9]{1,14}$/.test(word)) return true;
   return /^[A-Za-z0-9]{1,10}$/.test(word) && /^(?:[a-z0-9]+|[A-Z0-9]+|[A-Z][a-z0-9]+)$/.test(word);
 }
