@@ -142,12 +142,16 @@ function redactOpaqueToken(token: string, offset: number, source: string): strin
   if (isFilePathPrefix && !token.split('/').some(isOpaquePathSegment)) {
     return token;
   }
-  if (isWordPath(token)) return token;
+  // Readable words keep a filesystem path, never a URL: URLs are where keys
+  // travel (grouped activation keys, base36 tokens), so a URL path stays
+  // under the opaque rule above.
+  const word = /\S*$/.exec(context)?.[0] ?? '';
+  if (!word.includes('://') && isWordPath(token)) return token;
   return REDACTED;
 }
 
-/** A slash-separated run made only of readable path words is a file path or
- *  URL path, not a credential (Matt, Nov 2 2026: hub paths such as
+/** A slash-separated run made only of readable path words is a file path,
+ *  not a credential (Matt, Nov 2 2026: hub paths such as
  *  ASSISTANT-HUB/inbox/2026-11-02-operly-studio-technical-debt-audit.md
  *  printed as [redacted secret] because the whole dotless run is 64+ token
  *  characters). Every hyphen/underscore-separated word must be lowercase,
