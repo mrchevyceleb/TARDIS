@@ -17,8 +17,8 @@
 // that work. The 10:00 slot also reviews that agent's Pipeline cards with no
 // activity for 3+ days. Outside the slots, an agent whose lane has been quiet
 // for 20+ minutes while it owns Up next work gets one idle pickup message an
-// hour outside quiet hours (22:00-05:00 America/New_York: delayed, not
-// dropped; the first tick after 05:00 delivers). Silent when nothing
+// hour outside quiet hours (21:00-07:00 America/New_York: delayed, not
+// dropped; the first tick after 07:00 delivers). Silent when nothing
 // qualifies. The human owner is never messaged, and cards they own are never
 // listed.
 //
@@ -67,9 +67,9 @@ const PIPELINE_SLOT_HOUR = 10;
 const IDLE_QUIET_MS = 20 * 60_000;
 /** At most one idle pickup per agent per hour. */
 const IDLE_RESEND_MS = 60 * 60_000;
-/** Idle pickup quiet hours, Eastern minute of day: no sends 22:00-05:00 ET
+/** Idle pickup quiet hours, Eastern minute of day: no sends 21:00-07:00 ET
  *  (Matt, Oct 8 2026). Delayed, not dropped: the nudge state keeps aging, so
- *  the first tick after 05:00 delivers if the lane is still due. */
+ *  the first tick after 07:00 delivers if the lane is still due. */
 const MAX_LINES = 10;
 /** Deliveries per tick, so one slot never eats the team's shared per-minute
  *  handoff budget (teamBus allows 20 a minute across everyone). */

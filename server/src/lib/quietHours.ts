@@ -1,4 +1,5 @@
-/** Quiet hours (Matt, Oct 15 2026): nobody on the team works 22:00-05:00 ET.
+/** Quiet hours (Matt, Oct 15 2026; moved to 21:00-07:00 ET on Nov 2 2026):
+ *  nobody on the team works weeknights 21:00-07:00 ET.
  *  Weekend nights run longer (Matt, Oct 24 2026): Friday and Saturday nights
  *  are quiet 20:00-08:00 ET.
  *
@@ -8,8 +9,8 @@
  *  continuations, and human channel posts — the boss may always speak),
  *  Max's lanes (the Chief of Staff is on overnight outage duty), Samwise's
  *  lane (Matt, Oct 19 2026: he and his comms routines keep working through
- *  the window, and only him), and Max's overnight emergency check by routine
- *  id. Held never means lost: every gated path parks its record durably and
+ *  the window) and Pippin, Samwise's coding companion (Matt, Nov 2 2026), and
+ *  Max's overnight emergency check by routine id. Held never means lost: every gated path parks its record durably and
  *  the next tick after the window ends delivers it unchanged.
  *
  *  This module owns the shared clock and lane facts so the call sites can
@@ -38,9 +39,10 @@ const etWeekdayFmt = new Intl.DateTimeFormat('en-US', {
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-/** Weeknight quiet window, Eastern hour of day, half-open: [22:00, 05:00). */
-export const QUIET_START_ET = 22;
-export const QUIET_END_ET = 5;
+/** Weeknight quiet window, Eastern hour of day, half-open: [21:00, 07:00)
+ *  (Matt, Nov 2 2026; was 22:00-05:00). */
+export const QUIET_START_ET = 21;
+export const QUIET_END_ET = 7;
 
 /** Friday and Saturday nights: [20:00, 08:00) ET (Matt, Oct 24 2026). */
 export const WEEKEND_QUIET_START_ET = 20;
@@ -67,10 +69,11 @@ function quietEndMinute(weekday: number): number {
 /** Max's lanes: overnight holds never apply (outage duty + the boss's voice). */
 export const MAX_LANE_AGENT_IDS: ReadonlySet<string> = new Set(['chief-of-staff', 'max-voice']);
 
-/** Samwise's lane: the one teammate exception (Matt, Oct 19 2026). He and his
- *  comms routines keep working through 22:00-05:00 ET, so deliveries to him,
- *  his jobs, and his routines never hold — and only him. */
-export const SAMWISE_LANE_AGENT_IDS: ReadonlySet<string> = new Set(['samwise']);
+/** Samwise's lane and Pippin, his coding companion: the teammate exceptions
+ *  (Matt, Oct 19 2026 for Samwise; Nov 2 2026 for Pippin). They and their
+ *  routines keep working through the quiet window, so deliveries to them,
+ *  their jobs, and their routines never hold — and only them. */
+export const SAMWISE_LANE_AGENT_IDS: ReadonlySet<string> = new Set(['samwise', 'pippin-2']);
 
 /** Max's overnight emergency check: exempt by id even if its owner moves. */
 export const MAX_EMERGENCY_ROUTINE_ID = 'rt-mv09wwrd-s5u8';
@@ -79,8 +82,8 @@ export const MAX_EMERGENCY_ROUTINE_ID = 'rt-mv09wwrd-s5u8';
  *  quiet window (a person-sourced message or an explicit quietExempt routine
  *  fire). Jobs and watches started in the SAME quiet window at or after this
  *  wake may deliver their results overnight; a turn that started before
- *  22:00 ET has no exempt wake in the current window, so jobs it spawns
- *  after 22:00 ET hold until 05:00 ET (Opus review 3, Oct 16). */
+ *  the window start has no exempt wake in the current window, so jobs it
+ *  spawns after the start hold until the window ends (Opus review 3, Oct 16). */
 const exemptWakeAtByAgent = new Map<string, number>();
 
 /** Eastern hour of day for an epoch-ms timestamp, 0-23. */
@@ -88,7 +91,7 @@ export function etHour(ms: number): number {
   return Number(etHourFmt.format(new Date(ms)));
 }
 
-/** True inside the quiet window (weeknights 22:00-05:00 ET, Friday and
+/** True inside the quiet window (weeknights 21:00-07:00 ET, Friday and
  *  Saturday nights 20:00-08:00 ET, half-open). */
 export function inQuietHours(ms: number): boolean {
   const { weekday, minuteOfDay } = etClock(ms);
@@ -100,7 +103,7 @@ export function isMaxLane(agentId: string | undefined | null): boolean {
   return typeof agentId === 'string' && MAX_LANE_AGENT_IDS.has(agentId);
 }
 
-/** True when agentId is Samwise's lane. */
+/** True when agentId is Samwise's lane or Pippin's. */
 export function isSamwiseLane(agentId: string | undefined | null): boolean {
   return typeof agentId === 'string' && SAMWISE_LANE_AGENT_IDS.has(agentId);
 }

@@ -1356,11 +1356,11 @@ export async function sweepCardChecks(options: { dryRun?: boolean; liveLanes?: R
       const ownerAgent = resolveOwner(card);
       if (!card.nudgeAt) {
         // Quiet hours (Matt, Oct 15 2026): the owner nudge to a non-Max lane
-        // holds through 22:00-05:00 ET. The card stays unmarked, so the
-        // first sweep after 05:00 nudges it unchanged — held never means
+        // holds through 21:00-07:00 ET. The card stays unmarked, so the
+        // first sweep after 07:00 nudges it unchanged — held never means
         // lost. Chief escalation below targets Max's lane and always goes.
         if (inQuietHours(nowMs) && !isQuietExemptLane(ownerAgent)) {
-          // held: unmarked, retried by the next post-05:00 sweep
+          // held: unmarked, retried by the next post-07:00 sweep
         } else if (liveLanes.has(ownerAgent) && nowMs - next < LIVE_HOLD_CEILING_MS) {
           // Lane-liveness hold (Max, Oct 18 2026, card-b3468c): the owner's
           // lane is mid-turn; a quiet-check nudge must not derail it. Held
@@ -1395,7 +1395,7 @@ export async function sweepCardChecks(options: { dryRun?: boolean; liveLanes?: R
         // OUT, but during the window a non-Max owner's nudge can still be
         // held in the delivery queue, so escalating would tell the Chief a
         // falsehood. Never escalate a held owner inside the window, and
-        // after 05:00 count the 15 minutes from the later of the nudge and
+        // after 07:00 count the 15 minutes from the later of the nudge and
         // the last quiet end — the held nudge only just landed then (Opus
         // verify, Oct 16). Max-lane nudges deliver immediately, so their
         // timing is unchanged.

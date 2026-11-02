@@ -313,7 +313,7 @@ export async function flushFlagDigests(now: number = Date.now(), liveLanes?: Rea
     // delivery piled up ~840 duplicate records per owner per night and burned
     // the global rate limit Matt's Desk answers need. Skip before any
     // delivery: the entries stay queued untouched and the first flush after
-    // 05:00 delivers them once.
+    // 07:00 delivers them once.
     if (inQuietHours(now) && !isQuietExemptLane(ownerId)) continue;
     const last = ownerLastFlush.get(ownerId);
     if (last !== undefined && now - last < DIGEST_INTERVAL_MS) continue;
@@ -421,8 +421,8 @@ async function deliverDigest(ownerId: string, text: string, priority: boolean, n
     // run when the recipient sees the line, not when the receipt is durable.
     const result = await deliverTeamMessage({ from: 'TARDIS', to: ownerId, text, wait: false, priority, nudgeHoldSince, admissionAck: 'flag-digest' });
     // Quiet hours (Opus verify, Oct 16): a held digest is durable but will
-    // not land until after 05:00. Report it undelivered so the flush keeps
-    // the entries queued and unmarked — the next window after 05:00 delivers
+    // not land until after 07:00. Report it undelivered so the flush keeps
+    // the entries queued and unmarked — the next window after 07:00 delivers
     // them and runs the marks then. Marking here would let the commitment
     // sweep claim "It went to them" about a held raise.
     if (result.delivered !== true || result.held === 'quiet-hours') return { ok: false };

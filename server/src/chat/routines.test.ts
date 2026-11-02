@@ -75,8 +75,8 @@ test('parseSchedule still accepts the three schedule shapes', () => {
 
 // ---- quiet-hours daily legs (Opus verify, Oct 16) --------------------------
 
-test('a daily slot held overnight catches up after 05:00 via heldSlotAt', () => {
-  const now = local(2026, 10, 16, 5, 30);
+test('a daily slot held overnight catches up after 07:00 via heldSlotAt', () => {
+  const now = local(2026, 10, 16, 7, 30);
   const last = local(2026, 10, 14, 23, 0); // ran the night before the held one
   const heldSlotAt = local(2026, 10, 15, 23, 0);
   assert.equal(
@@ -105,7 +105,7 @@ test('an unpaused daily:23:00 with no heldSlotAt does not fire a false catch-up 
 });
 
 test('a Friday weekdays:22:30 slot held overnight catches up on Saturday morning', () => {
-  const saturdayMorning = local(2026, 10, 17, 5, 30); // Saturday Oct 17 2026
+  const saturdayMorning = local(2026, 10, 17, 8, 30); // Saturday Oct 17 2026
   const last = local(2026, 10, 15, 22, 30); // Thursday night
   const heldSlotAt = local(2026, 10, 16, 22, 30); // Friday night held
   assert.equal(
@@ -114,12 +114,12 @@ test('a Friday weekdays:22:30 slot held overnight catches up on Saturday morning
   );
 });
 
-test('a pre-22:00 slot that slipped into quiet hours catches up after 05:00 via heldSlotAt', () => {
-  const now = local(2026, 10, 16, 5, 5);
-  const last = local(2026, 10, 14, 21, 50);
-  const heldSlotAt = local(2026, 10, 15, 22, 2); // held when busy lane released at 22:02
+test('a pre-21:00 slot that slipped into quiet hours catches up after 07:00 via heldSlotAt', () => {
+  const now = local(2026, 10, 16, 7, 5);
+  const last = local(2026, 10, 14, 20, 50);
+  const heldSlotAt = local(2026, 10, 15, 21, 2); // held when busy lane released at 21:02
   assert.equal(
-    routineIsDue(routine({ schedule: 'daily:21:50', lastRunAt: last, heldSlotAt, agentId: 'naomi' }), now),
+    routineIsDue(routine({ schedule: 'daily:20:50', lastRunAt: last, heldSlotAt, agentId: 'naomi' }), now),
     true,
   );
 });

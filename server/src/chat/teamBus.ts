@@ -450,7 +450,7 @@ type QueuedTeamDelivery = StoredRecord & {
   queue?: true;
   /** Explicit person-sourced wake (Matt's Desk answer, voice continuation,
    *  Matt's channel post including unmentioned members, or an overnight Matt
-   *  ask nudge): exempt from the 22:00-05:00 ET quiet-hours hold. */
+   *  ask nudge): exempt from the 21:00-07:00 ET quiet-hours hold. */
   personSourced?: true;
   /** card-b3468c: an automation nudge (flag digest, Desk quiet-check,
    *  past-due raise) with its live-turn hold origin in epoch ms. While
@@ -1161,7 +1161,7 @@ export async function sendToAgentHome(
   opts: { peerFrom: string; peerFromRole?: string; peerText?: string; lane?: AgentLane; quietExempt?: boolean; neverSteer?: boolean },
 ): Promise<{ delivered: boolean; reason?: string }> {
   // Quiet hours (Matt, Oct 15 2026): automation prompts to a non-Max lane
-  // hold until 05:00 ET. Every caller parks its record and retries on a
+  // hold until 07:00 ET. Every caller parks its record and retries on a
   // refusal, so this is a hold, never a loss. Exempt: Matt's own messages
   // (Desk and voice roles), Max's lanes, and an explicit quietExempt — a
   // manual routine press or Max's emergency routine by id, both of which
@@ -1170,7 +1170,7 @@ export async function sendToAgentHome(
   const quietHold = !isExemptWake && !isQuietExemptLane(agent.id);
   const heldByQuietHours = (): { delivered: boolean; reason?: string } | null =>
     quietHold && inQuietHours(Date.now())
-      ? { delivered: false, reason: 'quiet hours (22:00-05:00 ET): held until 05:00' }
+      ? { delivered: false, reason: 'quiet hours (21:00-07:00 ET): held until 07:00' }
       : null;
   const entryHold = heldByQuietHours();
   if (entryHold) return entryHold;
@@ -1201,7 +1201,7 @@ export async function sendToAgentHome(
     return { delivered: false, reason: `engine unavailable: ${(e as Error).message}` };
   }
   // Re-check after the admission wait: it can run up to 30 minutes, so a
-  // call admitted before 22:00 can land inside the window. A refusal here
+  // call admitted before 21:00 can land inside the window. A refusal here
   // parks and retries exactly like the entry one (Opus review, Oct 16).
   const admissionHold = heldByQuietHours();
   if (admissionHold) return admissionHold;
@@ -1256,8 +1256,8 @@ export type TeamMessageResult = {
    *  receipt) keys its own state by this id (card-b3468c verify P1: the
    *  flag-digest admission ack). */
   deliveryId?: string;
-  /** The durable queue accepted the record but quiet hours (22:00-05:00 ET)
-   *  hold its delivery to a non-Max lane until 05:00. Callers that mark or
+  /** The durable queue accepted the record but quiet hours (21:00-07:00 ET)
+   *  hold its delivery to a non-Max lane until 07:00. Callers that mark or
    *  receipt on landing must not treat this as "it went to them" (Opus
    *  verify, Oct 16). */
   held?: 'quiet-hours';
@@ -1300,7 +1300,7 @@ type TeamDelivery = {
   /** Quiet hours (Matt, Oct 15 2026): optional predicate marking this
    *  delivery as ordinary automation chatter to a non-Max lane. It is
    *  re-evaluated AFTER admission, which can wait up to 30 minutes, so a
-   *  batch built before 22:00 cannot slip past the boundary while it waits
+   *  batch built before 21:00 cannot slip past the boundary while it waits
    *  for a busy turn to end (Opus verify, Oct 16). */
   quietHoldCheck?: () => boolean;
   /** card-b3468c: an automation nudge's live-turn hold origin (epoch ms).
@@ -1539,10 +1539,10 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
     // Quiet hours (Opus verify, Oct 16): the admission wait above can run 30
     // minutes, so a delivery that passed the entry clock can be inside the
     // window by the time it is about to send. Hold it exactly like an entry
-    // refusal: the caller parks its record and the 05:00 retry delivers it
+    // refusal: the caller parks its record and the 07:00 retry delivers it
     // unchanged.
     if (delivery.quietHoldCheck?.()) {
-      return { delivered: false, to: to.name, hop, held: 'quiet-hours', reason: 'quiet hours (22:00-05:00 ET): held until 05:00' };
+      return { delivered: false, to: to.name, hop, held: 'quiet-hours', reason: 'quiet hours (21:00-07:00 ET): held until 07:00' };
     }
 
     // Correlate admission and completion to this exact peer turn. A human can
@@ -1967,12 +1967,12 @@ function retryDelay(): Promise<void> {
 
 async function drainQueuedRecipient(queueKey: string): Promise<void> {
   // Quiet hours (Matt, Oct 15 2026): teammate chatter to a non-Max lane
-  // holds through 22:00-05:00 ET. Person-sourced records (Desk answers,
+  // holds through 21:00-07:00 ET. Person-sourced records (Desk answers,
   // voice continuations, human channel posts) still deliver — the boss may
   // always speak. Held records stay queued untouched and the retry timer
-  // targets the next 05:00 ET, so the first drain after the window delivers
+  // targets the next 07:00 ET, so the first drain after the window delivers
   // them unchanged. Read the clock once per pass so a drain that starts
-  // before 22:00 and keeps admitting (the admission wait can run 30 minutes)
+  // before 21:00 and keeps admitting (the admission wait can run 30 minutes)
   // re-checks the boundary on each pass without calling Intl.DateTimeFormat
   // per queued record (Opus review 3, Oct 16).
   const isNonMax = !isQuietExemptLane(queueKey);
@@ -1991,7 +1991,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
   // A quiet-hours park (runTeamDelivery held result) stops the whole drain:
   // person-sourced records sorted ahead of the parked batch, so everything
   // left is same-tier chatter, and the finally in scheduleQueuedRecipient
-  // reschedules the queue at the 05:00 ET window end.
+  // reschedules the queue at the 07:00 ET window end.
   let quietParked = false;
   for (const record of batch) {
     if (quietParked) break;
@@ -2246,9 +2246,9 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // Park the whole drain, not just this record: person-sourced records
         // sorted ahead of this batch, so everything left is same-tier
         // chatter. The scheduleQueuedRecipient finally re-schedules with
-        // queuedRetryDelay, which targets the next 05:00 ET for a queue with
+        // queuedRetryDelay, which targets the next 07:00 ET for a queue with
         // no person-sourced records left.
-        console.log(`[team] queued delivery ${lead.fromName} -> ${to.name} held for quiet hours (22:00-05:00 ET); resumes after 05:00`);
+        console.log(`[team] queued delivery ${lead.fromName} -> ${to.name} held for quiet hours (21:00-07:00 ET); resumes after 07:00`);
         quietParked = true;
         break;
       }
@@ -2276,7 +2276,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
 
 /** Retry delay for a paused queue with records still pending. Fast retry
  *  normally; during quiet hours a non-Max recipient's held teammate records
- *  wait for the 05:00 ET window end instead of churning the drain every 15
+ *  wait for the 07:00 ET window end instead of churning the drain every 15
  *  seconds all night. Person-sourced records keep the fast retry whatever
  *  the hour — the boss's messages never wait out the window. */
 function queuedRetryDelay(queueKey: string, remains: QueuedTeamDelivery[]): number {
@@ -2289,7 +2289,7 @@ function scheduleQueuedRecipient(queueKey: string, delayMs = 0): void {
   if (activeQueuedRecipients.has(queueKey)) return;
   const due = Date.now() + Math.max(0, delayMs);
   // A pending long timer must never gate out a sooner delivery: a quiet-hours
-  // hold parks the retry at the 05:00 ET window end, and a NEW message for
+  // hold parks the retry at the 07:00 ET window end, and a NEW message for
   // this recipient schedules an immediate drain — without preemption a
   // person-sourced record arriving at 23:00 would wait behind the held
   // chatter's timer until morning (Opus review, Oct 16). A sooner request
@@ -2489,9 +2489,9 @@ export async function deliverTeamMessage(input: {
   // blocked turns can finish; direct and longer cycles behave identically.
   const closesReplyCycle = requestedWaitForReply && hasReplyPath(to.id, from.id);
   // Quiet hours (Matt, Oct 15 2026): a synchronous wait would wake a
-  // non-Max lane inside 22:00-05:00 ET. The record is already durable, so a
+  // non-Max lane inside 21:00-07:00 ET. The record is already durable, so a
   // held handoff degrades to fire-and-forget exactly like a reply cycle:
-  // the drain holds it until 05:00 and delivers unchanged. Person-sourced
+  // the drain holds it until 07:00 and delivers unchanged. Person-sourced
   // records (Desk, voice, human channel posts, explicit personSourced wakes)
   // and Max's lanes never hold (Opus review, Oct 16).
   const isPersonSourced = personSourced({
@@ -2658,11 +2658,11 @@ export async function deliverTeamMessage(input: {
       queued: true,
       deliveryId: record.id,
       // Quiet hours (Opus verify, Oct 16): a held handoff is accepted and
-      // durable but will not land until after 05:00, so callers that mark or
+      // durable but will not land until after 07:00, so callers that mark or
       // receipt on landing can see the hold instead of "it went to them".
       held: quietHoldRecipient ? 'quiet-hours' : undefined,
       reason: quietHoldRecipient
-        ? 'stored durably for quiet hours (22:00-05:00 ET); delivery is automatic after 05:00'
+        ? 'stored durably for quiet hours (21:00-07:00 ET); delivery is automatic after 07:00'
         : nudgeHoldEntry
         ? 'stored durably; the live-turn hold (card-b3468c) delivers it at the recipient\'s next idle boundary'
         : taskStart
@@ -2711,9 +2711,9 @@ export async function deliverTeamMessage(input: {
     stillWanted: async () => queueStoreOperation(async () =>
       (await queuedDeliveryStore.list()).some((row) => row.id === record.id)),
     // Quiet hours (Opus verify, Oct 16): a synchronous handoff that entered
-    // before 22:00 can admit after it — hold it after admission like the
+    // before 21:00 can admit after it — hold it after admission like the
     // queue drain does. Person-sourced senders never hold; the record is
-    // already durable, so the caller's queued handling parks it for 05:00.
+    // already durable, so the caller's queued handling parks it for 07:00.
     quietHoldCheck: isPersonSourced
       ? undefined
       : () => inQuietHours(Date.now()) && !isQuietExemptLane(to.id),
@@ -2762,7 +2762,7 @@ export async function deliverTeamMessage(input: {
         queued: true,
         held: heldForQuietHours ? 'quiet-hours' : undefined,
         reason: heldForQuietHours
-          ? 'stored durably for quiet hours (22:00-05:00 ET); delivery is automatic after 05:00'
+          ? 'stored durably for quiet hours (21:00-07:00 ET); delivery is automatic after 07:00'
           : 'reply wait ended, but the handoff remains durably queued and will deliver automatically',
       };
     }

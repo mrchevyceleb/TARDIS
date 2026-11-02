@@ -243,9 +243,9 @@ export function sweepMattAsks(now: number = Date.now()): Array<{ askId: string; 
     for (const ask of store.asks) {
       const overnightAsk = inQuietHours(ask.askedAt);
       if (!ask.nudgedAt && now - ask.askedAt >= NUDGE_AFTER_MS) {
-        // An ask Matt sent before 22:00 on a non-Max lane waits until 05:00 ET
+        // An ask Matt sent before 21:00 on a non-Max lane waits until 07:00 ET
         // to nudge the agent so we neither wake them overnight for a daytime
-        // ask nor stamp nudgedAt with a stale pre-05:00 age. An ask Matt sent
+        // ask nor stamp nudgedAt with a stale pre-07:00 age. An ask Matt sent
         // inside quiet hours is an explicit overnight wake: nudge immediately
         // with personSourced so the 15m nudge and 30m Chief escalation both
         // work overnight (review 3, P1 #3).

@@ -128,9 +128,9 @@ export async function runRoutine(id: string, opts: { manual?: boolean } = {}): P
 async function runRoutineFor(routine: Routine, agent: Agent, opts: { manual?: boolean }): Promise<{ ran: boolean; reason?: string; gated?: string }> {
   const id = routine.id;
   // Quiet hours (Matt, Oct 15 2026) come before the gate and before any
-  // spend: a scheduled fire to a non-Max lane inside 22:00-05:00 ET skips
+  // spend: a scheduled fire to a non-Max lane inside 21:00-07:00 ET skips
   // without consuming the slot, records heldSlotAt on the routine, and parks
-  // the retry at 05:00 ET so the first tick after 05:00 fires it unchanged.
+  // the retry at 07:00 ET so the first tick after 07:00 fires it unchanged.
   // Exempt: Max's lanes (overnight outage duty), Max's overnight emergency
   // check by id, and a manual press (someone explicitly asked for this run
   // now, like a person message).
@@ -139,7 +139,7 @@ async function runRoutineFor(routine: Routine, agent: Agent, opts: { manual?: bo
       && inQuietHours(nowEntry) && !isQuietExemptLane(agent.id)) {
     markHeld(id, nowEntry);
     skipUntil.set(id, nowEntry + msUntilQuietEnd(nowEntry));
-    return { ran: false, reason: 'quiet hours (22:00-05:00 ET): held until 05:00' };
+    return { ran: false, reason: 'quiet hours (21:00-07:00 ET): held until 07:00' };
   }
   // A manual press or Max's emergency routine is an explicit ask for this
   // run now; sendToAgentHome would otherwise refuse the automation prompt
@@ -319,14 +319,14 @@ export function routineIsDue(routine: Routine, now: number): boolean {
     }
     // Catch up a slot that quiet hours actually held (persisted on the
     // routine as heldSlotAt when the quiet-hours hold fired, either at
-    // entry or after admission slipped past 22:00 ET, and cleared in
+    // entry or after admission slipped past 21:00 ET, and cleared in
     // markRun). Recording the hold instead of guessing from yesterday's
     // slot time means:
-    // - a Friday weekdays:22:30 slot held at 22:30 catches up after 05:00 ET
+    // - a Friday weekdays:22:30 slot held at 22:30 catches up after 07:00 ET
     //   even across the weekend (Saturday's weekend guard only blocks a new
     //   Saturday slot, not Friday's held run),
     // - a daily:21:50 slot whose busy retry or admission wait slipped into
-    //   22:00+ ET catches up after 05:00 ET, and
+    //   21:00+ ET catches up after 07:00 ET, and
     // - a paused or freshly unpaused routine never fires a stale catch-up
     //   for a slot that was never held (Opus review 3, Oct 16).
     return typeof routine.heldSlotAt === 'number'
