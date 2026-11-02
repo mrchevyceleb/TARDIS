@@ -1170,7 +1170,7 @@ export async function sendToAgentHome(
   const quietHold = !isExemptWake && !isQuietExemptLane(agent.id);
   const heldByQuietHours = (): { delivered: boolean; reason?: string } | null =>
     quietHold && inQuietHours(Date.now())
-      ? { delivered: false, reason: 'quiet hours (21:00-07:00 ET): held until 07:00' }
+      ? { delivered: false, reason: 'quiet hours (21:00-07:00 ET weeknights, 20:00-08:00 ET Friday and Saturday nights): held until they end' }
       : null;
   const entryHold = heldByQuietHours();
   if (entryHold) return entryHold;
@@ -1542,7 +1542,7 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
     // refusal: the caller parks its record and the 07:00 retry delivers it
     // unchanged.
     if (delivery.quietHoldCheck?.()) {
-      return { delivered: false, to: to.name, hop, held: 'quiet-hours', reason: 'quiet hours (21:00-07:00 ET): held until 07:00' };
+      return { delivered: false, to: to.name, hop, held: 'quiet-hours', reason: 'quiet hours (21:00-07:00 ET weeknights, 20:00-08:00 ET Friday and Saturday nights): held until they end' };
     }
 
     // Correlate admission and completion to this exact peer turn. A human can

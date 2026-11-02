@@ -139,7 +139,7 @@ async function runRoutineFor(routine: Routine, agent: Agent, opts: { manual?: bo
       && inQuietHours(nowEntry) && !isQuietExemptLane(agent.id)) {
     markHeld(id, nowEntry);
     skipUntil.set(id, nowEntry + msUntilQuietEnd(nowEntry));
-    return { ran: false, reason: 'quiet hours (21:00-07:00 ET): held until 07:00' };
+    return { ran: false, reason: 'quiet hours (21:00-07:00 ET weeknights, 20:00-08:00 ET Friday and Saturday nights): held until they end' };
   }
   // A manual press or Max's emergency routine is an explicit ask for this
   // run now; sendToAgentHome would otherwise refuse the automation prompt
