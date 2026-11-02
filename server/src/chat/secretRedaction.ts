@@ -142,7 +142,44 @@ function redactOpaqueToken(token: string, offset: number, source: string): strin
   if (isFilePathPrefix && !token.split('/').some(isOpaquePathSegment)) {
     return token;
   }
+  // Readable words keep a filesystem path, never a URL: URLs are where keys
+  // travel (grouped activation keys, base36 tokens), so a URL path stays
+  // under the opaque rule above. A filesystem path is anchored at /, ~/, ./
+  // or a bare folder name; a host (a dot before the first slash) or a
+  // scheme or protocol-relative // marks a URL.
+  const word = (/\S*$/.exec(context)?.[0] ?? '') + token;
+  const isFilesystemPath = !/[/:]{2}|^[^/]*[.:]/.test(word.replace(/^\.{1,2}\//, ''));
+  if (isFilesystemPath && isWordPath(token)) return token;
   return REDACTED;
+}
+
+/** A slash-separated run made only of readable path words is a file path,
+ *  not a credential (Matt, Nov 2 2026: hub paths such as
+ *  ASSISTANT-HUB/inbox/2026-11-02-operly-studio-technical-debt-audit.md
+ *  printed as [redacted secret] because the whole dotless run is 64+ token
+ *  characters). Every hyphen/underscore-separated word must be lowercase,
+ *  UPPERCASE, Capitalized or digits, and every segment short; a base64 or
+ *  random token splits into mixed-case fragments and still redacts. */
+function isWordPath(token: string): boolean {
+  if (!token.includes('/') || /[+=]/.test(token)) return false;
+  const segments = token.split('/').filter(Boolean);
+  if (segments.length < 2) return false;
+  const words = segments.flatMap((segment) => segment.split(/[-_]/));
+  // Grouped keys (8M4K-2N7P-9Q3R, Q7F2/H8K9/M4P6) are short letter-digit
+  // chunks; a real path has at most a couple (runtime24, v2).
+  const mixed = words.filter((word) => /[0-9]/.test(word) && /[A-Za-z]/.test(word)).length;
+  return mixed <= 2 && segments.every((segment) => segment.length <= 80) && words.every(isReadableWord);
+}
+
+/** One hyphen/underscore word of a path: a plain word (letters in any
+ *  case, up to 20: OpenAI, iOS), a number (up to 14 digits), or a
+ *  short letter-digit mix (v2, runtime24). A long letter-digit run is a
+ *  random token (base36, hex) and fails, as does any long hex run. */
+function isReadableWord(word: string): boolean {
+  if (/^[0-9a-fA-F]{12,}$/.test(word)) return false;
+  if (/^[A-Za-z]{1,20}$/.test(word)) return true;
+  if (/^[0-9]{1,14}$/.test(word)) return true;
+  return /^[A-Za-z0-9]{1,10}$/.test(word) && /^(?:[a-z0-9]+|[A-Z0-9]+|[A-Z][a-z0-9]+)$/.test(word);
 }
 
 /** Secret-named values from this process's own environment, collected once
