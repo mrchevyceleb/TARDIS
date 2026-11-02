@@ -157,8 +157,13 @@ function isWordPath(token: string): boolean {
   if (!token.includes('/') || /[+=]/.test(token)) return false;
   const segments = token.split('/').filter(Boolean);
   if (segments.length < 2) return false;
-  return segments.every((segment) => segment.length <= 80
-    && segment.split(/[-_]/).every(isReadableWord));
+  return segments.every((segment) => {
+    const words = segment.split(/[-_]/);
+    // Grouped keys (8M4K-2N7P-9Q3R) are short letter-digit chunks; a real
+    // name has at most one (runtime24, v2).
+    const mixed = words.filter((word) => /[0-9]/.test(word) && /[A-Za-z]/.test(word)).length;
+    return segment.length <= 80 && mixed <= 1 && words.every(isReadableWord);
+  });
 }
 
 /** One hyphen/underscore word of a path: a plain word (lowercase, UPPERCASE
