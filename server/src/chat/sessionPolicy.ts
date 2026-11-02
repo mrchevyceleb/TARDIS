@@ -92,21 +92,23 @@ export function sessionBriefs(chatId: string): string {
     configured = { ...raw?.defaults, ...raw?.agents?.[bareChatId(chatId).slice(4)] }.briefs;
   } catch { /* malformed files keep the existing last-good policy */ }
   if (configured !== undefined && !validBriefs(configured)) throw new Error('This agent’s office briefs must be Markdown filenames without directories.');
+  // Size is a budget, never a gate: a brief that grows past it still loads,
+  // because blocking every lane over a long line costs Matt his whole office.
   let bytes = 0;
-  return [...new Set(policy.briefs ?? [])].map(file => {
+  const blocks = [...new Set(policy.briefs ?? [])].map(file => {
     try {
       const text = readFileSync(join(STATE_DIR, 'briefs', file), 'utf8').trim();
       if (!text) throw Object.assign(new Error('empty brief'), { code: 'EMPTY' });
       bytes += Buffer.byteLength(text, 'utf8');
-      if (bytes > 16_384) throw Object.assign(new Error('briefs exceed 16 KiB'), { code: 'TOO_LARGE' });
       return `<rivendell-office-brief name="${file}">\n${text}\n</rivendell-office-brief>`;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      const reason = code === 'ENOENT' ? 'is missing' : code === 'EMPTY' ? 'is empty'
-        : code === 'TOO_LARGE' ? 'is too large' : 'could not be read';
+      const reason = code === 'ENOENT' ? 'is missing' : code === 'EMPTY' ? 'is empty' : 'could not be read';
       throw new Error(`This agent's required office brief (${file}) ${reason}. Restore it before retrying.`);
     }
-  }).join('\n\n');
+  });
+  if (bytes > 16_384) console.warn(`[native-session] office briefs for ${bareChatId(chatId)} are ${bytes} bytes, over the 16 KiB budget; trim them`);
+  return blocks.join('\n\n');
 }
 
 /** Operator files stay outside the repository. Native instructions keep these
@@ -119,7 +121,8 @@ export function sessionMemory(chatId: string): string {
     let text: string;
     try { text = readFileSync(resolve(policy.houseRules.replace(/^~\//, `${homedir()}/`)), 'utf8').trim(); }
     catch { throw new Error('This agent’s house rules could not be read. Restore the configured house-rules file before retrying.'); }
-    if (!text || Buffer.byteLength(text) > 65_536) throw new Error('The required house rules are empty or too large. Restore the file before retrying.');
+    if (!text) throw new Error('The required house rules are empty. Restore the file before retrying.');
+    if (Buffer.byteLength(text) > 65_536) console.warn(`[native-session] house rules are ${Buffer.byteLength(text)} bytes, over the 64 KiB budget; trim them`);
     blocks.push(`<rivendell-house-rules>\n${text}\n</rivendell-house-rules>`);
   }
   if (policy.notesCharacters) {
