@@ -1083,6 +1083,9 @@ class ClaudeSession {
       this.providerEmail = subscriptionEmail('claude', spawnEnv);
     }
     this.providerAccount = existsSync(profileDir) ? realpathSync(profileDir) : profileDir;
+    // Every worker start (first spawn or an account retry) reads the
+    // instructions now, so this is the stamp it runs on.
+    spawnStamps.set(this, stampFor(this, this.chatId));
     this.workerClosed = false;
     this.accountSwitchStdout = [];
     this.accountSwitchStderr = [];
