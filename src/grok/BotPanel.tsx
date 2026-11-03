@@ -16,142 +16,23 @@ import { parsePinLinkTarget } from '../chat/utils/proxyLinks';
 import { statusLabel } from '../theme/voice';
 import { DeskPaneSwitch, useDeskPaneMode } from './DeskPaneSwitch';
 import { MyDeskPane } from './MyDeskPane';
+import {
+  buildEverySchedule,
+  CUSTOM_INTERVAL_CHIPS,
+  CUSTOM_INTERVAL_VALUE,
+  customIntervalError,
+  customIntervalLabel,
+  humanizeCron,
+  humanizeRoutine,
+  parseEveryInterval,
+  SCHEDULE_PRESETS,
+  scheduleOptions,
+  type EveryUnit,
+} from './routineSchedule';
+
+export { humanizeCron };
 
 type ArtifactMeta = { id: string; title?: string; kind?: string; createdAt?: number };
-
-// Light cron humanizer for the Routines card. Shows "Weekdays · every 30 min,
-// 9:12 AM–4:42 PM", not "Cron 12,42 9-16 * * 1-5".
-function humanizeRoutine(schedule: string): string {
-  const m = /^every:(\d+)(m|h)$/.exec(schedule);
-  if (m) return m[2] === 'h' ? `Every ${m[1]} hour${m[1] === '1' ? '' : 's'}` : `Every ${m[1]} min`;
-  const d = /^(weekdays|daily):(\d{1,2}):(\d{2})$/.exec(schedule);
-  if (d) {
-    return `${d[1] === 'weekdays' ? 'Weekdays' : 'Daily'} · ${fmtClock(parseInt(d[2], 10), parseInt(d[3], 10))}`;
-  }
-  if (schedule.startsWith('cron:')) return humanizeCron(schedule.slice(5));
-  return humanizeCron(schedule);
-}
-
-function fmtClock(h: number, m: number): string {
-  const ap = h >= 12 ? 'PM' : 'AM';
-  const hh = h % 12 === 0 ? 12 : h % 12;
-  return `${hh}:${String(m).padStart(2, '0')} ${ap}`;
-}
-
-function parseIntList(field: string): number[] | null {
-  if (!/^\d+(,\d+)*$/.test(field)) return null;
-  return field.split(',').map(Number);
-}
-
-function parseStep(field: string): number | null {
-  const m = /^\*\/(\d+)$/.exec(field);
-  if (!m) return null;
-  const n = Number(m[1]);
-  return n > 0 ? n : null;
-}
-
-function parseRange(field: string): [number, number] | null {
-  const m = /^(\d+)-(\d+)$/.exec(field);
-  if (!m) return null;
-  return [Number(m[1]), Number(m[2])];
-}
-
-function describeDays(dow: string): string {
-  const sorted = (parseIntList(dow) ?? []).slice().sort((a, b) => a - b).join(',');
-  if (dow === '*' || dow === '0-6' || dow === '0-7') return '';
-  if (dow === '1-5') return 'Weekdays';
-  if (sorted === '0,6' || dow === '6,0') return 'Weekends';
-  if (sorted === '1,5') return 'Mon and Fri';
-  const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  if (/^[0-6]$/.test(dow) || dow === '7') return DAYS[dow === '7' ? 0 : Number(dow)] ?? '';
-  const list = parseIntList(dow);
-  if (list?.every((d) => d >= 0 && d <= 7)) {
-    return list.map((d) => DAYS[d === 7 ? 0 : d]).filter(Boolean).join(', ');
-  }
-  return '';
-}
-
-function joinWhen(when: string, days: string): string {
-  if (days && when) return `${days} · ${when}`;
-  return days || when || '';
-}
-
-export function humanizeCron(schedule: string): string {
-  const raw = schedule.trim().replace(/^cron:/, '');
-  const parts = raw.split(/\s+/);
-  if (parts.length !== 5) return schedule;
-  const [min, hour, dom, mon, dow] = parts;
-  if (dom !== '*' || mon !== '*') {
-    if (/^\d+$/.test(min) && /^\d+$/.test(hour) && /^\d+$/.test(dom) && mon === '*') {
-      return `On the ${ordinal(Number(dom))} of every month at ${fmtClock(Number(hour), Number(min))}`;
-    }
-    return raw;
-  }
-
-  const days = describeDays(dow);
-  const minStep = parseStep(min);
-  const hourStep = parseStep(hour);
-  const hourRange = parseRange(hour);
-  const hourList = parseIntList(hour);
-  const minList = parseIntList(min);
-  const oneMin = /^\d+$/.test(min) ? Number(min) : null;
-
-  if (minStep && hour === '*') return joinWhen(`every ${minStep} min`, days);
-  if (minStep && hourRange) {
-    return joinWhen(`every ${minStep} min, ${fmtClock(hourRange[0], 0)} to ${fmtClock(hourRange[1], 59)}`, days);
-  }
-  if (hourStep && (oneMin != null || min === '0')) {
-    const mm = oneMin ?? 0;
-    return joinWhen(`every ${hourStep} hours at :${String(mm).padStart(2, '0')}`, days);
-  }
-  if (oneMin != null && hourRange) {
-    return joinWhen(`hourly at :${String(oneMin).padStart(2, '0')}, ${fmtClock(hourRange[0], oneMin)} to ${fmtClock(hourRange[1], oneMin)}`, days);
-  }
-  if (minList && hourRange) {
-    const span = minList.length === 2 ? Math.abs(minList[1] - minList[0]) : 0;
-    const start = fmtClock(hourRange[0], Math.min(...minList));
-    const end = fmtClock(hourRange[1], Math.max(...minList));
-    const cadence = span === 30 ? `every 30 min, ${start} to ${end}` : `at :${minList.map((n) => String(n).padStart(2, '0')).join(' and :')}, ${start} to ${end}`;
-    return joinWhen(cadence, days);
-  }
-  if (oneMin != null && hourList) {
-    const times = hourList.map((h) => fmtClock(h, oneMin)).join(', ');
-    return joinWhen(times, days);
-  }
-  if (oneMin != null && hour === '*') {
-    return joinWhen(`hourly at :${String(oneMin).padStart(2, '0')}`, days);
-  }
-  if (oneMin != null && /^\d+$/.test(hour)) {
-    return joinWhen(fmtClock(Number(hour), oneMin), days) || `Every day at ${fmtClock(Number(hour), oneMin)}`;
-  }
-  return raw;
-}
-
-function ordinal(n: number): string {
-  const s = n % 10;
-  return `${n}${s === 1 && n !== 11 ? 'st' : s === 2 && n !== 12 ? 'nd' : s === 3 && n !== 13 ? 'rd' : 'th'}`;
-}
-
-const SCHEDULE_PRESETS: Array<{ value: string; label: string }> = [
-  { value: 'every:30m', label: 'Every 30 minutes' },
-  { value: 'every:2h', label: 'Every 2 hours' },
-  { value: 'every:4h', label: 'Every 4 hours' },
-  { value: 'daily:09:00', label: 'Daily · 9:00 AM' },
-  { value: 'daily:17:00', label: 'Daily · 5:00 PM' },
-  { value: 'weekdays:09:00', label: 'Weekdays · 9:00 AM' },
-  { value: 'cron:12,42 9-16 * * 1-5', label: 'Weekdays · every 30 min, 9 AM to 5 PM' },
-  { value: 'cron:17 18,22,2,6 * * 1-5', label: 'Weeknights · 6 PM, 10 PM, 2 AM, 6 AM' },
-  { value: 'cron:17 */4 * * 0,6', label: 'Weekends · every 4 hours' },
-  { value: 'cron:23 8-17 * * 1-5', label: 'Weekdays · hourly, 8 AM to 5 PM' },
-  { value: 'cron:23 21,1,5 * * 1-5', label: 'Weeknights · 9 PM, 1 AM, 5 AM' },
-  { value: 'cron:23 */4 * * 0,6', label: 'Weekends · every 4 hours' },
-  { value: 'cron:0 * * * *', label: 'Hourly' },
-];
-
-function scheduleOptions(current: string): Array<{ value: string; label: string }> {
-  if (SCHEDULE_PRESETS.some((p) => p.value === current)) return SCHEDULE_PRESETS;
-  return [{ value: current, label: humanizeRoutine(current) }, ...SCHEDULE_PRESETS];
-}
 
 export type ChatMeta = {
   agentLabel: string;
@@ -193,6 +74,34 @@ export function BotPanel({ meta, onOpenForge, onOpenDesk, onClose, className = '
   const [rtSchedule, setRtSchedule] = useState('daily:09:00');
   const [rtPrompt, setRtPrompt] = useState('');
   const [rtBusy, setRtBusy] = useState(false);
+  // Custom interval: any minutes or hours, typed beside the presets.
+  // rtSchedule stays the value sent to the API; these three drive the fields.
+  const [rtUseCustom, setRtUseCustom] = useState(false);
+  const [rtCustomValue, setRtCustomValue] = useState('5');
+  const [rtCustomUnit, setRtCustomUnit] = useState<EveryUnit>('m');
+  const rtCustomError = rtUseCustom ? customIntervalError(rtCustomValue, rtCustomUnit) : null;
+
+  const applyCustomInterval = (raw: string, unit: EveryUnit) => {
+    setRtCustomValue(raw);
+    setRtCustomUnit(unit);
+    if (!customIntervalError(raw, unit)) {
+      setRtSchedule(buildEverySchedule(Number(raw.trim()), unit));
+    }
+  };
+  const pickSchedule = (value: string) => {
+    if (value !== CUSTOM_INTERVAL_VALUE) {
+      setRtUseCustom(false);
+      setRtSchedule(value);
+      return;
+    }
+    // Carry the current interval over when there is one, so tweaking a
+    // preset starts from its own number instead of from scratch.
+    const seed = parseEveryInterval(rtSchedule) ?? { value: 5, unit: 'm' as EveryUnit };
+    setRtUseCustom(true);
+    setRtCustomValue(String(seed.value));
+    setRtCustomUnit(seed.unit);
+    setRtSchedule(buildEverySchedule(seed.value, seed.unit));
+  };
 
   const closeRoutineForm = () => {
     setRoutineForm(false);
@@ -200,6 +109,7 @@ export function BotPanel({ meta, onOpenForge, onOpenDesk, onClose, className = '
     setRtName('');
     setRtPrompt('');
     setRtSchedule(agent ? 'daily:09:00' : 'every:30m');
+    setRtUseCustom(false);
   };
   const openNewRoutine = () => {
     if (routineForm && !rtEditingId) { closeRoutineForm(); return; }
@@ -207,6 +117,7 @@ export function BotPanel({ meta, onOpenForge, onOpenDesk, onClose, className = '
     setRtName('');
     setRtPrompt('');
     setRtSchedule(agent ? 'daily:09:00' : 'every:30m');
+    setRtUseCustom(false);
     setRoutineForm(true);
   };
   const openEditRoutine = (r: { id: string; name: string; schedule: string; prompt: string }) => {
@@ -214,6 +125,15 @@ export function BotPanel({ meta, onOpenForge, onOpenDesk, onClose, className = '
     setRtName(r.name);
     setRtSchedule(r.schedule);
     setRtPrompt(r.prompt);
+    // An every-N routine no preset matches opens in the custom fields,
+    // showing its own number, ready to tweak.
+    const every = parseEveryInterval(r.schedule);
+    const custom = every !== null && !SCHEDULE_PRESETS.some((p) => p.value === r.schedule);
+    setRtUseCustom(custom);
+    if (custom && every) {
+      setRtCustomValue(String(every.value));
+      setRtCustomUnit(every.unit);
+    }
     setRoutineForm(true);
   };
 
@@ -324,11 +244,51 @@ export function BotPanel({ meta, onOpenForge, onOpenDesk, onClose, className = '
             {routineForm ? (
               <div className="bt-rt-form">
                 <input className="bt-rt-input" placeholder="Name (Morning brief)" value={rtName} onChange={(e) => setRtName(e.target.value)} maxLength={80} />
-                <select className="bt-rt-input" value={rtSchedule} onChange={(e) => setRtSchedule(e.target.value)}>
-                  {scheduleOptions(rtSchedule).map((opt) => (
+                <select className="bt-rt-input" aria-label="Schedule" value={rtUseCustom ? CUSTOM_INTERVAL_VALUE : rtSchedule} onChange={(e) => pickSchedule(e.target.value)}>
+                  {scheduleOptions(rtSchedule, rtUseCustom).map((opt) => (
                     <option key={opt.value} value={opt.value}>{opt.label}</option>
                   ))}
                 </select>
+                {rtUseCustom ? (
+                  <>
+                    <div className="bt-rt-custom">
+                      <span className="bt-rt-custom-every">Every</span>
+                      <input
+                        className="bt-rt-input bt-rt-custom-num"
+                        aria-label="Custom interval amount"
+                        inputMode="numeric"
+                        autoFocus
+                        value={rtCustomValue}
+                        onChange={(e) => applyCustomInterval(e.target.value, rtCustomUnit)}
+                        onFocus={(e) => e.target.select()}
+                      />
+                      <select
+                        className="bt-rt-input bt-rt-custom-unit"
+                        aria-label="Custom interval unit"
+                        value={rtCustomUnit}
+                        onChange={(e) => applyCustomInterval(rtCustomValue, e.target.value === 'h' ? 'h' : 'm')}
+                      >
+                        <option value="m">minutes</option>
+                        <option value="h">hours</option>
+                      </select>
+                    </div>
+                    <div className="bt-rt-chips">
+                      {CUSTOM_INTERVAL_CHIPS.map((chip) => (
+                        <button
+                          key={`${chip.value}${chip.unit}`}
+                          type="button"
+                          className={`bt-rt-chip${!rtCustomError && Number(rtCustomValue.trim()) === chip.value && rtCustomUnit === chip.unit ? ' on' : ''}`}
+                          onClick={() => applyCustomInterval(String(chip.value), chip.unit)}
+                        >
+                          {chip.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className={`bt-rt-hint${rtCustomError ? ' warn' : ''}`} aria-live="polite">
+                      {rtCustomError ?? customIntervalLabel(Number(rtCustomValue.trim()), rtCustomUnit)}
+                    </div>
+                  </>
+                ) : null}
                 <textarea
                   className="bt-rt-input"
                   placeholder={agent ? `What ${agent.name} should do each run…` : 'What the agent should do each run…'}
@@ -340,7 +300,7 @@ export function BotPanel({ meta, onOpenForge, onOpenDesk, onClose, className = '
                   <button type="button" className="bt-rt-btn" onClick={closeRoutineForm}>Cancel</button>
                   <button
                     className="bt-rt-btn primary"
-                    disabled={rtBusy || !rtPrompt.trim() || (!rtEditingId && !agent)}
+                    disabled={rtBusy || !rtPrompt.trim() || (!rtEditingId && !agent) || rtCustomError !== null}
                     onClick={async () => {
                       setRtBusy(true);
                       try {

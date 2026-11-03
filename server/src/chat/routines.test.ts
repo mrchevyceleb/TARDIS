@@ -73,6 +73,19 @@ test('parseSchedule still accepts the three schedule shapes', () => {
   assert.equal(parseSchedule('nope'), null);
 });
 
+test('custom every intervals from the panel are due after their own span', () => {
+  const last = local(2026, 9, 8, 11, 0);
+  assert.ok(parseSchedule('every:5m'));
+  assert.ok(parseSchedule('every:45m'));
+  assert.ok(parseSchedule('every:3h'));
+  assert.equal(routineIsDue(routine({ schedule: 'every:5m', lastRunAt: last }), local(2026, 9, 8, 11, 4)), false);
+  assert.equal(routineIsDue(routine({ schedule: 'every:5m', lastRunAt: last }), local(2026, 9, 8, 11, 5)), true);
+  assert.equal(routineIsDue(routine({ schedule: 'every:45m', lastRunAt: last }), local(2026, 9, 8, 11, 44)), false);
+  assert.equal(routineIsDue(routine({ schedule: 'every:45m', lastRunAt: last }), local(2026, 9, 8, 11, 45)), true);
+  assert.equal(routineIsDue(routine({ schedule: 'every:3h', lastRunAt: last }), local(2026, 9, 8, 13, 59)), false);
+  assert.equal(routineIsDue(routine({ schedule: 'every:3h', lastRunAt: last }), local(2026, 9, 8, 14, 0)), true);
+});
+
 // ---- quiet-hours daily legs (Opus verify, Oct 16) --------------------------
 
 test('a daily slot held overnight catches up after 07:00 via heldSlotAt', () => {

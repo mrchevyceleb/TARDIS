@@ -1638,6 +1638,16 @@
   font-family: inherit;
 }
 .bt-rt-input:focus { border-color: var(--r-tardis-lit); box-shadow: var(--r-glow-tardis); }
+.bt-rt-custom { display: flex; align-items: center; gap: 8px; }
+.bt-rt-custom-every { font-size: 13px; color: var(--r-ink-mute); flex: none; }
+.bt-rt-custom-num { flex: 1 1 0; min-width: 0; width: auto; }
+.bt-rt-custom-unit { flex: none; width: auto; }
+.bt-rt-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.bt-rt-chip { padding: 4px 10px; border-radius: 999px; font-size: 12px; cursor: pointer; background: transparent; border: 1px solid var(--r-line-strong); color: var(--r-ink-mute); font-family: inherit; }
+.bt-rt-chip:hover { color: var(--r-ink); border-color: var(--r-tardis-lit); }
+.bt-rt-chip.on { background: var(--r-gold); border-color: var(--r-gold); color: var(--r-bg); font-weight: 600; }
+.bt-rt-hint { font-size: 12px; color: var(--r-ink-mute); min-height: 15px; }
+.bt-rt-hint.warn { color: var(--r-rose); }
 .bt-rt-input textarea { resize: vertical; }
 .bt-rt-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .bt-rt-btn { padding: 6px 12px; border-radius: 999px; font-size: 12.5px; cursor: pointer; background: transparent; border: 1px solid var(--r-line-strong); color: var(--r-ink); }
