@@ -42,6 +42,10 @@ export type AgentSessionPolicy = {
 };
 type Policy = { agents?: Record<string, AgentSessionPolicy>; defaults?: AgentSessionPolicy };
 const lastGoodPolicies = new Map<string, { mtime: number; data: Policy }>();
+// Key by resolved file so lanes sharing rules share recovery, while a new
+// configured path can never inherit another file's instructions.
+const lastGoodHouseRules = new Map<string, string>();
+const warnedHouseRules = new Set<string>();
 const validBriefs = (value: unknown): value is string[] => Array.isArray(value)
   && value.every(x => typeof x === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9 ._-]*\.md$/i.test(x));
 function validPolicy(value: unknown): boolean {
@@ -124,11 +128,25 @@ export function sessionMemory(chatId: string): string {
   const policy = sessionPolicy(chatId);
   const blocks: string[] = [];
   if (policy.houseRules) {
+    const file = resolve(policy.houseRules.replace(/^~\//, `${homedir()}/`));
     let text: string;
-    try { text = readFileSync(resolve(policy.houseRules.replace(/^~\//, `${homedir()}/`)), 'utf8').trim(); }
-    catch { throw new Error('This agent’s house rules could not be read. Restore the configured house-rules file before retrying.'); }
-    if (!text) throw new Error('The required house rules are empty. Restore the file before retrying.');
-    if (Buffer.byteLength(text) > 65_536) console.warn(`[native-session] house rules are ${Buffer.byteLength(text)} bytes, over the 64 KiB budget; trim them`);
+    try {
+      try { text = readFileSync(file, 'utf8').trim(); }
+      catch { throw new Error('This agent’s house rules could not be read. Restore the configured house-rules file before retrying.'); }
+      if (!text) throw new Error('The required house rules are empty. Restore the file before retrying.');
+      if (Buffer.byteLength(text) > 65_536) console.warn(`[native-session] house rules are ${Buffer.byteLength(text)} bytes, over the 64 KiB budget; trim them`);
+      lastGoodHouseRules.set(file, text);
+      warnedHouseRules.delete(file);
+    } catch (error) {
+      const previous = lastGoodHouseRules.get(file);
+      // A first load must still supply real rules; never silently omit them.
+      if (previous === undefined) throw error;
+      text = previous;
+      if (!warnedHouseRules.has(file)) {
+        warnedHouseRules.add(file);
+        console.warn(`[native-session] house rules unavailable or invalid (${file}); retaining the last valid instructions`);
+      }
+    }
     blocks.push(`<rivendell-house-rules>\n${text}\n</rivendell-house-rules>`);
   }
   if (policy.notesCharacters) {

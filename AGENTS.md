@@ -6,6 +6,15 @@ TARDIS (formerly Rivendell) is a local-first, always-on multi-agent office. It s
 
 Internal identifiers keep the old name on purpose and must never be renamed: `RIVENDELL_*` / `ELROND_WORKSPACE_PATH` env vars, `~/.rivendell`, `rivendell:*` localStorage keys and DOM events, the `rivendell://` scheme and `rivendell-doc:` / `rivendell-folder:` links, the `rivendell-team` / `rivendell-browser` MCPs and `<rivendell-…>` prompt tags, `_rivendellTombstone`, the `rivendell_jobs` tables, the manifest `id`, and the `x-rivendell-*` headers. User-facing copy lives in `src/theme/voice.ts` and room labels in `src/data/roomNames.ts`.
 
+## Where to work (Matt's installation)
+
+When Matt asks for TARDIS code changes or troubleshooting from any computer, default to SSH into Moria and do the work there. Do not ask which machine unless his request explicitly points elsewhere, and do not stop at a local-only fix: local checkouts may be stale.
+
+- Connect with `ssh mrchevyceleb@moria`; on Windows, use `C:/Program Files/Git/usr/bin/ssh.exe`.
+- The live source checkout is `~/samwise/Personal-Apps/Rivendell`. If already on Moria, work there directly.
+- Read that checkout's current instructions and changes before editing. Preserve other work, and follow the live-service restart rule below.
+- Honor an explicit request to use another machine or checkout.
+
 ## Stack
 
 - React 19, Vite 8, TypeScript, Tailwind v4, TanStack Query, react-markdown.
