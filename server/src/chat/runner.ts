@@ -46,7 +46,7 @@ import { isRobotVoiceChatId, isVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STY
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { chatAttachmentPath, saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-guidance.ts';
-import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
+import { transcriptGuidance } from './sharedRules.ts';
 import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
 import { claudeAccountPool } from '../lib/claudeAccountPool.ts';
 import { refreshClaudeAccountUsage } from '../lib/accountUsage.ts';
@@ -1000,10 +1000,10 @@ class ClaudeSession {
     if (cli === 'assistant') {
       args.push(
         '--append-system-prompt',
-        [ASSISTANT_AGENT_PROMPT, voiceAddendum, personaScope, writingScope, isAgentThread(chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n'),
+        [ASSISTANT_AGENT_PROMPT, voiceAddendum, personaScope, writingScope, isAgentThread(chatId) ? transcriptGuidance() : null].filter(Boolean).join('\n\n'),
       );
     } else {
-      const sys = [voiceAddendum, personaScope, writingScope, isAgentThread(chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n');
+      const sys = [voiceAddendum, personaScope, writingScope, isAgentThread(chatId) ? transcriptGuidance() : null].filter(Boolean).join('\n\n');
       if (sys) args.push('--append-system-prompt', sys);
     }
 

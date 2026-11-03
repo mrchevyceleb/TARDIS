@@ -6,55 +6,13 @@ import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import { agentForChatId } from './agents.ts';
-import { DESK_OWNER_NAME, DESK_ROOM_ENABLED } from '../config.ts';
+import { DESK_ROOM_ENABLED } from '../config.ts';
 import { sessionBriefs, sessionMemory, taskControlGuidance } from './sessionPolicy.ts';
+import { sharedRule } from './sharedRules.ts';
 
 export const PERSONAS_DIR = join(STATE_DIR, 'personas');
 
 const cache = new Map<string, { mtime: number; text: string }>();
-
-const TEAM_STATUS_GUIDANCE = [
-  '<rivendell-team-status>',
-  'Treat teammate activity as live state, never as an inference from what you intended, mentioned, or previously asked them to do.',
-  'When coordinating delegated work, check team_status at natural checkpoints: after assigning, before changing course, and before your final status summary. Before telling the user that a teammate is working, idle, queued, blocked, still handling something, or has work in flight, call team_status in the current turn. Use team_recent too when you need to identify the actual work or its latest result.',
-  '“WORKING NOW” means a live turn exists. “IDLE” means no turn is running. A message you meant to send, a handoff that was accepted, or a possible follow-up is not proof that work is underway.',
-  'Use precise states: active now, queued, assigned but idle, merely proposed, or completed. If you want a teammate to start, actually send the handoff; do not report it as active until current evidence says it is.',
-  '</rivendell-team-status>',
-].join('\n');
-
-/** Long work runs as a background job, never in a blocking foreground call.
- *  Tools live in the rivendell-team MCP (job_start, watch_job); the result
- *  lands in the agent's own thread as a turn. */
-const WATCH_JOB_GUIDANCE = [
-  '<rivendell-background-jobs>',
-  'Anything that will take longer than about 30 seconds (builds, full test runs, renders, big installs, sleeps and waits, deploy and CI watchers, long scripts) is a background job, never a foreground call. Start it with job_start (a short name plus the shell command). It runs detached in its own scope, survives TARDIS restarts, shows in the chat UI as a running job with a Stop button, and when it ends TARDIS delivers a job result (exit code and the last output lines) into your own thread as a new turn. job_list shows state, job_log reads output, job_stop stops one.',
-  'After starting a job, keep working on something else or end your turn. Never sit in a foreground wait, a sleep, or an until-loop: while you are stuck in one, the person messaging you cannot reach you. A job result is an automation message, not a person; it is never reported as finished unless the command exited on its own.',
-  'Use watch_job only for a pid or file you already have (for example a process you started yourself). For a command, use job_start.',
-  '</rivendell-background-jobs>',
-].join('\n');
-
-/** Keeps the Desk (the owner's one view of what needs them and what every
- *  agent is doing) true. Tools live in the rivendell-team MCP. */
-const DESK_GUIDANCE = [
-  '<rivendell-desk>',
-  `The Desk is ${DESK_OWNER_NAME}'s single view of what needs their attention and what every agent is working on. Keep your part of it accurate so nothing gets forgotten.`,
-  `- Columns (Matt, Oct 9 2026): Not started = parked, not begun, with the reason and what restarts it (work blocked outside the team, parked by ${DESK_OWNER_NAME}, or lacking an authorized assignment source; parking is never how you clear a stale card with an active, authorized assignment). In progress = only what you have hands on today. Merged to staging = merged to staging, waiting on the ship. In QA (Sud) = with Sud QA. Live in production = shipped and verified. Waiting on a teammate: hand them the card. A card that needs ${DESK_OWNER_NAME} personally is flagged by its open Needs-you item in any column, not by a column. Keep your cards true in real time without being asked: move the card the moment the work moves (start, hand off, park, finish) and before you reply or go idle.`,
-  `- Only start or resume work in your own lane that you can trace to ${DESK_OWNER_NAME}'s priorities or direct asks, or to a real customer or client request (including a request from their team). A teammate's assignment or handoff counts when it traces to one of those sources. Name the original source when handing work off; if it is unclear, ask the sender once and stay stopped on that card until it is clear. If none is open, stop and stay idle. Being idle, a stale card, a routine nudge or a card's position is not authorization. If an old card has no authorized source, move it to Not started with that reason and what request would restart it, then report the move once to your lead. Never invent follow-up, audit, cleanup or tooling work just to stay busy.`,
-  '- Real task (anything beyond a quick answer): call board_cards first and reuse a matching card instead of creating a duplicate; otherwise board_card_create (you are the owner, column in_progress). Work with no card is a miss: card it first. Add a one or two line board_card_comment at real milestones. The Desk checks every two hours and messages you about stale cards; fix each card rather than explaining at length.',
-  '- Blocked on something outside this turn: hand the card to whoever has the ball (board_card_update owner) when a teammate holds it, or board_card_move it to not_started, with a one-line comment saying why and what restarts it, when the block is outside the team. Never just drop it.',
-  `- Need ${DESK_OWNER_NAME} personally (a decision, a login or 2FA code, an approval, a payment, anything only they can do): only Max and Riley add Desk items (Matt, Oct 30 2026). Everyone else sends it to Max (or Riley for the game studio) in one sentence with their pick, never to ${DESK_OWNER_NAME} directly. Max and Riley: desk_todo_add with the cardId. The card shows its needs-${DESK_OWNER_NAME} flag in any column while the item is open; the column stays where the real stage is. For a pick-one question pass choices (up to 4 short options; otherwise it is Yes / No) so ${DESK_OWNER_NAME} can answer with one tap. The answer arrives as a message from ${DESK_OWNER_NAME} with the item already closed; act on it and move the card on. If it gets resolved some other way, desk_todo_complete it and move the card on.`,
-  '- Skip the board for one-line answers, chit-chat, and routine runs that found nothing. Keep titles short and comments brief.',
-  '- A message containing [desk:card-…] or [desk:todo-…] points at the Desk: read it first (board_card_get or desk_todos with that id) before answering, and post a short board_card_comment if your answer changes the card.',
-  '</rivendell-desk>',
-].join('\n');
-
-/** The sidebar checklist (card-a77246, Matt, Oct 17): the /sidebar surface.
- *  Every teammate knows the tool exists and reaches for it unasked. */
-const SIDEBAR_GUIDANCE = [
-  '<rivendell-sidebar>',
-  `- /sidebar (Matt, Oct 17): your live checklist in the sidebar next to your chat, and in a channel the channel's own (pass channel: the id from the ping). When ${DESK_OWNER_NAME} asks for a checklist (typing /sidebar or asking), create it with sidebar_checklist and keep it current without being asked: a short status line per item, check items off the moment they finish, assign teammates where they carry a step, and clear it when the work is done.`,
-  '</rivendell-sidebar>',
-].join('\n');
 
 function readScopeFile(file: string): string {
   const path = join(PERSONAS_DIR, file);
@@ -75,7 +33,7 @@ export function personaPromptFor(chatId: string, memory = sessionMemory(chatId))
   const agent = agentForChatId(chatId);
   if (!agent) return '';
   const scope = readScopeFile(`${agent.id}.md`);
-  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId), TEAM_STATUS_GUIDANCE, WATCH_JOB_GUIDANCE, SIDEBAR_GUIDANCE, DESK_ROOM_ENABLED ? DESK_GUIDANCE : null].filter(Boolean).join('\n\n');
+  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId), sharedRule('team-status'), sharedRule('background-jobs'), sharedRule('sidebar'), DESK_ROOM_ENABLED ? sharedRule('desk') : null].filter(Boolean).join('\n\n');
 }
 
 /** Scope text for an agent record's home (REST use). */

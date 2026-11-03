@@ -43,6 +43,7 @@ import { OPEN_PANE_EVENT } from './messagePins';
 import { Council } from '../rooms/Council';
 import { Desk } from '../rooms/Desk';
 import { Usage } from '../rooms/Usage';
+import { Instructions } from '../rooms/Instructions';
 import { QaBoard } from '../rooms/QaBoard';
 import { DeskChatDock, DeskChatOpenContext, useDeskChat } from '../rooms/DeskChat';
 import { DESK_FOCUS_EVENT, FIRST_OPEN_REF, OPEN_AGENT_EVENT, focusDeskRef, hasDeskDeepLink, useDeskDeepLinks, useDeskSummary } from '../data/desk';
@@ -70,6 +71,7 @@ const ROOMS: Record<string, ComponentType> = {
   desk: Desk,
   qa: QaBoard,
   usage: Usage,
+  instructions: Instructions,
   council: Council,
   dashboard: Dashboard,
   tidings: Tidings,
@@ -565,7 +567,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
             </DeskChatOpenContext.Provider>
           ) : RoomView ? (
             <div className="bt-room r-scroll" key={activeRoom}>
-              <div className={`bt-room-wrap bt-fade${activeRoom === 'usage' ? ' bt-usage-wrap' : ''}`}>
+              <div className={`bt-room-wrap bt-fade${activeRoom === 'usage' ? ' bt-usage-wrap' : activeRoom === 'instructions' ? ' bt-instructions-wrap' : ''}`}>
                 <RoomView />
               </div>
             </div>

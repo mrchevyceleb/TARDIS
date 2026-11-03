@@ -16,6 +16,7 @@ import { getOrCreateSession, isClaudeFamilyCli, type CliKind } from './chat/runn
 import { brainForAgent, cliForAgentEngine, ensureAgents, listAgents } from './chat/agents.ts';
 import { resumeQueuedTeamDeliveries } from './chat/teamBus.ts';
 import { agentsRouter } from './routes/agents.ts';
+import { instructionsRouter } from './routes/instructions.ts';
 import { accountsRouter } from './routes/accounts.ts';
 import { usageRouter } from './routes/usage.ts';
 import { qaRouter } from './routes/qa.ts';
@@ -154,6 +155,7 @@ app.use('/api/files', filesRouter);
 app.use('/api/devices', devicesRouter);
 app.use('/api/robots', robotsRouter);
 app.use('/api/agents', agentsRouter);
+app.use('/api/instructions', instructionsRouter);
 app.use('/api/accounts', accountsRouter);
 app.use('/api/usage', usageRouter);
 app.use('/api/qa', qaRouter);

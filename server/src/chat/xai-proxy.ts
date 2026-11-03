@@ -2,7 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { getXaiAuth } from '../routes/xai-oauth.ts';
-import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
+import { transcriptGuidance } from './sharedRules.ts';
 
 // xAI's Anthropic-compatible endpoint (https://api.x.ai/v1/messages) rejects
 // `role: "system"` entries inside the `messages` array with a 400
@@ -130,7 +130,8 @@ export function transformRequest(body: string): string {
     obj.messages = kept;
     // Apply at system priority on every request, including warm Claude-CLI
     // processes. A user-turn reminder alone loses to CLI progress narration.
-    systemBlocks.push({ type: 'text', text: TRANSCRIPT_GUIDANCE });
+    const guidance = transcriptGuidance();
+    if (guidance) systemBlocks.push({ type: 'text', text: guidance });
     obj.system = systemBlocks;
   }
   if (Array.isArray(obj.tools)) {

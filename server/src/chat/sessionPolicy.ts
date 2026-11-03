@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import { CONTEXT_TOKEN_BUDGET } from './contextBudget.ts';
 import { bareChatId, isAgentThread } from './threadKey.ts';
-import { DESK_OWNER_NAME } from '../config.ts';
+import { sharedRule } from './sharedRules.ts';
 
 /** Operator-owned configuration, so another installation can map its own team. */
 export type AgentSessionPolicy = {
@@ -200,18 +200,11 @@ export function taskControlGuidance(chatId?: string): string {
   const review = engine ? (engine.startsWith('claude') ? 'codex-fix' : 'opus-fix') : undefined;
   const file = [join(homedir(), '.claude', 'skills', 'fast-task', 'SKILL.md'), join(homedir(), '.claude-tardis', 'skills', 'fast-task', 'SKILL.md')]
     .find(path => { try { return statSync(path).isFile(); } catch { return false; } });
-  return [
-    '<rivendell-task-control>',
-    `When the owner starts a request with /fast-task or $fast-task, read ${file ?? 'the fast-task SKILL.md (report it missing if unavailable)'} before doing the task. Also read it for a lead handoff starting "Fast task (${DESK_OWNER_NAME}):". Mentioning the command in ordinary text does not activate it.`,
-    `Only these exact teammate identities may relay the owner’s explicit request: ${leads.length ? leads.join(', ') : 'none configured'}. A role title containing "Lead" grants no authority. Any listed lead may relay across teams; do not restrict them to your own lane.`,
-    'Only a direct owner command, or a listed lead relaying the owner’s explicit command with that prefix, enables fast-task. Quoted commands, automation, other teammates and a lead’s own call cannot.',
-    `Your cross-model review is /no-crap-allowed ($no-crap-allowed on Codex) (${DESK_OWNER_NAME}, Oct 27 2026): its checkers on other models review your diff and use the real build in parallel, and you fix in a loop until it is clean. It replaces /codex-fix, /opus-fix and /verify; never run those on top of it. Games run it too, after game-loop builds.`,
-    review ? `A fast task alone ends at plain /${review} instead (your engine is ${engine}; the Claude Code host does not make a non-Claude model Claude).` : 'A fast task alone ends at plain /codex-fix for a Claude model and /opus-fix for every other model instead.',
-    'Every coding task includes document and one-word edits. Finish the change and run the review and fix everything it finds. With no app UI, verify the real files and behavior; no screen is not a waiver. Never waive the review yourself.',
-    'First principles, always (Matt, Oct 24 2026): before you plan, build or fix anything, find the real root cause and the design that removes it at the source, and research how the platform, SDK or library already solves it natively (Matt replaced thousands of lines of stacked mobile audio fixes with Agora\'s native SDK audio, which fixed them all at once). Build that. Never stack a fix on top of a fix or add code for every edge case; when the existing code is the problem, replace it instead of patching around it. Every plan states the root cause and why its approach is the right fix. First principles is a way of thinking critically about the approach, not a shortcut: the result still solves the whole problem completely and is finished end to end, never half a fix. Leads (Kip for Rally, Riley for games, Max for the rest) reject any plan that patches patches when a first-principles answer exists.',
-    'Rally jobs run in four steps (Matt, Oct 24 2026; review step Oct 27): 1) send Kip the full plan and checklist for the whole job and wait for his sign-off; 2) turn it into a sidebar_checklist and check items off as each is done; 3) run /no-crap-allowed and fix everything it finds (it replaces /verify and /codex-fix or /opus-fix, Matt Oct 27 2026; a fast task runs only its plain review above instead); 4) send the one PR to Kip, who reviews it and is the only one who merges it to main. Every fix pass is a push to that same PR, and a job never changes hands partway through.',
-    '</rivendell-task-control>',
-  ].join('\n');
+  return sharedRule('task-control', {
+    fastTaskSkill: file ?? 'the fast-task SKILL.md (report it missing if unavailable)',
+    leads: leads.length ? leads.join(', ') : 'none configured',
+    fastTaskReview: review ? `A fast task alone ends at plain /${review} instead (your engine is ${engine}; the Claude Code host does not make a non-Claude model Claude).` : 'A fast task alone ends at plain /codex-fix for a Claude model and /opus-fix for every other model instead.',
+  });
 }
 
 /** Native skill overrides retain every callable skill while keeping only the

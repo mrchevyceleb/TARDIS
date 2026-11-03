@@ -48,7 +48,7 @@ import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { isRobotVoiceChatId, isVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STYLE_ADDENDUM, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-guidance.ts';
-import { TRANSCRIPT_GUIDANCE } from './transcriptGuidance.ts';
+import { transcriptGuidance } from './sharedRules.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiModeFor, zaiTurnOutcome, type ZaiMode } from './zaiQuota.ts';
 import { emptyTurnOrigin, noteTurnPeer, notifyHandoffSenders, PROVIDER_CONTINUE_EVENT, providerCutEventFields, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { longCallGateEnv } from './longCallGate.ts';
@@ -270,7 +270,7 @@ export class PiSession {
       'External side effects stay draft-first unless the person explicitly asked you to send, post or deploy.',
       'Nothing you start in the background can report back to you. A backgrounded shell, nohup job or watcher never wakes you when it finishes, and it may be stopped when your turn ends. Run what you need the result of in the foreground, or poll it to completion inside this turn. If something must outlive the turn, tell the person what is running, where its output goes, and that you will not see it finish.',
     ].join('\n');
-    return [persona, voiceAddendum, operating, isAgentThread(this.chatId) ? TRANSCRIPT_GUIDANCE : null].filter(Boolean).join('\n\n');
+    return [persona, voiceAddendum, operating, isAgentThread(this.chatId) ? transcriptGuidance() : null].filter(Boolean).join('\n\n');
   }
 
   // ---- rpc transport -----------------------------------------------------------

@@ -29,7 +29,7 @@ import {
   Coins,
   FolderInput,
   Gauge,
-  Fuel,
+  Fuel, ScrollText,
   Hammer,
   Heart,
   ClipboardCheck,
@@ -79,6 +79,7 @@ export const ROOM_ENTRIES: RoomEntry[] = [
   { key: 'desk', label: ROOM_NAMES.desk.name, icon: <ClipboardList size={16} /> },
   { key: 'qa', label: ROOM_NAMES.qa.name, icon: <ClipboardCheck size={16} /> },
   { key: 'usage', label: ROOM_NAMES.usage.name, icon: <Fuel size={16} /> },
+  { key: 'instructions', label: ROOM_NAMES.instructions.name, icon: <ScrollText size={16} /> },
   { key: 'council', label: ROOM_NAMES.council.name, icon: <LayoutGrid size={16} /> },
   { key: 'dashboard', label: ROOM_NAMES.dashboard.name, icon: <Gauge size={16} /> },
   { key: 'tidings', label: ROOM_NAMES.tidings.name, icon: <Mail size={16} /> },
@@ -1075,6 +1076,7 @@ export function BotRail(props: BotRailProps) {
         <div className="bt-foot-details" id={footerId} inert={mobileFooter && !footerOpen}>
           <div className="bt-foot-details-inner">
             <button className="bt-foot-row" aria-current={props.activeRoom === 'usage' ? 'page' : undefined} onClick={() => props.onOpenRoom('usage')}><Fuel size={17} /> Usage</button>
+            <button className="bt-foot-row" aria-current={props.activeRoom === 'instructions' ? 'page' : undefined} onClick={() => props.onOpenRoom('instructions')}><ScrollText size={17} /> Instructions</button>
             <a className="bt-foot-row" href="/api/session-health/report" target="_blank" rel="noreferrer"><Activity size={17} /> Session health</a>
             <button className="bt-foot-row" onClick={() => { setAppearanceOpen(false); setPluginsOpen((o) => !o); }} aria-haspopup="menu" aria-expanded={pluginsOpen}>
               <Plug size={17} /> Plugins
