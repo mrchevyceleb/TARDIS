@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { formatReplyQuote } from './reply-quote.ts';
 import {
   isAutomationPeerEvent,
+  isEmptyReplyPlaceholder,
   isExactNoUpdate,
   isModelEosToken,
   isQuietRoutineReply,
@@ -113,7 +114,7 @@ function flushPending(
   if (!body) return afterAutomation;
   // Provider wire protocol never enters the model-visible conversation,
   // regardless of whether the originating turn was scheduled automation.
-  if (isModelEosToken(body)) return false;
+  if (isModelEosToken(body) || isEmptyReplyPlaceholder(body)) return false;
   if (afterAutomation && (isQuietRoutineReply(body) || isExactNoUpdate(body))) return false;
   turns.push({ role: 'assistant', text: clipTurn(body, maxChars), seq });
   return false;

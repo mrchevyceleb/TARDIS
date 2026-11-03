@@ -5,7 +5,7 @@
 // rendered blocks (live stream, replay, and the localStorage cache alike).
 
 import type { ChatBlock } from '../data/types';
-import { isModelEosToken } from './routineNoise';
+import { isEmptyReplyPlaceholder, isModelEosToken } from './routineNoise';
 
 const GEAR = '⚙';
 
@@ -58,7 +58,7 @@ export function isQuietRoutineReply(text: string): boolean {
   // Failure/delivery signals always win over the quiet patterns below —
   // "Stayed silent because of an API error" must surface, not vanish.
   if (hasFailureSignal(t)) return false;
-  if (isExactNoUpdate(t) || isModelEosToken(t)) return true;
+  if (isExactNoUpdate(t) || isModelEosToken(t) || isEmptyReplyPlaceholder(t)) return true;
   if (ROUTINE_PROGRESS.test(lower) && lower.length < 600) return true;
   if (/^quiet\b/.test(lower)) return true;
   if (/\bstayed silent\b/.test(lower)) return true;

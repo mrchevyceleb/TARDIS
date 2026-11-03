@@ -70,12 +70,21 @@ export function isModelEosToken(text: string): boolean {
   return MODEL_EOS_TOKENS.has(text.trim());
 }
 
+/** The Muse harness closes a turn that ended on tool calls with no final
+ *  text by emitting this exact placeholder as a zero-token result. It is
+ *  engine bookkeeping, never a reply: a tool-only turn already said its
+ *  piece through reply_now or team_message. Exact match only, so real prose
+ *  quoting the sentence still shows. */
+export function isEmptyReplyPlaceholder(text: string): boolean {
+  return text.trim() === '[Previous turn ended without an assistant reply.]';
+}
+
 /** Strict no-op tokens the model is told to emit, mirroring the client's `isNoopToken`: exact NO_UPDATE / EOS,
  *  or exact `quiet` / `quiet.`. "Quiet quitting is…" is prose and must still count. Empty is not a token. */
 export function isNoopToken(text: string): boolean {
   const t = text.trim();
   if (!t) return false;
-  if (isExactNoUpdate(t) || isModelEosToken(t)) return true;
+  if (isExactNoUpdate(t) || isModelEosToken(t) || isEmptyReplyPlaceholder(t)) return true;
   return /^quiet[.!?]*$/.test(normalizeReply(t));
 }
 
@@ -117,7 +126,7 @@ export function isQuietRoutineReply(text: string): boolean {
   // Failure/delivery signals always win over the quiet patterns below —
   // "Stayed silent because of an API error" must surface, not vanish.
   if (hasFailureSignal(t)) return false;
-  if (isExactNoUpdate(t) || isModelEosToken(t)) return true;
+  if (isExactNoUpdate(t) || isModelEosToken(t) || isEmptyReplyPlaceholder(t)) return true;
   if (ROUTINE_PROGRESS.test(lower) && lower.length < 600) return true;
   if (/^quiet\b/.test(lower)) return true;
   if (/\bstayed silent\b/.test(lower)) return true;
@@ -137,7 +146,7 @@ export function eventText(raw: unknown): string {
   if (real) return real;
   const fallback = texts.length ? texts[texts.length - 1] : '';
   // Exact provider wire tokens are never conversation, even outside routines.
-  return isModelEosToken(fallback) ? '' : fallback;
+  return isModelEosToken(fallback) || isEmptyReplyPlaceholder(fallback) ? '' : fallback;
 }
 
 export function isAutomationPeerEvent(raw: unknown): boolean {
@@ -212,7 +221,7 @@ export function isRoutineNoiseEvent(raw: unknown, afterAutomation: boolean): boo
     const nonempty = texts.map((x) => x.trim()).filter(Boolean);
     const quietAll = nonempty.length === 0 || nonempty.every(isQuietRoutineReply);
     const protocolNoop = nonempty.length > 0
-      && nonempty.every((x) => isExactNoUpdate(x) || isModelEosToken(x));
+      && nonempty.every((x) => isExactNoUpdate(x) || isModelEosToken(x) || isEmptyReplyPlaceholder(x));
     // Protocol idle tokens (exact NO_UPDATE / EOS) never badge, even if a
     // tool-result `user` event already closed the automation turn.
     if (protocolNoop) return true;

@@ -26,12 +26,18 @@ export function isModelEosToken(text: string): boolean {
   return MODEL_EOS_TOKENS.has(text.trim());
 }
 
+/** The Muse harness closes a tool-only turn with this exact placeholder
+ *  as a zero-token result. Engine bookkeeping, never a reply. */
+export function isEmptyReplyPlaceholder(text: string): boolean {
+  return text.trim() === '[Previous turn ended without an assistant reply.]';
+}
+
 /** Strict no-op tokens the model is told to emit. Empty is not a token.
  *  Exact `quiet` / `quiet.` only — "Quiet quitting is…" must still show. */
 export function isNoopToken(text: string): boolean {
   const t = text.trim();
   if (!t) return false;
-  if (isExactNoUpdate(t) || isModelEosToken(t)) return true;
+  if (isExactNoUpdate(t) || isModelEosToken(t) || isEmptyReplyPlaceholder(t)) return true;
   return /^quiet[.!?]*$/.test(normalizeReply(t));
 }
 
@@ -40,7 +46,7 @@ export function isQuietRoutineReply(text: string): boolean {
   const t = text.trim();
   if (!t) return true;
   const lower = normalizeReply(t);
-  if (isExactNoUpdate(t) || isModelEosToken(t)) return true;
+  if (isExactNoUpdate(t) || isModelEosToken(t) || isEmptyReplyPlaceholder(t)) return true;
   if (ROUTINE_PROGRESS.test(lower) && lower.length < 600) return true;
   if (/^quiet\b/.test(lower)) {
     if (/\b(posted|failed|needs you|needs matt)\b/.test(lower) || /\berror:/.test(lower)) return false;
