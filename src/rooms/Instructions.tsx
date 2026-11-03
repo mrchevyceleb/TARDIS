@@ -2,7 +2,7 @@
 // place (Matt, Nov 3 2026: "i want to be able to easily directly manage ALL
 // CONTEXT and instructions ALL agents in tardis get").
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, ChevronDown, Copy, Eye, Pencil, ScrollText, Search, Sparkles, Users, X } from 'lucide-react';
 import { apiJson } from '../data/api';
@@ -22,6 +22,25 @@ export function Instructions() {
   const [picked, setPicked] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
   const [exact, setExact] = useState(false);
+  // Layer keys with unsaved edits, so switching agent or view never drops work.
+  const [dirty, setDirty] = useState<Set<string>>(() => new Set());
+  const markDirty = useCallback((key: string, on: boolean) => setDirty(prev => {
+    if (prev.has(key) === on) return prev;
+    const next = new Set(prev);
+    if (on) next.add(key); else next.delete(key);
+    return next;
+  }), []);
+  const leave = (go: () => void) => {
+    if (dirty.size && !window.confirm('You have unsaved changes. Leave them and switch anyway?')) return;
+    setDirty(new Set());
+    go();
+  };
+  useEffect(() => {
+    if (!dirty.size) return;
+    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty.size]);
   const agentId = picked ?? agents[0]?.id ?? null;
   const query = useQuery({
     queryKey: ['instructions', agentId],
@@ -47,7 +66,7 @@ export function Instructions() {
         <aside className="ins-agents">
           <label className="ins-search"><Search size={14} /><input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Find an agent" /></label>
           <div className="ins-agent-list">
-            {shown.map(a => <AgentChip key={a.id} agent={a} active={a.id === agentId} onPick={() => { setPicked(a.id); setExact(false); }} />)}
+            {shown.map(a => <AgentChip key={a.id} agent={a} active={a.id === agentId} onPick={() => { if (a.id !== agentId) leave(() => { setPicked(a.id); setExact(false); }); }} />)}
           </div>
         </aside>
 
@@ -60,7 +79,7 @@ export function Instructions() {
                 <div><strong>{data.layers.length}</strong><span>layers</span></div>
                 <div><strong>{kb(total)}</strong><span>{tokens(total)}</span></div>
                 <div><strong>{data.agent.engine}</strong><span>engine</span></div>
-                <button className="ins-toggle" aria-pressed={exact} onClick={() => setExact(v => !v)}>
+                <button className="ins-toggle" aria-pressed={exact} onClick={() => leave(() => setExact(v => !v))}>
                   <Eye size={14} /> {exact ? 'Back to layers' : 'Exact text TARDIS adds'}
                 </button>
               </div>
@@ -68,7 +87,7 @@ export function Instructions() {
                 <div className="ins-layers">
                   {data.layers.map((layer, i) => (
                     <LayerCard key={`${data.agent.id}:${layer.key}`} layer={layer} index={i} agentId={data.agent.id}
-                      weight={layer.bytes / biggest} names={names} />
+                      weight={layer.bytes / biggest} names={names} onDirty={markDirty} />
                   ))}
                 </div>
               )}
@@ -91,22 +110,27 @@ function AgentChip({ agent, active, onPick }: { agent: Agent; active: boolean; o
   );
 }
 
-function LayerCard({ layer, index, agentId, weight, names }: { layer: Layer; index: number; agentId: string; weight: number; names: Map<string, string> }) {
+function LayerCard({ layer, index, agentId, weight, names, onDirty }: { layer: Layer; index: number; agentId: string; weight: number; names: Map<string, string>; onDirty: (key: string, on: boolean) => void }) {
   const client = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState<string | null>(null);
+  // The file's mtime when editing began travels with the draft, so a refetch
+  // mid-edit can never quietly turn a stale save into an overwrite.
+  const [draft, setDraft] = useState<{ text: string; mtime: number } | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
   useEffect(() => { if (!saved) return; const t = window.setTimeout(() => setSaved(false), 1600); return () => window.clearTimeout(t); }, [saved]);
   const others = layer.sharedWith.filter(id => id !== agentId);
   const editing = draft !== null;
+  const changed = draft !== null && draft.text !== layer.text;
+  useEffect(() => { onDirty(layer.key, changed); }, [changed, layer.key, onDirty]);
+  useEffect(() => () => onDirty(layer.key, false), [layer.key, onDirty]);
 
   async function save() {
     if (draft === null) return;
     setSaving(true); setError('');
     try {
-      await apiJson('/api/instructions', { method: 'PUT', body: JSON.stringify({ path: layer.path, text: draft, mtime: layer.mtime }) });
+      await apiJson('/api/instructions', { method: 'PUT', body: JSON.stringify({ path: layer.path, text: draft.text, mtime: draft.mtime }) });
       setDraft(null); setSaved(true);
       await client.invalidateQueries({ queryKey: ['instructions'] });
     } catch (e) {
@@ -133,7 +157,7 @@ function LayerCard({ layer, index, agentId, weight, names }: { layer: Layer; ind
             {others.length ? <span>Also used by {others.map(id => names.get(id) ?? id).join(', ')}</span> : <span>Only this agent</span>}
           </div>
           {editing ? (
-            <textarea className="ins-editor" value={draft} onChange={e => setDraft(e.target.value)} spellCheck autoFocus />
+            <textarea className="ins-editor" value={draft.text} onChange={e => setDraft({ ...draft, text: e.target.value })} spellCheck autoFocus />
           ) : (
             <pre className="ins-text">{layer.text}</pre>
           )}
@@ -143,10 +167,10 @@ function LayerCard({ layer, index, agentId, weight, names }: { layer: Layer; ind
               <>
                 {others.length ? <span className="ins-warn">Saving changes this for {layer.sharedWith.length} agents.</span> : null}
                 <button onClick={() => { setDraft(null); setError(''); }} disabled={saving}><X size={14} /> Cancel</button>
-                <button className="primary" onClick={save} disabled={saving || draft === layer.text}><Check size={14} /> {saving ? 'Saving…' : 'Save'}</button>
+                <button className="primary" onClick={save} disabled={saving || !changed}><Check size={14} /> {saving ? 'Saving…' : 'Save'}</button>
               </>
             ) : (
-              <button className="primary" onClick={() => setDraft(layer.text)}><Pencil size={14} /> Edit</button>
+              <button className="primary" onClick={() => setDraft({ text: layer.text, mtime: layer.mtime })}><Pencil size={14} /> Edit</button>
             )}
           </div>
         </div>

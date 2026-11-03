@@ -8,7 +8,7 @@ import { STATE_DIR } from './config.ts';
 import { agentForChatId } from './agents.ts';
 import { DESK_ROOM_ENABLED } from '../config.ts';
 import { sessionBriefs, sessionMemory, taskControlGuidance } from './sessionPolicy.ts';
-import { sharedRule } from './sharedRules.ts';
+import { sharedRule, type SharedRuleId } from './sharedRules.ts';
 
 export const PERSONAS_DIR = join(STATE_DIR, 'personas');
 
@@ -48,3 +48,7 @@ export function writeScopeFile(file: string, body: string): void {
   mkdirSync(PERSONAS_DIR, { recursive: true });
   writeFileSync(join(PERSONAS_DIR, file), body);
 }
+
+/** An engine's own basics, addressed to the agent by name. */
+export const engineRule = (id: SharedRuleId, chatId: string): string =>
+  sharedRule(id, { name: agentForChatId(chatId)?.name ?? 'a teammate' });

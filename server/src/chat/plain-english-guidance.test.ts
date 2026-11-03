@@ -5,13 +5,13 @@
 // stay silent or exact, so no writing rule rides them.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { PLAIN_ENGLISH_WRITING_BLOCK, plainEnglishWritingBlockFor } from './plain-english-guidance.ts';
+import { plainEnglishWritingBlock, plainEnglishWritingBlockFor } from './plain-english-guidance.ts';
 
 test('the block rides agy and OpenRouter Gemini human turns only', () => {
-  assert.equal(plainEnglishWritingBlockFor({ cli: 'agy', model: '' }), PLAIN_ENGLISH_WRITING_BLOCK);
-  assert.equal(plainEnglishWritingBlockFor({ cli: 'openrouter', model: 'google/gemini-4-argon' }), PLAIN_ENGLISH_WRITING_BLOCK);
-  assert.equal(plainEnglishWritingBlockFor({ cli: 'openrouter', model: '~google/gemini-3.8-flash' }), PLAIN_ENGLISH_WRITING_BLOCK);
-  assert.equal(plainEnglishWritingBlockFor({ cli: 'openrouter', model: 'Google/Gemini-4-Argon' }), PLAIN_ENGLISH_WRITING_BLOCK);
+  assert.equal(plainEnglishWritingBlockFor({ cli: 'agy', model: '' }), plainEnglishWritingBlock());
+  assert.equal(plainEnglishWritingBlockFor({ cli: 'openrouter', model: 'google/gemini-4-argon' }), plainEnglishWritingBlock());
+  assert.equal(plainEnglishWritingBlockFor({ cli: 'openrouter', model: '~google/gemini-3.8-flash' }), plainEnglishWritingBlock());
+  assert.equal(plainEnglishWritingBlockFor({ cli: 'openrouter', model: 'Google/Gemini-4-Argon' }), plainEnglishWritingBlock());
   assert.equal(plainEnglishWritingBlockFor({ cli: 'openrouter', model: 'anthropic/claude-opus-5.5' }), '');
   assert.equal(plainEnglishWritingBlockFor({ cli: 'zai', model: 'glm-5.3' }), '');
   assert.equal(plainEnglishWritingBlockFor({ cli: 'xai', model: 'grok-4.7' }), '');
@@ -24,5 +24,5 @@ test('voice and non-human turns carry no block', () => {
   assert.equal(plainEnglishWritingBlockFor({ cli: 'agy', model: '', humanTurn: false }), '');
   assert.equal(plainEnglishWritingBlockFor({ cli: 'openrouter', model: 'google/gemini-4-argon', humanTurn: false }), '');
   assert.equal(plainEnglishWritingBlockFor({ cli: 'openrouter', model: 'google/gemini-4-argon', voiceMode: true, humanTurn: false }), '');
-  assert.equal(plainEnglishWritingBlockFor({ cli: 'openrouter', model: 'google/gemini-4-argon', humanTurn: true }), PLAIN_ENGLISH_WRITING_BLOCK);
+  assert.equal(plainEnglishWritingBlockFor({ cli: 'openrouter', model: 'google/gemini-4-argon', humanTurn: true }), plainEnglishWritingBlock());
 });

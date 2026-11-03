@@ -39,7 +39,7 @@ import { maybeAutoCompact, noteUserTurn, peekEnginePrimerThroughSeq, refreshComp
 import { contextRotationDue, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { isAgentThread, isBackgroundChatId, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
-import { personaPromptFor } from './personaPrompts.ts';
+import { engineRule, personaPromptFor } from './personaPrompts.ts';
 import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
@@ -261,16 +261,8 @@ export class PiSession {
       ? [VOICE_STYLE_ADDENDUM, isRobotVoiceChatId(this.chatId) ? robotVoiceAddendum(this.chatId) : null].filter(Boolean).join('\n\n')
       : null;
     const persona = personaPromptFor(this.chatId);
-    const name = agentForChatId(this.chatId)?.name ?? 'a teammate';
-    const operating = [
-      `You are ${name}, a teammate aboard TARDIS, Matt's always-on office. You have file, shell and edit tools for this workspace, plus team tools (team_message, team_status and friends) for talking to other teammates, and assistant_* tools for email, calendar, tasks and integrations.`,
-      'Do the work yourself with tools; report outcomes plainly; never claim something is done that you did not verify.',
-      // Grok in particular likes to narrate a next step ("I'm looking at X now") and then end its turn with the step undone.
-      'Never end a turn on a stated intention. If you say you are checking, looking at, or about to do something, do it with tools in this same turn before you stop. The only things worth stopping for are a question the person must answer or a teammate reply you are waiting on, and say which.',
-      'External side effects stay draft-first unless the person explicitly asked you to send, post or deploy.',
-      'Nothing you start in the background can report back to you. A backgrounded shell, nohup job or watcher never wakes you when it finishes, and it may be stopped when your turn ends. Run what you need the result of in the foreground, or poll it to completion inside this turn. If something must outlive the turn, tell the person what is running, where its output goes, and that you will not see it finish.',
-    ].join('\n');
-    return [persona, voiceAddendum, operating, isAgentThread(this.chatId) ? transcriptGuidance() : null].filter(Boolean).join('\n\n');
+    const operating = engineRule('engine-pi', this.chatId);
+    return [persona, voiceAddendum, operating || null, isAgentThread(this.chatId) ? transcriptGuidance() : null].filter(Boolean).join('\n\n');
   }
 
   // ---- rpc transport -----------------------------------------------------------
