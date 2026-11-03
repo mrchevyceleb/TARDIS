@@ -3,6 +3,7 @@
 // and instructions ALL agents in tardis get"). The Instructions room reads
 // this to show each agent's whole prompt and edits the files in place.
 
+import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -13,6 +14,7 @@ import { sessionDirectory, sessionPolicy } from './sessionPolicy.ts';
 import { plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
 import { SHARED_RULES, SHARED_RULE_IDS, sharedRule, sharedRuleFile, sharedRuleText, transcriptGuidance, type SharedRuleId } from './sharedRules.ts';
 import { DESK_ROOM_ENABLED, ELROND_WORKSPACE_PATH } from '../config.ts';
+import { cliProfiles } from '../lib/cliProfiles.ts';
 
 export type InstructionLayer = {
   /** Stable key for the UI. */
@@ -111,17 +113,30 @@ function sources(agent: Agent): Source[] {
   return out;
 }
 
-/** Changes whenever a file behind this thread's instructions is saved, so a
- *  warm engine process that read them at spawn can be replaced at its next
- *  idle turn. The agent's own notes are left out: it writes them itself all
- *  day, and they are a running excerpt, not instructions. */
+/** Changes whenever the text of a file behind this thread's instructions
+ *  changes, so a warm engine process that read them at spawn can be replaced
+ *  at its next idle turn. Content, not mtime: saving unchanged text restarts
+ *  nobody. The agent's own notes are left out: it writes them itself all
+ *  day, and they are a running excerpt, not instructions. A Claude worker
+ *  may run on any Claude profile, so every profile's CLAUDE.md counts. */
 export function instructionsStamp(chatId: string): string {
   const agent = agentForChatId(chatId);
   if (!agent) return '';
   try {
-    return sources(agent).filter(s => s.key !== 'notes').map(s => {
-      try { return `${s.path}:${statSync(s.path).mtimeMs}`; } catch { return `${s.path}:-`; }
-    }).join('|');
+    const paths = sources(agent).filter(s => s.key !== 'notes').map(s => s.path);
+    if (cliForAgentEngine(agent.engine ?? '') === 'claude') {
+      for (const profile of cliProfiles()) {
+        const file = profile.engine === 'claude' ? real(join(profile.path, 'CLAUDE.md')) : null;
+        if (file && !paths.includes(file)) paths.push(file);
+      }
+    }
+    const hash = createHash('sha256');
+    for (const path of paths) {
+      hash.update(path).update('\0');
+      try { hash.update(readFileSync(path)); } catch { hash.update('-'); }
+      hash.update('\0');
+    }
+    return hash.digest('hex');
   } catch { return ''; }
 }
 

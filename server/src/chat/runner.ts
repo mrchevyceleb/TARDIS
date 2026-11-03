@@ -984,6 +984,12 @@ class ClaudeSession {
       '--model', zaiCredential?.wireModel ?? ((cli === 'claude' || cli === 'assistant') && /^claude-(sonnet|opus)-5-5$/.test(this.spawnModel) ? `${this.spawnModel}[1m]` : this.spawnModel),
       // The claude binary's --effort has no `minimal`; only the Pi harness does.
       '--effort', this.spawnEffort === 'minimal' ? 'low' : this.spawnEffort,
+      // Claude Code records the system prompt on a conversation's first
+      // request and replays that record on every resume, so a respawn after
+      // an instruction edit would still run the old text. Render it from this
+      // launch instead; within one process the text is fixed, so the prompt
+      // cache still holds.
+      '--system-prompt-snapshot', 'off',
     ];
     if (resumeId) args.push('--resume', resumeId);
     // Voice mode is derived from the chatId (`jarvis-*`, set by the
@@ -3855,10 +3861,11 @@ async function getOrCreateSessionUnlocked(opts: {
         await waitForChildExit(existing, 5_000);
         continue;
       }
-      // Instructions are read at spawn. When Matt saves an instruction file in
-      // the Instructions room (or on disk), the next real turn replaces an idle
-      // process; --resume keeps the same conversation.
-      if (!opts.passive && !opts.handoverSource && !existing.isBusy() && !holdsBackgroundWork(existing)
+      // Instructions are read at spawn. When Matt saves a change to an
+      // instruction file in the Instructions room (or on disk), the next real
+      // turn replaces an idle process; --resume keeps the same conversation.
+      // Agy resends its instruction block in place instead (agy-runner.ts).
+      if (!opts.passive && !opts.handoverSource && !(existing instanceof AgySession) && !existing.isBusy() && !holdsBackgroundWork(existing)
           && spawnStamps.get(existing) !== instructionsStamp(chatId)) {
         existing.shutdown('instructions changed');
         await waitForChildExit(existing, 5_000);

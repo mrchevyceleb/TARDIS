@@ -43,6 +43,7 @@ import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-guidance.ts';
 import { isVoiceChatId, isRobotVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STYLE_ADDENDUM, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { transcriptGuidance } from './sharedRules.ts';
+import { instructionsStamp } from './instructionLayers.ts';
 import { emptyTurnOrigin, noteTurnPeer, type TurnOrigin } from './providerSwitch.ts';
 import { longCallGateEnv } from './longCallGate.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
@@ -183,6 +184,10 @@ export class AgySession {
   private lastBoundaryInterruptAt = 0;
   private pausedForMessage = false;
   private seedWindowOnNextTurn = false;
+  /** Stamp of the instructions this process last sent. Agy carries its
+   *  instruction block in the conversation, so a saved edit (or a resumed
+   *  process that has not sent one yet) sends the current block again. */
+  private sentInstructions: string | null = null;
   private terminalNoticeEmitted = false;
   private buffer = '';
   /** Consecutive unparsable or unrecognized stdout frames; resets on a
@@ -1058,10 +1063,13 @@ export class AgySession {
       // (review 1 P0/P1: a last-position writing rule would push Gemini to
       // chatter instead of NO_UPDATE, or to speak backticks on a call).
       const plainEnglish = plainEnglishWritingBlockFor({ cli: this.cli, model: '', voiceMode: opts.voiceMode, humanTurn });
-      message = `${wantSeed ? this.systemPromptBlock() : ''}\n\n${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${continuation}${plainEnglish ? `\n\n${plainEnglish}` : ''}`;
+      const instructions = instructionsStamp(this.chatId);
+      const sendInstructions = wantSeed || instructions !== this.sentInstructions;
+      message = `${sendInstructions ? this.systemPromptBlock() : ''}\n\n${computerContext}\n\n${priorities ? `${priorities}\n\n` : ''}${seed ? `${seed}\n\n---\n\n` : ''}${continuation}${plainEnglish ? `\n\n${plainEnglish}` : ''}`;
 
       try {
         await this.writeUserLine(message);
+        if (sendInstructions) this.sentInstructions = instructions;
         this.pendingStateAccepts.push(stateDelta.accept);
       } catch (error) {
         // A failed stdin write is an indeterminate protocol boundary: the old
