@@ -2063,6 +2063,10 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         setAside.clear();
         continue;
       }
+      // Holds only narrow who may lead or join a new batch; a frozen batch
+      // is rebuilt from the full queue, since its ack deletes every stamped
+      // member and one filtered out here would be lost undelivered.
+      const allQueued = candidates;
       candidates = candidates.filter((item) => !setAside.has(item.id) && !behindHeldJob(item));
       // (card-504beb, verify P1 3 + review 3 P1 7) A queued record never
       // leads over a non-queued one in its OWN tier: it would wait out the
@@ -2093,7 +2097,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // delivered that member's text (this retry re-sends the rest anyway),
         // and a batch that never went simply delivers it separately. Left
         // stamped, the ack would delete a record that never rode the resend.
-        const { ride, drop } = frozenBatchMembers(lead, candidates.filter((item) => item.id !== lead.id && item.batchLeadId === lead.id));
+        const { ride, drop } = frozenBatchMembers(lead, allQueued.filter((item) => item.id !== lead.id && item.batchLeadId === lead.id));
         if (drop.length > 0) {
           const droppedIds = new Set(drop.map((item) => item.id));
           await queueStoreOperation(() => queuedDeliveryStore.modify((items) => items.map((item) => {
@@ -2169,7 +2173,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       const leadIsChannelFanout = lead.fromRole === 'channel';
       let freshRetryReason: string | undefined;
       let waitsForTurnEnd = false;
-      let freshStarted = false;
+      let taskStartLead = false;
       const toHome = agentLogKey(to);
       const toLogKey = logKeyFor(toHome.cli, sessionDirectory(toHome.chatKey, ELROND_WORKSPACE_PATH), toHome.chatKey);
       // A wipe that already began (`resetting`) always finishes before
@@ -2185,6 +2189,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // stale stamp from an earlier build) can never wipe for a sender
         // that is no longer a task source for this recipient.
         && isTaskStartHandoff({ senderId: lead.fromId, recipientId: to.id, recipientHome: to.home, text: lead.text }))) {
+        taskStartLead = true;
         // The batch is owed a wipe until its own task id's durable reset
         // state says complete: an interrupted wipe (`resetting`) resumes
         // after restart, and a different task is never suppressed by an
@@ -2193,7 +2198,6 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // delivering without a wipe until they drain.
         if (freshResetOwed(lead.taskId, lead.taskId ? threadResetTaskState(toLogKey, lead.taskId) : undefined)) {
           const wiped = await freshStartForAgent(to, lead.taskId);
-          freshStarted = wiped.fresh;
           // A missing or future queue stamp cannot prove a short wait, so it
           // counts as past the ceiling rather than holding indefinitely.
           const queuedAt = Date.parse(lead.createdAt ?? '');
@@ -2216,6 +2220,17 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
               freshRetryReason = `fresh-thread waiver not saved: ${(error as Error).message}`;
             }
           }
+        }
+      }
+      // A new job never joins a live turn, on its first attempt or any retry
+      // after its reset completed: a turn that started since then (or is
+      // running now) means it steps aside and waits, like a held job, so
+      // the recipient's other messages keep flowing meanwhile.
+      if (taskStartLead && !freshRetryReason) {
+        const busyNow = recipientBusyReason((await getRunner()).liveSessionsForLogKey(toLogKey));
+        if (busyNow && /mid-turn/i.test(busyNow)) {
+          freshRetryReason = busyNow;
+          waitsForTurnEnd = true;
         }
       }
       if (freshRetryReason) {
@@ -2249,10 +2264,9 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         waitForReply: false,
         deliveryId: lead.id,
         personPosted: lead.personPosted === true,
-        // A job that just got its fresh thread never steers: if a turn
-        // started in the gap since the reset, it rides the next turn of the
-        // new thread instead of joining that one mid-flight.
-        queue: lead.queue === true || freshStarted,
+        // A new job never steers: if a turn starts in the last gap before
+        // admission, it rides that thread's next turn instead.
+        queue: lead.queue === true || taskStartLead,
         nudgeHoldSince: batchHoldSince,
         personSourced: batchIsPersonSourced,
         mixedSenders: siblings.some((sibling) => sibling.fromId !== lead.fromId),
