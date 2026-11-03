@@ -1998,6 +1998,12 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
   // `setAside` empties each time only held jobs remain, so each re-checks
   // once per retry; `heldLogged` logs each task's hold reason once.
   const setAside = new Set<string>();
+  // Held jobs by id: a later message from the same sender belongs to that
+  // newer job, so it waits behind it instead of overtaking it into the old
+  // turn (where the job's reset would then erase it).
+  const heldJobs = new Map<string, { fromId: string; createdAt: string }>();
+  const behindHeldJob = (item: QueuedTeamDelivery) => [...heldJobs.entries()].some(([id, job]) =>
+    id !== item.id && item.fromId === job.fromId && String(item.createdAt ?? '') >= job.createdAt);
   const heldLogged = new Map<string, string>();
   for (const record of batch) {
     if (quietParked) break;
@@ -2049,13 +2055,15 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       }
       if (seenRows.length > 0) candidates = candidates.filter((item) => item.acked !== true);
       if (candidates.length === 0) break;
-      if (candidates.every((item) => setAside.has(item.id))) {
-        // Only held jobs remain: wait, then let each re-check its recipient.
+      for (const id of [...heldJobs.keys()]) if (!candidates.some((item) => item.id === id)) heldJobs.delete(id);
+      if (candidates.every((item) => setAside.has(item.id) || behindHeldJob(item))) {
+        // Only held jobs (and their senders' later messages) remain: wait,
+        // then let each job re-check its recipient.
         await retryDelay();
         setAside.clear();
         continue;
       }
-      candidates = candidates.filter((item) => !setAside.has(item.id));
+      candidates = candidates.filter((item) => !setAside.has(item.id) && !behindHeldJob(item));
       // (card-504beb, verify P1 3 + review 3 P1 7) A queued record never
       // leads over a non-queued one in its OWN tier: it would wait out the
       // live turn for up to 30 minutes with no interrupt, blocking the
@@ -2152,8 +2160,8 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       // never suppresses another's). The wipe itself waits for an idle
       // boundary and re-checks idle under the barrier, so a busy recipient
       // is never killed for a queued task, and the task never joins a live
-      // turn either: it waits for that turn to end. Person-sourced records never trigger it: they
-      // steer the thread the person is talking in. A wipe that fails before
+      // turn either: it waits for that turn to end. Person-sourced records
+      // never trigger it: they steer the thread the person is talking in. A wipe that fails before
       // anything destructive ran delivers into the intact old thread; one
       // that fails after the reset began holds the durable records for
       // retry instead.
@@ -2161,7 +2169,14 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       const leadIsChannelFanout = lead.fromRole === 'channel';
       let freshRetryReason: string | undefined;
       let waitsForTurnEnd = false;
-      if (freshThreadOnTask(to.home)
+      let freshStarted = false;
+      const toHome = agentLogKey(to);
+      const toLogKey = logKeyFor(toHome.cli, sessionDirectory(toHome.chatKey, ELROND_WORKSPACE_PATH), toHome.chatKey);
+      // A wipe that already began (`resetting`) always finishes before
+      // anything is delivered, whatever rule stamped the task: delivering
+      // into a half-reset thread is never safe.
+      const resetInFlight = Boolean(lead.taskId) && threadResetTaskState(toLogKey, lead.taskId!)?.state === 'resetting';
+      if (resetInFlight || (freshThreadOnTask(to.home)
         && !batchIsPersonSourced
         && !leadIsChannelFanout
         && !nudgeHoldActive(lead)
@@ -2169,9 +2184,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // trusting a stored marker alone, so an operator list change (or a
         // stale stamp from an earlier build) can never wipe for a sender
         // that is no longer a task source for this recipient.
-        && isTaskStartHandoff({ senderId: lead.fromId, recipientId: to.id, recipientHome: to.home, text: lead.text })) {
-        const toHome = agentLogKey(to);
-        const toLogKey = logKeyFor(toHome.cli, sessionDirectory(toHome.chatKey, ELROND_WORKSPACE_PATH), toHome.chatKey);
+        && isTaskStartHandoff({ senderId: lead.fromId, recipientId: to.id, recipientHome: to.home, text: lead.text }))) {
         // The batch is owed a wipe until its own task id's durable reset
         // state says complete: an interrupted wipe (`resetting`) resumes
         // after restart, and a different task is never suppressed by an
@@ -2180,6 +2193,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // delivering without a wipe until they drain.
         if (freshResetOwed(lead.taskId, lead.taskId ? threadResetTaskState(toLogKey, lead.taskId) : undefined)) {
           const wiped = await freshStartForAgent(to, lead.taskId);
+          freshStarted = wiped.fresh;
           // A missing or future queue stamp cannot prove a short wait, so it
           // counts as past the ceiling rather than holding indefinitely.
           const queuedAt = Date.parse(lead.createdAt ?? '');
@@ -2217,6 +2231,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // keeps the queue behind it, so nothing lands in a half-reset thread.
         if (waitsForTurnEnd) {
           setAside.add(lead.id);
+          heldJobs.set(lead.id, { fromId: lead.fromId, createdAt: String(lead.createdAt ?? '') });
           continue;
         }
         await retryDelay();
@@ -2234,7 +2249,10 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         waitForReply: false,
         deliveryId: lead.id,
         personPosted: lead.personPosted === true,
-        queue: lead.queue === true,
+        // A job that just got its fresh thread never steers: if a turn
+        // started in the gap since the reset, it rides the next turn of the
+        // new thread instead of joining that one mid-flight.
+        queue: lead.queue === true || freshStarted,
         nudgeHoldSince: batchHoldSince,
         personSourced: batchIsPersonSourced,
         mixedSenders: siblings.some((sibling) => sibling.fromId !== lead.fromId),
@@ -2278,7 +2296,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         break;
       }
       const remains = await queueStoreOperation(async () =>
-        (await queuedDeliveryStore.list()).some((item) => item.id === record.id));
+        (await queuedDeliveryStore.list()).some((item) => item.id === lead.id));
       // A dropped or gone lead needs neither the warning nor the retry wait:
       // sleeping here would stall the member's other queued deliveries for a
       // full retry interval after every channel Stop (review 3, P2 7).
