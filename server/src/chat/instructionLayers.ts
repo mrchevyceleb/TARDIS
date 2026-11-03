@@ -14,7 +14,6 @@ import { sessionDirectory, sessionPolicy } from './sessionPolicy.ts';
 import { plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
 import { SHARED_RULES, SHARED_RULE_IDS, sharedRule, sharedRuleFile, sharedRuleText, transcriptGuidance, type SharedRuleId } from './sharedRules.ts';
 import { DESK_ROOM_ENABLED, ELROND_WORKSPACE_PATH } from '../config.ts';
-import { cliProfiles } from '../lib/cliProfiles.ts';
 
 export type InstructionLayer = {
   /** Stable key for the UI. */
@@ -117,19 +116,17 @@ function sources(agent: Agent): Source[] {
  *  changes, so a warm engine process that read them at spawn can be replaced
  *  at its next idle turn. Content, not mtime: saving unchanged text restarts
  *  nobody. The agent's own notes are left out: it writes them itself all
- *  day, and they are a running excerpt, not instructions. A Claude worker
- *  may run on any Claude profile, so every profile's CLAUDE.md counts. */
-export function instructionsStamp(chatId: string): string {
+ *  day, and they are a running excerpt, not instructions. `profile` is the
+ *  Claude profile folder the process actually runs on, whose CLAUDE.md the
+ *  engine loads (the global rules); no other profile's file counts. */
+export function instructionsStamp(chatId: string, profile?: string | null): string {
   const agent = agentForChatId(chatId);
   if (!agent) return '';
   try {
-    const paths = sources(agent).filter(s => s.key !== 'notes').map(s => s.path);
-    if (cliForAgentEngine(agent.engine ?? '') === 'claude') {
-      for (const profile of cliProfiles()) {
-        const file = profile.engine === 'claude' ? real(join(profile.path, 'CLAUDE.md')) : null;
-        if (file && !paths.includes(file)) paths.push(file);
-      }
-    }
+    const paths = sources(agent).filter(s => s.key !== 'notes' && s.key !== 'global').map(s => s.path);
+    const global = profile ? real(join(profile, 'CLAUDE.md')) ?? real('~/.claude/CLAUDE.md') : null;
+    if (global && !paths.includes(global)) paths.push(global);
+    else if (!profile) for (const s of sources(agent)) if (s.key === 'global' && !paths.includes(s.path)) paths.push(s.path);
     const hash = createHash('sha256');
     for (const path of paths) {
       hash.update(path).update('\0');

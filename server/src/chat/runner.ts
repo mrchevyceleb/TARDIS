@@ -1996,6 +1996,12 @@ class ClaudeSession {
     return this.disposed;
   }
 
+  /** The Claude profile folder this process runs on, whatever the provider:
+   *  its CLAUDE.md is part of the instructions the engine loads. */
+  instructionProfile(): string | null {
+    return this.providerAccount || null;
+  }
+
   /** Read the profile this process actually spawned with, without starting it. */
   subscriptionProfile(): string | null {
     return this.cli === 'claude' || this.cli === 'assistant' ? this.providerAccount || null : null;
@@ -3866,7 +3872,7 @@ async function getOrCreateSessionUnlocked(opts: {
       // turn replaces an idle process; --resume keeps the same conversation.
       // Agy resends its instruction block in place instead (agy-runner.ts).
       if (!opts.passive && !opts.handoverSource && !(existing instanceof AgySession) && !existing.isBusy() && !holdsBackgroundWork(existing)
-          && spawnStamps.get(existing) !== instructionsStamp(chatId)) {
+          && spawnStamps.get(existing) !== stampFor(existing, chatId)) {
         existing.shutdown('instructions changed');
         await waitForChildExit(existing, 5_000);
         if (!existing.processExited()) throw new Error('The previous native worker is still stopping. Its saved session is retained.');
@@ -4165,6 +4171,8 @@ const pendingSpawns = new Map<string, Promise<LaneSession>>();
 
 /** The instructions stamp each live process was spawned with. */
 const spawnStamps = new WeakMap<LaneSession, string>();
+const stampFor = (session: LaneSession, chatId: string): string =>
+  instructionsStamp(chatId, session instanceof ClaudeSession ? session.instructionProfile() : null);
 
 async function spawnSessionOnce(
   cli: CliKind,
@@ -4227,7 +4235,7 @@ async function spawnSession(
     ? new MuseSession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort, resolveClaudeModel(cli, model)), seedFirst, switchedFrom)
     : new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, seedFirst, switchedFrom);
   sessions.set(key, session);
-  spawnStamps.set(session, instructionsStamp(chatId));
+  spawnStamps.set(session, stampFor(session, chatId));
   notifySessionCreated(session.logKey, session);
 
   session.subscribe((se) => {
