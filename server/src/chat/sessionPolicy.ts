@@ -33,8 +33,8 @@ export type AgentSessionPolicy = {
    *  empty, there is no operator allowlist: only a lead briefing one of its
    *  coders may stamp a task start. */
   freshTaskSenders?: string[];
-  /** When set, a handoff opens a new task (and a fresh thread) only when its
-   *  text starts with this prefix, e.g. "New job:". Every other message from
+  /** A handoff opens a new task (and a fresh thread) only when its text
+   *  starts with this prefix (default "New job:"). Every other message from
    *  a task source is a round inside the job in flight and keeps the thread
    *  (Matt, Nov 2 2026: Pippin stays on one job through every QA round with
    *  Sud and Sam, and only starts fresh once Sud passes it). */
@@ -198,9 +198,13 @@ export function freshTaskSenders(chatId: string): string[] {
   return sessionPolicy(chatId).freshTaskSenders ?? [];
 }
 
-/** The operator's new-task prefix for this recipient, if any. */
-export function freshTaskPrefix(chatId: string): string | undefined {
-  return sessionPolicy(chatId).freshTaskPrefix;
+/** The marker that opens a new task (and a fresh thread) for this
+ *  recipient. Every fresh-thread lane has one: the explicit marker is the
+ *  only task boundary (Matt, Nov 3 2026), so no guess from Desk cards or
+ *  timing ever decides it. */
+export const DEFAULT_FRESH_TASK_PREFIX = 'New job:';
+export function freshTaskPrefix(chatId: string): string {
+  return sessionPolicy(chatId).freshTaskPrefix ?? DEFAULT_FRESH_TASK_PREFIX;
 }
 
 /** Provider profiles need not install the same native skill catalog. Keep

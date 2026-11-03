@@ -22,7 +22,6 @@ import { freshThreadOnTask, freshTaskSenders, freshTaskPrefix, sessionDirectory 
 import { freshLifecycleStarted, freshLifecycleCompleted } from './freshLifecycle.ts';
 import { persistThreadResetEpoch, noteThreadResetEpoch, persistThreadResetTaskState, restoreThreadResetTaskState, threadResetTaskState, type ThreadResetTaskState } from './threadResetStore.ts';
 import { clearThreadSessionIds } from './sessions.ts';
-import { readOpenWork, type OpenWork } from './openWork.ts';
 import type { CliKind } from './runner.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
@@ -148,18 +147,6 @@ export function chainContinues(parentChain: TeamChain | undefined, fromId: strin
   return edges.includes(replyEdge(fromId, toId)) || edges.includes(replyEdge(toId, fromId));
 }
 
-/** Why a fresh-thread wipe must not run for this recipient, or undefined.
- *  One job stays in one thread start to finish (Matt, Oct 24 2026): while
- *  the recipient owns an In progress card or has a running background job,
- *  any handoff is part of that job, so it lands in the standing thread. An
- *  unreadable Desk or jobs store also keeps the thread (never wipe blind). */
-export function openJobReason(work: OpenWork): string | undefined {
-  if (!work.ok) return 'open job state unreadable';
-  if (work.cards > 0) return 'recipient has an open job (In progress card)';
-  if (work.jobs > 0) return 'recipient has an open job (running background job)';
-  return undefined;
-}
-
 /** A wipe outcome that must hold the task instead of admitting it into the
  *  standing thread (Codex review, Oct 23 2026): busy, a reset already in
  *  flight, a brain switch, or any retryable failure. Anything else (notably
@@ -175,20 +162,23 @@ export function freshHoldReason(
   // Once this task's wipe began (`resetting`), the thread may be half
   // erased: every refusal holds until the wipe completes, whatever the cause.
   if (resetBegun) return reason || 'fresh start already began for this task';
-  // A busy recipient (a live turn, or background work a wipe would kill)
-  // holds the task only up to a ceiling (Matt, Oct 23 2026: fresh threads
-  // were switched off because handoffs to lanes running long background
-  // jobs sat queued forever). Past it the task falls open into the standing
-  // thread, late but never lost, but only when this task's wipe never
-  // began: a `resetting` state may mean a half-erased thread, so that task
-  // keeps waiting for idle and finishes its wipe first.
-  if (/became busy/i.test(reason)) return heldMs < FRESH_BUSY_HOLD_MS ? reason : undefined;
+  // A new job never interrupts a live turn (Matt, Nov 3 2026): it waits
+  // for the turn to end however long that takes, while other messages for
+  // the recipient keep flowing past it (the drain sets held tasks aside).
+  if (/mid-turn/i.test(reason)) return reason;
+  // Background work with no live turn (work a wipe would kill) holds only
+  // up to a ceiling (Matt, Oct 23 2026: handoffs to lanes running long
+  // background jobs sat queued forever). Past it the task falls open into
+  // the standing thread, late but never lost and never mid-turn, but only
+  // when this task's wipe never began: a `resetting` state may mean a
+  // half-erased thread, so that task keeps waiting and finishes its wipe.
+  if (/background work/i.test(reason)) return heldMs < FRESH_BUSY_HOLD_MS ? reason : undefined;
   if (/already resetting|brain changed/i.test(reason)) return reason;
   return undefined;
 }
 
-/** How long a fresh-thread task waits for its recipient to go idle before it
- *  is delivered into the standing thread instead. */
+/** How long a fresh-thread task waits on background work (with no live
+ *  turn) before it is delivered into the standing thread instead. */
 export const FRESH_BUSY_HOLD_MS = 5 * 60_000;
 
 /** Server-side stamp decision (Codex verify Oct 23 2026: never infer a task
@@ -220,7 +210,7 @@ export function isTaskStartHandoff(opts: {
   if (opts.continuesChain === true) return false;
   if (!freshThreadOnTask(opts.recipientHome)) return false;
   const prefix = freshTaskPrefix(opts.recipientHome);
-  if (prefix && !(opts.text ?? '').trimStart().toLowerCase().startsWith(prefix.toLowerCase())) return false;
+  if (!(opts.text ?? '').trimStart().toLowerCase().startsWith(prefix.toLowerCase())) return false;
   const allowed = freshTaskSenders(opts.recipientHome);
   if (allowed.length) return allowed.includes(opts.senderId);
   return isCoderBrief(opts.senderId, opts.recipientId);
@@ -231,7 +221,15 @@ export function isTaskStartHandoff(opts: {
  *  task boundary, never mid-turn and never through background work the
  *  reset would terminate. */
 export function recipientIdle(sessions: Array<{ busy: boolean; backgroundTasks?: string[] }>): boolean {
-  return sessions.every((s) => !s.busy && !(s.backgroundTasks?.length));
+  return recipientBusyReason(sessions) === undefined;
+}
+
+/** Why the recipient is not idle: a live turn on any lane, or only
+ *  background work a reset would terminate. */
+export function recipientBusyReason(sessions: Array<{ busy: boolean; backgroundTasks?: string[] }>): string | undefined {
+  if (sessions.some((s) => s.busy)) return 'recipient is mid-turn';
+  if (sessions.some((s) => s.backgroundTasks?.length)) return 'recipient has background work running';
+  return undefined;
 }
 
 /** Wipe a recipient's home thread so the next task lands in a clean one
@@ -273,12 +271,8 @@ export async function freshStartForAgent(agent: Agent, taskId?: string): Promise
     // drain's candidate pick must not be killed. Priors are read here (not
     // before the barrier) so this is the same set the wipe would retire.
     const priors = runner.liveSessionsForLogKey(logKey);
-    if (!recipientIdle(priors)) return { fresh: false, reason: 'recipient became busy before reset' };
-    // One job, one thread (Matt, Oct 24 2026): checked under the barrier,
-    // right before anything destructive, so work that opened during the
-    // reset's awaits still keeps the standing thread.
-    const openJob = openJobReason(readOpenWork(agent.id));
-    if (openJob) return { fresh: false, reason: openJob };
+    const busy = recipientBusyReason(priors);
+    if (busy) return { fresh: false, reason: busy };
     const resetAt = Date.now();
     // The durable per-task state commits before the epoch and before any
     // destructive work: if the process dies anywhere from here to the end,
@@ -297,14 +291,15 @@ export async function freshStartForAgent(agent: Agent, taskId?: string): Promise
     // killed. Interrupting idle lanes and dropping their handles erases
     // nothing durable, so until the session ids are cleared a busy recipient
     // simply backs out: the task's state goes back to what it was, and the
-    // drain treats it like any busy refusal (held, then the 5-minute
-    // fallback) instead of a half-wiped thread.
-    const backOut = async () => {
+    // drain treats it like any busy refusal (held until the turn ends)
+    // instead of a half-wiped thread.
+    const backOut = async (reason: string) => {
       if (taskId) await restoreThreadResetTaskState(logKey, taskId, priorTaskState);
-      return { fresh: false, reason: 'recipient became busy during reset' };
+      return { fresh: false, reason };
     };
     const current = runner.liveSessionsForLogKey(logKey);
-    if (!recipientIdle(current)) return await backOut();
+    const busyNow = recipientBusyReason(current);
+    if (busyNow) return await backOut(busyNow);
     noteThreadResetEpoch(logKey, committed);
     freshLifecycleStarted({ logKey, repo: repoPath, chatId, cli: home.cli });
     for (const prior of current) {
@@ -312,7 +307,8 @@ export async function freshStartForAgent(agent: Agent, taskId?: string): Promise
       // the started hook (held steers are gone), a busy lane can no longer
       // back out cleanly: hold for retry with `resetting` kept, which never
       // kills the turn and never delivers into the reset thread.
-      if (!recipientIdle(runner.liveSessionsForLogKey(logKey))) return { fresh: false, retryable: true, reason: 'recipient became busy during reset' };
+      const busyDuring = recipientBusyReason(runner.liveSessionsForLogKey(logKey));
+      if (busyDuring) return { fresh: false, retryable: true, reason: busyDuring };
       await runner.interruptSession({ cli: prior.cli as CliKind, repoPath: prior.cwd, chatId: prior.chatId });
       runner.dropSession(prior.cli as CliKind, prior.cwd, prior.chatId);
     }
@@ -1996,6 +1992,13 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
   // left is same-tier chatter, and the finally in scheduleQueuedRecipient
   // reschedules the queue at the 07:00 ET window end.
   let quietParked = false;
+  // New jobs waiting for the recipient's live turn to end are set aside so
+  // every other message keeps flowing past them (a held job at the head of
+  // the queue would otherwise block steers and rounds for the whole turn).
+  // `setAside` empties each time only held jobs remain, so each re-checks
+  // once per retry; `heldLogged` logs each task's hold reason once.
+  const setAside = new Set<string>();
+  const heldLogged = new Map<string, string>();
   for (const record of batch) {
     if (quietParked) break;
     while (true) {
@@ -2046,6 +2049,13 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       }
       if (seenRows.length > 0) candidates = candidates.filter((item) => item.acked !== true);
       if (candidates.length === 0) break;
+      if (candidates.every((item) => setAside.has(item.id))) {
+        // Only held jobs remain: wait, then let each re-check its recipient.
+        await retryDelay();
+        setAside.clear();
+        continue;
+      }
+      candidates = candidates.filter((item) => !setAside.has(item.id));
       // (card-504beb, verify P1 3 + review 3 P1 7) A queued record never
       // leads over a non-queued one in its OWN tier: it would wait out the
       // live turn for up to 30 minutes with no interrupt, blocking the
@@ -2141,8 +2151,8 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       // an interrupted wipe resumes after restart and one task's completion
       // never suppresses another's). The wipe itself waits for an idle
       // boundary and re-checks idle under the barrier, so a busy recipient
-      // is never killed for a queued task: admission below simply joins the
-      // live turn as today. Person-sourced records never trigger it: they
+      // is never killed for a queued task, and the task never joins a live
+      // turn either: it waits for that turn to end. Person-sourced records never trigger it: they
       // steer the thread the person is talking in. A wipe that fails before
       // anything destructive ran delivers into the intact old thread; one
       // that fails after the reset began holds the durable records for
@@ -2150,6 +2160,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       const batchIsPersonSourced = siblings.some((sibling) => personSourced(sibling));
       const leadIsChannelFanout = lead.fromRole === 'channel';
       let freshRetryReason: string | undefined;
+      let waitsForTurnEnd = false;
       if (freshThreadOnTask(to.home)
         && !batchIsPersonSourced
         && !leadIsChannelFanout
@@ -2178,6 +2189,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
           const hold = freshHoldReason(wiped, heldMs, resetBegun);
           if (hold) {
             freshRetryReason = hold;
+            waitsForTurnEnd = !resetBegun && /mid-turn/i.test(hold);
           } else if (!wiped.fresh) {
             // Falling open is durable: the task is marked settled, so a
             // later clarification with the same task id never wipes the
@@ -2196,7 +2208,17 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // Keep the durable records queued and let the drain retry: the
         // reset epoch is already committed, so the retry re-runs the
         // idempotent wipe rather than delivering into a half-erased thread.
-        console.warn(`[team] fresh thread for ${to.name} will retry: ${freshRetryReason}`);
+        if (heldLogged.get(lead.id) !== freshRetryReason) {
+          heldLogged.set(lead.id, freshRetryReason);
+          console.warn(`[team] fresh thread for ${to.name} will retry: ${freshRetryReason}`);
+        }
+        // A job waiting out a live turn steps aside so the recipient's other
+        // messages still reach that turn. Any other hold (a reset in flight)
+        // keeps the queue behind it, so nothing lands in a half-reset thread.
+        if (waitsForTurnEnd) {
+          setAside.add(lead.id);
+          continue;
+        }
         await retryDelay();
         continue;
       }

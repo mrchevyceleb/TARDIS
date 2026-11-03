@@ -5,7 +5,7 @@ import { abortInFlightChannelDeliveries, agentLogKey, batchJoinable, deliveryInt
 import { laneChatId } from './threadKey.ts';
 import type { Agent } from './agents.ts';
 import { freshThreadOnTask, freshTaskSenders } from './sessionPolicy.ts';
-import { isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed, openJobReason } from './teamBus.ts';
+import { isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed } from './teamBus.ts';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -189,25 +189,29 @@ test('only an explicit task-start handoff from a task source stamps a fresh thre
   }));
   const previous = process.env.RIVENDELL_SESSION_POLICY_FILE;
   process.env.RIVENDELL_SESSION_POLICY_FILE = file;
+  const job = 'New job: tidy the hub';
   try {
+    // Only the explicit marker opens a task; any other message is a round
+    // inside the job in flight.
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', text: 'one more thing on this job' }), false);
     // Unconfigured recipient: a lead-to-coder brief is a task start, a
     // peer's follow-up or a worker's reply back is not.
-    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina' }), true);
-    assert.equal(isTaskStartHandoff({ senderId: 'samwise', recipientId: 'christina', recipientHome: 'bot-christina' }), true);
-    assert.equal(isTaskStartHandoff({ senderId: 'christina', recipientId: 'christina', recipientHome: 'bot-christina' }), false);
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', text: job }), true);
+    assert.equal(isTaskStartHandoff({ senderId: 'samwise', recipientId: 'christina', recipientHome: 'bot-christina', text: job }), true);
+    assert.equal(isTaskStartHandoff({ senderId: 'christina', recipientId: 'christina', recipientHome: 'bot-christina', text: job }), false);
     // Configured allowlist wins over the coder set: only Riley opens tasks
     // for Tim, not even another lead.
-    assert.equal(isTaskStartHandoff({ senderId: 'riley', recipientId: 'tim', recipientHome: 'bot-tim' }), true);
-    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'tim', recipientHome: 'bot-tim' }), false);
+    assert.equal(isTaskStartHandoff({ senderId: 'riley', recipientId: 'tim', recipientHome: 'bot-tim', text: job }), true);
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'tim', recipientHome: 'bot-tim', text: job }), false);
     // Person-sourced, channel and nudged deliveries never stamp.
-    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', personSourced: true }), false);
-    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', source: 'channel' }), false);
-    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', nudgeHoldSince: 1 }), false);
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', text: job, personSourced: true }), false);
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', text: job, source: 'channel' }), false);
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', text: job, nudgeHoldSince: 1 }), false);
     // A follow-up inside work the sender is already having with this
     // recipient (chain leg) never stamps, even from a task source.
-    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', continuesChain: true }), false);
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', text: job, continuesChain: true }), false);
     // An unflagged recipient never stamps.
-    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'kip', recipientHome: 'bot-kip' }), false);
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'kip', recipientHome: 'bot-kip', text: job }), false);
   } finally {
     if (previous === undefined) delete process.env.RIVENDELL_SESSION_POLICY_FILE;
     else process.env.RIVENDELL_SESSION_POLICY_FILE = previous;
@@ -278,16 +282,13 @@ test('a task start is a batch boundary and a busy wipe holds the task', () => {
   assert.equal(chainContinues(undefined, 'kip', 'christina'), false);
   // Answering the recipient's own message is a reply, not a new task.
   assert.equal(chainContinues({ id: 'c2', edges: ['adam->max'], route: ['adam', 'max'] }, 'max', 'adam'), true);
-  // An open job keeps the standing thread; an unreadable store never wipes.
-  assert.equal(openJobReason({ ok: true, cards: 0, jobs: 0 }), undefined);
-  assert.match(openJobReason({ ok: true, cards: 1, jobs: 0 }) ?? '', /open job/);
-  assert.match(openJobReason({ ok: false, cards: 0, jobs: 0 }) ?? '', /unreadable/);
-  // Busy, resetting, switched-brain and destructive wipe failures hold the
-  // task for retry; only a clean fresh start admits it.
-  assert.equal(freshHoldReason({ fresh: false, reason: 'recipient became busy before reset' }), 'recipient became busy before reset');
+  // A live turn holds a new job however long it runs; background work alone
+  // holds it up to the ceiling; a begun reset always holds.
+  assert.equal(freshHoldReason({ fresh: false, reason: 'recipient is mid-turn' }, 60 * 60_000), 'recipient is mid-turn');
   assert.equal(freshHoldReason({ fresh: false, reason: 'thread already resetting' }), 'thread already resetting');
-  assert.equal(freshHoldReason({ fresh: false, reason: 'recipient became busy before reset' }, 6 * 60_000), undefined);
-  assert.equal(freshHoldReason({ fresh: false, reason: 'recipient became busy before reset' }, 6 * 60_000, true), 'recipient became busy before reset');
+  assert.equal(freshHoldReason({ fresh: false, reason: 'recipient has background work running' }), 'recipient has background work running');
+  assert.equal(freshHoldReason({ fresh: false, reason: 'recipient has background work running' }, 6 * 60_000), undefined);
+  assert.equal(freshHoldReason({ fresh: false, reason: 'recipient has background work running' }, 6 * 60_000, true), 'recipient has background work running');
   assert.equal(freshHoldReason({ fresh: false, retryable: true, reason: 'fresh start failed: boom' }), 'fresh start failed: boom');
   assert.equal(freshHoldReason({ fresh: false, reason: 'some other refusal' }), undefined);
   assert.equal(freshHoldReason({ fresh: true }), undefined);

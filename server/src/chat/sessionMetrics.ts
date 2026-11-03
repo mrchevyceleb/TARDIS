@@ -135,6 +135,13 @@ export function recordNativeSession(lane: string, engine: string, sessionId: str
   }
   sessions.set(key, sessionId);
 }
+/** A fresh thread (manual or a team task wipe) starts a new native session
+ *  on purpose: forget the lane's last id so the next id is not reported as
+ *  an unexpected replacement. */
+export function forgetNativeSession(lane: string): void {
+  const prefix = `${bareChatId(lane)}|`;
+  for (const key of [...sessions.keys()]) if (key.startsWith(prefix)) sessions.delete(key);
+}
 export function recordNativeCompact(lane: string, engine: string, sessionId: string | null, metadata: any): void {
   const before = Number(metadata?.pre_tokens ?? metadata?.before ?? 0);
   const after = Number(metadata?.post_tokens ?? metadata?.after ?? 0);

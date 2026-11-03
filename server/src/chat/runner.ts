@@ -25,7 +25,7 @@ import { bareChatId } from './threadKey.ts';
 import { NATIVE_SESSION_GENERATION, sessionDirectory, nativeClaudeSettings } from './sessionPolicy.ts';
 import { claudeNativeTranscriptPath, prepareClaudeNativeStorage } from './nativeSessionStorage.ts';
 import { openRouterToolSearch } from './openrouterCompatibility.ts';
-import { recordNativeSession, recordNativeCompact, recordNativeFailure, recordNativeNotice } from './sessionMetrics.ts';
+import { recordNativeSession, recordNativeCompact, recordNativeFailure, recordNativeNotice, forgetNativeSession } from './sessionMetrics.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { backgroundChatId, backgroundLaneEnabled, isAgentThread, isBackgroundChatId, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
@@ -4388,6 +4388,7 @@ export async function freshStart(opts: {
   assertSubscriptionLane(opts.cli);
   const chatId = isAgentThread(opts.chatId || '') ? bareChatId(opts.chatId!) : opts.chatId || 'main';
   const repoPath = sessionDirectory(chatId, opts.repoPath);
+  forgetNativeSession(chatId);
   // The background lane shares the reset thread on every engine: end it and
   // forget its resume id before any engine-specific reset runs.
   for (const [bgKey, bg] of backgroundSiblings(trackedThreadLogKey({ ...opts, repoPath, chatId }), chatId)) {
