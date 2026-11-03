@@ -114,7 +114,10 @@ def tick(config, state, now, config_path=None):
             try:
                 approved = checked_release(config) or adopt_checked_release(config, info, config_path)
             except (OSError, ValueError, subprocess.SubprocessError):
-                approved = False
+                # A git call that is slow while the new process starts is not
+                # a verdict on the build: check this process again next tick.
+                state.pop('pid', None)
+                return
             if approved:
                 state.pop('unapproved_source', None)
                 state.pop('unapproved_notice_pid', None)
