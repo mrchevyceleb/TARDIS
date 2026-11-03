@@ -106,7 +106,9 @@ function sources(agent: Agent): Source[] {
   for (const id of SHARED_RULE_IDS) {
     if (id === 'desk' && !DESK_ROOM_ENABLED) continue;
     if (!ruleApplies(id, agent)) continue;
-    sharedRuleText(id); // seeds the file on a fresh install
+    // Seeds the file on a fresh install. An emptied file is a switched-off
+    // rule: nothing reaches the agent, so the room does not list it.
+    if (!sharedRuleText(id)) continue;
     push(`rule:${id}`, SHARED_RULES[id].title, 'Shared rule added by TARDIS for every agent.', real(sharedRuleFile(id)));
   }
   return out;
