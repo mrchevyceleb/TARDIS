@@ -57,7 +57,7 @@ function assembledFor(agent: Agent): string {
   const cli = cliForAgentEngine(agent.engine ?? '');
   const persona = personaPromptFor(agent.home);
   if (cli === 'codex') return [persona, sharedRule('engine-codex')].filter(Boolean).join('\n\n');
-  if (cli === 'muse' || cli === 'agy') return [persona, engineRule(`engine-${cli}`, agent.home), transcriptGuidance()].filter(Boolean).join('\n\n');
+  if (cli === 'muse' || cli === 'agy' || cli === 'pi') return [persona, engineRule(`engine-${cli}`, agent.home), transcriptGuidance()].filter(Boolean).join('\n\n');
   return [persona, plainEnglishWritingSystemBlockFor({ cli, model: agent.model ?? '' }), transcriptGuidance()].filter(Boolean).join('\n\n');
 }
 

@@ -15,8 +15,14 @@ import { sharedRule } from './sharedRules.ts';
 // silence or an exact token. It rides only human turns on Gemini lanes —
 // voice turns keep their own spoken-style addendum, and automation, peer and
 // continuation turns must stay silent or exact.
-// The text itself is an editable shared rule (writing-plain-english.md).
-export const plainEnglishWritingBlock = (): string => sharedRule('writing-plain-english');
+// The rules themselves are an editable shared rule (writing-plain-english.md).
+// This opening line only frames the end-of-turn copy, so it stays here and
+// the system block can use the editable rules whole.
+const TURN_INTRO = 'How to write your reply (this sits at the end on purpose — follow it unless the message above asks for a specific format, an exact token, or silence: then do exactly that, including replying with only the token or not replying at all):';
+export const plainEnglishWritingBlock = (): string => {
+  const rules = sharedRule('writing-plain-english');
+  return rules ? `${TURN_INTRO}\n${rules}` : '';
+};
 
 /** The block for one turn, or '' when the turn must not carry it: voice turns
  *  (their spoken-style addendum forbids code, paths and IDs outright),
@@ -46,6 +52,6 @@ export function plainEnglishWritingSystemBlockFor(opts: { cli: string; model: st
   return [
     'Keep each Write, Edit or shell-command payload below about 15 KB. Build large files with several bounded writes or edits, checking each result before continuing. Keep the whole job and its full scope; only the individual tool payloads are smaller.',
     'For ordinary human replies, use the writing rules below. A request for a specific format, an exact token or silence takes priority. For voice replies, follow the spoken style. Teammate messages, automation and continuation events follow their own reply instructions.',
-    ...plainEnglishWritingBlock().split('\n').slice(1),
+    sharedRule('writing-plain-english'),
   ].join('\n');
 }

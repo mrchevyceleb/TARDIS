@@ -144,7 +144,6 @@ export const SHARED_RULES: Record<SharedRuleId, { title: string; tag: string; en
     tag: '',
     engine: 'gemini',
     seed: () => [
-      'How to write your reply (this sits at the end on purpose — follow it unless the message above asks for a specific format, an exact token, or silence: then do exactly that, including replying with only the token or not replying at all):',
       'Write plain English sentences. Results, counts and statuses go in sentences, not inline code.',
       '- If 149 tests passed, write: "The build passed all 149 tests and the type check is clean."',
       '- Not: "`149/149` pass, `finish_reason: step_limit`, `tsc` exit `0` ✅"',
