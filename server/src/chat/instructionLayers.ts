@@ -7,7 +7,7 @@ import { readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { STATE_DIR } from './config.ts';
-import { cliForAgentEngine, listAgents, type Agent } from './agents.ts';
+import { agentForChatId, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
 import { PERSONAS_DIR, engineRule, personaPromptFor } from './personaPrompts.ts';
 import { sessionDirectory, sessionPolicy } from './sessionPolicy.ts';
 import { plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
@@ -109,6 +109,20 @@ function sources(agent: Agent): Source[] {
     push(`rule:${id}`, SHARED_RULES[id].title, 'Shared rule added by TARDIS for every agent.', real(sharedRuleFile(id)));
   }
   return out;
+}
+
+/** Changes whenever a file behind this thread's instructions is saved, so a
+ *  warm engine process that read them at spawn can be replaced at its next
+ *  idle turn. The agent's own notes are left out: it writes them itself all
+ *  day, and they are a running excerpt, not instructions. */
+export function instructionsStamp(chatId: string): string {
+  const agent = agentForChatId(chatId);
+  if (!agent) return '';
+  try {
+    return sources(agent).filter(s => s.key !== 'notes').map(s => {
+      try { return `${s.path}:${statSync(s.path).mtimeMs}`; } catch { return `${s.path}:-`; }
+    }).join('|');
+  } catch { return ''; }
 }
 
 export function instructionLayers(agentId: string): { agent: Agent; layers: InstructionLayer[]; assembled: string } | null {

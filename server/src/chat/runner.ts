@@ -47,6 +47,7 @@ import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { chatAttachmentPath, saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn, laneContextForTurn } from './conversation-guidance.ts';
 import { transcriptGuidance } from './sharedRules.ts';
+import { instructionsStamp } from './instructionLayers.ts';
 import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
 import { claudeAccountPool } from '../lib/claudeAccountPool.ts';
 import { refreshClaudeAccountUsage } from '../lib/accountUsage.ts';
@@ -3854,6 +3855,18 @@ async function getOrCreateSessionUnlocked(opts: {
         await waitForChildExit(existing, 5_000);
         continue;
       }
+      // Instructions are read at spawn. When Matt saves an instruction file in
+      // the Instructions room (or on disk), the next real turn replaces an idle
+      // process; --resume keeps the same conversation.
+      if (!opts.passive && !opts.handoverSource && !existing.isBusy() && !holdsBackgroundWork(existing)
+          && spawnStamps.get(existing) !== instructionsStamp(chatId)) {
+        existing.shutdown('instructions changed');
+        await waitForChildExit(existing, 5_000);
+        if (!existing.processExited()) throw new Error('The previous native worker is still stopping. Its saved session is retained.');
+        sessions.delete(key);
+        await flushEventLog(existing.logKey);
+        continue;
+      }
       // Recycle only an IDLE session whose model/effort differs, and only when
       // the caller explicitly opted in (a real authoritative turn). session_id
       // is preserved so the replacement --resumes the same conversation. A
@@ -4143,6 +4156,9 @@ const BREAKER_COOLDOWN_MS = 60_000;
  *  single in-flight spawn per key so only one process is ever created. */
 const pendingSpawns = new Map<string, Promise<LaneSession>>();
 
+/** The instructions stamp each live process was spawned with. */
+const spawnStamps = new WeakMap<LaneSession, string>();
+
 async function spawnSessionOnce(
   cli: CliKind,
   cwd: string,
@@ -4204,6 +4220,7 @@ async function spawnSession(
     ? new MuseSession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort, resolveClaudeModel(cli, model)), seedFirst, switchedFrom)
     : new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, seedFirst, switchedFrom);
   sessions.set(key, session);
+  spawnStamps.set(session, instructionsStamp(chatId));
   notifySessionCreated(session.logKey, session);
 
   session.subscribe((se) => {
