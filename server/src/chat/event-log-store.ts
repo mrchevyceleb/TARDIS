@@ -1,6 +1,6 @@
 import { appendFile, mkdir, open as openFile, rename, rm } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
-import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { MAX_EVENTS_PER_LOG, STATE_DIR } from './config.ts';
 import { redactEventSecrets, redactSerializedSecrets } from './secretRedaction.ts';
@@ -303,13 +303,39 @@ function fingerprintAt(fd: number, end: number): Buffer {
   return readRange(fd, Math.max(0, end - TAIL_FINGERPRINT_BYTES), end);
 }
 
-type LogRead = { text: string; fragment: string; cursor: AppendCursor; size: number; mtimeMs: number };
+type LogRead = { fragment: string; cursor: AppendCursor; size: number; mtimeMs: number };
 
-/** Complete lines (text) plus any trailing line without a newline yet
- * (fragment). The fragment is never consumed, so it is re-read once complete.
- * With a cursor, returns only what was appended after it, or null when the
- * file was rewritten or truncated underneath the cursor. */
-function readLog(path: string, cursor?: AppendCursor, maxAppend?: number): LogRead | null {
+// Logs are read in bounded slices. V8 strings top out near 512 MB, so one
+// whole-file string made every read of a bigger log throw; the reader then
+// reported an empty log, the allocator restarted the lane at seq 1 and the
+// client hid every new reply behind its old cursor (Samwise, Nov 3 2026).
+const READ_SLICE_BYTES = 32 * 1024 * 1024;
+
+/** Streams `[from, end)` to `onText` as complete-line text, one bounded slice
+ * at a time, and returns where the complete lines end plus the trailing
+ * unterminated line (fragment). */
+function scanLines(fd: number, from: number, end: number, onText: (text: string) => void): { consumed: number; fragment: string } {
+  let carry: Buffer = Buffer.alloc(0);
+  let at = from;
+  while (at < end) {
+    const slice = readRange(fd, at, Math.min(end, at + READ_SLICE_BYTES));
+    if (slice.length === 0) break;
+    at += slice.length;
+    const buf = carry.length ? Buffer.concat([carry, slice]) : slice;
+    const completeEnd = buf.lastIndexOf(0x0a) + 1;
+    if (completeEnd > 0) onText(buf.toString('utf8', 0, completeEnd));
+    carry = buf.subarray(completeEnd);
+  }
+  return { consumed: at - carry.length, fragment: carry.toString('utf8') };
+}
+
+/** Streams complete lines to `onText` and returns any trailing line without a
+ * newline yet (fragment). The fragment is never consumed, so it is re-read once
+ * complete. With a cursor, reads only what was appended after it, or returns
+ * null (before any text is delivered) when the file was rewritten or truncated
+ * underneath the cursor. A null after text was delivered means an I/O failure
+ * mid-read; callers discard what they accumulated. */
+function readLog(path: string, onText: (text: string) => void, cursor?: AppendCursor, maxAppend?: number): LogRead | null {
   let fd = -1;
   try {
     fd = openSync(path, 'r');
@@ -323,14 +349,11 @@ function readLog(path: string, cursor?: AppendCursor, maxAppend?: number): LogRe
       if (!fingerprintAt(fd, cursor.consumed).equals(cursor.fingerprint)) return null;
       from = cursor.consumed;
     }
-    const chunk = readRange(fd, from, st.size);
-    const completeEnd = chunk.lastIndexOf(0x0a) + 1;
-    const consumed = from + completeEnd;
+    const { consumed, fragment } = scanLines(fd, from, st.size, onText);
     return {
-      text: chunk.toString('utf8', 0, completeEnd),
-      fragment: chunk.toString('utf8', completeEnd),
+      fragment,
       cursor: { ino: st.ino, consumed, fingerprint: fingerprintAt(fd, consumed) },
-      size: from + chunk.length,
+      size: consumed + Buffer.byteLength(fragment),
       mtimeMs: st.mtimeMs,
     };
   } catch {
@@ -448,20 +471,37 @@ function loadEventLogProven(
 
   // Grown since the cached read: parse only the appended bytes. Anything else
   // (never read, evicted, rewritten, truncated) is a full read.
-  const appended = cached ? readLog(path, cached.cursor, incrementalOnly ? TAIL_LOAD_MAX_BYTES : undefined) : null;
+  type ParseState = { events: PersistedEvent[]; eventChars: number[]; highWater: number; echoIds: string[] };
+  // Parse slice by slice, trimming as it goes, so a log of any size holds at
+  // most ~2x the replay window in memory instead of every event it ever had.
+  const parseInto = (state: ParseState) => (text: string) => {
+    parseLogLines(text, state);
+    if (state.events.length > MAX_EVENTS_PER_LOG * 2) {
+      const drop = state.events.length - MAX_EVENTS_PER_LOG;
+      state.events.splice(0, drop);
+      state.eventChars.splice(0, drop);
+    }
+    if (state.echoIds.length > RECEIPTS_PER_LOG * 2) state.echoIds.splice(0, state.echoIds.length - RECEIPTS_PER_LOG);
+  };
+  let state: ParseState | null = null;
+  let read: LogRead | null = null;
+  if (cached) {
+    // Copies, so a read that fails partway never leaves half an append in
+    // the cached entry.
+    state = { events: cached.events.slice(), eventChars: cached.eventChars.slice(), highWater: cached.highWater, echoIds: (echoReceipts.get(path) ?? []).slice() };
+    read = readLog(path, parseInto(state), cached.cursor, incrementalOnly ? TAIL_LOAD_MAX_BYTES : undefined);
+  }
   // The one place the full read is reachable, and the one place the bounded
   // caller gets to decline it.
-  if (incrementalOnly && !appended) return null;
-  const read = appended ?? readLog(path);
+  if (incrementalOnly && !read) return null;
   if (!read) {
+    state = { events: [], eventChars: [], highWater: 0, echoIds: [] };
+    read = readLog(path, parseInto(state));
+  }
+  if (!read || !state) {
     if (incrementalOnly) return null;
     return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
   }
-  const incremental = Boolean(appended && cached);
-  const state = incremental && cached
-    ? { events: cached.events, eventChars: cached.eventChars, highWater: cached.highWater, echoIds: echoReceipts.get(path) ?? [] }
-    : { events: [] as PersistedEvent[], eventChars: [] as number[], highWater: 0, echoIds: [] as string[] };
-  parseLogLines(read.text, state);
   if (state.echoIds.length > RECEIPTS_PER_LOG) state.echoIds.splice(0, state.echoIds.length - RECEIPTS_PER_LOG);
   echoReceipts.set(path, state.echoIds);
   // Trim to the most recent window so a long-lived session that crashed
@@ -928,46 +968,60 @@ export function durableUserEchoClientMsgId(key: string, clientMsgId: string): bo
   return (echoReceipts.get(logPath(key)) ?? []).includes(clientMsgId);
 }
 
+function lineSeq(line: string): number | null {
+  if (!line) return null;
+  try {
+    const seq = JSON.parse(line)?.seq;
+    return typeof seq === 'number' && Number.isFinite(seq) ? seq : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Line-by-line sequence repair, so a log of any size can be rewritten as a
+ * stream. `originalMax` is the file's maximum seq before the repair. */
+function createSequenceNormalizer(originalMax: number): { line: (line: string) => string; latestSeq: () => number; repaired: () => boolean } {
+  let previous = 0;
+  let repairCursor = originalMax;
+  let repaired = false;
+  let repairingTail = false;
+  return {
+    line: (line: string) => {
+      if (!line) return line;
+      try {
+        const record = JSON.parse(line);
+        if (typeof record?.seq !== 'number' || !Number.isFinite(record.seq)) return line;
+        if (!repairingTail && record.seq > previous) {
+          previous = record.seq;
+          return line;
+        }
+        // Once chronology regresses, move the ENTIRE remaining tail above the
+        // old file maximum. A browser already at that old maximum will then
+        // receive every repaired event instead of silently discarding one that
+        // merely collided with an existing cursor value.
+        repairingTail = true;
+        const next = ++repairCursor;
+        previous = next;
+        repaired = true;
+        return JSON.stringify({ ...record, seq: next });
+      } catch {
+        return line;
+      }
+    },
+    latestSeq: () => previous,
+    repaired: () => repaired,
+  };
+}
+
 export function normalizeEventLogSequence(lines: readonly string[]): {
   lines: string[];
   repaired: boolean;
   latestSeq: number;
 } {
-  const originalMax = lines.reduce((max, line) => {
-    try {
-      const seq = JSON.parse(line)?.seq;
-      return typeof seq === 'number' && Number.isFinite(seq) ? Math.max(max, seq) : max;
-    } catch {
-      return max;
-    }
-  }, 0);
-  let previous = 0;
-  let repairCursor = originalMax;
-  let repaired = false;
-  let repairingTail = false;
-  const normalized = lines.map((line) => {
-    if (!line) return line;
-    try {
-      const record = JSON.parse(line);
-      if (typeof record?.seq !== 'number' || !Number.isFinite(record.seq)) return line;
-      if (!repairingTail && record.seq > previous) {
-        previous = record.seq;
-        return line;
-      }
-      // Once chronology regresses, move the ENTIRE remaining tail above the
-      // old file maximum. A browser already at that old maximum will then
-      // receive every repaired event instead of silently discarding one that
-      // merely collided with an existing cursor value.
-      repairingTail = true;
-      const next = ++repairCursor;
-      previous = next;
-      repaired = true;
-      return JSON.stringify({ ...record, seq: next });
-    } catch {
-      return line;
-    }
-  });
-  return { lines: normalized, repaired, latestSeq: previous };
+  const originalMax = lines.reduce((max, line) => Math.max(max, lineSeq(line) ?? 0), 0);
+  const normalizer = createSequenceNormalizer(originalMax);
+  const normalized = lines.map(normalizer.line);
+  return { lines: normalized, repaired: normalizer.repaired(), latestSeq: normalizer.latestSeq() };
 }
 
 // Per-log verification cursor for repairEventLogSequenceSync. Every hello runs
@@ -977,45 +1031,17 @@ export function normalizeEventLogSequence(lines: readonly string[]): {
 const repairCursors = new Map<string, AppendCursor & { previous: number }>();
 
 /** Check appended lines for a sequence regression without rewriting. Returns
- * null on any regression (the caller falls back to the full repair). */
-function verifyAppendedSequence(
-  text: string,
-  fragment: string,
-  previous: number,
-): { previousComplete: number; latestSeq: number } | null {
+ * the last seq seen, or null on any regression (the caller falls back to the
+ * full repair). */
+function verifyAppendedSequence(text: string, previous: number): number | null {
   let prev = previous;
   for (const line of text.split('\n')) {
-    if (!line) continue;
-    let seq: unknown;
-    try { seq = JSON.parse(line)?.seq; } catch { continue; }
-    if (typeof seq !== 'number' || !Number.isFinite(seq)) continue;
+    const seq = lineSeq(line);
+    if (seq === null) continue;
     if (seq <= prev) return null;
     prev = seq;
   }
-  const previousComplete = prev;
-  if (fragment) {
-    let seq: unknown;
-    try { seq = JSON.parse(fragment)?.seq; } catch { seq = undefined; }
-    if (typeof seq === 'number' && Number.isFinite(seq)) {
-      if (seq <= prev) return null;
-      prev = seq;
-    }
-  }
-  return { previousComplete, latestSeq: prev };
-}
-
-/** Last numeric seq among complete lines (the file is monotonic when this is
- * called, so the last one is also the highest). */
-function lastCompleteSeq(text: string): number {
-  const lines = text.split('\n');
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    if (!lines[i]) continue;
-    try {
-      const seq = JSON.parse(lines[i])?.seq;
-      if (typeof seq === 'number' && Number.isFinite(seq)) return seq;
-    } catch { /* keep looking */ }
-  }
-  return 0;
+  return prev;
 }
 
 /** Repair sequence regressions left by older per-engine allocators.
@@ -1031,36 +1057,64 @@ export function repairEventLogSequenceSync(key: string): { repaired: boolean; la
   // appended lines are already in order.
   const known = repairCursors.get(path);
   if (known) {
-    const appended = readLog(path, known);
-    if (appended) {
-      const verdict = verifyAppendedSequence(appended.text, appended.fragment, known.previous);
-      if (verdict) {
-        repairCursors.set(path, { ...appended.cursor, previous: verdict.previousComplete });
-        observeNextSeq(key, verdict.latestSeq + 1);
-        return { repaired: false, latestSeq: verdict.latestSeq };
+    let prev: number | null = known.previous;
+    const appended = readLog(path, (text) => {
+      if (prev !== null) prev = verifyAppendedSequence(text, prev);
+    }, known);
+    const previousComplete = prev;
+    if (appended && previousComplete !== null) {
+      const latestSeq = verifyAppendedSequence(appended.fragment, previousComplete);
+      if (latestSeq !== null) {
+        repairCursors.set(path, { ...appended.cursor, previous: previousComplete });
+        observeNextSeq(key, latestSeq + 1);
+        return { repaired: false, latestSeq };
       }
     }
   }
   repairCursors.delete(path);
 
-  const whole = readLog(path);
+  // Pass 1 (streamed): the file maximum, and whether chronology regresses.
+  let originalMax = 0;
+  let previous = 0;
+  let regressed = false;
+  const scanSeqs = (text: string) => {
+    for (const line of text.split('\n')) {
+      const seq = lineSeq(line);
+      if (seq === null) continue;
+      if (seq > originalMax) originalMax = seq;
+      if (seq <= previous) regressed = true;
+      else previous = seq;
+    }
+  };
+  const whole = readLog(path, scanSeqs);
   if (!whole) {
     return { repaired: false, latestSeq: latestEventLogSeq(key) };
   }
-  const raw = whole.text + whole.fragment;
+  const lastComplete = previous;
+  scanSeqs(whole.fragment);
 
-  const normalized = normalizeEventLogSequence(raw.split('\n'));
-  if (normalized.repaired) {
+  let latestSeq = previous;
+  if (regressed) {
+    // Pass 2 (streamed): rewrite through the normalizer into a temp file.
+    const normalizer = createSequenceNormalizer(originalMax);
     const temporaryPath = `${path}.seq-repair-${process.pid}.tmp`;
     let fd = -1;
     try {
       mkdirSync(EVENT_LOG_DIR, { recursive: true });
       fd = openSync(temporaryPath, 'w');
-      writeFileSync(fd, normalized.lines.join('\n'), 'utf8');
+      const out = fd;
+      const rewritten = readLog(path, (text) => {
+        const lines = text.split('\n');
+        lines.pop(); // text ends with a newline
+        writeAllSync(out, `${lines.map(normalizer.line).join('\n')}\n`);
+      });
+      if (!rewritten) throw new Error(`event log ${path} could not be re-read for sequence repair`);
+      if (rewritten.fragment) writeAllSync(out, normalizer.line(rewritten.fragment));
       fsyncSync(fd);
       closeSync(fd);
       fd = -1;
       renameSync(temporaryPath, path);
+      latestSeq = normalizer.latestSeq();
     } catch (error) {
       if (fd >= 0) {
         try { closeSync(fd); } catch { /* already closed */ }
@@ -1076,14 +1130,14 @@ export function repairEventLogSequenceSync(key: string): { repaired: boolean; la
     // The rewrite changed the inode; the next call re-verifies from scratch
     // and sets a fresh cursor.
   } else {
-    repairCursors.set(path, { ...whole.cursor, previous: lastCompleteSeq(whole.text) });
+    repairCursors.set(path, { ...whole.cursor, previous: lastComplete });
   }
 
   // Advance the allocator, but report the DURABLE repaired boundary. The
   // process allocator may already be higher because of memory-only events; a
   // replay must not mistake those newer events for stale session-buffer data.
-  observeNextSeq(key, normalized.latestSeq + 1);
-  return { repaired: normalized.repaired, latestSeq: normalized.latestSeq };
+  observeNextSeq(key, latestSeq + 1);
+  return { repaired: regressed, latestSeq };
 }
 
 /** Full durable HOT log for forever-thread assembly/compaction. Unlike
@@ -1110,23 +1164,26 @@ function parseEventLogLines(raw: string): PersistedEvent[] {
   return events;
 }
 
+function loadWholeEventLog(path: string): PersistedEvent[] {
+  const events: PersistedEvent[] = [];
+  const read = readLog(path, (text) => {
+    for (const event of parseEventLogLines(text)) events.push(event);
+  });
+  if (!read) return [];
+  // Interrupted trailing append: parsed if it is already a whole record.
+  for (const event of parseEventLogLines(read.fragment)) events.push(event);
+  return events;
+}
+
 export function loadEventLogForCompactionSync(key: string): PersistedEvent[] {
-  try {
-    return parseEventLogLines(readFileSync(logPath(key), 'utf8'));
-  } catch {
-    return [];
-  }
+  return loadWholeEventLog(logPath(key));
 }
 
 /** The archived prefix of a thread's durable log: events the rolling
  *  compact already covers, moved out of the hot file by cleanup. The hot
  *  file plus this is the complete durable log. */
 export function loadEventLogArchiveSync(key: string): PersistedEvent[] {
-  try {
-    return parseEventLogLines(readFileSync(archivePath(key), 'utf8'));
-  } catch {
-    return [];
-  }
+  return loadWholeEventLog(archivePath(key));
 }
 
 // Append-only writer keyed by sanitized session key. A per-key promise chain
@@ -1363,39 +1420,56 @@ export function removeEventLogEvents(key: string, sequences: Iterable<number>): 
   const path = logPath(key);
   const prior = writeChains.get(key) ?? Promise.resolve();
   const next = prior.then(() => {
+    const tmp = `${path}.scrub-${process.pid}`;
+    let fd = -1;
     try {
-      const raw = readFileSync(path, 'utf8');
-      const kept: string[] = [];
+      // Streamed into the temp file: a whole-file string breaks past ~512 MB.
+      fd = openSync(tmp, 'w');
+      const out = fd;
       let maxRemoved = 0;
       let maxKept = 0;
-      for (const line of raw.split('\n')) {
-        if (!line) continue;
-        try {
-          const parsed = JSON.parse(line);
-          const seq = typeof parsed?.seq === 'number' ? parsed.seq : 0;
-          if (seq > 0 && targets.has(seq)) {
-            maxRemoved = Math.max(maxRemoved, seq);
-            continue;
+      const scrub = (text: string) => {
+        const kept: string[] = [];
+        for (const line of text.split('\n')) {
+          if (!line) continue;
+          try {
+            const parsed = JSON.parse(line);
+            const seq = typeof parsed?.seq === 'number' ? parsed.seq : 0;
+            if (seq > 0 && targets.has(seq)) {
+              maxRemoved = Math.max(maxRemoved, seq);
+              continue;
+            }
+            maxKept = Math.max(maxKept, seq);
+          } catch {
+            // Preserve malformed/interrupted lines; this targeted scrub owns only
+            // records whose exact sequence was positively classified synthetic.
           }
-          maxKept = Math.max(maxKept, seq);
-        } catch {
-          // Preserve malformed/interrupted lines; this targeted scrub owns only
-          // records whose exact sequence was positively classified synthetic.
+          kept.push(line);
         }
-        kept.push(line);
-      }
-      if (maxRemoved === 0) return;
+        if (kept.length) writeAllSync(out, `${kept.join('\n')}\n`);
+      };
+      const read = readLog(path, scrub);
+      if (!read) throw new Error('event log could not be read');
+      scrub(read.fragment);
       if (maxRemoved > maxKept) {
-        kept.push(JSON.stringify({
+        writeAllSync(out, `${JSON.stringify({
           seq: maxRemoved,
           ev: { type: 'event', event: { type: '_protocol_watermark' } },
-        }));
+        })}\n`);
       }
-      const tmp = `${path}.scrub-${process.pid}`;
-      writeFileSync(tmp, kept.length ? `${kept.join('\n')}\n` : '', 'utf8');
+      closeSync(fd);
+      fd = -1;
+      if (maxRemoved === 0) {
+        unlinkSync(tmp);
+        return;
+      }
       renameSync(tmp, path);
       bumpEventLogRevision();
     } catch (err) {
+      if (fd >= 0) {
+        try { closeSync(fd); } catch { /* already closed */ }
+      }
+      try { unlinkSync(tmp); } catch { /* absent or renamed */ }
       console.warn('[event-log-store] synthetic stream scrub failed', key, (err as Error).message);
     }
   }).catch(() => {});
