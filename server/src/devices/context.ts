@@ -104,9 +104,9 @@ export function revokeComputerContext(owner: string): void {
  *  fresh one and supersedes the old as before.
  *
  *  Every lane gets this block on every turn (Matt, Nov 3): only the device line, the
- *  signed token and the policy line ride per turn. The static computer-use rules live
- *  in the rivendell-device computer_start tool description, which the agent already
- *  reads, so a fresh lane's first computer_start works without a re-arm turn. */
+ *  signed token and the policy line ride per turn. The static computer-use rules come
+ *  back with the computer_start result, so a fresh lane's first computer_start works
+ *  without a re-arm turn and pays for the rules only when it takes a desktop. */
 export function computerGuidance(cwd: string, chatId: string, label: string, human = true, sameTurn = false): string {
   const now = Date.now();
   const owner = computerOwnerKey(cwd, chatId);

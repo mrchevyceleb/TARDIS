@@ -1744,7 +1744,7 @@ class ClaudeSession {
     const writingReminder = plainEnglishWritingReminderFor({ cli: this.cli, model: this.spawnModel,
       voiceMode: Boolean(opts.voiceMode || isVoiceChatId(this.chatId)), humanTurn: humanTurn && !continuing });
     // Every turn carries the brief computer block (device + signed token + policy);
-    // the static rules live in the computer_start tool description.
+    // the static rules come back with the computer_start result.
     const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn);
     // Matt's Priorities ride every turn (continues and steers too), read fresh.
     const stateDelta = await prepareSessionStateDelta(this.chatId);

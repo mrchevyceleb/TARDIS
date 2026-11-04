@@ -785,7 +785,7 @@ export class PiSession {
       : recall ? `${recall}\n\n${promptText}` : promptText;
     const humanTurn = continuing ? continuing.origin.human : !opts.peerFrom && opts.peerFromRole !== 'automation';
     // Every turn carries the brief computer block (device + signed token + policy);
-    // the static rules live in the computer_start tool description.
+    // the static rules come back with the computer_start result.
     const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn);
     const handover = await prepareSessionStateDelta(this.chatId);
     const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);

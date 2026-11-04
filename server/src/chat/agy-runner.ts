@@ -1052,7 +1052,7 @@ export class AgySession {
         : [pausedNote, recall, promptText].filter(Boolean).join('\n\n');
       const humanTurn = !opts.peerFrom && opts.peerFromRole !== 'automation';
       // Every turn carries the brief computer block (device + signed token + policy);
-      // the static rules live in the computer_start tool description.
+      // the static rules come back with the computer_start result.
       const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn);
       const stateDelta = await prepareSessionStateDelta(this.chatId);
       const priorities = stateDelta.text;
