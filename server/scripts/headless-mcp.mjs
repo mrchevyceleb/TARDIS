@@ -88,7 +88,7 @@ const TOOLS = [
   },
 ];
 
-// A lane with no stable name (Banana, plain chats) proves who it is with the signed turn context from the top of its prompt.
+// A lane with no stable name (Banana, plain chats) proves who it is with the turn context from the top of its prompt.
 if (!AGENT) {
   for (const tool of TOOLS) {
     tool.inputSchema.properties.context = { type: 'string', description: 'The "computer_start context for this turn" string from the top of your prompt (do not echo it). It picks your private browser.' };

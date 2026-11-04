@@ -1,6 +1,6 @@
 // /api/headless: per-lane headless Chromium (backs the rivendell-headless MCP).
 // Not an app login: only a TARDIS-spawned MCP holds a token, and the token is bound
-// to one lane. A lane with no stable name sends the signed turn context instead.
+// to one lane. A lane with no stable name sends the turn context instead.
 
 import { Router } from 'express';
 import { asyncHandler } from './helpers.ts';

@@ -33,7 +33,7 @@ export function computerOwnerTurnRunning(owner: string): boolean { return ownerT
  *  never share a context. Engine-free, so a model switch keeps the same owner.
  *  JSON-encoded so the pair is injective: raw `|`-joining would let a pipe in
  *  one component collide with a pipe in the other. Nothing parses the key;
- *  every consumer (maps, the signed body, shim env, HTTP header) treats it as
+ *  every consumer (maps, the issued record, shim env, HTTP header) treats it as
  *  an opaque string. */
 export function computerOwnerKey(cwd: string, chatId: string): string { return JSON.stringify([cwd, chatId]); }
 /** The per-thread device selection key. The selection is the human's statement
@@ -88,7 +88,7 @@ export function readComputerContext(token: unknown): { owner: string; chatId: st
   if (current.expires < now && !ownerTurnRunning(data.owner)) throw expired();
   return { owner: data.owner, chatId: data.chatId, selection: data.selection, label: data.label, human: data.human };
 }
-/** The owner's turn was interrupted: its signed context stops working at once,
+/** The owner's turn was interrupted: its context stops working at once,
  *  so a tool call still in flight from that turn cannot open a new grant. The
  *  next turn mints a fresh one in computerGuidance. */
 export function revokeComputerContext(owner: string): void {
