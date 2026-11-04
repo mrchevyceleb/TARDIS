@@ -74,8 +74,11 @@ def as_user(*args, timeout=30):
     env = {'HOME': pw.pw_dir, 'USER': USER, 'PATH': '/usr/local/bin:/usr/bin:/bin',
            'XDG_RUNTIME_DIR': f'/run/user/{UID}',
            'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{UID}/bus'}
-    return subprocess.run(['/usr/sbin/runuser', '-u', USER, '--', *args], env=env, capture_output=True,
-                          text=True, timeout=timeout)
+    # setpriv, not runuser: no PAM session, so the journal is not flooded
+    # with session open/close lines every tick.
+    return subprocess.run(['/usr/bin/setpriv', f'--reuid={UID}', f'--regid={pw.pw_gid}', '--init-groups',
+                           '--reset-env', '--', '/usr/bin/env', *[f'{k}={v}' for k, v in env.items()], *args],
+                          capture_output=True, text=True, timeout=timeout, cwd='/')
 
 
 def user_systemctl(*args, timeout=20):
@@ -258,10 +261,21 @@ def roll_back(state, now):
     if result.returncode != 0 or head() != good:
         give_up(state, now, f'rolling back to {good[:8]} failed.')
         return
-    restart = user_systemctl('restart', '--no-block', UNIT)
+    state['rollback_from'] = current
+    restart_rolled_back(state, now)
+
+
+def restart_rolled_back(state, now):
+    """Restart onto the rolled-back checkout; retried each tick until
+    systemd accepts it, and only then reported."""
+    if user_systemctl('restart', '--no-block', UNIT).returncode != 0:
+        log('GUARDIAN_RESTART_FAILED', after='rollback')
+        return
+    current, good = state.pop('rollback_from', ''), head()
     state['rolled_back'] = True
     state['restarted_at'] = now
-    log('GUARDIAN_ROLLED_BACK', from_head=current, to_head=good, restart_ok=restart.returncode == 0)
+    state.pop('outage_pid', None)
+    log('GUARDIAN_ROLLED_BACK', from_head=current, to_head=good)
     notify(state, now, f'TARDIS would not come back on build {current[:8]}, so I rolled it back to {good[:8]}, the last build that ran healthy, and restarted it.')
 
 
@@ -283,9 +297,13 @@ def recover(state, info, now):
 
     down_since = state.setdefault('down_since', now)
     running = active == 'active' and info.get('SubState') == 'running'
-    age = process_age(int(info.get('MainPID', '0') or 0)) if running else None
-    # A running process younger than the boot grace may still be repairing
-    # its packages or building; a unit that keeps failing to start is not.
+    pid = info.get('MainPID', '0') if running else '0'
+    # The first process of this outage (or of our restart) may still be
+    # repairing its packages or building, so it gets the boot grace. A new
+    # PID after that means the unit is crash-looping: no grace, ever.
+    if pid != '0' and 'outage_pid' not in state:
+        state['outage_pid'] = pid
+    age = process_age(int(pid)) if pid != '0' and pid == state.get('outage_pid') else None
     booting = age is not None and age < BOOT_GRACE_SECONDS
 
     restarted_at = state.get('restarted_at')
@@ -295,6 +313,7 @@ def recover(state, info, now):
         if user_systemctl('restart', '--no-block', UNIT).returncode != 0:
             log('GUARDIAN_RESTART_FAILED')
             return  # try again next tick
+        state.pop('outage_pid', None)
         state['restarted_at'] = now
         log('GUARDIAN_RESTARTED', head=head())
         notify(state, now, f'TARDIS stopped answering for {round((now - down_since) / 60)} minutes, so I restarted it.')
@@ -311,11 +330,16 @@ def tick(state, now):
     retry_pages(state, now)
     if thaw_if_frozen(state, now):
         return
+    # A rolled-back checkout must get its restart even if the old process
+    # answers health again, or the old build keeps running on new files.
+    if 'rollback_from' in state:
+        restart_rolled_back(state, now)
+        return
     info = unit_info(UNIT)
     if healthy():
         if state.get('restarted_at') is not None or state.get('gave_up'):
             notify(state, now, 'TARDIS is answering again.', priority=0)
-        for key in ('down_since', 'restarted_at', 'rolled_back', 'gave_up', 'stopped_since'):
+        for key in ('down_since', 'restarted_at', 'rolled_back', 'gave_up', 'stopped_since', 'outage_pid'):
             state.pop(key, None)
         track_release(state, info, now)
         return
