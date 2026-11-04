@@ -209,8 +209,7 @@ export function isTaskStartHandoff(opts: {
   if (opts.nudgeHoldSince !== undefined) return false;
   if (opts.continuesChain === true) return false;
   if (!freshThreadOnTask(opts.recipientHome)) return false;
-  const prefix = freshTaskPrefix(opts.recipientHome);
-  if (!(opts.text ?? '').trimStart().toLowerCase().startsWith(prefix.toLowerCase())) return false;
+  if (!opensWithTaskMarker(opts.text ?? '', freshTaskPrefix(opts.recipientHome))) return false;
   const allowed = freshTaskSenders(opts.recipientHome);
   if (allowed.length) return allowed.includes(opts.senderId);
   return isCoderBrief(opts.senderId, opts.recipientId);
@@ -220,6 +219,17 @@ export function isTaskStartHandoff(opts: {
  *  session is carrying background work: the drain only wipes at an idle
  *  task boundary, never mid-turn and never through background work the
  *  reset would terminate. */
+/** True when the text opens with the task marker as words, whatever
+ *  punctuation follows: "New job:", "New job," and "New job -" all open a
+ *  task (Nov 4 2026: Riley wrote "New job, fresh thread please" and the
+ *  exact "New job:" match left Kate in her old thread). */
+export function opensWithTaskMarker(text: string, prefix: string): boolean {
+  const marker = prefix.trim().replace(/[\s\p{P}]+$/u, '');
+  if (!marker) return false;
+  const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+  return new RegExp(`^${escaped}(?![\\p{L}\\p{N}])`, 'iu').test(text.trimStart());
+}
+
 export function recipientIdle(sessions: Array<{ busy: boolean; backgroundTasks?: string[] }>): boolean {
   return recipientBusyReason(sessions) === undefined;
 }
