@@ -27,14 +27,16 @@ export BROWSER="${RIVENDELL_CLI_BROWSER:-/bin/false}"
 # Installed packages must match the lockfile before boot. Anything that empties
 # or half-replaces node_modules (an npm ci run elsewhere, a crash mid-install)
 # otherwise crash-loops the service on a missing tsx (Nov 3: nine hours down).
-# The stamp is written only after a complete install, so a wipe removes it too.
+# The stamp catches a lockfile change; npm ls catches any missing package.
 deps_stamp=node_modules/.tardis-lock.sha256
 lock_hash=$(sha256sum package-lock.json | cut -d' ' -f1)
-if [[ "$(cat "$deps_stamp" 2>/dev/null)" != "$lock_hash" ]]; then
+deps_ok() { [[ "$(cat "$deps_stamp" 2>/dev/null)" == "$lock_hash" ]] && npm ls --all >/dev/null 2>&1; }
+if ! deps_ok; then
   exec 8>"$HOME/.rivendell/deps-install.lock"
   flock 8
-  if [[ "$(cat "$deps_stamp" 2>/dev/null)" != "$lock_hash" ]]; then
+  if ! deps_ok; then
     echo "[start] installed packages do not match package-lock.json: running npm ci" >&2
+    rm -f "$deps_stamp"
     timeout --kill-after=10s 600 npm ci --no-audit --no-fund >"$HOME/.rivendell/deps-install.log" 2>&1 \
       || { echo "[start] FATAL: npm ci failed (log: $HOME/.rivendell/deps-install.log)" >&2; exit 1; }
     echo "$lock_hash" > "$deps_stamp"

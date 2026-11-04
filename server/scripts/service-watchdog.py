@@ -57,17 +57,27 @@ def page_matt(message):
 
 
 def outage_alert(state, now, down):
-    """Page once when TARDIS stays down for minutes, whatever the cause."""
-    if not down:
+    """Page once when TARDIS stays down for minutes, whatever the cause.
+
+    down is True (failing), False (healthy) or None (stopped on purpose,
+    which neither pages nor counts as recovered)."""
+    if down is None:
         state.pop('down_since', None)
-        state.pop('page_retry', None)
-        if state.pop('paged', None):
-            page_matt('TARDIS is responding again.')
         return
-    since = state.setdefault('down_since', now)
-    if not state.get('paged') and now - since >= 300 and now >= state.get('page_retry', 0):
-        if page_matt(f'TARDIS has not been responding for {round((now - since) / 60)} minutes. Rally agents and Samwise are offline.'):
-            state['paged'] = True
+    if down:
+        since = state.setdefault('down_since', now)
+        if not state.get('paged') and now - since >= 300 and now >= state.get('page_retry', 0):
+            if page_matt(f'TARDIS has not been responding for {round((now - since) / 60)} minutes. Rally agents and Samwise are offline.'):
+                state['paged'] = True
+                state.pop('page_retry', None)
+            else:
+                state['page_retry'] = now + 300
+        return
+    state.pop('down_since', None)
+    if state.get('paged') and now >= state.get('page_retry', 0):
+        if page_matt('TARDIS is responding again.'):
+            state.pop('paged', None)
+            state.pop('page_retry', None)
         else:
             state['page_retry'] = now + 300
 
@@ -131,7 +141,7 @@ def tick(config, state, now, config_path=None):
         # A unit that keeps failing to start (activating, auto-restart) is.
         state.pop('first_bad', None)
         state.pop('pid', None)
-        outage_alert(state, now, info.get('ActiveState') not in ('inactive', 'deactivating'))
+        outage_alert(state, now, None if info.get('ActiveState') in ('inactive', 'deactivating') else True)
         return
     new_process = state.get('pid') != pid
     if new_process:
