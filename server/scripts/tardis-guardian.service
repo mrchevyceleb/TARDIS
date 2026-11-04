@@ -1,0 +1,13 @@
+[Unit]
+Description=TARDIS guardian (root-level freeze and outage recovery)
+After=network-online.target user@1000.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/lib/tardis-guardian/guardian.py
+Restart=always
+RestartSec=5
+StateDirectory=tardis-guardian
+
+[Install]
+WantedBy=multi-user.target
