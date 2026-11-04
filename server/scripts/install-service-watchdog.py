@@ -61,6 +61,8 @@ Description=TARDIS independent liveness recovery
 
 [Service]
 Type=simple
+# Pushover keys for outage pages; the watchdog runs without them if absent.
+EnvironmentFile=-%h/.config/tardis-watchdog/pushover.env
 ExecStart=/usr/bin/python3 "{target / 'watchdog.py'}" --config "{target / 'config.json'}"
 Restart=always
 RestartSec=5

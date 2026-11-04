@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -39,6 +40,36 @@ def get_json(url, data=None, timeout=3):
                                      headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.load(response)
+
+
+def page_matt(message):
+    """Outside TARDIS: its own message API is down when this matters most."""
+    token, user = os.environ.get('PUSHOVER_API_KEY'), os.environ.get('PUSHOVER_USER_KEY')
+    if not token or not user:
+        return False
+    data = urllib.parse.urlencode({'token': token, 'user': user, 'title': 'TARDIS down',
+                                   'priority': 1, 'message': message}).encode()
+    try:
+        with urllib.request.urlopen('https://api.pushover.net/1/messages.json', data=data, timeout=20) as response:
+            return response.status == 200
+    except (OSError, ValueError):
+        return False
+
+
+def outage_alert(state, now, down):
+    """Page once when TARDIS stays down for minutes, whatever the cause."""
+    if not down:
+        state.pop('down_since', None)
+        state.pop('page_retry', None)
+        if state.pop('paged', None):
+            page_matt('TARDIS is responding again.')
+        return
+    since = state.setdefault('down_since', now)
+    if not state.get('paged') and now - since >= 300 and now >= state.get('page_retry', 0):
+        if page_matt(f'TARDIS has not been responding for {round((now - since) / 60)} minutes. Rally agents and Samwise are offline.'):
+            state['paged'] = True
+        else:
+            state['page_retry'] = now + 300
 
 
 def checked_release(config):
@@ -97,8 +128,10 @@ def tick(config, state, now, config_path=None):
     pid = info.get('MainPID', '0')
     if info.get('ActiveState') != 'active' or info.get('SubState') != 'running' or pid == '0':
         # Planned stop/start is not an outage. Keep an unsent recovery notice.
+        # A unit that keeps failing to start (activating, auto-restart) is.
         state.pop('first_bad', None)
         state.pop('pid', None)
+        outage_alert(state, now, info.get('ActiveState') not in ('inactive', 'deactivating'))
         return
     new_process = state.get('pid') != pid
     if new_process:
@@ -108,6 +141,7 @@ def tick(config, state, now, config_path=None):
         healthy = get_json(config['base'] + '/api/health').get('ok') is True
     except (OSError, ValueError):
         healthy = False
+    outage_alert(state, now, not healthy)
     if healthy:
         state.pop('first_bad', None)
         if new_process:
