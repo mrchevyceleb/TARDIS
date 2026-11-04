@@ -79,7 +79,7 @@ if [[ -x node_modules/.bin/vite ]]; then
       if [[ ! -e dist ]] || mv dist "$old" 2>/dev/null; then
         if mv "$build" dist; then
           # Keep the two newest previous bundles; a failed boot can flip back to one.
-          ls -dt dist.old.* 2>/dev/null | tail -n +3 | xargs -r rm -rf
+          ls -dt dist.old.* 2>/dev/null | tail -n +3 | xargs -r rm -rf || true
           echo "[start] client bundle rebuilt (previous kept at $old)" >&2
         else
           [[ -e dist ]] || mv "$old" dist 2>/dev/null || true

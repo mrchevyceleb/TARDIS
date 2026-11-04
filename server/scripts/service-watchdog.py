@@ -46,13 +46,15 @@ def page_matt(message):
     """Outside TARDIS: its own message API is down when this matters most."""
     token, user = os.environ.get('PUSHOVER_API_KEY'), os.environ.get('PUSHOVER_USER_KEY')
     if not token or not user:
+        print(json.dumps({'event': 'WATCHDOG_PAGE_SKIPPED', 'reason': 'no Pushover keys'}), flush=True)
         return False
     data = urllib.parse.urlencode({'token': token, 'user': user, 'title': 'TARDIS down',
                                    'priority': 1, 'message': message}).encode()
     try:
         with urllib.request.urlopen('https://api.pushover.net/1/messages.json', data=data, timeout=20) as response:
             return response.status == 200
-    except (OSError, ValueError):
+    except (OSError, ValueError) as error:
+        print(json.dumps({'event': 'WATCHDOG_PAGE_FAILED', 'errorType': type(error).__name__}), flush=True)
         return False
 
 
