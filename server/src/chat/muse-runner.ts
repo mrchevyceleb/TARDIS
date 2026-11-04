@@ -977,7 +977,7 @@ export class MuseSession {
         ? ['<rivendell-continuation>', `Warm continuation of the existing conversation. Host time: ${new Date().toString()}.`, 'Do not repeat session-start rituals.', '</rivendell-continuation>', ...(pausedNote ? ['', pausedNote] : []), ...(guidance ? ['', guidance] : []), ...(laneContext ? ['', laneContext] : []), ...(recall ? ['', recall] : []), ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []), '', promptText].join('\n')
         : [pausedNote, recall, promptText].filter(Boolean).join('\n\n');
       const humanTurn = !opts.peerFrom && opts.peerFromRole !== 'automation';
-      const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, false, !wantSeed);
+      const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, false);
       const stateDelta = await prepareSessionStateDelta(this.chatId);
       const priorities = stateDelta.text;
       const plainEnglish = plainEnglishWritingBlockFor({ cli: this.cli, model: this.spawnModel, voiceMode: opts.voiceMode, humanTurn });

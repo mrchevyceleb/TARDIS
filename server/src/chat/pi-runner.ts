@@ -784,9 +784,9 @@ export class PiSession {
       ? ['<rivendell-continuation>', `Warm continuation of the existing conversation. Host time: ${new Date().toString()}.`, 'Do not repeat session-start rituals.', '</rivendell-continuation>', ...(guidance ? ['', guidance] : []), ...(laneContext ? ['', laneContext] : []), ...(recall ? ['', recall] : []), ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []), '', promptText].join('\n')
       : recall ? `${recall}\n\n${promptText}` : promptText;
     const humanTurn = continuing ? continuing.origin.human : !opts.peerFrom && opts.peerFromRole !== 'automation';
-    // Full computer rules ride the seed message that starts a fresh pi window; later
-    // messages of the same warm process get the brief form (fresh token + device + policy).
-    const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
+    // Every turn carries the brief computer block (device + signed token + policy);
+    // the static rules live in the computer_start tool description.
+    const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn);
     const handover = await prepareSessionStateDelta(this.chatId);
     const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
     // Well-formed at the transport boundary: pi's JSONRPC parser (like

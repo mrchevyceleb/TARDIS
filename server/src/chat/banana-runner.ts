@@ -3083,7 +3083,7 @@ export class BananaSession {
     }
     const handover = await prepareSessionStateDelta(this.chatId);
     const priorities = prioritiesBlockFor(agentForChatId(this.chatId)?.id);
-    const effectiveText = `${handover.text ? `${handover.text}\n\n` : ''}${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, false, true)}\n\n${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${commandExpandedText}`;
+    const effectiveText = `${handover.text ? `${handover.text}\n\n` : ''}${priorities ? `${priorities}\n\n` : ''}${computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false)}\n\n${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${recall ? `${recall}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${commandExpandedText}`;
     if (seed) {
       this.turn.recoveryRecapUsed = true;
       this.emit({

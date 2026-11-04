@@ -1743,9 +1743,9 @@ class ClaudeSession {
     // human-only reminder refreshes the writing rule without resetting history.
     const writingReminder = plainEnglishWritingReminderFor({ cli: this.cli, model: this.spawnModel,
       voiceMode: Boolean(opts.voiceMode || isVoiceChatId(this.chatId)), humanTurn: humanTurn && !continuing });
-    // Full computer rules only on the message that seeds a fresh window; every later
-    // message of the same warm process carries the brief form (fresh token + device + policy).
-    const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
+    // Every turn carries the brief computer block (device + signed token + policy);
+    // the static rules live in the computer_start tool description.
+    const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn);
     // Matt's Priorities ride every turn (continues and steers too), read fresh.
     const stateDelta = await prepareSessionStateDelta(this.chatId);
     const priorities = stateDelta.text;

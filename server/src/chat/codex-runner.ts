@@ -638,7 +638,7 @@ export class CodexSession {
       }
 
       const steerState = await prepareSessionStateDelta(this.chatId);
-      const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', true, true);
+      const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', true);
       steerText += `\n\n${computerContext}${steerState.text ? `\n\n${steerState.text}` : ''}`;
       assertSelectedEngine(this.chatId, this.cli, selectionRevision);
       if (opts.peerDeliveryId && !this.submitPeerDelivery(opts.peerDeliveryId)) return;
@@ -865,7 +865,7 @@ export class CodexSession {
     const priorities = stateDelta.text;
     const prompt = [
       priorities,
-      computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false, Boolean(this.threadId)),
+      computerGuidance(this.cwd, this.chatId, sessionAgent?.name ?? 'Companion', !opts.peerFrom && opts.peerFromRole !== 'automation', false),
       seed,
       conversationGuidance,
       recall,

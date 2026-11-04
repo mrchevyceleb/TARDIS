@@ -6,16 +6,15 @@ import { join } from 'node:path';
 import sharp from 'sharp';
 import { ComputerController, COMPUTER_GRANT_MINUTES, COMPUTER_GRANT_MS, trustedComputerUrl } from '../../../desktop/native/computer.mjs';
 import { localMcpServers, localMcpBananaServers, localMcpCodexArgs, writeClaudeMcpConfigFile } from '../chat/local-mcp.ts';
-import { computerGuidance, computerOwnerKey, noteComputerToolUse, readComputerContext } from './context.ts';
+import { computerGuidance, readComputerContext } from './context.ts';
 import { ComputerStepJournal } from './stepJournal.ts';
 import { redactComputerImages } from './transcript.ts';
 
-// Isolate the persisted computer-use record from live state: noteComputerToolUse
-// writes <state>/computer-use-record.json (Matt, Oct 15), and these tests note.
-// The path and the lazy map resolve per call, so redirecting after the imports
-// is enough; the prior value is restored so later teardown sees real state.
+// Isolate any persisted device state these tests touch from live state. The
+// path resolves per call, so redirecting after the imports is enough; the
+// prior value is restored so later teardown sees real state.
 const priorRecordState = process.env.RIVENDELL_STATE_DIR;
-const recordState = mkdtempSync(join(tmpdir(), 'computer-use-record-'));
+const recordState = mkdtempSync(join(tmpdir(), 'computer-test-state-'));
 process.env.RIVENDELL_STATE_DIR = recordState;
 after(() => {
   if (priorRecordState === undefined) delete process.env.RIVENDELL_STATE_DIR;
@@ -160,10 +159,6 @@ test('all runner configurations include identical reserved device tools; turn id
   } finally {
     rmSync(cfgPath, { force: true });
   }
-  // The guidance block only rides lanes that have used a computer tool
-  // recently (card-d7bf78 b): seed this lane as a computer user so the
-  // signed-turn assertions below see the full block.
-  noteComputerToolUse(computerOwnerKey('/wt/owner-key', 'agent:test'));
   const prompt = computerGuidance('/wt/owner-key', 'agent:test', 'Test', true);
   const token = prompt.match(/do not echo\): ([\w.-]+)/)![1];
   assert.deepEqual(readComputerContext(token), { owner: JSON.stringify(['/wt/owner-key', 'agent:test']), chatId: 'agent:test', selection: JSON.stringify(['/wt/owner-key', 'agent:test']), label: 'Test', human: true });

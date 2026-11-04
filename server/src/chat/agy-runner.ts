@@ -1051,9 +1051,9 @@ export class AgySession {
         ? ['<rivendell-continuation>', `Warm continuation of the existing conversation. Host time: ${new Date().toString()}.`, 'Do not repeat session-start rituals.', '</rivendell-continuation>', ...(pausedNote ? ['', pausedNote] : []), ...(guidance ? ['', guidance] : []), ...(laneContext ? ['', laneContext] : []), ...(recall ? ['', recall] : []), ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []), '', promptText].join('\n')
         : [pausedNote, recall, promptText].filter(Boolean).join('\n\n');
       const humanTurn = !opts.peerFrom && opts.peerFromRole !== 'automation';
-      // Full computer rules ride the seed message that starts a fresh agy window;
-      // later messages of the same warm process get the brief form.
-      const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn, !wantSeed);
+      // Every turn carries the brief computer block (device + signed token + policy);
+      // the static rules live in the computer_start tool description.
+      const computerContext = computerGuidance(this.cwd, this.chatId, agentForChatId(this.chatId)?.name ?? 'Companion', humanTurn, !startsNewTurn);
       const stateDelta = await prepareSessionStateDelta(this.chatId);
       const priorities = stateDelta.text;
       // Plain-English writing block (card-0d1015): agy is Gemini, whose
