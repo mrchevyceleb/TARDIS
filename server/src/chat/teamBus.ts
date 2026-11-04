@@ -219,15 +219,19 @@ export function isTaskStartHandoff(opts: {
  *  session is carrying background work: the drain only wipes at an idle
  *  task boundary, never mid-turn and never through background work the
  *  reset would terminate. */
-/** True when the text opens with the task marker as words, whatever
- *  punctuation follows: "New job:", "New job," and "New job -" all open a
- *  task (Nov 4 2026: Riley wrote "New job, fresh thread please" and the
- *  exact "New job:" match left Kate in her old thread). */
+/** True when the text opens with the task marker followed by a delimiter:
+ *  "New job:", "New job," and "New job -" all open a task, while prose
+ *  such as "New job count is wrong" does not (Nov 4 2026: Riley wrote
+ *  "New job, fresh thread please" and the exact "New job:" match left Kate in
+ *  her old thread). Only the prefix's own trailing colon is the delimiter. */
 export function opensWithTaskMarker(text: string, prefix: string): boolean {
-  const marker = prefix.trim().replace(/[\s\p{P}]+$/u, '');
+  const trimmed = prefix.trim();
+  // A prefix without its own trailing colon is matched literally.
+  if (!trimmed.endsWith(':')) return trimmed.length > 0 && text.trimStart().toLowerCase().startsWith(trimmed.toLowerCase());
+  const marker = trimmed.replace(/\s*:$/, '');
   if (!marker) return false;
   const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
-  return new RegExp(`^${escaped}(?![\\p{L}\\p{N}])`, 'iu').test(text.trimStart());
+  return new RegExp(`^${escaped}[ \\t]*(?:[:,;.!\\-\u2013\u2014]|\\r?\\n|$)`, 'i').test(text.trimStart());
 }
 
 export function recipientIdle(sessions: Array<{ busy: boolean; backgroundTasks?: string[] }>): boolean {
