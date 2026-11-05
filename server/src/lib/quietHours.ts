@@ -91,9 +91,17 @@ export function etHour(ms: number): number {
   return Number(etHourFmt.format(new Date(ms)));
 }
 
+/** The pre-restart check's side copy (RIVENDELL_SIDE_COPY=1) has no real
+ *  teammates and no night to protect: its only lanes are the check's own
+ *  sandbox probes. Quiet hours there would turn the check's team_message
+ *  wait:true into a held, reply-less receipt, so an overnight update could
+ *  never pass the team leg (Nov 4 2026). */
+const SIDE_COPY = process.env.RIVENDELL_SIDE_COPY === '1';
+
 /** True inside the quiet window (weeknights 21:00-07:00 ET, Friday and
- *  Saturday nights 20:00-08:00 ET, half-open). */
+ *  Saturday nights 20:00-08:00 ET, half-open). Never true in a side copy. */
 export function inQuietHours(ms: number): boolean {
+  if (SIDE_COPY) return false;
   const { weekday, minuteOfDay } = etClock(ms);
   return minuteOfDay < quietEndMinute(weekday) || minuteOfDay >= quietStartMinute(weekday);
 }

@@ -533,6 +533,9 @@ async function teamRoundTrip(port, fromName, toName) {
   if (!res.ok || !body?.delivered) {
     fail(`team round trip was not delivered (HTTP ${res.status}): ${JSON.stringify(body).slice(0, 200)}`);
   }
+  // A queued receipt means the wait path never ran (quiet hours, a reply
+  // cycle, a task-start handoff): name the reason instead of an empty reply.
+  if (body.queued) fail(`team round trip was queued instead of waited on: ${body.reason ?? 'no reason given'}`);
   if (String(body.reply ?? '').trim() !== 'TEAMOK') {
     fail(`team round trip reply was not exactly TEAMOK (got: ${JSON.stringify(String(body.reply ?? '').slice(0, 120))})`);
   }
