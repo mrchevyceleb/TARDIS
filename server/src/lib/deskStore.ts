@@ -1,3 +1,4 @@
+import { addedWorkText, quietParkResume, relativeCheckpointTime, workTimingError } from './promiseTime.ts';
 // The Desk: "Needs you" todos for the owner plus a board of agent work.
 // Store: ~/.rivendell/desk.json (RIVENDELL_DESK_FILE overrides the path).
 //
@@ -79,7 +80,7 @@ export type DeskCard = {
   /** Silence is an event (card-baadaf A): every In progress / In QA card
    *  carries a check-in deadline set by the owner's last touch (create,
    *  move, or comment: 30 minutes out by default, or a written check-in
-   *  time in the comment honored up to 12 hours out). The hygiene tick
+   *  time in the comment honored within the same 30-minute window). The hygiene tick
    *  nudges the owner when it passes; 15 quiet minutes later it nudges the
    *  Chief. Only a new touch (a fresh nextCheckAt) clears the nudges. */
   nextCheckAt?: string;
@@ -99,9 +100,8 @@ export type DeskCard = {
  *  deadline this far out, and no such touch can push it further. */
 export const CARD_NEXT_CHECK_MS = 30 * 60_000;
 /** A written next check-in time in a comment is honored up to this far out:
- *  long enough for an overnight quiet-hours park, never long enough to
- *  suppress checks on a live card indefinitely. */
-export const CARD_NEXT_CHECK_WRITTEN_MAX_MS = 12 * 60 * 60_000;
+ *  the same 30-minute maximum as any other promised work time. */
+export const CARD_NEXT_CHECK_WRITTEN_MAX_MS = CARD_NEXT_CHECK_MS;
 /** Quiet time after the owner nudge before the Chief copy. */
 export const CARD_CHECK_ESCALATE_MS = 15 * 60_000;
 
@@ -109,7 +109,7 @@ function validIso(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '' && Number.isFinite(Date.parse(value));
 }
 
-const WRITTEN_CHECK_PHRASE = /\bcheck[\s-]?in\b/gi;
+const WRITTEN_CHECK_PHRASE = /\b(?:check[\s-]?in|next update|first look|checkpoint)\b/gi;
 // A time may state its zone: ET/Eastern is the team convention and honored;
 // any other recognized zone is rejected rather than silently rescheduled as
 // Eastern (a PT time would otherwise fire three hours early). The list is
@@ -178,7 +178,7 @@ export function parseWrittenNextCheck(text: string, nowMs: number): number | nul
   let found: number | null = null;
   for (const phrase of text.matchAll(WRITTEN_CHECK_PHRASE)) {
     const start = phrase.index ?? 0;
-    if (/\blast\s*$/i.test(text.slice(0, start))) continue;
+    if (/\b(?:last|previous)\s*$/i.test(text.slice(0, start))) continue;
     // The statement lives between the phrase and the next sentence break; a
     // month abbreviation's period is part of the date, not a break.
     const rest = text
@@ -186,6 +186,8 @@ export function parseWrittenNextCheck(text: string, nowMs: number): number | nul
       .replace(WRITTEN_CHECK_MONTH_ABBR_PERIOD, '$1');
     const cut = rest.search(/[.;\n]/);
     const window = (cut === -1 ? rest : rest.slice(0, cut)).slice(0, 80);
+    const relative = relativeCheckpointTime(window, nowMs);
+    if (relative !== null) { if (relative > nowMs) found = relative; continue; }
     const time = WRITTEN_CHECK_TIME.exec(window);
     if (!time) continue;
     const zone = (time[6] ?? '').toLowerCase();
@@ -237,16 +239,30 @@ export function parseWrittenNextCheck(text: string, nowMs: number): number | nul
   return found;
 }
 
-function touchCardNextCheck(card: DeskCard, nowIso: string, writtenNextCheckMs?: number | null): void {
+/** Validate every written check-in, not only the last one used for the clock. */
+function requireCardTiming(text: string, nowMs = Date.now()): void {
+  const error = workTimingError(text, undefined, undefined, nowMs);
+  if (error) throw new DeskError(422, error);
+  const phrases = [...text.matchAll(WRITTEN_CHECK_PHRASE)];
+  for (let i = 0; i < phrases.length; i += 1) {
+    const start = phrases[i].index ?? 0;
+    if (/\b(?:last|previous)\s*$/i.test(text.slice(0, start))) continue;
+    const at = parseWrittenNextCheck(text.slice(start, phrases[i + 1]?.index), nowMs);
+    const writtenError = workTimingError(text, undefined, at ?? undefined, nowMs);
+    if (writtenError) throw new DeskError(422, writtenError);
+  }
+}
+
+function touchCardNextCheck(card: DeskCard, nowIso: string, writtenNextCheckMs?: number | null, timingText = ''): void {
   // Archived cards carry no check state even in a live column: a PATCH or
   // comment on an archived card must not re-create a deadline.
   if (!card.archived && (card.column === 'in_progress' || card.column === 'in_qa')) {
     const nowMs = Date.parse(nowIso);
     if (typeof writtenNextCheckMs === 'number' && Number.isFinite(writtenNextCheckMs) && writtenNextCheckMs > nowMs) {
-      // A written check-in time in the comment is honored, capped at the
+      // A written check-in time in the comment is honored within the
       // written maximum so no comment can park a live card indefinitely:
       // parking until a stated time actually silences the card until then.
-      card.nextCheckAt = new Date(Math.min(writtenNextCheckMs, nowMs + CARD_NEXT_CHECK_WRITTEN_MAX_MS)).toISOString();
+      card.nextCheckAt = new Date(Math.min(writtenNextCheckMs, (quietParkResume(timingText, nowMs) ?? nowMs) + CARD_NEXT_CHECK_WRITTEN_MAX_MS)).toISOString();
       card.nextCheckWritten = true;
     } else {
       card.nextCheckAt = new Date(nowMs + CARD_NEXT_CHECK_MS).toISOString();
@@ -519,7 +535,9 @@ function normalizeCard(value: unknown, now: string): DeskCard | null {
     // marker without a deadline is incoherent and drops. A missing deadline is
     // seeded; an existing one is capped.
     if (card.nextCheckWritten && !card.nextCheckAt) delete card.nextCheckWritten;
-    const cap = Date.parse(now) + (card.nextCheckWritten ? CARD_NEXT_CHECK_WRITTEN_MAX_MS : CARD_NEXT_CHECK_MS);
+    const parkText = card.comments.at(-1)?.text ?? card.description ?? '';
+    const parkAt = quietParkResume(parkText, Date.parse(card.comments.at(-1)?.at ?? updatedAt));
+    const cap = Math.max(Date.parse(now), card.nextCheckWritten ? parkAt ?? 0 : 0) + CARD_NEXT_CHECK_MS;
     if (!card.nextCheckAt) {
       const base = Math.min(Date.parse(updatedAt || now), Date.parse(now));
       card.nextCheckAt = new Date(base + CARD_NEXT_CHECK_MS).toISOString();
@@ -1033,6 +1051,8 @@ function mirrorAfter(p: Promise<DeskCard>): Promise<DeskCard> {
 }
 
 export function createCard(input: CardInput, owner: DeskActor, by: DeskActor, opts: { dedupe?: boolean } = {}): Promise<DeskCard> {
+  try { if (by.kind !== 'owner') requireCardTiming([input.title, input.description].filter(v => typeof v === 'string').join('\n')); }
+  catch (error) { return Promise.reject(error); }
   return mirrorAfter(mutate((data, now) => {
     if (opts.dedupe) {
       const wanted = normalizeTitleKey(requireTitle(input.title));
@@ -1056,16 +1076,19 @@ export function createCard(input: CardInput, owner: DeskActor, by: DeskActor, op
     if (description) card.description = description;
     const project = requireOneLine(input.project, DESK_LIMITS.project, 'project');
     if (project) card.project = project;
-    touchCardNextCheck(card, now);
+    const timingText = [card.title, card.description].filter(Boolean).join('\n');
+    touchCardNextCheck(card, now, parseWrittenNextCheck(timingText, Date.parse(now)), timingText);
     pruneCards(data);
     placeCard(data, card, typeof input.index === 'number' ? input.index : undefined);
     return card;
   }));
 }
 
-export function updateCard(id: string, input: CardInput, owner?: DeskActor): Promise<DeskCard> {
+export function updateCard(id: string, input: CardInput, owner?: DeskActor, by?: DeskActor): Promise<DeskCard> {
   return mirrorAfter(mutate((data, now) => {
     const card = findCard(data, id);
+    const timingText = [addedWorkText(card.title, input.title), addedWorkText(card.description, input.description)].filter(Boolean).join('\n');
+    if (by?.kind !== 'owner') requireCardTiming(timingText, Date.parse(now));
     if (input.title !== undefined) card.title = requireTitle(input.title);
     if (input.description !== undefined) {
       const description = requireClip(input.description, DESK_LIMITS.description, 'description');
@@ -1091,7 +1114,7 @@ export function updateCard(id: string, input: CardInput, owner?: DeskActor): Pro
     // Every PATCH is an owner touch too: a column change into or out of the
     // live columns sets or clears the deadline, and a reassignment refreshes
     // it so the new owner gets their own 30-minute window, not the old one's.
-    touchCardNextCheck(card, now);
+    touchCardNextCheck(card, now, parseWrittenNextCheck(timingText, Date.parse(now)), timingText);
     return card;
   }));
 }
@@ -1129,6 +1152,7 @@ export async function commentCard(id: string, text: unknown, author: DeskActor):
     const card = findCard(data, id);
     const body = requireClip(text, DESK_LIMITS.comment, 'text');
     if (!body) throw new DeskError(400, 'text is required');
+    if (author.kind !== 'owner') requireCardTiming(body, Date.parse(now));
     if (card.comments.length >= DESK_LIMITS.commentsPerCard) {
       throw new DeskError(409, 'This card has too many comments; start a fresh card for the next phase.');
     }
@@ -1146,7 +1170,7 @@ export async function commentCard(id: string, text: unknown, author: DeskActor):
     // quiet-hours park with a stated time stays silent until that time. It
     // also closes the commenter's open Matt asks (card-baadaf B: the card
     // touch is the close), best effort.
-    touchCardNextCheck(card, now, parseWrittenNextCheck(body, Date.parse(now)));
+    touchCardNextCheck(card, now, parseWrittenNextCheck(body, Date.parse(now)), body);
     return { card, comment };
   });
   // Only a live roster agent's card comment closes their asks, and only after

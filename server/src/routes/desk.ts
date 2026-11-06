@@ -295,7 +295,7 @@ deskRouter.post('/cards', route(async (req, res) => {
 
 deskRouter.patch('/cards/:id', route(async (req, res) => {
   const input = body(req);
-  res.json({ card: await updateCard(param(req, 'id'), input, resolveOwner(input.owner)) });
+  res.json({ card: await updateCard(param(req, 'id'), input, resolveOwner(input.owner), resolveWriteAuthor(input, fetchSite(req))) });
 }));
 
 deskRouter.post('/cards/:id/move', route(async (req, res) => {

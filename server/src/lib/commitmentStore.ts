@@ -1,3 +1,4 @@
+import { parseDue, workTimingError } from './promiseTime.ts';
 // Agent-scoped open commitments — the small always-there list that survives
 // compaction by construction. Agents add and clear their own entries (owed
 // replies, promises with times, parked items); nothing here is ever rewritten
@@ -241,11 +242,13 @@ export function addCommitment(
   if (trimmedDue.length > DUE_CAP) {
     return { error: `Keep the time under ${DUE_CAP} characters (got ${trimmedDue.length}).` };
   }
+  const timingError = workTimingError(body, trimmedDue, opts?.dueAt);
+  if (timingError) return { error: timingError };
   const all = readAll();
   if (all.filter((c) => c.agentId === owner).length >= MAX_PER_AGENT) {
     return { error: `Your commitments list is full (${MAX_PER_AGENT}). Clear one that is done before adding another.` };
   }
-  const dueAt = asFiniteNumber(opts?.dueAt, 0);
+  const dueAt = asFiniteNumber(opts?.dueAt, 0) || (trimmedDue ? parseDue(trimmedDue) ?? 0 : 0);
   const sourceId = typeof opts?.sourceId === 'string' ? opts.sourceId.trim().slice(0, 120) : '';
   const commitment: Commitment = {
     id: `cm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
