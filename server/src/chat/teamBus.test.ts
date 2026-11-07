@@ -207,9 +207,10 @@ test('only an explicit task-start handoff from a task source stamps a fresh thre
     assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', text: job, personSourced: true }), false);
     assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', text: job, source: 'channel' }), false);
     assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', text: job, nudgeHoldSince: 1 }), false);
-    // A follow-up inside work the sender is already having with this
-    // recipient (chain leg) never stamps, even from a task source.
-    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', text: job, continuesChain: true }), false);
+    // An explicit job opener stamps even when it answers the coder's own
+    // handoff (chain leg); plain follow-ups in that chain still never stamp.
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', text: job, continuesChain: true }), true);
+    assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', text: 'one more thing on this job', continuesChain: true }), false);
     // An unflagged recipient never stamps.
     assert.equal(isTaskStartHandoff({ senderId: 'kip', recipientId: 'kip', recipientHome: 'bot-kip', text: job }), false);
   } finally {
