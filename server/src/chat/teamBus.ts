@@ -187,13 +187,12 @@ export const FRESH_BUSY_HOLD_MS = 5 * 60_000;
  *  roster teammate speaking directly (no Desk/voice/Slack/channel or explicit
  *  person-sourced provenance, no nudge hold), the sender is a task source
  *  for this recipient — either named on the operator list, or (list empty) a
- *  lead briefing one of its coders — AND the handoff does not continue the
- *  conversation the sender is already having with this recipient (chain
- *  leg: a clarification, answer or follow-up inside work in flight carries
- *  the inbound chain's edge and never stamps). A first handoff from a task
- *  source stamps; the recipient's next one stamps again once the earlier
- *  work's chain has closed. Worker replies back never stamp for a lead that
- *  is not flagged. */
+ *  lead briefing one of its coders — AND the text opens with the task marker.
+ *  The explicit marker decides, even mid-conversation (Nov 7 2026: a lead
+ *  answering a coder's handoff with "New job, <card>" continued the inbound
+ *  chain, so Theo and Christina got new jobs in their old threads). Follow-ups
+ *  inside work in flight don't open with the marker, so they never stamp.
+ *  Worker replies back never stamp for a lead that is not flagged. */
 export function isTaskStartHandoff(opts: {
   senderId: string;
   recipientId: string;
@@ -207,7 +206,6 @@ export function isTaskStartHandoff(opts: {
   if (!opts.senderId || opts.source) return false;
   if (opts.personSourced === true) return false;
   if (opts.nudgeHoldSince !== undefined) return false;
-  if (opts.continuesChain === true) return false;
   if (!freshThreadOnTask(opts.recipientHome)) return false;
   if (!opensWithTaskMarker(opts.text ?? '', freshTaskPrefix(opts.recipientHome))) return false;
   const allowed = freshTaskSenders(opts.recipientHome);
