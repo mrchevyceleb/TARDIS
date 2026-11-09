@@ -533,7 +533,15 @@ export function scanWorkspaceMentionSpans(text: string): WorkspaceMentionSpan[] 
 }
 
 function annotatePlainWorkspaceMentions(input: string): string {
-  return input.replace(MENTION_PATTERN, (match) => {
+  return input.replace(MENTION_PATTERN, (match: string, ...rest: unknown[]) => {
+    // A path that is already a link or image destination ("](path)" or
+    // "](<path>)") belongs to that markdown; wrapping it again nests a link
+    // inside the URL and breaks the image or link.
+    const offset = rest[rest.length - 2] as number;
+    const before = input.slice(0, offset);
+    const dest = before.lastIndexOf('](');
+    if (dest >= 0 && !/[)\s]/.test(before.slice(dest + 2).replace(/^\s*<?/, ''))) return match;
+    if (/^\s{0,3}\[[^\]]+\]:\s*<?\S*$/.test(before)) return match;
     const trailingMatch = match.match(TRAILING_PUNCT);
     const trailing = trailingMatch ? trailingMatch[0] : '';
     const cleanMatch = trailing ? match.slice(0, match.length - trailing.length) : match;
