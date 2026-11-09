@@ -15,7 +15,7 @@ const secret = randomBytes(32);
 // can still reacquire the desktop after its first lease runs out.
 const CONTEXT_IDLE_MS = 60 * 60_000;
 const CONTEXT_HARD_MS = 6 * 60 * 60_000;
-const contexts = new Map<string, { nonce: string; expires: number; hardExpires: number; human: boolean }>();
+const contexts = new Map<string, { nonce: string; expires: number; hardExpires: number; human: boolean; chatId: string; selection: string; label: string }>();
 let ownerTurnRunning: (owner: string) => boolean = () => false;
 export function setComputerOwnerTurnProbe(probe: (owner: string) => boolean): void { ownerTurnRunning = probe; }
 /** Whether the owner's turn is running right now (the probe above). Lease
@@ -97,6 +97,15 @@ export function readComputerContext(token: unknown): { owner: string; chatId: st
 /** The owner's turn was interrupted: its signed context stops working at once,
  *  so a tool call still in flight from that turn cannot open a new grant. The
  *  next turn mints a fresh one in computerGuidance. */
+/** The live context of an owner's current turn, for a lane-bound caller whose
+ *  shim names its owner: the header is the identity, so the signed token is
+ *  not needed. Same expiry rules as a presented token. */
+export function ownerComputerContext(owner: string): { owner: string; chatId: string; selection?: string; label: string; human: boolean } | undefined {
+  const current = contexts.get(owner);
+  const now = Date.now();
+  if (!current || current.hardExpires <= now || (current.expires < now && !ownerTurnRunning(owner))) return undefined;
+  return { owner, chatId: current.chatId, selection: current.selection || undefined, label: current.label, human: current.human };
+}
 export function revokeComputerContext(owner: string): void {
   contexts.delete(owner);
 }
@@ -183,35 +192,27 @@ export function computerGuidance(cwd: string, chatId: string, label: string, hum
   let purgedUseRecord = false;
   for (const [ownerKey, lastUse] of computerUseRecord()) if (now - lastUse > COMPUTER_BLOCK_WINDOW_MS) { computerUseRecord().delete(ownerKey); purgedUseRecord = true; }
   if (purgedUseRecord) writeComputerUseRecord();
-  // Matt, Oct 14 (card-d7bf78 b): the full computer block is injected only
-  // for lanes that have used a computer tool recently — a lane that never
-  // touches computers was paying the whole rules block every turn. A steer
-  // into a running turn always re-issues it (the turn may hold a context);
-  // a fresh turn on a lane with no recent use omits it, and a first computer
-  // attempt without the block lands as a clear failure whose API call
-  // re-arms the block for the next turn. The shared Banana serve process
-  // carries no lane owner, so its lanes cannot be recorded and stay
-  // ungated. The gate drops only the computer block: robot availability is
-  // unrelated to prior computer use and still rides along, and any stale
-  // context from an earlier turn is revoked here so no still-valid token
-  // floats past the omitted guidance.
-  if (!ungated && !sameTurn && now - (computerUseRecord().get(owner) ?? 0) > COMPUTER_BLOCK_WINDOW_MS) {
-    contexts.delete(owner);
-    // One-line stub (Matt, Oct 15): a prompt with no block was never told that
-    // a single failed attempt re-arms it, so lanes routed around the attempt
-    // instead of making it. Rides the ungated path only.
-    return [
-      'No computer-use block this turn: this lane has used no computer tool in the last 24h. One computer_* call from this turn, even one that fails, re-arms the block for the next turn.',
-      robotGuidance(),
-    ].filter(Boolean).join('\n');
-  }
   const held = sameTurn ? contexts.get(owner) : undefined;
   const context = held && held.human === human && held.hardExpires > now
     ? { ...held, expires: now + CONTEXT_IDLE_MS }
-    : { nonce: randomBytes(16).toString('hex'), expires: now + CONTEXT_IDLE_MS, hardExpires: now + CONTEXT_HARD_MS, human };
+    : { nonce: randomBytes(16).toString('hex'), expires: now + CONTEXT_IDLE_MS, hardExpires: now + CONTEXT_HARD_MS, human, chatId, selection: computerSelectionKey(cwd, chatId), label: label.slice(0, 100) };
   contexts.set(owner, context); // a later peer turn cannot replay this owner's earlier human context
   // The signed copy carries the hard cap; the idle window lives in the map above.
   const body = Buffer.from(JSON.stringify({ owner, chatId, selection: computerSelectionKey(cwd, chatId), label: label.slice(0, 100), human, nonce: context.nonce, expires: context.hardExpires })).toString('base64url');
+  // Matt, Oct 14 (card-d7bf78 b): the full rules block rides only for lanes
+  // that used a computer tool recently. Every turn still mints its context
+  // server-side, gated or not, so a lane-bound
+  // caller can start a computer on its first try (Nov 9: Riley's first
+  // computer_start in a day failed with no context, and the lane gave up
+  // instead of retrying). Only the prompt block is gated: a lane that has not
+  // used a computer recently skips the ~2.5k-token rules, and its shim's
+  // owner header stands in for the token it was never shown.
+  if (!ungated && !sameTurn && now - (computerUseRecord().get(owner) ?? 0) > COMPUTER_BLOCK_WINDOW_MS) {
+    return [
+      'Computer tools are available this turn: call computer_start with a purpose (no context needed). The full computer rules arrive with your next turn; until then use one controller, yield to a person using that machine, and never bypass a pause or refusal.',
+      robotGuidance(),
+    ].filter(Boolean).join('\n');
+  }
   const selected = computerTargetFor(cwd, chatId);
   const deviceLine = selected
     ? `The user explicitly selected device ${JSON.stringify(selected)} for this thread.`
