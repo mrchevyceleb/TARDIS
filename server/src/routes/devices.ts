@@ -14,7 +14,7 @@ import {
   type DeviceOp,
 } from '../devices/bridge.ts';
 import { asyncHandler } from './helpers.ts';
-import { backgroundComputerAllowed, computerSelectionKey, computerTarget, computerTargetFor, configuredDefaultComputer, noteComputerToolUse, ownerComputerContext, readComputerContext, setComputerTarget, validComputerMcpToken } from '../devices/context.ts';
+import { backgroundComputerAllowed, computerSelectionKey, computerTarget, computerTargetFor, configuredDefaultComputer, noteComputerToolUse, readComputerContext, setComputerTarget, validComputerMcpToken } from '../devices/context.ts';
 import { bareChatId } from '../chat/threadKey.ts';
 import { ComputerStepJournal } from '../devices/stepJournal.ts';
 import { computerOcr } from '../devices/ocr.ts';
@@ -97,19 +97,12 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
   let context: ReturnType<typeof readComputerContext> | undefined;
   if (op === 'start') {
     try {
-      // A lane-bound shim names its owner on every call, and that header is
-      // the identity: the lane starts on its own current turn's context, so a
-      // first call with no (or a stale, or a pasted) token still works, and a
-      // context from another lane can never be used here. Shims with no owner
-      // env (the shared Banana serve process) still present the signed token.
+      context = readComputerContext(body.context);
+      // A lane-bound shim names its owner on every call, so a context pasted
+      // from another lane (including a human turn's) cannot be started here.
+      // Shims with no owner env (the shared Banana serve process) are exempt.
       const callerOwner = req.get('x-rivendell-computer-owner');
-      if (callerOwner) {
-        const own = ownerComputerContext(callerOwner);
-        if (!own) throw new Error('This lane has no running turn to start a computer for. Try again from a live turn.');
-        context = own;
-      } else {
-        context = readComputerContext(body.context);
-      }
+      if (callerOwner && callerOwner !== context.owner) throw new Error(`This computer context was issued to ${context.label}'s turn, and this lane is not it. A context cannot be borrowed from another lane; use the "computer_start context for this turn" line at the top of your own prompt.`);
       if (!context.human && !backgroundComputerAllowed()) throw new Error('Background computer use is not authorized by operator policy.');
       // The per-thread device selection is the human's statement about the
       // whole thread, so both lanes of an agent share it: it keys on the
