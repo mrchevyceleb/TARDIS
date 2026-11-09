@@ -23,12 +23,12 @@ test('routing sends Operly to Martin, Studio to Edgar, Sud work to Sud', () => {
 });
 
 test('a staging merge lands once and keeps the thread status on re-merge', async () => {
-  const item = await upsertQaItem({ repo: 'acme/operly', pr: 12, title: 'Usage meter reset', app: 'Operly', slackThreadUrl: 'https://slack.example/t12' });
+  const item = await upsertQaItem({ repo: 'acme/operly', pr: 12, title: 'Usage meter reset', app: 'Operly', slackThreadUrl: 'https://slack.example/t12', slackThreadTs: 't1' });
   assert.ok(item);
   assert.equal(item.tester, 'martin');
   assert.equal(item.status, 'up_next');
   await applyQaOutcome(item.id, 'testing');
-  const again = await upsertQaItem({ repo: 'acme/operly', pr: 12, title: 'Usage meter reset', app: 'Operly' });
+  const again = await upsertQaItem({ repo: 'acme/operly', pr: 12, title: 'Usage meter reset', app: 'Operly', slackThreadTs: 't1' });
   assert.ok(again);
   assert.equal(again.id, item.id);
   assert.equal(again.status, 'testing');
@@ -38,7 +38,7 @@ test('a staging merge lands once and keeps the thread status on re-merge', async
 });
 
 test('validated drops the card; a fail loops Sud to retest', async () => {
-  const sudItem = await upsertQaItem({ repo: 'acme/studio', pr: 7, title: 'Mobile fixes', app: 'Studio', needsSud: true });
+  const sudItem = await upsertQaItem({ repo: 'acme/studio', pr: 7, title: 'Mobile fixes', app: 'Studio', needsSud: true, slackThreadTs: 't1' });
   assert.ok(sudItem);
   const failed = await applyQaOutcome(sudItem.id, 'fail');
   assert.equal(failed?.status, 'retest');
@@ -73,8 +73,8 @@ test('unconfigured repos never land, and concurrent merges land once', async () 
   const refused = await upsertQaItem({ repo: 'acme/other', pr: 1, title: 'Not QA work', app: 'Studio' });
   assert.equal(refused, null);
   const [a, b] = await Promise.all([
-    upsertQaItem({ repo: 'acme/operly', pr: 21, title: 'Race lander', app: 'Operly' }),
-    upsertQaItem({ repo: 'acme/operly', pr: 21, title: 'Race lander', app: 'Operly' }),
+    upsertQaItem({ repo: 'acme/operly', pr: 21, title: 'Race lander', app: 'Operly', slackThreadTs: 't1' }),
+    upsertQaItem({ repo: 'acme/operly', pr: 21, title: 'Race lander', app: 'Operly', slackThreadTs: 't1' }),
   ]);
   assert.equal(a?.id, b?.id);
   const board = await qaBoard();
@@ -82,17 +82,17 @@ test('unconfigured repos never land, and concurrent merges land once', async () 
 });
 
 test('a validated card stays validated under a racing fail and a retried merge', async () => {
-  const item = await upsertQaItem({ repo: 'acme/studio', pr: 22, title: 'Race outcomes', app: 'Studio' });
+  const item = await upsertQaItem({ repo: 'acme/studio', pr: 22, title: 'Race outcomes', app: 'Studio', slackThreadTs: 't1' });
   assert.ok(item);
   await Promise.all([applyQaOutcome(item.id, 'validated'), applyQaOutcome(item.id, 'fail')]);
-  const retried = await upsertQaItem({ repo: 'acme/studio', pr: 22, title: 'Race outcomes', app: 'Studio' });
+  const retried = await upsertQaItem({ repo: 'acme/studio', pr: 22, title: 'Race outcomes', app: 'Studio', slackThreadTs: 't1' });
   assert.equal(retried?.status, 'validated');
   const board = await qaBoard();
   assert.equal(board.edgar.filter((i) => i.pr === 22).length, 0);
 });
 
 test('a column shows at most eight cards per app, and parked cards wait off the board', async () => {
-  for (let pr = 400; pr < 410; pr++) await upsertQaItem({ repo: 'acme/studio', pr, title: `Cap ${pr}`, app: 'Studio' });
+  for (let pr = 400; pr < 410; pr++) await upsertQaItem({ repo: 'acme/studio', pr, title: `Cap ${pr}`, app: 'Studio', slackThreadTs: 't1' });
   const capped = (await qaBoard()).edgar.filter((i) => i.app === 'Studio');
   assert.equal(capped.length, 8);
   const parked = capped[0];
@@ -105,9 +105,9 @@ test('a column shows at most eight cards per app, and parked cards wait off the 
 });
 
 test('routing on a later signal moves an existing card; titles never name the builder', async () => {
-  const synced = await upsertQaItem({ repo: 'acme/operly', pr: 23, title: 'Naomi — repair billing', app: 'Operly' });
+  const synced = await upsertQaItem({ repo: 'acme/operly', pr: 23, title: 'Naomi — repair billing', app: 'Operly', slackThreadTs: 't1' });
   assert.equal(synced?.tester, 'martin');
   assert.equal(synced?.title, 'repair billing');
-  const routed = await upsertQaItem({ repo: 'acme/operly', pr: 23, title: 'repair billing', app: 'Operly', needsSud: true });
+  const routed = await upsertQaItem({ repo: 'acme/operly', pr: 23, title: 'repair billing', app: 'Operly', needsSud: true, slackThreadTs: 't1' });
   assert.equal(routed?.tester, 'sud');
 });
