@@ -21,7 +21,7 @@ test('pin channels parse per tester', () => {
 });
 
 test('held sends are attempted once per distinct list, never per sweep', async () => {
-  const item = await upsertQaItem({ repo: 'acme/operly', pr: 31, title: 'Pin refresh candidate', app: 'Operly' });
+  const item = await upsertQaItem({ repo: 'acme/operly', pr: 31, title: 'Pin refresh candidate', app: 'Operly', slackThreadTs: 't1' });
   assert.ok(item);
   let calls = 0;
   const heldTool = async () => { calls += 1; return { held: true, draftId: `d${calls}` }; };
@@ -36,7 +36,7 @@ test('held sends are attempted once per distinct list, never per sweep', async (
   // A changed list is one new attempt for the changed tester only.
   await applyQaOutcome(item.id, 'testing');
   const third = await qaPinsForTest.refreshQaPinsWith(heldTool);
-  assert.deepEqual(third.held, ['edgar']);
+  assert.deepEqual(third.held, ['martin']);
   assert.equal(calls, 4);
 });
 
@@ -50,7 +50,7 @@ test('a confirmed send records the pin and skips an unchanged list', async () =>
   assert.deepEqual(first.refreshed, []);
   assert.equal(calls, 0);
   // A new card changes Edgar's list: he posts, and the record lands.
-  const edgarItem = await upsertQaItem({ repo: 'acme/studio', pr: 32, title: 'Studio card for pins', app: 'Studio' });
+  const edgarItem = await upsertQaItem({ repo: 'acme/studio', pr: 32, title: 'Studio card for pins', app: 'Studio', slackThreadTs: 't2' });
   assert.ok(edgarItem);
   const second = await qaPinsForTest.refreshQaPinsWith(sentTool);
   assert.deepEqual(second.refreshed, ['edgar']);
