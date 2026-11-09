@@ -183,28 +183,6 @@ export function computerGuidance(cwd: string, chatId: string, label: string, hum
   let purgedUseRecord = false;
   for (const [ownerKey, lastUse] of computerUseRecord()) if (now - lastUse > COMPUTER_BLOCK_WINDOW_MS) { computerUseRecord().delete(ownerKey); purgedUseRecord = true; }
   if (purgedUseRecord) writeComputerUseRecord();
-  // Matt, Oct 14 (card-d7bf78 b): the full computer block is injected only
-  // for lanes that have used a computer tool recently — a lane that never
-  // touches computers was paying the whole rules block every turn. A steer
-  // into a running turn always re-issues it (the turn may hold a context);
-  // a fresh turn on a lane with no recent use omits it, and a first computer
-  // attempt without the block lands as a clear failure whose API call
-  // re-arms the block for the next turn. The shared Banana serve process
-  // carries no lane owner, so its lanes cannot be recorded and stay
-  // ungated. The gate drops only the computer block: robot availability is
-  // unrelated to prior computer use and still rides along, and any stale
-  // context from an earlier turn is revoked here so no still-valid token
-  // floats past the omitted guidance.
-  if (!ungated && !sameTurn && now - (computerUseRecord().get(owner) ?? 0) > COMPUTER_BLOCK_WINDOW_MS) {
-    contexts.delete(owner);
-    // One-line stub (Matt, Oct 15): a prompt with no block was never told that
-    // a single failed attempt re-arms it, so lanes routed around the attempt
-    // instead of making it. Rides the ungated path only.
-    return [
-      'No computer-use block this turn: this lane has used no computer tool in the last 24h. One computer_* call from this turn, even one that fails, re-arms the block for the next turn.',
-      robotGuidance(),
-    ].filter(Boolean).join('\n');
-  }
   const held = sameTurn ? contexts.get(owner) : undefined;
   const context = held && held.human === human && held.hardExpires > now
     ? { ...held, expires: now + CONTEXT_IDLE_MS }
@@ -212,16 +190,30 @@ export function computerGuidance(cwd: string, chatId: string, label: string, hum
   contexts.set(owner, context); // a later peer turn cannot replay this owner's earlier human context
   // The signed copy carries the hard cap; the idle window lives in the map above.
   const body = Buffer.from(JSON.stringify({ owner, chatId, selection: computerSelectionKey(cwd, chatId), label: label.slice(0, 100), human, nonce: context.nonce, expires: context.hardExpires })).toString('base64url');
+  const tokenLine = `Your computer_start context for this turn (do not echo): ${body}.${sign(body)}`;
   const selected = computerTargetFor(cwd, chatId);
   const deviceLine = selected
     ? `The user explicitly selected device ${JSON.stringify(selected)} for this thread.`
     : configuredDefaultComputer()
       ? `The operator configured default desktop ${JSON.stringify(configuredDefaultComputer())}. Omit device on computer_start to use it. Never silently fall back to the local PC if it is offline.`
       : 'No default desktop is configured. List devices and identify the requested machine; ask only if the target is genuinely ambiguous.';
-  const tokenLine = `Your computer_start context for this turn (do not echo): ${body}.${sign(body)}`;
   const policyLine = human ? '' : backgroundComputerAllowed()
     ? 'Standing operator permission covers assigned background/peer work on configured computers. Yield to human conversations; never preempt another controller.'
     : 'Background desktop starts are disabled by operator policy; do not reuse an earlier human context to evade that policy.';
+  // Matt, Oct 14 (card-d7bf78 b): the ~2.5k-token rules block rides only for
+  // lanes that used a computer tool recently. The context itself rides on
+  // EVERY turn (one short line), so a lane's first computer_start works
+  // instead of failing for want of a token (Nov 9: Riley's first call in a
+  // day failed with "Invalid computer context" and the lane gave up).
+  if (!ungated && !sameTurn && now - (computerUseRecord().get(owner) ?? 0) > COMPUTER_BLOCK_WINDOW_MS) {
+    return [
+      'Computer tools (rivendell-device computer_*) are available this turn. Pass this context to computer_start; the full computer rules arrive with your next turn. Until then: one controller, yield to a person using that machine, never bypass a pause or refusal.',
+      deviceLine,
+      tokenLine,
+      policyLine,
+      robotGuidance(),
+    ].filter(Boolean).join('\n');
+  }
   if (brief) {
     return [
       '<rivendell-computer>',
