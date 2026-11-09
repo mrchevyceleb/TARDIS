@@ -13,6 +13,7 @@ import {
   parseDeskHref,
   openWorkspaceLink,
   opensOnThisPcByClick,
+  normalizeWorkspacePath,
   parseProxyHref,
   parseWorkspaceMentionText,
 } from '../../utils/proxyLinks';
@@ -37,10 +38,36 @@ import { DeskRefPill } from './DeskRef';
 // react-markdown v10 strips unknown URL schemes via its default urlTransform.
 // Whitelist our internal proxy schemes so the `a` override below sees them
 // and can render in-app cards instead of empty external links.
-function proxyUrlTransform(url: string): string {
+function proxyUrlTransform(url: string, key: string, node: { tagName?: string }): string {
+  // Image paths resolve before sanitizing: the default transform drops a
+  // Windows drive letter ("C:") as an unknown scheme.
+  if (key === 'src' && node?.tagName === 'img') {
+    const resolved = chatImageSrc(url);
+    if (resolved !== url) return resolved ?? '';
+  }
   if (url.startsWith('rivendell-doc:') || url.startsWith('rivendell-folder:') || url.startsWith('rivendell-machine:') || url.startsWith(DESK_HREF_PREFIX)) return url;
   return defaultUrlTransform(url);
 }
+
+// Agents write images as file paths (workspace-relative, "ASSISTANT-HUB/...",
+// or an absolute path inside the workspace). The browser can't load a disk
+// path, so serve workspace images through the files API like any other file.
+// Web, data and blob URLs, and paths outside the workspace, pass through.
+export function chatImageSrc(src: string | undefined): string | undefined {
+  if (!src || /^(https?:|data:|blob:)/i.test(src) || src.startsWith('/api/')) return src;
+  let path = src;
+  try { path = decodeURIComponent(src); } catch { /* keep raw */ }
+  if (path.startsWith('file://')) path = path.slice('file://'.length);
+  path = path.replace(/^(\.\/)+/, '');
+  if (/^(\/|[A-Za-z]:[\\/])/.test(path) && !path.includes('ASSISTANT-HUB')) return src;
+  const rel = normalizeWorkspacePath(path);
+  return rel ? `/api/files/raw?path=${encodeURIComponent(rel)}` : src;
+}
+
+// src is already resolved by proxyUrlTransform.
+const MarkdownImage = ({ src, alt }: { src?: string; alt?: string }) => {
+  return <img src={src} alt={alt || ''} loading="lazy" style={{ maxWidth: '100%', borderRadius: 6, display: 'block', margin: '6px 0' }} />;
+};
 
 const REMARK_PLUGINS = [[remarkGfm, { singleTilde: false }]] as const;
 
@@ -379,6 +406,7 @@ const MD_COMPONENTS: Components = {
     return <MarkdownCodeBlock raw={raw}>{raw}</MarkdownCodeBlock>;
   },
   a: MarkdownAnchor,
+  img: ({ src, alt }: any) => <MarkdownImage src={typeof src === 'string' ? src : undefined} alt={alt} />,
   blockquote: ({ children }) => (
     <blockquote style={{
       borderLeft: '2px solid var(--r-gold-soft)',
