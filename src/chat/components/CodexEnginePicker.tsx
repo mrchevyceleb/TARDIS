@@ -7,12 +7,13 @@ export const CLAUDE_MODELS = [
   { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
   { id: 'claude-haiku-5-5', label: 'Haiku 5.5' },
   { id: 'claude-opus-5', label: 'Opus 5' },
+  { id: 'claude-fable-5-2', label: 'Fable 5.2' },
   { id: 'claude-fable-5-1', label: 'Fable 5.1' },
   { id: 'claude-fable-5', label: 'Fable 5' },
 ];
-// The 5.5 family (Opus, Sonnet, Haiku) shares the same five real effort tiers
-// (low → max); their own CLI defaults differ, but TARDIS always passes
-// --effort explicitly per brain.
+// The 5.5 family (Opus, Sonnet, Haiku) and Fable 5.1/5.2 share the same five
+// real effort tiers (low → max); their own CLI defaults differ, but TARDIS
+// always passes --effort explicitly per brain.
 export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 // Default Claude model when nothing (valid) is stored. Opus 5.5 is the flagship.
