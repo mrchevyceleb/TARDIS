@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { accountEnv } from '../lib/accountResolver.ts';
-import { withLongLivedClaudeToken } from '../lib/cliProfiles.ts';
+import { withVerifiedLongLivedClaudeToken } from '../lib/cliProfiles.ts';
 import { getXaiAuth } from '../routes/xai-oauth.ts';
 import { assertClaudeSubscription } from './subscription-auth.ts';
 import { assertSubscriptionEngine } from './subscription-policy.ts';
@@ -172,7 +172,10 @@ export async function completeSubscription(request: CompletionRequest, signal: A
   // Resolve the operator's explicitly configured account before entering an
   // empty directory. Content requests never load the workspace's instructions.
   const resolved = accountEnv(process.cwd());
-  const env = withLongLivedClaudeToken(resolved, resolved.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'));
+  const env = engine === 'claude'
+    ? await withVerifiedLongLivedClaudeToken(resolved, resolved.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'))
+    : resolved;
+  signal.throwIfAborted();
   const cwd = await mkdtemp(join(tmpdir(), 'tardis-content-'));
   let proxy: Awaited<ReturnType<typeof codexTextProxy>> | undefined;
   try {

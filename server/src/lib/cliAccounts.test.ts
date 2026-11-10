@@ -20,10 +20,17 @@ process.env.RIVENDELL_ACCOUNT_MAP = mapPath;
 
 const bin = join(root, 'bin');
 mkdirSync(bin, { recursive: true });
-writeFileSync(join(bin, 'claude'), '#!/bin/sh\ncat "$STATUS_JSON_FILE"\n');
+writeFileSync(join(bin, 'claude'), `#!/bin/sh
+if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ] && grep -q '"authMethod":"oauth_token"' "$STATUS_JSON_FILE"; then
+  printf '{"loggedIn":false}\\n'
+else
+  cat "$STATUS_JSON_FILE"
+fi
+`);
 chmodSync(join(bin, 'claude'), 0o755);
 
 const { claudeIdentity, probeLongLivedClaudeToken } = await import('./cliAccounts.ts');
+const { subscriptionRoutingKey, withLongLivedClaudeToken, withVerifiedLongLivedClaudeToken } = await import('./cliProfiles.ts');
 type LongLivedVerdict = import('./cliAccounts.ts').LongLivedVerdict;
 
 const profile = join(home, '.claude-year');
@@ -69,8 +76,13 @@ test('a wiped year-token profile still reads as connected', async () => {
 test('a rejected year token reads as signed out; network trouble does not', async () => {
   writeFileSync(join(profile, '.claude.json'), JSON.stringify({}));
   const status = stubStatus({ loggedIn: true, authMethod: 'oauth_token' });
+  const before = subscriptionRoutingKey('claude', status);
   assert.equal((await claudeIdentity(status, verdict('invalid'))).status, 'signed_out', 'auth status alone says loggedIn for any token; the provider verdict decides');
-  assert.equal((await claudeIdentity(status, verdict('unknown'))).status, 'unavailable', 'an unverified token is neither signed out nor proven connected');
+  assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, undefined, 'rejected tokens cannot override a native login on future lane spawns');
+  assert.notEqual(subscriptionRoutingKey('claude', status), before, 'provider rejection retires workers holding the rejected token without a file change');
+  assert.equal((await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'claude.ai', email: 'year@example.com' }))).status, 'connected', 'a native login remains usable after token rejection');
+  writeFileSync(join(profile, '.long-lived-oauth-token'), 'year@example.com\nsk-ant-oat01-replacement-token-0123456789\n');
+  assert.equal((await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'oauth_token' }), verdict('unknown'))).status, 'unavailable', 'an unverified replacement is neither signed out nor proven connected');
   assert.equal((await claudeIdentity(stubStatus({ loggedIn: false }), verdict('valid'))).status, 'signed_out');
 });
 
@@ -107,23 +119,33 @@ test('only authentication evidence verifies a token, not arbitrary HTTP response
   }
 });
 
-test('provider probes coalesce and outages preserve only prior verified verdicts', async (t) => {
+test('provider probes coalesce, recheck rejections after TTL, and preserve definitive verdicts during outages', async (t) => {
+  const token = 'sk-ant-oat01-coalesced';
   let clock = Date.now();
   t.mock.method(Date, 'now', () => clock);
   let status = 200;
   const fetchMock = t.mock.method(globalThis, 'fetch', async () => new Response('{}', { status }));
-  assert.deepEqual(await Promise.all([probeLongLivedClaudeToken('coalesced'), probeLongLivedClaudeToken('coalesced')]), ['valid', 'valid']);
+  assert.deepEqual(await Promise.all([probeLongLivedClaudeToken(token), probeLongLivedClaudeToken(token)]), ['valid', 'valid']);
   assert.equal(fetchMock.mock.callCount(), 1);
   clock += 11 * 60_000;
   status = 503;
-  assert.equal(await probeLongLivedClaudeToken('coalesced'), 'valid', 'a previously verified token survives provider outages');
+  assert.equal(await probeLongLivedClaudeToken(token), 'valid', 'a previously verified token survives provider outages');
   assert.equal(await probeLongLivedClaudeToken('never-verified'), 'unknown', 'an outage never invents a first verification');
   status = 401;
-  assert.equal(await probeLongLivedClaudeToken('coalesced'), 'invalid', 'a revocation supersedes the old valid verdict');
+  assert.equal(await probeLongLivedClaudeToken(token), 'invalid', 'a revocation supersedes the old valid verdict');
+  writeFileSync(join(profile, '.claude.json'), '{}');
+  writeFileSync(join(profile, '.long-lived-oauth-token'), `year@example.com\n${token}\n`);
+  assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  clock += 11 * 60_000;
+  status = 200;
+  assert.equal((await withVerifiedLongLivedClaudeToken({}, profile)).CLAUDE_CODE_OAUTH_TOKEN, token, 'a rejected token is rechecked after TTL instead of remaining stuck');
+  clock += 11 * 60_000;
+  status = 401;
+  assert.equal(await probeLongLivedClaudeToken(token), 'invalid');
   clock += 11 * 60_000;
   fetchMock.mock.restore();
   t.mock.method(globalThis, 'fetch', async () => { throw new Error('Network unavailable'); });
-  assert.equal(await probeLongLivedClaudeToken('coalesced'), 'invalid', 'network trouble never undoes a revocation');
+  assert.equal(await probeLongLivedClaudeToken(token), 'invalid', 'network trouble never undoes a revocation');
 });
 
 test('profiles without a year token keep the native answer', async () => {

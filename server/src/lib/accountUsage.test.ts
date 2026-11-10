@@ -63,10 +63,12 @@ test('merged token accounts use healthy normal credentials and renew only that l
   const accounts = (await listCliAccounts()).filter(item => item.engine === 'claude');
   assert.equal(accounts.length, 1, 'a wiped same-email profile folds into its unambiguous organization');
   assert.equal(accounts[0]!.profileIds.length, 3);
-  assert.equal('organizationId' in accounts[0]!, false, 'internal grouping metadata stays private');
+  for (const field of ['organizationId', 'tokenId', 'tokenIds']) assert.equal(field in accounts[0]!, false, 'internal grouping metadata stays private');
   assert.equal((await refresh())[0]!.status, 'live', 'a missing representative credential file falls back to its healthy peer');
   writeFileSync(join(dirs.first!, '.credentials.json'), '{torn');
   assert.equal((await refresh())[0]!.status, 'live', 'a torn representative also falls back');
+  writeFileSync(join(dirs.first!, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'nearly-expired-pass', expiresAt: clock + 61_001 } }));
+  assert.equal((await refresh())[0]!.status, 'live', 'a safely valid peer outranks a token with one millisecond left');
   writeFileSync(join(dirs.first!, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'expired-pass', expiresAt: clock - 1 } }));
   assert.equal((await refresh())[0]!.status, 'live', 'a fresh peer outranks an expired representative');
   rmSync(join(dirs.first!, '.credentials.json'));
@@ -92,10 +94,17 @@ test('merged token accounts use healthy normal credentials and renew only that l
   assert.equal(readFileSync(renewalFile, 'utf8').trim(), 'unset', 'the renewal cooldown prevents concurrent refreshes');
 });
 
-test('an organization-less token row never merges into an ambiguous same-email organization', async (t) => {
-  writeFileSync(join(dirs.peer!, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'year@example.com', organizationUuid: 'org-2' } }));
+test('organization-less profiles only fold with same-token proof and an unambiguous organization', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => new Response('{}'));
+  const tokenPath = join(dirs.wiped!, '.long-lived-oauth-token');
+  writeFileSync(tokenPath, 'year@example.com\nsk-ant-oat01-different-organization-token\n');
+  const distinct = (await listCliAccounts(true)).filter(item => item.engine === 'claude');
+  assert.equal(distinct.length, 2, 'a different token with the same email cannot borrow an organization');
+  writeFileSync(tokenPath, 'year@example.com\nsk-ant-oat01-usage-test-token\n');
+  writeFileSync(join(dirs.peer!, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'year@example.com', organizationUuid: 'org-2' } }));
   const accounts = (await listCliAccounts(true)).filter(item => item.engine === 'claude');
   assert.equal(accounts.length, 3);
   assert.ok(accounts.every(item => item.status === 'connected' && item.profileIds.length === 1));
+  for (const dir of Object.values(dirs)) writeFileSync(join(dir, '.claude.json'), '{}');
+  assert.equal((await listCliAccounts(true)).filter(item => item.engine === 'claude').length, 3, 'email without organization proof never groups profiles');
 });

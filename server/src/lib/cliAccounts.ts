@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { APP_ROOT } from '../config.ts';
 import { resolveCodexBin } from '../chat/codex-models.ts';
-import { cliProfiles, cliProfileId, cliProfileForEnv, longLivedClaudeToken, longLivedTokenApplies, withLongLivedClaudeToken, type AccountEngine, type CliProfile } from './cliProfiles.ts';
+import { cliProfiles, cliProfileId, cliProfileForEnv, longLivedClaudeToken, longLivedTokenApplies, recordLongLivedTokenVerdict, withVerifiedLongLivedClaudeToken, type AccountEngine, type CliProfile } from './cliProfiles.ts';
 export { cliProfileId, cliProfileForEnv };
 export type { AccountEngine };
 
@@ -21,7 +21,7 @@ export type CliAccount = {
   profileIds: string[];
 };
 
-type Identity = Omit<CliAccount, 'id' | 'engine' | 'profileIds'> & { organizationId?: string };
+type Identity = Omit<CliAccount, 'id' | 'engine' | 'profileIds'> & { organizationId?: string; tokenId?: string };
 type Profile = CliProfile;
 const run = promisify(execFile);
 const cache = new Map<string, { at: number; signature: string; result: Promise<Identity> }>();
@@ -77,7 +77,10 @@ export async function probeLongLivedClaudeToken(token: string): Promise<LongLive
         }
       } finally { if (!response.body?.locked) await response.body?.cancel().catch(() => {}); }
     } catch { /* No authentication verdict: keep the last provider evidence. */ }
-    if (verdict !== 'unknown') tokenVerdicts.set(key, { at: Date.now(), verdict });
+    if (verdict !== 'unknown') {
+      tokenVerdicts.set(key, { at: Date.now(), verdict });
+      recordLongLivedTokenVerdict(token, verdict);
+    }
     return verdict === 'unknown' ? cached?.verdict ?? 'unknown' : verdict;
   })().finally(() => { tokenProbes.delete(key); });
   tokenProbes.set(key, probe);
@@ -94,10 +97,15 @@ export async function claudeIdentity(env: NodeJS.ProcessEnv, verifyToken: (token
   // what proves it still opens doors, and a rejected one reads signed out.
   const profileDir = cliProfileForEnv('claude', env);
   const longLived = longLivedClaudeToken(profileDir);
+  let tokenVerdict: LongLivedVerdict | undefined;
+  const statusEnv = await withVerifiedLongLivedClaudeToken({ ...env }, profileDir, async token => {
+    tokenVerdict = await verifyToken(token);
+    return tokenVerdict;
+  });
   let stdout: string;
   try {
     ({ stdout } = await run('claude', ['auth', 'status', '--json'], {
-      cwd: APP_ROOT, env: longLived ? withLongLivedClaudeToken({ ...env }, profileDir) : env,
+      cwd: APP_ROOT, env: statusEnv,
       timeout: 8_000, maxBuffer: 64 * 1024, windowsHide: true,
     }));
   } catch (error) {
@@ -108,14 +116,17 @@ export async function claudeIdentity(env: NodeJS.ProcessEnv, verifyToken: (token
   }
   const data = JSON.parse(stdout);
   const checkedAt = Date.now();
-  if (data.loggedIn !== true) return { status: 'signed_out', checkedAt };
+  if (data.loggedIn !== true) return tokenVerdict === 'unknown'
+    ? { status: 'unavailable', checkedAt, email: longLived?.email }
+    : { status: 'signed_out', checkedAt };
   // The oauth_token answer is the token's own voice, so it only names the
   // token account when the token actually rides this profile — the same rule
   // lane spawns use, so the panel never shows an account its lanes can't bill.
-  if (longLived && longLivedTokenApplies(longLived, profileDir) && data.authMethod === 'oauth_token') {
-    const verdict = await verifyToken(longLived.token);
-    if (verdict === 'invalid') return { status: 'signed_out', checkedAt };
-    if (verdict === 'unknown') return { status: 'unavailable', checkedAt, email: longLived.email };
+  if (longLived && tokenVerdict !== undefined && data.authMethod === 'oauth_token') {
+    if (tokenVerdict === 'invalid') return { status: 'signed_out', checkedAt };
+    if (statusEnv.CLAUDE_CODE_OAUTH_TOKEN !== longLived.token || !longLivedTokenApplies(longLived, profileDir)) {
+      return { status: 'unavailable', checkedAt, email: longLived.email };
+    }
     let organization: string | undefined, organizationId: string | undefined, plan: string | undefined;
     try {
       const saved = JSON.parse(readFileSync(join(profileDir, '.claude.json'), 'utf8'))?.oauthAccount;
@@ -125,7 +136,8 @@ export async function claudeIdentity(env: NodeJS.ProcessEnv, verifyToken: (token
         plan = text(saved.planDisplayName) ?? text(saved.seatTier);
       }
     } catch { /* A wiped profile: the token alone is the identity. */ }
-    return { status: 'connected', checkedAt, email: longLived.email, organization, organizationId, plan };
+    return { status: 'connected', checkedAt, email: longLived.email, organization, organizationId, plan,
+      tokenId: createHash('sha256').update(longLived.token).digest('hex') };
   }
   if (data.authMethod !== 'claude.ai') return { status: 'unsupported', checkedAt };
   const email = text(data.email);
@@ -214,35 +226,39 @@ function identity(profile: Profile, refresh: boolean): Promise<Identity> {
 
 export async function listCliAccounts(refresh = false): Promise<CliAccount[]> {
   const entries = await Promise.all(cliProfiles().map(async (profile) => ({ profile, data: await identity(profile, refresh) })));
-  const grouped = new Map<string, CliAccount & { organizationId?: string }>();
+  const grouped = new Map<string, CliAccount & { organizationId?: string; tokenIds: Set<string> }>();
   for (const { profile, data } of entries) {
     // Two Claude directories are one login only when native status proves
     // both the email and organization match. Codex gives no workspace ID, so
     // separate Codex profiles stay separate even when the emails match.
-    const key = profile.engine === 'claude' && data.status === 'connected' && data.email
-      ? `${profile.engine}:${data.email.toLowerCase()}:${data.organizationId ?? ''}` : profile.id;
+    const key = profile.engine === 'claude' && data.status === 'connected' && data.email && data.organizationId
+      ? `${profile.engine}:${data.email.toLowerCase()}:${data.organizationId}` : profile.id;
     const existing = grouped.get(key);
     if (existing) {
       existing.profileIds.push(profile.id);
+      if (data.tokenId) existing.tokenIds.add(data.tokenId);
       continue;
     }
-    grouped.set(key, { id: profile.id, engine: profile.engine, ...data, profileIds: [profile.id] });
+    const { tokenId, ...publicIdentity } = data;
+    grouped.set(key, { id: profile.id, engine: profile.engine, ...publicIdentity, profileIds: [profile.id], tokenIds: new Set(tokenId ? [tokenId] : []) });
   }
   const rows = [...grouped.values()];
-  // A wiped year-token profile carries the email but no organization; fold it
-  // into the healthy row for the same email so the panel never shows the same
-  // login twice, whichever profile the reader happened to see first. Only an
-  // UNAMBIGUOUS host folds: two healthy rows sharing an email (one login in
-  // two workspaces) must never absorb a third row at Map order's whim.
+  // A wiped token profile may fold into one unambiguous organization-backed
+  // row only when the same verified token proves equivalence. Email alone
+  // never proves that two profiles bill the same organization.
   const healthyRows = rows.filter(row => row.engine === 'claude' && row.status === 'connected' && row.email && row.organizationId);
   const ambiguous = new Set(healthyRows.map(row => row.email!.toLowerCase()).filter((email, index, all) => all.indexOf(email) !== index));
   const healthy = new Map(healthyRows.filter(row => !ambiguous.has(row.email!.toLowerCase())).map(row => [row.email!.toLowerCase(), row]));
   for (let index = rows.length - 1; index >= 0; index--) {
     const row = rows[index];
     const host = row.engine === 'claude' && row.status === 'connected' && row.email && !row.organizationId ? healthy.get(row.email.toLowerCase()) : undefined;
-    if (host && host !== row) { host.profileIds.push(...row.profileIds); if (!host.organization && row.organization) host.organization = row.organization; rows.splice(index, 1); }
+    if (host && host !== row && row.tokenIds.size && [...row.tokenIds].every(id => host.tokenIds.has(id))) {
+      host.profileIds.push(...row.profileIds);
+      if (!host.organization && row.organization) host.organization = row.organization;
+      rows.splice(index, 1);
+    }
   }
-  return rows.map(({ organizationId: _organizationId, ...row }) => row);
+  return rows.map(({ organizationId: _organizationId, tokenIds: _tokenIds, ...row }) => row);
 }
 
 export function accountForProfile(accounts: CliAccount[], engine: AccountEngine, profile: string): CliAccount | undefined {

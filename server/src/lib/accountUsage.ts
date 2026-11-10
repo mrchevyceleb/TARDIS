@@ -145,6 +145,7 @@ async function guarded(base: UsageAccount, load: () => Promise<UsageAccount>, no
  * (matt@ sat expired for three days, Oct 30 2026) then can't report usage at
  * all. Let the CLI renew it the way it always does: one tiny turn on that
  * profile, under the CLI's own refresh lock, at most once per cooldown. */
+const CLAUDE_RENEW_WINDOW_MS = 5 * 60_000;
 const CLAUDE_RENEW_COOLDOWN_MS = 30 * 60_000;
 const CLAUDE_RENEW_TIMEOUT_MS = 90_000;
 const claudeRenewals = new Map<string, { at: number; running: boolean }>();
@@ -185,7 +186,7 @@ async function claudeAccessToken(profile: CliProfile): Promise<string> {
   // Only a profile still holding a refresh token can be renewed; spawning a
   // renewal turn anywhere else is a futile `claude -p` every cooldown.
   const accessToken = typeof oauth.accessToken === 'string' ? oauth.accessToken.trim() : '';
-  if (refreshToken && (!accessToken || expiresAt === undefined || expiresAt < Date.now() + 5 * 60_000)) renewClaudeLogin(profile);
+  if (refreshToken && (!accessToken || expiresAt === undefined || expiresAt < Date.now() + CLAUDE_RENEW_WINDOW_MS)) renewClaudeLogin(profile);
   return accessToken;
 }
 
@@ -245,7 +246,7 @@ async function claudeUsageProfile(info: CliAccount, profiles: CliProfile[]): Pro
       const oauth = rec(rec(JSON.parse(await readFile(join(profile.path, '.credentials.json'), 'utf8'))).claudeAiOauth);
       const accessToken = typeof oauth.accessToken === 'string' && oauth.accessToken.trim();
       const expiresAt = num(oauth.expiresAt);
-      if (accessToken && (expiresAt === undefined || expiresAt > Date.now())) return profile;
+      if (accessToken && expiresAt !== undefined && expiresAt > Date.now() + CLAUDE_RENEW_WINDOW_MS) return profile;
       if (!renewable && typeof oauth.refreshToken === 'string' && oauth.refreshToken.trim()) renewable = profile;
       if (!expired && accessToken) expired = profile;
     } catch { /* A same-login peer may still report usage. */ }

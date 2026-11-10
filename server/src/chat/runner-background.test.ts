@@ -111,7 +111,7 @@ test('a late usage-limit result cannot replay a completed turn', () => {
 test('account retry handles a worker that closed before quota refresh finished', async () => {
   const { session, events } = harness();
   Object.assign(session, {
-    workerClosed: true, cli: 'claude', logKey: 'test-already-closed', nativeStopGeneration: 0,
+    workerClosed: true, cli: 'claude', cwd: process.cwd(), chatId: 'bot-already-closed', logKey: 'test-already-closed', nativeStopGeneration: 0,
     child: { exitCode: 0 }, currentSessionId: null, startedResumeId: null,
     accountRerunPrompt: { text: 'Pending request', opts: {} },
     endBackgroundWork: () => {}, startWorker: () => {}, send: async () => {},

@@ -37,7 +37,7 @@ import { agentForChatId, brainForAgent, cliForAgentEngine, noteAgentLane, wantsF
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { crashTombstoneEvent, crashTombstoneText, restartMarkerEvent } from './crashTombstone.ts';
 import { BACKGROUND_MODEL_HOLD_MINUTES, backgroundEndedGuidance, backgroundTaskLabel, backgroundWorkEvent, type BackgroundWorkCause } from './backgroundWork.ts';
-import { subscriptionEnvForLane, withLongLivedClaudeToken, preferredSubscriptionEnv, subscriptionRoutingKey, subscriptionRoutingKeysMatch, subscriptionEmail, cliProfileForEnv, cliProfileId, cliProfiles } from '../lib/cliProfiles.ts';
+import { subscriptionEnvForLane, withLongLivedClaudeToken, withVerifiedLongLivedClaudeToken, preferredSubscriptionEnv, subscriptionRoutingKey, subscriptionRoutingKeysMatch, subscriptionEmail, cliProfileForEnv, cliProfileId, cliProfiles } from '../lib/cliProfiles.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
@@ -2158,6 +2158,9 @@ class ClaudeSession {
       }
       this.pendingAccountInputs = [];
       this.pendingPeerSteerAccepts.clear();
+      const accountEnv = subscriptionEnvForLane('claude', this.cwd, this.chatId, agentForChatId(this.chatId)?.name);
+      await withVerifiedLongLivedClaudeToken(accountEnv, cliProfileForEnv('claude', accountEnv));
+      if (this.disposed || generation !== this.nativeStopGeneration) return;
       if (prompt.opts.signal?.aborted) throw new Error('The pending delivery was cancelled.');
       this.startWorker(this.pendingResumeId);
       const resuming = this.pendingResumeId !== null;
@@ -4250,6 +4253,11 @@ async function spawnSession(
   }
   assertMemoryAvailableForSpawn(cli);
   await ensureNativeCompactProxy();
+  if (cli === 'claude' || cli === 'assistant') {
+    const accountEnv = subscriptionEnvForLane('claude', cwd, chatId, agentForChatId(chatId)?.name);
+    await withVerifiedLongLivedClaudeToken(accountEnv, cliProfileForEnv('claude', accountEnv));
+    if (sessionsShuttingDown) throw new Error('TARDIS is shutting down');
+  }
   // Metered providers share Claude Code. Subscription engines retain their native runner.
   const session: LaneSession = cli === 'agy'
     ? new AgySession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort, model), seedFirst, switchedFrom)

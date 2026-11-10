@@ -12,6 +12,13 @@ import { claudeAccountPool } from './claudeAccountPool.ts';
 
 export type AccountEngine = 'claude' | 'codex';
 
+const longLivedTokenVerdicts = new Map<string, 'valid' | 'invalid'>();
+/** Share definitive provider evidence with synchronous lane/routing decisions.
+ * Unknown network results never invent authentication or clear a rejection. */
+export function recordLongLivedTokenVerdict(token: string, verdict: 'valid' | 'invalid' | 'unknown'): void {
+  if (verdict !== 'unknown') longLivedTokenVerdicts.set(createHash('sha256').update(token).digest('hex'), verdict);
+}
+
 /** A Claude login refreshed by many lanes at once rotates its refresh token
  *  under them, and the native CLI wipes the login on the losing refresh. A
  *  long-lived token from `claude setup-token` never rotates, so lanes spawned
@@ -36,7 +43,7 @@ export function longLivedClaudeToken(profileDir: string): { email: string; token
  *  as someone else: an absent account file, or one with no account on it. Any
  *  other failure — unreadable, half-written, malformed — must refuse the
  *  token, or a profile that quietly signed in as B would keep billing A. */
-export function longLivedTokenApplies(token: { email: string }, profileDir: string): boolean {
+function longLivedTokenAccountMatches(token: { email: string }, profileDir: string): boolean {
   let raw: string;
   try {
     raw = readFileSync(join(profileDir, '.claude.json'), 'utf8');
@@ -53,6 +60,26 @@ export function longLivedTokenApplies(token: { email: string }, profileDir: stri
     // Missing identity is a wipe; a malformed identity is not permission to bill.
     return signedIn == null || (typeof signedIn === 'string' && signedIn.toLowerCase() === token.email.toLowerCase());
   } catch { return false; }
+}
+
+/** A token must have positive provider evidence before it can replace a login. */
+export function longLivedTokenApplies(token: { email: string; token: string }, profileDir: string): boolean {
+  return longLivedTokenVerdicts.get(createHash('sha256').update(token.token).digest('hex')) === 'valid'
+    && longLivedTokenAccountMatches(token, profileDir);
+}
+
+/** Probe independently of previous verdicts, so a rejection can be rechecked
+ * after the probe cache's TTL. Cold starts wait for evidence before injection. */
+export async function withVerifiedLongLivedClaudeToken(
+  env: NodeJS.ProcessEnv, profileDir: string,
+  verifyToken?: (token: string) => Promise<'valid' | 'invalid' | 'unknown'>,
+): Promise<NodeJS.ProcessEnv> {
+  const token = longLivedClaudeToken(profileDir);
+  if (token && longLivedTokenAccountMatches(token, profileDir)) {
+    const verify = verifyToken ?? (await import('./cliAccounts.ts')).probeLongLivedClaudeToken;
+    recordLongLivedTokenVerdict(token.token, await verify(token.token));
+  }
+  return withLongLivedClaudeToken(env, profileDir);
 }
 
 export function withLongLivedClaudeToken(env: NodeJS.ProcessEnv, profileDir: string): NodeJS.ProcessEnv {
@@ -230,8 +257,15 @@ export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.Proces
     // both feed the signature: replacing token A with token B, or a re-login
     // that changes which account lanes bill, must retire warm workers instead
     // of repainting the panel while they keep running.
-    try { const st = statSync(join(profile, '.long-lived-oauth-token')); signature += `|oat:${st.mtimeMs}:${st.size}`; } catch { /* No token for this profile. */ }
-    try { const st = statSync(join(profile, '.claude.json')); signature += `|acct:${st.mtimeMs}:${st.size}`; } catch { /* No saved account. */ }
+    for (const name of ['.long-lived-oauth-token', '.claude.json']) {
+      try { signature += `|${name}:${createHash('sha256').update(readFileSync(join(profile, name))).digest('hex')}`; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return `${id}:${previous?.identity || 'not-signed-in'}`;
+        signature += `|${name}:absent`;
+      }
+    }
+    const token = longLivedClaudeToken(profile);
+    signature += `|token-applies:${token ? longLivedTokenApplies(token, profile) : false}`;
   }
   let identity = previous?.identity || 'not-signed-in';
   if (previous && previous.signature === signature) return `${id}:${previous.identity}`;
@@ -280,6 +314,7 @@ export function subscriptionRoutingKeysMatch(current: string, desired: string): 
   };
   const left = split(current);
   const right = split(desired);
+  if (left.identity === 'signed-out' || right.identity === 'signed-out') return false;
   return left.profile === right.profile
     && (left.identity === right.identity
       || left.identity === 'not-signed-in' || right.identity === 'not-signed-in');
@@ -345,5 +380,5 @@ export async function backgroundSubscriptionEnv(cwd: string, agentName: string, 
     if (active.claudeProfile && ['claude', 'assistant'].includes(active.cli)
       && claudeProfileInLanePool(active.claudeProfile, laneHome)) { env.CLAUDE_CONFIG_DIR = active.claudeProfile; break; }
   }
-  return withLongLivedClaudeToken(env, env.CLAUDE_CONFIG_DIR!);
+  return withVerifiedLongLivedClaudeToken(env, env.CLAUDE_CONFIG_DIR!);
 }

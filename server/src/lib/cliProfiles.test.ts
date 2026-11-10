@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -28,7 +28,7 @@ const saved = {
 process.env.RIVENDELL_ACCOUNT_MAP = mapPath;
 process.env.HOME = home;
 
-const { claudeProfileInLanePool, longLivedClaudeToken, subscriptionRoutingKey, subscriptionRoutingKeysMatch, withLongLivedClaudeToken } = await import('./cliProfiles.ts');
+const { claudeProfileInLanePool, longLivedClaudeToken, recordLongLivedTokenVerdict, subscriptionRoutingKey, subscriptionRoutingKeysMatch, withLongLivedClaudeToken, withVerifiedLongLivedClaudeToken } = await import('./cliProfiles.ts');
 const gameDir = join(home, '.claude-game');
 const rallyDir = join(home, '.claude-rally');
 const otherDir = join(home, '.claude-other');
@@ -82,7 +82,7 @@ test('a broken pool config fails closed', () => {
   });
 });
 
-test('a year token rides lane environments, and the wipe it survives', () => {
+test('a year token rides lane environments, and the wipe it survives', async () => {
   const profile = join(root, 'token-profile');
   mkdirSync(profile, { recursive: true });
   const writeToken = (email: string, token: string) => writeFileSync(join(profile, '.long-lived-oauth-token'), `${email}\n${token}\n`);
@@ -107,6 +107,9 @@ test('a year token rides lane environments, and the wipe it survives', () => {
   // account keeps it out so a re-login never bills the old one.
   writeToken('A@Example.com', good);
   writeAccount('a@example.com');
+  assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, undefined, 'token presence alone never overrides a native login');
+  assert.equal((await withVerifiedLongLivedClaudeToken({}, profile, async () => 'unknown')).CLAUDE_CODE_OAUTH_TOKEN, undefined, 'an initial outage does not invent authentication');
+  assert.equal((await withVerifiedLongLivedClaudeToken({}, profile, async () => 'valid')).CLAUDE_CODE_OAUTH_TOKEN, good);
   assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, good);
   writeAccount(undefined);
   assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, good, 'a wiped profile authenticates on its year token');
@@ -138,18 +141,23 @@ test('a year token rides lane environments, and the wipe it survives', () => {
 test('a year-token swap retires the warm-worker routing key', () => {
   const profile = join(root, 'routing-profile');
   mkdirSync(profile, { recursive: true });
+  recordLongLivedTokenVerdict('sk-ant-oat01-example-token-0123456789', 'valid');
+  recordLongLivedTokenVerdict('sk-ant-oat01-example-token-9876543210', 'valid');
   const writeToken = (email: string, token: string) => writeFileSync(join(profile, '.long-lived-oauth-token'), `${email}\n${token}\n`);
   // Wiped profile, no normal credentials: the token file is the identity.
   writeToken('a@example.com', 'sk-ant-oat01-example-token-0123456789');
   const first = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile });
+  const preservedTime = new Date(1_600_000_000_000);
   writeToken('b@example.com', 'sk-ant-oat01-example-token-0123456789');
+  utimesSync(join(profile, '.long-lived-oauth-token'), preservedTime, preservedTime);
   const second = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile });
   assert.notEqual(first, second, 'a token swap must recycle warm workers still billing the old account');
   // Same email, replaced token (a revoked one renewed): the token's own
   // fingerprint rides the identity, so warm workers drop the dead token.
   writeToken('b@example.com', 'sk-ant-oat01-example-token-9876543210');
+  utimesSync(join(profile, '.long-lived-oauth-token'), preservedTime, preservedTime);
   const third = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile });
-  assert.notEqual(second, third, 'a same-email token replacement must recycle warm workers holding the old token');
+  assert.notEqual(second, third, 'a same-size token replacement with its timestamp preserved must recycle warm workers');
   assert.equal(subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile }), third, 'the key is stable between changes');
   // Confirmed absence is a real sign-out, never a stale token identity, and
   // it must not wildcard-match the worker still holding the old token.
@@ -158,6 +166,9 @@ test('a year-token swap retires the warm-worker routing key', () => {
   assert.equal(gone.endsWith(':signed-out'), true);
   assert.equal(subscriptionRoutingKeysMatch(third, gone), false, 'removing the token retires warm workers holding it');
   assert.equal(subscriptionRoutingKeysMatch(gone, gone), true);
+  const unknown = `${gone.slice(0, gone.lastIndexOf(':'))}:not-signed-in`;
+  assert.equal(subscriptionRoutingKeysMatch(unknown, gone), false, 'unknown identity cannot wildcard-match confirmed sign-out');
+  assert.equal(subscriptionRoutingKeysMatch(gone, unknown), false, 'confirmed sign-out cannot wildcard-match unknown identity');
 
   // The same rules hold while a saved account exists: lanes bill the token,
   // so swapping it must change the key there too.
@@ -166,7 +177,15 @@ test('a year-token swap retires the warm-worker routing key', () => {
   writeToken('b@example.com', 'sk-ant-oat01-example-token-0123456789');
   const withAccount = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile });
   writeToken('b@example.com', 'sk-ant-oat01-example-token-9876543210');
-  assert.notEqual(withAccount, subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile }), 'a token swap beside a saved account must recycle warm workers');
+  const replaced = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile });
+  assert.notEqual(withAccount, replaced, 'a token swap beside a saved account must recycle warm workers');
+  const token = longLivedClaudeToken(profile)!;
+  recordLongLivedTokenVerdict(token.token, 'invalid');
+  assert.notEqual(replaced, subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile }), 'rejection changes routing even beside an intact native account');
+  recordLongLivedTokenVerdict(token.token, 'unknown');
+  assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, undefined, 'an outage never clears a rejection');
+  recordLongLivedTokenVerdict(token.token, 'valid');
+  assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, token.token);
 });
 
 test('routing preserves a healthy worker through transient reads but recycles on a real re-login', () => {
@@ -175,7 +194,9 @@ test('routing preserves a healthy worker through transient reads but recycles on
   mkdirSync(profile, { recursive: true });
   const saved = join(profile, '.claude.json');
   const writeAccount = (email: string) => writeFileSync(saved, JSON.stringify({ oauthAccount: { emailAddress: email, organizationUuid: 'org-1' } }));
+  const preservedTime = new Date(1_600_000_000_000);
   writeAccount('first@example.com');
+  utimesSync(saved, preservedTime, preservedTime);
   const original = subscriptionRoutingKey('claude', env);
   writeFileSync(saved, '{"oauthAccount":');
   assert.equal(subscriptionRoutingKey('claude', env), original, 'a torn account file is not a confirmed sign-out');
@@ -184,7 +205,8 @@ test('routing preserves a healthy worker through transient reads but recycles on
   assert.equal(subscriptionRoutingKey('claude', env), original, 'a read error is not a confirmed sign-out');
   rmSync(saved, { recursive: true });
   assert.equal(subscriptionRoutingKeysMatch(original, subscriptionRoutingKey('claude', env)), false, 'confirmed absence retires the old worker');
-  writeAccount('second@example.com');
+  writeAccount('other@example.com');
+  utimesSync(saved, preservedTime, preservedTime);
   const changed = subscriptionRoutingKey('claude', env);
   assert.notEqual(changed, original);
   assert.equal(subscriptionRoutingKeysMatch(original, changed), false, 'a different login retires the old worker');
