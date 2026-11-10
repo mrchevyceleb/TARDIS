@@ -22,7 +22,7 @@ import { isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
-import { agentForChatId, noteAgentLane } from './agents.ts';
+import { agentForChatId, noteAgentLane, wantsFullToolbox } from './agents.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
 import {
   ASSISTANT_HUB_PATH,
@@ -1691,13 +1691,18 @@ export async function serveLocalModel(
  *  tool surface by default. Remote OpenRouter models require an explicit deploy
  *  flag because those tools can touch privileged local/data systems. Project
  *  MCPs are also opt-in: banana serve is shared globally, so project-scoped MCP
- *  config would otherwise restart or stale the shared process across chats. */
-function resolveMirroredMcp(opts: { projectPathHint?: string; cli?: CliKind } = {}): Record<string, BananaMcpConfig> {
+ *  config would otherwise restart or stale the shared process across chats.
+ *  A lean-toolbox lane (roster setting) mirrors everything except
+ *  assistant-mcp; the shared serve then reflects the toolbox of the lane that
+ *  last (re)started it, like any other config change. */
+function resolveMirroredMcp(opts: { projectPathHint?: string; cli?: CliKind; leanToolbox?: boolean } = {}): Record<string, BananaMcpConfig> {
   if ((opts.cli ?? 'banana') === 'banana' && !remoteBananaMcpEnabled()) return {};
-  return readClaudeMcpServers(opts.projectPathHint, { includeProjectMcp: projectBananaMcpEnabled() });
+  const mirrored = readClaudeMcpServers(opts.projectPathHint, { includeProjectMcp: projectBananaMcpEnabled() });
+  if (opts.leanToolbox) delete mirrored['assistant-mcp'];
+  return mirrored;
 }
 
-async function bananaConfigContent(opts: { projectPathHint?: string; cli?: CliKind } = {}): Promise<string | null> {
+async function bananaConfigContent(opts: { projectPathHint?: string; cli?: CliKind; leanToolbox?: boolean } = {}): Promise<string | null> {
   const includeOpenrouter = openrouterProviderEnabled();
   // Mirror the configured MCP set into Banana so OpenRouter and Local models
   // keep the same tool surface as the Claude/Codex-backed companions.
@@ -1993,7 +1998,7 @@ class BananaServer {
    *  chat can still pick up a config change for its OWN next turn. */
   async ensure(projectPathHint?: string, caller?: BananaSession): Promise<void> {
     assertSubscriptionLane(caller?.cli);
-    const configContent = await bananaConfigContent({ projectPathHint, cli: caller?.cli });
+    const configContent = await bananaConfigContent({ projectPathHint, cli: caller?.cli, leanToolbox: !wantsFullToolbox(caller ? agentForChatId(caller.chatId) : undefined) });
     // Compare on a canonical signature: ~/.claude.json and OpenRouter's catalog
     // can return semantically identical content with shuffled key/row order,
     // which would otherwise restart the serve and wipe every chat's context.

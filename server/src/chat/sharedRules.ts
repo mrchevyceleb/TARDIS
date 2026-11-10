@@ -16,10 +16,12 @@ import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 export const RULES_DIR = join(STATE_DIR, 'rules');
 
 export type SharedRuleId = 'task-control' | 'team-status' | 'background-jobs' | 'sidebar' | 'desk' | 'visible-transcript'
-  | 'engine-codex' | 'engine-muse' | 'engine-agy' | 'engine-pi' | 'writing-plain-english';
+  | 'ops-toolbox' | 'engine-codex' | 'engine-muse' | 'engine-agy' | 'engine-pi' | 'writing-plain-english';
 
-/** `engine` limits a rule to agents on that engine; `tag` '' adds the text bare. */
-export const SHARED_RULES: Record<SharedRuleId, { title: string; tag: string; engine?: string; seed: () => string }> = {
+/** `engine` limits a rule to agents on that engine; `toolbox: 'full'` limits
+ *  it to lanes whose roster toolbox mounts assistant-mcp (see
+ *  wantsFullToolbox in agents.ts); `tag` '' adds the text bare. */
+export const SHARED_RULES: Record<SharedRuleId, { title: string; tag: string; engine?: string; toolbox?: 'full'; seed: () => string }> = {
   'task-control': {
     title: 'Task control and review',
     tag: 'rivendell-task-control',
@@ -84,6 +86,18 @@ export const SHARED_RULES: Record<SharedRuleId, { title: string; tag: string; en
       'Do not narrate routine next steps ("Next I am checking...", "I will search...") or repeatedly acknowledge the same fact. Tool cards already show activity. Do not leave the person staring at a spinner with nothing on screen.',
       'Give the actual answer without replaying your work log. Plans explicitly requested by the person remain user-facing answers.',
       'When you are reminded that the person has not heard from you, answer in a normal visible text message, never inside your thinking: they cannot see your thinking.',
+    ].join('\n'),
+  },
+  'ops-toolbox': {
+    title: 'Ops toolbox (assistant-mcp router)',
+    tag: 'rivendell-ops-toolbox',
+    toolbox: 'full',
+    seed: () => [
+      'The assistant-mcp MCP tools are a ROUTER: pass the correct workplace/project on the call itself. They are NEVER broken.',
+      'Doppler "Could not find requested project", Railway missing services/wrong project list, or any assistant-mcp tool returning empty/unexpected data means a wrong router target, not a broken tool: retry with the explicit workplace/workspace below. The local doppler CLI fails here too (it defaults to the wrong workplace) — use the MCP doppler tool, or ~/bin/doppler-secret in a shell, with the explicit workplace.',
+      'Doppler workplaces: R-Link Studio, Operly, Pixa and RallyPoint live in `kg-app-labs`; everything else (FiscalPilot, wwyh, ...) in `personal`. Application hosting for R-Link Studio and Operly is DigitalOcean; before any Studio or Operly health, deploy, rollback or log action, read docs/rally-hosting.md in GLOBAL-AGENT-CONFIGS and the linked repo deployment guide. Production command: `npm run ship`.',
+      'Railway: Operly, Studio and Rally services live in workspace `rlink`; everything else in "Matt\'s Projects".',
+      'Need a real secret VALUE for code, a .env file, a script or a CLI (the Doppler MCP only shows fingerprints): call doppler action `secret_link` (workplace, project, config, names, optional format) and run the `download_bash` command it returns. One-time link, works on every machine. Never `doppler login`, never ask Matt for the key, never print the downloaded file. Download it outside every synced folder (/dev/shm or the system temp dir, never under ASSISTANT-HUB, which Syncthing copies to every device) and delete it when the task ends.',
     ].join('\n'),
   },
   'engine-codex': {

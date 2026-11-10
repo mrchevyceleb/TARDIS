@@ -31,7 +31,7 @@ import { sharedRule } from './sharedRules.ts';
 import { longCallGateEnv } from './longCallGate.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
-import { agentForChatId, brainForAgent, noteAgentLane } from './agents.ts';
+import { agentForChatId, brainForAgent, noteAgentLane, wantsFullToolbox } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { subscriptionEnvForLane, subscriptionEmail, cliProfileId } from '../lib/cliProfiles.ts';
@@ -886,7 +886,11 @@ export class CodexSession {
       );
     }
     const laneName = sessionAgent?.name;
-    browserMcpArgs.push(...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId), agentId: sessionAgent?.id }), ...officeMcpCodexArgs());
+    // Codex reads assistant-mcp from CODEX_HOME config.toml, so a lean-toolbox
+    // lane (roster setting) disables exactly that entry; every other
+    // config.toml server (game-assets-mcp, playwright, ...) stays.
+    const leanToolboxArgs = wantsFullToolbox(sessionAgent) ? [] : ['-c', 'mcp_servers.assistant-mcp.enabled=false'];
+    browserMcpArgs.push(...leanToolboxArgs, ...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId), agentId: sessionAgent?.id }), ...officeMcpCodexArgs());
     const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', `service_tier=${JSON.stringify(serviceTier)}`, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
 
     // Wait for OneDrive to release its sync lock on .codex/config.toml so

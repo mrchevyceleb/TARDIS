@@ -8,7 +8,7 @@ import { readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { STATE_DIR } from './config.ts';
-import { agentForChatId, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
+import { agentForChatId, cliForAgentEngine, listAgents, wantsFullToolbox, type Agent } from './agents.ts';
 import { PERSONAS_DIR, engineRule, personaPromptFor } from './personaPrompts.ts';
 import { sessionDirectory, sessionPolicy } from './sessionPolicy.ts';
 import { plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
@@ -43,9 +43,12 @@ type Source = { key: string; title: string; note: string; path: string };
 
 const shortHome = (path: string) => path.replace(homedir(), '~');
 
-/** Engine rules reach only agents whose runner adds them. */
+/** Engine rules reach only agents whose runner adds them; toolbox rules only
+ *  lanes whose roster toolbox mounts assistant-mcp. */
 function ruleApplies(id: SharedRuleId, agent: Agent): boolean {
-  const engine = SHARED_RULES[id].engine;
+  const rule = SHARED_RULES[id];
+  if (rule.toolbox === 'full' && !wantsFullToolbox(agent)) return false;
+  const engine = rule.engine;
   if (!engine) return true;
   const cli = cliForAgentEngine(agent.engine ?? '');
   if (engine === 'gemini') return Boolean(plainEnglishWritingSystemBlockFor({ cli, model: agent.model ?? '' }));

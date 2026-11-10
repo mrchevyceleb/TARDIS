@@ -33,6 +33,9 @@ export type Agent = {
   muted?: boolean;
   /** Sidebar color label, synced through the server so every device agrees. */
   color?: ChatColor;
+  /** 'lean' skips the assistant-mcp integrations on every engine (secrets
+   *  still work via ~/bin/doppler-secret); absent means the full toolbox. */
+  toolbox?: 'full' | 'lean';
 };
 
 /** Sidebar color labels. The keys mirror AGENT_COLORS on the server; the
@@ -133,7 +136,7 @@ export class AgentUpdateConflictError extends Error {
   }
 }
 
-export async function updateAgentReq(id: string, patch: { name?: string; role?: string; engine?: string; model?: string; effort?: string; serviceTier?: string; brainRevision?: number; voice?: string; pinned?: boolean; muted?: boolean; color?: ChatColor | null; scope?: string }): Promise<Agent> {
+export async function updateAgentReq(id: string, patch: { name?: string; role?: string; engine?: string; model?: string; effort?: string; serviceTier?: string; brainRevision?: number; voice?: string; pinned?: boolean; muted?: boolean; color?: ChatColor | null; toolbox?: 'full' | 'lean' | null; scope?: string }): Promise<Agent> {
   const response = await fetch(`/api/agents/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },

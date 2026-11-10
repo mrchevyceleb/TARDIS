@@ -112,6 +112,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
   const voiceTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [pinned, setPinned] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [leanToolbox, setLeanToolbox] = useState(false);
   const [scope, setScope] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -151,6 +152,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     setVoice(agent?.voice ?? 'ara');
     setPinned(Boolean(agent?.pinned));
     setMuted(Boolean(agent?.muted));
+    setLeanToolbox(agent?.toolbox === 'lean');
     setScope('');
     setErr(null);
     setAvatarVersion(undefined);
@@ -333,7 +335,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
       const brainChanged = engine !== initialBrain.current.engine || model !== initialBrain.current.model || effort !== initialBrain.current.effort || serviceTier !== initialBrain.current.serviceTier;
       const brain = !agent || brainChanged ? { engine, model: model || undefined, effort, ...(engine === 'codex' ? { serviceTier } : {}) } : {};
       const saved = agent
-        ? await updateAgentReq(agent.id, { name, role, ...brain, brainRevision, voice, pinned, muted, scope: scope.trim() || undefined })
+        ? await updateAgentReq(agent.id, { name, role, ...brain, brainRevision, voice, pinned, muted, toolbox: leanToolbox ? 'lean' : 'full', scope: scope.trim() || undefined })
         : await createAgent({ name, role, ...brain, voice, scope: scope.trim() || undefined });
       onSaved(saved);
       onClose();
@@ -486,6 +488,13 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
               <span>
                 Mute notifications
                 <small>Hide unread badges — for companions that talk to other agents, not you</small>
+              </span>
+            </label>
+            <label className="bt-agent-checkrow" title="Lean lanes skip the assistant-mcp integrations (Doppler, Railway, Gmail…) on every engine to keep their context small; ~/bin/doppler-secret still covers secrets">
+              <input type="checkbox" checked={leanToolbox} onChange={(e) => setLeanToolbox(e.target.checked)} />
+              <span>
+                Lean toolbox
+                <small>Skip the assistant-mcp integrations — secrets still work via ~/bin/doppler-secret</small>
               </span>
             </label>
           </>
