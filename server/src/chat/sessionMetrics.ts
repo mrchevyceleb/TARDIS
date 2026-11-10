@@ -331,7 +331,7 @@ export function nativeSessionReportHtml(date = day()): string {
     const known: Record<string, string> = {
       'claude-sonnet-5-5': 'Claude Sonnet 5.5', 'claude-opus-5-5': 'Claude Opus 5.5',
       'claude-fable-5-2': 'Claude Fable 5.2',
-      'gemini-4-argon': 'Gemini 4 Argon', 'grok-4.7': 'Grok 4.7',
+      'gemini-4-argon': 'Gemini 4 Argon', 'gemini-4-carbon': 'Gemini 4 Carbon', 'grok-4.7': 'Grok 4.7',
       'gpt-6.1-sol': 'GPT 6.1 Sol', 'glm-5p3-flash': 'GLM 5.3 Flash',
       'glm-5.3-flash': 'GLM 5.3 Flash', 'qwen3.8-flash': 'Qwen 3.8 Flash',
       'deepseek-v4.1-flash-1017': 'DeepSeek 4.1 Flash',

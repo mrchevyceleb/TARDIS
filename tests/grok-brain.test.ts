@@ -115,6 +115,44 @@ test('same-engine model, effort and speed picks stay one tap', async () => {
   assert.deepEqual(save.mock.calls.map(call => call.arguments[1].brainRevision), [1, 2, 3]);
 });
 
+test('a teammate can save Carbon at every Gemini effort and reload the authoritative brain', async () => {
+  await mount({ ...teammate, engine: 'agy', model: 'gemini-4-argon', effort: 'medium' });
+  await act(async () => picker.setAgyModel('gemini-4-carbon'));
+  assert.equal(save.mock.calls[0].arguments[1].model, 'gemini-4-carbon');
+  assert.equal(picker.model, 'gemini-4-carbon');
+  for (const effort of ['low', 'medium', 'high']) {
+    await act(async () => picker.setAgyEffort(effort));
+    const patch = save.mock.calls.at(-1)!.arguments[1];
+    assert.equal(patch.engine, 'agy');
+    assert.equal(patch.model, 'gemini-4-carbon');
+    assert.equal(patch.effort, effort);
+    assert.equal(picker.model, 'gemini-4-carbon');
+    assert.equal(picker.effort, effort);
+  }
+  chat.serverBrain = { cli: 'agy', model: 'gemini-4-carbon', effort: 'low', revision: 10 };
+  await refresh();
+  assert.equal(picker.model, 'gemini-4-carbon');
+  assert.equal(picker.effort, 'low');
+  assert.equal(confirm.mock.callCount(), 0, 'a Gemini model change must not ask to switch engines');
+});
+
+test('a local Gemini picker preserves a saved Carbon selection and persists new picks', async () => {
+  localStorage.setItem('rivendell:agy-model', 'gemini-4-carbon');
+  localStorage.setItem('rivendell:agy-effort', 'low');
+  await mount(null);
+  await act(async () => picker.setCompanion('agy'));
+  assert.equal(picker.model, 'gemini-4-carbon');
+  assert.equal(picker.effort, 'low');
+  await act(async () => picker.setAgyModel('gemini-4-argon'));
+  await act(async () => picker.setAgyModel('gemini-4-carbon'));
+  await act(async () => picker.setAgyEffort('high'));
+  assert.equal(localStorage.getItem('rivendell:agy-model'), 'gemini-4-carbon');
+  assert.equal(localStorage.getItem('rivendell:agy-effort'), 'high');
+  assert.equal(picker.model, 'gemini-4-carbon');
+  assert.equal(picker.effort, 'high');
+  assert.equal(save.mock.callCount(), 0);
+});
+
 test('a non-teammate picker changes locally without confirmation or an agent save', async () => {
   await mount(null);
   await act(async () => picker.setCompanion('codex'));
