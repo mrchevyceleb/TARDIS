@@ -3,7 +3,7 @@
   "ignoreExportsUsedInFile": true,
   "workspaces": {
     ".": {
-      "entry": ["public/sw.js"],
+      "entry": ["public/sw.js", "tests/grok-brain.test.ts"],
       "project": ["src/**/*.{ts,tsx}"]
     },
     "server": {
