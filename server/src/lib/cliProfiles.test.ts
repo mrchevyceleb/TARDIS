@@ -28,7 +28,7 @@ const saved = {
 process.env.RIVENDELL_ACCOUNT_MAP = mapPath;
 process.env.HOME = home;
 
-const { claudeProfileInLanePool, longLivedClaudeToken, subscriptionRoutingKey, withLongLivedClaudeToken } = await import('./cliProfiles.ts');
+const { claudeProfileInLanePool, longLivedClaudeToken, subscriptionRoutingKey, subscriptionRoutingKeysMatch, withLongLivedClaudeToken } = await import('./cliProfiles.ts');
 const gameDir = join(home, '.claude-game');
 const rallyDir = join(home, '.claude-rally');
 const otherDir = join(home, '.claude-other');
@@ -149,7 +149,20 @@ test('a year-token swap retires the warm-worker routing key', () => {
   const third = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile });
   assert.notEqual(second, third, 'a same-email token replacement must recycle warm workers holding the old token');
   assert.equal(subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile }), third, 'the key is stable between changes');
-  // Confirmed absence is not-signed-in, never a stale token identity.
+  // Confirmed absence is a real sign-out, never a stale token identity, and
+  // it must not wildcard-match the worker still holding the old token.
   rmSync(join(profile, '.long-lived-oauth-token'));
-  assert.equal(subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile }).endsWith(':not-signed-in'), true);
+  const gone = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile });
+  assert.equal(gone.endsWith(':signed-out'), true);
+  assert.equal(subscriptionRoutingKeysMatch(third, gone), false, 'removing the token retires warm workers holding it');
+  assert.equal(subscriptionRoutingKeysMatch(gone, gone), true);
+
+  // The same rules hold while a saved account exists: lanes bill the token,
+  // so swapping it must change the key there too.
+  const saved = join(profile, '.claude.json');
+  writeFileSync(saved, JSON.stringify({ oauthAccount: { emailAddress: 'b@example.com', organizationUuid: 'org-9' } }));
+  writeToken('b@example.com', 'sk-ant-oat01-example-token-0123456789');
+  const withAccount = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile });
+  writeToken('b@example.com', 'sk-ant-oat01-example-token-9876543210');
+  assert.notEqual(withAccount, subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile }), 'a token swap beside a saved account must recycle warm workers');
 });

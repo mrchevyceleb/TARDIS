@@ -210,8 +210,12 @@ export async function listCliAccounts(refresh = false): Promise<CliAccount[]> {
   const rows = [...grouped.values()];
   // A wiped year-token profile carries the email but no organization; fold it
   // into the healthy row for the same email so the panel never shows the same
-  // login twice, whichever profile the reader happened to see first.
-  const healthy = new Map(rows.filter(row => row.engine === 'claude' && row.status === 'connected' && row.email && row.organizationId).map(row => [row.email!.toLowerCase(), row]));
+  // login twice, whichever profile the reader happened to see first. Only an
+  // UNAMBIGUOUS host folds: two healthy rows sharing an email (one login in
+  // two workspaces) must never absorb a third row at Map order's whim.
+  const healthyRows = rows.filter(row => row.engine === 'claude' && row.status === 'connected' && row.email && row.organizationId);
+  const ambiguous = new Set(healthyRows.map(row => row.email!.toLowerCase()).filter((email, index, all) => all.indexOf(email) !== index));
+  const healthy = new Map(healthyRows.filter(row => !ambiguous.has(row.email!.toLowerCase())).map(row => [row.email!.toLowerCase(), row]));
   for (let index = rows.length - 1; index >= 0; index--) {
     const row = rows[index];
     const host = row.engine === 'claude' && row.status === 'connected' && row.email && !row.organizationId ? healthy.get(row.email.toLowerCase()) : undefined;

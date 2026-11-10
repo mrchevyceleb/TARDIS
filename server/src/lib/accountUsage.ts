@@ -174,14 +174,17 @@ async function claudeAccessToken(profile: CliProfile): Promise<string> {
   try {
     oauth = rec(rec(JSON.parse(await readFile(join(profile.path, '.credentials.json'), 'utf8'))).claudeAiOauth);
   } catch {
-    // The normal login is gone or unreadable (the wipe state). The renewal
-    // turn is the only thing that can rebuild it, and the read reports 401 so
-    // a year-token profile gets its honest note instead of a generic failure.
-    renewClaudeLogin(profile);
+    // The normal login is gone or unreadable (the wipe state). Nothing is
+    // left to renew — the CLI can only refresh a login whose refresh token
+    // it still holds — so the read reports 401 and a year-token profile gets
+    // its honest note instead of a generic failure.
     throw new FeedError(401);
   }
   const expiresAt = num(oauth.expiresAt);
-  if (expiresAt !== undefined && expiresAt < Date.now() + 5 * 60_000) renewClaudeLogin(profile);
+  const refreshToken = typeof oauth.refreshToken === 'string' && oauth.refreshToken ? oauth.refreshToken : null;
+  // Only a profile still holding a refresh token can be renewed; spawning a
+  // renewal turn anywhere else is a futile `claude -p` every cooldown.
+  if (refreshToken && (expiresAt === undefined || expiresAt < Date.now() + 5 * 60_000)) renewClaudeLogin(profile);
   return typeof oauth.accessToken === 'string' ? oauth.accessToken : '';
 }
 
@@ -200,9 +203,9 @@ async function claude(accountInfo: CliAccount, profile: CliProfile): Promise<Usa
   const notes = token && longLivedTokenApplies(token, profile.path) ? { 401: yearTokenNote, 403: yearTokenNote } : {};
   return guarded(base, async () => {
     const token = await claudeAccessToken(profile);
-    // Empty credentials with no expiry to compare against still get the
-    // renewal turn started: this is the backup-login recovery path.
-    if (!token) { renewClaudeLogin(profile); throw new FeedError(401); }
+    // Empty pass with a refresh token already kicked the renewal turn inside
+    // claudeAccessToken; without one there is nothing to renew.
+    if (!token) throw new FeedError(401);
     const data = await json('https://api.anthropic.com/api/oauth/usage', token, { 'anthropic-beta': 'oauth-2025-04-20', 'User-Agent': 'claude-code/usage' });
     const names: Record<string, string> = { session: 'Session', weekly_all: 'All models · week', weekly_scoped: 'Model · week' };
     if (Array.isArray(data.limits)) {
@@ -243,7 +246,13 @@ export function refreshClaudeAccountUsage(): Promise<UsageAccount[]> {
     const accounts = (await listCliAccounts()).filter(item => item.engine === 'claude');
     const profiles = cliProfiles();
     const readings = await Promise.all(accounts.map(async info => {
-      const profile = profiles.find(item => info.profileIds.includes(item.id));
+      // A merged row's own id is its healthy representative; only when that
+      // profile cannot report (wiped credentials) does another profile of the
+      // same login take the read, so one wiped directory never hides the
+      // healthy profile's live quota from the panel and the failover pool.
+      const profile = profiles.find(item => item.id === info.id)
+        ?? profiles.find(item => info.profileIds.includes(item.id) && existsSync(join(item.path, '.credentials.json')))
+        ?? profiles.find(item => info.profileIds.includes(item.id));
       const usage = profile && info.status === 'connected' ? await claude(info, profile)
         : unavailable(info.id, 'Claude', 'Subscription needs attention', 'subscription', 'https://claude.ai/settings/usage', 'Open an agent account picker to check this sign-in.');
       return { profileIds: info.profileIds, usage };

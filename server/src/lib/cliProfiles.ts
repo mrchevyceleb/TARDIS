@@ -233,15 +233,20 @@ export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.Proces
     if (engine === 'claude') {
       let account: { accountUuid?: unknown; organizationUuid?: unknown; emailAddress?: unknown } | undefined;
       try { account = JSON.parse(readFileSync(join(profile, '.claude.json'), 'utf8')).oauthAccount; } catch { /* Wiped or mid-write: the token decides. */ }
+      const token = longLivedClaudeToken(profile);
+      const applies = token ? longLivedTokenApplies(token, profile) : false;
+      // An applicable token is the credential lanes actually bill, so its
+      // fingerprint rides the identity even beside a saved account: swapping
+      // or revoking it must retire warm workers still holding the old one.
+      const fingerprint = applies ? createHash('sha256').update(token!.token).digest('hex').slice(0, 16) : undefined;
       if (account && typeof account.emailAddress === 'string') {
-        identity = JSON.stringify([account.accountUuid, account.organizationUuid, account.emailAddress]);
+        identity = JSON.stringify([account.accountUuid, account.organizationUuid, account.emailAddress, fingerprint]);
+      } else if (applies) {
+        identity = JSON.stringify(['long-lived-token', token!.email, fingerprint]);
       } else {
-        const token = longLivedClaudeToken(profile);
-        // Confirmed absence (no account, no applicable token) is not-signed-in,
-        // never a stale previous identity; a same-email token replacement still
-        // recycles workers because the token's own fingerprint rides identity.
-        if (!token || !longLivedTokenApplies(token, profile)) return `${id}:not-signed-in`;
-        identity = JSON.stringify(['long-lived-token', token.email, createHash('sha256').update(token.token).digest('hex').slice(0, 16)]);
+        // Confirmed absence of every credential, never a stale previous
+        // identity: workers holding the removed token must be retired.
+        return `${id}:signed-out`;
       }
     } else {
       const auth = JSON.parse(readFileSync(join(profile, 'auth.json'), 'utf8'));
@@ -254,9 +259,10 @@ export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.Proces
   return `${id}:${identity}`;
 }
 
-/** A transient credential-file read must not look like an account change. The
- * profile path still has to match; once both identities are known, they must
- * match too so a real re-login recycles the warm worker. */
+/** A transient credential-file read must not look like an account change: the
+ * profile path still has to match, and an UNKNOWN identity ('not-signed-in')
+ * borrows the other side's. A CONFIRMED sign-out ('signed-out') is a real
+ * change — a worker still holding the removed token or login must go. */
 export function subscriptionRoutingKeysMatch(current: string, desired: string): boolean {
   if (current === desired) return true;
   const split = (value: string) => {
@@ -266,7 +272,8 @@ export function subscriptionRoutingKeysMatch(current: string, desired: string): 
   const left = split(current);
   const right = split(desired);
   return left.profile === right.profile
-    && (left.identity === 'not-signed-in' || right.identity === 'not-signed-in');
+    && (left.identity === right.identity
+      || left.identity === 'not-signed-in' || right.identity === 'not-signed-in');
 }
 
 export function subscriptionEmail(engine: AccountEngine, env: NodeJS.ProcessEnv): string | null {

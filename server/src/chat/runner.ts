@@ -3918,12 +3918,12 @@ async function getOrCreateSessionUnlocked(opts: {
       let preferenceMatches = !subscriptionLane || subscriptionRoutingKeysMatch(existing.subscriptionPreferenceKey(), desiredPreferenceKey);
       if (subscriptionLane && accountMatches && !existing.isBusy()
           && existing.subscriptionAccountKey() !== desiredAccountKey
-          && !desiredAccountKey.endsWith(':not-signed-in')) {
+          && !desiredAccountKey.endsWith(':not-signed-in') && !desiredAccountKey.endsWith(':signed-out')) {
         existing.acceptSubscriptionAccount(desiredAccountKey);
       }
       if (subscriptionLane && preferenceMatches && !existing.isBusy()
           && existing.subscriptionPreferenceKey() !== desiredPreferenceKey
-          && !desiredPreferenceKey.endsWith(':not-signed-in')) {
+          && !desiredPreferenceKey.endsWith(':not-signed-in') && !desiredPreferenceKey.endsWith(':signed-out')) {
         existing.acceptSubscriptionPreference(desiredPreferenceKey);
       }
       // A picker change that still resolves to the same pooled account needs
