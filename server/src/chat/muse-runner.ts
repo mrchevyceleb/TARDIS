@@ -247,7 +247,7 @@ export class MuseSession {
     const env: Record<string, string> = {};
     if (process.env.RIVENDELL_SIDE_COPY === '1') return { args, env };
     const agent = agentForChatId(this.chatId);
-    const servers = laneMcpServers(agent?.name, isBackgroundChatId(this.chatId), computerOwnerKey(this.cwd, this.chatId), agent?.id);
+    const servers = laneMcpServers(agent, isBackgroundChatId(this.chatId), computerOwnerKey(this.cwd, this.chatId));
     let i = 0;
     for (const [name, server] of Object.entries(servers)) {
       if (this.skippedMcp.has(name)) continue;

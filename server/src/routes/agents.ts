@@ -3,7 +3,7 @@
 import { Router } from 'express';
 import express from 'express';
 import { asyncHandler } from './helpers.ts';
-import { AGENT_COLORS, AgentBrainConflictError, AgentBrainRevisionRequiredError, AgentBrainSelectionError, isAgentColor, listAgents, createAgent, updateAgent, deleteAgent, setAgentAvatar, clearAgentAvatar, agentAvatarPath, reorderAgents } from '../chat/agents.ts';
+import { AGENT_COLORS, AgentBrainConflictError, AgentBrainRevisionRequiredError, AgentBrainSelectionError, isAgentColor, isAgentToolbox, listAgents, createAgent, updateAgent, deleteAgent, setAgentAvatar, clearAgentAvatar, agentAvatarPath, reorderAgents } from '../chat/agents.ts';
 import { personaScopeFor } from '../chat/personaPrompts.ts';
 import { agentUnread, markAgentRead, agentLatestSeq } from '../chat/reads.ts';
 import { SubscriptionEngineError } from '../chat/subscription-policy.ts';
@@ -41,13 +41,17 @@ agentsRouter.post('/reorder', asyncHandler(async (req, res) => {
 }));
 
 agentsRouter.post('/', asyncHandler(async (req, res) => {
-  const { name, role, engine, model, effort, serviceTier, voice, scope } = req.body ?? {};
+  const { name, role, engine, model, effort, serviceTier, voice, toolbox, scope } = req.body ?? {};
   if (typeof name !== 'string' || !name.trim()) {
     res.status(400).json({ error: 'name is required' });
     return;
   }
+  if (toolbox !== undefined && !isAgentToolbox(toolbox)) {
+    res.status(400).json({ error: 'toolbox must be "full" or "lean"' });
+    return;
+  }
   try {
-    res.status(201).json({ agent: createAgent({ name, role, engine, model, effort, serviceTier, voice, scope }) });
+    res.status(201).json({ agent: createAgent({ name, role, engine, model, effort, serviceTier, voice, toolbox, scope }) });
   } catch (error) {
     if (error instanceof SubscriptionEngineError || error instanceof AgentBrainSelectionError) { res.status(400).json({ error: error.message }); return; }
     throw error;
@@ -55,7 +59,7 @@ agentsRouter.post('/', asyncHandler(async (req, res) => {
 }));
 
 agentsRouter.patch('/:id', asyncHandler(async (req, res) => {
-  const { name, role, engine, model, effort, serviceTier, brainRevision, voice, pinned, muted, color, scope } = req.body ?? {};
+  const { name, role, engine, model, effort, serviceTier, brainRevision, voice, pinned, muted, color, toolbox, scope } = req.body ?? {};
   const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   if (muted !== undefined && typeof muted !== 'boolean') {
     res.status(400).json({ error: 'muted must be a boolean' });
@@ -63,6 +67,10 @@ agentsRouter.patch('/:id', asyncHandler(async (req, res) => {
   }
   if (color !== undefined && color !== null && !isAgentColor(color)) {
     res.status(400).json({ error: `color must be null or one of ${AGENT_COLORS.join(', ')}` });
+    return;
+  }
+  if (toolbox !== undefined && toolbox !== null && !isAgentToolbox(toolbox)) {
+    res.status(400).json({ error: 'toolbox must be "full", "lean" or null' });
     return;
   }
   try {
@@ -75,6 +83,7 @@ agentsRouter.patch('/:id', asyncHandler(async (req, res) => {
         name, role, engine, model, effort, serviceTier, voice, pinned,
         muted,
         color,
+        toolbox,
         scope,
       },
       expectedRevision,

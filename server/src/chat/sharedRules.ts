@@ -16,10 +16,12 @@ import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 export const RULES_DIR = join(STATE_DIR, 'rules');
 
 export type SharedRuleId = 'task-control' | 'team-status' | 'background-jobs' | 'sidebar' | 'desk' | 'visible-transcript'
-  | 'engine-codex' | 'engine-muse' | 'engine-agy' | 'engine-pi' | 'writing-plain-english';
+  | 'ops-toolbox' | 'engine-codex' | 'engine-muse' | 'engine-agy' | 'engine-pi' | 'writing-plain-english';
 
-/** `engine` limits a rule to agents on that engine; `tag` '' adds the text bare. */
-export const SHARED_RULES: Record<SharedRuleId, { title: string; tag: string; engine?: string; seed: () => string }> = {
+/** `engine` limits a rule to agents on that engine; `toolbox: 'full'` limits
+ *  it to lanes whose roster toolbox mounts assistant-mcp (see
+ *  wantsFullToolbox in agents.ts); `tag` '' adds the text bare. */
+export const SHARED_RULES: Record<SharedRuleId, { title: string; tag: string; engine?: string; toolbox?: 'full'; seed: () => string }> = {
   'task-control': {
     title: 'Task control and review',
     tag: 'rivendell-task-control',
@@ -84,6 +86,17 @@ export const SHARED_RULES: Record<SharedRuleId, { title: string; tag: string; en
       'Do not narrate routine next steps ("Next I am checking...", "I will search...") or repeatedly acknowledge the same fact. Tool cards already show activity. Do not leave the person staring at a spinner with nothing on screen.',
       'Give the actual answer without replaying your work log. Plans explicitly requested by the person remain user-facing answers.',
       'When you are reminded that the person has not heard from you, answer in a normal visible text message, never inside your thinking: they cannot see your thinking.',
+    ].join('\n'),
+  },
+  'ops-toolbox': {
+    title: 'Ops toolbox (assistant-mcp router)',
+    tag: 'rivendell-ops-toolbox',
+    toolbox: 'full',
+    seed: () => [
+      'The assistant-mcp MCP tools are a ROUTER: pass the correct workplace/project on the call itself. They are NEVER broken.',
+      'If Doppler cannot find a project, Railway lists the wrong services, or a tool returns unexpected empty data, first verify the workplace/workspace on that call against the operator\'s configured routing. Do not assume the tool is broken or borrow credentials from another project.',
+      'Keep project-specific workplace mappings and hosting instructions in this editable local rule or the project\'s deployment guide. Never guess a production target. Optional integrations must be explicitly configured before use.',
+      'Need a secret value for code, a .env file, a script or a CLI: use Doppler secret_link with the explicit workplace, project, config and key names. Redeem its one-time URL directly into a private temporary file, never to the terminal. Keep secrets outside synced folders, never print them, and delete the file when the task ends.',
     ].join('\n'),
   },
   'engine-codex': {

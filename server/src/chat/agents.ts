@@ -69,6 +69,12 @@ export type Agent = {
   muted?: boolean;
   /** Sidebar color label (a key from AGENT_COLORS). Absent means no color. */
   color?: AgentColor;
+  /** Which optional toolbox the lane mounts. Absent (or 'full') mounts the
+   *  complete operator toolbox; 'lean' drops the assistant-mcp integration on
+   *  every engine. File, shell and built-in tools stay available.
+   *  One roster-level setting — see wantsFullToolbox, which every engine path
+   *  consults, never a per-engine patch. */
+  toolbox?: 'full' | 'lean';
 };
 
 /** Sidebar color labels. Keys only; the client owns the actual shades so
@@ -78,6 +84,18 @@ export type AgentColor = typeof AGENT_COLORS[number];
 
 export function isAgentColor(value: unknown): value is AgentColor {
   return typeof value === 'string' && (AGENT_COLORS as readonly string[]).includes(value);
+}
+
+export function isAgentToolbox(value: unknown): value is NonNullable<Agent['toolbox']> {
+  return value === 'full' || value === 'lean';
+}
+
+/** True unless the roster explicitly set this lane's toolbox to 'lean'.
+ *  THE single decision point for mounting assistant-mcp: the Claude-family
+ *  mcp-config, the Pi/Muse lane server set, Codex's config.toml entry and the
+ *  Banana mirror all consult this, as does the ops-toolbox instruction rule. */
+export function wantsFullToolbox(agent?: Agent): boolean {
+  return agent?.toolbox !== 'lean';
 }
 
 export type AgentBrain = { engine: string; model?: string; effort?: string; serviceTier?: string; revision: number; updatedAt?: number };
@@ -360,7 +378,7 @@ export function ensureAgents(): void {
   }
 }
 
-export type AgentInput = { name: string; role?: string; engine?: string; model?: string; effort?: string; serviceTier?: string; voice?: string; pinned?: boolean; muted?: boolean; color?: AgentColor | null; scope?: string };
+export type AgentInput = { name: string; role?: string; engine?: string; model?: string; effort?: string; serviceTier?: string; voice?: string; pinned?: boolean; muted?: boolean; color?: AgentColor | null; toolbox?: Agent['toolbox'] | null; scope?: string };
 
 /** Fail-closed: only a never-written ledger (ENOENT) reads as empty. An
  * unreadable or corrupt ledger THROWS - id allocation and retirement both
@@ -436,6 +454,8 @@ export function createAgent(input: AgentInput): Agent {
     order: Math.max(0, ...agents.map((a) => a.order ?? 0)) + 1,
   };
   if (input.muted) agent.muted = true;
+  // Absent means the full toolbox; only the lean choice is stored.
+  if (input.toolbox === 'lean') agent.toolbox = 'lean';
   if (input.scope && input.scope.trim()) {
     writeFileSync(join(AGENTS_DIR, `${id}.md`), input.scope);
   }
@@ -536,6 +556,12 @@ export function updateAgent(
   if (patch.color !== undefined) {
     if (isAgentColor(patch.color)) next.color = patch.color;
     else delete next.color;
+  }
+  // 'lean' opts the lane out of assistant-mcp; 'full' or null restores the
+  // default (stored as absent, like muted).
+  if (patch.toolbox !== undefined) {
+    if (patch.toolbox === 'lean') next.toolbox = 'lean';
+    else delete next.toolbox;
   }
   // Any deliberate brain change makes the prior live-lane stamp historical.
   if (brainChanged) delete next.cli;
