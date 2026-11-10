@@ -336,7 +336,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     try {
       const brainChanged = engine !== initialBrain.current.engine || model !== initialBrain.current.model || effort !== initialBrain.current.effort || serviceTier !== initialBrain.current.serviceTier;
       const brain = !agent || brainChanged ? { engine, model: model || undefined, effort, ...(engine === 'codex' ? { serviceTier } : {}) } : {};
-      const toolbox = leanToolbox && engine !== 'agy' ? 'lean' : 'full';
+      const toolbox = leanToolbox ? 'lean' : 'full';
       const saved = agent
         ? await updateAgentReq(agent.id, { name, role, ...brain, brainRevision, voice, pinned, muted, toolbox: toolbox !== initialToolbox.current ? toolbox : undefined, scope: scope.trim() || undefined })
         : await createAgent({ name, role, ...brain, voice, toolbox, scope: scope.trim() || undefined });
@@ -498,11 +498,11 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
           </>
         ) : null}
 
-        <label className="bt-agent-checkrow" title="Keeps file and coding tools, without the office integrations. Takes effect on the next turn.">
-          <input type="checkbox" checked={leanToolbox && engine !== 'agy'} disabled={engine === 'agy'} onChange={(e) => setLeanToolbox(e.target.checked)} />
+        <label className="bt-agent-checkrow" title="Keeps file, coding and browser tools, without the office integrations. Takes effect on the next turn.">
+          <input type="checkbox" checked={leanToolbox} onChange={(e) => setLeanToolbox(e.target.checked)} />
           <span>
             Lean toolbox
-            <small>{engine === 'agy' ? 'Not supported by Antigravity — its tools are managed by the engine' : 'A smaller, faster lane for heads-down builders'}</small>
+            <small>A smaller, faster lane for heads-down builders</small>
           </span>
         </label>
 

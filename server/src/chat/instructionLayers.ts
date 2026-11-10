@@ -8,7 +8,7 @@ import { readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { STATE_DIR } from './config.ts';
-import { agentForChatId, cliForAgentEngine, listAgents, wantsFullToolbox, type Agent } from './agents.ts';
+import { agentForChatId, cliForAgentEngine, listAgents, mountsOfficeTools, mountsTeamTools, type Agent } from './agents.ts';
 import { PERSONAS_DIR, engineRule, personaPromptFor } from './personaPrompts.ts';
 import { sessionDirectory, sessionPolicy } from './sessionPolicy.ts';
 import { plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
@@ -44,10 +44,16 @@ type Source = { key: string; title: string; note: string; path: string };
 const shortHome = (path: string) => path.replace(homedir(), '~');
 
 /** Engine rules reach only agents whose runner adds them; toolbox rules only
- *  lanes whose roster toolbox mounts assistant-mcp. */
+ *  lanes that actually mount assistant-mcp; team-tool rules only lanes that
+ *  mount the TARDIS-managed team/local tools at all — a lean roster choice
+ *  opts out of the office integrations, and the Antigravity engine mounts no
+ *  TARDIS-managed MCP at all (its CLI reads one machine-global config TARDIS
+ *  never writes). The prompt composition in personaPrompts uses the same
+ *  predicates, so the room never lists a rule a lane does not receive. */
 function ruleApplies(id: SharedRuleId, agent: Agent): boolean {
   const rule = SHARED_RULES[id];
-  if (rule.toolbox === 'full' && !wantsFullToolbox(agent)) return false;
+  if (rule.toolbox === 'full' && !mountsOfficeTools(agent)) return false;
+  if (rule.teamTools && !mountsTeamTools(agent)) return false;
   const engine = rule.engine;
   if (!engine) return true;
   const cli = cliForAgentEngine(agent.engine ?? '');

@@ -71,8 +71,11 @@ export type Agent = {
   color?: AgentColor;
   /** Which optional toolbox the lane mounts. Absent (or 'full') mounts the
    *  complete operator toolbox; 'lean' drops assistant-mcp while keeping
-   *  file, shell and built-in tools. Antigravity does not support this setting.
-   *  One roster-level setting — see wantsFullToolbox. */
+   *  file, shell and built-in tools. Honored on every engine: the Antigravity
+   *  CLI reads one machine-global MCP config TARDIS never writes, so its
+   *  lanes mount no office integrations either way and lean/full differ only
+   *  in whether the ops-toolbox guidance rides the prompt. One roster-level
+   *  setting — see wantsFullToolbox. */
   toolbox?: 'full' | 'lean';
 };
 
@@ -95,6 +98,23 @@ export function isAgentToolbox(value: unknown): value is NonNullable<Agent['tool
  *  Banana mirror all consult this, as does the ops-toolbox instruction rule. */
 export function wantsFullToolbox(agent?: Agent): boolean {
   return agent?.toolbox !== 'lean';
+}
+
+/** Whether the lane actually mounts the office integrations: a lean roster
+ *  choice opts out, and the Antigravity CLI reads one machine-global MCP
+ *  config TARDIS never writes, so its lanes mount them at no setting. One
+ *  answer shared by the prompt guidance and the instruction-layer scoping. */
+export function mountsOfficeTools(agent: Agent): boolean {
+  return wantsFullToolbox(agent) && cliForAgentEngine(agent.engine ?? '') !== 'agy';
+}
+
+/** Whether the lane mounts the TARDIS-managed team/local tools at all. Every
+ *  engine but Antigravity mounts them (a lean lane keeps them); the agy CLI
+ *  reads one machine-global MCP config TARDIS never writes, so its lanes have
+ *  no team_status, job_start, sidebar_checklist or board tools. Rules that
+ *  coach those tools are gated by this, in the prompt and in the room. */
+export function mountsTeamTools(agent: Agent): boolean {
+  return cliForAgentEngine(agent.engine ?? '') !== 'agy';
 }
 
 export type AgentBrain = { engine: string; model?: string; effort?: string; serviceTier?: string; revision: number; updatedAt?: number };
@@ -430,7 +450,6 @@ export function createAgent(input: AgentInput): Agent {
   let n = 2;
   while (agents.some((a) => a.id === id) || retired.has(id)) id = `${base}-${n++}`;
   const engine = input.engine && VALID_ENGINES.has(input.engine) ? input.engine : 'claude';
-  assertToolboxSelection(engine, input.toolbox);
   const defaults = defaultAgentBrain(engine);
   const model = normalizeBrainModel(engine, input.model, defaults.model);
   const effort = normalizeBrainEffort(engine, model, input.effort, defaults.effort);
@@ -485,12 +504,6 @@ function validatedServiceTier(model: string, tier?: unknown): string {
   catch (error) { throw new AgentBrainSelectionError((error as Error).message); }
 }
 
-function assertToolboxSelection(engine: string, toolbox: AgentInput['toolbox']): void {
-  if (engine === 'agy' && toolbox === 'lean') {
-    throw new AgentBrainSelectionError('Antigravity does not support lean toolboxes. Choose the full toolbox or another engine.');
-  }
-}
-
 function assertBrainSelection(input: Pick<AgentInput, 'model' | 'effort'>, model?: string, effort?: string): void {
   for (const field of ['model', 'effort'] as const) {
     if (input[field] === undefined) continue;
@@ -519,7 +532,6 @@ export function updateAgent(
     throw new AgentBrainConflictError(cur);
   }
   const engine = patch.engine && VALID_ENGINES.has(patch.engine) ? patch.engine : cur.engine;
-  assertToolboxSelection(engine, patch.toolbox === undefined ? cur.toolbox : patch.toolbox);
   const engineChanged = engine !== cur.engine;
   const defaults = defaultAgentBrain(engine);
   const modelChanged = patch.model !== undefined && patch.model !== cur.model;

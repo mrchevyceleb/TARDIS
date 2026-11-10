@@ -33,8 +33,8 @@ export type Agent = {
   muted?: boolean;
   /** Sidebar color label, synced through the server so every device agrees. */
   color?: ChatColor;
-  /** 'lean' skips assistant-mcp on supported engines (not Antigravity);
-   *  absent means the full toolbox. File and coding tools stay available. */
+  /** 'lean' skips the office integrations on engines that mount them; absent
+   *  means the full toolbox. File, coding and browser tools stay available. */
   toolbox?: 'full' | 'lean';
 };
 

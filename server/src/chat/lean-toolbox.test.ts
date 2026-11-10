@@ -31,8 +31,9 @@ const { wantsFullToolbox, createAgent, updateAgent, agentForChatId } = await imp
 const { laneMcpServers, optionalMcpServersFor } = await import('./runner.ts');
 const { bananaToolboxTools } = await import('./banana-runner.ts');
 const { personaPromptFor } = await import('./personaPrompts.ts');
+const { DESK_ROOM_ENABLED } = await import('../config.ts');
 const { instructionsStamp, instructionLayers } = await import('./instructionLayers.ts');
-const { sharedRuleFile, SHARED_RULES } = await import('./sharedRules.ts');
+const { sharedRuleFile, sharedRuleText, SHARED_RULES, RETIRED_STOCK_SEEDS } = await import('./sharedRules.ts');
 const { agentsRouter } = await import('../routes/agents.ts');
 
 const baseAgent = (patch: Partial<Agent>): Agent => ({
@@ -90,6 +91,71 @@ test('router guidance and instruction layers follow the toolbox, including non-r
   assert.doesNotMatch(SHARED_RULES['ops-toolbox'].seed(), /https?:\/\/|~\/bin\//);
 });
 
+test('a lean lane switches to Antigravity (Gemini 4 Carbon) and keeps lean', () => {
+  // Matt's flow: the picker saves an engine switch with brain fields only —
+  // no toolbox field — so the server must not re-check the lane's stored lean
+  // choice against the new engine (the old "Antigravity does not support
+  // lean toolboxes" refusal).
+  const dev = createAgent({ name: 'Dev lane', engine: 'claude', toolbox: 'lean' });
+  const saved = updateAgent(dev.id, { engine: 'agy', model: 'gemini-4-carbon', effort: 'medium' }, 1);
+  assert.equal(saved?.engine, 'agy');
+  assert.equal(saved?.model, 'gemini-4-carbon');
+  assert.equal(saved?.toolbox, 'lean', 'lean survives the engine switch');
+  const agy = createAgent({ name: 'Carbon builder', engine: 'agy', toolbox: 'lean' });
+  assert.equal(agy.toolbox, 'lean');
+});
+
+test('Antigravity lanes carry no office-tool guidance at any toolbox setting', () => {
+  // The Antigravity CLI reads one machine-global MCP config TARDIS never
+  // writes: no agy lane mounts assistant-mcp, so none of them get the router
+  // rule — lean or full. The team-status/background-jobs/sidebar/Desk rules
+  // coach tools those mounts carry (team_status, job_start,
+  // sidebar_checklist, board_*), so they stay off agy in the prompt AND in
+  // the Instructions room, which never lists a rule the lane never receives.
+  const agyFull = createAgent({ name: 'Agy full', engine: 'agy' });
+  const agyLean = createAgent({ name: 'Agy lean', engine: 'agy', toolbox: 'lean' });
+  const gatedRules = ['rule:ops-toolbox', 'rule:team-status', 'rule:background-jobs', 'rule:sidebar', 'rule:desk'];
+  const gatedTags = /<rivendell-ops-toolbox>|<rivendell-team-status>|<rivendell-background-jobs>|<rivendell-sidebar>|<rivendell-desk>/;
+  for (const agent of [agyFull, agyLean]) {
+    assert.doesNotMatch(personaPromptFor(agent.home), gatedTags);
+    for (const key of gatedRules) {
+      assert.ok(!instructionLayers(agent.id)?.layers.some(layer => layer.key === key), `${key} must not reach an agy lane`);
+    }
+  }
+  // Other engines keep the full-toolbox rule and the team-tool rules, in the
+  // prompt and in the room (a lean lane keeps the team tools, losing only
+  // the office integrations).
+  for (const lane of [{ agent: createAgent({ name: 'OpenRouter full', engine: 'openrouter' }), office: true }, { agent: createAgent({ name: 'OpenRouter lean', engine: 'openrouter', toolbox: 'lean' }), office: false }]) {
+    const prompt = personaPromptFor(lane.agent.home);
+    assert.match(prompt, /<rivendell-team-status>/);
+    assert.match(prompt, /<rivendell-background-jobs>/);
+    assert.match(prompt, /<rivendell-sidebar>/);
+    if (DESK_ROOM_ENABLED) assert.match(prompt, /<rivendell-desk>/);
+    assert.equal(prompt.includes('<rivendell-ops-toolbox>'), lane.office);
+    const layers = instructionLayers(lane.agent.id)?.layers ?? [];
+    for (const key of ['rule:team-status', 'rule:background-jobs', 'rule:sidebar']) assert.ok(layers.some(layer => layer.key === key), `${key} reaches a lane that mounts the team tools`);
+    assert.equal(layers.some(layer => layer.key === 'rule:ops-toolbox'), lane.office);
+  }
+  // The engine basics seed describes the CLI's real tool surface.
+  assert.doesNotMatch(SHARED_RULES['engine-agy'].seed(), /assistant_\* tools/);
+  assert.doesNotMatch(SHARED_RULES['engine-agy'].seed(), /team_message/);
+});
+
+test('a rule file still carrying a retired stock seed refreshes; an owner edit never does', () => {
+  // engine-agy shipped a seed that described office and team tools the CLI
+  // never mounts. A file still holding that text word-for-word was never
+  // owner-edited, so the corrected seed replaces it on first read.
+  const file = sharedRuleFile('engine-agy');
+  mkdirSync(join(dir, 'state', 'rules'), { recursive: true });
+  writeFileSync(file, `${RETIRED_STOCK_SEEDS['engine-agy']![0]}\n`);
+  assert.equal(sharedRuleText('engine-agy'), SHARED_RULES['engine-agy'].seed());
+  // An owner-edited variant keeps the owner's words.
+  writeFileSync(file, `${RETIRED_STOCK_SEEDS['engine-agy']![0]}\n\nOwner note.\n`);
+  const edited = sharedRuleText('engine-agy');
+  assert.match(edited, /Owner note\./);
+  assert.match(edited, /team_message/);
+});
+
 test('switching a toolbox changes the warm-process stamp even with an empty ops rule', () => {
   const agent = createAgent({ name: 'Warm lane' });
   const file = sharedRuleFile('ops-toolbox');
@@ -131,6 +197,13 @@ test('API validates toolbox values and supports lean creation, unrelated edits a
   }
   const renamed = await request('PATCH', `/${agent.id}`, { name: 'Still lean' });
   assert.equal((await renamed.json() as { agent: Agent }).agent.toolbox, 'lean');
+  // The chat picker's engine-switch payload (brain fields only, no toolbox)
+  // must save on a lean lane — the failure Matt hit switching to Antigravity.
+  const switched = await request('PATCH', `/${agent.id}`, { engine: 'agy', model: 'gemini-4-carbon', effort: 'medium', brainRevision: 1 });
+  assert.equal(switched.status, 200);
+  const switchedAgent = (await switched.json() as { agent: Agent }).agent;
+  assert.equal(switchedAgent.engine, 'agy');
+  assert.equal(switchedAgent.toolbox, 'lean');
   for (const toolbox of ['full', 'lean', null]) {
     const response = await request('PATCH', `/${agent.id}`, { toolbox });
     assert.equal(response.status, 200);
