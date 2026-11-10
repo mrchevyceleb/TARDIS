@@ -105,6 +105,26 @@ test('cancel saves nothing; accepting names both engines as the picker does', as
   assert.equal(picker.companion, 'agy');
 });
 
+test('a lean teammate can switch to Gemini and pick Carbon without changing its toolbox', async () => {
+  let stored: Agent = { ...teammate, toolbox: 'lean' };
+  save.mock.mockImplementation(async (_id, patch) => {
+    stored = { ...stored, ...patch, brainRevision: (stored.brainRevision ?? 1) + 1 };
+    return stored;
+  });
+  await mount(stored);
+  await act(async () => picker.setCompanion('agy'));
+  assert.equal(picker.companion, 'agy');
+  await act(async () => picker.setAgyModel('gemini-4-carbon'));
+  assert.equal(picker.model, 'gemini-4-carbon');
+  assert.equal(picker.selectionError, null);
+  assert.equal(stored.engine, 'agy');
+  assert.equal(stored.toolbox, 'lean');
+  assert.equal(save.mock.callCount(), 2);
+  for (const { arguments: [, patch] } of save.mock.calls) {
+    assert.equal(Object.hasOwn(patch, 'toolbox'), false, 'brain-only saves preserve the roster toolbox');
+  }
+});
+
 test('same-engine model, effort and speed picks stay one tap', async () => {
   await mount({ ...teammate, engine: 'codex', model: 'gpt-6.1-sol', serviceTier: 'default' });
   await act(async () => picker.setCodexModel('gpt-6-sol'));

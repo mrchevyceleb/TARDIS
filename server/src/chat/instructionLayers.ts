@@ -8,7 +8,7 @@ import { readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { STATE_DIR } from './config.ts';
-import { agentForChatId, cliForAgentEngine, listAgents, wantsFullToolbox, type Agent } from './agents.ts';
+import { agentForChatId, cliForAgentEngine, listAgents, mountsOfficeTools, mountsTeamTools, type Agent } from './agents.ts';
 import { PERSONAS_DIR, engineRule, personaPromptFor } from './personaPrompts.ts';
 import { sessionDirectory, sessionPolicy } from './sessionPolicy.ts';
 import { plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
@@ -44,10 +44,16 @@ type Source = { key: string; title: string; note: string; path: string };
 const shortHome = (path: string) => path.replace(homedir(), '~');
 
 /** Engine rules reach only agents whose runner adds them; toolbox rules only
- *  lanes whose roster toolbox mounts assistant-mcp. */
+ *  lanes that actually mount assistant-mcp; team-tool rules only lanes that
+ *  mount the TARDIS-managed team/local tools at all — a lean roster choice
+ *  opts out of the office integrations, and the Antigravity engine mounts no
+ *  TARDIS-managed MCP at all (its CLI reads one machine-global config TARDIS
+ *  never writes). The prompt composition in personaPrompts uses the same
+ *  predicates, so the room never lists a rule a lane does not receive. */
 function ruleApplies(id: SharedRuleId, agent: Agent): boolean {
   const rule = SHARED_RULES[id];
-  if (rule.toolbox === 'full' && !wantsFullToolbox(agent)) return false;
+  if (rule.toolbox === 'full' && !mountsOfficeTools(agent)) return false;
+  if (rule.teamTools && !mountsTeamTools(agent)) return false;
   const engine = rule.engine;
   if (!engine) return true;
   const cli = cliForAgentEngine(agent.engine ?? '');
@@ -109,10 +115,11 @@ function sources(agent: Agent): Source[] {
   for (const id of SHARED_RULE_IDS) {
     if (id === 'desk' && !DESK_ROOM_ENABLED) continue;
     if (!ruleApplies(id, agent)) continue;
-    // Seeds the file on a fresh install. An emptied file is a switched-off
-    // rule: nothing reaches the agent, so the room does not list it.
-    if (!sharedRuleText(id)) continue;
-    push(`rule:${id}`, SHARED_RULES[id].title, 'Shared rule added by TARDIS for every agent.', real(sharedRuleFile(id)));
+    // A split workflow may start disabled to preserve an owner's old policy.
+    // Keep that file editable in the room without sending it to the model.
+    const enabled = Boolean(sharedRuleText(id));
+    if (!enabled && id !== 'team-workflow') continue;
+    push(`rule:${id}`, SHARED_RULES[id].title, enabled ? 'Shared rule added by TARDIS for every agent.' : 'Disabled team workflow. Add text to turn it on for agents with team tools.', real(sharedRuleFile(id)));
   }
   return out;
 }
@@ -137,7 +144,9 @@ export function instructionsStamp(chatId: string, profile?: string | null): stri
     // mounts its MCP set at spawn, and with the rule text identical (for
     // example when the ops-toolbox rule is switched off) only this makes a
     // lean/full flip replace the process instead of reusing assistant-mcp.
-    hash.update(`toolbox=${agent.toolbox ?? 'full'}`).update('\0');
+    if (cliForAgentEngine(agent.engine ?? '') !== 'agy') {
+      hash.update(`toolbox=${agent.toolbox ?? 'full'}`).update('\0');
+    }
     for (const path of paths) {
       hash.update(path).update('\0');
       try { hash.update(readFileSync(path)); } catch { hash.update('-'); }
