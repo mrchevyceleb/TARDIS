@@ -15,6 +15,7 @@ import {
   normalizeZaiEffort,
   normalizeZaiModel,
   useCompanionPicker,
+  WORKSPACE_COMPANIONS,
 } from '../chat/hooks/useCompanionPicker';
 import { codexModelChange, normalizeCodexServiceTier, savedCodexServiceTier, normalizeCodexEffort, normalizeCodexModel } from '../chat/codexModels';
 import { normalizeFireworksEffort, normalizeFireworksModel } from '../chat/fireworksModels';
@@ -32,6 +33,8 @@ import { AgentUpdateConflictError, markAgentRead, updateAgentReq } from './agent
 import { onPresenceChange, userPresent } from '../chat/utils/userPresence';
 
 type BrainDraft = { engine: string; model?: string; effort?: string; serviceTier?: string };
+/** The engine name exactly as the picker shows it. */
+const engineName = (engine: string) => WORKSPACE_COMPANIONS.find((c) => c.id === engine)?.label ?? engine;
 
 // Keep the write-side draft consistent with the lane displayed by the picker,
 // including while an older server snapshot still carries a retired provider.
@@ -103,9 +106,6 @@ export function GrokChat(props: GrokChatProps) {
     return () => window.clearTimeout(timer);
   }, [brainSaveNotice]);
   const savedBrain = useRef<BrainDraft>({ engine: props.agent?.engine ?? 'claude', model: props.agent?.model, serviceTier: props.agent?.serviceTier, effort: props.agent?.effort });
-  useEffect(() => {
-    if (props.agent) savedBrain.current = { engine: props.agent.engine, model: props.agent.model, serviceTier: props.agent.serviceTier, effort: props.agent.effort };
-  }, [props.agent?.engine, props.agent?.model, props.agent?.effort, props.agent?.serviceTier, props.agent?.brainRevision]);
   const { chatId, cli, lane, repo } = props;
   // Seed the picker lane SYNCHRONOUSLY (before the hook's useState initializer
   // reads localStorage) so persona threads never connect on the wrong lane.
@@ -176,11 +176,12 @@ export function GrokChat(props: GrokChatProps) {
     if (revision < serverBrainRevision.current || appliedBrainRevision.current === revision) return;
     appliedBrainRevision.current = revision;
     serverBrainRevision.current = revision;
-    desiredBrain.current = canonicalBrain({
-      engine: props.agent.engine,
-      model: props.agent.model,
+    // Only accepted revisions may replace the fallback for a failed save.
+    savedBrain.current = {
+      engine: props.agent.engine, model: props.agent.model,
       serviceTier: props.agent.serviceTier, effort: props.agent.effort,
-    });
+    };
+    desiredBrain.current = canonicalBrain(savedBrain.current);
     picker.applyAuthoritativeBrain(props.agent.engine, props.agent.model, props.agent.effort, props.agent.serviceTier);
     if (chat.serverBrain && chat.serverBrain.revision !== revision) {
       window.setTimeout(chat.reconnect, 0);
@@ -193,12 +194,13 @@ export function GrokChat(props: GrokChatProps) {
     if (revision <= serverBrainRevision.current) return;
     serverBrainRevision.current = revision;
     appliedBrainRevision.current = revision;
-    desiredBrain.current = canonicalBrain({
+    savedBrain.current = {
       engine: chat.serverBrain.cli,
       model: chat.serverBrain.model,
       effort: chat.serverBrain.effort,
       serviceTier: chat.serverBrain.serviceTier,
-    });
+    };
+    desiredBrain.current = canonicalBrain(savedBrain.current);
     picker.applyAuthoritativeBrain(
       chat.serverBrain.cli,
       chat.serverBrain.model,
@@ -260,6 +262,17 @@ export function GrokChat(props: GrokChatProps) {
     setBrainSaveError(null);
     setBrainSaveNotice(null);
     const next = canonicalBrain({ ...desiredBrain.current, ...patch });
+    // A teammate's engine is a durable team setting, not a local preference.
+    // Ask before handing their thread to a different AI. Model and effort
+    // changes within the same engine stay one tap.
+    const currentEngine = desiredBrain.current.engine;
+    if (agentId && currentEngine && next.engine && next.engine !== currentEngine) {
+      const name = props.agent?.name ?? 'this teammate';
+      if (!window.confirm(`Switch ${name} from ${engineName(currentEngine)} to ${engineName(next.engine)}? Their next reply runs on the new engine.`)) {
+        picker.applyAuthoritativeBrain(desiredBrain.current.engine, desiredBrain.current.model, desiredBrain.current.effort, desiredBrain.current.serviceTier);
+        return;
+      }
+    }
     desiredBrain.current = next;
     if (!agentId) {
       picker.applyAuthoritativeBrain(next.engine, next.model, next.effort, next.serviceTier);
@@ -275,8 +288,10 @@ export function GrokChat(props: GrokChatProps) {
           brainRevision: serverBrainRevision.current,
         });
         serverBrainRevision.current = saved.brainRevision ?? serverBrainRevision.current + 1;
+        // Saves run one at a time, so every success is the newest durable brain,
+        // even when a later click is already queued behind it.
+        savedBrain.current = { engine: saved.engine, model: saved.model, serviceTier: saved.serviceTier, effort: saved.effort };
         if (gen === persistGen.current) {
-          savedBrain.current = { engine: saved.engine, model: saved.model, serviceTier: saved.serviceTier, effort: saved.effort };
           desiredBrain.current = canonicalBrain({ engine: saved.engine, model: saved.model, serviceTier: saved.serviceTier, effort: saved.effort });
           picker.applyAuthoritativeBrain(saved.engine, saved.model, saved.effort, saved.serviceTier);
           setBrainSaveNotice(notice ?? 'Selection saved. New replies will use it.');
@@ -291,16 +306,17 @@ export function GrokChat(props: GrokChatProps) {
             const current = error.current;
             savedBrain.current = { engine: current.engine, model: current.model, serviceTier: current.serviceTier, effort: current.effort };
             serverBrainRevision.current = current.brainRevision ?? serverBrainRevision.current;
-            picker.applyAuthoritativeBrain(current.engine, current.model, current.effort, current.serviceTier);
           }
           desiredBrain.current = canonicalBrain(savedBrain.current);
+          // Any failed save shows what is actually saved, never the choice that failed.
+          picker.applyAuthoritativeBrain(savedBrain.current.engine, savedBrain.current.model, savedBrain.current.effort, savedBrain.current.serviceTier);
           setBrainSaveError(error instanceof AgentUpdateConflictError
             ? 'Settings changed on another device. Refreshed them here; try your change again.'
             : `Change wasn’t saved. ${error instanceof Error ? error.message : 'Please try again.'}`);
         }
       }
     });
-  }, [agentId, picker.applyAuthoritativeBrain, props.onAgentBrainSaved]);
+  }, [agentId, picker.applyAuthoritativeBrain, props.agent?.name, props.onAgentBrainSaved]);
 
   const pickerForUi = !agentId ? picker : {
     ...picker,
