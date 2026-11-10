@@ -169,24 +169,37 @@ function renewClaudeLogin(profile: CliProfile): void {
   child.once('exit', finish);
   child.unref();
 }
-async function claudeAccessToken(profile: CliProfile): Promise<unknown> {
-  const oauth = rec(rec(JSON.parse(await readFile(join(profile.path, '.credentials.json'), 'utf8'))).claudeAiOauth);
+async function claudeAccessToken(profile: CliProfile): Promise<string> {
+  let oauth: Record<string, any>;
+  try {
+    oauth = rec(rec(JSON.parse(await readFile(join(profile.path, '.credentials.json'), 'utf8'))).claudeAiOauth);
+  } catch {
+    // The normal login is gone or unreadable (the wipe state). The renewal
+    // turn is the only thing that can rebuild it, and the read reports 401 so
+    // a year-token profile gets its honest note instead of a generic failure.
+    renewClaudeLogin(profile);
+    throw new FeedError(401);
+  }
   const expiresAt = num(oauth.expiresAt);
   if (expiresAt !== undefined && expiresAt < Date.now() + 5 * 60_000) renewClaudeLogin(profile);
-  return oauth.accessToken;
+  return typeof oauth.accessToken === 'string' ? oauth.accessToken : '';
 }
 
 async function claude(accountInfo: CliAccount, profile: CliProfile): Promise<UsageAccount> {
   const base = account(accountInfo.id, 'Claude', 'Claude subscription', 'subscription', 'Claude live quota', 'https://claude.ai/settings/usage');
   base.email = accountInfo.email; base.plan = accountInfo.plan;
-  // The provider's usage API rejects year tokens outright, so usage rides the
-  // normal login's short-lived pass; when that pass is gone on a year-token
-  // profile the account itself is fine (lanes authenticate with the token),
-  // and the note must say so instead of crying sign-in.
-  const notes = longLivedClaudeToken(profile.path) ? { 401: 'Lanes keep running on this account’s year token. Usage reporting reads the normal sign-in, which needs a fresh login on this profile.' } : {};
+  // The provider's usage API rejects year tokens outright (401, and 403 for
+  // an expired pass), so usage rides the normal login's short-lived pass;
+  // when that pass is gone on a year-token profile the account itself is
+  // fine (lanes authenticate with the token), and the note must say so
+  // instead of crying sign-in.
+  const yearTokenNote = 'Lanes keep running on this account’s year token. Usage reporting reads the normal sign-in, which needs a fresh login on this profile.';
+  const notes = longLivedClaudeToken(profile.path) ? { 401: yearTokenNote, 403: yearTokenNote } : {};
   return guarded(base, async () => {
     const token = await claudeAccessToken(profile);
-    if (typeof token !== 'string' || !token) throw new FeedError(401);
+    // Empty credentials with no expiry to compare against still get the
+    // renewal turn started: this is the backup-login recovery path.
+    if (!token) { renewClaudeLogin(profile); throw new FeedError(401); }
     const data = await json('https://api.anthropic.com/api/oauth/usage', token, { 'anthropic-beta': 'oauth-2025-04-20', 'User-Agent': 'claude-code/usage' });
     const names: Record<string, string> = { session: 'Session', weekly_all: 'All models · week', weekly_scoped: 'Model · week' };
     if (Array.isArray(data.limits)) {

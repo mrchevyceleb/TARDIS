@@ -1,10 +1,11 @@
 import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { APP_ROOT } from '../config.ts';
 import { resolveCodexBin } from '../chat/codex-models.ts';
-import { cliProfiles, cliProfileId, cliProfileForEnv, longLivedClaudeToken, withLongLivedClaudeToken, type AccountEngine, type CliProfile } from './cliProfiles.ts';
+import { cliProfiles, cliProfileId, cliProfileForEnv, longLivedClaudeToken, longLivedTokenApplies, withLongLivedClaudeToken, type AccountEngine, type CliProfile } from './cliProfiles.ts';
 export { cliProfileId, cliProfileForEnv };
 export type { AccountEngine };
 
@@ -29,12 +30,46 @@ function text(value: unknown): string | undefined {
   return typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 180) || undefined : undefined;
 }
 
-export async function claudeIdentity(env: NodeJS.ProcessEnv): Promise<Identity> {
+export type LongLivedVerdict = 'valid' | 'invalid' | 'unknown';
+const tokenVerdicts = new Map<string, { at: number; verdict: LongLivedVerdict }>();
+const VERDICT_TTL_MS = 10 * 60_000;
+
+/** `claude auth status` reports loggedIn for ANY token in the environment —
+ *  it checks presence, not validity (a fabricated token passes). The provider
+ *  settles it for free: an auth-bearing GET rejects a dead token with 401 and
+ *  answers a live one with any other status (the year token lacks the oauth
+ *  scope, so it gets 403). Read-only, fixed host, no paid call; network
+ *  trouble reports `unknown` rather than condemning a good token. Verdicts
+ *  cache ten minutes — the token never rotates, but it can be revoked. */
+export async function probeLongLivedClaudeToken(token: string): Promise<LongLivedVerdict> {
+  const key = createHash('sha256').update(token).digest('hex');
+  const cached = tokenVerdicts.get(key);
+  if (cached && Date.now() - cached.at < VERDICT_TTL_MS) return cached.verdict;
+  let verdict: LongLivedVerdict;
+  try {
+    // The URL is overridable so isolated tests can steer the verdict; the
+    // default is the provider's own endpoint, and the token only ever rides
+    // the Authorization header to that host.
+    const url = process.env.RIVENDELL_CLAUDE_TOKEN_PROBE_URL?.trim() || 'https://api.anthropic.com/api/oauth/profile';
+    const response = await fetch(url, {
+      headers: { Authorization: 'Bearer ' + token, 'anthropic-beta': 'oauth-2025-04-20', 'User-Agent': 'claude-code/usage' },
+      redirect: 'error', signal: AbortSignal.timeout(6_000),
+    });
+    await response.body?.cancel();
+    verdict = response.status === 401 ? 'invalid' : 'valid';
+  } catch { verdict = 'unknown'; }
+  tokenVerdicts.set(key, { at: Date.now(), verdict });
+  return verdict;
+}
+
+export async function claudeIdentity(env: NodeJS.ProcessEnv, verifyToken: (token: string) => Promise<LongLivedVerdict> = probeLongLivedClaudeToken): Promise<Identity> {
   // A profile holding a year token authenticates with it, and `claude auth
   // status` only proves that login when the token rides the environment; its
   // answer then says loggedIn with authMethod "oauth_token" and no email, so
   // the account identity comes from the token file, with the profile's saved
-  // account supplying the organization while it still matches.
+  // account supplying the organization while it still matches. But the CLI's
+  // answer only proves the token is PRESENT — the provider probe above is
+  // what proves it still opens doors, and a rejected one reads signed out.
   const profileDir = cliProfileForEnv('claude', env);
   const longLived = longLivedClaudeToken(profileDir);
   let stdout: string;
@@ -52,7 +87,11 @@ export async function claudeIdentity(env: NodeJS.ProcessEnv): Promise<Identity> 
   const data = JSON.parse(stdout);
   const checkedAt = Date.now();
   if (data.loggedIn !== true) return { status: 'signed_out', checkedAt };
-  if (longLived && data.authMethod === 'oauth_token') {
+  // The oauth_token answer is the token's own voice, so it only names the
+  // token account when the token actually rides this profile — the same rule
+  // lane spawns use, so the panel never shows an account its lanes can't bill.
+  if (longLived && longLivedTokenApplies(longLived, profileDir) && data.authMethod === 'oauth_token') {
+    if (await verifyToken(longLived.token) === 'invalid') return { status: 'signed_out', checkedAt };
     let organization: string | undefined, organizationId: string | undefined, plan: string | undefined;
     try {
       const saved = JSON.parse(readFileSync(join(profileDir, '.claude.json'), 'utf8'))?.oauthAccount;
@@ -154,12 +193,21 @@ export async function listCliAccounts(refresh = false): Promise<CliAccount[]> {
   const grouped = new Map<string, CliAccount>();
   for (const { profile, data } of entries) {
     // Two Claude directories are one login only when native status proves
-    // both the email and organization match. Codex gives no workspace ID, so
-    // separate Codex profiles stay separate even when the emails match.
-    const key = profile.engine === 'claude' && data.status === 'connected' && data.email && data.organizationId
-      ? `${profile.engine}:${data.email.toLowerCase()}:${data.organizationId}` : profile.id;
+    // both the email and organization match. A wiped year-token profile has
+    // the email but no organization left; it still merges on the email alone
+    // so the panel never shows the same login twice. Codex gives no workspace
+    // ID, so separate Codex profiles stay separate even when the emails match.
+    const key = profile.engine === 'claude' && data.status === 'connected' && data.email
+      ? `${profile.engine}:${data.email.toLowerCase()}:${data.organizationId ?? ''}` : profile.id;
     const existing = grouped.get(key);
-    if (existing) { existing.profileIds.push(profile.id); continue; }
+    if (existing) {
+      existing.profileIds.push(profile.id);
+      // A wiped year-token peer may be the first seen; a healthy peer's
+      // organization and plan still describe the merged login.
+      if (!existing.organization && data.organization) existing.organization = data.organization;
+      if (!existing.plan && data.plan) existing.plan = data.plan;
+      continue;
+    }
     const { organizationId: _organizationId, ...publicIdentity } = data;
     grouped.set(key, { id: profile.id, engine: profile.engine, ...publicIdentity, profileIds: [profile.id] });
   }

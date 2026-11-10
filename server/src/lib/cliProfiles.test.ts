@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -28,7 +28,7 @@ const saved = {
 process.env.RIVENDELL_ACCOUNT_MAP = mapPath;
 process.env.HOME = home;
 
-const { claudeProfileInLanePool, longLivedClaudeToken, withLongLivedClaudeToken } = await import('./cliProfiles.ts');
+const { claudeProfileInLanePool, longLivedClaudeToken, subscriptionRoutingKey, withLongLivedClaudeToken } = await import('./cliProfiles.ts');
 const gameDir = join(home, '.claude-game');
 const rallyDir = join(home, '.claude-rally');
 const otherDir = join(home, '.claude-other');
@@ -112,4 +112,36 @@ test('a year token rides lane environments, and the wipe it survives', () => {
   assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, good, 'a wiped profile authenticates on its year token');
   writeAccount('someone-else@example.com');
   assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, undefined, 'a different signed-in account never bills the token account');
+
+  // An UNREADABLE account state is not a wiped one: only a confirmed absent
+  // account file (ENOENT) leaves the token as the identity. A malformed or
+  // permission-denied .claude.json must refuse the token, so a profile that
+  // quietly signed in as someone else can never keep billing the old account.
+  rmSync(join(profile, '.claude.json'));
+  writeAccount('someone-else@example.com');
+  assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  rmSync(join(profile, '.claude.json'));
+  assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, good, 'a confirmed missing account file leaves the token in charge');
+  writeFileSync(join(profile, '.claude.json'), '{"oauthAccount":{"emailAddress":"a@example.com"'); // mid-write garbage
+  assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, undefined, 'a malformed account file never authorizes the token');
+  writeAccount(undefined);
+  chmodSync(join(profile, '.claude.json'), 0o000);
+  try {
+    assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, undefined, 'an unreadable account file never authorizes the token');
+  } finally {
+    chmodSync(join(profile, '.claude.json'), 0o644);
+  }
+});
+
+test('a year-token swap retires the warm-worker routing key', () => {
+  const profile = join(root, 'routing-profile');
+  mkdirSync(profile, { recursive: true });
+  const writeToken = (email: string) => writeFileSync(join(profile, '.long-lived-oauth-token'), `${email}\nsk-ant-oat01-example-token-0123456789\n`);
+  // Wiped profile, no normal credentials: the token file is the identity.
+  writeToken('a@example.com');
+  const first = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile });
+  writeToken('b@example.com');
+  const second = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile });
+  assert.notEqual(first, second, 'a token swap must recycle warm workers still billing the old account');
+  assert.equal(subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile }), second, 'the key is stable between changes');
 });

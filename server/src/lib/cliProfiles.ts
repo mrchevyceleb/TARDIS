@@ -32,12 +32,22 @@ export function longLivedClaudeToken(profileDir: string): { email: string; token
   return null;
 }
 
-function longLivedTokenApplies(token: { email: string }, profileDir: string): boolean {
+/** The token decides identity only when the profile is CONFIRMED not signed in
+ *  as someone else: an absent account file, or one with no account on it. Any
+ *  other failure — unreadable, half-written, malformed — must refuse the
+ *  token, or a profile that quietly signed in as B would keep billing A. */
+export function longLivedTokenApplies(token: { email: string }, profileDir: string): boolean {
+  let raw: string;
   try {
-    const signedIn = JSON.parse(readFileSync(join(profileDir, '.claude.json'), 'utf8'))?.oauthAccount?.emailAddress;
+    raw = readFileSync(join(profileDir, '.claude.json'), 'utf8');
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+  try {
+    const signedIn = JSON.parse(raw)?.oauthAccount?.emailAddress;
     // A profile signed in as someone else never bills the token's account.
     return typeof signedIn !== 'string' || signedIn.toLowerCase() === token.email.toLowerCase();
-  } catch { return true; /* No readable .claude.json: the token is the identity. */ }
+  } catch { return false; }
 }
 
 export function withLongLivedClaudeToken(env: NodeJS.ProcessEnv, profileDir: string): NodeJS.ProcessEnv {
@@ -208,12 +218,26 @@ export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.Proces
   const previous = routingCache.get(id);
   let signature = '';
   try { const st = statSync(join(profile, engine === 'claude' ? '.credentials.json' : 'auth.json')); signature = `${st.mtimeMs}:${st.size}`; } catch { /* A transient read must not recycle a healthy worker. */ }
+  if (engine === 'claude') {
+    // On a wiped profile the year-token file is the only identity-bearing
+    // credential left, so it feeds the signature too: replacing token A with
+    // token B must retire warm workers still billing A, not just repaint the
+    // panel while they keep running.
+    try { const st = statSync(join(profile, '.long-lived-oauth-token')); signature += `|oat:${st.mtimeMs}:${st.size}`; } catch { /* No token for this profile. */ }
+  }
   let identity = previous?.identity || 'not-signed-in';
   if (previous && previous.signature === signature) return `${id}:${previous.identity}`;
   try {
     if (engine === 'claude') {
-      const account = JSON.parse(readFileSync(join(profile, '.claude.json'), 'utf8')).oauthAccount;
-      identity = JSON.stringify([account?.accountUuid, account?.organizationUuid, account?.emailAddress]);
+      let account: { accountUuid?: unknown; organizationUuid?: unknown; emailAddress?: unknown } | undefined;
+      try { account = JSON.parse(readFileSync(join(profile, '.claude.json'), 'utf8')).oauthAccount; } catch { /* Wiped or mid-write: the token decides. */ }
+      if (account && typeof account.emailAddress === 'string') {
+        identity = JSON.stringify([account.accountUuid, account.organizationUuid, account.emailAddress]);
+      } else {
+        const token = longLivedClaudeToken(profile);
+        if (!token || !longLivedTokenApplies(token, profile)) return `${id}:${identity}`;
+        identity = JSON.stringify(['long-lived-token', token.email]);
+      }
     } else {
       const auth = JSON.parse(readFileSync(join(profile, 'auth.json'), 'utf8'));
       const jwt = JSON.parse(Buffer.from(String(auth.tokens?.id_token || '').split('.')[1] || '', 'base64url').toString());

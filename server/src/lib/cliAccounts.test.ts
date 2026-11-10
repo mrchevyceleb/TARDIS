@@ -24,6 +24,7 @@ writeFileSync(join(bin, 'claude'), '#!/bin/sh\ncat "$STATUS_JSON_FILE"\n');
 chmodSync(join(bin, 'claude'), 0o755);
 
 const { claudeIdentity } = await import('./cliAccounts.ts');
+type LongLivedVerdict = import('./cliAccounts.ts').LongLivedVerdict;
 
 const profile = join(home, '.claude-year');
 mkdirSync(profile, { recursive: true });
@@ -33,6 +34,10 @@ function stubStatus(json: unknown): NodeJS.ProcessEnv {
   writeFileSync(join(bin, 'status.json'), JSON.stringify(json));
   return { PATH: `${bin}:${process.env.PATH}`, CLAUDE_CONFIG_DIR: profile, STATUS_JSON_FILE: join(bin, 'status.json') };
 }
+
+/** `auth status` says loggedIn for ANY token in env, so the provider probe is
+ *  the only validity check; tests inject its verdict instead of the network. */
+const verdict = (value: LongLivedVerdict) => async () => value;
 
 test.after(() => {
   if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
@@ -45,7 +50,7 @@ test('a year-token profile reads as connected with the token account', async () 
   writeFileSync(join(profile, '.claude.json'), JSON.stringify({ oauthAccount: {
     emailAddress: 'Year@Example.com', organizationUuid: 'org-1', organizationName: 'Acme', planDisplayName: 'Pro',
   } }));
-  const identity = await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'oauth_token' }));
+  const identity = await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'oauth_token' }), verdict('valid'));
   assert.equal(identity.status, 'connected');
   assert.equal(identity.email, 'year@example.com');
   assert.equal(identity.organizationId, 'org-1');
@@ -55,21 +60,31 @@ test('a year-token profile reads as connected with the token account', async () 
 test('a wiped year-token profile still reads as connected', async () => {
   // The wipe takes the .claude.json account with it; the token is the identity.
   writeFileSync(join(profile, '.claude.json'), JSON.stringify({}));
-  const identity = await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'oauth_token' }));
+  const identity = await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'oauth_token' }), verdict('valid'));
   assert.equal(identity.status, 'connected');
   assert.equal(identity.email, 'year@example.com');
   assert.equal(identity.organizationId, undefined);
 });
 
-test('a dead year token is a real sign-out, and a foreign account is ignored', async () => {
+test('a rejected year token reads as signed out; network trouble does not', async () => {
+  writeFileSync(join(profile, '.claude.json'), JSON.stringify({}));
+  const status = stubStatus({ loggedIn: true, authMethod: 'oauth_token' });
+  assert.equal((await claudeIdentity(status, verdict('invalid'))).status, 'signed_out', 'auth status alone says loggedIn for any token; the provider verdict decides');
+  assert.equal((await claudeIdentity(status, verdict('unknown'))).status, 'connected', 'an unreachable provider must not condemn a good token');
+  assert.equal((await claudeIdentity(stubStatus({ loggedIn: false }), verdict('valid'))).status, 'signed_out');
+});
+
+test('a foreign account is never dressed up as the token account', async () => {
   writeFileSync(join(profile, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'other@example.com', organizationUuid: 'org-2' } }));
-  assert.equal((await claudeIdentity(stubStatus({ loggedIn: false }))).status, 'signed_out');
-  // The token authenticates, but the profile is signed in as someone else:
-  // the saved account must not dress up the token's identity.
-  const foreign = await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'oauth_token' }));
-  assert.equal(foreign.status, 'connected');
-  assert.equal(foreign.email, 'year@example.com');
-  assert.equal(foreign.organizationId, undefined, 'a foreign saved account never lends its organization');
+  // A token whose profile is signed in as someone else never rides the
+  // auth-status env, so even an oauth_token-shaped answer cannot name it.
+  const stray = await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'oauth_token' }), verdict('valid'));
+  assert.notEqual(stray.email, 'year@example.com');
+  // The real CLI answers for the profile's own login instead.
+  const native = await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'claude.ai', email: 'other@example.com' }), verdict('valid'));
+  assert.equal(native.status, 'connected');
+  assert.equal(native.email, 'other@example.com');
+  assert.equal(native.organizationId, undefined, 'a foreign saved account never lends its organization');
 });
 
 test('profiles without a year token keep the native answer', async () => {
