@@ -498,11 +498,11 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
           </>
         ) : null}
 
-        <label className="bt-agent-checkrow" title="Keeps file, coding and browser tools, without the office integrations. Takes effect on the next turn.">
+        <label className="bt-agent-checkrow" title={engine === 'agy' ? 'TARDIS does not mount office integrations for Gemini. Your preference carries to other engines.' : 'Keeps file, coding and browser tools, without the office integrations. Takes effect on the next turn.'}>
           <input type="checkbox" checked={leanToolbox} onChange={(e) => setLeanToolbox(e.target.checked)} />
           <span>
             Lean toolbox
-            <small>A smaller, faster lane for heads-down builders</small>
+            <small>{engine === 'agy' ? 'Saved for other engines' : 'A smaller, faster lane for heads-down builders'}</small>
           </span>
         </label>
 

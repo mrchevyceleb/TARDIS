@@ -71,11 +71,11 @@ export type Agent = {
   color?: AgentColor;
   /** Which optional toolbox the lane mounts. Absent (or 'full') mounts the
    *  complete operator toolbox; 'lean' drops assistant-mcp while keeping
-   *  file, shell and built-in tools. Honored on every engine: the Antigravity
+   *  file, shell and built-in tools. Saved on every engine: the Antigravity
    *  CLI reads one machine-global MCP config TARDIS never writes, so its
-   *  lanes mount no office integrations either way and lean/full differ only
-   *  in whether the ops-toolbox guidance rides the prompt. One roster-level
-   *  setting — see wantsFullToolbox. */
+   *  lanes mount no office integrations or their guidance either way. The
+   *  saved choice applies again when switching to an engine with managed
+   *  MCP mounts — see wantsFullToolbox. */
   toolbox?: 'full' | 'lean';
 };
 

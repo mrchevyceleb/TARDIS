@@ -28,24 +28,24 @@ function readScopeFile(file: string): string {
   }
 }
 
-/** The agent's scope for a home-thread chatId ('' when no agent owns it). */
-export function personaPromptFor(chatId: string, memory = sessionMemory(chatId)): string {
+/** The agent's scope and shared rules. Runners without managed MCP mounts
+ *  pass their engine too, since a workspace chat has no roster brain. */
+export function personaPromptFor(chatId: string, memory = sessionMemory(chatId), engine?: string): string {
   const agent = agentForChatId(chatId);
-  // A non-roster lane has no persona and no roster toolbox entry — it mounts
-  // the full toolbox, so it still needs the router guidance that moved out of
-  // the global AGENTS.md (lean is a roster choice; nothing else can be lean).
-  if (!agent) return sharedRule('ops-toolbox');
+  // A non-roster lane normally mounts the full toolbox, except Antigravity:
+  // its runner never mounts assistant-mcp, even without a roster entry.
+  if (!agent) return engine === 'agy' ? '' : sharedRule('ops-toolbox');
   const scope = readScopeFile(`${agent.id}.md`);
   // The ops-toolbox rule (assistant-mcp router guidance) rides the same
   // roster setting as the MCP mount itself: lean lanes have no assistant-mcp,
-  // so they never see its instructions either. The team-status,
-  // background-jobs, sidebar and Desk rules coach tools (team_status,
+  // so they never see its instructions either. The team-workflow,
+  // team-status, background-jobs, sidebar and Desk rules coach tools (team_status,
   // job_start, sidebar_checklist, board_*) that reach an agent only through
   // the TARDIS-managed mounts, and an Antigravity lane mounts none of those
   // at any toolbox setting — its seed says so, and these rules agree. The
   // Instructions room (instructionLayers) filters by the same predicates.
   const teamTools = mountsTeamTools(agent);
-  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId), teamTools ? sharedRule('team-status') : null, teamTools ? sharedRule('background-jobs') : null, teamTools ? sharedRule('sidebar') : null, DESK_ROOM_ENABLED && teamTools ? sharedRule('desk') : null, mountsOfficeTools(agent) ? sharedRule('ops-toolbox') : null].filter(Boolean).join('\n\n');
+  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId, teamTools), teamTools ? sharedRule('team-workflow') : null, teamTools ? sharedRule('team-status') : null, teamTools ? sharedRule('background-jobs') : null, teamTools ? sharedRule('sidebar') : null, DESK_ROOM_ENABLED && teamTools ? sharedRule('desk') : null, mountsOfficeTools(agent) ? sharedRule('ops-toolbox') : null].filter(Boolean).join('\n\n');
 }
 
 /** Scope text for an agent record's home (REST use). */

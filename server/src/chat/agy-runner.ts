@@ -340,7 +340,7 @@ export class AgySession {
     const voiceAddendum = voice
       ? [VOICE_STYLE_ADDENDUM, isRobotVoiceChatId(this.chatId) ? robotVoiceAddendum(this.chatId) : null].filter(Boolean).join('\n\n')
       : null;
-    const persona = personaPromptFor(this.chatId);
+    const persona = personaPromptFor(this.chatId, undefined, this.cli);
     const operating = engineRule('engine-agy', this.chatId);
     return [persona, voiceAddendum, operating || null, isAgentThread(this.chatId) ? transcriptGuidance() : null].filter(Boolean).join('\n\n');
   }

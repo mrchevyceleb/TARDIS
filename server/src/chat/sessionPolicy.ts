@@ -209,7 +209,7 @@ export function freshTaskPrefix(chatId: string): string {
 
 /** Provider profiles need not install the same native skill catalog. Keep
  * explicit owner commands resolvable through the shared, lazy skill file too. */
-export function taskControlGuidance(chatId?: string): string {
+export function taskControlGuidance(chatId?: string, teamTools = true): string {
   let agents: Array<{ id: string; name: string; engine?: string }> = [];
   try {
     const rows = JSON.parse(readFileSync(join(STATE_DIR, 'personas', 'agents.json'), 'utf8')).agents;
@@ -226,7 +226,7 @@ export function taskControlGuidance(chatId?: string): string {
     fastTaskSkill: file ?? 'the fast-task SKILL.md (report it missing if unavailable)',
     leads: leads.length ? leads.join(', ') : 'none configured',
     fastTaskReview: review ? `A fast task alone ends at plain /${review} instead (your engine is ${engine}; the Claude Code host does not make a non-Claude model Claude).` : 'A fast task alone ends at plain /codex-fix for a Claude model and /opus-fix for every other model instead.',
-  });
+  }, { teamTools });
 }
 
 /** Native skill overrides retain every callable skill while keeping only the
