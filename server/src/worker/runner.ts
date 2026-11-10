@@ -6,7 +6,7 @@ import { WORKER_RUNNER } from '../config.ts';
 import { emitScribe } from './scribe.ts';
 import { dispatchDryRun, type DispatcherResult } from './dispatchers.ts';
 import { backgroundAccountEnv } from '../lib/accountResolver.ts';
-import { withLongLivedClaudeToken } from '../lib/cliProfiles.ts';
+import { withVerifiedLongLivedClaudeToken } from '../lib/cliProfiles.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { engineDefault } from '../lib/engineConfig.ts';
@@ -35,7 +35,7 @@ export async function runJob(job: RivendellJob): Promise<DispatcherResult> {
   // Queue jobs have no teammate identity; bill the repository they run in,
   // never the workspace stand-in's profile or inherited Claude auth.
   const resolved = backgroundAccountEnv(job.repo || process.cwd());
-  const env = withLongLivedClaudeToken(resolved, resolved.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'));
+  const env = await withVerifiedLongLivedClaudeToken(resolved, resolved.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'));
   assertClaudeSubscription(env, job.repo || process.cwd());
   return new Promise((resolve, reject) => {
     const child = spawnLaneWorker('claude', ['-p', '--output-format', 'stream-json', '--dangerously-skip-permissions', '--model', CLAUDE_MODEL, '--effort', CLAUDE_EFFORT, prompt], {

@@ -1,10 +1,9 @@
 import { execFile, spawn } from 'node:child_process';
-import { statSync } from 'node:fs';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { APP_ROOT } from '../config.ts';
 import { resolveCodexBin } from '../chat/codex-models.ts';
-import { cliProfiles, cliProfileId, cliProfileForEnv, type AccountEngine, type CliProfile } from './cliProfiles.ts';
+import { cliProfiles, cliProfileId, cliProfileForEnv, cliProfileCredentialSignature, longLivedClaudeToken, longLivedTokenVerdictVersion, recordLongLivedTokenVerdict, readClaudeAccountState, withVerifiedLongLivedClaudeToken, type AccountEngine, type CliProfile } from './cliProfiles.ts';
 export { cliProfileId, cliProfileForEnv };
 export type { AccountEngine };
 
@@ -20,7 +19,7 @@ export type CliAccount = {
   profileIds: string[];
 };
 
-type Identity = Omit<CliAccount, 'id' | 'engine' | 'profileIds'> & { organizationId?: string };
+type Identity = Omit<CliAccount, 'id' | 'engine' | 'profileIds'> & { organizationId?: string; tokenId?: string };
 type Profile = CliProfile;
 const run = promisify(execFile);
 const cache = new Map<string, { at: number; signature: string; result: Promise<Identity> }>();
@@ -29,11 +28,87 @@ function text(value: unknown): string | undefined {
   return typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 180) || undefined : undefined;
 }
 
-export async function claudeIdentity(env: NodeJS.ProcessEnv): Promise<Identity> {
+export type LongLivedVerdict = 'valid' | 'invalid' | 'unknown';
+const tokenVerdicts = new Map<string, { at: number; verdict: LongLivedVerdict }>();
+const tokenProbes = new Map<string, Promise<LongLivedVerdict>>();
+const tokenProbeBackoff = new Map<string, number>();
+const VERDICT_TTL_MS = 10 * 60_000;
+const UNKNOWN_BACKOFF_MS = 30_000;
+
+/** Presence is not authentication. Only success or the provider's explicit
+ * missing-profile-scope response proves a year token; generic 403s, outages
+ * and throttling prove nothing. A transient failure preserves the last
+ * definitive verdict, never inventing a first successful verification. */
+export async function probeLongLivedClaudeToken(token: string): Promise<LongLivedVerdict> {
+  const key = createHash('sha256').update(token).digest('hex');
+  const cached = tokenVerdicts.get(key);
+  if (cached && Date.now() - cached.at < VERDICT_TTL_MS) return cached.verdict;
+  if ((tokenProbeBackoff.get(key) ?? 0) > Date.now()) return cached?.verdict ?? 'unknown';
+  const pending = tokenProbes.get(key);
+  if (pending) return pending;
+  const probe = (async (): Promise<LongLivedVerdict> => {
+    let verdict: LongLivedVerdict = 'unknown';
+    try {
+      const response = await fetch('https://api.anthropic.com/api/oauth/profile', {
+        headers: { Authorization: 'Bearer ' + token, 'anthropic-beta': 'oauth-2025-04-20', 'User-Agent': 'claude-code/usage' },
+        redirect: 'error', signal: AbortSignal.timeout(6_000),
+      });
+      try {
+        if (response.status === 401) verdict = 'invalid';
+        else if (response.ok) verdict = 'valid';
+        else if (response.status === 403) {
+          // A setup-token intentionally lacks user:profile/user:office. Read
+          // only enough of the error to distinguish that from a proxy/WAF 403.
+          const reader = response.body?.getReader();
+          if (reader) {
+            const parts: Uint8Array[] = []; let length = 0;
+            try {
+              while (true) {
+                const { value, done } = await reader.read(); if (done) break;
+                length += value.length;
+                if (length > 8 * 1024) throw new Error('Oversized auth response.');
+                parts.push(value);
+              }
+              const error = JSON.parse(Buffer.concat(parts).toString('utf8'))?.error;
+              if (error?.type === 'permission_error' && typeof error.message === 'string'
+                && /\bscopes?\b/i.test(error.message) && /\b(?:missing|requires?|required|does not meet|lacks?)\b/i.test(error.message)
+                && /user:(profile|office)\b/i.test(error.message)) verdict = 'valid';
+            } finally { await reader.cancel().catch(() => {}); }
+          }
+        }
+      } finally { if (!response.body?.locked) await response.body?.cancel().catch(() => {}); }
+    } catch { /* No authentication verdict: keep the last provider evidence. */ }
+    if (verdict !== 'unknown') {
+      tokenProbeBackoff.delete(key);
+      tokenVerdicts.set(key, { at: Date.now(), verdict });
+      recordLongLivedTokenVerdict(token, verdict);
+    } else tokenProbeBackoff.set(key, Date.now() + UNKNOWN_BACKOFF_MS);
+    return verdict === 'unknown' ? cached?.verdict ?? 'unknown' : verdict;
+  })().finally(() => { tokenProbes.delete(key); });
+  tokenProbes.set(key, probe);
+  return probe;
+}
+
+export async function claudeIdentity(env: NodeJS.ProcessEnv, verifyToken: (token: string) => Promise<LongLivedVerdict> = probeLongLivedClaudeToken): Promise<Identity> {
+  // A profile holding a year token authenticates with it, and `claude auth
+  // status` only proves that login when the token rides the environment; its
+  // answer then says loggedIn with authMethod "oauth_token" and no email, so
+  // the account identity comes from the token file, with the profile's saved
+  // account supplying the organization while it still matches. But the CLI's
+  // answer only proves the token is PRESENT — the provider probe above is
+  // what proves it still opens doors, and a rejected one reads signed out.
+  const profileDir = cliProfileForEnv('claude', env);
+  const longLived = longLivedClaudeToken(profileDir);
+  let tokenVerdict: LongLivedVerdict | undefined;
+  const statusEnv = await withVerifiedLongLivedClaudeToken({ ...env }, profileDir, async token => {
+    tokenVerdict = await verifyToken(token);
+    return tokenVerdict;
+  });
   let stdout: string;
   try {
     ({ stdout } = await run('claude', ['auth', 'status', '--json'], {
-      cwd: APP_ROOT, env, timeout: 8_000, maxBuffer: 64 * 1024, windowsHide: true,
+      cwd: APP_ROOT, env: statusEnv,
+      timeout: 8_000, maxBuffer: 64 * 1024, windowsHide: true,
     }));
   } catch (error) {
     // A signed-out CLI may return valid status JSON with a nonzero exit.
@@ -43,7 +118,27 @@ export async function claudeIdentity(env: NodeJS.ProcessEnv): Promise<Identity> 
   }
   const data = JSON.parse(stdout);
   const checkedAt = Date.now();
-  if (data.loggedIn !== true) return { status: 'signed_out', checkedAt };
+  if (data.loggedIn !== true) return tokenVerdict === 'unknown'
+    ? { status: 'unavailable', checkedAt, email: longLived?.email }
+    : { status: 'signed_out', checkedAt };
+  // The oauth_token answer is the token's own voice, so it only names the
+  // token account when the token actually rides this profile — the same rule
+  // lane spawns use, so the panel never shows an account its lanes can't bill.
+  if (longLived && tokenVerdict !== undefined && data.authMethod === 'oauth_token') {
+    if (tokenVerdict === 'invalid') return { status: 'signed_out', checkedAt };
+    if (statusEnv.CLAUDE_CODE_OAUTH_TOKEN !== longLived.token) {
+      return { status: 'unavailable', checkedAt, email: longLived.email };
+    }
+    let organization: string | undefined, organizationId: string | undefined, plan: string | undefined;
+    const saved = readClaudeAccountState(profileDir, env).account;
+    if (typeof saved?.emailAddress === 'string' && saved.emailAddress.toLowerCase() === longLived.email.toLowerCase()) {
+      organization = text(saved.organizationName);
+      organizationId = text(saved.organizationUuid);
+      plan = text(saved.planDisplayName) ?? text(saved.seatTier);
+    }
+    return { status: 'connected', checkedAt, email: longLived.email, organization, organizationId, plan,
+      tokenId: createHash('sha256').update(longLived.token).digest('hex') };
+  }
   if (data.authMethod !== 'claude.ai') return { status: 'unsupported', checkedAt };
   const email = text(data.email);
   return {
@@ -115,9 +210,24 @@ export async function codexIdentity(env: NodeJS.ProcessEnv): Promise<Identity> {
 
 function identity(profile: Profile, refresh: boolean): Promise<Identity> {
   const previous = cache.get(profile.id);
-  const signature = ['.credentials.json', 'auth.json'].map(name => {
-    try { const st = statSync(join(profile.path, name)); return `${st.mtimeMs}:${st.size}`; } catch { return ''; }
-  }).join('|');
+  // Login/token changes invalidate immediately. Claude rewrites unrelated
+  // counters in .claude.json during normal work, so account display metadata
+  // follows the ordinary 60-second refresh instead of defeating coalescing.
+  let signature: string;
+  try { signature = cliProfileCredentialSignature(profile.engine, profile.path); }
+  catch { signature = previous?.signature ?? 'credentials-unreadable'; }
+  if (profile.engine === 'claude') {
+    const token = longLivedClaudeToken(profile.path);
+    signature += `|token-verdict:${token ? longLivedTokenVerdictVersion(token.token) : 0}`;
+    // Claude rewrites unrelated fields in .claude.json constantly. Hash only
+    // the account fields that shape this row, so metadata chatter neither
+    // spawns auth-status checks nor hides a real login/organization change.
+    const saved = readClaudeAccountState(profile.path, profile.env);
+    signature += `|account:${createHash('sha256').update(JSON.stringify(saved.status === 'present' ? [
+      saved.account?.accountUuid, saved.account?.organizationUuid, saved.account?.emailAddress,
+      saved.account?.organizationName, saved.account?.planDisplayName, saved.account?.seatTier,
+    ] : [saved.status])).digest('hex').slice(0, 16)}`;
+  }
   // Even explicit refreshes coalesce, so opening several agents cannot spawn
   // an auth-status storm. Failures recover without restarting TARDIS.
   if (previous && previous.signature === signature && Date.now() - previous.at < (refresh ? 5_000 : 60_000)) return previous.result;
@@ -129,7 +239,7 @@ function identity(profile: Profile, refresh: boolean): Promise<Identity> {
 
 export async function listCliAccounts(refresh = false): Promise<CliAccount[]> {
   const entries = await Promise.all(cliProfiles().map(async (profile) => ({ profile, data: await identity(profile, refresh) })));
-  const grouped = new Map<string, CliAccount>();
+  const grouped = new Map<string, CliAccount & { organizationId?: string; tokenIds: Set<string> }>();
   for (const { profile, data } of entries) {
     // Two Claude directories are one login only when native status proves
     // both the email and organization match. Codex gives no workspace ID, so
@@ -137,11 +247,31 @@ export async function listCliAccounts(refresh = false): Promise<CliAccount[]> {
     const key = profile.engine === 'claude' && data.status === 'connected' && data.email && data.organizationId
       ? `${profile.engine}:${data.email.toLowerCase()}:${data.organizationId}` : profile.id;
     const existing = grouped.get(key);
-    if (existing) { existing.profileIds.push(profile.id); continue; }
-    const { organizationId: _organizationId, ...publicIdentity } = data;
-    grouped.set(key, { id: profile.id, engine: profile.engine, ...publicIdentity, profileIds: [profile.id] });
+    if (existing) {
+      existing.profileIds.push(profile.id);
+      if (data.tokenId) existing.tokenIds.add(data.tokenId);
+      continue;
+    }
+    const { tokenId, ...publicIdentity } = data;
+    grouped.set(key, { id: profile.id, engine: profile.engine, ...publicIdentity, profileIds: [profile.id], tokenIds: new Set(tokenId ? [tokenId] : []) });
   }
-  return [...grouped.values()];
+  const rows = [...grouped.values()];
+  // A wiped token profile may fold into one unambiguous organization-backed
+  // row only when the same verified token proves equivalence. Email alone
+  // never proves that two profiles bill the same organization.
+  const healthyRows = rows.filter(row => row.engine === 'claude' && row.status === 'connected' && row.email && row.organizationId);
+  const ambiguous = new Set(healthyRows.map(row => row.email!.toLowerCase()).filter((email, index, all) => all.indexOf(email) !== index));
+  const healthy = new Map(healthyRows.filter(row => !ambiguous.has(row.email!.toLowerCase())).map(row => [row.email!.toLowerCase(), row]));
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const row = rows[index];
+    const host = row.engine === 'claude' && row.status === 'connected' && row.email && !row.organizationId ? healthy.get(row.email.toLowerCase()) : undefined;
+    if (host && host !== row && row.tokenIds.size && [...row.tokenIds].every(id => host.tokenIds.has(id))) {
+      host.profileIds.push(...row.profileIds);
+      if (!host.organization && row.organization) host.organization = row.organization;
+      rows.splice(index, 1);
+    }
+  }
+  return rows.map(({ organizationId: _organizationId, tokenIds: _tokenIds, ...row }) => row);
 }
 
 export function accountForProfile(accounts: CliAccount[], engine: AccountEngine, profile: string): CliAccount | undefined {

@@ -12,22 +12,76 @@ import { claudeAccountPool } from './claudeAccountPool.ts';
 
 export type AccountEngine = 'claude' | 'codex';
 
+const longLivedTokenVerdicts = new Map<string, 'valid' | 'invalid'>();
+const longLivedTokenVerdictVersions = new Map<string, number>();
+const longLivedTokenKey = (token: string): string => createHash('sha256').update(token).digest('hex');
+const verdictVersionForKey = (key: string | undefined): number => key ? longLivedTokenVerdictVersions.get(key) ?? 0 : 0;
+export const longLivedTokenVerdictVersion = (token: string): number => verdictVersionForKey(longLivedTokenKey(token));
+/** Share definitive provider evidence with synchronous lane/routing decisions.
+ * Unknown network results never invent authentication or clear a rejection. */
+export function recordLongLivedTokenVerdict(token: string, verdict: 'valid' | 'invalid' | 'unknown'): void {
+  if (verdict === 'unknown') return;
+  const key = longLivedTokenKey(token);
+  if (longLivedTokenVerdicts.get(key) === verdict) return;
+  longLivedTokenVerdicts.set(key, verdict);
+  longLivedTokenVerdictVersions.set(key, verdictVersionForKey(key) + 1);
+}
+
 /** A Claude login refreshed by many lanes at once rotates its refresh token
  *  under them, and the native CLI wipes the login on the losing refresh. A
  *  long-lived token from `claude setup-token` never rotates, so lanes spawned
  *  on a profile that holds one authenticate with it and never refresh. The
  *  file (`<profile>/.long-lived-oauth-token`, mode 600) is the account email on
- *  line one and the token on line two; it applies only while the profile is
- *  still signed in as that account, so a re-login to another account never
- *  bills the old one. The profile's own credentials stay for the usage reader
- *  and the idle renewal, the only remaining refresher. */
-export function withLongLivedClaudeToken(env: NodeJS.ProcessEnv, profileDir: string): NodeJS.ProcessEnv {
-  delete env.CLAUDE_CODE_OAUTH_TOKEN;
+ *  line one and the token on line two. It applies while the profile is signed
+ *  in as that account, and also when the profile holds no signed-in account at
+ *  all — the wipe this whole mechanism exists to prevent takes the .claude.json
+ *  account with it, and the token, not the login, is then the profile's source
+ *  of truth. Only a re-login to a DIFFERENT account keeps the token out, so a
+ *  re-login never bills the old one. The profile's own credentials stay for
+ *  the usage reader and the idle renewal, the only remaining refreshers. */
+export function longLivedClaudeToken(profileDir: string): { email: string; token: string } | null {
   try {
     const [email, token] = readFileSync(join(profileDir, '.long-lived-oauth-token'), 'utf8').split('\n').map(line => line.trim());
-    const signedIn = JSON.parse(readFileSync(join(profileDir, '.claude.json'), 'utf8'))?.oauthAccount?.emailAddress;
-    if (email && typeof signedIn === 'string' && signedIn.toLowerCase() === email.toLowerCase() && /^sk-ant-oat[\w-]+$/.test(token ?? '')) env.CLAUDE_CODE_OAUTH_TOKEN = token;
+    if (email && email.includes('@') && /^sk-ant-oat[\w-]+$/.test(token ?? '')) return { email, token: token! };
   } catch { /* No token for this profile: the CLI uses its own login. */ }
+  return null;
+}
+
+/** The token decides identity only when the profile is CONFIRMED not signed in
+ *  as someone else: an absent account file, or one with no account on it. Any
+ *  other failure — unreadable, half-written, malformed — must refuse the
+ *  token, or a profile that quietly signed in as B would keep billing A. */
+function longLivedTokenAccountMatches(token: { email: string }, profileDir: string, env: NodeJS.ProcessEnv): boolean {
+  return tokenMatchesAccount(token, readClaudeAccountState(profileDir, env));
+}
+
+/** A token must have positive provider evidence before it can replace a login. */
+export function longLivedTokenApplies(token: { email: string; token: string }, profileDir: string, accountState?: ClaudeAccountState): boolean {
+  return longLivedTokenVerdicts.get(longLivedTokenKey(token.token)) === 'valid'
+    && tokenMatchesAccount(token, accountState ?? readClaudeAccountState(profileDir));
+}
+
+/** Probe independently of previous verdicts, so a rejection can be rechecked
+ * after the probe cache's TTL. Cold starts wait for evidence before injection. */
+export async function withVerifiedLongLivedClaudeToken(
+  env: NodeJS.ProcessEnv, profileDir: string,
+  verifyToken?: (token: string) => Promise<'valid' | 'invalid' | 'unknown'>,
+): Promise<NodeJS.ProcessEnv> {
+  const token = longLivedClaudeToken(profileDir);
+  if (token && longLivedTokenAccountMatches(token, profileDir, env)) {
+    const verify = verifyToken ?? (await import('./cliAccounts.ts')).probeLongLivedClaudeToken;
+    recordLongLivedTokenVerdict(token.token, await verify(token.token));
+  }
+  // Re-read after the await: a login or token replacement that happened while
+  // the provider was answering must win over the now-stale verification.
+  return withLongLivedClaudeToken(env, profileDir);
+}
+
+export function withLongLivedClaudeToken(env: NodeJS.ProcessEnv, profileDir: string): NodeJS.ProcessEnv {
+  delete env.CLAUDE_CODE_OAUTH_TOKEN;
+  const token = longLivedClaudeToken(profileDir);
+  const account = readClaudeAccountState(profileDir, env);
+  if (token && longLivedTokenApplies(token, profileDir, account)) env.CLAUDE_CODE_OAUTH_TOKEN = token.token;
   return env;
 }
 
@@ -35,8 +89,74 @@ export type CliProfile = { id: string; engine: AccountEngine; path: string; env:
 type ManagedProfile = { id: string; engine: AccountEngine };
 type Choice = { id: string; profileId: string };
 const managedStore = new JsonStore<ManagedProfile>('cli-profiles.json', []);
-const routingCache = new Map<string, { signature: string; identity: string }>();
+const routingCache = new Map<string, { signature: string; identity: string; tokenKey?: string }>();
 const choicesStore = new JsonStore<Choice>('cli-account-choices.json', []);
+
+export type ClaudeSavedAccount = { accountUuid?: unknown; organizationUuid?: unknown; emailAddress?: unknown; organizationName?: unknown; planDisplayName?: unknown; seatTier?: unknown };
+export type ClaudeAccountState = { status: 'present' | 'absent' | 'unknown'; account?: ClaudeSavedAccount };
+
+/** An explicit CLAUDE_CONFIG_DIR always owns its .claude.json, even when it is
+ * literally ~/.claude. Only the native implicit default stores the file beside
+ * that directory. The environment, not the path spelling, distinguishes them. */
+export function claudeAccountFile(profileDir: string, env?: NodeJS.ProcessEnv): string {
+  if (env?.CLAUDE_CONFIG_DIR?.trim()) return join(profileDir, '.claude.json');
+  return resolve(profileDir) === resolve(join(homedir(), '.claude'))
+    ? join(homedir(), '.claude.json')
+    : join(profileDir, '.claude.json');
+}
+
+export function readClaudeAccountState(profileDir: string, env?: NodeJS.ProcessEnv): ClaudeAccountState {
+  let raw: string;
+  try {
+    raw = readFileSync(claudeAccountFile(profileDir, env), 'utf8');
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? { status: 'absent' } : { status: 'unknown' };
+  }
+  try {
+    const saved = JSON.parse(raw);
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return { status: 'unknown' };
+    const account = saved.oauthAccount;
+    if (account == null) return { status: 'absent' };
+    if (typeof account !== 'object' || Array.isArray(account)) return { status: 'unknown' };
+    if (account.emailAddress == null) return { status: 'absent' };
+    return typeof account.emailAddress === 'string' ? { status: 'present', account } : { status: 'unknown' };
+  } catch { return { status: 'unknown' }; }
+}
+
+function tokenMatchesAccount(token: { email: string }, state: ClaudeAccountState): boolean {
+  const email = state.account?.emailAddress;
+  return state.status === 'absent'
+    || (state.status === 'present' && typeof email === 'string' && email.toLowerCase() === token.email.toLowerCase());
+}
+
+function claudeCredentialState(profileDir: string): 'present' | 'absent' | 'unknown' {
+  try {
+    const saved = JSON.parse(readFileSync(join(profileDir, '.credentials.json'), 'utf8'));
+    const oauth = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved.claudeAiOauth : undefined;
+    if (!oauth || typeof oauth !== 'object' || Array.isArray(oauth)) return 'absent';
+    return (typeof oauth.accessToken === 'string' && oauth.accessToken.trim())
+      || (typeof oauth.refreshToken === 'string' && oauth.refreshToken.trim()) ? 'present' : 'absent';
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : 'unknown';
+  }
+}
+
+function credentialFileSignature(path: string): string {
+  try {
+    const st = statSync(path);
+    return `${st.mtimeMs}:${st.ctimeMs}:${st.size}:${st.ino}`;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return 'absent';
+  }
+}
+
+/** Credential changes invalidate account status immediately; callers track
+ * saved account metadata separately without treating CLI counters as a login. */
+export function cliProfileCredentialSignature(engine: AccountEngine, profileDir: string): string {
+  const names = engine === 'claude' ? ['.credentials.json', '.long-lived-oauth-token'] : ['auth.json'];
+  return names.map(name => `${name}:${credentialFileSignature(join(profileDir, name))}`).join('|');
+}
 
 function readRecords<T>(name: string): T[] {
   try {
@@ -184,20 +304,80 @@ export function preferredSubscriptionEnv(engine: AccountEngine, cwd: string, cha
   return pinned ? accountEnvForAccount(pinned, cwd) : accountEnv(cwd);
 }
 
-/** Stable identity, excluding access/refresh tokens. A sign-in to a different
- * identity in the same native directory must retire an idle warm worker. */
-export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.ProcessEnv): string {
+/** Stable identity, excluding rotating access/refresh tokens but including
+ * the year token workers hold for their lifetime. Real credential changes
+ * retire idle workers; transient account-file reads never do. */
+export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.ProcessEnv, heldClaudeToken?: string | null): string {
   const profile = cliProfileForEnv(engine, env);
   const id = cliProfileId(engine, profile);
-  const previous = routingCache.get(id);
-  let signature = '';
-  try { const st = statSync(join(profile, engine === 'claude' ? '.credentials.json' : 'auth.json')); signature = `${st.mtimeMs}:${st.size}`; } catch { /* A transient read must not recycle a healthy worker. */ }
+  const accountFileKey = engine === 'claude' ? claudeAccountFile(profile, env) : '';
+  const cacheId = `${id}|${accountFileKey}${heldClaudeToken === undefined ? '' : '|spawn'}`;
+  const previous = routingCache.get(cacheId);
+  // heldClaudeToken is supplied only for a just-built spawn environment. It
+  // makes the worker's key describe what was actually injected, even if a
+  // profile file was transiently unreadable while that environment was made.
+  let baseSignature: string;
+  try {
+    baseSignature = cliProfileCredentialSignature(engine, profile);
+    // Account metadata alone can change whether the year token may bill this
+    // profile. Re-read it only when the file changes, with no time window that
+    // can permanently hide a late login update. Unrelated counters still hash
+    // to the same identity below and never recycle a healthy worker.
+    if (engine === 'claude') baseSignature += `|account:${credentialFileSignature(accountFileKey)}`;
+  } catch {
+    if (engine !== 'claude' || heldClaudeToken === undefined) return `${id}:${previous?.identity || 'not-signed-in'}`;
+    const held = heldClaudeToken ? longLivedTokenKey(heldClaudeToken).slice(0, 16) : 'native';
+    baseSignature = `spawn-unreadable:${held}`;
+  }
+  let signature = `${baseSignature}|token-verdict:${verdictVersionForKey(previous?.tokenKey)}`;
+  if (engine === 'claude' && heldClaudeToken !== undefined) {
+    const held = heldClaudeToken ? longLivedTokenKey(heldClaudeToken).slice(0, 16) : 'native';
+    signature += `|spawn:${held}`;
+  }
   let identity = previous?.identity || 'not-signed-in';
+  let routedTokenKey: string | undefined;
   if (previous && previous.signature === signature) return `${id}:${previous.identity}`;
   try {
     if (engine === 'claude') {
-      const account = JSON.parse(readFileSync(join(profile, '.claude.json'), 'utf8')).oauthAccount;
-      identity = JSON.stringify([account?.accountUuid, account?.organizationUuid, account?.emailAddress]);
+      const saved = readClaudeAccountState(profile, env);
+      if (saved.status === 'unknown') {
+        if (heldClaudeToken === undefined) return `${id}:${identity}`;
+        const held = heldClaudeToken ? longLivedTokenKey(heldClaudeToken).slice(0, 16) : 'native';
+        identity = createHash('sha256').update(JSON.stringify(['spawn-credential', held])).digest('hex').slice(0, 20);
+        // A definite one-off key prevents wildcard matching, but never cache an
+        // unreadable account snapshot: the very next spawn must try the file again.
+        return `${id}:${identity}`;
+      }
+      const account = saved.account;
+      const token = longLivedClaudeToken(profile);
+      const tokenKey = token ? longLivedTokenKey(token.token) : undefined;
+      routedTokenKey = tokenKey;
+      signature = `${baseSignature}|token-verdict:${verdictVersionForKey(tokenKey)}`
+        + (heldClaudeToken !== undefined ? `|spawn:${heldClaudeToken ? longLivedTokenKey(heldClaudeToken).slice(0, 16) : 'native'}` : '');
+      const applies = heldClaudeToken === undefined
+        ? Boolean(token && longLivedTokenApplies(token, profile, saved))
+        : Boolean(heldClaudeToken);
+      // An applicable token is the credential lanes actually bill, so its
+      // fingerprint rides the identity even beside a saved account: swapping
+      // or revoking it must retire warm workers still holding the old one.
+      const fingerprint = applies
+        ? longLivedTokenKey(heldClaudeToken === undefined ? token!.token : heldClaudeToken!).slice(0, 16)
+        : 'native';
+      if (account && typeof account.emailAddress === 'string') {
+        identity = JSON.stringify([account.accountUuid, account.organizationUuid, account.emailAddress, fingerprint]);
+      } else if (applies) {
+        identity = JSON.stringify(['long-lived-token', token?.email, fingerprint]);
+      } else {
+        const credentials = claudeCredentialState(profile);
+        if (credentials === 'present') identity = JSON.stringify(['native-login', fingerprint]);
+        else if (credentials === 'unknown') return `${id}:${identity}`;
+        else {
+          // Confirmed absence of every credential, never a stale previous
+          // identity: workers holding the removed token must be retired.
+          routingCache.set(cacheId, { signature, identity: 'signed-out', tokenKey });
+          return `${id}:signed-out`;
+        }
+      }
     } else {
       const auth = JSON.parse(readFileSync(join(profile, 'auth.json'), 'utf8'));
       const jwt = JSON.parse(Buffer.from(String(auth.tokens?.id_token || '').split('.')[1] || '', 'base64url').toString());
@@ -205,13 +385,14 @@ export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.Proces
     }
   } catch { return `${id}:${identity}`; }
   identity = createHash('sha256').update(identity).digest('hex').slice(0, 20);
-  routingCache.set(id, { signature, identity });
+  routingCache.set(cacheId, { signature, identity, tokenKey: routedTokenKey });
   return `${id}:${identity}`;
 }
 
-/** A transient credential-file read must not look like an account change. The
- * profile path still has to match; once both identities are known, they must
- * match too so a real re-login recycles the warm worker. */
+/** A transient credential-file read must not look like an account change: the
+ * profile path still has to match, and an UNKNOWN identity ('not-signed-in')
+ * borrows the other side's. A CONFIRMED sign-out ('signed-out') is a real
+ * change — a worker still holding the removed token or login must go. */
 export function subscriptionRoutingKeysMatch(current: string, desired: string): boolean {
   if (current === desired) return true;
   const split = (value: string) => {
@@ -220,15 +401,17 @@ export function subscriptionRoutingKeysMatch(current: string, desired: string): 
   };
   const left = split(current);
   const right = split(desired);
+  if (left.identity === 'signed-out' || right.identity === 'signed-out') return false;
   return left.profile === right.profile
-    && (left.identity === 'not-signed-in' || right.identity === 'not-signed-in');
+    && (left.identity === right.identity
+      || left.identity === 'not-signed-in' || right.identity === 'not-signed-in');
 }
 
 export function subscriptionEmail(engine: AccountEngine, env: NodeJS.ProcessEnv): string | null {
   try {
     const profile = cliProfileForEnv(engine, env);
     const email = engine === 'claude'
-      ? JSON.parse(readFileSync(join(profile, '.claude.json'), 'utf8')).oauthAccount?.emailAddress
+      ? readClaudeAccountState(profile, env).account?.emailAddress
       : JSON.parse(Buffer.from(String(JSON.parse(readFileSync(join(profile, 'auth.json'), 'utf8')).tokens?.id_token || '').split('.')[1] || '', 'base64url').toString()).email;
     return typeof email === 'string' && email.length < 180 ? email.replace(/[\x00-\x1f\x7f]/g, '') : null;
   } catch { return null; }
@@ -284,5 +467,5 @@ export async function backgroundSubscriptionEnv(cwd: string, agentName: string, 
     if (active.claudeProfile && ['claude', 'assistant'].includes(active.cli)
       && claudeProfileInLanePool(active.claudeProfile, laneHome)) { env.CLAUDE_CONFIG_DIR = active.claudeProfile; break; }
   }
-  return withLongLivedClaudeToken(env, env.CLAUDE_CONFIG_DIR!);
+  return withVerifiedLongLivedClaudeToken(env, env.CLAUDE_CONFIG_DIR!);
 }
