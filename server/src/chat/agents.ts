@@ -108,6 +108,15 @@ export function mountsOfficeTools(agent: Agent): boolean {
   return wantsFullToolbox(agent) && cliForAgentEngine(agent.engine ?? '') !== 'agy';
 }
 
+/** Whether the lane mounts the TARDIS-managed team/local tools at all. Every
+ *  engine but Antigravity mounts them (a lean lane keeps them); the agy CLI
+ *  reads one machine-global MCP config TARDIS never writes, so its lanes have
+ *  no team_status, job_start, sidebar_checklist or board tools. Rules that
+ *  coach those tools are gated by this, in the prompt and in the room. */
+export function mountsTeamTools(agent: Agent): boolean {
+  return cliForAgentEngine(agent.engine ?? '') !== 'agy';
+}
+
 export type AgentBrain = { engine: string; model?: string; effort?: string; serviceTier?: string; revision: number; updatedAt?: number };
 
 const VALID_ENGINES = SUBSCRIPTION_ENGINES;

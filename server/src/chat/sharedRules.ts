@@ -19,9 +19,11 @@ export type SharedRuleId = 'task-control' | 'team-status' | 'background-jobs' | 
   | 'ops-toolbox' | 'engine-codex' | 'engine-muse' | 'engine-agy' | 'engine-pi' | 'writing-plain-english';
 
 /** `engine` limits a rule to agents on that engine; `toolbox: 'full'` limits
- *  it to lanes whose roster toolbox mounts assistant-mcp (see
- *  wantsFullToolbox in agents.ts); `tag` '' adds the text bare. */
-export const SHARED_RULES: Record<SharedRuleId, { title: string; tag: string; engine?: string; toolbox?: 'full'; seed: () => string }> = {
+ *  it to lanes that actually mount assistant-mcp (see mountsOfficeTools in
+ *  agents.ts); `teamTools: true` limits it to lanes that mount the
+ *  TARDIS-managed team/local tools at all (see mountsTeamTools — an agy lane
+ *  mounts none of them); `tag` '' adds the text bare. */
+export const SHARED_RULES: Record<SharedRuleId, { title: string; tag: string; engine?: string; toolbox?: 'full'; teamTools?: true; seed: () => string }> = {
   'task-control': {
     title: 'Task control and review',
     tag: 'rivendell-task-control',
@@ -39,6 +41,7 @@ export const SHARED_RULES: Record<SharedRuleId, { title: string; tag: string; en
   'team-status': {
     title: 'Teammate status',
     tag: 'rivendell-team-status',
+    teamTools: true,
     seed: () => [
       'Treat teammate activity as live state, never as an inference from what you intended, mentioned, or previously asked them to do.',
       'When coordinating delegated work, check team_status at natural checkpoints: after assigning, before changing course, and before your final status summary. Before telling the user that a teammate is working, idle, queued, blocked, still handling something, or has work in flight, call team_status in the current turn. Use team_recent too when you need to identify the actual work or its latest result.',
@@ -49,6 +52,7 @@ export const SHARED_RULES: Record<SharedRuleId, { title: string; tag: string; en
   'background-jobs': {
     title: 'Background jobs',
     tag: 'rivendell-background-jobs',
+    teamTools: true,
     seed: () => [
       'Anything that will take longer than about 30 seconds (builds, full test runs, renders, big installs, sleeps and waits, deploy and CI watchers, long scripts) is a background job, never a foreground call. Start it with job_start (a short name plus the shell command). It runs detached in its own scope, survives TARDIS restarts, shows in the chat UI as a running job with a Stop button, and when it ends TARDIS delivers a job result (exit code and the last output lines) into your own thread as a new turn. job_list shows state, job_log reads output, job_stop stops one.',
       'After starting a job, keep working on something else or end your turn. Never sit in a foreground wait, a sleep, or an until-loop: while you are stuck in one, the person messaging you cannot reach you. A job result is an automation message, not a person; it is never reported as finished unless the command exited on its own.',
@@ -58,6 +62,7 @@ export const SHARED_RULES: Record<SharedRuleId, { title: string; tag: string; en
   'sidebar': {
     title: 'Sidebar checklist',
     tag: 'rivendell-sidebar',
+    teamTools: true,
     seed: () => [
       `- /sidebar (Matt, Oct 17): your live checklist in the sidebar next to your chat, and in a channel the channel's own (pass channel: the id from the ping). When ${DESK_OWNER_NAME} asks for a checklist (typing /sidebar or asking), create it with sidebar_checklist and keep it current without being asked: a short status line per item, check items off the moment they finish, assign teammates where they carry a step, and clear it when the work is done.`,
     ].join('\n'),
@@ -65,6 +70,7 @@ export const SHARED_RULES: Record<SharedRuleId, { title: string; tag: string; en
   'desk': {
     title: 'The Desk',
     tag: 'rivendell-desk',
+    teamTools: true,
     seed: () => [
       `The Desk is ${DESK_OWNER_NAME}'s single view of what needs their attention and what every agent is working on. Keep your part of it accurate so nothing gets forgotten.`,
       `- Columns (Matt, Oct 9 2026): Not started = parked, not begun, with the reason and what restarts it (work blocked outside the team, parked by ${DESK_OWNER_NAME}, or lacking an authorized assignment source; parking is never how you clear a stale card with an active, authorized assignment). In progress = only what you have hands on today. Merged to staging = merged to staging, waiting on the ship. In QA (Sud) = with Sud QA. Live in production = shipped and verified. Waiting on a teammate: hand them the card. A card that needs ${DESK_OWNER_NAME} personally is flagged by its open Needs-you item in any column, not by a column. Keep your cards true in real time without being asked: move the card the moment the work moves (start, hand off, park, finish) and before you reply or go idle.`,

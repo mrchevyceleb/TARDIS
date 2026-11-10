@@ -5,7 +5,7 @@
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
-import { agentForChatId, cliForAgentEngine, mountsOfficeTools } from './agents.ts';
+import { agentForChatId, mountsOfficeTools, mountsTeamTools } from './agents.ts';
 import { DESK_ROOM_ENABLED } from '../config.ts';
 import { sessionBriefs, sessionMemory, taskControlGuidance } from './sessionPolicy.ts';
 import { sharedRule, type SharedRuleId } from './sharedRules.ts';
@@ -38,15 +38,14 @@ export function personaPromptFor(chatId: string, memory = sessionMemory(chatId))
   const scope = readScopeFile(`${agent.id}.md`);
   // The ops-toolbox rule (assistant-mcp router guidance) rides the same
   // roster setting as the MCP mount itself: lean lanes have no assistant-mcp,
-  // so they never see its instructions either. Antigravity mounts no
-  // TARDIS-managed MCP at all (one machine-global config TARDIS never
-  // writes), so its lanes never see the rule either, whatever the toolbox.
-  // The same is true of the team-status/background-jobs/sidebar rules: they
-  // coach tools (team_status, job_start, sidebar_checklist) that reach an
-  // agent only through those mounts, and an Antigravity lane would read
-  // "call team_status" next to a seed saying it has no such tools.
-  const onAgy = cliForAgentEngine(agent.engine ?? '') === 'agy';
-  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId), onAgy ? null : sharedRule('team-status'), onAgy ? null : sharedRule('background-jobs'), onAgy ? null : sharedRule('sidebar'), DESK_ROOM_ENABLED ? sharedRule('desk') : null, mountsOfficeTools(agent) ? sharedRule('ops-toolbox') : null].filter(Boolean).join('\n\n');
+  // so they never see its instructions either. The team-status,
+  // background-jobs, sidebar and Desk rules coach tools (team_status,
+  // job_start, sidebar_checklist, board_*) that reach an agent only through
+  // the TARDIS-managed mounts, and an Antigravity lane mounts none of those
+  // at any toolbox setting — its seed says so, and these rules agree. The
+  // Instructions room (instructionLayers) filters by the same predicates.
+  const teamTools = mountsTeamTools(agent);
+  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId), teamTools ? sharedRule('team-status') : null, teamTools ? sharedRule('background-jobs') : null, teamTools ? sharedRule('sidebar') : null, DESK_ROOM_ENABLED && teamTools ? sharedRule('desk') : null, mountsOfficeTools(agent) ? sharedRule('ops-toolbox') : null].filter(Boolean).join('\n\n');
 }
 
 /** Scope text for an agent record's home (REST use). */

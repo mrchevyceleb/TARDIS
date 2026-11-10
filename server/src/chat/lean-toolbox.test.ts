@@ -31,6 +31,7 @@ const { wantsFullToolbox, createAgent, updateAgent, agentForChatId } = await imp
 const { laneMcpServers, optionalMcpServersFor } = await import('./runner.ts');
 const { bananaToolboxTools } = await import('./banana-runner.ts');
 const { personaPromptFor } = await import('./personaPrompts.ts');
+const { DESK_ROOM_ENABLED } = await import('../config.ts');
 const { instructionsStamp, instructionLayers } = await import('./instructionLayers.ts');
 const { sharedRuleFile, sharedRuleText, SHARED_RULES, RETIRED_STOCK_SEEDS } = await import('./sharedRules.ts');
 const { agentsRouter } = await import('../routes/agents.ts');
@@ -107,21 +108,34 @@ test('a lean lane switches to Antigravity (Gemini 4 Carbon) and keeps lean', () 
 test('Antigravity lanes carry no office-tool guidance at any toolbox setting', () => {
   // The Antigravity CLI reads one machine-global MCP config TARDIS never
   // writes: no agy lane mounts assistant-mcp, so none of them get the router
-  // rule — lean or full. The team-status/background-jobs/sidebar rules coach
-  // tools those mounts carry, so they stay off agy too.
+  // rule — lean or full. The team-status/background-jobs/sidebar/Desk rules
+  // coach tools those mounts carry (team_status, job_start,
+  // sidebar_checklist, board_*), so they stay off agy in the prompt AND in
+  // the Instructions room, which never lists a rule the lane never receives.
   const agyFull = createAgent({ name: 'Agy full', engine: 'agy' });
   const agyLean = createAgent({ name: 'Agy lean', engine: 'agy', toolbox: 'lean' });
+  const gatedRules = ['rule:ops-toolbox', 'rule:team-status', 'rule:background-jobs', 'rule:sidebar', 'rule:desk'];
+  const gatedTags = /<rivendell-ops-toolbox>|<rivendell-team-status>|<rivendell-background-jobs>|<rivendell-sidebar>|<rivendell-desk>/;
   for (const agent of [agyFull, agyLean]) {
-    assert.doesNotMatch(personaPromptFor(agent.home), /<rivendell-ops-toolbox>/);
-    assert.ok(!instructionLayers(agent.id)?.layers.some(layer => layer.key === 'rule:ops-toolbox'));
-    assert.doesNotMatch(personaPromptFor(agent.home), /<rivendell-team-status>|<rivendell-background-jobs>|<rivendell-sidebar>/);
+    assert.doesNotMatch(personaPromptFor(agent.home), gatedTags);
+    for (const key of gatedRules) {
+      assert.ok(!instructionLayers(agent.id)?.layers.some(layer => layer.key === key), `${key} must not reach an agy lane`);
+    }
   }
-  // Other engines keep the full-toolbox rule and the team-tool rules.
-  const orLane = createAgent({ name: 'OpenRouter full', engine: 'openrouter' });
-  assert.match(personaPromptFor(orLane.home), /<rivendell-ops-toolbox>/);
-  assert.match(personaPromptFor(orLane.home), /<rivendell-team-status>/);
-  assert.match(personaPromptFor(orLane.home), /<rivendell-background-jobs>/);
-  assert.match(personaPromptFor(orLane.home), /<rivendell-sidebar>/);
+  // Other engines keep the full-toolbox rule and the team-tool rules, in the
+  // prompt and in the room (a lean lane keeps the team tools, losing only
+  // the office integrations).
+  for (const lane of [{ agent: createAgent({ name: 'OpenRouter full', engine: 'openrouter' }), office: true }, { agent: createAgent({ name: 'OpenRouter lean', engine: 'openrouter', toolbox: 'lean' }), office: false }]) {
+    const prompt = personaPromptFor(lane.agent.home);
+    assert.match(prompt, /<rivendell-team-status>/);
+    assert.match(prompt, /<rivendell-background-jobs>/);
+    assert.match(prompt, /<rivendell-sidebar>/);
+    if (DESK_ROOM_ENABLED) assert.match(prompt, /<rivendell-desk>/);
+    assert.equal(prompt.includes('<rivendell-ops-toolbox>'), lane.office);
+    const layers = instructionLayers(lane.agent.id)?.layers ?? [];
+    for (const key of ['rule:team-status', 'rule:background-jobs', 'rule:sidebar']) assert.ok(layers.some(layer => layer.key === key), `${key} reaches a lane that mounts the team tools`);
+    assert.equal(layers.some(layer => layer.key === 'rule:ops-toolbox'), lane.office);
+  }
   // The engine basics seed describes the CLI's real tool surface.
   assert.doesNotMatch(SHARED_RULES['engine-agy'].seed(), /assistant_\* tools/);
   assert.doesNotMatch(SHARED_RULES['engine-agy'].seed(), /team_message/);
