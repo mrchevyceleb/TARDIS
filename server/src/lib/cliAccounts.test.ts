@@ -35,7 +35,7 @@ type LongLivedVerdict = import('./cliAccounts.ts').LongLivedVerdict;
 
 const profile = join(home, '.claude-year');
 mkdirSync(profile, { recursive: true });
-writeFileSync(join(profile, '.long-lived-oauth-token'), 'year@example.com\nsk-ant-oat01-example-token-0123456789\n');
+writeFileSync(join(profile, '.long-lived-oauth-token'), `year@example.com\nsk-ant-oat01-example-token-0123456789\n${JSON.stringify({ accountUuid: 'acct-1', organizationUuid: 'org-1' })}\n`);
 
 function stubStatus(json: unknown): NodeJS.ProcessEnv {
   writeFileSync(join(bin, 'status.json'), JSON.stringify(json));
@@ -53,9 +53,9 @@ test.after(() => {
 });
 
 test('a year-token profile reads as connected with the token account', async () => {
-  // The saved account matches the token: identity carries org and plan too.
+  // The saved account and organization match the provisioned token binding.
   writeFileSync(join(profile, '.claude.json'), JSON.stringify({ oauthAccount: {
-    emailAddress: 'Year@Example.com', organizationUuid: 'org-1', organizationName: 'Acme', planDisplayName: 'Pro',
+    emailAddress: 'Year@Example.com', accountUuid: 'acct-1', organizationUuid: 'org-1', organizationName: 'Acme', planDisplayName: 'Pro',
   } }));
   const identity = await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'oauth_token' }), verdict('valid'));
   assert.equal(identity.status, 'connected');
@@ -65,7 +65,8 @@ test('a year-token profile reads as connected with the token account', async () 
 });
 
 test('a wiped year-token profile still reads as connected', async () => {
-  // The wipe takes the .claude.json account with it; the token is the identity.
+  // Legacy tokens also survive a full wipe, but cannot invent an organization.
+  writeFileSync(join(profile, '.long-lived-oauth-token'), 'year@example.com\nsk-ant-oat01-example-token-0123456789\n');
   writeFileSync(join(profile, '.claude.json'), JSON.stringify({}));
   const identity = await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'oauth_token' }), verdict('valid'));
   assert.equal(identity.status, 'connected');
@@ -87,6 +88,11 @@ test('a rejected year token reads as signed out; network trouble does not', asyn
 });
 
 test('a foreign account is never dressed up as the token account', async () => {
+  writeFileSync(join(profile, '.long-lived-oauth-token'), `year@example.com\nsk-ant-oat01-example-token-0123456789\n${JSON.stringify({ accountUuid: 'acct-1', organizationUuid: 'org-1' })}\n`);
+  writeFileSync(join(profile, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'year@example.com', accountUuid: 'acct-1', organizationUuid: 'org-2' } }));
+  assert.notEqual((await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'oauth_token' }), verdict('valid'))).status, 'connected', 'email alone cannot associate the old token with a new organization');
+  const otherOrg = await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'claude.ai', email: 'year@example.com', orgId: 'org-2' }), verdict('valid'));
+  assert.equal(otherOrg.organizationId, 'org-2', 'a same-email organization switch follows native identity, never the old token');
   writeFileSync(join(profile, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'other@example.com', organizationUuid: 'org-2' } }));
   // A token whose profile is signed in as someone else never rides the
   // auth-status env, so even an oauth_token-shaped answer cannot name it.

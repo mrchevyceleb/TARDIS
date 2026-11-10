@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { APP_ROOT } from '../config.ts';
 import { resolveCodexBin } from '../chat/codex-models.ts';
-import { cliProfiles, cliProfileId, cliProfileForEnv, cliProfileCredentialSignature, longLivedClaudeToken, longLivedTokenVerdictVersion, recordLongLivedTokenVerdict, readClaudeAccountState, withVerifiedLongLivedClaudeToken, type AccountEngine, type CliProfile } from './cliProfiles.ts';
+import { cliProfiles, cliProfileId, cliProfileForEnv, cliProfileCredentialSignature, longLivedClaudeToken, longLivedTokenApplies, longLivedTokenVerdictVersion, recordLongLivedTokenVerdict, readClaudeAccountState, withVerifiedLongLivedClaudeToken, type AccountEngine, type CliProfile } from './cliProfiles.ts';
 export { cliProfileId, cliProfileForEnv };
 export type { AccountEngine };
 
@@ -93,8 +93,8 @@ export async function claudeIdentity(env: NodeJS.ProcessEnv, verifyToken: (token
   // A profile holding a year token authenticates with it, and `claude auth
   // status` only proves that login when the token rides the environment; its
   // answer then says loggedIn with authMethod "oauth_token" and no email, so
-  // the account identity comes from the token file, with the profile's saved
-  // account supplying the organization while it still matches. But the CLI's
+  // the account identity comes from the token's provisioned binding, never
+  // from an email-only match with the profile's organization. The CLI's
   // answer only proves the token is PRESENT — the provider probe above is
   // what proves it still opens doors, and a rejected one reads signed out.
   const profileDir = cliProfileForEnv('claude', env);
@@ -129,12 +129,12 @@ export async function claudeIdentity(env: NodeJS.ProcessEnv, verifyToken: (token
     if (statusEnv.CLAUDE_CODE_OAUTH_TOKEN !== longLived.token) {
       return { status: 'unavailable', checkedAt, email: longLived.email };
     }
-    let organization: string | undefined, organizationId: string | undefined, plan: string | undefined;
-    const saved = readClaudeAccountState(profileDir, env).account;
-    if (typeof saved?.emailAddress === 'string' && saved.emailAddress.toLowerCase() === longLived.email.toLowerCase()) {
-      organization = text(saved.organizationName);
-      organizationId = text(saved.organizationUuid);
-      plan = text(saved.planDisplayName) ?? text(saved.seatTier);
+    const organizationId = text(longLived.organizationUuid);
+    let organization: string | undefined, plan: string | undefined;
+    const saved = readClaudeAccountState(profileDir, env);
+    if (saved.account && longLivedTokenApplies(longLived, profileDir, saved)) {
+      organization = text(saved.account.organizationName);
+      plan = text(saved.account.planDisplayName) ?? text(saved.account.seatTier);
     }
     return { status: 'connected', checkedAt, email: longLived.email, organization, organizationId, plan,
       tokenId: createHash('sha256').update(longLived.token).digest('hex') };

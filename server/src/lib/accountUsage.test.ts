@@ -23,7 +23,11 @@ writeFileSync(process.env.RIVENDELL_ACCOUNT_MAP, JSON.stringify({
 }));
 writeFileSync(join(bin, 'claude'), `#!/bin/sh
 if [ "$1" = auth ]; then
-  printf '{"loggedIn":true,"authMethod":"oauth_token"}\\n'
+  if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+    printf '{"loggedIn":true,"authMethod":"oauth_token"}\\n'
+  else
+    "${process.execPath}" -e 'const fs = require("node:fs"); const a = JSON.parse(fs.readFileSync(process.env.CLAUDE_CONFIG_DIR + "/.claude.json", "utf8")).oauthAccount; console.log(JSON.stringify(a ? { loggedIn: true, authMethod: "claude.ai", email: a.emailAddress, orgId: a.organizationUuid } : { loggedIn: false }));'
+  fi
 else
   printf '%s\\n' "\${CLAUDE_CODE_OAUTH_TOKEN-unset}" >> "$CLAUDE_CONFIG_DIR/renewals"
 fi
@@ -32,8 +36,9 @@ chmodSync(join(bin, 'claude'), 0o755);
 const dirs = Object.fromEntries(['first', 'peer', 'wiped'].map(name => [name, join(home, `.claude-${name}`)]));
 for (const [name, dir] of Object.entries(dirs)) {
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, '.long-lived-oauth-token'), 'year@example.com\nsk-ant-oat01-usage-test-token\n');
-  writeFileSync(join(dir, '.claude.json'), JSON.stringify(name === 'wiped' ? {} : { oauthAccount: { emailAddress: 'year@example.com', organizationUuid: 'org-1', planDisplayName: 'Pro' } }));
+  const binding = name === 'wiped' ? '' : JSON.stringify({ accountUuid: 'acct-1', organizationUuid: 'org-1' });
+  writeFileSync(join(dir, '.long-lived-oauth-token'), `year@example.com\nsk-ant-oat01-usage-test-token\n${binding}\n`);
+  writeFileSync(join(dir, '.claude.json'), JSON.stringify(name === 'wiped' ? {} : { oauthAccount: { emailAddress: 'year@example.com', accountUuid: 'acct-1', organizationUuid: 'org-1', planDisplayName: 'Pro' } }));
 }
 const { refreshClaudeAccountUsage } = await import('./accountUsage.ts');
 const { listCliAccounts } = await import('./cliAccounts.ts');
@@ -62,7 +67,7 @@ test('merged token accounts use healthy normal credentials and renew only that l
   writeCredentials({ accessToken: 'normal-pass', expiresAt: clock + 3_600_000 });
 
   const accounts = (await listCliAccounts()).filter(item => item.engine === 'claude');
-  assert.equal(accounts.length, 1, 'a wiped same-email profile folds into its unambiguous organization');
+  assert.equal(accounts.length, 1, 'the same verified token folds into its unambiguous, provisioned organization');
   assert.equal(accounts[0]!.profileIds.length, 3);
   for (const field of ['organizationId', 'tokenId', 'tokenIds']) assert.equal(field in accounts[0]!, false, 'internal grouping metadata stays private');
   assert.equal((await refresh())[0]!.status, 'live', 'a missing representative credential file falls back to its healthy peer');
@@ -112,10 +117,12 @@ test('organization-less profiles only fold with same-token proof and an unambigu
   const distinct = (await listCliAccounts(true)).filter(item => item.engine === 'claude');
   assert.equal(distinct.length, 2, 'a different token with the same email cannot borrow an organization');
   writeFileSync(tokenPath, 'year@example.com\nsk-ant-oat01-usage-test-token\n');
-  writeFileSync(join(dirs.peer!, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'year@example.com', organizationUuid: 'org-2' } }));
+  writeFileSync(join(dirs.peer!, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'year@example.com', accountUuid: 'acct-1', organizationUuid: 'org-2' } }));
   const accounts = (await listCliAccounts(true)).filter(item => item.engine === 'claude');
   assert.equal(accounts.length, 3);
   assert.ok(accounts.every(item => item.status === 'connected' && item.profileIds.length === 1));
   for (const dir of Object.values(dirs)) writeFileSync(join(dir, '.claude.json'), '{}');
-  assert.equal((await listCliAccounts(true)).filter(item => item.engine === 'claude').length, 3, 'email without organization proof never groups profiles');
+  rmSync(join(dirs.first!, '.credentials.json'));
+  rmSync(join(dirs.peer!, '.credentials.json'));
+  assert.equal((await listCliAccounts(true)).filter(item => item.engine === 'claude').length, 1, 'the provisioned token organization survives a full native-login wipe');
 });

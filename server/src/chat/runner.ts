@@ -37,7 +37,7 @@ import { agentForChatId, brainForAgent, cliForAgentEngine, noteAgentLane, wantsF
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { crashTombstoneEvent, crashTombstoneText, restartMarkerEvent } from './crashTombstone.ts';
 import { BACKGROUND_MODEL_HOLD_MINUTES, backgroundEndedGuidance, backgroundTaskLabel, backgroundWorkEvent, type BackgroundWorkCause } from './backgroundWork.ts';
-import { subscriptionEnvForLane, withLongLivedClaudeToken, withVerifiedLongLivedClaudeToken, preferredSubscriptionEnv, subscriptionRoutingKey, subscriptionRoutingKeysMatch, subscriptionEmail, cliProfileForEnv, cliProfileId, cliProfiles } from '../lib/cliProfiles.ts';
+import { subscriptionEnvForLane, verifiedClaudeSubscriptionForLane, preferredSubscriptionEnv, subscriptionRoutingKey, subscriptionRoutingKeysMatch, subscriptionEmail, cliProfileForEnv, cliProfileId, cliProfiles, type VerifiedClaudeSubscription } from '../lib/cliProfiles.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
@@ -786,7 +786,7 @@ class ClaudeSession {
   /** A provider-verified subscription environment prepared immediately before
    * a spawn. Consume it once so the child and its routing key describe the same
    * token decision instead of re-reading profile files on either side. */
-  private preparedSubscriptionEnv?: NodeJS.ProcessEnv;
+  private preparedSubscription?: VerifiedClaudeSubscription;
   /** The saved picker/pin choice when this worker spawned. Account-pool
    * redirects are deliberately excluded so quota routing cannot masquerade
    * as an explicit account change at the send boundary. */
@@ -902,7 +902,7 @@ class ClaudeSession {
   readonly ready: Promise<boolean>;
   private resolveReady!: (ok: boolean) => void;
 
-  constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model?: string, effort?: string, seedFirst = false, switchedFrom: string | null = null, preparedSubscriptionEnv?: NodeJS.ProcessEnv) {
+  constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model?: string, effort?: string, seedFirst = false, switchedFrom: string | null = null, preparedSubscription?: VerifiedClaudeSubscription) {
     assertSubscriptionLane(cli);
     this.cli = cli;
     this.cwd = cwd;
@@ -913,7 +913,7 @@ class ClaudeSession {
     this.startedResumeId = resumeId;
     this.spawnModel = resolveClaudeModel(cli, model);
     this.spawnEffort = resolveClaudeEffort(cli, effort, this.spawnModel);
-    this.preparedSubscriptionEnv = preparedSubscriptionEnv;
+    this.preparedSubscription = preparedSubscription;
     // Persona/FACE stay in --append-system-prompt. The forever-window
     // (compact + last 50) is prepended to the first user message so raw
     // turns are not promoted to system-level instructions.
@@ -968,6 +968,11 @@ class ClaudeSession {
 
   private startWorker(resumeId: string | null): void {
     const { cli, cwd, chatId } = this;
+    const preparedSubscription = this.preparedSubscription;
+    this.preparedSubscription = undefined;
+    if ((cli === 'claude' || cli === 'assistant') && !preparedSubscription) {
+      throw new Error('Claude worker starts require a verified subscription environment.');
+    }
     // xai also blocks the built-in web tools: they are unusable against xAI's
     // Anthropic endpoint (WebSearch is a server tool xAI 422s for a missing
     // `description`; WebFetch's summarization call returns "No response from
@@ -1054,16 +1059,13 @@ class ClaudeSession {
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
     // login; a per-agent pin (RIVENDELL_AGENT_ACCOUNTS) comes next; everything else
     // keeps the per-repo account-map resolution.
-    const preparedSubscriptionEnv = this.preparedSubscriptionEnv;
-    this.preparedSubscriptionEnv = undefined;
     const spawnEnv = cli === 'xai' ? xaiEnv(this.spawnModel)
       : cli === 'zai' ? zaiEnv(this.spawnModel, zaiCredential!)
       : cli === 'fireworks' ? fireworksEnv(this.spawnModel)
       : cli === 'openrouter' ? openRouterEnv(this.spawnModel)
       : cli === 'openrouter2' ? openRouter2Env(this.spawnModel)
       : cli === 'meta' ? metaEnv(this.spawnModel)
-      : preparedSubscriptionEnv ?? subscriptionEnvForLane('claude', cwd, chatId, agentForChatId(chatId)?.name);
-    if ((cli === 'claude' || cli === 'assistant') && !preparedSubscriptionEnv) withLongLivedClaudeToken(spawnEnv, spawnEnv.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'));
+      : preparedSubscription!.env;
     if (cli !== 'xai' && cli !== 'zai' && cli !== 'fireworks' && cli !== 'openrouter' && cli !== 'openrouter2' && cli !== 'meta') assertClaudeSubscription(spawnEnv, cwd);
     if (cli === 'claude' || cli === 'assistant') {
       spawnEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(CLAUDE_NATIVE_COMPACT_WINDOW);
@@ -1104,7 +1106,7 @@ class ClaudeSession {
     if (nativeStorage.project) spawnEnv.CLAUDE_CODE_PROJECT_DIR_NAME = nativeStorage.project;
     if (cli === 'claude' || cli === 'assistant') {
       this.providerRoutingKey = subscriptionRoutingKey('claude', spawnEnv, spawnEnv.CLAUDE_CODE_OAUTH_TOKEN ?? null);
-      this.preferredAccountRoutingKey = subscriptionRoutingKey('claude', preferredSubscriptionEnv('claude', cwd, chatId, agentForChatId(chatId)?.name));
+      this.preferredAccountRoutingKey = preparedSubscription!.preferenceKey;
       this.providerEmail = subscriptionEmail('claude', spawnEnv);
     }
     this.providerAccount = existsSync(profileDir) ? realpathSync(profileDir) : profileDir;
@@ -2152,8 +2154,7 @@ class ClaudeSession {
       // Preserve the context-recovery decision even if account resolution or
       // provider verification fails before the queues are drained below.
       hadUncommittedHumanGuidance = (this.pendingAccountInputs ?? []).some(input => !input.deliveryId);
-      const accountEnv = subscriptionEnvForLane('claude', this.cwd, this.chatId, agentForChatId(this.chatId)?.name);
-      const preparedSubscriptionEnv = await withVerifiedLongLivedClaudeToken(accountEnv, cliProfileForEnv('claude', accountEnv));
+      const preparedSubscription = await verifiedClaudeSubscriptionForLane(this.cwd, this.chatId, agentForChatId(this.chatId)?.name);
       if (this.disposed || generation !== this.nativeStopGeneration) return;
       const replayInputs = [...(this.pendingAccountInputs ?? [])];
       hadUncommittedHumanGuidance ||= replayInputs.some(input => !input.deliveryId);
@@ -2171,7 +2172,7 @@ class ClaudeSession {
       this.pendingAccountInputs = [];
       this.pendingPeerSteerAccepts.clear();
       if (prompt.opts.signal?.aborted) throw new Error('The pending delivery was cancelled.');
-      this.preparedSubscriptionEnv = preparedSubscriptionEnv;
+      this.preparedSubscription = preparedSubscription;
       this.startWorker(this.pendingResumeId);
       const resuming = this.pendingResumeId !== null;
       const text = [resuming ? 'Continue the pending request from before the Claude account usage limit. Check its last actual result and finish it without repeating completed actions.' : prompt.text,
@@ -4263,10 +4264,9 @@ async function spawnSession(
   }
   assertMemoryAvailableForSpawn(cli);
   await ensureNativeCompactProxy();
-  let preparedSubscriptionEnv: NodeJS.ProcessEnv | undefined;
+  let preparedSubscription: VerifiedClaudeSubscription | undefined;
   if (cli === 'claude' || cli === 'assistant') {
-    const accountEnv = subscriptionEnvForLane('claude', cwd, chatId, agentForChatId(chatId)?.name);
-    preparedSubscriptionEnv = await withVerifiedLongLivedClaudeToken(accountEnv, cliProfileForEnv('claude', accountEnv));
+    preparedSubscription = await verifiedClaudeSubscriptionForLane(cwd, chatId, agentForChatId(chatId)?.name);
     if (sessionsShuttingDown) throw new Error('TARDIS is shutting down');
   }
   // Metered providers share Claude Code. Subscription engines retain their native runner.
@@ -4274,7 +4274,7 @@ async function spawnSession(
     ? new AgySession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort, model), seedFirst, switchedFrom)
     : cli === 'muse'
     ? new MuseSession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort, resolveClaudeModel(cli, model)), seedFirst, switchedFrom)
-    : new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, seedFirst, switchedFrom, preparedSubscriptionEnv);
+    : new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, seedFirst, switchedFrom, preparedSubscription);
   sessions.set(key, session);
   spawnStamps.set(session, stampFor(session, chatId));
   notifySessionCreated(session.logKey, session);

@@ -69,6 +69,9 @@ test('pooled account redirects do not look like picker changes', () => {
   assert.equal(subscriptionRoutingKeysMatch(`${profileKey}:signed-out`, `${profileKey}:healthy-account`), false,
     'a confirmed sign-out must retire the old worker');
 
+  assert.throws(() => session.startWorker(null), /verified subscription environment/,
+    'a restart cannot fall back to an indefinitely retained synchronous token verdict');
+
   session.preferredAccountRoutingKey = 'claude-the-previous-explicit-choice:old-account';
   assert.throws(() => session.assertSubscriptionAccount(), (error: unknown) => {
     assert.equal((error as { code?: string }).code, 'MODEL_SELECTION_CHANGED');
