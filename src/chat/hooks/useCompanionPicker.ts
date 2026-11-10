@@ -203,13 +203,14 @@ export function readStoredXaiEffort(): string {
   return effort;
 }
 
-// Gemini on Matt's Google subscription (the agy CLI lane). Two base models,
+// Gemini on Matt's Google subscription (the agy CLI lane). Three base models,
 // each taking low/medium/high as the lane's effort value; the server resolves
 // the pair into the agy binary's --model/--effort spawn args.
 export const DEFAULT_AGY_MODEL = 'gemini-4-argon';
 export const DEFAULT_AGY_EFFORT = 'medium';
 export const AGY_MODELS: { id: string; label: string }[] = [
   { id: 'gemini-4-argon', label: 'Gemini 4 Argon' },
+  { id: 'gemini-4-carbon', label: 'Gemini 4 Carbon' },
   { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
 ];
 export const AGY_EFFORTS = ['low', 'medium', 'high'];
