@@ -33,7 +33,7 @@ export type Agent = {
   muted?: boolean;
   /** Sidebar color label, synced through the server so every device agrees. */
   color?: ChatColor;
-  /** 'lean' skips the assistant-mcp integrations on every engine;
+  /** 'lean' skips assistant-mcp on supported engines (not Antigravity);
    *  absent means the full toolbox. File and coding tools stay available. */
   toolbox?: 'full' | 'lean';
 };
@@ -120,7 +120,7 @@ export function useAgents(): { agents: Agent[]; reload: () => void } {
   return { agents, reload };
 }
 
-export async function createAgent(input: { name: string; role?: string; engine?: string; model?: string; effort?: string; serviceTier?: string; voice?: string; scope?: string }): Promise<Agent> {
+export async function createAgent(input: { name: string; role?: string; engine?: string; model?: string; effort?: string; serviceTier?: string; voice?: string; toolbox?: 'full' | 'lean'; scope?: string }): Promise<Agent> {
   const r = await apiJson<{ agent: Agent }>('/api/agents', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

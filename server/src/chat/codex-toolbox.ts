@@ -11,15 +11,18 @@ function assistantServer(file: string): Server {
     if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return {};
     const server = (servers as Record<string, unknown>)['assistant-mcp'];
     return server && typeof server === 'object' && !Array.isArray(server) ? server : {};
-  } catch { return {}; }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw error;
+  }
 }
 
 /** Disable only assistant-mcp using Codex's native override. Parse real TOML
  *  (comments, quoted keys and inline tables all work), including configs from
  *  the repo root through the working directory, not just the leaf folder.
- *  Project-only transports are re-stated because Codex skips untrusted project
- *  configs: enabled=false alone would then create an invalid, transport-less
- *  server and prevent the entire lane from starting. */
+ *  Project-only servers get an inert transport because Codex skips untrusted
+ *  project configs: enabled=false alone would create an invalid, transport-less
+ *  server. Never copy a configured URL (possibly credential-bearing) into argv. */
 export function codexToolboxArgs(fullToolbox: boolean, home: string, cwd: string): string[] {
   if (fullToolbox) return [];
   const homeServer = assistantServer(join(home, 'config.toml'));
@@ -40,7 +43,8 @@ export function codexToolboxArgs(fullToolbox: boolean, home: string, cwd: string
   const args = ['-c', 'mcp_servers.assistant-mcp.enabled=false'];
   if (typeof homeServer.command !== 'string' && typeof homeServer.url !== 'string') {
     const key = typeof server.command === 'string' ? 'command' : 'url';
-    args.push('-c', `mcp_servers.assistant-mcp.${key}=${JSON.stringify(server[key])}`);
+    const value = key === 'command' ? 'node' : 'http://127.0.0.1:9/disabled';
+    args.push('-c', `mcp_servers.assistant-mcp.${key}=${JSON.stringify(value)}`);
   }
   return args;
 }

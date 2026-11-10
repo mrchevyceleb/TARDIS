@@ -887,15 +887,6 @@ export class CodexSession {
       );
     }
     const laneName = sessionAgent?.name;
-    // Codex reads assistant-mcp from CODEX_HOME config.toml, so a lean-toolbox
-    // lane (roster setting) disables exactly that entry; every other
-    // config.toml server (game-assets-mcp, playwright, ...) stays. The
-    // helper preserves a valid transport even when a project-only server's
-    // config is skipped by Codex's trust gate.
-    const leanToolboxArgs = codexToolboxArgs(wantsFullToolbox(sessionAgent), codexHomeFor(childEnv), this.cwd);
-    browserMcpArgs.push(...leanToolboxArgs, ...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId), agentId: sessionAgent?.id }), ...officeMcpCodexArgs());
-    const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', `service_tier=${JSON.stringify(serviceTier)}`, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
-
     // Wait for OneDrive to release its sync lock on .codex/config.toml so
     // codex's own read at startup doesn't fail with EDEADLK and kill the turn.
     const configProbe = await probeProjectConfig(this.cwd);
@@ -911,6 +902,22 @@ export class CodexSession {
       this.emitCancellationTurnEnd();
       return;
     }
+
+    // Read toolbox config only after the project lock probe. A lean lane must
+    // not start with the full toolbox when a config is unreadable or malformed.
+    let leanToolboxArgs: string[];
+    try {
+      leanToolboxArgs = codexToolboxArgs(wantsFullToolbox(sessionAgent), codexHomeFor(childEnv), this.cwd);
+    } catch (error) {
+      cleanupImages();
+      this.busy = false;
+      console.warn('[chat codex] toolbox config failed:', (error as Error).message);
+      this.emitTurnFailure('Codex could not read its toolbox configuration. Check config.toml and try again. Your conversation is saved.', 'CODEX_TOOLBOX_CONFIG_FAILED', true);
+      this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
+      return;
+    }
+    browserMcpArgs.push(...leanToolboxArgs, ...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId), agentId: sessionAgent?.id }), ...officeMcpCodexArgs());
+    const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', `service_tier=${JSON.stringify(serviceTier)}`, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
 
     let contextProxy: Awaited<ReturnType<typeof codexContextProxy>>;
     try {

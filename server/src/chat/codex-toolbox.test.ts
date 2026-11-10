@@ -49,10 +49,13 @@ test('comments and multiline strings are not Codex MCP server definitions', t =>
 
 test('Codex project-only overrides retain a transport even if the project is untrusted', t => {
   const { home, repo, config } = fixture(t);
-  for (const [key, value] of [['command', 'node'], ['url', 'https://example.invalid/mcp']]) {
+  for (const [key, value, inert] of [
+    ['command', 'node', 'node'],
+    ['url', 'https://fixture:password@example.invalid/mcp?token=secret', 'http://127.0.0.1:9/disabled'],
+  ]) {
     config(join(repo, '.codex'), `[mcp_servers.assistant-mcp]\n${key} = ${JSON.stringify(value)}\n`);
     assert.deepEqual(codexToolboxArgs(false, home, repo), [
-      ...disabled, '-c', `mcp_servers.assistant-mcp.${key}=${JSON.stringify(value)}`,
+      ...disabled, '-c', `mcp_servers.assistant-mcp.${key}=${JSON.stringify(inert)}`,
     ]);
   }
 });

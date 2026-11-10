@@ -123,6 +123,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
   const agentRef = useRef('');
   const savingRef = useRef(false);
   const initialBrain = useRef({ engine: '', model: '', effort: '', serviceTier: 'default' });
+  const initialToolbox = useRef<'full' | 'lean'>('full');
 
   // Reset the form when the editor OPENS, or when it retargets to a
   // different agent (by id — object identity changes every agents poll, and
@@ -153,6 +154,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     setPinned(Boolean(agent?.pinned));
     setMuted(Boolean(agent?.muted));
     setLeanToolbox(agent?.toolbox === 'lean');
+    initialToolbox.current = agent?.toolbox === 'lean' ? 'lean' : 'full';
     setScope('');
     setErr(null);
     setAvatarVersion(undefined);
@@ -334,9 +336,10 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     try {
       const brainChanged = engine !== initialBrain.current.engine || model !== initialBrain.current.model || effort !== initialBrain.current.effort || serviceTier !== initialBrain.current.serviceTier;
       const brain = !agent || brainChanged ? { engine, model: model || undefined, effort, ...(engine === 'codex' ? { serviceTier } : {}) } : {};
+      const toolbox = leanToolbox && engine !== 'agy' ? 'lean' : 'full';
       const saved = agent
-        ? await updateAgentReq(agent.id, { name, role, ...brain, brainRevision, voice, pinned, muted, toolbox: leanToolbox ? 'lean' : 'full', scope: scope.trim() || undefined })
-        : await createAgent({ name, role, ...brain, voice, scope: scope.trim() || undefined });
+        ? await updateAgentReq(agent.id, { name, role, ...brain, brainRevision, voice, pinned, muted, toolbox: toolbox !== initialToolbox.current ? toolbox : undefined, scope: scope.trim() || undefined })
+        : await createAgent({ name, role, ...brain, voice, toolbox, scope: scope.trim() || undefined });
       onSaved(saved);
       onClose();
     } catch (e) {
@@ -352,6 +355,8 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
         setServiceTier(current.serviceTier ?? 'default');
         initialBrain.current = { engine: currentEngine, model: currentModel, effort: current.effort ?? defaults.effort, serviceTier: current.serviceTier ?? 'default' };
         setBrainRevision(current.brainRevision ?? 1);
+        setLeanToolbox(current.toolbox === 'lean');
+        initialToolbox.current = current.toolbox === 'lean' ? 'lean' : 'full';
         onSaved(current);
         setErr('Brain settings changed on another device. Refreshed them here; review and save again.');
       } else {
@@ -490,15 +495,16 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
                 <small>Hide unread badges — for companions that talk to other agents, not you</small>
               </span>
             </label>
-            <label className="bt-agent-checkrow" title="Keeps file and coding tools, without the office integrations. Takes effect on the next turn.">
-              <input type="checkbox" checked={leanToolbox} onChange={(e) => setLeanToolbox(e.target.checked)} />
-              <span>
-                Lean toolbox
-                <small>A smaller, faster lane for heads-down builders</small>
-              </span>
-            </label>
           </>
         ) : null}
+
+        <label className="bt-agent-checkrow" title="Keeps file and coding tools, without the office integrations. Takes effect on the next turn.">
+          <input type="checkbox" checked={leanToolbox && engine !== 'agy'} disabled={engine === 'agy'} onChange={(e) => setLeanToolbox(e.target.checked)} />
+          <span>
+            Lean toolbox
+            <small>{engine === 'agy' ? 'Not supported by Antigravity — its tools are managed by the engine' : 'A smaller, faster lane for heads-down builders'}</small>
+          </span>
+        </label>
 
         <div className="bt-agent-field">
           <span>Voice — how this agent sounds on calls</span>
