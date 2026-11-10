@@ -2,7 +2,8 @@
 // payloads against disposable state, never the operator's installed roster.
 import assert from 'node:assert/strict';
 import test, { after, mock } from 'node:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express from 'express';
@@ -31,7 +32,7 @@ const { wantsFullToolbox, createAgent, updateAgent, agentForChatId } = await imp
 const { laneMcpServers, optionalMcpServersFor } = await import('./runner.ts');
 const { AgySession } = await import('./agy-runner.ts');
 const { bananaToolboxTools } = await import('./banana-runner.ts');
-const { personaPromptFor } = await import('./personaPrompts.ts');
+const { engineRule, personaPromptFor } = await import('./personaPrompts.ts');
 const { DESK_ROOM_ENABLED } = await import('../config.ts');
 const { instructionsStamp, instructionLayers, saveInstructionFile } = await import('./instructionLayers.ts');
 const { sharedRuleFile, sharedRuleText, SHARED_RULES, RETIRED_STOCK_SEEDS } = await import('./sharedRules.ts');
@@ -196,7 +197,7 @@ test('Antigravity instruction stamps ignore rules for tools it never mounts', ()
   }
 });
 
-test('stock upgrades seed the missing workflow, including when the task-control rewrite is blocked', () => {
+test('stock upgrades seed the missing workflow without rewriting existing rules', () => {
   const file = sharedRuleFile('task-control');
   const workflowFile = sharedRuleFile('team-workflow');
   const originalTask = sharedRuleText('task-control');
@@ -205,28 +206,18 @@ test('stock upgrades seed the missing workflow, including when the task-control 
   const agy = createAgent({ name: 'Agy workflow', engine: 'agy' });
   const other = createAgent({ name: 'Team workflow' });
   try {
-    for (const blockedWrite of [false, true]) {
-      writeRule(file, retired);
-      rmSync(workflowFile);
-      const blocked = `${file}.${process.pid}.tmp`;
-      if (blockedWrite) mkdirSync(blocked);
-      const warning = mock.method(console, 'warn', () => {});
-      try {
-        assert.equal(sharedRuleText('team-workflow'), SHARED_RULES['team-workflow'].seed());
-        assert.equal(readFileSync(workflowFile, 'utf8'), `${SHARED_RULES['team-workflow'].seed()}\n`);
-        assert.equal(readFileSync(file, 'utf8'), blockedWrite ? retired : `${SHARED_RULES['task-control'].seed()}\n`);
-        const prompt = personaPromptFor(agy.home);
-        assert.match(prompt, /no-crap-allowed/);
-        assert.match(prompt, /fast-task/);
-        assert.doesNotMatch(prompt, /sidebar_checklist|send Kip/);
-        assert.match(prompt, /Only Kip merges Rally PRs to main/);
-        assert.match(personaPromptFor(other.home), /<rivendell-team-workflow>/);
-        assert.equal(warning.mock.callCount(), blockedWrite ? 1 : 0);
-      } finally {
-        warning.mock.restore();
-        rmSync(blocked, { recursive: true, force: true });
-      }
-    }
+    writeRule(file, retired);
+    rmSync(workflowFile);
+    assert.equal(sharedRuleText('team-workflow'), SHARED_RULES['team-workflow'].seed());
+    assert.equal(readFileSync(workflowFile, 'utf8'), `${SHARED_RULES['team-workflow'].seed()}\n`);
+    assert.equal(readFileSync(file, 'utf8'), retired, 'stock updates never replace an existing file');
+    const prompt = personaPromptFor(agy.home);
+    assert.match(prompt, /no-crap-allowed/);
+    assert.match(prompt, /fast-task/);
+    assert.doesNotMatch(prompt, /sidebar_checklist|send Kip/);
+    assert.match(prompt, /Only Kip merges Rally PRs to main/);
+    assert.match(personaPromptFor(other.home), /<rivendell-team-workflow>/);
+    assert.ok(instructionLayers(agy.id)?.layers.some(layer => layer.key === 'rule:task-control' && /retired stock text/.test(layer.note)));
     writeRule(file, `${SHARED_RULES['task-control'].seed()}\n`);
     writeRule(workflowFile, 'Owner-edited team workflow.\n');
     assert.match(personaPromptFor(other.home), /Owner-edited team workflow/);
@@ -240,6 +231,17 @@ test('stock upgrades seed the missing workflow, including when the task-control 
       assert.equal(sharedRuleText('task-control'), ownerEdit.trim());
       assert.equal(readFileSync(file, 'utf8'), ownerEdit);
       assert.equal(warning.mock.callCount(), 1, 'retained stale tool guidance warns once, never overwrites');
+      const agyPrompt = personaPromptFor(agy.home);
+      assert.match(agyPrompt, /Owner workflow note/);
+      assert.match(agyPrompt, /Only Kip merges Rally PRs to main/);
+      assert.doesNotMatch(agyPrompt, /sidebar_checklist|send Kip/);
+      assert.match(personaPromptFor(other.home), /sidebar_checklist/, 'team-enabled lanes keep the owner policy');
+      const instructions = instructionLayers(agy.id);
+      const layer = instructions?.layers.find(layer => layer.key === 'rule:task-control');
+      assert.ok(layer);
+      assert.equal(layer.text, ownerEdit, 'the editor shows the unchanged owner file');
+      assert.match(layer.note, /retired tool guidance.*Antigravity omits/);
+      assert.doesNotMatch(instructions?.assembled ?? '', /sidebar_checklist|send Kip/);
     } finally {
       warning.mock.restore();
     }
@@ -276,15 +278,15 @@ test('owner-disabled split workflows stay disabled but remain editable in the In
   }
 });
 
-test('a rule file still carrying a retired stock seed refreshes; an owner edit never does', () => {
-  // engine-agy shipped a seed that described office and team tools the CLI
-  // never mounts. A file still holding that text word-for-word was never
-  // owner-edited, so the corrected seed replaces it on first read.
+test('retired stock resolves to current text without rewriting the file; owner edits stay literal', () => {
+  // engine-agy shipped a seed describing tools the CLI never mounts. Reads
+  // resolve that exact stock text in memory, never writing an owner file.
   const file = sharedRuleFile('engine-agy');
   mkdirSync(join(dir, 'state', 'rules'), { recursive: true });
-  writeRule(file, `${RETIRED_STOCK_SEEDS['engine-agy']![0]}\n`);
+  const retired = `${RETIRED_STOCK_SEEDS['engine-agy']![0]}\n`;
+  writeRule(file, retired);
   assert.equal(sharedRuleText('engine-agy'), SHARED_RULES['engine-agy'].seed());
-  assert.equal(readFileSync(file, 'utf8'), `${SHARED_RULES['engine-agy'].seed()}\n`);
+  assert.equal(readFileSync(file, 'utf8'), retired);
   // An owner-edited variant keeps the owner's words and warns once if it
   // still carries stale tool claims; the owner remains in control.
   const warning = mock.method(console, 'warn', () => {});
@@ -296,6 +298,16 @@ test('a rule file still carrying a retired stock seed refreshes; an owner edit n
     assert.equal(sharedRuleText('engine-agy'), edited);
     assert.equal(readFileSync(file, 'utf8').trim(), edited);
     assert.equal(warning.mock.callCount(), 1);
+    const agy = createAgent({ name: 'Custom engine basics', engine: 'agy' });
+    const effective = engineRule('engine-agy', agy.home);
+    assert.match(effective, /You are Custom engine basics/);
+    assert.match(effective, /Owner note/);
+    assert.match(effective, /no office integration tools and no team messaging tools/);
+    assert.doesNotMatch(effective, /team_message|assistant_\* tools/);
+    const instructions = instructionLayers(agy.id);
+    assert.ok(instructions?.layers.some(layer => layer.key === 'rule:engine-agy' && /Antigravity uses the current tool description/.test(layer.note)));
+    assert.doesNotMatch(instructions?.assembled ?? '', /team_message|assistant_\* tools/);
+    assert.equal(readFileSync(file, 'utf8').trim(), edited, 'composition never rewrites the owner file');
   } finally {
     warning.mock.restore();
   }
@@ -305,24 +317,49 @@ test('a rule file still carrying a retired stock seed refreshes; an owner edit n
   assert.equal(readFileSync(file, 'utf8'), '\n');
 });
 
-test('a readable retired rule still loads when its refresh cannot be written', () => {
+test('resolving retired stock cannot overwrite an owner edit made during the read', () => {
   const file = sharedRuleFile('engine-agy');
   const retired = `${RETIRED_STOCK_SEEDS['engine-agy']![0]}\n`;
+  const ownerEdit = 'New owner policy written while stock text is resolving.\n';
   writeRule(file, retired);
-  // A directory at the temporary-file path deterministically refuses the
-  // write, without depending on uid or filesystem permission semantics.
-  const blocked = `${file}.${process.pid}.tmp`;
-  mkdirSync(blocked);
-  const warning = mock.method(console, 'warn', () => {});
+  const fresh = SHARED_RULES['engine-agy'].seed();
+  const seed = mock.method(SHARED_RULES['engine-agy'], 'seed', () => {
+    writeRule(file, ownerEdit);
+    return fresh;
+  });
   try {
-    assert.equal(sharedRuleText('engine-agy'), SHARED_RULES['engine-agy'].seed());
-    assert.equal(readFileSync(file, 'utf8'), retired);
-    assert.equal(sharedRuleText('engine-agy'), SHARED_RULES['engine-agy'].seed(), 'fallback is cached');
-    assert.equal(warning.mock.callCount(), 1);
+    assert.equal(sharedRuleText('engine-agy'), fresh);
+    assert.equal(readFileSync(file, 'utf8'), ownerEdit);
+    assert.equal(sharedRuleText('engine-agy'), ownerEdit.trim(), 'the next read picks up the concurrent edit');
   } finally {
-    warning.mock.restore();
-    rmSync(blocked, { recursive: true });
-    writeRule(file, `${SHARED_RULES['engine-agy'].seed()}\n`);
+    seed.mock.restore();
+    writeRule(file, `${fresh}\n`);
+  }
+});
+
+test('initial rules publish complete text without replacing a concurrent creator', () => {
+  const file = sharedRuleFile('ops-toolbox');
+  const original = readFileSync(file, 'utf8');
+  const ownerText = 'Owner rule created while a stock seed was being prepared.\n';
+  rmSync(file);
+  const realLink = fs.linkSync;
+  const publish = mock.method(fs, 'linkSync', (tmp: fs.PathLike, destination: fs.PathLike) => {
+    assert.equal(destination, file);
+    assert.equal(readFileSync(tmp, 'utf8'), `${SHARED_RULES['ops-toolbox'].seed()}\n`);
+    assert.equal(existsSync(file), false, 'the final path stays absent until the seed is complete');
+    writeRule(file, ownerText);
+    return realLink(tmp, destination);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.equal(sharedRuleText('ops-toolbox'), ownerText.trim());
+    assert.equal(readFileSync(file, 'utf8'), ownerText);
+    assert.equal(publish.mock.callCount(), 1);
+    assert.ok(!readdirSync(join(dir, 'state', 'rules')).some(name => name.endsWith('.tmp')));
+  } finally {
+    publish.mock.restore();
+    syncBuiltinESMExports();
+    writeRule(file, original);
   }
 });
 

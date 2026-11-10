@@ -45,7 +45,7 @@ export function personaPromptFor(chatId: string, memory = sessionMemory(chatId),
   // at any toolbox setting — its seed says so, and these rules agree. The
   // Instructions room (instructionLayers) filters by the same predicates.
   const teamTools = mountsTeamTools(agent);
-  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId), teamTools ? sharedRule('team-workflow') : null, teamTools ? sharedRule('team-status') : null, teamTools ? sharedRule('background-jobs') : null, teamTools ? sharedRule('sidebar') : null, DESK_ROOM_ENABLED && teamTools ? sharedRule('desk') : null, mountsOfficeTools(agent) ? sharedRule('ops-toolbox') : null].filter(Boolean).join('\n\n');
+  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId, teamTools), teamTools ? sharedRule('team-workflow') : null, teamTools ? sharedRule('team-status') : null, teamTools ? sharedRule('background-jobs') : null, teamTools ? sharedRule('sidebar') : null, DESK_ROOM_ENABLED && teamTools ? sharedRule('desk') : null, mountsOfficeTools(agent) ? sharedRule('ops-toolbox') : null].filter(Boolean).join('\n\n');
 }
 
 /** Scope text for an agent record's home (REST use). */

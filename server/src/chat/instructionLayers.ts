@@ -12,7 +12,7 @@ import { agentForChatId, cliForAgentEngine, listAgents, mountsOfficeTools, mount
 import { PERSONAS_DIR, engineRule, personaPromptFor } from './personaPrompts.ts';
 import { sessionDirectory, sessionPolicy } from './sessionPolicy.ts';
 import { plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
-import { SHARED_RULES, SHARED_RULE_IDS, sharedRule, sharedRuleFile, sharedRuleText, transcriptGuidance, type SharedRuleId } from './sharedRules.ts';
+import { SHARED_RULES, SHARED_RULE_IDS, sharedRule, sharedRuleFile, sharedRuleNotice, sharedRuleText, transcriptGuidance, type SharedRuleId } from './sharedRules.ts';
 import { DESK_ROOM_ENABLED, ELROND_WORKSPACE_PATH } from '../config.ts';
 
 export type InstructionLayer = {
@@ -119,7 +119,8 @@ function sources(agent: Agent): Source[] {
     // Keep that file editable in the room without sending it to the model.
     const enabled = Boolean(sharedRuleText(id));
     if (!enabled && id !== 'team-workflow') continue;
-    push(`rule:${id}`, SHARED_RULES[id].title, enabled ? 'Shared rule added by TARDIS for every agent.' : 'Disabled team workflow. Add text to turn it on for agents with team tools.', real(sharedRuleFile(id)));
+    const note = enabled ? 'Shared rule added by TARDIS for every agent.' : 'Disabled team workflow. Add text to turn it on for agents with team tools.';
+    push(`rule:${id}`, SHARED_RULES[id].title, [note, sharedRuleNotice(id)].filter(Boolean).join(' '), real(sharedRuleFile(id)));
   }
   return out;
 }

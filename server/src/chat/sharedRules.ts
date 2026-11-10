@@ -2,11 +2,13 @@
 // (Matt, Nov 3 2026: "i want to be able to easily directly manage ALL CONTEXT
 // and instructions ALL agents in tardis get"). They used to be string
 // constants in the server; now each lives at <state>/rules/<id>.md, seeded
-// once from the text below and read with an mtime cache after that. Code
-// only wraps the file in its tag and fills the few live values ({{leads}},
-// {{fastTaskSkill}}, {{fastTaskReview}}) that come from the roster.
+// once from the text below and read with an mtime cache after that. Stock
+// updates resolve in memory, never overwriting an owner's file. Composition
+// wraps the text, fills live roster values and scopes recognized legacy
+// team-tool guidance to engines that can use it.
 
-import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { linkSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import { DESK_OWNER_NAME } from '../config.ts';
@@ -190,12 +192,11 @@ export const SHARED_RULE_IDS = Object.keys(SHARED_RULES) as SharedRuleId[];
 
 export const sharedRuleFile = (id: SharedRuleId): string => join(RULES_DIR, `${id}.md`);
 
-const cache = new Map<string, { mtime: number; text: string }>();
+const cache = new Map<string, { mtime: number; text: string; source: string }>();
 
-/** Seed texts a newer build replaced, exact-match. A rule file still carrying
- *  one word-for-word was never owner-edited (the owner edits these files
- *  directly, and an emptied file switches a rule off), so the current seed
- *  refreshes it; any other content is an owner edit and stays untouched. */
+/** Seed texts a newer build replaced, exact-match. Resolve these to the
+ *  current stock text in memory only: a read must never overwrite a file
+ *  the owner may be editing. Any other content, including empty, is kept. */
 export const RETIRED_STOCK_SEEDS: Partial<Record<SharedRuleId, string[]>> = {
   'task-control': [[
     `When the owner starts a request with /fast-task or $fast-task, read {{fastTaskSkill}} before doing the task. Also read it for a lead handoff starting "Fast task (${DESK_OWNER_NAME}):". Mentioning the command in ordinary text does not activate it.`,
@@ -229,42 +230,68 @@ export function sharedRuleText(id: SharedRuleId): string {
     // already removed or disabled in their task-control rule.
     const keepOwnerWorkflow = id === 'team-workflow'
       && sharedRuleText('task-control') !== SHARED_RULES['task-control'].seed().trim();
-    const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, `${keepOwnerWorkflow ? '' : SHARED_RULES[id].seed()}\n`);
-    renameSync(tmp, file);
+    const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      // Flush a complete file before atomically publishing it. linkSync is
+      // no-replace: a concurrent creator wins without losing their content.
+      writeFileSync(tmp, `${keepOwnerWorkflow ? '' : SHARED_RULES[id].seed()}\n`, { flag: 'wx', flush: true });
+      try { linkSync(tmp, file); }
+      catch (writeError) {
+        if ((writeError as NodeJS.ErrnoException).code !== 'EEXIST') throw writeError;
+      }
+    } finally {
+      rmSync(tmp, { force: true });
+    }
     mtime = statSync(file).mtimeMs;
   }
   const hit = cache.get(file);
   if (hit && hit.mtime === mtime) return hit.text;
   const text = readFileSync(file, 'utf8').trim();
   if (RETIRED_STOCK_SEEDS[id]?.includes(text)) {
-    const tmp = `${file}.${process.pid}.tmp`;
     const fresh = SHARED_RULES[id].seed().trim();
-    try {
-      writeFileSync(tmp, `${fresh}\n`);
-      renameSync(tmp, file);
-      mtime = statSync(file).mtimeMs;
-    } catch (error) {
-      try { unlinkSync(tmp); } catch { /* the write may not have created a file */ }
-      console.warn(`[shared-rules] could not persist the updated ${id} rule; using its current stock text in memory (restart or edit the file to retry): ${(error as Error).message}`);
-    }
-    cache.set(file, { mtime, text: fresh });
+    cache.set(file, { mtime, text: fresh, source: text });
     return fresh;
   }
   // Owner text is never rewritten. Make stale stock tool claims actionable
   // instead; the mtime cache keeps the warning to one per edit.
-  const retiredToolLine = id === 'task-control' ? RETIRED_STOCK_SEEDS[id]?.[0]?.split('\n').at(-1)
-    : id === 'engine-agy' ? RETIRED_STOCK_SEEDS[id]?.[0]?.split('\n')[0] : undefined;
+  const retiredToolLine = retiredToolPassage(id);
   if (retiredToolLine && text.includes(retiredToolLine)) {
     console.warn(`[shared-rules] owner-edited ${id} still contains retired tool guidance; update this rule in the Instructions room before using Antigravity. The owner text was left unchanged.`);
   }
-  cache.set(file, { mtime, text });
+  cache.set(file, { mtime, text, source: text });
   return text;
 }
 
+function retiredToolPassage(id: SharedRuleId): string | undefined {
+  return id === 'task-control' ? RETIRED_STOCK_SEEDS[id]?.[0]?.split('\n').at(-1)
+    : id === 'engine-agy' ? RETIRED_STOCK_SEEDS[id]?.[0]?.split('\n')[0] : undefined;
+}
+
+/** Explain read-time stock updates and retained legacy text in the editor. */
+export function sharedRuleNotice(id: SharedRuleId): string {
+  sharedRuleText(id);
+  const source = cache.get(sharedRuleFile(id))?.source ?? '';
+  if (RETIRED_STOCK_SEEDS[id]?.includes(source)) {
+    return 'This file contains retired stock text. Agents use the current stock rule without changing this file. Edit and save to customize it.';
+  }
+  const retired = retiredToolPassage(id);
+  if (!retired || !source.includes(retired)) return '';
+  return id === 'task-control'
+    ? 'This edited file retains retired tool guidance. Antigravity omits that passage; other engines keep it. Review and save your policy here.'
+    : 'This edited file retains retired tool guidance. Antigravity uses the current tool description in place of that passage. Review and save your policy here.';
+}
+
 /** The rule as an agent receives it. An emptied file switches the rule off. */
-export function sharedRule(id: SharedRuleId, values: Record<string, string> = {}): string {
-  const text = sharedRuleText(id).replace(/\{\{(\w+)\}\}/g, (whole, key: string) => values[key] ?? whole);
+export function sharedRule(id: SharedRuleId, values: Record<string, string> = {}, options: { teamTools?: boolean } = {}): string {
+  let body = sharedRuleText(id);
+  if (id === 'engine-agy' || (id === 'task-control' && options.teamTools === false)) {
+    const retired = retiredToolPassage(id);
+    // Keep custom policy, replacing only the recognized legacy passage:
+    // agy gets its real tool surface and the universal merge constraints.
+    const lines = SHARED_RULES[id].seed().split('\n');
+    if (retired) body = body.replaceAll(retired, (id === 'engine-agy' ? lines[0] : lines.at(-1))!);
+  }
+  const text = body.replace(/\{\{(\w+)\}\}/g, (whole, key: string) => values[key] ?? whole);
   if (!text) return '';
   const tag = SHARED_RULES[id].tag;
   return tag ? `<${tag}>\n${text}\n</${tag}>` : text;
