@@ -33,7 +33,7 @@ import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateSettings } from './longCallGate.ts';
 import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
-import { agentForChatId, brainForAgent, cliForAgentEngine, noteAgentLane } from './agents.ts';
+import { agentForChatId, brainForAgent, cliForAgentEngine, noteAgentLane, wantsFullToolbox, type Agent } from './agents.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { crashTombstoneEvent, crashTombstoneText, restartMarkerEvent } from './crashTombstone.ts';
 import { BACKGROUND_MODEL_HOLD_MINUTES, backgroundEndedGuidance, backgroundTaskLabel, backgroundWorkEvent, type BackgroundWorkCause } from './backgroundWork.ts';
@@ -521,12 +521,13 @@ const ASSISTANT_MCP_PROXY =
   process.env.RIVENDELL_ASSISTANT_MCP_PROXY ||
   join(ASSISTANT_MCP_WORKSPACE, 'assistant-mcp', 'proxy', 'mcp-proxy.js');
 const BROWSER_MCP_ENTRY = process.env.RIVENDELL_BROWSER_MCP?.trim() || '';
-const optionalMcpServers: Record<string, {
+export type OptionalMcpServer = {
   type: string;
   command: string;
   args: string[];
   env?: Record<string, string>;
-}> = {};
+};
+const optionalMcpServers: Record<string, OptionalMcpServer> = {};
 // A side-copy boot (pre-restart check) mounts no optional proxies: the
 // probe engine must never reach assistant-mcp (Railway) or the browser MCP.
 const OPTIONAL_MCP_DISABLED = process.env.RIVENDELL_SIDE_COPY === '1';
@@ -545,14 +546,29 @@ if (!OPTIONAL_MCP_DISABLED && BROWSER_MCP_ENTRY && existsSync(BROWSER_MCP_ENTRY)
     args: [BROWSER_MCP_ENTRY],
   };
 }
-const ASSISTANT_MCP_CONFIG = JSON.stringify({ mcpServers: optionalMcpServers });
+
+/** The assistant-mcp entry only, when configured: the one optional backend a
+ *  lean-toolbox lane drops (roster setting — see wantsFullToolbox). */
+function dropLeanMcpServers<T extends Record<string, unknown>>(servers: T, agent?: Agent): T {
+  if (wantsFullToolbox(agent)) return servers;
+  const lean = { ...servers };
+  delete lean['assistant-mcp'];
+  return lean;
+}
+
+/** The operator's optional backends one lane may mount. Lean lanes lose
+ *  assistant-mcp only; the browser bridge and every built-in stay. */
+export function optionalMcpServersFor(agent?: Agent): Record<string, OptionalMcpServer> {
+  return dropLeanMcpServers(optionalMcpServers, agent);
+}
 
 /** Every stdio MCP server a lane gets, for harnesses that mount servers
  *  themselves (the Pi bridge): the operator's optional backends (assistant-mcp
  *  proxy, browser) plus the built-in team and device servers. Same set the
- *  claude binary receives through --mcp-config. */
-export function laneMcpServers(agentName?: string, backgroundLane = false, owner?: string, agentId?: string): Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> {
-  return { ...optionalMcpServers, ...localMcpServers(agentName, { backgroundLane, owner, agentId }) };
+ *  claude binary receives through --mcp-config. A lean-toolbox lane's set
+ *  excludes assistant-mcp, per the roster. */
+export function laneMcpServers(agent: Agent | undefined, backgroundLane = false, owner?: string): Record<string, OptionalMcpServer> {
+  return { ...optionalMcpServersFor(agent), ...localMcpServers(agent?.name, { backgroundLane, owner, agentId: agent?.id }) };
 }
 
 
@@ -586,8 +602,9 @@ function withTeamMcp(configJson: string, cwd: string, chatId: string): string {
 // WebFetch stay disallowed below (xAI's Anthropic endpoint 422s the server
 // tool shape; the MCP's web_search/quick_search/deep_research tools cover it
 // instead). The spawn below still passes --strict-mcp-config with the fresh
-// ASSISTANT_MCP_CONFIG so the STALE assistant-mcp entry in
-// ~/.claude-xai/.claude.json (dead proxy path) cannot shadow this one.
+// lane config (see the --mcp-config push in the claude args) so the STALE
+// assistant-mcp entry in ~/.claude-xai/.claude.json (dead proxy path) cannot
+// shadow this one.
 
 const ASSISTANT_AGENT_PROMPT =
   "You are TARDIS, a calm, exacting, helpful assistant — named for the ship, and at most " +
@@ -1023,8 +1040,10 @@ class ClaudeSession {
     // rivendell-team. --strict-mcp-config so a model switch cannot
     // silently pick up extra (or stale) servers from ~/.claude*.json. Keep
     // --mcp-config last: it is variadic and swallows any plain arg after it.
+    // Lean-toolbox lanes (roster setting) mount everything except
+    // assistant-mcp; withTeamMcp adds the built-ins below.
     if (cli === 'assistant' || cli === 'xai' || cli === 'claude' || cli === 'zai' || cli === 'fireworks' || cli === 'openrouter' || cli === 'openrouter2' || cli === 'meta') {
-      args.push('--strict-mcp-config', '--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, this.cwd, chatId));
+      args.push('--strict-mcp-config', '--mcp-config', withTeamMcp(JSON.stringify({ mcpServers: optionalMcpServersFor(agentForChatId(chatId)) }), this.cwd, chatId));
     }
 
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact

@@ -33,6 +33,9 @@ export type Agent = {
   muted?: boolean;
   /** Sidebar color label, synced through the server so every device agrees. */
   color?: ChatColor;
+  /** 'lean' skips assistant-mcp on supported engines (not Antigravity);
+   *  absent means the full toolbox. File and coding tools stay available. */
+  toolbox?: 'full' | 'lean';
 };
 
 /** Sidebar color labels. The keys mirror AGENT_COLORS on the server; the
@@ -117,7 +120,7 @@ export function useAgents(): { agents: Agent[]; reload: () => void } {
   return { agents, reload };
 }
 
-export async function createAgent(input: { name: string; role?: string; engine?: string; model?: string; effort?: string; serviceTier?: string; voice?: string; scope?: string }): Promise<Agent> {
+export async function createAgent(input: { name: string; role?: string; engine?: string; model?: string; effort?: string; serviceTier?: string; voice?: string; toolbox?: 'full' | 'lean'; scope?: string }): Promise<Agent> {
   const r = await apiJson<{ agent: Agent }>('/api/agents', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -133,7 +136,7 @@ export class AgentUpdateConflictError extends Error {
   }
 }
 
-export async function updateAgentReq(id: string, patch: { name?: string; role?: string; engine?: string; model?: string; effort?: string; serviceTier?: string; brainRevision?: number; voice?: string; pinned?: boolean; muted?: boolean; color?: ChatColor | null; scope?: string }): Promise<Agent> {
+export async function updateAgentReq(id: string, patch: { name?: string; role?: string; engine?: string; model?: string; effort?: string; serviceTier?: string; brainRevision?: number; voice?: string; pinned?: boolean; muted?: boolean; color?: ChatColor | null; toolbox?: 'full' | 'lean' | null; scope?: string }): Promise<Agent> {
   const response = await fetch(`/api/agents/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },

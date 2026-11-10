@@ -5,7 +5,7 @@
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
-import { agentForChatId } from './agents.ts';
+import { agentForChatId, wantsFullToolbox } from './agents.ts';
 import { DESK_ROOM_ENABLED } from '../config.ts';
 import { sessionBriefs, sessionMemory, taskControlGuidance } from './sessionPolicy.ts';
 import { sharedRule, type SharedRuleId } from './sharedRules.ts';
@@ -31,9 +31,15 @@ function readScopeFile(file: string): string {
 /** The agent's scope for a home-thread chatId ('' when no agent owns it). */
 export function personaPromptFor(chatId: string, memory = sessionMemory(chatId)): string {
   const agent = agentForChatId(chatId);
-  if (!agent) return '';
+  // A non-roster lane has no persona and no roster toolbox entry — it mounts
+  // the full toolbox, so it still needs the router guidance that moved out of
+  // the global AGENTS.md (lean is a roster choice; nothing else can be lean).
+  if (!agent) return sharedRule('ops-toolbox');
   const scope = readScopeFile(`${agent.id}.md`);
-  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId), sharedRule('team-status'), sharedRule('background-jobs'), sharedRule('sidebar'), DESK_ROOM_ENABLED ? sharedRule('desk') : null].filter(Boolean).join('\n\n');
+  // The ops-toolbox rule (assistant-mcp router guidance) rides the same
+  // roster setting as the MCP mount itself: lean lanes have no assistant-mcp,
+  // so they never see its instructions either.
+  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId), sharedRule('team-status'), sharedRule('background-jobs'), sharedRule('sidebar'), DESK_ROOM_ENABLED ? sharedRule('desk') : null, wantsFullToolbox(agent) ? sharedRule('ops-toolbox') : null].filter(Boolean).join('\n\n');
 }
 
 /** Scope text for an agent record's home (REST use). */

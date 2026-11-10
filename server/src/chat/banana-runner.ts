@@ -22,7 +22,7 @@ import { isBackgroundChatId, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
-import { agentForChatId, noteAgentLane } from './agents.ts';
+import { agentForChatId, noteAgentLane, wantsFullToolbox, type Agent } from './agents.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
 import {
   ASSISTANT_HUB_PATH,
@@ -1691,7 +1691,8 @@ export async function serveLocalModel(
  *  tool surface by default. Remote OpenRouter models require an explicit deploy
  *  flag because those tools can touch privileged local/data systems. Project
  *  MCPs are also opt-in: banana serve is shared globally, so project-scoped MCP
- *  config would otherwise restart or stale the shared process across chats. */
+ *  config would otherwise restart or stale the shared process across chats.
+ *  The roster toolbox is applied per session prompt, never to this shared set. */
 function resolveMirroredMcp(opts: { projectPathHint?: string; cli?: CliKind } = {}): Record<string, BananaMcpConfig> {
   if ((opts.cli ?? 'banana') === 'banana' && !remoteBananaMcpEnabled()) return {};
   return readClaudeMcpServers(opts.projectPathHint, { includeProjectMcp: projectBananaMcpEnabled() });
@@ -3116,6 +3117,9 @@ export class BananaSession {
         // {reasoningEffort} for openai-compatible. A model with no matching
         // variant is a safe no-op.
         ...(providerVariant ? { variant: providerVariant } : {}),
+        // Native per-session filtering removes the assistant tool schemas
+        // without restarting the shared serve or changing a sibling's toolbox.
+        tools: bananaToolboxTools(agentForChatId(this.chatId)),
         parts: [...fileParts, { type: 'text' as const, text: promptText }],
       });
       if (res.error) {
@@ -4059,6 +4063,17 @@ const PLAN_RULESET: PermissionRuleset = [
   { permission: 'plan_enter', action: 'deny', pattern: '*' },
   { permission: 'plan_exit', action: 'deny', pattern: '*' },
 ];
+
+/** The SDK's tools map replaces session permissions, so retain the plan
+ *  denials on every prompt. Full prompts also clear a previous lean denial.
+ *  This filters assistant-mcp even when it came from operator config instead
+ *  of the Claude mirror, without touching any other server or built-in tool. */
+export function bananaToolboxTools(agent?: Agent): Record<string, boolean> {
+  return {
+    ...Object.fromEntries(PLAN_RULESET.map(rule => [rule.permission, false])),
+    ...(!wantsFullToolbox(agent) ? { 'assistant-mcp_*': false } : {}),
+  };
+}
 
 /** Best-effort extraction of a human message from a banana error object. */
 function errorText(error: unknown): string {
