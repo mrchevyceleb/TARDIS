@@ -17,17 +17,48 @@ export type AccountEngine = 'claude' | 'codex';
  *  long-lived token from `claude setup-token` never rotates, so lanes spawned
  *  on a profile that holds one authenticate with it and never refresh. The
  *  file (`<profile>/.long-lived-oauth-token`, mode 600) is the account email on
- *  line one and the token on line two; it applies only while the profile is
- *  still signed in as that account, so a re-login to another account never
- *  bills the old one. The profile's own credentials stay for the usage reader
- *  and the idle renewal, the only remaining refresher. */
-export function withLongLivedClaudeToken(env: NodeJS.ProcessEnv, profileDir: string): NodeJS.ProcessEnv {
-  delete env.CLAUDE_CODE_OAUTH_TOKEN;
+ *  line one and the token on line two. It applies while the profile is signed
+ *  in as that account, and also when the profile holds no signed-in account at
+ *  all — the wipe this whole mechanism exists to prevent takes the .claude.json
+ *  account with it, and the token, not the login, is then the profile's source
+ *  of truth. Only a re-login to a DIFFERENT account keeps the token out, so a
+ *  re-login never bills the old one. The profile's own credentials stay for
+ *  the usage reader and the idle renewal, the only remaining refreshers. */
+export function longLivedClaudeToken(profileDir: string): { email: string; token: string } | null {
   try {
     const [email, token] = readFileSync(join(profileDir, '.long-lived-oauth-token'), 'utf8').split('\n').map(line => line.trim());
-    const signedIn = JSON.parse(readFileSync(join(profileDir, '.claude.json'), 'utf8'))?.oauthAccount?.emailAddress;
-    if (email && typeof signedIn === 'string' && signedIn.toLowerCase() === email.toLowerCase() && /^sk-ant-oat[\w-]+$/.test(token ?? '')) env.CLAUDE_CODE_OAUTH_TOKEN = token;
+    if (email && email.includes('@') && /^sk-ant-oat[\w-]+$/.test(token ?? '')) return { email, token: token! };
   } catch { /* No token for this profile: the CLI uses its own login. */ }
+  return null;
+}
+
+/** The token decides identity only when the profile is CONFIRMED not signed in
+ *  as someone else: an absent account file, or one with no account on it. Any
+ *  other failure — unreadable, half-written, malformed — must refuse the
+ *  token, or a profile that quietly signed in as B would keep billing A. */
+export function longLivedTokenApplies(token: { email: string }, profileDir: string): boolean {
+  let raw: string;
+  try {
+    raw = readFileSync(join(profileDir, '.claude.json'), 'utf8');
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+  try {
+    const saved = JSON.parse(raw);
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return false;
+    const account = saved.oauthAccount;
+    if (account == null) return true;
+    if (typeof account !== 'object' || Array.isArray(account)) return false;
+    const signedIn = account.emailAddress;
+    // Missing identity is a wipe; a malformed identity is not permission to bill.
+    return signedIn == null || (typeof signedIn === 'string' && signedIn.toLowerCase() === token.email.toLowerCase());
+  } catch { return false; }
+}
+
+export function withLongLivedClaudeToken(env: NodeJS.ProcessEnv, profileDir: string): NodeJS.ProcessEnv {
+  delete env.CLAUDE_CODE_OAUTH_TOKEN;
+  const token = longLivedClaudeToken(profileDir);
+  if (token && longLivedTokenApplies(token, profileDir)) env.CLAUDE_CODE_OAUTH_TOKEN = token.token;
   return env;
 }
 
@@ -184,20 +215,48 @@ export function preferredSubscriptionEnv(engine: AccountEngine, cwd: string, cha
   return pinned ? accountEnvForAccount(pinned, cwd) : accountEnv(cwd);
 }
 
-/** Stable identity, excluding access/refresh tokens. A sign-in to a different
- * identity in the same native directory must retire an idle warm worker. */
+/** Stable identity, excluding rotating access/refresh tokens but including
+ * the year token workers hold for their lifetime. Real credential changes
+ * retire idle workers; transient account-file reads never do. */
 export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.ProcessEnv): string {
   const profile = cliProfileForEnv(engine, env);
   const id = cliProfileId(engine, profile);
   const previous = routingCache.get(id);
   let signature = '';
   try { const st = statSync(join(profile, engine === 'claude' ? '.credentials.json' : 'auth.json')); signature = `${st.mtimeMs}:${st.size}`; } catch { /* A transient read must not recycle a healthy worker. */ }
+  if (engine === 'claude') {
+    // On a wiped profile the year-token file is the only identity-bearing
+    // credential left, and .claude.json decides which credential applies, so
+    // both feed the signature: replacing token A with token B, or a re-login
+    // that changes which account lanes bill, must retire warm workers instead
+    // of repainting the panel while they keep running.
+    try { const st = statSync(join(profile, '.long-lived-oauth-token')); signature += `|oat:${st.mtimeMs}:${st.size}`; } catch { /* No token for this profile. */ }
+    try { const st = statSync(join(profile, '.claude.json')); signature += `|acct:${st.mtimeMs}:${st.size}`; } catch { /* No saved account. */ }
+  }
   let identity = previous?.identity || 'not-signed-in';
   if (previous && previous.signature === signature) return `${id}:${previous.identity}`;
   try {
     if (engine === 'claude') {
-      const account = JSON.parse(readFileSync(join(profile, '.claude.json'), 'utf8')).oauthAccount;
-      identity = JSON.stringify([account?.accountUuid, account?.organizationUuid, account?.emailAddress]);
+      let account: { accountUuid?: unknown; organizationUuid?: unknown; emailAddress?: unknown } | undefined;
+      try { account = JSON.parse(readFileSync(join(profile, '.claude.json'), 'utf8')).oauthAccount; } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      const token = longLivedClaudeToken(profile);
+      const applies = token ? longLivedTokenApplies(token, profile) : false;
+      // An applicable token is the credential lanes actually bill, so its
+      // fingerprint rides the identity even beside a saved account: swapping
+      // or revoking it must retire warm workers still holding the old one.
+      const fingerprint = applies ? createHash('sha256').update(token!.token).digest('hex').slice(0, 16) : undefined;
+      if (account && typeof account.emailAddress === 'string') {
+        identity = JSON.stringify([account.accountUuid, account.organizationUuid, account.emailAddress, fingerprint]);
+      } else if (applies) {
+        identity = JSON.stringify(['long-lived-token', token!.email, fingerprint]);
+      } else {
+        // Confirmed absence of every credential, never a stale previous
+        // identity: workers holding the removed token must be retired.
+        routingCache.set(id, { signature, identity: 'signed-out' });
+        return `${id}:signed-out`;
+      }
     } else {
       const auth = JSON.parse(readFileSync(join(profile, 'auth.json'), 'utf8'));
       const jwt = JSON.parse(Buffer.from(String(auth.tokens?.id_token || '').split('.')[1] || '', 'base64url').toString());
@@ -209,9 +268,10 @@ export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.Proces
   return `${id}:${identity}`;
 }
 
-/** A transient credential-file read must not look like an account change. The
- * profile path still has to match; once both identities are known, they must
- * match too so a real re-login recycles the warm worker. */
+/** A transient credential-file read must not look like an account change: the
+ * profile path still has to match, and an UNKNOWN identity ('not-signed-in')
+ * borrows the other side's. A CONFIRMED sign-out ('signed-out') is a real
+ * change — a worker still holding the removed token or login must go. */
 export function subscriptionRoutingKeysMatch(current: string, desired: string): boolean {
   if (current === desired) return true;
   const split = (value: string) => {
@@ -221,7 +281,8 @@ export function subscriptionRoutingKeysMatch(current: string, desired: string): 
   const left = split(current);
   const right = split(desired);
   return left.profile === right.profile
-    && (left.identity === 'not-signed-in' || right.identity === 'not-signed-in');
+    && (left.identity === right.identity
+      || left.identity === 'not-signed-in' || right.identity === 'not-signed-in');
 }
 
 export function subscriptionEmail(engine: AccountEngine, env: NodeJS.ProcessEnv): string | null {
