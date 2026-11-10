@@ -89,7 +89,7 @@ export type CliProfile = { id: string; engine: AccountEngine; path: string; env:
 type ManagedProfile = { id: string; engine: AccountEngine };
 type Choice = { id: string; profileId: string };
 const managedStore = new JsonStore<ManagedProfile>('cli-profiles.json', []);
-const routingCache = new Map<string, { signature: string; identity: string; tokenKey?: string; accountConfirmUntil?: number }>();
+const routingCache = new Map<string, { signature: string; identity: string; tokenKey?: string }>();
 const choicesStore = new JsonStore<Choice>('cli-account-choices.json', []);
 
 export type ClaudeSavedAccount = { accountUuid?: unknown; organizationUuid?: unknown; emailAddress?: unknown; organizationName?: unknown; planDisplayName?: unknown; seatTier?: unknown };
@@ -141,22 +141,22 @@ function claudeCredentialState(profileDir: string): 'present' | 'absent' | 'unkn
   }
 }
 
-/** Metadata that can actually change the credential a worker holds. Claude's
- * general config is deliberately excluded: the CLI rewrites unrelated counters
- * there during normal work, while a real login change also changes credentials. */
+function cliProfileFileSignature(path: string): string {
+  try {
+    const st = statSync(path);
+    return `${st.mtimeMs}:${st.ctimeMs}:${st.size}:${st.ino}`;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return 'absent';
+  }
+}
+
+/** Credential-file metadata, separate from Claude's frequently rewritten
+ * general config. Routing also tracks the account file because its identity
+ * decides whether the year token may replace the native login. */
 export function cliProfileCredentialSignature(engine: AccountEngine, profileDir: string): string {
   const names = engine === 'claude' ? ['.credentials.json', '.long-lived-oauth-token'] : ['auth.json'];
-  const parts: string[] = [];
-  for (const name of names) {
-    try {
-      const st = statSync(join(profileDir, name));
-      parts.push(`${name}:${st.mtimeMs}:${st.ctimeMs}:${st.size}:${st.ino}`);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      parts.push(`${name}:absent`);
-    }
-  }
-  return parts.join('|');
+  return names.map(name => `${name}:${cliProfileFileSignature(join(profileDir, name))}`).join('|');
 }
 
 function readRecords<T>(name: string): T[] {
@@ -318,7 +318,10 @@ export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.Proces
   // makes the worker's key describe what was actually injected, even if a
   // profile file was transiently unreadable while that environment was made.
   let baseSignature: string;
-  try { baseSignature = cliProfileCredentialSignature(engine, profile); } catch {
+  try {
+    baseSignature = cliProfileCredentialSignature(engine, profile);
+    if (engine === 'claude') baseSignature += `|account:${cliProfileFileSignature(accountFileKey)}`;
+  } catch {
     if (engine !== 'claude' || heldClaudeToken === undefined) return `${id}:${previous?.identity || 'not-signed-in'}`;
     const held = heldClaudeToken ? longLivedTokenKey(heldClaudeToken).slice(0, 16) : 'native';
     baseSignature = `spawn-unreadable:${held}`;
@@ -330,7 +333,7 @@ export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.Proces
   }
   let identity = previous?.identity || 'not-signed-in';
   let routedTokenKey: string | undefined;
-  if (previous && previous.signature === signature && Date.now() >= (previous.accountConfirmUntil ?? 0)) return `${id}:${previous.identity}`;
+  if (previous && previous.signature === signature) return `${id}:${previous.identity}`;
   try {
     if (engine === 'claude') {
       const saved = readClaudeAccountState(profile, env);
@@ -368,8 +371,7 @@ export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.Proces
         else {
         // Confirmed absence of every credential, never a stale previous
         // identity: workers holding the removed token must be retired.
-          routingCache.set(cacheId, { signature, identity: 'signed-out', tokenKey,
-            accountConfirmUntil: heldClaudeToken === undefined && previous?.signature !== signature ? Date.now() + 30_000 : previous?.accountConfirmUntil });
+          routingCache.set(cacheId, { signature, identity: 'signed-out', tokenKey });
           return `${id}:signed-out`;
         }
       }
@@ -380,8 +382,7 @@ export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.Proces
     }
   } catch { return `${id}:${identity}`; }
   identity = createHash('sha256').update(identity).digest('hex').slice(0, 20);
-  routingCache.set(cacheId, { signature, identity, tokenKey: routedTokenKey,
-    accountConfirmUntil: engine === 'claude' && heldClaudeToken === undefined && previous?.signature !== signature ? Date.now() + 30_000 : previous?.accountConfirmUntil });
+  routingCache.set(cacheId, { signature, identity, tokenKey: routedTokenKey });
   return `${id}:${identity}`;
 }
 

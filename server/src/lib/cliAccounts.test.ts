@@ -73,17 +73,19 @@ test('a wiped year-token profile still reads as connected', async () => {
   assert.equal(identity.organizationId, undefined);
 });
 
-test('a rejected year token reads as signed out; network trouble does not', async () => {
+test('a rejected year token reads as signed out; network trouble does not', async (t) => {
+  const fetchMock = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected provider request'); });
   writeFileSync(join(profile, '.claude.json'), JSON.stringify({}));
   const status = stubStatus({ loggedIn: true, authMethod: 'oauth_token' });
   const before = subscriptionRoutingKey('claude', status);
   assert.equal((await claudeIdentity(status, verdict('invalid'))).status, 'signed_out', 'auth status alone says loggedIn for any token; the provider verdict decides');
   assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, undefined, 'rejected tokens cannot override a native login on future lane spawns');
   assert.notEqual(subscriptionRoutingKey('claude', status), before, 'provider rejection retires workers holding the rejected token without a file change');
-  assert.equal((await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'claude.ai', email: 'year@example.com' }))).status, 'connected', 'a native login remains usable after token rejection');
+  assert.equal((await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'claude.ai', email: 'year@example.com' }), verdict('invalid'))).status, 'connected', 'a native login remains usable after token rejection');
   writeFileSync(join(profile, '.long-lived-oauth-token'), 'year@example.com\nsk-ant-oat01-replacement-token-0123456789\n');
   assert.equal((await claudeIdentity(stubStatus({ loggedIn: true, authMethod: 'oauth_token' }), verdict('unknown'))).status, 'unavailable', 'an unverified replacement is neither signed out nor proven connected');
   assert.equal((await claudeIdentity(stubStatus({ loggedIn: false }), verdict('valid'))).status, 'signed_out');
+  assert.equal(fetchMock.mock.callCount(), 0, 'identity unit tests never probe the provider');
 });
 
 test('a foreign account is never dressed up as the token account', async () => {

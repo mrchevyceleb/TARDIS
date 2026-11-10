@@ -209,6 +209,43 @@ test('a year-token swap retires the warm-worker routing key', () => {
   assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, token.token);
 });
 
+test('routing observes account-only changes after the initial confirmation window', (t) => {
+  let clock = Date.now();
+  t.mock.method(Date, 'now', () => clock);
+  const token = 'sk-ant-oat01-routing-account-change';
+  recordLongLivedTokenVerdict(token, 'valid');
+  const defaultProfile = join(home, '.claude');
+  const profiles = [
+    { profile: join(root, 'account-only-routing'), env: { CLAUDE_CONFIG_DIR: join(root, 'account-only-routing') }, accountFile: join(root, 'account-only-routing', '.claude.json') },
+    { profile: defaultProfile, env: {}, accountFile: join(home, '.claude.json') },
+    { profile: defaultProfile, env: { CLAUDE_CONFIG_DIR: defaultProfile }, accountFile: join(defaultProfile, '.claude.json') },
+  ];
+  for (const { profile, env, accountFile } of profiles) {
+    mkdirSync(profile, { recursive: true });
+    writeFileSync(join(profile, '.long-lived-oauth-token'), `first@example.com\n${token}\n`);
+    const preservedTime = new Date(1_600_000_000_000);
+    const writeAccount = (emailAddress: string, numStartups = 1) => {
+      writeFileSync(accountFile, JSON.stringify({ oauthAccount: { emailAddress, organizationUuid: 'org-1' }, numStartups }));
+      utimesSync(accountFile, preservedTime, preservedTime);
+    };
+    writeAccount('first@example.com');
+    const original = subscriptionRoutingKey('claude', env);
+    const worker = subscriptionRoutingKey('claude', env, token);
+    assert.equal(subscriptionRoutingKeysMatch(worker, original), true);
+    clock += 31_000;
+    assert.equal(subscriptionRoutingKey('claude', env), original, 'prime the cache beyond its old confirmation window');
+    writeAccount('first@example.com', 2);
+    assert.equal(subscriptionRoutingKey('claude', env), original, 'unrelated config writes do not retire a healthy worker');
+    // A preserved mtime must not hide a different account behind unchanged credentials.
+    writeAccount('other@example.com');
+    assert.equal(withLongLivedClaudeToken({ ...env }, profile).CLAUDE_CODE_OAUTH_TOKEN, undefined);
+    const changed = subscriptionRoutingKey('claude', env);
+    assert.equal(subscriptionRoutingKeysMatch(worker, changed), false, 'an account-only change retires workers holding the previous account token');
+    writeAccount('first@example.com');
+    assert.equal(subscriptionRoutingKey('claude', env), original, 'a later matching login restores the token routing identity');
+  }
+});
+
 test('routing preserves a healthy worker through transient reads but recycles on a real re-login', () => {
   const profile = join(root, 'transient-routing');
   const env = { CLAUDE_CONFIG_DIR: profile };
