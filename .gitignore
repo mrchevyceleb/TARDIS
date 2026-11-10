@@ -70,3 +70,4 @@ __pycache__/
 
 # personal session notes, never publish
 Sessions/
+.agent-one/
