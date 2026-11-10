@@ -1,10 +1,10 @@
 import { execFile, spawn } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { APP_ROOT } from '../config.ts';
 import { resolveCodexBin } from '../chat/codex-models.ts';
-import { cliProfiles, cliProfileId, cliProfileForEnv, type AccountEngine, type CliProfile } from './cliProfiles.ts';
+import { cliProfiles, cliProfileId, cliProfileForEnv, longLivedClaudeToken, withLongLivedClaudeToken, type AccountEngine, type CliProfile } from './cliProfiles.ts';
 export { cliProfileId, cliProfileForEnv };
 export type { AccountEngine };
 
@@ -30,10 +30,18 @@ function text(value: unknown): string | undefined {
 }
 
 export async function claudeIdentity(env: NodeJS.ProcessEnv): Promise<Identity> {
+  // A profile holding a year token authenticates with it, and `claude auth
+  // status` only proves that login when the token rides the environment; its
+  // answer then says loggedIn with authMethod "oauth_token" and no email, so
+  // the account identity comes from the token file, with the profile's saved
+  // account supplying the organization while it still matches.
+  const profileDir = cliProfileForEnv('claude', env);
+  const longLived = longLivedClaudeToken(profileDir);
   let stdout: string;
   try {
     ({ stdout } = await run('claude', ['auth', 'status', '--json'], {
-      cwd: APP_ROOT, env, timeout: 8_000, maxBuffer: 64 * 1024, windowsHide: true,
+      cwd: APP_ROOT, env: longLived ? withLongLivedClaudeToken({ ...env }, profileDir) : env,
+      timeout: 8_000, maxBuffer: 64 * 1024, windowsHide: true,
     }));
   } catch (error) {
     // A signed-out CLI may return valid status JSON with a nonzero exit.
@@ -44,6 +52,18 @@ export async function claudeIdentity(env: NodeJS.ProcessEnv): Promise<Identity> 
   const data = JSON.parse(stdout);
   const checkedAt = Date.now();
   if (data.loggedIn !== true) return { status: 'signed_out', checkedAt };
+  if (longLived && data.authMethod === 'oauth_token') {
+    let organization: string | undefined, organizationId: string | undefined, plan: string | undefined;
+    try {
+      const saved = JSON.parse(readFileSync(join(profileDir, '.claude.json'), 'utf8'))?.oauthAccount;
+      if (typeof saved?.emailAddress === 'string' && saved.emailAddress.toLowerCase() === longLived.email.toLowerCase()) {
+        organization = text(saved.organizationName);
+        organizationId = text(saved.organizationUuid);
+        plan = text(saved.planDisplayName) ?? text(saved.seatTier);
+      }
+    } catch { /* A wiped profile: the token alone is the identity. */ }
+    return { status: 'connected', checkedAt, email: longLived.email, organization, organizationId, plan };
+  }
   if (data.authMethod !== 'claude.ai') return { status: 'unsupported', checkedAt };
   const email = text(data.email);
   return {
@@ -115,7 +135,9 @@ export async function codexIdentity(env: NodeJS.ProcessEnv): Promise<Identity> {
 
 function identity(profile: Profile, refresh: boolean): Promise<Identity> {
   const previous = cache.get(profile.id);
-  const signature = ['.credentials.json', 'auth.json'].map(name => {
+  // The year-token file and the saved account shape the answer as much as the
+  // native credentials do, so all three feed the cache signature.
+  const signature = ['.credentials.json', 'auth.json', '.claude.json', '.long-lived-oauth-token'].map(name => {
     try { const st = statSync(join(profile.path, name)); return `${st.mtimeMs}:${st.size}`; } catch { return ''; }
   }).join('|');
   // Even explicit refreshes coalesce, so opening several agents cannot spawn

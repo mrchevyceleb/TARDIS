@@ -10,7 +10,7 @@ import { resolveCodexBin } from '../chat/codex-models.ts';
 import { latestMuseAllowance, museInstalled, parseMuseAllowance, resolveMuseBin, type MuseAllowance } from '../chat/muse-models.ts';
 import { museSubscriptionEnvironment } from '../chat/subscription-policy.ts';
 import { getXaiAuth, type XaiAuth } from '../routes/xai-oauth.ts';
-import { cliProfiles, subscriptionEnvForLane, cliProfileForEnv, type CliProfile } from './cliProfiles.ts';
+import { cliProfiles, subscriptionEnvForLane, cliProfileForEnv, longLivedClaudeToken, type CliProfile } from './cliProfiles.ts';
 import { listCliAccounts, accountForProfile, type CliAccount } from './cliAccounts.ts';
 import { claudeAccountPool } from './claudeAccountPool.ts';
 
@@ -125,12 +125,15 @@ async function json(url: string, token: string, extra: Record<string, string> = 
 function account(id: string, provider: string, name: string, kind: UsageAccount['kind'], source: string, href: string): UsageAccount {
   return { id, provider, name, kind, source, href, status: 'live', checkedAt: now(), attemptedAt: now(), windows: [], amounts: [], agents: [], note: '' };
 }
-async function guarded(base: UsageAccount, load: () => Promise<UsageAccount>): Promise<UsageAccount> {
+async function guarded(base: UsageAccount, load: () => Promise<UsageAccount>, notes: Partial<Record<number, string>> = {}): Promise<UsageAccount> {
   try {
     const result = await load(); cache.set(base.id, result); return result;
   } catch (error) {
     const previous = cache.get(base.id);
-    const reason = error instanceof FeedError && [401, 403].includes(error.code) ? 'This connection cannot read usage. Open the provider to check its access.'
+    const code = error instanceof FeedError ? error.code : undefined;
+    const reason = code !== undefined && notes[code]
+      ? notes[code]!
+      : error instanceof FeedError && [401, 403].includes(error.code) ? 'This connection cannot read usage. Open the provider to check its access.'
       : error instanceof FeedError && error.code === 429 ? 'The provider asked for a pause. The next automatic check will try again.'
       : 'The provider could not report usage just now. The next check will try again.';
     return { ...(previous || base), agents: [], attemptedAt: now(), checkedAt: previous?.checkedAt || null, status: previous ? 'stale' : 'unavailable', note: reason + (previous ? ' These are the last reported figures.' : '') };
@@ -176,6 +179,11 @@ async function claudeAccessToken(profile: CliProfile): Promise<unknown> {
 async function claude(accountInfo: CliAccount, profile: CliProfile): Promise<UsageAccount> {
   const base = account(accountInfo.id, 'Claude', 'Claude subscription', 'subscription', 'Claude live quota', 'https://claude.ai/settings/usage');
   base.email = accountInfo.email; base.plan = accountInfo.plan;
+  // The provider's usage API rejects year tokens outright, so usage rides the
+  // normal login's short-lived pass; when that pass is gone on a year-token
+  // profile the account itself is fine (lanes authenticate with the token),
+  // and the note must say so instead of crying sign-in.
+  const notes = longLivedClaudeToken(profile.path) ? { 401: 'Lanes keep running on this account’s year token. Usage reporting reads the normal sign-in, which needs a fresh login on this profile.' } : {};
   return guarded(base, async () => {
     const token = await claudeAccessToken(profile);
     if (typeof token !== 'string' || !token) throw new FeedError(401);
@@ -205,7 +213,7 @@ async function claude(accountInfo: CliAccount, profile: CliProfile): Promise<Usa
       : extra.is_enabled === false || label(extra.disabled_reason) ? 'Extra usage is off.' : 'Extra usage status is not reported.';
     if (!base.amounts.length) base.note += ' Subscription price is not supplied by this quota feed.';
     return base;
-  });
+  }, notes);
 }
 
 let claudeRead: Promise<UsageAccount[]> | undefined;

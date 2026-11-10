@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -28,7 +28,7 @@ const saved = {
 process.env.RIVENDELL_ACCOUNT_MAP = mapPath;
 process.env.HOME = home;
 
-const { claudeProfileInLanePool } = await import('./cliProfiles.ts');
+const { claudeProfileInLanePool, longLivedClaudeToken, withLongLivedClaudeToken } = await import('./cliProfiles.ts');
 const gameDir = join(home, '.claude-game');
 const rallyDir = join(home, '.claude-rally');
 const otherDir = join(home, '.claude-other');
@@ -80,4 +80,36 @@ test('a broken pool config fails closed', () => {
     assert.equal(claudeProfileInLanePool(rallyDir, gameDir), false, 'a foreign profile is refused when pools cannot be read');
     assert.equal(claudeProfileInLanePool(gameDir, gameDir), true, "the lane's own resolved profile is never foreign to itself");
   });
+});
+
+test('a year token rides lane environments, and the wipe it survives', () => {
+  const profile = join(root, 'token-profile');
+  mkdirSync(profile, { recursive: true });
+  const writeToken = (email: string, token: string) => writeFileSync(join(profile, '.long-lived-oauth-token'), `${email}\n${token}\n`);
+  const writeAccount = (email?: string) => writeFileSync(join(profile, '.claude.json'), JSON.stringify(email ? { oauthAccount: { emailAddress: email, organizationUuid: 'org-1', organizationName: 'Acme', planDisplayName: 'Pro' } } : {}));
+  const good = 'sk-ant-oat01-example-token-0123456789';
+
+  // No token file: nothing applies, and an inherited token never leaks in.
+  writeAccount('someone@example.com');
+  assert.equal(longLivedClaudeToken(profile), null);
+  assert.equal(withLongLivedClaudeToken({ CLAUDE_CODE_OAUTH_TOKEN: 'inherited' }, profile).CLAUDE_CODE_OAUTH_TOKEN, undefined);
+
+  // Malformed tokens and headerless emails never apply.
+  writeToken('not-an-email', good);
+  assert.equal(longLivedClaudeToken(profile), null);
+  writeToken('a@example.com', 'sk-ant-wrongprefix');
+  assert.equal(longLivedClaudeToken(profile), null);
+  writeToken('a@example.com', '');
+  assert.equal(longLivedClaudeToken(profile), null);
+
+  // A matching signed-in account (case-insensitive) and a wiped profile
+  // (no account at all) both ride the token; only a different signed-in
+  // account keeps it out so a re-login never bills the old one.
+  writeToken('A@Example.com', good);
+  writeAccount('a@example.com');
+  assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, good);
+  writeAccount(undefined);
+  assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, good, 'a wiped profile authenticates on its year token');
+  writeAccount('someone-else@example.com');
+  assert.equal(withLongLivedClaudeToken({}, profile).CLAUDE_CODE_OAUTH_TOKEN, undefined, 'a different signed-in account never bills the token account');
 });

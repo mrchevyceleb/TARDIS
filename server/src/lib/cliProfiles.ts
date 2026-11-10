@@ -17,17 +17,33 @@ export type AccountEngine = 'claude' | 'codex';
  *  long-lived token from `claude setup-token` never rotates, so lanes spawned
  *  on a profile that holds one authenticate with it and never refresh. The
  *  file (`<profile>/.long-lived-oauth-token`, mode 600) is the account email on
- *  line one and the token on line two; it applies only while the profile is
- *  still signed in as that account, so a re-login to another account never
- *  bills the old one. The profile's own credentials stay for the usage reader
- *  and the idle renewal, the only remaining refresher. */
-export function withLongLivedClaudeToken(env: NodeJS.ProcessEnv, profileDir: string): NodeJS.ProcessEnv {
-  delete env.CLAUDE_CODE_OAUTH_TOKEN;
+ *  line one and the token on line two. It applies while the profile is signed
+ *  in as that account, and also when the profile holds no signed-in account at
+ *  all — the wipe this whole mechanism exists to prevent takes the .claude.json
+ *  account with it, and the token, not the login, is then the profile's source
+ *  of truth. Only a re-login to a DIFFERENT account keeps the token out, so a
+ *  re-login never bills the old one. The profile's own credentials stay for
+ *  the usage reader and the idle renewal, the only remaining refreshers. */
+export function longLivedClaudeToken(profileDir: string): { email: string; token: string } | null {
   try {
     const [email, token] = readFileSync(join(profileDir, '.long-lived-oauth-token'), 'utf8').split('\n').map(line => line.trim());
-    const signedIn = JSON.parse(readFileSync(join(profileDir, '.claude.json'), 'utf8'))?.oauthAccount?.emailAddress;
-    if (email && typeof signedIn === 'string' && signedIn.toLowerCase() === email.toLowerCase() && /^sk-ant-oat[\w-]+$/.test(token ?? '')) env.CLAUDE_CODE_OAUTH_TOKEN = token;
+    if (email && email.includes('@') && /^sk-ant-oat[\w-]+$/.test(token ?? '')) return { email, token: token! };
   } catch { /* No token for this profile: the CLI uses its own login. */ }
+  return null;
+}
+
+function longLivedTokenApplies(token: { email: string }, profileDir: string): boolean {
+  try {
+    const signedIn = JSON.parse(readFileSync(join(profileDir, '.claude.json'), 'utf8'))?.oauthAccount?.emailAddress;
+    // A profile signed in as someone else never bills the token's account.
+    return typeof signedIn !== 'string' || signedIn.toLowerCase() === token.email.toLowerCase();
+  } catch { return true; /* No readable .claude.json: the token is the identity. */ }
+}
+
+export function withLongLivedClaudeToken(env: NodeJS.ProcessEnv, profileDir: string): NodeJS.ProcessEnv {
+  delete env.CLAUDE_CODE_OAUTH_TOKEN;
+  const token = longLivedClaudeToken(profileDir);
+  if (token && longLivedTokenApplies(token, profileDir)) env.CLAUDE_CODE_OAUTH_TOKEN = token.token;
   return env;
 }
 
