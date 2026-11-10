@@ -869,7 +869,7 @@ const ENGINE_LABEL: Record<string, string> = {
   muse: 'Muse Code',
 };
 
-export function engineLabel(id: string): string {
+function engineLabel(id: string): string {
   return ENGINE_LABEL[id] ?? id;
 }
 

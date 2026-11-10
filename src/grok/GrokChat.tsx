@@ -15,6 +15,7 @@ import {
   normalizeZaiEffort,
   normalizeZaiModel,
   useCompanionPicker,
+  WORKSPACE_COMPANIONS,
 } from '../chat/hooks/useCompanionPicker';
 import { codexModelChange, normalizeCodexServiceTier, savedCodexServiceTier, normalizeCodexEffort, normalizeCodexModel } from '../chat/codexModels';
 import { normalizeFireworksEffort, normalizeFireworksModel } from '../chat/fireworksModels';
@@ -29,10 +30,11 @@ import { GrokConversation, type ConversationDock } from './GrokConversation';
 import type { ChatMeta } from './BotPanel';
 import type { Agent } from './agents';
 import { AgentUpdateConflictError, markAgentRead, updateAgentReq } from './agents';
-import { engineLabel } from '../chat/components/reimagine/blocks';
 import { onPresenceChange, userPresent } from '../chat/utils/userPresence';
 
 type BrainDraft = { engine: string; model?: string; effort?: string; serviceTier?: string };
+/** The engine name exactly as the picker shows it. */
+const engineName = (engine: string) => WORKSPACE_COMPANIONS.find((c) => c.id === engine)?.label ?? engine;
 
 // Keep the write-side draft consistent with the lane displayed by the picker,
 // including while an older server snapshot still carries a retired provider.
@@ -269,7 +271,7 @@ export function GrokChat(props: GrokChatProps) {
     const currentEngine = desiredBrain.current.engine;
     if (agentId && currentEngine && next.engine && next.engine !== currentEngine) {
       const name = props.agent?.name ?? 'this teammate';
-      if (!window.confirm(`Switch ${name} from ${engineLabel(currentEngine)} to ${engineLabel(next.engine)}? Their next reply runs on the new engine.`)) {
+      if (!window.confirm(`Switch ${name} from ${engineName(currentEngine)} to ${engineName(next.engine)}? Their next reply runs on the new engine.`)) {
         picker.applyAuthoritativeBrain(desiredBrain.current.engine, desiredBrain.current.model, desiredBrain.current.effort, desiredBrain.current.serviceTier);
         return;
       }
@@ -305,9 +307,10 @@ export function GrokChat(props: GrokChatProps) {
             const current = error.current;
             savedBrain.current = { engine: current.engine, model: current.model, serviceTier: current.serviceTier, effort: current.effort };
             serverBrainRevision.current = current.brainRevision ?? serverBrainRevision.current;
-            picker.applyAuthoritativeBrain(current.engine, current.model, current.effort, current.serviceTier);
           }
           desiredBrain.current = canonicalBrain(savedBrain.current);
+          // Any failed save shows what is actually saved, never the choice that failed.
+          picker.applyAuthoritativeBrain(savedBrain.current.engine, savedBrain.current.model, savedBrain.current.effort, savedBrain.current.serviceTier);
           setBrainSaveError(error instanceof AgentUpdateConflictError
             ? 'Settings changed on another device. Refreshed them here; try your change again.'
             : `Change wasn’t saved. ${error instanceof Error ? error.message : 'Please try again.'}`);
