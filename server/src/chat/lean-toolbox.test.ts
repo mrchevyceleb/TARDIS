@@ -32,7 +32,7 @@ const { laneMcpServers, optionalMcpServersFor } = await import('./runner.ts');
 const { bananaToolboxTools } = await import('./banana-runner.ts');
 const { personaPromptFor } = await import('./personaPrompts.ts');
 const { instructionsStamp, instructionLayers } = await import('./instructionLayers.ts');
-const { sharedRuleFile, SHARED_RULES } = await import('./sharedRules.ts');
+const { sharedRuleFile, sharedRuleText, SHARED_RULES, RETIRED_STOCK_SEEDS } = await import('./sharedRules.ts');
 const { agentsRouter } = await import('../routes/agents.ts');
 
 const baseAgent = (patch: Partial<Agent>): Agent => ({
@@ -120,6 +120,21 @@ test('Antigravity lanes carry no office-tool guidance at any toolbox setting', (
   // The engine basics seed describes the CLI's real tool surface.
   assert.doesNotMatch(SHARED_RULES['engine-agy'].seed(), /assistant_\* tools/);
   assert.doesNotMatch(SHARED_RULES['engine-agy'].seed(), /team_message/);
+});
+
+test('a rule file still carrying a retired stock seed refreshes; an owner edit never does', () => {
+  // engine-agy shipped a seed that described office and team tools the CLI
+  // never mounts. A file still holding that text word-for-word was never
+  // owner-edited, so the corrected seed replaces it on first read.
+  const file = sharedRuleFile('engine-agy');
+  mkdirSync(join(dir, 'state', 'rules'), { recursive: true });
+  writeFileSync(file, `${RETIRED_STOCK_SEEDS['engine-agy']![0]}\n`);
+  assert.equal(sharedRuleText('engine-agy'), SHARED_RULES['engine-agy'].seed());
+  // An owner-edited variant keeps the owner's words.
+  writeFileSync(file, `${RETIRED_STOCK_SEEDS['engine-agy']![0]}\n\nOwner note.\n`);
+  const edited = sharedRuleText('engine-agy');
+  assert.match(edited, /Owner note\./);
+  assert.match(edited, /team_message/);
 });
 
 test('switching a toolbox changes the warm-process stamp even with an empty ops rule', () => {

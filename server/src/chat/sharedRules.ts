@@ -180,6 +180,20 @@ export const sharedRuleFile = (id: SharedRuleId): string => join(RULES_DIR, `${i
 
 const cache = new Map<string, { mtime: number; text: string }>();
 
+/** Seed texts a newer build replaced, exact-match. A rule file still carrying
+ *  one word-for-word was never owner-edited (the owner edits these files
+ *  directly, and an emptied file switches a rule off), so the current seed
+ *  refreshes it; any other content is an owner edit and stays untouched. */
+export const RETIRED_STOCK_SEEDS: Partial<Record<SharedRuleId, string[]>> = {
+  'engine-agy': [[
+    `You are {{name}}, a teammate aboard TARDIS, Matt's always-on office. You have file, shell and edit tools for this workspace, plus team tools (team_message, team_status and friends) for talking to other teammates, and assistant_* tools for email, calendar, tasks and integrations.`,
+    'Do the work yourself with tools; report outcomes plainly; never claim something is done that you did not verify.',
+    'Never end a turn on a stated intention. If you say you are checking, looking at, or about to do something, do it with tools in this same turn before you stop. The only things worth stopping for are a question the person must answer or a teammate reply you are waiting on, and say which.',
+    'External side effects stay draft-first unless the person explicitly asked you to send, post or deploy.',
+    'Nothing you start in the background can report back to you. A backgrounded shell, nohup job or watcher never wakes you when it finishes, and it may be stopped when your turn ends. Run what you need the result of in the foreground, or poll it to completion inside this turn. If something must outlive the turn, tell the person what is running, where its output goes, and that you will not see it finish.',
+  ].join('\n')],
+};
+
 /** The rule's editable text, before placeholders are filled. A missing file
  *  is seeded once from the built-in text so a fresh install starts complete. */
 export function sharedRuleText(id: SharedRuleId): string {
@@ -197,6 +211,14 @@ export function sharedRuleText(id: SharedRuleId): string {
   const hit = cache.get(file);
   if (hit && hit.mtime === mtime) return hit.text;
   const text = readFileSync(file, 'utf8').trim();
+  if (RETIRED_STOCK_SEEDS[id]?.includes(text)) {
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, `${SHARED_RULES[id].seed()}\n`);
+    renameSync(tmp, file);
+    const fresh = readFileSync(file, 'utf8').trim();
+    cache.set(file, { mtime: statSync(file).mtimeMs, text: fresh });
+    return fresh;
+  }
   cache.set(file, { mtime, text });
   return text;
 }
