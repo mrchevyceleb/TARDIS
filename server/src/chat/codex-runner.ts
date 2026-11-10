@@ -241,16 +241,24 @@ function isIgnorableCodexStderr(line: string): boolean {
   return CODEX_TRACING_LINE.test(line);
 }
 
-/** True when the lane's CODEX_HOME config.toml defines
- *  [mcp_servers.assistant-mcp]. A -c override naming a server the home has no
- *  transport for fails codex's whole config load ("invalid transport"), so a
- *  lean lane only disables an entry that is actually there. */
-function codexHomeDefinesAssistantMcp(env: NodeJS.ProcessEnv): boolean {
+/** An uncommented `[mcp_servers.assistant-mcp]` table header (quoted-key form
+ *  allowed; sub-tables like `.env` do not count, comments never match). */
+const CODEX_ASSISTANT_MCP_ENTRY = /^\s*\[\s*mcp_servers\.(?:assistant-mcp|"assistant-mcp")\s*\]\s*$/m;
+function codexConfigDefinesAssistantMcp(file: string): boolean {
   try {
-    return readFileSync(join(codexHomeFor(env), 'config.toml'), 'utf8').includes('mcp_servers.assistant-mcp');
+    return CODEX_ASSISTANT_MCP_ENTRY.test(readFileSync(file, 'utf8'));
   } catch {
     return false;
   }
+}
+
+/** True when codex would actually load an assistant-mcp server for this lane:
+ *  the CODEX_HOME config or the project's own .codex/config.toml defines it.
+ *  A -c override naming a server no layer defines fails codex's whole config
+ *  load ("invalid transport"), so a lean lane only disables what is there. */
+function codexDefinesAssistantMcp(env: NodeJS.ProcessEnv, cwd: string): boolean {
+  return codexConfigDefinesAssistantMcp(join(codexHomeFor(env), 'config.toml'))
+    || codexConfigDefinesAssistantMcp(join(cwd, '.codex', 'config.toml'));
 }
 
 /** Diagnostics belong in the server log. A chat error describes the failed
@@ -905,7 +913,7 @@ export class CodexSession {
     // refuses to boot on a -c override describing a server it has no
     // transport for ("invalid transport"), which would kill every lean lane
     // on a fresh install or an account profile without assistant-mcp.
-    const leanToolboxArgs = wantsFullToolbox(sessionAgent) || !codexHomeDefinesAssistantMcp(childEnv)
+    const leanToolboxArgs = wantsFullToolbox(sessionAgent) || !codexDefinesAssistantMcp(childEnv, this.cwd)
       ? [] : ['-c', 'mcp_servers.assistant-mcp.enabled=false'];
     browserMcpArgs.push(...leanToolboxArgs, ...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId), agentId: sessionAgent?.id }), ...officeMcpCodexArgs());
     const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', `service_tier=${JSON.stringify(serviceTier)}`, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);

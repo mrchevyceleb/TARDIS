@@ -490,7 +490,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
                 <small>Hide unread badges — for companions that talk to other agents, not you</small>
               </span>
             </label>
-            <label className="bt-agent-checkrow" title="A lean lane skips the office integrations on every engine to keep its context small; they come back with one switch. Secrets still work — ~/bin/doppler-secret covers them.">
+            <label className="bt-agent-checkrow" title="Runs without the office integrations for a smaller, faster lane. One switch brings them back, and secrets still work.">
               <input type="checkbox" checked={leanToolbox} onChange={(e) => setLeanToolbox(e.target.checked)} />
               <span>
                 Lean toolbox
