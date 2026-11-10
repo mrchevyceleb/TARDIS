@@ -29,6 +29,7 @@ import { GrokConversation, type ConversationDock } from './GrokConversation';
 import type { ChatMeta } from './BotPanel';
 import type { Agent } from './agents';
 import { AgentUpdateConflictError, markAgentRead, updateAgentReq } from './agents';
+import { engineLabel } from '../chat/components/reimagine/blocks';
 import { onPresenceChange, userPresent } from '../chat/utils/userPresence';
 
 type BrainDraft = { engine: string; model?: string; effort?: string; serviceTier?: string };
@@ -260,6 +261,19 @@ export function GrokChat(props: GrokChatProps) {
     setBrainSaveError(null);
     setBrainSaveNotice(null);
     const next = canonicalBrain({ ...desiredBrain.current, ...patch });
+    // A teammate's engine is a durable team setting that hands their live
+    // thread to a different AI. One stray tap on the picker moved an Operly
+    // developer from Claude to Codex mid-job (Nov 10 2026), so switching a
+    // teammate to another engine always asks first. Model and effort changes
+    // within the same engine stay one tap.
+    const currentEngine = desiredBrain.current.engine;
+    if (agentId && currentEngine && next.engine && next.engine !== currentEngine) {
+      const name = props.agent?.name ?? 'this teammate';
+      if (!window.confirm(`Switch ${name} from ${engineLabel(currentEngine)} to ${engineLabel(next.engine)}? Their next reply runs on the new engine.`)) {
+        picker.applyAuthoritativeBrain(desiredBrain.current.engine, desiredBrain.current.model, desiredBrain.current.effort, desiredBrain.current.serviceTier);
+        return;
+      }
+    }
     desiredBrain.current = next;
     if (!agentId) {
       picker.applyAuthoritativeBrain(next.engine, next.model, next.effort, next.serviceTier);
@@ -300,7 +314,7 @@ export function GrokChat(props: GrokChatProps) {
         }
       }
     });
-  }, [agentId, picker.applyAuthoritativeBrain, props.onAgentBrainSaved]);
+  }, [agentId, picker.applyAuthoritativeBrain, props.agent?.name, props.onAgentBrainSaved]);
 
   const pickerForUi = !agentId ? picker : {
     ...picker,
