@@ -291,8 +291,10 @@ export function GrokChat(props: GrokChatProps) {
           brainRevision: serverBrainRevision.current,
         });
         serverBrainRevision.current = saved.brainRevision ?? serverBrainRevision.current + 1;
+        // Saves run one at a time, so every success is the newest durable brain,
+        // even when a later click is already queued behind it.
+        savedBrain.current = { engine: saved.engine, model: saved.model, serviceTier: saved.serviceTier, effort: saved.effort };
         if (gen === persistGen.current) {
-          savedBrain.current = { engine: saved.engine, model: saved.model, serviceTier: saved.serviceTier, effort: saved.effort };
           desiredBrain.current = canonicalBrain({ engine: saved.engine, model: saved.model, serviceTier: saved.serviceTier, effort: saved.effort });
           picker.applyAuthoritativeBrain(saved.engine, saved.model, saved.effort, saved.serviceTier);
           setBrainSaveNotice(notice ?? 'Selection saved. New replies will use it.');
