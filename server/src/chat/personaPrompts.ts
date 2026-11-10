@@ -5,7 +5,7 @@
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
-import { agentForChatId, cliForAgentEngine, wantsFullToolbox } from './agents.ts';
+import { agentForChatId, cliForAgentEngine, mountsOfficeTools } from './agents.ts';
 import { DESK_ROOM_ENABLED } from '../config.ts';
 import { sessionBriefs, sessionMemory, taskControlGuidance } from './sessionPolicy.ts';
 import { sharedRule, type SharedRuleId } from './sharedRules.ts';
@@ -41,8 +41,12 @@ export function personaPromptFor(chatId: string, memory = sessionMemory(chatId))
   // so they never see its instructions either. Antigravity mounts no
   // TARDIS-managed MCP at all (one machine-global config TARDIS never
   // writes), so its lanes never see the rule either, whatever the toolbox.
-  const mountsOfficeTools = wantsFullToolbox(agent) && cliForAgentEngine(agent.engine) !== 'agy';
-  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId), sharedRule('team-status'), sharedRule('background-jobs'), sharedRule('sidebar'), DESK_ROOM_ENABLED ? sharedRule('desk') : null, mountsOfficeTools ? sharedRule('ops-toolbox') : null].filter(Boolean).join('\n\n');
+  // The same is true of the team-status/background-jobs/sidebar rules: they
+  // coach tools (team_status, job_start, sidebar_checklist) that reach an
+  // agent only through those mounts, and an Antigravity lane would read
+  // "call team_status" next to a seed saying it has no such tools.
+  const onAgy = cliForAgentEngine(agent.engine ?? '') === 'agy';
+  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId), onAgy ? null : sharedRule('team-status'), onAgy ? null : sharedRule('background-jobs'), onAgy ? null : sharedRule('sidebar'), DESK_ROOM_ENABLED ? sharedRule('desk') : null, mountsOfficeTools(agent) ? sharedRule('ops-toolbox') : null].filter(Boolean).join('\n\n');
 }
 
 /** Scope text for an agent record's home (REST use). */

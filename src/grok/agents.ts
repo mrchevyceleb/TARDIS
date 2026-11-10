@@ -33,8 +33,8 @@ export type Agent = {
   muted?: boolean;
   /** Sidebar color label, synced through the server so every device agrees. */
   color?: ChatColor;
-  /** 'lean' skips the office integrations on every engine; absent means the
-   *  full toolbox. File, coding and browser tools stay available. */
+  /** 'lean' skips the office integrations on engines that mount them; absent
+   *  means the full toolbox. File, coding and browser tools stay available. */
   toolbox?: 'full' | 'lean';
 };
 

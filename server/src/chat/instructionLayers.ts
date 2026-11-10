@@ -8,7 +8,7 @@ import { readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { STATE_DIR } from './config.ts';
-import { agentForChatId, cliForAgentEngine, listAgents, wantsFullToolbox, type Agent } from './agents.ts';
+import { agentForChatId, cliForAgentEngine, listAgents, mountsOfficeTools, type Agent } from './agents.ts';
 import { PERSONAS_DIR, engineRule, personaPromptFor } from './personaPrompts.ts';
 import { sessionDirectory, sessionPolicy } from './sessionPolicy.ts';
 import { plainEnglishWritingSystemBlockFor } from './plain-english-guidance.ts';
@@ -49,7 +49,7 @@ const shortHome = (path: string) => path.replace(homedir(), '~');
  *  reads one machine-global config TARDIS never writes). */
 function ruleApplies(id: SharedRuleId, agent: Agent): boolean {
   const rule = SHARED_RULES[id];
-  if (rule.toolbox === 'full' && (!wantsFullToolbox(agent) || cliForAgentEngine(agent.engine ?? '') === 'agy')) return false;
+  if (rule.toolbox === 'full' && !mountsOfficeTools(agent)) return false;
   const engine = rule.engine;
   if (!engine) return true;
   const cli = cliForAgentEngine(agent.engine ?? '');

@@ -107,16 +107,21 @@ test('a lean lane switches to Antigravity (Gemini 4 Carbon) and keeps lean', () 
 test('Antigravity lanes carry no office-tool guidance at any toolbox setting', () => {
   // The Antigravity CLI reads one machine-global MCP config TARDIS never
   // writes: no agy lane mounts assistant-mcp, so none of them get the router
-  // rule — lean or full.
+  // rule — lean or full. The team-status/background-jobs/sidebar rules coach
+  // tools those mounts carry, so they stay off agy too.
   const agyFull = createAgent({ name: 'Agy full', engine: 'agy' });
   const agyLean = createAgent({ name: 'Agy lean', engine: 'agy', toolbox: 'lean' });
   for (const agent of [agyFull, agyLean]) {
     assert.doesNotMatch(personaPromptFor(agent.home), /<rivendell-ops-toolbox>/);
     assert.ok(!instructionLayers(agent.id)?.layers.some(layer => layer.key === 'rule:ops-toolbox'));
+    assert.doesNotMatch(personaPromptFor(agent.home), /<rivendell-team-status>|<rivendell-background-jobs>|<rivendell-sidebar>/);
   }
-  // Other engines keep the full-toolbox rule.
+  // Other engines keep the full-toolbox rule and the team-tool rules.
   const orLane = createAgent({ name: 'OpenRouter full', engine: 'openrouter' });
   assert.match(personaPromptFor(orLane.home), /<rivendell-ops-toolbox>/);
+  assert.match(personaPromptFor(orLane.home), /<rivendell-team-status>/);
+  assert.match(personaPromptFor(orLane.home), /<rivendell-background-jobs>/);
+  assert.match(personaPromptFor(orLane.home), /<rivendell-sidebar>/);
   // The engine basics seed describes the CLI's real tool surface.
   assert.doesNotMatch(SHARED_RULES['engine-agy'].seed(), /assistant_\* tools/);
   assert.doesNotMatch(SHARED_RULES['engine-agy'].seed(), /team_message/);

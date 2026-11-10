@@ -100,6 +100,14 @@ export function wantsFullToolbox(agent?: Agent): boolean {
   return agent?.toolbox !== 'lean';
 }
 
+/** Whether the lane actually mounts the office integrations: a lean roster
+ *  choice opts out, and the Antigravity CLI reads one machine-global MCP
+ *  config TARDIS never writes, so its lanes mount them at no setting. One
+ *  answer shared by the prompt guidance and the instruction-layer scoping. */
+export function mountsOfficeTools(agent: Agent): boolean {
+  return wantsFullToolbox(agent) && cliForAgentEngine(agent.engine ?? '') !== 'agy';
+}
+
 export type AgentBrain = { engine: string; model?: string; effort?: string; serviceTier?: string; revision: number; updatedAt?: number };
 
 const VALID_ENGINES = SUBSCRIPTION_ENGINES;
