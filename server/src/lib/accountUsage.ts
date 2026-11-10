@@ -10,7 +10,7 @@ import { resolveCodexBin } from '../chat/codex-models.ts';
 import { latestMuseAllowance, museInstalled, parseMuseAllowance, resolveMuseBin, type MuseAllowance } from '../chat/muse-models.ts';
 import { museSubscriptionEnvironment } from '../chat/subscription-policy.ts';
 import { getXaiAuth, type XaiAuth } from '../routes/xai-oauth.ts';
-import { cliProfiles, subscriptionEnvForLane, cliProfileForEnv, type CliProfile } from './cliProfiles.ts';
+import { cliProfiles, subscriptionEnvForLane, cliProfileForEnv, longLivedClaudeToken, longLivedTokenApplies, readClaudeAccountState, type CliProfile } from './cliProfiles.ts';
 import { listCliAccounts, accountForProfile, type CliAccount } from './cliAccounts.ts';
 import { claudeAccountPool } from './claudeAccountPool.ts';
 
@@ -125,12 +125,15 @@ async function json(url: string, token: string, extra: Record<string, string> = 
 function account(id: string, provider: string, name: string, kind: UsageAccount['kind'], source: string, href: string): UsageAccount {
   return { id, provider, name, kind, source, href, status: 'live', checkedAt: now(), attemptedAt: now(), windows: [], amounts: [], agents: [], note: '' };
 }
-async function guarded(base: UsageAccount, load: () => Promise<UsageAccount>): Promise<UsageAccount> {
+async function guarded(base: UsageAccount, load: () => Promise<UsageAccount>, notes: Partial<Record<number, string>> = {}): Promise<UsageAccount> {
   try {
     const result = await load(); cache.set(base.id, result); return result;
   } catch (error) {
     const previous = cache.get(base.id);
-    const reason = error instanceof FeedError && [401, 403].includes(error.code) ? 'This connection cannot read usage. Open the provider to check its access.'
+    const code = error instanceof FeedError ? error.code : undefined;
+    const reason = code !== undefined && notes[code]
+      ? notes[code]!
+      : error instanceof FeedError && [401, 403].includes(error.code) ? 'This connection cannot read usage. Open the provider to check its access.'
       : error instanceof FeedError && error.code === 429 ? 'The provider asked for a pause. The next automatic check will try again.'
       : 'The provider could not report usage just now. The next check will try again.';
     return { ...(previous || base), agents: [], attemptedAt: now(), checkedAt: previous?.checkedAt || null, status: previous ? 'stale' : 'unavailable', note: reason + (previous ? ' These are the last reported figures.' : '') };
@@ -142,6 +145,7 @@ async function guarded(base: UsageAccount, load: () => Promise<UsageAccount>): P
  * (matt@ sat expired for three days, Oct 30 2026) then can't report usage at
  * all. Let the CLI renew it the way it always does: one tiny turn on that
  * profile, under the CLI's own refresh lock, at most once per cooldown. */
+const CLAUDE_RENEW_WINDOW_MS = 5 * 60_000;
 const CLAUDE_RENEW_COOLDOWN_MS = 30 * 60_000;
 const CLAUDE_RENEW_TIMEOUT_MS = 90_000;
 const claudeRenewals = new Map<string, { at: number; running: boolean }>();
@@ -166,19 +170,42 @@ function renewClaudeLogin(profile: CliProfile): void {
   child.once('exit', finish);
   child.unref();
 }
-async function claudeAccessToken(profile: CliProfile): Promise<unknown> {
-  const oauth = rec(rec(JSON.parse(await readFile(join(profile.path, '.credentials.json'), 'utf8'))).claudeAiOauth);
+async function claudeAccessToken(profile: CliProfile): Promise<string> {
+  let oauth: Record<string, any>;
+  try {
+    oauth = rec(rec(JSON.parse(await readFile(join(profile.path, '.credentials.json'), 'utf8'))).claudeAiOauth);
+  } catch (error) {
+    // Only a missing file proves the normal sign-in is gone. A torn write or
+    // permission failure is transient/unknown and must not claim it was removed.
+    throw new FeedError((error as NodeJS.ErrnoException).code === 'ENOENT' ? 401 : 503);
+  }
   const expiresAt = num(oauth.expiresAt);
-  if (expiresAt !== undefined && expiresAt < Date.now() + 5 * 60_000) renewClaudeLogin(profile);
-  return oauth.accessToken;
+  const refreshToken = typeof oauth.refreshToken === 'string' ? oauth.refreshToken.trim() : '';
+  // Only a profile still holding a refresh token can be renewed; spawning a
+  // renewal turn anywhere else is a futile `claude -p` every cooldown.
+  const accessToken = typeof oauth.accessToken === 'string' ? oauth.accessToken.trim() : '';
+  if (refreshToken && (!accessToken || expiresAt === undefined || expiresAt < Date.now() + CLAUDE_RENEW_WINDOW_MS)) renewClaudeLogin(profile);
+  return accessToken;
 }
 
-async function claude(accountInfo: CliAccount, profile: CliProfile): Promise<UsageAccount> {
+async function claude(accountInfo: CliAccount, profile: CliProfile, profiles: CliProfile[]): Promise<UsageAccount> {
   const base = account(accountInfo.id, 'Claude', 'Claude subscription', 'subscription', 'Claude live quota', 'https://claude.ai/settings/usage');
   base.email = accountInfo.email; base.plan = accountInfo.plan;
+  // Year tokens lack the usage endpoint's profile scope. Keep quota reads and
+  // automatic renewal on the separate normal login, never the lane token.
+  const yearTokenNote = 'Lanes keep running on this account’s year token. Usage reporting uses the separate normal sign-in, and TARDIS asks Claude to renew it when refresh credentials are available. If that sign-in is missing or can no longer provide a usage pass, only usage reporting needs a fresh sign-in.';
+  // The note may only promise year-token lanes where spawns would actually
+  // ride the token — a foreign signed-in account keeps it out.
+  const notes = accountInfo.profileIds.some(id => {
+    const candidate = profiles.find(item => item.id === id);
+    const token = candidate && longLivedClaudeToken(candidate.path);
+    return Boolean(candidate && token && longLivedTokenApplies(token, candidate.path, readClaudeAccountState(candidate.path, candidate.env)));
+  }) ? { 401: yearTokenNote } : {};
   return guarded(base, async () => {
     const token = await claudeAccessToken(profile);
-    if (typeof token !== 'string' || !token) throw new FeedError(401);
+    // Empty pass with a refresh token already kicked the renewal turn inside
+    // claudeAccessToken; without one there is nothing to renew.
+    if (!token) throw new FeedError(401);
     const data = await json('https://api.anthropic.com/api/oauth/usage', token, { 'anthropic-beta': 'oauth-2025-04-20', 'User-Agent': 'claude-code/usage' });
     const names: Record<string, string> = { session: 'Session', weekly_all: 'All models · week', weekly_scoped: 'Model · week' };
     if (Array.isArray(data.limits)) {
@@ -205,7 +232,27 @@ async function claude(accountInfo: CliAccount, profile: CliProfile): Promise<Usa
       : extra.is_enabled === false || label(extra.disabled_reason) ? 'Extra usage is off.' : 'Extra usage status is not reported.';
     if (!base.amounts.length) base.note += ' Subscription price is not supplied by this quota feed.';
     return base;
-  });
+  }, notes);
+}
+
+/** Prefer the row's representative, but a wiped/torn representative must not
+ * hide a healthy duplicate's quota. Only profiles already grouped into this
+ * same login are eligible; an expired pass remains a renewal fallback. */
+async function claudeUsageProfile(info: CliAccount, profiles: CliProfile[]): Promise<CliProfile | undefined> {
+  const candidates = profiles.filter(item => item.id === info.id)
+    .concat(profiles.filter(item => item.id !== info.id && info.profileIds.includes(item.id)));
+  let renewable: CliProfile | undefined, expired: CliProfile | undefined;
+  for (const profile of candidates) {
+    try {
+      const oauth = rec(rec(JSON.parse(await readFile(join(profile.path, '.credentials.json'), 'utf8'))).claudeAiOauth);
+      const accessToken = typeof oauth.accessToken === 'string' && oauth.accessToken.trim();
+      const expiresAt = num(oauth.expiresAt);
+      if (accessToken && expiresAt !== undefined && expiresAt > Date.now() + CLAUDE_RENEW_WINDOW_MS) return profile;
+      if (!renewable && typeof oauth.refreshToken === 'string' && oauth.refreshToken.trim()) renewable = profile;
+      if (!expired && accessToken) expired = profile;
+    } catch { /* A same-login peer may still report usage. */ }
+  }
+  return renewable ?? expired ?? candidates[0];
 }
 
 let claudeRead: Promise<UsageAccount[]> | undefined;
@@ -219,8 +266,8 @@ export function refreshClaudeAccountUsage(): Promise<UsageAccount[]> {
     const accounts = (await listCliAccounts()).filter(item => item.engine === 'claude');
     const profiles = cliProfiles();
     const readings = await Promise.all(accounts.map(async info => {
-      const profile = profiles.find(item => info.profileIds.includes(item.id));
-      const usage = profile && info.status === 'connected' ? await claude(info, profile)
+      const profile = info.status === 'connected' ? await claudeUsageProfile(info, profiles) : undefined;
+      const usage = profile && info.status === 'connected' ? await claude(info, profile, profiles)
         : unavailable(info.id, 'Claude', 'Subscription needs attention', 'subscription', 'https://claude.ai/settings/usage', 'Open an agent account picker to check this sign-in.');
       return { profileIds: info.profileIds, usage };
     }));
@@ -458,7 +505,7 @@ async function collect(): Promise<AccountUsage> {
   const pending: Array<Promise<UsageAccount[]>> = native.filter(info => info.engine !== 'claude').map(info => {
     const profile = profiles.find(p => p.engine === info.engine && info.profileIds.includes(p.id));
     if (!profile || info.status !== 'connected') return Promise.resolve([unavailable(info.id, info.engine === 'claude' ? 'Claude' : 'Codex', 'Subscription needs attention', 'subscription', info.engine === 'claude' ? 'https://claude.ai/settings/usage' : 'https://chatgpt.com/codex/settings/usage', 'Open an agent account picker to check this sign-in.')]);
-    return (info.engine === 'claude' ? claude(info, profile) : codex(info, profile)).then(value => [value]);
+    return codex(info, profile).then(value => [value]);
   });
   pending.push(refreshClaudeAccountUsage().then(accounts => accounts.map(item => ({ ...item, agents: [] }))));
   const router = key('RIVENDELL_OPENROUTER_API_KEY', 'OPENROUTER_API_KEY'), personal = key('RIVENDELL_PERSONAL_OPENROUTER_API_KEY', 'PERSONAL_OPENROUTER_API_KEY');
