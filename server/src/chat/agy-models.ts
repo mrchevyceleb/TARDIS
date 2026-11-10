@@ -31,6 +31,8 @@ export const AGY_EFFORTS = ['low', 'medium', 'high'] as const;
 
 const HAND_MODELS: AgyModelInfo[] = [
   { id: 'gemini-4-argon', label: 'Gemini 4 Argon', efforts: LMH, defaultEffort: 'medium', contextWindow: 1_000_000 },
+  // Added Nov 10 2026 (Matt); live `agy models` lists carbon-low/medium/high and a spawn answered.
+  { id: 'gemini-4-carbon', label: 'Gemini 4 Carbon', efforts: LMH, defaultEffort: 'medium', contextWindow: 1_000_000 },
   { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', efforts: LMH, defaultEffort: 'high', contextWindow: 1_000_000 },
 ];
 const HAND_BY_ID = new Map(HAND_MODELS.map((m) => [m.id, m]));
