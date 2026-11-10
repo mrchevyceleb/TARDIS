@@ -44,10 +44,12 @@ type Source = { key: string; title: string; note: string; path: string };
 const shortHome = (path: string) => path.replace(homedir(), '~');
 
 /** Engine rules reach only agents whose runner adds them; toolbox rules only
- *  lanes whose roster toolbox mounts assistant-mcp. */
+ *  lanes that actually mount assistant-mcp: a lean roster choice opts out,
+ *  and the Antigravity engine mounts no TARDIS-managed MCP at all (its CLI
+ *  reads one machine-global config TARDIS never writes). */
 function ruleApplies(id: SharedRuleId, agent: Agent): boolean {
   const rule = SHARED_RULES[id];
-  if (rule.toolbox === 'full' && !wantsFullToolbox(agent)) return false;
+  if (rule.toolbox === 'full' && (!wantsFullToolbox(agent) || cliForAgentEngine(agent.engine ?? '') === 'agy')) return false;
   const engine = rule.engine;
   if (!engine) return true;
   const cli = cliForAgentEngine(agent.engine ?? '');

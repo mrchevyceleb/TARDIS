@@ -90,6 +90,38 @@ test('router guidance and instruction layers follow the toolbox, including non-r
   assert.doesNotMatch(SHARED_RULES['ops-toolbox'].seed(), /https?:\/\/|~\/bin\//);
 });
 
+test('a lean lane switches to Antigravity (Gemini 4 Carbon) and keeps lean', () => {
+  // Matt's flow: the picker saves an engine switch with brain fields only —
+  // no toolbox field — so the server must not re-check the lane's stored lean
+  // choice against the new engine (the old "Antigravity does not support
+  // lean toolboxes" refusal).
+  const dev = createAgent({ name: 'Dev lane', engine: 'claude', toolbox: 'lean' });
+  const saved = updateAgent(dev.id, { engine: 'agy', model: 'gemini-4-carbon', effort: 'medium' }, 1);
+  assert.equal(saved?.engine, 'agy');
+  assert.equal(saved?.model, 'gemini-4-carbon');
+  assert.equal(saved?.toolbox, 'lean', 'lean survives the engine switch');
+  const agy = createAgent({ name: 'Carbon builder', engine: 'agy', toolbox: 'lean' });
+  assert.equal(agy.toolbox, 'lean');
+});
+
+test('Antigravity lanes carry no office-tool guidance at any toolbox setting', () => {
+  // The Antigravity CLI reads one machine-global MCP config TARDIS never
+  // writes: no agy lane mounts assistant-mcp, so none of them get the router
+  // rule — lean or full.
+  const agyFull = createAgent({ name: 'Agy full', engine: 'agy' });
+  const agyLean = createAgent({ name: 'Agy lean', engine: 'agy', toolbox: 'lean' });
+  for (const agent of [agyFull, agyLean]) {
+    assert.doesNotMatch(personaPromptFor(agent.home), /<rivendell-ops-toolbox>/);
+    assert.ok(!instructionLayers(agent.id)?.layers.some(layer => layer.key === 'rule:ops-toolbox'));
+  }
+  // Other engines keep the full-toolbox rule.
+  const orLane = createAgent({ name: 'OpenRouter full', engine: 'openrouter' });
+  assert.match(personaPromptFor(orLane.home), /<rivendell-ops-toolbox>/);
+  // The engine basics seed describes the CLI's real tool surface.
+  assert.doesNotMatch(SHARED_RULES['engine-agy'].seed(), /assistant_\* tools/);
+  assert.doesNotMatch(SHARED_RULES['engine-agy'].seed(), /team_message/);
+});
+
 test('switching a toolbox changes the warm-process stamp even with an empty ops rule', () => {
   const agent = createAgent({ name: 'Warm lane' });
   const file = sharedRuleFile('ops-toolbox');
@@ -131,6 +163,13 @@ test('API validates toolbox values and supports lean creation, unrelated edits a
   }
   const renamed = await request('PATCH', `/${agent.id}`, { name: 'Still lean' });
   assert.equal((await renamed.json() as { agent: Agent }).agent.toolbox, 'lean');
+  // The chat picker's engine-switch payload (brain fields only, no toolbox)
+  // must save on a lean lane — the failure Matt hit switching to Antigravity.
+  const switched = await request('PATCH', `/${agent.id}`, { engine: 'agy', model: 'gemini-4-carbon', effort: 'medium', brainRevision: 1 });
+  assert.equal(switched.status, 200);
+  const switchedAgent = (await switched.json() as { agent: Agent }).agent;
+  assert.equal(switchedAgent.engine, 'agy');
+  assert.equal(switchedAgent.toolbox, 'lean');
   for (const toolbox of ['full', 'lean', null]) {
     const response = await request('PATCH', `/${agent.id}`, { toolbox });
     assert.equal(response.status, 200);

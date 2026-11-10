@@ -71,8 +71,11 @@ export type Agent = {
   color?: AgentColor;
   /** Which optional toolbox the lane mounts. Absent (or 'full') mounts the
    *  complete operator toolbox; 'lean' drops assistant-mcp while keeping
-   *  file, shell and built-in tools. Antigravity does not support this setting.
-   *  One roster-level setting — see wantsFullToolbox. */
+   *  file, shell and built-in tools. Honored on every engine: the Antigravity
+   *  CLI reads one machine-global MCP config TARDIS never writes, so its
+   *  lanes mount no office integrations either way and lean/full differ only
+   *  in whether the ops-toolbox guidance rides the prompt. One roster-level
+   *  setting — see wantsFullToolbox. */
   toolbox?: 'full' | 'lean';
 };
 
@@ -430,7 +433,6 @@ export function createAgent(input: AgentInput): Agent {
   let n = 2;
   while (agents.some((a) => a.id === id) || retired.has(id)) id = `${base}-${n++}`;
   const engine = input.engine && VALID_ENGINES.has(input.engine) ? input.engine : 'claude';
-  assertToolboxSelection(engine, input.toolbox);
   const defaults = defaultAgentBrain(engine);
   const model = normalizeBrainModel(engine, input.model, defaults.model);
   const effort = normalizeBrainEffort(engine, model, input.effort, defaults.effort);
@@ -485,12 +487,6 @@ function validatedServiceTier(model: string, tier?: unknown): string {
   catch (error) { throw new AgentBrainSelectionError((error as Error).message); }
 }
 
-function assertToolboxSelection(engine: string, toolbox: AgentInput['toolbox']): void {
-  if (engine === 'agy' && toolbox === 'lean') {
-    throw new AgentBrainSelectionError('Antigravity does not support lean toolboxes. Choose the full toolbox or another engine.');
-  }
-}
-
 function assertBrainSelection(input: Pick<AgentInput, 'model' | 'effort'>, model?: string, effort?: string): void {
   for (const field of ['model', 'effort'] as const) {
     if (input[field] === undefined) continue;
@@ -519,7 +515,6 @@ export function updateAgent(
     throw new AgentBrainConflictError(cur);
   }
   const engine = patch.engine && VALID_ENGINES.has(patch.engine) ? patch.engine : cur.engine;
-  assertToolboxSelection(engine, patch.toolbox === undefined ? cur.toolbox : patch.toolbox);
   const engineChanged = engine !== cur.engine;
   const defaults = defaultAgentBrain(engine);
   const modelChanged = patch.model !== undefined && patch.model !== cur.model;

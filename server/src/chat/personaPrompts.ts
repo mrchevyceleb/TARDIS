@@ -5,7 +5,7 @@
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
-import { agentForChatId, wantsFullToolbox } from './agents.ts';
+import { agentForChatId, cliForAgentEngine, wantsFullToolbox } from './agents.ts';
 import { DESK_ROOM_ENABLED } from '../config.ts';
 import { sessionBriefs, sessionMemory, taskControlGuidance } from './sessionPolicy.ts';
 import { sharedRule, type SharedRuleId } from './sharedRules.ts';
@@ -38,8 +38,11 @@ export function personaPromptFor(chatId: string, memory = sessionMemory(chatId))
   const scope = readScopeFile(`${agent.id}.md`);
   // The ops-toolbox rule (assistant-mcp router guidance) rides the same
   // roster setting as the MCP mount itself: lean lanes have no assistant-mcp,
-  // so they never see its instructions either.
-  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId), sharedRule('team-status'), sharedRule('background-jobs'), sharedRule('sidebar'), DESK_ROOM_ENABLED ? sharedRule('desk') : null, wantsFullToolbox(agent) ? sharedRule('ops-toolbox') : null].filter(Boolean).join('\n\n');
+  // so they never see its instructions either. Antigravity mounts no
+  // TARDIS-managed MCP at all (one machine-global config TARDIS never
+  // writes), so its lanes never see the rule either, whatever the toolbox.
+  const mountsOfficeTools = wantsFullToolbox(agent) && cliForAgentEngine(agent.engine) !== 'agy';
+  return [scope, memory, sessionBriefs(chatId), taskControlGuidance(chatId), sharedRule('team-status'), sharedRule('background-jobs'), sharedRule('sidebar'), DESK_ROOM_ENABLED ? sharedRule('desk') : null, mountsOfficeTools ? sharedRule('ops-toolbox') : null].filter(Boolean).join('\n\n');
 }
 
 /** Scope text for an agent record's home (REST use). */
