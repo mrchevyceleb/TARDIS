@@ -133,6 +133,11 @@ export function instructionsStamp(chatId: string, profile?: string | null): stri
     if (global && !paths.includes(global)) paths.push(global);
     else if (!profile) for (const s of sources(agent)) if (s.key === 'global' && !paths.includes(s.path)) paths.push(s.path);
     const hash = createHash('sha256');
+    // The toolbox setting itself is part of the stamp: a warm lane process
+    // mounts its MCP set at spawn, and with the rule text identical (for
+    // example when the ops-toolbox rule is switched off) only this makes a
+    // lean/full flip replace the process instead of reusing assistant-mcp.
+    hash.update(`toolbox=${agent.toolbox ?? 'full'}`).update('\0');
     for (const path of paths) {
       hash.update(path).update('\0');
       try { hash.update(readFileSync(path)); } catch { hash.update('-'); }

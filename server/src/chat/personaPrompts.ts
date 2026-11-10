@@ -31,7 +31,10 @@ function readScopeFile(file: string): string {
 /** The agent's scope for a home-thread chatId ('' when no agent owns it). */
 export function personaPromptFor(chatId: string, memory = sessionMemory(chatId)): string {
   const agent = agentForChatId(chatId);
-  if (!agent) return '';
+  // A non-roster lane has no persona and no roster toolbox entry — it mounts
+  // the full toolbox, so it still needs the router guidance that moved out of
+  // the global AGENTS.md (lean is a roster choice; nothing else can be lean).
+  if (!agent) return sharedRule('ops-toolbox');
   const scope = readScopeFile(`${agent.id}.md`);
   // The ops-toolbox rule (assistant-mcp router guidance) rides the same
   // roster setting as the MCP mount itself: lean lanes have no assistant-mcp,

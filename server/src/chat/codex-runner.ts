@@ -7,7 +7,7 @@ import { execFileSync, type ChildProcess, type ChildProcessByStdio } from 'node:
 import type { Readable, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
@@ -239,6 +239,18 @@ function isIgnorableCodexStderr(line: string): boolean {
   if (/failed to record rollout items/i.test(line)) return true;
   if (/write_stdin failed: stdin is closed for this session/i.test(line)) return true;
   return CODEX_TRACING_LINE.test(line);
+}
+
+/** True when the lane's CODEX_HOME config.toml defines
+ *  [mcp_servers.assistant-mcp]. A -c override naming a server the home has no
+ *  transport for fails codex's whole config load ("invalid transport"), so a
+ *  lean lane only disables an entry that is actually there. */
+function codexHomeDefinesAssistantMcp(env: NodeJS.ProcessEnv): boolean {
+  try {
+    return readFileSync(join(codexHomeFor(env), 'config.toml'), 'utf8').includes('mcp_servers.assistant-mcp');
+  } catch {
+    return false;
+  }
 }
 
 /** Diagnostics belong in the server log. A chat error describes the failed
@@ -888,8 +900,13 @@ export class CodexSession {
     const laneName = sessionAgent?.name;
     // Codex reads assistant-mcp from CODEX_HOME config.toml, so a lean-toolbox
     // lane (roster setting) disables exactly that entry; every other
-    // config.toml server (game-assets-mcp, playwright, ...) stays.
-    const leanToolboxArgs = wantsFullToolbox(sessionAgent) ? [] : ['-c', 'mcp_servers.assistant-mcp.enabled=false'];
+    // config.toml server (game-assets-mcp, playwright, ...) stays. The
+    // override only goes out when that home actually defines the entry: codex
+    // refuses to boot on a -c override describing a server it has no
+    // transport for ("invalid transport"), which would kill every lean lane
+    // on a fresh install or an account profile without assistant-mcp.
+    const leanToolboxArgs = wantsFullToolbox(sessionAgent) || !codexHomeDefinesAssistantMcp(childEnv)
+      ? [] : ['-c', 'mcp_servers.assistant-mcp.enabled=false'];
     browserMcpArgs.push(...leanToolboxArgs, ...localMcpCodexArgs(laneName ?? 'Teammate', { unnamedLane: !laneName, owner: computerOwnerKey(this.cwd, this.chatId), agentId: sessionAgent?.id }), ...officeMcpCodexArgs());
     const appServerArgs = buildCodexAppServerArgs([...browserMcpArgs, '-c', `service_tier=${JSON.stringify(serviceTier)}`, '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
 

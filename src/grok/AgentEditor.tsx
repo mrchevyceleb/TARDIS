@@ -490,11 +490,11 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
                 <small>Hide unread badges — for companions that talk to other agents, not you</small>
               </span>
             </label>
-            <label className="bt-agent-checkrow" title="Lean lanes skip the assistant-mcp integrations (Doppler, Railway, Gmail…) on every engine to keep their context small; ~/bin/doppler-secret still covers secrets">
+            <label className="bt-agent-checkrow" title="A lean lane skips the office integrations on every engine to keep its context small; they come back with one switch. Secrets still work — ~/bin/doppler-secret covers them.">
               <input type="checkbox" checked={leanToolbox} onChange={(e) => setLeanToolbox(e.target.checked)} />
               <span>
                 Lean toolbox
-                <small>Skip the assistant-mcp integrations — secrets still work via ~/bin/doppler-secret</small>
+                <small>A smaller, faster lane for heads-down builders</small>
               </span>
             </label>
           </>
