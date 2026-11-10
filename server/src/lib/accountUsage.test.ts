@@ -48,12 +48,13 @@ test('merged token accounts use healthy normal credentials and renew only that l
   let clock = Date.now();
   t.mock.method(Date, 'now', () => clock);
   let usageCalls = 0;
+  let usageStatus = 200;
   t.mock.method(globalThis, 'fetch', async (...[url, options]: Parameters<typeof fetch>) => {
     if (url === 'https://api.anthropic.com/api/oauth/profile') return new Response('{}');
     assert.equal(url, 'https://api.anthropic.com/api/oauth/usage');
     assert.equal(new Headers(options?.headers).get('Authorization'), 'Bearer normal-pass', 'usage must never submit the year token');
     usageCalls++;
-    return Response.json({ five_hour: { utilization: 12, resets_at: new Date(clock + 3_600_000).toISOString() } });
+    return Response.json({ five_hour: { utilization: 12, resets_at: new Date(clock + 3_600_000).toISOString() } }, { status: usageStatus });
   });
   const credentials = join(dirs.peer!, '.credentials.json');
   const writeCredentials = (value: unknown) => writeFileSync(credentials, JSON.stringify({ claudeAiOauth: value }));
@@ -67,10 +68,20 @@ test('merged token accounts use healthy normal credentials and renew only that l
   assert.equal((await refresh())[0]!.status, 'live', 'a missing representative credential file falls back to its healthy peer');
   writeFileSync(join(dirs.first!, '.credentials.json'), '{torn');
   assert.equal((await refresh())[0]!.status, 'live', 'a torn representative also falls back');
+  usageStatus = 403;
+  const forbidden = (await refresh())[0]!;
+  assert.equal(forbidden.status, 'stale');
+  assert.doesNotMatch(forbidden.note, /Lanes keep running/, 'a provider 403 is not proof that the separate login was removed');
+  usageStatus = 200;
   writeFileSync(join(dirs.first!, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'nearly-expired-pass', expiresAt: clock + 61_001 } }));
   assert.equal((await refresh())[0]!.status, 'live', 'a safely valid peer outranks a token with one millisecond left');
   writeFileSync(join(dirs.first!, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'expired-pass', expiresAt: clock - 1 } }));
   assert.equal((await refresh())[0]!.status, 'live', 'a fresh peer outranks an expired representative');
+  writeFileSync(join(dirs.first!, '.credentials.json'), '{torn');
+  writeFileSync(credentials, '{torn');
+  const unreadable = (await refresh())[0]!;
+  assert.equal(unreadable.status, 'stale');
+  assert.doesNotMatch(unreadable.note, /Lanes keep running/, 'a torn credential read stays unknown instead of claiming the sign-in was removed');
   rmSync(join(dirs.first!, '.credentials.json'));
   rmSync(credentials);
   const callsBeforeWipe = usageCalls;

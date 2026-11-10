@@ -10,7 +10,7 @@ import { resolveCodexBin } from '../chat/codex-models.ts';
 import { latestMuseAllowance, museInstalled, parseMuseAllowance, resolveMuseBin, type MuseAllowance } from '../chat/muse-models.ts';
 import { museSubscriptionEnvironment } from '../chat/subscription-policy.ts';
 import { getXaiAuth, type XaiAuth } from '../routes/xai-oauth.ts';
-import { cliProfiles, subscriptionEnvForLane, cliProfileForEnv, longLivedClaudeToken, longLivedTokenApplies, type CliProfile } from './cliProfiles.ts';
+import { cliProfiles, subscriptionEnvForLane, cliProfileForEnv, longLivedClaudeToken, longLivedTokenApplies, readClaudeAccountState, type CliProfile } from './cliProfiles.ts';
 import { listCliAccounts, accountForProfile, type CliAccount } from './cliAccounts.ts';
 import { claudeAccountPool } from './claudeAccountPool.ts';
 
@@ -174,12 +174,10 @@ async function claudeAccessToken(profile: CliProfile): Promise<string> {
   let oauth: Record<string, any>;
   try {
     oauth = rec(rec(JSON.parse(await readFile(join(profile.path, '.credentials.json'), 'utf8'))).claudeAiOauth);
-  } catch {
-    // The normal login is gone or unreadable (the wipe state). Nothing is
-    // left to renew — the CLI can only refresh a login whose refresh token
-    // it still holds — so the read reports 401 and a year-token profile gets
-    // its honest note instead of a generic failure.
-    throw new FeedError(401);
+  } catch (error) {
+    // Only a missing file proves the normal sign-in is gone. A torn write or
+    // permission failure is transient/unknown and must not claim it was removed.
+    throw new FeedError((error as NodeJS.ErrnoException).code === 'ENOENT' ? 401 : 503);
   }
   const expiresAt = num(oauth.expiresAt);
   const refreshToken = typeof oauth.refreshToken === 'string' ? oauth.refreshToken.trim() : '';
@@ -190,16 +188,19 @@ async function claudeAccessToken(profile: CliProfile): Promise<string> {
   return accessToken;
 }
 
-async function claude(accountInfo: CliAccount, profile: CliProfile): Promise<UsageAccount> {
+async function claude(accountInfo: CliAccount, profile: CliProfile, profiles: CliProfile[]): Promise<UsageAccount> {
   const base = account(accountInfo.id, 'Claude', 'Claude subscription', 'subscription', 'Claude live quota', 'https://claude.ai/settings/usage');
   base.email = accountInfo.email; base.plan = accountInfo.plan;
   // Year tokens lack the usage endpoint's profile scope. Keep quota reads and
   // automatic renewal on the separate normal login, never the lane token.
-  const yearTokenNote = 'Lanes keep running on this account’s year token. Usage reporting uses the separate normal sign-in; automatic renewal uses its refresh credentials when available. If that login was removed, only usage reporting needs a fresh sign-in.';
+  const yearTokenNote = 'Lanes keep running on this account’s year token. Usage reporting uses the separate normal sign-in, and TARDIS asks Claude to renew it when refresh credentials are available. If that sign-in is missing or can no longer provide a usage pass, only usage reporting needs a fresh sign-in.';
   // The note may only promise year-token lanes where spawns would actually
   // ride the token — a foreign signed-in account keeps it out.
-  const token = longLivedClaudeToken(profile.path);
-  const notes = token && longLivedTokenApplies(token, profile.path) ? { 401: yearTokenNote, 403: yearTokenNote } : {};
+  const notes = accountInfo.profileIds.some(id => {
+    const candidate = profiles.find(item => item.id === id);
+    const token = candidate && longLivedClaudeToken(candidate.path);
+    return Boolean(candidate && token && longLivedTokenApplies(token, candidate.path, readClaudeAccountState(candidate.path, candidate.env)));
+  }) ? { 401: yearTokenNote } : {};
   return guarded(base, async () => {
     const token = await claudeAccessToken(profile);
     // Empty pass with a refresh token already kicked the renewal turn inside
@@ -266,7 +267,7 @@ export function refreshClaudeAccountUsage(): Promise<UsageAccount[]> {
     const profiles = cliProfiles();
     const readings = await Promise.all(accounts.map(async info => {
       const profile = info.status === 'connected' ? await claudeUsageProfile(info, profiles) : undefined;
-      const usage = profile && info.status === 'connected' ? await claude(info, profile)
+      const usage = profile && info.status === 'connected' ? await claude(info, profile, profiles)
         : unavailable(info.id, 'Claude', 'Subscription needs attention', 'subscription', 'https://claude.ai/settings/usage', 'Open an agent account picker to check this sign-in.');
       return { profileIds: info.profileIds, usage };
     }));
@@ -504,7 +505,7 @@ async function collect(): Promise<AccountUsage> {
   const pending: Array<Promise<UsageAccount[]>> = native.filter(info => info.engine !== 'claude').map(info => {
     const profile = profiles.find(p => p.engine === info.engine && info.profileIds.includes(p.id));
     if (!profile || info.status !== 'connected') return Promise.resolve([unavailable(info.id, info.engine === 'claude' ? 'Claude' : 'Codex', 'Subscription needs attention', 'subscription', info.engine === 'claude' ? 'https://claude.ai/settings/usage' : 'https://chatgpt.com/codex/settings/usage', 'Open an agent account picker to check this sign-in.')]);
-    return (info.engine === 'claude' ? claude(info, profile) : codex(info, profile)).then(value => [value]);
+    return codex(info, profile).then(value => [value]);
   });
   pending.push(refreshClaudeAccountUsage().then(accounts => accounts.map(item => ({ ...item, agents: [] }))));
   const router = key('RIVENDELL_OPENROUTER_API_KEY', 'OPENROUTER_API_KEY'), personal = key('RIVENDELL_PERSONAL_OPENROUTER_API_KEY', 'PERSONAL_OPENROUTER_API_KEY');

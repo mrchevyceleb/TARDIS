@@ -1,11 +1,9 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { APP_ROOT } from '../config.ts';
 import { resolveCodexBin } from '../chat/codex-models.ts';
-import { cliProfiles, cliProfileId, cliProfileForEnv, longLivedClaudeToken, longLivedTokenApplies, recordLongLivedTokenVerdict, withVerifiedLongLivedClaudeToken, type AccountEngine, type CliProfile } from './cliProfiles.ts';
+import { cliProfiles, cliProfileId, cliProfileForEnv, cliProfileCredentialSignature, longLivedClaudeToken, longLivedTokenVerdictVersion, recordLongLivedTokenVerdict, readClaudeAccountState, withVerifiedLongLivedClaudeToken, type AccountEngine, type CliProfile } from './cliProfiles.ts';
 export { cliProfileId, cliProfileForEnv };
 export type { AccountEngine };
 
@@ -33,7 +31,9 @@ function text(value: unknown): string | undefined {
 export type LongLivedVerdict = 'valid' | 'invalid' | 'unknown';
 const tokenVerdicts = new Map<string, { at: number; verdict: LongLivedVerdict }>();
 const tokenProbes = new Map<string, Promise<LongLivedVerdict>>();
+const tokenProbeBackoff = new Map<string, number>();
 const VERDICT_TTL_MS = 10 * 60_000;
+const UNKNOWN_BACKOFF_MS = 30_000;
 
 /** Presence is not authentication. Only success or the provider's explicit
  * missing-profile-scope response proves a year token; generic 403s, outages
@@ -43,6 +43,7 @@ export async function probeLongLivedClaudeToken(token: string): Promise<LongLive
   const key = createHash('sha256').update(token).digest('hex');
   const cached = tokenVerdicts.get(key);
   if (cached && Date.now() - cached.at < VERDICT_TTL_MS) return cached.verdict;
+  if ((tokenProbeBackoff.get(key) ?? 0) > Date.now()) return cached?.verdict ?? 'unknown';
   const pending = tokenProbes.get(key);
   if (pending) return pending;
   const probe = (async (): Promise<LongLivedVerdict> => {
@@ -70,17 +71,18 @@ export async function probeLongLivedClaudeToken(token: string): Promise<LongLive
               }
               const error = JSON.parse(Buffer.concat(parts).toString('utf8'))?.error;
               if (error?.type === 'permission_error' && typeof error.message === 'string'
-                && error.message.includes('OAuth token does not meet scope requirement')
-                && /user:(profile|office)\b/.test(error.message)) verdict = 'valid';
+                && /\bscopes?\b/i.test(error.message) && /\b(?:missing|requires?|required|does not meet|lacks?)\b/i.test(error.message)
+                && /user:(profile|office)\b/i.test(error.message)) verdict = 'valid';
             } finally { await reader.cancel().catch(() => {}); }
           }
         }
       } finally { if (!response.body?.locked) await response.body?.cancel().catch(() => {}); }
     } catch { /* No authentication verdict: keep the last provider evidence. */ }
     if (verdict !== 'unknown') {
+      tokenProbeBackoff.delete(key);
       tokenVerdicts.set(key, { at: Date.now(), verdict });
       recordLongLivedTokenVerdict(token, verdict);
-    }
+    } else tokenProbeBackoff.set(key, Date.now() + UNKNOWN_BACKOFF_MS);
     return verdict === 'unknown' ? cached?.verdict ?? 'unknown' : verdict;
   })().finally(() => { tokenProbes.delete(key); });
   tokenProbes.set(key, probe);
@@ -124,18 +126,16 @@ export async function claudeIdentity(env: NodeJS.ProcessEnv, verifyToken: (token
   // lane spawns use, so the panel never shows an account its lanes can't bill.
   if (longLived && tokenVerdict !== undefined && data.authMethod === 'oauth_token') {
     if (tokenVerdict === 'invalid') return { status: 'signed_out', checkedAt };
-    if (statusEnv.CLAUDE_CODE_OAUTH_TOKEN !== longLived.token || !longLivedTokenApplies(longLived, profileDir)) {
+    if (statusEnv.CLAUDE_CODE_OAUTH_TOKEN !== longLived.token) {
       return { status: 'unavailable', checkedAt, email: longLived.email };
     }
     let organization: string | undefined, organizationId: string | undefined, plan: string | undefined;
-    try {
-      const saved = JSON.parse(readFileSync(join(profileDir, '.claude.json'), 'utf8'))?.oauthAccount;
-      if (typeof saved?.emailAddress === 'string' && saved.emailAddress.toLowerCase() === longLived.email.toLowerCase()) {
-        organization = text(saved.organizationName);
-        organizationId = text(saved.organizationUuid);
-        plan = text(saved.planDisplayName) ?? text(saved.seatTier);
-      }
-    } catch { /* A wiped profile: the token alone is the identity. */ }
+    const saved = readClaudeAccountState(profileDir, env).account;
+    if (typeof saved?.emailAddress === 'string' && saved.emailAddress.toLowerCase() === longLived.email.toLowerCase()) {
+      organization = text(saved.organizationName);
+      organizationId = text(saved.organizationUuid);
+      plan = text(saved.planDisplayName) ?? text(saved.seatTier);
+    }
     return { status: 'connected', checkedAt, email: longLived.email, organization, organizationId, plan,
       tokenId: createHash('sha256').update(longLived.token).digest('hex') };
   }
@@ -210,11 +210,24 @@ export async function codexIdentity(env: NodeJS.ProcessEnv): Promise<Identity> {
 
 function identity(profile: Profile, refresh: boolean): Promise<Identity> {
   const previous = cache.get(profile.id);
-  // The year-token file and the saved account shape the answer as much as the
-  // native credentials do, so all three feed the cache signature.
-  const signature = ['.credentials.json', 'auth.json', '.claude.json', '.long-lived-oauth-token'].map(name => {
-    try { const st = statSync(join(profile.path, name)); return `${st.mtimeMs}:${st.size}`; } catch { return ''; }
-  }).join('|');
+  // Login/token changes invalidate immediately. Claude rewrites unrelated
+  // counters in .claude.json during normal work, so account display metadata
+  // follows the ordinary 60-second refresh instead of defeating coalescing.
+  let signature: string;
+  try { signature = cliProfileCredentialSignature(profile.engine, profile.path); }
+  catch { signature = previous?.signature ?? 'credentials-unreadable'; }
+  if (profile.engine === 'claude') {
+    const token = longLivedClaudeToken(profile.path);
+    signature += `|token-verdict:${token ? longLivedTokenVerdictVersion(token.token) : 0}`;
+    // Claude rewrites unrelated fields in .claude.json constantly. Hash only
+    // the account fields that shape this row, so metadata chatter neither
+    // spawns auth-status checks nor hides a real login/organization change.
+    const saved = readClaudeAccountState(profile.path, profile.env);
+    signature += `|account:${createHash('sha256').update(JSON.stringify(saved.status === 'present' ? [
+      saved.account?.accountUuid, saved.account?.organizationUuid, saved.account?.emailAddress,
+      saved.account?.organizationName, saved.account?.planDisplayName, saved.account?.seatTier,
+    ] : [saved.status])).digest('hex').slice(0, 16)}`;
+  }
   // Even explicit refreshes coalesce, so opening several agents cannot spawn
   // an auth-status storm. Failures recover without restarting TARDIS.
   if (previous && previous.signature === signature && Date.now() - previous.at < (refresh ? 5_000 : 60_000)) return previous.result;

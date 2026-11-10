@@ -1,14 +1,58 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
-import { ClaudeSession } from './runner.ts';
-import { preferredSubscriptionEnv, subscriptionRoutingKey } from '../lib/cliProfiles.ts';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// This file exercises account rollover, so isolate every profile lookup before
+// importing runner/accountResolver. Unit tests must never inspect a developer's
+// login or verify a real token against Anthropic.
+const testRoot = mkdtempSync(join(tmpdir(), 'tardis-runner-background-'));
+const testHome = join(testRoot, 'home');
+const accountMap = join(testRoot, 'accounts.json');
+mkdirSync(testHome, { recursive: true });
+const testClaudeProfile = join(testHome, '.claude-test');
+mkdirSync(testClaudeProfile, { recursive: true });
+writeFileSync(join(testClaudeProfile, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'test@example.com', organizationUuid: 'org-test' } }));
+writeFileSync(join(testClaudeProfile, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'synthetic-test-pass' } }));
+writeFileSync(accountMap, JSON.stringify({
+  accounts: { test: { claude_config_dir: '.claude-test', codex_home: '.codex-test' } },
+  default_account: 'test', rules: [],
+}));
+const savedEnv = {
+  home: process.env.HOME, map: process.env.RIVENDELL_ACCOUNT_MAP, state: process.env.RIVENDELL_STATE_DIR,
+  defaultAccount: process.env.RIVENDELL_DEFAULT_CLI_ACCOUNT, agentAccounts: process.env.RIVENDELL_AGENT_ACCOUNTS,
+  pools: process.env.RIVENDELL_CLAUDE_ACCOUNT_POOLS,
+};
+process.env.HOME = testHome;
+process.env.RIVENDELL_ACCOUNT_MAP = accountMap;
+process.env.RIVENDELL_STATE_DIR = join(testRoot, 'state');
+delete process.env.RIVENDELL_DEFAULT_CLI_ACCOUNT;
+delete process.env.RIVENDELL_AGENT_ACCOUNTS;
+delete process.env.RIVENDELL_CLAUDE_ACCOUNT_POOLS;
+mkdirSync(process.env.RIVENDELL_STATE_DIR, { recursive: true });
+
+const { ClaudeSession } = await import('./runner.ts');
+const { preferredSubscriptionEnv, subscriptionRoutingKey, subscriptionRoutingKeysMatch } = await import('../lib/cliProfiles.ts');
+
+test.after(() => {
+  if (savedEnv.home === undefined) delete process.env.HOME; else process.env.HOME = savedEnv.home;
+  if (savedEnv.map === undefined) delete process.env.RIVENDELL_ACCOUNT_MAP; else process.env.RIVENDELL_ACCOUNT_MAP = savedEnv.map;
+  if (savedEnv.state === undefined) delete process.env.RIVENDELL_STATE_DIR; else process.env.RIVENDELL_STATE_DIR = savedEnv.state;
+  if (savedEnv.defaultAccount === undefined) delete process.env.RIVENDELL_DEFAULT_CLI_ACCOUNT; else process.env.RIVENDELL_DEFAULT_CLI_ACCOUNT = savedEnv.defaultAccount;
+  if (savedEnv.agentAccounts === undefined) delete process.env.RIVENDELL_AGENT_ACCOUNTS; else process.env.RIVENDELL_AGENT_ACCOUNTS = savedEnv.agentAccounts;
+  if (savedEnv.pools === undefined) delete process.env.RIVENDELL_CLAUDE_ACCOUNT_POOLS; else process.env.RIVENDELL_CLAUDE_ACCOUNT_POOLS = savedEnv.pools;
+  rmSync(testRoot, { recursive: true, force: true });
+});
 
 test('pooled account redirects do not look like picker changes', () => {
   const { session } = harness();
   const cwd = process.cwd();
   const chatId = 'pool-routing-regression';
   const preferredKey = subscriptionRoutingKey('claude', preferredSubscriptionEnv('claude', cwd, chatId));
+  assert.equal(preferredKey.endsWith(':not-signed-in') || preferredKey.endsWith(':signed-out'), false,
+    'the synthetic mapped login resolves to a definite healthy identity');
   Object.assign(session, {
     cli: 'claude', cwd, chatId,
     preferredAccountRoutingKey: preferredKey,
@@ -17,8 +61,13 @@ test('pooled account redirects do not look like picker changes', () => {
   assert.doesNotThrow(() => session.assertSubscriptionAccount());
 
   const profileKey = preferredKey.slice(0, preferredKey.lastIndexOf(':'));
+  assert.equal(subscriptionRoutingKeysMatch(`${profileKey}:not-signed-in`, `${profileKey}:healthy-account`), true,
+    'a transient identity read must keep the healthy worker');
   session.preferredAccountRoutingKey = `${profileKey}:not-signed-in`;
-  assert.doesNotThrow(() => session.assertSubscriptionAccount(), 'a transient identity read must keep the healthy worker');
+  assert.doesNotThrow(() => session.assertSubscriptionAccount(),
+    'the real session boundary tolerates only the transient unknown identity');
+  assert.equal(subscriptionRoutingKeysMatch(`${profileKey}:signed-out`, `${profileKey}:healthy-account`), false,
+    'a confirmed sign-out must retire the old worker');
 
   session.preferredAccountRoutingKey = 'claude-the-previous-explicit-choice:old-account';
   assert.throws(() => session.assertSubscriptionAccount(), (error: unknown) => {
@@ -36,7 +85,7 @@ test('account rollover keeps the lane, native resume ID and pending teammate rec
   const prompt = { text: 'Finish the task', images: [{ mediaType: 'image/png', base64: 'test' }], opts: { peerFrom: 'Tester', peerDeliveryId: 'delivery-1', peerFromRole: 'teammate' } };
   const origin = { peers: [{ name: 'Tester', role: 'teammate', text: prompt.text }], human: false, automation: false };
   Object.assign(session, {
-    cli: 'claude', chatId: 'bot-test', logKey: 'test-account-rollover', child,
+    cli: 'claude', cwd: process.cwd(), chatId: 'bot-test', logKey: 'test-account-rollover', child,
     currentSessionId: 'saved-native-id', nativeStopGeneration: 0,
     turnStartedAt: Date.now(), accountRerunPrompt: prompt, turnOrigin: origin,
     endBackgroundWork: () => {}, pendingPeerAccepts: new Set(['delivery-1', 'delivery-2']),

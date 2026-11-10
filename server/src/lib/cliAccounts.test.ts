@@ -101,8 +101,10 @@ test('a foreign account is never dressed up as the token account', async () => {
 
 test('only authentication evidence verifies a token, not arbitrary HTTP responses', async (t) => {
   const scopeError = { type: 'error', error: { type: 'permission_error', message: 'OAuth token does not meet scope requirement any_of(user:profile, user:office)' } };
+  const rewordedScopeError = { type: 'error', error: { type: 'permission_error', message: 'This token is missing the required scope user:profile' } };
+  const pluralScopeError = { type: 'error', error: { type: 'permission_error', message: 'Token lacks required scopes: user:office' } };
   const cases: Array<[number, unknown, LongLivedVerdict]> = [
-    [200, {}, 'valid'], [401, {}, 'invalid'], [403, scopeError, 'valid'],
+    [200, {}, 'valid'], [401, {}, 'invalid'], [403, scopeError, 'valid'], [403, rewordedScopeError, 'valid'], [403, pluralScopeError, 'valid'],
     [403, { error: { type: 'permission_error', message: 'Account is disabled' } }, 'unknown'],
     [403, '<html>Forbidden</html>', 'unknown'], [429, {}, 'unknown'], [503, {}, 'unknown'], [302, {}, 'unknown'],
     [403, 'x'.repeat(9 * 1024), 'unknown'],
@@ -131,6 +133,10 @@ test('provider probes coalesce, recheck rejections after TTL, and preserve defin
   status = 503;
   assert.equal(await probeLongLivedClaudeToken(token), 'valid', 'a previously verified token survives provider outages');
   assert.equal(await probeLongLivedClaudeToken('never-verified'), 'unknown', 'an outage never invents a first verification');
+  const afterUnknown = fetchMock.mock.callCount();
+  assert.equal(await probeLongLivedClaudeToken('never-verified'), 'unknown');
+  assert.equal(fetchMock.mock.callCount(), afterUnknown, 'unknown probes back off instead of delaying every lane spawn');
+  clock += 31_000;
   status = 401;
   assert.equal(await probeLongLivedClaudeToken(token), 'invalid', 'a revocation supersedes the old valid verdict');
   writeFileSync(join(profile, '.claude.json'), '{}');

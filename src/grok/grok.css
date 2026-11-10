@@ -1205,8 +1205,12 @@
   .bt-head-actions { flex: none; }
   .bot-app .rc .bt-head-actions .bt-mic { margin-right: 0; }
   .bt-iconbtn { width: 44px; height: 44px; }
-  /* On the narrowest phones the header is out of room: "Edit <agent>" is in Settings, one tap away. */
-  @media (max-width: 420px) { .bt-head-actions .bt-head-edit { display: none; } }
+  /* Keep companion accounts directly reachable on narrow phones. Compact the
+     action cluster instead of hiding Edit behind the settings menu. */
+  @media (max-width: 420px) {
+    .bt-head-actions { gap: 0; }
+    .bt-head-actions .bt-iconbtn { width: 40px; height: 40px; }
+  }
   .bt-feed { padding: 12px max(14px, env(safe-area-inset-right, 0px)) 4px max(14px, env(safe-area-inset-left, 0px)); overscroll-behavior-y: contain; }
   .bt-dock { padding: 4px max(12px, env(safe-area-inset-right, 0px)) max(8px, env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px)); }
   .bt-dock-inner .composer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-bottom: 4px; }

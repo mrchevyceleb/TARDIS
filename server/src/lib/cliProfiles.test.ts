@@ -136,6 +136,25 @@ test('a year token rides lane environments, and the wipe it survives', async () 
   } finally {
     chmodSync(join(profile, '.claude.json'), 0o644);
   }
+
+  // Claude's default profile keeps its account file beside ~/.claude rather
+  // than inside it. A foreign default login still blocks the token.
+  const defaultProfile = join(home, '.claude');
+  mkdirSync(defaultProfile, { recursive: true });
+  writeFileSync(join(defaultProfile, '.long-lived-oauth-token'), `default@example.com\n${good}\n`);
+  recordLongLivedTokenVerdict(good, 'valid');
+  writeFileSync(join(home, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'foreign@example.com' } }));
+  assert.equal(withLongLivedClaudeToken({}, defaultProfile).CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  writeFileSync(join(home, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'default@example.com' } }));
+  assert.equal(withLongLivedClaudeToken({}, defaultProfile).CLAUDE_CODE_OAUTH_TOKEN, good);
+  writeFileSync(join(defaultProfile, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'foreign@example.com' } }));
+  assert.equal(withLongLivedClaudeToken({ CLAUDE_CONFIG_DIR: defaultProfile }, defaultProfile).CLAUDE_CODE_OAUTH_TOKEN, undefined,
+    'an explicitly configured ~/.claude profile reads its account file inside the directory');
+  const implicitKey = subscriptionRoutingKey('claude', {});
+  const explicitKey = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: defaultProfile });
+  assert.notEqual(implicitKey, explicitKey, 'implicit and explicit default profiles route from the same account files their workers use');
+  writeFileSync(join(defaultProfile, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'default@example.com' } }));
+  assert.equal(withLongLivedClaudeToken({ CLAUDE_CONFIG_DIR: defaultProfile }, defaultProfile).CLAUDE_CODE_OAUTH_TOKEN, good);
 });
 
 test('a year-token swap retires the warm-worker routing key', () => {
@@ -159,6 +178,8 @@ test('a year-token swap retires the warm-worker routing key', () => {
   const third = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile });
   assert.notEqual(second, third, 'a same-size token replacement with its timestamp preserved must recycle warm workers');
   assert.equal(subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile }), third, 'the key is stable between changes');
+  assert.notEqual(subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile }, null), third,
+    'a worker spawned without the applicable token records the native credential it actually holds');
   // Confirmed absence is a real sign-out, never a stale token identity, and
   // it must not wildcard-match the worker still holding the old token.
   rmSync(join(profile, '.long-lived-oauth-token'));
@@ -193,19 +214,29 @@ test('routing preserves a healthy worker through transient reads but recycles on
   const env = { CLAUDE_CONFIG_DIR: profile };
   mkdirSync(profile, { recursive: true });
   const saved = join(profile, '.claude.json');
+  const credentials = join(profile, '.credentials.json');
   const writeAccount = (email: string) => writeFileSync(saved, JSON.stringify({ oauthAccount: { emailAddress: email, organizationUuid: 'org-1' } }));
+  const writeCredentials = (accessToken: string) => writeFileSync(credentials, JSON.stringify({ claudeAiOauth: { accessToken } }));
   const preservedTime = new Date(1_600_000_000_000);
   writeAccount('first@example.com');
+  writeCredentials('first-pass');
   utimesSync(saved, preservedTime, preservedTime);
   const original = subscriptionRoutingKey('claude', env);
   writeFileSync(saved, '{"oauthAccount":');
+  assert.equal(subscriptionRoutingKey('claude', env), original, 'unrelated .claude.json rewrites do not defeat the hot-path cache');
+  writeCredentials('first-pass-refreshed');
   assert.equal(subscriptionRoutingKey('claude', env), original, 'a torn account file is not a confirmed sign-out');
   rmSync(saved);
   mkdirSync(saved);
+  writeCredentials('first-pass-refreshed-again');
   assert.equal(subscriptionRoutingKey('claude', env), original, 'a read error is not a confirmed sign-out');
   rmSync(saved, { recursive: true });
+  rmSync(credentials);
   assert.equal(subscriptionRoutingKeysMatch(original, subscriptionRoutingKey('claude', env)), false, 'confirmed absence retires the old worker');
+  writeCredentials('native-pass');
+  assert.equal(subscriptionRoutingKey('claude', env).endsWith(':signed-out'), false, 'native credentials without account metadata are not a confirmed sign-out');
   writeAccount('other@example.com');
+  writeCredentials('other-pass');
   utimesSync(saved, preservedTime, preservedTime);
   const changed = subscriptionRoutingKey('claude', env);
   assert.notEqual(changed, original);
