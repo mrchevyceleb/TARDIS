@@ -58,7 +58,10 @@ export async function probeLongLivedClaudeToken(token: string): Promise<LongLive
     await response.body?.cancel();
     verdict = response.status === 401 ? 'invalid' : 'valid';
   } catch { verdict = 'unknown'; }
-  tokenVerdicts.set(key, { at: Date.now(), verdict });
+  // Only definitive verdicts cache: an `unknown` (network trouble) must never
+  // overwrite a fresh 401 rejection, and retrying it next read is one bounded
+  // fetch, not a storm.
+  if (verdict !== 'unknown') tokenVerdicts.set(key, { at: Date.now(), verdict });
   return verdict;
 }
 
@@ -190,28 +193,31 @@ function identity(profile: Profile, refresh: boolean): Promise<Identity> {
 
 export async function listCliAccounts(refresh = false): Promise<CliAccount[]> {
   const entries = await Promise.all(cliProfiles().map(async (profile) => ({ profile, data: await identity(profile, refresh) })));
-  const grouped = new Map<string, CliAccount>();
+  const grouped = new Map<string, CliAccount & { organizationId?: string }>();
   for (const { profile, data } of entries) {
     // Two Claude directories are one login only when native status proves
-    // both the email and organization match. A wiped year-token profile has
-    // the email but no organization left; it still merges on the email alone
-    // so the panel never shows the same login twice. Codex gives no workspace
-    // ID, so separate Codex profiles stay separate even when the emails match.
+    // both the email and organization match. Codex gives no workspace ID, so
+    // separate Codex profiles stay separate even when the emails match.
     const key = profile.engine === 'claude' && data.status === 'connected' && data.email
       ? `${profile.engine}:${data.email.toLowerCase()}:${data.organizationId ?? ''}` : profile.id;
     const existing = grouped.get(key);
     if (existing) {
       existing.profileIds.push(profile.id);
-      // A wiped year-token peer may be the first seen; a healthy peer's
-      // organization and plan still describe the merged login.
-      if (!existing.organization && data.organization) existing.organization = data.organization;
-      if (!existing.plan && data.plan) existing.plan = data.plan;
       continue;
     }
-    const { organizationId: _organizationId, ...publicIdentity } = data;
-    grouped.set(key, { id: profile.id, engine: profile.engine, ...publicIdentity, profileIds: [profile.id] });
+    grouped.set(key, { id: profile.id, engine: profile.engine, ...data, profileIds: [profile.id] });
   }
-  return [...grouped.values()];
+  const rows = [...grouped.values()];
+  // A wiped year-token profile carries the email but no organization; fold it
+  // into the healthy row for the same email so the panel never shows the same
+  // login twice, whichever profile the reader happened to see first.
+  const healthy = new Map(rows.filter(row => row.engine === 'claude' && row.status === 'connected' && row.email && row.organizationId).map(row => [row.email!.toLowerCase(), row]));
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const row = rows[index];
+    const host = row.engine === 'claude' && row.status === 'connected' && row.email && !row.organizationId ? healthy.get(row.email.toLowerCase()) : undefined;
+    if (host && host !== row) { host.profileIds.push(...row.profileIds); if (!host.organization && row.organization) host.organization = row.organization; rows.splice(index, 1); }
+  }
+  return rows.map(({ organizationId: _organizationId, ...row }) => row);
 }
 
 export function accountForProfile(accounts: CliAccount[], engine: AccountEngine, profile: string): CliAccount | undefined {

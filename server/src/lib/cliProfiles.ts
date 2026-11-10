@@ -220,10 +220,12 @@ export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.Proces
   try { const st = statSync(join(profile, engine === 'claude' ? '.credentials.json' : 'auth.json')); signature = `${st.mtimeMs}:${st.size}`; } catch { /* A transient read must not recycle a healthy worker. */ }
   if (engine === 'claude') {
     // On a wiped profile the year-token file is the only identity-bearing
-    // credential left, so it feeds the signature too: replacing token A with
-    // token B must retire warm workers still billing A, not just repaint the
-    // panel while they keep running.
+    // credential left, and .claude.json decides which credential applies, so
+    // both feed the signature: replacing token A with token B, or a re-login
+    // that changes which account lanes bill, must retire warm workers instead
+    // of repainting the panel while they keep running.
     try { const st = statSync(join(profile, '.long-lived-oauth-token')); signature += `|oat:${st.mtimeMs}:${st.size}`; } catch { /* No token for this profile. */ }
+    try { const st = statSync(join(profile, '.claude.json')); signature += `|acct:${st.mtimeMs}:${st.size}`; } catch { /* No saved account. */ }
   }
   let identity = previous?.identity || 'not-signed-in';
   if (previous && previous.signature === signature) return `${id}:${previous.identity}`;
@@ -235,8 +237,11 @@ export function subscriptionRoutingKey(engine: AccountEngine, env: NodeJS.Proces
         identity = JSON.stringify([account.accountUuid, account.organizationUuid, account.emailAddress]);
       } else {
         const token = longLivedClaudeToken(profile);
-        if (!token || !longLivedTokenApplies(token, profile)) return `${id}:${identity}`;
-        identity = JSON.stringify(['long-lived-token', token.email]);
+        // Confirmed absence (no account, no applicable token) is not-signed-in,
+        // never a stale previous identity; a same-email token replacement still
+        // recycles workers because the token's own fingerprint rides identity.
+        if (!token || !longLivedTokenApplies(token, profile)) return `${id}:not-signed-in`;
+        identity = JSON.stringify(['long-lived-token', token.email, createHash('sha256').update(token.token).digest('hex').slice(0, 16)]);
       }
     } else {
       const auth = JSON.parse(readFileSync(join(profile, 'auth.json'), 'utf8'));

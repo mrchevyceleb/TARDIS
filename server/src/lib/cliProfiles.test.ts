@@ -136,12 +136,20 @@ test('a year token rides lane environments, and the wipe it survives', () => {
 test('a year-token swap retires the warm-worker routing key', () => {
   const profile = join(root, 'routing-profile');
   mkdirSync(profile, { recursive: true });
-  const writeToken = (email: string) => writeFileSync(join(profile, '.long-lived-oauth-token'), `${email}\nsk-ant-oat01-example-token-0123456789\n`);
+  const writeToken = (email: string, token: string) => writeFileSync(join(profile, '.long-lived-oauth-token'), `${email}\n${token}\n`);
   // Wiped profile, no normal credentials: the token file is the identity.
-  writeToken('a@example.com');
+  writeToken('a@example.com', 'sk-ant-oat01-example-token-0123456789');
   const first = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile });
-  writeToken('b@example.com');
+  writeToken('b@example.com', 'sk-ant-oat01-example-token-0123456789');
   const second = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile });
   assert.notEqual(first, second, 'a token swap must recycle warm workers still billing the old account');
-  assert.equal(subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile }), second, 'the key is stable between changes');
+  // Same email, replaced token (a revoked one renewed): the token's own
+  // fingerprint rides the identity, so warm workers drop the dead token.
+  writeToken('b@example.com', 'sk-ant-oat01-example-token-9876543210');
+  const third = subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile });
+  assert.notEqual(second, third, 'a same-email token replacement must recycle warm workers holding the old token');
+  assert.equal(subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile }), third, 'the key is stable between changes');
+  // Confirmed absence is not-signed-in, never a stale token identity.
+  rmSync(join(profile, '.long-lived-oauth-token'));
+  assert.equal(subscriptionRoutingKey('claude', { CLAUDE_CONFIG_DIR: profile }).endsWith(':not-signed-in'), true);
 });

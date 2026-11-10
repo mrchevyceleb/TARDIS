@@ -10,7 +10,7 @@ import { resolveCodexBin } from '../chat/codex-models.ts';
 import { latestMuseAllowance, museInstalled, parseMuseAllowance, resolveMuseBin, type MuseAllowance } from '../chat/muse-models.ts';
 import { museSubscriptionEnvironment } from '../chat/subscription-policy.ts';
 import { getXaiAuth, type XaiAuth } from '../routes/xai-oauth.ts';
-import { cliProfiles, subscriptionEnvForLane, cliProfileForEnv, longLivedClaudeToken, type CliProfile } from './cliProfiles.ts';
+import { cliProfiles, subscriptionEnvForLane, cliProfileForEnv, longLivedClaudeToken, longLivedTokenApplies, type CliProfile } from './cliProfiles.ts';
 import { listCliAccounts, accountForProfile, type CliAccount } from './cliAccounts.ts';
 import { claudeAccountPool } from './claudeAccountPool.ts';
 
@@ -194,7 +194,10 @@ async function claude(accountInfo: CliAccount, profile: CliProfile): Promise<Usa
   // fine (lanes authenticate with the token), and the note must say so
   // instead of crying sign-in.
   const yearTokenNote = 'Lanes keep running on this account’s year token. Usage reporting reads the normal sign-in, which needs a fresh login on this profile.';
-  const notes = longLivedClaudeToken(profile.path) ? { 401: yearTokenNote, 403: yearTokenNote } : {};
+  // The note may only promise year-token lanes where spawns would actually
+  // ride the token — a foreign signed-in account keeps it out.
+  const token = longLivedClaudeToken(profile.path);
+  const notes = token && longLivedTokenApplies(token, profile.path) ? { 401: yearTokenNote, 403: yearTokenNote } : {};
   return guarded(base, async () => {
     const token = await claudeAccessToken(profile);
     // Empty credentials with no expiry to compare against still get the
