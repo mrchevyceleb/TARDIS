@@ -159,6 +159,51 @@ test('a failed pick preserves a newer WebSocket brain even after a stale agent p
   assert.equal(confirm.mock.callCount(), 0, 'failure recovery must not silently switch engines');
 });
 
+for (const brainRevision of [2, undefined]) {
+  test(`a delayed save response (revision ${brainRevision ?? 'missing'}) preserves a newer WebSocket brain`, async () => {
+    const response = deferred<Agent>();
+    save.mock.mockImplementationOnce(() => response.promise, 0);
+    await mount();
+    await act(async () => picker.setCompanion('codex'));
+    const staleSaved = { ...teammate, ...save.mock.calls[0].arguments[1], brainRevision };
+    chat.serverBrain = { cli: 'agy', model: 'gemini-4-argon', effort: 'medium', revision: 3 };
+    await refresh();
+    await act(async () => response.resolve(staleSaved));
+    assert.equal(picker.companion, 'agy');
+    assert.equal(picker.model, 'gemini-4-argon');
+    assert.equal(picker.effort, 'medium');
+
+    save.mock.mockImplementation(async () => { throw new Error('offline'); });
+    await act(async () => picker.setAgyEffort('high'));
+    assert.equal(save.mock.calls[1].arguments[1].brainRevision, 3);
+    assert.equal(picker.companion, 'agy');
+    assert.equal(picker.model, 'gemini-4-argon');
+    assert.equal(picker.effort, 'medium', 'failure must restore the newer authoritative brain');
+  });
+}
+
+for (const source of ['websocket', 'props']) {
+  test(`a newer ${source} brain cancels a queued pick without reporting it saved`, async () => {
+    const response = deferred<Agent>();
+    save.mock.mockImplementationOnce(() => response.promise, 0);
+    await mount();
+    await act(async () => picker.setCompanion('codex'));
+    await act(async () => picker.setCodexEffort('xhigh'));
+    assert.equal(save.mock.callCount(), 1);
+    if (source === 'websocket') {
+      chat.serverBrain = { cli: 'agy', model: 'gemini-4-argon', effort: 'medium', revision: 3 };
+    } else {
+      props = { ...props, agent: { ...teammate, engine: 'agy', model: 'gemini-4-argon', effort: 'medium', brainRevision: 3 } };
+    }
+    await refresh();
+    await act(async () => response.resolve({ ...teammate, ...save.mock.calls[0].arguments[1], brainRevision: 2 }));
+    assert.equal(save.mock.callCount(), 1, 'the discarded queued pick must not save the remote selection');
+    assert.equal(picker.companion, 'agy');
+    assert.equal(picker.effort, 'medium');
+    assert.equal(picker.selectionNotice, null, 'a discarded pick must not be reported as saved');
+  });
+}
+
 test('a conflict restores the winning brain and uses it in the next confirmation', async () => {
   await mount();
   save.mock.mockImplementation(async () => {

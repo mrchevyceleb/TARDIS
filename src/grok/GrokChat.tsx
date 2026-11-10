@@ -163,6 +163,7 @@ export function GrokChat(props: GrokChatProps) {
     selectionRevision: picker.selectionRevision,
   });
 
+  const persistGen = useRef(0);
   const appliedBrainRevision = useRef<number | null>(null);
   const serverBrainRevision = useRef(props.agent?.brainRevision ?? 1);
   const desiredBrain = useRef<BrainDraft>(canonicalBrain({
@@ -174,6 +175,8 @@ export function GrokChat(props: GrokChatProps) {
     if (!props.agent) return;
     const revision = props.agent.brainRevision ?? 1;
     if (revision < serverBrainRevision.current || appliedBrainRevision.current === revision) return;
+    // New authority supersedes pending picks as well as the visible draft.
+    if (revision > serverBrainRevision.current) persistGen.current += 1;
     appliedBrainRevision.current = revision;
     serverBrainRevision.current = revision;
     // Only accepted revisions may replace the fallback for a failed save.
@@ -192,6 +195,7 @@ export function GrokChat(props: GrokChatProps) {
     if (!props.agent || !chat.serverBrain?.revision) return;
     const revision = chat.serverBrain.revision;
     if (revision <= serverBrainRevision.current) return;
+    persistGen.current += 1;
     serverBrainRevision.current = revision;
     appliedBrainRevision.current = revision;
     savedBrain.current = {
@@ -227,7 +231,6 @@ export function GrokChat(props: GrokChatProps) {
   }, [chat.status, chat.stop, docked]);
 
   const agentId = props.agent?.id;
-  const persistGen = useRef(0);
   const persistChain = useRef(Promise.resolve());
   const selectionForLane = (engine: string, modelOverride?: string, effortOverride?: string) => {
     const model = modelOverride ?? (
@@ -282,14 +285,23 @@ export function GrokChat(props: GrokChatProps) {
     persistChain.current = persistChain.current.catch(() => {}).then(async () => {
       if (gen !== persistGen.current) return;
       const wanted = { ...desiredBrain.current };
+      const requestRevision = serverBrainRevision.current;
       try {
         const saved = await updateAgentReq(agentId, {
           ...wanted,
-          brainRevision: serverBrainRevision.current,
+          brainRevision: requestRevision,
         });
-        serverBrainRevision.current = saved.brainRevision ?? serverBrainRevision.current + 1;
-        // Saves run one at a time, so every success is the newest durable brain,
-        // even when a later click is already queued behind it.
+        // Another device may advance the brain before this response arrives.
+        // Unversioned responses are safe only if no newer revision was observed.
+        const responseIsCurrent = saved.brainRevision === undefined
+          ? serverBrainRevision.current === requestRevision
+          : saved.brainRevision >= serverBrainRevision.current;
+        if (!responseIsCurrent) {
+          props.onAgentBrainSaved();
+          return;
+        }
+        serverBrainRevision.current = saved.brainRevision ?? requestRevision + 1;
+        // Even with a later click queued, this is the newest accepted save.
         savedBrain.current = { engine: saved.engine, model: saved.model, serviceTier: saved.serviceTier, effort: saved.effort };
         if (gen === persistGen.current) {
           desiredBrain.current = canonicalBrain({ engine: saved.engine, model: saved.model, serviceTier: saved.serviceTier, effort: saved.effort });
