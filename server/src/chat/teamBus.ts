@@ -18,7 +18,7 @@ import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, recordQuietExemptWake
 import { LIVE_HOLD_CEILING_MS } from '../lib/laneLiveness.ts';
 import { briefEnvelopeForHandoff, isCoderBrief } from './briefEnvelope.ts';
 import { recordNativeFailure } from './sessionMetrics.ts';
-import { freshThreadOnTask, freshTaskSenders, freshTaskPrefix, sessionDirectory } from './sessionPolicy.ts';
+import { freshTaskPolicy, sessionDirectory, type FreshTaskPolicy } from './sessionPolicy.ts';
 import { freshLifecycleStarted, freshLifecycleCompleted } from './freshLifecycle.ts';
 import { persistThreadResetEpoch, noteThreadResetEpoch, persistThreadResetTaskState, restoreThreadResetTaskState, threadResetTaskState, type ThreadResetTaskState } from './threadResetStore.ts';
 import { clearThreadSessionIds } from './sessions.ts';
@@ -197,6 +197,7 @@ export function isTaskStartHandoff(opts: {
   senderId: string;
   recipientId: string;
   recipientHome: string;
+  policy?: FreshTaskPolicy;
   source?: string;
   personSourced?: boolean;
   nudgeHoldSince?: number;
@@ -206,11 +207,14 @@ export function isTaskStartHandoff(opts: {
   if (!opts.senderId || opts.source) return false;
   if (opts.personSourced === true) return false;
   if (opts.nudgeHoldSince !== undefined) return false;
-  if (!freshThreadOnTask(opts.recipientHome)) return false;
-  if (!opensWithTaskMarker(opts.text ?? '', freshTaskPrefix(opts.recipientHome))) return false;
-  const allowed = freshTaskSenders(opts.recipientHome);
-  if (allowed.length) return allowed.includes(opts.senderId);
-  return isCoderBrief(opts.senderId, opts.recipientId);
+  const policy = opts.policy ?? freshTaskPolicy(opts.recipientHome);
+  if (!policy.enabled) return false;
+  if (!opensWithTaskMarker(opts.text ?? '', policy.prefix)) return false;
+  return taskSourceAllowed(opts.senderId, opts.recipientId, policy);
+}
+
+function taskSourceAllowed(senderId: string, recipientId: string, policy: FreshTaskPolicy): boolean {
+  return policy.senders.length ? policy.senders.includes(senderId) : isCoderBrief(senderId, recipientId);
 }
 
 /** True when the recipient has no live busy turn on any lane and no live
@@ -230,6 +234,50 @@ export function opensWithTaskMarker(text: string, prefix: string): boolean {
   if (!marker) return false;
   const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
   return new RegExp(`^${escaped}[ \\t]*(?:[:,;.!\\-\u2013\u2014]|\\r?\\n|$)`, 'i').test(text.trimStart());
+}
+
+/** True when the task marker appears somewhere AFTER the opening of the
+ *  text ("Verified the deploy. New job: ..."). Such a message reads like a
+ *  new job but never opens a fresh thread, because only the opening marker
+ *  counts (Nov 11 2026: Max tucked Adam's scaling job behind a status line
+ *  twice and Adam kept his old thread). */
+export function buriesTaskMarker(text: string, prefix: string): boolean {
+  const marker = prefix.trim().replace(/\s*:$/, '');
+  if (!marker || opensWithTaskMarker(text, prefix)) return false;
+  const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}[ \\t]*[:,(\\-\u2013\u2014]`, 'iu').test(text);
+}
+
+/** The explicit way to start a job (Matt, Nov 11 2026: fresh threads MUST
+ *  happen). `newJob: true` on team_message puts the recipient's own task
+ *  marker at the very start of the text, so the whole stamp, claim and
+ *  idle-boundary wipe pipeline sees a task start with no reliance on the
+ *  sender's wording. Without the flag, a task source whose text buries the
+ *  marker mid-message is refused with a resend instruction instead of
+ *  silently landing in the old thread. Senders that are not task sources
+ *  for a fresh-thread recipient pass through untouched. */
+export function resolveNewJobText(opts: {
+  newJob?: boolean;
+  senderId: string;
+  recipientId: string;
+  recipientHome: string;
+  recipientName: string;
+  policy?: FreshTaskPolicy;
+  text: string;
+}): { text: string } | { error: string } {
+  const policy = opts.policy ?? freshTaskPolicy(opts.recipientHome);
+  const isSource = policy.enabled && taskSourceAllowed(opts.senderId, opts.recipientId, policy);
+  if (opts.newJob === true) {
+    if (!policy.enabled) return { error: `${opts.recipientName} does not start jobs in fresh threads, so newJob does not apply. Resend without newJob.` };
+    if (!isSource) return { error: `You are not a job source for ${opts.recipientName}, so you cannot start a new job for them. Send it to their lead instead.` };
+    const text = opensWithTaskMarker(opts.text, policy.prefix) ? opts.text : `${policy.prefix.trim()} ${opts.text}`;
+    if (!opensWithTaskMarker(text, policy.prefix)) return { error: `${opts.recipientName}'s configured new-job marker is invalid. Fix their freshTaskPrefix before assigning another job.` };
+    return { text };
+  }
+  if (isSource && buriesTaskMarker(opts.text, policy.prefix)) {
+    return { error: `This reads like a new job, but "${policy.prefix.trim()}" is not at the very start, so it would land in ${opts.recipientName}'s OLD thread. If it is a new job, resend the brief alone with newJob: true (send any other news as a separate message first). If it is not, reword it without "${policy.prefix.trim()}".` };
+  }
+  return { text: opts.text };
 }
 
 export function recipientIdle(sessions: Array<{ busy: boolean; backgroundTasks?: string[] }>): boolean {
@@ -432,10 +480,13 @@ type FreshTaskClaimRecord = StoredRecord & {
   taskId: string;
 };
 
-/** Durable first-handoff claims, keyed by (request, sender, recipient).
+/** Durable marker-only first-handoff claims, keyed by (request, sender,
+ *  recipient).
  *  The first stamped handoff of a request claims a task id atomically; a
  *  later send on the same request edge (a clarification sent before the
- *  recipient replies) reuses that id instead of stamping a second task. */
+ *  recipient replies) reuses that id instead of stamping a second task.
+ *  Explicit newJob sends carry their own task id: each flag is deliberately
+ *  a separate boundary and never mutates a legacy claim before persistence. */
 const freshTaskClaims = new JsonStore<FreshTaskClaimRecord>('fresh-task-claims.json', []);
 const requestRootWrites = new Map<string, Promise<unknown>>();
 
@@ -512,9 +563,9 @@ function freshClaimId(requestId: string, senderId: string, recipientId: string):
   return `claim:${createHash('sha256').update(`${requestId}\u0000${senderId}\u0000${recipientId}`).digest('hex')}`;
 }
 
-/** Atomically claim (or reuse) the durable task id for one first-handoff
- *  edge. The read-modify-write runs inside the store's mutation chain, so
- *  two concurrent sends on the same request edge can never mint two ids.
+/** Atomically claim (or reuse) the durable task id for one marker-only
+ *  first-handoff edge. The read-modify-write runs inside the store's mutation
+ *  chain, so concurrent sends on the same request edge can never mint two ids.
  *  Minting is deferred until every cheap exit (rate limit, duplicate,
  *  acknowledgement-only, informational) has already passed, and every mint
  *  prunes expired and excess rows, so the store stays bounded even if a
@@ -2167,22 +2218,21 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         home: '',
         createdAt: 0,
       };
-      // Fresh thread on task (Matt, Oct 22 2026): a flagged recipient's next
-      // new task lands in a clean thread. The trigger is deliberately narrow:
-      // the recipient is flagged, the lead record is a direct non-person
-      // handoff (no Desk/voice/Slack/channel fan-out, no nudge hold), and the
+      // Fresh thread on task (Matt, Oct 22 2026): an admitted task-start
+      // record lands in a clean thread. Authorization, recipient policy and
+      // marker wording are decided once at admission and carried by the
+      // server-only taskStart/taskId stamp; policy edits while a record waits
+      // cannot silently change an already accepted job's boundary. The
       // batch's durable task id is still owed its reset (per-task state, so
       // an interrupted wipe resumes after restart and one task's completion
       // never suppresses another's). The wipe itself waits for an idle
       // boundary and re-checks idle under the barrier, so a busy recipient
       // is never killed for a queued task, and the task never joins a live
-      // turn either: it waits for that turn to end. Person-sourced records
-      // never trigger it: they steer the thread the person is talking in. A wipe that fails before
+      // turn either: it waits for that turn to end. A wipe that fails before
       // anything destructive ran delivers into the intact old thread; one
       // that fails after the reset began holds the durable records for
       // retry instead.
       const batchIsPersonSourced = siblings.some((sibling) => personSourced(sibling));
-      const leadIsChannelFanout = lead.fromRole === 'channel';
       let freshRetryReason: string | undefined;
       let waitsForTurnEnd = false;
       let taskStartLead = false;
@@ -2192,15 +2242,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       // anything is delivered, whatever rule stamped the task: delivering
       // into a half-reset thread is never safe.
       const resetInFlight = Boolean(lead.taskId) && threadResetTaskState(toLogKey, lead.taskId!)?.state === 'resetting';
-      if (resetInFlight || (freshThreadOnTask(to.home)
-        && !batchIsPersonSourced
-        && !leadIsChannelFanout
-        && !nudgeHoldActive(lead)
-        // Defense in depth: the drain re-derives the sender gate instead of
-        // trusting a stored marker alone, so an operator list change (or a
-        // stale stamp from an earlier build) can never wipe for a sender
-        // that is no longer a task source for this recipient.
-        && isTaskStartHandoff({ senderId: lead.fromId, recipientId: to.id, recipientHome: to.home, text: lead.text }))) {
+      if (resetInFlight || (lead.taskStart === true && Boolean(lead.taskId))) {
         taskStartLead = true;
         // The batch is owed a wipe until its own task id's durable reset
         // state says complete: an interrupted wipe (`resetting`) resumes
@@ -2463,6 +2505,9 @@ export function teamMessageWaitRequested(wait: boolean | undefined): boolean {
 export async function deliverTeamMessage(input: {
   /** Status/FYI only: save for the next real turn, never start or steer one. */
   informational?: boolean;
+  /** Starts a new job: the recipient's task marker is put at the very start
+   *  of the text so a fresh-thread recipient always gets a clean thread. */
+  newJob?: boolean;
   from: string;
   to: string;
   text: string;
@@ -2511,7 +2556,7 @@ export async function deliverTeamMessage(input: {
   fromLane?: AgentLane;
 }): Promise<TeamMessageResult> {
   const hop = Math.max(1, Math.floor(input.hop ?? 1));
-  const text = (input.text ?? '').trim().slice(0, MAX_TEXT);
+  let text = (input.text ?? '').trim().slice(0, MAX_TEXT);
   if (!text) return { delivered: false, reason: 'empty message' };
 
   const to = findAgent(input.to);
@@ -2538,6 +2583,14 @@ export async function deliverTeamMessage(input: {
 
   const fromLane = input.fromLane === 'bg' ? 'bg' : 'main';
   const rosterSender = findAgent(from.id);
+  const recipientTaskPolicy = rosterSender && !input.source ? freshTaskPolicy(to.home) : undefined;
+  if (input.newJob === true && (input.source || !rosterSender)) return { delivered: false, reason: 'newJob is only for a teammate starting a job for another teammate' };
+  if (input.newJob === true && input.informational === true) return { delivered: false, reason: 'A new job cannot be informational. Resend with newJob: true and without informational.' };
+  if (rosterSender && !input.source && recipientTaskPolicy) {
+    const resolved = resolveNewJobText({ newJob: input.newJob, senderId: from.id, recipientId: to.id, recipientHome: to.home, recipientName: to.name, policy: recipientTaskPolicy, text });
+    if ('error' in resolved) return { delivered: false, to: to.name, reason: resolved.error };
+    text = resolved.text.slice(0, MAX_TEXT);
+  }
   const request = input.source || !rosterSender ? randomUUID() : await outboundRequest(from, fromLane);
   let parentChain: TeamChain | undefined;
   const parentActive = activeInboundChains.get(chainKey(from.id, fromLane));
@@ -2577,12 +2630,16 @@ export async function deliverTeamMessage(input: {
     senderId: from.id,
     recipientId: to.id,
     recipientHome: to.home,
+    policy: recipientTaskPolicy,
     source: input.source,
     personSourced: input.personSourced === true,
     nudgeHoldSince: input.nudgeHoldSince,
     continuesChain,
     text,
   });
+  if (input.newJob === true && !taskStartCandidate) {
+    return { delivered: false, to: to.name, reason: `Could not start a fresh job for ${to.name}. Check their fresh-thread policy and new-job marker, then resend.` };
+  }
   // Every cheap exit runs BEFORE any claim is minted: a send that dies at
   // the rate limit, the duplicate guard, the acknowledgement path or the
   // informational path never owns a task id, so its retry still stamps the
@@ -2613,10 +2670,19 @@ export async function deliverTeamMessage(input: {
   // reply closes the chain (below), so the next genuine task mints anew.
   let taskStart = false, taskId: string | undefined, mintedFreshClaim = false;
   if (taskStartCandidate) {
-    const priorTaskId = (await freshTaskClaims.list()).find((item) => item.requestId === request && item.senderId === from.id && item.recipientId === to.id)?.taskId;
-    taskStart = priorTaskId === undefined;
-    if (priorTaskId !== undefined) taskId = priorTaskId;
-    else { const mintedClaim = await claimFreshTaskId(request, from.id, to.id); taskId = mintedClaim.taskId; mintedFreshClaim = mintedClaim.minted; }
+    if (input.newJob === true) {
+      taskStart = true;
+      taskId = randomUUID();
+    } else {
+      const priorTaskId = (await freshTaskClaims.list()).find((item) => item.requestId === request && item.senderId === from.id && item.recipientId === to.id)?.taskId;
+      taskStart = priorTaskId === undefined;
+      if (priorTaskId !== undefined) taskId = priorTaskId;
+      else {
+        const mintedClaim = await claimFreshTaskId(request, from.id, to.id);
+        taskId = mintedClaim.taskId;
+        mintedFreshClaim = mintedClaim.minted;
+      }
+    }
   }
   // Any record carrying a fresh-task claim (the stamped lead AND its
   // pre-reply clarifications) must ride the drain, never the synchronous

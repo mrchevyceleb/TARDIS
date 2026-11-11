@@ -4,8 +4,8 @@ import { ELROND_WORKSPACE_PATH } from '../config.ts';
 import { abortInFlightChannelDeliveries, agentLogKey, batchJoinable, deliveryInterruptClass, deliveryLanePolicy, extendTeamChain, frozenBatchMembers, liveChannelTurnLanes, registerInFlightChannelDelivery, releaseInFlightChannelDelivery, teamAvailability, teamMessageWaitRequested, waitForDeliveryBoundary, type TeamChain } from './teamBus.ts';
 import { laneChatId } from './threadKey.ts';
 import type { Agent } from './agents.ts';
-import { freshThreadOnTask, freshTaskSenders } from './sessionPolicy.ts';
-import { isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed } from './teamBus.ts';
+import { freshTaskPolicy, freshThreadOnTask } from './sessionPolicy.ts';
+import { buriesTaskMarker, isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed, resolveNewJobText } from './teamBus.ts';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -167,8 +167,8 @@ test('fresh thread on task policy: flagged coders fresh, leads never', () => {
     assert.equal(freshThreadOnTask('bot-kip'), false);
     assert.equal(freshThreadOnTask('bot-riley'), false);
     assert.equal(freshThreadOnTask('bot-unknown'), false);
-    assert.deepEqual(freshTaskSenders('bot-tim'), ['riley']);
-    assert.deepEqual(freshTaskSenders('bot-christina'), []);
+    assert.deepEqual(freshTaskPolicy('bot-tim').senders, ['riley']);
+    assert.deepEqual(freshTaskPolicy('bot-christina').senders, []);
   } finally {
     if (previous === undefined) delete process.env.RIVENDELL_SESSION_POLICY_FILE;
     else process.env.RIVENDELL_SESSION_POLICY_FILE = previous;
@@ -444,4 +444,26 @@ test('the person’s channel posts never batch with agent replies from the same 
   assert.equal(batchJoinable(personLead as never, agentReply as never), false);
   assert.equal(batchJoinable(personLead as never, personToo as never), true);
   assert.equal(batchJoinable(personLead as never, otherChannel as never), false);
+});
+
+test('buriesTaskMarker: a job marker after other text is caught, prose and an opening marker are not', () => {
+  const p = 'New job:';
+  assert.equal(buriesTaskMarker('Verified prod. Now your main job. New job: two copies share the load', p), true);
+  assert.equal(buriesTaskMarker('Great work. New job (fresh thread), card-919ae7.', p), true);
+  assert.equal(buriesTaskMarker('New job: two copies share the load', p), false);
+  assert.equal(buriesTaskMarker('The new job count is wrong', p), false);
+  assert.equal(buriesTaskMarker('Renew job: soon', p), false);
+});
+
+test('resolveNewJobText: the explicit flag owns wording while policy owns authorization', () => {
+  const allowed = { enabled: true, senders: ['kip'], prefix: 'New job:' };
+  const base = { senderId: 'kip', recipientId: 'christina', recipientHome: 'bot-christina', recipientName: 'Christina', policy: allowed };
+  const errorOf = (result: ReturnType<typeof resolveNewJobText>) => 'error' in result ? result.error : '';
+  assert.deepEqual(resolveNewJobText({ ...base, newJob: true, text: 'Tidy the hub' }), { text: 'New job: Tidy the hub' });
+  assert.deepEqual(resolveNewJobText({ ...base, newJob: true, text: 'New job, tidy the hub' }), { text: 'New job, tidy the hub' });
+  assert.match(errorOf(resolveNewJobText({ ...base, text: 'Status first. New job: tidy the hub' })), /resend the brief alone with newJob: true/);
+  assert.deepEqual(resolveNewJobText({ ...base, text: 'The new job count is wrong' }), { text: 'The new job count is wrong' });
+  assert.match(errorOf(resolveNewJobText({ ...base, senderId: 'samwise', newJob: true, text: 'Tidy the hub' })), /not a job source/);
+  assert.match(errorOf(resolveNewJobText({ ...base, policy: { ...allowed, enabled: false }, newJob: true, text: 'Tidy the hub' })), /does not start jobs in fresh threads/);
+  assert.match(errorOf(resolveNewJobText({ ...base, policy: { ...allowed, prefix: ':' }, newJob: true, text: 'Tidy the hub' })), /configured new-job marker is invalid/);
 });
