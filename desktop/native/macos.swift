@@ -361,27 +361,26 @@ let keyCodes: [String: CGKeyCode] = [
 let modifierFlags: [String: CGEventFlags] = ["CTRL": .maskControl, "ALT": .maskAlternate, "SHIFT": .maskShift, "META": .maskCommand]
 let modifierCodes: [CGKeyCode] = [54, 55, 56, 58, 59, 60, 61, 62, 63]
 
+/// One key or chord: parseAction allows at most one key besides modifiers.
 func pressKeys(_ names: [String]) throws {
   var flags: CGEventFlags = []
-  var mains: [CGKeyCode] = []
+  var main: CGKeyCode?
   for name in names {
     if let flag = modifierFlags[name] { flags.insert(flag) }
-    else if let code = keyCodes[name] { mains.append(code) }
+    else if let code = keyCodes[name] { main = code }
     else { throw Failure(message: "Unsupported key \(name).") }
   }
-  if mains.isEmpty {
+  guard let code = main else {
     // A lone modifier press is a flags change, not a key.
     let down = CGEvent(source: source); down?.type = .flagsChanged; down?.flags = flags; post(down)
     usleep(30_000)
     let up = CGEvent(source: source); up?.type = .flagsChanged; up?.flags = []; post(up)
     return
   }
-  for code in mains {
-    let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true); down?.flags = flags; post(down)
-    usleep(15_000)
-    let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false); up?.flags = flags; post(up)
-    usleep(15_000)
-  }
+  let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true); down?.flags = flags; post(down)
+  usleep(15_000)
+  let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false); up?.flags = flags; post(up)
+  usleep(15_000)
 }
 
 func typeText(_ text: String) {
@@ -477,8 +476,11 @@ func parseAction(_ request: [String: Any]) throws -> Action {
     action.text = text
   }
   if name == "key" {
-    guard let keys = request["keys"] as? [String], !keys.isEmpty, keys.count <= 5, keys.allSatisfy({ modifierFlags[$0] != nil || keyCodes[$0] != nil }) else {
-      throw Failure(message: "Key needs 1 to 5 known key names.")
+    // One chord, never a sequence: after Cmd+H a second key would reach the
+    // next app, and assertAfterInput trusts a key to be a single event.
+    guard let keys = request["keys"] as? [String], !keys.isEmpty, keys.count <= 5, keys.allSatisfy({ modifierFlags[$0] != nil || keyCodes[$0] != nil }),
+          keys.filter({ modifierFlags[$0] == nil }).count <= 1 else {
+      throw Failure(message: "Key needs one known key or chord: modifiers plus at most one other key.")
     }
     action.keys = keys
   }

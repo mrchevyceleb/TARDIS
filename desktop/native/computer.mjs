@@ -25,8 +25,12 @@ export function validateText(value) {
   if (typeof value !== 'string' || !value || value.length > 2000 || /[\x00-\x08\x0b-\x1f\x7f]/.test(value)) throw new Error('Text must be 1–2000 characters without control codes.');
   return value;
 }
+const MODIFIERS = new Set(['CTRL', 'ALT', 'SHIFT', 'META']);
 export function validateKeys(value) {
   if (!Array.isArray(value) || !value.length || value.length > 5 || value.some(k => !KEYS.has(k))) throw new Error('Invalid keys; use 1–5 named uppercase keys.');
+  // One key or chord. A second main key is a sequence: once the first acts
+  // (Cmd+H, Alt+F4) the rest can land in whatever window comes up next.
+  if (value.filter(k => !MODIFIERS.has(k)).length > 1) throw new Error('Send one key or chord per call: modifiers plus at most one other key, like ["META", "W"]. Press the next key in its own call.');
   return [...new Set(value)];
 }
 // Background window input validates tighter than foreground input: posted
