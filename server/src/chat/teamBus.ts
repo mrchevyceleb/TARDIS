@@ -9,7 +9,7 @@ import { acknowledgementOnly, claimOutbound, releaseOutbound, saveInformational,
 
 import { createHash, randomUUID } from 'node:crypto';
 import { DESK_OWNER_NAME, ELROND_WORKSPACE_PATH } from '../config.ts';
-import { agentForChatId, brainForAgent, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
+import { agentForChatId, brainForAgent, cliForAgentEngine, listAgents, listAgentsOrThrow, type Agent } from './agents.ts';
 import { backgroundChatId, backgroundLaneEnabled, bareChatId, isBackgroundChatId, logKeyFor } from './threadKey.ts';
 import { extractVisibleTurns } from './threadWindow.ts';
 import { JsonStore, type StoredRecord } from '../lib/jsonStore.ts';
@@ -423,9 +423,9 @@ function chainKey(agentId: string, lane: AgentLane): string {
 /** Backward-compatible export for callers that resolve an engine lane. */
 export const cliForEngine = cliForAgentEngine;
 
-function findAgent(ref: string): Agent | undefined {
+function findAgent(ref: string, roster: Agent[] = listAgents()): Agent | undefined {
   const needle = ref.trim().toLowerCase();
-  return listAgents().find((a) => a.id === needle || a.name.trim().toLowerCase() === needle);
+  return roster.find((a) => a.id === needle || a.name.trim().toLowerCase() === needle);
 }
 
 // ---- guards ----------------------------------------------------------------
@@ -495,6 +495,9 @@ type QueuedTeamDelivery = StoredRecord & {
   fromName: string;
   fromRole?: string;
   toId: string;
+  /** The recipient's display name when queued, so a message returned after
+   *  they leave the roster can still name them. Older rows lack it. */
+  toName?: string;
   text: string;
   hop: number;
   /** Explicit priority flag from team_message: this record sorts with
@@ -2020,6 +2023,55 @@ async function fireDigestAdmissionAcks(toId: string, members: QueuedTeamDelivery
   }
 }
 
+/** Settle everything queued for a recipient who left the roster. A
+ *  teammate's message lives only in this queue, so it goes back to them;
+ *  everything else is dropped: system nudges, plus Desk, voice, channel and
+ *  Slack copies, whose originals stay where they were posted. A return that
+ *  cannot be queued yet keeps its row for the next pass. */
+async function settleDepartedRecipient(queueKey: string, roster: Agent[]): Promise<void> {
+  const records = (await queueStoreOperation(() => queuedDeliveryStore.list()))
+    .filter((item) => queueKeyOf(item) === queueKey);
+  for (const record of records) {
+    const sender = returnAddress(record, roster);
+    const name = record.toName ?? record.toId;
+    if (sender) {
+      const returned = await deliverTeamMessage({ from: 'TARDIS', to: sender.id, text: undeliveredNotice(record), wait: false });
+      if (!returned.delivered) {
+        console.warn(`[team] queued delivery ${record.id} for ${name} could not go back to ${sender.name} yet: ${returned.reason ?? 'unknown'}`);
+        continue;
+      }
+    }
+    await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
+    console.log(`[team] queued delivery ${record.id} from ${record.fromName} ${sender ? 'returned to sender' : 'dropped'}: ${name} is no longer on the team`);
+  }
+}
+
+/** Who gets a message back when its recipient left the roster: the sending
+ *  teammate, by exact id (a same-name replacement never inherits it), and
+ *  only if the recipient never saw it. Undefined drops it. Exported for tests. */
+export function returnAddress(record: Pick<QueuedTeamDelivery, 'fromId' | 'acked'>, roster: Agent[]): Agent | undefined {
+  return record.acked === true ? undefined : roster.find((agent) => agent.id === record.fromId);
+}
+
+/** The note a sender gets back with a message that can never be delivered.
+ *  It must fit MAX_TEXT, so a very long original is clamped with a visible
+ *  note (as channel posts are), never cut silently on delivery. */
+export function undeliveredNotice(record: Pick<QueuedTeamDelivery, 'toId' | 'toName' | 'text' | 'createdAt'>): string {
+  // Rows queued before toName existed know only the id, usually the name's
+  // lowercase slug, so give it back its capital.
+  const name = record.toName ?? record.toId.charAt(0).toUpperCase() + record.toId.slice(1);
+  const sentAt = Date.parse(record.createdAt ?? '');
+  const sent = Number.isFinite(sentAt)
+    ? ` from ${new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' }).format(sentAt)}`
+    : '';
+  const head = `Not delivered: ${name} is no longer on the team. If it still matters, send it to someone else.\n\nYour message${sent}:\n`;
+  const text = record.text.trim();
+  if (head.length + text.length <= MAX_TEXT) return head + text;
+  // 80 characters always holds the clamp note below.
+  const kept = text.slice(0, MAX_TEXT - head.length - 80);
+  return `${head}${kept}\n\n(The last ${text.length - kept.length} characters didn't fit in this note.)`;
+}
+
 function retryDelay(): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ASYNC_RETRY_MS);
@@ -2077,18 +2129,18 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
 
       const to = findAgent(record.toId);
       if (!to) {
-        console.warn(`[team] queued delivery ${record.id} is waiting for missing teammate ${record.toId}`);
-        // (card-b3468c review P1, Oct 18) A flag-digest record for a
-        // teammate no longer on the roster can never admit, and its source
-        // entry would wait on the record forever. Drop it: the digest's
-        // next flush sees the record gone from the queue and re-queues the
-        // line, which fails cleanly at recipient resolution while the
-        // teammate stays missing (no record is created) and delivers fresh
-        // if they return. Teammate chatter keeps waiting: a person may
-        // re-add the teammate and those messages still matter.
-        if (record.admissionAck === 'flag-digest') {
-          await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
-          break;
+        // Missing from a roster that reads cleanly means gone for good:
+        // deleteAgent burns the id, so nobody ever comes back on it, and
+        // waiting only retried every 15 seconds forever. Settle the whole
+        // queue now. The lookup above is fail-open (a broken roster file
+        // reads as empty), so only a confirmed read may settle anything.
+        let roster: Agent[] | undefined;
+        try { roster = listAgentsOrThrow(); } catch (error) {
+          console.warn(`[team] queued delivery ${record.id} for ${record.toId} waits: the roster could not be read (${(error as Error).message})`);
+        }
+        if (roster && !findAgent(record.toId, roster)) {
+          await settleDepartedRecipient(queueKey, roster);
+          return;
         }
         await retryDelay();
         continue;
@@ -2452,7 +2504,7 @@ export async function resumeQueuedTeamDeliveries(): Promise<number> {
     const stamp = new Date().toISOString();
     await queueStoreOperation(() => queuedDeliveryStore.modify(items => items.some(row => row.id === item.id) ? items : [...items, {
       id: item.id, createdAt: stamp, updatedAt: stamp, fromId: from?.id ?? 'unknown', fromName: item.from,
-      toId: to.id, text: item.text, hop: 1, priority: true, admissionAck: item.admissionAck,
+      toId: to.id, toName: to.name, text: item.text, hop: 1, priority: true, admissionAck: item.admissionAck,
       chainId: randomUUID(), chainEdges: [], chainRoute: [],
     }]));
     await removeSavedInformation(item.id);
@@ -2706,6 +2758,7 @@ export async function deliverTeamMessage(input: {
       fromName: from.name,
       fromRole: from.role || undefined,
       toId: to.id,
+      toName: to.name,
       text,
       hop,
       priority: input.priority === true ? true : undefined,
