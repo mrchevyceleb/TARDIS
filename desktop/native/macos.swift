@@ -112,13 +112,22 @@ func activeDisplays() -> [CGDirectDisplayID] {
 
 /// Ordinary windows on screen, front to back. Menu bar, Dock and floating
 /// panels (the control indicator among them) sit on other layers and stay out.
+/// The windows a person sees as windows, front to back: ordinary windows plus
+/// floating panels and alerts above them (layers 0 to 19). A system prompt such
+/// as a privacy request ("… would like to access files in your Downloads
+/// folder") is a modal panel at layer 8 that blocks its app until answered, so
+/// leaving it out made a waiting app look hung. The Dock, menu bar and
+/// Notification Center (layer 20 and up) are system chrome, and this helper's
+/// own Stop panel is never offered as a target.
 func onScreenWindows() -> [Win] {
   guard let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
+  let helper = ProcessInfo.processInfo.processName
   var rows: [Win] = []
   for entry in raw {
     guard let id = entry[kCGWindowNumber as String] as? Int,
           let pid = entry[kCGWindowOwnerPID as String] as? Int,
-          (entry[kCGWindowLayer as String] as? Int) == 0,
+          let layer = entry[kCGWindowLayer as String] as? Int, (0...19).contains(layer),
+          (entry[kCGWindowOwnerName as String] as? String) != helper,
           let dictionary = entry[kCGWindowBounds as String] as? NSDictionary,
           let bounds = CGRect(dictionaryRepresentation: dictionary as CFDictionary) else { continue }
     if ((entry[kCGWindowAlpha as String] as? Double) ?? 1) < 0.01 || bounds.width < 16 || bounds.height < 16 { continue }
