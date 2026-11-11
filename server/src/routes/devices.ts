@@ -142,7 +142,7 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
     } catch (error) { res.status(409).json({ error: (error as Error).message }); return; }
   }
   const info = device ? findDevice(device) : undefined;
-  if (!info || info.id !== device || !info.computer) { res.status(400).json({ error: 'Explicit online computer id required. Call device_list; never switch targets implicitly.' }); return; }
+  if (!info || info.id !== device || !info.computer) { res.status(400).json({ error: 'No online computer has that device id. Pass the id computer_start returned (only computer_start accepts a name); if that computer went offline, check device_list. Never switch targets implicitly.' }); return; }
   const ac = new AbortController();
   res.on('close', () => { if (!res.writableEnded) ac.abort(); });
   const call = async (operation: string, params: Record<string, unknown>) => {
