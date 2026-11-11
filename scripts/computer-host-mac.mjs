@@ -4,7 +4,9 @@
 // light, with no Electron window or renderer.
 //
 // The agent runs host.ts on TARDIS.app's own signed binary in Node mode
-// (ELECTRON_RUN_AS_NODE; its embedded Node strips the TypeScript types).
+// (ELECTRON_RUN_AS_NODE), loading the TypeScript through this checkout's tsx
+// exactly as npm run computer:host does elsewhere. Node's built-in type
+// stripping is not enough: the server code uses syntax it cannot strip.
 // launchd makes that process its own responsible process, so macOS attributes
 // Screen Recording and Accessibility to TARDIS: the host inherits whatever the
 // person at the Mac already allowed for TARDIS, with no new grant to click. A
@@ -69,9 +71,10 @@ if (!app) fail(`TARDIS.app was not found ${values.app ? `at ${values.app}` : 'in
 const bundleId = run('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', join(app, 'Contents', 'Info.plist')]).out;
 if (bundleId !== BUNDLE_ID) fail(`${app} is not TARDIS (bundle id ${bundleId || 'unknown'}).`);
 const binary = join(app, 'Contents', 'MacOS', 'TARDIS');
-const probe = run(binary, ['-p', 'process.features.typescript'], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, timeout: 30_000 });
-if (!probe.ok || !['strip', 'transform'].includes(probe.out)) {
-  fail(`${app} cannot run the host in Node mode (${(probe.err || probe.out || 'no output').slice(0, 300)}). Update TARDIS.app: the host needs Electron's RunAsNode fuse and TypeScript type stripping (Node 24+).`);
+const runtime = [binary, '--import', 'tsx']; // tsx resolves from WorkingDirectory, this checkout
+const probe = run(runtime[0], [...runtime.slice(1), '-p', '1'], { cwd: root, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, timeout: 30_000 });
+if (!probe.ok || probe.out !== '1') {
+  fail(`${app} cannot run the host in Node mode (${(probe.err || probe.out || 'no output').slice(0, 300)}). Run npm install in this checkout first; if it is installed, update TARDIS.app (the host needs Electron's RunAsNode fuse).`);
 }
 
 // 2. The Swift helper, built from this checkout so it always matches host.ts.
@@ -115,8 +118,7 @@ writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?>
   <key>Label</key><string>${LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${xml(binary)}</string>
-    <string>${xml(join(root, 'server', 'src', 'devices', 'host.ts'))}</string>
+${[...runtime, join(root, 'server', 'src', 'devices', 'host.ts')].map(arg => `    <string>${xml(arg)}</string>`).join('\n')}
   </array>
   <key>WorkingDirectory</key><string>${xml(root)}</string>
   <key>EnvironmentVariables</key>
@@ -146,20 +148,32 @@ for (let attempt = 0; ; attempt++) {
   pause(500);
 }
 
-// 6. Show what the host itself reports: its link and the permissions it holds.
-let report = '';
-for (let waited = 0; waited < 15_000 && !/macOS (allows|has not allowed)|not built|cannot|Error/.test(report); waited += 500) {
-  pause(500);
-  if (!existsSync(log)) continue;
-  const size = statSync(log).size;
-  if (size <= logStart) continue;
+// 6. The host's own report is the proof it runs: its link and the permissions it
+// holds. launchd records an exit even after KeepAlive respawns the job, so a
+// host that dies on startup is taken down again rather than left to crash-loop.
+function logSince(offset) {
+  if (!existsSync(log) || statSync(log).size <= offset) return '';
   const fd = openSync(log, 'r');
-  const chunk = Buffer.alloc(Math.min(size - logStart, 64 * 1024));
-  readSync(fd, chunk, 0, chunk.length, logStart);
-  closeSync(fd);
-  report = chunk.toString('utf8');
+  try {
+    const chunk = Buffer.alloc(Math.min(statSync(log).size - offset, 64 * 1024));
+    readSync(fd, chunk, 0, chunk.length, offset);
+    return chunk.toString('utf8');
+  } finally { closeSync(fd); }
 }
-console.log(`\n${report.trim() || '(the host has not logged anything yet)'}\n`);
+const reported = /macOS (allows|has not allowed)|could not read the macOS permissions/;
+const neverExited = () => /last exit code = \(never exited\)/.test(run('launchctl', ['print', `${domain}/${LABEL}`]).out);
+let report = '';
+let alive = true;
+for (let waited = 0; waited < 20_000 && alive && !reported.test(report); waited += 500) {
+  pause(500);
+  report = logSince(logStart);
+  alive = neverExited();
+}
+if (!reported.test(report)) {
+  bootout();
+  fail(`the host ${alive ? 'did not report within 20 seconds' : 'stopped as it started'}, so it was removed again. It logged:\n${report.trim() || '(nothing)'}\nFull log: ${log}`);
+}
+console.log(`\n${report.trim()}\n`);
 console.log(`TARDIS computer host installed as "${name || 'this Mac'}" → ${new URL(server).origin}
   Starts at login and restarts if it stops (LaunchAgent ${LABEL}).
   Approval: ${values.unattended ? 'automatic (unattended)' : 'asks the person at this Mac for each grant'}; indicator ${values['no-indicator'] ? 'off' : 'on'}.
