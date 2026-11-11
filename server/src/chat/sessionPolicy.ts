@@ -52,7 +52,8 @@ function validPolicy(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const p = value as Record<string, unknown>;
   return Object.entries(p).every(([key, v]) => {
-    if (key === 'directory' || key === 'reportsTo' || key === 'houseRules' || key === 'freshTaskPrefix') return typeof v === 'string' && v.length > 0;
+    if (key === 'directory' || key === 'reportsTo' || key === 'houseRules') return typeof v === 'string' && v.length > 0;
+    if (key === 'freshTaskPrefix') return typeof v === 'string' && v.trim().replace(/\s*:$/, '').trim().length > 0;
     if (key === 'skills' || key === 'excludeInstructions') return Array.isArray(v) && v.every(x => typeof x === 'string');
     if (key === 'briefs') return validBriefs(v);
     if (key === 'lead' || key === 'memoryIndex' || key === 'freshThreadOnTask') return typeof v === 'boolean';
@@ -189,22 +190,27 @@ export function freshThreadOnTask(chatId: string): boolean {
   return sessionPolicy(chatId).freshThreadOnTask === true;
 }
 
-/** Agent ids allowed to start a fresh thread for this recipient. Empty
- *  means no operator allowlist is configured, so the stamp gate falls back
- *  to lead-to-coder briefs only; a listed set gates the trigger to those
- *  senders. Either way the drain still requires the explicit task-start
- *  marker. */
-export function freshTaskSenders(chatId: string): string[] {
-  return sessionPolicy(chatId).freshTaskSenders ?? [];
-}
-
 /** The marker that opens a new task (and a fresh thread) for this
  *  recipient. Every fresh-thread lane has one: the explicit marker is the
  *  only task boundary (Matt, Nov 3 2026), so no guess from Desk cards or
  *  timing ever decides it. */
 export const DEFAULT_FRESH_TASK_PREFIX = 'New job:';
-export function freshTaskPrefix(chatId: string): string {
-  return sessionPolicy(chatId).freshTaskPrefix ?? DEFAULT_FRESH_TASK_PREFIX;
+export type FreshTaskPolicy = {
+  enabled: boolean;
+  senders: string[];
+  prefix: string;
+};
+
+/** Resolve the recipient's complete task-boundary policy from one snapshot.
+ *  Team-message admission is a hot path, so callers carry these three facts
+ *  together instead of statting the operator policy file once per field. */
+export function freshTaskPolicy(chatId: string): FreshTaskPolicy {
+  const policy = sessionPolicy(chatId);
+  return {
+    enabled: policy.freshThreadOnTask === true,
+    senders: policy.freshTaskSenders ?? [],
+    prefix: policy.freshTaskPrefix ?? DEFAULT_FRESH_TASK_PREFIX,
+  };
 }
 
 /** Provider profiles need not install the same native skill catalog. Keep

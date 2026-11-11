@@ -119,7 +119,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        newJob: { type: 'boolean', description: 'True when this message starts a NEW job for the teammate. Their old thread is wiped and the job starts in a fresh one. Put only the job brief in text; send any other news as a separate message first.' },
+        newJob: { type: 'boolean', description: 'True when this message starts a NEW job for the teammate. Their old thread is wiped and the job starts in a fresh one. Each true is a separate fresh-thread job: set it only on the first message, and omit it from continuation parts. Put only the job brief in text; send any other news as a separate message first.' },
         informational: { type: 'boolean', description: 'True for information or an FYI. Saves it for their next real turn without waking or interrupting them. Use false or omit only when they must act now.' },
         from: { type: 'string', description: 'Your own teammate name (the sender)' },
         to: { type: 'string', description: "Teammate name, e.g. 'Chief of Staff'" },
