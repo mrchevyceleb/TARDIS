@@ -46,6 +46,12 @@ export async function contentRequest<T>(path: string, method = 'GET', body?: unk
   return data as T;
 }
 
+/** A T3 Code session an agent has running (GET /api/t3-sessions). */
+export type T3SessionView = { id: string; host: string; threadId: string; ownerId: string; title: string; link?: string; state: string; runningSince: number };
+export function fetchT3Sessions(signal?: AbortSignal) {
+  return apiJson<{ configured: boolean; now: number; sessions: T3SessionView[] }>('/api/t3-sessions', { signal, cache: 'no-store' });
+}
+
 export type LinkedComputer = {
   id: string; name: string; platform: string;
   computer?: { supported: boolean; reason?: string; approvalMode?: 'ask' | 'automatic'; paused?: boolean; pausedAt?: number; pausedReason?: string; control: { owner: string; label: string; purpose: string; expiresAt: number } | null };

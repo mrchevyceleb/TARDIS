@@ -7,6 +7,7 @@ import { useCallback, useEffect, useId, useRef, useState, type DragEvent, type K
 import { createPortal } from 'react-dom';
 import { ArrowDown, ArrowUp, Check, ChevronRight, Ellipsis, Pencil, Plus, Trash2 } from 'lucide-react';
 import { RailJobsBadge } from '../chat/components/jobs/RailJobsBadge';
+import { T3SessionsBadge } from './T3Sessions';
 import { GROUP_NAME_MAX, OTHER_GROUP_NAME } from './railGroups';
 import { menuClosesOnScroll } from './menuScroll';
 import './railGroups.css';
@@ -204,6 +205,8 @@ export type RailGroupSectionProps = {
   working: number;
   /** Listed companions running background jobs. Counted on their own, so one can also be mid-turn. */
   jobs: number;
+  /** T3 Code sessions the listed companions have running. */
+  sessions: number;
   /** Unread replies across listed companions (muted ones already count zero). */
   unread: number;
   collapsed: boolean;
@@ -225,7 +228,7 @@ export type RailGroupSectionProps = {
 };
 
 export function RailGroupSection(props: RailGroupSectionProps) {
-  const { id, name, isOther, count, working, jobs, unread, collapsed, dragging, dropping } = props;
+  const { id, name, isOther, count, working, jobs, sessions, unread, collapsed, dragging, dropping } = props;
   const bodyId = useId();
   const [menu, setMenu] = useState<{ x: number; y: number; restore: HTMLElement | null } | null>(null);
   const [editing, setEditing] = useState(false);
@@ -246,6 +249,7 @@ export function RailGroupSection(props: RailGroupSectionProps) {
     `${name}, ${count} ${count === 1 ? 'companion' : 'companions'}`,
     working ? `${working} working` : '',
     jobs ? `${jobs} on background jobs` : '',
+    sessions ? `${sessions} T3 ${sessions === 1 ? 'session' : 'sessions'} running` : '',
     unread ? `${unread} unread` : '',
   ].filter(Boolean).join(', ');
 
@@ -292,10 +296,11 @@ export function RailGroupSection(props: RailGroupSectionProps) {
             <ChevronRight className="bt-group-chev" size={15} aria-hidden="true" />
             <span className="bt-group-name" aria-hidden="true">{name}</span>
             <span className="bt-group-count" aria-hidden="true">{count}</span>
-            {collapsed && (working > 0 || jobs > 0 || unread > 0) ? (
+            {collapsed && (working > 0 || jobs > 0 || sessions > 0 || unread > 0) ? (
               <span className="bt-group-chips">
                 {working > 0 ? <PopBadge value={working} className="bt-group-working"><span className="bt-group-dot" />{working} working</PopBadge> : null}
                 {jobs > 0 ? <PopBadge value={jobs} className="bt-group-jobs"><RailJobsBadge running={jobs} label={`${jobs} on jobs`} /></PopBadge> : null}
+                {sessions > 0 ? <PopBadge value={sessions} className="bt-group-jobs"><T3SessionsBadge count={sessions} /></PopBadge> : null}
                 {unread > 0 ? <PopBadge value={unread} className="bt-unread">{unread > 9 ? '9+' : unread}</PopBadge> : null}
               </span>
             ) : null}

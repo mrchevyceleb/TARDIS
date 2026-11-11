@@ -1,0 +1,67 @@
+/* Running T3 Code sessions on the roster. Violet, so a session never reads as
+   the amber busy pulse or the teal jobs badge. Global --r-* tokens only. */
+
+.t3s, .t3s-badge {
+  --t3: color-mix(in oklch, var(--r-violet) 82%, var(--r-ink));
+  --t3-spring: cubic-bezier(0.22, 1.4, 0.3, 1);
+}
+
+@keyframes t3s-turn { to { transform: rotate(360deg); } }
+@keyframes t3s-in { from { opacity: 0; transform: translateY(-4px) scale(0.97); } to { opacity: 1; transform: none; } }
+@keyframes t3s-hold { 50% { opacity: 0.35; } }
+
+.t3s { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
+
+.t3s-line {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 4px 5px 4px 7px; border-radius: 8px;
+  border: 1px solid color-mix(in oklch, var(--t3) 26%, transparent);
+  background: color-mix(in oklch, var(--t3) 8%, transparent);
+  color: var(--r-ink-soft); font-size: 11.5px; line-height: 1.35;
+  animation: t3s-in 0.3s var(--t3-spring) both;
+  transition: transform 0.18s var(--t3-spring), background 0.15s ease, border-color 0.15s ease;
+}
+.t3s-line:hover { transform: translateX(2px); background: color-mix(in oklch, var(--t3) 15%, transparent); border-color: color-mix(in oklch, var(--t3) 46%, transparent); }
+.t3s-line.is-wait { --t3: var(--r-amber); }
+.t3s-line.is-warm { --t3: var(--r-ink-mute); }
+
+.t3s-orbit { width: 12px; height: 12px; flex: none; color: var(--t3); }
+.t3s-moon { transform-origin: 8px 8px; animation: t3s-turn 2.4s linear infinite; }
+.t3s-line:hover .t3s-moon { animation-duration: 0.8s; }
+.t3s-line.is-wait .t3s-moon { animation: t3s-hold 1.4s ease-in-out infinite; }
+.t3s-line.is-warm .t3s-moon { animation-duration: 5s; }
+
+.t3s-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.t3s-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.t3s-state {
+  flex: none; padding: 0 5px; border-radius: 4px;
+  background: color-mix(in oklch, var(--t3) 18%, transparent); color: var(--t3);
+  font: 600 9.5px/1.6 var(--r-mono); letter-spacing: 0.03em; text-transform: uppercase;
+}
+.t3s-meta { display: flex; align-items: center; gap: 5px; color: var(--r-ink-faint); font: 500 10px/1.5 var(--r-mono); white-space: nowrap; }
+.t3s-clock { color: var(--t3); font-variant-numeric: tabular-nums; }
+.t3s-open {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; margin: -2px -2px -2px 0; border-radius: 6px;
+  color: var(--r-ink-faint); cursor: pointer;
+  transition: transform 0.18s var(--t3-spring), color 0.15s ease, background 0.15s ease;
+}
+.t3s-open:hover { color: var(--t3); background: color-mix(in oklch, var(--t3) 20%, transparent); transform: translate(1px, -1px) scale(1.12); }
+.t3s-open:focus-visible { color: var(--t3); outline: 2px solid var(--t3); outline-offset: 1px; }
+.t3s-more { padding-left: 24px; color: var(--r-ink-faint); font: 500 10px/1.5 var(--r-mono); }
+
+.t3s-badge {
+  display: inline-flex; align-items: center; gap: 4px; flex: none; padding: 1px 6px 1px 4px; border-radius: 5px;
+  border: 1px solid color-mix(in oklch, var(--t3) 48%, transparent);
+  background: color-mix(in oklch, var(--t3) 10%, transparent); color: var(--t3);
+  font: 600 10px/1.5 var(--r-mono); letter-spacing: 0.02em; white-space: nowrap;
+  transition: transform 0.18s var(--t3-spring), background 0.15s ease;
+}
+.t3s-badge:hover { transform: translateY(-1px); background: color-mix(in oklch, var(--t3) 18%, transparent); }
+.t3s-badge .t3s-orbit { width: 10px; height: 10px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .t3s-line, .t3s-moon, .t3s-line.is-wait .t3s-moon { animation: none; }
+  .t3s-line, .t3s-open, .t3s-badge { transition: none; }
+  .t3s-line:hover, .t3s-open:hover, .t3s-badge:hover { transform: none; }
+}

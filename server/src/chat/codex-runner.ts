@@ -29,6 +29,7 @@ import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { sharedRule } from './sharedRules.ts';
 import { longCallGateEnv } from './longCallGate.ts';
+import { agentIdentityEnv } from './agentIdentity.ts';
 import { spawnLaneWorker } from '../lib/workerReap.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { agentForChatId, brainForAgent, noteAgentLane, wantsFullToolbox } from './agents.ts';
@@ -950,7 +951,7 @@ export class CodexSession {
     const child = spawnLaneWorker(process.execPath, [CODEX_APP_TURN_SCRIPT], {
       cwd: this.cwd,
       // The marker tells the installed long-call gate hook this is a TARDIS agent turn.
-      env: { ...codexSpawnEnv, ...localMcpSecretEnv(laneName ?? 'Teammate', { unnamedLane: !laneName }), ...longCallGateEnv(this.chatId) },
+      env: { ...codexSpawnEnv, ...localMcpSecretEnv(laneName ?? 'Teammate', { unnamedLane: !laneName }), ...longCallGateEnv(this.chatId), ...agentIdentityEnv(this.chatId) },
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessByStdio<Writable, Readable, Readable>;

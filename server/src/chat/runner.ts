@@ -32,6 +32,7 @@ import { backgroundChatId, backgroundLaneEnabled, isAgentThread, isBackgroundCha
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { longCallGateSettings } from './longCallGate.ts';
+import { agentIdentityEnv } from './agentIdentity.ts';
 import { prioritiesBlockFor } from '../lib/prioritiesStore.ts';
 import { agentForChatId, brainForAgent, cliForAgentEngine, noteAgentLane, wantsFullToolbox, type Agent } from './agents.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
@@ -1071,6 +1072,7 @@ class ClaudeSession {
       // Its 200k fallback otherwise wins over the requested 333k window.
       if (/^claude-(sonnet|opus)-5-5$/.test(this.spawnModel)) spawnEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '1000000';
     }
+    Object.assign(spawnEnv, agentIdentityEnv(chatId));
     delete spawnEnv.DISABLE_AUTO_COMPACT;
     delete spawnEnv.DISABLE_COMPACT;
     spawnEnv.ENABLE_TOOL_SEARCH = (cli === 'openrouter' || cli === 'openrouter2') && !openRouterToolSearch(this.spawnModel) ? 'false' : 'true';

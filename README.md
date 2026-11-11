@@ -84,6 +84,7 @@ Start with [`.env.example`](.env.example). Important groups:
 | Content engine | `RIVENDELL_CONTENT_TOKEN` (dedicated server secret; see [content gateway](docs/CONTENT-ENGINE.md)) |
 | External MCP | `ASSISTANT_MCP_URL`, `ASSISTANT_MCP_TOKEN`, `RIVENDELL_ASSISTANT_MCP_PROXY` |
 | Browser bridge | `RIVENDELL_BROWSER_MCP` |
+| T3 Code sessions | `RIVENDELL_T3_HOSTS` (optional; wakes a teammate when a T3 Code session they started ends a turn) |
 | CLI profiles | `RIVENDELL_ACCOUNT_MAP`, `RIVENDELL_DEFAULT_CLI_ACCOUNT` (optional explicit account routing) |
 | Calendar display | `RIVENDELL_CALENDAR_PRIMARY_*`, `RIVENDELL_CALENDAR_SECONDARY_*`, `RIVENDELL_CALENDAR_SECONDARY_MARKERS` |
 | Windows links | `VITE_RIVENDELL_WINDOWS_WORKSPACE_PATH` |
