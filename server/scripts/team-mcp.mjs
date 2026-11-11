@@ -119,6 +119,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
+        newJob: { type: 'boolean', description: 'True when this message starts a NEW job for the teammate. Their old thread is wiped and the job starts in a fresh one. Put only the job brief in text; send any other news as a separate message first.' },
         informational: { type: 'boolean', description: 'True for information or an FYI. Saves it for their next real turn without waking or interrupting them. Use false or omit only when they must act now.' },
         from: { type: 'string', description: 'Your own teammate name (the sender)' },
         to: { type: 'string', description: "Teammate name, e.g. 'Chief of Staff'" },
@@ -921,7 +922,7 @@ async function callTool(name, args, signal) {
         // Version the async-default behavior at the MCP boundary. The raw HTTP
         // API keeps its historical synchronous default for non-MCP callers.
         wait: args.wait === true,
-        informational: args.informational, priority: args.priority === true,
+        informational: args.informational, priority: args.priority === true, newJob: args.newJob === true ? true : undefined,
       }),
     }, signal);
     if (!result.delivered) return `NOT DELIVERED: ${result.reason}`;

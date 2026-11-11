@@ -232,6 +232,50 @@ export function opensWithTaskMarker(text: string, prefix: string): boolean {
   return new RegExp(`^${escaped}[ \\t]*(?:[:,;.!\\-\u2013\u2014]|\\r?\\n|$)`, 'i').test(text.trimStart());
 }
 
+/** True when the task marker appears somewhere AFTER the opening of the
+ *  text ("Verified the deploy. New job: ..."). Such a message reads like a
+ *  new job but never opens a fresh thread, because only the opening marker
+ *  counts (Nov 11 2026: Max tucked Adam's scaling job behind a status line
+ *  twice and Adam kept his old thread). */
+export function buriesTaskMarker(text: string, prefix: string): boolean {
+  const marker = prefix.trim().replace(/\s*:$/, '');
+  if (!marker || opensWithTaskMarker(text, prefix)) return false;
+  const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}[ \\t]*[:,(\\-\u2013\u2014]`, 'iu').test(text);
+}
+
+/** The explicit way to start a job (Matt, Nov 11 2026: fresh threads MUST
+ *  happen). `newJob: true` on team_message puts the recipient's own task
+ *  marker at the very start of the text, so the whole stamp, claim and
+ *  idle-boundary wipe pipeline sees a task start with no reliance on the
+ *  sender's wording. Without the flag, a task source whose text buries the
+ *  marker mid-message is refused with a resend instruction instead of
+ *  silently landing in the old thread. Senders that are not task sources
+ *  for a fresh-thread recipient pass through untouched. */
+export function resolveNewJobText(opts: {
+  newJob?: boolean;
+  senderId: string;
+  recipientId: string;
+  recipientHome: string;
+  recipientName: string;
+  text: string;
+}): { text: string } | { error: string } {
+  const fresh = freshThreadOnTask(opts.recipientHome);
+  const allowed = freshTaskSenders(opts.recipientHome);
+  const isSource = fresh && (allowed.length ? allowed.includes(opts.senderId) : isCoderBrief(opts.senderId, opts.recipientId));
+  const prefix = freshTaskPrefix(opts.recipientHome);
+  if (opts.newJob === true) {
+    if (!fresh) return { error: `${opts.recipientName} does not start jobs in fresh threads, so newJob does not apply. Resend without newJob.` };
+    if (!isSource) return { error: `You are not a job source for ${opts.recipientName}, so you cannot start a new job for them. Send it to their lead instead.` };
+    if (opensWithTaskMarker(opts.text, prefix)) return { text: opts.text };
+    return { text: `${prefix.trim()} ${opts.text}` };
+  }
+  if (isSource && buriesTaskMarker(opts.text, prefix)) {
+    return { error: `This reads like a new job, but "${prefix.trim()}" is not at the very start, so it would land in ${opts.recipientName}'s OLD thread. If it is a new job, resend the brief alone with newJob: true (send any other news as a separate message first). If it is not, reword it without "${prefix.trim()}".` };
+  }
+  return { text: opts.text };
+}
+
 export function recipientIdle(sessions: Array<{ busy: boolean; backgroundTasks?: string[] }>): boolean {
   return recipientBusyReason(sessions) === undefined;
 }
@@ -2463,6 +2507,9 @@ export function teamMessageWaitRequested(wait: boolean | undefined): boolean {
 export async function deliverTeamMessage(input: {
   /** Status/FYI only: save for the next real turn, never start or steer one. */
   informational?: boolean;
+  /** Starts a new job: the recipient's task marker is put at the very start
+   *  of the text so a fresh-thread recipient always gets a clean thread. */
+  newJob?: boolean;
   from: string;
   to: string;
   text: string;
@@ -2511,7 +2558,7 @@ export async function deliverTeamMessage(input: {
   fromLane?: AgentLane;
 }): Promise<TeamMessageResult> {
   const hop = Math.max(1, Math.floor(input.hop ?? 1));
-  const text = (input.text ?? '').trim().slice(0, MAX_TEXT);
+  let text = (input.text ?? '').trim().slice(0, MAX_TEXT);
   if (!text) return { delivered: false, reason: 'empty message' };
 
   const to = findAgent(input.to);
@@ -2538,6 +2585,13 @@ export async function deliverTeamMessage(input: {
 
   const fromLane = input.fromLane === 'bg' ? 'bg' : 'main';
   const rosterSender = findAgent(from.id);
+  if (input.newJob === true && (input.source || !rosterSender)) return { delivered: false, reason: 'newJob is only for a teammate starting a job for another teammate' };
+  if (input.newJob === true && input.informational === true) return { delivered: false, reason: 'A new job cannot be informational. Resend with newJob: true and without informational.' };
+  if (rosterSender && !input.source) {
+    const resolved = resolveNewJobText({ newJob: input.newJob, senderId: from.id, recipientId: to.id, recipientHome: to.home, recipientName: to.name, text });
+    if ('error' in resolved) return { delivered: false, to: to.name, reason: resolved.error };
+    text = resolved.text.slice(0, MAX_TEXT);
+  }
   const request = input.source || !rosterSender ? randomUUID() : await outboundRequest(from, fromLane);
   let parentChain: TeamChain | undefined;
   const parentActive = activeInboundChains.get(chainKey(from.id, fromLane));

@@ -5,7 +5,7 @@ import { abortInFlightChannelDeliveries, agentLogKey, batchJoinable, deliveryInt
 import { laneChatId } from './threadKey.ts';
 import type { Agent } from './agents.ts';
 import { freshThreadOnTask, freshTaskSenders } from './sessionPolicy.ts';
-import { isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed } from './teamBus.ts';
+import { buriesTaskMarker, isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed } from './teamBus.ts';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -444,4 +444,13 @@ test('the person’s channel posts never batch with agent replies from the same 
   assert.equal(batchJoinable(personLead as never, agentReply as never), false);
   assert.equal(batchJoinable(personLead as never, personToo as never), true);
   assert.equal(batchJoinable(personLead as never, otherChannel as never), false);
+});
+
+test('buriesTaskMarker: a job marker after other text is caught, prose and an opening marker are not', () => {
+  const p = 'New job:';
+  assert.equal(buriesTaskMarker('Verified prod. Now your main job. New job: two copies share the load', p), true);
+  assert.equal(buriesTaskMarker('Great work. New job (fresh thread), card-919ae7.', p), true);
+  assert.equal(buriesTaskMarker('New job: two copies share the load', p), false);
+  assert.equal(buriesTaskMarker('The new job count is wrong', p), false);
+  assert.equal(buriesTaskMarker('Renew job: soon', p), false);
 });
