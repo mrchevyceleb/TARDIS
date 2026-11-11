@@ -26,8 +26,8 @@ import type { Server as HttpServer } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { JsonStore } from '../lib/jsonStore.ts';
-import { computerOwnerTurnRunning, loadComputerTargets, revokeComputerContext } from './context.ts';
-import { forgetRobot, recordRobotEvent, robotStatus, safeRobotName, setRobotStatus, type RobotStatus } from './robots.ts';
+import { computerOwnerTurnRunning, loadComputerTargets, revokeComputerContext, setOnlineComputersProbe } from './context.ts';
+import { forgetRobot, recordRobotEvent, robotStatus, safeDeviceName, setRobotStatus, type RobotStatus } from './robots.ts';
 import type { ControlStatus } from '../../../desktop/native/computer.mjs';
 
 export type DeviceOp = 'exec' | 'read' | 'write' | 'ls' | 'open' | `computer.${string}` | `robot.${string}`;
@@ -85,6 +85,7 @@ export function listDevices(): DeviceInfo[] {
     .map((device) => device.info)
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+setOnlineComputersProbe(() => listDevices().filter((device) => device.kind === 'computer' && device.computer?.supported));
 
 /** Online robots with their latest self-reported status. */
 export function listRobots(): RobotInfo[] {
@@ -115,9 +116,16 @@ export function findDevice(idOrName: string): DeviceInfo | undefined {
   for (const device of devices.values()) {
     if (device.info.id.toLowerCase() === needle) return device.info;
   }
+  // Names are stored as safeDeviceName cleaned them, so a reference written
+  // against the name a machine sends (a configured default, an agent copying
+  // the Mac's own name) is cleaned the same way before it is compared.
+  const cleaned = safeDeviceName(idOrName, '').toLowerCase();
   // Two machines can share a hostname. Rather than guess which one runs the
   // command, say so and make the caller use the id.
-  const byName = [...devices.values()].filter((device) => device.info.name.toLowerCase() === needle);
+  const byName = [...devices.values()].filter((device) => {
+    const name = device.info.name.toLowerCase();
+    return name === needle || name === cleaned;
+  });
   if (byName.length === 1) return byName[0].info;
   if (byName.length > 1) throw new AmbiguousDeviceError(byName.map((device) => device.info));
   return undefined;
@@ -436,8 +444,10 @@ export function registerDeviceBridge(server: HttpServer): void {
             ws.send(JSON.stringify({ type: 'error', message: 'already registered' }));
             return;
           }
+          // Ids are quoted into agent prompts and tool output, so only a plain
+          // token is accepted (every TARDIS client sends a UUID).
           const id = String(msg.deviceId ?? '').trim();
-          if (!id || id.length > 100) {
+          if (!/^[\w.:-]{1,100}$/.test(id)) {
             ws.send(JSON.stringify({ type: 'error', message: 'valid deviceId is required' }));
             ws.close();
             return;
@@ -461,9 +471,10 @@ export function registerDeviceBridge(server: HttpServer): void {
             : undefined;
           const info: DeviceInfo = {
             id,
-            // A robot's name is quoted into agent prompts; keep it one plain line.
-            name: kind === 'robot' ? safeRobotName(msg.name, id) : String(msg.name ?? '').trim() || id,
-            platform: String(msg.platform ?? 'unknown'),
+            // Every device's name is quoted into agent prompts; keep it one plain line.
+            name: safeDeviceName(msg.name, id),
+            // Quoted into prompts too: a bare token such as darwin, win32 or linux.
+            platform: typeof msg.platform === 'string' && /^[\w.-]{1,24}$/.test(msg.platform) ? msg.platform : 'unknown',
             homeDir: String(msg.homeDir ?? ''),
             workspaceRoot: String(msg.workspaceRoot ?? ''),
             version: String(msg.version ?? ''),

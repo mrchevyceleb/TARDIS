@@ -68,6 +68,21 @@ export async function setComputerTarget(chatId: string, device: string): Promise
 }
 export function computerTarget(chatId: string): string { return targets.get(chatId) ?? ''; }
 export function configuredDefaultComputer(): string { return process.env.RIVENDELL_COMPUTER_DEFAULT_DEVICE?.trim() ?? ''; }
+type OnlineComputer = { id: string; name: string; platform: string };
+let onlineComputers: () => OnlineComputer[] = () => [];
+/** The device bridge hands over its live list (it imports this module, so
+ *  this module never imports it back). */
+export function setOnlineComputersProbe(probe: () => OnlineComputer[]): void { onlineComputers = probe; }
+const PLATFORM_NAMES: Record<string, string> = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' };
+/** Every computer an agent can drive right now. Without it an agent only knew
+ *  the default, and took a Mac that was online but not the default for a
+ *  missing one. Empty when none is online. */
+export function onlineComputersLine(): string {
+  const online = onlineComputers();
+  return online.length
+    ? `Computers online now: ${online.map((computer) => `${computer.name} (${PLATFORM_NAMES[computer.platform] ?? computer.platform})`).join(', ')}. To use one, pass its exact name or id as device on computer_start.`
+    : '';
+}
 export function backgroundComputerAllowed(): boolean { return process.env.RIVENDELL_COMPUTER_ALLOW_BACKGROUND === 'true'; }
 function sign(body: string): string { return createHmac('sha256', secret).update(body).digest('base64url'); }
 export function validComputerMcpToken(value: string | undefined): boolean {
@@ -192,11 +207,12 @@ export function computerGuidance(cwd: string, chatId: string, label: string, hum
   const body = Buffer.from(JSON.stringify({ owner, chatId, selection: computerSelectionKey(cwd, chatId), label: label.slice(0, 100), human, nonce: context.nonce, expires: context.hardExpires })).toString('base64url');
   const tokenLine = `Your computer_start context for this turn (do not echo): ${body}.${sign(body)}`;
   const selected = computerTargetFor(cwd, chatId);
-  const deviceLine = selected
+  const deviceLine = [selected
     ? `The user explicitly selected device ${JSON.stringify(selected)} for this thread.`
     : configuredDefaultComputer()
       ? `The operator configured default desktop ${JSON.stringify(configuredDefaultComputer())}. Omit device on computer_start to use it. Never silently fall back to the local PC if it is offline.`
-      : 'No default desktop is configured. List devices and identify the requested machine; ask only if the target is genuinely ambiguous.';
+      : 'No default desktop is configured. List devices and identify the requested machine; ask only if the target is genuinely ambiguous.',
+  onlineComputersLine()].filter(Boolean).join(' ');
   const policyLine = human ? '' : backgroundComputerAllowed()
     ? 'Standing operator permission covers assigned background/peer work on configured computers. Yield to human conversations; never preempt another controller.'
     : 'Background desktop starts are disabled by operator policy; do not reuse an earlier human context to evade that policy.';

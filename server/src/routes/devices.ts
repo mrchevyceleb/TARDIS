@@ -14,7 +14,7 @@ import {
   type DeviceOp,
 } from '../devices/bridge.ts';
 import { asyncHandler } from './helpers.ts';
-import { backgroundComputerAllowed, computerSelectionKey, computerTarget, computerTargetFor, configuredDefaultComputer, noteComputerToolUse, readComputerContext, setComputerTarget, validComputerMcpToken } from '../devices/context.ts';
+import { backgroundComputerAllowed, computerSelectionKey, computerTarget, computerTargetFor, configuredDefaultComputer, noteComputerToolUse, onlineComputersLine, readComputerContext, setComputerTarget, validComputerMcpToken } from '../devices/context.ts';
 import { bareChatId } from '../chat/threadKey.ts';
 import { ComputerStepJournal } from '../devices/stepJournal.ts';
 import { computerOcr } from '../devices/ocr.ts';
@@ -93,7 +93,9 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
   // the context when one is presented.
   const recordingOwner = req.get('x-rivendell-computer-owner') || (() => { try { return readComputerContext(body.context)?.owner ?? ''; } catch { return ''; } })();
   if (recordingOwner) noteComputerToolUse(recordingOwner);
-  let device = typeof body.device === 'string' ? body.device : '';
+  // Whitespace names no computer: it must not count as an explicit choice, or
+  // reach findDevice, where an empty name means "the only linked machine".
+  let device = typeof body.device === 'string' ? body.device.trim() : '';
   let context: ReturnType<typeof readComputerContext> | undefined;
   if (op === 'start') {
     try {
@@ -116,9 +118,17 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
       const selected = context.selection
         ? computerTarget(context.selection)
         : computerTarget(bareChatId(context.chatId));
-      const ref = device || selected || configuredDefaultComputer();
+      // An agent names a computer by its id or its exact (unique) name, both
+      // as listed in its guidance; a shared name is refused as ambiguous.
+      const named = device;
+      const ref = named || selected || configuredDefaultComputer();
       const resolved = ref ? findDevice(ref) : undefined;
-      if (!resolved || (device && resolved.id !== device)) throw new Error('Requested/default computer is unavailable. Use an explicit online id or configure a default; never fall back to another machine.');
+      if (!resolved) {
+        const why = named ? `No online computer has the id or name ${JSON.stringify(named)}`
+          : ref ? 'The selected/default computer is offline'
+          : 'No computer was named, and this thread has no selected or default computer';
+        throw new Error(`${why}. ${onlineComputersLine() || 'No computer is online right now.'} Never fall back to another machine on your own.`);
+      }
       device = resolved.id;
       const trenzalore = trenzaloreRefusal(device, callerOwner || context.owner);
       if (trenzalore) throw new Error(trenzalore);
@@ -129,12 +139,12 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
       // shouldn't have to manually point you at a computer"). Omitting the id
       // still resolves to the selection, then the default; consent-mode
       // computers keep the picker lock.
-      const explicitAutomatic = body.device === device && resolved.computer?.approvalMode === 'automatic';
+      const explicitAutomatic = Boolean(named) && resolved.computer?.approvalMode === 'automatic';
       if (selected && selected !== device && !explicitAutomatic) throw new Error('This is not the computer selected for this thread. Change the selection explicitly; never fall back to another machine.');
     } catch (error) { res.status(409).json({ error: (error as Error).message }); return; }
   }
   const info = device ? findDevice(device) : undefined;
-  if (!info || info.id !== device || !info.computer) { res.status(400).json({ error: 'Explicit online computer id required. Call device_list; never switch targets implicitly.' }); return; }
+  if (!info || info.id !== device || !info.computer) { res.status(400).json({ error: 'No online computer has that device id. Pass the id computer_start returned (only computer_start accepts a name); if that computer went offline, check device_list. Never switch targets implicitly.' }); return; }
   const ac = new AbortController();
   res.on('close', () => { if (!res.writableEnded) ac.abort(); });
   const call = async (operation: string, params: Record<string, unknown>) => {

@@ -24,8 +24,11 @@ export class ComputerController {
     uiaInvoke?(window: string, element: string, name: string | undefined, signal: AbortSignal): Promise<{ png: Buffer; bounds: { x: number; y: number; width: number; height: number } }>;
     uiaKey?(window: string, keys: string[], signal: AbortSignal): Promise<{ png: Buffer; bounds: { x: number; y: number; width: number; height: number }; postedTo?: number }>;
   } });
-  /** The platform adapter. macOS adds the two setup methods. */
-  readonly adapter: { requestPermissions?(): Promise<PermissionStatus>; permissionStatus?(): Promise<PermissionStatus> };
+  /** The platform adapter. macOS adds the two setup methods, plus the consent
+   *  dialog and control indicator the windowless host companion borrows. */
+  readonly adapter: { requestPermissions?(): Promise<PermissionStatus>; permissionStatus?(): Promise<PermissionStatus>;
+    ask?(prompt: { title: string; detail: string; allow: string }, signal: AbortSignal): Promise<boolean>;
+    indicator?(text: string): import('node:child_process').ChildProcess };
   status(): ControlStatus;
   stop(pause?: boolean): void;
   handle(op: string, params?: Record<string, unknown>): Promise<any>;
