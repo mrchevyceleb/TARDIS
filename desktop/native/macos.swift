@@ -429,6 +429,23 @@ func assertWindow(_ id: Int, _ expected: [String: Any]?, afterInput: Bool) throw
   }
 }
 
+/// One click or one key chord lands whole in the window verified just before
+/// it, so it cannot be split between two windows. If that window is gone
+/// afterwards (Cmd+W, Cmd+Q, a dialog's own button), the input did what it was
+/// asked rather than "the active window changed during input". Apps take a
+/// moment to close a window, so watch for it briefly. Typing, double clicks,
+/// scrolls and drags are several events, so they keep the strict check.
+func assertAfterInput(_ id: Int, _ expected: [String: Any]?, singleEvent: Bool) throws {
+  do { try assertWindow(id, expected, afterInput: true) } catch {
+    guard singleEvent else { throw error }
+    for _ in 0..<10 {
+      if !onScreenWindows().contains(where: { $0.id == id }) { return }
+      usleep(50_000)
+    }
+    throw error
+  }
+}
+
 let mouseActions = ["move", "click", "right_click", "double_click", "scroll", "drag"]
 
 /// Everything a request asks for, checked before anything happens: no focus
@@ -548,14 +565,14 @@ func act(_ request: [String: Any]) throws {
       mouse(.leftMouseUp, action.dragTo)
     }
     usleep(80_000)
-    if let target = action.target { try assertWindow(target, action.expected, afterInput: true) }
+    if let target = action.target { try assertAfterInput(target, action.expected, singleEvent: ["click", "right_click"].contains(action.name)) }
     return
   }
 
   // parseAction guarantees a target for type and key.
   if action.name == "type" { typeText(action.text) } else { try pressKeys(action.keys) }
   usleep(80_000)
-  if let target = action.target { try assertWindow(target, nil, afterInput: true) }
+  if let target = action.target { try assertAfterInput(target, nil, singleEvent: action.name == "key") }
 }
 
 /// Let go of anything an interrupted action left down.

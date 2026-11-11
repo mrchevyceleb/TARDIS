@@ -76,6 +76,13 @@ async function encodeScreenshot(png, region) {
     .jpeg({ quality: 75 }).toBuffer({ resolveWithObject: true });
 }
 
+/** The display under a window's center (the first display if none is). */
+function displayContaining(displays, bounds) {
+  const x = bounds.x + bounds.width / 2;
+  const y = bounds.y + bounds.height / 2;
+  return displays.find(item => x >= item.bounds.x && x < item.bounds.x + item.bounds.width && y >= item.bounds.y && y < item.bounds.y + item.bounds.height) ?? displays[0];
+}
+
 export class ComputerController {
   constructor({ approve, automatic = () => false, changed = () => {}, adapter = createAdapter(), encode = encodeScreenshot }) {
     this.approve = approve;
@@ -168,6 +175,16 @@ export class ComputerController {
     if (!window) throw new Error('Window is no longer available. Inspect windows again; do not guess its id or coordinates.');
     return window;
   }
+  /** The verification capture after input. A click or key chord that closed,
+   *  quit or hid its own window (Cmd+W, Cmd+Q, a dialog's button) leaves no
+   *  window to capture, and the adapter has already confirmed that was the
+   *  input's own doing: show the display the window was on, and say so. */
+  async captureAfterInput(info, windowId, displayId, signal) {
+    if (!windowId) return this.captureFrame(info, { display: displayId }, signal);
+    if (info.windows.some(item => item.id === windowId)) return this.captureFrame(info, { window: windowId }, signal);
+    const result = await this.captureFrame(info, { display: displayId }, signal);
+    return { ...result, note: 'The window is gone after this input (it closed, quit or hid), so this shows the display it was on. The input ran; do not repeat it.' };
+  }
   async captureFrame(info, params, signal) {
     if (params.window && params.display) throw new Error('Choose either a window or a display, not both.');
     let current = info;
@@ -183,11 +200,7 @@ export class ComputerController {
       if (current.activeWindow !== window.id) throw new Error('Window could not be verified active. No screenshot was returned.');
     }
     const display = window
-      ? current.displays.find(item => {
-          const centerX = window.bounds.x + window.bounds.width / 2;
-          const centerY = window.bounds.y + window.bounds.height / 2;
-          return centerX >= item.bounds.x && centerX < item.bounds.x + item.bounds.width && centerY >= item.bounds.y && centerY < item.bounds.y + item.bounds.height;
-        }) ?? current.displays[0]
+      ? displayContaining(current.displays, window.bounds)
       : current.displays.find(item => item.id === (params.display ?? current.displays[0]?.id));
     if (!display) throw new Error('Display unavailable. Inspect displays again.');
     const bounds = window?.bounds ?? display.bounds;
@@ -402,7 +415,7 @@ export class ComputerController {
         if (keyboardEntry) keyboardEntry.outcome = { executed: true, windowId: window.id, windowTitle: window.title };
         check();
         const after = await this.adapter.inspect(ac.signal);
-        const result = await this.captureFrame(after, { window: window.id }, ac.signal);
+        const result = await this.captureAfterInput(after, window.id, displayContaining(after.displays, window.bounds)?.id, ac.signal);
         check(); this.requireGrant(params.session);
         if (keyboardEntry) {
           keyboardEntry.outcome = { ...keyboardEntry.outcome, capturedAt: result.capturedAt };
@@ -429,7 +442,7 @@ export class ComputerController {
       if (action.action !== 'move') this.touched(); // a hover alone changes nothing worth a retype
       check();
       const after = await this.adapter.inspect(ac.signal);
-      const result = await this.captureFrame(after, f.windowId ? { window: f.windowId } : { display: f.displayId }, ac.signal);
+      const result = await this.captureAfterInput(after, f.windowId, f.displayId, ac.signal);
       check(); this.requireGrant(params.session); return result;
     } catch (error) {
       // The native layer explicitly reported a refusal BEFORE any input ran
