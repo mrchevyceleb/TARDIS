@@ -171,7 +171,9 @@ function start() {
     report = logSince(logStart);
     alive = /last exit code = \(never exited\)/.test(run('launchctl', ['print', `${domain}/${LABEL}`]).out);
   }
-  return reported.test(report) ? { report } : { why: alive ? 'it did not report within 20 seconds' : 'it stopped as it started', report };
+  // An exit launchd saw fails it even after a report: that host is not running.
+  if (!alive) return { why: 'it stopped as it started', report };
+  return reported.test(report) ? { report } : { why: 'it did not report within 20 seconds', report };
 }
 renameSync(staged, plist);
 const outcome = start();
