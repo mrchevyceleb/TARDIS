@@ -46,6 +46,7 @@ import { transcriptGuidance } from './sharedRules.ts';
 import { instructionsStamp } from './instructionLayers.ts';
 import { emptyTurnOrigin, noteTurnPeer, type TurnOrigin } from './providerSwitch.ts';
 import { longCallGateEnv } from './longCallGate.ts';
+import { agentIdentityEnv } from './agentIdentity.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { laneTagFor, shareBackgroundLaneEvent, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
 import { plainEnglishWritingBlockFor } from './plain-english-guidance.ts';
@@ -257,7 +258,7 @@ export class AgySession {
     const env = agySubscriptionEnvironment(process.env);
     env.SAMWISE_ACCOUNT = cli;
     // Marks this as a TARDIS agent turn for the long-call gate extension (see longCallGate.ts).
-    Object.assign(env, longCallGateEnv(chatId));
+    Object.assign(env, longCallGateEnv(chatId), agentIdentityEnv(chatId));
 
     const args = [
       '--input-format', 'stream-json',

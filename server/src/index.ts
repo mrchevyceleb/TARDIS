@@ -22,6 +22,8 @@ import { usageRouter } from './routes/usage.ts';
 import { qaRouter } from './routes/qa.ts';
 import { startQaSyncScheduler } from './lib/qaSyncScheduler.ts';
 import { teamRouter } from './routes/team.ts';
+import { t3SessionsRouter } from './routes/t3Sessions.ts';
+import { startT3SessionWatch } from './lib/t3Sessions.ts';
 import { channelsRouter } from './routes/channels.ts';
 import { headlessRouter } from './routes/headless.ts';
 import { closeAllHeadlessLanes } from './headless/pool.ts';
@@ -160,6 +162,7 @@ app.use('/api/accounts', accountsRouter);
 app.use('/api/usage', usageRouter);
 app.use('/api/qa', qaRouter);
 app.use('/api/team', teamRouter);
+app.use('/api/t3-sessions', t3SessionsRouter);
 app.use('/api/channels', channelsRouter);
 app.use('/api/headless', headlessRouter);
 app.use('/api/jobs', jobsRouter);
@@ -254,6 +257,7 @@ if (!SIDE_COPY) startQaSyncScheduler(); // QA board self-sync (first sweep at 15
 if (!SIDE_COPY) startRoutineScheduler(); // agent-scoped routine scheduler (30s tick)
 if (!SIDE_COPY) startJobWatchScheduler(); // background job watches (10s tick): pid/file/command → agent wake
 if (!SIDE_COPY) startJobScheduler(); // job_start jobs (5s tick): exit records → agent job-result
+if (!SIDE_COPY) startT3SessionWatch(); // agent-owned T3 Code sessions: turn ends → owner wake (off until RIVENDELL_T3_HOSTS)
 // Needs-you phone alerts and digests, plus answer delivery retries (60s tick).
 if (!SIDE_COPY && DESK_ROOM_ENABLED) startDeskNotifier({ retryAnswer: (id) => deliverDeskAnswer(id) });
 if (!SIDE_COPY && DESK_ROOM_ENABLED) startUsageThresholdAlerts(); // 90% subscription usage Desk alerts (card-2de6e4)

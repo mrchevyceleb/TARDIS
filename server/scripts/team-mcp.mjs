@@ -576,7 +576,17 @@ function formatAgentStatus(agent) {
     : agent.status === 'queued'
       ? `QUEUED · no live turn · ${agent.queuedMessages} handoff${agent.queuedMessages === 1 ? '' : 's'}`
       : 'IDLE';
-  return `- ${agent.name} (${agent.id}) — ${agent.role} [${activity} · ${agent.engine}${agent.model ? ` · ${agent.model}` : ''}${agent.effort ? ` · ${agent.effort}` : ''}]`;
+  const line = `- ${agent.name} (${agent.id}) — ${agent.role} [${activity} · ${agent.engine}${agent.model ? ` · ${agent.model}` : ''}${agent.effort ? ` · ${agent.effort}` : ''}]`;
+  const sessions = agent.t3Sessions ?? [];
+  if (!sessions.length) return line;
+  // Work the agent has out in T3 Code: it reports back on its own, so the lane can read IDLE while these run.
+  return [`${line} · ${sessions.length} T3 session${sessions.length === 1 ? '' : 's'} running`,
+    ...sessions.map((s) => `    T3 session "${s.title}" on ${s.host}: ${s.state === 'asking' ? 'running' : s.state} for ${formatElapsed(Date.now() - s.runningSince)}${s.state === 'asking' ? ', blocked on a question for them' : ''}`)].join('\n');
+}
+
+function formatElapsed(ms) {
+  const minutes = Math.max(0, Math.floor(ms / 60000));
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
 function describeRoutine(r) {

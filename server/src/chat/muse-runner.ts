@@ -49,6 +49,7 @@ import { isVoiceChatId, isRobotVoiceChatId, robotVoiceAddendum, THREAD_VOICE_STY
 import { transcriptGuidance } from './sharedRules.ts';
 import { emptyTurnOrigin, humanQueued, noteTurnPeer, type TurnOrigin } from './providerSwitch.ts';
 import { longCallGateEnv } from './longCallGate.ts';
+import { agentIdentityEnv } from './agentIdentity.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { officeMcpConfig } from './office-mcp.ts';
 import { laneMcpServers, laneTagFor, shareBackgroundLaneEvent, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
@@ -276,7 +277,7 @@ export class MuseSession {
     const env = museSubscriptionEnvironment(process.env);
     Object.assign(env, mcpEnv);
     env.SAMWISE_ACCOUNT = this.cli;
-    Object.assign(env, longCallGateEnv(this.chatId));
+    Object.assign(env, longCallGateEnv(this.chatId), agentIdentityEnv(this.chatId));
     const args = [
       'exec', '--json',
       '--prompt-file', promptFile,

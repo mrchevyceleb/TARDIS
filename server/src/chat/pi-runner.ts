@@ -52,6 +52,7 @@ import { transcriptGuidance } from './sharedRules.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiModeFor, zaiTurnOutcome, type ZaiMode } from './zaiQuota.ts';
 import { emptyTurnOrigin, noteTurnPeer, notifyHandoffSenders, PROVIDER_CONTINUE_EVENT, providerCutEventFields, providerCutGuidance, scheduleProviderContinue, type ProviderContinueOpts, type ProviderCut, type TurnOrigin } from './providerSwitch.ts';
 import { longCallGateEnv } from './longCallGate.ts';
+import { agentIdentityEnv } from './agentIdentity.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { laneMcpServers, laneTagFor, shareBackgroundLaneEvent, type CliKind, type SeqEvent, type SessionEvent } from './runner.ts';
 import { isPersonMessage, REPLY_NUDGE_NOTE, replyNudgeEvent, ReplyWatch } from './replyNudge.ts';
@@ -209,7 +210,7 @@ export class PiSession {
     env.RIVENDELL_PI_MCP = JSON.stringify(laneMcpServers(agentForChatId(chatId), isBackgroundChatId(chatId), computerOwnerKey(cwd, chatId)));
     env.SAMWISE_ACCOUNT = cli;
     // Marks this as a TARDIS agent turn for the long-call gate extension (see longCallGate.ts).
-    Object.assign(env, longCallGateEnv(chatId));
+    Object.assign(env, longCallGateEnv(chatId), agentIdentityEnv(chatId));
 
     const args = [
       '--mode', 'rpc',

@@ -253,6 +253,8 @@ export async function createJob(input: CreateJobInput): Promise<Job> {
   const timeoutMin = typeof input.timeoutMin === 'number' ? input.timeoutMin : DEFAULT_TIMEOUT_MIN;
 
   const env = await backgroundSubscriptionEnv(cwd, agent.name, agent.home || `bot-${agent.id}`);
+  // A job is its agent's own shell work: it carries the same identity.
+  env.RIVENDELL_AGENT_ID = agent.id;
   const id = randomUUID();
   const short = id.slice(0, 8);
   const scoped = await canLaunchInScope();

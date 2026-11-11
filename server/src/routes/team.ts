@@ -4,6 +4,7 @@ import { Router } from 'express';
 import { asyncHandler } from './helpers.ts';
 import { deliverTeamMessage, teamRoster, teamRecent, publishOwnerReply } from '../chat/teamBus.ts';
 import { createJobWatch, deleteJobWatch, jobWatchesWithAgents } from '../chat/jobWatches.ts';
+import { liveT3Sessions } from '../lib/t3Sessions.ts';
 
 export const teamRouter = Router();
 
@@ -18,7 +19,9 @@ teamRouter.post('/reply', asyncHandler(async (req, res) => {
 }));
 
 teamRouter.get('/', asyncHandler(async (_req, res) => {
-  res.json({ agents: await teamRoster() });
+  // Each agent's running T3 Code sessions ride along, so an idle lane never
+  // hides the work it has out.
+  res.json({ agents: (await teamRoster()).map((agent) => ({ ...agent, t3Sessions: liveT3Sessions(agent.id) })) });
 }));
 
 teamRouter.post('/message', asyncHandler(async (req, res) => {

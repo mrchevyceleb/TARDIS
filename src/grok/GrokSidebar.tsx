@@ -59,6 +59,8 @@ import { useLive } from '../chat/hooks/useLive';
 import { useJobsSummary } from '../chat/hooks/useJobs';
 import { useMediaQuery } from '../chat/hooks/useMediaQuery';
 import { RailJobsBadge } from '../chat/components/jobs/RailJobsBadge';
+import { T3SessionLines, T3SessionsBadge } from './T3Sessions';
+import { useT3Sessions } from './useT3Sessions';
 import type { HistoryItem } from './history';
 import { NativeOpenHelper } from '../components/NativeOpenHelper';
 import { ChannelsRail } from '../chat/components/ChannelsRail';
@@ -338,6 +340,7 @@ function dayStamp(ts: number): string {
 
 /** Drop target meaning "after the last pinned bubble". */
 const PINS_END = '__pins_end__';
+const NO_T3_SESSIONS: never[] = [];
 
 type AgentRow = { kind: 'agent'; a: Agent; item?: HistoryItem; ts: number };
 type Row = AgentRow | { kind: 'adhoc'; item: HistoryItem; ts: number };
@@ -531,6 +534,7 @@ export function BotRail(props: BotRailProps) {
   // is not a turn: an agent on jobs is busy but free to talk, so it gets its
   // own outlined badge and never the working lamp.
   const jobsByAgent = useJobsSummary();
+  const t3Sessions = useT3Sessions();
   // Each teammate's current board task (one tiny poll for the whole rail).
   const deskTasksQuery = useDeskCardsLight(true);
   const deskTasks = deskTasksQuery.data;
@@ -686,10 +690,11 @@ export function BotRail(props: BotRailProps) {
         // Every listed row wearing a jobs badge. Independent of "working": an
         // agent mid-turn can be on jobs too, and the header must not hide that.
         jobs: g.agents.filter((a) => jobsByAgent.has(a.id)).length,
+        sessions: g.agents.reduce((sum, a) => sum + (t3Sessions.byAgent.get(a.id)?.length ?? 0), 0),
         unread: listed.reduce((sum, r) => sum + (r.a.muted ? 0 : r.a.unread ?? 0), 0),
       };
     });
-  }, [groupsOn, railGroups.groups, agentRowsById, busyAgents, jobsByAgent]);
+  }, [groupsOn, railGroups.groups, agentRowsById, busyAgents, jobsByAgent, t3Sessions]);
   // Unassigned agents, loose under the pins (no header, no collapse): also the
   // drop zone that takes an agent out of a group.
   const looseRows = useMemo(() => {
@@ -846,6 +851,7 @@ export function BotRail(props: BotRailProps) {
               </span>
             </span>
             <AgentPrsSub name={a.name} info={taskMap.get(a.id)} tasksState={tasksState} prs={deskPrsQuery.data?.prs ?? []} prsState={prsState} />
+            <T3SessionLines agentName={a.name} sessions={t3Sessions.byAgent.get(a.id) ?? NO_T3_SESSIONS} skewMs={t3Sessions.skewMs} />
             {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
           </span>
         </button>
@@ -955,6 +961,7 @@ export function BotRail(props: BotRailProps) {
                   <span className="bt-pin-name">{a.name}</span>
                   <span className="bt-pin-role">{a.role}</span>
                   {onJobs ? <RailJobsBadge running={onJobs.running} latest={onJobs.latest} latestLine={onJobs.latestLine} /> : null}
+                  <T3SessionsBadge sessions={t3Sessions.byAgent.get(a.id)} />
                   {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
                 </button>
               );
@@ -992,6 +999,7 @@ export function BotRail(props: BotRailProps) {
                       pinned={sec.pinned}
                       working={sec.working}
                       jobs={sec.jobs}
+                      sessions={sec.sessions}
                       unread={sec.unread}
                       collapsed={sec.g.collapsed}
                       first={sec.g.id === firstGroupId}
