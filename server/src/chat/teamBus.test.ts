@@ -5,7 +5,7 @@ import { abortInFlightChannelDeliveries, agentLogKey, batchJoinable, deliveryInt
 import { laneChatId } from './threadKey.ts';
 import type { Agent } from './agents.ts';
 import { freshTaskPolicy, freshThreadOnTask } from './sessionPolicy.ts';
-import { buriesTaskMarker, isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed, resolveNewJobText } from './teamBus.ts';
+import { buriesTaskMarker, isTaskStartHandoff, recipientIdle, batchJoinableFresh, chainContinues, freshHoldReason, freshResetOwed, resolveNewJobText, returnAddress, undeliveredNotice, MAX_TEXT } from './teamBus.ts';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -466,4 +466,26 @@ test('resolveNewJobText: the explicit flag owns wording while policy owns author
   assert.match(errorOf(resolveNewJobText({ ...base, senderId: 'samwise', newJob: true, text: 'Tidy the hub' })), /not a job source/);
   assert.match(errorOf(resolveNewJobText({ ...base, policy: { ...allowed, enabled: false }, newJob: true, text: 'Tidy the hub' })), /does not start jobs in fresh threads/);
   assert.match(errorOf(resolveNewJobText({ ...base, policy: { ...allowed, prefix: ':' }, newJob: true, text: 'Tidy the hub' })), /configured new-job marker is invalid/);
+});
+
+test('a message for a teammate who left goes back only to a sender still on the team', () => {
+  const adam: Agent = { id: 'adam', name: 'Adam', role: 'Dev', engine: 'claude', home: 'bot-adam', createdAt: 1 };
+  assert.equal(returnAddress({ fromId: 'adam' }, [adam]), adam);
+  // System nudges and Desk/voice/channel/Slack copies are dropped.
+  assert.equal(returnAddress({ fromId: 'external:76f753aacb0ed0f2' }, [adam]), undefined);
+  assert.equal(returnAddress({ fromId: 'desk:owner' }, [adam]), undefined);
+  // A sender who also left gets nothing back, even with a same-name replacement.
+  assert.equal(returnAddress({ fromId: 'christina' }, [adam, { ...adam, id: 'christina-2', name: 'Christina' }]), undefined);
+  // A row the recipient already saw is never reported undelivered.
+  assert.equal(returnAddress({ fromId: 'adam', acked: true }, [adam]), undefined);
+  // An older row without toName still reads as a name.
+  assert.equal(
+    undeliveredNotice({ toId: 'kip', text: 'Backgrounds ship.', createdAt: '2026-03-14T16:00:00.000Z' }),
+    'Not delivered: Kip is no longer on the team. If it still matters, send it to someone else.\n\nYour message from Mar 14:\nBackgrounds ship.',
+  );
+  assert.match(undeliveredNotice({ toId: 'chief-of-staff', toName: 'Max', text: 'Hi' }), /^Not delivered: Max is no longer on the team\./);
+  // A message already at the size cap still fits, and says what was cut.
+  const long = undeliveredNotice({ toId: 'kip', text: 'x'.repeat(MAX_TEXT) });
+  assert.ok(long.length <= MAX_TEXT);
+  assert.match(long, /\n\n\(The last \d+ characters didn't fit in this note\.\)$/);
 });
