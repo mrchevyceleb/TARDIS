@@ -109,10 +109,13 @@ if (build.status !== 0) { rmSync(building, { force: true }); fail('the Swift hel
 renameSync(building, helper); // atomic: a running host never executes a half-written helper
 
 // 4. The LaunchAgent. Aqua only: computer control needs the logged-in desktop.
-// AssociatedBundleIdentifiers lists it under TARDIS in Login Items.
+// AssociatedBundleIdentifiers lists it under TARDIS in Login Items. It is
+// staged and validated outside LaunchAgents, and replaces the live file only to start.
 mkdirSync(dirname(plist), { recursive: true });
 mkdirSync(dirname(log), { recursive: true });
-writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?>
+const previous = existsSync(plist) ? readFileSync(plist, 'utf8') : null;
+const staged = join(dirname(log), `${LABEL}.plist.${process.pid}.tmp`);
+writeFileSync(staged, `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -136,22 +139,12 @@ ${Object.entries(env).map(([key, value]) => `    <key>${key}</key><string>${xml(
 </dict>
 </plist>
 `);
-const lint = run('plutil', ['-lint', plist]);
-if (!lint.ok) fail(`the LaunchAgent did not validate: ${lint.out || lint.err}`);
+const lint = run('plutil', ['-lint', staged]);
+if (!lint.ok) { rmSync(staged, { force: true }); fail(`the LaunchAgent did not validate: ${lint.out || lint.err}`); }
 
-// 5. (Re)start it. launchd can take a moment to tear the previous job down.
-const logStart = existsSync(log) ? statSync(log).size : 0;
-bootout();
-for (let attempt = 0; ; attempt++) {
-  const started = run('launchctl', ['bootstrap', domain, plist]);
-  if (started.ok) break;
-  if (attempt === 5) fail(`launchctl could not start the host: ${started.err || started.out}. Run this from the Mac's logged-in user (an SSH session works while that user is logged in at the desktop).`);
-  pause(500);
-}
-
-// 6. The host's own report is the proof it runs: its link and the permissions it
-// holds. launchd records an exit even after KeepAlive respawns the job, so a
-// host that dies on startup is taken down again rather than left to crash-loop.
+// 5. Start it, and keep it only once the host's own report proves it runs: its
+// link and the permissions it holds. launchd records an exit even after
+// KeepAlive respawns the job, so a host that dies on startup is caught too.
 function logSince(offset) {
   if (!existsSync(log) || statSync(log).size <= offset) return '';
   const fd = openSync(log, 'r');
@@ -162,18 +155,38 @@ function logSince(offset) {
   } finally { closeSync(fd); }
 }
 const reported = /macOS (allows|has not allowed)|could not read the macOS permissions/;
-const neverExited = () => /last exit code = \(never exited\)/.test(run('launchctl', ['print', `${domain}/${LABEL}`]).out);
-let report = '';
-let alive = true;
-for (let waited = 0; waited < 20_000 && alive && !reported.test(report); waited += 500) {
-  pause(500);
-  report = logSince(logStart);
-  alive = neverExited();
+function start() {
+  const logStart = existsSync(log) ? statSync(log).size : 0;
+  bootout(); // launchd can take a moment to tear the previous job down
+  let started = run('launchctl', ['bootstrap', domain, plist]);
+  for (let attempt = 0; attempt < 5 && !started.ok; attempt++) {
+    pause(500);
+    started = run('launchctl', ['bootstrap', domain, plist]);
+  }
+  if (!started.ok) return { why: `launchctl refused it (${started.err || started.out}). Run this as the Mac's logged-in user (an SSH session works while that user is logged in at the desktop)`, report: '' };
+  let report = '';
+  let alive = true;
+  for (let waited = 0; waited < 20_000 && alive && !reported.test(report); waited += 500) {
+    pause(500);
+    report = logSince(logStart);
+    alive = /last exit code = \(never exited\)/.test(run('launchctl', ['print', `${domain}/${LABEL}`]).out);
+  }
+  return reported.test(report) ? { report } : { why: alive ? 'it did not report within 20 seconds' : 'it stopped as it started', report };
 }
-if (!reported.test(report)) {
-  bootout();
-  fail(`the host ${alive ? 'did not report within 20 seconds' : 'stopped as it started'}, so it was removed again. It logged:\n${report.trim() || '(nothing)'}\nFull log: ${log}`);
+renameSync(staged, plist);
+const outcome = start();
+if (outcome.why) {
+  // Never leave a failing host enabled for the next login: put the previous
+  // settings back if they still run, otherwise remove the LaunchAgent.
+  let restored = false;
+  if (previous !== null) {
+    writeFileSync(plist, previous);
+    restored = !start().why;
+  }
+  if (!restored) { bootout(); rmSync(plist, { force: true }); }
+  fail(`the host could not start: ${outcome.why}. ${restored ? 'The previous host settings were put back, and that host is running.' : 'Its LaunchAgent was removed, so nothing starts at login.'} It logged:\n${outcome.report.trim() || '(nothing)'}\nFull log: ${log}`);
 }
+const report = outcome.report;
 // Electron logs a harmless codesign check in Node mode; show the host's own lines.
 console.log(`\n${report.split('\n').filter(line => line.startsWith('[computer]')).join('\n')}\n`);
 console.log(`TARDIS computer host installed as "${name || 'this Mac'}" → ${new URL(server).origin}
