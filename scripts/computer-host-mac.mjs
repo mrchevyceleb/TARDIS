@@ -77,18 +77,9 @@ if (!probe.ok || probe.out !== '1') {
   fail(`${app} cannot run the host in Node mode (${(probe.err || probe.out || 'no output').slice(0, 300)}). Run npm install in this checkout first; if it is installed, update TARDIS.app (the host needs Electron's RunAsNode fuse).`);
 }
 
-// 2. The Swift helper, built from this checkout so it always matches host.ts.
-if (!run('xcode-select', ['-p']).ok) fail('building the macOS control helper needs the Xcode Command Line Tools. Run xcode-select --install, then run this again.');
-const helper = join(root, 'desktop', 'native', 'macos-helper');
-const building = `${helper}.${process.pid}.tmp`;
-const arch = process.arch === 'arm64' ? 'arm64' : 'x86_64';
-console.log(`Building the macOS control helper (${arch})…`);
-const build = spawnSync('xcrun', ['swiftc', '-O', '-swift-version', '5', '-target', `${arch}-apple-macos14`, join(root, 'desktop', 'native', 'macos.swift'), '-o', building], { stdio: 'inherit' });
-if (build.status !== 0) { rmSync(building, { force: true }); fail('the Swift helper did not build (see above).'); }
-renameSync(building, helper); // atomic: a running host never executes a half-written helper
-
-// 3. Where to connect and what to be called. The app's own server is the
-// default, so a Mac already linked through TARDIS.app needs no flags.
+// 2. Where to connect and what to be called, settled before anything changes on
+// disk. The app's own server is the default, so a Mac already linked through
+// TARDIS.app needs no flags.
 let appServer;
 try { appServer = JSON.parse(readFileSync(join(homedir(), 'Library', 'Application Support', 'TARDIS', 'settings.json'), 'utf8')).serverUrl; } catch { /* the app was never connected */ }
 const server = values.server || process.env.RIVENDELL_COMPUTER_SERVER_URL || appServer || 'http://127.0.0.1:8091';
@@ -106,6 +97,16 @@ const env = {
   ...(values.unattended ? { RIVENDELL_COMPUTER_UNATTENDED: 'true' } : {}),
   ...(values['no-indicator'] ? { RIVENDELL_COMPUTER_INDICATOR: 'false' } : {}),
 };
+
+// 3. The Swift helper, built from this checkout so it always matches host.ts.
+if (!run('xcode-select', ['-p']).ok) fail('building the macOS control helper needs the Xcode Command Line Tools. Run xcode-select --install, then run this again.');
+const helper = join(root, 'desktop', 'native', 'macos-helper');
+const building = `${helper}.${process.pid}.tmp`;
+const arch = process.arch === 'arm64' ? 'arm64' : 'x86_64';
+console.log(`Building the macOS control helper (${arch})…`);
+const build = spawnSync('xcrun', ['swiftc', '-O', '-swift-version', '5', '-target', `${arch}-apple-macos14`, join(root, 'desktop', 'native', 'macos.swift'), '-o', building], { stdio: 'inherit' });
+if (build.status !== 0) { rmSync(building, { force: true }); fail('the Swift helper did not build (see above).'); }
+renameSync(building, helper); // atomic: a running host never executes a half-written helper
 
 // 4. The LaunchAgent. Aqua only: computer control needs the logged-in desktop.
 // AssociatedBundleIdentifiers lists it under TARDIS in Login Items.
