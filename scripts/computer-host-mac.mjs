@@ -173,7 +173,8 @@ if (!reported.test(report)) {
   bootout();
   fail(`the host ${alive ? 'did not report within 20 seconds' : 'stopped as it started'}, so it was removed again. It logged:\n${report.trim() || '(nothing)'}\nFull log: ${log}`);
 }
-console.log(`\n${report.trim()}\n`);
+// Electron logs a harmless codesign check in Node mode; show the host's own lines.
+console.log(`\n${report.split('\n').filter(line => line.startsWith('[computer]')).join('\n')}\n`);
 console.log(`TARDIS computer host installed as "${name || 'this Mac'}" → ${new URL(server).origin}
   Starts at login and restarts if it stops (LaunchAgent ${LABEL}).
   Approval: ${values.unattended ? 'automatic (unattended)' : 'asks the person at this Mac for each grant'}; indicator ${values['no-indicator'] ? 'off' : 'on'}.
