@@ -72,9 +72,13 @@ export function safeRobotText(value: unknown, max: number): string {
 
 /** Display name a device (robot or computer) may register under: one line,
  *  plain characters. Agents' prompts quote it, and they name it back to pick
- *  that device, so the stored name is already the safe one. */
+ *  that device, so the stored name is already the safe one. A typographic
+ *  apostrophe (macOS writes "Matt’s Mac mini") becomes a plain one, and
+ *  parentheses stay, so ordinary names come through unchanged. */
 export function safeDeviceName(value: unknown, fallback: string): string {
-  const cleaned = typeof value === 'string' ? value.replace(/[^\p{L}\p{N} _.'-]+/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 40) : '';
+  const cleaned = typeof value === 'string'
+    ? value.replace(/[‘’ʼ]/g, "'").replace(/[^\p{L}\p{N} _.'()-]+/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 40)
+    : '';
   return cleaned || fallback;
 }
 

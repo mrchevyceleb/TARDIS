@@ -93,7 +93,9 @@ devicesRouter.post('/computer/:op', asyncHandler(async (req, res) => {
   // the context when one is presented.
   const recordingOwner = req.get('x-rivendell-computer-owner') || (() => { try { return readComputerContext(body.context)?.owner ?? ''; } catch { return ''; } })();
   if (recordingOwner) noteComputerToolUse(recordingOwner);
-  let device = typeof body.device === 'string' ? body.device : '';
+  // Whitespace names no computer: it must not count as an explicit choice, or
+  // reach findDevice, where an empty name means "the only linked machine".
+  let device = typeof body.device === 'string' ? body.device.trim() : '';
   let context: ReturnType<typeof readComputerContext> | undefined;
   if (op === 'start') {
     try {
