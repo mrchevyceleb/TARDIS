@@ -70,8 +70,10 @@ export function safeRobotText(value: unknown, max: number): string {
   return value.replace(/[\u0000-\u001f\u007f<>]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
-/** Display name a robot may register under: one line, plain characters. */
-export function safeRobotName(value: unknown, fallback: string): string {
+/** Display name a device (robot or computer) may register under: one line,
+ *  plain characters. Agents' prompts quote it, and they name it back to pick
+ *  that device, so the stored name is already the safe one. */
+export function safeDeviceName(value: unknown, fallback: string): string {
   const cleaned = typeof value === 'string' ? value.replace(/[^\p{L}\p{N} _.'-]+/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 40) : '';
   return cleaned || fallback;
 }
@@ -145,7 +147,7 @@ export function recordRobotEvent(robot: { id: string; name: string }, raw: unkno
   const payload = v?.data && typeof v.data === 'object' && !Array.isArray(v.data) ? v.data as Record<string, unknown> : {};
   if (JSON.stringify(payload).length > 4000) return null;
   const data = safeEventData(payload) as Record<string, unknown>;
-  const event: RobotEvent = { seq: ++seq, robot: robot.id, robotName: safeRobotName(robot.name, robot.id), name, data, ts: Date.now() };
+  const event: RobotEvent = { seq: ++seq, robot: robot.id, robotName: safeDeviceName(robot.name, robot.id), name, data, ts: Date.now() };
   events.push(event);
   if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
   bus.emit('event', event);
@@ -490,7 +492,7 @@ export function robotGuidance(robots: RobotIdentity[] = onlineRobots()): string 
       s?.voice && s.voice !== 'off' ? `voice ${s.voice}` : null,
       s?.hardware ? s.hardware : null,
     ].filter(Boolean).join(' · ');
-    return `- ${safeRobotName(r.name, r.id)} (${safeRobotText(r.id, 100)})${bits ? ` — ${bits}` : ''}`;
+    return `- ${safeDeviceName(r.name, r.id)} (${safeRobotText(r.id, 100)})${bits ? ` — ${bits}` : ''}`;
   });
   return [
     '<rivendell-robot>',

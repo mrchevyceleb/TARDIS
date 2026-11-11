@@ -26,8 +26,8 @@ import type { Server as HttpServer } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { JsonStore } from '../lib/jsonStore.ts';
-import { computerOwnerTurnRunning, loadComputerTargets, revokeComputerContext } from './context.ts';
-import { forgetRobot, recordRobotEvent, robotStatus, safeRobotName, setRobotStatus, type RobotStatus } from './robots.ts';
+import { computerOwnerTurnRunning, loadComputerTargets, revokeComputerContext, setOnlineComputersProbe } from './context.ts';
+import { forgetRobot, recordRobotEvent, robotStatus, safeDeviceName, setRobotStatus, type RobotStatus } from './robots.ts';
 import type { ControlStatus } from '../../../desktop/native/computer.mjs';
 
 export type DeviceOp = 'exec' | 'read' | 'write' | 'ls' | 'open' | `computer.${string}` | `robot.${string}`;
@@ -85,6 +85,7 @@ export function listDevices(): DeviceInfo[] {
     .map((device) => device.info)
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+setOnlineComputersProbe(() => listDevices().filter((device) => device.kind === 'computer' && device.computer?.supported));
 
 /** Online robots with their latest self-reported status. */
 export function listRobots(): RobotInfo[] {
@@ -461,8 +462,8 @@ export function registerDeviceBridge(server: HttpServer): void {
             : undefined;
           const info: DeviceInfo = {
             id,
-            // A robot's name is quoted into agent prompts; keep it one plain line.
-            name: kind === 'robot' ? safeRobotName(msg.name, id) : String(msg.name ?? '').trim() || id,
+            // Every device's name is quoted into agent prompts; keep it one plain line.
+            name: safeDeviceName(msg.name, id),
             platform: String(msg.platform ?? 'unknown'),
             homeDir: String(msg.homeDir ?? ''),
             workspaceRoot: String(msg.workspaceRoot ?? ''),

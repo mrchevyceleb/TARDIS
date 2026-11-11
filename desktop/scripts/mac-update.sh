@@ -77,7 +77,14 @@ wait_for_quit() {
   done
   return 1
 }
+restart_host() {
+  # The light computer host (npm run computer:mac) runs on this bundle's
+  # binary. Restart it onto the bundle now in place, or it keeps running the
+  # swapped-out one until that is deleted. Not installed: nothing happens.
+  launchctl kickstart -k "gui/$(id -u)/app.tardis.computer-host" >/dev/null 2>&1 || true
+}
 launch_app() {
+  restart_host
   # An open issued right after the quit can return 0 without spawning
   # anything (LaunchServices is still finalizing the old instance), so
   # verify the process is really up and try a bounded number of times.

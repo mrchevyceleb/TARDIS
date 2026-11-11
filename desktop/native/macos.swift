@@ -1,15 +1,18 @@
 // TARDIS macOS computer-control helper. One request as JSON on stdin, one JSON
 // object on stdout. Exit 0 on success; on failure exit 1 with
 // {"error": "...", "inputAttempted": bool}. It plays the role windows.ps1 plays
-// on Windows: the Electron app owns the grant and serialises requests, this
-// only touches the machine.
+// on Windows: the controller (TARDIS.app, or the host companion) owns the grant
+// and serialises requests, this only touches the machine.
 //
-// It runs as a child of TARDIS.app, so macOS attributes Screen Recording and
-// Accessibility to TARDIS. Coordinates are global display points (origin at the
-// top-left of the main display), the same space screenshots are mapped back to;
-// captures are resampled to that space so one screenshot pixel is one point.
+// It runs as a child of TARDIS.app, or of the host companion running on
+// TARDIS.app's own binary, so macOS attributes Screen Recording and
+// Accessibility to TARDIS either way. Coordinates are global display points
+// (origin at the top-left of the main display), the same space screenshots are
+// mapped back to; captures are resampled to that space so one screenshot pixel
+// is one point.
 //
 // Build: swiftc -O -swift-version 5 -target arm64-apple-macos14 macos.swift -o macos-helper
+// (npm run computer:mac -- install builds it for the host companion).
 import AppKit
 import ApplicationServices
 import CoreGraphics
@@ -126,7 +129,9 @@ func onScreenWindows() -> [Win] {
 
 func focusedPID() -> pid_t? {
   var ref: CFTypeRef?
-  if AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(), kAXFocusedApplicationAttribute as CFString, &ref) == .success, let app = ref {
+  let system = AXUIElementCreateSystemWide()
+  AXUIElementSetMessagingTimeout(system, 1)
+  if AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute as CFString, &ref) == .success, let app = ref {
     var pid: pid_t = 0
     // The focused-application attribute always holds an AXUIElement.
     if AXUIElementGetPid(app as! AXUIElement, &pid) == .success { return pid }
@@ -134,9 +139,34 @@ func focusedPID() -> pid_t? {
   return NSWorkspace.shared.frontmostApplication?.processIdentifier
 }
 
+/// The window keyboard input goes to: the focused app's focused Accessibility
+/// window, matched to its CoreGraphics window by frame. The frontmost window of
+/// the frontmost app is not enough: a browser's link-preview bubble, a tooltip
+/// or a popover is a separate ordinary window of the same app and can sit
+/// above the window that has focus.
 func activeWindowID() -> Int? {
   guard let pid = focusedPID() else { return nil }
-  return onScreenWindows().first { $0.pid == pid }?.id
+  let windows = onScreenWindows().filter { $0.pid == pid }
+  let app = AXUIElementCreateApplication(pid)
+  AXUIElementSetMessagingTimeout(app, 1)
+  var ref: CFTypeRef?
+  switch AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &ref) {
+  case .success:
+    guard let value = ref, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    // The closest frame wins; front-to-back order breaks a tie.
+    var best: Win?
+    var bestGap = CGFloat.greatestFiniteMagnitude
+    for win in windows {
+      if let gap = frameGap(value as! AXUIElement, win.bounds), gap < bestGap { bestGap = gap; best = win }
+    }
+    return bestGap <= 8 ? best?.id : nil
+  case .noValue:
+    return nil // the app has no focused window, so keys would go nowhere
+  default:
+    // An app that does not answer Accessibility: front-to-back order is the
+    // best evidence left.
+    return windows.first?.id
+  }
 }
 
 func inspect() throws -> [String: Any] {
@@ -258,6 +288,13 @@ func axSize(_ element: AXUIElement, _ attribute: String) -> CGSize? {
   return AXValueGetValue(value as! AXValue, .cgSize, &size) ? size : nil
 }
 
+/// How far an Accessibility window's frame is from a CoreGraphics window's
+/// bounds, in points; nil when the element reports no frame.
+func frameGap(_ element: AXUIElement, _ bounds: CGRect) -> CGFloat? {
+  guard let origin = axPoint(element, kAXPositionAttribute), let size = axSize(element, kAXSizeAttribute) else { return nil }
+  return abs(origin.x - bounds.minX) + abs(origin.y - bounds.minY) + abs(size.width - bounds.width) + abs(size.height - bounds.height)
+}
+
 /// The Accessibility window that is the given CoreGraphics window: same frame.
 func axWindow(for win: Win, in app: AXUIElement) -> AXUIElement? {
   var ref: CFTypeRef?
@@ -265,9 +302,7 @@ func axWindow(for win: Win, in app: AXUIElement) -> AXUIElement? {
   var best: AXUIElement?
   var bestGap = CGFloat.greatestFiniteMagnitude
   for element in list {
-    guard let origin = axPoint(element, kAXPositionAttribute), let size = axSize(element, kAXSizeAttribute) else { continue }
-    let gap = abs(origin.x - win.bounds.minX) + abs(origin.y - win.bounds.minY) + abs(size.width - win.bounds.width) + abs(size.height - win.bounds.height)
-    if gap < bestGap { bestGap = gap; best = element }
+    if let gap = frameGap(element, win.bounds), gap < bestGap { bestGap = gap; best = element }
   }
   return bestGap <= 8 ? best : nil
 }
@@ -549,6 +584,68 @@ func requestPermissions() -> [String: Any] {
   return statusJSON()
 }
 
+// MARK: host companion surfaces
+//
+// TARDIS.app draws its own consent dialog and control indicator. The host
+// companion has no window of its own, so it asks the helper for these two.
+
+func requestText(_ request: [String: Any], _ key: String, _ fallback: String, limit: Int) -> String {
+  String(((request[key] as? String) ?? fallback).prefix(limit))
+}
+
+/// The person at the Mac decides. "No" is the default button, as in the app's
+/// own dialog: only a deliberate press of the Allow button approves.
+func ask(_ request: [String: Any]) -> [String: Any] {
+  NSApplication.shared.setActivationPolicy(.accessory)
+  let alert = NSAlert()
+  alert.alertStyle = .warning
+  alert.messageText = requestText(request, "title", "TARDIS computer control", limit: 200)
+  alert.informativeText = requestText(request, "detail", "", limit: 2000)
+  alert.addButton(withTitle: "No")
+  alert.addButton(withTitle: requestText(request, "allow", "Allow", limit: 60))
+  // A background process may not be allowed to take focus; floating keeps the
+  // question in sight above other windows either way.
+  alert.layout()
+  alert.window.level = .floating
+  NSApp.activate()
+  return ["approved": alert.runModal() == .alertSecondButtonReturn]
+}
+
+final class IndicatorControls: NSObject, NSWindowDelegate {
+  @objc func stop() { finish(["stopped": true]) }
+  func windowWillClose(_ notification: Notification) { stop() }
+}
+
+/// Shown for as long as an agent holds control; the host kills it when control
+/// ends. Stop control or closing it revokes control at once. It floats without
+/// ever taking focus from the app being driven, and its floating layer keeps it
+/// out of inspect's window list.
+func indicator(_ request: [String: Any]) -> Never {
+  NSApplication.shared.setActivationPolicy(.accessory)
+  let size = NSSize(width: 400, height: 88)
+  let area = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+  let panel = NSPanel(contentRect: NSRect(x: area.maxX - size.width - 16, y: area.minY + 16, width: size.width, height: size.height),
+                      styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel], backing: .buffered, defer: false)
+  let controls = IndicatorControls()
+  panel.title = "TARDIS computer control"
+  panel.level = .floating
+  panel.hidesOnDeactivate = false
+  panel.isReleasedWhenClosed = false
+  panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+  panel.delegate = controls
+  let label = NSTextField(wrappingLabelWithString: requestText(request, "text", "An agent is controlling this Mac.", limit: 400))
+  label.frame = NSRect(x: 14, y: 42, width: size.width - 28, height: size.height - 48)
+  label.maximumNumberOfLines = 2
+  label.lineBreakMode = .byTruncatingTail
+  let button = NSButton(title: "Stop control", target: controls, action: #selector(IndicatorControls.stop))
+  button.frame = NSRect(x: size.width - 134, y: 8, width: 120, height: 30)
+  panel.contentView?.addSubview(label)
+  panel.contentView?.addSubview(button)
+  panel.orderFrontRegardless()
+  NSApp.run()
+  exit(0)
+}
+
 // MARK: main
 
 let input = FileHandle.standardInput.readDataToEndOfFile()
@@ -565,6 +662,8 @@ do {
   case "window_capture": finish(try windowCapture(request))
   case "act": try act(request); finish(["ok": true])
   case "release": release(); finish(["ok": true])
+  case "ask": finish(ask(request))
+  case "indicator": indicator(request)
   default: finish(["error": "Unknown helper op \(op)."], code: 1)
   }
 } catch let failure as Failure {

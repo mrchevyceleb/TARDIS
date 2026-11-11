@@ -35,9 +35,12 @@ Environment=RIVENDELL_COMPUTER_ALLOW_BACKGROUND=true
 Use the stable id from `device_list` or `/api/devices`. A unique device name is
 also accepted in the operator setting. `computer_start` can omit `device`:
 server-side resolution uses the chat's explicit selection first, then this
-default. It returns the actual `device` and `session` for subsequent calls.
-An offline/ambiguous default is an error, **never a reason to take over another
-computer**. The local Electron PC is an explicit target, not a fallback.
+default. To use another machine, an agent passes its exact id or unique name;
+every agent's computer guidance lists the computers online right now, and a
+refused start lists them too. It returns the actual `device` id and `session`
+for subsequent calls. An offline/ambiguous default is an error, **never a
+reason to take over another computer**. The local Electron PC is an explicit
+target, not a fallback.
 
 The background flag is standing authorization for assigned peer/routine work.
 It is off by default; background starts are rejected otherwise. Contexts are
@@ -68,12 +71,14 @@ remote host.
   This is independent of Electron and controls the real desktop, not a headless
   browser. It opens no inbound port.
 - **This computer:** run the updated Electron app. Windows input uses bundled
-  Windows APIs rather than page-only events. No Python installation is needed.
+  Windows APIs rather than page-only events, and macOS uses a bundled Swift
+  helper. No Python installation is needed.
+- **An always-on Mac:** the light host below, which needs no app window.
 
-Native input currently supports **Windows** and **GNOME X11**. macOS and
-Wayland report unavailable pending native permission/portal adapters. Locked
-sessions and Windows UAC/secure desktops are not controllable. SSH alone does
-not create a graphical session.
+Native input supports **Windows**, **macOS 14 or later** and **GNOME X11**.
+Wayland reports unavailable pending a portal adapter. Locked sessions and
+Windows UAC/secure desktops are not controllable. SSH alone does not create a
+graphical session.
 
 Linux dependencies: `xdotool`, `wmctrl`, `x11-xserver-utils` (`xrandr`),
 `maim`, `libglib2.0-bin` (`gdbus`) and `zenity` for attended prompts
@@ -112,6 +117,39 @@ Import the graphical environment from a desktop terminal if necessary:
 ```bash
 systemctl --user import-environment DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS XDG_SESSION_TYPE
 ```
+
+### macOS host
+
+TARDIS.app controls its own Mac. For an always-on Mac that does not need the
+app's window, run the same companion as a light host instead, started at login
+by a per-user LaunchAgent:
+
+```bash
+npm install
+npm run computer:mac -- install --unattended --no-indicator
+```
+
+It needs TARDIS.app (in `~/Applications` or `/Applications`, or pass `--app`)
+and the Xcode Command Line Tools. The LaunchAgent runs `host.ts` on TARDIS.app's
+own binary in Node mode: no Electron window or renderer, and macOS attributes
+Screen Recording and Accessibility to TARDIS, so a Mac where TARDIS can already
+be controlled needs no new permission. The installer builds the Swift helper
+from the checkout, connects to the server the app uses (or `--server`), names
+the computer after its Finder name (or `--name`), and prints the host's first
+report, including whether TARDIS holds both permissions. Run it again after
+pulling or after updating TARDIS.app; `npm run computer:mac -- uninstall`
+removes it. Logs go to `~/Library/Logs/TARDIS/computer-host.log`. Without
+`--unattended` each grant asks the person at the Mac; without `--no-indicator`
+a small floating panel shows who is in control and stops them.
+
+On a fresh Mac, the person at the Mac grants the permissions once: open TARDIS,
+choose **Ship → Set Up Computer Control on This Mac…**, switch TARDIS on under
+**Screen & System Audio Recording** (Screen Recording on macOS 14) and
+**Accessibility** in System Settings → Privacy & Security, then run the install
+again. Nothing remote can grant them; `tccutil` only resets. An ad-hoc signed
+TARDIS.app update drops both grants, while a stable signing identity keeps them.
+Run one controller per Mac: with the host installed, quit the app or untick
+**Ship → Allow Agents on This Computer**, or agents see the same desktop twice.
 
 `RIVENDELL_COMPUTER_SERVER_URL` defaults to `http://127.0.0.1:8091`; any
 non-loopback address requires HTTPS. `RIVENDELL_COMPUTER_NAME` sets the host's

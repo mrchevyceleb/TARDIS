@@ -44,6 +44,9 @@ mac:
   # this builds exactly as unsigned as today; with CSC_LINK set,
   # electron-builder imports the identity and signs.
   hardenedRuntime: false
+  # The light macOS computer host (npm run computer:mac) runs this binary with
+  # ELECTRON_RUN_AS_NODE: keep the RunAsNode fuse enabled (the default). Under a
+  # hardened runtime it would also need library validation off for sharp.
 dmg:
   artifactName: ${productName}-${version}-mac-${arch}.${ext}
 linux:

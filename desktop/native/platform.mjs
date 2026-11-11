@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { accessSync, constants, existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { release as osRelease, tmpdir } from 'node:os';
@@ -311,17 +311,19 @@ class WindowsAdapter {
   }
 }
 // macOS: a small Swift helper (macos.swift, built into native/macos-helper)
-// does the window list, capture and input. It runs as a child of the app, so
-// macOS attributes Screen Recording and Accessibility to TARDIS itself, and it
-// refuses with a plain "needs Screen Recording / Accessibility" message until
-// someone at the Mac has allowed both. Coordinates are global display points.
+// does the window list, capture and input. It runs as a child of the app, or of
+// the host companion running on the app's own binary, so macOS attributes
+// Screen Recording and Accessibility to TARDIS itself, and it refuses with a
+// plain "needs Screen Recording / Accessibility" message until someone at the
+// Mac has allowed both. Coordinates are global display points.
 class MacAdapter {
   constructor() {
     this.helper = join(nativeDir(), 'macos-helper');
     // os.release() is the Darwin version: 23 is macOS 14.
     const reason = Number.parseInt(osRelease(), 10) < 23 ? 'Computer control needs macOS 14 or later.'
-      : !existsSync(this.helper) ? 'This TARDIS build has no macOS control helper. Install a build that includes native/macos-helper.'
-      : undefined;
+      : existsSync(this.helper) ? undefined
+      : this.helper.includes('app.asar.unpacked') ? 'This TARDIS build has no macOS control helper. Install a build that includes native/macos-helper.'
+      : 'The macOS control helper is not built in this checkout. Run npm run computer:mac -- install on this Mac.';
     this.capability = { supported: !reason, reason };
   }
   async call(op, args = {}, signal, timeoutMs = 30_000) {
@@ -355,6 +357,20 @@ class MacAdapter {
   /** Raises the two system prompts on purpose. Only for the Ship menu item or
    *  the setup launch flag, never for an agent request. */
   requestPermissions(signal) { return this.call('request_permissions', {}, signal, 20_000); }
+  /** The host companion's consent dialog (TARDIS.app draws its own). Only a
+   *  press of the Allow button approves; a timeout or an abort is a no. */
+  async ask(prompt, signal) {
+    const result = await this.call('ask', prompt, signal, 65_000);
+    return result.approved === true;
+  }
+  /** The host companion's control indicator: a floating panel that runs until
+   *  killed, and exits by itself when the person presses Stop control. */
+  indicator(text) {
+    const child = spawn(this.helper, [], { stdio: ['pipe', 'ignore', 'ignore'] });
+    child.stdin.on('error', () => {}); // an early exit reports through 'close'
+    child.stdin.end(JSON.stringify({ op: 'indicator', text }));
+    return child;
+  }
 }
 export function createAdapter() {
   if (process.platform === 'linux') return new LinuxAdapter();

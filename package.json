@@ -26,6 +26,7 @@
     "typecheck": "tsc -b && npm --workspace server run typecheck",
     "test": "tsx --test tests/menu-scroll.test.ts tests/desk-tasks.test.ts tests/schedule-humanize.test.ts && tsx --tsconfig tsconfig.app.json --experimental-test-module-mocks --test tests/grok-brain.test.ts && npm --workspace server run test",
     "computer:host": "tsx server/src/devices/host.ts",
+    "computer:mac": "node scripts/computer-host-mac.mjs",
     "deadcode": "knip --include files,dependencies,unlisted,devDependencies",
     "icons": "node scripts/generate-pwa-icons.mjs",
     "icons:native": "node scripts/generate-native-icons.mjs",
