@@ -275,7 +275,8 @@ const TAIL_FINGERPRINT_BYTES = 64;
 
 type AppendCursor = { ino: number; consumed: number; fingerprint: Buffer };
 
-function readRange(fd: number, start: number, end: number): Buffer {
+/** Bytes [start, end) of an open file, shorter only when the file is. */
+export function readRange(fd: number, start: number, end: number): Buffer {
   const length = Math.max(0, end - start);
   const buf = Buffer.alloc(length);
   let read = 0;
@@ -1156,6 +1157,7 @@ function parseEventLogLines(raw: string): PersistedEvent[] {
       if (typeof parsed.eng === 'string' && parsed.eng) event.eng = parsed.eng;
       if (typeof parsed.mdl === 'string' && parsed.mdl) event.mdl = parsed.mdl;
       if (parsed.lane === 'bg') event.lane = 'bg';
+      if (typeof parsed.at === 'number' && Number.isFinite(parsed.at)) event.at = parsed.at;
       events.push(event);
     } catch {
       // Interrupted trailing append: ignore only the malformed line.
@@ -1184,6 +1186,100 @@ export function loadEventLogForCompactionSync(key: string): PersistedEvent[] {
  *  file plus this is the complete durable log. */
 export function loadEventLogArchiveSync(key: string): PersistedEvent[] {
   return loadWholeEventLog(archivePath(key));
+}
+
+// Raw bytes per step when a catch-up reads a log.
+const CATCH_UP_CHUNK_BYTES = 256 * 1024;
+
+type OpenLog = { fd: number; size: number };
+
+/** A log file opened for reading at its current size, or null when it does
+ *  not exist. Any other failure throws: an unreadable log is not an empty one. */
+function openLogForRead(path: string): OpenLog | null {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+  try {
+    return { fd, size: fstatSync(fd).size };
+  } catch (err) {
+    closeSync(fd);
+    throw err;
+  }
+}
+
+/** A run of whole lines in one of a log's files, and the lowest seq it holds. */
+type LogRun = { file: number; start: number; end: number; minSeq: number };
+
+/** The newest stretch of a thread's whole durable log (the archive, where
+ *  cleanup moves the hot file's oldest events, then the hot file), handed to
+ *  `visit` in file order a run of whole lines at a time: from the run where
+ *  walking back from the end first meets an event `begin` accepts, or from the
+ *  very start when none does, through to the end. Sync and async appends reach
+ *  the file out of seq order, so each run comes with the lowest seq of
+ *  everything after it: no event still to come sorts below that bound. Home
+ *  logs and their archives run to gigabytes, so nothing beyond a run (a chunk,
+ *  or one long line) is held at once, and each line is assembled once per
+ *  walk. Both files are opened together before any await, so a cleanup that
+ *  moves events meanwhile is seen exactly once, and only what they held at
+ *  that moment is read. Only a missing file reads as empty; any other error
+ *  rejects. */
+export async function readEventLogFrom(
+  key: string,
+  begin: (event: PersistedEvent) => boolean,
+  visit: (events: PersistedEvent[], laterMinSeq: number) => Promise<void>,
+): Promise<void> {
+  const files: OpenLog[] = [];
+  try {
+    const hot = openLogForRead(logPath(key));
+    if (hot) files.push(hot);
+    const archive = openLogForRead(archivePath(key));
+    if (archive) files.unshift(archive);
+    // Back from the end, newest run first, until a run holds an event `begin` accepts.
+    const runs: LogRun[] = [];
+    search: for (let f = files.length - 1; f >= 0; f--) {
+      // Bytes read already that finish a line starting further back.
+      let rest: Buffer[] = [];
+      let runEnd = files[f].size;
+      for (let end = files[f].size; end > 0;) {
+        const start = Math.max(0, end - CATCH_UP_CHUNK_BYTES);
+        const fresh = readRange(files[f].fd, start, end);
+        end = start;
+        const cut = start > 0 ? fresh.indexOf(0x0a) + 1 : 0;
+        if (start > 0 && cut === 0) {
+          rest.unshift(fresh);
+          continue;
+        }
+        const events = parseEventLogLines(Buffer.concat([fresh.subarray(cut), ...rest]).toString('utf8'));
+        rest = [fresh.subarray(0, cut)];
+        let minSeq = Infinity;
+        for (const event of events) if (event.seq < minSeq) minSeq = event.seq;
+        runs.push({ file: f, start: start + cut, end: runEnd, minSeq });
+        runEnd = start + cut;
+        if (events.some(begin)) break search;
+        await yieldToEventLoop();
+      }
+    }
+    // Then forward, oldest run first, each with the lowest seq after it.
+    let later = Infinity;
+    const bounds = runs.map((run) => {
+      const bound = later;
+      later = Math.min(later, run.minSeq);
+      return bound;
+    });
+    for (let i = runs.length - 1; i >= 0; i--) {
+      const run = runs[i];
+      await visit(parseEventLogLines(readRange(files[run.file].fd, run.start, run.end).toString('utf8')), bounds[i]);
+      await yieldToEventLoop();
+    }
+  } finally {
+    for (const file of files) {
+      try { closeSync(file.fd); } catch { /* already closed */ }
+    }
+  }
 }
 
 // Append-only writer keyed by sanitized session key. A per-key promise chain
@@ -1348,9 +1444,42 @@ function mattAskHooks(key: string, persisted: PersistedEvent): void {
   }
 }
 
+/** The agent history writer (agentHistory.ts) sees every append the moment it
+ *  is made, so in the order things were said (a queued write can land after a
+ *  later synchronous one), and has the last word before a clear deletes a log.
+ *  A hook, not an import, so this module stays a leaf. */
+export type EventLogObserver = {
+  appended: (key: string, event: PersistedEvent) => void;
+  /** Persist whatever must outlive the log. A rejection refuses the clear. */
+  beforeClear: (key: string) => Promise<void>;
+  removed: (key: string, sequences: ReadonlySet<number>) => void;
+};
+
+let observer: EventLogObserver | null = null;
+
+export function setEventLogObserver(next: EventLogObserver | null): void {
+  observer = next;
+}
+
+function notifyAppended(key: string, event: PersistedEvent): void {
+  try {
+    observer?.appended(key, event);
+  } catch (err) {
+    console.warn('[event-log-store] append observer failed', key, (err as Error).message);
+  }
+}
+
 export function appendEventLogSync(key: string, persisted: PersistedEvent): boolean {
   observeNextSeq(key, persisted.seq + 1);
   if (isPlumbingEvent(persisted.ev)) return true;
+  const safe = writeEventLineSync(key, persisted);
+  if (safe) notifyAppended(key, safe);
+  return safe !== null;
+}
+
+/** The durable write behind every synchronous append: the redacted event, or
+ *  null when it could not be written. */
+function writeEventLineSync(key: string, persisted: PersistedEvent): PersistedEvent | null {
   try {
     mkdirSync(EVENT_LOG_DIR, { recursive: true });
     // The durable log is the single upstream for the chat render, the
@@ -1365,13 +1494,14 @@ export function appendEventLogSync(key: string, persisted: PersistedEvent): bool
     // walk's shape restrictions pass through untouched (a toJSON output, a
     // hostile object key, raw prose a tool embedded in a non-plain instance)
     // still gets one last text-level scan before the line is durable.
-    appendFileSync(logPath(key), redactSerializedSecrets(JSON.stringify(redactEventSecrets(persisted))) + '\n', 'utf8');
-    mattAskHooks(key, redactEventSecrets(persisted));
+    const safe = redactEventSecrets(persisted);
+    appendFileSync(logPath(key), redactSerializedSecrets(JSON.stringify(safe)) + '\n', 'utf8');
+    mattAskHooks(key, safe);
     bumpEventLogRevision(persisted.ev);
-    return true;
+    return safe;
   } catch (err) {
     console.warn('[event-log-store] sync append failed', key, (err as Error).message);
-    return false;
+    return null;
   }
 }
 
@@ -1379,8 +1509,10 @@ export function appendEventLogSync(key: string, persisted: PersistedEvent): bool
  * A synchronous append outside it could land ahead of older queued frames. */
 export function appendEventLogDurable(key: string, persisted: PersistedEvent): Promise<void> {
   observeNextSeq(key, persisted.seq + 1);
+  const plumbing = isPlumbingEvent(persisted.ev);
+  if (!plumbing) notifyAppended(key, redactEventSecrets(persisted));
   const next = (writeChains.get(key) ?? Promise.resolve()).then(() => {
-    if (!appendEventLogSync(key, persisted)) throw new Error('Could not save the call transcript to the conversation');
+    if (!plumbing && !writeEventLineSync(key, persisted)) throw new Error('Could not save the call transcript to the conversation');
   });
   writeChains.set(key, next.catch(() => {}));
   return next;
@@ -1393,7 +1525,9 @@ export function appendEventLog(key: string, persisted: PersistedEvent): void {
   // Same live-path redaction as appendEventLogSync, including the
   // structure-safe serialized-line pass: the durable line is what every later
   // reader (render, transcript, resume, compaction) consumes.
-  const line = redactSerializedSecrets(JSON.stringify(redactEventSecrets(persisted))) + '\n';
+  const safe = redactEventSecrets(persisted);
+  const line = redactSerializedSecrets(JSON.stringify(safe)) + '\n';
+  notifyAppended(key, safe);
   const prior = writeChains.get(key) ?? Promise.resolve();
   const next = prior
     .then(async () => {
@@ -1401,7 +1535,7 @@ export function appendEventLog(key: string, persisted: PersistedEvent): void {
         await mkdir(EVENT_LOG_DIR, { recursive: true });
         await appendFile(path, line, 'utf8');
         bumpEventLogRevision(persisted.ev);
-        mattAskHooks(key, redactEventSecrets(persisted));
+        mattAskHooks(key, safe);
       } catch (err) {
         console.warn('[event-log-store] append failed', key, (err as Error).message);
       }
@@ -1465,6 +1599,7 @@ export function removeEventLogEvents(key: string, sequences: Iterable<number>): 
       }
       renameSync(tmp, path);
       bumpEventLogRevision();
+      try { observer?.removed(key, targets); } catch { /* history keeps the text */ }
     } catch (err) {
       if (fd >= 0) {
         try { closeSync(fd); } catch { /* already closed */ }
@@ -1497,12 +1632,24 @@ export function removeEventLogEvents(key: string, sequences: Iterable<number>): 
 // and a surviving archive would let the next trim splice pre-reset turns
 // back in. Staged names end in `.clear-<pid>`, which neither history scan
 // matches.
+//
+// (Matt, Nov 12 2026) Resetting the thread must never erase what was said.
+// Before anything moves, the history observer writes every visible turn still
+// in this log to the agent's transcript; if that fails, the clear is refused
+// and the old thread stays in place.
 export async function clearEventLog(key: string): Promise<boolean> {
   const path = logPath(key);
   const prior = writeChains.get(key) ?? Promise.resolve();
   let cleared = true;
   const next = prior
     .then(async () => {
+      try {
+        await observer?.beforeClear(key);
+      } catch (err) {
+        cleared = false;
+        console.warn('[event-log-store] clear refused: history not saved', key, (err as Error).message);
+        return;
+      }
       const hotStaged = `${path}.clear-${process.pid}`;
       const archiveStaged = `${archivePath(key)}.clear-${process.pid}`;
       let archiveMoved = false;

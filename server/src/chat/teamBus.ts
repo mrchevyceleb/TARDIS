@@ -12,6 +12,7 @@ import { DESK_OWNER_NAME, ELROND_WORKSPACE_PATH } from '../config.ts';
 import { agentForChatId, brainForAgent, cliForAgentEngine, listAgents, listAgentsOrThrow, type Agent } from './agents.ts';
 import { backgroundChatId, backgroundLaneEnabled, bareChatId, isBackgroundChatId, logKeyFor } from './threadKey.ts';
 import { extractVisibleTurns } from './threadWindow.ts';
+import { recentHistory } from './agentHistory.ts';
 import { JsonStore, type StoredRecord } from '../lib/jsonStore.ts';
 import { scanOutgoingPromise } from '../lib/promiseScan.ts';
 import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, quietHoldsFor, recordQuietExemptWake } from '../lib/quietHours.ts';
@@ -3102,21 +3103,13 @@ export async function teamRoster() {
   });
 }
 
-/** Recent visible texts from an agent's authoritative shared home thread. */
-export async function teamRecent(name: string, limit = 8): Promise<Array<{ who: 'agent' | 'user' | 'peer'; text: string }>> {
+/** Recent visible messages from an agent's durable history: across thread
+ *  resets, with a reply that is still streaming included. */
+export async function teamRecent(name: string, limit = 8): Promise<Array<{ who: 'agent' | 'user' | 'peer'; from?: string; text: string }>> {
   const agent = findAgent(name);
   if (!agent) return [];
-  const { cli, chatKey } = agentLogKey(agent);
-  const logKey = logKeyFor(cli, ELROND_WORKSPACE_PATH, chatKey);
-  // Polls commonly happen immediately after delivery/turnEnd; wait for the
-  // append chain so team_recent never reports an empty stale disk tail.
-  try { await flushEventLog(logKey); } catch { /* best-effort */ }
-  const { events } = loadEventLogSync(logKey);
-  return extractVisibleTurns(events).slice(-limit).map((turn) => {
-    const peer = turn.role === 'user' ? /^\[([^\]]+)]\s+([\s\S]*)$/.exec(turn.text) : null;
-    return {
-      who: turn.role === 'assistant' ? 'agent' as const : peer ? 'peer' as const : 'user' as const,
-      text: (peer?.[2] ?? turn.text).replace(/\s+/g, ' ').trim().slice(0, 400),
-    };
+  return recentHistory(agent.id, limit).map((entry) => {
+    const who = entry.who === agent.name ? 'agent' as const : entry.who === DESK_OWNER_NAME ? 'user' as const : 'peer' as const;
+    return { who, ...(who === 'peer' ? { from: entry.who } : {}), text: entry.text.replace(/\s+/g, ' ').trim().slice(0, 400) };
   });
 }

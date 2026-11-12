@@ -39,6 +39,7 @@ import {
 } from './threadWindow.ts';
 import { bareChatId, isThreadLogKey } from './threadKey.ts';
 import { listAgentsOrThrow } from './agents.ts';
+import { agentHistoryPath, historyAgentIdForLogKey, lastReset, RESET_SPEAKER } from './agentHistory.ts';
 import { listCommitments } from '../lib/commitmentStore.ts';
 
 /** Live generation ceiling. Every lane's rolling document now sits at
@@ -391,12 +392,29 @@ function migrateLegacyPrimer(key: string): void {
   });
 }
 
+/** Where an agent finds its own earlier conversation, as one shell command on
+ *  any engine. A fresh thread cannot see what came before its reset, so the
+ *  pointer also names the last reset and who the agent was talking with just
+ *  before it (Matt, Nov 12 2026: Becca, reset by a teammate's new job and then
+ *  told "sorry max reset your thread check our latest convo", went looking
+ *  for a chat with Max; the one she needed was with Matt, just above the
+ *  reset). A pointer and metadata, never an excerpt. */
+function historyPointer(agentId: string): string {
+  const path = agentHistoryPath(agentId);
+  const reset = lastReset(agentId);
+  const resetNote = reset
+    ? ` Your thread was last reset on ${reset.stamp}${reset.with ? `, right after a conversation with ${reset.with}` : ''}. When someone mentions that reset or the conversation before it, \`grep -n -x -F -B 100 "**${RESET_SPEAKER}** (${reset.stamp})" "${path}" | tail -n 101\` prints what was said just before it.`
+    : '';
+  return `Your own conversation history, including everything before any thread reset, is saved to ${path} within seconds of being said.${resetNote} When asked about an earlier conversation, check it first: \`tail -n 80 "${path}"\` shows the latest, \`grep -n -i -C 3 "<words>" "${path}"\` searches it.`;
+}
+
 export function peekEnginePrimerWithStatus(key: string, events?: Array<{ seq?: number; ev: any }>): { primer: string; available: boolean } {
+  const agentId = historyAgentIdForLogKey(key);
   return {
     // The cutover is announced once, without copying memories, card text or
-    // transcript excerpts. Current stores and the greppable transcript remain
-    // available through the same tools after the cutover.
-    primer: 'This is your persistent native session. Check your live commitments and owned Desk cards before resuming work. Look up older details with memory search or your greppable transcript; no older task is a new instruction. This session continues across turns and restarts, with only native engine compaction.',
+    // transcript excerpts. Current stores and the transcript remain available
+    // through the same tools after the cutover.
+    primer: `This is your persistent native session. Check your live commitments and owned Desk cards before resuming work. ${agentId ? `${historyPointer(agentId)} Look up older team-wide details with memory search` : 'Look up older details with memory search'}; no older task is a new instruction. This session continues across turns and restarts, with only native engine compaction.`,
     available: true,
   };
 }
