@@ -398,12 +398,14 @@ function migrateLegacyPrimer(key: string): void {
  *  before it (Matt, Nov 12 2026: Becca, reset by a teammate's new job and then
  *  told "sorry max reset your thread check our latest convo", went looking
  *  for a chat with Max; the one she needed was with Matt, just above the
- *  reset). A pointer and metadata, never an excerpt. */
+ *  reset). The command prints the reset marker, whose recap of the last
+ *  messages before it stays short however long one of them was. A pointer and
+ *  metadata, never an excerpt. */
 function historyPointer(agentId: string): string {
   const path = agentHistoryPath(agentId);
   const reset = lastReset(agentId);
   const resetNote = reset
-    ? ` Your thread was last reset on ${reset.stamp}${reset.with ? `, right after a conversation with ${reset.with}` : ''}. When someone mentions that reset or the conversation before it, \`grep -n -x -F -B 100 "**${RESET_SPEAKER}** (${reset.stamp})" "${path}" | tail -n 101\` prints what was said just before it.`
+    ? ` Your thread was last reset on ${reset.stamp}${reset.with ? `, right after a conversation with ${reset.with}` : ''}. When someone mentions that reset or the conversation before it, \`grep -n -x -F -A ${reset.lines} "**${RESET_SPEAKER}** (${reset.stamp})" "${path}"\` prints the last messages before it and who said each, long ones shortened; their full text is above it in the file.`
     : '';
   return `Your own conversation history, including everything before any thread reset, is saved to ${path} within seconds of being said.${resetNote} When asked about an earlier conversation, check it first: \`tail -n 80 "${path}"\` shows the latest, \`grep -n -i -C 3 "<words>" "${path}"\` searches it.`;
 }

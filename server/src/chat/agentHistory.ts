@@ -15,8 +15,9 @@
 //   whole by extractVisibleTurns, the reader the model window uses, so every
 //   engine's replies land alike.
 // - A thread clear first writes everything still pending, a reply cut off
-//   mid-stream included, plus a reset marker. If that write fails the clear is
-//   refused (event-log-store.ts).
+//   mid-stream included, plus a reset marker that recaps the last few messages
+//   before it, one short line each. If that write fails the clear is refused
+//   (event-log-store.ts).
 // - Boot resumes from each agent's watermark (.state.json, the old script's
 //   format, so the switch-over continues exactly where the script stopped),
 //   streaming the log from just before the mark and writing the backlog in
@@ -24,7 +25,8 @@
 //   clear proceeds. Shutdown flushes whatever is still pending.
 // - A fresh thread cannot see what came before its reset, so its primer names
 //   the last reset and who the agent was talking with just before it
-//   (lastReset): "check our latest convo" must land on that conversation.
+//   (lastReset), and one command prints that marker's recap: "check our latest
+//   convo" must land on that conversation, however long a message in it was.
 
 import { appendFile, mkdir, rename, writeFile } from 'node:fs/promises';
 import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
@@ -56,6 +58,11 @@ const CATCH_UP_BATCH = 2000;
 /** The speaker of the marker entry a thread clear writes. */
 export const RESET_SPEAKER = 'Thread reset';
 const RESET_NOTE = 'The chat thread was cleared here. Everything above happened before the reset; the fresh thread starts below.';
+/** A reset marker recaps this many of the last messages before it, each cut
+ *  to one line this long (Matt, Nov 12 2026: a 2,000-line paste just before a
+ *  reset filled a line-based recall, and the exchange before it never showed). */
+const RECAP_ENTRIES = 8;
+const RECAP_CHARS = 300;
 // Same clock as the rest of the office (restartWake, deskHygiene), and the
 // exact stamp the transcript and its readers (memory feed) already use.
 const stampFormat = new Intl.DateTimeFormat('en-US', {
@@ -431,7 +438,7 @@ async function beforeClear(key: string): Promise<void> {
     cancelTimer(lane);
     await commit(lane, true);
     const agent = rosterAgent(agentId);
-    if (agent) await appendEntries(agent, [{ who: RESET_SPEAKER, at: Date.now(), text: RESET_NOTE }]);
+    if (agent) await appendEntries(agent, [{ who: RESET_SPEAKER, at: Date.now(), text: resetMarkerText(agentId) }]);
     lane.context = null;
   });
 }
@@ -623,10 +630,24 @@ function agentName(agentId: string): string | null {
   }
 }
 
+/** A message someone said, not a reset marker. */
+const said = (entry: HistoryEntry) => entry.who !== RESET_SPEAKER && entry.text !== '';
+
+/** A reset marker's text: the note, then the last few messages before it, who
+ *  said each, on one short line apiece. The primer's one step prints exactly
+ *  this, and it sits where the tail of the file is read, so whatever a fresh
+ *  thread reads first shows the exchange, however long one message was. */
+function resetMarkerText(agentId: string): string {
+  const recap = newestEntries(agentId, RECAP_ENTRIES, said).map((entry) => {
+    const text = entry.text.replace(/\s+/g, ' ');
+    return `- ${entry.who} (${entry.stamp}): ${text.length > RECAP_CHARS ? `${text.slice(0, RECAP_CHARS).trimEnd()}…` : text}`;
+  });
+  return recap.length ? [RESET_NOTE, 'The last messages before it, long ones shortened (the full text is above):', ...recap].join('\n') : RESET_NOTE;
+}
+
 /** The newest messages in an agent's history, across thread resets, with the
  *  reply still streaming (not yet written) included. */
 export function recentHistory(agentId: string, limit: number): HistoryEntry[] {
-  const said = (entry: HistoryEntry) => entry.who !== RESET_SPEAKER && entry.text !== '';
   const entries = newestEntries(agentId, limit, said);
   const name = agentName(agentId);
   const agent = name ? rosterCache.get(agentId) : undefined;
@@ -639,15 +660,18 @@ export function recentHistory(agentId: string, limit: number): HistoryEntry[] {
   return entries.filter(said).slice(-limit);
 }
 
-/** The agent's latest thread reset and who it was talking with just before it
- *  (the owner or a teammate), or null when its recent history has none. */
-export function lastReset(agentId: string): { stamp: string; with: string | null } | null {
+/** The agent's latest thread reset, who it was talking with just before it
+ *  (the owner or a teammate), and how many lines the marker's note and recap
+ *  span below its header; null when its recent history has none. */
+export function lastReset(agentId: string): { stamp: string; with: string | null; lines: number } | null {
   const entries = newestEntries(agentId, 64);
   const index = entries.findLastIndex((entry) => entry.who === RESET_SPEAKER);
   if (index < 0) return null;
+  const { stamp, text } = entries[index];
+  const lines = text.split('\n').length;
   const name = agentName(agentId);
   for (let i = index - 1; i >= 0 && entries[i].who !== RESET_SPEAKER; i--) {
-    if (entries[i].who !== name) return { stamp: entries[index].stamp, with: entries[i].who };
+    if (entries[i].who !== name) return { stamp, with: entries[i].who, lines };
   }
-  return { stamp: entries[index].stamp, with: null };
+  return { stamp, with: null, lines };
 }

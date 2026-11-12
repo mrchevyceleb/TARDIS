@@ -29,6 +29,7 @@ writeFileSync(join(dir, 'personas', 'agents.json'), JSON.stringify({ agents: [
   { id: 'dee', name: 'Dee', role: 'Research', engine: 'pi', home: 'bot-dee', createdAt: 3 },
   { id: 'eve', name: 'Eve', role: 'Support', engine: 'claude', home: 'bot-eve', createdAt: 4 },
   { id: 'fay', name: 'Fay', role: 'Ops', engine: 'pi', home: 'bot-fay', createdAt: 5 },
+  { id: 'gus', name: 'Gus', role: 'Facilities', engine: 'codex', home: 'bot-gus', createdAt: 6 },
 ] }));
 
 const { ASSISTANT_HUB_PATH } = await import('./config.ts');
@@ -42,7 +43,8 @@ const cole = threadLogKey(ASSISTANT_HUB_PATH, 'bot-cole');
 const dee = threadLogKey(ASSISTANT_HUB_PATH, 'bot-dee');
 const eve = threadLogKey(ASSISTANT_HUB_PATH, 'bot-eve');
 const fay = threadLogKey(ASSISTANT_HUB_PATH, 'bot-fay');
-const event = (inner: unknown) => ({ type: 'event', event: inner }) as any;
+const gus = threadLogKey(ASSISTANT_HUB_PATH, 'bot-gus');
+const event =(inner: unknown) => ({ type: 'event', event: inner }) as any;
 const echo = (key: string, text: string) => store.appendEventLogSync(key, { seq: store.reserveEventLogSeq(key), at: Date.now(), ev: event({ type: '_user_echo', text }) });
 const frame = (key: string, ev: any) => store.appendEventLog(key, { seq: store.reserveEventLogSeq(key), at: Date.now(), ev });
 const streamed = (key: string, text: string) => {
@@ -212,10 +214,38 @@ test('a fresh session is pointed at its own history, and at what came just befor
   // The Becca case: asked about "our latest convo" after a teammate's reset,
   // the fresh thread knows who it was with and gets that conversation back.
   assert.match(primer, /Your thread was last reset on [A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M, right after a conversation with Owner\./);
-  const command = /`(grep -n -x -F -B [^`]+)`/.exec(primer)?.[1];
+  const command = /`(grep -n -x -F -A [^`]+)`/.exec(primer)?.[1];
   assert.ok(command, primer);
   const before = execFileSync('bash', ['-c', command], { encoding: 'utf8' });
   assert.ok(before.includes('Find me a charging station for the desk.') && before.includes('Yes, that model has two AC outl'), before);
-  assert.ok(before.trimEnd().endsWith(')') && before.includes('**Thread reset**') && !before.includes('New job: clean start.'), before);
+  assert.ok(/^\d+:\*\*Thread reset\*\* \(/.test(before) && !before.includes('New job: clean start.'), before);
   assert.ok(!peekEnginePrimerWithStatus(`claude|${dir}|studio-1`).primer.includes('agent-notes'));
+});
+
+test('after a reset, one step hands back the last messages before it, however long one was', async () => {
+  // The case that broke the line-based recall: a 2,000-line paste right before
+  // the reset filled its 100-line window, and the exchange before it never showed.
+  echo(gus, 'The gate code for the warehouse is 4512.');
+  streamed(gus, 'Noted: gate code 4512.');
+  turnEnd(gus);
+  echo(gus, `Here is the full server export:\n${'2026-11-12 10:00:00 INFO request served in 12ms\n'.repeat(2000)}End of export.`);
+  streamed(gus, 'That export looks clean.');
+  turnEnd(gus);
+  assert.equal(await store.clearEventLog(gus), true);
+  store.appendEventLogSync(gus, { seq: store.reserveEventLogSeq(gus), at: Date.now(), ev: event({ type: 'peer_message', from: 'Max', fromRole: 'Chief of Staff', text: 'New job: count the pallets.', deliveryId: 'd-2' }) });
+  await until(() => transcript('gus').includes('New job: count the pallets.'), 'the job');
+  const primer = peekEnginePrimerWithStatus(gus).primer;
+  const lines = execFileSync('bash', ['-c', /`(grep -n -x -F -A [^`]+)`/.exec(primer)![1]], { encoding: 'utf8' }).trimEnd().split('\n');
+  assert.match(lines[0], /^\d+:\*\*Thread reset\*\* \(/);
+  // Who said what, each on one short line, and nothing from after the reset.
+  const recap = lines.slice(3).map((line) => line.replace(/^\d+-- (\w+) \([^)]+\): /, '$1: '));
+  assert.deepEqual(recap.map((line) => line.split(' 2026-11-12')[0]), [
+    'Owner: The gate code for the warehouse is 4512.',
+    'Gus: Noted: gate code 4512.',
+    'Owner: Here is the full server export:',
+    'Gus: That export looks clean.',
+  ]);
+  assert.ok(recap[2].endsWith('…') && lines.every((line) => line.length < 400), lines.join('\n'));
+  // Reading the tail instead lands on the same recap, not on a wall of paste.
+  assert.ok(execFileSync('bash', ['-c', /`(tail -n 80 [^`]+)`/.exec(primer)![1]], { encoding: 'utf8' }).includes('The gate code for the warehouse is 4512.'));
 });
