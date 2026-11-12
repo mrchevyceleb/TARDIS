@@ -1,4 +1,4 @@
-// Live conversation history for every agent (Matt, Nov 12 2026).
+// Live conversation history for every agent.
 //
 // <state>/agent-notes/<id>/transcript.md is an agent's own greppable record of
 // its home thread: the owner's messages, teammates' messages and the agent's
@@ -59,8 +59,8 @@ const CATCH_UP_BATCH = 2000;
 export const RESET_SPEAKER = 'Thread reset';
 const RESET_NOTE = 'The chat thread was cleared here. Everything above happened before the reset; the fresh thread starts below.';
 /** A reset marker recaps this many of the last messages before it, each cut
- *  to one line this long (Matt, Nov 12 2026: a 2,000-line paste just before a
- *  reset filled a line-based recall, and the exchange before it never showed). */
+ *  to one line this long: one huge message just before a reset, such as a
+ *  2,000-line paste, must never push the exchange before it out of view. */
 const RECAP_ENTRIES = 8;
 const RECAP_CHARS = 300;
 // Same clock as the rest of the office (restartWake, deskHygiene), and the

@@ -395,12 +395,11 @@ function migrateLegacyPrimer(key: string): void {
 /** Where an agent finds its own earlier conversation, as one shell command on
  *  any engine. A fresh thread cannot see what came before its reset, so the
  *  pointer also names the last reset and who the agent was talking with just
- *  before it (Matt, Nov 12 2026: Becca, reset by a teammate's new job and then
- *  told "sorry max reset your thread check our latest convo", went looking
- *  for a chat with Max; the one she needed was with Matt, just above the
- *  reset). The command prints the reset marker, whose recap of the last
- *  messages before it stays short however long one of them was. A pointer and
- *  metadata, never an excerpt. */
+ *  before it: an agent reset by a teammate's new job and then asked about
+ *  "our latest convo" can otherwise go looking for a chat with that teammate,
+ *  when the one it needs sits just above the reset. The command prints the
+ *  reset marker, whose recap of the last messages before it stays short
+ *  however long one of them was. A pointer and metadata, never an excerpt. */
 function historyPointer(agentId: string): string {
   const path = agentHistoryPath(agentId);
   const reset = lastReset(agentId);

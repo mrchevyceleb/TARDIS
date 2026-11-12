@@ -1,7 +1,7 @@
-// The live history writer against disposable state (Matt, Nov 12 2026: a chat
-// was lost because the thread reset five minutes later and the transcript was
-// only rebuilt every 30). What is said reaches the agent's transcript within a
-// moment on any engine, and a reset can never erase it.
+// The live history writer against disposable state. A chat was once lost
+// because the thread reset five minutes after it, while the transcript was
+// only rebuilt every 30; what is said now reaches the agent's transcript
+// within a moment on any engine, and a reset can never erase it.
 import assert from 'node:assert/strict';
 import test, { after, mock } from 'node:test';
 import { execFileSync } from 'node:child_process';

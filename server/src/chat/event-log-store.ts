@@ -1633,7 +1633,7 @@ export function removeEventLogEvents(key: string, sequences: Iterable<number>): 
 // back in. Staged names end in `.clear-<pid>`, which neither history scan
 // matches.
 //
-// (Matt, Nov 12 2026) Resetting the thread must never erase what was said.
+// Resetting the thread must never erase what was said.
 // Before anything moves, the history observer writes every visible turn still
 // in this log to the agent's transcript; if that fails, the clear is refused
 // and the old thread stays in place.
