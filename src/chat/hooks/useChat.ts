@@ -1,3 +1,4 @@
+import { contextWindowForAgyModel } from '../agyModels';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatBlock, ChatImagePreview, CompanionId, Repo } from '../data/types';
 import { isReactionEmoji } from '../data/reactions';
@@ -59,10 +60,6 @@ const DEFAULT_WINDOW_TOKENS = 200_000;
 const LARGE_WINDOW_TOKENS = 1_000_000;
 const BANANA_WINDOW_TOKENS = 200_000; // banana default model context
 const GROK_WINDOW_TOKENS = 500_000; // Grok 4.x context window
-// Gemini 4 class on the agy subscription lane: unmeasured, pinned to the
-// expected class so the meter starts honest; refine when measured.
-const AGY_WINDOW_TOKENS = 1_000_000;
-
 // Pick the starting context window for a given CLI before we've seen any model
 // id. Codex uses the selected catalog entry; current Claude (Opus 4.6/4.7/4.8,
 // Sonnet 4.6) is 1M; GLM 5.3/5.2 is 1M; xAI/Grok is 500K; banana/OpenRouter defaults to 200K.
@@ -77,7 +74,7 @@ function defaultWindowForCli(cli: CompanionId, model?: string): number {
   // xAI always runs Grok (500K). Pin before system/init arrives so the meter
   // never flashes the 200K non-claude default.
   if (cli === 'xai') return GROK_WINDOW_TOKENS;
-  if (cli === 'agy') return AGY_WINDOW_TOKENS;
+  if (cli === 'agy') return contextWindowForAgyModel(model);
   return windowForClaudeModel(model); // Claude/Z.ai model ids carry the real window.
 }
 
@@ -1655,6 +1652,21 @@ export function useChat(opts: {
     windowTokensRef.current = windowForCli(cli, modelRef.current, contextWindowTokens);
     setUsage(null);
     setServerBrain(null);
+    const updateContextUsage = (payload: Record<string, number | undefined>) => {
+      const input = payload.input_tokens ?? 0;
+      const cacheRead = payload.cache_read_input_tokens ?? 0;
+      const cacheCreate = payload.cache_creation_input_tokens ?? 0;
+      const output = payload.output_tokens ?? 0;
+      const total = input + cacheRead + cacheCreate;
+      // Antigravity's tool-only frames carry zeroes, not a new model call.
+      if (cli === 'agy' && total === 0) return;
+      if (!isCodexCli(cli) && total > windowTokensRef.current && windowTokensRef.current < LARGE_WINDOW_TOKENS) {
+        windowTokensRef.current = LARGE_WINDOW_TOKENS;
+      }
+      const windowTokens = windowTokensRef.current;
+      setUsage({ inputTokens: input, cacheReadTokens: cacheRead, cacheCreateTokens: cacheCreate,
+        outputTokens: output, fraction: Math.min(total / windowTokens, 1), windowTokens });
+    };
     // A reconnect to the same lane keeps what we know; the replay only carries
     // newer events. A different lane starts clean.
     const backgroundLane = conversationKey(cli, repo.path, chatId);
@@ -1859,6 +1871,14 @@ export function useChat(opts: {
             setError(null);
             markTurnStarted();
             setStatus('streaming');
+          }
+          return;
+        }
+        if (msg.type === 'contextUsage') {
+          if (cli === 'agy' && msg.cli === 'agy') {
+            windowTokensRef.current = windowForCli(cli, msg.model ?? modelRef.current, contextWindowTokens);
+            if (msg.usage) updateContextUsage(msg.usage);
+            else setUsage(null);
           }
           return;
         }
@@ -2261,10 +2281,11 @@ export function useChat(opts: {
           //
           // Codex/Banana don't have this Claude cumulative-result bug:
           // Codex and Banana synthesize one result usage payload per turn.
-          // Z.ai emits zeroes on assistant.message.usage but real per-call
-          // numbers on the final message_delta, so read that instead.
+          // Z.ai emits zeroes on assistant.message.usage; Antigravity emits
+          // no full assistant frames. Both put per-call usage on message_delta.
+          // Antigravity's result usage is cumulative, so ignore those totals.
           const messageDeltaUsage =
-            cli === 'zai' &&
+            (cli === 'zai' || cli === 'agy') &&
             msg.event?.type === 'stream_event' &&
             msg.event?.event?.type === 'message_delta' &&
             msg.event.event.usage
@@ -2283,34 +2304,7 @@ export function useChat(opts: {
                 ? (msg.event.usage as Record<string, number | undefined>)
                 : null);
 
-          if (usagePayload) {
-            const input = usagePayload.input_tokens ?? 0;
-            const cacheRead = usagePayload.cache_read_input_tokens ?? 0;
-            const cacheCreate = usagePayload.cache_creation_input_tokens ?? 0;
-            const output = usagePayload.output_tokens ?? 0;
-            const total = input + cacheRead + cacheCreate;
-            // Safety net (claude only): if observed usage exceeds the known
-            // window, ratchet up to 1M. Covers the case where init didn't
-            // carry a model id but the session is plainly running on the
-            // large-context variant. Codex windows come from the model catalog,
-            // so the meter clamps at 100% if reported usage somehow exceeds one.
-            if (
-              !isCodexCli(cli) &&
-              total > windowTokensRef.current &&
-              windowTokensRef.current < LARGE_WINDOW_TOKENS
-            ) {
-              windowTokensRef.current = LARGE_WINDOW_TOKENS;
-            }
-            const windowTokens = windowTokensRef.current;
-            setUsage({
-              inputTokens: input,
-              cacheReadTokens: cacheRead,
-              cacheCreateTokens: cacheCreate,
-              outputTokens: output,
-              fraction: Math.min(total / windowTokens, 1),
-              windowTokens,
-            });
-          }
+          if (usagePayload) updateContextUsage(usagePayload);
         }
         else if (msg.type === 'sendAdmission') {
           if (typeof msg.activeCli === 'string') serverCliRef.current = msg.activeCli as CompanionId;

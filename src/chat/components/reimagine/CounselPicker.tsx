@@ -1,3 +1,4 @@
+import { agyEffortsForModel, agyModelLabel } from '../../agyModels';
 // Choose a companion — the reimagined companion + model + effort picker
 // (§3.10). Reskins CompanionControls.tsx into a single "model chip" that opens
 // either a desktop popover ("Counsel of the house") or a mobile bottom sheet
@@ -7,7 +8,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CompanionPicker } from '../../hooks/useCompanionPicker';
 import {
-  AGY_EFFORTS,
   AGY_MODELS,
   WORKSPACE_COMPANIONS,
   XAI_MODELS,
@@ -61,7 +61,7 @@ export function counselChipInfo(picker: CompanionPicker) {
   else if (picker.isFireworks) name = labelFor(picker.fireworksModel, FIREWORKS_MODELS);
   else if (picker.isOpenRouter2) name = labelFor(picker.openRouter2Model, OPENROUTER_MODELS);
   else if (picker.isOpenRouter) name = labelFor(picker.openRouterModel, OPENROUTER_MODELS);
-  else if (picker.isAgy) name = labelFor(picker.agyModel, AGY_MODELS);
+  else if (picker.isAgy) name = agyModelLabel(picker.agyModel);
   else if (picker.isMeta) name = labelFor(picker.metaModel, META_MODELS);
   else if (picker.isMuse) name = labelFor(picker.museModel, MUSE_MODELS);
   const lane = WORKSPACE_COMPANIONS.find((c) => c.id === picker.companion);
@@ -371,7 +371,7 @@ function LaneControls({ picker, accountContext, rejectedCodexModel }: { picker: 
             </button>
           ))}
           <span className="ctl-lab">thinking</span>
-          <EffortPills options={AGY_EFFORTS} current={picker.agyEffort} onPick={picker.setAgyEffort} />
+          <EffortPills options={agyEffortsForModel(picker.agyModel)} current={picker.agyEffort} onPick={picker.setAgyEffort} />
         </>
       )}
       {picker.isMeta && (

@@ -1,9 +1,9 @@
+import { agyEffortsForModel, agyModelChange } from '../chat/agyModels';
 // Agent editor — create/edit a teammate: identity, canonical brain, voice, and scope.
 
 import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, Loader2, Play, Square, X } from 'lucide-react';
 import {
-  AGY_EFFORTS,
   AGY_MODELS,
   DEFAULT_AGY_EFFORT,
   DEFAULT_AGY_MODEL,
@@ -56,7 +56,7 @@ function effortOptions(engine: string, model: string): string[] {
   if (engine === 'zai') return ZAI_EFFORTS;
   if (engine === 'fireworks') return fireworksEffortsForModel(model);
   if (engine === 'openrouter' || engine === 'openrouter2') return openRouterEffortsForModel(model);
-  if (engine === 'agy') return AGY_EFFORTS;
+  if (engine === 'agy') return agyEffortsForModel(model);
   if (engine === 'meta') return META_EFFORTS;
   if (engine === 'muse') return MUSE_EFFORTS;
   return XAI_EFFORTS;
@@ -304,6 +304,13 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
       const next = codexModelChange(nextModel, effort, serviceTier);
       setServiceTier(next.serviceTier);
       setModel(nextModel);
+      setEffort(next.effort);
+      setEffortNotice(next.notice);
+      return;
+    }
+    if (engine === 'agy') {
+      const next = agyModelChange(nextModel, effort);
+      setModel(next.model);
       setEffort(next.effort);
       setEffortNotice(next.notice);
       return;

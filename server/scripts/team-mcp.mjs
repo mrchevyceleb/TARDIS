@@ -597,7 +597,7 @@ function formatAgentStatus(agent) {
     : agent.status === 'queued'
       ? `QUEUED · no live turn · ${agent.queuedMessages} handoff${agent.queuedMessages === 1 ? '' : 's'}`
       : 'IDLE';
-  const line = `- ${agent.name} (${agent.id}) — ${agent.role} [${activity} · ${agent.engine}${agent.model ? ` · ${agent.model}` : ''}${agent.effort ? ` · ${agent.effort}` : ''}]`;
+  const line = `- ${agent.name} (${agent.id}) — ${agent.role} [${activity} · ${agent.engine}${agent.model ? ` · ${agent.modelLabel ?? agent.model}` : ''}${agent.effort ? ` · ${agent.effort}` : ''}]`;
   const sessions = agent.t3Sessions ?? [];
   if (!sessions.length) return line;
   // Work the agent has out in T3 Code: it reports back on its own, so the lane can read IDLE while these run.

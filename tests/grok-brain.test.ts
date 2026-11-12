@@ -275,3 +275,48 @@ test('a conflict restores the winning brain and uses it in the next confirmation
   assert.match(confirm.mock.calls[0].arguments[0], /from Gemini to Codex/);
   assert.equal(save.mock.callCount(), 1, 'a conflict must not be retried silently');
 });
+
+
+test('Hydrogen xhigh is saved, restored and clamped when switching to Carbon or Argon', async () => {
+  let stored: Agent = { ...teammate, engine: 'agy', model: 'gemini-4-argon', effort: 'medium' };
+  save.mock.mockImplementation(async (_id, patch) => {
+    stored = { ...stored, ...patch, brainRevision: (stored.brainRevision ?? 1) + 1 };
+    return stored;
+  });
+  await mount(stored);
+  await act(async () => picker.setAgyModel('gemini-4-hydrogen'));
+  await act(async () => picker.setAgyEffort('xhigh'));
+  assert.equal(stored.model, 'gemini-4-hydrogen');
+  assert.equal(stored.effort, 'xhigh');
+  await act(async () => renderer!.unmount());
+  await mount(stored);
+  assert.equal(picker.model, 'gemini-4-hydrogen');
+  assert.equal(picker.effort, 'xhigh');
+  for (const model of ['gemini-4-carbon', 'gemini-4-argon']) {
+    await act(async () => picker.setAgyModel(model));
+    assert.equal(stored.model, model);
+    assert.equal(stored.effort, 'medium');
+    assert.match(picker.selectionNotice ?? '', /doesn't offer xhigh thinking/);
+    await act(async () => picker.setAgyModel('gemini-4-hydrogen'));
+    await act(async () => picker.setAgyEffort('xhigh'));
+  }
+});
+
+test('workspace Hydrogen xhigh persists across remounts and normalizes as a pair', async () => {
+  localStorage.setItem('rivendell:agy-model', 'gemini-4-hydrogen');
+  localStorage.setItem('rivendell:agy-effort', 'xhigh');
+  await mount(null);
+  await act(async () => picker.setCompanion('agy'));
+  assert.equal(picker.model, 'gemini-4-hydrogen');
+  assert.equal(picker.effort, 'xhigh');
+  await act(async () => picker.setAgyModel('gemini-4-carbon'));
+  assert.equal(picker.effort, 'medium');
+  assert.equal(localStorage.getItem('rivendell:agy-effort'), 'medium');
+  assert.match(picker.selectionNotice ?? '', /doesn't offer xhigh thinking/);
+  await act(async () => picker.setAgyModel('gemini-4-hydrogen'));
+  await act(async () => picker.setAgyEffort('xhigh'));
+  await act(async () => renderer!.unmount());
+  await mount(null);
+  assert.equal(picker.model, 'gemini-4-hydrogen');
+  assert.equal(picker.effort, 'xhigh');
+});

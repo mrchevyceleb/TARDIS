@@ -1,3 +1,4 @@
+import { agyModelLabel } from '../shared/agyModels.ts';
 import { acknowledgementOnly, claimOutbound, releaseOutbound, saveInformational, informationalPending, legacyActionableInformation, removeSavedInformation } from './messagingPolicy.ts';
 // Team bus — agent-to-agent messaging. Any teammate can message any other
 // teammate through the `rivendell-team` MCP tool (see server/scripts/team-mcp.mjs);
@@ -3096,6 +3097,7 @@ export async function teamRoster() {
       role: agent.role,
       engine: brain.engine,
       model: brain.model,
+      modelLabel: brain.model ? agyModelLabel(brain.model) : undefined,
       effort: brain.effort,
       ...(brain.serviceTier !== undefined ? { serviceTier: brain.serviceTier } : {}),
       ...teamAvailability(agent, sessions, queued),
