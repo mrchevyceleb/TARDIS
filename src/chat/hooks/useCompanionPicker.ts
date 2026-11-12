@@ -1,3 +1,5 @@
+import { agyModelChange, DEFAULT_AGY_MODEL, DEFAULT_AGY_EFFORT, normalizeAgyModel, normalizeAgyEffort } from '../agyModels';
+export { AGY_MODELS, DEFAULT_AGY_MODEL, DEFAULT_AGY_EFFORT, normalizeAgyModel, normalizeAgyEffort } from '../agyModels';
 import { useCallback, useEffect, useState } from 'react';
 import type { CompanionId } from '../data/types';
 import {
@@ -203,26 +205,6 @@ export function readStoredXaiEffort(): string {
   return effort;
 }
 
-// Gemini on Matt's Google subscription (the agy CLI lane). Three base models,
-// each taking low/medium/high as the lane's effort value; the server resolves
-// the pair into the agy binary's --model/--effort spawn args.
-export const DEFAULT_AGY_MODEL = 'gemini-4-argon';
-export const DEFAULT_AGY_EFFORT = 'medium';
-export const AGY_MODELS: { id: string; label: string }[] = [
-  { id: 'gemini-4-argon', label: 'Gemini 4 Argon' },
-  { id: 'gemini-4-carbon', label: 'Gemini 4 Carbon' },
-  { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
-];
-export const AGY_EFFORTS = ['low', 'medium', 'high'];
-
-export function normalizeAgyModel(model: string): string {
-  return AGY_MODELS.some((entry) => entry.id === model) ? model : DEFAULT_AGY_MODEL;
-}
-
-export function normalizeAgyEffort(effort: string): string {
-  return AGY_EFFORTS.includes(effort) ? effort : DEFAULT_AGY_EFFORT;
-}
-
 export function readStoredAgyModel(): string {
   if (typeof window === 'undefined') return DEFAULT_AGY_MODEL;
   const raw = localStorage.getItem('rivendell:agy-model') || DEFAULT_AGY_MODEL;
@@ -246,7 +228,7 @@ export const META_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 export function readStoredAgyEffort(): string {
   if (typeof window === 'undefined') return DEFAULT_AGY_EFFORT;
   const raw = localStorage.getItem('rivendell:agy-effort') || DEFAULT_AGY_EFFORT;
-  const effort = normalizeAgyEffort(raw);
+  const effort = normalizeAgyEffort(readStoredAgyModel(), raw);
   if (effort !== raw) localStorage.setItem('rivendell:agy-effort', effort);
   return effort;
 }
@@ -444,13 +426,19 @@ export function useCompanionPicker(storageKey: string) {
   };
   const setAgyModel = (v: string) => {
     markSelectionChanged('agy');
-    const model = normalizeAgyModel(v);
+    const { model, effort, notice } = agyModelChange(v, agyEffort);
+    setSelectionNotice(notice);
     setAgyModelState(model);
-    if (typeof window !== 'undefined') localStorage.setItem('rivendell:agy-model', model);
+    setAgyEffortState(effort);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('rivendell:agy-model', model);
+      localStorage.setItem('rivendell:agy-effort', effort);
+    }
   };
   const setAgyEffort = (v: string) => {
     markSelectionChanged('agy');
-    const effort = normalizeAgyEffort(v);
+    setSelectionNotice(null);
+    const effort = normalizeAgyEffort(agyModel, v);
     setAgyEffortState(effort);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:agy-effort', effort);
   };
@@ -580,7 +568,7 @@ export function useCompanionPicker(storageKey: string) {
       }
     } else if (lane === 'agy') {
       const nextModel = normalizeAgyModel(model ?? '');
-      const nextEffort = normalizeAgyEffort(effort ?? '');
+      const nextEffort = normalizeAgyEffort(nextModel, effort ?? '');
       setAgyModelState(nextModel);
       setAgyEffortState(nextEffort);
       if (typeof window !== 'undefined') {

@@ -1,3 +1,4 @@
+import { agyModelChange } from '../chat/agyModels';
 // Bot-shell chat host — GrokApp's equivalent of the Studio's ChatTab.
 // Owns the companion picker + useChat transport for one conversation
 // (chatId), hoists useChatShell state, renders GrokConversation, and reports
@@ -63,7 +64,8 @@ function canonicalBrain(brain: BrainDraft): BrainDraft {
     return { engine, model: nextModel, effort: normalizeOpenRouterEffort(nextModel, effort ?? '') };
   }
   if (engine === 'agy') {
-    return { engine, model: normalizeAgyModel(model ?? ''), effort: normalizeAgyEffort(effort ?? '') };
+    const nextModel = normalizeAgyModel(model ?? '');
+    return { engine, model: nextModel, effort: normalizeAgyEffort(nextModel, effort ?? '') };
   }
   if (engine === 'meta') {
     return { engine, model: normalizeMetaModel(model ?? ''), effort: normalizeMetaEffort(normalizeMetaModel(model ?? ''), effort ?? '') };
@@ -370,8 +372,11 @@ export function GrokChat(props: GrokChatProps) {
     setOpenRouterEffort: (value: string) => persistBrain({ engine: 'openrouter', effort: normalizeOpenRouterEffort(picker.openRouterModel, value) }),
     setOpenRouter2Model: (value: string) => persistBrain({ engine: 'openrouter2', model: normalizeOpenRouterModel(value) }),
     setOpenRouter2Effort: (value: string) => persistBrain({ engine: 'openrouter2', effort: normalizeOpenRouterEffort(picker.openRouter2Model, value) }),
-    setAgyModel: (value: string) => persistBrain({ engine: 'agy', model: normalizeAgyModel(value) }),
-    setAgyEffort: (value: string) => persistBrain({ engine: 'agy', effort: normalizeAgyEffort(value) }),
+    setAgyModel: (value: string) => {
+      const { model, effort, notice } = agyModelChange(value, desiredBrain.current.effort ?? picker.agyEffort);
+      persistBrain({ engine: 'agy', model, effort }, notice);
+    },
+    setAgyEffort: (value: string) => persistBrain({ engine: 'agy', effort: normalizeAgyEffort(desiredBrain.current.model ?? picker.agyModel, value) }),
     setMetaModel: (value: string) => persistBrain({ engine: 'meta', model: normalizeMetaModel(value) }),
     setMetaEffort: (value: string) => persistBrain({ engine: 'meta', effort: normalizeMetaEffort(picker.metaModel, value) }),
     setMuseModel: (value: string) => persistBrain({ engine: 'muse', model: normalizeMuseModel(value) }),

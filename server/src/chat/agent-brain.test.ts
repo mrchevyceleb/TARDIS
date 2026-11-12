@@ -79,3 +79,12 @@ test('a saved Codex speed belongs to its canonical lane brain', () => {
   assert.equal(brainForAgent(baseAgent({ engine: 'codex', model: 'gpt-6.1-sol' })).serviceTier, 'default');
   assert.equal(brainForAgent(baseAgent({ engine: 'claude', serviceTier: 'priority' })).serviceTier, undefined);
 });
+
+
+test('the canonical Antigravity brain preserves Hydrogen xhigh for the next turn', () => {
+  const brain = brainForAgent(baseAgent({ engine: 'agy', model: 'gemini-4-hydrogen', effort: 'xhigh', brainRevision: 3 }));
+  assert.equal(brain.engine, 'agy');
+  assert.equal(brain.model, 'gemini-4-hydrogen');
+  assert.equal(brain.effort, 'xhigh');
+  assert.equal(brain.revision, 3);
+});

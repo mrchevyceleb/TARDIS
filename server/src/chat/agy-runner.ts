@@ -719,7 +719,8 @@ export class AgySession {
     stream({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: toolUseId, name, input: {} } });
     stream({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: input } });
     stream({ type: 'content_block_stop', index: 0 });
-    stream({ type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } });
+    // A tool card isn't a model call and has no usage measurement.
+    stream({ type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null } });
     stream({ type: 'message_stop' });
   }
 
@@ -744,7 +745,9 @@ export class AgySession {
         // text to a stale or empty recovery string (Oct 15 final review).
         if (buf.text.trim()) this.lastAssistantText = buf.text;
         this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'content_block_stop', index: 0 }, session_id: sid } });
-        this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: this.turnFailed ? null : 'end_turn', stop_sequence: null }, usage: { input_tokens: this.turnUsage.input, output_tokens: this.turnUsage.output, cache_read_input_tokens: this.turnUsage.cacheRead, cache_creation_input_tokens: 0 } }, session_id: sid } });
+        // An unfinished step has no per-call usage yet. Never substitute the
+        // accumulated turn total for the last measured context size.
+        this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: this.turnFailed ? null : 'end_turn', stop_sequence: null } }, session_id: sid } });
         this.emit({ type: 'event', event: { type: 'stream_event', event: { type: 'message_stop' }, session_id: sid } });
       }
     }

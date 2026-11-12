@@ -21,6 +21,7 @@ import { fireworksCatalogPayload, startFireworksCatalog } from './fireworks-mode
 import { openRouterCatalogPayload, startOpenRouterCatalog } from './openrouter-models.ts';
 import { metaCatalogPayload } from './meta-models.ts';
 import { agyCatalogPayload } from './agy-models.ts';
+import { latestAgyContextUsage } from './agy-context.ts';
 import { museCatalogPayload } from './muse-models.ts';
 import {
   clampReplayWindow,
@@ -1366,6 +1367,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
       if (replays && (epoch !== bindEpoch || ws.readyState !== ws.OPEN)) return session;
       if (resetReplay) safeSend({ type: 'replayReset', latestSeq: latest, resetAt });
 
+      // Independent of the transcript cursor: a cached browser may have no
+      // missing events. Send before subscribing so newer live usage wins.
+      if (sessionCli(session) === 'agy') {
+        const context = latestAgyContextUsage(events);
+        safeSend({ type: 'contextUsage', cli: 'agy', model: context?.model, usage: context?.usage ?? null });
+      }
+
       const liveReplay: DispatchSeqEvent[] = [];
       let replaying = replaySince >= 0;
       const listener = (se: DispatchSeqEvent) => {
@@ -1466,6 +1474,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
         : { extra: [], reachedSince: true };
       if (replaySince >= 0 && (epoch !== bindEpoch || ws.readyState !== ws.OPEN)) return latest;
       if (resetReplay) safeSend({ type: 'replayReset', latestSeq: latest, resetAt });
+      if (cli === 'agy') {
+        const context = latestAgyContextUsage(events);
+        safeSend({ type: 'contextUsage', cli: 'agy', model: context?.model, usage: context?.usage ?? null });
+      }
       if (replaySince >= 0) {
         const pending: DispatchSeqEvent[] = [...catchUp.extra, ...events]
           .filter((event) => event.seq > replaySince)

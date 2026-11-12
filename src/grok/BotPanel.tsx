@@ -1,3 +1,4 @@
+import { agyModelLabel } from '../chat/agyModels';
 // Grok Bot right info pane: the agent's "screen" (latest artifact it made,
 // live preview when it's HTML/an image — honest empty state otherwise), the
 // Routines card (real cron jobs from /api/cron with status + schedule), and a
@@ -474,7 +475,7 @@ export function BotPanel({ meta, onOpenForge, onOpenDesk, onClose, className = '
               <div className="bt-pane-title">Session</div>
               <div className="bt-session">
                 <div className="bt-session-row"><span>Agent</span><b>{meta.agentLabel}</b></div>
-                {meta.model ? <div className="bt-session-row"><span>Model</span><b>{meta.model}</b></div> : null}
+                {meta.model ? <div className="bt-session-row"><span>Model</span><b>{agyModelLabel(meta.model)}</b></div> : null}
                 <div className="bt-session-row"><span>State</span><b>{meta.compacting ? 'Regenerating…' : statusLabel(meta.status)}</b></div>
                 {typeof frac === 'number' ? (
                   <>
