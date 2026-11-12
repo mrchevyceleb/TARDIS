@@ -80,6 +80,7 @@ import { migrateAgentThreadLogs } from './chat/threadMigrate.ts';
 import { markBackgroundWorkEndedByRestart, markBusyLanesRestarting, activeClaudeSessions } from './chat/runner.ts';
 import { markPendingProviderContinuesInterrupted } from './chat/providerSwitch.ts';
 import { flushAllEventChains } from './chat/event-log-store.ts';
+import { flushAgentHistory, startAgentHistory } from './chat/agentHistory.ts';
 import { markBusyCodexLanesRestarting, activeCodexSessions } from './chat/codex-runner.ts';
 import { markBusyBananaLanesRestarting, activeBananaSessions } from './chat/banana-runner.ts';
 import { computerOwnerKey, setComputerOwnerTurnProbe } from './devices/context.ts';
@@ -251,6 +252,10 @@ try {
 } catch (err) {
   console.warn(`[thread-migrate] failed: ${(err as Error).message}`);
 }
+// Before any lane exists: from here on every append and every thread clear
+// passes through the history writer, while each agent's transcript catches up
+// from disk in the background (commits and clears wait for it).
+void startAgentHistory();
 const stopChat = await registerChat(app, server);
 registerVoiceCalls(server);
 if (!SIDE_COPY) registerDeviceBridge(server);
@@ -428,6 +433,7 @@ const tearDown = (signal: NodeJS.Signals) => {
     const headlessClosed = closeAllHeadlessLanes().catch(() => {});
     // Everything is quiesced and sessions are dead — the chains are final.
     try { await flushAllEventChains(); } catch { /* best effort */ }
+    try { await flushAgentHistory(); } catch { /* best effort */ }
     await Promise.race([headlessClosed, new Promise((resolve) => setTimeout(resolve, 1200))]);
     console.warn('[tardis] shutdown: logs flushed, closing http');
     shutdownXaiProxy();

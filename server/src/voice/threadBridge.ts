@@ -27,7 +27,7 @@ export function recordVoiceTranscript(
   const event: PersistedEvent = {
     // Do not change lastEngineOf: a voice call must not retire a healthy
     // text process just because the transport changed.
-    seq: reserveEventLogSeq(logKey), mdl: 'grok-voice-think-fast-2.0',
+    seq: reserveEventLogSeq(logKey), mdl: 'grok-voice-think-fast-2.0', at: Date.now(),
     ev: { type: 'event', event: { type: '_voice_transcript', role, text: text.trim(), id: randomUUID(), ts: Date.now() } },
   };
   const saved = appendEventLogDurable(logKey, event);

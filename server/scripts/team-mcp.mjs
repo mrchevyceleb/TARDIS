@@ -251,7 +251,7 @@ const TOOLS = [
   {
     name: 'team_recent',
     description:
-      "Read a teammate's recent thread messages (their last exchanges) — check what they " +
+      "Read a teammate's recent thread messages (their last exchanges, kept across thread resets) — check what they " +
       'already said or did before re-asking.',
     inputSchema: {
       type: 'object',
@@ -1052,7 +1052,7 @@ async function callTool(name, args, signal) {
   if (name === 'team_recent') {
     const { messages } = await api(`/api/team/recent?name=${encodeURIComponent(args.name)}&limit=${args.limit ?? 8}`, undefined, signal);
     if (!messages?.length) return `No recent messages for ${args.name}.`;
-    return messages.map((m) => `${m.who === 'agent' ? args.name : m.who === 'peer' ? '→ teammate msg' : 'user'}: ${m.text}`).join('\n');
+    return messages.map((m) => `${m.who === 'agent' ? args.name : m.who === 'peer' ? `→ from ${m.from ?? 'a teammate'}` : 'user'}: ${m.text}`).join('\n');
   }
   if (name === 'watch_job') {
     const self = process.env.RIVENDELL_AGENT_NAME;
