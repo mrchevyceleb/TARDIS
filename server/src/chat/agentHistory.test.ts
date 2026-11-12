@@ -3,15 +3,19 @@
 // only rebuilt every 30). What is said reaches the agent's transcript within a
 // moment on any engine, and a reset can never erase it.
 import assert from 'node:assert/strict';
-import test, { after } from 'node:test';
+import test, { after, mock } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fsp from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const dir = mkdtempSync(join(tmpdir(), 'agent-history-'));
 const previous = { state: process.env.RIVENDELL_STATE_DIR, owner: process.env.RIVENDELL_OWNER_NAME };
 after(() => {
+  mock.restoreAll();
+  syncBuiltinESMExports();
   rmSync(dir, { recursive: true, force: true });
   if (previous.state === undefined) delete process.env.RIVENDELL_STATE_DIR; else process.env.RIVENDELL_STATE_DIR = previous.state;
   if (previous.owner === undefined) delete process.env.RIVENDELL_OWNER_NAME; else process.env.RIVENDELL_OWNER_NAME = previous.owner;
@@ -23,6 +27,8 @@ writeFileSync(join(dir, 'personas', 'agents.json'), JSON.stringify({ agents: [
   { id: 'ava', name: 'Ava', role: 'Personal', engine: 'claude', home: 'bot-ava', createdAt: 1 },
   { id: 'cole', name: 'Cole', role: 'Developer', engine: 'codex', home: 'bot-cole', createdAt: 2 },
   { id: 'dee', name: 'Dee', role: 'Research', engine: 'pi', home: 'bot-dee', createdAt: 3 },
+  { id: 'eve', name: 'Eve', role: 'Support', engine: 'claude', home: 'bot-eve', createdAt: 4 },
+  { id: 'fay', name: 'Fay', role: 'Ops', engine: 'pi', home: 'bot-fay', createdAt: 5 },
 ] }));
 
 const { ASSISTANT_HUB_PATH } = await import('./config.ts');
@@ -34,6 +40,8 @@ const { peekEnginePrimerWithStatus } = await import('./compaction.ts');
 const ava = threadLogKey(ASSISTANT_HUB_PATH, 'bot-ava');
 const cole = threadLogKey(ASSISTANT_HUB_PATH, 'bot-cole');
 const dee = threadLogKey(ASSISTANT_HUB_PATH, 'bot-dee');
+const eve = threadLogKey(ASSISTANT_HUB_PATH, 'bot-eve');
+const fay = threadLogKey(ASSISTANT_HUB_PATH, 'bot-fay');
 const event = (inner: unknown) => ({ type: 'event', event: inner }) as any;
 const echo = (key: string, text: string) => store.appendEventLogSync(key, { seq: store.reserveEventLogSeq(key), at: Date.now(), ev: event({ type: '_user_echo', text }) });
 const frame = (key: string, ev: any) => store.appendEventLog(key, { seq: store.reserveEventLogSeq(key), at: Date.now(), ev });
@@ -72,6 +80,24 @@ writeFileSync(join(dir, 'agent-notes', 'ava', '.state.json'), JSON.stringify({ l
 // Dee's log holds an unwritten message, but the log cannot be read at boot.
 store.appendEventLogSync(dee, { seq: 1, at: t0, ev: event({ type: '_user_echo', text: 'Book the dentist for Friday.' }) });
 chmodSync(join(dir, 'event-logs', `${store.sanitizeKey(dee)}.jsonl`), 0o000);
+// Fay is new: no history and no watermark, but a conversation already in her
+// log. The disk fills up right after boot creates her history file, before a
+// word of that conversation lands in it.
+for (const [seq, ev] of [[1, event({ type: '_user_echo', text: 'Order the blue tiles for the bathroom.' })],
+  [2, event({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Ordered: 40 blue tiles, arriving Monday.' }] } })],
+  [3, { type: 'turnEnd' }]] as const) {
+  store.appendEventLogSync(fay, { seq, at: t0 + seq, ev });
+}
+const realAppendFile = fsp.appendFile;
+let fayDiskFull = 0;
+mock.method(fsp, 'appendFile', (async (path: any, ...rest: any[]) => {
+  if (String(path) === agentHistoryPath('fay') && fayDiskFull === 0) {
+    fayDiskFull += 1;
+    throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+  }
+  return (realAppendFile as any)(path, ...rest);
+}) as any);
+syncBuiltinESMExports();
 await startAgentHistory();
 
 test('boot resumes after the watermark without repeating what was written', () => {
@@ -82,6 +108,49 @@ test('boot resumes after the watermark without repeating what was written', () =
     .map((line) => text.indexOf(line));
   assert.ok(said.every((at, i) => at >= 0 && (i === 0 || at > said[i - 1])), text);
   assert.ok(!text.includes('xxxxx'), 'tool input never reaches the transcript');
+});
+
+test('a failed first write never leaves an empty history that skips the backlog', async () => {
+  try {
+    assert.equal(fayDiskFull, 1, 'boot hit the full disk');
+    assert.ok(existsSync(agentHistoryPath('fay')) && !transcript('fay').includes('blue tiles'), 'Fay starts with an empty history');
+    // Space is freed; her next exchange retries.
+    echo(fay, 'Did the tiles ship?');
+    streamed(fay, 'Yes, they ship Monday.');
+    turnEnd(fay);
+    await until(() => transcript('fay').includes('Yes, they ship Monday.'), 'the retry');
+    const text = transcript('fay');
+    const said = ['Order the blue tiles for the bathroom.', 'Ordered: 40 blue tiles, arriving Monday.', 'Did the tiles ship?', 'Yes, they ship Monday.']
+      .map((line) => text.indexOf(line));
+    assert.ok(said.every((at, i) => at >= 0 && (i === 0 || at > said[i - 1])), text);
+    assert.equal(text.split('Order the blue tiles').length - 1, 1, text);
+  } finally {
+    mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
+test('one enormous message never hides the conversation before it', () => {
+  // Bigger than the most the old tail reader would ever read (16 MB). Chat
+  // refuses a message this big today (the log's secret scan gives out near
+  // 8 MB), so the history is written as it would read holding one.
+  const stamp = (time: string) => `(Nov 12, 2026, ${time})`;
+  mkdirSync(join(dir, 'agent-notes', 'eve'), { recursive: true });
+  writeFileSync(agentHistoryPath('eve'), [
+    '# Eve — conversation history\n',
+    `**Owner** ${stamp('9:56 AM')}\nThe gate code for the warehouse is 4512.\n`,
+    `**Eve** ${stamp('9:56 AM')}\nNoted: gate code 4512.\n`,
+    `**Owner** ${stamp('9:58 AM')}\nHere is the full server export:\n${'2026-11-12 10:00:00 INFO request served in 12ms\n'.repeat(380_000)}End of export.\n`,
+    `**Eve** ${stamp('9:59 AM')}\nThat export looks clean.\n`,
+    `**Thread reset** ${stamp('10:01 AM')}\nThe chat thread was cleared here.\n`,
+  ].join('\n'));
+  // Asked what was said (team_recent reads this), the exchange before the paste is all there...
+  assert.deepEqual(recentHistory('eve', 4).map((entry) => [entry.who, entry.text.slice(0, 31)]), [
+    ['Owner', 'The gate code for the warehouse'], ['Eve', 'Noted: gate code 4512.'],
+    ['Owner', 'Here is the full server export:'], ['Eve', 'That export looks clean.'],
+  ]);
+  // ...and the fresh session knows who it was talking with before the reset.
+  assert.match(peekEnginePrimerWithStatus(eve).primer, /last reset on Nov 12, 2026, 10:01 AM, right after a conversation with Owner\./);
 });
 
 test('a streamed reply lands within a moment of the turn ending, every message whole', async () => {
