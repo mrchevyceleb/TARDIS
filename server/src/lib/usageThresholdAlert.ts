@@ -50,6 +50,49 @@ function crossingKey(account: UsageAccount, window: UsageWindow): string {
   return `usage-alert:${account.id}:${window.label.replace(/\s+/g, '_')}`;
 }
 
+/** The account an alert is about: its provider and login, or its own name. */
+function accountName(account: UsageAccount): string {
+  if (account.email) return `${account.provider} ${account.email}`;
+  return account.name.startsWith(account.provider) ? account.name : `${account.provider} ${account.name}`;
+}
+
+/** A limit in plain words, the way the provider's usage page names it. Labels
+ *  come from accountUsage.ts as "<scope> · <period>": Claude splits its week
+ *  into "All models · week" and one model's "Fable · week", which its page
+ *  lists as "All models" and "Fable only" under weekly limits (its older feed
+ *  says "seven day" and "seven day opus"), and Codex's "Codex · 7 days" is its
+ *  weekly limit. A label with no period ("Voice characters") stays as it is. */
+export function limitName(account: UsageAccount, window: UsageWindow): string {
+  const legacy = /^seven day(?: (\w+))?$/.exec(window.label);
+  const [scope, period] = legacy
+    ? [legacy[1] ? legacy[1][0].toUpperCase() + legacy[1].slice(1) : 'All models', 'week']
+    : window.label.split(' · ');
+  if (period === undefined) return window.label.charAt(0).toLowerCase() + window.label.slice(1);
+  const count = /^(\d+) (day|hour)s?$/.exec(period);
+  const when = ['week', '1 week', '7 days'].includes(period) ? 'weekly' : period === '1 month' ? 'monthly'
+    : count ? `${count[1]}-${count[2]}` : period;
+  const whose = scope === 'All models' ? 'all-models ' : scope === account.provider ? ''
+    : account.provider === 'Claude' ? `${scope === 'Model' ? 'one-model' : `${scope}-only`} ` : `${scope} `;
+  return `${whose}${when} limit`;
+}
+
+/** The Desk alert for one window crossing the threshold. A phone push shows
+ *  only the title, and a lock screen cuts it to one line, so it leads with the
+ *  limit and how much of it is used, then names the account. The detail adds
+ *  the account's other long limits, so a lower number on the provider's page
+ *  for a different limit never reads as a contradiction. */
+export function alertText(account: UsageAccount, window: UsageWindow, percent: number): { title: string; detail: string } {
+  const who = accountName(account), name = limitName(account, window), pct = Math.round(percent);
+  const others = account.windows.flatMap((other) => {
+    const used = other === window || shortWindow(other) ? null : windowPercent(other);
+    return used === null ? [] : [`its ${limitName(account, other)} is ${Math.round(used)}% used`];
+  });
+  return {
+    title: `${name.charAt(0).toUpperCase()}${name.slice(1)} ${pct}% used · ${who}`,
+    detail: `${who}${account.plan ? ` (${account.plan} plan)` : ''} has used ${pct}% of its ${name}. ${formatReset(window.resetsAt)}${others.length ? ` Right now ${others.join(' and ')}.` : ''} Open Usage to decide what to do before it fills up.`,
+  };
+}
+
 function formatReset(iso: string | null): string {
   const at = iso ? new Date(iso) : null;
   if (!at || !Number.isFinite(at.getTime())) return 'Its reset time is not reported.';
@@ -103,17 +146,12 @@ async function tick(state: AlertState): Promise<void> {
       if (percent < USAGE_ALERT_THRESHOLD || state[key]) continue;
       openKeys ??= await openAlertKeys();
       if (!openKeys.has(key)) {
-        const pct = Math.round(percent);
-        const who = account.email ? `${account.provider} ${account.email}` : account.name;
+        const { title, detail } = alertText(account, window, percent);
         try {
-          await createTodo({
-            title: `${who} is at ${pct}% usage`,
-            detail: `${who}${account.plan ? ` (${account.plan} plan)` : ''} is at ${pct}% of its ${window.label} window. ${formatReset(window.resetsAt)} Open Usage to decide what to do before it fills up.\n\n${key}`,
-            priority: 'high',
-          }, TARDIS_ACTOR);
-          console.log(`[usage-alert] ${who} ${window.label} at ${pct}%: Desk alert created`);
+          await createTodo({ title, detail: `${detail}\n\n${key}`, priority: 'high' }, TARDIS_ACTOR);
+          console.log(`[usage-alert] ${title}: Desk alert created`);
         } catch (error) {
-          console.warn(`[usage-alert] Desk alert failed for ${who}: ${(error as Error).message}`);
+          console.warn(`[usage-alert] Desk alert failed for ${accountName(account)}: ${(error as Error).message}`);
           continue; // not recorded, so the next tick retries
         }
       }
