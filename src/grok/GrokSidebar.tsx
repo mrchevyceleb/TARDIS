@@ -61,6 +61,7 @@ import { useMediaQuery } from '../chat/hooks/useMediaQuery';
 import { RailJobsBadge } from '../chat/components/jobs/RailJobsBadge';
 import { T3SessionLines, T3SessionsBadge } from './T3Sessions';
 import { useT3Sessions } from './useT3Sessions';
+import { liftEndText } from './QuietHoursLift';
 import type { HistoryItem } from './history';
 import { NativeOpenHelper } from '../components/NativeOpenHelper';
 import { ChannelsRail } from '../chat/components/ChannelsRail';
@@ -159,6 +160,13 @@ function colorLabel(a: Agent): string {
   const key = chatColorOf(a);
   const label = key ? CHAT_COLORS.find((c) => c.key === key)?.label : undefined;
   return label ? `, ${label.toLowerCase()} label` : '';
+}
+
+/** When a teammate's quiet-hours lift ends ("Sun, Nov 15, 9:00 PM") while it
+ *  is in force; undefined otherwise, so a lift that ran out shows no moon. */
+function quietLiftEnd(a: Agent): string | undefined {
+  const until = a.quietHours?.until;
+  return until && Date.parse(until) > Date.now() ? liftEndText(until) : undefined;
 }
 
 /** Touch has no right-click, so holding a row this long opens the same menu. */
@@ -790,6 +798,7 @@ export function BotRail(props: BotRailProps) {
       const a = r.a;
       const isActive = props.activeChat && sameChatId(props.activeChat.chatId, a.home);
       const onJobs = jobsByAgent.get(a.id);
+      const nightEnd = quietLiftEnd(a);
       // Group mode marks the landing line from `groupDrop`; the flat list from `dropBefore`.
       const landing = slot && dragId && dragId !== a.id && groupDrop && !groupDrop.head && groupDrop.group === slot.group ? groupDrop : null;
       const dropAbove = slot ? landing?.before === a.id : dropBefore === a.id && dragId && dragId !== a.id;
@@ -804,7 +813,7 @@ export function BotRail(props: BotRailProps) {
           {...pressProps(a)}
           aria-haspopup="menu"
           aria-expanded={agentMenu?.id === a.id}
-          title={`${a.name} · ${a.role}${colorLabel(a)}${a.muted ? ' · muted' : ''} (right-click or long-press to mute, pin, color, or edit)`}
+          title={`${a.name} · ${a.role}${colorLabel(a)}${a.muted ? ' · muted' : ''}${nightEnd ? ` · working through quiet hours until ${nightEnd}` : ''} (right-click or long-press to mute, pin, color, or edit)`}
           draggable
           onDragStart={(e) => {
             if (pressOpened.current) { e.preventDefault(); return; }
@@ -837,6 +846,7 @@ export function BotRail(props: BotRailProps) {
                 {a.name} <span className="bt-role-chip">{a.role}</span>
               </span>
               {onJobs ? <RailJobsBadge running={onJobs.running} latest={onJobs.latest} latestLine={onJobs.latestLine} /> : null}
+              {nightEnd ? <span className="bt-conv-night" title={`Working through quiet hours until ${nightEnd}`} aria-hidden><Moon size={13} /></span> : null}
               {a.muted ? <span className="bt-conv-mute" title="Notifications muted"><BellOff size={13} /></span> : a.unread ? <span className="bt-unread" title={`${a.unread} waiting`}>{a.unread > 9 ? '9+' : a.unread}</span> : null}
               {r.item ? <span className="bt-conv-day" title={`${new Date(r.item.updatedAt).toLocaleString()} · ${TIMEY_WIMEY}`}>{dayStamp(r.item.updatedAt)}</span> : null}
               <span
@@ -853,6 +863,7 @@ export function BotRail(props: BotRailProps) {
             <AgentPrsSub name={a.name} info={taskMap.get(a.id)} tasksState={tasksState} prs={deskPrsQuery.data?.prs ?? []} prsState={prsState} />
             <T3SessionLines agentName={a.name} sessions={t3Sessions.byAgent.get(a.id) ?? NO_T3_SESSIONS} skewMs={t3Sessions.skewMs} />
             {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
+            {nightEnd ? <span className="bt-sr">, working through quiet hours until {nightEnd}</span> : null}
           </span>
         </button>
       );
@@ -924,6 +935,7 @@ export function BotRail(props: BotRailProps) {
               const isActive = props.activeChat && sameChatId(props.activeChat.chatId, a.home);
               const url = agentAvatarUrl(a);
               const onJobs = jobsByAgent.get(a.id);
+              const nightEnd = quietLiftEnd(a);
               const dropHere = pinDrag && pinDrag !== a.id;
               const dropLeft = dropHere && pinDropBefore === a.id;
               const dropRight = dropHere && pinDropBefore === PINS_END && index === pins.length - 1;
@@ -937,7 +949,7 @@ export function BotRail(props: BotRailProps) {
                   {...pressProps(a)}
                   aria-haspopup="menu"
                   aria-expanded={agentMenu?.id === a.id}
-                  title={`${a.name} · ${a.role}${colorLabel(a)}${a.muted ? ' · muted' : ''} (right-click or long-press to mute, pin, color, or edit)`}
+                  title={`${a.name} · ${a.role}${colorLabel(a)}${a.muted ? ' · muted' : ''}${nightEnd ? ` · working through quiet hours until ${nightEnd}` : ''} (right-click or long-press to mute, pin, color, or edit)`}
                   draggable
                   onDragStart={(e) => {
                     if (pressOpened.current) { e.preventDefault(); return; }
@@ -957,12 +969,14 @@ export function BotRail(props: BotRailProps) {
                   <span className={`bt-pin-disc${liveAgents.has(a.id) ? ' has-presence' : ''}`} style={url ? undefined : { background: agentColor(a.name) }}>
                     {url ? <img src={url} alt={a.name} /> : agentMark(a)}
                     {a.muted ? <span className="bt-pin-mute" title="Notifications muted"><BellOff size={10} /></span> : a.unread ? <span className="bt-pin-unread">{a.unread > 9 ? '9+' : a.unread}</span> : null}
+                    {nightEnd ? <span className="bt-pin-night" title={`Working through quiet hours until ${nightEnd}`} aria-hidden><Moon size={11} /></span> : null}
                   </span>
                   <span className="bt-pin-name">{a.name}</span>
                   <span className="bt-pin-role">{a.role}</span>
                   {onJobs ? <RailJobsBadge running={onJobs.running} latest={onJobs.latest} latestLine={onJobs.latestLine} /> : null}
                   <T3SessionsBadge sessions={t3Sessions.byAgent.get(a.id)} />
                   {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
+                  {nightEnd ? <span className="bt-sr">, working through quiet hours until {nightEnd}</span> : null}
                 </button>
               );
             })}

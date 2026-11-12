@@ -14,7 +14,8 @@ import { backgroundChatId, backgroundLaneEnabled, bareChatId, isBackgroundChatId
 import { extractVisibleTurns } from './threadWindow.ts';
 import { JsonStore, type StoredRecord } from '../lib/jsonStore.ts';
 import { scanOutgoingPromise } from '../lib/promiseScan.ts';
-import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, recordQuietExemptWake } from '../lib/quietHours.ts';
+import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, quietHoldsFor, recordQuietExemptWake } from '../lib/quietHours.ts';
+import { onQuietPassGranted } from '../lib/quietPasses.ts';
 import { LIVE_HOLD_CEILING_MS } from '../lib/laneLiveness.ts';
 import { briefEnvelopeForHandoff, isCoderBrief } from './briefEnvelope.ts';
 import { recordNativeFailure } from './sessionMetrics.ts';
@@ -1225,16 +1226,16 @@ export async function sendToAgentHome(
    *  then starts its own, the same admission the queued deliveries use. */
   opts: { peerFrom: string; peerFromRole?: string; peerText?: string; lane?: AgentLane; quietExempt?: boolean; neverSteer?: boolean },
 ): Promise<{ delivered: boolean; reason?: string }> {
-  // Quiet hours (Matt, Oct 15 2026): automation prompts to a non-Max lane
-  // hold until 07:00 ET. Every caller parks its record and retries on a
-  // refusal, so this is a hold, never a loss. Exempt: Matt's own messages
-  // (Desk and voice roles), Max's lanes, and an explicit quietExempt — a
-  // manual routine press or Max's emergency routine by id, both of which
-  // are an explicit ask for this run now (Opus review, Oct 16).
+  // Quiet hours (Matt, Oct 15 2026): automation prompts to a lane quiet
+  // hours hold wait for the window end. Every caller parks its record and
+  // retries on a refusal, so this is a hold, never a loss. Exempt: Matt's
+  // own messages (Desk and voice roles), the standing exceptions and lanes
+  // on a quiet-hours pass, and an explicit quietExempt — a manual routine
+  // press or Max's emergency routine by id, both of which are an explicit
+  // ask for this run now (Opus review, Oct 16).
   const isExemptWake = opts.quietExempt === true || personSourced({ fromRole: opts.peerFromRole });
-  const quietHold = !isExemptWake && !isQuietExemptLane(agent.id);
   const heldByQuietHours = (): { delivered: boolean; reason?: string } | null =>
-    quietHold && inQuietHours(Date.now())
+    !isExemptWake && quietHoldsFor(agent.id)
       ? { delivered: false, reason: 'quiet hours (21:00-07:00 ET weeknights, 20:00-08:00 ET Friday and Saturday nights): held until they end' }
       : null;
   const entryHold = heldByQuietHours();
@@ -2080,8 +2081,10 @@ function retryDelay(): Promise<void> {
 }
 
 async function drainQueuedRecipient(queueKey: string): Promise<void> {
-  // Quiet hours (Matt, Oct 15 2026): teammate chatter to a non-Max lane
-  // holds through 21:00-07:00 ET. Person-sourced records (Desk answers,
+  // Quiet hours (Matt, Oct 15 2026): teammate chatter to a lane quiet hours
+  // hold (not a standing exception, no pass in force) waits out the window.
+  // Every drain step re-reads the hold, so a quiet-hours pass granted or
+  // ending mid-drain applies at once. Person-sourced records (Desk answers,
   // voice continuations, human channel posts) still deliver — the boss may
   // always speak. Held records stay queued untouched and the retry timer
   // targets the next 07:00 ET, so the first drain after the window delivers
@@ -2089,8 +2092,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
   // before 21:00 and keeps admitting (the admission wait can run 30 minutes)
   // re-checks the boundary on each pass without calling Intl.DateTimeFormat
   // per queued record (Opus review 3, Oct 16).
-  const isNonMax = !isQuietExemptLane(queueKey);
-  const holdInitial = isNonMax && inQuietHours(Date.now());
+  const holdInitial = quietHoldsFor(queueKey);
   // Snapshot this worker's batch. Handoffs accepted while it runs are scheduled
   // as the next batch, behind any synchronous delivery already waiting on the
   // same recipient tail.
@@ -2155,7 +2157,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
       // chains no longer gate it), and the join is capped by count and
       // characters so an admitted turn never grows past admission limits.
       // Whatever does not fit stays queued and the next admission takes it.
-      const holdNow = isNonMax && inQuietHours(Date.now());
+      const holdNow = quietHoldsFor(queueKey);
       let candidates = (await queueStoreOperation(() => queuedDeliveryStore.list()))
         .filter((item) => queueKeyOf(item) === queueKey && (!holdNow || personSourced(item)))
         .sort((a, b) => (Number(sortsAhead(b)) - Number(sortsAhead(a)))
@@ -2391,7 +2393,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // all-chatter batch to a non-Max lane parks whole.
         quietHoldCheck: batchIsPersonSourced
           ? undefined
-          : () => isNonMax && inQuietHours(Date.now()),
+          : () => quietHoldsFor(queueKey),
         // (card-b3468c verify P1) The digest admission ack fires in the
         // finally: the batch ack's own failure (a receipt that did not reach
         // the event log) must not strand the digest's in-flight entries —
@@ -2444,7 +2446,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
  *  the hour — the boss's messages never wait out the window. */
 function queuedRetryDelay(queueKey: string, remains: QueuedTeamDelivery[]): number {
   const now = Date.now();
-  if (!inQuietHours(now) || isQuietExemptLane(queueKey)) return ASYNC_RETRY_MS;
+  if (!quietHoldsFor(queueKey, now)) return ASYNC_RETRY_MS;
   return remains.some((item) => personSourced(item)) ? ASYNC_RETRY_MS : msUntilQuietEnd(now);
 }
 
@@ -2491,6 +2493,13 @@ function scheduleQueuedRecipient(queueKey: string, delayMs = 0): void {
   timer.unref?.();
   queuedRetryTimers.set(queueKey, { timer, due });
 }
+
+// A quiet-hours pass lets the recipient work now: a queue parked until the
+// window end drains at once (a sooner schedule replaces the long timer).
+// T3 Code session wakes and teammate chatter held overnight ride this queue.
+onQuietPassGranted((agentId) => {
+  if (queuedRetryTimers.has(agentId)) scheduleQueuedRecipient(agentId);
+});
 
 /** Resume accepted fire-and-forget handoffs after a TARDIS restart. */
 export async function resumeQueuedTeamDeliveries(): Promise<number> {

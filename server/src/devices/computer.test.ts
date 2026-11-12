@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import sharp from 'sharp';
 import { ComputerController, COMPUTER_GRANT_MINUTES, COMPUTER_GRANT_MS, trustedComputerUrl } from '../../../desktop/native/computer.mjs';
 import { localMcpServers, localMcpBananaServers, localMcpCodexArgs, writeClaudeMcpConfigFile } from '../chat/local-mcp.ts';
+import { teamLaneToken } from '../chat/teamToken.ts';
 import { computerGuidance, computerOwnerKey, noteComputerToolUse, readComputerContext } from './context.ts';
 import { ComputerStepJournal } from './stepJournal.ts';
 import { redactComputerImages } from './transcript.ts';
@@ -143,7 +144,11 @@ test('all runner configurations include identical reserved device tools; turn id
   assert.ok(codexArgs.some(arg => arg.includes('mcp_servers.rivendell-device.args=')));
   assert.ok(codexArgs.some(arg => arg === 'mcp_servers.rivendell-device.env_vars=["RIVENDELL_COMPUTER_MCP_TOKEN"]'));
   assert.ok(codexArgs.some(arg => arg === 'mcp_servers.rivendell-headless.env_vars=["RIVENDELL_HEADLESS_TOKEN"]'));
-  assert.ok(codexArgs.some(arg => arg === 'shell_environment_policy.exclude=["RIVENDELL_COMPUTER_MCP_TOKEN","RIVENDELL_HEADLESS_TOKEN"]'));
+  assert.ok(codexArgs.some(arg => arg === 'shell_environment_policy.exclude=["RIVENDELL_COMPUTER_MCP_TOKEN","RIVENDELL_HEADLESS_TOKEN","RIVENDELL_TEAM_TOKEN"]'));
+  // A roster lane's team token rides env_vars by name, never the command line.
+  const teamArgs = localMcpCodexArgs('Test', { agentId: 'tester' });
+  assert.ok(teamArgs.some(arg => arg.startsWith('mcp_servers.rivendell-team.env_vars=') && arg.includes('"RIVENDELL_TEAM_TOKEN"')));
+  assert.ok(!teamArgs.some(arg => arg.includes(teamLaneToken('tester'))), 'Codex CLI args must not expose RIVENDELL_TEAM_TOKEN');
   const headlessEnv = servers['rivendell-headless'].env;
   for (const arg of codexArgs) {
     assert.ok(!arg.includes(env.RIVENDELL_COMPUTER_MCP_TOKEN), 'Codex CLI args must not expose RIVENDELL_COMPUTER_MCP_TOKEN');

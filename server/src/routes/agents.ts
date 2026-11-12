@@ -7,6 +7,7 @@ import { AGENT_COLORS, AgentBrainConflictError, AgentBrainRevisionRequiredError,
 import { personaScopeFor } from '../chat/personaPrompts.ts';
 import { agentUnread, markAgentRead, agentLatestSeq } from '../chat/reads.ts';
 import { SubscriptionEngineError } from '../chat/subscription-policy.ts';
+import { agentQuietHours } from './quietHours.ts';
 
 const rawImage = express.raw({ type: 'image/*', limit: '6mb' });
 
@@ -19,6 +20,8 @@ agentsRouter.get('/', asyncHandler(async (_req, res) => {
     ...a,
     unread: await agentUnread(a),
     muted: Boolean(a.muted),
+    // Works through the overnight quiet window: always, or on a pass.
+    quietHours: agentQuietHours(a.id),
   })));
   res.json({ agents });
 }));

@@ -1,0 +1,161 @@
+/* Quiet-hours lift inside the teammate editor (QuietHoursLift.tsx). */
+
+.bt-quiet {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--r-line-strong);
+  border-radius: 12px;
+  background: var(--r-bg-soft);
+  font-size: 13.5px;
+  color: var(--r-ink);
+}
+.bt-quiet.is-picking { display: block; }
+
+/* A lift in force reads as a small night sky: a warm wash and a few stars. */
+.bt-quiet.is-lifted,
+.bt-quiet.is-standing,
+.bt-quiet.is-picking {
+  border-color: color-mix(in srgb, var(--r-gold) 45%, var(--r-line-strong));
+  background:
+    radial-gradient(1.6px 1.6px at 72% 28%, color-mix(in srgb, var(--r-gold) 75%, transparent) 99%, transparent),
+    radial-gradient(1.2px 1.2px at 84% 70%, color-mix(in srgb, var(--r-gold) 60%, transparent) 99%, transparent),
+    radial-gradient(1px 1px at 63% 78%, color-mix(in srgb, var(--r-gold) 55%, transparent) 99%, transparent),
+    radial-gradient(1.2px 1.2px at 93% 22%, color-mix(in srgb, var(--r-gold) 50%, transparent) 99%, transparent),
+    linear-gradient(115deg, color-mix(in srgb, var(--r-gold) 11%, var(--r-bg-soft)), var(--r-bg-soft) 72%);
+}
+
+.bt-quiet-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  color: var(--r-ink-mute);
+  background: color-mix(in srgb, var(--r-ink-mute) 12%, transparent);
+}
+.bt-quiet.is-lifted .bt-quiet-icon,
+.bt-quiet.is-standing .bt-quiet-icon,
+.bt-quiet.is-picking .bt-quiet-icon {
+  color: var(--r-gold);
+  background: color-mix(in srgb, var(--r-gold) 16%, transparent);
+}
+.bt-quiet.is-lifted .bt-quiet-icon { animation: bt-quiet-glow 3.2s ease-in-out infinite; }
+@keyframes bt-quiet-glow {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--r-gold) 0%, transparent); }
+  50% { box-shadow: 0 0 14px 2px color-mix(in srgb, var(--r-gold) 38%, transparent); }
+}
+
+.bt-quiet-text { flex: 1; min-width: 0; }
+.bt-quiet-text small {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--r-ink-faint);
+}
+
+.bt-quiet-btns { flex: none; display: flex; gap: 4px; }
+.bt-quiet-btn,
+.bt-quiet-chip {
+  flex: none;
+  border: 1px solid var(--r-line-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--r-ink);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+}
+.bt-quiet-btn { padding: 6px 12px; }
+.bt-quiet-chip { padding: 5px 12px; }
+.bt-quiet-btn:hover:not(:disabled),
+.bt-quiet-chip:hover:not(:disabled) { border-color: var(--r-gold); }
+.bt-quiet-btn:active:not(:disabled),
+.bt-quiet-chip:active:not(:disabled) { transform: scale(0.95); }
+.bt-quiet-btn:focus-visible,
+.bt-quiet-chip:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; }
+.bt-quiet-btn:disabled,
+.bt-quiet-chip:disabled { opacity: 0.5; cursor: default; }
+.bt-quiet-btn.ghost { border-color: transparent; color: var(--r-ink-mute); }
+.bt-quiet-btn.primary { background: var(--r-gold); border-color: var(--r-gold); color: var(--r-bg); }
+.bt-quiet-btn.primary:hover:not(:disabled) { background: var(--r-elf-glow); border-color: var(--r-elf-glow); }
+.bt-quiet-chip.on {
+  border-color: var(--r-gold);
+  background: color-mix(in srgb, var(--r-gold) 22%, transparent);
+}
+
+.bt-quiet-head { display: flex; align-items: center; gap: 10px; }
+.bt-quiet-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 10px; }
+.bt-quiet-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 10px; }
+.bt-quiet-field { display: block; min-width: 0; }
+.bt-quiet-field span { display: block; margin-bottom: 4px; font-size: 11.5px; color: var(--r-ink-mute); }
+.bt-quiet-field em { font-style: normal; color: var(--r-ink-faint); }
+.bt-quiet-field input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--r-line-strong);
+  border-radius: 10px;
+  background: var(--r-bg);
+  color: var(--r-ink);
+  font: inherit;
+  font-size: 13.5px;
+  outline: none;
+}
+.bt-quiet-field input:focus { border-color: var(--r-tardis-lit); box-shadow: var(--r-glow-tardis); }
+.bt-quiet-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.bt-quiet-err { margin: -6px 0 14px; font-size: 12px; color: var(--r-rose); }
+.bt-quiet.is-picking .bt-quiet-err { margin: 10px 0 0; }
+
+@media (max-width: 600px) {
+  .bt-quiet:not(.is-picking) { flex-wrap: wrap; }
+  .bt-quiet:not(.is-picking) .bt-quiet-text { flex-basis: calc(100% - 40px); }
+  .bt-quiet-btns, .bt-quiet:not(.is-picking) > .bt-quiet-btn { margin-left: 40px; }
+  .bt-quiet-fields { grid-template-columns: 1fr; }
+}
+
+/* Sidebar: a small moon on a teammate working through quiet hours on a lift. */
+.bt-conv-night {
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--r-gold);
+}
+
+/* Pinned bubble: the same moon as a badge on the disc's free top-left corner
+   (mute/unread sit top-right, presence bottom-right), glowing softly while
+   the lift runs and tipping its hat on hover. */
+.bt-pin-night {
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--r-bg-card);
+  border: 2px solid var(--r-bg-soft);
+  color: var(--r-gold);
+  display: grid;
+  place-items: center;
+  box-sizing: content-box;
+  animation: bt-quiet-glow 3.2s ease-in-out infinite;
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.bt-pin:hover .bt-pin-night { transform: rotate(-20deg) scale(1.12); }
+
+@media (prefers-reduced-motion: reduce) {
+  .bt-quiet.is-lifted .bt-quiet-icon { animation: none; }
+  .bt-quiet-btn, .bt-quiet-chip { transition: none; }
+  .bt-pin-night {
+    animation: none;
+    transition: none;
+    box-shadow: 0 0 8px color-mix(in srgb, var(--r-gold) 40%, transparent);
+  }
+  .bt-pin:hover .bt-pin-night { transform: none; }
+}

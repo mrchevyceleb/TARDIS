@@ -36,7 +36,13 @@ export type Agent = {
   /** 'lean' skips the office integrations on engines that mount them; absent
    *  means the full toolbox. File, coding and browser tools stay available. */
   toolbox?: 'full' | 'lean';
+  /** Works through the overnight quiet window: always (a standing exception)
+   *  or lifted until `until`. Absent means quiet hours hold their night work. */
+  quietHours?: AgentQuietHours;
 };
+
+/** Server-computed on /api/agents (routes/quietHours.ts agentQuietHours). */
+export type AgentQuietHours = { standing?: true; until?: string; reason?: string; grantedBy?: string };
 
 /** Sidebar color labels. The keys mirror AGENT_COLORS on the server; the
  *  shades live in grok.css (--bt-cc-*) so each theme can tune them. */

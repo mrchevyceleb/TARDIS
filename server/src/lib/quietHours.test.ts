@@ -10,6 +10,7 @@ import {
   lastQuietEndMs,
   lastQuietStartMs,
   msUntilQuietEnd,
+  quietWindowEnds,
   recordQuietExemptWake,
   resetQuietExemptWakes,
 } from './quietHours.ts';
@@ -108,4 +109,17 @@ test('isQuietExemptWork requires an exempt wake inside the current quiet window'
   assert.equal(isQuietExemptWork('naomi', et('2026-10-15T22:15'), tonightNow), true);
 
   resetQuietExemptWakes();
+});
+
+test('quietWindowEnds walks the real windows: the lift lengths Tonight, 3 nights, a week', () => {
+  // Thursday daytime: Thursday night ends Fri 07:00, the weekend nights at
+  // 08:00, Sunday night Mon 07:00.
+  assert.deepEqual(quietWindowEnds(et('2026-10-15T10:00'), 4), [
+    et('2026-10-16T07:00'), et('2026-10-17T08:00'), et('2026-10-18T08:00'), et('2026-10-19T07:00'),
+  ]);
+  // Inside a window, tonight is the one in force; at its end, the next one.
+  assert.deepEqual(quietWindowEnds(et('2026-10-17T07:30'), 1), [et('2026-10-17T08:00')]);
+  assert.deepEqual(quietWindowEnds(et('2026-10-16T07:00'), 1), [et('2026-10-17T08:00')]);
+  // The fall-back night ends at 08:00 EST, an hour later in UTC.
+  assert.deepEqual(quietWindowEnds(et('2026-10-31T12:00'), 1), [Date.parse('2026-11-01T13:00:00Z')]);
 });
