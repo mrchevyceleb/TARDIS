@@ -44,6 +44,11 @@ const REPLY_NOW_HOST = process.env.RIVENDELL_REPLY_NOW_HOST === '1';
 // Which of the agent's two lanes this tool server belongs to. Jobs and watches
 // report back to the lane that started them; handoffs keep chains per lane.
 const LANE = process.env.RIVENDELL_AGENT_LANE === 'bg' ? 'bg' : 'main';
+// quiet_hours lifts the overnight window for a teammate, so only Max's lanes
+// see it (MAX_LANE_AGENT_IDS in server/src/lib/quietHours.ts). The server
+// refuses every other caller as well.
+const QUIET_HOURS_LIFTER = ['chief-of-staff', 'max-voice'].includes(process.env.RIVENDELL_AGENT_ID ?? '');
+const QUIET_WINDOW = 'weeknights 21:00-07:00 ET, Friday and Saturday nights 20:00-08:00 ET';
 const FROM_PROP = { type: 'string', description: 'Your own teammate name. Only needed if TARDIS has not already identified you.' };
 
 const TOOLS = [
@@ -371,6 +376,22 @@ const TOOLS = [
       type: 'object',
       properties: { id: { type: 'string' } },
       required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'quiet_hours',
+    description:
+      `Who works through quiet hours (${QUIET_WINDOW}), and lift them for one teammate for a set stretch. Lift only on ${OWNER}'s say. ` +
+      'No arguments: lists the standing exceptions and every lift in force. agent + until: that teammate gets every overnight delivery (routines, job results, watch wakes, T3 Code session wake-ups, teammate messages) until then, and anything already held overnight goes out now; quiet hours apply to them again on their own when it ends. agent + end:true: ends the lift now.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agent: { type: 'string', description: 'Teammate name or id' },
+        until: { type: 'string', description: 'When the lift ends: date and time with its UTC offset, e.g. 2026-11-15T21:00:00-05:00 for 9pm Eastern in November. At most 30 days out.' },
+        reason: { type: 'string', description: `Why ${OWNER} lifted it, in a few words` },
+        end: { type: 'boolean', description: 'End this teammate\'s lift now' },
+      },
       additionalProperties: false,
     },
   },
@@ -1152,6 +1173,31 @@ async function callTool(name, args, signal) {
       return deleted ? `Deleted ${args.id}.` : `No routine ${args.id}.`;
     }
   }
+  if (name === 'quiet_hours') {
+    const caller = process.env.RIVENDELL_AGENT_ID || process.env.RIVENDELL_AGENT_NAME || '';
+    // The lane token TARDIS minted for this MCP's roster id: the server lifts
+    // only for Max's own MCP, never for a call that merely names him.
+    const headers = { 'x-rivendell-team-token': process.env.RIVENDELL_TEAM_TOKEN ?? '' };
+    const et = (iso) => `${new Date(iso).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} ET`;
+    if (args.end === true || args.until !== undefined) {
+      if (typeof args.agent !== 'string' || !args.agent.trim()) throw new Error('Name the teammate: agent.');
+      const path = `/api/quiet-hours/passes/${encodeURIComponent(args.agent.trim())}`;
+      if (args.end === true) {
+        const { ended } = await api(path, { method: 'DELETE', headers, body: JSON.stringify({ agent: caller }) }, signal);
+        return ended ? `Ended the quiet-hours lift for ${args.agent}. Quiet hours hold their overnight work again.` : `${args.agent} had no quiet-hours lift in force.`;
+      }
+      const { pass } = await api(path, { method: 'PUT', headers, body: JSON.stringify({ agent: caller, until: args.until, reason: args.reason }) }, signal);
+      return `${pass.name} works through quiet hours until ${et(pass.until)}${pass.reason ? ` (${pass.reason})` : ''}. After that, quiet hours apply to them again on their own.`;
+    }
+    const { quietNow, standing, passes } = await api('/api/quiet-hours', undefined, signal);
+    return [
+      `Quiet hours are ${quietNow ? 'on' : 'off'} right now (${QUIET_WINDOW}).`,
+      `Always working through them: ${standing.map((a) => a.name).join(', ') || 'nobody'}.`,
+      passes.length
+        ? `Lifted:\n${passes.map((p) => `- ${p.name} until ${et(p.until)}${p.reason ? ` (${p.reason})` : ''}, by ${p.grantedBy}`).join('\n')}`
+        : 'No lifts in force.',
+    ].join('\n');
+  }
   throw new Error(`unknown tool: ${name}`);
 }
 
@@ -1177,7 +1223,7 @@ rl.on('line', async (line) => {
     } else if (method === 'ping') {
       send({ jsonrpc: '2.0', id, result: {} });
     } else if (method === 'tools/list') {
-      send({ jsonrpc: '2.0', id, result: { tools: TOOLS.filter((t) => t.name !== 'reply_now' || REPLY_NOW_ENABLED) } });
+      send({ jsonrpc: '2.0', id, result: { tools: TOOLS.filter((t) => (t.name !== 'reply_now' || REPLY_NOW_ENABLED) && (t.name !== 'quiet_hours' || QUIET_HOURS_LIFTER)) } });
     } else if (method === 'tools/call') {
       const controller = new AbortController();
       activeCalls.set(id, controller);

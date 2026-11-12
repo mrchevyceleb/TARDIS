@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import { DESK_OWNER_NAME, DEVICE_MCP_SCRIPT, HEADLESS_MCP_SCRIPT, PORT, stateDir, TEAM_MCP_SCRIPT } from '../config.ts';
 import { COMPUTER_MCP_TOKEN } from '../devices/context.ts';
 import { headlessLaneToken } from '../headless/pool.ts';
+import { teamLaneToken } from './teamToken.ts';
 
-export const MCP_SECRET_ENV_KEYS = ['RIVENDELL_COMPUTER_MCP_TOKEN', 'RIVENDELL_HEADLESS_TOKEN'] as const;
+export const MCP_SECRET_ENV_KEYS = ['RIVENDELL_COMPUTER_MCP_TOKEN', 'RIVENDELL_HEADLESS_TOKEN', 'RIVENDELL_TEAM_TOKEN'] as const;
 const SECRET_ENV_KEYS = new Set<string>(MCP_SECRET_ENV_KEYS);
 const GROK_IMAGINE_MCP_SCRIPT = process.env.RIVENDELL_GROK_IMAGINE_MCP?.trim()
   || join(homedir(), 'GLOBAL-AGENT-CONFIGS', 'extensions', 'grok-imagine-mcp', 'index.mjs');
@@ -15,12 +16,13 @@ const GROK_IMAGINE_MCP_SCRIPT = process.env.RIVENDELL_GROK_IMAGINE_MCP?.trim()
  *  expansion while excluded from Codex shell subprocesses via
  *  `shell_environment_policy.exclude`, keeping tokens off process command lines
  *  (`ps` / `/proc/<pid>/cmdline`) and out of agent shell commands (card-667aa9). */
-export function localMcpSecretEnv(agentName?: string, opts: { unnamedLane?: boolean } = {}): Record<string, string> {
+export function localMcpSecretEnv(agentName?: string, opts: { unnamedLane?: boolean; agentId?: string } = {}): Record<string, string> {
   if (process.env.RIVENDELL_SIDE_COPY === '1') return {};
   const headlessAgent = opts.unnamedLane ? undefined : agentName;
   return {
     RIVENDELL_COMPUTER_MCP_TOKEN: COMPUTER_MCP_TOKEN,
     RIVENDELL_HEADLESS_TOKEN: headlessLaneToken(headlessAgent),
+    ...(opts.agentId ? { RIVENDELL_TEAM_TOKEN: teamLaneToken(opts.agentId) } : {}),
   };
 }
 
@@ -57,7 +59,8 @@ export function localMcpServers(agentName?: string, opts: { replyNow?: boolean; 
       // RIVENDELL_AGENT_LANE lets jobs, watches and handoffs report back to the lane that started them.
       // RIVENDELL_AGENT_ID is the stable roster id, so owner-isolated tools
       // (commitments) never resolve identity through a mutable display name.
-      env: { ...base, ...(agentName ? { RIVENDELL_AGENT_NAME: agentName } : {}), ...(opts.agentId ? { RIVENDELL_AGENT_ID: opts.agentId } : {}), RIVENDELL_REPLY_NOW: '1', ...(!opts.replyNow || opts.agentId ? { RIVENDELL_REPLY_NOW_HOST: '1' } : {}), ...(opts.backgroundLane ? { RIVENDELL_AGENT_LANE: 'bg' } : {}) } },
+      // RIVENDELL_TEAM_TOKEN proves that id to routes that act on it (teamToken.ts).
+      env: { ...base, ...(agentName ? { RIVENDELL_AGENT_NAME: agentName } : {}), ...(opts.agentId ? { RIVENDELL_AGENT_ID: opts.agentId, RIVENDELL_TEAM_TOKEN: teamLaneToken(opts.agentId) } : {}), RIVENDELL_REPLY_NOW: '1', ...(!opts.replyNow || opts.agentId ? { RIVENDELL_REPLY_NOW_HOST: '1' } : {}), ...(opts.backgroundLane ? { RIVENDELL_AGENT_LANE: 'bg' } : {}) } },
     'rivendell-device': { type: 'stdio', command: 'node', args: [DEVICE_MCP_SCRIPT],
       // The owner env binds this shim's calls to its lane: computer_start
       // refuses a context whose owner lane is not the caller. Banana's serve

@@ -104,11 +104,20 @@ test('a daily slot already caught up today does not fire twice', () => {
   assert.equal(routineIsDue(routine({ schedule: 'daily:23:00', lastRunAt: last, agentId: 'naomi' }), now), false);
 });
 
-test('a Max-lane slot is never held, so it never catches up', () => {
+test('a held slot waits while quiet hours still hold the lane', () => {
   const now = local(2026, 10, 16, 5, 30);
   const last = local(2026, 10, 14, 23, 0);
   const heldSlotAt = local(2026, 10, 15, 23, 0);
-  assert.equal(routineIsDue(routine({ schedule: 'daily:23:00', lastRunAt: last, heldSlotAt }), now), false);
+  assert.equal(routineIsDue(routine({ schedule: 'daily:23:00', lastRunAt: last, heldSlotAt, agentId: 'naomi' }), now), false);
+});
+
+test('a held slot catches up at once on a lane quiet hours no longer hold', () => {
+  // A pass granted after midnight exempts the lane the same way Max's lanes
+  // are: last night's held 23:00 slot delivers now, never swallowed.
+  const now = local(2026, 10, 16, 5, 30);
+  const last = local(2026, 10, 14, 23, 0);
+  const heldSlotAt = local(2026, 10, 15, 23, 0);
+  assert.equal(routineIsDue(routine({ schedule: 'daily:23:00', lastRunAt: last, heldSlotAt }), now), true);
 });
 
 test('an unpaused daily:23:00 with no heldSlotAt does not fire a false catch-up at 06:00', () => {

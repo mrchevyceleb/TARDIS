@@ -28,6 +28,7 @@ import { DEFAULT_FIREWORKS_EFFORT, DEFAULT_FIREWORKS_MODEL, FIREWORKS_MODELS, fi
 import { DEFAULT_OPENROUTER_EFFORT, DEFAULT_OPENROUTER_MODEL, OPENROUTER_MODELS, openRouterEffortsForModel, useOpenRouterModels } from '../chat/openrouterModels';
 import { AgentUpdateConflictError, createAgent, updateAgentReq, deleteAgentReq, uploadAgentAvatar, removeAgentAvatar, agentAvatarUrl, DISC_INK, agentColor, type Agent } from './agents';
 import { AccountControl } from './AccountControl';
+import { QuietHoursLift } from './QuietHoursLift';
 import { DEFAULT_MUSE_EFFORT, DEFAULT_MUSE_MODEL, MUSE_EFFORTS, MUSE_MODELS } from '../chat/museModels';
 import { GROK_VOICES } from '../voice/useGrokCall';
 
@@ -495,6 +496,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
                 <small>Hide unread badges — for companions that talk to other agents, not you</small>
               </span>
             </label>
+            <QuietHoursLift agent={agent} onChanged={() => onSaved(agent)} />
           </>
         ) : null}
 

@@ -10,14 +10,20 @@
  *  Max's lanes (the Chief of Staff is on overnight outage duty), Samwise's
  *  lane (Matt, Oct 19 2026: he and his comms routines keep working through
  *  the window) and Pippin, Samwise's coding companion (Matt, Nov 2 2026), and
- *  Max's overnight emergency check by routine id. Held never means lost: every gated path parks its record durably and
- *  the next tick after the window ends delivers it unchanged.
+ *  Max's overnight emergency check by routine id. Any other teammate is
+ *  exempt while a quiet-hours pass is in force (quietPasses.ts, Matt, Nov 12
+ *  2026): Matt, or Max on his say, lifts the window for a set stretch and it
+ *  applies again on its own when the stretch ends. Held never means lost:
+ *  every gated path parks its record durably and the next tick after the
+ *  window ends (or after a pass lifts it) delivers it unchanged.
  *
  *  This module owns the shared clock and lane facts so the call sites can
  *  never drift apart on the window, the roster ids, or the exemptions. The
  *  person-sourced record test itself lives with the queue in teamBus.ts
  *  (personSourced), next to the batch class logic it must stay consistent
  *  with. */
+
+import { activeQuietPass } from './quietPasses.ts';
 
 const etHourFmt = new Intl.DateTimeFormat('en-US', {
   hour: 'numeric',
@@ -69,10 +75,11 @@ function quietEndMinute(weekday: number): number {
 /** Max's lanes: overnight holds never apply (outage duty + the boss's voice). */
 export const MAX_LANE_AGENT_IDS: ReadonlySet<string> = new Set(['chief-of-staff', 'max-voice']);
 
-/** Samwise's lane and Pippin, his coding companion: the teammate exceptions
- *  (Matt, Oct 19 2026 for Samwise; Nov 2 2026 for Pippin). They and their
- *  routines keep working through the quiet window, so deliveries to them,
- *  their jobs, and their routines never hold — and only them. */
+/** Samwise's lane and Pippin, his coding companion: the standing teammate
+ *  exceptions (Matt, Oct 19 2026 for Samwise; Nov 2 2026 for Pippin). They
+ *  and their routines keep working through the quiet window, so deliveries
+ *  to them, their jobs, and their routines never hold. Anyone else needs a
+ *  time-boxed pass (quietPasses.ts). */
 export const SAMWISE_LANE_AGENT_IDS: ReadonlySet<string> = new Set(['samwise', 'pippin-2']);
 
 /** Max's overnight emergency check: exempt by id even if its owner moves. */
@@ -98,12 +105,16 @@ export function etHour(ms: number): number {
  *  never pass the team leg (Nov 4 2026). */
 const SIDE_COPY = process.env.RIVENDELL_SIDE_COPY === '1';
 
+/** The window rule itself, side copy or not. */
+function inQuietWindow(ms: number): boolean {
+  const { weekday, minuteOfDay } = etClock(ms);
+  return minuteOfDay < quietEndMinute(weekday) || minuteOfDay >= quietStartMinute(weekday);
+}
+
 /** True inside the quiet window (weeknights 21:00-07:00 ET, Friday and
  *  Saturday nights 20:00-08:00 ET, half-open). Never true in a side copy. */
 export function inQuietHours(ms: number): boolean {
-  if (SIDE_COPY) return false;
-  const { weekday, minuteOfDay } = etClock(ms);
-  return minuteOfDay < quietEndMinute(weekday) || minuteOfDay >= quietStartMinute(weekday);
+  return !SIDE_COPY && inQuietWindow(ms);
 }
 
 /** True when agentId is one of Max's lanes. */
@@ -116,11 +127,26 @@ export function isSamwiseLane(agentId: string | undefined | null): boolean {
   return typeof agentId === 'string' && SAMWISE_LANE_AGENT_IDS.has(agentId);
 }
 
-/** True when the overnight holds never apply to agentId: Max's lanes and
- *  Samwise's lane. Every quiet-hours gate reads this, so the exemption set
- *  can never drift between call sites. */
-export function isQuietExemptLane(agentId: string | undefined | null): boolean {
+/** True when agentId always works through quiet hours: Max's lanes, and
+ *  Samwise's lane and Pippin's. These never need a pass. */
+export function hasStandingQuietExemption(agentId: string | undefined | null): boolean {
   return isMaxLane(agentId) || isSamwiseLane(agentId);
+}
+
+/** True when the overnight holds do not apply to agentId at `nowMs`: the
+ *  standing exceptions, and any teammate whose quiet-hours pass is still in
+ *  force. Every quiet-hours gate reads this, so the exemption set can never
+ *  drift between call sites, and a pass starts and ends for every gate at
+ *  once. */
+export function isQuietExemptLane(agentId: string | undefined | null, nowMs: number = Date.now()): boolean {
+  return hasStandingQuietExemption(agentId) || activeQuietPass(agentId, nowMs) !== undefined;
+}
+
+/** True when quiet hours hold automation for agentId at `nowMs`: inside the
+ *  window and not exempt. Read it at the moment of delivery, never once up
+ *  front: a pass can start or end while a delivery waits for admission. */
+export function quietHoldsFor(agentId: string | undefined | null, nowMs: number = Date.now()): boolean {
+  return inQuietHours(nowMs) && !isQuietExemptLane(agentId, nowMs);
 }
 
 /** Every quiet edge is a whole Eastern hour, and Eastern offsets are whole
@@ -179,11 +205,11 @@ export function recordQuietExemptWake(agentId: string, atMs: number = Date.now()
  *  deliver its result inside quiet hours at `nowMs`: `nowMs` is in quiet
  *  hours, `startedAtMs` is inside the CURRENT quiet window (on or after
  *  `lastQuietStartMs(nowMs)`), and the agent received an exempt wake in
- *  this window at or before `startedAtMs`. Max lanes and Samwise's lane are
- *  always exempt. */
+ *  this window at or before `startedAtMs`. An exempt lane (standing, or on
+ *  a pass at `nowMs`) always is. */
 export function isQuietExemptWork(agentId: string, startedAtMs: number, nowMs: number = Date.now()): boolean {
   if (!Number.isFinite(startedAtMs) || !inQuietHours(nowMs)) return false;
-  if (isQuietExemptLane(agentId)) return true;
+  if (isQuietExemptLane(agentId, nowMs)) return true;
   const windowStart = lastQuietStartMs(nowMs);
   if (startedAtMs < windowStart || startedAtMs > nowMs) return false;
   const wakeAt = exemptWakeAtByAgent.get(agentId);
@@ -193,6 +219,21 @@ export function isQuietExemptWork(agentId: string, startedAtMs: number, nowMs: n
 /** Clear recorded exempt wakes (for tests). */
 export function resetQuietExemptWakes(): void {
   exemptWakeAtByAgent.clear();
+}
+
+/** When each of the next `count` quiet windows ends, starting with the one in
+ *  force at `ms`: the ends a lift for tonight, 3 nights or a week runs to.
+ *  Windows open and close on the hour in Eastern time, so an hourly walk
+ *  lands exactly on each edge. */
+export function quietWindowEnds(ms: number, count: number): number[] {
+  const ends: number[] = [];
+  let t = hourFloor(ms);
+  while (ends.length < count) {
+    while (!inQuietWindow(t)) t += HOUR_MS;
+    while (inQuietWindow(t)) t += HOUR_MS;
+    ends.push(t);
+  }
+  return ends;
 }
 
 /** Milliseconds until the quiet window ends, for scheduling a held retry.

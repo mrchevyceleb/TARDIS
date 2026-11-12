@@ -16,7 +16,8 @@ import { STATE_DIR } from '../config.ts';
 import { listAgents, type Agent } from './agents.ts';
 import { sendToAgentHome } from './teamBus.ts';
 import { jevConfigured } from '../lib/jev.ts';
-import { inQuietHours, isQuietExemptLane, msUntilQuietEnd, MAX_EMERGENCY_ROUTINE_ID } from '../lib/quietHours.ts';
+import { msUntilQuietEnd, quietHoldsFor, MAX_EMERGENCY_ROUTINE_ID } from '../lib/quietHours.ts';
+import { onQuietPassGranted } from '../lib/quietPasses.ts';
 import { runRoutineGate, type RoutineGateConfig } from './routineGate.ts';
 
 export type Routine = {
@@ -128,15 +129,15 @@ export async function runRoutine(id: string, opts: { manual?: boolean } = {}): P
 async function runRoutineFor(routine: Routine, agent: Agent, opts: { manual?: boolean }): Promise<{ ran: boolean; reason?: string; gated?: string }> {
   const id = routine.id;
   // Quiet hours (Matt, Oct 15 2026) come before the gate and before any
-  // spend: a scheduled fire to a non-Max lane inside 21:00-07:00 ET skips
-  // without consuming the slot, records heldSlotAt on the routine, and parks
-  // the retry at 07:00 ET so the first tick after 07:00 fires it unchanged.
-  // Exempt: Max's lanes (overnight outage duty), Max's overnight emergency
-  // check by id, and a manual press (someone explicitly asked for this run
-  // now, like a person message).
+  // spend: a scheduled fire to a lane quiet hours hold skips without
+  // consuming the slot, records heldSlotAt on the routine, and parks the
+  // retry at the window end so the first tick after it fires it unchanged
+  // (a pass granted meanwhile releases the park early). Exempt: the
+  // standing exceptions and lanes on a pass (quietHours.isQuietExemptLane),
+  // Max's overnight emergency check by id, and a manual press (someone
+  // explicitly asked for this run now, like a person message).
   const nowEntry = Date.now();
-  if (!opts.manual && id !== MAX_EMERGENCY_ROUTINE_ID
-      && inQuietHours(nowEntry) && !isQuietExemptLane(agent.id)) {
+  if (!opts.manual && id !== MAX_EMERGENCY_ROUTINE_ID && quietHoldsFor(agent.id, nowEntry)) {
     markHeld(id, nowEntry);
     skipUntil.set(id, nowEntry + msUntilQuietEnd(nowEntry));
     return { ran: false, reason: 'quiet hours (21:00-07:00 ET weeknights, 20:00-08:00 ET Friday and Saturday nights): held until they end' };
@@ -223,6 +224,13 @@ function markRun(id: string, at: number): void {
 
 const SKIP_COOLDOWN_MS = 2 * 60 * 1000;
 const skipUntil = new Map<string, number>();
+
+// A quiet-hours pass lets the lane work now: drop its routines' parks (a
+// quiet hold parks until the window ends) so the next minute tick fires
+// what quiet hours were holding instead of waiting for morning.
+onQuietPassGranted((agentId) => {
+  for (const routine of listRoutines()) if (routine.agentId === agentId) skipUntil.delete(routine.id);
+});
 
 // ---- schedule parsing / due checks -------------------------------------------
 
@@ -329,10 +337,13 @@ export function routineIsDue(routine: Routine, now: number): boolean {
     //   21:00+ ET catches up after 07:00 ET, and
     // - a paused or freshly unpaused routine never fires a stale catch-up
     //   for a slot that was never held (Opus review 3, Oct 16).
+    // The catch-up waits only while quiet hours still hold the lane, so a
+    // quiet-hours pass granted after midnight delivers the slot held at
+    // 23:00 right away (and still does after the window, while the pass
+    // keeps the lane exempt) instead of swallowing it.
     return typeof routine.heldSlotAt === 'number'
       && last < routine.heldSlotAt
-      && !inQuietHours(now)
-      && !isQuietExemptLane(routine.agentId);
+      && !quietHoldsFor(routine.agentId, now);
   }
   // cron: due if the most recent matching slot has not been delivered yet.
   // A watched-thread skip must not burn that slot for the rest of the day.

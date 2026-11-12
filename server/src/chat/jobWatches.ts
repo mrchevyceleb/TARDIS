@@ -25,6 +25,7 @@ import { homedir } from 'node:os';
 import { sessionDirectory } from './sessionPolicy.ts';
 import { JsonStore } from '../lib/jsonStore.ts';
 import { inQuietHours, isQuietExemptWork, lastQuietEndMs, msUntilQuietEnd } from '../lib/quietHours.ts';
+import { onQuietPassGranted } from '../lib/quietPasses.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { listAgents } from './agents.ts';
 import { sendToAgentHome } from './teamBus.ts';
@@ -82,6 +83,15 @@ const children = new Map<string, ChildProcess>();
 const delivering = new Set<string>();
 /** Delivery retry cooldowns after admission failures. */
 const retryUntil = new Map<string, number>();
+
+// A quiet-hours pass lets the lane work now: drop its watches' cooldowns (a
+// quiet hold parks a wake until the window ends) so the next tick delivers
+// the held wakes instead of waiting for morning.
+onQuietPassGranted((agentId) => {
+  void store.list()
+    .then((watches) => { for (const watch of watches) if (watch.agentId === agentId) retryUntil.delete(watch.id); })
+    .catch((err) => console.warn(`[job-watches] could not release quiet-hours holds for ${agentId}:`, (err as Error).message));
+});
 
 // All store mutations are read-modify-write, so they run one at a time.
 let mutations: Promise<unknown> = Promise.resolve();

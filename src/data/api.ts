@@ -46,6 +46,21 @@ export async function contentRequest<T>(path: string, method = 'GET', body?: unk
   return data as T;
 }
 
+/** A teammate's time-boxed lift of the overnight quiet window (/api/quiet-hours). */
+export type QuietPass = { agentId: string; name: string; until: string; reason?: string; grantedBy: string; grantedAt?: string };
+/** When each of the next 7 quiet windows ends (ISO), the one in force first. */
+export function fetchQuietNightEnds() {
+  return apiJson<{ nightEnds: string[] }>('/api/quiet-hours').then((overview) => overview.nightEnds);
+}
+/** Let a teammate work through quiet hours until `until` (an ISO instant). */
+export function liftQuietHours(agentId: string, until: string, reason?: string) {
+  return apiJson<{ pass: QuietPass }>(`/api/quiet-hours/passes/${encodeURIComponent(agentId)}`, { method: 'PUT', body: JSON.stringify({ until, reason }) });
+}
+/** End a teammate's lift now; quiet hours hold them again. */
+export function endQuietHoursLift(agentId: string) {
+  return apiJson<{ ended: boolean }>(`/api/quiet-hours/passes/${encodeURIComponent(agentId)}`, { method: 'DELETE' });
+}
+
 /** A T3 Code session an agent has running (GET /api/t3-sessions). */
 export type T3SessionView = { id: string; host: string; threadId: string; ownerId: string; title: string; link?: string; state: string; runningSince: number };
 export function fetchT3Sessions(signal?: AbortSignal) {
