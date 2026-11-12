@@ -32,10 +32,10 @@ import {
   Fuel, ScrollText,
   Hammer,
   Heart,
-  ClipboardCheck,
   LayoutGrid,
   Mail,
   Moon,
+  Orbit,
   Palette,
   Pin,
   Plug,
@@ -80,7 +80,7 @@ export const ROOM_ENTRIES: RoomEntry[] = [
   { key: 'setup', label: ROOM_NAMES.setup.name, icon: <Plug size={16} /> },
   { key: 'content', label: ROOM_NAMES.content.name, icon: <Pencil size={16} /> },
   { key: 'desk', label: ROOM_NAMES.desk.name, icon: <ClipboardList size={16} /> },
-  { key: 'qa', label: ROOM_NAMES.qa.name, icon: <ClipboardCheck size={16} /> },
+  { key: 'sessions', label: ROOM_NAMES.sessions.name, icon: <Orbit size={16} /> },
   { key: 'usage', label: ROOM_NAMES.usage.name, icon: <Fuel size={16} /> },
   { key: 'instructions', label: ROOM_NAMES.instructions.name, icon: <ScrollText size={16} /> },
   { key: 'council', label: ROOM_NAMES.council.name, icon: <LayoutGrid size={16} /> },
@@ -1077,7 +1077,7 @@ export function BotRail(props: BotRailProps) {
         {pluginsOpen ? (
           <div className="bt-plugins-pop" role="menu">
             <div className="bt-plug-h">Rooms</div>
-            {ROOM_ENTRIES.filter((r) => (r.key !== 'content' || flags.contentRoom) && (r.key !== 'desk' || flags.deskRoom)).map((r) => (
+            {ROOM_ENTRIES.filter((r) => (r.key !== 'content' || flags.contentRoom) && (r.key !== 'desk' || flags.deskRoom) && (r.key !== 'sessions' || flags.t3Sessions)).map((r) => (
               <button key={r.key} className="bt-plug-row" onClick={() => { props.onOpenRoom(r.key); setPluginsOpen(false); }}>
                 {r.icon} {r.label}
               </button>

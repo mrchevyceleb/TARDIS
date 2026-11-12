@@ -24,6 +24,7 @@ import { startQaSyncScheduler } from './lib/qaSyncScheduler.ts';
 import { teamRouter } from './routes/team.ts';
 import { t3SessionsRouter } from './routes/t3Sessions.ts';
 import { startT3SessionWatch } from './lib/t3Sessions.ts';
+import { t3Hosts } from './lib/t3Hosts.ts';
 import { channelsRouter } from './routes/channels.ts';
 import { headlessRouter } from './routes/headless.ts';
 import { closeAllHeadlessLanes } from './headless/pool.ts';
@@ -135,6 +136,9 @@ app.get('/api/health', (_req, res) => {
     /** The Desk room (Needs you + agent work board). On by default;
      *  RIVENDELL_DESK_ROOM=off hides it. */
     deskRoom: DESK_ROOM_ENABLED,
+    /** The Sessions tab: T3 Code sessions by teammate. Shown only when
+     *  RIVENDELL_T3_HOSTS names a host to read them from. */
+    t3Sessions: t3Hosts().length > 0,
     ts: Date.now(),
   });
 });
@@ -209,9 +213,10 @@ app.use('/internal/content/v1', contentGatewayRouter);
 // job watches and job results, Desk nudges and phone alerts, computer
 // control, the workspace watcher, restart wakes, model-catalog pollers,
 // optional MCP proxies, xAI OAuth priming, cron pausing, durable team
-// delivery, agent prewarm) stays off, so a check boot can never message
-// anyone, touch another system, or spend agent turns beyond its own probe
-// lane. Computed FIRST so nothing above it runs either.
+// delivery, agent prewarm, T3 owner wakes) stays off, so a check boot can
+// never message anyone, change another system, or spend agent turns beyond
+// its own probe lane. It still reads T3 session state, so its Sessions tab is
+// live. Computed FIRST so nothing above it runs either.
 const SIDE_COPY = process.env.RIVENDELL_SIDE_COPY === '1';
 if (SIDE_COPY) console.log('[side-copy] lanes and engines only: schedulers, delivery, crons, catalogs, Slack/Gmail sends and computer control are off');
 // Oct 19 2026 (card-16bc3e): lane workers that outlived the server that spawned
@@ -264,7 +269,7 @@ if (!SIDE_COPY) startQaSyncScheduler(); // QA board self-sync (first sweep at 15
 if (!SIDE_COPY) startRoutineScheduler(); // agent-scoped routine scheduler (30s tick)
 if (!SIDE_COPY) startJobWatchScheduler(); // background job watches (10s tick): pid/file/command → agent wake
 if (!SIDE_COPY) startJobScheduler(); // job_start jobs (5s tick): exit records → agent job-result
-if (!SIDE_COPY) startT3SessionWatch(); // agent-owned T3 Code sessions: turn ends → owner wake (off until RIVENDELL_T3_HOSTS)
+startT3SessionWatch({ wake: !SIDE_COPY }); // agent-owned T3 Code sessions: turn ends → owner wake; a side copy only reads them (off until RIVENDELL_T3_HOSTS)
 // Needs-you phone alerts and digests, plus answer delivery retries (60s tick).
 if (!SIDE_COPY && DESK_ROOM_ENABLED) startDeskNotifier({ retryAnswer: (id) => deliverDeskAnswer(id) });
 if (!SIDE_COPY && DESK_ROOM_ENABLED) startUsageThresholdAlerts(); // 90% subscription usage Desk alerts (card-2de6e4)

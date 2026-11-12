@@ -20,7 +20,8 @@ function tone(state: string): 'run' | 'wait' | 'warm' {
 /** The word on the chip. `asking` is a run blocked on a question for its owner. */
 const stateLabel = (state: string): string => (state === 'asking' ? 'needs answer' : state);
 
-function Orbit() {
+/** The orbit a session wears; its moon (.t3s-moon) is what turns. */
+export function T3Orbit() {
   return (
     <svg className="t3s-orbit" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <circle cx="8" cy="8" r="6" stroke="currentColor" strokeOpacity="0.32" strokeWidth="1.2" />
@@ -55,7 +56,7 @@ export function T3SessionLines({ agentName, sessions, skewMs }: { agentName: str
         const elapsed = now - session.runningSince;
         return (
           <span key={session.id} className={`t3s-line is-${tone(session.state)}`} role="listitem" title={describe(session, elapsed)}>
-            <Orbit />
+            <T3Orbit />
             <span className="t3s-body">
               <span className="t3s-title">{session.title}</span>
               <span className="t3s-meta">
@@ -96,7 +97,7 @@ export function T3SessionsBadge({ sessions, count = sessions?.length ?? 0 }: { s
   const detail = sessions?.map((s) => `${s.title} (${stateLabel(s.state)} on ${s.host})`).join('\n');
   return (
     <span className="t3s-badge" role="status" aria-label={label} title={detail ? `${label}\n${detail}` : label}>
-      <Orbit />
+      <T3Orbit />
       {count} {count === 1 ? 'session' : 'sessions'}
     </span>
   );

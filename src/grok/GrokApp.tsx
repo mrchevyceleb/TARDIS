@@ -13,7 +13,7 @@
 // Studio IDE stays at /studio.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from 'react';
-import { ClipboardCheck, ClipboardList, Menu, MessageSquare, Pencil } from 'lucide-react';
+import { ClipboardList, Menu, MessageSquare, Orbit, Pencil } from 'lucide-react';
 import { apiJson } from '../data/api';
 import { useJarvis } from '../jarvis/JarvisProvider';
 import { useMediaQuery } from '../chat/hooks/useMediaQuery';
@@ -44,7 +44,8 @@ import { Council } from '../rooms/Council';
 import { Desk } from '../rooms/Desk';
 import { Usage } from '../rooms/Usage';
 import { Instructions } from '../rooms/Instructions';
-import { QaBoard } from '../rooms/QaBoard';
+import { Sessions } from '../rooms/Sessions';
+import { useT3Sessions } from './useT3Sessions';
 import { DeskChatDock, DeskChatOpenContext, useDeskChat } from '../rooms/DeskChat';
 import { DESK_FOCUS_EVENT, FIRST_OPEN_REF, OPEN_AGENT_EVENT, focusDeskRef, hasDeskDeepLink, useDeskDeepLinks, useDeskSummary } from '../data/desk';
 import { NeedsYouBadge, useNeedsYouAlerts } from '../components/NeedsYouBadge';
@@ -69,7 +70,7 @@ const ROOMS: Record<string, ComponentType> = {
   integrations: Integrations,
   content: Content,
   desk: Desk,
-  qa: QaBoard,
+  sessions: Sessions,
   usage: Usage,
   instructions: Instructions,
   council: Council,
@@ -360,10 +361,17 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
     return () => window.removeEventListener(OPEN_AGENT_EVENT, onOpenAgent);
   }, [agents, openAgent, toastEgg]);
 
-  // A deployment that turns the Desk off never strands a device inside it.
+  // A deployment that turns a room off (the Desk, or Sessions with no T3 host
+  // to read) never strands a device inside it.
   useEffect(() => {
-    if (!flags.deskRoom && view.kind === 'room' && view.key === 'desk') goHome();
-  }, [flags.deskRoom, view, goHome]);
+    if (view.kind !== 'room') return;
+    if ((!flags.deskRoom && view.key === 'desk') || (!flags.t3Sessions && view.key === 'sessions')) goHome();
+  }, [flags.deskRoom, flags.t3Sessions, view, goHome]);
+
+  // The roster's live-session poll (one shared query) also counts the Sessions tab.
+  const liveT3 = useT3Sessions();
+  let sessionsRunning = 0;
+  for (const list of liveT3.byAgent.values()) sessionsRunning += list.length;
 
   const deskSummary = useDeskSummary(flags.deskRoom);
   const needsYou = deskSummary.data?.openTodos ?? 0;
@@ -487,9 +495,15 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
               {flags.contentRoom && <button type="button" aria-pressed={activeRoom === 'content'} onClick={() => {
                 if (activeRoom !== 'content') openRoom('content');
               }}><Pencil size={16} aria-hidden="true" /><span className="bt-ws-label">{ROOM_NAMES.content.name}</span></button>}
-              <button type="button" aria-pressed={activeRoom === 'qa'} onClick={() => {
-                if (activeRoom !== 'qa') openRoom('qa');
-              }}><ClipboardCheck size={16} aria-hidden="true" /><span className="bt-ws-label">{ROOM_NAMES.qa.name}</span></button>
+              {flags.t3Sessions && <button
+                type="button"
+                aria-pressed={activeRoom === 'sessions'}
+                aria-label={sessionsRunning ? `${ROOM_NAMES.sessions.name}, ${sessionsRunning} running` : ROOM_NAMES.sessions.name}
+                onClick={() => { if (activeRoom !== 'sessions') openRoom('sessions'); }}
+              >
+                <Orbit size={16} aria-hidden="true" /><span className="bt-ws-label">{ROOM_NAMES.sessions.name}</span>
+                {sessionsRunning ? <span className="bt-ws-count" aria-hidden="true">{sessionsRunning}</span> : null}
+              </button>}
             </nav>
             {/* Always on screen, far from the composer and the phone's thumb zone. */}
             {flags.deskRoom ? <NeedsYouBadge summary={deskSummary.data} onOpen={openNeedsYou} /> : null}

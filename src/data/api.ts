@@ -67,6 +67,22 @@ export function fetchT3Sessions(signal?: AbortSignal) {
   return apiJson<{ configured: boolean; now: number; sessions: T3SessionView[] }>('/api/t3-sessions', { signal, cache: 'no-store' });
 }
 
+/** A pull request T3 linked to a session; `state` is open, merged or closed. */
+export type T3PullRequest = { repo: string; number: number; url: string; state: string };
+/** working: a run is going. waiting: a run is blocked on its owner. finished: no run is going. */
+export type T3SessionPhase = 'working' | 'waiting' | 'finished';
+/** One session on the Sessions tab (GET /api/t3-sessions/all). `since` is when it entered its phase. */
+export type T3SessionRow = {
+  id: string; host: string; threadId: string; ownerId: string; title: string; link?: string;
+  phase: T3SessionPhase; status: string; since: number;
+  model?: string; pullRequests?: T3PullRequest[];
+};
+/** `reachable` turns false once a look fails; no `seenAt` means the host has not been read yet. */
+export type T3HostStatus = { name: string; reachable: boolean; seenAt?: number };
+export function fetchAllT3Sessions(signal?: AbortSignal) {
+  return apiJson<{ configured: boolean; now: number; hosts: T3HostStatus[]; sessions: T3SessionRow[] }>('/api/t3-sessions/all', { signal, cache: 'no-store' });
+}
+
 export type LinkedComputer = {
   id: string; name: string; platform: string;
   computer?: { supported: boolean; reason?: string; approvalMode?: 'ask' | 'automatic'; paused?: boolean; pausedAt?: number; pausedReason?: string; control: { owner: string; label: string; purpose: string; expiresAt: number } | null };
@@ -305,14 +321,15 @@ export async function uploadWorkspaceFile(path: string, file: Blob): Promise<Wor
 
 /** Per-deployment surfaces the server chooses to expose. Read once at boot;
  *  a failed probe leaves everything on so a health blip cannot blank the UI. */
-export async function fetchDeploymentFlags(): Promise<{ contentRoom: boolean; deskRoom: boolean }> {
+export async function fetchDeploymentFlags(): Promise<{ contentRoom: boolean; deskRoom: boolean; t3Sessions: boolean }> {
+  const fallback = { contentRoom: true, deskRoom: true, t3Sessions: true };
   try {
     const response = await fetch('/api/health');
-    if (!response.ok) return { contentRoom: true, deskRoom: true };
-    const data = await response.json() as { contentRoom?: boolean; deskRoom?: boolean };
-    return { contentRoom: data.contentRoom !== false, deskRoom: data.deskRoom !== false };
+    if (!response.ok) return fallback;
+    const data = await response.json() as { contentRoom?: boolean; deskRoom?: boolean; t3Sessions?: boolean };
+    return { contentRoom: data.contentRoom !== false, deskRoom: data.deskRoom !== false, t3Sessions: data.t3Sessions !== false };
   } catch {
-    return { contentRoom: true, deskRoom: true };
+    return fallback;
   }
 }
 

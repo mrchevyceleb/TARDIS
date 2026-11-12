@@ -343,18 +343,42 @@
 .bt-workspace-switch button:focus-visible { outline: 2px solid var(--r-gold); outline-offset: 2px; }
 .bt-workspace-switch button:active { transform: scale(0.97); }
 .bt-ws-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* How many T3 sessions are running, on the Sessions tab. Violet, like every T3 mark. */
+.bt-ws-count {
+  flex: none; min-width: 20px; margin-left: -2px; padding: 0 6px; border-radius: 999px;
+  background: color-mix(in oklch, var(--r-violet) 20%, transparent);
+  color: color-mix(in oklch, var(--r-violet) 82%, var(--r-ink));
+  font: 700 11px/20px var(--r-mono); font-variant-numeric: tabular-nums; text-align: center;
+}
 @media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
   .bt-workspacebar { gap: 6px; }
   .bt-workspace-switch button { padding: 0 14px; }
 }
-/* Phones share the bar with the Needs-you badge (sizes are the bar's inner
-   width): the tabs keep their words and drop their icons, so no label clips. */
-@container bt-workspacebar (max-width: 400px) {
+/* The bar is shared with the Needs-you badge (sizes are its inner width). In
+   the middle the tabs keep their words and drop their icons. A phone has no
+   room for four words: the tabs you are not on shrink to their icons, the one
+   you are on keeps its word, and the running count rides on the Sessions icon. */
+@container bt-workspacebar (max-width: 520px) {
   .bt-workspace-switch button { padding: 0 12px; }
   .bt-workspace-switch button > svg { display: none; }
 }
-@container bt-workspacebar (max-width: 300px) {
-  .bt-workspace-switch button { padding: 0 6px; font-size: 13px; }
+@container bt-workspacebar (max-width: 400px) {
+  .bt-workspace-switch button { position: relative; gap: 6px; padding: 0 11px; }
+  .bt-workspace-switch button > svg { display: block; flex: none; }
+  .bt-workspace-switch button:not([aria-pressed="true"]) { flex: none; width: 40px; padding: 0; }
+  .bt-workspace-switch button:not([aria-pressed="true"]) .bt-ws-label {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%);
+  }
+  .bt-workspace-switch button:not([aria-pressed="true"]) .bt-ws-count {
+    position: absolute; top: 1px; right: 1px; min-width: 16px; margin: 0; padding: 0 4px;
+    background: color-mix(in oklch, var(--r-violet) 85%, var(--r-ink)); color: var(--r-bg);
+    font-size: 9.5px; line-height: 15px;
+  }
+  .bt-workspace-switch button[aria-pressed="true"] .bt-ws-count { display: none; }
+}
+@container bt-workspacebar (max-width: 305px) {
+  .bt-workspace-switch button { font-size: 13px; }
+  .bt-workspace-switch button[aria-pressed="true"] > svg { display: none; }
 }
 .bot-app.rail-collapsed .bt-workspacebar { padding-left: calc(62px + env(safe-area-inset-left, 0px)); }
 @media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
