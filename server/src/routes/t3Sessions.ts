@@ -3,7 +3,7 @@
 import { Router } from 'express';
 import { asyncHandler } from './helpers.ts';
 import { t3Hosts } from '../lib/t3Hosts.ts';
-import { liveT3Sessions, registerT3Session } from '../lib/t3Sessions.ts';
+import { allT3Sessions, liveT3Sessions, registerT3Session } from '../lib/t3Sessions.ts';
 
 export const t3SessionsRouter = Router();
 
@@ -11,6 +11,12 @@ export const t3SessionsRouter = Router();
 t3SessionsRouter.get('/', (_req, res) => {
   res.json({ configured: t3Hosts().length > 0, now: Date.now(), sessions: liveT3Sessions() });
 });
+
+// Every watched session, finished ones included, for the Sessions tab.
+t3SessionsRouter.get('/all', asyncHandler(async (_req, res) => {
+  const configured = t3Hosts().length > 0;
+  res.json({ configured, now: Date.now(), ...(configured ? await allT3Sessions() : { hosts: [], sessions: [] }) });
+}));
 
 // The launcher records who started a session, so its turn ends wake that agent.
 t3SessionsRouter.post('/', asyncHandler(async (req, res) => {

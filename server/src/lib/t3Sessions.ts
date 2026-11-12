@@ -9,7 +9,9 @@
 //     owed a wake: the owner gets one teammate message (holds that land close
 //     together share it);
 //   - a session whose latest run is still going shows under its owner in team
-//     status and the roster.
+//     status and the roster;
+//   - every record, with the model and pull requests T3 reports for it, is a
+//     row on the Sessions tab.
 // A session nobody registered (a person's own) has no record, so it never wakes
 // anyone.
 
@@ -17,6 +19,9 @@ import { listAgents, type Agent } from '../chat/agents.ts';
 import { MAX_TEXT, deliverTeamMessage } from '../chat/teamBus.ts';
 import { JsonStore } from './jsonStore.ts';
 import { T3ToolError, t3Call, t3Host, t3Hosts, type T3Host } from './t3Hosts.ts';
+
+/** A pull request T3 linked to a session, with its last known state (open, merged, closed). */
+export type T3PullRequest = { repo: string; number: number; url: string; state: string };
 
 export type T3Session = {
   /** `${host}:${threadId}` */
@@ -37,13 +42,23 @@ export type T3Session = {
   /** The open question a running session is blocked on, and when TARDIS saw it. */
   askId?: string;
   askedAt?: number;
+  /** When TARDIS first saw T3 report this run as waiting on its owner. */
+  waitingSince?: number;
   /** What the owner was last told about: a run id or a question id. */
   toldFor?: string;
+  /** The model the session runs on, as T3 names it (claude-opus-5-5). */
+  model?: string;
+  /** Linked pull requests, oldest first, as T3 last reported them. */
+  pullRequests?: T3PullRequest[];
   createdAt?: string;
   updatedAt?: string;
 };
 
-type T3Thread = { threadId: string; title: string; link?: string; status: string; latestRunId: string | null; itemCount?: number; updatedAt?: string };
+type T3Thread = {
+  threadId: string; title: string; link?: string; status: string; latestRunId: string | null; itemCount?: number; updatedAt?: string;
+  model?: string;
+  pullRequests?: Array<{ repository?: string; number?: number; url?: string; state?: string }>;
+};
 type T3ThreadList = { threads: T3Thread[]; nextCursor: number | null };
 type T3ThreadRead = {
   thread: T3Thread;
@@ -73,6 +88,11 @@ const activity = new Map<string, { at?: string; asked: boolean }>();
 /** Hosts whose last look failed. Their sessions wait: nothing is read from them
  *  until they answer again, and the outage is logged once, not every tick. */
 const unreachable = new Set<string>();
+/** When each host last answered a full look, so the Sessions tab can say how fresh its rows are. */
+const seenAt = new Map<string, number>();
+/** Owner wakes run only where startT3SessionWatch turned them on. A side copy
+ *  keeps its records current, read-only, and never messages anyone. */
+let wakesOn = false;
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const cleanTitle = (title: string | undefined): string => (title ?? '').trim().slice(0, 200);
 let loaded: Promise<void> | null = null;
@@ -100,20 +120,35 @@ function findAgent(ref: string): Agent | undefined {
   return listAgents().find((agent) => agent.id === needle || agent.name.trim().toLowerCase() === needle);
 }
 
+/** The pull requests T3 linked to a thread, oldest first. */
+function pullRequestsOf(thread: T3Thread): T3PullRequest[] {
+  return (thread.pullRequests ?? []).flatMap((pr) => (typeof pr.number === 'number' && typeof pr.url === 'string' && /^https:\/\//.test(pr.url)
+    ? [{ repo: pr.repository ?? '', number: pr.number, url: pr.url, state: pr.state ?? 'open' }]
+    : []));
+}
+
 /** Fold what T3 says about a thread into its record. True when it changed. */
 function observe(session: T3Session, thread: T3Thread, quiet: boolean, now: number): boolean {
   const before = JSON.stringify(session);
   session.title = cleanTitle(thread.title) || session.title;
   if (thread.link) session.link = thread.link;
+  if (thread.model) session.model = thread.model;
+  const pullRequests = pullRequestsOf(thread);
+  if (pullRequests.length) session.pullRequests = pullRequests;
+  else delete session.pullRequests;
   const runId = thread.latestRunId ?? undefined;
   if (runId !== session.runId) {
     session.runId = runId;
     session.runStartedAt = now;
     delete session.runEndedAt;
+    delete session.waitingSince;
   }
   session.status = thread.status;
   if (isLive(session)) delete session.runEndedAt;
   else session.runEndedAt ??= now;
+  // A wait is timed from when it began, never from the work before it.
+  if (session.status === 'waiting') session.waitingSince ??= now;
+  else delete session.waitingSince;
   // A question stands only while the session stays quiet behind it.
   if (!isLive(session) || !quiet) { delete session.askId; delete session.askedAt; }
   return JSON.stringify(session) !== before;
@@ -164,6 +199,7 @@ async function observeHost(host: T3Host, now: number): Promise<boolean> {
       break;
     }
   }
+  seenAt.set(host.name, Date.now());
   for (const session of wentQuiet) {
     // Marked looked-for only once the look succeeded, so a failed one runs again next tick.
     try {
@@ -295,7 +331,7 @@ async function tick(): Promise<void> {
       if (!watched(session, now) || !t3Host(session.host)) { sessions.delete(session.id); changed = true; }
     }
     for (const id of activity.keys()) if (!sessions.has(id)) activity.delete(id);
-    changed = await wakeOwners(now) || changed;
+    if (wakesOn) changed = await wakeOwners(now) || changed;
     if (changed) await persist();
   } catch (error) {
     console.warn('[t3] session watch tick failed:', errorText(error));
@@ -304,10 +340,13 @@ async function tick(): Promise<void> {
   }
 }
 
-/** Watch owned T3 sessions. A no-op until RIVENDELL_T3_HOSTS names a host. */
-export function startT3SessionWatch(): void {
+/** Watch owned T3 sessions. A no-op until RIVENDELL_T3_HOSTS names a host.
+ *  Without `wake` (a side copy) the records still follow T3, read-only, so the
+ *  Sessions tab stays live, but no owner is ever messaged. */
+export function startT3SessionWatch({ wake }: { wake: boolean }): void {
   if (!t3Hosts().length) return;
-  console.log(`[t3] watching agent-owned sessions on ${t3Hosts().map((host) => host.name).join(', ')}`);
+  wakesOn = wake;
+  console.log(`[t3] watching agent-owned sessions on ${t3Hosts().map((host) => host.name).join(', ')}${wake ? '' : ' (read-only: owner wakes are off)'}`);
   setInterval(() => void tick(), TICK_MS).unref();
   void tick();
 }
@@ -335,6 +374,42 @@ export async function registerT3Session(input: { owner: string; host: string; th
   await persist();
   void tick();
   return { ok: true, session };
+}
+
+/** working: a run is going. waiting: a run is blocked on its owner. finished: no run is going. */
+export type T3SessionPhase = 'working' | 'waiting' | 'finished';
+/** One session as the Sessions tab shows it. `since` is when it entered its phase. */
+export type T3SessionRow = {
+  id: string; host: string; threadId: string; ownerId: string; title: string; link?: string;
+  phase: T3SessionPhase; status: string; since: number;
+  model?: string; pullRequests?: T3PullRequest[];
+};
+/** `reachable` turns false once a look at the host fails. `seenAt` is when it
+ *  last answered one; a host with no watched sessions is never looked at, so
+ *  it has none. */
+export type T3HostStatus = { name: string; reachable: boolean; seenAt?: number };
+
+function rowOf(session: T3Session): T3SessionRow {
+  const phase: T3SessionPhase = !isLive(session) ? 'finished' : session.askId || session.status === 'waiting' ? 'waiting' : 'working';
+  const since = phase === 'working' ? session.runStartedAt
+    : phase === 'waiting' ? session.askedAt ?? session.waitingSince ?? session.runStartedAt
+      : session.runEndedAt ?? session.runStartedAt;
+  return {
+    id: session.id, host: session.host, threadId: session.threadId, ownerId: session.ownerId, title: session.title,
+    ...(session.link ? { link: session.link } : {}),
+    phase, status: session.status, since,
+    ...(session.model ? { model: session.model } : {}),
+    ...(session.pullRequests?.length ? { pullRequests: session.pullRequests } : {}),
+  };
+}
+
+/** Every watched session, latest change first, and how each host is answering. */
+export async function allT3Sessions(): Promise<{ hosts: T3HostStatus[]; sessions: T3SessionRow[] }> {
+  await load();
+  return {
+    hosts: t3Hosts().map(({ name }) => ({ name, reachable: !unreachable.has(name), ...(seenAt.has(name) ? { seenAt: seenAt.get(name) } : {}) })),
+    sessions: [...sessions.values()].map(rowOf).sort((a, b) => b.since - a.since),
+  };
 }
 
 export type LiveT3Session = { id: string; host: string; threadId: string; ownerId: string; title: string; link?: string; state: string; runningSince: number };
