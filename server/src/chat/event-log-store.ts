@@ -1,6 +1,6 @@
-import { appendFile, mkdir, open as openFile, rename, rm } from 'node:fs/promises';
+import { mkdir, open as openFile, rename, rm } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
-import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { MAX_EVENTS_PER_LOG, STATE_DIR } from './config.ts';
 import { redactEventSecrets, redactSerializedSecrets } from './secretRedaction.ts';
@@ -1495,7 +1495,7 @@ function writeEventLineSync(key: string, persisted: PersistedEvent): PersistedEv
     // hostile object key, raw prose a tool embedded in a non-plain instance)
     // still gets one last text-level scan before the line is durable.
     const safe = redactEventSecrets(persisted);
-    appendFileSync(logPath(key), redactSerializedSecrets(JSON.stringify(safe)) + '\n', 'utf8');
+    appendLinesSync(logPath(key), redactSerializedSecrets(JSON.stringify(safe)) + '\n');
     mattAskHooks(key, safe);
     bumpEventLogRevision(persisted.ev);
     return safe;
@@ -1533,7 +1533,7 @@ export function appendEventLog(key: string, persisted: PersistedEvent): void {
     .then(async () => {
       try {
         await mkdir(EVENT_LOG_DIR, { recursive: true });
-        await appendFile(path, line, 'utf8');
+        appendLinesSync(path, line);
         bumpEventLogRevision(persisted.ev);
         mattAskHooks(key, safe);
       } catch (err) {
@@ -1717,6 +1717,26 @@ type LogLine = { raw: string; seq: number | null; plumbing: boolean };
 /** Remove old invisible protocol chatter without sacrificing the allocator's
  * high-water mark. If the newest record is plumbing, retain that ONE line so a
  * restart cannot reuse its seq; loadEventLogSync still hides it from replay. */
+/** Append whole JSONL records. A tail torn by a crash or an older build is
+ *  closed off first, so a new record never glues onto it, and a write the disk
+ *  refuses (ENOSPC) is rolled back to the old length, so it never leaves half a
+ *  line behind for the next record to land on. */
+function appendLinesSync(path: string, data: string | ((fd: number) => void)): void {
+  const fd = openSync(path, 'a+'); // readable too, for the tail check
+  let size = 0;
+  try {
+    size = fstatSync(fd).size;
+    if (size > 0 && readRange(fd, size - 1, size)[0] !== 0x0a) writeAllSync(fd, '\n');
+    if (typeof data === 'string') writeAllSync(fd, data);
+    else data(fd);
+  } catch (err) {
+    try { ftruncateSync(fd, size); } catch { /* the caller still sees the write error */ }
+    throw err;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** writeSync can short-write; loop until the whole payload lands, like
  *  writeFileSync does internally. A zero/negative count is an error, not a
  *  silent truncation. */
@@ -2054,21 +2074,9 @@ function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void
       // leaves the log untrimmed, silently, exactly like a write failure: the
       // open sits inside its own guard (the Oct 15 verify finding — a bare
       // open let the throw escape the trim instead).
-      let afd: number;
       try {
-        afd = openSync(archivePath(key), 'a');
+        appendLinesSync(archivePath(key), (afd) => { for (const line of dropped) writeAllSync(afd, `${line}\n`); });
       } catch (err) {
-        console.warn(
-          `[event-log-store] archive failed for ${key}, leaving log untrimmed:`,
-          (err as Error).message,
-        );
-        return;
-      }
-      try {
-        for (const line of dropped) writeAllSync(afd, `${line}\n`);
-        closeSync(afd);
-      } catch (err) {
-        try { closeSync(afd); } catch { /* already closed */ }
         console.warn(
           `[event-log-store] archive failed for ${key}, leaving log untrimmed:`,
           (err as Error).message,
