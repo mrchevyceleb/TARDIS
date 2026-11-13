@@ -156,14 +156,19 @@ def tick(config, state, now, config_path=None):
     outage_alert(state, now, not healthy)
     if healthy:
         state.pop('first_bad', None)
-        if new_process:
+        # Each process is checked once, on its first healthy tick. A deploy is
+        # usually still booting when its new PID is first seen; checking only
+        # then left every release after Nov 10 2026 unwatched. A PID can be
+        # reused, so a process is its PID plus when the unit became active.
+        process = f"{pid}@{info.get('ActiveEnterTimestampMonotonic', '')}"
+        if state.get('checked_process') != process:
             try:
                 approved = checked_release(config) or adopt_checked_release(config, info, config_path)
             except (OSError, ValueError, subprocess.SubprocessError):
                 # A git call that is slow while the new process starts is not
                 # a verdict on the build: check this process again next tick.
-                state.pop('pid', None)
                 return
+            state['checked_process'] = process
             if approved:
                 state.pop('unapproved_source', None)
                 state.pop('unapproved_notice_pid', None)
