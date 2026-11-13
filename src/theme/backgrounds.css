@@ -42,8 +42,9 @@
 @keyframes scene-scroll { to { translate: var(--dx, 0px) var(--dy, 0px); } }
 @keyframes scene-glow { from { opacity: .3; } to { opacity: 1; } }
 @keyframes scene-wave { from { transform: translate(-6%, 6%) rotate(-14deg); } to { transform: translate(7%, -6%) rotate(12deg); } }
-[data-motion="calm"] .background-scene .scene-layer,
-.background-scene[data-hidden] .scene-layer { animation-play-state: paused !important; }
+/* Pseudo-elements cannot sit inside :is(), so each pause names ::before itself. */
+[data-motion="calm"] .background-scene .scene-layer, [data-motion="calm"] .background-scene .scene-layer::before,
+.background-scene[data-hidden] .scene-layer, .background-scene[data-hidden] .scene-layer::before { animation-play-state: paused !important; }
 
 /* Keep even the smallest thumbnails representative of the full scene. */
 .is-preview:is([data-scene="particles"], [data-scene="starfield"], [data-scene="bubbles"]) .scene-layer { inset: -100px; }
@@ -124,10 +125,86 @@
 /* CSS owns pause for the stage, the sample and every hovered thumbnail.
    Pausing rather than removing animations also preserves the chosen speed when
    the device toggles reduced motion without remounting the scene. */
-@media (prefers-reduced-motion: reduce) { .background-scene .scene-layer { animation-play-state: paused !important; } }
+@media (prefers-reduced-motion: reduce) { .background-scene .scene-layer, .background-scene .scene-layer::before { animation-play-state: paused !important; } }
 .is-preview[data-scene="bubbles"] .scene-layer { background-size: 65px 85px; --dy: -85px; }
 .is-preview[data-scene="ripples"] .scene-layer { background-size: 45% 70%; }
 .is-preview[data-scene="blinds"] .scene-layer { background-size: 50% 100%; }
 
 /* The first object is visible too when a scene opens in calm motion. */
 :is([data-scene="lanterns"], [data-scene="comets"], [data-scene="petals"]) .scene-one { animation-delay: -5s; }
+
+/* Room scenes. Same rules: three layers (one may carry a ::before), transform
+   and opacity only. Sizes are custom properties so thumbnails stay readable. */
+[data-scene="radar"] { --scene-opacity: .5; --ring: 72px; }
+[data-scene="radar"] .scene-layer { inset: 0; margin: auto; width: min(92cqw, 130cqh); aspect-ratio: 1; border-radius: 50%; }
+[data-scene="radar"] .scene-one {
+  background:
+    linear-gradient(90deg, transparent calc(50% - .5px), var(--scene-a) 0 calc(50% + .5px), transparent 0),
+    linear-gradient(0deg, transparent calc(50% - .5px), var(--scene-a) 0 calc(50% + .5px), transparent 0),
+    repeating-radial-gradient(circle, transparent 0 calc(var(--ring) - 1px), var(--scene-a) 0 var(--ring));
+  opacity: .55;
+}
+[data-scene="radar"] .scene-two { background: conic-gradient(from 0deg, transparent 0 290deg, var(--scene-a) 360deg); animation: scene-orbit 7s linear infinite; }
+[data-scene="radar"] .scene-three {
+  background:
+    radial-gradient(circle at 64% 30%, var(--r-emerald) 0 3px, transparent 5px),
+    radial-gradient(circle at 28% 62%, var(--scene-a) 0 3px, transparent 5px),
+    radial-gradient(circle at 71% 74%, var(--r-amber) 0 3px, transparent 5px);
+  animation: scene-glow 2.4s ease-in-out infinite alternate;
+}
+
+[data-scene="ruled"] { --scene-opacity: .55; --rule: 32px; }
+[data-scene="ruled"] .scene-one { inset: 0; background: repeating-linear-gradient(180deg, transparent 0 calc(var(--rule) - 1px), var(--r-violet) 0 var(--rule)); opacity: .55; }
+[data-scene="ruled"] .scene-two { inset: 0 auto 0 calc(var(--rule) * 2); width: 2px; background: var(--r-rose); opacity: .7; }
+[data-scene="ruled"] .scene-three { inset: 0 auto 0 calc(var(--rule) * .35); width: calc(var(--rule) * .7); background: radial-gradient(circle closest-side, var(--r-line-strong) 0 50%, transparent 56%) center / 100% 33.333% repeat-y; }
+
+[data-scene="synthgrid"] { --scene-opacity: .55; --cell: 64px; }
+[data-scene="synthgrid"] .scene-one {
+  inset: auto; left: 50%; top: calc(56% - min(34cqw, 44cqh) * .72); width: min(34cqw, 44cqh); aspect-ratio: 1; translate: -50% 0;
+  border-radius: 50%; background: linear-gradient(180deg, var(--r-amber), var(--r-rose) 75%);
+  clip-path: inset(0 0 28% 0);
+  mask-image: linear-gradient(180deg, #000 45%, transparent 45%), repeating-linear-gradient(180deg, #000 0 9%, transparent 9% 12%);
+  animation: scene-sun 5s ease-in-out infinite alternate;
+}
+[data-scene="synthgrid"] .scene-two { inset: 56% 0 0; perspective: 240px; overflow: hidden; mask-image: linear-gradient(180deg, transparent, #000 45%); }
+[data-scene="synthgrid"] .scene-two::before {
+  content: ''; position: absolute; left: -80%; right: -80%; top: 0; height: 300%; transform-origin: 50% 0;
+  background:
+    linear-gradient(90deg, var(--scene-a) 0 2px, transparent 2px) 0 0 / var(--cell) var(--cell),
+    linear-gradient(180deg, var(--scene-a) 0 2px, transparent 2px) 0 0 / var(--cell) var(--cell);
+  animation: scene-grid-roll 2.6s linear infinite;
+}
+[data-scene="synthgrid"] .scene-three {
+  inset: 0 0 46%;
+  background:
+    radial-gradient(circle, var(--r-ink) 0 1px, transparent 1.6px) 0 0 / 97px 71px,
+    radial-gradient(circle, var(--r-violet) 0 1px, transparent 1.6px) 41px 33px / 139px 93px;
+  background-repeat: repeat;
+  animation: scene-glow 3.6s ease-in-out infinite alternate;
+}
+
+[data-scene="hearth"] { --scene-opacity: .55; --ember: 1; }
+[data-scene="hearth"] .scene-one { inset: 30% -20% -40%; background: radial-gradient(ellipse at 50% 100%, var(--r-amber), transparent 62%); transform-origin: 50% 100%; animation: scene-flicker 3.1s steps(9, jump-none) infinite; }
+[data-scene="hearth"] .scene-two { inset: 45% 10% -30%; background: radial-gradient(ellipse at 45% 100%, var(--scene-a), transparent 58%); transform-origin: 50% 100%; animation: scene-flicker 2.3s steps(7, jump-none) infinite reverse; }
+[data-scene="hearth"] .scene-three {
+  inset: -400px;
+  background:
+    radial-gradient(circle at 30% 40%, var(--r-amber) 0 calc(2px * var(--ember)), transparent calc(4px * var(--ember))) 0 0 / 150px 230px,
+    radial-gradient(circle at 70% 75%, var(--r-rose) 0 calc(1.5px * var(--ember)), transparent calc(3px * var(--ember))) 0 0 / 210px 230px;
+  background-repeat: repeat;
+  --dy: -230px;
+  animation: scene-scroll 13s linear infinite, scene-glow 1.7s ease-in-out infinite alternate;
+}
+
+@keyframes scene-grid-roll { from { transform: rotateX(72deg) translateY(calc(var(--cell) * -1)); } to { transform: rotateX(72deg) translateY(0); } }
+@keyframes scene-sun { from { opacity: .72; } to { opacity: 1; } }
+@keyframes scene-flicker {
+  0% { opacity: .78; transform: scale(1); } 20% { opacity: .95; transform: scale(1.03, 1.06); } 35% { opacity: .8; transform: scale(.99, 1.01); }
+  55% { opacity: 1; transform: scale(1.04, 1.08); } 75% { opacity: .84; transform: scale(1.01, 1.02); } 100% { opacity: .9; transform: scale(1.02, 1.04); }
+}
+
+.is-preview[data-scene="radar"] { --ring: 14px; }
+.is-preview[data-scene="ruled"] { --rule: 9px; }
+.is-preview[data-scene="synthgrid"] { --cell: 14px; }
+.is-preview[data-scene="hearth"] { --ember: .6; }
+.is-preview[data-scene="hearth"] .scene-three { inset: -100px; background-size: 50px 76px, 70px 76px; --dy: -76px; }

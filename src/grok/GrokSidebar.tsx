@@ -1,4 +1,3 @@
-import { hasRecentTurnSignal } from '../chat/utils/livePresence';
 // Grok Bot left rail — THE TEAM, one list, no redundancy:
 //
 //   mark [+]   ·   Search
@@ -55,7 +54,7 @@ import { OTHER_GROUP_ID, OTHER_GROUP_NAME } from './railGroups';
 import { useRailGroups } from './useRailGroups';
 import { agentMark, DISC_INK, agentColor, agentAvatarUrl, sameChatId, CHAT_COLORS, chatColorOf, type Agent, type AgentFlagPatch, type ChatColor } from './agents';
 import { agentTaskMap, agentTaskSubline, useDeskCardsLight, useDeskPrs, type AgentTaskSlot, type DeskPr, type TaskQueryState } from '../data/desk';
-import { useLive } from '../chat/hooks/useLive';
+import { useTeamPresence } from './teamPresence';
 import { useJobsSummary } from '../chat/hooks/useJobs';
 import { useMediaQuery } from '../chat/hooks/useMediaQuery';
 import { RailJobsBadge } from '../chat/components/jobs/RailJobsBadge';
@@ -71,7 +70,7 @@ import { AppearanceSettings } from '../theme/AppearanceSettings';
 import type { ThemeName } from '../theme/applyTheme';
 import type { Appearance } from '../theme/themes';
 import { TIMEY_WIMEY } from '../theme/voice';
-import { readSound, useIdle, useTripleTap, vworp, writeSound } from '../theme/eggs';
+import { useIdle, useSound, useTripleTap, vworp } from '../theme/eggs';
 
 export type RoomEntry = { key: string; label: string; icon: React.ReactNode };
 
@@ -125,6 +124,8 @@ export type BotRailProps = {
   appearance: Appearance;
   appearanceSync: 'loading' | 'saving' | 'saved' | 'local' | 'error';
   onAppearance: (a: Appearance) => void;
+  /** Opens the Rooms sheet (from the appearance panel). */
+  onOpenRooms: () => void;
   onToggleTheme: () => void;
   onOpenStudio: () => void;
   onHome: () => void;
@@ -417,7 +418,9 @@ export function BotRail(props: BotRailProps) {
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropBefore, setDropBefore] = useState<string | null>(null);
   const pluginsRef = useRef<HTMLDivElement | null>(null);
-  const live = useLive();
+  // Online lamps, plus the lanes mid-turn: the "working" count on a folded
+  // group and the ring on a row's presence lamp.
+  const { live: liveAgents, busy: busyAgents, anyBusy } = useTeamPresence(props.agents);
   const menuAgent = agentMenu ? props.agents.find((a) => a.id === agentMenu.id) : undefined;
   const openAgentMenu = (e: MouseEvent, a: Agent) => {
     e.preventDefault();
@@ -480,8 +483,7 @@ export function BotRail(props: BotRailProps) {
   // (never while any lane is busy), a lamp flash on a triple tap of the mark,
   // and an opt-in synthesised vworp. None of these touch a turn.
   const idle = useIdle(600_000);
-  const anyBusy = live.some((s) => s.busy);
-  const [sound, setSound] = useState(readSound);
+  const [sound, setSound] = useSound();
   const soundRef = useRef(sound);
   soundRef.current = sound;
   const [lampFlash, setLampFlash] = useState(false);
@@ -519,25 +521,6 @@ export function BotRail(props: BotRailProps) {
     return map;
   }, [props.items, props.hubRepo, props.agents]);
 
-  const liveAgents = useMemo(() => {
-    const set = new Set<string>();
-    for (const s of live) {
-      const a = props.agents.find((aa) => (s.agentId ? s.agentId === aa.id : s.chatId.replace(/__acct__[a-z0-9-]+$/i, '').replace(/__bg$/, '') === aa.home));
-      if (a) set.add(a.id);
-    }
-    return set;
-  }, [live, props.agents]);
-  // Same match, but only lanes mid-turn: the "working" count on a folded group
-  // and the ring on a row's presence lamp.
-  const busyAgents = useMemo(() => {
-    const set = new Set<string>();
-    for (const s of live) {
-      if (!hasRecentTurnSignal(s)) continue;
-      const a = props.agents.find((aa) => (s.agentId ? s.agentId === aa.id : s.chatId.replace(/__acct__[a-z0-9-]+$/i, '').replace(/__bg$/, '') === aa.home));
-      if (a) set.add(a.id);
-    }
-    return set;
-  }, [live, props.agents]);
   // Running background jobs per agent (one request for the whole rail). A job
   // is not a turn: an agent on jobs is busy but free to talk, so it gets its
   // own outlined badge and never the working lamp.
@@ -579,8 +562,11 @@ export function BotRail(props: BotRailProps) {
     if (e.button !== 0 || !rail) return;
     e.preventDefault();
     const handle = e.currentTarget;
-    const left = rail.getBoundingClientRect().left;
-    const move = (ev: PointerEvent) => setRailWidth(clampRailWidth(ev.clientX - left));
+    // A mirrored room seats the rail on the right, so its inner edge is its left.
+    const { left, right } = rail.getBoundingClientRect();
+    const move = mirroredRail()
+      ? (ev: PointerEvent) => setRailWidth(clampRailWidth(right - ev.clientX))
+      : (ev: PointerEvent) => setRailWidth(clampRailWidth(ev.clientX - left));
     const end = () => {
       handle.removeEventListener('pointermove', move);
       for (const type of ['pointerup', 'pointercancel', 'lostpointercapture'] as const) handle.removeEventListener(type, end);
@@ -973,6 +959,7 @@ export function BotRail(props: BotRailProps) {
                   </span>
                   <span className="bt-pin-name">{a.name}</span>
                   <span className="bt-pin-role">{a.role}</span>
+                  <PinSeat working={busyAgents.has(a.id)} online={liveAgents.has(a.id)} info={taskMap.get(a.id)} tasksState={tasksState} prs={(deskPrsQuery.data?.prs ?? []).filter((p) => p.owner === a.name)} prsState={prsState} />
                   {onJobs ? <RailJobsBadge running={onJobs.running} latest={onJobs.latest} latestLine={onJobs.latestLine} /> : null}
                   <T3SessionsBadge sessions={t3Sessions.byAgent.get(a.id)} />
                   {chatColorOf(a) ? <span className="bt-sr">{colorLabel(a)}</span> : null}
@@ -1089,7 +1076,7 @@ export function BotRail(props: BotRailProps) {
             <button className="bt-plug-row" onClick={() => { props.onToggleTheme(); setPluginsOpen(false); }}>
               {props.theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />} {props.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
             </button>
-            <button className="bt-plug-row" onClick={() => { const next = !sound; setSound(next); writeSound(next); if (next) vworp(); }} aria-pressed={sound}>
+            <button className="bt-plug-row" onClick={() => { const next = !sound; setSound(next); if (next) vworp(); }} aria-pressed={sound}>
               {sound ? <Volume2 size={16} /> : <VolumeX size={16} />} Sound {sound ? 'on' : 'off'}
             </button>
             <NativeOpenHelper />
@@ -1127,6 +1114,7 @@ export function BotRail(props: BotRailProps) {
           appearance={props.appearance}
           syncStatus={props.appearanceSync}
           onAppearance={props.onAppearance}
+          onOpenRooms={() => { setAppearanceOpen(false); props.onOpenRooms(); }}
           onClose={(restoreFocus = true) => {
             setAppearanceOpen(false);
             if (restoreFocus) {
@@ -1180,11 +1168,24 @@ export function BotRail(props: BotRailProps) {
         onKeyDown={(e) => {
           if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
           e.preventDefault();
-          setRailWidth((w) => clampRailWidth(w + (e.key === 'ArrowRight' ? RAIL_KEY_STEP : -RAIL_KEY_STEP)));
+          const outward = (e.key === 'ArrowRight') !== mirroredRail();
+          setRailWidth((w) => clampRailWidth(w + (outward ? RAIL_KEY_STEP : -RAIL_KEY_STEP)));
         }}
       />
     </aside>
   );
+}
+
+function mirroredRail(): boolean {
+  return document.documentElement.dataset.layout === 'mirror';
+}
+
+// A seat in the seating-chart team view: a lamp and what they are on. Other
+// team views hide it; the row's own lamp and title already say who is here.
+function PinSeat({ working, online, info, tasksState, prs, prsState }: { working: boolean; online: boolean; info?: AgentTaskSlot; tasksState: TaskQueryState; prs: DeskPr[]; prsState: TaskQueryState }) {
+  const line = agentTaskSubline(info ?? {}, prs, tasksState, prsState);
+  const state = working ? 'Working' : online ? 'Online' : 'Free';
+  return <span className="bt-pin-seat" data-state={state.toLowerCase()}><i aria-hidden="true" /><span className="bt-sr">{state}. </span>{line.text}</span>;
 }
 
 // The line under a teammate's name: what they are actually working on, in

@@ -1,8 +1,9 @@
 # Appearance fonts
 
 Most families use Latin and extended Latin WOFF2 variable subsets from the
-Google Fonts CSS API, plus Vietnamese where upstream provides it, weights 400 to 700. Lora and Quicksand use
-complete upstream fonts, as described below.
+Google Fonts CSS API, plus Vietnamese where upstream provides it, weights 400 to 700.
+Silkscreen and Courier Prime are static, so their 400 and 700 weights are separate files.
+Lora and Quicksand use complete upstream fonts, as described below.
 The browser downloads a family on selection or a name preview on hover/focus.
 Additional language subsets load only when their characters are used.
 Scripts a family does not cover fall back to system fonts. All families use the SIL Open Font License.
@@ -19,6 +20,8 @@ Scripts a family does not cover fall back to system fonts. All families use the 
 - Newsreader: https://github.com/google/fonts/tree/main/ofl/newsreader (license: newsreader-OFL.txt)
 - Fraunces: https://github.com/google/fonts/tree/main/ofl/fraunces (license: fraunces-OFL.txt)
 - Roboto Mono: https://github.com/google/fonts/tree/main/ofl/robotomono (license: roboto-mono-OFL.txt)
+- Silkscreen: https://github.com/google/fonts/tree/main/ofl/silkscreen (license: silkscreen-OFL.txt)
+- Courier Prime: https://github.com/google/fonts/tree/main/ofl/courierprime (license: courier-prime-OFL.txt)
 
 Lora and Quicksand declare Reserved Font Names. Their files here are the complete
 upstream variable TTFs with WOFF2 compression only, using fontTools. No glyph

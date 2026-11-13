@@ -1,4 +1,5 @@
 import { BACKGROUNDS } from './backgrounds';
+import { DISPLAY_FACES, LAYOUTS, PAINT_RE, SOUND_KITS, SURFACES, TEAM_VIEWS, type DisplayId, type LayoutId, type SoundKit, type SurfaceId, type TeamView } from './roomParts';
 
 // Theme library: named palettes, appearance knobs, and persistence.
 // Every custom palette is a compact set of canonical colors expanded into the
@@ -321,6 +322,27 @@ export function pickOn(accent: string): string {
   return contrast(accent, BLACK) >= contrast(accent, WHITE) ? BLACK : WHITE;
 }
 
+/** A room's own colors, made safe to read. The background decides day or
+ *  night whatever the label claims, then is held inside a band where every
+ *  surface, overlay and backdrop stays legible; ink keeps strong contrast.
+ *  expandTokens then checks every text color against every surface. */
+const paintCache = new Map<string, ThemeDef>();
+export function paintDef(paint: string): ThemeDef | null {
+  if (!PAINT_RE.test(paint)) return null;
+  const hit = paintCache.get(paint);
+  if (hit) return hit;
+  const [, ...hexes] = paint.split(' ');
+  let [bg, ink] = hexes;
+  const [, , accent, emerald, amber, rose, violet] = hexes;
+  const mode: Mode = luminance(bg) < 0.2 ? 'dark' : 'light';
+  for (let i = 0; i < 24 && mode === 'dark' && luminance(bg) > 0.035; i++) bg = mix(bg, BLACK, 0.12);
+  for (let i = 0; i < 24 && mode === 'light' && luminance(bg) < 0.78; i++) bg = mix(bg, WHITE, 0.15);
+  ink = ensure(ink, bg, 9, mode);
+  const def = playground('room', 'Room colors', mode, '', bg, ink, accent, emerald, amber, rose, violet);
+  paintCache.set(paint, def);
+  return def;
+}
+
 /* --------------------------- token expansion --------------------------- */
 
 function cm(color: string, pct: number, alphaTail = 'transparent'): string {
@@ -417,6 +439,17 @@ export interface Appearance {
   background: string;         // BACKGROUNDS id
   backgroundIntensity: number; // 0..1, deliberately capped by the renderer
   backgroundSpeed: number;     // .25..4, playback multiplier independent of pause
+  // Rooms: the whole place, not just its paint. See rooms.ts.
+  room: string;               // the room this look came from
+  layout: LayoutId;           // where the team, chat and Desk sit
+  team: TeamView;             // how the team shows up
+  surface: SurfaceId;         // the shape of cards, bubbles and panels
+  sounds: SoundKit;           // the room's little noises (device sound toggle still rules)
+  display: DisplayId;         // face for names, labels and headings
+  paint: string | null;       // a room's own colors; null = the palette above
+  daily: boolean;             // redecorate each morning
+  pin: string | null;         // a pinned room the morning routine keeps
+  redecorated: string | null; // YYYY-MM-DD of the last morning redecoration
 }
 
 export const APPEARANCE_KEY = 'rivendell:appearance';
@@ -497,15 +530,22 @@ export const DEFAULT_APPEARANCE: Appearance = {
   palette: DEFAULT_PALETTE, style: 'console', accent: null,
   font: 'system', textScale: 1, radius: 1, motion: true,
   contrast: 'standard', background: 'original', backgroundIntensity: .65, backgroundSpeed: 1,
+  room: 'console', layout: 'classic', team: 'portraits', surface: 'soft', sounds: 'console',
+  display: 'body', paint: null, daily: false, pin: null, redecorated: null,
 };
 
 export function findPalette(id: string): ThemeDef {
   return PALETTES.find((p) => p.id === id) ?? PALETTES[0];
 }
 
+/** The colors actually on screen: a room's own paint, else the palette. */
+export function effectiveDef(a: Pick<Appearance, 'palette' | 'paint'>): ThemeDef {
+  return (a.paint && paintDef(a.paint)) || findPalette(a.palette);
+}
+
 /** Mode/style this appearance will apply to <html> datasets. */
 export function appearanceAxes(a: Appearance): { mode: Mode; style: StyleAxis } {
-  const def = findPalette(a.palette);
+  const def = effectiveDef(a);
   return { mode: def.mode, style: def.legacyStyle ?? a.style };
 }
 
@@ -530,6 +570,16 @@ export function normalizeAppearance(value: unknown, base: Appearance = DEFAULT_A
   if (BACKGROUNDS.some((b) => b.id === v.background)) a.background = v.background!;
   if (typeof v.backgroundIntensity === 'number' && v.backgroundIntensity >= 0 && v.backgroundIntensity <= 1) a.backgroundIntensity = v.backgroundIntensity;
   if (typeof v.backgroundSpeed === 'number' && v.backgroundSpeed >= .25 && v.backgroundSpeed <= 4) a.backgroundSpeed = v.backgroundSpeed;
+  if (typeof v.room === 'string' && /^[a-z0-9-]{1,48}$/.test(v.room)) a.room = v.room;
+  if (LAYOUTS.some((x) => x.id === v.layout)) a.layout = v.layout!;
+  if (TEAM_VIEWS.some((x) => x.id === v.team)) a.team = v.team!;
+  if (SURFACES.some((x) => x.id === v.surface)) a.surface = v.surface!;
+  if (SOUND_KITS.some((x) => x.id === v.sounds)) a.sounds = v.sounds!;
+  if (DISPLAY_FACES.some((x) => x.id === v.display)) a.display = v.display!;
+  if (v.paint === null || (typeof v.paint === 'string' && PAINT_RE.test(v.paint))) a.paint = v.paint;
+  if (typeof v.daily === 'boolean') a.daily = v.daily;
+  if (v.pin === null || (typeof v.pin === 'string' && /^[a-z0-9-]{1,48}$/.test(v.pin))) a.pin = v.pin;
+  if (v.redecorated === null || (typeof v.redecorated === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v.redecorated))) a.redecorated = v.redecorated;
   return a;
 }
 
@@ -573,7 +623,7 @@ export function writeAppearance(a: Appearance): void {
     // keep the legacy keys coherent for the boot script and older surfaces
     localStorage.setItem('rivendell:theme', mode);
     localStorage.setItem('rivendell:style', style);
-    localStorage.setItem(BOOT_BG_KEY, findPalette(a.palette).colors.bg);
+    localStorage.setItem(BOOT_BG_KEY, effectiveDef(a).colors.bg);
   } catch { /* the controls still work without storage */ }
 }
 
@@ -582,16 +632,23 @@ export const APPLIED_PROP_KEYS = [
   ...Object.keys(expandTokens(PALETTES[0])),
   '--r-body', '--r-display', '--r-sign', '--r-mono',
   '--r-radius-sm', '--r-radius', '--r-radius-lg', '--r-radius-xl', '--r-text-scale',
+  '--r-round', '--r-room-display',
 ];
 
 const RADIUS_BASE = { sm: 4, r: 8, lg: 14, xl: 20 } as const;
 
-export function applyAppearance(a: Appearance, root: HTMLElement = document.documentElement): void {
-  const def = findPalette(a.palette);
+/** Put a look on screen without saving it: a room preview, or the saved look. */
+export function paintAppearance(a: Appearance, root: HTMLElement = document.documentElement): void {
+  const def = effectiveDef(a);
   const { mode, style } = appearanceAxes(a);
   root.dataset.theme = mode;
   root.dataset.background = a.background;
   root.dataset.style = style;
+  root.dataset.layout = a.layout;
+  root.dataset.team = a.team;
+  root.dataset.surface = a.surface;
+  root.dataset.display = a.display;
+  root.dataset.sounds = a.sounds;
   if (a.motion) delete root.dataset.motion;
   else root.dataset.motion = 'calm';
 
@@ -604,8 +661,12 @@ export function applyAppearance(a: Appearance, root: HTMLElement = document.docu
 
   const font = FONTS.find((f) => f.id === a.font);
   if (font?.vars) for (const [k, v] of Object.entries(font.vars)) root.style.setProperty(k, v);
+  const display = DISPLAY_FACES.find((f) => f.id === a.display);
+  if (display && display.id !== 'body') root.style.setProperty('--r-room-display', display.stack);
 
   if (a.radius !== 1) {
+    // --r-round scales the shell's own shapes (bubbles, cards, rows, tabs).
+    root.style.setProperty('--r-round', String(a.radius));
     root.style.setProperty('--r-radius-sm', `${Math.round(RADIUS_BASE.sm * a.radius)}px`);
     root.style.setProperty('--r-radius', `${Math.round(RADIUS_BASE.r * a.radius)}px`);
     root.style.setProperty('--r-radius-lg', `${Math.round(RADIUS_BASE.lg * a.radius)}px`);
@@ -618,7 +679,10 @@ export function applyAppearance(a: Appearance, root: HTMLElement = document.docu
   const bg = def.colors.bg;
   root.style.setProperty('--boot-bg', bg);
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', bg);
+}
 
+export function applyAppearance(a: Appearance, root: HTMLElement = document.documentElement): void {
+  paintAppearance(a, root);
   writeAppearance(a);
 }
 
@@ -628,18 +692,18 @@ export function paletteIndex(a: Appearance): number {
 
 export function cycleAppearance(a: Appearance): Appearance {
   const next = PALETTES[(paletteIndex(a) + 1) % PALETTES.length];
-  return { ...a, palette: next.id, style: next.legacyStyle ?? a.style };
+  return { ...a, palette: next.id, style: next.legacyStyle ?? a.style, paint: null };
 }
 
 /** Switch the light/dark axis, keeping the style axis (console/lavender) look. */
 export function withMode(a: Appearance, mode: Mode): Appearance {
-  const def = findPalette(a.palette);
+  const def = effectiveDef(a);
   if (def.mode === mode) return a;
   const style = def.legacyStyle ?? a.style;
   const palette = style === 'lavender'
     ? (mode === 'light' ? 'lavender-light' : 'lavender')
     : (mode === 'light' ? 'console-light' : 'console');
-  return { ...a, palette, style };
+  return { ...a, palette, style, paint: null };
 }
 
 /** Switch the console/lavender axis; legacy palettes follow their look. */
@@ -655,9 +719,9 @@ export function withStyle(a: Appearance, style: StyleAxis): Appearance {
 }
 
 export function shuffleAppearance(a: Appearance): Appearance {
-  const others = PALETTES.filter((p) => p.id !== a.palette);
+  const others = PALETTES.filter((p) => a.paint || p.id !== a.palette);
   const pick = others[Math.floor(Math.random() * others.length)];
-  return { ...a, palette: pick.id, style: pick.legacyStyle ?? a.style };
+  return { ...a, palette: pick.id, style: pick.legacyStyle ?? a.style, paint: null };
 }
 
 /** Cycle/shuffle from storage, for surfaces that do not hold React state. */

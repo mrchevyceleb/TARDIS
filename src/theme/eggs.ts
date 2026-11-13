@@ -78,20 +78,37 @@ export function useTripleTap(onFire: () => void, windowMs = 900): () => void {
 // A NEW key on purpose: never a rivendell:* key, and off unless explicitly on.
 export const SOUND_KEY = 'tardis:sound';
 
+const SOUND_EVENT = 'tardis:sound-change';
+let pageSound: boolean | null = null;
+
 export function readSound(): boolean {
   try {
     return localStorage.getItem(SOUND_KEY) === 'on';
   } catch {
-    return false;
+    return pageSound ?? false;
   }
 }
 
 export function writeSound(on: boolean): void {
+  pageSound = on;
   try {
     localStorage.setItem(SOUND_KEY, on ? 'on' : 'off');
   } catch {
     /* private mode — the toggle still works for this page */
   }
+  window.dispatchEvent(new Event(SOUND_EVENT));
+}
+
+/** The device's Sound switch, kept in step everywhere it appears. */
+export function useSound(): [boolean, (on: boolean) => void] {
+  const [on, setOn] = useState(readSound);
+  useEffect(() => {
+    const sync = () => setOn(readSound());
+    window.addEventListener(SOUND_EVENT, sync);
+    window.addEventListener('storage', sync);
+    return () => { window.removeEventListener(SOUND_EVENT, sync); window.removeEventListener('storage', sync); };
+  }, []);
+  return [on, writeSound];
 }
 
 let ctx: AudioContext | null = null;
@@ -102,13 +119,19 @@ export function soundUnlocked(): boolean {
   return ctx !== null && ctx.state === 'running';
 }
 
+/** The page's one AudioContext. Create it only from a gesture handler. */
+export function audioContext(): AudioContext {
+  ctx ??= new AudioContext();
+  if (ctx.state === 'suspended') void ctx.resume();
+  return ctx;
+}
+
 /** An original, synthesised "vworp". Two detuned saws + a triangle through a
     resonant low-pass; one slow LFO both sweeps the cutoff and drives a
     tremolo — that is the wheeze. ~2.6 s, quiet. Call from a gesture handler. */
 export function vworp(): void {
   try {
-    ctx ??= new AudioContext();
-    if (ctx.state === 'suspended') void ctx.resume();
+    const ctx = audioContext();
     const t0 = ctx.currentTime;
     const dur = 2.6;
 

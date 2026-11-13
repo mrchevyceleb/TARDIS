@@ -1,18 +1,20 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, Dices, Pause, Play, RotateCcw, X } from 'lucide-react';
+import { Check, Dices, DoorOpen, Pause, Play, RotateCcw, X } from 'lucide-react';
 import {
   ACCENT_PRESETS, FONTS, PALETTES, RADIUS_STEPS, TEXT_SCALES,
-  PRE_SYNC_KEY, SYNCED_KEY, defaultAppearance, readPreviousAppearance, findPalette, shuffleAppearance, type Appearance,
+  PRE_SYNC_KEY, SYNCED_KEY, defaultAppearance, effectiveDef, readPreviousAppearance, findPalette, shuffleAppearance, type Appearance,
 } from './themes';
 import { BackgroundScene } from './BackgroundScene';
 import { BACKGROUNDS } from './backgrounds';
 import './appearance.css';
 
-export function AppearanceSettings({ appearance, onAppearance, onClose, triggerRef, syncStatus }: {
+export function AppearanceSettings({ appearance, onAppearance, onOpenRooms, onClose, triggerRef, syncStatus }: {
   appearance: Appearance;
   syncStatus: 'loading' | 'saving' | 'saved' | 'local' | 'error';
   onAppearance: (next: Appearance) => void;
+  /** Rooms change the whole place; this panel fine-tunes the one you are in. */
+  onOpenRooms: () => void;
   onClose: (restoreFocus?: boolean) => void;
   triggerRef: RefObject<HTMLButtonElement | null>;
 }) {
@@ -101,11 +103,12 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
 
   const themeCard = (id: string) => {
     const p = PALETTES.find((t) => t.id === id)!;
-    return <button type="button" key={p.id} className="appearance-theme" aria-pressed={appearance.palette === p.id} onClick={() => patch({ palette: p.id, style: p.legacyStyle ?? appearance.style })} title={p.blurb}>
+    const on = appearance.palette === p.id && !appearance.paint;
+    return <button type="button" key={p.id} className="appearance-theme" aria-pressed={on} onClick={() => patch({ palette: p.id, style: p.legacyStyle ?? appearance.style, paint: null })} title={p.blurb}>
       <span className="appearance-theme-swatch" aria-hidden="true">
         <i style={{ background: p.colors.bg }} /><i style={{ background: p.colors.bgCard }} /><i style={{ background: appearance.accent ?? p.colors.accent }} /><i style={{ background: p.colors.ink }} />
       </span>
-      <strong>{p.label}</strong>{appearance.palette === p.id && <Check className="appearance-selected" size={13} aria-hidden="true" />}
+      <strong>{p.label}</strong>{on && <Check className="appearance-selected" size={13} aria-hidden="true" />}
     </button>;
   };
 
@@ -120,7 +123,8 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
   }}>
     <div className="appearance-head">
       <h2 id="appearance-title">Make it yours</h2>
-      <button type="button" className="appearance-shuffle" onClick={() => choose(shuffleAppearance(appearance))} title="Shuffle theme (Alt+Shift+R)" aria-label="Shuffle theme"><Dices size={17} /></button>
+      <button type="button" className="appearance-rooms" onClick={onOpenRooms} title="Rooms: change the whole place" aria-label="Open rooms"><DoorOpen size={17} /></button>
+      <button type="button" className="appearance-shuffle" onClick={() => choose(shuffleAppearance(appearance))} title="Shuffle colors" aria-label="Shuffle colors"><Dices size={17} /></button>
       <button type="button" onClick={() => onClose()} aria-label="Close appearance settings"><X size={17} /></button>
     </div>
 
@@ -140,7 +144,7 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
     </div>}
     <div className="appearance-preview" data-background={appearance.background}>
       <BackgroundScene scene={appearance.background} intensity={appearance.backgroundIntensity} speed={appearance.backgroundSpeed} />
-      <div className="appearance-preview-copy"><span>Your little universe</span><strong>{palette.label}</strong><small>{palette.blurb} · {FONTS.find((f) => f.id === appearance.font)?.label}</small></div>
+      <div className="appearance-preview-copy"><span>Your little universe</span><strong>{appearance.paint ? 'Room colors' : palette.label}</strong><small>{appearance.paint ? 'Painted for this room' : palette.blurb} · {FONTS.find((f) => f.id === appearance.font)?.label}</small></div>
       <div className="appearance-preview-chat"><span>Room for a bright idea.</span><b>Let’s make something.</b></div>
     </div>
     <div className="appearance-tabs" role="group" aria-label="Appearance sections">
@@ -176,7 +180,7 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
       <button type="button" className="appearance-dot appearance-dot-theme" aria-pressed={appearance.accent === null} onClick={() => patch({ accent: null })} title="Theme accent">A</button>
       {ACCENT_PRESETS.map((hex) => <button type="button" key={hex} className="appearance-dot" style={{ background: hex }} aria-pressed={appearance.accent === hex} onClick={() => patch({ accent: hex })} title={hex} aria-label={`Accent ${hex}`} />)}
       <label className="appearance-dot appearance-dot-custom" title="Custom accent">
-        <input type="color" value={appearance.accent ?? palette.colors.accent} onChange={(e) => patch({ accent: e.target.value })} aria-label="Custom accent color" />
+        <input type="color" value={appearance.accent ?? effectiveDef(appearance).colors.accent} onChange={(e) => patch({ accent: e.target.value })} aria-label="Custom accent color" />
       </label>
     </div></fieldset>
 
@@ -207,6 +211,6 @@ export function AppearanceSettings({ appearance, onAppearance, onClose, triggerR
     <button type="button" className="appearance-reset appearance-chip" onClick={() => choose(defaultAppearance())}><RotateCcw size={13} />Reset appearance</button>
     </>}
     </div>
-    <div className="appearance-footer"><span role="status">{syncStatus === 'saved' ? 'Saved across this TARDIS’s devices' : syncStatus === 'loading' ? 'Checking your saved look…' : syncStatus === 'saving' ? 'Saving your look…' : syncStatus === 'error' ? 'That choice couldn’t sync. Try another look.' : 'Saved here. Will sync when connected.'}</span><small>Alt+Shift+T to cycle · Alt+Shift+R to shuffle</small></div>
+    <div className="appearance-footer"><span role="status">{syncStatus === 'saved' ? 'Saved across this TARDIS’s devices' : syncStatus === 'loading' ? 'Checking your saved look…' : syncStatus === 'saving' ? 'Saving your look…' : syncStatus === 'error' ? 'That choice couldn’t sync. Try another look.' : 'Saved here. Will sync when connected.'}</span><small>Alt+Shift+T cycles colors · Alt+Shift+R surprises you with a room</small></div>
   </div>, document.querySelector('.bot-app') ?? document.body);
 }

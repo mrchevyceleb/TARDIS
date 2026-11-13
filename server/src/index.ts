@@ -35,6 +35,7 @@ import { messagePinsRouter } from './routes/messagePins.ts';
 import { commitmentsRouter } from './routes/commitments.ts';
 import { prioritiesRouter } from './routes/priorities.ts';
 import { appearanceRouter } from './routes/appearance.ts';
+import { migrateToRooms, roomsRouter } from './routes/rooms.ts';
 import { railLayoutRouter } from './routes/railLayout.ts';
 import { deliverDeskAnswer, deskRouter } from './routes/desk.ts';
 import { startDeskNotifier } from './lib/deskNotify.ts';
@@ -179,6 +180,7 @@ app.use('/api/commitments', commitmentsRouter);
 app.use('/api/priorities', prioritiesRouter);
 app.use('/api/rail-layout', railLayoutRouter);
 app.use('/api/appearance', appearanceRouter);
+app.use('/api/rooms', roomsRouter);
 app.use('/api/desk', deskRouter);
 app.use('/api/jarvis', jarvisRouter);
 app.use('/api/voice-preview', voicePreviewRouter);
@@ -317,6 +319,7 @@ server.listen(PORT, HOST, () => {
     console.log('[side-copy] up: cron pausing and durable team delivery stay off');
     return;
   }
+  void migrateToRooms().catch((err) => console.warn('[rooms] could not keep the original look as a room:', (err as Error).message));
   void resumeQueuedTeamDeliveries().then((count) => {
     if (count > 0) console.log(`[team] resumed ${count} durable queued ${count === 1 ? 'delivery' : 'deliveries'}`);
   }).catch((error) => {

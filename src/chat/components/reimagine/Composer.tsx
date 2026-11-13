@@ -12,6 +12,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CommandEntry } from '../../data/types';
 import { ArrowUp, Plus, SquarePen, StopSquare } from './icons';
 import { isEggPhrase } from '../../../theme/eggs';
+import { playScreenCue } from '../../../theme/roomSounds';
 import { RobotControl } from '../RobotControl';
 import { ChatDictation } from '../../dictation/ChatDictation';
 import { BIG_UPLOAD_MAX_BYTES, humanFileSize, uploadBigFile } from '../../../data/api';
@@ -459,6 +460,7 @@ export function Composer(props: ComposerProps) {
     if (props.busy) {
       if (hasLiveContent && props.onSteer) {
         clearPendingDictation();
+        playScreenCue('send');
         if (queueIntent && props.onSendQueued && (canSteer || props.queueAvailable === true)) {
           props.onSendQueued(v, imgs);
           props.onChange('');
@@ -478,6 +480,7 @@ export function Composer(props: ComposerProps) {
     }
     if (!v && !imgs?.length && !refs) return false;
     clearPendingDictation();
+    playScreenCue('send');
     // A queued send on a channel (never busy-blocked there): Ctrl+Enter
     // arms the next-turn choice even when the composer itself is not busy.
     const sendQueued = queueIntent && props.onSendQueued && (canSteer || props.queueAvailable === true);

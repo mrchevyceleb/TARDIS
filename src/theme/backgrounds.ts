@@ -8,6 +8,7 @@ export const BACKGROUNDS = [
   { id: 'topography', label: 'Contour club', blurb: 'Quiet, rippling contours', animated: false },
   { id: 'grid', label: 'Dot journal', blurb: 'A little room to think', animated: false },
   { id: 'prism', label: 'Prism party', blurb: 'Folded ribbons of color', animated: false },
+  { id: 'ruled', label: 'Ruled paper', blurb: 'Faint lines, a red margin, three holes', animated: false },
   { id: 'orbits', label: 'Orbit club', blurb: 'Three planets, one happy orbit', animated: true },
   { id: 'rain', label: 'Window rain', blurb: 'Silver rain on a quiet window', animated: true },
   { id: 'bubbles', label: 'Bubble bath', blurb: 'Little bubbles, happily bobbing', animated: true },
@@ -25,4 +26,7 @@ export const BACKGROUNDS = [
   { id: 'starfield', label: 'Stargazer', blurb: 'A drifting constellation', animated: true },
   { id: 'particles', label: 'Firefly garden', blurb: 'Little lights, gently rising', animated: true },
   { id: 'waves', label: 'Slow tide', blurb: 'Waves with nowhere to rush', animated: true },
+  { id: 'radar', label: 'Radar sweep', blurb: 'Range rings and a patient sweep', animated: true },
+  { id: 'synthgrid', label: 'Neon horizon', blurb: 'A grid rolling toward the sunset', animated: true },
+  { id: 'hearth', label: 'Hearth', blurb: 'Firelight and drifting embers', animated: true },
 ] as const;
