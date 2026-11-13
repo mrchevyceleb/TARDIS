@@ -1723,14 +1723,16 @@ type LogLine = { raw: string; seq: number | null; plumbing: boolean };
  *  line behind for the next record to land on. */
 function appendLinesSync(path: string, data: string | ((fd: number) => void)): void {
   const fd = openSync(path, 'a+'); // readable too, for the tail check
-  let size = 0;
+  // Unknown until fstat answers; a failure before then has written nothing
+  // and must never truncate anything.
+  let size = -1;
   try {
     size = fstatSync(fd).size;
     if (size > 0 && readRange(fd, size - 1, size)[0] !== 0x0a) writeAllSync(fd, '\n');
     if (typeof data === 'string') writeAllSync(fd, data);
     else data(fd);
   } catch (err) {
-    try { ftruncateSync(fd, size); } catch { /* the caller still sees the write error */ }
+    if (size >= 0) try { ftruncateSync(fd, size); } catch { /* the caller still sees the write error */ }
     throw err;
   } finally {
     closeSync(fd);
