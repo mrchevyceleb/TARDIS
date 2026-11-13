@@ -12,7 +12,8 @@ linked card is in Not started. Titles may appear on the lock screen;
 keep private details in the item's detail field.
 
 Digest behavior is unchanged: at most three titles, items older than 24 hours
-count only in “+N more”, a 20-minute catch-up window, and persisted receipts to
+count only in “+N more” (age restarts when a snoozed item wakes), a 20-minute
+catch-up window, and persisted receipts to
 avoid repeating a slot after restart. Failed sends retain their existing bounded
 retries during that weekday's daytime. A first run seeds earlier slots instead
 of sending them late; an empty slot is recorded and is not sent later that slot.
