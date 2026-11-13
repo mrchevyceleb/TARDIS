@@ -55,6 +55,7 @@ import { useRailGroups } from './useRailGroups';
 import { agentMark, DISC_INK, agentColor, agentAvatarUrl, sameChatId, CHAT_COLORS, chatColorOf, type Agent, type AgentFlagPatch, type ChatColor } from './agents';
 import { agentTaskMap, agentTaskSubline, useDeskCardsLight, useDeskPrs, type AgentTaskSlot, type DeskPr, type TaskQueryState } from '../data/desk';
 import { useTeamPresence } from './teamPresence';
+import { fitName } from './fitName';
 import { useJobsSummary } from '../chat/hooks/useJobs';
 import { useMediaQuery } from '../chat/hooks/useMediaQuery';
 import { RailJobsBadge } from '../chat/components/jobs/RailJobsBadge';
@@ -957,7 +958,7 @@ export function BotRail(props: BotRailProps) {
                     {a.muted ? <span className="bt-pin-mute" title="Notifications muted"><BellOff size={10} /></span> : a.unread ? <span className="bt-pin-unread">{a.unread > 9 ? '9+' : a.unread}</span> : null}
                     {nightEnd ? <span className="bt-pin-night" title={`Working through quiet hours until ${nightEnd}`} aria-hidden><Moon size={11} /></span> : null}
                   </span>
-                  <span className="bt-pin-name">{a.name}</span>
+                  <span className="bt-pin-name" ref={fitName}>{a.name}</span>
                   <span className="bt-pin-role">{a.role}</span>
                   <PinSeat working={busyAgents.has(a.id)} online={liveAgents.has(a.id)} info={taskMap.get(a.id)} tasksState={tasksState} prs={(deskPrsQuery.data?.prs ?? []).filter((p) => p.owner === a.name)} prsState={prsState} />
                   {onJobs ? <RailJobsBadge running={onJobs.running} latest={onJobs.latest} latestLine={onJobs.latestLine} /> : null}

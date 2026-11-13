@@ -401,7 +401,7 @@
 }
 .bt-head-agent:hover { background: var(--r-line); }
 .bt-head-agent .bt-disc { width: 26px; height: 26px; font-size: 11px; }
-.bt-head-name { min-width: 0; font-size: 14px; font-weight: 600; color: var(--r-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bt-head-name { min-width: 0; font-size: 14px; font-weight: 600; color: var(--r-ink); overflow: hidden; white-space: nowrap; }
 .bt-head-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; min-width: 0; }
 
 .bt-head-identity { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; gap: 2px; }
@@ -1762,7 +1762,8 @@
   font-size: 12.5px; font-weight: 600;
   color: var(--r-ink);
   max-width: 86px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* Never cut: wraps at spaces, and fitName steps down a word too wide for the pin. */
+  overflow: hidden;
 }
 .bt-pin-role {
   font-size: 10.5px;

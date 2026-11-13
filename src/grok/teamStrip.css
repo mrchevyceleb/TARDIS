@@ -42,8 +42,9 @@
   box-shadow: 0 0 0 2px var(--r-bg-soft);
 }
 .ts-text { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
-.ts-name, .ts-role, .ts-doing > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ts-name { font-size: 13px; font-weight: 600; }
+.ts-role, .ts-doing > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A name is never cut: it wraps at spaces, and fitName steps down a word too wide for its box. */
+.ts-name { min-width: 0; overflow: hidden; font-size: 13px; font-weight: 600; line-height: 1.2; }
 .ts-role { font-size: 11px; color: var(--r-ink-faint); }
 .ts-member.is-muted .ts-name { color: var(--r-ink-mute); }
 .ts-doing { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 11px; color: var(--r-ink-soft); }
@@ -54,7 +55,7 @@
 /* ---------- Dock: a slim column of faces beside a wide chat ---------- */
 .team-strip.is-column {
   flex: none; flex-direction: column; align-items: center; z-index: 21;
-  width: 84px; padding: calc(10px + env(safe-area-inset-top, 0px)) 0 0;
+  min-width: 84px; padding: calc(10px + env(safe-area-inset-top, 0px)) 0 0;
   background-color: var(--r-bg-soft); border-right: 1px solid var(--r-line);
 }
 .team-strip.is-column .bt-menubtn {
@@ -67,10 +68,10 @@
   overflow-y: auto; padding: 8px 0 calc(14px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--r-line);
 }
-.team-strip.is-column .ts-member { flex-direction: column; justify-content: center; gap: 5px; width: 74px; padding: 8px 4px 6px; }
+.team-strip.is-column .ts-member { flex-direction: column; justify-content: center; gap: 5px; align-self: stretch; min-width: 74px; margin: 0 5px; padding: 8px 4px 6px; }
 .team-strip.is-column .ts-face { width: 46px; height: 46px; font-size: 18px; }
 .team-strip.is-column .ts-text { align-items: center; max-width: 100%; }
-.team-strip.is-column .ts-name { font-size: 11px; font-weight: 600; max-width: 68px; }
+.team-strip.is-column .ts-name { font-size: 11px; font-weight: 600; max-width: 100px; text-align: center; }
 .team-strip.is-column .ts-role, .team-strip.is-column .ts-doing { display: none; }
 .team-strip.is-column .ts-member[aria-current="true"] { box-shadow: inset 3px 0 0 var(--r-tardis-lit); }
 
@@ -102,16 +103,16 @@
 @media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
   /* A phone keeps it to faces and first names: who is here, who is working, who wrote. */
   .team-strip.is-row { padding: 6px max(8px, env(safe-area-inset-right, 0px)) 6px max(8px, env(safe-area-inset-left, 0px)); }
-  .team-strip.is-row .team-strip-list { gap: 2px; }
+  .team-strip.is-row .team-strip-list { gap: 2px; align-items: flex-start; }
   .team-strip.is-row .ts-member,
   [data-team] .team-strip.is-row .ts-member {
-    flex-direction: column; gap: 3px; width: 62px; min-width: 0; max-width: none;
+    flex-direction: column; gap: 3px; min-width: 62px; max-width: none;
     padding: 5px 2px 4px; background: transparent; box-shadow: none; border-radius: calc(12px * var(--r-round, 1));
   }
   .team-strip.is-row .ts-member[aria-current="true"] { background: var(--r-bg-hover); box-shadow: none; }
   .team-strip.is-row .ts-face, [data-team] .team-strip.is-row .ts-face { width: 40px; height: 40px; font-size: 16px; }
   .team-strip.is-row .ts-text { align-items: center; max-width: 100%; }
-  .team-strip.is-row .ts-name { font-size: 10.5px; max-width: 58px; }
+  .team-strip.is-row .ts-name { font-size: 10.5px; max-width: 108px; text-align: center; }
   .team-strip.is-row :is(.ts-role, .ts-doing) { display: none; }
 }
 

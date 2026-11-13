@@ -8,6 +8,7 @@ import { agentTaskMap, agentTaskSubline, useDeskCardsLight, useDeskPrs, type Tas
 import type { TeamView } from '../theme/roomParts';
 import { agentAvatarUrl, agentColor, agentMark, DISC_INK, type Agent } from './agents';
 import { teamOrder, type TeamPresence } from './teamPresence';
+import { fitName } from './fitName';
 import './teamStrip.css';
 
 export function TeamStrip({ agents, presence, activeAgentId, orientation, team, onOpenAgent, lead }: {
@@ -62,7 +63,7 @@ export function TeamStrip({ agents, presence, activeAgentId, orientation, team, 
                 {unread ? <span className="ts-unread" aria-hidden="true">{unread > 9 ? '9+' : unread}</span> : null}
               </span>
               <span className="ts-text" aria-hidden="true">
-                <span className="ts-name">{a.name}</span>
+                <span className="ts-name" ref={fitName}>{a.name}</span>
                 {stations ? <span className="ts-doing"><i /><span>{status}{doing ? ` · ${doing}` : ''}</span></span> : <span className="ts-role">{a.role}</span>}
               </span>
             </button>
