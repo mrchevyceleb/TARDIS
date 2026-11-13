@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-test('snooze persists on the item, hides alerts and wakes once across notifier restarts', async () => {
+test('snooze persists on the item, hides items and wakes quietly across notifier restarts', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'desk-snooze-'));
   process.env.RIVENDELL_STATE_DIR = dir;
   const { createTodo, readDesk, snoozeTodo, isTodoOpen, setTodoStatus, updateTodo } = await import('./deskStore.ts');
@@ -38,31 +38,31 @@ test('snooze persists on the item, hides alerts and wakes once across notifier r
     await createDeskNotifier(resetOptions).tick();
     at = new Date(Date.parse(sleeping.snoozedUntil!));
     assert.equal(isTodoOpen(sleeping, at.getTime()), true);
-    // Respect the existing push window, rather than changing notification policy.
+    // Even during desktop alert hours, waking never sends a phone push.
     while (isQuietHours(at)) at = new Date(at.getTime() + 60_000);
     await createDeskNotifier(options).tick();
-    assert.equal(sends.filter((title) => title === todo.title).length, 1);
+    assert.equal(sends.filter((title) => title === todo.title).length, 0);
     await createDeskNotifier(options).tick();
-    assert.equal(sends.filter((title) => title === todo.title).length, 1);
+    assert.equal(sends.filter((title) => title === todo.title).length, 0);
     await createDeskNotifier(resetOptions).tick();
     await createDeskNotifier(resetOptions).tick();
-    assert.equal(resetPushes, 1, 'a future wake survives first-run seeding and restart');
+    assert.equal(resetPushes, 0, 'a future wake stays quiet across notifier restarts');
     // A missing notification state file must not replay an old wake-up.
     at = new Date(at.getTime() + 1000);
     await createDeskNotifier({ ...options, stateFile: join(dir, 'reset-notify.json') }).tick();
-    assert.equal(sends.filter((title) => title === todo.title).length, 1);
+    assert.equal(sends.filter((title) => title === todo.title).length, 0);
     await snoozeTodo(todo.id, 48);
     const awake = await snoozeTodo(todo.id, null);
     assert.equal(isTodoOpen(awake), true);
     await createDeskNotifier(options).tick();
-    assert.equal(sends.filter((title) => title === todo.title).length, 1);
+    assert.equal(sends.filter((title) => title === todo.title).length, 0);
     const repeated = await snoozeTodo(todo.id, 24);
     assert.equal(repeated.snoozeReturnedPriority, undefined);
     at = new Date(Math.max(at.getTime(), Date.parse(repeated.snoozedUntil!)));
     while (isQuietHours(at)) at = new Date(at.getTime() + 60_000);
     await createDeskNotifier(options).tick();
     await createDeskNotifier(options).tick();
-    assert.equal(sends.filter((title) => title === todo.title).length, 2);
+    assert.equal(sends.filter((title) => title === todo.title).length, 0);
     const normal = await createTodo({ title: 'Pick a date' }, owner);
     await snoozeTodo(normal.id, 24);
     const normalReturn = await snoozeTodo(normal.id, null);
@@ -75,9 +75,9 @@ test('snooze persists on the item, hides alerts and wakes once across notifier r
     assert.equal(normalResetSends.filter((title) => title === normal.title).length, 0, 'normal-priority early return stays silent after state reset');
     await updateTodo(normal.id, { priority: 'high' });
     await createDeskNotifier(options).tick();
-    assert.equal(sends.filter((title) => title === normal.title).length, 1, 'promotion alerts with intact notification state');
+    assert.equal(sends.filter((title) => title === normal.title).length, 0, 'promotion stays quiet with intact notification state');
     await createDeskNotifier(normalReset).tick();
-    assert.equal(normalResetSends.filter((title) => title === normal.title).length, 1, 'promotion also alerts after notification state reset');
+    assert.equal(normalResetSends.filter((title) => title === normal.title).length, 0, 'promotion stays quiet after notification state reset');
     const done = await setTodoStatus(todo.id, 'done', { note: 'Reviewed', by: owner });
     assert.equal(done.snoozedUntil, undefined);
     await assert.rejects(snoozeTodo(todo.id, 24), /already done/);
@@ -86,7 +86,7 @@ test('snooze persists on the item, hides alerts and wakes once across notifier r
   }
 });
 
-test('bringing a high item back early keeps its later reminder across notifier restarts', async () => {
+test('bringing a high item back early stays quiet three hours later across restarts', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'desk-return-reminder-'));
   const { createDeskNotifier } = await import('./deskNotify.ts');
   try {
@@ -108,8 +108,8 @@ test('bringing a high item back early keeps its later reminder across notifier r
     assert.equal(sends.length, 0, 'explicit return stays quiet');
     at = new Date(at.getTime() + 3 * 3_600_000);
     await createDeskNotifier(options).tick();
-    assert.equal(sends.filter((title) => title === `Still waiting: ${todo.title}`).length, 1);
+    assert.equal(sends.filter((title) => title === `Still waiting: ${todo.title}`).length, 0);
     await createDeskNotifier(options).tick();
-    assert.equal(sends.filter((title) => title === `Still waiting: ${todo.title}`).length, 1, 'restart never repeats a reminder');
+    assert.equal(sends.filter((title) => title === `Still waiting: ${todo.title}`).length, 0, 'restart never sends a reminder');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

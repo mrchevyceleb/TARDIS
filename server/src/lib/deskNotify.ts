@@ -1,18 +1,13 @@
 // Needs-you alerts for the owner's phone (Pushover), plus the retry loop for
 // answers the owning agent has not heard yet. Started from index.ts.
 //
-// Policy, all in America/New_York:
-//  - A high item pushes at once between 08:00 and 17:59, any day. Outside that
-//    it is held and goes out on the first tick at or after 08:00.
-//  - A high item still open 3h after its push gets one "Still waiting" push,
-//    on weekdays inside the same hours. After that it rides the digests.
+// Policy, all in America/New_York (see docs/DESK-NOTIFICATIONS.md):
+//  - No per-item phone pushes, at any priority, and no "Still waiting" reminders.
 //  - Weekday digests at 09:30, 13:30 and 16:30 when anything is open. A slot
 //    is caught up within 20 minutes (a restart) and never repeats. Its top
 //    three lines skip items older than 24h (they count in "+N more" only).
-//  - A high item whose linked card sits in Pipeline is parked: it never pushes,
-//    never re-nudges and ranks as normal in digests. It alerts again if the
-//    card leaves Pipeline while the item is still open.
-//  - Normal and low items never push on their own.
+//  - A high item whose linked card sits in Not started ranks as normal in digests.
+//  - Answer delivery retries run independently of phone sends.
 // Every send is at most once: the attempt is on disk before the network call,
 // and one left mid-flight by a crash counts as sent.
 // State: ~/.rivendell/desk-notify.json (RIVENDELL_DESK_NOTIFY_FILE overrides).
@@ -26,7 +21,6 @@ import { isTodoOpen, readDesk, writeJsonAtomic, type DeskCard, type DeskData, ty
 const TICK_MS = 60_000;
 const DAY_START_MIN = 8 * 60;
 const DAY_END_MIN = 18 * 60;
-const RENUDGE_AFTER_MS = 3 * 60 * 60_000;
 const RETRY_SPACING_MS = 5 * 60_000;
 const MAX_TRIES = 6;
 const DIGEST_SLOTS_MIN = [9 * 60 + 30, 13 * 60 + 30, 16 * 60 + 30];
@@ -43,9 +37,6 @@ const ANSWER_HOURLY_RETRY_MS = 60 * 60_000;
  *  (or the send hung): reclaim it. A repeated message to an agent is harmless;
  *  a lost answer is not. */
 export const ANSWER_CLAIM_STALE_MS = 5 * 60_000;
-/** Records for items that left the Desk are dropped after this long. Never
- *  sooner: a desk.json moved aside for repair must not re-arm every push. */
-const FORGET_AFTER_MS = 14 * 24 * 60 * 60_000;
 const DIGEST_KEEP_DAYS = 8;
 /** Items older than this stay out of a digest's top lines (still counted). */
 const DIGEST_LINE_MAX_AGE_MS = 24 * 60 * 60_000;
@@ -86,7 +77,7 @@ function isWeekend(clock: EasternClock): boolean {
   return clock.weekday === 'Sat' || clock.weekday === 'Sun';
 }
 
-/** True when a high item must not raise an alert right now (18:00 to 07:59
+/** True when a high item must not raise a desktop alert (18:00 to 07:59
  *  ET). The Desk summary hands this to clients so every surface agrees. */
 export function isQuietHours(at: Date = new Date()): boolean {
   return !inPushHours(easternClock(at));
@@ -117,20 +108,7 @@ function deskLink(baseUrl: string, target: string): Pick<PushPayload, 'url' | 'u
   return baseUrl ? { url: `${baseUrl}/?desk=${encodeURIComponent(target)}`, url_title: 'Open in TARDIS' } : {};
 }
 
-/** The body never carries the item's detail: it lands on a lock screen through
- *  a third-party push service, and detail is where amounts and numbers live.
- *  The title is the only content; the detail waits behind the tap. */
-export function itemPayload(todo: DeskTodo, kind: 'push' | 'renudge', baseUrl: string): PushPayload {
-  return {
-    title: clipText(kind === 'renudge' ? `Still waiting: ${todo.title}` : todo.title, 250),
-    message: todo.from.kind === 'agent' ? `${todo.from.name} needs you` : 'Open the Desk.',
-    priority: 1,
-    ...deskLink(baseUrl, todo.id),
-  };
-}
-
-/** A high item whose card is parked in Not started is not asking for the owner
- *  right now: no push, no re-nudge, no high rank in a digest. */
+/** A high item whose card is parked in Not started ranks as normal in digests. */
 export function isParkedHigh(todo: DeskTodo, cards: DeskCard[]): boolean {
   if (todo.priority !== 'high' || !todo.cardId) return false;
   return cards.find((c) => c.id === todo.cardId)?.column === 'not_started';
@@ -214,8 +192,7 @@ export function senderFromEnv(env: NodeJS.ProcessEnv = process.env, opts: { endp
 /** One alert's progress. Finished once sent, seeded on first run, skipped, or
  *  given up on. `sendingAt` is the claim written just before the network call. */
 type Send = { tries: number; lastTryAt?: string; sendingAt?: string; sentAt?: string; seededAt?: string; failedAt?: string; skipped?: 'empty' };
-type ItemState = { push?: Send; renudge?: Send; doneSeen?: boolean; wakeAt?: string };
-type NotifyState = { version: 1; createdAt: string; items: Record<string, ItemState>; digests: Record<string, Send> };
+type NotifyState = { version: 1; createdAt: string; items: Record<string, never>; digests: Record<string, Send> };
 
 function finished(send: Send | undefined): boolean {
   return Boolean(send && (send.sentAt || send.seededAt || send.failedAt || send.skipped));
@@ -225,11 +202,6 @@ function readyToTry(send: Send | undefined, nowMs: number): boolean {
   if (!send) return true;
   if (finished(send) || send.tries >= MAX_TRIES) return false;
   return !send.lastTryAt || nowMs - Date.parse(send.lastTryAt) >= RETRY_SPACING_MS;
-}
-
-function lastTouched(item: ItemState): number {
-  const stamps = [item.push, item.renudge].flatMap((s) => (s ? [s.lastTryAt, s.sentAt, s.seededAt, s.failedAt] : []));
-  return Math.max(0, ...stamps.map((s) => (s ? Date.parse(s) : 0)).filter(Number.isFinite));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -247,18 +219,6 @@ async function loadState(file: string, log: (line: string) => void): Promise<Not
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (isRecord(parsed) && (parsed.version === undefined || parsed.version === 1) && isRecord(parsed.items) && isRecord(parsed.digests)) {
-      const items: Record<string, ItemState> = {};
-      for (const [id, value] of Object.entries(parsed.items)) {
-        if (!isRecord(value)) continue;
-        const item: ItemState = {};
-        if (typeof value.wakeAt === 'string') item.wakeAt = value.wakeAt;
-        if (value.doneSeen === true) item.doneSeen = true;
-        const push = cleanSend(value.push);
-        const renudge = cleanSend(value.renudge);
-        if (push) item.push = push;
-        if (renudge) item.renudge = renudge;
-        items[id] = item;
-      }
       const digests: Record<string, Send> = {};
       for (const [key, value] of Object.entries(parsed.digests)) {
         const send = cleanSend(value);
@@ -267,7 +227,8 @@ async function loadState(file: string, log: (line: string) => void): Promise<Not
       return {
         version: 1,
         createdAt: typeof parsed.createdAt === 'string' ? parsed.createdAt : new Date().toISOString(),
-        items,
+        // Ignore legacy per-item push/reminder records, including failed sends.
+        items: {},
         digests,
       };
     }
@@ -301,10 +262,6 @@ function settleInterrupted(st: NotifyState, log: (line: string) => void): boolea
     settled = true;
     log(`[desk-notify] ${what} was mid-send when the server stopped; counted as sent so it never repeats`);
   };
-  for (const [id, item] of Object.entries(st.items)) {
-    settle(item.push, `push ${id}`);
-    settle(item.renudge, `re-nudge ${id}`);
-  }
   for (const [key, digest] of Object.entries(st.digests)) settle(digest, `digest ${key}`);
   return settled;
 }
@@ -333,28 +290,21 @@ export type DeskNotifier = {
 };
 
 /** `build` runs against a fresh read right before the send, so an item
- *  answered or lowered since the tick started never goes out; null skips. */
+ *  answered or snoozed since the tick started leaves the digest; null skips. */
 type Job = {
   send: Send;
   what: string;
-  heldKey?: string;
-  /** Re-nudges and digests never go out on a weekend. */
-  weekdayOnly?: boolean;
   build: (data: DeskData) => PushPayload | null;
   onGone?: () => void;
 };
 
 export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
   const now = opts.now ?? (() => new Date());
-  // Items created after this process started are new work, not backlog, even
-  // when the very first tick (and its one-time seeding) runs a moment later.
-  const bootMs = now().getTime();
   const read = opts.readDesk ?? readDesk;
   const log = opts.log ?? ((line: string) => console.log(line));
   const stateFile = opts.stateFile ?? DESK_NOTIFY_FILE;
   const baseUrl = (opts.baseUrl ?? publicBaseUrl()).replace(/\/+$/, '');
   let state: NotifyState | null | undefined;
-  const heldLogged = new Set<string>();
   const answerTriedAt = new Map<string, number>();
   const answerNoted = new Set<string>();
   let running: Promise<void> | null = null;
@@ -362,26 +312,16 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
 
   const save = (st: NotifyState) => writeJsonAtomic(stateFile, st);
 
-  async function ensureState(data: DeskData, at: Date): Promise<NotifyState> {
+  async function ensureState(at: Date): Promise<NotifyState> {
     if (state === undefined) {
       state = await loadState(stateFile, log);
       if (state && settleInterrupted(state, log)) await save(state);
     }
     if (state) return state;
-    // First run: every item already open rides the digests instead of
-    // arriving as a burst, including one created a moment before this tick.
     const stamp = at.toISOString();
+    // Keep the version-1 envelope so existing digest receipts survive upgrades.
     const fresh: NotifyState = { version: 1, createdAt: stamp, items: {}, digests: {} };
-    let seeded = 0;
-    for (const todo of data.todos) {
-      if (todo.status !== 'open' || todo.priority !== 'high') continue;
-      // A lost notification state file keeps the existing no-backlog policy.
-      // Future wake-ups still re-arm on this scheduler, including after restart.
-      if (Date.parse(todo.snoozedUntil ?? todo.createdAt) >= bootMs && todo.snoozeReturnedPriority !== 'high') continue;
-      fresh.items[todo.id] = { wakeAt: todo.snoozedUntil, push: { tries: 0, seededAt: stamp }, renudge: { tries: 0, seededAt: stamp } };
-      seeded += 1;
-    }
-    // Same for digest slots that have already started today: a first boot at
+    // Seed digest slots that have already started today: a first boot at
     // 13:38 must not send the 13:30 digest late (Matt would get it twice when
     // something else already covered that slot). Later slots still go out.
     const clock = easternClock(at);
@@ -393,19 +333,12 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
     }
     await save(fresh);
     state = fresh;
-    log(`[desk-notify] first run: ${seeded} open item${seeded === 1 ? '' : 's'} marked as already pushed; they ride the digests${slotsSeeded ? `; ${slotsSeeded} earlier digest slot${slotsSeeded === 1 ? '' : 's'} today marked handled` : ''}`);
+    log(`[desk-notify] first run: ${slotsSeeded} earlier digest slots today marked handled`);
     return fresh;
   }
 
-  function prune(st: NotifyState, data: DeskData, clock: EasternClock, nowMs: number): boolean {
+  function prune(st: NotifyState, clock: EasternClock): boolean {
     let dirty = false;
-    const ids = new Set(data.todos.map((t) => t.id));
-    for (const [id, item] of Object.entries(st.items)) {
-      if (!ids.has(id) && nowMs - lastTouched(item) > FORGET_AFTER_MS) {
-        delete st.items[id];
-        dirty = true;
-      }
-    }
     const [y, m, d] = clock.day.split('-').map(Number);
     const oldest = new Date(Date.UTC(y, m - 1, d - DIGEST_KEEP_DAYS)).toISOString().slice(0, 10);
     for (const key of Object.keys(st.digests)) {
@@ -415,12 +348,6 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
       }
     }
     return dirty;
-  }
-
-  function hold(key: string, line: string): void {
-    if (heldLogged.has(key)) return;
-    heldLogged.add(key);
-    log(line);
   }
 
   async function retryAnswers(data: DeskData, nowMs: number): Promise<void> {
@@ -457,92 +384,24 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
     const nowMs = at.getTime();
     await retryAnswers(data, nowMs);
     if (!opts.send) return;
-    const st = await ensureState(data, at);
+    const st = await ensureState(at);
     const clock = easternClock(at);
-    let dirty = prune(st, data, clock, nowMs);
-    // A pushed item that was completed and then reopened is asking for the owner
-    // again: forget that it was pushed so it alerts like a new one.
-    for (const todo of data.todos) {
-      const item = st.items[todo.id] ?? (todo.status === 'open' && (todo.priority === 'high' || todo.snoozedUntil) ? (st.items[todo.id] = {}) : undefined);
-      if (!item) continue;
-      // Deadline doubles as the durable alert generation. It cannot be missed
-      // when snooze and wake both happened while this process was stopped.
-      if (item.wakeAt !== todo.snoozedUntil) {
-        delete item.push;
-        delete item.renudge;
-        if (todo.snoozeReturnedPriority === 'high') {
-          // An explicit return is already acknowledged by the owner. Stay
-          // quiet now, but keep the normal reminder clock for later.
-          item.push = { tries: 0, sentAt: todo.snoozedUntil ?? at.toISOString() };
-        }
-        item.wakeAt = todo.snoozedUntil;
-        dirty = true;
-      }
-      if (todo.status === 'done' && !item.doneSeen) {
-        item.doneSeen = true;
-        dirty = true;
-      } else if (todo.status === 'open' && item.doneSeen) {
-        delete item.push;
-        delete item.renudge;
-        delete item.doneSeen;
-        dirty = true;
-        log(`[desk-notify] ${todo.id} "${todo.title}" was reopened: alerting again if it is high priority`);
-      }
-    }
+    let dirty = prune(st, clock);
     const open = data.todos.filter((t) => isTodoOpen(t, nowMs));
     const dayHours = inPushHours(clock);
     const weekday = !isWeekend(clock);
     const stamp = at.toISOString();
     const jobs: Job[] = [];
 
-    const itemJob = (todo: DeskTodo, kind: 'push' | 'renudge', send: Send): Job => ({
-      send,
-      what: `${kind === 'push' ? 'push' : 're-nudge'} ${todo.id} "${todo.title}"`,
-      heldKey: `${kind}:${todo.id}`,
-      weekdayOnly: kind === 'renudge',
-      build: (fresh) => {
-        const current = fresh.todos.find((t) => t.id === todo.id);
-        return current && isTodoOpen(current, now().getTime()) && current.snoozedUntil === todo.snoozedUntil && current.priority === 'high' && !isParkedHigh(current, fresh.cards)
-          ? itemPayload(current, kind, baseUrl)
-          : null;
-      },
-    });
     const digestJob = (key: string, send: Send): Job => ({
       send,
       what: `digest ${key}`,
-      weekdayOnly: true,
       build: (fresh) => {
         const stillOpen = fresh.todos.filter((t) => isTodoOpen(t, now().getTime()));
         return stillOpen.length ? digestPayload(stillOpen, baseUrl, fresh.cards, now().getTime()) : null;
       },
       onGone: () => { send.skipped = 'empty'; },
     });
-
-    for (const todo of open) {
-      if (todo.priority !== 'high') continue;
-      if (isParkedHigh(todo, data.cards)) {
-        hold(`parked:${todo.id}`, `[desk-notify] ${todo.id} "${todo.title}" is parked (its card is in Not started): no push or re-nudge until the card moves`);
-        continue;
-      }
-      heldLogged.delete(`parked:${todo.id}`);
-      const item = (st.items[todo.id] ??= {});
-      const name = `${todo.id} "${todo.title}"`;
-      if (!finished(item.push)) {
-        if (!dayHours) {
-          hold(`push:${todo.id}`, `[desk-notify] held push ${name}: quiet hours (${clock.label}), goes out at 08:00 ET`);
-        } else if (readyToTry(item.push, nowMs)) {
-          jobs.push(itemJob(todo, 'push', (item.push ??= { tries: 0 })));
-        }
-        continue;
-      }
-      if (!item.push?.sentAt || finished(item.renudge) || nowMs - Date.parse(item.push.sentAt) < RENUDGE_AFTER_MS) continue;
-      if (!dayHours || !weekday) {
-        const why = weekday ? `quiet hours (${clock.label})` : 'weekend';
-        hold(`renudge:${todo.id}`, `[desk-notify] held re-nudge ${name}: ${why}, goes out at the next weekday 08:00 ET`);
-      } else if (readyToTry(item.renudge, nowMs)) {
-        jobs.push(itemJob(todo, 'renudge', (item.renudge ??= { tries: 0 })));
-      }
-    }
 
     if (weekday) {
       for (const slot of DIGEST_SLOTS_MIN) {
@@ -578,7 +437,7 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
       // The clock may have moved on since the tick started (a tick begun at
       // 17:59, a slow send before this one); the next tick picks it up.
       const clockNow = easternClock(now());
-      if (!inPushHours(clockNow) || (job.weekdayOnly && isWeekend(clockNow))) {
+      if (!inPushHours(clockNow) || isWeekend(clockNow)) {
         log(`[desk-notify] held ${job.what}: outside the allowed hours now (${clockNow.label})`);
         continue;
       }
@@ -590,7 +449,7 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
       // counted as sent on restart, never repeated.
       await save(st);
       // The fresh read comes after the claim write, so nothing slow sits between
-      // the last check (answered, lowered, moved to Pipeline) and the send.
+      // the last check (answered or snoozed) and the send.
       const payload = job.build(await read());
       if (!payload) {
         job.send.tries = prior.tries;
@@ -606,7 +465,6 @@ export function createDeskNotifier(opts: DeskNotifierOptions): DeskNotifier {
       delete job.send.sendingAt;
       if (result.ok) {
         job.send.sentAt = stamp;
-        if (job.heldKey) heldLogged.delete(job.heldKey);
         log(`[desk-notify] ${result.dryRun ? 'dry run, counted as sent' : 'sent'} ${job.what}`);
       } else if (job.send.tries >= MAX_TRIES) {
         job.send.failedAt = stamp;
@@ -663,7 +521,7 @@ export function startDeskNotifier(opts: Partial<DeskNotifierOptions> & { retryAn
   else if (!send) console.warn('[desk-notify] PUSHOVER_API_KEY or PUSHOVER_USER_KEY is not set; phone alerts stay off until both are');
   const notifier = createDeskNotifier({ ...opts, send });
   const every = setInterval(() => { void notifier.run(); }, TICK_MS);
-  // First pass soon after boot, so a first run seeds before new items arrive.
+  // First pass soon after boot to seed earlier digest slots and retry answers.
   const first = setTimeout(() => { void notifier.run(); }, 3_000);
   every.unref?.();
   first.unref?.();
@@ -677,8 +535,8 @@ export function stopDeskNotifier(): void {
   active = null;
 }
 
-/** A todo was created or its priority changed: tick now so a new high item
- *  goes out within a second instead of a minute. Fire and forget. */
+/** Refresh scheduled digests and answer retries after a Desk change.
+ *  Individual items never trigger a phone push. Fire and forget. */
 export function notifyTodoTouched(): void {
   if (active) void active.notifier.run();
 }

@@ -272,7 +272,7 @@ if (!SIDE_COPY) startRoutineScheduler(); // agent-scoped routine scheduler (30s 
 if (!SIDE_COPY) startJobWatchScheduler(); // background job watches (10s tick): pid/file/command → agent wake
 if (!SIDE_COPY) startJobScheduler(); // job_start jobs (5s tick): exit records → agent job-result
 startT3SessionWatch({ wake: !SIDE_COPY }); // agent-owned T3 Code sessions: turn ends → owner wake; a side copy only reads them (off until RIVENDELL_T3_HOSTS)
-// Needs-you phone alerts and digests, plus answer delivery retries (60s tick).
+// Needs-you phone digests, plus answer delivery retries (60s tick).
 if (!SIDE_COPY && DESK_ROOM_ENABLED) startDeskNotifier({ retryAnswer: (id) => deliverDeskAnswer(id) });
 if (!SIDE_COPY && DESK_ROOM_ENABLED) startUsageThresholdAlerts(); // 90% subscription usage Desk alerts (card-2de6e4)
 registerScribeSocket(server);
