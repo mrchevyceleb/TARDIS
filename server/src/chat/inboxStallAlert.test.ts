@@ -16,7 +16,7 @@ function harness(deliver: () => boolean) {
   return { sent, deps, at: (ms: number) => { now = ms; } };
 }
 
-test('a failing inbox alerts Max and the Desk once after two minutes, and both hear the recovery', async () => {
+test('a teammate stuck two minutes tells Max once, never the Desk, and Max hears the recovery', async () => {
   const { sent, deps, at } = harness(() => true);
   const info = { name: 'Adam', waiting: 24, error: 'disk full' };
   noteInboxFailed('bot-adam', info, deps);
@@ -24,15 +24,14 @@ test('a failing inbox alerts Max and the Desk once after two minutes, and both h
   assert.deepEqual(sent, []);
   at(INBOX_STALL_ALERT_MS); noteInboxFailed('bot-adam', info, deps); await settle();
   at(INBOX_STALL_ALERT_MS + 15_000); noteInboxFailed('bot-adam', info, deps); await settle();
-  assert.equal(sent.length, 2);
+  assert.equal(sent.length, 1);
   assert.match(sent[0], /^max:Adam's inbox has not moved .*24 messages are waiting/);
-  assert.equal(sent[1], "desk:Adam's inbox is stuck");
   at(5 * 60_000); noteInboxMoved('bot-adam', deps); await settle();
-  assert.match(sent[2], /^max:Adam's inbox is moving again after about 5 minutes/);
-  assert.equal(sent[3], 'closed:todo-1');
+  assert.equal(sent.length, 2);
+  assert.match(sent[1], /^max:Adam's inbox is moving again after about 5 minutes/);
 });
 
-test('an inbox that recovers before any alert could land still tells Max what happened', async () => {
+test('a jam that beat the alert still reaches Max afterwards, and only Max', async () => {
   let diskFull = true;
   const { sent, deps, at } = harness(() => !diskFull);
   const info = { name: 'Riley', waiting: 3, error: 'no space left' };
@@ -41,7 +40,14 @@ test('an inbox that recovers before any alert could land still tells Max what ha
   assert.deepEqual(sent, []);
   diskFull = false;
   at(4 * 60_000); noteInboxMoved('bot-riley', deps); await settle();
-  assert.equal(sent.length, 2);
+  assert.equal(sent.length, 1);
   assert.match(sent[0], /^max:Riley's inbox was stuck for about 4 minutes .*nothing was lost/);
-  assert.equal(sent[1], "desk:Riley's inbox was stuck for a while");
+});
+
+test("Max's own stuck inbox goes to the Desk instead, and the item closes when it clears", async () => {
+  const { sent, deps, at } = harness(() => true);
+  noteInboxFailed('chief-of-staff', { name: 'Max', waiting: 2, error: 'disk full' }, deps);
+  at(INBOX_STALL_ALERT_MS); noteInboxFailed('chief-of-staff', { name: 'Max', waiting: 2, error: 'disk full' }, deps); await settle();
+  at(3 * 60_000); noteInboxMoved('chief-of-staff', deps); await settle();
+  assert.deepEqual(sent, ["desk:Max's inbox is stuck", 'closed:todo-1']);
 });
