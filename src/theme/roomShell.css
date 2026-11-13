@@ -1,0 +1,196 @@
+/* Rooms reshape the shell, not just its paint. paintAppearance marks <html>
+   with the room's parts (data-layout, data-team, data-surface, data-display);
+   every part below is tested on its own, so any combination a person or a
+   model picks still renders on every screen. Colors always come from the
+   room's repaired tokens, never from here. */
+
+/* =============================== Layouts =============================== */
+
+/* Mirror: the Desk on the left, the team on the right. */
+[data-layout="mirror"] .bot-app { flex-direction: row-reverse; }
+[data-layout="mirror"] .bt-rail { border-right: 0; border-left: 1px solid var(--r-line); }
+[data-layout="mirror"] .bt-pane { border-left: 0; border-right: 1px solid var(--r-line); }
+[data-layout="mirror"] .bt-menubtn { left: auto; right: max(10px, env(safe-area-inset-right, 0px)); }
+[data-layout="mirror"] .appearance-settings { left: auto; right: calc(12px + env(safe-area-inset-right, 0px)); }
+@media (min-width: 761px) {
+  [data-layout="mirror"] .bt-rail-resize { right: auto; left: -4px; }
+  [data-layout="mirror"] .bt-rail { transition: margin-right .25s cubic-bezier(.16, 1, .3, 1), visibility 0s linear 0s; }
+  [data-layout="mirror"] .bot-app.rail-collapsed .bt-rail {
+    margin-left: 0; margin-right: calc(-1 * var(--bt-rail-w, 350px) - 1px);
+    transition: margin-right .25s cubic-bezier(.16, 1, .3, 1), visibility 0s linear .25s;
+  }
+}
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
+  [data-layout="mirror"] .bt-rail {
+    left: auto; right: 0; transform: translateX(102%);
+    padding-left: 0; padding-right: env(safe-area-inset-right, 0px);
+  }
+  [data-layout="mirror"] .bt-rail.drawer-open { transform: none; }
+}
+@media (max-width: 1180px) {
+  [data-layout="mirror"] .bt-pane-mount { right: auto; left: 0; transform: translateX(-103%); box-shadow: 20px 0 60px rgb(0 0 0 / .5); padding-right: 0; padding-left: env(safe-area-inset-left, 0px); }
+  [data-layout="mirror"] .bt-pane-mount.open { transform: none; }
+}
+
+/* Whenever the menu button floats over the bar, the bar leaves it room. */
+.bot-app.menu-float .bt-menubtn { display: grid; place-items: center; border-radius: 50%; color: var(--r-ink-mute); }
+.bot-app.menu-float .bt-menubtn:hover { background: var(--r-line); color: var(--r-ink); }
+.bot-app.menu-float .bt-workspacebar { padding-left: calc(62px + env(safe-area-inset-left, 0px)); }
+[data-layout="mirror"] .bot-app.menu-float .bt-workspacebar {
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: calc(62px + env(safe-area-inset-right, 0px));
+}
+
+/* Dock and Crew seat the team in a strip; the whole rail becomes a drawer. */
+.bot-app.rail-drawer .bt-rail {
+  position: absolute; top: 0; bottom: 0; left: 0; z-index: 30; margin-left: 0;
+  transform: translateX(-102%);
+  box-shadow: 0 0 60px rgb(0 0 0 / .5);
+  transition: transform .28s cubic-bezier(.16, 1, .3, 1), visibility 0s linear .28s;
+}
+.bot-app.rail-drawer .bt-rail.drawer-open { transform: none; transition-delay: 0s; }
+.bot-app.rail-drawer .bt-rail:not(.drawer-open) { visibility: hidden; pointer-events: none; }
+.bot-app.rail-drawer .bt-rail-resize { display: none; }
+
+/* ============================== Team views ============================= */
+
+.bt-pin-seat { display: none; }
+
+/* List: compact rows. */
+[data-team="list"] .bt-pins { grid-template-columns: 1fr; gap: 2px; padding: 8px 4px 10px; }
+[data-team="list"] .bt-pin { flex-direction: row; justify-content: flex-start; gap: 10px; padding: 6px 8px; text-align: left; }
+[data-team="list"] .bt-pin-disc { width: 32px; height: 32px; font-size: 13px; flex: none; }
+[data-team="list"] .bt-pin-name { flex: none; max-width: 48%; }
+[data-team="list"] .bt-pin-role { flex: 1; min-width: 0; max-width: none; }
+[data-team="list"] .bt-conv { padding: 7px 8px; gap: 10px; }
+[data-team="list"] .bt-conv .bt-disc { width: 32px; height: 32px; font-size: 13px; }
+
+/* Tiles: small square tiles, more to a row. */
+[data-team="tiles"] .bt-pins { grid-template-columns: repeat(auto-fill, minmax(66px, 1fr)); }
+[data-team="tiles"] .bt-pin { padding: 8px 2px 6px; gap: 5px; }
+[data-team="tiles"] .bt-pin-disc { width: 50px; height: 50px; font-size: 19px; border-radius: calc(12px * var(--r-round, 1)); }
+[data-team="tiles"] .bt-pin-disc img { border-radius: inherit; }
+[data-team="tiles"] .bt-pin-name { font-size: 11.5px; max-width: 62px; }
+[data-team="tiles"] .bt-pin-role { display: none; }
+[data-team="tiles"] .bt-conv .bt-disc,
+[data-team="tiles"] .bt-conv .bt-disc-img { border-radius: calc(10px * var(--r-round, 1)); }
+
+/* Seating chart: each pinned teammate gets a seat that says what they are on. */
+[data-team="seats"] .bt-pins { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; padding: 10px 6px 12px; }
+[data-team="seats"] .bt-pin {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "disc name" "disc role" "seat seat";
+  align-items: center; column-gap: 10px; row-gap: 1px; padding: 9px 10px 10px; text-align: left;
+  background: var(--r-bg-raised); box-shadow: inset 0 0 0 1px var(--r-line);
+}
+[data-team="seats"] .bt-pin:hover { background: var(--r-bg-hover); }
+[data-team="seats"] .bt-pin.on { box-shadow: inset 0 0 0 1.5px var(--r-tardis-lit); }
+[data-team="seats"] .bt-pin > :not(.bt-pin-disc, .bt-pin-name, .bt-pin-role, .bt-pin-seat) { grid-column: 1 / -1; justify-self: start; }
+[data-team="seats"] .bt-pin-disc { grid-area: disc; width: 40px; height: 40px; font-size: 16px; }
+[data-team="seats"] .bt-pin-name { grid-area: name; align-self: end; max-width: none; }
+[data-team="seats"] .bt-pin-role { grid-area: role; align-self: start; max-width: none; }
+[data-team="seats"] .bt-pin-seat {
+  grid-area: seat; display: flex; align-items: flex-start; gap: 6px; margin-top: 7px; padding-top: 7px;
+  border-top: 1px dashed var(--r-line-strong);
+  font-size: 11.5px; line-height: 1.35; color: var(--r-ink-soft);
+  overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+}
+.bt-pin-seat i {
+  display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%;
+  background: var(--r-line-strong); vertical-align: 1px;
+}
+.bt-pin-seat[data-state="online"] i { background: var(--r-elf-blue); }
+.bt-pin-seat[data-state="working"] i { background: var(--r-emerald); box-shadow: 0 0 6px var(--r-emerald); }
+
+/* ============================== Surfaces =============================== */
+/* The shape of cards, bubbles and panels. Radii already follow --r-round. */
+
+:root { --hud-c: color-mix(in srgb, var(--r-elf-blue) 85%, transparent); }
+[data-surface="paper"] { --sf-pill: 8px; }
+[data-surface="pixel"], [data-surface="terminal"] { --sf-pill: 0px; }
+[data-surface="hud"] { --sf-pill: 4px; }
+
+/* Paper: index cards with inked edges and a red rule. */
+[data-surface="paper"] .bot-app .rc :is(.m-elrond:not(.m-update, .m-activity), .bubble),
+[data-surface="paper"] :is(.bt-workspace-switch, .bot-app .rc .composer) {
+  border: 1px solid color-mix(in srgb, var(--r-ink) 24%, transparent);
+  box-shadow: 2px 3px 0 color-mix(in srgb, var(--r-ink) 10%, transparent);
+}
+[data-surface="paper"] .bot-app .rc .m-elrond:not(.m-update, .m-activity) { border-top: 3px solid color-mix(in srgb, var(--r-accent-fill) 75%, transparent); }
+[data-surface="paper"] .bt-workspace-switch button[aria-pressed="true"] { background: var(--r-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--r-ink) 30%, transparent); }
+[data-surface="paper"] :is(.bt-pin.on, .bt-conv.on, .ts-member[aria-current="true"]) { background: color-mix(in srgb, var(--r-amber) 16%, var(--r-bg-raised)); }
+
+/* Pixel: hard edges and chunky offset shadows; buttons press in. */
+[data-surface="pixel"] .bot-app .rc :is(.m-elrond:not(.m-update, .m-activity), .bubble),
+[data-surface="pixel"] :is(.bt-workspace-switch, .bot-app .rc .composer, .team-strip .ts-member[aria-current="true"]) {
+  border: 2px solid var(--r-line-strong);
+  box-shadow: 4px 4px 0 color-mix(in srgb, var(--r-accent-fill) 50%, #000);
+}
+[data-surface="pixel"] .bot-app .rc .bubble { box-shadow: 4px 4px 0 color-mix(in srgb, var(--r-violet) 55%, #000); }
+[data-surface="pixel"] .bt-workspace-switch button[aria-pressed="true"] { background: var(--r-accent-fill); color: var(--r-on-accent-fill); box-shadow: none; }
+[data-surface="pixel"] :is(.bt-workspace-switch button, .bt-iconbtn, .ts-member, .bt-pin, .bt-conv):active { transform: translate(2px, 2px); }
+
+/* Heads-up: thin glowing lines with corner brackets. */
+[data-surface="hud"] .bot-app .rc :is(.m-elrond:not(.m-update, .m-activity), .bubble),
+[data-surface="hud"] :is(.bt-workspace-switch, .bot-app .rc .composer, .team-strip.is-row .ts-member, .bt-pin.on, .bt-conv.on) {
+  border: 1px solid color-mix(in srgb, var(--r-elf-blue) 34%, transparent);
+  box-shadow: inset 0 0 22px color-mix(in srgb, var(--r-elf-blue) 7%, transparent), 0 0 16px color-mix(in srgb, var(--r-elf-blue) 7%, transparent);
+  background-image:
+    linear-gradient(var(--hud-c), var(--hud-c)), linear-gradient(var(--hud-c), var(--hud-c)),
+    linear-gradient(var(--hud-c), var(--hud-c)), linear-gradient(var(--hud-c), var(--hud-c)),
+    linear-gradient(var(--hud-c), var(--hud-c)), linear-gradient(var(--hud-c), var(--hud-c)),
+    linear-gradient(var(--hud-c), var(--hud-c)), linear-gradient(var(--hud-c), var(--hud-c));
+  background-size: 11px 2px, 2px 11px, 11px 2px, 2px 11px, 11px 2px, 2px 11px, 11px 2px, 2px 11px;
+  background-position: 0 0, 0 0, 100% 0, 100% 0, 0 100%, 0 100%, 100% 100%, 100% 100%;
+  background-repeat: no-repeat;
+}
+[data-surface="hud"] :is(.bt-group-name, .bt-pane-title, .ts-doing) { text-transform: uppercase; letter-spacing: .08em; }
+[data-surface="hud"] .bt-workspace-switch button[aria-pressed="true"] { background: color-mix(in srgb, var(--r-elf-blue) 16%, var(--r-bg-raised)); box-shadow: inset 0 -2px 0 var(--r-elf-blue); }
+
+/* Cozy: pillowy and warm. */
+[data-surface="cozy"] .bot-app .rc :is(.m-elrond:not(.m-update, .m-activity), .bubble),
+[data-surface="cozy"] :is(.bt-workspace-switch, .bot-app .rc .composer) {
+  border-color: transparent;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .06), 0 8px 22px rgb(0 0 0 / .26);
+}
+[data-surface="cozy"] .bot-app .rc .bubble { background: color-mix(in srgb, var(--r-amber) 18%, var(--r-bg-raised)); }
+[data-surface="cozy"] :is(.bt-pin.on, .bt-conv.on) { background: color-mix(in srgb, var(--r-amber) 12%, var(--r-bg-hover)); }
+
+/* Glass: frosted panels over the scene. */
+[data-surface="glass"] :is(.bt-workspacebar, .team-strip.is-row) {
+  background: color-mix(in srgb, var(--r-bg-raised) 52%, transparent);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3); backdrop-filter: blur(16px) saturate(1.3);
+}
+[data-surface="glass"] .bot-app .rc .composer {
+  background: color-mix(in srgb, var(--r-bg-raised) 76%, transparent);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+}
+[data-surface="glass"] .bot-app .rc :is(.m-elrond:not(.m-update, .m-activity), .bubble, .composer),
+[data-surface="glass"] .bt-workspace-switch {
+  border: 1px solid color-mix(in srgb, var(--r-ink) 12%, transparent);
+  box-shadow: 0 8px 28px rgb(0 0 0 / .08), inset 0 1px 0 rgb(255 255 255 / .35);
+}
+[data-surface="glass"][data-theme="dark"] .bot-app .rc :is(.m-elrond:not(.m-update, .m-activity), .bubble, .composer),
+[data-surface="glass"][data-theme="dark"] .bt-workspace-switch { box-shadow: 0 8px 28px rgb(0 0 0 / .3), inset 0 1px 0 rgb(255 255 255 / .07); }
+
+/* Terminal: flat phosphor lines and a faint scan. */
+[data-surface="terminal"] .bot-app .rc :is(.m-elrond:not(.m-update, .m-activity), .bubble) {
+  background: color-mix(in srgb, var(--r-elf-blue) 5%, var(--r-bg));
+  border: 1px dashed color-mix(in srgb, var(--r-elf-blue) 42%, transparent);
+  box-shadow: none;
+}
+[data-surface="terminal"] :is(.bot-app .rc .composer, .bt-workspace-switch) { border: 1px solid color-mix(in srgb, var(--r-elf-blue) 60%, transparent); box-shadow: none; }
+[data-surface="terminal"] :is(.bt-pin-name, .ts-name, .bt-conv-title, .bt-head-name) { text-shadow: 0 0 7px color-mix(in srgb, var(--r-elf-blue) 45%, transparent); }
+[data-surface="terminal"] .bt-workspace-switch button[aria-pressed="true"] { background: var(--r-accent-fill); color: var(--r-on-accent-fill); box-shadow: none; }
+[data-surface="terminal"] .bt-main::after {
+  content: ''; position: absolute; inset: 0; z-index: 60; pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgb(0 0 0 / .09) 0 1px, transparent 1px 3px);
+}
+
+/* ============================ Display face ============================= */
+/* Names, labels and headings; message text keeps the body font. */
+:root:not([data-display="body"]) :is(
+  .bt-pin-name, .bt-conv-title, .bt-head-name, .ts-name, .bt-workspace-switch button, .bt-pane-title,
+  .bt-group-name, .bt-empty-title, .bt-room-wrap h1, .bt-room-wrap h2, .bot-app .rc .who .who-from
+) { font-family: var(--r-room-display); }
+[data-display="silkscreen"] :is(.bt-pin-name, .bt-conv-title, .ts-name, .bt-workspace-switch button, .bt-head-name) { letter-spacing: .02em; }
+[data-display="michroma"] :is(.bt-workspace-switch button, .bt-conv-title, .bt-pin-name, .ts-name) { font-size: .92em; letter-spacing: .01em; }

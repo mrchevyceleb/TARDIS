@@ -369,3 +369,20 @@ export async function saveAppearance(patch: Partial<Appearance>): Promise<{ appe
   if (!data?.appearance) throw new Error('The saved appearance response was incomplete.');
   return data;
 }
+
+// Rooms Matt made or kept (built-in rooms ship with the web app).
+export type SavedRoom = { id: string; name: string; blurb: string; prompt?: string; look: Record<string, unknown> };
+async function roomCall<T>(path: string, init: RequestInit, timeout = 10_000, cancel?: AbortSignal): Promise<T> {
+  const deadline = AbortSignal.timeout(timeout);
+  const signal = cancel && typeof AbortSignal.any === 'function' ? AbortSignal.any([deadline, cancel]) : cancel ?? deadline;
+  const response = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json' }, signal });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) throw Object.assign(new Error(data?.error || 'The room library is unavailable.'), { status: response.status });
+  return data as T;
+}
+export const fetchRooms = () => roomCall<{ rooms: SavedRoom[] }>('/api/rooms', { cache: 'no-store' });
+export const saveRoom = (room: Omit<SavedRoom, 'id'>) => roomCall<{ room: SavedRoom }>('/api/rooms', { method: 'POST', body: JSON.stringify({ room }) });
+export const deleteRoom = (id: string) => roomCall<{ deleted: boolean }>(`/api/rooms/${encodeURIComponent(id)}`, { method: 'DELETE' });
+/** Ask the designer for a room. With `base`, the words tweak that room instead. */
+export const imagineRoom = (prompt: string, base: { name: string; prompt?: string; look: Record<string, unknown> } | undefined, cancel: AbortSignal) =>
+  roomCall<{ room: SavedRoom }>('/api/rooms/imagine', { method: 'POST', body: JSON.stringify({ prompt, base }) }, 80_000, cancel);

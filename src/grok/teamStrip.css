@@ -1,0 +1,124 @@
+/* The team strip: Dock column, Crew stations, and the phone's strip.
+   Lamps match the rail: a lit lamp is online, a ring going out is working. */
+
+.team-strip { display: flex; gap: 6px; min-width: 0; }
+.team-strip-list { display: flex; gap: 4px; min-width: 0; scrollbar-width: none; }
+.team-strip-list::-webkit-scrollbar { display: none; }
+
+.ts-member {
+  position: relative; display: flex; align-items: center; min-width: 0; flex: none;
+  color: var(--r-ink); text-align: left; cursor: pointer;
+  border-radius: calc(14px * var(--r-round, 1));
+  transition: background .14s ease, transform .12s ease, box-shadow .14s ease;
+}
+.ts-member:hover { background: var(--r-line); }
+.ts-member:active { transform: scale(.96); }
+.ts-member:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: 1px; }
+.ts-member[aria-current="true"] { background: var(--r-bg-hover); }
+
+.ts-face {
+  position: relative; display: grid; place-items: center; flex: none;
+  width: 40px; height: 40px; border-radius: 50%;
+  background: var(--r-bg-hover); font-weight: 600; font-size: 16px; user-select: none;
+}
+.ts-face img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block; }
+.ts-member[aria-current="true"] .ts-face { box-shadow: 0 0 0 2px var(--r-bg-soft), 0 0 0 4px var(--r-tardis-lit); }
+.ts-member:is([data-state="online"], [data-state="working"]) .ts-face::before {
+  content: ''; position: absolute; right: -1px; bottom: -1px; width: 12px; height: 12px; border-radius: 50%;
+  background: var(--r-elf-blue); border: 2px solid var(--r-bg-soft); box-sizing: border-box;
+  box-shadow: 0 0 6px color-mix(in oklch, var(--r-elf-blue) 70%, transparent);
+}
+.ts-member[data-state="working"] .ts-face::after {
+  content: ''; position: absolute; right: -1px; bottom: -1px; width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--r-elf-blue); box-sizing: border-box;
+  animation: ts-ring 1.5s ease-out infinite;
+}
+@keyframes ts-ring { from { transform: scale(.8); opacity: .85; } to { transform: scale(2.1); opacity: 0; } }
+.ts-unread {
+  position: absolute; top: -4px; right: -5px; z-index: 1;
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; box-sizing: border-box;
+  display: grid; place-items: center;
+  background: var(--r-rose); color: var(--r-on-rose, #fff); font: 700 10.5px/1 var(--r-body);
+  box-shadow: 0 0 0 2px var(--r-bg-soft);
+}
+.ts-text { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.ts-role, .ts-doing > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A name is never cut: it wraps at spaces, and fitName steps down a word too wide for its box. */
+.ts-name { min-width: 0; overflow: hidden; font-size: 13px; font-weight: 600; line-height: 1.2; }
+.ts-role { font-size: 11px; color: var(--r-ink-faint); }
+.ts-member.is-muted .ts-name { color: var(--r-ink-mute); }
+.ts-doing { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 11px; color: var(--r-ink-soft); }
+.ts-doing i { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--r-line-strong); }
+.ts-member[data-state="online"] .ts-doing i { background: var(--r-elf-blue); }
+.ts-member[data-state="working"] .ts-doing i { background: var(--r-emerald); box-shadow: 0 0 6px var(--r-emerald); }
+
+/* ---------- Dock: a slim column of faces beside a wide chat ---------- */
+.team-strip.is-column {
+  flex: none; flex-direction: column; align-items: center; z-index: 21;
+  min-width: 84px; padding: calc(10px + env(safe-area-inset-top, 0px)) 0 0;
+  background-color: var(--r-bg-soft); border-right: 1px solid var(--r-line);
+}
+.team-strip.is-column .bt-menubtn {
+  position: relative; inset: auto; transform: none; display: grid; place-items: center; flex: none;
+  width: 44px; height: 44px; margin-bottom: 6px; border-radius: 50%; color: var(--r-ink-mute);
+}
+.team-strip.is-column .bt-menubtn:hover { background: var(--r-line); color: var(--r-ink); }
+.team-strip.is-column .team-strip-list {
+  flex: 1; min-height: 0; width: 100%; flex-direction: column; align-items: center;
+  overflow-y: auto; padding: 8px 0 calc(14px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--r-line);
+}
+.team-strip.is-column .ts-member { flex-direction: column; justify-content: center; gap: 5px; align-self: stretch; min-width: 74px; margin: 0 5px; padding: 8px 4px 6px; }
+.team-strip.is-column .ts-face { width: 46px; height: 46px; font-size: 18px; }
+.team-strip.is-column .ts-text { align-items: center; max-width: 100%; }
+.team-strip.is-column .ts-name { font-size: 11px; font-weight: 600; max-width: 100px; text-align: center; }
+.team-strip.is-column .ts-role, .team-strip.is-column .ts-doing { display: none; }
+.team-strip.is-column .ts-member[aria-current="true"] { box-shadow: inset 3px 0 0 var(--r-tardis-lit); }
+
+/* ---------- Row: Crew stations, and every phone strip ---------- */
+.team-strip.is-row {
+  flex: none; position: relative; z-index: 2; align-items: center;
+  padding: 8px 12px; border-bottom: 1px solid var(--r-line);
+  background: color-mix(in srgb, var(--r-bg-soft) 88%, transparent);
+}
+.team-strip.is-row .team-strip-list {
+  flex: 1; overflow-x: auto; padding: 4px; gap: 8px; scroll-snap-type: x proximity; overscroll-behavior-x: contain;
+  mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+}
+.team-strip.is-row .ts-member {
+  gap: 10px; max-width: 230px; padding: 6px 14px 6px 6px; scroll-snap-align: start;
+  background: var(--r-bg-raised); box-shadow: inset 0 0 0 1px var(--r-line);
+}
+.team-strip.is-row .ts-member:hover { background: var(--r-bg-hover); }
+.team-strip.is-row .ts-member[aria-current="true"] { box-shadow: inset 0 0 0 1.5px var(--r-tardis-lit); }
+.team-strip.is-row .ts-face { width: 36px; height: 36px; font-size: 15px; }
+
+/* Team views: tiles are squares, a list is a row of name chips. */
+[data-team="tiles"] .ts-face { border-radius: calc(11px * var(--r-round, 1)); }
+[data-team="list"] .team-strip.is-row .ts-member { padding: 4px 14px 4px 4px; border-radius: 999px; }
+[data-team="list"] .team-strip.is-row .ts-face { width: 28px; height: 28px; font-size: 12px; }
+[data-team="list"] .team-strip.is-row .ts-role { display: none; }
+[data-team="seats"] .team-strip.is-row .ts-member { min-width: 170px; }
+
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1180px) {
+  /* A phone keeps it to faces and first names: who is here, who is working, who wrote. */
+  .team-strip.is-row { padding: 6px max(8px, env(safe-area-inset-right, 0px)) 6px max(8px, env(safe-area-inset-left, 0px)); }
+  .team-strip.is-row .team-strip-list { gap: 2px; align-items: flex-start; }
+  .team-strip.is-row .ts-member,
+  [data-team] .team-strip.is-row .ts-member {
+    flex-direction: column; gap: 3px; min-width: 62px; max-width: none;
+    padding: 5px 2px 4px; background: transparent; box-shadow: none; border-radius: calc(12px * var(--r-round, 1));
+  }
+  .team-strip.is-row .ts-member[aria-current="true"] { background: var(--r-bg-hover); box-shadow: none; }
+  .team-strip.is-row .ts-face, [data-team] .team-strip.is-row .ts-face { width: 40px; height: 40px; font-size: 16px; }
+  .team-strip.is-row .ts-text { align-items: center; max-width: 100%; }
+  .team-strip.is-row .ts-name { font-size: 10.5px; max-width: 108px; text-align: center; }
+  .team-strip.is-row :is(.ts-role, .ts-doing) { display: none; }
+}
+
+[data-motion="calm"] .ts-member[data-state="working"] .ts-face::after { animation: none; opacity: .6; }
+@media (prefers-reduced-motion: reduce) {
+  .ts-member { transition: none; }
+  .ts-member:active { transform: none; }
+  .ts-member[data-state="working"] .ts-face::after { animation: none; opacity: .6; }
+}

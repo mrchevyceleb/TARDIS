@@ -12,8 +12,8 @@
 // auto-compaction. Rooms open in the center pane from Plugins; the classic
 // Studio IDE stays at /studio.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from 'react';
-import { ClipboardList, Menu, MessageSquare, Orbit, Pencil } from 'lucide-react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from 'react';
+import { ClipboardList, Dices, DoorOpen, Menu, MessageSquare, Orbit, Pencil } from 'lucide-react';
 import { apiJson } from '../data/api';
 import { useJarvis } from '../jarvis/JarvisProvider';
 import { useMediaQuery } from '../chat/hooks/useMediaQuery';
@@ -33,7 +33,15 @@ import { CallOverlay } from '../voice/CallOverlay';
 import { useKonami } from '../theme/eggs';
 import { BackgroundScene } from '../theme/BackgroundScene';
 import { useAppearance } from '../theme/useAppearance';
-import { applyAppearance, appearanceAxes, cycleAppearance, shuffleAppearance, withMode } from '../theme/themes';
+import { appearanceAxes, cycleAppearance, paintAppearance, withMode, writeAppearance } from '../theme/themes';
+import { useRoomStage } from '../theme/useRooms';
+import { RoomBanner, RoomNotice, RoomsDialog } from '../theme/RoomsDialog';
+import { tapPoint } from '../theme/RoomCard';
+import { useRoomChimes } from '../theme/roomSounds';
+import { useChannels } from '../chat/hooks/useChannels';
+import { TeamStrip } from './TeamStrip';
+import { useTeamPresence } from './teamPresence';
+import '../theme/roomShell.css';
 import { TAGLINE, WORKSPACE_NAV } from '../theme/voice';
 import { ROOM_NAMES } from '../data/roomNames';
 import { useAgents, reorderAgentIds, patchAgent, sameChatId, type Agent } from './agents';
@@ -110,6 +118,11 @@ function readView(): View {
 
 export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   const { appearance, setAppearance, syncStatus: appearanceSync } = useAppearance();
+  // The room on screen: the saved look, or a try-on worn over it.
+  const stage = useRoomStage(appearance, setAppearance, appearanceSync);
+  const shown = stage.shown;
+  const [roomsOpen, setRoomsOpen] = useState<false | 'gallery' | 'tweak'>(false);
+  const roomsTrigger = useRef<HTMLButtonElement>(null);
   const flags = useDeploymentFlags();
   const jarvis = useJarvis();
   const viewer = useProxyViewer();
@@ -135,17 +148,28 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   const setPaneOpen = overlayPane ? setMobilePaneOpen : setDesktopPaneOpen;
   const [railCollapsed, setRailCollapsed] = useState(() => localStorage.getItem('rivendell:rail-collapsed') === 'true');
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // The room's arrangement. Dock and Crew seat the team in a strip, so on a
+  // desktop the full rail becomes a drawer; a phone always has the drawer and
+  // gets the strip too, so who is working and who wrote stays on screen.
+  const layout = shown.layout;
+  const railDrawer = !isMobile && (layout === 'dock' || layout === 'crew');
+  const drawerMode = isMobile || railDrawer;
+  const strip: 'column' | 'row' | null = layout === 'dock' && !isMobile ? 'column' : layout === 'dock' || layout === 'crew' ? 'row' : null;
+  const floatingMenu = isMobile || (railDrawer ? strip !== 'column' : railCollapsed);
   const [meta, setMeta] = useState<ChatMeta | null>(null);
-  const { mode: theme, style: visualStyle } = appearanceAxes(appearance);
+  const { mode: theme, style: visualStyle } = appearanceAxes(shown);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<Agent | undefined>(undefined);
   const [callAgent, setCallAgent] = useState<Agent | null>(null);
 
-  // Layout effect: the stored palette and knobs must be on <html> before the
-  // first paint, or a reload flashes the default look (font, size, corners, motion).
-  useLayoutEffect(() => { applyAppearance(appearance); }, [appearance]);
+  // Layout effects: the stored look and knobs must be on <html> before the
+  // first paint, or a reload flashes the default look (font, size, corners,
+  // motion). Only the saved look is stored; a try-on is painted, never saved.
+  useLayoutEffect(() => { writeAppearance(appearance); }, [appearance]);
+  useLayoutEffect(() => { paintAppearance(shown); }, [shown]);
   const toggleTheme = () => setAppearance((a) => withMode(a, appearanceAxes(a).mode === 'dark' ? 'light' : 'dark'));
-  // Quick theme switching: Alt+Shift+T cycles, Alt+Shift+R shuffles.
+  // Quick switching: Alt+Shift+T cycles colors, Alt+Shift+R surprises with a room.
+  const surpriseRoom = stage.surprise;
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (!event.altKey || !event.shiftKey || event.metaKey || event.ctrlKey || event.defaultPrevented) return;
@@ -153,11 +177,11 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return;
       const key = event.key.toLowerCase();
       if (key === 't') { event.preventDefault(); setAppearance((a) => cycleAppearance(a)); }
-      else if (key === 'r') { event.preventDefault(); setAppearance((a) => shuffleAppearance(a)); }
+      else if (key === 'r') { event.preventDefault(); surpriseRoom(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [setAppearance, surpriseRoom]);
   useEffect(() => { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); }, [view]);
   useEffect(() => { localStorage.setItem(PANE_KEY, String(desktopPaneOpen)); }, [desktopPaneOpen]);
   // A desktop preference must never reopen a sheet over a phone conversation.
@@ -194,9 +218,9 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !isDeskView && !editorOpen && !callAgent) {
-        // The drawer's own Escape handler owns mobile navigation. Letting this
+        // The drawer's own Escape handler owns drawer navigation. Letting this
         // desktop shortcut run too persists railCollapsed=true underneath it.
-        if (isMobile || drawerOpen) return;
+        if (drawerMode || drawerOpen) return;
         const tag = (document.activeElement?.tagName ?? '').toLowerCase();
         if (tag === 'input' || tag === 'textarea' || (document.activeElement as HTMLElement | null)?.isContentEditable) return;
         setRailCollapsed(true);
@@ -204,8 +228,8 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [editorOpen, callAgent, isMobile, drawerOpen, isDeskView]);
-  useEffect(() => { if (!isMobile) setDrawerOpen(false); }, [isMobile]);
+  }, [editorOpen, callAgent, drawerMode, drawerOpen, isDeskView]);
+  useEffect(() => { if (!drawerMode) setDrawerOpen(false); }, [drawerMode]);
 
   // Easter eggs — presentation only. Konami regenerates every disc for a
   // beat; an unknown room path gets a BAD WOLF toast. Neither touches a turn.
@@ -432,12 +456,53 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
     ? (repos.find((r) => r.path === activeChat.repoPath) ?? hubRepo)
     : hubRepo;
 
+  // Who is here and who is working (one shared poll with the rail), and the
+  // room's soft "done" when a teammate finishes.
+  const presence = useTeamPresence(agents);
+  useRoomChimes(presence.busy, shown.sounds);
+  // While the rail is tucked away, its menu button says something is waiting
+  // in it: a channel reply always, a teammate's reply when no strip shows it.
+  const channels = useChannels();
+  const hiddenUnread = (channels.data?.channels ?? []).some((c) => (c.unread ?? 0) > 0)
+    || (!strip && agents.some((a) => !a.muted && (a.unread ?? 0) > 0));
+  const unreadHint = useId();
+  const menuButton = (
+    <button
+      className={`bt-menubtn${drawerOpen ? ' is-open' : ''}`}
+      onClick={() => {
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        setMobilePaneOpen(false);
+        if (drawerMode) setDrawerOpen(true);
+        else setRailCollapsed(false);
+      }}
+      aria-label="Open sidebar"
+      aria-describedby={hiddenUnread ? unreadHint : undefined}
+      title="Open sidebar"
+      aria-hidden={drawerOpen || undefined}
+      tabIndex={drawerOpen ? -1 : 0}
+    >
+      <Menu size={17} />
+      {hiddenUnread ? <span className="bt-menudot" id={unreadHint}><span className="bt-sr">New messages waiting</span></span> : null}
+    </button>
+  );
+  const teamStrip = (orientation: 'column' | 'row') => (
+    <TeamStrip
+      agents={agents}
+      presence={presence}
+      activeAgentId={agent?.id}
+      orientation={orientation}
+      team={shown.team}
+      onOpenAgent={openAgent}
+      lead={orientation === 'column' ? menuButton : undefined}
+    />
+  );
+
   return (
     <StudioFilesContext.Provider value={fileActions}>
-      <div ref={appRef} className={`bot-app${railCollapsed ? ' rail-collapsed' : ''}${regen ? ' regen' : ''}`} data-style={visualStyle}>
+      <div ref={appRef} className={`bot-app${railCollapsed && !railDrawer ? ' rail-collapsed' : ''}${railDrawer ? ' rail-drawer' : ''}${floatingMenu ? ' menu-float' : ''}${regen ? ' regen' : ''}`} data-style={visualStyle}>
         <BotRail
-          collapsed={railCollapsed}
-          onToggleCollapse={() => setRailCollapsed((c) => !c)}
+          collapsed={railCollapsed && !railDrawer}
+          onToggleCollapse={railDrawer ? undefined : () => setRailCollapsed((c) => !c)}
           drawerOpen={drawerOpen}
           onCloseDrawer={() => setDrawerOpen(false)}
           agents={agents}
@@ -468,6 +533,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
           appearance={appearance}
           appearanceSync={appearanceSync}
           onAppearance={setAppearance}
+          onOpenRooms={() => { setDrawerOpen(false); setRoomsOpen('gallery'); }}
           onToggleTheme={toggleTheme}
           onOpenStudio={openStudio}
           onHome={goHome}
@@ -475,8 +541,10 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
 
         <div className={`bt-scrim${drawerOpen ? ' show' : ''}`} onClick={() => setDrawerOpen(false)} />
 
+        {strip === 'column' ? teamStrip('column') : null}
+
         <main className="bt-main">
-          <BackgroundScene scene={appearance.background} intensity={appearance.backgroundIntensity} speed={appearance.backgroundSpeed} />
+          <BackgroundScene scene={shown.background} intensity={shown.backgroundIntensity} speed={shown.backgroundSpeed} />
           <header className="bt-workspacebar">
             <nav className="bt-workspace-switch" aria-label={WORKSPACE_NAV.label}>
               <button type="button" aria-pressed={view.kind === 'chat'} onClick={() => {
@@ -505,26 +573,29 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
                 {sessionsRunning ? <span className="bt-ws-count" aria-hidden="true">{sessionsRunning}</span> : null}
               </button>}
             </nav>
+            <div className="bt-roomdoor">
+              <button
+                ref={roomsTrigger}
+                type="button"
+                className="is-door"
+                data-rooms-trigger
+                aria-haspopup="dialog"
+                aria-expanded={Boolean(roomsOpen)}
+                title="Rooms: change the whole place"
+                onClick={() => setRoomsOpen((open) => (open ? false : 'gallery'))}
+              >
+                <DoorOpen size={16} aria-hidden="true" /><span className="bt-ws-label">Rooms</span>
+              </button>
+              <button type="button" className="is-dice" title="Surprise me with a room (Alt+Shift+R)" aria-label="Surprise me with a room" onClick={(event) => stage.surprise(tapPoint(event))}>
+                <Dices size={16} aria-hidden="true" />
+              </button>
+            </div>
             {/* Always on screen, far from the composer and the phone's thumb zone. */}
             {flags.deskRoom ? <NeedsYouBadge summary={deskSummary.data} onOpen={openNeedsYou} /> : null}
           </header>
-          {(isMobile || railCollapsed) ? (
-            <button
-              className={`bt-menubtn${drawerOpen ? ' is-open' : ''}`}
-              onClick={() => {
-                (document.activeElement as HTMLElement | null)?.blur?.();
-                setMobilePaneOpen(false);
-                if (isMobile) setDrawerOpen(true);
-                else setRailCollapsed(false);
-              }}
-              aria-label="Open sidebar"
-              title="Open sidebar"
-              aria-hidden={drawerOpen || undefined}
-              tabIndex={drawerOpen ? -1 : 0}
-            >
-              <Menu size={17} />
-            </button>
-          ) : null}
+          {strip === 'row' ? teamStrip('row') : null}
+          {roomsOpen ? null : <RoomBanner stage={stage} onTweak={() => setRoomsOpen('tweak')} />}
+          {floatingMenu ? menuButton : null}
 
           {view.kind === 'chat' ? (
             <GrokChat
@@ -586,6 +657,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
               </div>
             </div>
           ) : null}
+          <RoomNotice stage={stage} />
         </main>
 
         {view.kind === 'chat' && overlayPane && paneOpen ? (
@@ -639,6 +711,18 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
             }
           }}
         />
+        {roomsOpen ? (
+          <RoomsDialog
+            stage={stage}
+            appearance={appearance}
+            isMobile={isMobile}
+            startTweaking={roomsOpen === 'tweak'}
+            onClose={(restoreFocus = true) => {
+              setRoomsOpen(false);
+              if (restoreFocus) roomsTrigger.current?.focus({ preventScroll: true });
+            }}
+          />
+        ) : null}
         {eggToast ? <div className="bt-toast" role="status">{eggToast}</div> : null}
       </div>
     </StudioFilesContext.Provider>
