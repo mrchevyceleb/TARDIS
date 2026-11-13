@@ -34,12 +34,22 @@ const TOMBSTONE_MAX_AGE_MS = 15 * 60_000;
  *  scrolled out, the lane has run a lot since and is resumed). */
 const TAIL_BYTES = 4 * 1024 * 1024;
 /** The kill itself writes a few rows (result, turn end, interrupted, background
- *  notes) within a couple of seconds of the tombstone. Whatever engine wrote a
- *  later row, the lane is being used again (not every engine writes a turn-start
- *  row). With this process's boot time known, the boundary is the boot itself: a
- *  row stamped at or after it is the new process's. This window is only the
+ *  notes) within a couple of seconds of the tombstone, and a resumed engine
+ *  writes housekeeping of its own at boot: Claude Code reports the background
+ *  tasks the restart orphaned, its init, and an empty result with no turn
+ *  (Riley, Nov 13: those rows read as "back at work", so the wake skipped him).
+ *  Only a turn starting, or a message admitted, means the lane is in use again;
+ *  every engine writes `turnStart` when it opens one. With this process's boot
+ *  time known, the turn must start at or after the boot. This window is only the
  *  fallback for callers that have no boot time. */
 const SETTLE_MS = 10_000;
+
+/** Rows that mean the lane is working again, as opposed to the engine settling. */
+function startsWork(ev: { type?: unknown; event?: { type?: unknown } } | undefined): boolean {
+  if (ev?.type === 'turnStart') return true;
+  const inner = ev?.type === 'event' ? ev.event?.type : undefined;
+  return inner === '_user_echo' || inner === 'peer_message';
+}
 /** Sent-set entries are forgotten after this. */
 const SENT_KEEP_MS = 24 * 60 * 60_000;
 /** Spacing between wakes, so a restart that cut many lanes stays well inside
@@ -83,6 +93,8 @@ function restartWakeDryRun(): boolean {
 }
 
 // ---- reading the tombstone --------------------------------------------------------
+// A lane handed to the next server (lib/laneHost.ts) is never tombstoned: it was
+// not cut. This wake is for the lanes that could not be handed over.
 
 export type CutReadOptions = { bootMs?: number; tailBytes?: number };
 
@@ -122,14 +134,15 @@ export function unansweredRestartCutAt(file: string, opts: CutReadOptions = {}):
       // Before any tombstone nothing needs reading; after one, each row's time says
       // whether it is the kill settling or the lane being used again.
       if (!marked && cutAt === null) continue;
-      let row: { at?: unknown; ev?: { event?: { _serviceRestart?: unknown } } };
+      let row: { at?: unknown; ev?: { type?: unknown; event?: { type?: unknown; _serviceRestart?: unknown } } };
       try {
         row = JSON.parse(line);
       } catch {
         continue;
       }
       if (marked && row.ev?.event?._serviceRestart === true && typeof row.at === 'number') cutAt = row.at;
-      else if (cutAt !== null && typeof row.at === 'number' && (hasBoot ? row.at >= bootMs : row.at > cutAt + SETTLE_MS)) cutAt = null;
+      else if (cutAt !== null && typeof row.at === 'number' && startsWork(row.ev)
+        && (hasBoot ? row.at >= bootMs : row.at > cutAt + SETTLE_MS)) cutAt = null;
     }
     return cutAt;
   } catch {

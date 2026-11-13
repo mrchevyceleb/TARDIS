@@ -23,10 +23,11 @@ import { maybeAutoCompact, refreshCompactForRotation, bankRotation, noteUserTurn
 import { CLAUDE_CONTEXT_TOKEN_BUDGET, CLAUDE_NATIVE_COMPACT_WINDOW, CONTEXT_TOKEN_BUDGET, NATIVE_COMPACT_MARGIN, contextRotationDue, contextTokens, learnContextLimit, providerContextBudget, recordContextUsage, recordContextRotation } from './contextBudget.ts';
 import { bareChatId } from './threadKey.ts';
 import { NATIVE_SESSION_GENERATION, sessionDirectory, nativeClaudeSettings } from './sessionPolicy.ts';
-import { claudeNativeTranscriptPath, prepareClaudeNativeStorage } from './nativeSessionStorage.ts';
+import { claudeNativeTranscriptPath, nativeLocationRecorder, prepareClaudeNativeStorage } from './nativeSessionStorage.ts';
 import { openRouterToolSearch } from './openrouterCompatibility.ts';
 import { recordNativeSession, recordNativeCompact, recordNativeFailure, recordNativeNotice, forgetNativeSession } from './sessionMetrics.ts';
-import { spawnLaneWorker } from '../lib/workerReap.ts';
+import { attachHostedWorker, hostedChildOf, spawnEngineProcess, type EngineProcess } from '../lib/laneHost.ts';
+import { pickState, restoreState, type ClaudeLaneHandoff } from './laneHandoff.ts';
 import { wellFormedText } from '../lib/wellFormed.ts';
 import { backgroundChatId, backgroundLaneEnabled, isAgentThread, isBackgroundChatId, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { recallBlockForTurn, recallEligibleTurn } from './autoRecall.ts';
@@ -53,7 +54,7 @@ import { noteProviderUsageLimit } from '../lib/providerLimitAlert.ts';
 import { claudeAccountPool } from '../lib/claudeAccountPool.ts';
 import { refreshClaudeAccountUsage } from '../lib/accountUsage.ts';
 import { applyProviderLimits } from './providerEnv.ts';
-import { ensureNativeCompactProxy, nativeCompactBaseUrl, markNativeCompacting, markNativeHandoverRecovery, releaseNativeCompactRoute, confirmNativeCompact } from './nativeCompactProxy.ts';
+import { ensureNativeCompactProxy, nativeCompactBaseUrl, markNativeCompacting, markNativeHandoverRecovery, releaseNativeCompactRoute, confirmNativeCompact, holdNativeRoutesDuring, nativeCompactRouteSnapshot, restoreNativeCompactRoute } from './nativeCompactProxy.ts';
 import { compactFailureError, isContextLengthRejection, isSyntheticApiErrorEvent, isSyntheticApiErrorText, providerLabel, syntheticApiErrorReason, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
 import { noteProviderGateFailure } from '../lib/providerGateAlert.ts';
 import { isZaiFallbackProviderFailure, noteZaiFallbackFailure, noteZaiPlanQuota, zaiCredentials, zaiModeFor, zaiTurnOutcome, type ZaiMode, type ZaiTurnOutcome } from './zaiQuota.ts';
@@ -685,6 +686,27 @@ export function pausedMessageNote(opts: { peerFrom?: string; peerFromRole?: stri
 type ClaudeSendOptions = { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; humanOrigin?: boolean; skipAttachments?: boolean; voiceMode?: boolean; imagesAsFiles?: boolean; providerContinue?: ProviderContinueOpts; replyNudge?: ReplyNudge; compactRerun?: boolean; echoText?: string; replyTo?: { from: string; snippet: string }; accountRerun?: boolean; accountRerunOrigin?: TurnOrigin };
 type PendingAccountInput = { deliveryId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; from?: string };
 type DeferredAccountExit = { code: number | null; signal: NodeJS.Signals | null };
+/** A teammate delivery as it echoes into the thread once Claude admits it. */
+type PeerEcho = { from: string; fromRole?: string; text: string; startsTurn: boolean; person: boolean; deliveryId?: string };
+type PendingPeerInput = { nativeInputId: string; text: string; images?: Array<{ mediaType: string; base64: string }>; from?: string; echo?: () => void; peer?: PeerEcho };
+
+/** Session fields handed to the next server with a running engine: the turn
+ *  and process state the engine's own output cannot rebuild. Everything else
+ *  starts fresh, which is right for an engine no server-side step is mid-way
+ *  through (canDetach). */
+const CLAUDE_HANDOFF_FIELDS = [
+  'spawnModel', 'spawnEffort', 'currentSessionId', 'startedResumeId', 'pendingResumeId',
+  'seedWindowOnNextTurn', 'pendingSeedAck', 'resumeFailed', 'nativeBaseUrl', 'harnessChars', 'harnessPhase',
+  'zaiMode', 'turnOrigin', 'turnIsContinuation', 'zaiTurnProviderFailed', 'terminalNoticeEmitted',
+  'syntheticApiErrorSeen', 'syntheticApiErrorReason', 'compactFailure', 'providerWindow', 'nativeCompactWindow',
+  'rotateAfterNativeCompact', 'usageSeen', 'seedOverflowed', 'startTokens', 'statusContext', 'providerAccount',
+  'providerRoutingKey', 'preferredAccountRoutingKey', 'providerEmail', 'automationTurn', 'personTurn',
+  'activeToolIds', 'laneSyncSeq', 'pausedForMessage', 'turnPromptSubmitted', 'nativeCompactRecovering',
+  'nativeCompactCommand', 'contextRotated', 'mcpPrewarmed', 'mcpRecoveryEnabled', 'selectionPersisted',
+  'initSeen', 'backgroundTasks', 'interruptHazards', 'turnStartedAt', 'lastActivityAtMs',
+] as const;
+
+type AdoptedEngine = { handoff: ClaudeLaneHandoff; child: EngineProcess };
 
 class ClaudeSession {
   readonly key: string;
@@ -731,7 +753,7 @@ class ClaudeSession {
   private harnessChars = 0;
   private harnessPhase: 'startup' | 'turn' = 'startup';
   private statusAcks: Array<() => void> = [];
-  private pendingPeerInputs = new Map<string, { nativeInputId: string; text: string; images?: Array<{ mediaType: string; base64: string }>; from?: string; echo?: () => void }>();
+  private pendingPeerInputs = new Map<string, PendingPeerInput>();
   private pendingAccountInputs: PendingAccountInput[] = [];
   private spawnError: string | null = null;
   /** Set once we detect a fatal 401. Guards failAuth() so a retry storm only
@@ -878,6 +900,9 @@ class ClaudeSession {
    *  must NOT re-create the jsonl after freshStart's clearEventLog removed it
    *  (that would resurrect a reset thread on a later full replay). */
   private disposed = false;
+  /** This engine was handed to the next server (detachForRestart). It keeps
+   *  running; nothing here may signal it, write to it, or record for it. */
+  private handedOff = false;
   /** Background work alive inside this CLI (backgrounded shells, background
    *  subagents), task id -> plain description. It wakes the agent only while
    *  this process lives, so automatic kills wait for it and deliberate ones
@@ -901,7 +926,7 @@ class ClaudeSession {
   readonly ready: Promise<boolean>;
   private resolveReady!: (ok: boolean) => void;
 
-  constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model?: string, effort?: string, seedFirst = false, switchedFrom: string | null = null, preparedSubscriptionEnv?: NodeJS.ProcessEnv) {
+  constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model?: string, effort?: string, seedFirst = false, switchedFrom: string | null = null, preparedSubscriptionEnv?: NodeJS.ProcessEnv, adopted?: AdoptedEngine) {
     assertSubscriptionLane(cli);
     this.cli = cli;
     this.cwd = cwd;
@@ -962,7 +987,43 @@ class ClaudeSession {
       }
     }, 2000).unref();
 
-    this.startWorker(resumeId);
+    if (adopted) this.adoptWorker(adopted.handoff, adopted.child);
+    else this.startWorker(resumeId);
+  }
+
+  /** Take over an engine the last server handed over, mid-turn or idle, with
+   *  its background work still running inside it. */
+  private adoptWorker(handoff: ClaudeLaneHandoff, child: EngineProcess): void {
+    restoreState(this, CLAUDE_HANDOFF_FIELDS, handoff.state);
+    const extra = handoff.state as {
+      pendingPeerInputs?: Array<{ deliveryId: string; nativeInputId: string; text: string; from?: string; peer?: PeerEcho }>;
+      pendingAccountInputs?: PendingAccountInput[];
+      compactRerunPrompt?: ClaudeSession['compactRerunPrompt'];
+    };
+    for (const input of extra.pendingPeerInputs ?? []) {
+      const peer = input.peer;
+      this.pendingPeerInputs.set(input.deliveryId, {
+        nativeInputId: input.nativeInputId, text: input.text, from: input.from, peer,
+        echo: peer ? () => this.echoPeerInput(peer) : undefined,
+      });
+    }
+    this.pendingAccountInputs = extra.pendingAccountInputs ?? [];
+    this.compactRerunPrompt = extra.compactRerunPrompt ?? null;
+    const transcript = handoff.route?.transcript;
+    if (transcript?.project) this.nativeStorageAccept = nativeLocationRecorder(this.chatId, transcript.profile, transcript.project, this.cwd);
+    // The engine still calls the proxy URL it was started with.
+    if (!handoff.nativeBaseUrl || !handoff.route || !restoreNativeCompactRoute(handoff.nativeBaseUrl, handoff.route, {
+      sessionId: () => this.currentSessionId ?? this.startedResumeId,
+      harnessChars: () => this.harnessChars,
+      harnessPhase: () => this.harnessPhase,
+    })) {
+      throw new Error('the engine\'s API route could not be restored');
+    }
+    this.child = child;
+    this.bindWorker(child, this.nativeBaseUrl);
+    this.resolveReady(true);
+    if (this.mcpRecoveryEnabled) this.scheduleMcpCheck(60_000);
+    console.log(`[chat ${this.cli}] adopted ${this.key} from the last server (busy=${handoff.busy} background=${handoff.backgroundWork.length})`);
   }
 
   private startWorker(resumeId: string | null): void {
@@ -1119,15 +1180,13 @@ class ClaudeSession {
     this.accountSwitchStdout = [];
     this.accountSwitchStderr = [];
     this.deferredAccountExit = null;
-    this.child = spawnLaneWorker('claude', args, {
-      cwd,
-      env: spawnEnv,
-      detached: true,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }) as ChildProcessByStdio<Writable, Readable, Readable>;
-    const child = this.child;
-    const workerBaseUrl = this.nativeBaseUrl;
+    this.child = spawnEngineProcess('claude', args, { cwd, env: spawnEnv });
+    this.bindWorker(this.child, this.nativeBaseUrl);
+  }
 
+  /** Wire a running engine to this session: its output, its exit, its errors.
+   *  A fresh spawn and an engine adopted across a restart share this. */
+  private bindWorker(child: EngineProcess, workerBaseUrl: string | undefined): void {
     child.once('close', () => { if (this.child === child) this.workerClosed = true; });
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
@@ -1437,6 +1496,7 @@ class ClaudeSession {
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
   async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: ClaudeSendOptions = {}): Promise<void> {
+    if (this.handedOff) throw new Error('TARDIS is restarting; this lane carries on in the next server');
     assertSubscriptionLane(this.cli);
     const selectionRevision = assertSelectedEngine(this.chatId, this.cli);
     // A receipt timeout must not write a second copy of an input that the
@@ -1666,6 +1726,14 @@ class ClaudeSession {
 
     // Emit only in the same synchronous slice as the final selection guard
     // and stdin write; an unsubmitted old-model message has no durable echo.
+    const peerEcho: PeerEcho | null = opts.peerFrom ? {
+      from: opts.peerFrom,
+      fromRole: opts.peerFromRole,
+      text: opts.peerText !== undefined ? opts.peerText : text,
+      startsTurn: startsNewTurn,
+      person: isPersonMessage(opts),
+      deliveryId: opts.peerDeliveryId,
+    } : null;
     const echoInput = () => {
       if (opts.accountRerun) {
         if (this.turnOrigin?.human || isPersonMessage(opts)) this.watchReply().arm();
@@ -1688,26 +1756,8 @@ class ClaudeSession {
       } else if (replyNudge) {
         this.emit({ type: 'turnStart' });
         this.emit(replyNudgeEvent(replyNudge));
-      } else if (opts.peerFrom) {
-        const origin = this.turnOrigin ??= emptyTurnOrigin();
-        noteTurnPeer(origin, opts.peerFrom, opts.peerFromRole, opts.peerText ?? text);
-        if (isPersonMessage(opts)) this.watchReply().arm();
-        if (startsNewTurn && opts.peerFromRole === 'automation') origin.automation = true;
-        if (startsNewTurn) this.emit({ type: 'turnStart' });
-        // Deliveries with an ID echo on their native input receipt. A failed
-        // write must leave neither a delivered bubble nor an admitted chain.
-        this.emit({
-          type: 'event',
-          event: {
-            type: 'peer_message',
-            startsTurn: startsNewTurn,
-            from: opts.peerFrom,
-            fromRole: opts.peerFromRole ?? '',
-            text: opts.peerText !== undefined ? opts.peerText : text,
-            ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}),
-            ts: Date.now(),
-          },
-        });
+      } else if (peerEcho) {
+        this.echoPeerInput(peerEcho);
       } else {
         if (!opts.clientMsgId || !durableUserEchoClientMsgId(this.logKey, opts.clientMsgId)) {
           this.emit({
@@ -1831,7 +1881,7 @@ class ClaudeSession {
         if (pausedNote) this.pausedForMessage = false;
       }
       if (opts.peerDeliveryId && !opts.accountRerun) {
-        this.pendingPeerInputs.set(opts.peerDeliveryId, { nativeInputId, text, images, from: opts.peerFrom, echo: echoInput });
+        this.pendingPeerInputs.set(opts.peerDeliveryId, { nativeInputId, text, images, from: opts.peerFrom, echo: echoInput, peer: peerEcho ?? undefined });
       }
       if (opts.accountRerun) {
         for (const input of this.pendingPeerInputs.values()) {
@@ -1879,6 +1929,7 @@ class ClaudeSession {
   /** Tear down the underlying process. Background work dies with it, so name
    *  that work in the thread first, while emit() still accepts frames. */
   shutdown(reason = 'unspecified', ended: BackgroundWorkCause = 'other'): void {
+    if (this.handedOff) return;
     // A Stop still settling has already dropped what Claude stopped from the
     // live list. Name those as the Stop's, then what this shutdown ends.
     const stopped = this.takeStopWatch();
@@ -1899,11 +1950,50 @@ class ClaudeSession {
     }, 3000).unref();
   }
 
+  /** Can the next server take this engine over exactly as it is? Only a hosted
+   *  engine this server is reading, with no server-side step half done: those
+   *  live in this process's promises and would be lost part way. */
+  canDetach(): boolean {
+    return Boolean(hostedChildOf(this.child)?.isAttached()) && !this.disposed && this.initSeen
+      && !this.accountSwitching && !this.contextMaintenance && !this.interruptInFlight
+      && !this.userInterruptPending && !this.nativeHandoverPending && !this.preparingTurnAborter
+      && !this.warmupPromise && !this.mcpRecoveryRequest;
+  }
+
+  /** Stop reading this engine and describe it for the next server. The engine,
+   *  its turn and its background work carry on in the lane host. */
+  detachForRestart(): ClaudeLaneHandoff | null {
+    const hosted = hostedChildOf(this.child);
+    if (!hosted || !this.canDetach()) return null;
+    const busy = this.isBusy();
+    const backgroundWork = this.backgroundWork();
+    const route = nativeCompactRouteSnapshot(this.nativeBaseUrl);
+    const state = pickState(this, CLAUDE_HANDOFF_FIELDS);
+    state.pendingPeerInputs = [...this.pendingPeerInputs].map(([deliveryId, input]) => ({
+      deliveryId, nativeInputId: input.nativeInputId, text: input.text, from: input.from, peer: input.peer,
+    }));
+    state.pendingAccountInputs = (this.pendingAccountInputs ?? []).map(({ images: _images, ...input }) => input);
+    state.compactRerunPrompt = this.compactRerunPrompt ? { ...this.compactRerunPrompt, images: undefined } : null;
+    const host = hosted.detach();
+    if (!host) return null;
+    this.handedOff = true;
+    this.disposed = true;
+    this.clearMcpRecovery();
+    this.clearBoundaryRequest();
+    if (this.stopWatch?.timer) clearTimeout(this.stopWatch.timer);
+    return {
+      kind: 'claude', key: this.key, cli: this.cli, cwd: this.cwd, chatId: this.chatId, logKey: this.logKey,
+      host, detachedAt: Date.now(), busy, backgroundWork,
+      model: this.spawnModel, effort: this.spawnEffort, nativeBaseUrl: this.nativeBaseUrl ?? null, route, state,
+    };
+  }
+
   /** Cancel only the active turn and keep the initialized CLI/MCP process warm.
    * Claude Code's stream-json control protocol returns a normal canceled result
    * and then accepts the next user message in the same process. Fall back to a
    * process kill only if the control channel itself fails or never settles. */
   interrupt(reason = 'interrupt'): Promise<boolean> {
+    if (this.handedOff) return Promise.resolve(false);
     if (this.accountSwitching) {
       if (reason !== 'interruptSession') return Promise.resolve(true);
       this.nativeStopGeneration++;
@@ -2982,6 +3072,28 @@ class ClaudeSession {
       if (this.accountSwitching && !this.isNativeInputReceipt(ev)) this.accountSwitchStdout.push(line + '\n');
       else this.handleEvent(ev);
     }
+  }
+
+  private echoPeerInput(peer: PeerEcho): void {
+    const origin = this.turnOrigin ??= emptyTurnOrigin();
+    noteTurnPeer(origin, peer.from, peer.fromRole, peer.text);
+    if (peer.person) this.watchReply().arm();
+    if (peer.startsTurn && peer.fromRole === 'automation') origin.automation = true;
+    if (peer.startsTurn) this.emit({ type: 'turnStart' });
+    // Deliveries with an ID echo on their native input receipt. A failed
+    // write must leave neither a delivered bubble nor an admitted chain.
+    this.emit({
+      type: 'event',
+      event: {
+        type: 'peer_message',
+        startsTurn: peer.startsTurn,
+        from: peer.from,
+        fromRole: peer.fromRole ?? '',
+        text: peer.text,
+        ...(peer.deliveryId ? { deliveryId: peer.deliveryId } : {}),
+        ts: Date.now(),
+      },
+    });
   }
 
   private settleNativePeerInput(nativeInputId: string, accepted: boolean): void {
@@ -4276,15 +4388,7 @@ async function spawnSession(
     : cli === 'muse'
     ? new MuseSession(cli, cwd, chatId, resumeId, resolveClaudeModel(cli, model), resolveClaudeEffort(cli, effort, resolveClaudeModel(cli, model)), seedFirst, switchedFrom)
     : new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, seedFirst, switchedFrom, preparedSubscriptionEnv);
-  sessions.set(key, session);
-  spawnStamps.set(session, stampFor(session, chatId));
-  notifySessionCreated(session.logKey, session);
-
-  session.subscribe((se) => {
-    if (se.ev.type === 'closed' && sessions.get(key) === session) {
-      sessions.delete(key);
-    }
-  }, -1, false);
+  registerSession(key, session, stampFor(session, chatId));
 
   // Agy bounds its own readiness (a live child that never emits init is
   // retired so the lookup cannot wedge on it); the other lanes keep their own
@@ -4334,6 +4438,78 @@ async function spawnSession(
   }
   spawnFailures.delete(key);
   return session;
+}
+
+function registerSession(key: string, session: LaneSession, stamp: string): void {
+  sessions.set(key, session);
+  spawnStamps.set(session, stamp);
+  notifySessionCreated(session.logKey, session);
+  session.subscribe((se) => {
+    if (se.ev.type === 'closed' && sessions.get(key) === session) {
+      sessions.delete(key);
+    }
+  }, -1, false);
+}
+
+/** Service shutdown, before anything is marked or killed: hand every engine
+ *  that can carry on by itself to the next server. Those lanes leave the
+ *  session map, so the restart markers, background-work notes and kills that
+ *  follow never touch them. What is left goes the old way. */
+export function detachLanesForRestart(): ClaudeLaneHandoff[] {
+  const handed: ClaudeLaneHandoff[] = [];
+  for (const [key, session] of [...sessions]) {
+    if (!(session instanceof ClaudeSession)) continue;
+    const handoff = session.detachForRestart();
+    if (!handoff) continue;
+    sessions.delete(key);
+    handed.push({ ...handoff, key });
+  }
+  return handed;
+}
+
+/** Boot: take over the engines the last server handed over. An adopted lane
+ *  runs on the last build's instructions stamp, so it moves onto this build
+ *  at its next idle moment with no background work (getOrCreateSession). */
+export function adoptHandedOffLanes(handoffs: ClaudeLaneHandoff[]): Promise<{ adopted: ClaudeLaneHandoff[]; failed: ClaudeLaneHandoff[] }> {
+  return holdNativeRoutesDuring(adoptLanes(handoffs));
+}
+
+async function adoptLanes(handoffs: ClaudeLaneHandoff[]): Promise<{ adopted: ClaudeLaneHandoff[]; failed: ClaudeLaneHandoff[] }> {
+  const adopted: ClaudeLaneHandoff[] = [];
+  const failed: ClaudeLaneHandoff[] = [];
+  await ensureNativeCompactProxy();
+  for (const handoff of handoffs) {
+    const child = await attachHostedWorker(handoff.host);
+    if (!child) { failed.push(handoff); continue; }
+    try {
+      const session = new ClaudeSession(handoff.cli as CliKind, handoff.cwd, handoff.chatId, null, handoff.model, handoff.effort,
+        false, null, undefined, { handoff, child: child as unknown as EngineProcess });
+      registerSession(handoff.key, session, 'adopted');
+      // Only now, with the session listening, does the output held since the
+      // last server let go flow in.
+      child.startReading();
+      adopted.push(handoff);
+    } catch (error) {
+      console.warn(`[chat] could not adopt ${handoff.key}: ${(error as Error).message}`);
+      child.kill('SIGTERM');
+      failed.push(handoff);
+    }
+  }
+  return { adopted, failed };
+}
+
+/** A handed-over lane the next server could not take over: its engine is
+ *  gone, so record what the restart cost exactly as an undetached lane would
+ *  have, stamped when the old server let go. Restart wake picks it up. */
+export function markFailedHandoff(handoff: ClaudeLaneHandoff, signal: string): void {
+  const reserve = () => reserveEventLogSeq(handoff.logKey, loadEventLogSync(handoff.logKey).nextSeq);
+  const base = { ...laneTagFor(handoff.chatId), eng: handoff.cli, mdl: handoff.model };
+  if (handoff.busy) {
+    appendEventLogSync(handoff.logKey, { ...base, seq: reserve(), at: handoff.detachedAt, ev: restartMarkerEvent(signal) as never });
+  }
+  if (handoff.backgroundWork.length) {
+    appendEventLogSync(handoff.logKey, { ...base, seq: reserve(), at: handoff.detachedAt, ev: { type: 'event', event: backgroundWorkEvent('ended', 'restart', handoff.backgroundWork) } });
+  }
 }
 
 export function shutdownAllSessions(): void {

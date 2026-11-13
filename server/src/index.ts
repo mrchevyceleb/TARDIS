@@ -79,7 +79,9 @@ import { internalRouter } from './routes/internal.ts';
 import { xaiOauthRouter } from './routes/xai-oauth.ts';
 import { primeXaiOauthToken } from './chat/runner.ts';
 import { migrateAgentThreadLogs } from './chat/threadMigrate.ts';
-import { markBackgroundWorkEndedByRestart, markBusyLanesRestarting, activeClaudeSessions } from './chat/runner.ts';
+import { markBackgroundWorkEndedByRestart, markBusyLanesRestarting, activeClaudeSessions, adoptHandedOffLanes, detachLanesForRestart, markFailedHandoff } from './chat/runner.ts';
+import { takeLaneHandoff, writeLaneHandoff } from './chat/laneHandoff.ts';
+import { endUnclaimedLaneHosts, prepareLaneHosts } from './lib/laneHost.ts';
 import { markPendingProviderContinuesInterrupted } from './chat/providerSwitch.ts';
 import { flushAllEventChains } from './chat/event-log-store.ts';
 import { flushAgentHistory, startAgentHistory } from './chat/agentHistory.ts';
@@ -121,12 +123,13 @@ app.get('/api/health', (_req, res) => {
     brand: 'tardis',
     port: PORT,
     workerRunner: WORKER_RUNNER,
-    /** In-flight turns right now. A restart kills them mid-flight — deploys
-     *  MUST check this is 0 (or accept the tombstone) before bouncing. */
+    /** In-flight turns right now. Claude-family lanes in a lane host carry on
+     *  through a restart (handedOffLanes); any other busy lane is cut and
+     *  woken by restart wake. */
     busyTurns,
-    /** Background shells/subagents running inside Claude lanes. A restart ends
-     *  them too (each lane gets a note naming what ended), so check this with
-     *  busyTurns before bouncing. */
+    /** Background shells/subagents running inside Claude lanes. They survive a
+     *  restart with their lane; a lane that cannot be handed over gets a note
+     *  naming what ended. */
     backgroundTasks: backgroundLanes.reduce((sum, lane) => sum + lane.tasks, 0),
     backgroundLanes,
     /** The Content rooms are a per-deployment surface, not core TARDIS. An
@@ -263,6 +266,20 @@ try {
 // passes through the history writer, while each agent's transcript catches up
 // from disk in the background (commits and clears wait for it).
 void startAgentHistory();
+// Engines the last server handed over keep running in their lane hosts: take
+// them over before anything can spawn a second engine for the same lane. A
+// host nobody claims (a crash left no handoff) is ended, as the boot sweep
+// would have ended the engine before lane hosts existed.
+await prepareLaneHosts();
+{
+  const handoffs = takeLaneHandoff();
+  const { adopted, failed } = await adoptHandedOffLanes(handoffs);
+  for (const lane of failed) {
+    try { markFailedHandoff(lane, 'SIGTERM'); } catch (err) { console.warn(`[lane-handoff] restart marker failed for ${lane.logKey}: ${(err as Error).message}`); }
+  }
+  const ended = await endUnclaimedLaneHosts(new Set(adopted.map((lane) => lane.host.hostId)));
+  if (handoffs.length || ended) console.log(`[lane-handoff] adopted ${adopted.length} lane(s), ${failed.length} could not be adopted, ended ${ended} unclaimed host(s)`);
+}
 const stopChat = await registerChat(app, server);
 registerVoiceCalls(server);
 if (!SIDE_COPY) registerDeviceBridge(server);
@@ -409,6 +426,22 @@ const tearDown = (signal: NodeJS.Signals) => {
   // Quiesce first: no new turns after this point, so nothing starts after the
   // busy lanes are tombstoned.
   quiesceChat();
+  // Hand every engine that can carry on by itself to the next server: its
+  // turn, shells and timers keep running in its lane host, and the next boot
+  // reads on from the byte this one stopped at. Only what is left below is
+  // marked, noted and stopped.
+  try {
+    const handed = detachLanesForRestart();
+    if (handed.length) {
+      const written = writeLaneHandoff(handed);
+      // Unwritten, the next boot ends these engines: mark them as cut now so
+      // restart wake still picks them up.
+      if (!written) for (const lane of handed) markFailedHandoff(lane, signal);
+      console.warn(`[tardis] handed ${handed.length} lane(s) to the next server${written ? '' : ' (handoff NOT written: marked as cut)'}`);
+    }
+  } catch (err) {
+    console.warn('[tardis] lane handoff failed:', (err as Error).message);
+  }
   try {
     const marked =
       markBusyLanesRestarting(signal) +

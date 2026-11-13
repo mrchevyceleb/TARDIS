@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { assertSubscriptionLane } from './subscription-policy.ts';
 import { isSelectedEngineChanged } from './engineHandover.ts';
 import { normalizeReplyTo, withReplyQuote } from './reply-quote.ts';
@@ -75,7 +76,11 @@ import { watchThread, unwatchThread, setWatchVisible } from './threadWatch.ts';
 import { agentForChatId, brainForAgent, cliForAgentEngine } from './agents.ts';
 import { loadThreadResetEpochs, noteThreadResetEpoch, noteThreadResetEpochs, persistThreadResetEpoch, subscribeThreadResetEpochs } from './threadResetStore.ts';
 import { setQueuedHumanProbe } from './providerSwitch.ts';
-import { bareChatId, isBackgroundChatId, backgroundChatId } from './threadKey.ts';
+import { bareChatId, isBackgroundChatId, backgroundChatId, backgroundLaneEnabled } from './threadKey.ts';
+
+/** This server process. A client holding guidance an earlier process accepted
+ *  but never delivered sees the process changed and sends it again. */
+const SERVER_BOOT_ID = randomUUID();
 
 type ClientSelection = {
   model?: string;
@@ -517,6 +522,10 @@ export function filterReplayEvents(events: DispatchSeqEvent[], spans?: QuietAuto
  *  codex and banana registries get their own read-only peeks, so no engine's
  *  bg lane reports a hardcoded false. Only isBusy is read. */
 function bgLaneBusy(cli: CliKind, repoPath: string, chatId: string): boolean {
+  // With the lane off, backgroundChatId is the home chat itself: peeking it
+  // reported the home turn as a bg turn, and since no bg turnEnd ever follows,
+  // every viewer that attached mid-turn stayed "In flight" after it ended.
+  if (!backgroundLaneEnabled()) return false;
   const bgId = backgroundChatId(chatId);
   if (isPersistentProcessCli(cli)) {
     const live = peekClaudeSession({ cli, repoPath, chatId: bgId });
@@ -528,8 +537,8 @@ function bgLaneBusy(cli: CliKind, repoPath: string, chatId: string): boolean {
   return banana ? banana.isBusy() : false;
 }
 
-/** Set on service shutdown: new turns are rejected (existing sockets get a
- *  clean error) so no work starts after the busy lanes were tombstoned. */
+/** Set on service shutdown: nothing new starts after the busy lanes were
+ *  handed over or tombstoned; sockets are told to take it to the next server. */
 let chatQuiesced = false;
 export function quiesceChat(): void {
   chatQuiesced = true;
@@ -1109,6 +1118,14 @@ export async function registerChat(app: express.Express, server: Server): Promis
     const safeSend = (msg: object) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
     };
+    // A server that is shutting down takes nothing new. Closing with 1012
+    // (Service Restart) leaves the message where the client already keeps it
+    // until its durable echo (the outbound FIFO, the bootId steer carry), so
+    // the next server delivers it under the same clientMsgId. An error reply
+    // here turned every release into "Not delivered" bubbles to retry by hand.
+    const yieldToNextServer = () => {
+      try { ws.close(1012, 'TARDIS is restarting'); } catch { /* already closing */ }
+    };
     const sendHandshakePending = (clientMsgId?: string) => {
       safeSend({
         type: 'error',
@@ -1585,6 +1602,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       try {
         if ('cli' in msg && msg.cli !== undefined && msg.type !== 'stop' && msg.type !== 'react') assertSubscriptionLane(msg.cli);
         if (msg.type === 'hello') {
+          if (chatQuiesced) { yieldToNextServer(); return; }
           // Serialize only hello/replay operations. A second focus/pageshow
           // hello must not race the first subscription bind, but Stop/steer
           // remain independent and can still interrupt long work immediately.
@@ -1642,6 +1660,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             lastQueuedSignature = queuedClientMsgIds.join('\u0000');
             safeSend({
               type: 'ready',
+              bootId: SERVER_BOOT_ID,
               cli: desiredBrain.cli,
               model: desiredBrain.model,
               serviceTier: desiredBrain.serviceTier, effort: desiredBrain.effort,
@@ -1716,6 +1735,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             lastQueuedSignature = queuedClientMsgIds.join('\u0000');
             safeSend({
               type: 'ready',
+              bootId: SERVER_BOOT_ID,
               cli: desiredBrain.cli,
               model: desiredBrain.model,
               serviceTier: desiredBrain.serviceTier, effort: desiredBrain.effort,
@@ -1765,6 +1785,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           lastQueuedSignature = queuedClientMsgIds.join('\u0000');
           safeSend({
             type: 'ready',
+            bootId: SERVER_BOOT_ID,
             cli: desiredBrain.cli,
             model: desiredBrain.model,
             serviceTier: desiredBrain.serviceTier, effort: desiredBrain.effort,
@@ -1976,11 +1997,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // steers run in the order the user typed.
           const gateScope = heldScopeKey(msg.repo, normalizeChatId(msg.chatId));
           for (let gate = stopBarriers.get(gateScope); gate; gate = stopBarriers.get(gateScope)) await gate;
-          if (chatQuiesced) {
-            safeSend({ type: 'error', code: 'STEER_REJECTED', clientMsgId: msg.clientMsgId, message: 'TARDIS is regenerating — try again in a few seconds.' });
-            if (!peekThreadSession({ cli: cliKind ?? msg.cli, repoPath: repoPath ?? msg.repo, chatId: normalizeChatId(msg.chatId) })?.isBusy()) safeSend({ type: 'turnEnd' });
-            return;
-          }
+          if (chatQuiesced) { yieldToNextServer(); return; }
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
           const authoritativeAgent = agentForChatId(chatId);
@@ -2357,9 +2374,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
             return;
           }
           if (chatQuiesced) {
-            rejectSteer('TARDIS is regenerating — try again in a few seconds.');
             releaseSteer();
-            if (!peekThreadSession({ cli: cliKind ?? msg.cli, repoPath: repoPath ?? msg.repo, chatId: normalizeChatId(msg.chatId) })?.isBusy()) safeSend({ type: 'turnEnd' });
+            yieldToNextServer();
             return;
           }
           cliKind = steerCli;
@@ -2525,11 +2541,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             sendHandshakePending(msg.clientMsgId);
             return;
           }
-          if (chatQuiesced) {
-            safeSend({ type: 'error', message: 'TARDIS is regenerating — try again in a few seconds.' });
-            safeSend({ type: 'turnEnd' });
-            return;
-          }
+          if (chatQuiesced) { yieldToNextServer(); return; }
           const requestedChatId = normalizeChatId(msg.chatId ?? chatId);
           const authoritativeAgent = agentForChatId(requestedChatId);
           let sendBrain = resolvedBrain(requestedChatId, {
@@ -2820,11 +2832,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             safeSend({ type: 'error', message: 'codex is on a turn - wait for the result' });
             return;
           }
-          if (chatQuiesced) {
-            safeSend({ type: 'error', message: 'TARDIS is regenerating — try again in a few seconds.' });
-            safeSend({ type: 'turnEnd' });
-            return;
-          }
+          if (chatQuiesced) { yieldToNextServer(); return; }
           if (authoritativeAgent) selectionApplied = true;
           logChatTurn(wsId, 'send', cliKind, repoPath, chatId, outgoingText);
           if (reservedSendAdmission) {
@@ -2887,6 +2895,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
           ws.emit('message', Buffer.from(JSON.stringify({ ...msg, type: 'steer', cli: cliKind, repo: repoPath, queue: true })));
           return;
         }
+        // Shutdown tore down what this message was waiting on (a spawn, a
+        // rebind): the next server takes it, as above.
+        if (chatQuiesced) { yieldToNextServer(); return; }
         busy = Boolean(cliKind && repoPath && peekThreadSession({ cli: cliKind, repoPath, chatId })?.isBusy());
         if (error instanceof MemoryPressureSpawnError) {
           console.warn(`[chat ws#${wsId}] memory-pressure spawn refused: ${error.message}`);

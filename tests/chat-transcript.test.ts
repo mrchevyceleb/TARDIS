@@ -69,3 +69,36 @@ test('streamed updates acquire the same metadata as canonical-only replay', () =
   assert.equal(blocks[0].kind === 'text' && blocks[0].presentation, 'update');
   assert.equal(blocks[0].kind === 'text' && blocks[0].text, 'The test failed. I am fixing it.');
 });
+
+test('a reply whose stream was cut and abandoned shows only its retake, once', () => {
+  const cursor = { current: '' };
+  const stream = (event: object, extra: object = {}) => ({ type: 'event', event: { type: 'stream_event', event, ...extra } });
+  let blocks: ChatBlock[] = [];
+  for (const ev of [
+    stream({ type: 'message_start' }),
+    stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+    stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'one, two, thr' } }),
+    stream({ type: 'content_block_stop', index: 0 }),
+    stream({ type: 'message_stop' }, { abandoned_blocks: { api_message_id: 'm1', from_block_index: 0 } }),
+    stream({ type: 'message_start' }),
+    stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+    stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'one, two, three' } }),
+    stream({ type: 'content_block_stop', index: 0 }),
+  ]) blocks = reduce(blocks, ev, cursor);
+  assert.deepEqual(blocks.filter(b => b.kind === 'text').map(b => b.kind === 'text' && b.text), ['one, two, three']);
+});
+
+test('a reply paused for a new message keeps its partial once when Claude Code flushes it after the interrupt', () => {
+  const cursor = { current: '' };
+  const stream = (event: object) => ({ type: 'event', event: { type: 'stream_event', event } });
+  let blocks: ChatBlock[] = [];
+  for (const ev of [
+    stream({ type: 'message_start', message: { id: 'm1' } }),
+    stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+    stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'one, two, thr' } }),
+    { type: 'event', event: { type: '_interrupted' } },
+    { type: 'event', event: { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'one, two, thr' }] } } },
+    { type: 'event', event: { type: 'result', subtype: 'success', result: 'one, two, thr' } },
+  ]) blocks = reduce(blocks, ev, cursor);
+  assert.deepEqual(blocks.filter(b => b.kind === 'text').map(b => b.kind === 'text' && b.text), ['one, two, thr']);
+});

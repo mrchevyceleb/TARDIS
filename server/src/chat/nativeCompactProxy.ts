@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { Transform, Readable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { setTimeout as delay } from 'node:timers/promises';
+import { listenOnStablePort } from '../lib/continuity.ts';
 import { openRouterCapability } from './openrouter-models.ts';
 import { OpenRouterCompatibilityError, pinOpenRouterProvider, rememberOpenRouterProvider, type OpenRouterTranscript } from './openrouterCompatibility.ts';
 import { fireworksCapability } from './fireworks-models.ts';
@@ -260,7 +261,9 @@ export function ensureNativeCompactProxy(): Promise<void> {
     server = createServer(async (req, res) => {
       const parsed = new URL(req.url || '/', 'http://localhost');
       const key = parsed.pathname.split('/')[1];
-      const route = routes.get(key);
+      let route = routes.get(key);
+      // An engine adopted from the last server may call before its route is back.
+      if (!route && adopting) { await adopting; route = routes.get(key); }
       if (!route) { res.writeHead(404).end(); return; }
       const aborter = new AbortController();
       req.on('aborted', () => aborter.abort());
@@ -361,10 +364,22 @@ export function ensureNativeCompactProxy(): Promise<void> {
         if (!res.destroyed) res.end(JSON.stringify({ type: 'error', error: { type: conflict ? 'invalid_request_error' : 'api_error', message: conflict ? error.message : 'The native provider connection failed.' } }));
       }
     });
-    server.once('error', error => { ready = null; reject(error); });
-    server.listen(0, '127.0.0.1', () => { port = (server!.address() as { port: number }).port; server!.unref(); resolve(); });
+    // The same port as last time: engines that outlived a restart keep calling
+    // the base URL they were spawned with (lib/laneHost.ts).
+    listenOnStablePort(server, 'native-compact-proxy').then((bound) => { port = bound; server!.unref(); resolve(); },
+      (error) => { ready = null; reject(error); });
   });
   return ready;
+}
+
+let adopting: Promise<unknown> | null = null;
+
+/** Hold calls for routes this server does not know yet until `adoption` settles:
+ *  the engines it is adopting are already calling, before their routes return. */
+export async function holdNativeRoutesDuring<T>(adoption: Promise<T>): Promise<T> {
+  const settled = adoption.then(() => {}, () => {});
+  adopting = settled;
+  try { return await adoption; } finally { if (adopting === settled) adopting = null; }
 }
 
 export function nativeCompactBaseUrl(upstream: string, metadata: Omit<Route, 'upstream' | 'compacting'>): string {
@@ -372,6 +387,28 @@ export function nativeCompactBaseUrl(upstream: string, metadata: Omit<Route, 'up
   const key = randomUUID();
   routes.set(key, { upstream, ...metadata, compacting: false });
   return `http://127.0.0.1:${port}/${key}`;
+}
+
+/** The plain-data part of a route, handed to the next server with its engine. */
+export type NativeRouteSnapshot = Pick<Route, 'upstream' | 'lane' | 'provider' | 'resumed' | 'transcript' | 'recovering' | 'summarySeen'>;
+type RouteClosures = Pick<Route, 'sessionId' | 'harnessChars' | 'harnessPhase'>;
+
+export function nativeCompactRouteSnapshot(baseUrl: string | undefined): NativeRouteSnapshot | null {
+  if (!baseUrl) return null;
+  const route = routes.get(new URL(baseUrl).pathname.slice(1));
+  if (!route) return null;
+  const { upstream, lane, provider, resumed, transcript, recovering, summarySeen } = route;
+  return { upstream, lane, provider, resumed, transcript, recovering, summarySeen };
+}
+
+/** Re-register an adopted engine's route under the key it was spawned with.
+ *  False when the proxy no longer answers at that engine's port. */
+export function restoreNativeCompactRoute(baseUrl: string, snapshot: NativeRouteSnapshot, closures: RouteClosures): boolean {
+  if (!port) return false;
+  const url = new URL(baseUrl);
+  if (Number(url.port) !== port) return false;
+  routes.set(url.pathname.slice(1), { ...snapshot, ...closures, compacting: false });
+  return true;
 }
 
 export function releaseNativeCompactRoute(baseUrl: string | undefined): void {

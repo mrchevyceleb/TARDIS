@@ -139,7 +139,7 @@ function isSyntheticApiErrorEvent(ev: any): boolean {
 // Pure reducer — all per-turn state lives on the blocks themselves
 // (turnId + cbIndex). This keeps it safe under React Strict Mode, which
 // invokes reducers twice for purity-checking.
-type ReducerCursor = { current: string; peerId?: string; promptPeerId?: string; ownerPrompt?: boolean; originKnown?: boolean; automation?: boolean; lane?: 'bg'; bg?: ReducerCursor; agyStep?: number; agySession?: string; legacyReplies?: Record<string, { text: string; turnId: string }> };
+type ReducerCursor = { current: string; peerId?: string; promptPeerId?: string; ownerPrompt?: boolean; originKnown?: boolean; automation?: boolean; lane?: 'bg'; bg?: ReducerCursor; agyStep?: number; agySession?: string; streamed?: { messageId: string; turnId: string }; legacyReplies?: Record<string, { text: string; turnId: string }> };
 
 /** Blocks this cursor's lane owns. The agent's background lane streams into
  *  the same thread as the home lane, so closing one lane's turn must never
@@ -176,7 +176,7 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
 
   if ((ev.type === 'stream_event' || ev.type === 'event') && ev.event) {
     const inner = ev.event && typeof ev.event === 'object'
-      ? { ...ev.event, seq: ev.seq ?? ev.event.seq, at: ev.at ?? ev.event.at }
+      ? { ...ev.event, seq: ev.seq ?? ev.event.seq, at: ev.at ?? ev.event.at, ...(ev.abandoned_blocks ? { abandoned_blocks: ev.abandoned_blocks } : {}) }
       : ev.event;
     return reduce(blocks, inner, turnIdRef);
   }
@@ -472,6 +472,10 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     // content_block_stop, and one stale running/open flag suppresses the
     // typing indicator forever (hasOpen scans the whole history).
     turnIdRef.current = `t${nextId++}`;
+    // The message's own id ties its final `assistant` frame back to what was
+    // streamed, even when that frame lands after the turn closed (an interrupt
+    // for a new message ends the turn before Claude Code flushes the partial).
+    turnIdRef.streamed = typeof ev.message?.id === 'string' ? { messageId: ev.message.id, turnId: turnIdRef.current } : undefined;
     // Agy frames stamp the emitting step's identity (card-e2bd7a): blocks
     // created inside this message carry it, so a later agy_thinking marker
     // resolves to the exact block, not a positional guess.
@@ -489,7 +493,9 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   if (ev.type === 'result' || ev.type === '_interrupted') {
     turnIdRef.legacyReplies = undefined;
     const resultSeq = typeof ev.seq === 'number' ? ev.seq : undefined;
-    const finalTurnId = turnIdRef.current || `t${nextId++}`;
+    // A result after an interrupt reconciles with the message it ended.
+    const finalTurnId = turnIdRef.current || (ev.type === 'result' ? turnIdRef.streamed?.turnId : undefined) || `t${nextId++}`;
+    if (ev.type === 'result') turnIdRef.streamed = undefined;
     const finalPeerId = turnIdRef.peerId;
     turnIdRef.current = '';
     turnIdRef.peerId = undefined;
@@ -676,6 +682,17 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
     });
   }
 
+  // Claude Code lost this message's stream (a network drop, or the server
+  // restarting under it) and abandons the blocks from this index on: they were
+  // never part of the reply, and the model answers again from that point.
+  // Keeping them would show the cut-off start of the reply above its retake.
+  if (ev.type === 'message_stop' && typeof ev.abandoned_blocks?.from_block_index === 'number') {
+    const from: number = ev.abandoned_blocks.from_block_index;
+    const turnId = turnIdRef.current;
+    if (!turnId) return blocks;
+    return blocks.filter((b) => !((b.kind === 'text' || b.kind === 'tool') && b.turnId === turnId && (b.cbIndex ?? -1) >= from));
+  }
+
   if (ev.type === 'content_block_stop') {
     const idx: number = ev.index;
     const turnId = turnIdRef.current;
@@ -752,8 +769,9 @@ export function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): 
   }
 
   if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
-    if (!turnIdRef.current) turnIdRef.current = `t${nextId++}`;
-    const turnId = turnIdRef.current;
+    const streamedTurn = turnIdRef.streamed && turnIdRef.streamed.messageId === ev.message.id ? turnIdRef.streamed.turnId : '';
+    if (!turnIdRef.current && !streamedTurn) turnIdRef.current = `t${nextId++}`;
+    const turnId = streamedTurn || turnIdRef.current;
     for (const call of ev.message.content) {
       if (call?.type === 'tool_use' && typeof call.id === 'string'
         && /^(mcp__.+__)?reply_now$/.test(call.name ?? '')
@@ -924,6 +942,10 @@ type PendingSteer = {
   replyTo?: { from: string; snippet: string };
   clientMsgId: string;
   ts: number;
+  queue?: boolean;
+  /** The server process that accepted it. One that restarted before
+   *  delivering it no longer holds it, so it is sent again. */
+  bootId?: string;
 };
 const pendingSteerQueue = new Map<string, PendingSteer[]>();
 
@@ -1276,6 +1298,8 @@ export function useChat(opts: {
    *  rejected while nobody was watching, or lost in transit or with a server
    *  restart, and must not say "will run next" forever on a busy lane. */
   const settleOnReadyRef = useRef<Set<string>>(new Set());
+  /** The server process this socket last attached to (from `ready`). */
+  const serverBootIdRef = useRef<string | null>(null);
   // `chatId` already carries `__acct__<account>` when the lane is pinned.
   const restoreKey = enabled && repo ? conversationKey(cli, repo.path, chatId) : '';
   const restoreKeyRef = useRef(restoreKey);
@@ -1438,6 +1462,7 @@ export function useChat(opts: {
     rawDeliveredIds: unknown,
     serverBusy: boolean,
     settledIds?: ReadonlySet<string>,
+    bootId?: string,
   ) => {
     const hasQueuedState = Array.isArray(rawQueuedIds);
     const hasDeliveredState = Array.isArray(rawDeliveredIds);
@@ -1452,13 +1477,23 @@ export function useChat(opts: {
         ? (rawDeliveredIds as unknown[]).filter((value): value is string => typeof value === 'string')
         : [],
     );
+    // Guidance a server accepted and then restarted before delivering is not
+    // lost: it is still here, so it goes to the new server under the same id
+    // (which the server dedupes against its durable echo).
+    const steerKey = repo ? conversationKey(cli, repo.path, chatId) : null;
+    const carried = bootId && steerKey && hasQueuedState && hasDeliveredState
+      ? pendingSteersFor(steerKey).filter((item) => item.bootId && item.bootId !== bootId
+        && !deliveredIds.has(item.clientMsgId) && !queuedIds.has(item.clientMsgId))
+      : [];
+    const carriedIds = new Set(carried.map((item) => item.clientMsgId));
     setBlocks((prev) => prev.map((block) => {
       if (block.kind !== 'user' || !block.clientMsgId) return block;
       if (deliveredIds.has(block.clientMsgId) && block.deliveryState !== undefined) {
         return { ...block, deliveryState: undefined };
       }
       if (
-        hasQueuedState
+        !carriedIds.has(block.clientMsgId)
+        && hasQueuedState
         && (!serverBusy || (hasDeliveredState && settledIds?.has(block.clientMsgId)))
         && block.deliveryState === 'queued'
         && !queuedIds.has(block.clientMsgId)
@@ -1468,6 +1503,7 @@ export function useChat(opts: {
     const current = [...queuedSteerRef.current];
     let droppedUnretained = false;
     for (const id of current) {
+      if (carriedIds.has(id)) continue;
       if (deliveredIds.has(id)) {
         if (repo) forgetPendingSteer(conversationKey(cli, repo.path, chatId), id);
         queuedSteerRef.current.delete(id);
@@ -1483,6 +1519,14 @@ export function useChat(opts: {
       const steerKey = conversationKey(cli, repo.path, chatId);
       for (const item of pendingSteersFor(steerKey)) {
         if (deliveredIds.has(item.clientMsgId)) forgetPendingSteer(steerKey, item.clientMsgId);
+      }
+    }
+    const ws = wsRef.current;
+    if (carried.length && repo && ws?.readyState === WebSocket.OPEN) {
+      for (const item of carried) {
+        item.bootId = bootId;
+        queuedSteerRef.current.add(item.clientMsgId);
+        ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text: item.text, images: payloadImages(item.images), clientMsgId: item.clientMsgId, ...(item.queue ? { queue: true } : {}), ...(item.replyTo ? { replyTo: item.replyTo } : {}), model: modelRef.current, effort: effortRef.current, serviceTier: serviceTierRef.current, ...selectionIntent() }));
       }
     }
     pendingSendRef.current = queuedSteerRef.current.size > 0 || Boolean(peekOutbound(conversationKey(cli, repo?.path ?? '', chatId)));
@@ -1926,7 +1970,9 @@ export function useChat(opts: {
           // those; guidance sent after the hello is tracked live.
           const settledIds = settleOnReadyRef.current;
           settleOnReadyRef.current = new Set();
-          reconcileQueuedState(msg.queuedClientMsgIds, msg.deliveredClientMsgIds, msg.busy === true, settledIds);
+          const bootId = typeof msg.bootId === 'string' ? msg.bootId : undefined;
+          reconcileQueuedState(msg.queuedClientMsgIds, msg.deliveredClientMsgIds, msg.busy === true, settledIds, bootId);
+          if (bootId) serverBootIdRef.current = bootId;
           // If the server says we attached to a busy session (Sam is mid-turn
           // because the user reconnected from a phone unlock or tab switch),
           // jump straight to 'streaming' so the UI shows tending instead of
@@ -2971,7 +3017,7 @@ export function useChat(opts: {
     ]);
     queuedSteerRef.current.add(clientMsgId);
     pendingSendRef.current = true;
-    rememberPendingSteer(key, { text, images, clientMsgId, ts: Date.now(), ...(replyTo ? { replyTo } : {}) });
+    rememberPendingSteer(key, { text, images, clientMsgId, ts: Date.now(), queue, ...(serverBootIdRef.current ? { bootId: serverBootIdRef.current } : {}), ...(replyTo ? { replyTo } : {}) });
     setError(null);
     ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), clientMsgId, ...(queue ? { queue: true } : {}), ...(replyTo ? { replyTo } : {}), model: modelRef.current, effort: effortRef.current, serviceTier: serviceTierRef.current, ...selectionIntent() }));
     lastMessageAtRef.current = Date.now();

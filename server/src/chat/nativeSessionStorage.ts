@@ -64,14 +64,21 @@ export function prepareClaudeNativeStorage(lane: string, profile: string, resume
       if (existsSync(join(source, resumeId))) cpSync(join(source, resumeId), join(target, resumeId), { recursive: true });
     }
   }
-  return { project, reseed, accept(id: string) {
+  return { project, reseed, accept: nativeLocationRecorder(lane, profile, project, cwd) };
+}
+
+/** Records where a lane's native transcript lives once Claude reports its id.
+ *  A lane adopted across a server restart rebuilds the same recorder. */
+export function nativeLocationRecorder(lane: string, profile: string, project: string, cwd?: string): (id: string) => void {
+  const agent = isAgentThread(lane) ? bareChatId(lane) : `${cwd ?? ''}|${lane}`;
+  return (id: string) => {
     const all = locations();
     all[agent] = { profile, project, id };
     mkdirSync(STATE_DIR, { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(all), { mode: 0o600 });
     renameSync(tmp, file);
-  } };
+  };
 }
 
 /** Resolve the current on-disk transcript without assuming Claude's legacy

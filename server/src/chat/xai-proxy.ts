@@ -1,6 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual } from 'node:crypto';
+import { listenOnStablePort, stableSecret } from '../lib/continuity.ts';
 import { getXaiAuth } from '../routes/xai-oauth.ts';
 import { transcriptGuidance } from './sharedRules.ts';
 
@@ -47,13 +48,14 @@ export function isTransientXaiCapacity(status: number, body: string): boolean {
   return status === 429 && /\bmodel\s+is\s+currently\s+at\s+capacity\b/i.test(body);
 }
 
-// Per-process credential. xaiEnv() seeds the child's ANTHROPIC_AUTH_TOKEN with
+// Per-installation credential (stable across restarts, so a Grok engine that
+// outlived the last server still authenticates). xaiEnv() seeds the child's ANTHROPIC_AUTH_TOKEN with
 // THIS instead of a real token, which is what makes the whole scheme work:
 // nothing expirable is ever frozen into a child env, and the proxy can tell its
 // own claude children apart from any other process that stumbles onto the port.
 // Without it, binding 127.0.0.1 would hand the operator's subscription to any local
 // caller that asked — loopback is not identity on a shared machine.
-const PROXY_SECRET = randomBytes(32).toString('hex');
+const PROXY_SECRET = stableSecret('xai-proxy').toString('hex');
 
 /** The value xaiEnv() must put in ANTHROPIC_AUTH_TOKEN for OAuth injection. */
 export function xaiProxySecret(): string {
@@ -335,14 +337,13 @@ function startServer(): Promise<string> {
         });
       });
     });
-    srv.on('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const addr = srv.address();
-      port = typeof addr === 'object' && addr ? addr.port : 0;
+    // The same port as last time: Grok engines that outlived a restart still call it.
+    listenOnStablePort(srv, 'xai-proxy').then((bound) => {
+      port = bound;
       server = srv;
       console.log(`[xai-proxy] listening on 127.0.0.1:${port} -> ${XAI_UPSTREAM}`);
       resolve(`http://127.0.0.1:${port}`);
-    });
+    }, reject);
   });
 }
 

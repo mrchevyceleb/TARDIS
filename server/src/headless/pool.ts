@@ -3,10 +3,11 @@
 // closed so web work never waits on whoever holds the desktop.
 
 import { chromium, type BrowserContext, type Locator, type Page } from 'playwright-core';
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { appendFile, chmod, mkdir, readFile, readlink, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
+import { stableSecret } from '../lib/continuity.ts';
 import { importDesktopSession, type ImportSummary } from './sessionImport.ts';
 
 export const HEADLESS_DIR = process.env.RIVENDELL_HEADLESS_DIR?.trim() || join(STATE_DIR, 'headless');
@@ -16,7 +17,8 @@ export const HEADLESS_DIR = process.env.RIVENDELL_HEADLESS_DIR?.trim() || join(S
 // and name themselves with the signed turn context. Like the computer MCP token,
 // this stops a console page or a mistaken call; it is not a sandbox between lanes
 // that run as the same OS user.
-const headlessSecret = randomBytes(32);
+// Kept per installation so an engine that outlived a restart keeps its browser.
+const headlessSecret = stableSecret('headless-lane-token');
 const CONTEXT_IDENTITY = '\0context';
 const tokenFor = (identity: string) => createHmac('sha256', headlessSecret).update(`headless:${identity}`).digest('hex');
 export const headlessLaneToken = (agent?: string) => tokenFor(agent?.trim() ? `lane:${agent.trim()}` : CONTEXT_IDENTITY);

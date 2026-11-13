@@ -2,13 +2,15 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { JsonStore } from '../lib/jsonStore.ts';
+import { stableSecret } from '../lib/continuity.ts';
 import { stateDir } from '../config.ts';
 import { bareChatId } from '../chat/threadKey.ts';
 import { robotGuidance } from './robots.ts';
 
 // Only TARDIS-spawned MCPs can invoke input APIs. This is not a general app
 // login; it prevents a page on the trusted console from minting agent identity.
-export const COMPUTER_MCP_TOKEN = randomBytes(32).toString('hex');
+// Kept per installation so an engine that outlived a restart keeps its MCP.
+export const COMPUTER_MCP_TOKEN = stableSecret('computer-mcp-token').toString('hex');
 const secret = randomBytes(32);
 // `expires` is the idle window (60 minutes from the start of the owner's turn). A context
 // whose owner is still mid-turn stays valid past it, up to `hardExpires`, so a long turn
