@@ -731,9 +731,7 @@ class ClaudeSession {
   private harnessChars = 0;
   private harnessPhase: 'startup' | 'turn' = 'startup';
   private statusAcks: Array<() => void> = [];
-  private pendingPeerAccepts = new Set<string>();
-  private pendingPeerSteerAccepts = new Set<string>();
-  private pendingPeerInputs = new Map<string, { text: string; images?: Array<{ mediaType: string; base64: string }>; from?: string }>();
+  private pendingPeerInputs = new Map<string, { nativeInputId: string; text: string; images?: Array<{ mediaType: string; base64: string }>; from?: string; echo?: () => void }>();
   private pendingAccountInputs: PendingAccountInput[] = [];
   private spawnError: string | null = null;
   /** Set once we detect a fatal 401. Guards failAuth() so a retry storm only
@@ -990,6 +988,10 @@ class ClaudeSession {
       '--output-format', 'stream-json',
       '--verbose',
       '--include-partial-messages',
+      // A saved native input is delivered even if generation later fails.
+      // Match this acknowledgement to the UUID sent on stdin, not to an
+      // unrelated assistant response or the success of the whole query.
+      '--replay-user-messages',
       // In -p (non-interactive) stream-json mode the CLI auto-fails an
       // AskUserQuestion call within milliseconds with a `{content:"Answer
       // questions?",is_error:true}` result the host can't answer in time — so the
@@ -1130,8 +1132,7 @@ class ClaudeSession {
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
       if (this.child !== child) return;
-      if (this.accountSwitching) this.accountSwitchStdout.push(chunk);
-      else this.onStdout(chunk);
+      this.onStdout(chunk);
     });
 
     child.stderr.setEncoding('utf8');
@@ -1440,7 +1441,7 @@ class ClaudeSession {
     const selectionRevision = assertSelectedEngine(this.chatId, this.cli);
     // A receipt timeout must not write a second copy of an input that the
     // native CLI already holds. A retry listens for that same delivery ID.
-    if (!opts.accountRerun && opts.peerDeliveryId && this.pendingPeerAccepts.has(opts.peerDeliveryId)) return;
+    if (!opts.accountRerun && opts.peerDeliveryId && this.pendingPeerInputs.has(opts.peerDeliveryId)) return;
     if (this.contextMaintenance && !opts.accountRerun) await this.contextMaintenance;
     if (opts.signal?.aborted) return;
     if (this.nativeHandoverPending) {
@@ -1693,10 +1694,8 @@ class ClaudeSession {
         if (isPersonMessage(opts)) this.watchReply().arm();
         if (startsNewTurn && opts.peerFromRole === 'automation') origin.automation = true;
         if (startsNewTurn) this.emit({ type: 'turnStart' });
-        // The echo stays ahead of the stdin write: it must be causally before
-        // any provider frame of the turn it opens (a steered turn's output can
-        // interleave with the write callback), and the write window here is
-        // synchronous — only a failed write could strand it.
+        // Deliveries with an ID echo on their native input receipt. A failed
+        // write must leave neither a delivered bubble nor an admitted chain.
         this.emit({
           type: 'event',
           event: {
@@ -1795,8 +1794,12 @@ class ClaudeSession {
     if (stdinText) content.push({ type: 'text', text: stdinText });
     this.harnessChars = Math.max(0, stdinText.length - commandText.length);
     this.harnessPhase = wantSeed ? 'startup' : 'turn';
+    // Correlate receipts to this submission, including account continuations.
+    // A late receipt from a failed write must not acknowledge a newer attempt.
+    const nativeInputId = randomUUID();
     const payload = JSON.stringify({
       type: 'user',
+      uuid: nativeInputId,
       message: {
         role: 'user',
         content: content.length === 1 && content[0].type === 'text' && !outImages?.length
@@ -1817,7 +1820,7 @@ class ClaudeSession {
       if (!startsNewTurn && this.activeToolIds.size === 0) {
         throw Object.assign(new Error('the native steering window closed before delivery'), { notAdmitted: true });
       }
-      echoInput();
+      if (!opts.peerDeliveryId) echoInput();
       if (visionNote) {
         console.log(`[chat ${this.cli}] vision adapter: ${visionNote}`);
         this.emit({ type: 'event', event: { type: '_vision_adapter', images: images!.length, note: visionNote, ts: Date.now() } });
@@ -1827,12 +1830,15 @@ class ClaudeSession {
         this.turnPromptSubmitted = true;
         if (pausedNote) this.pausedForMessage = false;
       }
-      if (opts.peerDeliveryId) {
-        this.pendingPeerAccepts.add(opts.peerDeliveryId);
-        this.pendingPeerInputs.set(opts.peerDeliveryId, { text, images, from: opts.peerFrom });
-        if (!startsNewTurn) this.pendingPeerSteerAccepts.add(opts.peerDeliveryId);
+      if (opts.peerDeliveryId && !opts.accountRerun) {
+        this.pendingPeerInputs.set(opts.peerDeliveryId, { nativeInputId, text, images, from: opts.peerFrom, echo: echoInput });
       }
-      if (!startsNewTurn && !opts.accountRerun) {
+      if (opts.accountRerun) {
+        for (const input of this.pendingPeerInputs.values()) {
+          input.nativeInputId = nativeInputId;
+        }
+      }
+      if (!startsNewTurn && !opts.accountRerun && !opts.peerDeliveryId) {
         pendingAccountInput = { deliveryId: opts.peerDeliveryId, text, images, from: opts.peerFrom };
         (this.pendingAccountInputs ??= []).push(pendingAccountInput);
       }
@@ -1858,12 +1864,7 @@ class ClaudeSession {
         abandonUnsentTurn();
         throw e;
       }
-      if (opts.peerDeliveryId) {
-        this.pendingPeerAccepts.delete(opts.peerDeliveryId);
-        this.pendingPeerInputs.delete(opts.peerDeliveryId);
-        this.pendingPeerSteerAccepts.delete(opts.peerDeliveryId);
-        this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId: opts.peerDeliveryId, ts: Date.now() } });
-      }
+      this.settleNativePeerInput(nativeInputId, false);
       if (wantSeed) this.seedWindowOnNextTurn = true;
       if (startsNewTurn && this.turnStartedAt !== null) {
         this.turnStartedAt = null;
@@ -2082,7 +2083,9 @@ class ClaudeSession {
         this.accountSwitchStdout.push(...stdout.slice(i));
         break;
       }
-      this.onStdout(stdout[i]);
+      // These are complete, already-validated lines. Do not feed them back
+      // through stdoutBuf, which may hold the newer line's trailing fragment.
+      this.handleEvent(JSON.parse(stdout[i]));
     }
     for (let i = 0; i < stderr.length; i++) {
       if (this.accountSwitching) {
@@ -2159,26 +2162,19 @@ class ClaudeSession {
       if (this.disposed || generation !== this.nativeStopGeneration) return;
       const replayInputs = [...(this.pendingAccountInputs ?? [])];
       hadUncommittedHumanGuidance ||= replayInputs.some(input => !input.deliveryId);
-      const recordedDeliveries = new Set(replayInputs.flatMap(input => input.deliveryId ? [input.deliveryId] : []));
-      for (const id of this.pendingPeerSteerAccepts) {
-        if (recordedDeliveries.has(id)) continue;
-        const input = this.pendingPeerInputs?.get(id);
-        if (input) {
-          replayInputs.push({ ...input, deliveryId: id });
-          continue;
-        }
-        this.pendingPeerAccepts.delete(id);
-        this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId: id, ts: Date.now() } });
+      for (const [deliveryId, input] of this.pendingPeerInputs) {
+        // Every re-keyed delivery must actually be present in the new input,
+        // including a turn-opening input whose receipt never arrived.
+        replayInputs.push({ ...input, deliveryId });
       }
       this.pendingAccountInputs = [];
-      this.pendingPeerSteerAccepts.clear();
       if (prompt.opts.signal?.aborted) throw new Error('The pending delivery was cancelled.');
       this.preparedSubscriptionEnv = preparedSubscriptionEnv;
       this.startWorker(this.pendingResumeId);
       const resuming = this.pendingResumeId !== null;
-      const text = [resuming ? 'Continue the pending request from before the Claude account usage limit. Check its last actual result and finish it without repeating completed actions.' : prompt.text,
+      const text = [resuming || (prompt.opts.peerDeliveryId && this.pendingPeerInputs.has(prompt.opts.peerDeliveryId)) ? 'Continue the pending request from before the Claude account usage limit. Check its last actual result and finish it without repeating completed actions.' : prompt.text,
         ...replayInputs.map(input => `Queued guidance from ${input.from ?? 'the user'}:\n${input.text}`)].join('\n\n');
-      const images = [...(resuming ? [] : prompt.images ?? []), ...replayInputs.flatMap(input => input.images ?? [])];
+      const images = [...(resuming || (prompt.opts.peerDeliveryId && this.pendingPeerInputs.has(prompt.opts.peerDeliveryId)) ? [] : prompt.images ?? []), ...replayInputs.flatMap(input => input.images ?? [])];
       this.accountSwitching = false;
       this.statusAcks = [];
       this.pendingSeedAck = false;
@@ -2186,7 +2182,7 @@ class ClaudeSession {
         peerFrom: prompt.opts.peerFrom,
         peerFromRole: prompt.opts.peerFromRole,
         peerText: prompt.opts.peerText,
-        peerDeliveryId: prompt.opts.peerDeliveryId,
+        peerDeliveryId: prompt.opts.peerDeliveryId && this.pendingPeerInputs.has(prompt.opts.peerDeliveryId) ? prompt.opts.peerDeliveryId : undefined,
         clientMsgId: prompt.opts.clientMsgId,
         humanOrigin: prompt.opts.humanOrigin,
         skipAttachments: true,
@@ -2203,9 +2199,8 @@ class ClaudeSession {
         // so that guidance remains part of the conversation.
         if (hadUncommittedHumanGuidance) this.seedWindowOnNextTurn = true;
         this.emitTerminalNotice({ ...terminal, message: 'Claude account rollover could not finish. Your saved session and pending messages are retained. Try again.' });
-        for (const deliveryId of this.pendingPeerAccepts) this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, ts: Date.now() } });
-        this.pendingPeerAccepts.clear();
-        this.pendingPeerInputs?.clear();
+        for (const deliveryId of this.pendingPeerInputs.keys()) this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, ts: Date.now() } });
+        this.pendingPeerInputs.clear();
         if (this.turnStartedAt !== null) {
           this.turnStartedAt = null;
           this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
@@ -2982,29 +2977,42 @@ class ClaudeSession {
       let ev: any;
       try { ev = JSON.parse(line); }
       catch { continue; }
-      this.handleEvent(ev);
-      if (this.accountSwitching) {
-        if (this.stdoutBuf) this.accountSwitchStdout.unshift(this.stdoutBuf);
-        this.stdoutBuf = '';
-        return;
-      }
+      // Account recovery defers query output, never transport receipts. Keep
+      // parsing through the old worker's final stdout before replacing it.
+      if (this.accountSwitching && !this.isNativeInputReceipt(ev)) this.accountSwitchStdout.push(line + '\n');
+      else this.handleEvent(ev);
     }
   }
 
+  private settleNativePeerInput(nativeInputId: string, accepted: boolean): void {
+    for (const [deliveryId, input] of this.pendingPeerInputs) {
+      if (input.nativeInputId !== nativeInputId) continue;
+      this.pendingPeerInputs.delete(deliveryId);
+      if (accepted) input.echo?.();
+      this.emit({ type: 'event', event: {
+        type: accepted ? 'peer_delivery_accepted' : 'peer_delivery_rejected', deliveryId, ts: Date.now(),
+      } });
+    }
+  }
+
+  private isNativeInputReceipt(ev: any): boolean {
+    return ev?.type === 'user' && ev.isReplay === true && !ev.parent_tool_use_id;
+  }
+
   private handleEvent(ev: any, accountLimitHandled = false): void {
+    // Native admission is independent of query success and account recovery.
+    // Consume the receipt before either can defer or discard worker output.
+    if (this.isNativeInputReceipt(ev)) {
+      if (typeof ev.uuid === 'string') this.settleNativePeerInput(ev.uuid, true);
+      return; // Receipt for our input, never a tool_result or a second UI echo.
+    }
     if (this.accountSwitching && !accountLimitHandled) return;
     if (this.handleMcpRecovery(ev)) return;
     if (ev?.type === 'autocompact_state') {
       console.log(`[native-compact-state] lane=${this.chatId} provider=${this.cli} ${JSON.stringify(ev.value)}`);
     }
-    // Writing stdin does not prove the saved native session or provider took
-    // a handoff. Keep its durable queue receipt until a real response arrives.
     if (ev?.type === 'assistant' && !ev.parent_tool_use_id && !isSyntheticApiErrorEvent(ev)) {
       this.statusAcks.splice(0).forEach(ack => ack());
-      for (const deliveryId of this.pendingPeerAccepts) this.emit({ type: 'event', event: { type: 'peer_delivery_accepted', deliveryId, ts: Date.now() } });
-      this.pendingPeerAccepts.clear();
-      this.pendingPeerInputs?.clear();
-      this.pendingPeerSteerAccepts.clear();
       this.pendingAccountInputs = [];
     }
     // Monitor/background-task notifications can start a query inside the warm
@@ -3462,17 +3470,8 @@ class ClaudeSession {
       this.accountRerunPrompt = null;
       const seeded = this.pendingSeedAck;
       const resultFailed = ev.is_error === true || typeof ev.api_error_status === 'number';
-      if (resultFailed) {
-        for (const deliveryId of this.pendingPeerAccepts) {
-          // Stdin guidance can belong to the native CLI's next query. A
-          // failure of the query already running does not reject that input.
-          if (this.pendingPeerSteerAccepts.has(deliveryId)) continue;
-          this.pendingPeerAccepts.delete(deliveryId);
-          this.pendingPeerInputs?.delete(deliveryId);
-          this.emit({ type: 'event', event: { type: 'peer_delivery_rejected', deliveryId, ts: Date.now() } });
-        }
-      }
-      this.pendingPeerSteerAccepts.clear();
+      // A result belongs to a query, not necessarily to the stdin input that
+      // is still queued behind it. Only native receipts settle admission.
       const failed = seeded && resultFailed;
       if (seeded) this.pendingSeedAck = false;
       // An accepted handover is never replayed after an API failure.

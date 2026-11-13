@@ -88,24 +88,26 @@ test('account rollover keeps the lane, native resume ID and pending teammate rec
     cli: 'claude', cwd: process.cwd(), chatId: 'bot-test', logKey: 'test-account-rollover', child,
     currentSessionId: 'saved-native-id', nativeStopGeneration: 0,
     turnStartedAt: Date.now(), accountRerunPrompt: prompt, turnOrigin: origin,
-    endBackgroundWork: () => {}, pendingPeerAccepts: new Set(['delivery-1', 'delivery-2']),
-    pendingPeerSteerAccepts: new Set(['delivery-2']),
-    pendingPeerInputs: new Map([['delivery-2', { text: 'Keep the queued guidance', images: prompt.images, from: 'Other tester' }]]),
+    endBackgroundWork: () => {},
+    pendingPeerInputs: new Map([
+      ['delivery-1', { nativeInputId: 'delivery-1', steering: false, text: prompt.text }],
+      ['delivery-2', { nativeInputId: 'delivery-2', steering: true, text: 'Keep the queued guidance', images: prompt.images, from: 'Other tester' }],
+    ]),
     pendingAccountInputs: [{ text: 'Keep the human guidance too' }],
   });
   let resumed: string | undefined;
   session.startWorker = (id: string) => { resumed = id; };
   session.send = async (text: string, images: unknown, opts: Record<string, unknown>) => {
     assert.match(text, /Continue the pending request/);
+    assert.match(text, /Finish the task/, 'a re-keyed initial delivery is included in the continuation');
     assert.match(text, /Keep the queued guidance/);
     assert.match(text, /Keep the human guidance too/);
     assert.deepEqual(images, prompt.images);
     assert.equal(opts.peerDeliveryId, 'delivery-1');
     assert.equal(opts.accountRerun, true);
     assert.equal(opts.accountRerunOrigin, origin);
-    assert.equal(session.pendingPeerAccepts.has('delivery-1'), true);
-    assert.equal(session.pendingPeerAccepts.has('delivery-2'), true);
-    assert.equal(session.pendingPeerSteerAccepts.size, 0);
+    assert.equal(session.pendingPeerInputs.has('delivery-1'), true);
+    assert.equal(session.pendingPeerInputs.has('delivery-2'), true);
   };
   const rerun = session.retryOnAccount({ message: 'full', usageLimit: true });
   assert.equal(session.isBusy(), true);
@@ -133,13 +135,13 @@ test('usage-limit results enter asynchronous recovery before emitting a failure 
     cli: 'claude', chatId: 'bot-limit-test', providerAccount: '/tmp/test-profile',
     compactFailure: null, syntheticApiErrorReason: null, turnStartedAt: Date.now(),
     accountRerunPrompt: { text: 'Pending request', opts: {} },
-    pendingPeerAccepts: new Set(['waiting-delivery']),
+    pendingPeerInputs: new Map([['waiting-delivery', { nativeInputId: 'waiting-delivery', steering: false, text: 'Pending request' }]]),
   });
   let recovering = false;
   session.recoverAccountLimit = (error: { usageLimit: boolean }) => { recovering = error.usageLimit; };
   session.handleEvent({ type: 'result', is_error: true, result: "You've hit your session limit · resets 5pm (UTC)" });
   assert.equal(recovering, true);
-  assert.equal(session.pendingPeerAccepts.has('waiting-delivery'), true);
+  assert.equal(session.pendingPeerInputs.has('waiting-delivery'), true);
   assert.deepEqual(events, []);
 });
 
@@ -174,11 +176,10 @@ test('staying on the current account drains post-limit worker output in order', 
   const seen: string[] = [];
   Object.assign(session, {
     accountSwitching: true,
-    accountSwitchStdout: ['later-stdout'],
+    accountSwitchStdout: ['{"type":"later-stdout"}\n'],
     accountSwitchStderr: ['later-stderr'],
     deferredAccountExit: null,
-    handleEvent: (_event: unknown, handled: boolean) => { seen.push(`result:${handled}`); },
-    onStdout: (chunk: string) => { seen.push(`stdout:${chunk}`); },
+    handleEvent: (event: { type: string }, handled: boolean) => { seen.push(handled ? `result:${handled}` : `stdout:${event.type}`); },
     onStderr: (chunk: string) => { seen.push(`stderr:${chunk}`); },
     finishDeferredAccountExit: () => { seen.push('exit'); },
   });
@@ -209,13 +210,65 @@ function harness() {
   const events: Array<{ type: string }> = [];
   const session = Object.assign(Object.create(ClaudeSession.prototype), {
     cli: 'xai', disposed: false, turnStartedAt: null,
-    activeToolIds: new Set(), streamTextBlocks: new Map(), pendingPeerAccepts: new Set(), pendingPeerSteerAccepts: new Set(), statusAcks: [],
+    activeToolIds: new Set(), streamTextBlocks: new Map(), pendingPeerInputs: new Map(), pendingAccountInputs: [], statusAcks: [], compactFailure: null, accountSwitchStdout: [], accountSwitchStderr: [], stdoutBuf: '',
     emit: (event: { type: string }) => events.push(event),
     trackStreamText: () => {}, persistAppliedSelection: () => {},
     maybeCompact: async () => {},
   });
   return { session, events };
 }
+
+test('a native input receipt survives an HTTP 503 without delivering the handoff again', () => {
+  const { session, events } = harness();
+  const deliveryId = '00000000-0000-4000-8000-000000000001';
+  let submissions = 0;
+  // The native CLI saves and acknowledges the input BEFORE the API fails.
+  // Reproduce the durable outbox retrying precisely when the runner rejects it.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const start = events.length;
+    submissions++;
+    session.pendingPeerInputs.set(deliveryId, { nativeInputId: deliveryId, text: 'Check the release once', steering: false });
+    session.turnStartedAt = Date.now();
+    session.handleEvent({ type: 'user', isReplay: true, uuid: deliveryId, parent_tool_use_id: null,
+      message: { role: 'user', content: 'Check the release once' } });
+    session.handleEvent({ type: 'result', is_error: true, api_error_status: 503 });
+    if (!events.slice(start).some((e: any) => e.event?.type === 'peer_delivery_rejected')) break;
+  }
+  assert.equal(submissions, 1, 'a failed generation must not resubmit a saved native input');
+  assert.equal(events.filter((e: any) => e.event?.type === 'peer_delivery_accepted').length, 1);
+  assert.equal(events.some((e: any) => e.event?.type === 'peer_delivery_rejected'), false);
+  assert.equal(events.some((e: any) => e.event?.type === '_terminal_error'), true, 'execution failure stays visible');
+});
+
+test('an unrelated failed query cannot reject an input still awaiting its receipt', () => {
+  const { session, events } = harness();
+  const deliveryId = '00000000-0000-4000-8000-000000000002';
+  const input = { nativeInputId: deliveryId, steering: false, text: 'Deliver after recovery' };
+  session.pendingPeerInputs.set(deliveryId, input);
+  session.handleEvent({ type: 'result', is_error: true, api_error_status: 503 });
+  assert.equal(session.pendingPeerInputs.has(deliveryId), true, 'query failure says nothing about pending input admission');
+  assert.equal(events.filter((e: any) => e.event?.type === 'peer_delivery_rejected').length, 0);
+  session.handleEvent({ type: 'user', isReplay: true, uuid: deliveryId });
+  assert.equal(events.filter((e: any) => e.event?.type === 'peer_delivery_accepted').length, 1);
+  assert.equal(session.pendingPeerInputs.size, 0);
+});
+
+test('only the matching root input receipt accepts a pending handoff', () => {
+  const { session, events } = harness();
+  session.turnStartedAt = 1;
+  for (const deliveryId of ['first', 'second']) {
+    session.pendingPeerInputs.set(deliveryId, { nativeInputId: deliveryId, steering: true, text: deliveryId });
+  }
+  session.handleEvent({ type: 'assistant', message: { content: [] } });
+  session.handleEvent({ type: 'user', uuid: 'first' });
+  session.handleEvent({ type: 'user', isReplay: true, uuid: 'first', parent_tool_use_id: 'child' });
+  session.handleEvent({ type: 'user', isReplay: true, uuid: 'unrelated' });
+  assert.equal(session.pendingPeerInputs.size, 2, 'another response, tool result or child cannot acknowledge this input');
+  session.handleEvent({ type: 'user', isReplay: true, uuid: 'first' });
+  session.handleEvent({ type: 'user', isReplay: true, uuid: 'first' });
+  assert.deepEqual(events.filter((e: any) => e.event?.type === 'peer_delivery_accepted').map((e: any) => e.event.deliveryId), ['first']);
+  assert.deepEqual([...session.pendingPeerInputs.keys()], ['second']);
+});
 
 test('native monitor query becomes busy, tracks the tool window, and ends normally', () => {
   const { session, events } = harness();
@@ -337,4 +390,44 @@ test('a queued teammate cannot suppress the still-owed human reply nudge', async
   await nextBoundary();
   assert.equal(interrupted(), 1);
   assert.equal(nudges, 1);
+});
+
+
+test('account switching consumes fragmented native receipts before replacing the worker', () => {
+  const { session, events } = harness();
+  let echoes = 0;
+  session.accountSwitching = true;
+  session.pendingPeerInputs.set('delivery', { nativeInputId: 'attempt', steering: true, text: 'Once', echo: () => echoes++ });
+  session.onStdout('{"type":"user","isReplay":true,"uuid":"att');
+  session.onStdout('empt"}\n{"type":"result","is_error":true}\n');
+  assert.equal(session.pendingPeerInputs.size, 0);
+  assert.equal(echoes, 1);
+  assert.equal(events.filter((e: any) => e.event?.type === 'peer_delivery_accepted').length, 1);
+  assert.deepEqual(session.accountSwitchStdout, ['{"type":"result","is_error":true}\n']);
+});
+
+test('staying on an account preserves complete queued events and the trailing partial stdout line', () => {
+  const { session } = harness();
+  session.accountSwitching = true;
+  session.onStdout('{"type":"marker","n":1}\n{"type":"mark');
+  const seen: number[] = [];
+  session.handleEvent = (event: { n?: number }) => { if (event.n) seen.push(event.n); };
+  session.finishDeferredAccountExit = () => {};
+  session.keepCurrentAccountAfterLimit({ type: 'result' });
+  session.onStdout('er","n":2}\n');
+  assert.deepEqual(seen, [1, 2], 'replaying complete frames must not consume or prefix the trailing fragment');
+  assert.equal(session.stdoutBuf, '');
+});
+
+test('a late receipt for a failed attempt cannot accept the retry of the same delivery', () => {
+  const { session, events } = harness();
+  session.pendingPeerInputs.set('delivery', { nativeInputId: 'attempt-1', text: 'Once' });
+  session.settleNativePeerInput('attempt-1', false);
+  session.pendingPeerInputs.set('delivery', { nativeInputId: 'attempt-2', text: 'Once' });
+  session.handleEvent({ type: 'user', isReplay: true, uuid: 'attempt-1' });
+  assert.equal(session.pendingPeerInputs.has('delivery'), true);
+  assert.equal(events.filter((e: any) => e.event?.type === 'peer_delivery_accepted').length, 0);
+  session.handleEvent({ type: 'user', isReplay: true, uuid: 'attempt-2' });
+  assert.equal(session.pendingPeerInputs.size, 0);
+  assert.equal(events.filter((e: any) => e.event?.type === 'peer_delivery_accepted').length, 1);
 });
