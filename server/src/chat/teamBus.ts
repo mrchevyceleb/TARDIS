@@ -462,7 +462,9 @@ const DELIVERY_REFUSAL_BACKOFF_MAX_MS = 30_000;
 const ASYNC_RETRY_MS = 15_000;
 const recipientDeliveryTails = new Map<string, Promise<void>>();
 const synchronousReplyEdges = new Map<string, number>();
-const admittedQueuedDeliveries = new Set<string>();
+/** Deliveries the recipient's provider accepted whose ack is still owed,
+ *  keyed to the event log their receipt belongs in. */
+const admittedQueuedDeliveries = new Map<string, string>();
 
 export type TeamChain = {
   id: string;
@@ -999,6 +1001,9 @@ export function deliveryLanePolicy(fromRole: string | undefined, personPosted?: 
     : 'bg';
 }
 
+/** The recipient never reached a delivery boundary: a wait, not a failure. */
+class RecipientBusyError extends Error {}
+
 async function getRecipientSessionForDelivery(
   agent: Agent,
   deadline: number,
@@ -1077,7 +1082,7 @@ async function getRecipientSessionForDelivery(
     // turn until Claude Code's ~5 minute tool timeout. The message is already
     // durable; let the outbox worker wait in the background and return to the
     // sender immediately. Only defer when we cannot steer this turn.
-    if (deferIfBusy) throw new Error(`${agent.name} is busy; durable delivery will continue automatically`);
+    if (deferIfBusy) throw new RecipientBusyError(`${agent.name} is busy; durable delivery will continue automatically`);
     waited = true;
     // Only a steering window this caller would actually admit counts as a
     // boundary. A turn still running a superseded brain can only be joined
@@ -1098,7 +1103,7 @@ async function getRecipientSessionForDelivery(
     // recipient FIFO until the entire long-running turn ends.
   }
 
-  throw new Error(`${agent.name} did not reach an admissible delivery boundary within ${Math.round(RECIPIENT_IDLE_WAIT_MS / 60_000)} minutes`);
+  throw new RecipientBusyError(`${agent.name} did not reach an admissible delivery boundary within ${Math.round(RECIPIENT_IDLE_WAIT_MS / 60_000)} minutes`);
 }
 
 // ---- delivery ----------------------------------------------------------------
@@ -1319,6 +1324,8 @@ export type TeamMessageResult = {
   loopClosed?: boolean;
   /** Accepted by the durable asynchronous path instead of making the caller retry. */
   queued?: boolean;
+  /** Not delivered only because the recipient stayed busy: a wait, not a failure. */
+  waiting?: boolean;
   /** The durable record's id, on the fire-and-forget receipt: a producer
    *  that needs to learn the record's actual admission (not its durable
    *  receipt) keys its own state by this id (card-b3468c verify P1: the
@@ -1587,7 +1594,7 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
       serviceTier = admission.serviceTier;
       waited ||= admission.waited;
     } catch (error) {
-      return { delivered: false, to: to.name, hop, queued: waited || undefined, reason: (error as Error).message };
+      return { delivered: false, to: to.name, hop, queued: waited || undefined, waiting: error instanceof RecipientBusyError || undefined, reason: (error as Error).message };
     }
     if (signal?.aborted) {
       return { delivered: false, to: to.name, hop, queued: waited || undefined, reason: 'sender stopped before delivery' };
@@ -1755,7 +1762,7 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
       channelInFlight.chatKey = session.chatId ?? (lane === 'bg' ? backgroundChatId(to.home) : to.home);
       channelInFlight.admittedAt = Date.now();
     }
-    if (delivery.deliveryId) admittedQueuedDeliveries.add(deliveryId);
+    if (delivery.deliveryId) admittedQueuedDeliveries.set(deliveryId, session.logKey);
     try {
       await onAdmitted?.(session);
       admittedQueuedDeliveries.delete(deliveryId);
@@ -1818,6 +1825,7 @@ async function runTeamDeliveryInner(delivery: TeamDelivery, channelInFlight: InF
     to: to.name,
     hop,
     queued: waited || undefined,
+    waiting: true,
     reason: `${to.name} did not accept the queued delivery within ${Math.round(RECIPIENT_IDLE_WAIT_MS / 60_000)} minutes`,
   };
 }
@@ -1842,14 +1850,34 @@ async function retainFailedQueuedDelivery(session: SessionLike, deliveryId: stri
   await queueStoreOperation(() => queuedDeliveryStore.modify(items => items.filter(item => !ids.has(item.id))));
 }
 
-async function acknowledgeQueuedDelivery(record: QueuedTeamDelivery, session: SessionLike): Promise<void> {
-  // Persist and verify the provider-accepted receipt before deleting the outbox
-  // row. A swallowed event-log write can never lose the message.
-  await flushEventLog(session.logKey);
-  if (!await hasDurablePeerDeliveryReceipt(session.logKey, record.id)) {
-    throw new Error('accepted delivery receipt did not reach the event log');
-  }
+/** Make a provider acceptance durable before any outbox row goes. Every ack
+ *  runs only once acceptance is proven (the live receipt was seen, or a
+ *  durable one exists), so a receipt the stream emitted but the disk refused
+ *  (Nov 13: ENOSPC) is written again here rather than demanded. Until it
+ *  lands the ack throws and the drain retries; the message is never resent
+ *  meanwhile, because the in-memory admission still answers for it. */
+async function persistPeerReceipt(logKey: string, deliveryId: string): Promise<void> {
+  await flushEventLog(logKey);
+  if (await hasDurablePeerDeliveryReceipt(logKey, deliveryId)) return;
+  await appendEventLogDurable(logKey, {
+    seq: reserveEventLogSeq(logKey),
+    ev: { type: 'event', event: { type: 'peer_delivery_accepted', deliveryId, ts: Date.now() } } as PersistedEvent['ev'],
+  });
+}
+
+async function acknowledgeQueuedDelivery(record: QueuedTeamDelivery, logKey: string): Promise<void> {
+  await persistPeerReceipt(logKey, record.id);
   await queueStoreOperation(() => queuedDeliveryStore.delete(record.id));
+}
+
+/** The recipient log that durably holds this delivery's provider receipt. */
+async function durableAcceptanceLog(to: Agent, deliveryId: string): Promise<string | undefined> {
+  for (const lane of ['main', 'bg'] as const) {
+    const home = agentLogKey(to, lane);
+    const logKey = logKeyFor(home.cli, sessionDirectory(home.chatKey, ELROND_WORKSPACE_PATH), home.chatKey);
+    if (await hasDurablePeerDeliveryReceipt(logKey, deliveryId)) return logKey;
+  }
+  return undefined;
 }
 
 /** The joined-delivery block for each batch record after the lead. Mirrors
@@ -1978,11 +2006,8 @@ export function frozenBatchMembers(
  *  receipts and rows go (and the lead's row goes last), so every partial
  *  failure leaves the queue in a state the next pass resolves by dropping
  *  rows, never by resending a message the recipient already saw. */
-async function acknowledgeQueuedBatch(lead: QueuedTeamDelivery, session: SessionLike): Promise<void> {
-  await flushEventLog(session.logKey);
-  if (!await hasDurablePeerDeliveryReceipt(session.logKey, lead.id)) {
-    throw new Error('accepted delivery receipt did not reach the event log');
-  }
+async function acknowledgeQueuedBatch(lead: QueuedTeamDelivery, logKey: string): Promise<void> {
+  await persistPeerReceipt(logKey, lead.id);
   const members = [lead, ...(await queueStoreOperation(() => queuedDeliveryStore.list()))
     .filter((item) => item.batchLeadId === lead.id && queueKeyOf(item) === queueKeyOf(lead))];
   const memberIds = new Set(members.map((member) => member.id));
@@ -1991,12 +2016,7 @@ async function acknowledgeQueuedBatch(lead: QueuedTeamDelivery, session: Session
       ? { ...item, acked: true }
       : item))));
   for (const member of members) {
-    if (member.id === lead.id) continue;
-    if (await hasDurablePeerDeliveryReceipt(session.logKey, member.id)) continue;
-    await appendEventLogDurable(session.logKey, {
-      seq: reserveEventLogSeq(session.logKey),
-      ev: { type: 'event', event: { type: 'peer_delivery_accepted', deliveryId: member.id } } as PersistedEvent['ev'],
-    });
+    if (member.id !== lead.id) await persistPeerReceipt(logKey, member.id);
   }
   for (const member of [...members.slice(1), lead]) {
     await queueStoreOperation(() => queuedDeliveryStore.delete(member.id));
@@ -2173,6 +2193,33 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         await queueStoreOperation(() => queuedDeliveryStore.delete(row.id));
       }
       if (seenRows.length > 0) candidates = candidates.filter((item) => item.acked !== true);
+      // A record the recipient already accepted owes only its ack. Sent
+      // again, or leading or joining a fresh batch, it would show twice or
+      // let its ack delete siblings that never went out. Its ack throws while
+      // the receipt still cannot be saved, so the drain retries it here.
+      // Acceptance is known in memory, or (after a restart) by a durable
+      // receipt on a record that was never stamped into, or leads, a batch.
+      const owed: { item: QueuedTeamDelivery; logKey: string }[] = [];
+      for (const item of candidates) {
+        const logKey = admittedQueuedDeliveries.get(item.id)
+          ?? (!item.batchLeadId || item.batchLeadId === item.id ? await durableAcceptanceLog(to, item.id) : undefined);
+        if (logKey) owed.push({ item, logKey });
+      }
+      if (owed.length > 0) {
+        for (const { item, logKey } of owed) {
+          // As on the admission path, the digest learns of every member the
+          // accepted turn carried even when the ack itself must retry
+          // (idempotent: an entry already acknowledged is gone).
+          const members = [item, ...candidates.filter((m) => m.id !== item.id && m.batchLeadId === item.id)];
+          try {
+            await acknowledgeQueuedBatch(item, logKey);
+          } finally {
+            await fireDigestAdmissionAcks(to.id, members);
+          }
+          admittedQueuedDeliveries.delete(item.id);
+        }
+        continue;
+      }
       if (candidates.length === 0) break;
       for (const id of [...heldJobs.keys()]) if (!candidates.some((item) => item.id === id)) heldJobs.delete(id);
       if (candidates.every((item) => setAside.has(item.id) || behindHeldJob(item))) {
@@ -2354,6 +2401,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // A job waiting out a live turn steps aside so the recipient's other
         // messages still reach that turn. Any other hold (a reset in flight)
         // keeps the queue behind it, so nothing lands in a half-reset thread.
+        if (!waitsForTurnEnd) noteInboxFailed(queueKey, { name: to.name, waiting: allQueued.length, error: freshRetryReason });
         if (waitsForTurnEnd) {
           setAside.add(lead.id);
           heldJobs.set(lead.id, { fromId: lead.fromId, createdAt: String(lead.createdAt ?? '') });
@@ -2403,7 +2451,7 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // owe their marks.
         onAdmitted: async (session) => {
           try {
-            await acknowledgeQueuedBatch(lead, session);
+            await acknowledgeQueuedBatch(lead, session.logKey);
           } finally {
             await fireDigestAdmissionAcks(to.id, siblings);
           }
@@ -2431,11 +2479,18 @@ async function drainQueuedRecipient(queueKey: string): Promise<void> {
         // must not wait a retry interval behind the abort that let it lead.
         const abortedQueuedWait = (lead.queue === true || nudgeHoldActive(lead)) && result.reason === 'sender stopped before delivery';
         if (!abortedQueuedWait) {
+          // Anything but a wait (a busy recipient, a sender that stopped) is
+          // a failure: the drain retries it in place and never throws, so
+          // the inbox is stuck all the same.
+          if (!result.waiting && result.reason !== 'sender stopped before delivery') {
+            noteInboxFailed(queueKey, { name: to.name, waiting: allQueued.length, error: result.reason ?? 'acknowledgement pending' });
+          }
           console.warn(`[team] queued delivery ${lead.fromName} -> ${to.name} will retry: ${result.reason ?? 'durable acknowledgement pending'}`);
           await retryDelay();
         }
         continue;
       }
+      noteInboxMoved(queueKey);
       break;
     }
   }
@@ -2472,13 +2527,18 @@ function scheduleQueuedRecipient(queueKey: string, delayMs = 0): void {
     if (activeQueuedRecipients.has(queueKey)) return;
     activeQueuedRecipients.add(queueKey);
     const { job } = enqueueForRecipient(queueKey, () => drainQueuedRecipient(queueKey));
+    let failure: Error | null = null;
     void job.catch((error) => {
-      console.warn(`[team] durable queue for ${queueKey} paused after an error: ${(error as Error).message}`);
+      failure = error as Error;
+      console.warn(`[team] durable queue for ${queueKey} paused after an error: ${failure.message}`);
     }).finally(async () => {
       activeQueuedRecipients.delete(queueKey);
       try {
         const remains = await queueStoreOperation(async () =>
           (await queuedDeliveryStore.list()).filter((item) => queueKeyOf(item) === queueKey));
+        if (failure && remains.length > 0) {
+          noteInboxFailed(queueKey, { name: findAgent(queueKey)?.name ?? queueKey, waiting: remains.length, error: (failure as Error).message });
+        } else noteInboxMoved(queueKey);
         if (remains.length > 0) scheduleQueuedRecipient(queueKey, queuedRetryDelay(queueKey, remains));
       } catch (error) {
         console.warn(`[team] could not inspect durable queue for ${queueKey}: ${(error as Error).message}`);
@@ -2922,7 +2982,7 @@ export async function deliverTeamMessage(input: {
     // the digest's in-flight entries when the turn still carried the line.
     onAdmitted: async (session) => {
       try {
-        await acknowledgeQueuedDelivery(record, session);
+        await acknowledgeQueuedDelivery(record, session.logKey);
       } finally {
         await fireDigestAdmissionAcks(to.id, [record]);
       }
@@ -2989,6 +3049,7 @@ export async function deliverTeamMessage(input: {
 
 // ---- reply extraction ---------------------------------------------------------
 
+import { noteInboxFailed, noteInboxMoved } from './inboxStallAlert.ts';
 import { appendEventLogDurable, appendEventLogSync, flushEventLog, hasDurablePeerDeliveryReceipt, loadEventLogSync, loadEventLogTail, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { redactEventSecrets } from './secretRedaction.ts';
 

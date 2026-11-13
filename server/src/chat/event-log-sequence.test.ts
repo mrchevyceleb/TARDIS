@@ -100,3 +100,24 @@ test('password-named credentials mask; config-dimension names stay readable', ()
     assert.equal(redactSecrets(input), input);
   }
 });
+
+test('a record appended after a torn tail lands on its own line and still proves acceptance', () => {
+  // Nov 13: a full disk left half a line in a thread log and the next record
+  // glued onto it, so a provider receipt could never be read back.
+  const source = `
+    import { mkdtempSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
+    import { tmpdir } from 'node:os';
+    import { join } from 'node:path';
+    process.env.RIVENDELL_STATE_DIR = mkdtempSync(join(tmpdir(), 'torn-tail-'));
+    const store = await import(${JSON.stringify(new URL('./event-log-store.ts', import.meta.url).href)});
+    mkdirSync(store.EVENT_LOG_DIR, { recursive: true });
+    const path = join(store.EVENT_LOG_DIR, store.sanitizeKey('torn') + '.jsonl');
+    writeFileSync(path, JSON.stringify({ seq: 1, ev: { type: 'turnEnd' } }) + '\\n{"seq":2,"ev":{"ty');
+    store.appendEventLogSync('torn', { seq: 3, ev: { type: 'event', event: { type: 'peer_delivery_accepted', deliveryId: 'd1' } } });
+    const last = readFileSync(path, 'utf8').trimEnd().split('\\n').at(-1);
+    console.log(JSON.parse(last).seq, await store.hasDurablePeerDeliveryReceipt('torn', 'd1'));
+  `;
+  const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source], { encoding: 'utf8', timeout: 15000 });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout.trim(), '3 true');
+});

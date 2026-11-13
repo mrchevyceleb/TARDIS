@@ -3208,7 +3208,11 @@ class ClaudeSession {
       this.resolveReady(true);
       this.resolveStartupWaiters('initialized');
       recordNativeSession(this.chatId, 'claude-code', ev.session_id, this.startedResumeId);
-      this.nativeStorageAccept(ev.session_id);
+      // Location bookkeeping only. A refused write (Nov 13: a full disk) threw
+      // out of this stdout handler, skipping the session id below and the rest
+      // of the chunk; the next start still finds the transcript by its id.
+      try { this.nativeStorageAccept(ev.session_id); }
+      catch (error) { console.warn(`[chat] native transcript location not saved for ${this.chatId}: ${(error as Error).message}`); }
       this.currentSessionId = ev.session_id;
       void setSessionId(this.cli, this.cwd, ev.session_id, this.chatId);
     }
